@@ -1,0 +1,44 @@
+{
+    "Name": "BundleName",
+    "Schema": "SchemaName",
+    "Documents" : [
+        {
+            "Name": "DocumentName",
+            "DocumentId": "DocumentId",
+            "Description": "Document description",
+            "Fields": [
+                {
+                    "Name": "FieldName",
+                    "Type": "FieldType",
+                    "Value": "FieldValue",
+                    "Description": "Field description",
+                    "DefaultValue": "DefaultValue",
+                    "Required": true,
+                    "Unique": false
+                }
+            ]
+        }
+    ],
+    "Relationships": [
+        {
+            "Source": "SourceDocumentName",
+            "Target": "TargetDocumentName",
+            "Type": "RelationshipType",
+            "Description": "Relationship description"
+        }
+    ],
+    "Constraints": [
+        {
+            "Name": "ConstraintName",
+            "Type": "ConstraintType",
+            "Description": "Constraint description"
+        }
+    ],
+    "Indexes": [
+        {
+            "Name": "IndexName",
+            "Fields": ["FieldName1", "FieldName2"],
+            "Description": "Index description"
+        }
+    ]
+}

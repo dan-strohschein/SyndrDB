@@ -96,7 +96,7 @@ func (s *UserStore) VerifyCredentials(username, password string) (bool, *User, e
 			// Compare the hashes (constant-time comparison to prevent timing attacks)
 			if SlowEqual(hash, storedUser.PasswordHash.Hash) {
 				return true, &User{
-					ID:       storedUser.ID,
+					UserID:   storedUser.UserID,
 					Username: storedUser.Username,
 					// Don't include password
 				}, nil

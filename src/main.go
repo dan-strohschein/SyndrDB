@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"syndrdb/src/engine"
+
 	"syndrdb/src/server"
 	"syndrdb/src/settings"
 	"syscall"
@@ -32,27 +32,38 @@ func printUsage() {
 
 func main() {
 	// Create a new settings.Arguments instance
-	args := settings.Arguments{}
+	// Get the global settings instance
+	args := settings.GetSettings()
+
+	//args := settings.Arguments{}
 
 	// Define command line flags that map to the Arguments struct
-	flag.StringVar(&args.DataDir, "datadir", "./data", "Directory to store data files")
-	flag.StringVar(&args.LogFile, "logfile", "", "Log file path (default: stdout)")
+	flag.StringVar(&args.DataDir, "datadir", "./datafiles", "Directory to store data files")
+	flag.StringVar(&args.LogFile, "logfile", "./logfiles", "Log file path (default: stdout)")
 	flag.StringVar(&args.Host, "host", "127.0.0.1", "Host name or IP address to listen on")
 	flag.IntVar(&args.Port, "port", 1776, "Port for the HTTP server")
-	flag.BoolVar(&args.Verbose, "verbose", false, "Enable verbose logging")
+	flag.BoolVar(&args.Verbose, "verbose", true, "Enable verbose logging")
 	flag.StringVar(&args.ConfigFile, "config", "", "Path to config file")
 	flag.StringVar(&args.Mode, "mode", "standalone", "Operation mode (standalone, cluster)")
 	flag.BoolVar(&args.AuthEnabled, "auth", false, "Enable authentication")
+	flag.StringVar(&args.Version, "version", "0.0.1alpha", "Shows version")
+	flag.BoolVar(&args.PrintToScreen, "print", true, "Print Log Messages to screen")
+	flag.BoolVar(&args.Debug, "debug", true, "Enable debug mode")
+	flag.BoolVar(&args.UserDebug, "userdebug", false, "Enable user debug mode")
 
 	// Parse the command line
 	flag.Parse()
 
 	// Validate the arguments
-	if err := validateArguments(&args); err != nil {
+	if err := validateArguments(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n\n", err)
 		printUsage()
 		os.Exit(1)
 	}
+
+	// Configure logger
+	log.SetOutput(os.Stdout)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 
 	// Print the arguments if in verbose mode
 	if args.Verbose {
@@ -68,7 +79,7 @@ func main() {
 	}
 
 	// Set up logging
-	if args.LogFile != "" {
+	if args.LogFile != "" && !args.PrintToScreen {
 		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
 			log.Fatalf("Failed to open log file: %v", err)
@@ -83,13 +94,17 @@ func main() {
 	}
 
 	// Initialize the database
-	db := &engine.Database{
-		DataFilePath: args.DataDir,
-		Bundles:      make(map[string]engine.Bundle),
-	}
+	// db := &engine.Database{
+	// 	DataDirectory: args.DataDir,
+	// 	Bundles:       make(map[string]engine.Bundle),
+	// }
 
 	// Create and start the server
-	srv := server.NewServer(args.Host, args.Port, db, args.AuthEnabled)
+	srv, err := server.InitServer(args)
+	if err != nil {
+		log.Fatalf("Failed to initialize server: %v", err)
+	}
+	//srv := server.NewServer(args.Host, args.Port, db, args.AuthEnabled)
 
 	// Add users if authentication is enabled
 	if args.AuthEnabled {

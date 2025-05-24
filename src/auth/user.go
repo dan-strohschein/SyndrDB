@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -22,7 +23,7 @@ type PasswordHash struct {
 }
 
 type User struct {
-	ID             string
+	UserID         string
 	Username       string
 	PasswordHash   PasswordHash
 	CreatedAt      time.Time
@@ -30,7 +31,7 @@ type User struct {
 }
 
 type NewUser struct {
-	ID       string
+	UserID   string
 	Username string
 	Password string
 }
@@ -42,6 +43,7 @@ type UserStore struct {
 	users         []User       // In-memory cache of users
 	mu            sync.RWMutex // Mutex for thread safety
 	dirty         bool         // Whether the store has unsaved changes
+
 }
 
 type UserPermissions struct {
@@ -63,7 +65,7 @@ func (s *UserStore) GetUser(username string) (*User, error) {
 	for _, storedUser := range s.users {
 		if storedUser.Username == username {
 			return &User{
-				ID:       storedUser.ID,
+				UserID:   storedUser.UserID,
 				Username: storedUser.Username,
 				// Don't include password
 			}, nil
@@ -87,21 +89,21 @@ func (s *UserStore) ListUsers() []string {
 }
 
 // AddUser adds a new user to the store
-func (s *UserStore) AddUser(user NewUser) error {
+func (s *UserStore) AddUser(user NewUser) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Check if username already exists
 	for _, existingUser := range s.users {
 		if existingUser.Username == user.Username {
-			return errors.New("username already exists")
+			return nil, errors.New("username already exists")
 		}
 	}
 
 	// Generate salt
 	salt := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return fmt.Errorf("failed to generate salt: %w", err)
+		return nil, fmt.Errorf("failed to generate salt: %w", err)
 	}
 
 	// Hash the password using Argon2id
@@ -118,7 +120,7 @@ func (s *UserStore) AddUser(user NewUser) error {
 
 	// Create stored user
 	storedUser := User{
-		ID:       user.ID,
+		UserID:   user.UserID,
 		Username: user.Username,
 		PasswordHash: PasswordHash{
 			Hash:    hash,
@@ -137,7 +139,7 @@ func (s *UserStore) AddUser(user NewUser) error {
 	s.dirty = true
 
 	// Save the changes
-	return s.Save()
+	return &storedUser, s.Save()
 }
 
 // UpdateUser updates an existing user

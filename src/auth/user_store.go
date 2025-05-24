@@ -8,6 +8,10 @@ import (
 	"path/filepath"
 )
 
+type UserFactory interface {
+	NewUserStruct(name, password string) *NewUser
+}
+
 // NewUserStore creates a new user store
 func NewUserStore(filePath string, encryptionKeyString string) (*UserStore, error) {
 	// Create directory if it doesn't exist
@@ -128,4 +132,26 @@ func (s *UserStore) Load() error {
 
 	s.users = users
 	return nil
+}
+
+// GetUserByName retrieves a user by their username
+func (store *UserStore) GetUserByName(userName string) (*User, error) {
+	for _, user := range store.users {
+		if user.Username == userName {
+			return &user, nil
+		}
+	}
+	// If user not found, return an error
+
+	return nil, ErrUserNotFound
+
+}
+
+// GetAllUsers retrieves all users from the store
+func (store *UserStore) GetAllUsers() ([]*User, error) {
+	var userList []*User
+	for _, user := range store.users {
+		userList = append(userList, &user)
+	}
+	return userList, nil
 }
