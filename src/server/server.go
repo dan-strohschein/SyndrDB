@@ -105,7 +105,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	zap.ReplaceGlobals(logger)
 
 	// Create database storage
-	databaseStore, err := engine.NewDatabaseStore(config.DataDir)
+	databaseStore, err := engine.NewDatabaseStore(config.DataDir, logger.Sugar())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database store: %w", err)
 	}
@@ -113,6 +113,17 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 	// Create service
 	databaseService := directors.NewDatabaseService(databaseStore, databaseFactory, config)
+
+	// Create bundle service
+	bundleStore, err := engine.NewBundleStore(config.DataDir, logger.Sugar())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bundle store: %w", err)
+	}
+	bundleFactory := engine.NewBundleFactory()
+	bundleService := directors.NewBundleService(bundleStore, bundleFactory, config)
+
+	// Initialize the singleton
+	directors.InitServiceManager(databaseService, bundleService, sugar)
 
 	// Create a new server
 	server := &Server{
@@ -273,6 +284,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Writer:     writer,
 		Authorized: !s.AuthEnabled, // If auth is disabled, connection is automatically authorized
 		LastActive: time.Now(),
+		Logger:     connLogger,
 	}
 
 	// Register the connection
@@ -378,8 +390,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		case line, ok := <-dataCh:
 			if !ok {
 				// Channel closed
-				connLogger.Info(" Aome kind of thing happened")
-				connLogger.Sync()
+
 				goto cleanup
 			}
 			// Process the line
@@ -410,6 +421,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 				line = strings.TrimSpace(line)
 				connection.LastActive = time.Now()
+				connection.Database = connStr.Database
+				connection.User = connStr.Username
 
 				if !connection.Authorized {
 
@@ -473,63 +486,6 @@ cleanup:
 	// Cleanup
 	close(doneCh)
 
-	//connLogger.Infow("Client connected")
-
-	// Process client commands until disconnection
-	// for {
-	// 	// Read client input
-	// 	line, err := reader.ReadString('\n')
-	// 	if err != nil {
-	// 		connLogger.Errorw("Error reading from client: %v", err)
-	// 		return
-	// 	}
-
-	// 	line = strings.TrimSpace(line)
-	// 	connection.LastActive = time.Now()
-
-	// 	// Handle connection string if not yet authenticated
-	// 	if !connection.Authorized {
-
-	// 		if !strings.EqualFold(connStr.Database, "default") {
-	// 			db, err := s.databaseService.GetDatabaseByName(connStr.Database)
-	// 			if err != nil {
-	// 				sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
-	// 				return
-	// 			}
-	// 			if db == nil {
-	// 				sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
-	// 				return
-	// 			}
-	// 		}
-
-	// 		// TODO: IF the db is legit, check to see if the user is allowed to access it
-	// 		if s.AuthEnabled && !s.authenticate(connStr.Username, connStr.Password) {
-	// 			sendError(writer, "Authentication failed")
-	// 			return
-	// 		}
-
-	// 		connection.Authorized = true
-	// 		connection.Database = connStr.Database
-	// 		connection.User = connStr.Username
-	// 		connection.Logger = connLogger.Desugar().Sugar()
-
-	// 		connLogger.Infow("Client authenticated",
-	// 			"user", connection.User,
-	// 			"database", connection.Database)
-
-	// 		sendSuccess(writer, "Authentication successful")
-	// 		continue
-	// 	}
-
-	// 	// Process command for authenticated clients
-	// 	//log.Printf("Processing command from %s: %s", connection.ID, line)
-	// 	result, err := s.processCommand(connection, line)
-	// 	if err != nil {
-	// 		sendError(writer, err.Error())
-	// 	} else {
-	// 		sendResult(writer, result)
-	// 	}
-	// }
 }
 
 // Process a client command
@@ -570,134 +526,15 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 
 // handleTextCommand processes commands received in plain text format
 func (s *Server) handleTextCommand(conn *Connection, command string, args []string) (interface{}, error) {
+	serviceManager := directors.GetServiceManager()
 
 	s.logger.Infof("Debugging the command received: %s", command)
 	s.logger.Sync()
 
-	result, err := directors.CommandDirector(s.databaseService, command)
+	result, err := directors.CommandDirector(conn.Database, *serviceManager, command, s.logger)
 
 	return result, err
-	//parts := strings.Fields(command)
-	// switch strings.ToUpper(parts[0]) {
-	// case "SELECT":
-	// 	if len(parts) < 2 {
-	// 		return nil, fmt.Errorf("SELECT requires a query string")
-	// 	}
-	// 	queryStr := strings.Join(parts[1:], " ")
-	// 	// Here you'd call your query engine
 
-	// 	switch parts[1] {
-	// 	case "BUNDLE":
-	// 	case "DATABASES":
-	// 		//SELECT DATABASES FROM Default
-
-	// 		// if len(parts) < 3 {
-	// 		// 	return nil, fmt.Errorf("SELECT DATABASES requires the spec 'FROM Default'")
-	// 		// }
-	// 		// if strings.EqualFold(parts[3], "DEFAULT") {
-	// 		// 	// TODO get a json list of databases
-	// 		// 	databases := s.databaseService.ListDatabases()
-
-	// 		// 	renderedDatabases, err := json.Marshal(databases)
-	// 		// 	if err != nil {
-	// 		// 		return nil, fmt.Errorf("failed to render databases: %w", err)
-	// 		// 	}
-	// 		// 	return renderedDatabases
-
-	// 		// }
-
-	// 	case "USER":
-	// 	default:
-	// 		return nil, fmt.Errorf("SELECT requires a BUNDLE, DATABASE, or USER specification")
-	// 	}
-
-	// 	return map[string]interface{}{
-	// 		"command": "query",
-	// 		"status":  "received",
-	// 		"query":   queryStr,
-	// 	}, nil
-
-	// case "CREATE":
-	// 	if len(parts) < 2 {
-	// 		return nil, fmt.Errorf("CREATE requires a database, bundle, or user specification")
-	// 	}
-
-	// 	switch strings.ToUpper(parts[1]) {
-	// 	case "BUNDLE":
-	// 		if len(parts) < 3 {
-	// 			return nil, fmt.Errorf("CREATE BUNDLE requires a bundle name")
-	// 		}
-	// 		// newBundleCmd, err := engine.ParseCreateBundleCommand(command)
-	// 		// if err != nil {
-	// 		// 	return nil, fmt.Errorf("failed to parse bundle command: %w", err)
-	// 		// }
-
-	// 		// // TODO do a database name check case insensitive
-	// 		// db, err := directors.GetDatabase(&s.Databases, conn.Database)
-	// 		// if err != nil {
-	// 		// 	return nil, fmt.Errorf("database %s does not exist", conn.Database)
-	// 		// }
-
-	// 		//engine.ExecuteBundleCommand(db, newBundleCmd)
-	// 		//bundleName := parts[2]
-	// 		//engine.CreateBundleFile(bundleName)
-	// 		bundleStr := strings.Join(parts[1:], " ")
-	// 		// Here you'd call your bundle creation logic
-	// 		return map[string]interface{}{
-	// 			"command": "create",
-	// 			"status":  "received",
-	// 			"bundle":  bundleStr,
-	// 		}, nil
-	// 	case "DATABASE":
-	// 		// You can only create a database if you are connected to the default database
-	// 		if strings.EqualFold(conn.Database, "default") {
-	// 			return nil, fmt.Errorf("You can only create a database if you are connected to the default database")
-	// 		}
-
-	// 		if len(parts) < 3 {
-	// 			return nil, fmt.Errorf("CREATE DATABASE requires a database name")
-	// 		}
-	// 		databaseName := parts[2]
-	// 		dbCommand, err := engine.ParseCreateDatabaseCommand(databaseName)
-	// 		if err != nil {
-	// 			return nil, fmt.Errorf("failed to parse database command: %w", err)
-	// 		}
-
-	// 		err = s.databaseService.AddDatabase(*dbCommand)
-	// 		if err != nil {
-	// 			return nil, fmt.Errorf("failed to create database: %w", err)
-	// 		}
-
-	// 	}
-
-	// case "UPDATE":
-	// 	if len(parts) < 2 {
-	// 		return nil, fmt.Errorf("UPDATE requires a bundle specification")
-	// 	}
-	// 	bundleStr := strings.Join(parts[1:], " ")
-	// 	// Here you'd call your bundle update logic
-	// 	return map[string]interface{}{
-	// 		"command": "update",
-	// 		"status":  "received",
-	// 		"bundle":  bundleStr,
-	// 	}, nil
-
-	// case "DELETE":
-	// 	if len(parts) < 2 {
-	// 		return nil, fmt.Errorf("DELETE requires a bundle name")
-	// 	}
-	// 	bundleName := parts[1]
-	// 	// Here you'd call your bundle deletion logic
-	// 	return map[string]interface{}{
-	// 		"command": "delete",
-	// 		"status":  "received",
-	// 		"bundle":  bundleName,
-	// 	}, nil
-
-	// default:
-	// 	return nil, fmt.Errorf("Syntax Error Unknown Command: %s", parts[0])
-	// }
-	return nil, nil
 }
 
 func parseConnectionString(connStr string) (ConnectionString, error) {

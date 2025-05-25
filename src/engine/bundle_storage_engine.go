@@ -9,12 +9,15 @@ import (
 	"syscall"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
 
 type BundleStorageEngine struct {
 	DataDirectory string
+	logger        *zap.SugaredLogger
 }
+
 type BundleFactory interface {
 	NewBundle(name, description string) *Bundle
 }
@@ -29,10 +32,11 @@ type BundleStore interface {
 	RemoveBundleFile(database *Database, bundleName string) error
 }
 
-func NewBundleStore(dataDir string) (*BundleStorageEngine, error) {
+func NewBundleStore(dataDir string, logger *zap.SugaredLogger) (*BundleStorageEngine, error) {
 	// Create a new bundle store
 	store := &BundleStorageEngine{
 		DataDirectory: dataDir,
+		logger:        logger,
 	}
 
 	// Ensure the data directory exists
@@ -43,7 +47,45 @@ func NewBundleStore(dataDir string) (*BundleStorageEngine, error) {
 	return store, nil
 }
 
-func LoadBundleIntoMemory(database *Database, bundleName string) (*[]byte, *Bundle, error) {
+// LoadAllBundleDataFiles loads all bundle data files from the given directory
+func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[string]*Bundle, error) {
+	bundles := make(map[string]*Bundle)
+	// Implementation for loading all bundle data files
+	// This is a placeholder that should be filled with actual loading logic
+	return bundles, nil
+}
+
+func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (*Bundle, error) {
+	filePath := filepath.Join(dataRootDir, fileName)
+	// Check if the file exists
+	if !helpers.FileExists(filePath, *b.logger) {
+		return nil, fmt.Errorf("bundle file %s does not exist", fileName)
+	}
+	// Open the file
+	bundleFile, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("error opening bundle file %s: %w", fileName, err)
+	}
+	defer bundleFile.Close()
+	// Read the file content
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("error reading bundle file %s: %w", fileName, err)
+	}
+	// Decode the BSON data
+	bundleData, err := helpers.DecodeBSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("error decoding bundle data from file %s: %w", fileName, err)
+	}
+	// Assert that the decoded data is of type Bundle
+	bundle, ok := bundleData.(Bundle)
+	if !ok {
+		return nil, fmt.Errorf("decoded data from file %s is not of type Bundle", fileName)
+	}
+	return &bundle, nil
+}
+
+func (b *BundleStorageEngine) LoadBundleIntoMemory(database *Database, bundleName string) (*[]byte, *Bundle, error) {
 	bundleFile, err := helpers.OpenDataFile(database.DataDirectory, bundleName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening bundle file %s: %w", bundleName, err)
@@ -80,12 +122,12 @@ func LoadBundleIntoMemory(database *Database, bundleName string) (*[]byte, *Bund
 	return &data, &bundle, nil
 }
 
-func CreateBundleFile(database *Database, bundle *Bundle) error {
+func (b *BundleStorageEngine) CreateBundleFile(database *Database, bundle *Bundle) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, bundle.Name)
 
 	// Check if the file already exists
-	if helpers.FileExists(filePath) {
+	if helpers.FileExists(filePath, *b.logger) {
 		return fmt.Errorf("Bundle %s already exists", bundle.Name)
 	}
 
@@ -119,12 +161,12 @@ func CreateBundleFile(database *Database, bundle *Bundle) error {
 	return nil
 }
 
-func UpdateBundleFile(database *Database, bundle *Bundle) error {
+func (b *BundleStorageEngine) UpdateBundleFile(database *Database, bundle *Bundle) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, bundle.Name)
 
 	// Check if the file already exists
-	if !helpers.FileExists(filePath) {
+	if !helpers.FileExists(filePath, *b.logger) {
 		return fmt.Errorf("Bundle %s does not exist", bundle.Name)
 	}
 
@@ -156,7 +198,7 @@ func UpdateBundleFile(database *Database, bundle *Bundle) error {
 	return nil
 }
 
-func UpdateDocumentDataInBundleFile(database *Database,
+func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *Database,
 	bundle *Bundle,
 	documentID string,
 	updatedDocument map[string]interface{},
@@ -229,7 +271,7 @@ func UpdateDocumentDataInBundleFile(database *Database,
 	return nil
 }
 
-func RemoveDocumentFromBundleFile(database *Database,
+func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *Database,
 	bundle *Bundle,
 	documentID string,
 	mmapData []byte) error {
@@ -315,12 +357,12 @@ func RemoveDocumentFromBundleFile(database *Database,
 	return nil
 }
 
-func RemoveBundleFile(database *Database, bundleName string) error {
+func (b *BundleStorageEngine) RemoveBundleFile(database *Database, bundleName string) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, bundleName)
 
 	// Check if the file already exists
-	if !helpers.FileExists(filePath) {
+	if !helpers.FileExists(filePath, *b.logger) {
 		return fmt.Errorf("Bundle %s does not exist", bundleName)
 	}
 

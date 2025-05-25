@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -10,20 +11,22 @@ type BundleCommand struct {
 	CommandType string // CREATE, UPDATE, DELETE
 	BundleName  string
 	Fields      []FieldDefinition
-	Changes     []FieldChange
+	Changes     []FieldChange // This will be used for UPDATE commands
 }
 
 type FieldDefinition struct {
-	Name       string
-	Type       string
-	IsRequired bool
-	IsUnique   bool
+	Name         string
+	Type         string
+	IsRequired   bool // Indicates if the field can be null
+	IsUnique     bool
+	DefaultValue interface{} // Optional default value for the field
 }
 
+// If the Bundle Command is UPDATE, then these changes are used
 type FieldChange struct {
-	ChangeType string // CHANGE, ADD, REMOVE
-	OldField   string
-	NewField   FieldDefinition
+	ChangeType   string // CHANGE, ADD, REMOVE
+	OldFieldName string
+	NewField     FieldDefinition
 }
 
 // ParseBundleCommand parses a bundle command (CREATE, UPDATE, DELETE)
@@ -161,12 +164,14 @@ func parseFieldDefinition(fieldText string) (FieldDefinition, error) {
 	fieldType := strings.Trim(parts[1], "\"")
 	required := parseBool(parts[2])
 	unique := parseBool(parts[3])
+	defaultValue := DetermineDefaultValue(fieldType, parts[4])
 
 	return FieldDefinition{
-		Name:       name,
-		Type:       fieldType,
-		IsRequired: required,
-		IsUnique:   unique,
+		Name:         name,
+		Type:         fieldType,
+		IsRequired:   required,
+		IsUnique:     unique,
+		DefaultValue: defaultValue,
 	}, nil
 }
 
@@ -187,9 +192,9 @@ func parseFieldChanges(command string) ([]FieldChange, error) {
 			return nil, err
 		}
 		changes = append(changes, FieldChange{
-			ChangeType: "CHANGE",
-			OldField:   oldField,
-			NewField:   fieldDef,
+			ChangeType:   "CHANGE",
+			OldFieldName: oldField,
+			NewField:     fieldDef,
 		})
 	}
 
@@ -218,10 +223,102 @@ func parseFieldChanges(command string) ([]FieldChange, error) {
 			continue
 		}
 		changes = append(changes, FieldChange{
-			ChangeType: "REMOVE",
-			OldField:   match[1],
+			ChangeType:   "REMOVE",
+			OldFieldName: match[1],
 		})
 	}
 
 	return changes, nil
+}
+
+func DetermineDefaultValue(fieldType string, defaultValue interface{}) interface{} {
+	// If defaultValue is nil or empty string, return the zero value for the type
+	if defaultValue == nil {
+		return getZeroValue(fieldType)
+	}
+
+	// If defaultValue is a string, try to convert to the appropriate type
+	strValue, isString := defaultValue.(string)
+	if isString {
+		if strValue == "" {
+			return getZeroValue(fieldType)
+		}
+
+		// Convert string to the appropriate type
+		switch fieldType {
+		case "string":
+			return strValue
+		case "int":
+			intVal, err := strconv.Atoi(strValue)
+			if err != nil {
+				// If conversion fails, return zero value
+				return 0
+			}
+			return intVal
+		case "float":
+			floatVal, err := strconv.ParseFloat(strValue, 64)
+			if err != nil {
+				// If conversion fails, return zero value
+				return 0.0
+			}
+			return floatVal
+		case "bool":
+			boolVal, err := strconv.ParseBool(strValue)
+			if err != nil {
+				// If conversion fails, return zero value
+				return false
+			}
+			return boolVal
+		default:
+			return nil
+		}
+	}
+
+	// If defaultValue is not a string, check if it matches the required type
+	switch fieldType {
+	case "string":
+		if _, ok := defaultValue.(string); ok {
+			return defaultValue
+		}
+		return ""
+	case "int":
+		if intVal, ok := defaultValue.(int); ok {
+			return intVal
+		}
+		if floatVal, ok := defaultValue.(float64); ok {
+			return int(floatVal)
+		}
+		return 0
+	case "float":
+		if floatVal, ok := defaultValue.(float64); ok {
+			return floatVal
+		}
+		if intVal, ok := defaultValue.(int); ok {
+			return float64(intVal)
+		}
+		return 0.0
+	case "bool":
+		if boolVal, ok := defaultValue.(bool); ok {
+			return boolVal
+		}
+		return false
+	default:
+		return nil
+	}
+}
+
+// Helper function to get zero value for a given type
+func getZeroValue(fieldType string) interface{} {
+	switch fieldType {
+	case "string":
+		return ""
+	case "int":
+		return 0
+	case "float":
+		return 0.0
+	case "bool":
+		return false
+	default:
+		return nil
+	}
 }

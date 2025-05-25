@@ -5,8 +5,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"syndrdb/src/settings"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.uber.org/zap"
 )
 
 func OpenDataFile(dataDirectory, fileName string) (*os.File, error) {
@@ -25,15 +27,19 @@ func DeleteDataFile(filePath string) error {
 }
 
 // fileExists checks if a file exists and is not a directory
-func FileExists(filename string) bool {
+func FileExists(filename string, logger zap.SugaredLogger) bool {
+	args := settings.GetSettings()
+
 	info, err := os.Stat(filename)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("File does not exist: %s\n", filename)
+			if args.Debug && args.Verbose {
+				logger.Infof("File does not exist: %s\n", filename)
+			}
 			return false // File does not exist
-
 		}
-		log.Printf("Error checking file %s for existence: %s\n", filename, err)
+
+		logger.Infof("Error checking file %s for existence: %s\n", filename, err)
 		return false // Some other error occurred
 	}
 

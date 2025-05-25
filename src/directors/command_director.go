@@ -4,57 +4,106 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/engine"
+
+	"go.uber.org/zap"
 )
 
-func CommandDirector(service *DatabaseService, command string) (interface{}, error) {
+func CommandDirector(databaseName string, serviceManager ServiceManager, command string, logger *zap.SugaredLogger) (interface{}, error) {
 	command = strings.TrimSpace(command)
 	command = strings.TrimSuffix(command, ";") // Remove trailing semicolon if present
 	commandParts := strings.Split(command, " ")
 	result := ""
 
-	if strings.HasPrefix(command, "SELECT") {
+	if strings.HasPrefix(strings.ToLower(command), "select") {
 		// Parse SELECT command
 		//dbCommand, err := engine.ParseSelectCommand(command)
-		switch commandParts[1] {
-		case "DATABASES":
+		switch strings.ToLower(commandParts[1]) {
+		case "databases":
 			if len(commandParts) < 3 {
 				return nil, fmt.Errorf("SELECT DATABASES requires the spec 'FROM Default'")
 			}
 			if strings.EqualFold(commandParts[3], "DEFAULT") {
-				// TODO get a json list of databases
-				databases := service.ListDatabases()
+				databases := serviceManager.DatabaseService.ListDatabases()
 
-				//renderedDatabases, err := json.Marshal(databases)
-				// if err != nil {
-				// 	return nil, fmt.Errorf("failed to render databases: %w", err)
-				// }
 				if len(databases) == 0 {
 					//fmt.Print("No databases found.\n")
 					databases = make([]*engine.Database, 0)
 				}
 
-				return &databases, nil
-
+				cmdResponse := &engine.CommandResponse{
+					ResultCount: len(databases),
+					Result:      databases,
+				}
+				return &cmdResponse, nil
 			}
 
 		}
 		return nil, nil
 	}
 
-	if strings.HasPrefix(command, "CREATE") {
+	if strings.HasPrefix(strings.ToLower(command), "create") {
 
-		switch commandParts[1] {
-		case "DATABASE":
-			dbCommand, err := engine.ParseCreateDatabaseCommand(command)
+		switch strings.ToLower(commandParts[1]) {
+		case "database":
+			dbCommand, err := engine.ParseCreateDatabaseCommand(command, logger)
 			if err != nil {
 				return nil, err
 			}
+
+			// Check if the database already exists
+			existingDB, err := serviceManager.DatabaseService.GetDatabaseByName(dbCommand.DatabaseName)
+			if err == nil {
+				return nil, fmt.Errorf("database '%s' already exists", existingDB.Name)
+			}
+
+			//Validate the database name with a regex
+			if !engine.IsValidDatabaseName(dbCommand.DatabaseName) {
+				return nil, fmt.Errorf("invalid database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", dbCommand.DatabaseName)
+			}
 			// Execute the database command
-			service.AddDatabase(*dbCommand)
-		case "BUNDLE":
-			engine.ParseCreateBundleCommand(command)
-			//service.AddBundle(db, bundleCommand)
-		case "USER":
+			err = serviceManager.DatabaseService.AddDatabase(*dbCommand)
+			if err != nil {
+				return nil, fmt.Errorf("error creating database: %v", err)
+			}
+			result = fmt.Sprintf("Database '%s' created successfully.", dbCommand.DatabaseName)
+			cmdResponse := &engine.CommandResponse{
+				ResultCount: 1,
+				Result:      result,
+			}
+			return cmdResponse, nil
+		case "bundle":
+			bundleCmd, err := engine.ParseCreateBundleCommand(command)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing bundle command: %v", err)
+			}
+
+			//Check if the bundle already exists
+			existingBundle, err := serviceManager.BundleService.GetBundleByName(bundleCmd.BundleName)
+			if err == nil {
+				return nil, fmt.Errorf("bundle '%s' already exists", existingBundle.Name)
+			}
+
+			// Get database object by name
+			database, err := serviceManager.DatabaseService.GetDatabaseByName(databaseName)
+			if err != nil {
+				return nil, fmt.Errorf("error retrieving database '%s': %v", databaseName, err)
+			}
+
+			// Add the bundle to the database
+			err = serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, *bundleCmd)
+			if err != nil {
+				return nil, fmt.Errorf("error creating bundle: %v", err)
+			}
+
+			// Return the response
+			result = fmt.Sprintf("Bundle '%s' created successfully in database '%s'.", bundleCmd.BundleName, databaseName)
+			cmdResponse := &engine.CommandResponse{
+				ResultCount: 1,
+				Result:      result,
+			}
+			return cmdResponse, nil
+
+		case "user":
 			// ParseCreateRelationshipCommand(command)
 		default:
 
@@ -63,19 +112,19 @@ func CommandDirector(service *DatabaseService, command string) (interface{}, err
 		return &result, nil
 	}
 
-	// Parse UPDATE BUNDLE command
-	if strings.HasPrefix(command, "UPDATE") {
-		switch commandParts[1] {
-		case "DATABASE":
+	// Parse UPDATE  command
+	if strings.HasPrefix(strings.ToLower(command), "update") {
+		switch strings.ToLower(commandParts[1]) {
+		case "database":
 			dbCommand, err := engine.ParseUpdateDatabaseCommand(command)
 			if err != nil {
 				return &result, err
 			}
 			// Execute the database command
-			service.UpdateDatabase(*dbCommand)
-		case "BUNDLE":
+			serviceManager.DatabaseService.UpdateDatabase(*dbCommand)
+		case "bundle":
 			engine.ParseUpdateBundleCommand(command)
-		case "USER":
+		case "user":
 			// ParseCreateRelationshipCommand(command)
 		default:
 			return &result, fmt.Errorf("unknown command format: %s", command)
@@ -83,20 +132,20 @@ func CommandDirector(service *DatabaseService, command string) (interface{}, err
 		return &result, nil
 	}
 
-	// Parse DELETE BUNDLE command
-	if strings.HasPrefix(command, "DELETE") {
+	// Parse DELETE  command
+	if strings.HasPrefix(strings.ToLower(command), "delete") {
 
-		switch commandParts[1] {
-		case "DATABASE":
+		switch strings.ToLower(commandParts[1]) {
+		case "database":
 			dbCommand, err := engine.ParseDeleteDatabaseCommand(command)
 			if err != nil {
 				return &result, err
 			}
 			// Execute the database command
-			service.DeleteDatabase(dbCommand.DatabaseName)
-		case "BUNDLE":
+			serviceManager.DatabaseService.DeleteDatabase(dbCommand.DatabaseName)
+		case "bundle":
 			engine.ParseDeleteBundleCommand(command)
-		case "USER":
+		case "user":
 			// ParseCreateRelationshipCommand(command)
 		default:
 			return &result, fmt.Errorf("unknown command format: %s", command)

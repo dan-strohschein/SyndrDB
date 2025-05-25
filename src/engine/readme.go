@@ -24,7 +24,18 @@ A.Relationship.RelationshipField = SomeOtherValue
 To create a bundle:
 
 CREATE BUNDLE "BUNDLE_NAME"
-WITH FIELDS ({"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>}, {"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>})
+WITH FIELDS (
+	{"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>, <DEFAULTVALUE>},
+	{"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>, <DEFAULTVALUE>}
+)
+
+CREATE BUNDLE "Test-Bundle-1"
+WITH FIELDS (
+	{"ProductName", "STRING", TRUE, FALSE, "Some Default Value"},
+	{"Age", "INT", TRUE, FALSE, 0},
+	{"Price", "FLOAT", FALSE, FALSE, 0.0},
+	{"IsActive", "BOOL", TRUE, FALSE, TRUE}
+)
 
 To update a bundle:
 UPDATE BUNDLE "BUNDLE_NAME"

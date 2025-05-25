@@ -15,14 +15,14 @@ func (db *Database) GetBundle(bundleName string) (*Bundle, error) {
 	return nil, fmt.Errorf("Bundle %s was not found", bundle.Name)
 }
 
-func (db *Database) AddBundle(bundle Bundle, dbStore DatabaseStore) error {
+func (db *Database) AddBundle(bundle Bundle, dbStore DatabaseStore, bundleStore BundleStore) error {
 	if _, exists := db.Bundles[bundle.Name]; exists {
 		return fmt.Errorf("Bundle %s already exists", bundle.Name)
 	}
 	db.Bundles[bundle.Name] = bundle
 
 	//This needs to be added to a bundle file
-	err := CreateBundleFile(db, &bundle)
+	err := bundleStore.CreateBundleFile(db, &bundle)
 	if err != nil {
 		return fmt.Errorf("error creating bundle file: %w", err)
 	}
@@ -39,7 +39,7 @@ func (db *Database) AddBundle(bundle Bundle, dbStore DatabaseStore) error {
 	return nil
 }
 
-func (db *Database) RemoveBundle(bundleName string, dbStore DatabaseStore) error {
+func (db *Database) RemoveBundle(bundleName string, dbStore DatabaseStore, bundleStore BundleStorageEngine) error {
 	if _, exists := db.Bundles[bundleName]; !exists {
 		return fmt.Errorf("Bundle with ID %s not found to remove", bundleName)
 	}
@@ -70,7 +70,7 @@ func (db *Database) RemoveBundle(bundleName string, dbStore DatabaseStore) error
 	return nil
 }
 
-func (db *Database) UpdateBundle(bundleName string, bundle Bundle) error {
+func (db *Database) UpdateBundle(bundleName string, bundle Bundle, bundleStore BundleStorageEngine) error {
 	if _, exists := db.Bundles[bundleName]; !exists {
 		return fmt.Errorf("Bundle %s not found to update", bundleName)
 	}
@@ -81,7 +81,7 @@ func (db *Database) UpdateBundle(bundleName string, bundle Bundle) error {
 		return fmt.Errorf("error removing old bundle file %s: %w", bundleFilePath, err)
 	}
 
-	err := UpdateBundleFile(db, &bundle)
+	err := bundleStore.UpdateBundleFile(db, &bundle)
 	if err != nil {
 		return fmt.Errorf("error updating bundle file %s: %w", bundleFilePath, err)
 	}

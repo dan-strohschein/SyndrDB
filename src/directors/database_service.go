@@ -68,7 +68,6 @@ func (s *DatabaseService) AddDatabase(databaseCommand engine.DatabaseCommand) er
 	s.databases[db.DatabaseID] = db
 
 	return s.store.CreateDatabaseDataFile(db)
-	// TODO add the database to th server's database map
 
 }
 
@@ -151,11 +150,11 @@ func (s *DatabaseService) ListDatabases() []*engine.Database {
 }
 
 // In DatabaseService
-func (s *DatabaseService) AddBundleToDatabase(dbName string, bundle engine.Bundle) error {
+func (s *DatabaseService) AddBundleToDatabase(dbName string, bundle engine.Bundle, bundleStore engine.BundleStore) error {
 	db, err := s.GetDatabaseByName(dbName)
 	if err != nil {
 		return err
 	}
 
-	return db.AddBundle(bundle, s.store)
+	return db.AddBundle(bundle, s.store, bundleStore)
 }

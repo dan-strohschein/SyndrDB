@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/helpers"
 	"syscall"
 
+	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
 
@@ -34,6 +35,7 @@ type DatabaseStore interface {
 
 type DatabaseStorageEngine struct {
 	DataDirectory string
+	logger        *zap.SugaredLogger
 }
 
 // DatabaseFactory creates new Database instances
@@ -41,10 +43,11 @@ type DatabaseFactory interface {
 	NewDatabase(name, description string) *Database
 }
 
-func NewDatabaseStore(dataDir string) (*DatabaseStorageEngine, error) {
+func NewDatabaseStore(dataDir string, logger *zap.SugaredLogger) (*DatabaseStorageEngine, error) {
 	// Create a new database store
 	store := &DatabaseStorageEngine{
 		DataDirectory: dataDir,
+		logger:        logger,
 	}
 
 	// Ensure the data directory exists
@@ -195,9 +198,11 @@ func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *Database) error
 	filePath := filepath.Join(database.DataDirectory, database.Name)
 
 	// Check if the file already exists
-	if helpers.FileExists(filePath) {
+	if helpers.FileExists(filePath, *d.logger) {
 		return fmt.Errorf("Database %s already exists", database.Name)
 	}
+
+	d.logger.Infof("Creating database file %s", filePath)
 
 	file, err := os.Create(filePath)
 	if err != nil {
@@ -234,7 +239,7 @@ func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *Database) error
 	filePath := filepath.Join(database.DataDirectory, database.Name)
 
 	// Check if the file already exists
-	if !helpers.FileExists(filePath) {
+	if !helpers.FileExists(filePath, *d.logger) {
 		return fmt.Errorf("Database %s does not exist", database.Name)
 	}
 

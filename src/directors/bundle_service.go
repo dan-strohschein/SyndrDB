@@ -34,7 +34,7 @@ func NewBundleService(store engine.BundleStore, factory engine.BundleFactory, se
 	return service
 }
 
-func (s *BundleService) AddBundle(db *engine.Database, bundleCommand engine.BundleCommand) error {
+func (s *BundleService) AddBundle(databaseService *DatabaseService, db *engine.Database, bundleCommand engine.BundleCommand) error {
 	// Check if the bundle already exists
 	if _, err := s.GetBundleByName(bundleCommand.BundleName); err == nil {
 		return fmt.Errorf("bundle '%s' already exists", bundleCommand.BundleName)
@@ -46,24 +46,19 @@ func (s *BundleService) AddBundle(db *engine.Database, bundleCommand engine.Bund
 	// TODO take the fields and structure from the command and create them in the bundle struct
 	for _, fieldDef := range bundleCommand.Fields {
 		bundle.DocumentStructure[fieldDef.Name] = engine.Field{
-			Name:        fieldDef.Name,
-			FieldType:   fieldDef.Type,
-			Required:    fieldDef.IsRequired,
-			Unique:      fieldDef.IsUnique,
-			Description: "", // Default empty description
+			Name:         fieldDef.Name,
+			FieldType:    fieldDef.Type,
+			Required:     fieldDef.IsRequired,
+			Unique:       fieldDef.IsUnique,
+			Description:  "", // Default empty description
+			DefaultValue: fieldDef.DefaultValue,
 		}
 	}
 	// // Add the bundle to the database
-	// err := db.AddBundle(*bundle)
+	err := db.AddBundle(*bundle, databaseService.store, s.store)
 
-	// if err != nil {
-	// 	return fmt.Errorf("failed to add bundle to database: %w", err)
-	// }
-
-	// Add the bundle to the store
-	err := s.store.CreateBundleFile(db, bundle)
 	if err != nil {
-		return fmt.Errorf("failed to add bundle to store: %w", err)
+		return fmt.Errorf("failed to add bundle to database: %w", err)
 	}
 
 	s.bundles[bundleCommand.BundleName] = bundle

@@ -37,6 +37,9 @@ import (
 	"regexp"
 	"strings"
 	"syndrdb/src/helpers"
+	"syndrdb/src/settings"
+
+	"go.uber.org/zap"
 )
 
 type DatabaseCommand struct {
@@ -46,19 +49,30 @@ type DatabaseCommand struct {
 	DBMetadataFilePath string
 }
 
-func ParseCreateDatabaseCommand(command string) (*DatabaseCommand, error) {
+func ParseCreateDatabaseCommand(command string, logger *zap.SugaredLogger) (*DatabaseCommand, error) {
+	args := settings.GetSettings()
 	// Regular expression to extract database name
-	databaseNameRegex := regexp.MustCompile(`CREATE DATABASE\s+"([^"]+)"`)
+	databaseNameRegex := regexp.MustCompile(`CREATE DATABASE\s+(?:"([^"]+)"|([^\s;]+))`)
 	matches := databaseNameRegex.FindStringSubmatch(command)
 	if len(matches) < 2 {
+		logger.Infof("Invalid CREATE DATABASE command syntax: %s", command)
+		logger.Infof("Matches found: %v", matches)
+
 		return nil, fmt.Errorf("invalid CREATE DATABASE command syntax")
 	}
-	databaseName := matches[1]
+
+	// The database name could be in group 1 (with quotes) or group 2 (without quotes)
+	var databaseName string
+	if matches[1] != "" {
+		databaseName = matches[1] // Quoted name
+	} else {
+		databaseName = matches[2] // Unquoted name
+	}
 
 	return &DatabaseCommand{
 		ID:                 helpers.GenerateUUID(), // Generate a unique ID for the command
 		DatabaseName:       databaseName,
-		DBMetadataFilePath: "path/to/metadata/file", // Placeholder for actual metadata file path
+		DBMetadataFilePath: args.DataDir, // Placeholder for actual metadata file path
 		CommandType:        "CREATE",
 	}, nil
 }
@@ -114,4 +128,29 @@ func ParseSelectDatabaseCommand(command string) (*DatabaseCommand, error) {
 func parseBool(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
 	return value == "true"
+}
+
+func IsValidDatabaseName(name string) bool {
+	// Regular expression to validate database name
+	// Must start with a letter, can contain letters, numbers, underscores, and hyphens
+	validNameRegex := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+	return validNameRegex.MatchString(name)
+}
+func IsValidBundleName(name string) bool {
+	// Regular expression to validate bundle name
+	// Must start with a letter, can contain letters, numbers, underscores, and hyphens
+	validNameRegex := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+	return validNameRegex.MatchString(name)
+}
+func IsValidFieldName(name string) bool {
+	// Regular expression to validate field name
+	// Must start with a letter, can contain letters, numbers, underscores, and hyphens
+	validNameRegex := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+	return validNameRegex.MatchString(name)
+}
+func IsValidRelationshipName(name string) bool {
+	// Regular expression to validate relationship name
+	// Must start with a letter, can contain letters, numbers, underscores, and hyphens
+	validNameRegex := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+	return validNameRegex.MatchString(name)
 }

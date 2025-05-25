@@ -27,7 +27,7 @@ func printUsage() {
 	// fmt.Println("  delete [bundle name]   - Delete a bundle")
 	log.Println("\nExamples:")
 	log.Println("  syndrdb --datadir=/data")
-	log.Println("  syndrdb --port=8080 --logfile=syndrdb.log")
+	log.Println("  syndrdb --port=1776 --logfile=syndrdb.log")
 }
 
 func main() {
