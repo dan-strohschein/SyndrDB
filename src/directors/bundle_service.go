@@ -8,18 +8,20 @@ import (
 )
 
 type BundleService struct {
-	store    engine.BundleStore
-	factory  engine.BundleFactory
-	settings *settings.Arguments
-	bundles  map[string]*engine.Bundle
+	store           engine.BundleStore
+	factory         engine.BundleFactory
+	documentFactory engine.DocumentFactory
+	settings        *settings.Arguments
+	bundles         map[string]*engine.Bundle
 }
 
-func NewBundleService(store engine.BundleStore, factory engine.BundleFactory, settings *settings.Arguments) *BundleService {
+func NewBundleService(store engine.BundleStore, factory engine.BundleFactory, docFactory engine.DocumentFactory, settings *settings.Arguments) *BundleService {
 	service := &BundleService{
-		store:    store,
-		factory:  factory,
-		settings: settings,
-		bundles:  make(map[string]*engine.Bundle),
+		store:           store,
+		factory:         factory,
+		documentFactory: docFactory,
+		settings:        settings,
+		bundles:         make(map[string]*engine.Bundle),
 	}
 
 	// Load existing databases
@@ -105,6 +107,25 @@ func (s *BundleService) UpdateBundle(db *engine.Database, bundleCommand engine.B
 	err = s.store.UpdateBundleFile(db, bundle)
 	if err != nil {
 		return fmt.Errorf("failed to update bundle in store: %w", err)
+	}
+
+	return nil
+}
+
+func (s *BundleService) AddDocumentToBundle(bundle *engine.Bundle, docCommand *engine.DocumentCommand) error {
+	// Check if the bundle exists
+	exists := s.bundles[bundle.Name]
+	if exists != nil {
+		return fmt.Errorf("bundle '%s' not found", bundle.Name)
+	}
+
+	// Add the document to the bundle
+	newDocument := s.documentFactory.NewDocument(*docCommand)
+
+	s.bundles[bundle.Name].Documents[newDocument.DocumentID] = *newDocument
+	err := s.store.AddDocumentToBundleFile(bundle, newDocument)
+	if err != nil {
+		return fmt.Errorf("failed to add document to bundle: %w", err)
 	}
 
 	return nil

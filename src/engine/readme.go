@@ -65,6 +65,15 @@ To Drop a relationship:
 UPDATE BUNDLE "BUNDLE_NAME"
 DELETE RELATIONSHIP "RELATIONSHIP_NAME"
 
+To Add a Document to a Bundle:
+ADD DOCUMENT TO BUNDLE "BUNDLE_NAME"
+(<FIELDNAME> = <VALUE>, <FIELDNAME> = <VALUE>, ... )
+
+UPDATE DOCUMENT IN BUNDLE "BUNDLE_NAME"
+(<FIELDNAME> = <VALUE>, <FIELDNAME> = <VALUE>, ... )
+
+DELETE DOCUMENT FROM BUNDLE "BUNDLE_NAME"
+WHERE <FIELDNAME> = <VALUE>
 
 The way this works is that first, we get a list of the documents from that bundle
 Then, we filter out documents that do not match the filter
@@ -72,6 +81,15 @@ Then, if there is an include command, we get the documents from that included bu
 That match the keys from the field of first set of documents A
 Then, we filter out THOSE documents that do not match the OTHER filter
 Then, we return the documents that match the filter
+
+
+ADD DOCUMENT TO BUNDLE "Test-Bundle-1"
+WITH  (
+	{"ProductName"="MY FIRST PRODUCT"},
+	{"Age", 10},
+	{"Price", 5.0},
+	{"IsActive", True}
+)
 
 
 */

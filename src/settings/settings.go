@@ -5,7 +5,7 @@ import "sync"
 type Arguments struct {
 	// The file path to the datafiles
 	DataDir string
-	LogFile string
+	LogDir  string
 
 	ConfigFile      string
 	CreateDefaultDB bool // Create default database if it doesn't exist
@@ -44,7 +44,7 @@ func GetSettings() *Arguments {
 		instance = &Arguments{
 			// Default values
 			DataDir:         "./data",
-			LogFile:         "",
+			LogDir:          "",
 			ConfigFile:      "",
 			Mode:            "standalone",
 			Host:            "0.0.0.0",
@@ -67,8 +67,8 @@ func UpdateSettings(args Arguments) {
 	if args.DataDir != "" {
 		instance.DataDir = args.DataDir
 	}
-	if args.LogFile != "" {
-		instance.LogFile = args.LogFile
+	if args.LogDir != "" {
+		instance.LogDir = args.LogDir
 	}
 	if args.ConfigFile != "" {
 		instance.ConfigFile = args.ConfigFile

@@ -3,14 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
-
 	"syndrdb/src/server"
 	"syndrdb/src/settings"
 	"syscall"
+	"time"
 )
 
 // printUsage prints helpful usage information
@@ -39,7 +40,7 @@ func main() {
 
 	// Define command line flags that map to the Arguments struct
 	flag.StringVar(&args.DataDir, "datadir", "./datafiles", "Directory to store data files")
-	flag.StringVar(&args.LogFile, "logfile", "./logfiles", "Log file path (default: stdout)")
+	flag.StringVar(&args.LogDir, "logdir", "./log_files", "Directory to store log files (default: stdout)")
 	flag.StringVar(&args.Host, "host", "127.0.0.1", "Host name or IP address to listen on")
 	flag.IntVar(&args.Port, "port", 1776, "Port for the HTTP server")
 	flag.BoolVar(&args.Verbose, "verbose", true, "Enable verbose logging")
@@ -53,6 +54,12 @@ func main() {
 
 	// Parse the command line
 	flag.Parse()
+
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	logFilename := fmt.Sprintf("%s_%s_ServerLog.txt", timestamp, args.Host)
+
+	// Combine with the directory path from args.LogFile
+	args.LogDir = filepath.Join(args.LogDir, logFilename)
 
 	// Validate the arguments
 	if err := validateArguments(args); err != nil {
@@ -69,7 +76,7 @@ func main() {
 	if args.Verbose {
 		log.Println("SyndrDB starting with options:")
 		log.Printf("  Data Directory: %s\n", args.DataDir)
-		log.Printf("  Log File: %s\n", args.LogFile)
+		log.Printf("  Log File: %s\n", args.LogDir)
 		log.Printf("  Host: %s\n", args.Host)
 		log.Printf("  Port: %d\n", args.Port)
 		log.Printf("  Verbose: %v\n", args.Verbose)
@@ -79,13 +86,35 @@ func main() {
 	}
 
 	// Set up logging
-	if args.LogFile != "" && !args.PrintToScreen {
-		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if args.LogDir != "" {
+		// Create timestamped log filename
+		// timestamp := time.Now().Format("2006-01-02_15-04-05")
+		// logFilename := fmt.Sprintf("%s_%s_ServerLog.txt", timestamp, args.Host)
+
+		// // Combine with the directory path from args.LogFile
+		// logFilePath := filepath.Join(args.LogDir, logFilename)
+
+		// Ensure log directory exists
+		logDir := filepath.Dir(args.LogDir)
+		if err := os.MkdirAll(logDir, 0755); err != nil {
+			log.Fatalf("Failed to create log directory: %v", err)
+		}
+
+		log.Printf("Logging to file: %s", args.LogDir)
+
+		logFile, err := os.OpenFile(args.LogDir, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
 			log.Fatalf("Failed to open log file: %v", err)
 		}
 		defer logFile.Close()
-		log.SetOutput(logFile)
+
+		// Use MultiWriter to write logs to both file and stdout if PrintToScreen is enabled
+		if args.PrintToScreen {
+			mw := io.MultiWriter(os.Stdout, logFile)
+			log.SetOutput(mw)
+		} else {
+			log.SetOutput(logFile)
+		}
 	}
 
 	// Ensure data directory exists
@@ -150,8 +179,8 @@ func validateArguments(args *settings.Arguments) error {
 	}
 
 	// Check if log file can be written to
-	if args.LogFile != "" {
-		logDir := filepath.Dir(args.LogFile)
+	if args.LogDir != "" {
+		logDir := filepath.Dir(args.LogDir)
 		if logDir != "." {
 			if _, err := os.Stat(logDir); os.IsNotExist(err) {
 				err = os.MkdirAll(logDir, 0755)
@@ -162,7 +191,7 @@ func validateArguments(args *settings.Arguments) error {
 		}
 
 		// Check if we can create/open the log file
-		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		logFile, err := os.OpenFile(args.LogDir, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
 			return fmt.Errorf("could not open log file for writing: %w", err)
 		}

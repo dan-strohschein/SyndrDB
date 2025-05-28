@@ -120,7 +120,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		return nil, fmt.Errorf("failed to create bundle store: %w", err)
 	}
 	bundleFactory := engine.NewBundleFactory()
-	bundleService := directors.NewBundleService(bundleStore, bundleFactory, config)
+	documentFactory := engine.NewDocumentFactory()
+	bundleService := directors.NewBundleService(bundleStore, bundleFactory, documentFactory, config)
 
 	// Initialize the singleton
 	directors.InitServiceManager(databaseService, bundleService, sugar)

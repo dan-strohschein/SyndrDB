@@ -112,6 +112,38 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 		return &result, nil
 	}
 
+	// Parse Add Document command
+	if strings.HasPrefix(strings.ToLower(command), "add") {
+		switch strings.ToLower(commandParts[1]) {
+		case "document":
+			if len(commandParts) < 4 {
+				return nil, fmt.Errorf("ADD DOCUMENT requires the spec 'TO <bundle_name>'")
+			}
+			bundleName := commandParts[3]
+			// Parse the document command
+			docCommand, err := engine.ParseAddDocumentCommand(command, bundleName)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing add document command: %v", err)
+			}
+			// Get the bundle by name
+			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			if err != nil {
+				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+			}
+			// Add the document to the bundle
+			err = serviceManager.BundleService.AddDocumentToBundle(bundle, docCommand)
+			if err != nil {
+				return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
+			}
+			result = fmt.Sprintf("Document added successfully to bundle '%s'.", bundleName)
+			cmdResponse := &engine.CommandResponse{
+				ResultCount: 1,
+				Result:      result,
+			}
+			return cmdResponse, nil
+		}
+	}
+
 	// Parse UPDATE  command
 	if strings.HasPrefix(strings.ToLower(command), "update") {
 		switch strings.ToLower(commandParts[1]) {

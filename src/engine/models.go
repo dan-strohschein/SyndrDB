@@ -1,5 +1,7 @@
 package engine
 
+import "time"
+
 type Database struct {
 	// DatabaseID is the unique identifier for the database.
 	DatabaseID string
@@ -37,10 +39,10 @@ type Bundle struct {
 }
 
 type Document struct {
-	DocumentID  string
-	Name        string
-	Description string
-	Fields      map[string]Field
+	DocumentID string
+	Fields     map[string]Field
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type Field struct {
