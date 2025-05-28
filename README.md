@@ -7,8 +7,7 @@ A relational Document DB with a graphQL interface implemented in Golang. Think M
 Warning: Extremely WIP. This project was just started and is pretty much purely educational for myself. Use at your own risk, contribute if you wish. 
 
 ## Usage
-
-Usage of ./syndr:
+``` Usage of ./syndr:
   -auth
         Enable authentication (Not yet working)
   -config string
@@ -33,7 +32,7 @@ Usage of ./syndr:
         Enable verbose logging (default true)
   -version string
         Shows version (default "0.0.1alpha")
-
+```
 ## How to install
 
 TO BE DETERMINED
