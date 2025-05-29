@@ -44,3 +44,51 @@ This is the current design of the systems within the server so far.
 ## How its built
 
 ```go build -o syndr main.go  ```
+
+## How to use it
+
+It only supports a handful of commands for now. I am adding new commands every week.
+
+To create a Database:
+
+```CREATE DATABASE "<Database_Name>";```
+
+To Create a Bundle:
+
+```
+CREATE BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS (
+	{"<FIELDNAME>", <FIELDTYPE>, <ISREQUIRED>, <ISUNIQUE>, <DEFAULTVALUE>},
+	{"<FIELDNAME>", <FIELDTYPE>, <ISREQUIRED>, <ISUNIQUE>, <DEFAULTVALUE>}
+);
+```
+
+Field Types:
+* STRING
+* INT
+* FLOAT
+* BOOL
+(Coming soon)
+* DATETIME
+
++ ISREQUIRED is a boolean value (TRUE/FALSE) indicating if the value MUST be supplied to be valid
++ ISUNIQUE is a boolean value (TRUE/FALSE) indicating if the value MUST be unique within that field across all of the documents in that bundle
++ DEFAULTVALUE is a value that is automatically added to the field if the ISREQUIRED Flag is set to true and no value is supplied by the user.
+
+To add a Document to a bundle:
+
+```
+ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>"
+ WITH  (
+    {"<FIELD_NAME>"=<VALUE>},
+    ...
+);
+```
+
+As long as the field type matches the data type of the value supplied.
+
+Currently you can do a super simple query:
+
+```SELECT DOCUMENTS FROM "<BUNDLE_NAME";```
+
+This will return all of the documents in the bundle. Soon you will be able to add filters.
