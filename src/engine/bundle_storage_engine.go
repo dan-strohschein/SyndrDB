@@ -8,6 +8,7 @@ import (
 	"syndrdb/src/helpers"
 	"syndrdb/src/settings"
 	"syscall"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.uber.org/zap"
@@ -35,7 +36,7 @@ type BundleStore interface {
 	UpdateDocumentDataInBundleFile(database *Database, bundle *Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
 	AddDocumentToBundleFile(bundle *Bundle, document *Document) error
 	RemoveDocumentFromBundleFile(database *Database, bundle *Bundle, documentID string, mmapData []byte) error
-
+	BundleFileExists(bundleName string) bool
 	RemoveBundleFile(database *Database, bundleName string) error
 }
 
@@ -84,16 +85,23 @@ func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (
 	if err != nil {
 		return nil, fmt.Errorf("error decoding bundle data from file %s: %w", fileName, err)
 	}
-	// Assert that the decoded data is of type Bundle
-	bundle, ok := bundleData.(Bundle)
-	if !ok {
-		return nil, fmt.Errorf("decoded data from file %s is not of type Bundle", fileName)
+
+	bundle, err := MapToBundle(bundleData.(map[string]interface{}))
+	if err != nil {
+		return nil, fmt.Errorf("error converting map to Bundle from file %s: %w", fileName, err)
 	}
-	return &bundle, nil
+
+	b.logger.Infof("Decoded bundle data from file %s is %v", fileName, bundleData)
+	// Assert that the decoded data is of type Bundle
+	// bundle, ok := bundleData.(Bundle)
+	// if !ok {
+	// 	return nil, fmt.Errorf("decoded data from file %s is not of type Bundle", fileName)
+	// }
+	return bundle, nil
 }
 
 func (b *BundleStorageEngine) LoadBundleIntoMemory(database *Database, bundleName string) (*[]byte, *Bundle, error) {
-	bundleFile, err := helpers.OpenDataFile(database.DataDirectory, bundleName)
+	bundleFile, err := helpers.OpenDataFile(database.DataDirectory, fmt.Sprintf("%s.bnd", bundleName))
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening bundle file %s: %w", bundleName, err)
 	}
@@ -128,10 +136,16 @@ func (b *BundleStorageEngine) LoadBundleIntoMemory(database *Database, bundleNam
 
 	return &data, &bundle, nil
 }
+func (b *BundleStorageEngine) BundleFileExists(bundleName string) bool {
+	// Check if the bundle file exists in the data directory
+	args := settings.GetSettings()
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
+	return helpers.FileExists(filePath, *b.logger)
+}
 
 func (b *BundleStorageEngine) CreateBundleFile(database *Database, bundle *Bundle) error {
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, bundle.Name)
+	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
 
 	// Check if the file already exists
 	if helpers.FileExists(filePath, *b.logger) {
@@ -170,7 +184,7 @@ func (b *BundleStorageEngine) CreateBundleFile(database *Database, bundle *Bundl
 
 func (b *BundleStorageEngine) UpdateBundleFile(database *Database, bundle *Bundle) error {
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, bundle.Name)
+	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *b.logger) {
@@ -262,7 +276,7 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *Database,
 	}
 
 	// Update the data file
-	filePath := filepath.Join(database.DataDirectory, bundle.Name)
+	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
 	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("error opening bundle file for update: %w", err)
@@ -303,11 +317,11 @@ func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *Bundle, document *
 		return fmt.Errorf("bundle has no associated database directory")
 	}
 
-	filePath := filepath.Join(dataDir, bundle.Name)
+	filePath := filepath.Join(dataDir, fmt.Sprintf("%s.bnd", bundle.Name))
 
 	// Check if the file exists
 	if !helpers.FileExists(filePath, *b.logger) {
-		return fmt.Errorf("bundle file %s does not exist", bundle.Name)
+		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s.bnd", bundle.Name))
 	}
 
 	// 1. First, add the document to the bundle in memory
@@ -498,10 +512,13 @@ func (b *BundleStorageEngine) RemoveBundleFile(database *Database, bundleName st
 
 func BundleToMap(bundle *Bundle) map[string]interface{} {
 	return map[string]interface{}{
-		"BundleID":      bundle.BundleID,
-		"Name":          bundle.Name,
-		"Relationships": bundle.Relationships,
-		"Constraints":   bundle.Constraints,
+		"BundleID":          bundle.BundleID,
+		"Name":              bundle.Name,
+		"DocumentStructure": bundle.DocumentStructure,
+		"FieldDefinitions":  bundle.DocumentStructure.FieldDefinitions,
+		"Documents":         bundle.Documents,
+		"Relationships":     bundle.Relationships,
+		"Constraints":       bundle.Constraints,
 	}
 }
 
@@ -524,4 +541,211 @@ func calculateDocumentOffset(data []byte, index int) (int, error) {
 	}
 
 	return offset, nil
+}
+
+// MapToBundle converts a map to a Bundle struct
+func MapToBundle(data map[string]interface{}) (*Bundle, error) {
+	bundle := &Bundle{}
+
+	// Extract basic fields
+	if id, ok := data["BundleID"].(string); ok {
+		bundle.BundleID = id
+	} else {
+		return nil, fmt.Errorf("invalid or missing BundleID in map")
+	}
+
+	if name, ok := data["Name"].(string); ok {
+		bundle.Name = name
+	} else {
+		return nil, fmt.Errorf("invalid or missing Name in map")
+	}
+
+	// Extract relationships
+	if relations, ok := data["Relationships"]; ok && relations != nil {
+		if relationMap, ok := relations.(map[string]Relationship); ok {
+			bundle.Relationships = relationMap
+		} else {
+			// If not directly convertible, try to convert each item individually
+			bundle.Relationships = make(map[string]Relationship)
+			if relMap, ok := relations.(map[string]interface{}); ok {
+				for key, val := range relMap {
+					if relData, ok := val.(map[string]interface{}); ok {
+						rel := Relationship{
+							// ID:           stringValue(relData, "ID", ""),
+							Name: stringValue(relData, "Name", ""),
+							//  TargetBundle: stringValue(relData, "TargetBundle", ""),
+						}
+						bundle.Relationships[key] = rel
+					}
+				}
+			}
+		}
+	} else {
+		bundle.Relationships = make(map[string]Relationship)
+	}
+
+	// Extract constraints
+	if constraints, ok := data["Constraints"]; ok && constraints != nil {
+		if constraintMap, ok := constraints.(map[string]Constraint); ok {
+			bundle.Constraints = constraintMap
+		} else {
+			// If not directly convertible, try to convert each item individually
+			bundle.Constraints = make(map[string]Constraint)
+			if consMap, ok := constraints.(map[string]interface{}); ok {
+				for key, val := range consMap {
+					if consData, ok := val.(map[string]interface{}); ok {
+						cons := Constraint{
+							Name: stringValue(consData, "Name", ""),
+							// Type:      stringValue(consData, "Type", ""),
+							// Fields:    stringArrayValue(consData, "Fields"),
+							// Condition: stringValue(consData, "Condition", ""),
+						}
+						bundle.Constraints[key] = cons
+					}
+				}
+			}
+		}
+	} else {
+		bundle.Constraints = make(map[string]Constraint)
+	}
+
+	// Extract field definitions
+	if fieldDefs, ok := data["FieldDefinitions"]; ok && fieldDefs != nil {
+		if fieldDefMap, ok := fieldDefs.(map[string]FieldDefinition); ok {
+			bundle.DocumentStructure.FieldDefinitions = fieldDefMap
+		} else {
+			// If not directly convertible, try to convert each item individually
+			bundle.DocumentStructure.FieldDefinitions = make(map[string]FieldDefinition)
+			if fdMap, ok := fieldDefs.(map[string]interface{}); ok {
+				for key, val := range fdMap {
+					if fdData, ok := val.(map[string]interface{}); ok {
+						fd := FieldDefinition{
+							Name:         stringValue(fdData, "Name", ""),
+							Type:         stringValue(fdData, "Type", ""),
+							IsRequired:   boolValue(fdData, "IsRequired", false),
+							IsUnique:     boolValue(fdData, "IsUnique", false),
+							DefaultValue: fdData["DefaultValue"],
+						}
+						bundle.DocumentStructure.FieldDefinitions[key] = fd
+					}
+				}
+			}
+		}
+	} else {
+		bundle.DocumentStructure.FieldDefinitions = make(map[string]FieldDefinition)
+	}
+
+	// Extract documents
+	if docs, ok := data["Documents"]; ok && docs != nil {
+		bundle.Documents = make(map[string]Document)
+
+		// Handle array of documents
+		if docArray, ok := docs.([]interface{}); ok {
+			for _, doc := range docArray {
+				if docMap, ok := doc.(map[string]interface{}); ok {
+					// Extract document ID
+					docID, ok := docMap["ID"].(string)
+					if !ok {
+						continue // Skip documents without valid ID
+					}
+
+					document := Document{
+						DocumentID: docID,
+						Fields:     make(map[string]Field),
+					}
+
+					// Extract CreatedAt and UpdatedAt if available
+					if created, ok := docMap["CreatedAt"].(time.Time); ok {
+						document.CreatedAt = created
+					}
+					if updated, ok := docMap["UpdatedAt"].(time.Time); ok {
+						document.UpdatedAt = updated
+					}
+
+					// Extract fields
+					if fields, ok := docMap["Fields"].(map[string]interface{}); ok {
+						for fieldName, fieldValue := range fields {
+							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
+								field := Field{
+									Name:  stringValue(fieldMap, "Name", fieldName),
+									Value: fieldMap["Value"],
+								}
+								document.Fields[fieldName] = field
+							}
+						}
+					}
+
+					bundle.Documents[docID] = document
+				}
+			}
+		} else if docMap, ok := docs.(map[string]interface{}); ok {
+			// Handle map of documents
+			for docID, docData := range docMap {
+				if docMapData, ok := docData.(map[string]interface{}); ok {
+					document := Document{
+						DocumentID: docID,
+						Fields:     make(map[string]Field),
+					}
+
+					// Extract CreatedAt and UpdatedAt if available
+					if created, ok := docMapData["CreatedAt"].(time.Time); ok {
+						document.CreatedAt = created
+					}
+					if updated, ok := docMapData["UpdatedAt"].(time.Time); ok {
+						document.UpdatedAt = updated
+					}
+
+					// Extract fields
+					if fields, ok := docMapData["Fields"].(map[string]interface{}); ok {
+						for fieldName, fieldValue := range fields {
+							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
+								field := Field{
+									Name:  stringValue(fieldMap, "Name", fieldName),
+									Value: fieldMap["Value"],
+								}
+								document.Fields[fieldName] = field
+							}
+						}
+					}
+
+					bundle.Documents[docID] = document
+				}
+			}
+		}
+	}
+
+	return bundle, nil
+}
+
+// Helper functions for safe type conversions
+func stringValue(data map[string]interface{}, key, defaultVal string) string {
+	if val, ok := data[key].(string); ok {
+		return val
+	}
+	return defaultVal
+}
+
+func boolValue(data map[string]interface{}, key string, defaultVal bool) bool {
+	if val, ok := data[key].(bool); ok {
+		return val
+	}
+	return defaultVal
+}
+
+func stringArrayValue(data map[string]interface{}, key string) []string {
+	var result []string
+
+	if val, ok := data[key]; ok {
+		if strArr, ok := val.([]string); ok {
+			return strArr
+		} else if arrIface, ok := val.([]interface{}); ok {
+			for _, item := range arrIface {
+				if str, ok := item.(string); ok {
+					result = append(result, str)
+				}
+			}
+		}
+	}
+
+	return result
 }

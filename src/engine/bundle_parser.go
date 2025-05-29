@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 type BundleCommand struct {
@@ -45,9 +47,9 @@ func ParseBundleCommand(command string) (*BundleCommand, error) {
 	command = strings.TrimSpace(command)
 
 	// Parse CREATE BUNDLE command
-	if strings.HasPrefix(command, "CREATE BUNDLE") {
-		return ParseCreateBundleCommand(command)
-	}
+	// if strings.HasPrefix(command, "CREATE BUNDLE") {
+	// 	return ParseCreateBundleCommand(command)
+	// }
 
 	// Parse UPDATE BUNDLE command
 	if strings.HasPrefix(command, "UPDATE BUNDLE") {
@@ -63,7 +65,10 @@ func ParseBundleCommand(command string) (*BundleCommand, error) {
 }
 
 // ParseCreateBundleCommand parses CREATE BUNDLE command
-func ParseCreateBundleCommand(command string) (*BundleCommand, error) {
+func ParseCreateBundleCommand(command string, logger *zap.SugaredLogger) (*BundleCommand, error) {
+	command = strings.ReplaceAll(command, "\n", " ")
+	command = strings.ReplaceAll(command, "\t", " ")
+
 	// Regular expression to extract bundle name
 	bundleNameRegex := regexp.MustCompile(`CREATE BUNDLE\s+"([^"]+)"`)
 	matches := bundleNameRegex.FindStringSubmatch(command)
@@ -79,7 +84,8 @@ func ParseCreateBundleCommand(command string) (*BundleCommand, error) {
 	}
 
 	fieldsSection := command[fieldsStartIndex+11:] // Skip "WITH FIELDS"
-	fields, err := parseFieldDefinitions(fieldsSection)
+	fieldsSection = normalizeFieldsSection(fieldsSection)
+	fields, err := parseFieldDefinitions(fieldsSection, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -91,24 +97,55 @@ func ParseCreateBundleCommand(command string) (*BundleCommand, error) {
 	}, nil
 }
 
-func ParseAddDocumentCommand(command string, bundleName string) (*DocumentCommand, error) {
-	// Regular expression to extract document fields
-	fieldsRegex := regexp.MustCompile(`ADD DOCUMENT\s+TO\s+"([^"]+)"\s+WITH\s+\{([^}]+)\}`)
-	matches := fieldsRegex.FindStringSubmatch(command)
-	if len(matches) < 3 || matches[1] != bundleName {
-		return nil, fmt.Errorf("invalid ADD DOCUMENT command syntax for bundle %s", bundleName)
+func normalizeFieldsSection(fieldsText string) string {
+	// First, replace newlines and tabs with spaces
+	fieldsText = strings.ReplaceAll(fieldsText, "\n", " ")
+	fieldsText = strings.ReplaceAll(fieldsText, "\t", " ")
+
+	// Trim leading/trailing whitespace
+	fieldsText = strings.TrimSpace(fieldsText)
+
+	// Remove spaces after commas between field definitions
+	// This regex finds a closing brace followed by comma and spaces, then an opening brace
+	fieldsText = regexp.MustCompile(`\},\s*\{`).ReplaceAllString(fieldsText, "},{")
+
+	// Remove extra spaces at the beginning (after the opening parenthesis)
+	fieldsText = regexp.MustCompile(`\(\s*\{`).ReplaceAllString(fieldsText, "({")
+
+	// Remove extra spaces at the end (before the closing parenthesis)
+	fieldsText = regexp.MustCompile(`\}\s*\)`).ReplaceAllString(fieldsText, "})")
+
+	return fieldsText
+}
+
+func ParseAddDocumentCommand(command string, logger *zap.SugaredLogger) (*DocumentCommand, error) {
+	// Regular expression to match the command structure
+	command = strings.Trim(command, " \n\r\t")
+	command = strings.ReplaceAll(command, "\n", " ")
+	command = strings.ReplaceAll(command, "\t", " ")
+
+	addDocRegex := regexp.MustCompile(`ADD DOCUMENT TO BUNDLE\s+"([^"]+)"\s*WITH\s*\(([\s\S]+)\)`)
+	matches := addDocRegex.FindStringSubmatch(command)
+
+	if len(matches) < 3 {
+		logger.Errorw("Invalid ADD DOCUMENT command syntax", "command", command)
+		return nil, fmt.Errorf("invalid ADD DOCUMENT command syntax")
 	}
 
-	// Parse field definitions
-	fields, err := parseFieldValues(matches[2])
+	bundleName := matches[1]
+	fieldsText := matches[2]
+
+	// Parse the field values from the format {key=value}
+	fieldValues, err := parseFieldValues(fieldsText)
 	if err != nil {
-		return nil, err
+		logger.Errorw("Error parsing field values", "error", err)
+		return nil, fmt.Errorf("error parsing field values: %w", err)
 	}
 
 	return &DocumentCommand{
 		CommandType: "ADD",
 		BundleName:  bundleName,
-		Fields:      fields,
+		Fields:      fieldValues,
 	}, nil
 }
 
@@ -152,7 +189,7 @@ func ParseDeleteBundleCommand(command string) (*BundleCommand, error) {
 }
 
 // parseFieldDefinitions parses field definitions like ({"fieldName", "string", true, false}, ...)
-func parseFieldDefinitions(fieldsText string) ([]FieldDefinition, error) {
+func parseFieldDefinitions(fieldsText string, logger *zap.SugaredLogger) ([]FieldDefinition, error) {
 	// Remove parentheses
 	fieldsText = strings.TrimSpace(fieldsText)
 	if !strings.HasPrefix(fieldsText, "(") || !strings.HasSuffix(fieldsText, ")") {
@@ -161,7 +198,7 @@ func parseFieldDefinitions(fieldsText string) ([]FieldDefinition, error) {
 	fieldsText = fieldsText[1 : len(fieldsText)-1]
 
 	// Split by "}, {"
-	fieldParts := strings.Split(fieldsText, "}, {")
+	fieldParts := strings.Split(fieldsText, "},{")
 	for i, part := range fieldParts {
 		// Clean up first and last parts
 		if i == 0 {
@@ -175,6 +212,7 @@ func parseFieldDefinitions(fieldsText string) ([]FieldDefinition, error) {
 
 	var fields []FieldDefinition
 	for _, fieldText := range fieldParts {
+
 		field, err := parseFieldDefinition(fieldText)
 		if err != nil {
 			return nil, err
@@ -208,81 +246,73 @@ func parseFieldDefinition(fieldText string) (FieldDefinition, error) {
 }
 
 func parseFieldValues(fieldsText string) ([]KeyValue, error) {
-	// Remove curly braces
+	// Split the fields by commas, respecting quotes and braces
+	// var fieldParts []string
+	var fieldValues []KeyValue
+
+	// Remove any leading/trailing whitespace
 	fieldsText = strings.TrimSpace(fieldsText)
-	if !strings.HasPrefix(fieldsText, "{") || !strings.HasSuffix(fieldsText, "}") {
-		return nil, fmt.Errorf("field values must be enclosed in curly braces")
-	}
-	fieldsText = fieldsText[1 : len(fieldsText)-1]
 
-	// Split by commas, but handle potential comma values inside quotes
-	var fieldParts []string
-	inQuote := false
-	start := 0
-
-	for i := 0; i < len(fieldsText); i++ {
-		switch fieldsText[i] {
-		case '"':
-			inQuote = !inQuote
-		case ',':
-			if !inQuote {
-				// Found a comma outside quotes - this is a field separator
-				part := strings.TrimSpace(fieldsText[start:i])
-				if part != "" {
-					fieldParts = append(fieldParts, part)
-				}
-				start = i + 1
-			}
+	// Split by closing brace + comma
+	parts := strings.Split(fieldsText, "},")
+	for i, part := range parts {
+		// If this isn't the last part, add the closing brace back
+		if i < len(parts)-1 {
+			part += "}"
 		}
-	}
 
-	// Add the last part
-	if start < len(fieldsText) {
-		part := strings.TrimSpace(fieldsText[start:])
+		// Trim whitespace and process if not empty
+		part = strings.TrimSpace(part)
 		if part != "" {
-			fieldParts = append(fieldParts, part)
+			// Check if part starts with '{' and trim it
+			if strings.HasPrefix(part, "{") {
+				part = part[1:]
+			}
+
+			// Check if part ends with '}' and trim it
+			if strings.HasSuffix(part, "}") {
+				part = part[:len(part)-1]
+			}
+
+			// Parse the key-value pair
+			keyValue := strings.SplitN(part, "=", 2)
+			if len(keyValue) != 2 {
+				return nil, fmt.Errorf("invalid field format: %s", part)
+			}
+
+			key := strings.TrimSpace(keyValue[0])
+			key = strings.Trim(key, "\"") // Remove quotes around the key
+			valueStr := strings.TrimSpace(keyValue[1])
+
+			// Convert valueStr to appropriate type
+			var value interface{} = valueStr
+
+			// Remove quotes if present
+			if strings.HasPrefix(valueStr, "\"") && strings.HasSuffix(valueStr, "\"") {
+				value = strings.Trim(valueStr, "\"")
+			} else if strings.EqualFold(valueStr, "true") || strings.EqualFold(valueStr, "false") {
+				// Handle boolean values
+				value = strings.EqualFold(valueStr, "true")
+			} else if strings.Contains(valueStr, ".") {
+				// Try to parse as float
+				if floatVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
+					value = floatVal
+				}
+			} else {
+				// Try to parse as int
+				if intVal, err := strconv.Atoi(valueStr); err == nil {
+					value = intVal
+				}
+			}
+
+			fieldValues = append(fieldValues, KeyValue{
+				Key:   key,
+				Value: value,
+			})
 		}
 	}
 
-	var fields []KeyValue
-	for _, part := range fieldParts {
-		// Split by equals sign to get key and value, respecting spaces around it
-		keyValue := strings.SplitN(part, "=", 2)
-		if len(keyValue) != 2 {
-			return nil, fmt.Errorf("invalid field format: %s (expected 'FieldName = FieldValue')", part)
-		}
-
-		key := strings.TrimSpace(keyValue[0])
-		valueStr := strings.TrimSpace(keyValue[1])
-
-		// Process the value based on its format
-		var value interface{} = valueStr
-
-		// If it's a quoted string, remove the quotes
-		if strings.HasPrefix(valueStr, "\"") && strings.HasSuffix(valueStr, "\"") {
-			value = strings.Trim(valueStr, "\"")
-		} else if valueStr == "true" || valueStr == "false" {
-			// Handle boolean values
-			value, _ = strconv.ParseBool(valueStr)
-		} else if strings.Contains(valueStr, ".") {
-			// Try to parse as float
-			if floatVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
-				value = floatVal
-			}
-		} else {
-			// Try to parse as integer
-			if intVal, err := strconv.Atoi(valueStr); err == nil {
-				value = intVal
-			}
-		}
-
-		fields = append(fields, KeyValue{
-			Key:   key,
-			Value: value,
-		})
-	}
-
-	return fields, nil
+	return fieldValues, nil
 }
 
 // parseFieldChanges parses field change operations (CHANGE, ADD, REMOVE)

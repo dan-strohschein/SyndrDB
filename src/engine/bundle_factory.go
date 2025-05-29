@@ -18,7 +18,7 @@ func (f *BundleFactoryImpl) NewBundle(name string, description string) *Bundle {
 	return &Bundle{
 		BundleID:          helpers.GenerateUUID(),
 		Name:              name,
-		DocumentStructure: make(map[string]Field),
+		DocumentStructure: DocumentStructure{FieldDefinitions: make(map[string]FieldDefinition)},
 		Documents:         make(map[string]Document),
 		Relationships:     make(map[string]Relationship),
 		Constraints:       make(map[string]Constraint),

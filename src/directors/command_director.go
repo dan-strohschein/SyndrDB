@@ -37,6 +37,38 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 				return &cmdResponse, nil
 			}
 
+		case "documents":
+
+			if len(commandParts) < 4 || !strings.EqualFold(commandParts[2], "FROM") {
+				return nil, fmt.Errorf("SELECT DOCUMENTS requires the spec 'FROM <Bundle_name>'")
+			}
+
+			bundleName := strings.Trim(commandParts[3], "\"'")
+
+			bundleName = strings.ReplaceAll(bundleName, "\"", "")
+			bundleName = strings.ReplaceAll(bundleName, "'", "")
+			bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
+
+			// Get the bundle by name
+			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			if err != nil {
+				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+			}
+			// Get documents from the bundle
+			documents := bundle.Documents
+
+			if len(documents) == 0 {
+				result = fmt.Sprintf("No documents found in bundle '%s'.", bundleName)
+			} else {
+				result = fmt.Sprintf("Found %d documents in bundle '%s'.", len(documents), bundleName)
+			}
+			logger.Infof(result)
+
+			cmdResponse := &engine.CommandResponse{
+				ResultCount: len(documents),
+				Result:      documents,
+			}
+			return cmdResponse, nil
 		}
 		return nil, nil
 	}
@@ -72,7 +104,7 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			}
 			return cmdResponse, nil
 		case "bundle":
-			bundleCmd, err := engine.ParseCreateBundleCommand(command)
+			bundleCmd, err := engine.ParseCreateBundleCommand(command, logger)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing bundle command: %v", err)
 			}
@@ -119,14 +151,16 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			if len(commandParts) < 4 {
 				return nil, fmt.Errorf("ADD DOCUMENT requires the spec 'TO <bundle_name>'")
 			}
-			bundleName := commandParts[3]
+
 			// Parse the document command
-			docCommand, err := engine.ParseAddDocumentCommand(command, bundleName)
+			docCommand, err := engine.ParseAddDocumentCommand(command, logger)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing add document command: %v", err)
 			}
+
+			bundleName := docCommand.BundleName
 			// Get the bundle by name
-			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			bundle, err := serviceManager.BundleService.GetBundleByName(docCommand.BundleName)
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}

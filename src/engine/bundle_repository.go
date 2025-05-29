@@ -3,6 +3,8 @@ package engine
 import (
 	"fmt"
 	"os"
+
+	"go.uber.org/zap"
 )
 
 // TODO this whole file needs to be redone and the functions placed in the right areas/files
@@ -15,7 +17,7 @@ func (db *Database) GetBundle(bundleName string) (*Bundle, error) {
 	return nil, fmt.Errorf("Bundle %s was not found", bundle.Name)
 }
 
-func (db *Database) AddBundle(bundle Bundle, dbStore DatabaseStore, bundleStore BundleStore) error {
+func (db *Database) AddBundle(bundle Bundle, dbStore DatabaseStore, bundleStore BundleStore, logger *zap.SugaredLogger) error {
 	if _, exists := db.Bundles[bundle.Name]; exists {
 		return fmt.Errorf("Bundle %s already exists", bundle.Name)
 	}
@@ -26,9 +28,9 @@ func (db *Database) AddBundle(bundle Bundle, dbStore DatabaseStore, bundleStore 
 	if err != nil {
 		return fmt.Errorf("error creating bundle file: %w", err)
 	}
-
+	//logger.Infof("Decoded bundle data from file %v", bundle)
 	// and then the bundle file name needs to be added to the database file
-	db.BundleFiles = append(db.BundleFiles, bundle.Name)
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s.bnd", bundle.Name))
 
 	// Write the updated database file
 	err = dbStore.UpdateDatabaseDataFile(db)

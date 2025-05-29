@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syndrdb/src/helpers"
+	"syndrdb/src/settings"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -82,9 +83,9 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (ma
 		}
 
 		// Check file extension if you have a specific extension for database files
-		// if !strings.HasSuffix(file.Name(), ".db") {
-		//     continue
-		// }
+		if !strings.HasSuffix(file.Name(), ".db") {
+			continue
+		}
 
 		// Load the database
 		db, err := d.LoadDatabaseDataFile(dataRootDir, file.Name())
@@ -108,6 +109,8 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (ma
 
 // LoadDatabaseDataFile loads a single database metadata file
 func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName string) (*Database, error) {
+	args := settings.GetSettings()
+
 	fullPath := filepath.Join(dataRootDir, fileName)
 
 	// Open the file
@@ -140,6 +143,10 @@ func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName strin
 	dbMap, err := helpers.DecodeBSON(data)
 	if err != nil {
 		return nil, fmt.Errorf("error decoding database data: %w", err)
+	}
+
+	if args.Debug {
+		log.Printf("Loaded database metadata from file %s: %v", fileName, dbMap)
 	}
 
 	// Convert map to Database object
@@ -195,7 +202,7 @@ func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *Database, datab
 
 func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *Database) error {
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, database.Name)
+	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.db", database.Name))
 
 	// Check if the file already exists
 	if helpers.FileExists(filePath, *d.logger) {
@@ -236,16 +243,16 @@ func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *Database) error
 
 func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *Database) error {
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, database.Name)
+	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.db", database.Name))
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *d.logger) {
-		return fmt.Errorf("Database %s does not exist", database.Name)
+		return fmt.Errorf("Database %s does not exist", filePath)
 	}
 
 	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_TRUNC, 0644)
 	if err != nil {
-		return fmt.Errorf("error opening database file %s: %w", database.Name, err)
+		return fmt.Errorf("error opening database file %s: %w", filePath, err)
 	}
 	defer file.Close()
 
@@ -261,11 +268,11 @@ func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *Database) error
 	// Write the encoded db to the file
 	fileLen, err := file.Write(encodedDB)
 	if err != nil {
-		return fmt.Errorf("error writing to bundle data file %s: %w", database.Name, err)
+		return fmt.Errorf("error writing to bundle data file %s: %w", filePath, err)
 	}
 
 	if fileLen != len(encodedDB) {
-		return fmt.Errorf("error writing to bundle data file %s: wrote %d bytes, expected %d", database.Name, fileLen, len(encodedDB))
+		return fmt.Errorf("error writing to bundle data file %s: wrote %d bytes, expected %d", filePath, fileLen, len(encodedDB))
 	}
 
 	return nil

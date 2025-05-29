@@ -29,13 +29,17 @@ type Bundle struct {
 	Name string
 
 	// A description of the document structure, similar to a schema/table definition.
-	DocumentStructure map[string]Field
+	DocumentStructure DocumentStructure
 
 	// A list of documents in the bundle, similar to rows in a table.
 	Documents map[string]Document
 
 	Relationships map[string]Relationship
 	Constraints   map[string]Constraint
+}
+
+type DocumentStructure struct {
+	FieldDefinitions map[string]FieldDefinition
 }
 
 type Document struct {
@@ -46,13 +50,13 @@ type Document struct {
 }
 
 type Field struct {
-	Name         string
-	FieldType    string
-	Value        interface{}
-	Description  string
-	Required     bool
-	Unique       bool
-	DefaultValue interface{}
+	Name string
+	//FieldType    string
+	Value interface{}
+	// Description  string
+	// Required     bool
+	// Unique       bool
+	// DefaultValue interface{}
 }
 
 type Constraint struct {

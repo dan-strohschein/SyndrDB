@@ -7,6 +7,8 @@ import (
 	"syndrdb/src/engine"
 
 	"syndrdb/src/settings"
+
+	"go.uber.org/zap"
 )
 
 // func (s *Server) LoadAllDatabases() error {
@@ -31,14 +33,18 @@ type DatabaseService struct {
 	factory   engine.DatabaseFactory
 	settings  *settings.Arguments
 	databases map[string]*engine.Database
+	logger    *zap.SugaredLogger
 }
 
 // NewDatabaseService creates a new DatabaseService
-func NewDatabaseService(store engine.DatabaseStore, factory engine.DatabaseFactory, settings *settings.Arguments) *DatabaseService {
+func NewDatabaseService(store engine.DatabaseStore, factory engine.DatabaseFactory,
+	settings *settings.Arguments,
+	logger *zap.SugaredLogger) *DatabaseService {
 	service := &DatabaseService{
 		store:     store,
 		factory:   factory,
 		settings:  settings,
+		logger:    logger,
 		databases: make(map[string]*engine.Database),
 	}
 
@@ -156,5 +162,5 @@ func (s *DatabaseService) AddBundleToDatabase(dbName string, bundle engine.Bundl
 		return err
 	}
 
-	return db.AddBundle(bundle, s.store, bundleStore)
+	return db.AddBundle(bundle, s.store, bundleStore, s.logger)
 }

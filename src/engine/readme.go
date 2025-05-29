@@ -86,9 +86,9 @@ Then, we return the documents that match the filter
 ADD DOCUMENT TO BUNDLE "Test-Bundle-1"
 WITH  (
 	{"ProductName"="MY FIRST PRODUCT"},
-	{"Age", 10},
-	{"Price", 5.0},
-	{"IsActive", True}
+	{"Age" = 10},
+	{"Price" = 5.0},
+	{"IsActive" = True}
 )
 
 

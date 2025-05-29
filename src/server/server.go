@@ -112,7 +112,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	databaseFactory := engine.NewDatabaseFactory()
 
 	// Create service
-	databaseService := directors.NewDatabaseService(databaseStore, databaseFactory, config)
+	databaseService := directors.NewDatabaseService(databaseStore, databaseFactory, config, sugar)
 
 	// Create bundle service
 	bundleStore, err := engine.NewBundleStore(config.DataDir, logger.Sugar())
@@ -121,7 +121,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	}
 	bundleFactory := engine.NewBundleFactory()
 	documentFactory := engine.NewDocumentFactory()
-	bundleService := directors.NewBundleService(bundleStore, bundleFactory, documentFactory, config)
+	bundleService := directors.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, config)
 
 	// Initialize the singleton
 	directors.InitServiceManager(databaseService, bundleService, sugar)
@@ -404,11 +404,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if strings.HasPrefix(line, "syndrdb://") {
 				connLogger.Debug("Reading connection string")
 
-				connStr, err := parseConnectionString(line)
+				connStr, err := parseConnectionString(s, line)
 				if err != nil {
 					connLogger.Errorw("Error parsing connection string", "error", err, "input", line)
 					connLogger.Sync()
 					sendError(writer, fmt.Sprintf("Invalid connection string: %v", err))
+					// Give TCP stack time to send the data
+					time.Sleep(100 * time.Millisecond)
+
+					close(doneCh)
 					return
 				}
 
@@ -529,8 +533,8 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 func (s *Server) handleTextCommand(conn *Connection, command string, args []string) (interface{}, error) {
 	serviceManager := directors.GetServiceManager()
 
-	s.logger.Infof("Debugging the command received: %s", command)
-	s.logger.Sync()
+	//s.logger.Infof("Debugging the command received: %s", command)
+	//s.logger.Sync()
 
 	result, err := directors.CommandDirector(conn.Database, *serviceManager, command, s.logger)
 
@@ -538,7 +542,7 @@ func (s *Server) handleTextCommand(conn *Connection, command string, args []stri
 
 }
 
-func parseConnectionString(connStr string) (ConnectionString, error) {
+func parseConnectionString(server *Server, connStr string) (ConnectionString, error) {
 	result := ConnectionString{
 		Options: make(map[string]string),
 	}
@@ -561,7 +565,15 @@ func parseConnectionString(connStr string) (ConnectionString, error) {
 	}
 	result.Port = portNum
 	result.Database = optionsParts[2]
-	// TODO Check to make sure the database exists
+
+	if result.Database == "" {
+		return result, fmt.Errorf("database name cannot be empty")
+	}
+
+	// Check to make sure the database exists
+	if !DatabaseExists(server.Databases, result.Database) {
+		return result, fmt.Errorf("invalid database name: %s", result.Database)
+	}
 
 	result.Username = optionsParts[3]
 	result.Password = optionsParts[4]
@@ -614,6 +626,15 @@ func parseConnectionString(connStr string) (ConnectionString, error) {
 	// }
 
 	return result, nil
+}
+
+func DatabaseExists(databases map[string]*engine.Database, dbName string) bool {
+	for _, db := range databases {
+		if strings.EqualFold(db.Name, dbName) {
+			return true
+		}
+	}
+	return false
 }
 
 // Helper functions
