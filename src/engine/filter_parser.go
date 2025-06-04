@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"go.uber.org/zap"
 	//"syndrdb/src/engine"
 )
 
@@ -244,22 +246,24 @@ func parseValue(valueToken string) (interface{}, error) {
 }
 
 // EvaluateWhereClause evaluates a WHERE clause against a document
-func EvaluateWhereClause(document *Document, whereGroup *WhereGroup) bool {
+func EvaluateWhereClause(document *Document, whereGroup *WhereGroup, logger *zap.SugaredLogger) bool {
 	// If there are no clauses or subgroups, default to true
 	if len(whereGroup.Clauses) == 0 && len(whereGroup.SubGroups) == 0 {
+		logger.Infof("DEBUG DEBUG:: No clauses or subgroups in WHERE group, returning true")
 		return true
 	}
 
 	// Evaluate all clauses in this group
 	clauseResults := make([]bool, 0, len(whereGroup.Clauses))
 	for _, clause := range whereGroup.Clauses {
-		clauseResults = append(clauseResults, evaluateClause(document, clause))
+		logger.Infof("DEBUG DEBUG:: Evaluating clause: %+v", clause)
+		clauseResults = append(clauseResults, evaluateClause(document, clause, logger))
 	}
 
 	// Evaluate all subgroups
 	subgroupResults := make([]bool, 0, len(whereGroup.SubGroups))
 	for _, subgroup := range whereGroup.SubGroups {
-		subgroupResults = append(subgroupResults, EvaluateWhereClause(document, &subgroup))
+		subgroupResults = append(subgroupResults, EvaluateWhereClause(document, &subgroup, logger))
 	}
 
 	// Combine all results using appropriate logic
@@ -281,11 +285,21 @@ func EvaluateWhereClause(document *Document, whereGroup *WhereGroup) bool {
 }
 
 // evaluateClause evaluates a single clause against a document
-func evaluateClause(document *Document, clause WhereClause) bool {
+func evaluateClause(document *Document, clause WhereClause, logger *zap.SugaredLogger) bool {
 	// Get field value from document
-	fieldValue, exists := document.Fields[clause.Field]
-	if !exists {
+
+	field, exists := document.Fields[clause.Field]
+	if !exists && !strings.EqualFold(clause.Field, "documentid") {
+		logger.Infof("Field '%s' does not exist in document, returning false", clause.Field)
 		return false // Field doesn't exist
+	}
+
+	if strings.EqualFold(clause.Field, "documentid") {
+		// Special case for document ID
+		field = Field{
+			Name:  "DocumentID",
+			Value: document.DocumentID,
+		}
 	}
 
 	// If no value is specified in the clause, we assume it matches any value
@@ -296,24 +310,26 @@ func evaluateClause(document *Document, clause WhereClause) bool {
 	// Compare based on operator and types
 	switch clause.Operator {
 	case "==":
-		return compareValues(fieldValue, clause.Value, func(a, b float64) bool { return a == b })
+		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a == b })
 	case "!=":
-		return compareValues(fieldValue, clause.Value, func(a, b float64) bool { return a != b })
+		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a != b })
 	case ">":
-		return compareValues(fieldValue, clause.Value, func(a, b float64) bool { return a > b })
+		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a > b })
 	case "<":
-		return compareValues(fieldValue, clause.Value, func(a, b float64) bool { return a < b })
+		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a < b })
 	default:
 		return false
 	}
 }
 
 // compareValues handles type conversion and comparison
-func compareValues(a, b interface{}, numericComparison func(float64, float64) bool) bool {
+func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericComparison func(float64, float64) bool) bool {
 	// Handle string comparison
 	aStr, aIsString := a.(string)
 	bStr, bIsString := b.(string)
+	//logger.Infof("DEBUG DEBUG:: Comparing strings: '%s' and '%s'", aStr, bStr)
 	if aIsString && bIsString {
+
 		return aStr == bStr
 	}
 
@@ -360,17 +376,17 @@ func compareValues(a, b interface{}, numericComparison func(float64, float64) bo
 }
 
 // FilterDocuments filters documents based on a WHERE clause
-func FilterDocuments(bundle *Bundle, whereClause string) ([]*Document, error) {
+func FilterDocuments(bundle *Bundle, whereClause string, logger *zap.SugaredLogger) ([]*Document, error) {
 	// Parse the WHERE clause
 	whereGroup, err := ParseWhereClause(whereClause)
 	if err != nil {
 		return nil, err
 	}
-
+	//logger.Infof("Parsed WHERE clause: %+v", whereGroup)
 	// Filter documents
 	var result []*Document
 	for _, doc := range bundle.Documents {
-		if EvaluateWhereClause(&doc, whereGroup) {
+		if EvaluateWhereClause(&doc, whereGroup, logger) {
 			result = append(result, &doc)
 		}
 	}

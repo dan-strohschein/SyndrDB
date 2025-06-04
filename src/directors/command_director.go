@@ -54,15 +54,36 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
-			// Get documents from the bundle
-			documents := bundle.Documents
 
-			if len(documents) == 0 {
-				result = fmt.Sprintf("No documents found in bundle '%s'.", bundleName)
+			var documents map[string]*engine.Document
+			if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
+				//logger.Infof("Filtering documents in bundle '%s' with WHERE clause: %s", bundleName, strings.Join(commandParts[5:], " "))
+				whereClause := strings.Join(commandParts[5:], " ")
+				filteredDocs, err := engine.FilterDocuments(bundle, whereClause, logger)
+				if err != nil {
+					return nil, fmt.Errorf("error filtering documents: %v", err)
+				}
+				//logger.Infof("Found %d documents in bundle '%s' ", len(filteredDocs), bundleName)
+				documents = make(map[string]*engine.Document)
+				for _, v := range filteredDocs {
+					docCopy := v
+					documents[docCopy.DocumentID] = v
+				}
 			} else {
-				result = fmt.Sprintf("Found %d documents in bundle '%s'.", len(documents), bundleName)
+				// Get documents from the bundle
+				documents = make(map[string]*engine.Document)
+				for k, v := range bundle.Documents {
+					docCopy := v
+					documents[k] = &docCopy
+				}
 			}
-			logger.Infof(result)
+
+			// if len(documents) == 0 {
+			// 	result = fmt.Sprintf("No documents found in bundle '%s'.", bundleName)
+			// } else {
+			// 	result = fmt.Sprintf("Found %d documents in bundle '%s'.", len(documents), bundleName)
+			// }
+			// logger.Infof(result)
 
 			cmdResponse := &engine.CommandResponse{
 				ResultCount: len(documents),
@@ -232,6 +253,30 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
+
+			var documents map[string]*engine.Document
+			if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
+				//logger.Infof("Filtering documents in bundle '%s' with WHERE clause: %s", bundleName, strings.Join(commandParts[5:], " "))
+				whereClause := strings.Join(commandParts[5:], " ")
+				filteredDocs, err := engine.FilterDocuments(bundle, whereClause, logger)
+				if err != nil {
+					return nil, fmt.Errorf("error filtering documents: %v", err)
+				}
+				//logger.Infof("Found %d documents in bundle '%s' ", len(filteredDocs), bundleName)
+				documents = make(map[string]*engine.Document)
+				for _, v := range filteredDocs {
+					docCopy := v
+					documents[docCopy.DocumentID] = v
+				}
+			} else {
+				// Get documents from the bundle
+				documents = make(map[string]*engine.Document)
+				for k, v := range bundle.Documents {
+					docCopy := v
+					documents[k] = &docCopy
+				}
+			}
+
 			// Delete the document from the bundle
 			err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand)
 		case "user":

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -35,6 +36,7 @@ type BundleStore interface {
 	UpdateBundleFile(database *Database, bundle *Bundle) error
 	UpdateDocumentDataInBundleFile(database *Database, bundle *Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
 	DeleteDocumentFromBundleFile(bundle *Bundle, documentID string) error
+
 	AddDocumentToBundleFile(bundle *Bundle, document *Document) error
 
 	RemoveDocumentFromBundleFile(database *Database, bundle *Bundle, documentID string, mmapData []byte) error
@@ -88,12 +90,18 @@ func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (
 		return nil, fmt.Errorf("error decoding bundle data from file %s: %w", fileName, err)
 	}
 
-	bundle, err := MapToBundle(bundleData.(map[string]interface{}))
+	bundle, err := MapToBundle(bundleData.(map[string]interface{}), *b.logger)
 	if err != nil {
 		return nil, fmt.Errorf("error converting map to Bundle from file %s: %w", fileName, err)
 	}
 
-	b.logger.Infof("Decoded bundle data from file %s is %v", fileName, bundleData)
+	// To:
+	prettyJSON, err := json.MarshalIndent(bundleData, "", "  ")
+	if err != nil {
+		b.logger.Warnf("Failed to pretty-print bundle data: %v", err)
+	} else {
+		b.logger.Infof("Decoded bundle data from file %s:\n%s", fileName, string(prettyJSON))
+	}
 	// Assert that the decoded data is of type Bundle
 	// bundle, ok := bundleData.(Bundle)
 	// if !ok {
@@ -484,18 +492,28 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *Bundle, filePath string)
 	convertedBundle := BundleToMap(bundle)
 
 	// 2. Make sure Documents are included in the map
-	docs := make([]interface{}, 0, len(bundle.Documents))
-	for _, doc := range bundle.Documents {
-		// Convert Document to map
-		docMap := map[string]interface{}{
-			"ID":        doc.DocumentID,
+	docMap := make(map[string]interface{})
+	for docID, doc := range bundle.Documents {
+		docMap[docID] = map[string]interface{}{
 			"Fields":    doc.Fields,
 			"CreatedAt": doc.CreatedAt,
 			"UpdatedAt": doc.UpdatedAt,
 		}
-		docs = append(docs, docMap)
 	}
-	convertedBundle["Documents"] = docs
+	convertedBundle["Documents"] = docMap
+
+	// docs := make([]interface{}, 0, len(bundle.Documents))
+	// for _, doc := range bundle.Documents {
+	// 	// Convert Document to map
+	// 	docMap := map[string]interface{}{
+	// 		"ID":        doc.DocumentID,
+	// 		"Fields":    doc.Fields,
+	// 		"CreatedAt": doc.CreatedAt,
+	// 		"UpdatedAt": doc.UpdatedAt,
+	// 	}
+	// 	docs = append(docs, docMap)
+	// }
+	// convertedBundle["Documents"] = docs
 
 	// 3. Encode the bundle to BSON
 	encodedBundle, err := helpers.EncodeBSON(convertedBundle)
@@ -607,7 +625,7 @@ func calculateDocumentOffset(data []byte, index int) (int, error) {
 }
 
 // MapToBundle converts a map to a Bundle struct
-func MapToBundle(data map[string]interface{}) (*Bundle, error) {
+func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle, error) {
 	bundle := &Bundle{}
 
 	// Extract basic fields
@@ -698,12 +716,16 @@ func MapToBundle(data map[string]interface{}) (*Bundle, error) {
 		bundle.DocumentStructure.FieldDefinitions = make(map[string]FieldDefinition)
 	}
 
+	logger.Infof("Processing bundle %s , going to load documents, with ID %s", bundle.Name, bundle.BundleID)
+
 	// Extract documents
 	if docs, ok := data["Documents"]; ok && docs != nil {
 		bundle.Documents = make(map[string]Document)
-
+		//logger.Infof("Found %t for array", docs.([]interface{}))
+		//logger.Infof("Found %t for map", docs.(map[string]interface{}))
 		// Handle array of documents
 		if docArray, ok := docs.([]interface{}); ok {
+			logger.Infof("Processing %d documents array in bundle %s", len(docArray), bundle.Name)
 			for _, doc := range docArray {
 				if docMap, ok := doc.(map[string]interface{}); ok {
 					// Extract document ID
@@ -742,6 +764,7 @@ func MapToBundle(data map[string]interface{}) (*Bundle, error) {
 				}
 			}
 		} else if docMap, ok := docs.(map[string]interface{}); ok {
+			logger.Infof("Processing %d documents map in bundle %s", len(docMap), bundle.Name)
 			// Handle map of documents
 			for docID, docData := range docMap {
 				if docMapData, ok := docData.(map[string]interface{}); ok {

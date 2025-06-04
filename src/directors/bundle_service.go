@@ -82,13 +82,16 @@ func (s *BundleService) GetBundleByName(name string) (*engine.Bundle, error) {
 	fileExists := s.store.BundleFileExists(name)
 	//First, check to see if the bundle file exists in the store
 	if !fileExists {
-		return nil, fmt.Errorf("bundle file '%s' does not exist", name)
+		return nil, fmt.Errorf("bundle file '%s' does not exist on disk", name)
 	}
 
 	bundle, exists := s.bundles[name]
 	if !exists {
 		if fileExists {
 			// If the bundle exists in the store but not in memory, load it
+			if args.Debug {
+				s.logger.Infof("Bundle '%s' not found in memory, loading from store", name)
+			}
 			bundle, err := s.store.LoadBundleDataFile(s.settings.DataDir, fmt.Sprintf("%s.bnd", name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to load bundle '%s': %w", name, err)
@@ -101,7 +104,7 @@ func (s *BundleService) GetBundleByName(name string) (*engine.Bundle, error) {
 			s.bundles[name] = bundle
 			return bundle, nil
 		} else {
-			return nil, fmt.Errorf("bundle file '%s'.bnd not found", name)
+			return nil, fmt.Errorf("bundle file exists in memory but not on disk. '%s'.bnd not found", name)
 		}
 
 	}
@@ -214,24 +217,12 @@ func (s *BundleService) GetDocumentsByFilter(bundle *engine.Bundle, whereParts s
 		return nil, fmt.Errorf("bundle '%s' is nil, cannot filter documents", bundle.Name)
 	}
 
-	// bundle, err := s.GetBundleByName(bundle.Name)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("bundle '%s' not found", bundle.Name)
-	// }
-	filteredDocs, err := engine.FilterDocuments(bundle, whereParts)
+	filteredDocs, err := engine.FilterDocuments(bundle, whereParts, s.logger)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return nil, fmt.Errorf("failed to filter documents: %w", err)
 	}
-	// b := engine.ParseWhereClauses(whereParts)
-	// if args.Debug {
-	// 	s.logger.Infof("Filtering documents in bundle '%s' with filter '%s'", bundle.Name, whereParts)
-	// 	s.logger.Debugf("Parsed filter: %+v", b)
 
-	// }
-	// docs := engine.FilterDocuments(&bundle.Documents, b)
-	// Filter documents based on the command
-	//filteredDocs := bundle.FilterDocuments(filterCommand)
 	return filteredDocs, nil
 }
 

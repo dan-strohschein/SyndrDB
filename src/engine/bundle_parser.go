@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syndrdb/src/helpers"
 	"syndrdb/src/settings"
 
 	"go.uber.org/zap"
@@ -332,8 +333,7 @@ func parseFieldValues(fieldsText string) ([]KeyValue, error) {
 				return nil, fmt.Errorf("invalid field format: %s", part)
 			}
 
-			key := strings.TrimSpace(keyValue[0])
-			key = strings.Trim(key, "\"") // Remove quotes around the key
+			key := helpers.StripQuotes(strings.TrimSpace(keyValue[0]))
 			valueStr := strings.TrimSpace(keyValue[1])
 
 			// Convert valueStr to appropriate type
