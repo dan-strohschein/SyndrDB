@@ -34,7 +34,9 @@ type BundleStore interface {
 	CreateBundleFile(database *Database, bundle *Bundle) error
 	UpdateBundleFile(database *Database, bundle *Bundle) error
 	UpdateDocumentDataInBundleFile(database *Database, bundle *Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
+	DeleteDocumentFromBundleFile(bundle *Bundle, documentID string) error
 	AddDocumentToBundleFile(bundle *Bundle, document *Document) error
+
 	RemoveDocumentFromBundleFile(database *Database, bundle *Bundle, documentID string, mmapData []byte) error
 	BundleFileExists(bundleName string) bool
 	RemoveBundleFile(database *Database, bundleName string) error
@@ -292,6 +294,50 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *Database,
 	return nil
 }
 
+func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *Bundle, documentID string) error {
+
+	// Validate inputs
+	if bundle == nil {
+		return fmt.Errorf("bundle cannot be nil")
+	}
+	if documentID == "" {
+		return fmt.Errorf("documentID cannot be nil")
+	}
+
+	args := settings.GetSettings()
+	dataDir := args.DataDir
+
+	if bundle.Documents == nil {
+		return fmt.Errorf("bundle %s has no documents. Cannot delete from nothing.", bundle.Name)
+	}
+
+	if args.Debug {
+		b.logger.Infof("Attempting to delete document %s from bundle file", documentID)
+	}
+
+	for _, doc := range bundle.Documents {
+		if doc.DocumentID == documentID {
+
+			delete(bundle.Documents, documentID)
+		}
+	}
+
+	filePath := filepath.Join(dataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+
+	// Check if the file exists
+	if !helpers.FileExists(filePath, *b.logger) {
+		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s.bnd", bundle.Name))
+	}
+
+	// Write bundle to file
+	err := b.WriteBundleToFile(bundle, filePath)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *Bundle, document *Document) error {
 	if b.logger != nil {
 		b.logger.Infow("Adding document to bundle file",
@@ -324,59 +370,23 @@ func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *Bundle, document *
 		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s.bnd", bundle.Name))
 	}
 
-	// 1. First, add the document to the bundle in memory
+	// Add the document to the bundle in memory
 	if bundle.Documents == nil {
 		bundle.Documents = make(map[string]Document)
 	}
 	bundle.Documents[document.DocumentID] = *document
 
-	// 2. Convert the bundle to a map for BSON encoding
-	convertedBundle := BundleToMap(bundle)
-
-	// Make sure Documents are included in the map (BundleToMap might not include them)
-	docs := make([]interface{}, 0, len(bundle.Documents))
-	for _, doc := range bundle.Documents {
-		// Convert Document to map
-		docMap := map[string]interface{}{
-			"ID": doc.DocumentID,
-			//"BundleID":  doc.BundleID,
-			"Fields":    doc.Fields,
-			"CreatedAt": doc.CreatedAt,
-			"UpdatedAt": doc.UpdatedAt,
-		}
-		docs = append(docs, docMap)
-	}
-	convertedBundle["Documents"] = docs
-
-	// 3. Encode the bundle to BSON
-	encodedBundle, err := helpers.EncodeBSON(convertedBundle)
+	// Write bundle to file
+	err := b.WriteBundleToFile(bundle, filePath)
 	if err != nil {
-		return fmt.Errorf("error encoding bundle data: %w", err)
-	}
-
-	// 4. Open the file for writing
-	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("error opening bundle file for writing: %w", err)
-	}
-	defer file.Close()
-
-	// 5. Write the encoded bundle to the file
-	fileLen, err := file.Write(encodedBundle)
-	if err != nil {
-		return fmt.Errorf("error writing to bundle data file %s: %w", bundle.Name, err)
-	}
-
-	if fileLen != len(encodedBundle) {
-		return fmt.Errorf("error writing to bundle file %s: wrote %d bytes, expected %d",
-			bundle.Name, fileLen, len(encodedBundle))
+		return err
 	}
 
 	if b.logger != nil {
 		b.logger.Infow("Successfully added document to bundle",
 			"bundle", bundle.Name,
 			"documentID", document.DocumentID,
-			"fileSize", fileLen)
+		)
 	}
 
 	return nil
@@ -463,6 +473,59 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *Database,
 	err = unix.Msync(mmapData, unix.MS_SYNC)
 	if err != nil {
 		return fmt.Errorf("error syncing changes to file: %w", err)
+	}
+
+	return nil
+}
+
+// WriteBundleToFile encodes a bundle and writes it to a file
+func (b *BundleStorageEngine) WriteBundleToFile(bundle *Bundle, filePath string) error {
+	// 1. Convert the bundle to a map for BSON encoding
+	convertedBundle := BundleToMap(bundle)
+
+	// 2. Make sure Documents are included in the map
+	docs := make([]interface{}, 0, len(bundle.Documents))
+	for _, doc := range bundle.Documents {
+		// Convert Document to map
+		docMap := map[string]interface{}{
+			"ID":        doc.DocumentID,
+			"Fields":    doc.Fields,
+			"CreatedAt": doc.CreatedAt,
+			"UpdatedAt": doc.UpdatedAt,
+		}
+		docs = append(docs, docMap)
+	}
+	convertedBundle["Documents"] = docs
+
+	// 3. Encode the bundle to BSON
+	encodedBundle, err := helpers.EncodeBSON(convertedBundle)
+	if err != nil {
+		return fmt.Errorf("error encoding bundle data: %w", err)
+	}
+
+	// 4. Open the file for writing
+	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("error opening bundle file for writing: %w", err)
+	}
+	defer file.Close()
+
+	// 5. Write the encoded bundle to the file
+	fileLen, err := file.Write(encodedBundle)
+	if err != nil {
+		return fmt.Errorf("error writing to bundle data file %s: %w", bundle.Name, err)
+	}
+
+	if fileLen != len(encodedBundle) {
+		return fmt.Errorf("error writing to bundle file %s: wrote %d bytes, expected %d",
+			bundle.Name, fileLen, len(encodedBundle))
+	}
+
+	if b.logger != nil {
+		b.logger.Debugw("Successfully wrote bundle to file",
+			"bundle", bundle.Name,
+			"path", filePath,
+			"size", fileLen)
 	}
 
 	return nil

@@ -211,6 +211,29 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			serviceManager.DatabaseService.DeleteDatabase(dbCommand.DatabaseName)
 		case "bundle":
 			engine.ParseDeleteBundleCommand(command)
+		case "documents":
+			//DELETE DOCUMENTS FROM BUNDLE "BUNDLE_NAME"
+			//WHERE <FIELDNAME> = <VALUE>
+			if len(commandParts) < 5 || !strings.EqualFold(commandParts[2], "FROM") {
+				return nil, fmt.Errorf("DELETE DOCUMENTS requires the spec 'FROM <Bundle_name>'")
+			}
+			bundleName := strings.Trim(commandParts[4], "\"'")
+			bundleName = strings.ReplaceAll(bundleName, "\"", "")
+			bundleName = strings.ReplaceAll(bundleName, "'", "")
+			bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
+			// Get the bundle by name
+
+			// Parse the document command
+			docCommand, err := engine.ParseDeleteDocumentCommand(command, logger)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing delete document command: %v", err)
+			}
+			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			if err != nil {
+				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+			}
+			// Delete the document from the bundle
+			err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand)
 		case "user":
 			// ParseCreateRelationshipCommand(command)
 		default:

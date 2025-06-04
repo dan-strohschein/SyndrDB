@@ -171,6 +171,70 @@ func (s *BundleService) AddDocumentToBundle(bundle *engine.Bundle, docCommand *e
 	return nil
 }
 
+func (s *BundleService) DeleteDocumentFromBundle(bundle *engine.Bundle, docCommand *engine.DocumentDeleteCommand) error {
+	args := settings.GetSettings()
+
+	// Check if the bundle exists
+	if bundle == nil {
+		s.logger.Errorf("Bundle is nil, cannot delete document")
+		return fmt.Errorf("bundle '%s' is nil, cannot delete document", docCommand.BundleName)
+	}
+
+	// bundle, err := s.GetBundleByName(docCommand.BundleName)
+	// if err != nil {
+	// 	return fmt.Errorf("bundle '%s' not found", docCommand.BundleName)
+	// }
+
+	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause)
+	if err != nil {
+		return fmt.Errorf("failed to filter documents: %w", err)
+	}
+
+	if args.Debug {
+		s.logger.Infof("Deleting %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
+	}
+
+	for _, doc := range filteredDocs {
+		// Remove the document from the bundle
+		err = s.store.DeleteDocumentFromBundleFile(bundle, doc.DocumentID)
+		if err != nil {
+			return fmt.Errorf("failed to remove document from bundle: %w", err)
+		}
+
+		delete(s.bundles[docCommand.BundleName].Documents, doc.DocumentID)
+	}
+	return nil
+}
+
+func (s *BundleService) GetDocumentsByFilter(bundle *engine.Bundle, whereParts string) ([]*engine.Document, error) {
+	//args := settings.GetSettings()
+	// Check if the bundle exists
+	if bundle == nil {
+		s.logger.Errorf("Bundle is nil, cannot filter documents")
+		return nil, fmt.Errorf("bundle '%s' is nil, cannot filter documents", bundle.Name)
+	}
+
+	// bundle, err := s.GetBundleByName(bundle.Name)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("bundle '%s' not found", bundle.Name)
+	// }
+	filteredDocs, err := engine.FilterDocuments(bundle, whereParts)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return nil, fmt.Errorf("failed to filter documents: %w", err)
+	}
+	// b := engine.ParseWhereClauses(whereParts)
+	// if args.Debug {
+	// 	s.logger.Infof("Filtering documents in bundle '%s' with filter '%s'", bundle.Name, whereParts)
+	// 	s.logger.Debugf("Parsed filter: %+v", b)
+
+	// }
+	// docs := engine.FilterDocuments(&bundle.Documents, b)
+	// Filter documents based on the command
+	//filteredDocs := bundle.FilterDocuments(filterCommand)
+	return filteredDocs, nil
+}
+
 // ExecuteBundleCommand executes a parsed bundle command
 // func (s *BundleService) ExecuteBundleCommand(db *Database, command *BundleCommand) error {
 // 	switch command.CommandType {
