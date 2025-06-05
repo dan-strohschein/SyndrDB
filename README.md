@@ -89,6 +89,21 @@ As long as the field type matches the data type of the value supplied.
 
 Currently you can do a super simple query:
 
-```SELECT DOCUMENTS FROM "<BUNDLE_NAME";```
+```SELECT DOCUMENTS FROM "<BUNDLE_NAME>";```
 
 This will return all of the documents in the bundle. Soon you will be able to add filters.
+
+To filter more accurately, this is the format:
+
+```SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE ((<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>));```
+
+Currently supported operators are:
+
+== (equals)
+!= (Not equals)
+> (Greater Than)
+< (Less Than)
+
+String values are double quoted
+DateTimes are double quoted (Coming soon)
+boolean values are true/false
