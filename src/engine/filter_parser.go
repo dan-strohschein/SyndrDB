@@ -384,6 +384,16 @@ func FilterDocuments(bundle *Bundle, whereClause string, logger *zap.SugaredLogg
 	}
 	//logger.Infof("Parsed WHERE clause: %+v", whereGroup)
 	// Filter documents
+	// if len(bundle.Documents) > 0 {
+	// 	prettyJSON, err := json.MarshalIndent(bundle.Documents, "", "  ")
+	// 	if err != nil {
+	// 		logger.Warnf("Failed to convert documents to JSON: %v", err)
+	// 	} else {
+	// 		logger.Infof("Found %d documents: \n%s", len(bundle.Documents), string(prettyJSON))
+	// 	}
+	// } else {
+	// 	logger.Infof("No documents found matching the filter")
+	// }
 	var result []*Document
 	for _, doc := range bundle.Documents {
 		if EvaluateWhereClause(&doc, whereGroup, logger) {

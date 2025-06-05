@@ -63,7 +63,18 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 				if err != nil {
 					return nil, fmt.Errorf("error filtering documents: %v", err)
 				}
-				//logger.Infof("Found %d documents in bundle '%s' ", len(filteredDocs), bundleName)
+
+				// if len(filteredDocs) > 0 {
+				// 	prettyJSON, err := json.MarshalIndent(filteredDocs, "", "  ")
+				// 	if err != nil {
+				// 		logger.Warnf("Failed to convert documents to JSON: %v", err)
+				// 	} else {
+				// 		logger.Infof("Found %d documents: \n%s", len(filteredDocs), string(prettyJSON))
+				// 	}
+				// } else {
+				// 	logger.Infof("No documents found matching the filter")
+				// }
+
 				documents = make(map[string]*engine.Document)
 				for _, v := range filteredDocs {
 					docCopy := v
@@ -211,6 +222,32 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			serviceManager.DatabaseService.UpdateDatabase(*dbCommand)
 		case "bundle":
 			engine.ParseUpdateBundleCommand(command)
+		case "documents":
+
+			/*
+				UPDATE DOCUMENTS IN BUNDLE "BUNDLE_NAME"
+				(<FIELDNAME> = <VALUE>, <FIELDNAME> = <VALUE>, ... )
+			*/
+			if len(commandParts) < 5 || !strings.EqualFold(commandParts[2], "IN") {
+				return nil, fmt.Errorf("UPDATE DOCUMENTS requires the spec 'IN <Bundle_name>'")
+			}
+			bundleName := strings.Trim(commandParts[4], "\"'")
+			bundleName = strings.ReplaceAll(bundleName, "\"", "")
+			bundleName = strings.ReplaceAll(bundleName, "'", "")
+			bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
+			// Get the bundle by name
+			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			if err != nil {
+				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+			}
+			// Parse the document command
+			docCommand, err := engine.ParseUpdateDocumentCommand(command, logger)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing update document command: %v", err)
+			}
+
+			// Delete the document from the bundle
+			err = serviceManager.BundleService.UpdateDocumentInBundle(bundle, docCommand)
 		case "user":
 			// ParseCreateRelationshipCommand(command)
 		default:
@@ -252,29 +289,6 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
-			}
-
-			var documents map[string]*engine.Document
-			if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
-				//logger.Infof("Filtering documents in bundle '%s' with WHERE clause: %s", bundleName, strings.Join(commandParts[5:], " "))
-				whereClause := strings.Join(commandParts[5:], " ")
-				filteredDocs, err := engine.FilterDocuments(bundle, whereClause, logger)
-				if err != nil {
-					return nil, fmt.Errorf("error filtering documents: %v", err)
-				}
-				//logger.Infof("Found %d documents in bundle '%s' ", len(filteredDocs), bundleName)
-				documents = make(map[string]*engine.Document)
-				for _, v := range filteredDocs {
-					docCopy := v
-					documents[docCopy.DocumentID] = v
-				}
-			} else {
-				// Get documents from the bundle
-				documents = make(map[string]*engine.Document)
-				for k, v := range bundle.Documents {
-					docCopy := v
-					documents[k] = &docCopy
-				}
 			}
 
 			// Delete the document from the bundle

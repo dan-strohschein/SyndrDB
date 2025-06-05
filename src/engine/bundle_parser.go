@@ -45,6 +45,12 @@ type DocumentDeleteCommand struct {
 	WhereClause string     // Optional where clause for filtering documents
 }
 
+type DocumentUpdateCommand struct {
+	BundleName  string
+	Fields      []KeyValue // Fields to be added or updated in the document
+	WhereClause string     // Optional where clause for filtering documents
+}
+
 type KeyValue struct {
 	Key   string      // Field name
 	Value interface{} // Field value, can be any type
@@ -202,6 +208,54 @@ func ParseDeleteDocumentCommand(command string, logger *zap.SugaredLogger) (*Doc
 	}, nil
 }
 
+func ParseUpdateDocumentCommand(command string, logger *zap.SugaredLogger) (*DocumentUpdateCommand, error) {
+	args := settings.GetSettings()
+	// Regular expression to match the command structure
+	command = strings.Trim(command, " \n\r\t")
+	command = strings.ReplaceAll(command, "\n", " ")
+	command = strings.ReplaceAll(command, "\t", " ")
+	command = strings.ReplaceAll(command, "\r", " ")
+
+	//updateDocRegex := regexp.MustCompile(`UPDATE DOCUMENTS IN(?:\s+BUNDLE)?\s+"([^"]+)"\s*WHERE\s*(?:\()?([\s\S]+?)(?:\))?(?:;)?$`)
+	updateDocRegex := regexp.MustCompile(`UPDATE DOCUMENTS(?:S)? IN(?:\s+BUNDLE)?\s+"([^"]+)"\s*\(([\s\S]+?)\)\s*WHERE\s*(?:\()?([\s\S]+?)(?:\))?(?:;)?$`)
+	matches := updateDocRegex.FindStringSubmatch(command)
+	if args.Debug {
+		logger.Debugf("Parsing UPDATE DOCUMENTS command has: %d", len(matches))
+	}
+	if args.Debug {
+		logger.Debugf("UPDATE DOCUMENTS command - matches found: %d", len(matches))
+		for i, match := range matches {
+			logger.Debugf("Match[%d]: %s", i, match)
+		}
+	}
+	if len(matches) < 3 {
+		logger.Errorw("Invalid UPDATE DOCUMENTS command syntax", "command", command)
+		return nil, fmt.Errorf("invalid UPDATE DOCUMENTS command syntax")
+	}
+
+	bundleName := matches[1]
+	fieldsText := matches[2]
+	whereClauseStr := matches[3]
+
+	if args.Debug {
+		logger.Debugf("Parsed UPDATE DOCUMENTS command: BundleName=%s, FieldsText=%s", bundleName, fieldsText)
+	}
+
+	// Parse the field values from the format {key=value}
+	fieldValues, err := parseFieldValueSets(fieldsText)
+	if err != nil {
+		logger.Errorw("Error parsing field values", "error", err)
+		return nil, fmt.Errorf("error parsing field values: %w", err)
+	}
+
+	return &DocumentUpdateCommand{
+
+		BundleName:  bundleName,
+		Fields:      fieldValues,
+		WhereClause: strings.TrimSpace(whereClauseStr), // Assuming the where clause is the same as fields for simplicity
+	}, nil
+}
+
 // parseUpdateBundleCommand parses UPDATE BUNDLE command
 func ParseUpdateBundleCommand(command string) (*BundleCommand, error) {
 	// Regular expression to extract bundle name
@@ -296,6 +350,38 @@ func parseFieldDefinition(fieldText string) (FieldDefinition, error) {
 		IsUnique:     unique,
 		DefaultValue: defaultValue,
 	}, nil
+}
+
+func parseFieldValueSets(fieldsText string) ([]KeyValue, error) {
+	results := []KeyValue{}
+	valueSets := strings.Split(fieldsText, ",")
+	for _, valueSet := range valueSets {
+
+		valueSet = strings.TrimSpace(valueSet)
+		if valueSet == "" {
+			continue
+		}
+
+		valueParts := strings.Split(valueSet, "=")
+		if len(valueParts) != 2 {
+			return nil, fmt.Errorf("invalid field value set format: %s", valueSet)
+		}
+		key := strings.TrimSpace(valueParts[0])
+		value := strings.TrimSpace(valueParts[1])
+
+		// TODO make sure the field part of the valueSet is valid
+		// For example, check if it is a valid field name or a valid value type
+		// if !isValidValueSet(valueSet) {
+		// 	return nil, fmt.Errorf("invalid field value set format: %s", valueSet)
+		// }
+		kv := KeyValue{
+			Key:   key,
+			Value: value,
+		}
+		results = append(results, kv)
+
+	}
+	return results, nil
 }
 
 func parseFieldValues(fieldsText string) ([]KeyValue, error) {

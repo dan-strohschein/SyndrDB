@@ -35,6 +35,8 @@ type BundleStore interface {
 	CreateBundleFile(database *Database, bundle *Bundle) error
 	UpdateBundleFile(database *Database, bundle *Bundle) error
 	UpdateDocumentDataInBundleFile(database *Database, bundle *Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
+
+	UpdateDocumentInBundleFile(bundle *Bundle, document *Document) error
 	DeleteDocumentFromBundleFile(bundle *Bundle, documentID string) error
 
 	AddDocumentToBundleFile(bundle *Bundle, document *Document) error
@@ -95,7 +97,6 @@ func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (
 		return nil, fmt.Errorf("error converting map to Bundle from file %s: %w", fileName, err)
 	}
 
-	// To:
 	prettyJSON, err := json.MarshalIndent(bundleData, "", "  ")
 	if err != nil {
 		b.logger.Warnf("Failed to pretty-print bundle data: %v", err)
@@ -297,6 +298,60 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *Database,
 	_, err = file.WriteAt(mmapData, 0)
 	if err != nil {
 		return fmt.Errorf("error writing updated data to file: %w", err)
+	}
+
+	return nil
+}
+
+func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *Bundle, document *Document) error {
+	if b.logger != nil {
+		b.logger.Infow("Updating document in bundle file",
+			"bundle", bundle.Name,
+			"documentID", document.DocumentID)
+	}
+
+	// Validate inputs
+	if bundle == nil {
+		return fmt.Errorf("bundle cannot be nil")
+	}
+	if document == nil {
+		return fmt.Errorf("document cannot be nil")
+	}
+	if document.DocumentID == "" {
+		return fmt.Errorf("document must have a valid ID")
+	}
+
+	// Find the file path for the bundle
+	args := settings.GetSettings()
+	dataDir := args.DataDir
+	if dataDir == "" {
+		return fmt.Errorf("bundle has no associated database directory")
+	}
+
+	filePath := filepath.Join(dataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+
+	// Check if the file exists
+	if !helpers.FileExists(filePath, *b.logger) {
+		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s.bnd", bundle.Name))
+	}
+
+	// Update the document in the bundle in memory
+	if bundle.Documents == nil {
+		bundle.Documents = make(map[string]Document)
+	}
+	bundle.Documents[document.DocumentID] = *document
+
+	// Write bundle to file
+	err := b.WriteBundleToFile(bundle, filePath)
+	if err != nil {
+		return err
+	}
+
+	if b.logger != nil {
+		b.logger.Infow("Successfully updated document in bundle",
+			"bundle", bundle.Name,
+			"documentID", document.DocumentID,
+		)
 	}
 
 	return nil
@@ -748,12 +803,24 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 					}
 
 					// Extract fields
+
 					if fields, ok := docMap["Fields"].(map[string]interface{}); ok {
 						for fieldName, fieldValue := range fields {
+
+							// Case 1: Field value is a map with Name/Value properties
 							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
 								field := Field{
 									Name:  stringValue(fieldMap, "Name", fieldName),
-									Value: fieldMap["Value"],
+									Value: fieldMap["Value"], // This might be null if "Value" doesn't exist
+								}
+
+								document.Fields[fieldName] = field
+							} else {
+								// Case 2: Field value is the direct value (not wrapped in a map)
+
+								field := Field{
+									Name:  fieldName,
+									Value: fieldValue, // Use the value directly
 								}
 								document.Fields[fieldName] = field
 							}
@@ -782,13 +849,24 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 					}
 
 					// Extract fields
+
 					if fields, ok := docMapData["Fields"].(map[string]interface{}); ok {
 						for fieldName, fieldValue := range fields {
+
+							// Case 1: Field value is a map with Name/Value properties
 							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
 								field := Field{
 									Name:  stringValue(fieldMap, "Name", fieldName),
-									Value: fieldMap["Value"],
+									Value: fieldMap["value"],
 								}
+								document.Fields[fieldName] = field
+							} else {
+								// Case 2: Field value is the direct value (not wrapped in a map)
+								field := Field{
+									Name:  fieldName,
+									Value: fieldValue, // Use the value directly
+								}
+
 								document.Fields[fieldName] = field
 							}
 						}
