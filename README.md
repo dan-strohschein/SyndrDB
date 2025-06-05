@@ -6,8 +6,15 @@ A relational Document DB with a graphQL interface implemented in Golang. Think M
 
 Warning: Extremely WIP. This project was just started and is pretty much purely educational for myself. Use at your own risk, contribute if you wish. 
 
++Current progress+:
+- Partial SQL Style query language
+- Poor but working filtering
+- Poor but working file storage and retrieval
+
+
 ## Usage
-``` Usage of ./syndr:
+``` 
+Usage of ./syndr:
   -auth
         Enable authentication (Not yet working)
   -config string
@@ -35,7 +42,7 @@ Warning: Extremely WIP. This project was just started and is pretty much purely 
 ```
 ## How to install
 
-TO BE DETERMINED
+TO BE DETERMINED - Right now its just a single executable file with command line options.
 
 ## How it works
 This is the current design of the systems within the server so far.
@@ -51,7 +58,9 @@ It only supports a handful of commands for now. I am adding new commands every w
 
 To create a Database:
 
-```CREATE DATABASE "<Database_Name>";```
+```
+      CREATE DATABASE "<Database_Name>";
+```
 
 To Create a Bundle:
 
@@ -89,21 +98,29 @@ As long as the field type matches the data type of the value supplied.
 
 Currently you can do a super simple query:
 
-```SELECT DOCUMENTS FROM "<BUNDLE_NAME>";```
+```
+ SELECT DOCUMENTS FROM "<BUNDLE_NAME>";
+```
 
-This will return all of the documents in the bundle. Soon you will be able to add filters.
+This will return all of the documents in the bundle. 
 
-To filter more accurately, this is the format:
+To filter and get results more accurately, use this format:
 
-```SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE ((<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>));```
+```
+SELECT DOCUMENTS FROM "<BUNDLE_NAME>" 
+      WHERE (
+            (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
+            (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
+      );
+```
 
 Currently supported operators are:
 
-== (equals)
-!= (Not equals)
-> (Greater Than)
-< (Less Than)
+* == (equals)
+* != (Not equals)
+* \> (Greater Than)
+* < (Less Than)
 
-String values are double quoted
-DateTimes are double quoted (Coming soon)
-boolean values are true/false
+- String values are double quoted
+- DateTimes are double quoted (**Coming soon**)
+- Boolean values are true/false
