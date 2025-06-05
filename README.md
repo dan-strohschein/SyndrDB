@@ -6,7 +6,7 @@ A relational Document DB with a graphQL interface implemented in Golang. Think M
 
 Warning: Extremely WIP. This project was just started and is pretty much purely educational for myself. Use at your own risk, contribute if you wish. 
 
-+Current progress+:
+(+Current progress+):
 - Partial SQL Style query language
 - Poor but working filtering
 - Poor but working file storage and retrieval
@@ -59,7 +59,7 @@ It only supports a handful of commands for now. I am adding new commands every w
 To create a Database:
 
 ```
-      CREATE DATABASE "<Database_Name>";
+ CREATE DATABASE "<Database_Name>";
 ```
 
 To Create a Bundle:
@@ -124,3 +124,25 @@ Currently supported operators are:
 - String values are double quoted
 - DateTimes are double quoted (**Coming soon**)
 - Boolean values are true/false
+
+To Update one or more documents in a bundle:
+
+```
+UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>"
+      (<FIELD> = <NEW_VALUE>, <FIELD> = <NEW_VALUE> )
+      WHERE (
+            (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
+            (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
+      );
+```
+
+To Delete one or more Documents in a Bundle:
+
+```
+DELETE DOCUMENTS FROM BUNDLE "<BUNDLE_NAME>" 
+     WHERE (
+            (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
+            (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
+      );
+
+```
