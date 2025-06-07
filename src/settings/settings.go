@@ -3,11 +3,11 @@ package settings
 import "sync"
 
 type Arguments struct {
-	// The file path to the datafiles
-	DataDir string
-	LogDir  string
+	DataDir    string
+	LogDir     string
+	TempDir    string // Temporary directory for intermediate files/indexes/sorts
+	ConfigFile string
 
-	ConfigFile      string
 	CreateDefaultDB bool // Create default database if it doesn't exist
 	PrintToScreen   bool // Print to screen
 
@@ -20,6 +20,9 @@ type Arguments struct {
 
 	// the host name or IP address to listen on
 	Host string
+
+	// Add to Journal struct
+	MaxJournalFileSize int64
 
 	// the port number to listen on
 	Port int

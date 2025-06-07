@@ -21,11 +21,7 @@ func printUsage() {
 	log.Println("  syndrdb [options]")
 	log.Println("\nOptions:")
 	flag.PrintDefaults()
-	// fmt.Println("\nCommands:")
-	// fmt.Println("  query [query string]   - Execute a query")
-	// fmt.Println("  create [bundle name]   - Create a bundle")
-	// fmt.Println("  update [bundle name]   - Update a bundle")
-	// fmt.Println("  delete [bundle name]   - Delete a bundle")
+
 	log.Println("\nExamples:")
 	log.Println("  syndrdb --datadir=/data")
 	log.Println("  syndrdb --port=1776 --logfile=syndrdb.log")
@@ -41,6 +37,8 @@ func main() {
 	// Define command line flags that map to the Arguments struct
 	flag.StringVar(&args.DataDir, "datadir", "./datafiles", "Directory to store data files")
 	flag.StringVar(&args.LogDir, "logdir", "./log_files", "Directory to store log files (default: stdout)")
+	flag.StringVar(&args.TempDir, "tempdir", "./temp", "Temporary directory for intermediate files/indexes/sorts")
+	flag.Int64Var(&args.MaxJournalFileSize, "maxjournalfilesize", 1000000, "Maximum size of journal files in bytes (default: 1MB)")
 	flag.StringVar(&args.Host, "host", "127.0.0.1", "Host name or IP address to listen on")
 	flag.IntVar(&args.Port, "port", 1776, "Port for the HTTP server")
 	flag.BoolVar(&args.Verbose, "verbose", true, "Enable verbose logging")

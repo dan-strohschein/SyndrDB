@@ -166,7 +166,18 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 				Result:      result,
 			}
 			return cmdResponse, nil
-
+		case "b-index":
+			btreeIndexCommand, err := engine.ParseCreateBTreeIndexCommand(command, logger)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing B-Tree index command: %v", err)
+			}
+			logger.Infof("Parsed B-Tree index command: %+v", btreeIndexCommand)
+		case "h-index":
+			hashIndexCommand, err := engine.ParseCreateHashIndexCommand(command, logger)
+			if err != nil {
+				return nil, fmt.Errorf("error parsing hash index command: %v", err)
+			}
+			logger.Infof("Parsed Hash index command: %+v", hashIndexCommand)
 		case "user":
 			// ParseCreateRelationshipCommand(command)
 		default:

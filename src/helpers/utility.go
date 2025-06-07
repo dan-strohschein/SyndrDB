@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -20,4 +21,9 @@ func StripQuotes(s string) string {
 		}
 	}
 	return s
+}
+
+// timeNow returns the current time as a string
+func TimeNow() string {
+	return time.Now().Format(time.RFC3339)
 }
