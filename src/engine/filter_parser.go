@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"syndrdb/src/models"
 
 	"go.uber.org/zap"
 	//"syndrdb/src/engine"
@@ -246,7 +247,7 @@ func parseValue(valueToken string) (interface{}, error) {
 }
 
 // EvaluateWhereClause evaluates a WHERE clause against a document
-func EvaluateWhereClause(document *Document, whereGroup *WhereGroup, logger *zap.SugaredLogger) bool {
+func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logger *zap.SugaredLogger) bool {
 	// If there are no clauses or subgroups, default to true
 	if len(whereGroup.Clauses) == 0 && len(whereGroup.SubGroups) == 0 {
 		logger.Infof("DEBUG DEBUG:: No clauses or subgroups in WHERE group, returning true")
@@ -285,7 +286,7 @@ func EvaluateWhereClause(document *Document, whereGroup *WhereGroup, logger *zap
 }
 
 // evaluateClause evaluates a single clause against a document
-func evaluateClause(document *Document, clause WhereClause, logger *zap.SugaredLogger) bool {
+func evaluateClause(document *models.Document, clause WhereClause, logger *zap.SugaredLogger) bool {
 	// Get field value from document
 
 	field, exists := document.Fields[clause.Field]
@@ -296,7 +297,7 @@ func evaluateClause(document *Document, clause WhereClause, logger *zap.SugaredL
 
 	if strings.EqualFold(clause.Field, "documentid") {
 		// Special case for document ID
-		field = Field{
+		field = models.Field{
 			Name:  "DocumentID",
 			Value: document.DocumentID,
 		}
@@ -376,7 +377,7 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 }
 
 // FilterDocuments filters documents based on a WHERE clause
-func FilterDocuments(bundle *Bundle, whereClause string, logger *zap.SugaredLogger) ([]*Document, error) {
+func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	// Parse the WHERE clause
 	whereGroup, err := ParseWhereClause(whereClause)
 	if err != nil {
@@ -394,7 +395,7 @@ func FilterDocuments(bundle *Bundle, whereClause string, logger *zap.SugaredLogg
 	// } else {
 	// 	logger.Infof("No documents found matching the filter")
 	// }
-	var result []*Document
+	var result []*models.Document
 	for _, doc := range bundle.Documents {
 		if EvaluateWhereClause(&doc, whereGroup, logger) {
 			result = append(result, &doc)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"syndrdb/src/models"
 
 	"go.uber.org/zap"
 )
@@ -11,13 +12,13 @@ import (
 type CreateBTreeIndexCommand struct {
 	IndexName  string
 	BundleName string
-	Fields     []FieldDefinition
+	Fields     []models.FieldDefinition
 }
 
 type CreateHashIndexCommand struct {
 	IndexName  string
 	BundleName string
-	Fields     []FieldDefinition
+	Fields     []models.FieldDefinition
 }
 
 func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*CreateBTreeIndexCommand, error) {
@@ -49,7 +50,7 @@ func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*C
 	indexName := parts[3]
 	bundleName := parts[5] // Assuming the bundle name is the next part after the index name
 
-	Fields := []FieldDefinition{}
+	Fields := []models.FieldDefinition{}
 	fieldsPart := strings.TrimSpace(command[strings.Index(command, "WITH FIELDS (")+len("WITH FIELDS (") : strings.LastIndex(command, ")")])
 	if fieldsPart == "" {
 		return nil, fmt.Errorf("no fields specified for index: %s", command)
@@ -70,7 +71,7 @@ func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*C
 		required := match[2] == "true"
 		unique := match[3] == "true" // Changed from match[4] to match[3]
 
-		fieldDef := FieldDefinition{
+		fieldDef := models.FieldDefinition{
 			Name:       fieldName,
 			IsRequired: required,
 			IsUnique:   unique,
@@ -114,7 +115,7 @@ func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*Cr
 	indexName := parts[3]
 	bundleName := parts[5] // Assuming the bundle name is the next part after the index name
 
-	Fields := []FieldDefinition{}
+	Fields := []models.FieldDefinition{}
 	fieldsPart := strings.TrimSpace(command[strings.Index(command, "WITH FIELDS (")+len("WITH FIELDS (") : strings.LastIndex(command, ")")])
 	if fieldsPart == "" {
 		return nil, fmt.Errorf("no fields specified for index: %s", command)
@@ -134,7 +135,7 @@ func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*Cr
 		fieldName := match[1]
 		required := match[2] == "true"
 		unique := match[3] == "true" // Changed from match[4] to match[3]
-		fieldDef := FieldDefinition{
+		fieldDef := models.FieldDefinition{
 			Name:       fieldName,
 			IsRequired: required,
 			IsUnique:   unique,

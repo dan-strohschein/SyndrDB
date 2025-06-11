@@ -1,6 +1,9 @@
 package engine
 
-import "syndrdb/src/helpers"
+import (
+	"syndrdb/src/helpers"
+	"syndrdb/src/models"
+)
 
 // DatabaseFactoryImpl is a concrete implementation of DatabaseFactory
 type DatabaseFactoryImpl struct {
@@ -17,13 +20,13 @@ func NewDatabaseFactory() DatabaseFactory {
 }
 
 // NewDatabase creates a new Database instance
-func (f *DatabaseFactoryImpl) NewDatabase(name, description string) *Database {
-	return &Database{
+func (f *DatabaseFactoryImpl) NewDatabase(name, description string) *models.Database {
+	return &models.Database{
 		DatabaseID:    helpers.GenerateUUID(),
 		Name:          name,
 		Description:   description,
 		DataDirectory: f.defaultDataDir, // This will be populated later
-		Bundles:       make(map[string]Bundle),
+		Bundles:       make(map[string]models.Bundle),
 		BundleFiles:   []string{},
 	}
 }

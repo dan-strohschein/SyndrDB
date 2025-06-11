@@ -1,6 +1,10 @@
-package engine
+package models
 
-import "time"
+import (
+	//btreeindex "syndrdb/src/btree_index"
+	//hashindex "syndrdb/src/hash_index"
+	"time"
+)
 
 type Database struct {
 	// DatabaseID is the unique identifier for the database.
@@ -33,7 +37,8 @@ type Bundle struct {
 
 	// A list of documents in the bundle, similar to rows in a table.
 	Documents map[string]Document
-
+	//BTreeServices map[string]*btreeindex.BTreeService
+	//HashIndexServices map[string]*hashindex.HashService
 	Relationships map[string]Relationship
 	Constraints   map[string]Constraint
 }
@@ -47,6 +52,14 @@ type Document struct {
 	Fields     map[string]Field
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+}
+
+type FieldDefinition struct {
+	Name         string
+	Type         string
+	IsRequired   bool // Indicates if the field can be null
+	IsUnique     bool
+	DefaultValue interface{} // Optional default value for the field
 }
 
 type Field struct {

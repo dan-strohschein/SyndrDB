@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"syndrdb/src/engine"
+	"syndrdb/src/models"
 	"syndrdb/src/settings"
 
 	"go.uber.org/zap"
@@ -14,7 +15,7 @@ type BundleService struct {
 	factory         engine.BundleFactory
 	documentFactory engine.DocumentFactory
 	settings        *settings.Arguments
-	bundles         map[string]*engine.Bundle
+	bundles         map[string]*models.Bundle
 	logger          *zap.SugaredLogger
 }
 
@@ -28,7 +29,7 @@ func NewBundleService(store engine.BundleStore, factory engine.BundleFactory,
 		documentFactory: docFactory,
 		settings:        settings,
 		logger:          logger,
-		bundles:         make(map[string]*engine.Bundle),
+		bundles:         make(map[string]*models.Bundle),
 	}
 
 	// Load existing databases
@@ -43,7 +44,7 @@ func NewBundleService(store engine.BundleStore, factory engine.BundleFactory,
 	return service
 }
 
-func (s *BundleService) AddBundle(databaseService *DatabaseService, db *engine.Database, bundleCommand engine.BundleCommand) error {
+func (s *BundleService) AddBundle(databaseService *DatabaseService, db *models.Database, bundleCommand engine.BundleCommand) error {
 	args := settings.GetSettings()
 	// Check if the bundle already exists
 	if _, err := s.GetBundleByName(bundleCommand.BundleName); err == nil {
@@ -55,7 +56,7 @@ func (s *BundleService) AddBundle(databaseService *DatabaseService, db *engine.D
 
 	// TODO take the fields and structure from the command and create them in the bundle struct
 	for _, fieldDef := range bundleCommand.Fields {
-		bundle.DocumentStructure.FieldDefinitions[fieldDef.Name] = engine.FieldDefinition{
+		bundle.DocumentStructure.FieldDefinitions[fieldDef.Name] = models.FieldDefinition{
 			Name:         fieldDef.Name,
 			Type:         fieldDef.Type,
 			IsRequired:   fieldDef.IsRequired,
@@ -67,7 +68,23 @@ func (s *BundleService) AddBundle(databaseService *DatabaseService, db *engine.D
 		}
 	}
 	// // Add the bundle to the database
-	err := db.AddBundle(*bundle, databaseService.store, s.store, s.logger)
+
+	db.Bundles[bundle.Name] = *bundle
+
+	//This needs to be added to a bundle file
+	err := s.store.CreateBundleFile(db, bundle)
+	if err != nil {
+		return fmt.Errorf("error creating bundle file: %w", err)
+	}
+	//logger.Infof("Decoded bundle data from file %v", bundle)
+	// and then the bundle file name needs to be added to the database file
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s.bnd", bundle.Name))
+
+	// Write the updated database file
+	err = databaseService.store.UpdateDatabaseDataFile(db)
+	if err != nil {
+		return fmt.Errorf("error updating database file: %w", err)
+	}
 
 	if err != nil {
 		return fmt.Errorf("failed to add bundle to database: %w", err)
@@ -77,7 +94,7 @@ func (s *BundleService) AddBundle(databaseService *DatabaseService, db *engine.D
 	return nil
 }
 
-func (s *BundleService) GetBundleByName(name string) (*engine.Bundle, error) {
+func (s *BundleService) GetBundleByName(name string) (*models.Bundle, error) {
 	args := settings.GetSettings()
 	fileExists := s.store.BundleFileExists(name)
 	//First, check to see if the bundle file exists in the store
@@ -112,11 +129,11 @@ func (s *BundleService) GetBundleByName(name string) (*engine.Bundle, error) {
 	return bundle, nil
 }
 
-func (s *BundleService) GetAllBundles() map[string]*engine.Bundle {
+func (s *BundleService) GetAllBundles() map[string]*models.Bundle {
 	return s.bundles
 }
 
-func (s *BundleService) RemoveBundle(db *engine.Database, name string) error {
+func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 	// Check if the bundle exists
 	bundle, exists := s.bundles[name]
 	if !exists {
@@ -133,7 +150,7 @@ func (s *BundleService) RemoveBundle(db *engine.Database, name string) error {
 	return nil
 }
 
-func (s *BundleService) UpdateBundle(db *engine.Database, bundleCommand engine.BundleCommand) error {
+func (s *BundleService) UpdateBundle(db *models.Database, bundleCommand engine.BundleCommand) error {
 	// Check if the bundle exists
 	bundle, err := s.GetBundleByName(bundleCommand.BundleName)
 	if err != nil {
@@ -149,7 +166,7 @@ func (s *BundleService) UpdateBundle(db *engine.Database, bundleCommand engine.B
 	return nil
 }
 
-func (s *BundleService) AddDocumentToBundle(bundle *engine.Bundle, docCommand *engine.DocumentCommand) error {
+func (s *BundleService) AddDocumentToBundle(bundle *models.Bundle, docCommand *engine.DocumentCommand) error {
 	// Check if the bundle exists
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot add document")
@@ -174,7 +191,7 @@ func (s *BundleService) AddDocumentToBundle(bundle *engine.Bundle, docCommand *e
 	return nil
 }
 
-func (s *BundleService) UpdateDocumentInBundle(bundle *engine.Bundle, docCommand *engine.DocumentUpdateCommand) error {
+func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand *engine.DocumentUpdateCommand) error {
 	args := settings.GetSettings()
 	// Check if the bundle exists
 	if bundle == nil {
@@ -215,7 +232,7 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *engine.Bundle, docCommand
 	return nil
 }
 
-func (s *BundleService) DeleteDocumentFromBundle(bundle *engine.Bundle, docCommand *engine.DocumentDeleteCommand) error {
+func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docCommand *engine.DocumentDeleteCommand) error {
 	args := settings.GetSettings()
 
 	// Check if the bundle exists
@@ -250,7 +267,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *engine.Bundle, docComma
 	return nil
 }
 
-func (s *BundleService) GetDocumentsByFilter(bundle *engine.Bundle, whereParts string) ([]*engine.Document, error) {
+func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts string) ([]*models.Document, error) {
 	//args := settings.GetSettings()
 	// Check if the bundle exists
 	if bundle == nil {

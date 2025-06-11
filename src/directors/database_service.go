@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"syndrdb/src/engine"
+	"syndrdb/src/models"
 
 	"syndrdb/src/settings"
 
@@ -32,7 +33,7 @@ type DatabaseService struct {
 	store     engine.DatabaseStore
 	factory   engine.DatabaseFactory
 	settings  *settings.Arguments
-	databases map[string]*engine.Database
+	databases map[string]*models.Database
 	logger    *zap.SugaredLogger
 }
 
@@ -45,7 +46,7 @@ func NewDatabaseService(store engine.DatabaseStore, factory engine.DatabaseFacto
 		factory:   factory,
 		settings:  settings,
 		logger:    logger,
-		databases: make(map[string]*engine.Database),
+		databases: make(map[string]*models.Database),
 	}
 
 	// Load existing databases
@@ -100,7 +101,7 @@ func (s *DatabaseService) UpdateDatabase(databaseCommand engine.DatabaseCommand)
 	return nil
 }
 
-func GetDatabase(databases *map[string]*engine.Database, databaseName string) (*engine.Database, error) {
+func GetDatabase(databases *map[string]*models.Database, databaseName string) (*models.Database, error) {
 	// Check if the database exists in the system.
 	for dbName, db := range *databases {
 		if strings.EqualFold(dbName, databaseName) {
@@ -128,7 +129,7 @@ func (s *DatabaseService) DeleteDatabase(databaseName string) error {
 }
 
 // GetDatabaseByID retrieves a database by its ID
-func (s *DatabaseService) GetDatabaseByID(id string) (*engine.Database, error) {
+func (s *DatabaseService) GetDatabaseByID(id string) (*models.Database, error) {
 	if db, exists := s.databases[id]; exists {
 		return db, nil
 	}
@@ -136,7 +137,7 @@ func (s *DatabaseService) GetDatabaseByID(id string) (*engine.Database, error) {
 }
 
 // GetDatabaseByName retrieves a database by name (case insensitive)
-func (s *DatabaseService) GetDatabaseByName(name string) (*engine.Database, error) {
+func (s *DatabaseService) GetDatabaseByName(name string) (*models.Database, error) {
 	nameLower := strings.ToLower(name)
 	for _, db := range s.databases {
 		if strings.ToLower(db.Name) == nameLower {
@@ -147,8 +148,8 @@ func (s *DatabaseService) GetDatabaseByName(name string) (*engine.Database, erro
 }
 
 // ListDatabases returns all databases
-func (s *DatabaseService) ListDatabases() []*engine.Database {
-	databases := make([]*engine.Database, 0, len(s.databases))
+func (s *DatabaseService) ListDatabases() []*models.Database {
+	databases := make([]*models.Database, 0, len(s.databases))
 	for _, db := range s.databases {
 		databases = append(databases, db)
 	}
@@ -156,11 +157,28 @@ func (s *DatabaseService) ListDatabases() []*engine.Database {
 }
 
 // In DatabaseService
-func (s *DatabaseService) AddBundleToDatabase(dbName string, bundle engine.Bundle, bundleStore engine.BundleStore) error {
+func (s *DatabaseService) AddBundleToDatabase(dbName string, bundle models.Bundle, bundleStore engine.BundleStore) error {
 	db, err := s.GetDatabaseByName(dbName)
 	if err != nil {
 		return err
 	}
 
-	return db.AddBundle(bundle, s.store, bundleStore, s.logger)
+	db.Bundles[bundle.Name] = bundle
+
+	//This needs to be added to a bundle file
+	err = bundleStore.CreateBundleFile(db, &bundle)
+	if err != nil {
+		return fmt.Errorf("error creating bundle file: %w", err)
+	}
+	//logger.Infof("Decoded bundle data from file %v", bundle)
+	// and then the bundle file name needs to be added to the database file
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s.bnd", bundle.Name))
+
+	// Write the updated database file
+	err = s.store.UpdateDatabaseDataFile(db)
+	if err != nil {
+		return fmt.Errorf("error updating database file: %w", err)
+	}
+
+	return err
 }

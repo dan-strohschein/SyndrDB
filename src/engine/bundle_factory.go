@@ -1,6 +1,9 @@
 package engine
 
-import "syndrdb/src/helpers"
+import (
+	"syndrdb/src/helpers"
+	"syndrdb/src/models"
+)
 
 type BundleFactoryImpl struct {
 	// TODO Add configuration fields here if needed
@@ -14,14 +17,14 @@ func NewBundleFactory() BundleFactory {
 	}
 }
 
-func (f *BundleFactoryImpl) NewBundle(name string, description string) *Bundle {
-	return &Bundle{
+func (f *BundleFactoryImpl) NewBundle(name string, description string) *models.Bundle {
+	return &models.Bundle{
 		BundleID:          helpers.GenerateUUID(),
 		Name:              name,
-		DocumentStructure: DocumentStructure{FieldDefinitions: make(map[string]FieldDefinition)},
-		Documents:         make(map[string]Document),
-		Relationships:     make(map[string]Relationship),
-		Constraints:       make(map[string]Constraint),
+		DocumentStructure: models.DocumentStructure{FieldDefinitions: make(map[string]models.FieldDefinition)},
+		Documents:         make(map[string]models.Document),
+		Relationships:     make(map[string]models.Relationship),
+		Constraints:       make(map[string]models.Constraint),
 	}
 }
 

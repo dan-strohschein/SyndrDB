@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syndrdb/src/engine"
+	"syndrdb/src/models"
 	"time"
 
 	"go.uber.org/zap"
@@ -23,7 +23,7 @@ func NewHashService(dataDir string, maxMemorySize int64, logger *zap.SugaredLogg
 }
 
 // CreateHashIndex creates a new hash index for the specified field
-func (hs *HashService) CreateHashIndex(bundle *engine.Bundle, indexField IndexField) (string, error) {
+func (hs *HashService) CreateHashIndex(bundle *models.Bundle, indexField IndexField) (string, error) {
 	// Generate a unique index name
 	indexName := fmt.Sprintf("%s_%s_hidx", bundle.BundleID, indexField.FieldName)
 	indexName = cleanFileName(indexName)
@@ -200,7 +200,7 @@ func openHashIndex(path string, cacheSize int, logger *zap.SugaredLogger) (*Hash
 }
 
 // scanBundleForHashIndex scans a bundle and extracts values for hash indexing
-func (hs *HashService) scanBundleForHashIndex(bundle *engine.Bundle, indexField IndexField) ([]IndexTuple, error) {
+func (hs *HashService) scanBundleForHashIndex(bundle *models.Bundle, indexField IndexField) ([]IndexTuple, error) {
 	var tuples []IndexTuple
 	var tid uint64 = 1 // Start TIDs at 1
 

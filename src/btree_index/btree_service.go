@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"syndrdb/src/models"
 	"time"
 
 	//"github.com/google/uuid"
 	"go.uber.org/zap"
-
-	"syndrdb/src/engine"
 	//"syndrdb/src/engine/tournament_sort"
 )
 
@@ -51,7 +51,7 @@ func NewBTreeService(dataDir string, maxMemorySize int64, logger *zap.SugaredLog
 }
 
 // CreateIndex creates a new B-tree index for the specified field across documents in a bundle
-func (bts *BTreeService) CreateIndex(bundle *engine.Bundle, indexField IndexField) (string, error) {
+func (bts *BTreeService) CreateIndex(bundle *models.Bundle, indexField IndexField) (string, error) {
 	// Generate a unique index name
 	indexName := fmt.Sprintf("%s_%s_idx", bundle.BundleID, indexField.FieldName)
 	indexName = strings.ReplaceAll(indexName, "-", "_") // Make safe for filenames
@@ -248,7 +248,7 @@ func (bts *BTreeService) DropIndex(indexName string) error {
 }
 
 // scanBundleAndCreateTuples scans a bundle and extracts index tuples for the specified field
-func (bts *BTreeService) scanBundleAndCreateTuples(bundle *engine.Bundle, indexField IndexField) ([]IndexTuple, error) {
+func (bts *BTreeService) scanBundleAndCreateTuples(bundle *models.Bundle, indexField IndexField) ([]IndexTuple, error) {
 	var tuples []IndexTuple
 	var tid uint64 = 1 // Start TIDs at 1
 

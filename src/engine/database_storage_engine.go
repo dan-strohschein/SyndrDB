@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syndrdb/src/helpers"
+	"syndrdb/src/models"
 	"syndrdb/src/settings"
 	"syscall"
 
@@ -16,15 +17,15 @@ import (
 
 // DatabaseStore defines the interface for database storage operations
 type DatabaseStore interface {
-	LoadAllDatabaseDataFiles(dataRootDir string) (map[string]*Database, error)
+	LoadAllDatabaseDataFiles(dataRootDir string) (map[string]*models.Database, error)
 
-	LoadDatabaseDataFile(dataRootDir, fileName string) (*Database, error)
+	LoadDatabaseDataFile(dataRootDir, fileName string) (*models.Database, error)
 
-	LoadDatabaseIntoMemory(database *Database, databaseName string) (*[]byte, *Database, error)
+	LoadDatabaseIntoMemory(database *models.Database, databaseName string) (*[]byte, *models.Database, error)
 
-	CreateDatabaseDataFile(database *Database) error
+	CreateDatabaseDataFile(database *models.Database) error
 
-	UpdateDatabaseDataFile(database *Database) error
+	UpdateDatabaseDataFile(database *models.Database) error
 
 	// GetByID(id string) (*Database, bool)
 	// GetByName(name string) (*Database, bool)
@@ -41,7 +42,7 @@ type DatabaseStorageEngine struct {
 
 // DatabaseFactory creates new Database instances
 type DatabaseFactory interface {
-	NewDatabase(name, description string) *Database
+	NewDatabase(name, description string) *models.Database
 }
 
 func NewDatabaseStore(dataDir string, logger *zap.SugaredLogger) (*DatabaseStorageEngine, error) {
@@ -60,9 +61,9 @@ func NewDatabaseStore(dataDir string, logger *zap.SugaredLogger) (*DatabaseStora
 }
 
 // LoadAllDatabaseDataFiles scans the data directory and loads all database metadata files
-func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (map[string]*Database, error) {
+func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (map[string]*models.Database, error) {
 	// Create map to hold databases
-	databases := make(map[string]*Database)
+	databases := make(map[string]*models.Database)
 
 	// Ensure the data directory exists
 	if err := os.MkdirAll(dataRootDir, 0755); err != nil {
@@ -108,7 +109,7 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (ma
 }
 
 // LoadDatabaseDataFile loads a single database metadata file
-func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName string) (*Database, error) {
+func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName string) (*models.Database, error) {
 	args := settings.GetSettings()
 
 	fullPath := filepath.Join(dataRootDir, fileName)
@@ -163,7 +164,7 @@ func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName strin
 	return db, nil
 }
 
-func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *Database, databaseName string) (*[]byte, *Database, error) {
+func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *models.Database, databaseName string) (*[]byte, *models.Database, error) {
 	dbFile, err := helpers.OpenDataFile(database.DataDirectory, databaseName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening database file %s: %w", databaseName, err)
@@ -192,7 +193,7 @@ func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *Database, datab
 	}
 
 	// Assert that the decoded data is of type Bundle
-	db, ok := dbMetadata.(Database)
+	db, ok := dbMetadata.(models.Database)
 	if !ok {
 		return nil, nil, fmt.Errorf("decoded data is not of type Bundle")
 	}
@@ -200,7 +201,7 @@ func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *Database, datab
 	return &data, &db, nil
 }
 
-func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *Database) error {
+func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *models.Database) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.db", database.Name))
 
@@ -241,7 +242,7 @@ func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *Database) error
 	return nil
 }
 
-func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *Database) error {
+func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *models.Database) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.db", database.Name))
 
@@ -278,7 +279,7 @@ func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *Database) error
 	return nil
 }
 
-func DBToMap(database *Database) map[string]interface{} {
+func DBToMap(database *models.Database) map[string]interface{} {
 	// Convert the database object to a map
 	return map[string]interface{}{
 		"DatabaseID":    database.DatabaseID,
@@ -291,7 +292,7 @@ func DBToMap(database *Database) map[string]interface{} {
 }
 
 // MapToDB converts a map to a Database object
-func MapToDB(data interface{}) (*Database, error) {
+func MapToDB(data interface{}) (*models.Database, error) {
 	// Check if data is a map
 	dbMap, ok := data.(map[string]interface{})
 	if !ok {
@@ -299,8 +300,8 @@ func MapToDB(data interface{}) (*Database, error) {
 	}
 
 	// Create a new database
-	db := &Database{
-		Bundles:     make(map[string]Bundle),
+	db := &models.Database{
+		Bundles:     make(map[string]models.Bundle),
 		BundleFiles: []string{},
 	}
 

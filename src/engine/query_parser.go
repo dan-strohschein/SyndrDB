@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"reflect"
+	"syndrdb/src/models"
 
 	//"strconv"
 	"strings"
@@ -131,7 +132,7 @@ func ParseQuery(query string) (*Query, error) {
 // 	return clauses
 // }
 
-func ExecuteQuery(database *Database, query *Query) ([]*Document, error) {
+func ExecuteQuery(database *models.Database, query *Query) ([]*models.Document, error) {
 	// Load the bundle into memory
 	// bundle, err := database.GetBundle(query.FromBundle)
 	// if err != nil {
@@ -291,7 +292,7 @@ A document matches if EITHER:
 // }
 
 // DocumentToMap converts a Document type to a map[string]interface{}
-func DocumentToMap(doc Document) map[string]interface{} {
+func DocumentToMap(doc models.Document) map[string]interface{} {
 	// Create a result map
 	result := make(map[string]interface{})
 

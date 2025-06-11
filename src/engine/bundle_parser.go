@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"syndrdb/src/helpers"
+	"syndrdb/src/models"
 	"syndrdb/src/settings"
 
 	"go.uber.org/zap"
@@ -14,23 +15,15 @@ import (
 type BundleCommand struct {
 	CommandType string // CREATE, UPDATE, DELETE
 	BundleName  string
-	Fields      []FieldDefinition
+	Fields      []models.FieldDefinition
 	Changes     []FieldChange // This will be used for UPDATE commands
-}
-
-type FieldDefinition struct {
-	Name         string
-	Type         string
-	IsRequired   bool // Indicates if the field can be null
-	IsUnique     bool
-	DefaultValue interface{} // Optional default value for the field
 }
 
 // If the Bundle Command is UPDATE, then these changes are used
 type FieldChange struct {
 	ChangeType   string // CHANGE, ADD, REMOVE
 	OldFieldName string
-	NewField     FieldDefinition
+	NewField     models.FieldDefinition
 }
 
 type DocumentCommand struct {
@@ -296,7 +289,7 @@ func ParseDeleteBundleCommand(command string) (*BundleCommand, error) {
 }
 
 // parseFieldDefinitions parses field definitions like ({"fieldName", "string", true, false}, ...)
-func parseFieldDefinitions(fieldsText string, logger *zap.SugaredLogger) ([]FieldDefinition, error) {
+func parseFieldDefinitions(fieldsText string, logger *zap.SugaredLogger) ([]models.FieldDefinition, error) {
 	// Remove parentheses
 	fieldsText = strings.TrimSpace(fieldsText)
 	if !strings.HasPrefix(fieldsText, "(") || !strings.HasSuffix(fieldsText, ")") {
@@ -317,7 +310,7 @@ func parseFieldDefinitions(fieldsText string, logger *zap.SugaredLogger) ([]Fiel
 		fieldParts[i] = part
 	}
 
-	var fields []FieldDefinition
+	var fields []models.FieldDefinition
 	for _, fieldText := range fieldParts {
 
 		field, err := parseFieldDefinition(fieldText)
@@ -331,10 +324,10 @@ func parseFieldDefinitions(fieldsText string, logger *zap.SugaredLogger) ([]Fiel
 }
 
 // parseFieldDefinition parses a single field definition like "fieldName", "string", true, false
-func parseFieldDefinition(fieldText string) (FieldDefinition, error) {
+func parseFieldDefinition(fieldText string) (models.FieldDefinition, error) {
 	parts := strings.Split(fieldText, ", ")
 	if len(parts) < 4 {
-		return FieldDefinition{}, fmt.Errorf("field definition must have name, type, required, and unique properties")
+		return models.FieldDefinition{}, fmt.Errorf("field definition must have name, type, required, and unique properties")
 	}
 
 	name := strings.Trim(parts[0], "\"")
@@ -343,7 +336,7 @@ func parseFieldDefinition(fieldText string) (FieldDefinition, error) {
 	unique := parseBool(parts[3])
 	defaultValue := DetermineDefaultValue(fieldType, parts[4])
 
-	return FieldDefinition{
+	return models.FieldDefinition{
 		Name:         name,
 		Type:         fieldType,
 		IsRequired:   required,

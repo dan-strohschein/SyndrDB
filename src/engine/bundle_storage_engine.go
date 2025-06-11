@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"syndrdb/src/helpers"
+	"syndrdb/src/models"
 	"syndrdb/src/settings"
 	"syscall"
 	"time"
@@ -22,28 +23,28 @@ type BundleStorageEngine struct {
 }
 
 type BundleFactory interface {
-	NewBundle(name, description string) *Bundle
+	NewBundle(name, description string) *models.Bundle
 }
 type DocumentFactory interface {
-	NewDocument(docCommand DocumentCommand) *Document
+	NewDocument(docCommand DocumentCommand) *models.Document
 }
 
 type BundleStore interface {
-	LoadAllBundleDataFiles(dataRootDir string) (map[string]*Bundle, error)
-	LoadBundleDataFile(dataRootDir, fileName string) (*Bundle, error)
-	LoadBundleIntoMemory(database *Database, bundleName string) (*[]byte, *Bundle, error)
-	CreateBundleFile(database *Database, bundle *Bundle) error
-	UpdateBundleFile(database *Database, bundle *Bundle) error
-	UpdateDocumentDataInBundleFile(database *Database, bundle *Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
+	LoadAllBundleDataFiles(dataRootDir string) (map[string]*models.Bundle, error)
+	LoadBundleDataFile(dataRootDir, fileName string) (*models.Bundle, error)
+	LoadBundleIntoMemory(database *models.Database, bundleName string) (*[]byte, *models.Bundle, error)
+	CreateBundleFile(database *models.Database, bundle *models.Bundle) error
+	UpdateBundleFile(database *models.Database, bundle *models.Bundle) error
+	UpdateDocumentDataInBundleFile(database *models.Database, bundle *models.Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
 
-	UpdateDocumentInBundleFile(bundle *Bundle, document *Document) error
-	DeleteDocumentFromBundleFile(bundle *Bundle, documentID string) error
+	UpdateDocumentInBundleFile(bundle *models.Bundle, document *models.Document) error
+	DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error
 
-	AddDocumentToBundleFile(bundle *Bundle, document *Document) error
+	AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) error
 
-	RemoveDocumentFromBundleFile(database *Database, bundle *Bundle, documentID string, mmapData []byte) error
+	RemoveDocumentFromBundleFile(database *models.Database, bundle *models.Bundle, documentID string, mmapData []byte) error
 	BundleFileExists(bundleName string) bool
-	RemoveBundleFile(database *Database, bundleName string) error
+	RemoveBundleFile(database *models.Database, bundleName string) error
 }
 
 func NewBundleStore(dataDir string, logger *zap.SugaredLogger) (*BundleStorageEngine, error) {
@@ -62,14 +63,14 @@ func NewBundleStore(dataDir string, logger *zap.SugaredLogger) (*BundleStorageEn
 }
 
 // LoadAllBundleDataFiles loads all bundle data files from the given directory
-func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[string]*Bundle, error) {
-	bundles := make(map[string]*Bundle)
+func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[string]*models.Bundle, error) {
+	bundles := make(map[string]*models.Bundle)
 	// Implementation for loading all bundle data files
 	// This is a placeholder that should be filled with actual loading logic
 	return bundles, nil
 }
 
-func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (*Bundle, error) {
+func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (*models.Bundle, error) {
 	filePath := filepath.Join(dataRootDir, fileName)
 	// Check if the file exists
 	if !helpers.FileExists(filePath, *b.logger) {
@@ -111,7 +112,7 @@ func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (
 	return bundle, nil
 }
 
-func (b *BundleStorageEngine) LoadBundleIntoMemory(database *Database, bundleName string) (*[]byte, *Bundle, error) {
+func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bundleName string) (*[]byte, *models.Bundle, error) {
 	bundleFile, err := helpers.OpenDataFile(database.DataDirectory, fmt.Sprintf("%s.bnd", bundleName))
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening bundle file %s: %w", bundleName, err)
@@ -140,7 +141,7 @@ func (b *BundleStorageEngine) LoadBundleIntoMemory(database *Database, bundleNam
 	}
 
 	// Assert that the decoded data is of type Bundle
-	bundle, ok := bundleData.(Bundle)
+	bundle, ok := bundleData.(models.Bundle)
 	if !ok {
 		return nil, nil, fmt.Errorf("decoded data is not of type Bundle")
 	}
@@ -154,7 +155,7 @@ func (b *BundleStorageEngine) BundleFileExists(bundleName string) bool {
 	return helpers.FileExists(filePath, *b.logger)
 }
 
-func (b *BundleStorageEngine) CreateBundleFile(database *Database, bundle *Bundle) error {
+func (b *BundleStorageEngine) CreateBundleFile(database *models.Database, bundle *models.Bundle) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
 
@@ -193,7 +194,7 @@ func (b *BundleStorageEngine) CreateBundleFile(database *Database, bundle *Bundl
 	return nil
 }
 
-func (b *BundleStorageEngine) UpdateBundleFile(database *Database, bundle *Bundle) error {
+func (b *BundleStorageEngine) UpdateBundleFile(database *models.Database, bundle *models.Bundle) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
 
@@ -230,8 +231,8 @@ func (b *BundleStorageEngine) UpdateBundleFile(database *Database, bundle *Bundl
 	return nil
 }
 
-func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *Database,
-	bundle *Bundle,
+func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *models.Database,
+	bundle *models.Bundle,
 	documentID string,
 	updatedDocument map[string]interface{},
 	mmapData []byte) error {
@@ -303,7 +304,7 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *Database,
 	return nil
 }
 
-func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *Bundle, document *Document) error {
+func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *models.Bundle, document *models.Document) error {
 	if b.logger != nil {
 		b.logger.Infow("Updating document in bundle file",
 			"bundle", bundle.Name,
@@ -337,7 +338,7 @@ func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *Bundle, documen
 
 	// Update the document in the bundle in memory
 	if bundle.Documents == nil {
-		bundle.Documents = make(map[string]Document)
+		bundle.Documents = make(map[string]models.Document)
 	}
 	bundle.Documents[document.DocumentID] = *document
 
@@ -357,7 +358,7 @@ func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *Bundle, documen
 	return nil
 }
 
-func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *Bundle, documentID string) error {
+func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error {
 
 	// Validate inputs
 	if bundle == nil {
@@ -401,7 +402,7 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *Bundle, docum
 	return nil
 }
 
-func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *Bundle, document *Document) error {
+func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) error {
 	if b.logger != nil {
 		b.logger.Infow("Adding document to bundle file",
 			"bundle", bundle.Name,
@@ -435,7 +436,7 @@ func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *Bundle, document *
 
 	// Add the document to the bundle in memory
 	if bundle.Documents == nil {
-		bundle.Documents = make(map[string]Document)
+		bundle.Documents = make(map[string]models.Document)
 	}
 	bundle.Documents[document.DocumentID] = *document
 
@@ -455,8 +456,8 @@ func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *Bundle, document *
 	return nil
 }
 
-func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *Database,
-	bundle *Bundle,
+func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *models.Database,
+	bundle *models.Bundle,
 	documentID string,
 	mmapData []byte) error {
 
@@ -542,7 +543,7 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *Database,
 }
 
 // WriteBundleToFile encodes a bundle and writes it to a file
-func (b *BundleStorageEngine) WriteBundleToFile(bundle *Bundle, filePath string) error {
+func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath string) error {
 	// 1. Convert the bundle to a map for BSON encoding
 	convertedBundle := BundleToMap(bundle)
 
@@ -604,7 +605,7 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *Bundle, filePath string)
 	return nil
 }
 
-func (b *BundleStorageEngine) RemoveBundleFile(database *Database, bundleName string) error {
+func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundleName string) error {
 	// Create a new data file
 	filePath := filepath.Join(database.DataDirectory, bundleName)
 
@@ -646,7 +647,7 @@ func (b *BundleStorageEngine) RemoveBundleFile(database *Database, bundleName st
 // 	return decodedData, nil
 // }
 
-func BundleToMap(bundle *Bundle) map[string]interface{} {
+func BundleToMap(bundle *models.Bundle) map[string]interface{} {
 	return map[string]interface{}{
 		"BundleID":          bundle.BundleID,
 		"Name":              bundle.Name,
@@ -680,8 +681,8 @@ func calculateDocumentOffset(data []byte, index int) (int, error) {
 }
 
 // MapToBundle converts a map to a Bundle struct
-func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle, error) {
-	bundle := &Bundle{}
+func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models.Bundle, error) {
+	bundle := &models.Bundle{}
 
 	// Extract basic fields
 	if id, ok := data["BundleID"].(string); ok {
@@ -698,15 +699,15 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 
 	// Extract relationships
 	if relations, ok := data["Relationships"]; ok && relations != nil {
-		if relationMap, ok := relations.(map[string]Relationship); ok {
+		if relationMap, ok := relations.(map[string]models.Relationship); ok {
 			bundle.Relationships = relationMap
 		} else {
 			// If not directly convertible, try to convert each item individually
-			bundle.Relationships = make(map[string]Relationship)
+			bundle.Relationships = make(map[string]models.Relationship)
 			if relMap, ok := relations.(map[string]interface{}); ok {
 				for key, val := range relMap {
 					if relData, ok := val.(map[string]interface{}); ok {
-						rel := Relationship{
+						rel := models.Relationship{
 							// ID:           stringValue(relData, "ID", ""),
 							Name: stringValue(relData, "Name", ""),
 							//  TargetBundle: stringValue(relData, "TargetBundle", ""),
@@ -717,20 +718,20 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 			}
 		}
 	} else {
-		bundle.Relationships = make(map[string]Relationship)
+		bundle.Relationships = make(map[string]models.Relationship)
 	}
 
 	// Extract constraints
 	if constraints, ok := data["Constraints"]; ok && constraints != nil {
-		if constraintMap, ok := constraints.(map[string]Constraint); ok {
+		if constraintMap, ok := constraints.(map[string]models.Constraint); ok {
 			bundle.Constraints = constraintMap
 		} else {
 			// If not directly convertible, try to convert each item individually
-			bundle.Constraints = make(map[string]Constraint)
+			bundle.Constraints = make(map[string]models.Constraint)
 			if consMap, ok := constraints.(map[string]interface{}); ok {
 				for key, val := range consMap {
 					if consData, ok := val.(map[string]interface{}); ok {
-						cons := Constraint{
+						cons := models.Constraint{
 							Name: stringValue(consData, "Name", ""),
 							// Type:      stringValue(consData, "Type", ""),
 							// Fields:    stringArrayValue(consData, "Fields"),
@@ -742,20 +743,20 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 			}
 		}
 	} else {
-		bundle.Constraints = make(map[string]Constraint)
+		bundle.Constraints = make(map[string]models.Constraint)
 	}
 
 	// Extract field definitions
 	if fieldDefs, ok := data["FieldDefinitions"]; ok && fieldDefs != nil {
-		if fieldDefMap, ok := fieldDefs.(map[string]FieldDefinition); ok {
+		if fieldDefMap, ok := fieldDefs.(map[string]models.FieldDefinition); ok {
 			bundle.DocumentStructure.FieldDefinitions = fieldDefMap
 		} else {
 			// If not directly convertible, try to convert each item individually
-			bundle.DocumentStructure.FieldDefinitions = make(map[string]FieldDefinition)
+			bundle.DocumentStructure.FieldDefinitions = make(map[string]models.FieldDefinition)
 			if fdMap, ok := fieldDefs.(map[string]interface{}); ok {
 				for key, val := range fdMap {
 					if fdData, ok := val.(map[string]interface{}); ok {
-						fd := FieldDefinition{
+						fd := models.FieldDefinition{
 							Name:         stringValue(fdData, "Name", ""),
 							Type:         stringValue(fdData, "Type", ""),
 							IsRequired:   boolValue(fdData, "IsRequired", false),
@@ -768,14 +769,14 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 			}
 		}
 	} else {
-		bundle.DocumentStructure.FieldDefinitions = make(map[string]FieldDefinition)
+		bundle.DocumentStructure.FieldDefinitions = make(map[string]models.FieldDefinition)
 	}
 
 	logger.Infof("Processing bundle %s , going to load documents, with ID %s", bundle.Name, bundle.BundleID)
 
 	// Extract documents
 	if docs, ok := data["Documents"]; ok && docs != nil {
-		bundle.Documents = make(map[string]Document)
+		bundle.Documents = make(map[string]models.Document)
 		//logger.Infof("Found %t for array", docs.([]interface{}))
 		//logger.Infof("Found %t for map", docs.(map[string]interface{}))
 		// Handle array of documents
@@ -789,9 +790,9 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 						continue // Skip documents without valid ID
 					}
 
-					document := Document{
+					document := models.Document{
 						DocumentID: docID,
-						Fields:     make(map[string]Field),
+						Fields:     make(map[string]models.Field),
 					}
 
 					// Extract CreatedAt and UpdatedAt if available
@@ -809,7 +810,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 
 							// Case 1: Field value is a map with Name/Value properties
 							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
-								field := Field{
+								field := models.Field{
 									Name:  stringValue(fieldMap, "Name", fieldName),
 									Value: fieldMap["Value"], // This might be null if "Value" doesn't exist
 								}
@@ -818,7 +819,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 							} else {
 								// Case 2: Field value is the direct value (not wrapped in a map)
 
-								field := Field{
+								field := models.Field{
 									Name:  fieldName,
 									Value: fieldValue, // Use the value directly
 								}
@@ -835,9 +836,9 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 			// Handle map of documents
 			for docID, docData := range docMap {
 				if docMapData, ok := docData.(map[string]interface{}); ok {
-					document := Document{
+					document := models.Document{
 						DocumentID: docID,
-						Fields:     make(map[string]Field),
+						Fields:     make(map[string]models.Field),
 					}
 
 					// Extract CreatedAt and UpdatedAt if available
@@ -855,14 +856,14 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*Bundle
 
 							// Case 1: Field value is a map with Name/Value properties
 							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
-								field := Field{
+								field := models.Field{
 									Name:  stringValue(fieldMap, "Name", fieldName),
 									Value: fieldMap["value"],
 								}
 								document.Fields[fieldName] = field
 							} else {
 								// Case 2: Field value is the direct value (not wrapped in a map)
-								field := Field{
+								field := models.Field{
 									Name:  fieldName,
 									Value: fieldValue, // Use the value directly
 								}

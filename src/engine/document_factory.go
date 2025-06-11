@@ -2,6 +2,7 @@ package engine
 
 import (
 	"syndrdb/src/helpers"
+	"syndrdb/src/models"
 	"time"
 )
 
@@ -17,10 +18,10 @@ func NewDocumentFactory() DocumentFactory {
 	}
 }
 
-func (f *DocumentFactoryImpl) NewDocument(docCommand DocumentCommand) *Document {
+func (f *DocumentFactoryImpl) NewDocument(docCommand DocumentCommand) *models.Document {
 	now := time.Now()
 
-	newDoc := &Document{
+	newDoc := &models.Document{
 		DocumentID: helpers.GenerateUUID(),
 		Fields:     f.MakeDocumentFields(docCommand),
 		CreatedAt:  now,
@@ -30,13 +31,13 @@ func (f *DocumentFactoryImpl) NewDocument(docCommand DocumentCommand) *Document 
 	return newDoc
 }
 
-func (f *DocumentFactoryImpl) MakeDocumentFields(docCommand DocumentCommand) map[string]Field {
-	fields := make(map[string]Field)
+func (f *DocumentFactoryImpl) MakeDocumentFields(docCommand DocumentCommand) map[string]models.Field {
+	fields := make(map[string]models.Field)
 
 	// Iterate over the field definitions in the document command
 	for _, f := range docCommand.Fields {
 		// Create a new field based on the definition
-		field := Field{
+		field := models.Field{
 			Name:  f.Key,
 			Value: f.Value,
 		}
@@ -48,7 +49,7 @@ func (f *DocumentFactoryImpl) MakeDocumentFields(docCommand DocumentCommand) map
 	return fields
 }
 
-func (f *DocumentFactoryImpl) NewDocumentWithFields(docCommand DocumentCommand, fields map[string]Field) *Document {
+func (f *DocumentFactoryImpl) NewDocumentWithFields(docCommand DocumentCommand, fields map[string]models.Field) *models.Document {
 	newDoc := f.NewDocument(docCommand)
 
 	// Add fields to the new document

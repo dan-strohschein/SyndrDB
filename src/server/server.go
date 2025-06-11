@@ -15,6 +15,7 @@ import (
 	"syndrdb/src/directors"
 	"syndrdb/src/engine"
 	"syndrdb/src/helpers"
+	"syndrdb/src/models"
 	"syndrdb/src/settings"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 type Server struct {
 	Host              string
 	Port              int
-	Databases         map[string]*engine.Database
+	Databases         map[string]*models.Database
 	Listener          net.Listener
 	AuthEnabled       bool
 	Users             map[string]string // username -> hashed password
@@ -130,7 +131,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	server := &Server{
 		Host:              config.Host,
 		Port:              config.Port,
-		Databases:         make(map[string]*engine.Database),
+		Databases:         make(map[string]*models.Database),
 		AuthEnabled:       config.AuthEnabled,
 		Users:             make(map[string]string),
 		ActiveConnections: make(map[string]*Connection),
@@ -150,12 +151,12 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 	// If no databases were found, create a default database
 	if len(server.Databases) == 0 && config.CreateDefaultDB {
-		defaultDB := &engine.Database{
+		defaultDB := &models.Database{
 			DatabaseID:    helpers.GenerateUUID(),
 			Name:          "default",
 			Description:   "Default database created at startup",
 			DataDirectory: config.DataDir,
-			Bundles:       make(map[string]engine.Bundle),
+			Bundles:       make(map[string]models.Bundle),
 			BundleFiles:   []string{},
 		}
 
@@ -628,7 +629,7 @@ func parseConnectionString(server *Server, connStr string) (ConnectionString, er
 	return result, nil
 }
 
-func DatabaseExists(databases map[string]*engine.Database, dbName string) bool {
+func DatabaseExists(databases map[string]*models.Database, dbName string) bool {
 	for _, db := range databases {
 		if strings.EqualFold(db.Name, dbName) {
 			return true

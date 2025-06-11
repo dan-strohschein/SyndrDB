@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/engine"
+	"syndrdb/src/models"
 
 	"go.uber.org/zap"
 )
@@ -27,7 +28,7 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 
 				if len(databases) == 0 {
 					//fmt.Print("No databases found.\n")
-					databases = make([]*engine.Database, 0)
+					databases = make([]*models.Database, 0)
 				}
 
 				cmdResponse := &engine.CommandResponse{
@@ -55,7 +56,7 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
 
-			var documents map[string]*engine.Document
+			var documents map[string]*models.Document
 			if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
 				//logger.Infof("Filtering documents in bundle '%s' with WHERE clause: %s", bundleName, strings.Join(commandParts[5:], " "))
 				whereClause := strings.Join(commandParts[5:], " ")
@@ -75,14 +76,14 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 				// 	logger.Infof("No documents found matching the filter")
 				// }
 
-				documents = make(map[string]*engine.Document)
+				documents = make(map[string]*models.Document)
 				for _, v := range filteredDocs {
 					docCopy := v
 					documents[docCopy.DocumentID] = v
 				}
 			} else {
 				// Get documents from the bundle
-				documents = make(map[string]*engine.Document)
+				documents = make(map[string]*models.Document)
 				for k, v := range bundle.Documents {
 					docCopy := v
 					documents[k] = &docCopy
