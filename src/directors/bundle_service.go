@@ -3,9 +3,13 @@ package directors
 import (
 	"fmt"
 	"log"
+	btreeindex "syndrdb/src/btree_index"
 	"syndrdb/src/engine"
+
+	//hashindex "syndrdb/src/hash_index"
 	"syndrdb/src/models"
 	"syndrdb/src/settings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -67,8 +71,8 @@ func (s *BundleService) AddBundle(databaseService *DatabaseService, db *models.D
 			s.logger.Infof("Added field '%s' to bundle '%s'", fieldDef.Name, bundleCommand.BundleName)
 		}
 	}
-	// // Add the bundle to the database
 
+	// Add the bundle to the database
 	db.Bundles[bundle.Name] = *bundle
 
 	//This needs to be added to a bundle file
@@ -161,6 +165,58 @@ func (s *BundleService) UpdateBundle(db *models.Database, bundleCommand engine.B
 	err = s.store.UpdateBundleFile(db, bundle)
 	if err != nil {
 		return fmt.Errorf("failed to update bundle in store: %w", err)
+	}
+
+	return nil
+}
+
+func (s *BundleService) AddIndexToBundle(bundle *models.Bundle, indexCommand *engine.CreateIndexCommand) error {
+	args := settings.GetSettings()
+	// Check if the bundle exists
+	if bundle == nil {
+		s.logger.Errorf("Bundle is nil, cannot add index")
+		return fmt.Errorf("bundle '%s' is nil, cannot add index", indexCommand.BundleName)
+	}
+
+	bundle, err := s.GetBundleByName(bundle.Name)
+	if err != nil {
+		return fmt.Errorf("bundle '%s' not found", indexCommand.BundleName)
+	}
+
+	// Create the index based on the command type
+
+	switch indexCommand.IndexType {
+	case "btree":
+
+		// Create index services
+		btreeService := btreeindex.NewBTreeService(args.DataDir, 100*1024*1024, s.logger)
+
+		// Register services for this bundle
+		engine.RegisterBTreeService(bundle.BundleID, btreeService)
+
+		// Now you can use the services
+
+		indexName, err := btreeService.CreateIndex(bundle, "myField", true)
+		if err != nil {
+			s.logger.Errorf("Failed to create index: %v", err)
+			return err
+		}
+
+		// Record the created index
+		bundle.Indexes[indexName] = models.IndexReference{
+			IndexName: indexCommand.IndexName,
+			Fields:    indexCommand.Fields,
+			IndexType: indexCommand.IndexType,
+
+			CreateTime: time.Now(),
+		}
+
+	case "hash":
+		//index = hashindex.NewHashService(bundle.Name, indexCommand.Fields, s.logger)
+	//	hashService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+
+	default:
+		return fmt.Errorf("unknown index type: %s", indexCommand.IndexType)
 	}
 
 	return nil

@@ -3,6 +3,7 @@ package models
 import (
 	//btreeindex "syndrdb/src/btree_index"
 	//hashindex "syndrdb/src/hash_index"
+
 	"time"
 )
 
@@ -37,8 +38,10 @@ type Bundle struct {
 
 	// A list of documents in the bundle, similar to rows in a table.
 	Documents map[string]Document
-	//BTreeServices map[string]*btreeindex.BTreeService
-	//HashIndexServices map[string]*hashindex.HashService
+
+	// Track indexes by name -> reference
+	Indexes map[string]IndexReference
+
 	Relationships map[string]Relationship
 	Constraints   map[string]Constraint
 }
@@ -96,4 +99,20 @@ type Relationship struct {
 	Target string
 	// Type is the type of the relationship (e.g., one-to-one, one-to-many, many-to-many).
 	RelationshipType string
+}
+
+// IndexService defines the interface for any index implementation
+type IndexService interface {
+	CreateIndex(bundle *Bundle, fieldName string, isUnique bool) (string, error)
+	SearchIndex(indexName string, key interface{}) ([]string, error)
+	ListIndexes(bundleID string) ([]string, error)
+	DropIndex(indexName string) error
+}
+
+// IndexReference stores information about an index
+type IndexReference struct {
+	IndexName  string
+	Fields     []FieldDefinition // List of fields in the index
+	IndexType  string            // "btree", "hash", etc.
+	CreateTime time.Time
 }

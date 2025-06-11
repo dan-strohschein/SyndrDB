@@ -21,7 +21,14 @@ type CreateHashIndexCommand struct {
 	Fields     []models.FieldDefinition
 }
 
-func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*CreateBTreeIndexCommand, error) {
+type CreateIndexCommand struct {
+	IndexType  string // "BTree" or "Hash"
+	IndexName  string
+	BundleName string
+	Fields     []models.FieldDefinition
+}
+
+func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*CreateIndexCommand, error) {
 	// This function should parse the command string and return a CreateBTreeIndexCommand struct
 	//args := settings.GetSettings()
 
@@ -80,14 +87,15 @@ func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*C
 		Fields = append(Fields, fieldDef)
 	}
 
-	return &CreateBTreeIndexCommand{
+	return &CreateIndexCommand{
+		IndexType:  "btree",
 		IndexName:  indexName,
 		BundleName: bundleName,
 		Fields:     Fields,
 	}, nil
 }
 
-func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*CreateHashIndexCommand, error) {
+func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*CreateIndexCommand, error) {
 	// This function should parse the command string and return a CreateHashIndexCommand struct
 	//args := settings.GetSettings()
 	// Regular expression to match the command structure
@@ -143,7 +151,8 @@ func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*Cr
 		}
 		Fields = append(Fields, fieldDef)
 	}
-	return &CreateHashIndexCommand{
+	return &CreateIndexCommand{
+		IndexType:  "hash",
 		IndexName:  indexName,
 		BundleName: bundleName,
 		Fields:     Fields,
