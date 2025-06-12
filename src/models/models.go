@@ -44,6 +44,8 @@ type Bundle struct {
 
 	Relationships map[string]Relationship
 	Constraints   map[string]Constraint
+
+	Database *Database // Reference to the parent database
 }
 
 type DocumentStructure struct {
@@ -115,4 +117,8 @@ type IndexReference struct {
 	Fields     []FieldDefinition // List of fields in the index
 	IndexType  string            // "btree", "hash", etc.
 	CreateTime time.Time
+	// Reference to the actual index instance
+	// Stored as interface{} to avoid circular imports
+	IndexInstance interface{} `json:"-"` // Skip serialization
+
 }

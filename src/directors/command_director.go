@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func CommandDirector(databaseName string, serviceManager ServiceManager, command string, logger *zap.SugaredLogger) (interface{}, error) {
+func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger) (interface{}, error) {
 	command = strings.TrimSpace(command)
 	command = strings.TrimSuffix(command, ";") // Remove trailing semicolon if present
 	commandParts := strings.Split(command, " ")
@@ -51,7 +51,7 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
 
 			// Get the bundle by name
-			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
@@ -143,15 +143,15 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			}
 
 			//Check if the bundle already exists
-			existingBundle, err := serviceManager.BundleService.GetBundleByName(bundleCmd.BundleName)
+			existingBundle, err := serviceManager.BundleService.GetBundleByName(database, bundleCmd.BundleName)
 			if err == nil {
 				return nil, fmt.Errorf("bundle '%s' already exists", existingBundle.Name)
 			}
 
 			// Get database object by name
-			database, err := serviceManager.DatabaseService.GetDatabaseByName(databaseName)
+			database, err := serviceManager.DatabaseService.GetDatabaseByName(database.Name)
 			if err != nil {
-				return nil, fmt.Errorf("error retrieving database '%s': %v", databaseName, err)
+				return nil, fmt.Errorf("error retrieving database '%s': %v", database.Name, err)
 			}
 
 			// Add the bundle to the database
@@ -161,7 +161,7 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			}
 
 			// Return the response
-			result = fmt.Sprintf("Bundle '%s' created successfully in database '%s'.", bundleCmd.BundleName, databaseName)
+			result = fmt.Sprintf("Bundle '%s' created successfully in database '%s'.", bundleCmd.BundleName, database.Name)
 			cmdResponse := &engine.CommandResponse{
 				ResultCount: 1,
 				Result:      result,
@@ -173,12 +173,35 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 				return nil, fmt.Errorf("error parsing B-Tree index command: %v", err)
 			}
 			logger.Infof("Parsed B-Tree index command: %+v", btreeIndexCommand)
+
+			// Get the bundle by name
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, btreeIndexCommand.BundleName)
+			if err == nil {
+				return nil, fmt.Errorf("bundle '%s' cannot be found", bundle.Name)
+			}
+
+			// TODO Validate the index name
+			err = serviceManager.BundleService.AddIndexToBundle(database, bundle, btreeIndexCommand)
+			if err != nil {
+				return nil, fmt.Errorf("error adding B-Tree index to bundle '%s': %v", btreeIndexCommand.BundleName, err)
+			}
 		case "h-index":
 			hashIndexCommand, err := engine.ParseCreateHashIndexCommand(command, logger)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing hash index command: %v", err)
 			}
 			logger.Infof("Parsed Hash index command: %+v", hashIndexCommand)
+
+			// Get the bundle by name
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, hashIndexCommand.BundleName)
+			if err == nil {
+				return nil, fmt.Errorf("bundle '%s' cannot be found", bundle.Name)
+			}
+
+			err = serviceManager.BundleService.AddIndexToBundle(database, bundle, hashIndexCommand)
+			if err != nil {
+				return nil, fmt.Errorf("error adding hash index to bundle '%s': %v", hashIndexCommand.BundleName, err)
+			}
 		case "user":
 			// ParseCreateRelationshipCommand(command)
 		default:
@@ -204,12 +227,12 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 
 			bundleName := docCommand.BundleName
 			// Get the bundle by name
-			bundle, err := serviceManager.BundleService.GetBundleByName(docCommand.BundleName)
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, docCommand.BundleName)
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
 			// Add the document to the bundle
-			err = serviceManager.BundleService.AddDocumentToBundle(bundle, docCommand)
+			err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
 			if err != nil {
 				return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
 			}
@@ -248,7 +271,7 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			bundleName = strings.ReplaceAll(bundleName, "'", "")
 			bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
 			// Get the bundle by name
-			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
@@ -298,7 +321,7 @@ func CommandDirector(databaseName string, serviceManager ServiceManager, command
 			if err != nil {
 				return nil, fmt.Errorf("error parsing delete document command: %v", err)
 			}
-			bundle, err := serviceManager.BundleService.GetBundleByName(bundleName)
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}

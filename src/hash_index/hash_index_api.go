@@ -2,8 +2,23 @@ package hashindex
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
+	"time"
 )
+
+func generateSeed() uint32 {
+	var seedBytes [4]byte
+	_, err := rand.Read(seedBytes[:])
+	if err != nil {
+		// Fall back to time-based seed
+		return uint32(time.Now().UnixNano())
+	}
+	return uint32(seedBytes[0]) |
+		uint32(seedBytes[1])<<8 |
+		uint32(seedBytes[2])<<16 |
+		uint32(seedBytes[3])<<24
+}
 
 // Insert adds a key to the hash index
 func (hi *HashIndex) Insert(key []byte, docID string, tid uint64) error {
@@ -11,7 +26,9 @@ func (hi *HashIndex) Insert(key []byte, docID string, tid uint64) error {
 	defer hi.Unlock()
 
 	// Compute hash value
-	hashValue := hashKey(key)
+	//hashValue := hashKey(key)
+
+	hashValue := jenkinsHash(key, hi.metadata.Seed)
 
 	// Find the bucket
 	bucketNum := hi.computeBucket(hashValue)
@@ -231,7 +248,7 @@ func (hi *HashIndex) splitBucket() error {
 		return fmt.Errorf("failed to write reset bucket: %w", err)
 	}
 
-	// Delete all overflow pages (in a real implementation, you'd recycle these)
+	// Delete all overflow pages (in a full implementation, we will recycle these)
 	// For this example, we'll just "forget" them
 
 	// Write the new bucket
@@ -281,8 +298,8 @@ func (hi *HashIndex) Find(key []byte) (*IndexTuple, error) {
 	defer hi.RUnlock()
 
 	// Compute hash value
-	hashValue := hashKey(key)
-
+	//hashValue := hashKey(key)
+	hashValue := jenkinsHash(key, hi.metadata.Seed) // Using the new Jenkins hash function
 	// Find the bucket
 	bucketNum := hi.computeBucket(hashValue)
 

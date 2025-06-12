@@ -35,6 +35,7 @@ type HashIndexMetadata struct {
 	IndexField    string    // Name of the indexed field
 	IsUnique      bool      // Whether the index enforces uniqueness
 	Created       time.Time // When the index was created
+	Seed          uint32    // Seed for hash function (for linear hashing)
 }
 
 // HashIndexPage represents a page in the hash index file

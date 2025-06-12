@@ -275,6 +275,7 @@ func createEmptyHashIndex(filePath string, indexField IndexField, fillFactor uin
 		OverflowPages: 0,
 		IndexField:    indexField.FieldName,
 		IsUnique:      indexField.IsUnique,
+		Seed:          generateSeed(), //Use cryptographic random seed
 		Created:       time.Now(),
 	}
 

@@ -405,7 +405,7 @@ func appendStringWithPrefix(buffer *bytes.Buffer, s string) {
 // ---------------------------------------- Multicolumn Indexing ----------------------------------------
 // CreateMulticolumnIndex creates a B-tree index for multiple fields in a bundle
 // CreateMultiColumnIndex creates a B-tree index on multiple fields, similar to PostgreSQL's multi-column indexes
-func (bts *BTreeService) CreateMultiColumnIndex(bundle *models.Bundle, indexFields []IndexField, isUnique bool) (string, error) {
+func (bts *BTreeService) CreateMultiColumnIndex(bundle *models.Bundle, indexFields []IndexField, isUnique bool) (*BTreeIndex, error) {
 	// Generate a unique index name with all field names
 	fieldNames := make([]string, 0, len(indexFields))
 	for _, field := range indexFields {
@@ -421,13 +421,14 @@ func (bts *BTreeService) CreateMultiColumnIndex(bundle *models.Bundle, indexFiel
 	// Step 1: Scan the bundle and create composite index tuples
 	tuples, err := bts.scanBundleAndCreateMultiColumnTuples(bundle, indexFields, isUnique)
 	if err != nil {
-		return "", fmt.Errorf("failed to scan bundle for multi-column index: %w", err)
+		return nil, fmt.Errorf("failed to scan bundle for multi-column index: %w", err)
 	}
 
 	bts.logger.Infof("Created %d index tuples for multi-column index %s", len(tuples), indexName)
 
 	// For small indexes, we can just sort in memory
 	if len(tuples) < 100000 { // Arbitrary threshold
+		// TODO Update this to be a faster sort algorithm
 		bts.logger.Debugf("Using in-memory sort for small index")
 		sort.Slice(tuples, func(i, j int) bool {
 			return bytes.Compare(tuples[i].Key, tuples[j].Key) < 0
@@ -436,13 +437,13 @@ func (bts *BTreeService) CreateMultiColumnIndex(bundle *models.Bundle, indexFiel
 		// Build B-tree from sorted tuples
 		btreeIndex, err := bts.buildBTreeFromTuples(indexName, tuples, indexFields[0]) // Use first field for metadata
 		if err != nil {
-			return "", fmt.Errorf("failed to build B-tree: %w", err)
+			return nil, fmt.Errorf("failed to build B-tree: %w", err)
 		}
 
 		bts.logger.Infof("Successfully created multi-column B-tree index %s with height %d",
 			indexName, btreeIndex.Height)
 
-		return indexName, nil
+		return btreeIndex, nil
 	}
 
 	// For larger datasets, use tournament sort
@@ -463,14 +464,14 @@ func (bts *BTreeService) CreateMultiColumnIndex(bundle *models.Bundle, indexFiel
 		docRef = buf.Bytes()
 
 		if err := sorter.Add(tuple.Key, tuple.DocID, docRef); err != nil {
-			return "", fmt.Errorf("failed to add tuple to sorter: %w", err)
+			return nil, fmt.Errorf("failed to add tuple to sorter: %w", err)
 		}
 	}
 
 	// Perform the sort
 	iterator, err := sorter.Sort()
 	if err != nil {
-		return "", fmt.Errorf("failed to sort tuples: %w", err)
+		return nil, fmt.Errorf("failed to sort tuples: %w", err)
 	}
 	defer iterator.Close()
 
@@ -497,13 +498,13 @@ func (bts *BTreeService) CreateMultiColumnIndex(bundle *models.Bundle, indexFiel
 
 	btreeIndex, err := bts.buildBTreeFromTuples(indexName, sortedTuples, indexFields[0]) // Use first field for metadata
 	if err != nil {
-		return "", fmt.Errorf("failed to build B-tree: %w", err)
+		return nil, fmt.Errorf("failed to build B-tree: %w", err)
 	}
 
 	bts.logger.Infof("Successfully created multi-column B-tree index %s with height %d",
 		indexName, btreeIndex.Height)
 
-	return indexName, nil
+	return btreeIndex, nil
 }
 
 // scanBundleAndCreateMultiColumnTuples scans a bundle and creates composite key tuples for multi-column indexes

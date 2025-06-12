@@ -31,7 +31,7 @@ type DocumentFactory interface {
 
 type BundleStore interface {
 	LoadAllBundleDataFiles(dataRootDir string) (map[string]*models.Bundle, error)
-	LoadBundleDataFile(dataRootDir, fileName string) (*models.Bundle, error)
+	LoadBundleDataFile(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error)
 	LoadBundleIntoMemory(database *models.Database, bundleName string) (*[]byte, *models.Bundle, error)
 	CreateBundleFile(database *models.Database, bundle *models.Bundle) error
 	UpdateBundleFile(database *models.Database, bundle *models.Bundle) error
@@ -70,7 +70,7 @@ func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[stri
 	return bundles, nil
 }
 
-func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (*models.Bundle, error) {
+func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error) {
 	filePath := filepath.Join(dataRootDir, fileName)
 	// Check if the file exists
 	if !helpers.FileExists(filePath, *b.logger) {
@@ -97,6 +97,8 @@ func (b *BundleStorageEngine) LoadBundleDataFile(dataRootDir, fileName string) (
 	if err != nil {
 		return nil, fmt.Errorf("error converting map to Bundle from file %s: %w", fileName, err)
 	}
+
+	bundle.Database = database
 
 	prettyJSON, err := json.MarshalIndent(bundleData, "", "  ")
 	if err != nil {
@@ -200,7 +202,7 @@ func (b *BundleStorageEngine) UpdateBundleFile(database *models.Database, bundle
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *b.logger) {
-		return fmt.Errorf("Bundle %s does not exist", bundle.Name)
+		return fmt.Errorf("bundle %s does not exist", bundle.Name)
 	}
 
 	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
@@ -651,6 +653,7 @@ func BundleToMap(bundle *models.Bundle) map[string]interface{} {
 	return map[string]interface{}{
 		"BundleID":          bundle.BundleID,
 		"Name":              bundle.Name,
+		"Database":          bundle.Database,
 		"DocumentStructure": bundle.DocumentStructure,
 		"FieldDefinitions":  bundle.DocumentStructure.FieldDefinitions,
 		"Documents":         bundle.Documents,

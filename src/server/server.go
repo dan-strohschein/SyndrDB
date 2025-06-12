@@ -41,15 +41,16 @@ type Server struct {
 
 // Connection represents an active client connection
 type Connection struct {
-	ID         string
-	Conn       net.Conn
-	Reader     *bufio.Reader
-	Writer     *bufio.Writer
-	Database   string
-	User       string
-	Authorized bool
-	LastActive time.Time
-	Logger     *zap.SugaredLogger
+	ID           string
+	Conn         net.Conn
+	Reader       *bufio.Reader
+	Writer       *bufio.Writer
+	DatabaseName string
+	Database     *models.Database // Current database for this connection
+	User         string
+	Authorized   bool
+	LastActive   time.Time
+	Logger       *zap.SugaredLogger
 }
 
 // ConnectionString represents parsed MongoDB connection string
@@ -429,7 +430,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 				line = strings.TrimSpace(line)
 				connection.LastActive = time.Now()
-				connection.Database = connStr.Database
+				connection.DatabaseName = connStr.Database
+				connection.Database = s.Databases[connStr.Database]
+
 				connection.User = connStr.Username
 
 				if !connection.Authorized {
@@ -453,13 +456,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 					}
 
 					connection.Authorized = true
-					connection.Database = connStr.Database
+					connection.DatabaseName = connStr.Database
 					connection.User = connStr.Username
 					connection.Logger = connLogger.Desugar().Sugar()
 
 					connLogger.Infow("Client authenticated",
 						"user", connection.User,
-						"database", connection.Database)
+						"database", connection.DatabaseName)
 
 					sendSuccess(writer, "Authentication successful")
 					continue

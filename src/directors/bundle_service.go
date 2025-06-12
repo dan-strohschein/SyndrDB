@@ -5,6 +5,7 @@ import (
 	"log"
 	btreeindex "syndrdb/src/btree_index"
 	"syndrdb/src/engine"
+	hashindex "syndrdb/src/hash_index"
 
 	//hashindex "syndrdb/src/hash_index"
 	"syndrdb/src/models"
@@ -51,12 +52,13 @@ func NewBundleService(store engine.BundleStore, factory engine.BundleFactory,
 func (s *BundleService) AddBundle(databaseService *DatabaseService, db *models.Database, bundleCommand engine.BundleCommand) error {
 	args := settings.GetSettings()
 	// Check if the bundle already exists
-	if _, err := s.GetBundleByName(bundleCommand.BundleName); err == nil {
+	if _, err := s.GetBundleByName(db, bundleCommand.BundleName); err == nil {
 		return fmt.Errorf("bundle '%s' already exists", bundleCommand.BundleName)
 	}
 
 	// Create a new bundle
 	bundle := s.factory.NewBundle(bundleCommand.BundleName, "")
+	bundle.Database = db
 
 	// TODO take the fields and structure from the command and create them in the bundle struct
 	for _, fieldDef := range bundleCommand.Fields {
@@ -98,7 +100,7 @@ func (s *BundleService) AddBundle(databaseService *DatabaseService, db *models.D
 	return nil
 }
 
-func (s *BundleService) GetBundleByName(name string) (*models.Bundle, error) {
+func (s *BundleService) GetBundleByName(database *models.Database, name string) (*models.Bundle, error) {
 	args := settings.GetSettings()
 	fileExists := s.store.BundleFileExists(name)
 	//First, check to see if the bundle file exists in the store
@@ -113,7 +115,8 @@ func (s *BundleService) GetBundleByName(name string) (*models.Bundle, error) {
 			if args.Debug {
 				s.logger.Infof("Bundle '%s' not found in memory, loading from store", name)
 			}
-			bundle, err := s.store.LoadBundleDataFile(s.settings.DataDir, fmt.Sprintf("%s.bnd", name))
+
+			bundle, err := s.store.LoadBundleDataFile(database, s.settings.DataDir, fmt.Sprintf("%s.bnd", name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to load bundle '%s': %w", name, err)
 			}
@@ -156,7 +159,7 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 
 func (s *BundleService) UpdateBundle(db *models.Database, bundleCommand engine.BundleCommand) error {
 	// Check if the bundle exists
-	bundle, err := s.GetBundleByName(bundleCommand.BundleName)
+	bundle, err := s.GetBundleByName(db, bundleCommand.BundleName)
 	if err != nil {
 		return fmt.Errorf("bundle '%s' not found", bundleCommand.BundleName)
 	}
@@ -170,7 +173,7 @@ func (s *BundleService) UpdateBundle(db *models.Database, bundleCommand engine.B
 	return nil
 }
 
-func (s *BundleService) AddIndexToBundle(bundle *models.Bundle, indexCommand *engine.CreateIndexCommand) error {
+func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *models.Bundle, indexCommand *engine.CreateIndexCommand) error {
 	args := settings.GetSettings()
 	// Check if the bundle exists
 	if bundle == nil {
@@ -178,7 +181,7 @@ func (s *BundleService) AddIndexToBundle(bundle *models.Bundle, indexCommand *en
 		return fmt.Errorf("bundle '%s' is nil, cannot add index", indexCommand.BundleName)
 	}
 
-	bundle, err := s.GetBundleByName(bundle.Name)
+	bundle, err := s.GetBundleByName(database, bundle.Name)
 	if err != nil {
 		return fmt.Errorf("bundle '%s' not found", indexCommand.BundleName)
 	}
@@ -194,26 +197,80 @@ func (s *BundleService) AddIndexToBundle(bundle *models.Bundle, indexCommand *en
 		// Register services for this bundle
 		engine.RegisterBTreeService(bundle.BundleID, btreeService)
 
-		// Now you can use the services
+		// use the services
+		var indexRef models.IndexReference
 
-		indexName, err := btreeService.CreateIndex(bundle, "myField", true)
+		//Determine if the index has more than one field
+		if len(indexCommand.Fields) > 1 {
+			indexFields := make([]btreeindex.IndexField, 0, len(indexCommand.Fields))
+			for _, field := range indexCommand.Fields {
+				b := btreeindex.IndexField{
+					FieldName: field.Name,
+					IsUnique:  field.IsUnique,
+					Collation: "",
+				}
+				indexFields = append(indexFields, b)
+			}
+			index, err := btreeService.CreateMultiColumnIndex(bundle, indexFields, true)
+			if err != nil {
+				s.logger.Errorf("Failed to create multi-column index: %v", err)
+				return err
+			}
+
+			indexRef = models.IndexReference{
+				IndexName: indexCommand.IndexName,
+				Fields:    indexCommand.Fields,
+				IndexType: indexCommand.IndexType,
+
+				CreateTime:    time.Now(),
+				IndexInstance: index,
+			}
+		} else {
+			index, err := btreeService.CreateIndex(bundle, "myField", true)
+			if err != nil {
+				s.logger.Errorf("Failed to create index: %v", err)
+				return err
+			}
+
+			indexRef = models.IndexReference{
+				IndexName: indexCommand.IndexName,
+				Fields:    indexCommand.Fields,
+				IndexType: indexCommand.IndexType,
+
+				CreateTime:    time.Now(),
+				IndexInstance: index,
+			}
+		}
+		// Record the created index
+		bundle.Indexes[indexCommand.IndexName] = indexRef
+		s.store.UpdateBundleFile(bundle.Database, bundle)
+	case "hash":
+		hIndexService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+
+		engine.RegisterHashService(bundle.BundleID, hIndexService)
+
+		b := hashindex.IndexField{
+			FieldName: indexCommand.Fields[0].Name,
+			IsUnique:  indexCommand.Fields[0].IsUnique,
+			Collation: "",
+		}
+
+		index, err := hIndexService.CreateHashIndex(bundle, b)
 		if err != nil {
 			s.logger.Errorf("Failed to create index: %v", err)
 			return err
 		}
 
-		// Record the created index
-		bundle.Indexes[indexName] = models.IndexReference{
+		indexRef := models.IndexReference{
 			IndexName: indexCommand.IndexName,
 			Fields:    indexCommand.Fields,
 			IndexType: indexCommand.IndexType,
 
-			CreateTime: time.Now(),
+			CreateTime:    time.Now(),
+			IndexInstance: index,
 		}
 
-	case "hash":
-		//index = hashindex.NewHashService(bundle.Name, indexCommand.Fields, s.logger)
-	//	hashService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+		bundle.Indexes[indexCommand.IndexName] = indexRef
 
 	default:
 		return fmt.Errorf("unknown index type: %s", indexCommand.IndexType)
@@ -222,14 +279,14 @@ func (s *BundleService) AddIndexToBundle(bundle *models.Bundle, indexCommand *en
 	return nil
 }
 
-func (s *BundleService) AddDocumentToBundle(bundle *models.Bundle, docCommand *engine.DocumentCommand) error {
+func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *models.Bundle, docCommand *engine.DocumentCommand) error {
 	// Check if the bundle exists
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot add document")
 		return fmt.Errorf("bundle '%s' is nil, cannot add document ", docCommand.BundleName)
 	}
 
-	bundle, err := s.GetBundleByName(docCommand.BundleName)
+	bundle, err := s.GetBundleByName(database, docCommand.BundleName)
 	//exists := s.bundles[docCommand.BundleName]
 	if err != nil {
 		return fmt.Errorf("bundle '%s' not found", docCommand.BundleName)
