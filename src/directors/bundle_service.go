@@ -243,7 +243,11 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 		}
 		// Record the created index
 		bundle.Indexes[indexCommand.IndexName] = indexRef
-		s.store.UpdateBundleFile(bundle.Database, bundle)
+		err = s.store.UpdateBundleFile(bundle.Database, bundle)
+		if err != nil {
+			s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
+			return fmt.Errorf("failed to update bundle file after creating index: %w", err)
+		}
 	case "hash":
 		hIndexService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
 
@@ -271,7 +275,11 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 		}
 
 		bundle.Indexes[indexCommand.IndexName] = indexRef
-
+		err = s.store.UpdateBundleFile(bundle.Database, bundle)
+		if err != nil {
+			s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
+			return fmt.Errorf("failed to update bundle file after creating index: %w", err)
+		}
 	default:
 		return fmt.Errorf("unknown index type: %s", indexCommand.IndexType)
 	}

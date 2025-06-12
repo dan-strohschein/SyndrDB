@@ -84,6 +84,24 @@ Field Types:
 + ISUNIQUE is a boolean value (TRUE/FALSE) indicating if the value MUST be unique within that field across all of the documents in that bundle
 + DEFAULTVALUE is a value that is automatically added to the field if the ISREQUIRED Flag is set to true and no value is supplied by the user.
 
+### Indexes 
+
+To Create an Index:
+```
+CREATE B-INDEX "INDEX_NAME" ON BUNDLE "BUNDLE_NAME"
+WITH FIELDS (
+	{"<FIELDNAME>", <ISUNIQUE>},
+	{"<FIELDNAME>", <ISUNIQUE>}
+)
+```
+Or, to create a hash index (Note - hash indexes only operate on one field):
+
+```
+CREATE H-INDEX "INDEX_NAME" ON BUNDLE "BUNDLE_NAME"
+WITH FIELDS ({"<FIELDNAME>", <UNIQUE>})
+```
+
+### Basic Create, Read, Update, and Delete commands for documents
 To add a Document to a bundle:
 
 ```
