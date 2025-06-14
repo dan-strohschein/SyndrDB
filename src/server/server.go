@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"syndrdb/src/buffermgr"
 	"syndrdb/src/data"
 	"syndrdb/src/directors"
 	"syndrdb/src/engine"
@@ -37,6 +38,7 @@ type Server struct {
 	Running           bool
 	databaseService   *directors.DatabaseService
 	logger            *zap.SugaredLogger
+	bufferPool        *buffermgr.BufferPool
 }
 
 // Connection represents an active client connection
@@ -118,8 +120,11 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	// Create service
 	databaseService := directors.NewDatabaseService(databaseStore, databaseFactory, config, sugar)
 
+	// Create buffer pool
+	bufferPool := buffermgr.NewBufferPool(config.BundleBufferSize, buffermgr.DefaultPageSize, sugar)
+
 	// Create bundle service
-	bundleStore, err := engine.NewBundleStore(config.DataDir, logger.Sugar())
+	bundleStore, err := engine.NewBundleStore(config.DataDir, bufferPool, logger.Sugar())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bundle store: %w", err)
 	}
@@ -140,6 +145,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		ActiveConnections: make(map[string]*Connection),
 		databaseService:   databaseService,
 		logger:            sugar,
+		bufferPool:        bufferPool,
 	}
 
 	// Load all databases
@@ -212,6 +218,16 @@ func (s *Server) Stop() error {
 	}
 
 	wg.Wait()
+
+	// Flush any dirty pages
+	s.bufferPool.FlushAllDirty()
+
+	// Close the buffer pool & Release buffer memory
+	err := s.bufferPool.ShutDown()
+	if err != nil {
+		s.logger.Warnf("Error during buffer pool shutdown: %v", err)
+	}
+	// Close open files
 
 	// Flush any buffered log entries
 	s.logger.Info("Server shutdown complete")
@@ -542,7 +558,15 @@ func (s *Server) handleTextCommand(conn *Connection, command string, args []stri
 	//s.logger.Infof("Debugging the command received: %s", command)
 	//s.logger.Sync()
 
+	stats := s.bufferPool.GetStats()
+	s.logger.Debugf("Buffer stats before command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
+		stats.Hits, stats.Misses, stats.HitRatio, stats.UsedBuffers, stats.TotalBuffers)
+
 	result, err := directors.CommandDirector(conn.Database, *serviceManager, command, s.logger)
+
+	stats = s.bufferPool.GetStats()
+	s.logger.Debugf("Buffer stats after command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
+		stats.Hits, stats.Misses, stats.HitRatio, stats.UsedBuffers, stats.TotalBuffers)
 
 	return result, err
 

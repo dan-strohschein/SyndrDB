@@ -9,6 +9,61 @@ import (
 	"sync"
 )
 
+/*
+
+This b-Tree index implementation uses the Clock sweep algorithm for page replacement.
+# Clock Sweep Algorithm Implementation for B-Tree Page Cache
+
+The Clock Sweep algorithm is an excellent approximation of LRU that's more efficient to implement.
+
+## How the Clock Sweep Algorithm Works
+
+1. **Conceptual Model**: Imagine all cached pages arranged in a circular list with a clock hand pointing to one page.
+
+2. **Access Tracking**: When a page is accessed, its access flag is set to `true`.
+
+3. **Eviction Process**:
+   - The clock hand moves clockwise around the circle
+   - For each page it encounters:
+     - If access flag is `true`: Give the page another chance by setting the flag to `false` and moving the hand
+     - If access flag is `false`: Evict this page and stop
+
+4. **Second-Chance Policy**: Pages that were recently accessed (flag=`true`) get a "second chance" before eviction.
+
+## Advantages Over Your Current Implementation
+
+1. **Better Approximation of LRU**: Clock sweep approximates LRU well without the overhead of maintaining access timestamps or a linked list.
+
+2. **Constant-Time Operations**: Adding and evicting pages is O(1) amortized time.
+
+3. **Scan-Resistant**: Unlike simple LRU, clock sweep is somewhat resistant to sequential scans overwhelming the cache.
+
+4. **Dirty Page Handling**: The implementation writes dirty pages to disk before eviction to preserve changes.
+
+## Additional Optimization Suggestions
+
+1. **Pre-allocation**: Pre-allocate the clockEntries array to the maximum cache size to avoid resizing operations.
+
+2. **Dirty Bit Queueing**: You could add a separate queue for dirty pages to batch write operations.
+
+3. **Reference Counting**: For advanced usage patterns, you could add reference counting to prevent eviction of pages currently in use.
+
+4. **Fine-Grained Locking**: If performance becomes an issue, consider more fine-grained locking around the cache operations.
+
+This implementation provides an excellent balance of simplicity and effectiveness for your B-tree page cache. It's a standard algorithm used in many database systems, including some variations of PostgreSQL.
+
+Additional Optimization Ideas
+Pre-allocation: Pre-allocate the clockEntries array to the maximum cache size to avoid resizing operations.
+
+Dirty Bit Queueing: You could add a separate queue for dirty pages to batch write operations.
+
+Reference Counting: Potentially add reference counting to prevent eviction of pages currently in use.
+
+Fine-Grained Locking: If performance becomes an issue, maybe use more fine-grained locking around the cache operations.
+
+
+*/
+
 // BTreeFile represents a file-backed B-tree index
 type BTreeFile struct {
 	sync.RWMutex
@@ -20,6 +75,12 @@ type BTreeFile struct {
 	pageCache    map[uint32]*BTreePage
 	cacheSize    int
 	maxCacheSize int
+
+	// Clock sweep algorithm implementation fields
+	clockHand    int             // Current position in the clock hand
+	clockEntries []uint32        // Array of page numbers in clock order
+	accessFlags  map[uint32]bool // Tracks whether pages were accessed since last check
+
 }
 
 // OpenBTreeFile opens an existing B-tree index file
@@ -35,6 +96,9 @@ func OpenBTreeFile(path string, cacheSize int) (*BTreeFile, error) {
 		pageCache:    make(map[uint32]*BTreePage),
 		cacheSize:    0,
 		maxCacheSize: cacheSize,
+		clockHand:    0,
+		clockEntries: make([]uint32, 0, cacheSize),
+		accessFlags:  make(map[uint32]bool),
 	}
 
 	// Read the meta page
@@ -245,6 +309,8 @@ func (bt *BTreeFile) findLeafPage(key []byte) (*BTreePage, error) {
 func (bt *BTreeFile) readPage(pageNum uint32) (*BTreePage, error) {
 	// Check if page is in cache
 	if page, found := bt.pageCache[pageNum]; found {
+		// Mark the page as accessed
+		bt.accessFlags[pageNum] = true
 		return page, nil
 	}
 
@@ -263,7 +329,7 @@ func (bt *BTreeFile) readPage(pageNum uint32) (*BTreePage, error) {
 		return nil, fmt.Errorf("failed to parse page: %w", err)
 	}
 
-	// Add to cache if there's room
+	// Add to cache
 	bt.addToCache(pageNum, page)
 
 	return page, nil
@@ -293,26 +359,94 @@ func (bt *BTreeFile) writePage(pageNum uint32, page *BTreePage) error {
 
 // addToCache adds a page to the cache, evicting if necessary
 func (bt *BTreeFile) addToCache(pageNum uint32, page *BTreePage) {
-	// If already in cache, just update
+	// If already in cache, just update the page
 	if _, found := bt.pageCache[pageNum]; found {
 		bt.pageCache[pageNum] = page
+		bt.accessFlags[pageNum] = true
 		return
 	}
 
-	// If cache is full, evict a page
-	if bt.cacheSize >= bt.maxCacheSize && len(bt.pageCache) > 0 {
-		// Simple LRU could be implemented here, or Clock Sweep.
-		// For now, just remove a random page
-		for num := range bt.pageCache {
-			delete(bt.pageCache, num)
-			break
-		}
-		bt.cacheSize--
+	// If cache is full, evict a page using clock sweep
+	if bt.cacheSize >= bt.maxCacheSize {
+		bt.evictPage()
 	}
 
-	// Add to cache
+	// Add new page to cache
 	bt.pageCache[pageNum] = page
+	bt.clockEntries = append(bt.clockEntries, pageNum)
+	bt.accessFlags[pageNum] = true
 	bt.cacheSize++
+}
+
+func (bt *BTreeFile) evictPage() {
+	// If cache is empty, nothing to evict
+	if len(bt.clockEntries) == 0 {
+		return
+	}
+
+	// Perform clock sweep until we find a page to evict
+	for {
+		// Move the clock hand
+		bt.clockHand = (bt.clockHand + 1) % len(bt.clockEntries)
+		pageNum := bt.clockEntries[bt.clockHand]
+
+		// Check access flag
+		if bt.accessFlags[pageNum] {
+			// Page was accessed since last check, give it a second chance
+			bt.accessFlags[pageNum] = false
+		} else {
+			// Page wasn't accessed, evict it
+
+			// Check if the page is dirty and needs to be written to disk
+			page := bt.pageCache[pageNum]
+			if page.IsDirty {
+				// Write the page to disk before evicting
+				if err := bt.writePageToDisk(pageNum, page); err != nil {
+					// Log the error but continue with eviction
+					// In production, you might want different error handling
+					fmt.Printf("Error writing page %d to disk: %v\n", pageNum, err)
+				}
+			}
+
+			// Remove from cache structures
+			delete(bt.pageCache, pageNum)
+			delete(bt.accessFlags, pageNum)
+
+			// Remove from clock entries by replacing with the last entry and truncating
+			lastIdx := len(bt.clockEntries) - 1
+			bt.clockEntries[bt.clockHand] = bt.clockEntries[lastIdx]
+			bt.clockEntries = bt.clockEntries[:lastIdx]
+
+			// Adjust clock hand if needed
+			if bt.clockHand >= len(bt.clockEntries) {
+				bt.clockHand = 0
+			}
+
+			bt.cacheSize--
+			return
+		}
+	}
+}
+
+func (bt *BTreeFile) writePageToDisk(pageNum uint32, page *BTreePage) error {
+	// Serialize the page
+	pageData, err := serializePage(page)
+	if err != nil {
+		return fmt.Errorf("failed to serialize page: %w", err)
+	}
+
+	// Calculate file offset
+	offset := int64(pageNum) * int64(BTreePageSize)
+
+	// Write the page data
+	if _, err := bt.file.WriteAt(pageData, offset); err != nil {
+		return fmt.Errorf("failed to write page data: %w", err)
+	}
+
+	// Mark as clean
+	page.IsDirty = false
+
+	return nil
 }
 
 // parsePage deserializes a page from bytes
@@ -453,6 +587,12 @@ func decodeTID(value []byte) (uint64, error) {
 		return 0, fmt.Errorf("value too short to contain TID")
 	}
 	return binary.LittleEndian.Uint64(value), nil
+}
+
+func (bt *BTreeFile) markPageDirty(pageNum uint32) {
+	if page, found := bt.pageCache[pageNum]; found {
+		page.IsDirty = true
+	}
 }
 
 // Metadata structure for decoding the meta page

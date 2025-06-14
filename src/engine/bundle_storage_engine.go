@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"syndrdb/src/buffermgr"
 	"syndrdb/src/helpers"
 	"syndrdb/src/models"
 	"syndrdb/src/settings"
@@ -18,6 +20,7 @@ import (
 )
 
 type BundleStorageEngine struct {
+	fileManager   *buffermgr.FileManager
 	DataDirectory string
 	logger        *zap.SugaredLogger
 }
@@ -47,10 +50,17 @@ type BundleStore interface {
 	RemoveBundleFile(database *models.Database, bundleName string) error
 }
 
-func NewBundleStore(dataDir string, logger *zap.SugaredLogger) (*BundleStorageEngine, error) {
+func NewBundleStore(dataDir string, bufferPool *buffermgr.BufferPool, logger *zap.SugaredLogger) (*BundleStorageEngine, error) {
+	// Create a buffer pool for file management
+	fileManager, err := buffermgr.NewFileManager(dataDir, bufferPool, logger)
+	if err != nil {
+		return nil, fmt.Errorf("could not create file manager: %w", err)
+	}
+
 	// Create a new bundle store
 	store := &BundleStorageEngine{
 		DataDirectory: dataDir,
+		fileManager:   fileManager,
 		logger:        logger,
 	}
 
@@ -70,6 +80,7 @@ func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[stri
 	return bundles, nil
 }
 
+// TODO This is the old, pre-buffer manager implementation.
 func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error) {
 	filePath := filepath.Join(dataRootDir, fileName)
 	// Check if the file exists
@@ -114,6 +125,7 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 	return bundle, nil
 }
 
+// TODO this is the old, pre-buffer manager implementation.
 func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bundleName string) (*[]byte, *models.Bundle, error) {
 	bundleFile, err := helpers.OpenDataFile(database.DataDirectory, fmt.Sprintf("%s.bnd", bundleName))
 	if err != nil {
@@ -150,6 +162,153 @@ func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bu
 
 	return &data, &bundle, nil
 }
+
+// LoadBundle loads a bundle from disk
+func (bs *BundleStorageEngine) LoadBundle(bundleName string) (*models.Bundle, error) {
+	// Get the fileID for this bundle
+	bundleFilename := fmt.Sprintf("%s.bun", bundleName)
+	fileID, err := bs.fileManager.OpenFile(bundleFilename)
+	if err != nil {
+		return nil, fmt.Errorf("could not open bundle file: %w", err)
+	}
+
+	// Read the header page (block 0)
+	headerBuffer, err := bs.fileManager.ReadPage(fileID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("could not read header page: %w", err)
+	}
+	defer bs.fileManager.ReleasePage(headerBuffer)
+
+	// Parse the header
+	bundle, docCount, err := bs.parseHeaderPage(headerBuffer.Data)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse header page: %w", err)
+	}
+
+	// Read the document pages
+	docs, err := bs.readDocuments(fileID, docCount)
+	if err != nil {
+		return nil, fmt.Errorf("could not read documents: %w", err)
+	}
+
+	bundle.Documents = docs
+
+	return bundle, nil
+}
+
+// parseHeaderPage parses the header page of a bundle file
+func (bs *BundleStorageEngine) parseHeaderPage(pageData []byte) (*models.Bundle, uint32, error) {
+	// First 4 bytes: magic number
+	magic := binary.LittleEndian.Uint32(pageData[:4])
+	if magic != 0x42554E44 { // "BUND" in hex
+		return nil, 0, fmt.Errorf("invalid bundle file format (bad magic number)")
+	}
+
+	// Next 4 bytes: version
+	version := binary.LittleEndian.Uint32(pageData[4:8])
+	if version != 1 {
+		return nil, 0, fmt.Errorf("unsupported bundle file version: %d", version)
+	}
+
+	// Next 4 bytes: document count
+	docCount := binary.LittleEndian.Uint32(pageData[8:12])
+
+	// Rest of header contains serialized bundle metadata
+	// For simplicity, let's assume JSON format
+	// TODO In the production, use a more efficient binary format like bson
+	bundleMetadata := pageData[16:2048] // Limit the metadata size
+
+	// Trim null bytes - FOR THE FULL IMPLEMENTATION, handle this metadata properly
+	// metadataLen := 0
+	// for i, b := range bundleMetadata {
+	// 	if b == 0 {
+	// 		metadataLen = i
+	// 		break
+	// 	}
+	// }
+
+	bundle := &models.Bundle{}
+	// TODO deserialize bundle from bundleMetadata[:metadataLen]
+
+	// For this example, just create an empty bundle
+	bundle.BundleID = string(bundleMetadata[:32])
+	bundle.Name = string(bundleMetadata[32:64])
+	bundle.Documents = make(map[string]models.Document)
+
+	return bundle, docCount, nil
+}
+
+// readDocuments reads all documents from a bundle file
+func (bs *BundleStorageEngine) readDocuments(fileID uint32, docCount uint32) (map[string]models.Document, error) {
+	docs := make(map[string]models.Document)
+
+	// Start reading from block 1 (block 0 is the header)
+	currentBlock := uint32(1)
+	docsRead := uint32(0)
+
+	for docsRead < docCount {
+		buffer, err := bs.fileManager.ReadPage(fileID, currentBlock)
+		if err != nil {
+			return nil, fmt.Errorf("could not read document page %d: %w", currentBlock, err)
+		}
+
+		// Process documents from this page
+		pageDocsRead, err := bs.processDocumentPage(buffer.Data, docs)
+		bs.fileManager.ReleasePage(buffer)
+
+		if err != nil {
+			return nil, fmt.Errorf("could not process document page %d: %w", currentBlock, err)
+		}
+
+		docsRead += pageDocsRead
+		currentBlock++
+	}
+
+	return docs, nil
+}
+
+// processDocumentPage extracts documents from a page
+func (bs *BundleStorageEngine) processDocumentPage(pageData []byte, docs map[string]models.Document) (uint32, error) {
+	// First 4 bytes: document count in this page
+	docsInPage := binary.LittleEndian.Uint32(pageData[:4])
+
+	offset := 4
+	for i := uint32(0); i < docsInPage; i++ {
+		// Read document length
+		if offset+4 > len(pageData) {
+			return i, fmt.Errorf("unexpected end of page data")
+		}
+
+		docLen := binary.LittleEndian.Uint32(pageData[offset : offset+4])
+		offset += 4
+
+		// Read document data
+		if offset+int(docLen) > len(pageData) {
+			return i, fmt.Errorf("document exceeds page boundary")
+		}
+
+		docData := pageData[offset : offset+int(docLen)]
+		offset += int(docLen)
+
+		// Parse document
+		doc := models.Document{}
+		// In real code: deserialize document from docData
+
+		// For this example, just extract ID from first few bytes
+		idLen := 16
+		if idLen > len(docData) {
+			idLen = len(docData)
+		}
+		docID := string(docData[:idLen])
+		doc.DocumentID = docID
+
+		// Add to the map
+		docs[docID] = doc
+	}
+
+	return docsInPage, nil
+}
+
 func (b *BundleStorageEngine) BundleFileExists(bundleName string) bool {
 	// Check if the bundle file exists in the data directory
 	args := settings.GetSettings()

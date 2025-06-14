@@ -41,6 +41,7 @@ type BTreePage struct {
 	NumEntries uint16
 	FreeSpace  uint16
 	Entries    []BTreeEntry
+	IsDirty    bool // Indicates if the page has been modified since last write
 }
 
 // BTreeEntry represents a single entry in a B-tree page

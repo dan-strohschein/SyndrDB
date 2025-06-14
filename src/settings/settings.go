@@ -24,6 +24,8 @@ type Arguments struct {
 	// Add to Journal struct
 	MaxJournalFileSize int64
 
+	BundleBufferSize int // Size of the buffer for bundle reads
+
 	// the port number to listen on
 	Port int
 
