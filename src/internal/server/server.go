@@ -11,15 +11,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"syndrdb/src/buffermgr"
 	"syndrdb/src/data"
-	"syndrdb/src/directors"
-	"syndrdb/src/engine"
+	"syndrdb/src/internal/domain/bundle"
+	"syndrdb/src/internal/domain/database"
+	"syndrdb/src/internal/domain/document"
+	"syndrdb/src/internal/domain/models"
 
-	"syndrdb/src/helpers"
-	"syndrdb/src/models"
-	"syndrdb/src/settings"
+	"syndrdb/src/internal/storage/buffer"
+	"syndrdb/src/internal/storage/bundlestore"
+	"syndrdb/src/internal/storage/databasestore"
+	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
+
 	"time"
 
 	"go.uber.org/zap"
@@ -36,9 +39,9 @@ type Server struct {
 	ActiveConnections map[string]*Connection
 	mu                sync.Mutex
 	Running           bool
-	databaseService   *directors.DatabaseService
+	databaseService   *database.DatabaseService
 	logger            *zap.SugaredLogger
-	bufferPool        *buffermgr.BufferPool
+	bufferPool        *buffer.BufferPool
 }
 
 // Connection represents an active client connection
@@ -111,35 +114,35 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	zap.ReplaceGlobals(logger)
 
 	// Create database storage
-	databaseStore, err := engine.NewDatabaseStore(config.DataDir, logger.Sugar())
+	databaseStore, err := databasestore.NewDatabaseStore(config.DataDir, logger.Sugar())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database store: %w", err)
 	}
-	databaseFactory := engine.NewDatabaseFactory()
+	databaseFactory := database.NewDatabaseFactory()
 
 	// Create service
-	databaseService := directors.NewDatabaseService(databaseStore, databaseFactory, config, sugar)
+	databaseService := database.NewDatabaseService(databaseStore, databaseFactory, config, sugar)
 
 	// Create the File Registry
-	fileRegistry, err := buffermgr.NewFileRegistry(config.DataDir, buffermgr.SyncInterval, logger.Sugar())
+	fileRegistry, err := buffer.NewFileRegistry(config.DataDir, buffer.SyncInterval, logger.Sugar())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file registry: %w", err)
 	}
 
 	// Create buffer pool
-	bufferPool := buffermgr.NewBufferPool(config.BundleBufferSize, buffermgr.DefaultPageSize, fileRegistry, sugar)
+	bufferPool := buffer.NewBufferPool(config.BundleBufferSize, buffer.DefaultPageSize, fileRegistry, sugar)
 
 	// Create bundle service
-	bundleStore, err := engine.NewBundleStore(config.DataDir, bufferPool, logger.Sugar())
+	bundleStore, err := bundlestore.NewBundleStore(config.DataDir, bufferPool, logger.Sugar())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bundle store: %w", err)
 	}
-	bundleFactory := engine.NewBundleFactory()
-	documentFactory := engine.NewDocumentFactory()
-	bundleService := directors.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, config)
+	bundleFactory := bundle.NewBundleFactory()
+	documentFactory := document.NewDocumentFactory()
+	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, config)
 
 	// Initialize the singleton
-	directors.InitServiceManager(databaseService, bundleService, sugar)
+	InitServiceManager(databaseService, bundleService, sugar)
 
 	// Create a new server
 	server := &Server{
@@ -554,12 +557,13 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 	}
 
 	// Process the command
-	return s.handleTextCommand(conn, data, parts[1:])
+	return s.handleTextCommand(conn, data) // parts[1:]}
+
 }
 
 // handleTextCommand processes commands received in plain text format
-func (s *Server) handleTextCommand(conn *Connection, command string, args []string) (interface{}, error) {
-	serviceManager := directors.GetServiceManager()
+func (s *Server) handleTextCommand(conn *Connection, command string) (interface{}, error) {
+	serviceManager := GetServiceManager()
 
 	//s.logger.Infof("Debugging the command received: %s", command)
 	//s.logger.Sync()
@@ -568,7 +572,8 @@ func (s *Server) handleTextCommand(conn *Connection, command string, args []stri
 	s.logger.Debugf("Buffer stats before command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
 		stats.Hits, stats.Misses, stats.HitRatio, stats.UsedBuffers, stats.TotalBuffers)
 
-	result, err := directors.CommandDirector(conn.Database, *serviceManager, command, s.logger)
+	// TODO pull this from the original architecture
+	result, err := CommandDirector(conn.Database, *serviceManager, command, s.logger)
 
 	stats = s.bufferPool.GetStats()
 	s.logger.Debugf("Buffer stats after command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
