@@ -7,12 +7,12 @@ import (
 	"math"
 	"sort"
 	"strings"
-	"syndrdb/src/internal/storage/hash"
+	"syndrdb/src/internal/domain/models"
 	"time"
 )
 
 // encodeFieldValue encodes a field value into a byte slice optimized for hash indexing
-func encodeFieldValue(value interface{}, indexField hash.IndexField) ([]byte, string, error) {
+func encodeFieldValue(value interface{}, indexField models.IndexField) ([]byte, string, error) {
 	var buffer bytes.Buffer
 	var keyString string
 

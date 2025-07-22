@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/settings"
 
@@ -262,7 +263,7 @@ func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logg
 		clauseResults = append(clauseResults, evaluateClause(document, clause, logger))
 	}
 
-	// Evaluate all subgroups
+	// Evaluate all subgroups by recursively calling EvaluateWhereClause
 	subgroupResults := make([]bool, 0, len(whereGroup.SubGroups))
 	for _, subgroup := range whereGroup.SubGroups {
 		subgroupResults = append(subgroupResults, EvaluateWhereClause(document, &subgroup, logger))
@@ -424,4 +425,85 @@ func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.Sugar
 		}
 	}
 	return result, nil
+}
+
+func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, where string, logger *zap.SugaredLogger) ([]*models.Document, error) {
+	whereGroup, err := ParseWhereClause(where)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only optimize for a single equality clause
+	if len(whereGroup.Clauses) == 1 && len(whereGroup.SubGroups) == 0 {
+		clause := whereGroup.Clauses[0]
+		if clause.Operator == "==" {
+			// Check if the field is indexed
+			if idxRef, ok := bundle.Indexes[clause.Field]; ok {
+				var docIDs []string
+				switch idxRef.IndexType {
+				case "hash":
+					docIDs, err = ScanHashIndex(bundle, &idxRef, clause.Value)
+					if err != nil {
+						return nil, err
+					}
+				case "btree":
+					docIDs, err = ScanBTreeIndex(bundle, &idxRef, clause.Value)
+					if err != nil {
+						return nil, err
+					}
+				}
+				// Collect documents by ID
+				result := make([]*models.Document, 0, len(docIDs))
+				for _, docID := range docIDs {
+					if doc, ok := bundle.Documents[docID]; ok {
+						d := doc // avoid pointer aliasing
+						result = append(result, &d)
+					}
+				}
+				return result, nil
+			}
+		}
+	}
+
+	// Fallback: full scan
+	var result []*models.Document
+	for _, doc := range docs {
+		if EvaluateWhereClause(doc, whereGroup, logger) {
+			result = append(result, doc)
+		}
+	}
+	return result, nil
+}
+
+// ScanHashIndex returns document IDs matching the value in the hash index
+func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}) ([]string, error) {
+	// Get the hash index service for this bundle
+	hashService := index.GetHashService(bundle.BundleID)
+	if hashService == nil {
+		return nil, fmt.Errorf("no hash index service for bundle %s", bundle.BundleID)
+	}
+	// Search the hash index
+	docID, err := hashService.SearchHashIndex(idxRef.IndexName, value, idxRef.HashIndexField)
+	if err != nil {
+		return nil, err
+	}
+	if docID == "" {
+		return []string{}, nil
+	}
+	return []string{docID}, nil
+}
+
+// ScanBTreeIndex returns document IDs matching the value in the btree index
+func ScanBTreeIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}) ([]string, error) {
+	// Get the btree index service for this bundle
+	btreeService := index.GetBTreeService(bundle.BundleID)
+	if btreeService == nil {
+		return nil, fmt.Errorf("no btree index service for bundle %s", bundle.BundleID)
+	}
+	// Search the btree index
+	docIDs, err := btreeService.SearchIndex(idxRef.IndexName, value, idxRef.BTreeIndexField)
+	if err != nil {
+		return nil, err
+	}
+	return docIDs, nil
 }

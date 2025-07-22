@@ -10,7 +10,6 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/storage/bundlestore"
-	"syndrdb/src/internal/storage/hash"
 	"syndrdb/src/pkg/settings"
 
 	hashindex "syndrdb/src/internal/domain/index/hashindex"
@@ -67,6 +66,14 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	bundle := s.factory.NewBundle(bundleCommand.BundleName, "")
 	bundle.Database = db
 
+	bundle.DocumentStructure.FieldDefinitions["DocumentID"] = models.FieldDefinition{
+		Name:         "DocumentID",
+		Type:         "string",
+		IsRequired:   true,
+		IsUnique:     true,
+		DefaultValue: "",
+	}
+
 	// TODO take the fields and structure from the command and create them in the bundle struct
 	for _, fieldDef := range bundleCommand.Fields {
 		bundle.DocumentStructure.FieldDefinitions[fieldDef.Name] = models.FieldDefinition{
@@ -99,6 +106,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 		return fmt.Errorf("error updating database file: %w", err)
 	}
 
+	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
 	// if err != nil {
 	// 	return fmt.Errorf("failed to add bundle to database: %w", err)
 	// }
@@ -208,42 +216,89 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 	bundle.Relationships[relationship.Name] = relationship //= append(bundle.Relationships, relationship)
 
 	//if the type is one-to-one, then we need to add the field, and make it unique
-	if relationship.RelationshipType == 1 { //one to one
+	switch relationship.RelationshipType {
+	case 1: //one to one
+		// In this scenario, the target bundle will have a foreign key field that references the source bundle
+		// and it will be UNIQUE (no duplicates allowed)
 
-		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.TargetBundleName)
-		bundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
+		//First we need to find the target bundle
+		targetBundle, err := s.GetBundleByName(bundle.Database, relationship.TargetBundleName)
+		if err != nil {
+			return fmt.Errorf("target bundle '%s' not found: %w", relationship.TargetBundleName, err)
+		}
+		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.SourceBundleName)
+		targetBundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
 			Name:         fk_fieldName,
 			Type:         "relationship",
 			IsRequired:   true,
 			IsUnique:     true,
 			DefaultValue: nil,
 		}
-		//if _, exists := bundle.Documents[relationship.SourceDocumentID]; !exists {}
-	} else if relationship.RelationshipType == 2 { //one to many
 
-		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.TargetBundleName)
-		bundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
+		// Update the bundle in the store
+		err = s.store.UpdateBundleFile(targetBundle.Database, targetBundle)
+		if err != nil {
+			return fmt.Errorf("failed to update bundle in store: %w", err)
+		}
+	case 2: //one to many
+		// In this scenario, the target bundle will have a foreign key field that references the source bundle
+		//First we need to find the target bundle
+		targetBundle, err := s.GetBundleByName(bundle.Database, relationship.TargetBundleName)
+		if err != nil {
+			return fmt.Errorf("target bundle '%s' not found: %w", relationship.TargetBundleName, err)
+		}
+
+		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.SourceBundleID)
+		targetBundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
 			Name:         fk_fieldName,
 			Type:         "relationship",
 			IsRequired:   true,
-			IsUnique:     true,
+			IsUnique:     false, // One-to-many relationships can have multiple entries
 			DefaultValue: nil,
 		}
-	} else if relationship.RelationshipType == 3 { //many to many
-		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.TargetBundleName)
-		bundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
+
+		// Update the bundle in the store
+		err = s.store.UpdateBundleFile(targetBundle.Database, targetBundle)
+		if err != nil {
+			return fmt.Errorf("failed to update bundle in store: %w", err)
+		}
+	case 3: //many to many
+		// In this scenarion both bundles will have a foreign key field that references the other bundle
+		//Left to right relationship
+		targetBundle, err := s.GetBundleByName(bundle.Database, relationship.TargetBundleName)
+		if err != nil {
+			return fmt.Errorf("target bundle '%s' not found: %w", relationship.TargetBundleName, err)
+		}
+
+		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.SourceBundleID)
+		targetBundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
 			Name:         fk_fieldName,
+			Type:         "relationship",
+			IsRequired:   true,
+			IsUnique:     false, // One-to-many relationships can have multiple entries
+			DefaultValue: nil,
+		}
+
+		fk_fieldName1 := fmt.Sprintf("_%s_fk", relationship.TargetBundleName)
+		bundle.DocumentStructure.FieldDefinitions[fk_fieldName1] = models.FieldDefinition{
+			Name:         fk_fieldName1,
 			Type:         "relationship",
 			IsRequired:   true,
 			IsUnique:     false, // Many-to-many relationships can have multiple entries
 			DefaultValue: nil,
 		}
-	}
 
-	// Update the bundle in the store
-	err := s.store.UpdateBundleFile(bundle.Database, bundle)
-	if err != nil {
-		return fmt.Errorf("failed to update bundle in store: %w", err)
+		// Update the target bundle in the store
+		err = s.store.UpdateBundleFile(targetBundle.Database, targetBundle)
+		if err != nil {
+			return fmt.Errorf("failed to update target bundle in store: %w", err)
+		}
+
+		// Update the source bundle in the store
+		err = s.store.UpdateBundleFile(bundle.Database, bundle)
+		if err != nil {
+			return fmt.Errorf("failed to update bundle in store: %w", err)
+		}
 	}
 
 	return nil
@@ -325,41 +380,84 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 			return fmt.Errorf("failed to update bundle file after creating index: %w", err)
 		}
 	case "hash":
-		hIndexService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+		err1 := CreateHashIndex(args, s, bundle, indexCommand)
+		return err1
 
-		index.RegisterHashService(bundle.BundleID, hIndexService)
-
-		b := hash.IndexField{
-			FieldName: indexCommand.Fields[0].Name,
-			IsUnique:  indexCommand.Fields[0].IsUnique,
-			Collation: "",
-		}
-
-		index, err := hIndexService.CreateHashIndex(bundle, b)
-		if err != nil {
-			s.logger.Errorf("Failed to create index: %v", err)
-			return err
-		}
-
-		indexRef := models.IndexReference{
-			IndexName: indexCommand.IndexName,
-			Fields:    indexCommand.Fields,
-			IndexType: indexCommand.IndexType,
-
-			CreateTime:    time.Now(),
-			IndexInstance: index,
-		}
-
-		bundle.Indexes[indexCommand.IndexName] = indexRef
-		err = s.store.UpdateBundleFile(bundle.Database, bundle)
-		if err != nil {
-			s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
-			return fmt.Errorf("failed to update bundle file after creating index: %w", err)
-		}
 	default:
 		return fmt.Errorf("unknown index type: %s", indexCommand.IndexType)
 	}
 
+	return nil
+}
+
+func CreateHashIndex(args *settings.Arguments, s *BundleService, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
+	hIndexService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+
+	index.RegisterHashService(bundle.BundleID, hIndexService)
+
+	b := models.IndexField{
+		FieldName: indexCommand.Fields[0].Name,
+		IsUnique:  indexCommand.Fields[0].IsUnique,
+		Collation: "",
+	}
+
+	index, err := hIndexService.CreateHashIndex(bundle, b)
+	if err != nil {
+		s.logger.Errorf("Failed to create index: %v", err)
+		return err
+	}
+
+	indexRef := models.IndexReference{
+		IndexName: indexCommand.IndexName,
+		Fields:    indexCommand.Fields,
+		IndexType: indexCommand.IndexType,
+
+		CreateTime:    time.Now(),
+		IndexInstance: index,
+	}
+
+	bundle.Indexes[indexCommand.IndexName] = indexRef
+	err = s.store.UpdateBundleFile(bundle.Database, bundle)
+	if err != nil {
+		s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
+		return fmt.Errorf("failed to update bundle file after creating index: %w", err)
+	}
+	return nil
+}
+
+func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name string) error {
+	args := settings.GetSettings()
+	hIndexService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+
+	index.RegisterHashService(bundle.BundleID, hIndexService)
+
+	b := models.IndexField{
+		FieldName: name,
+		IsUnique:  true,
+		Collation: "",
+	}
+
+	index, err := hIndexService.CreateHashIndex(bundle, b)
+	if err != nil {
+		s.logger.Errorf("Failed to create index: %v", err)
+		return err
+	}
+
+	indexRef := models.IndexReference{
+		IndexName: name,
+		Fields:    []models.FieldDefinition{bundle.DocumentStructure.FieldDefinitions["DocumentID"]},
+		IndexType: "hash",
+
+		CreateTime:    time.Now(),
+		IndexInstance: index,
+	}
+
+	bundle.Indexes[name] = indexRef
+	err = s.store.UpdateBundleFile(bundle.Database, bundle)
+	if err != nil {
+		s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
+		return fmt.Errorf("failed to update bundle file after creating index: %w", err)
+	}
 	return nil
 }
 

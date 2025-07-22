@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/hash"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 )
 
 // createEmptyHashIndex creates a new empty hash index file
-func CreateEmptyHashIndex(filePath string, indexField hash.IndexField, fillFactor uint32,
+func CreateEmptyHashIndex(filePath string, indexField models.IndexField, fillFactor uint32,
 	logger *zap.SugaredLogger) (*HashIndex, *hash.HashIndexFile, error) {
 
 	// Create the file

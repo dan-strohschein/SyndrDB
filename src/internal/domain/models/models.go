@@ -114,8 +114,15 @@ type IndexReference struct {
 	CreateTime time.Time
 	// Reference to the actual index instance
 	// Stored as interface{} to avoid circular imports
-	IndexInstance interface{} `json:"-"` // Skip serialization
+	IndexInstance   interface{} `json:"-"` // Skip serialization
+	HashIndexField  IndexField
+	BTreeIndexField IndexField
+}
 
+type IndexField struct {
+	FieldName string
+	IsUnique  bool
+	Collation string // Optional collation for string comparison
 }
 
 // ------------------------------ parser commands ------------------------------

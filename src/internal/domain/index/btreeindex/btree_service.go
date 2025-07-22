@@ -181,7 +181,7 @@ func (bts *BTreeService) CreateIndex(bundle *models.Bundle, fieldName string, is
 }
 
 // SearchIndex searches the B-tree index for documents matching a key
-func (bts *BTreeService) SearchIndex(indexName string, key interface{}, indexField IndexField) ([]string, error) {
+func (bts *BTreeService) SearchIndex(indexName string, key interface{}, indexField models.IndexField) ([]string, error) {
 	// Open the index file
 	indexPath := filepath.Join(bts.dataDir, indexName+".idx")
 	btree, err := btree.OpenBTreeFile(indexPath, 100) // Cache up to 100 pages TODO make this configurable

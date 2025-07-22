@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"syndrdb/src/internal/domain/models"
-	"syndrdb/src/internal/storage/hash"
 
 	"go.uber.org/zap"
 )
@@ -22,7 +21,7 @@ func NewHashService(dataDir string, maxMemorySize int64, logger *zap.SugaredLogg
 }
 
 // SearchHashIndex searches the hash index for a document with the given key
-func (hs *HashService) SearchHashIndex(indexName string, key interface{}, indexField hash.IndexField) (string, error) {
+func (hs *HashService) SearchHashIndex(indexName string, key interface{}, indexField models.IndexField) (string, error) {
 	// Open the index file
 	indexPath := filepath.Join(hs.DataDir, indexName+".hidx")
 	index, indexFile, err := OpenHashIndex(indexPath, 100, hs.Logger) // Cache up to 100 pages
@@ -75,7 +74,7 @@ func (hs *HashService) DropHashIndex(indexName string) error {
 }
 
 // CreateHashIndex creates a new hash index for the specified field
-func (hs *HashService) CreateHashIndex(bundle *models.Bundle, indexField hash.IndexField) (string, error) {
+func (hs *HashService) CreateHashIndex(bundle *models.Bundle, indexField models.IndexField) (string, error) {
 	// Generate a unique index name
 	indexName := fmt.Sprintf("%s_%s_hidx", bundle.BundleID, indexField.FieldName)
 	indexName = CleanFileName(indexName)

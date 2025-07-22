@@ -7,7 +7,7 @@ import (
 )
 
 // scanBundleForHashIndex scans a bundle and extracts values for hash indexing
-func (hs *HashService) ScanBundleForHashIndex(bundle *models.Bundle, indexField hash.IndexField) ([]hash.IndexTuple, error) {
+func (hs *HashService) ScanBundleForHashIndex(bundle *models.Bundle, indexField models.IndexField) ([]hash.IndexTuple, error) {
 	var tuples []hash.IndexTuple
 	var tid uint64 = 1 // Start TIDs at 1
 

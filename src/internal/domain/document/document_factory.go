@@ -8,7 +8,6 @@ import (
 
 type DocumentFactoryImpl struct {
 	// TODO Add configuration fields here if needed
-	// For example:
 	//Bundle *Bundle
 }
 
