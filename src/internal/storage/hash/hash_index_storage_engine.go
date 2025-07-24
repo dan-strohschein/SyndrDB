@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -14,8 +15,39 @@ func (hi *HashIndexFile) ReadPage(pageNum uint32) (*HashIndexPage, error) {
 		return page, nil
 	}
 
-	// Calculate file offset
-	offset := int64(pageNum-1) * int64(HashPageSize)
+	var file_err error
+	if hi.File == nil {
+
+		hi.File, file_err = os.OpenFile(hi.FilePath, os.O_RDWR|os.O_CREATE, 0755)
+		if file_err != nil {
+			return nil, fmt.Errorf("INSERT.ReadPage:: failed to open hash index file: %w", file_err)
+		}
+	} else {
+		_, err := hi.File.Stat()
+		if err != nil {
+			hi.File, file_err = os.OpenFile(hi.FilePath, os.O_RDWR|os.O_CREATE, 0755)
+			if file_err != nil {
+				return nil, fmt.Errorf("INSERT.ReadPage2:: failed to open hash index file: %w", file_err)
+			}
+		} else {
+			fmt.Println("File is open and valid.")
+		}
+	}
+
+	if hi.File == nil {
+		return nil, fmt.Errorf("INSERT.ReadPage:: hash index file is not open, COULD NOT BECAUSE")
+	}
+
+	// TODO: When the an index is brand new, it's empty. When a document is added to the bundle
+	// it will try to load the index, but it won't have any pages yet. We need to handle this case.
+	var offset int64
+	if pageNum == 0 {
+		offset = 0
+		//return nil, fmt.Errorf("cannot read page 0, it is reserved for metadata")
+	} else {
+		// Calculate file offset
+		offset = int64(pageNum-1) * int64(HashPageSize)
+	}
 
 	// Read the page data
 	pageData := make([]byte, HashPageSize)
@@ -116,6 +148,78 @@ func (hi *HashIndexFile) WriteMetaPage(page *HashIndexPage) error {
 
 	hi.Dirty = false
 	return nil
+}
+
+func (hi *HashIndexFile) TempReadMetaPage() (*HashIndexMetadata, error) {
+	// Read the first page (meta page)
+	pageData := make([]byte, HashPageSize*4)
+	_, err := hi.File.ReadAt(pageData, 0)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to read meta page: %w", err)
+	}
+
+	// Print raw bytes for debugging
+	fmt.Printf("RAW DATA: % x\n", pageData)
+
+	// Parse the metadata from the page
+	return nil, nil
+}
+
+func (hi *HashIndexFile) ReadMetaPage() (*HashIndexMetadata, error) {
+	pageData := make([]byte, HashPageSize)
+	if _, err := hi.File.ReadAt(pageData, 0); err != nil {
+		return nil, fmt.Errorf("failed to read meta page: %w", err)
+	}
+
+	// Print raw bytes for debugging
+	//fmt.Printf("Raw pageData bytes: % x\n", pageData)
+
+	reader := bytes.NewReader(pageData)
+
+	// Read standard page header
+	var pageType uint32
+	var pageNum uint32
+	var nextPage uint32
+	var itemCount uint16
+	var freeSpace uint16
+
+	binary.Read(reader, binary.LittleEndian, &pageType)
+	binary.Read(reader, binary.LittleEndian, &pageNum)
+	binary.Read(reader, binary.LittleEndian, &nextPage)
+	binary.Read(reader, binary.LittleEndian, &itemCount)
+	binary.Read(reader, binary.LittleEndian, &freeSpace)
+	fmt.Printf("Read meta page: type=%d, num=%d, next=%d, items=%d, free=%d\n", pageType, pageNum, nextPage, itemCount, freeSpace)
+	// Read current time
+	var timeLen uint32
+	binary.Read(reader, binary.LittleEndian, &timeLen)
+	timeBytes := make([]byte, timeLen)
+	reader.Read(timeBytes)
+
+	// Read "METADATA" marker
+	var markerLen uint32
+	binary.Read(reader, binary.LittleEndian, &markerLen)
+
+	marker := make([]byte, markerLen)
+	reader.Read(marker)
+	fmt.Println("Marker:", string(marker))
+	if string(marker) != "METADATA" {
+		return nil, fmt.Errorf("invalid metadata marker: %s", string(marker))
+	}
+
+	// Read metadata length and content
+	var metadataLen uint32
+	binary.Read(reader, binary.LittleEndian, &metadataLen)
+	metadataBytes := make([]byte, metadataLen)
+	reader.Read(metadataBytes)
+
+	// Deserialize metadata
+	metadata, err := DeserializeHashMetadata(metadataBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to deserialize metadata: %w", err)
+	}
+
+	return metadata, nil
 }
 
 // Close flushes any pending changes and closes the index file

@@ -44,7 +44,7 @@ func NewDatabaseService(store databasestore.DatabaseStore, factory DatabaseFacto
 	}
 
 	// Load existing databases
-	databases, err := store.LoadAllDatabaseDataFiles(settings.DataDir)
+	databases, err := store.LoadAllDatabaseDataFiles(settings.DataDir, logger)
 	if err != nil {
 		log.Printf("Warning: Error loading databases: %v", err)
 	} else {
@@ -66,7 +66,7 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) er
 	db.DataDirectory = s.Settings.DataDir
 
 	// Add to in-memory map
-	s.Databases[db.DatabaseID] = db
+	s.Databases[db.Name] = db
 
 	return s.Store.CreateDatabaseDataFile(db)
 

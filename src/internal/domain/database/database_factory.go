@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
 )
@@ -29,7 +30,7 @@ func (f *DatabaseFactoryImpl) NewDatabase(name, description string) *models.Data
 	return &models.Database{
 		DatabaseID:    helpers.GenerateUUID(),
 		Name:          name,
-		Description:   description,
+		Description:   fmt.Sprintf("%s - %s", name, description),
 		DataDirectory: f.defaultDataDir, // This will be populated later
 		Bundles:       make(map[string]models.Bundle),
 		BundleFiles:   []string{},

@@ -1,10 +1,9 @@
 package hashindex
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/hash"
 	"time"
@@ -16,6 +15,7 @@ import (
 func CreateEmptyHashIndex(filePath string, indexField models.IndexField, fillFactor uint32,
 	logger *zap.SugaredLogger) (*HashIndex, *hash.HashIndexFile, error) {
 
+	logger.Infof("Trying to create empty hash index at %s", filePath)
 	// Create the file
 	file, err := os.Create(filePath)
 	if err != nil {
@@ -49,17 +49,17 @@ func CreateEmptyHashIndex(filePath string, indexField models.IndexField, fillFac
 	}
 
 	// Create meta page
-	metaPage := &hash.HashIndexPage{
-		PageType:  HashMetaPage,
-		PageNum:   0,
-		ItemCount: 0,
-	}
+	// metaPage := &hash.HashIndexPage{
+	// 	PageType:  HashMetaPage,
+	// 	PageNum:   0,
+	// 	ItemCount: 0,
+	// }
 
 	// Write metadata to the meta page
-	if err := indexFile.WriteMetaPage(metaPage); err != nil {
-		file.Close()
-		return nil, nil, fmt.Errorf("failed to write meta page: %w", err)
-	}
+	// if err := indexFile.WriteMetaPage(metaPage); err != nil {
+	// 	file.Close()
+	// 	return nil, nil, fmt.Errorf("failed to write meta page: %w", err)
+	// }
 
 	// Create initial bucket pages
 	for i := uint32(0); i < InitialBucketCount; i++ {
@@ -86,10 +86,20 @@ func CreateEmptyHashIndex(filePath string, indexField models.IndexField, fillFac
 
 // openHashIndex opens an existing hash index
 func OpenHashIndex(path string, cacheSize int, logger *zap.SugaredLogger) (*HashIndex, *hash.HashIndexFile, error) {
-	// Open the file
-	file, err := os.OpenFile(path, os.O_RDWR, 0644)
+
+	err := os.MkdirAll(filepath.Dir(path), 0755) // 0755 is a common permission setting
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open hash index file: %w", err)
+		// handle error
+		logger.Errorf("OpenHashIndex:: failed to read directory for hash index file: %w", err)
+		return nil, nil, fmt.Errorf("OpenHashIndex:: failed to read directory for hash index file: %w", err)
+	}
+
+	// Open the file
+	file, err := os.Open(path)
+	//file, err := os.OpenFile(path, os.O_RDWR, 0755) //0644
+	if err != nil {
+		logger.Infof("Trying to open hash index file %s", path)
+		return nil, nil, fmt.Errorf("OpenHashIndex:: failed to open hash index file: %w", err)
 	}
 
 	// Create the indexFile object
@@ -103,67 +113,75 @@ func OpenHashIndex(path string, cacheSize int, logger *zap.SugaredLogger) (*Hash
 	}
 
 	// Read the meta page
-	metaPage, err := indexFile.ReadPage(0)
+	//metaPage, err := indexFile.ReadPage(0)
+
+	metadata, err := indexFile.ReadMetaPage()
 	if err != nil {
 		file.Close()
 		return nil, nil, fmt.Errorf("failed to read meta page: %w", err)
 	}
 
-	// The meta page should have an entry with our metadata
-	if len(metaPage.Items) < 1 || !bytes.Equal(metaPage.Items[0].Key, []byte("metadata")) {
-		file.Close()
-		return nil, nil, fmt.Errorf("invalid meta page format")
-	}
-
-	// Read metadata marker
-	offset := int64(16) // Skip page header
-
-	// Read timestamp length and skip it
-	var timeLen uint32
-	timeData := make([]byte, 4)
-	file.ReadAt(timeData, offset)
-	timeLen = binary.LittleEndian.Uint32(timeData)
-	offset += 4 + int64(timeLen)
-
-	// Read marker
-	markerLenData := make([]byte, 4)
-	file.ReadAt(markerLenData, offset)
-	markerLen := binary.LittleEndian.Uint32(markerLenData)
-	offset += 4
-
-	markerData := make([]byte, markerLen)
-	file.ReadAt(markerData, offset)
-	if string(markerData) != "METADATA" {
-		file.Close()
-		return nil, nil, fmt.Errorf("invalid metadata marker")
-	}
-	offset += int64(markerLen)
-
-	// Read metadata length
-	metaLenData := make([]byte, 4)
-	file.ReadAt(metaLenData, offset)
-	metaLen := binary.LittleEndian.Uint32(metaLenData)
-	offset += 4
-
-	// Read metadata
-	metaData := make([]byte, metaLen)
-	file.ReadAt(metaData, offset)
-
-	// metadata, err := deserializeHashMetadata(metaData)
-	// if err != nil {
-	// 	file.Close()
-	// 	return nil, fmt.Errorf("failed to deserialize metadata: %w", err)
-	// }
-
-	metadata, err := hash.DeserializeHashMetadata(metaPage.Items[0].Value)
-	if err != nil {
-		file.Close()
-		return nil, nil, fmt.Errorf("failed to deserialize metadata: %w", err)
-	}
-
+	// Set the metadata
 	indexFile.Metadata = *metadata
 
+	// logger.Infof("metapage items are %d", metaPage.ItemCount)
+	// //logger.Infof("checking for metatadata with key  %s", metaPage.Items[0].Key)
+	// // The meta page should have an entry with our metadata
+	// if len(metaPage.Items) < 1 || !bytes.Equal(metaPage.Items[0].Key, []byte("metadata")) {
+	// 	file.Close()
+	// 	return nil, nil, fmt.Errorf("invalid meta page format")
+	// }
+
+	// // Read metadata marker
+	// offset := int64(16) // Skip page header
+
+	// // Read timestamp length and skip it
+	// var timeLen uint32
+	// timeData := make([]byte, 4)
+	// file.ReadAt(timeData, offset)
+	// timeLen = binary.LittleEndian.Uint32(timeData)
+	// offset += 4 + int64(timeLen)
+
+	// // Read marker
+	// markerLenData := make([]byte, 4)
+	// file.ReadAt(markerLenData, offset)
+	// markerLen := binary.LittleEndian.Uint32(markerLenData)
+	// offset += 4
+
+	// markerData := make([]byte, markerLen)
+	// file.ReadAt(markerData, offset)
+	// if string(markerData) != "METADATA" {
+	// 	file.Close()
+	// 	return nil, nil, fmt.Errorf("invalid metadata marker")
+	// }
+	// offset += int64(markerLen)
+
+	// // Read metadata length
+	// metaLenData := make([]byte, 4)
+	// file.ReadAt(metaLenData, offset)
+	// metaLen := binary.LittleEndian.Uint32(metaLenData)
+	// offset += 4
+
+	// // Read metadata
+	// metaData := make([]byte, metaLen)
+	// file.ReadAt(metaData, offset)
+
+	// // metadata, err := deserializeHashMetadata(metaData)
+	// // if err != nil {
+	// // 	file.Close()
+	// // 	return nil, fmt.Errorf("failed to deserialize metadata: %w", err)
+	// // }
+
+	// metadata, err := hash.DeserializeHashMetadata(metaPage.Items[0].Value)
+	// if err != nil {
+	// 	file.Close()
+	// 	return nil, nil, fmt.Errorf("failed to deserialize metadata: %w", err)
+	// }
+
+	// indexFile.Metadata = *metadata
+
 	index := CopyIndexFileToIndex(indexFile)
+	//defer file.Close()
 
 	return index, indexFile, nil
 }

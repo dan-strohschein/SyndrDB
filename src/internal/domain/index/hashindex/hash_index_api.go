@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"fmt"
+	"os"
 	"syndrdb/src/internal/storage/hash"
 	"time"
 )
@@ -21,6 +22,33 @@ func generateSeed() uint32 {
 		uint32(seedBytes[3])<<24
 }
 
+func (hi *HashIndex) AddDocumentByField(fieldName string, fieldValue string, docID string) error {
+	// Prepare the key (could be just the field value, or fieldName+value for composite keys)
+	key := []byte(fieldValue)
+
+	// Use the default HashIndexFile (assume hi.File is set up)
+	hf := hi.File
+	if hf == nil {
+		return fmt.Errorf("HashIndexFile not initialized")
+	}
+
+	hif := &hash.HashIndexFile{
+		FilePath:     hi.FilePath,
+		File:         hi.File,
+		PageCache:    hi.PageCache,
+		CacheSize:    hi.CacheSize,
+		MaxCacheSize: hi.MaxCacheSize,
+		Logger:       hi.Logger,
+		Dirty:        hi.Dirty,
+	}
+
+	// Use default TID (0 for first version)
+	tid := uint64(0)
+
+	// Call the main Insert function
+	return hi.Insert(hif, key, docID, tid)
+}
+
 // Insert adds a key to the hash index
 func (hi *HashIndex) Insert(hif *hash.HashIndexFile, key []byte, docID string, tid uint64) error {
 	hi.Lock()
@@ -34,10 +62,23 @@ func (hi *HashIndex) Insert(hif *hash.HashIndexFile, key []byte, docID string, t
 	// Find the bucket
 	bucketNum := hi.ComputeBucket(hashValue)
 
+	// check to see if the hi.File is open
+	if hif.File == nil {
+		var file_err error
+		hif.File, file_err = os.OpenFile(hif.FilePath, os.O_RDWR|os.O_CREATE, 0644)
+		if file_err != nil {
+			return fmt.Errorf("INSERT:: failed to open hash index file: %w", file_err)
+		}
+	}
+
+	if hif.File == nil {
+		return fmt.Errorf("INSERT:: hash index file is not open, COULD NOT BECAUSE")
+	}
+
 	// Read the bucket page
 	bucketPage, err := hif.ReadPage(bucketNum)
 	if err != nil {
-		return fmt.Errorf("failed to read bucket page: %w", err)
+		return fmt.Errorf("INSERT::failed to read bucket page: %w", err)
 	}
 
 	// Check if key already exists (for uniqueness)
@@ -317,10 +358,19 @@ func (hi *HashIndex) Find(hif *hash.HashIndexFile, key []byte) (*hash.IndexTuple
 	// Find the bucket
 	bucketNum := hi.ComputeBucket(hashValue)
 
+	// check to see if the hi.File is open
+	if hif.File == nil {
+		var file_err error
+		hif.File, file_err = os.OpenFile(hif.FilePath, os.O_RDWR|os.O_CREATE, 0644)
+		if file_err != nil {
+			return nil, fmt.Errorf("failed to open hash index file: %w", file_err)
+		}
+	}
+
 	// Read the bucket page
 	bucketPage, err := hif.ReadPage(bucketNum)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read bucket page: %w", err)
+		return nil, fmt.Errorf("FIND::failed to read bucket page: %w", err)
 	}
 
 	// Search for the key in this bucket and its overflow chain

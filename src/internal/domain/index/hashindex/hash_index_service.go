@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -50,8 +51,8 @@ func (hs *HashService) SearchHashIndex(indexName string, key interface{}, indexF
 }
 
 // ListHashIndexes lists all hash indexes for a bundle
-func (hs *HashService) ListHashIndexes(bundleID string) ([]string, error) {
-	pattern := filepath.Join(hs.DataDir, bundleID+"_*_hidx.hidx")
+func (hs *HashService) ListHashIndexes(bundleName string) ([]string, error) {
+	pattern := filepath.Join(hs.DataDir, bundleName+"_*_hidx.hidx")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list hash indexes: %w", err)
@@ -67,6 +68,57 @@ func (hs *HashService) ListHashIndexes(bundleID string) ([]string, error) {
 	return indexNames, nil
 }
 
+func (hs *HashService) GetHashIndex(bundle *models.Bundle) (*HashIndex, error) {
+	if bundle == nil {
+		return nil, fmt.Errorf("bundle is nil")
+	}
+
+	var indexFileName string
+
+	for _, index := range bundle.Indexes {
+		if index.IndexType == "hash" {
+			indexFileName := fmt.Sprintf("%s_%s_hidx", bundle.Name, index.HashIndexField.FieldName)
+			return hs.getHashIndexByName(bundle, indexFileName)
+		}
+	}
+
+	if indexFileName == "" {
+		return nil, fmt.Errorf("no hash index found for bundle %s", bundle.BundleID)
+	}
+
+	indexFileName = CleanFileName(indexFileName)
+
+	hs.Logger.Infof("Getting hash index %s", indexFileName)
+
+	// Open the index file
+	indexPath := filepath.Join(hs.DataDir, indexFileName+".hidx")
+	index, indexFile, err := OpenHashIndex(indexPath, 100, hs.Logger) // Cache up to 100 pages
+	if err != nil {
+		return nil, fmt.Errorf("failed to open hash index: %w", err)
+	}
+	defer indexFile.Close()
+
+	return index, nil
+}
+
+func (hs *HashService) getHashIndexByName(bundle *models.Bundle, indexName string) (*HashIndex, error) {
+	args := settings.GetSettings()
+	hs.Logger.Infof("Getting hash index %s for bundle %s", indexName, bundle.BundleID)
+
+	// Open the index file
+	indexName = CleanFileName(indexName)
+	indexPath := filepath.Join(args.DataDir, indexName+".hidx")
+	//hs.Logger.Infof("Path is %s", indexPath)
+
+	index, _, err := OpenHashIndex(indexPath, 100, hs.Logger) // Cache up to 100 pages
+	if err != nil {
+		return nil, fmt.Errorf("failed to open hash index: %w", err)
+	}
+	//defer indexFile.Close()
+
+	return index, nil
+}
+
 // DropHashIndex removes a hash index
 func (hs *HashService) DropHashIndex(indexName string) error {
 	indexPath := filepath.Join(hs.DataDir, indexName+".hidx")
@@ -74,9 +126,9 @@ func (hs *HashService) DropHashIndex(indexName string) error {
 }
 
 // CreateHashIndex creates a new hash index for the specified field
-func (hs *HashService) CreateHashIndex(bundle *models.Bundle, indexField models.IndexField) (string, error) {
+func (hs *HashService) CreateHashIndex(bundle *models.Bundle, indexField models.IndexField) (*HashIndex, string, error) {
 	// Generate a unique index name
-	indexName := fmt.Sprintf("%s_%s_hidx", bundle.BundleID, indexField.FieldName)
+	indexName := fmt.Sprintf("%s_%s_hidx", bundle.Name, indexField.FieldName)
 	indexName = CleanFileName(indexName)
 
 	hs.Logger.Infof("Creating hash index %s on field %s", indexName, indexField.FieldName)
@@ -85,7 +137,7 @@ func (hs *HashService) CreateHashIndex(bundle *models.Bundle, indexField models.
 	indexPath := filepath.Join(hs.DataDir, indexName+".hidx")
 	index, hif, err := CreateEmptyHashIndex(indexPath, indexField, DefaultFillFactor, hs.Logger)
 	if err != nil {
-		return "", fmt.Errorf("failed to create hash index file: %w", err)
+		return nil, "", fmt.Errorf("failed to create hash index file: %w", err)
 	}
 
 	// Scan the bundle and extract values to index
@@ -93,26 +145,27 @@ func (hs *HashService) CreateHashIndex(bundle *models.Bundle, indexField models.
 	if err != nil {
 		hif.Close()
 		os.Remove(indexPath)
-		return "", fmt.Errorf("failed to scan bundle: %w", err)
+		return nil, "", fmt.Errorf("failed to scan bundle: %w", err)
 	}
 
 	// Insert all tuples into the hash index
 	for _, tuple := range tuples {
 		if err := index.Insert(hif, tuple.Key, tuple.DocID, tuple.TID); err != nil {
 			hif.Close()
-			return "", fmt.Errorf("failed to insert tuple: %w", err)
+			return nil, "", fmt.Errorf("failed to insert tuple: %w", err)
 		}
 	}
 
 	// Close and finalize the index
+	hif.File.Sync()
 	if err := hif.Close(); err != nil {
-		return "", fmt.Errorf("failed to close index: %w", err)
+		return nil, "", fmt.Errorf("failed to close index: %w", err)
 	}
 
 	hs.Logger.Infof("Successfully created hash index %s with %d entries",
 		indexName, len(tuples))
 
-	return indexName, nil
+	return index, indexName, nil
 }
 
 /*

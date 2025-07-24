@@ -72,7 +72,7 @@ func main() {
 	defer dbClient.Close()
 
 	// Send connection string to the server immediately after connecting
-	connectionCommand := fmt.Sprintf("%s\n", args.ConnectionString)
+	connectionCommand := fmt.Sprintf("%s;\n", args.ConnectionString)
 	fmt.Printf("Sending connection info: database=%s, user=%s\n", args.Database, args.Username)
 
 	err = dbClient.SendCommand(connectionCommand)

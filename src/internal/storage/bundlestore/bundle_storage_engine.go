@@ -848,14 +848,14 @@ func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundle
 
 func BundleToMap(bundle *models.Bundle) map[string]interface{} {
 	return map[string]interface{}{
-		"BundleID":          bundle.BundleID,
-		"Name":              bundle.Name,
-		"Database":          bundle.Database,
+		"BundleID": bundle.BundleID,
+		"Name":     bundle.Name,
+		//"Database":          bundle.Database,
 		"DocumentStructure": bundle.DocumentStructure,
 		"FieldDefinitions":  bundle.DocumentStructure.FieldDefinitions,
 		"Documents":         bundle.Documents,
-		"Relationships":     bundle.Relationships,
-		"Constraints":       bundle.Constraints,
+		//"Relationships":     bundle.Relationships,
+		"Constraints": bundle.Constraints,
 	}
 }
 

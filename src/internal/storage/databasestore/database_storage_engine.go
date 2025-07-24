@@ -18,7 +18,7 @@ import (
 
 // DatabaseStore defines the interface for database storage operations
 type DatabaseStore interface {
-	LoadAllDatabaseDataFiles(dataRootDir string) (map[string]*models.Database, error)
+	LoadAllDatabaseDataFiles(dataRootDir string, logger *zap.SugaredLogger) (map[string]*models.Database, error)
 
 	LoadDatabaseDataFile(dataRootDir, fileName string) (*models.Database, error)
 
@@ -57,7 +57,7 @@ func NewDatabaseStore(dataDir string, logger *zap.SugaredLogger) (*DatabaseStora
 }
 
 // LoadAllDatabaseDataFiles scans the data directory and loads all database metadata files
-func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (map[string]*models.Database, error) {
+func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string, logger *zap.SugaredLogger) (map[string]*models.Database, error) {
 	// Create map to hold databases
 	databases := make(map[string]*models.Database)
 
@@ -74,6 +74,7 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (ma
 
 	// Process each file that could be a database metadata file
 	for _, file := range files {
+		logger.Infof("Processing file: %s", file.Name())
 		// Skip directories and hidden files
 		if file.IsDir() || strings.HasPrefix(file.Name(), ".") {
 			continue
@@ -83,7 +84,7 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (ma
 		if !strings.HasSuffix(file.Name(), ".db") {
 			continue
 		}
-
+		logger.Infof("Trying to load database file: %s", file.Name())
 		// Load the database
 		db, err := d.LoadDatabaseDataFile(dataRootDir, file.Name())
 		if err != nil {
@@ -92,7 +93,7 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string) (ma
 		}
 
 		// Add to map using the database ID as key
-		databases[db.DatabaseID] = db
+		databases[db.Name] = db
 
 		// Also create a name-based lookup if needed
 		// This is useful for case-insensitive lookups later
@@ -278,11 +279,11 @@ func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *models.Database
 func DBToMap(database *models.Database) map[string]interface{} {
 	// Convert the database object to a map
 	return map[string]interface{}{
-		"DatabaseID":    database.DatabaseID,
-		"Name":          database.Name,
-		"Description":   database.Description,
-		"BundleFiles":   database.BundleFiles,
-		"Bundles":       database.Bundles,
+		"DatabaseID":  database.DatabaseID,
+		"Name":        database.Name,
+		"Description": database.Description,
+		"BundleFiles": database.BundleFiles,
+		//"Bundles":       database.Bundles,
 		"DataDirectory": database.DataDirectory,
 	}
 }

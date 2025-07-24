@@ -2,12 +2,15 @@ package server
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -300,23 +303,26 @@ func CreateBTreeIndex(command string, logger *zap.SugaredLogger, serviceManager 
 }
 
 func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, result string) (*CommandResponse, error) {
+	args := settings.GetSettings()
 	bundleCmd, err := bndle.ParseCreateBundleCommand(command, logger)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing bundle command: %v", err)
 	}
 
 	//Check if the bundle already exists
-	existingBundle, err := serviceManager.BundleService.GetBundleByName(database, bundleCmd.BundleName)
-	if err == nil {
-		return nil, fmt.Errorf("bundle '%s' already exists", existingBundle.Name)
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleCmd.BundleName))
+	existingBundle := helpers.FileExists(filePath, *logger)
+	if existingBundle {
+		return nil, fmt.Errorf("bundle '%s' already exists", bundleCmd.BundleName)
 	}
 
+	//TODO The database pointer is null for some reason here. So we need to fix that shit.
 	// Get database object by name
-	database, err1 := serviceManager.DatabaseService.GetDatabaseByName(database.Name)
-	if err1 != nil {
-		return nil, fmt.Errorf("error retrieving database '%s': %v", database.Name, err)
-	}
-
+	// database, err1 := serviceManager.DatabaseService.GetDatabaseByName(database.Name)
+	// if err1 != nil {
+	// 	return nil, fmt.Errorf("error retrieving database '%s': %v", database.Name, err)
+	// }
+	logger.Infof("Creating bundle '%s' in database '%s'", bundleCmd.BundleName, database.Name)
 	// Add the bundle to the database
 	err = serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
 	if err != nil {

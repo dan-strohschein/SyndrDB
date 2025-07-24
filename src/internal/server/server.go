@@ -158,7 +158,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	}
 
 	// Load all databases
-	databases, err := databaseStore.LoadAllDatabaseDataFiles(config.DataDir)
+	databases, err := databaseStore.LoadAllDatabaseDataFiles(config.DataDir, logger.Sugar())
+
 	if err != nil {
 		log.Printf("Warning: Error loading databases: %v", err)
 		// Continue with empty database map - this allows creating new databases
@@ -312,7 +313,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Conn:       conn,
 		Reader:     reader,
 		Writer:     writer,
-		Authorized: !s.AuthEnabled, // If auth is disabled, connection is automatically authorized
+		Authorized: true, //!s.AuthEnabled, // If auth is disabled, connection is automatically authorized
 		LastActive: time.Now(),
 		Logger:     connLogger,
 	}
@@ -381,27 +382,52 @@ func (s *Server) handleConnection(conn net.Conn) {
 					// Append to any previous partial data
 					data = partialData + data
 
-					// Look for complete lines
 					if strings.Contains(data, "\n") {
 						lines := strings.Split(data, "\n")
-
-						// The last element might be incomplete
-						partialData = lines[len(lines)-1]
-
-						// Process complete lines
-						for i := 0; i < len(lines)-1; i++ {
-							if line := strings.TrimSpace(lines[i]); line != "" {
-								connLogger.Infof("Received line: %s", line)
-								connLogger.Sync()
-								dataCh <- line
+						for i := 0; i < len(lines); i++ {
+							line := strings.TrimSpace(lines[i])
+							if line != "" {
+								partialData += line + "\n" // accumulate lines, preserve newlines if needed
+								if strings.HasSuffix(line, ";") {
+									// Command is complete
+									cmd := strings.TrimSpace(partialData)
+									dataCh <- cmd
+									partialData = "" // reset for next command
+								}
 							}
 						}
 					} else {
-						// No newline, store entire chunk as partial
-						partialData = data
-						connLogger.Infof("Received data: %s", data)
-						connLogger.Sync()
+						// No newline, accumulate as partial
+						partialData += data
 					}
+					// Look for complete lines
+					// if strings.Contains(data, "\n") {
+					// 	lines := strings.Split(data, "\n")
+
+					// 	// The last element might be incomplete
+					// 	partialData = lines[len(lines)-1]
+
+					// 	// Process complete lines
+					// 	for i := 0; i < len(lines)-1; i++ {
+					// 		line := strings.TrimSpace(lines[i])
+					// 		if line != "" {
+					// 			connLogger.Infof("Received line: %s", line)
+					// 			connLogger.Sync()
+					// 			// Only send to dataCh if line ends with ';'
+					// 			if strings.HasSuffix(line, ";") {
+					// 				dataCh <- line
+					// 			} else {
+					// 				// Accumulate incomplete command
+					// 				partialData += line
+					// 			}
+					// 		}
+					// 	}
+					// } else {
+					// 	// No newline, store entire chunk as partial
+					// 	partialData = data
+					// 	connLogger.Infof("Received data: %s", data)
+					// 	connLogger.Sync()
+					// }
 				} else {
 					connLogger.Info("No Data Seen")
 					connLogger.Sync()
@@ -432,7 +458,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "syndrdb://") {
 				connLogger.Debug("Reading connection string")
-
+				//TODO fix this - its sending the connection string attached to the first command sent.
 				connStr, err := parseConnectionString(s, line)
 				if err != nil {
 					connLogger.Errorw("Error parsing connection string", "error", err, "input", line)
@@ -456,42 +482,43 @@ func (s *Server) handleConnection(conn net.Conn) {
 				line = strings.TrimSpace(line)
 				connection.LastActive = time.Now()
 				connection.DatabaseName = connStr.Database
-				connection.Database = s.Databases[connStr.Database]
+				//connection.Database = s.Databases[connStr.Database]
 
 				connection.User = connStr.Username
 
-				if !connection.Authorized {
+				//if connection.Authorized { }
 
-					if !strings.EqualFold(connStr.Database, "default") {
-						db, err := s.databaseService.GetDatabaseByName(connStr.Database)
-						if err != nil {
-							sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
-							return
-						}
-						if db == nil {
-							sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
-							return
-						}
-					}
-
-					// TODO: IF the db is legit, check to see if the user is allowed to access it
-					if s.AuthEnabled && !s.authenticate(connStr.Username, connStr.Password) {
-						sendError(writer, "Authentication failed")
+				if !strings.EqualFold(connStr.Database, "default") {
+					db, err := s.databaseService.GetDatabaseByName(connStr.Database)
+					if err != nil {
+						sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
 						return
 					}
-
-					connection.Authorized = true
-					connection.DatabaseName = connStr.Database
-					connection.User = connStr.Username
-					connection.Logger = connLogger.Desugar().Sugar()
-
-					connLogger.Infow("Client authenticated",
-						"user", connection.User,
-						"database", connection.DatabaseName)
-
-					sendSuccess(writer, "Authentication successful")
-					continue
+					if db == nil {
+						sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
+						return
+					}
+					connection.Database = db
 				}
+
+				// TODO: IF the db is legit, check to see if the user is allowed to access it
+				if s.AuthEnabled && !s.authenticate(connStr.Username, connStr.Password) {
+					sendError(writer, "Authentication failed")
+					return
+				}
+
+				connection.Authorized = true
+				connection.DatabaseName = connStr.Database
+				connection.User = connStr.Username
+				connection.Logger = connLogger.Desugar().Sugar()
+
+				connLogger.Infow("Client authenticated",
+					"user", connection.User,
+					"database", connection.DatabaseName)
+
+				sendSuccess(writer, "Authentication successful")
+				continue
+
 			}
 
 			// Process command for authenticated clients
