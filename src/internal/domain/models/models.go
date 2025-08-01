@@ -37,10 +37,11 @@ type Bundle struct {
 	DocumentStructure DocumentStructure
 
 	// A list of documents in the bundle, similar to rows in a table.
-	Documents map[string]Document
+	Documents *map[string]Document
 
 	// Track indexes by name -> reference
-	Indexes map[string]IndexReference
+	Indexes    map[string]IndexReference
+	IndexNames []string // List of index names for easy access
 
 	Relationships map[string]Relationship
 	Constraints   map[string]Constraint

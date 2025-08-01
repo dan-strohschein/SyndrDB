@@ -8,6 +8,7 @@ import (
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
@@ -378,6 +379,11 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	bundleName = strings.ReplaceAll(bundleName, "'", "")
 	bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
 
+	// TODO : Change the code after this to create an Execution Plan
+	// and then use the execution plan to execute the command. The execution plan
+	// should use the buffer pool to get the bundle and documents, and also
+	// use the indexes if available.
+
 	// Get the bundle by name
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 	if err != nil {
@@ -385,38 +391,75 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	}
 
 	var documents map[string]*models.Document
+
 	if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
-		//logger.Infof("Filtering documents in bundle '%s' with WHERE clause: %s", bundleName, strings.Join(commandParts[5:], " "))
 		whereClause := strings.Join(commandParts[5:], " ")
-		filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
+
+		// Create execution planner
+		planner := planner.NewQueryPlanner(logger)
+
+		// Create execution plan
+		plan, err := planner.CreateExecutionPlan(bundle, whereClause)
 		if err != nil {
-			return nil, fmt.Errorf("error filtering documents: %v", err)
-		}
-
-		// if len(filteredDocs) > 0 {
-		// 	prettyJSON, err := json.MarshalIndent(filteredDocs, "", "  ")
-		// 	if err != nil {
-		// 		logger.Warnf("Failed to convert documents to JSON: %v", err)
-		// 	} else {
-		// 		logger.Infof("Found %d documents: \n%s", len(filteredDocs), string(prettyJSON))
-		// 	}
-		// } else {
-		// 	logger.Infof("No documents found matching the filter")
-		// }
-
-		documents = make(map[string]*models.Document)
-		for _, v := range filteredDocs {
-			docCopy := v
-			documents[docCopy.DocumentID] = v
+			logger.Warnf("Failed to create execution plan, falling back to full scan: %v", err)
+			// Fallback to existing filter logic
+			filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
+			if err != nil {
+				return nil, fmt.Errorf("error filtering documents: %v", err)
+			}
+			documents = make(map[string]*models.Document)
+			for _, v := range filteredDocs {
+				documents[v.DocumentID] = v
+			}
+		} else {
+			// Execute the plan
+			logger.Infof("Executing plan with indexes: %v", plan.IndexesUsed)
+			documents, err = plan.RootNode.Execute()
+			if err != nil {
+				return nil, fmt.Errorf("error executing query plan: %v", err)
+			}
 		}
 	} else {
-		// Get documents from the bundle
+		// No WHERE clause - return all documents
 		documents = make(map[string]*models.Document)
-		for k, v := range bundle.Documents {
+		for k, v := range *bundle.Documents {
 			docCopy := v
 			documents[k] = &docCopy
 		}
 	}
+	// var documents map[string]*models.Document
+	// if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
+	// 	//logger.Infof("Filtering documents in bundle '%s' with WHERE clause: %s", bundleName, strings.Join(commandParts[5:], " "))
+	// 	whereClause := strings.Join(commandParts[5:], " ")
+	// 	filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("error filtering documents: %v", err)
+	// 	}
+
+	// 	// if len(filteredDocs) > 0 {
+	// 	// 	prettyJSON, err := json.MarshalIndent(filteredDocs, "", "  ")
+	// 	// 	if err != nil {
+	// 	// 		logger.Warnf("Failed to convert documents to JSON: %v", err)
+	// 	// 	} else {
+	// 	// 		logger.Infof("Found %d documents: \n%s", len(filteredDocs), string(prettyJSON))
+	// 	// 	}
+	// 	// } else {
+	// 	// 	logger.Infof("No documents found matching the filter")
+	// 	// }
+
+	// 	documents = make(map[string]*models.Document)
+	// 	for _, v := range filteredDocs {
+	// 		docCopy := v
+	// 		documents[docCopy.DocumentID] = v
+	// 	}
+	// } else {
+	// 	// Get documents from the bundle
+	// 	documents = make(map[string]*models.Document)
+	// 	for k, v := range *bundle.Documents {
+	// 		docCopy := v
+	// 		documents[k] = &docCopy
+	// 	}
+	// }
 
 	// if len(documents) == 0 {
 	// 	result = fmt.Sprintf("No documents found in bundle '%s'.", bundleName)

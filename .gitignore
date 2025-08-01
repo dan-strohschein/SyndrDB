@@ -3,3 +3,7 @@
 src/datafiles
 src/log_files
 src/.DS_STORE
+
+bin/server/data_files
+bin/server/log_files
+bin/server/.DS_STORE

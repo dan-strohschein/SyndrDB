@@ -289,7 +289,7 @@ func (bts *BTreeService) scanBundleAndCreateTuples(bundle *models.Bundle, indexF
 	}
 
 	// Scan each document in the bundle
-	for docID, doc := range bundle.Documents {
+	for docID, doc := range *bundle.Documents {
 		// Get the field from the document
 		field, exists := doc.Fields[indexField.FieldName]
 		if !exists {
@@ -525,7 +525,7 @@ func (bts *BTreeService) scanBundleAndCreateMultiColumnTuples(bundle *models.Bun
 	uniqueKeys := make(map[string]struct{})
 
 	// Scan each document in the bundle
-	for docID, doc := range bundle.Documents {
+	for docID, doc := range *bundle.Documents {
 		// Check if this document has all needed fields
 		missingField := false
 		for _, indexField := range indexFields {

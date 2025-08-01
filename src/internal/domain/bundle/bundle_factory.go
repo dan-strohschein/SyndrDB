@@ -29,8 +29,10 @@ func (f *BundleFactoryImpl) NewBundle(name string, description string) *models.B
 		BundleID:          helpers.GenerateUUID(),
 		Name:              name,
 		DocumentStructure: models.DocumentStructure{FieldDefinitions: make(map[string]models.FieldDefinition)},
-		Documents:         make(map[string]models.Document),
+		Documents:         func() *map[string]models.Document { m := make(map[string]models.Document); return &m }(),
 		Relationships:     make(map[string]models.Relationship),
+		Indexes:           make(map[string]models.IndexReference),
+		IndexNames:        []string{},
 		Constraints:       make(map[string]models.Constraint),
 	}
 }

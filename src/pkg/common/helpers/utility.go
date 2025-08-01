@@ -32,3 +32,8 @@ func ParseBool(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
 	return value == "true"
 }
+
+func CleanFileName(name string) string {
+	// Replace characters that might be problematic in filenames
+	return strings.ReplaceAll(name, "-", "_")
+}

@@ -12,7 +12,7 @@ import (
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/pkg/settings"
 
-	hashindex "syndrdb/src/internal/domain/index/hashindex"
+	hashindex "syndrdb/src/internal/domain/index/hashindexV2"
 
 	//hashindex "syndrdb/src/hash_index"
 
@@ -66,6 +66,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	bundle := s.factory.NewBundle(bundleCommand.BundleName, "")
 	bundle.Database = db
 
+	// Automatically add a DocumentID field to the bundle structure for all bundles
 	bundle.DocumentStructure.FieldDefinitions["DocumentID"] = models.FieldDefinition{
 		Name:         "DocumentID",
 		Type:         "string",
@@ -74,7 +75,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 		DefaultValue: "",
 	}
 
-	// TODO take the fields and structure from the command and create them in the bundle struct
+	// Initialize the Document structure in the bundle
 	for _, fieldDef := range bundleCommand.Fields {
 		bundle.DocumentStructure.FieldDefinitions[fieldDef.Name] = models.FieldDefinition{
 			Name:         fieldDef.Name,
@@ -107,9 +108,6 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	}
 
 	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
-	// if err != nil {
-	// 	return fmt.Errorf("failed to add bundle to database: %w", err)
-	// }
 
 	s.bundles[bundleCommand.BundleName] = bundle
 	return nil
@@ -141,13 +139,21 @@ func (s *BundleService) GetBundleByName(database *models.Database, name string) 
 			}
 
 			s.bundles[name] = bundle
+
 			return bundle, nil
 		} else {
 			return nil, fmt.Errorf("bundle file exists in memory but not on disk. '%s'.bnd not found", name)
 		}
 
 	}
-	//s.logger.Infof("Retrieved bundle '%v' from memory", bundle)
+
+	// prettyJSON, err := json.MarshalIndent(s.bundles[name], "", "  ")
+	// if err != nil {
+	// 	s.logger.Warnf("Failed to pretty-print bundle data: %v", err)
+	// } else {
+	// 	s.logger.Infof("RETURNING THE BUNDLE bundle data from file \n%s", string(prettyJSON))
+	// }
+
 	return bundle, nil
 }
 
@@ -215,6 +221,7 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 	// Add the relationship to the bundle
 	bundle.Relationships[relationship.Name] = relationship //= append(bundle.Relationships, relationship)
 
+	// TODO make the relationship stuff a separate function
 	//if the type is one-to-one, then we need to add the field, and make it unique
 	switch relationship.RelationshipType {
 	case 1: //one to one
@@ -357,6 +364,7 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 				IndexInstance: index,
 			}
 		} else {
+			//TODO Actually implement this with real fields
 			index, err := btreeService.CreateIndex(bundle, "myField", true)
 			if err != nil {
 				s.logger.Errorf("Failed to create index: %v", err)
@@ -392,95 +400,115 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 
 func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
 	args := settings.GetSettings()
-	hIndexService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+	// Create configuration for the new hash index
+	config := hashindex.IndexConfig{
+		BundleName:  bundle.Name,
+		FieldName:   indexCommand.Fields[0].Name,
+		IsUnique:    indexCommand.Fields[0].IsUnique,
+		DataDir:     args.DataDir,
+		DebugMode:   args.Debug,
+		InitialSize: 16,   // Start with 16 buckets
+		PageSize:    8192, // 8KB pages (PostgreSQL-style)
+		LoadFactor:  0.75, // Split when 75% full
+		CacheSize:   100,  // Cache 100 pages
+	}
 
-	index.RegisterHashService(bundle.BundleID, hIndexService)
+	// Create the hash index using the new V2 implementation
+	hashIndex, err := hashindex.CreateHashIndex(&config, s.logger)
+	if err != nil {
+		s.logger.Errorf("Failed to create hash index: %v", err)
+		return fmt.Errorf("failed to create hash index: %w", err)
+	}
 
-	b := models.IndexField{
+	// Create the index field structure for compatibility
+	indexField := models.IndexField{
 		FieldName: indexCommand.Fields[0].Name,
 		IsUnique:  indexCommand.Fields[0].IsUnique,
 		Collation: "",
 	}
 
-	index, _, err := hIndexService.CreateHashIndex(bundle, b)
-	if err != nil {
-		s.logger.Errorf("Failed to create index: %v", err)
-		return err
-	}
-
+	// Create the index reference
 	indexRef := models.IndexReference{
-		IndexName: indexCommand.IndexName,
-		Fields:    indexCommand.Fields,
-		IndexType: indexCommand.IndexType,
-
+		IndexName:      indexCommand.IndexName,
+		Fields:         indexCommand.Fields,
+		IndexType:      indexCommand.IndexType,
 		CreateTime:     time.Now(),
-		IndexInstance:  index,
-		HashIndexField: b,
+		IndexInstance:  hashIndex, // Store the V2 hash index instance
+		HashIndexField: indexField,
 	}
 
+	// Add the index to the bundle
 	bundle.Indexes[indexCommand.IndexName] = indexRef
+	bundle.IndexNames = append(bundle.IndexNames, indexCommand.IndexName)
+
+	// Update the bundle file
 	err = s.store.UpdateBundleFile(bundle.Database, bundle)
 	if err != nil {
 		s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
 		return fmt.Errorf("failed to update bundle file after creating index: %w", err)
 	}
+
+	s.logger.Infof("Successfully created hash index '%s' on field '%s' for bundle '%s'",
+		indexCommand.IndexName, indexCommand.Fields[0].Name, bundle.Name)
 	return nil
 }
 
 func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name string) error {
 	args := settings.GetSettings()
-	hIndexService := hashindex.NewHashService(args.DataDir, 100*1024*1024, s.logger)
+	// Create configuration for the new hash index
+	config := hashindex.IndexConfig{
+		BundleName:  bundle.Name,
+		FieldName:   name,
+		IsUnique:    true,
+		DataDir:     args.DataDir,
+		DebugMode:   args.Debug,
+		InitialSize: 16,   // Start with 16 buckets
+		PageSize:    8192, // 8KB pages (PostgreSQL-style)
+		LoadFactor:  0.75, // Split when 75% full
+		CacheSize:   100,  // Cache 100 pages
+	}
 
-	index.RegisterHashService(bundle.BundleID, hIndexService)
+	// Create the hash index using the new V2 implementation
+	hashIndex, err := hashindex.CreateHashIndex(&config, s.logger)
+	if err != nil {
+		s.logger.Errorf("Failed to create hash index: %v", err)
+		return fmt.Errorf("failed to create hash index: %w", err)
+	}
 
-	b := models.IndexField{
+	// Create the index field structure for compatibility
+	indexField := models.IndexField{
 		FieldName: name,
 		IsUnique:  true,
 		Collation: "",
 	}
 
-	// c := models.FieldDefinition{
-	// 	Name:         name,
-	// 	Type:         "string",
-	// 	IsRequired:   true,
-	// 	IsUnique:     true,
-	// 	DefaultValue: nil,
-	// }
-
-	// indexCommand := &models.CreateIndexCommand{
-	// 	BundleName: bundle.Name,
-	// 	IndexName:  name,
-	// 	IndexType:  "hash",
-	// 	Fields:     []models.FieldDefinition{c},
-	// }
-
-	index, _, err := hIndexService.CreateHashIndex(bundle, b)
-	if err != nil {
-		s.logger.Errorf("Failed to create index: %v", err)
-		return err
-	}
-
+	// Create the index reference
 	indexRef := models.IndexReference{
-		IndexName: name,
-		Fields:    []models.FieldDefinition{bundle.DocumentStructure.FieldDefinitions["DocumentID"]},
-		IndexType: "hash",
-
+		IndexName:      name,
+		Fields:         []models.FieldDefinition{bundle.DocumentStructure.FieldDefinitions["DocumentID"]},
+		IndexType:      "hash",
 		CreateTime:     time.Now(),
-		IndexInstance:  index,
-		HashIndexField: b,
+		IndexInstance:  hashIndex, // Store the V2 hash index instance
+		HashIndexField: indexField,
 	}
 
+	// Initialize indexes map if nil
 	if bundle.Indexes == nil {
 		bundle.Indexes = make(map[string]models.IndexReference)
 	}
 
+	// Add the index to the bundle
 	bundle.Indexes[name] = indexRef
+	bundle.IndexNames = append(bundle.IndexNames, name)
 
+	// Update the bundle file
 	err = s.store.UpdateBundleFile(bundle.Database, bundle)
 	if err != nil {
 		s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
 		return fmt.Errorf("failed to update bundle file after creating index: %w", err)
 	}
+
+	s.logger.Infof("Successfully created hash index '%s' on field '%s' for bundle '%s'", name, name, bundle.Name)
 	return nil
 }
 
@@ -492,7 +520,6 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	}
 
 	bundle, err := s.GetBundleByName(database, docCommand.BundleName)
-	//exists := s.bundles[docCommand.BundleName]
 	if err != nil {
 		return fmt.Errorf("bundle '%s' not found", docCommand.BundleName)
 	}
@@ -500,22 +527,34 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// Add the document to the bundle
 	newDocument := s.documentFactory.NewDocument(*docCommand)
 
-	// Add the document ID to the hash index
-	hashService := index.GetHashService(bundle.BundleID)
-	if hashService != nil {
-		hashIndex, err := hashService.GetHashIndex(bundle)
-		if err != nil {
-			s.logger.Warnf("Failed to get hash index for bundle '%s': %v", bundle.BundleID, err)
-		} else {
-			// Insert the document ID into the hash index
-			err = hashIndex.AddDocumentByField("DocumentID", newDocument.DocumentID, newDocument.DocumentID)
-			if err != nil {
-				s.logger.Warnf("Failed to add DocumentID to hash index: %v", err)
+	// Add the document ID to the hash index using the new V2 implementation
+	if bundle.Indexes != nil {
+		// Look for the DocumentID hash index
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
+				// Cast to the new V2 hash index
+				if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndex); ok {
+					err := hashIndex.InsertDocument(newDocument.DocumentID)
+					if err != nil {
+						s.logger.Warnf("Failed to add DocumentID '%s' to hash index '%s': %v",
+							newDocument.DocumentID, indexName, err)
+					} else {
+						s.logger.Debugf("Successfully added DocumentID '%s' to hash index '%s'",
+							newDocument.DocumentID, indexName)
+					}
+				} else {
+					s.logger.Warnf("Hash index '%s' is not of type *hashindex.HashIndex", indexName)
+				}
 			}
 		}
+	} else {
+		s.logger.Warnf("No indexes found for bundle '%s'", bundle.Name)
 	}
 
-	s.bundles[docCommand.BundleName].Documents[newDocument.DocumentID] = *newDocument
+	// Add document to in-memory bundle
+	(*s.bundles[docCommand.BundleName].Documents)[newDocument.DocumentID] = *newDocument
+
+	// Add document to bundle file
 	err = s.store.AddDocumentToBundleFile(bundle, newDocument)
 	if err != nil {
 		return fmt.Errorf("failed to add document to bundle: %w", err)
@@ -559,7 +598,7 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 			return fmt.Errorf("failed to update document in bundle: %w", err)
 		}
 
-		bundle.Documents[doc.DocumentID] = *doc
+		(*bundle.Documents)[doc.DocumentID] = *doc
 	}
 
 	return nil
@@ -574,11 +613,6 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		return fmt.Errorf("bundle '%s' is nil, cannot delete document", docCommand.BundleName)
 	}
 
-	// bundle, err := s.GetBundleByName(docCommand.BundleName)
-	// if err != nil {
-	// 	return fmt.Errorf("bundle '%s' not found", docCommand.BundleName)
-	// }
-
 	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause)
 	if err != nil {
 		return fmt.Errorf("failed to filter documents: %w", err)
@@ -589,15 +623,84 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 	}
 
 	for _, doc := range filteredDocs {
-		// Remove the document from the bundle
+		// Remove the document ID from the hash index using the new V2 implementation
+		if bundle.Indexes != nil {
+			// Look for the DocumentID hash index
+			for indexName, indexRef := range bundle.Indexes {
+				if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
+					// Cast to the new V2 hash index
+					if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndex); ok {
+						deleted, err := hashIndex.DeleteDocument(doc.DocumentID)
+						if err != nil {
+							s.logger.Warnf("Failed to delete DocumentID '%s' from hash index '%s': %v",
+								doc.DocumentID, indexName, err)
+						} else if deleted {
+							s.logger.Debugf("Successfully deleted DocumentID '%s' from hash index '%s'",
+								doc.DocumentID, indexName)
+						} else {
+							s.logger.Debugf("DocumentID '%s' was not found in hash index '%s'",
+								doc.DocumentID, indexName)
+						}
+					} else {
+						s.logger.Warnf("Hash index '%s' is not of type *hashindex.HashIndex", indexName)
+					}
+				}
+			}
+		}
+
+		// Remove the document from the bundle file
 		err = s.store.DeleteDocumentFromBundleFile(bundle, doc.DocumentID)
 		if err != nil {
 			return fmt.Errorf("failed to remove document from bundle: %w", err)
 		}
 
-		delete(s.bundles[docCommand.BundleName].Documents, doc.DocumentID)
+		// Remove from in-memory bundle
+		delete(*s.bundles[docCommand.BundleName].Documents, doc.DocumentID)
 	}
 	return nil
+}
+
+// GetDocumentByID retrieves a document by its ID using the hash index for fast lookup
+func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string) (*models.Document, error) {
+	if bundle == nil {
+		return nil, fmt.Errorf("bundle is nil")
+	}
+
+	// Try to use hash index for fast lookup first
+	if bundle.Indexes != nil {
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
+				if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndex); ok {
+					results, err := hashIndex.Search(documentID)
+					if err != nil {
+						s.logger.Warnf("Failed to search hash index '%s' for DocumentID '%s': %v",
+							indexName, documentID, err)
+						// Fall back to linear search
+						break
+					}
+
+					if len(results) > 0 {
+						// Found in index, now get the actual document
+						if doc, exists := (*bundle.Documents)[documentID]; exists {
+							return &doc, nil
+						} else {
+							s.logger.Warnf("DocumentID '%s' found in hash index but not in bundle documents", documentID)
+						}
+					} else {
+						// Not found in index
+						return nil, fmt.Errorf("document with ID '%s' not found", documentID)
+					}
+				}
+			}
+		}
+	}
+
+	// Fall back to linear search if hash index is not available or failed
+	if doc, exists := (*bundle.Documents)[documentID]; exists {
+		return &doc, nil
+	}
+
+	return nil, fmt.Errorf("document with ID '%s' not found", documentID)
 }
 
 func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts string) ([]*models.Document, error) {

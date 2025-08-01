@@ -69,6 +69,15 @@ func (hi *HashIndexFile) ReadPage(pageNum uint32) (*HashIndexPage, error) {
 
 // writePage writes a page to disk
 func (hi *HashIndexFile) WritePage(pageNum uint32, page *HashIndexPage) error {
+
+	// DEFENSIVE CHECK: Never allow writing to page 0 unless it's explicitly a metapage
+	if pageNum == 0 && page.PageType != HashMetaPage {
+		return fmt.Errorf("attempt to write non-meta page to page 0 (metapage)")
+	}
+
+	// Log all page writes for debugging
+	fmt.Printf("WRITE PAGE: pageNum=%d, pageType=%d\n", pageNum, page.PageType)
+
 	// Serialize the page
 	page.PageNum = pageNum
 	page.LastUpdated = time.Now()
@@ -79,7 +88,13 @@ func (hi *HashIndexFile) WritePage(pageNum uint32, page *HashIndexPage) error {
 	}
 
 	// Calculate file offset
-	offset := int64(pageNum-1) * int64(HashPageSize)
+	//offset := int64(pageNum-1) * int64(HashPageSize)
+	var offset int64
+	if pageNum == 0 {
+		offset = 0 // Metapage is at offset 0
+	} else {
+		offset = int64(pageNum) * int64(HashPageSize) // Regular pages start after metapage
+	}
 
 	// Write the page data
 	if _, err := hi.File.WriteAt(pageData, offset); err != nil {
@@ -316,17 +331,18 @@ func ParseHashPage(data []byte) (*HashIndexPage, error) {
 	if pageType == HashMetaPage {
 		// Read metadata marker
 		var markerLen uint32
-		binary.Read(reader, binary.LittleEndian, &markerLen)
+		//binary.Read(reader, binary.LittleEndian, &markerLen)
 
-		marker := make([]byte, markerLen)
-		reader.Read(marker)
+		if markerLen > 0 {
+			marker := make([]byte, markerLen)
+			reader.Read(marker)
 
-		if string(marker) != "METADATA" {
-			return nil, fmt.Errorf("invalid metadata marker")
+			if string(marker) != "METADATA" {
+				return nil, fmt.Errorf("invalid metadata marker")
+			}
 		}
-
 		// Skip actual metadata - it's handled separately
-		return page, nil
+		//return page, nil
 	}
 
 	// Read items

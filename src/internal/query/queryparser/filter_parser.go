@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"syndrdb/src/internal/domain/index"
+	"syndrdb/src/internal/domain/index/hashindexV2"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/settings"
 
@@ -34,7 +35,38 @@ type WhereClause struct {
 type WhereGroup struct {
 	Clauses   []WhereClause
 	SubGroups []WhereGroup
-	Logic     string // Logic connecting this group to others ("AND" or "OR")
+	Operator  string // Logic connecting this group to others ("AND" or "OR")
+}
+
+// Matches checks if the clause matches a document based on its field value
+func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLogger) bool {
+	// If the field doesn't exist in the document, return false
+	if _, exists := document.Fields[wc.Field]; !exists {
+		logger.Infof("Field '%s' does not exist in document, returning false", wc.Field)
+		return false
+	}
+
+	// Get the field value from the document
+	fieldValue := document.Fields[wc.Field].Value
+
+	// If no value is specified in the clause, we assume it matches any value
+	if wc.Value == nil {
+		return true
+	}
+
+	// Compare based on operator and types
+	switch wc.Operator {
+	case "==":
+		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a == b })
+	case "!=":
+		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a != b })
+	case ">":
+		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a > b })
+	case "<":
+		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a < b })
+	default:
+		return false
+	}
 }
 
 // tokenizeWhereClause breaks a WHERE clause into tokens while preserving quoted strings
@@ -154,7 +186,7 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 
 			// Set logical connector if there are more tokens
 			if pos < len(tokens) && (strings.ToUpper(tokens[pos]) == "AND" || strings.ToUpper(tokens[pos]) == "OR") {
-				subGroup.Logic = strings.ToUpper(tokens[pos])
+				subGroup.Operator = strings.ToUpper(tokens[pos])
 				pos++
 			}
 
@@ -403,7 +435,7 @@ func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.Suga
 	// 	logger.Infof("No documents found matching the filter")
 	// }
 	var result []*models.Document
-	for _, doc := range bundle.Documents {
+	for _, doc := range *bundle.Documents {
 		if EvaluateWhereClause(&doc, whereGroup, logger) {
 			result = append(result, &doc)
 		}
@@ -455,7 +487,7 @@ func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, wher
 				// Collect documents by ID
 				result := make([]*models.Document, 0, len(docIDs))
 				for _, docID := range docIDs {
-					if doc, ok := bundle.Documents[docID]; ok {
+					if doc, ok := (*bundle.Documents)[docID]; ok {
 						d := doc // avoid pointer aliasing
 						result = append(result, &d)
 					}
@@ -477,20 +509,29 @@ func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, wher
 
 // ScanHashIndex returns document IDs matching the value in the hash index
 func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}) ([]string, error) {
-	// Get the hash index service for this bundle
-	hashService := index.GetHashService(bundle.BundleID)
-	if hashService == nil {
-		return nil, fmt.Errorf("no hash index service for bundle %s", bundle.BundleID)
+	// Validate that this is a hash index
+	if idxRef.IndexType != "hash" {
+		return nil, fmt.Errorf("index %s is not a hash index (type: %s)", idxRef.IndexName, idxRef.IndexType)
 	}
+
+	// Cast to the V2 hash index
+	hashIndex, ok := idxRef.IndexInstance.(*hashindexV2.HashIndex)
+	if !ok {
+		return nil, fmt.Errorf("hash index %s is not of type *hashindexV2.HashIndex", idxRef.IndexName)
+	}
+
+	// Convert the search value to string for hash index lookup
+	searchKeyStr := fmt.Sprintf("%v", value)
+
 	// Search the hash index
-	docID, err := hashService.SearchHashIndex(idxRef.IndexName, value, idxRef.HashIndexField)
+	docIDs, err := hashIndex.Search(searchKeyStr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("hash index search failed for value '%v': %w", value, err)
 	}
-	if docID == "" {
-		return []string{}, nil
-	}
-	return []string{docID}, nil
+
+	// Return the document IDs (hashindexV2 returns []string, not single string)
+	return docIDs, nil
+
 }
 
 // ScanBTreeIndex returns document IDs matching the value in the btree index

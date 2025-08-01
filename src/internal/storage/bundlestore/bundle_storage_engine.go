@@ -20,6 +20,7 @@ import (
 	"syndrdb/src/internal/storage/buffer"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
 )
@@ -101,19 +102,25 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 		return nil, fmt.Errorf("error reading bundle file %s: %w", fileName, err)
 	}
 	// Decode the BSON data
-	bundleData, err := helpers.DecodeBSON(data)
+	// bundleData, err := helpers.DecodeBSON(data)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("error decoding bundle data from file %s: %w", fileName, err)
+	// }
+
+	// bundle, err := MapToBundle(bundleData.(map[string]interface{}), *b.logger)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("error converting map to Bundle from file %s: %w", fileName, err)
+	// }
+
+	var bundle models.Bundle
+	err = bson.Unmarshal(data, &bundle)
 	if err != nil {
 		return nil, fmt.Errorf("error decoding bundle data from file %s: %w", fileName, err)
 	}
 
-	bundle, err := MapToBundle(bundleData.(map[string]interface{}), *b.logger)
-	if err != nil {
-		return nil, fmt.Errorf("error converting map to Bundle from file %s: %w", fileName, err)
-	}
-
 	bundle.Database = database
 
-	prettyJSON, err := json.MarshalIndent(bundleData, "", "  ")
+	prettyJSON, err := json.MarshalIndent(bundle, "", "  ")
 	if err != nil {
 		b.logger.Warnf("Failed to pretty-print bundle data: %v", err)
 	} else {
@@ -124,7 +131,7 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 	// if !ok {
 	// 	return nil, fmt.Errorf("decoded data from file %s is not of type Bundle", fileName)
 	// }
-	return bundle, nil
+	return &bundle, nil
 }
 
 // TODO this is the old, pre-buffer manager implementation.
@@ -193,7 +200,7 @@ func (bs *BundleStorageEngine) LoadBundle(bundleName string) (*models.Bundle, er
 		return nil, fmt.Errorf("could not read documents: %w", err)
 	}
 
-	bundle.Documents = docs
+	bundle.Documents = &docs
 
 	return bundle, nil
 }
@@ -235,7 +242,8 @@ func (bs *BundleStorageEngine) parseHeaderPage(pageData []byte) (*models.Bundle,
 	// For this example, just create an empty bundle
 	bundle.BundleID = string(bundleMetadata[:32])
 	bundle.Name = string(bundleMetadata[32:64])
-	bundle.Documents = make(map[string]models.Document)
+	bundle.Documents = new(map[string]models.Document)
+	*bundle.Documents = make(map[string]models.Document)
 
 	return bundle, docCount, nil
 }
@@ -501,9 +509,10 @@ func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *models.Bundle, 
 
 	// Update the document in the bundle in memory
 	if bundle.Documents == nil {
-		bundle.Documents = make(map[string]models.Document)
+		bundle.Documents = new(map[string]models.Document)
+		*bundle.Documents = make(map[string]models.Document)
 	}
-	bundle.Documents[document.DocumentID] = *document
+	(*bundle.Documents)[document.DocumentID] = *document
 
 	// Write bundle to file
 	err := b.WriteBundleToFile(bundle, filePath)
@@ -542,10 +551,10 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		b.logger.Infof("Attempting to delete document %s from bundle file", documentID)
 	}
 
-	for _, doc := range bundle.Documents {
+	for _, doc := range *bundle.Documents {
 		if doc.DocumentID == documentID {
 
-			delete(bundle.Documents, documentID)
+			delete(*bundle.Documents, documentID)
 		}
 	}
 
@@ -588,9 +597,10 @@ func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bu
 
 	// Add the document to the bundle in memory
 	if bundle.Documents == nil {
-		bundle.Documents = make(map[string]models.Document)
+		bundle.Documents = new(map[string]models.Document)
+		*bundle.Documents = make(map[string]models.Document)
 	}
-	bundle.Documents[document.DocumentID] = *document
+	(*bundle.Documents)[document.DocumentID] = *document
 
 	// Update the index to point to this document
 	// err = bs.updateDocumentIndex(bundleID, document.DocumentID, pageNum, offset)
@@ -635,9 +645,10 @@ func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *models.Bundle, doc
 
 	// Add the document to the bundle in memory
 	if bundle.Documents == nil {
-		bundle.Documents = make(map[string]models.Document)
+		bundle.Documents = new(map[string]models.Document)
+		*bundle.Documents = make(map[string]models.Document)
 	}
-	bundle.Documents[document.DocumentID] = *document
+	(*bundle.Documents)[document.DocumentID] = *document
 
 	// Write bundle to file
 	err := b.WriteBundleToFile(bundle, filePath)
@@ -748,7 +759,7 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 
 	// 2. Make sure Documents are included in the map
 	docMap := make(map[string]interface{})
-	for docID, doc := range bundle.Documents {
+	for docID, doc := range *bundle.Documents {
 		docMap[docID] = map[string]interface{}{
 			"Fields":    doc.Fields,
 			"CreatedAt": doc.CreatedAt,
@@ -854,6 +865,8 @@ func BundleToMap(bundle *models.Bundle) map[string]interface{} {
 		"DocumentStructure": bundle.DocumentStructure,
 		"FieldDefinitions":  bundle.DocumentStructure.FieldDefinitions,
 		"Documents":         bundle.Documents,
+		"IndexNames":        bundle.IndexNames,
+		"Indexes":           bundle.Indexes,
 		//"Relationships":     bundle.Relationships,
 		"Constraints": bundle.Constraints,
 	}
@@ -921,6 +934,72 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 		bundle.Relationships = make(map[string]models.Relationship)
 	}
 
+	//Extract Index Names
+	if data["IndexNames"] != nil {
+		bundle.IndexNames = make([]string, 0)
+
+		if indexNames, ok := data["IndexNames"].(primitive.A); ok {
+			bundle.IndexNames = ConvertToStringSlice(indexNames)
+		} else {
+			logger.Infof("Bundle %v IS MISSING THE []STRING datatype", data["IndexNames"])
+		}
+	} else {
+		logger.Infof("Bundle %s has no index names defined", bundle.Name)
+		bundle.IndexNames = make([]string, 0)
+	}
+
+	// if data["Indexes"] != nil {
+	// 	indexes := data["Indexes"]
+	// 	if indexMap, ok := indexes.(map[string]models.IndexReference); ok {
+	// 		bundle.Indexes = indexMap
+	// 	} else {
+	// 		// If not directly convertible, try to convert each item individually
+	// 		bundle.Indexes = make(map[string]models.IndexReference)
+	// 		if indexMap, ok := indexes.(map[string]interface{}); ok {
+	// 			for key, val := range indexMap {
+	// 				if indexData, ok := val.(map[string]interface{}); ok {
+	// 					indexRef := models.IndexReference{
+	// 						IndexName: stringValue(indexData, "IndexName", ""),
+	// 						// Fields:    stringArrayValue(indexData, "Fields"),
+	// 						// IsUnique:  boolValue(indexData, "IsUnique", false),
+	// 						// IsPartial: boolValue(indexData, "IsPartial", false),
+	// 						// Condition: stringValue(indexData, "Condition", ""),
+	// 					}
+	// 					bundle.Indexes[key] = indexRef
+	// 				}
+	// 			}
+	// 		}
+	// 	}
+	// }
+
+	// Extract indexes
+	if indexes, ok := data["Indexes"]; ok && indexes != nil {
+		if indexMap, ok := indexes.(map[string]models.IndexReference); ok {
+			bundle.Indexes = indexMap
+		} else {
+			// If not directly convertible, try to convert each item individually
+			bundle.Indexes = make(map[string]models.IndexReference)
+			if indexMap, ok := indexes.(map[string]interface{}); ok {
+				for key, val := range indexMap {
+					if indexData, ok := val.(map[string]interface{}); ok {
+						indexRef := models.IndexReference{
+							IndexName: stringValue(indexData, "IndexName", ""),
+							// Fields:    stringArrayValue(indexData, "Fields"),
+							IndexType: stringValue(indexData, "IndexType", ""),
+
+							// IsUnique:  boolValue(indexData, "IsUnique", false),
+							// IsPartial: boolValue(indexData, "IsPartial", false),
+							// Condition: stringValue(indexData, "Condition", ""),
+						}
+						bundle.Indexes[key] = indexRef
+					}
+				}
+			}
+		}
+	} else {
+		bundle.Indexes = make(map[string]models.IndexReference)
+	}
+
 	// Extract constraints
 	if constraints, ok := data["Constraints"]; ok && constraints != nil {
 		if constraintMap, ok := constraints.(map[string]models.Constraint); ok {
@@ -976,7 +1055,8 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 
 	// Extract documents
 	if docs, ok := data["Documents"]; ok && docs != nil {
-		bundle.Documents = make(map[string]models.Document)
+		bundle.Documents = new(map[string]models.Document)
+		*bundle.Documents = make(map[string]models.Document)
 		//logger.Infof("Found %t for array", docs.([]interface{}))
 		//logger.Infof("Found %t for map", docs.(map[string]interface{}))
 		// Handle array of documents
@@ -1028,7 +1108,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 						}
 					}
 
-					bundle.Documents[docID] = document
+					(*bundle.Documents)[docID] = document
 				}
 			}
 		} else if docMap, ok := docs.(map[string]interface{}); ok {
@@ -1073,7 +1153,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 						}
 					}
 
-					bundle.Documents[docID] = document
+					(*bundle.Documents)[docID] = document
 				}
 			}
 		}
@@ -1095,6 +1175,14 @@ func boolValue(data map[string]interface{}, key string, defaultVal bool) bool {
 		return val
 	}
 	return defaultVal
+}
+
+func ConvertToStringSlice(arr primitive.A) []string {
+	strs := make([]string, len(arr))
+	for i, v := range arr {
+		strs[i] = fmt.Sprint(v)
+	}
+	return strs
 }
 
 // func stringArrayValue(data map[string]interface{}, key string) []string {
