@@ -2,6 +2,7 @@ package queryparser
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syndrdb/src/internal/domain/index"
@@ -474,12 +475,12 @@ func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, wher
 				var docIDs []string
 				switch idxRef.IndexType {
 				case "hash":
-					docIDs, err = ScanHashIndex(bundle, &idxRef, clause.Value)
+					docIDs, err = ScanHashIndex(bundle, &idxRef, clause.Value, logger)
 					if err != nil {
 						return nil, err
 					}
 				case "btree":
-					docIDs, err = ScanBTreeIndex(bundle, &idxRef, clause.Value)
+					docIDs, err = ScanBTreeIndex(bundle, &idxRef, clause.Value, logger)
 					if err != nil {
 						return nil, err
 					}
@@ -508,34 +509,105 @@ func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, wher
 }
 
 // ScanHashIndex returns document IDs matching the value in the hash index
-func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}) ([]string, error) {
+func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}, logger *zap.SugaredLogger) ([]string, error) {
+	// Validate input parameters following SyndrDB defensive programming practices
+	if bundle == nil {
+		return nil, fmt.Errorf("bundle cannot be nil")
+	}
+
+	if idxRef == nil {
+		return nil, fmt.Errorf("index reference cannot be nil")
+	}
+
 	// Validate that this is a hash index
 	if idxRef.IndexType != "hash" {
 		return nil, fmt.Errorf("index %s is not a hash index (type: %s)", idxRef.IndexName, idxRef.IndexType)
 	}
 
-	// Cast to the V2 hash index
-	hashIndex, ok := idxRef.IndexInstance.(*hashindexV2.HashIndex)
-	if !ok {
-		return nil, fmt.Errorf("hash index %s is not of type *hashindexV2.HashIndex", idxRef.IndexName)
+	// CRITICAL: Ensure the hash index instance is properly loaded
+	// Following SyndrDB modular development practices, handle index loading transparently
+	hashIndex, err := EnsureHashIndexLoaded(bundle, idxRef, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure hash index %s is loaded: %w", idxRef.IndexName, err)
 	}
 
 	// Convert the search value to string for hash index lookup
+	// Following SyndrDB data integrity requirements, ensure consistent key formatting
 	searchKeyStr := fmt.Sprintf("%v", value)
+
+	// Validate that the search key is not empty
+	if searchKeyStr == "" {
+		return nil, fmt.Errorf("search key cannot be empty for hash index %s", idxRef.IndexName)
+	}
 
 	// Search the hash index
 	docIDs, err := hashIndex.Search(searchKeyStr)
 	if err != nil {
-		return nil, fmt.Errorf("hash index search failed for value '%v': %w", value, err)
+		return nil, fmt.Errorf("hash index search failed for value '%v' in index %s: %w", value, idxRef.IndexName, err)
 	}
 
-	// Return the document IDs (hashindexV2 returns []string, not single string)
+	// Validate the result (defensive programming)
+	if docIDs == nil {
+		// Return empty slice instead of nil for consistency
+		return []string{}, nil
+	}
+
 	return docIDs, nil
 
 }
 
+// EnsureHashIndexLoaded ensures that a hash index instance is properly loaded and typed
+// This function follows the Single Responsibility Principle by handling only index loading
+// Following SyndrDB comprehensive error handling, it validates and loads indexes as needed
+func EnsureHashIndexLoaded(bundle *models.Bundle, idxRef *models.IndexReference, logger *zap.SugaredLogger) (*hashindexV2.HashIndex, error) {
+	args := settings.GetSettings()
+	// Check if IndexInstance is already properly loaded and typed
+	if idxRef.IndexInstance != nil {
+		if hashIndex, ok := idxRef.IndexInstance.(*hashindexV2.HashIndex); ok {
+			// Already properly loaded and typed
+			return hashIndex, nil
+		}
+
+		// IndexInstance exists but wrong type - log warning and reload
+		// This handles cases where the index was loaded incorrectly
+		fmt.Printf("WARNING: Hash index %s has incorrect type %T, reloading from disk\n",
+			idxRef.IndexName, idxRef.IndexInstance)
+	}
+
+	// IndexInstance is nil or wrong type - need to load from disk
+	// Following SyndrDB project structure, construct the expected file path
+
+	indexFileName := fmt.Sprintf("%s_%s.hidx", bundle.Name, idxRef.HashIndexField.FieldName)
+	indexFilePath := filepath.Join(args.DataDir, indexFileName)
+
+	// Attempt to open the hash index from disk
+	// Following SyndrDB modular development, use the proper constructor
+	hashIndex, err := hashindexV2.OpenHashIndex(indexFilePath, true, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open hash index from file %s: %w", indexFilePath, err)
+	}
+
+	// Validate that the opened index is properly initialized
+	if hashIndex == nil {
+		return nil, fmt.Errorf("opened hash index is nil for file %s", indexFilePath)
+	}
+
+	// Update the IndexInstance with the properly loaded hash index
+	// Following SyndrDB data integrity requirements, ensure the reference is updated
+	idxRef.IndexInstance = hashIndex
+
+	return hashIndex, nil
+}
+
+// ensureBTreeIndexLoaded ensures that a BTree index instance is properly loaded and typed
+// This function follows the Single Responsibility Principle by handling only BTree index loading
+// Following SyndrDB comprehensive error handling, it validates and loads indexes as needed
+// func ensureBTreeIndexLoaded(bundle *models.Bundle, idxRef *models.IndexReference, logger *zap.SugaredLogger) (*index.BTreeService, error) {
+
+// }
+
 // ScanBTreeIndex returns document IDs matching the value in the btree index
-func ScanBTreeIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}) ([]string, error) {
+func ScanBTreeIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}, logger *zap.SugaredLogger) ([]string, error) {
 	// Get the btree index service for this bundle
 	btreeService := index.GetBTreeService(bundle.BundleID)
 	if btreeService == nil {

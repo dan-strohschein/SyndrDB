@@ -87,12 +87,12 @@ func (hi *HashIndex) clearOverflowChain(firstOverflowPageNum uint32) error {
 			return fmt.Errorf("page %d is not an overflow page", currentPageNum)
 		}
 
-		nextPageNum := overflowPage.NextPageNum
+		nextPageNum := overflowPage.NextOverflowPage
 
 		// Clear the page and mark for deletion
 		overflowPage.Records = make([]*IndexRecord, 0)
 		overflowPage.RecordCount = 0
-		overflowPage.NextPageNum = 0
+		overflowPage.NextOverflowPage = 0
 
 		// Write cleared page (or implement page deletion)
 		err = hi.fileManager.WritePage(currentPageNum, overflowPage)
@@ -130,10 +130,10 @@ func calculateHash(key []byte, seed uint32) uint32 {
 	return h.Sum32()
 }
 
-// generateHashSeed creates a random seed for the hash function
+// GenerateHashSeed creates a random seed for the hash function
 // Returns:
 //   - uint32: A random seed value
-func generateHashSeed() uint32 {
+func GenerateHashSeed() uint32 {
 	// Try to use crypto/rand for better randomness
 	seedBytes := make([]byte, 4)
 	if _, err := rand.Read(seedBytes); err != nil {
@@ -367,7 +367,7 @@ func (hi *HashIndex) collectAllRecords(bucketPage *BucketPage) ([]*IndexRecord, 
 
 		overflowPage := overflowPageData.(*OverflowPage)
 		allRecords = append(allRecords, overflowPage.Records...)
-		currentOverflowPageNum = overflowPage.NextPageNum
+		currentOverflowPageNum = overflowPage.NextOverflowPage
 	}
 
 	return allRecords, nil
@@ -382,12 +382,44 @@ func (hi *HashIndex) collectAllRecords(bucketPage *BucketPage) ([]*IndexRecord, 
 // Returns:
 //   - uint32: The bucket number (0-based)
 func (hi *HashIndex) computeBucket(hashValue uint32) uint32 {
+
+	if hi.metadata == nil {
+		hi.logger.Errorf("CRITICAL: metadata is nil in computeBucket")
+		return 0
+	}
+
+	if hi.metadata.BucketCount == 0 {
+		hi.logger.Errorf("CRITICAL: bucket count is 0 in computeBucket")
+		return 0
+	}
+
+	// Following SyndrDB data integrity requirements, validate mask consistency
+	if hi.metadata.HighMask == 0 || hi.metadata.MaxBucket == 0 {
+		hi.logger.Warnf("Linear hashing metadata not properly initialized, using simple modulo")
+		hi.logger.Warnf("  HighMask: %d, LowMask: %d, MaxBucket: %d",
+			hi.metadata.HighMask, hi.metadata.LowMask, hi.metadata.MaxBucket)
+
+		// Fallback to simple modulo bucket calculation
+		// Following SyndrDB defensive programming, provide reliable fallback
+		bucketNum := hashValue % hi.metadata.BucketCount
+		hi.logger.Debugf("computeBucket FALLBACK - using modulo: %d %% %d = %d",
+			hashValue, hi.metadata.BucketCount, bucketNum)
+		return bucketNum
+	}
+
 	// Apply the high mask first
 	bucket := hashValue & hi.metadata.HighMask
 
 	// If the bucket is beyond our current range, use the low mask
 	if bucket > hi.metadata.MaxBucket {
 		bucket = hashValue & hi.metadata.LowMask
+	}
+
+	// Final validation following SyndrDB data integrity requirements
+	if bucket >= hi.metadata.BucketCount {
+		hi.logger.Errorf("CRITICAL: computed bucket %d >= BucketCount %d, using fallback",
+			bucket, hi.metadata.BucketCount)
+		bucket = hashValue % hi.metadata.BucketCount
 	}
 
 	return bucket

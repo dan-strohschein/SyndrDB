@@ -48,9 +48,12 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 
 			return CreateBundleCommand(command, logger, serviceManager, database, result)
 		case "b-index":
-			result1, err, shouldReturn := CreateBTreeIndex(command, logger, serviceManager, database)
-			if shouldReturn {
+			result1, err := CreateBTreeIndex(command, logger, serviceManager, database)
+			if err != nil {
+				// If there is an error, return it
 				return result1, err
+			} else {
+				return result1, nil
 			}
 		case "h-index":
 			result1, err, shouldReturn := CreateHashIndex(command, logger, serviceManager, database)
@@ -277,30 +280,30 @@ func CreateHashIndex(command string, logger *zap.SugaredLogger, serviceManager S
 	return cmdResponse, nil, true
 }
 
-func CreateBTreeIndex(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error, bool) {
+func CreateBTreeIndex(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error) {
 	btreeIndexCommand, err := index.ParseCreateBTreeIndexCommand(command, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing B-Tree index command: %v", err), true
+		return nil, fmt.Errorf("error parsing B-Tree index command: %v", err)
 	}
 	logger.Infof("Parsed B-Tree index command: %+v", btreeIndexCommand)
 
 	// Get the bundle by name
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, btreeIndexCommand.BundleName)
-	if err == nil {
-		return nil, fmt.Errorf("bundle '%s' cannot be found", bundle.Name), true
+	if err == nil && bundle == nil {
+		return nil, fmt.Errorf("bundle '%s' cannot be found", btreeIndexCommand.BundleName)
 	}
 
 	// TODO Validate the index name
 	err = serviceManager.BundleService.AddIndexToBundle(database, bundle, btreeIndexCommand)
 	if err != nil {
-		return nil, fmt.Errorf("error adding B-Tree index to bundle '%s': %v", btreeIndexCommand.BundleName, err), true
+		return nil, fmt.Errorf("error adding B-Tree index to bundle '%s': %v", btreeIndexCommand.BundleName, err)
 	}
 
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
 		Result:      "Index created successfully",
 	}
-	return cmdResponse, nil, true
+	return cmdResponse, nil
 }
 
 func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, result string) (*CommandResponse, error) {

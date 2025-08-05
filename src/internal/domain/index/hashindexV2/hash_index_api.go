@@ -86,9 +86,10 @@ type HashIndexMetadata struct {
 	NextPageNum  uint32 // Next available page number for allocation
 	DebugMode    bool   // Whether to write human-readable format
 
-	BitmapPages   uint32 // Number of bitmap pages (for future use)
-	OverflowPages uint32 // Number of overflow pages allocated
-
+	BitmapPages   uint32   // Number of bitmap pages (for future use)
+	OverflowPages uint32   // Number of overflow pages allocated
+	DocumentCount uint64   // Total number of documents indexed
+	FreePageList  []uint32 // List of free pages available for reuse
 }
 
 // CreateHashIndex creates a new hash index for the specified bundle and field
@@ -124,9 +125,6 @@ func CreateHashIndex(config *IndexConfig, logger *zap.SugaredLogger) (*HashIndex
 		return nil, fmt.Errorf("failed to create page manager: %w", err)
 	}
 
-	// Create bucket manager
-	bucketManager := NewBucketManager(pageManager, fileManager, logger)
-
 	// Create storage
 	storage := NewHashIndexStorage(fileManager, logger)
 
@@ -148,11 +146,17 @@ func CreateHashIndex(config *IndexConfig, logger *zap.SugaredLogger) (*HashIndex
 		TotalRecords:  0,
 		LoadFactor:    config.LoadFactor,
 		SplitPointer:  0,
-		HashSeed:      generateHashSeed(),
+		HashSeed:      GenerateHashSeed(),
 		NextPageNum:   config.InitialSize + 1, // After metadata and initial buckets
 		DebugMode:     config.DebugMode,
 		BitmapPages:   0,
 		OverflowPages: 0,
+	}
+
+	// Create bucket manager
+	bucketManager, err := NewBucketManager(storage, pageManager, fileManager, metadata, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bucket manager: %w", err)
 	}
 
 	// Create hash index instance
@@ -196,30 +200,82 @@ func OpenHashIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) (
 		return nil, fmt.Errorf("hash index file does not exist: %s", filePath)
 	}
 
-	// Create hash index structure
-	hashIndex := &HashIndex{
-		FilePath:    filePath,
-		logger:      logger,
-		IsDebugMode: debugMode,
+	// Create file manager with proper initialization
+	// Note: We'll read the page size from the existing file metadata
+	fileManager, err := NewFileManager(filePath, 0, debugMode, logger) // 0 means read from file
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file manager: %w", err)
+	}
+
+	// Validate that file manager was created successfully
+	if fileManager == nil {
+		return nil, fmt.Errorf("file manager creation returned nil without error")
 	}
 
 	// Initialize storage
-	var err error
-	hashIndex.Storage = NewHashIndexStorage(hashIndex.fileManager, logger)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("failed to open storage: %w", err)
-	// }
+	storage := NewHashIndexStorage(fileManager, logger)
+	if storage == nil {
+		// Clean up file manager if storage creation fails
+		if closeErr := fileManager.Close(); closeErr != nil {
+			logger.Warnf("Failed to close file manager during cleanup: %v", closeErr)
+		}
+		return nil, fmt.Errorf("failed to create storage manager: %w", err)
+	}
 
 	// Load metadata from file
-	hashIndex.metadata, err = hashIndex.Storage.LoadMetadata()
+	metadata, err := storage.LoadMetadata()
 	if err != nil {
+		// Clean up resources if metadata loading fails
+		if closeErr := fileManager.Close(); closeErr != nil {
+			logger.Warnf("Failed to close file manager during cleanup: %v", closeErr)
+		}
 		return nil, fmt.Errorf("failed to load metadata: %w", err)
 	}
 
+	// Validate metadata
+	if metadata == nil {
+		// Clean up resources if metadata is nil
+		if closeErr := fileManager.Close(); closeErr != nil {
+			logger.Warnf("Failed to close file manager during cleanup: %v", closeErr)
+		}
+		return nil, fmt.Errorf("loaded metadata is nil")
+	}
+
 	// Initialize page manager
-	hashIndex.pageManager, err = NewPageManager(hashIndex.metadata.PageSize, 100, logger)
+	pageManager, err := NewPageManager(metadata.PageSize, 100, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create page manager: %w", err)
+	}
+
+	// Create bucket manager with proper initialization
+	bucketManager, err := NewBucketManager(storage, pageManager, fileManager, metadata, logger)
+	if err != nil {
+		// Clean up resources if bucket manager creation fails
+		if closeErr := fileManager.Close(); closeErr != nil {
+			logger.Warnf("Failed to close file manager during cleanup: %v", closeErr)
+		}
+		return nil, fmt.Errorf("failed to create bucket manager: %w", err)
+	}
+
+	// Validate bucket manager
+	if bucketManager == nil {
+		// Clean up resources if bucket manager is nil
+		if closeErr := fileManager.Close(); closeErr != nil {
+			logger.Warnf("Failed to close file manager during cleanup: %v", closeErr)
+		}
+		return nil, fmt.Errorf("bucket manager creation returned nil without error")
+	}
+
+	// Create the hash index instance
+	hashIndex := &HashIndex{
+		FilePath:      filePath,
+		Storage:       storage,
+		metadata:      metadata,
+		pageManager:   pageManager,
+		bucketManager: bucketManager,
+		fileManager:   fileManager,
+		isOpen:        true,
+		logger:        logger,
 	}
 
 	logger.Infof("Successfully opened hash index with %d buckets", hashIndex.metadata.BucketCount)
@@ -290,11 +346,14 @@ func (hi *HashIndex) InsertDocument(documentID string) error {
 	defer hi.mutex.Unlock()
 
 	// Calculate hash value
-	keyBytes := []byte(documentID)
-	hashValue := calculateHash(keyBytes, hi.metadata.HashSeed)
+	// keyBytes := []byte(documentID)
+	// hashValue := calculateHash(keyBytes, hi.metadata.HashSeed)
 
-	// Determine target bucket
-	bucketNum := hi.calculateBucket(hashValue)
+	// // Determine target bucket
+	// bucketNum := hi.calculateBucket(hashValue)
+
+	hashValue := jenkinsHash(documentID, hi.metadata.HashSeed)
+	bucketNum := hi.computeBucket(hashValue)
 
 	// Create index record
 	record := &IndexRecord{
@@ -309,7 +368,6 @@ func (hi *HashIndex) InsertDocument(documentID string) error {
 	}
 
 	// Update metadata
-	//hi.metadata.IncrementRecordCount()
 	hi.metadata.TotalRecords++
 
 	// Check if we need to split
@@ -357,11 +415,13 @@ func (hi *HashIndex) Search(key string) ([]string, error) {
 	defer hi.mutex.RUnlock()
 
 	// Calculate hash value
-	keyBytes := []byte(key)
-	hashValue := calculateHash(keyBytes, hi.metadata.HashSeed)
-
+	//keyBytes := []byte(key)
+	//hashValue := calculateHash(keyBytes, hi.metadata.HashSeed)
+	hashValue := jenkinsHash(key, hi.metadata.HashSeed)
+	bucketNum := hi.computeBucket(hashValue)
+	hi.logger.Debugf("DEBUG DEBUG DEBUG Searching key: %s, Hash value: %d, Bucket: %d", key, hashValue, bucketNum)
 	// Determine target bucket
-	bucketNum := hi.calculateBucket(hashValue)
+	//bucketNum := hi.calculateBucket(hashValue)
 
 	// Search in bucket
 	return hi.searchInBucket(bucketNum, key)

@@ -58,6 +58,7 @@ func (hi *HashIndex) insertIntoBucket(bucketNum uint32, record *IndexRecord) err
 
 	// Check if bucket can fit the record
 	if !bucketPage.CanFitRecord(record) {
+
 		// Need to handle overflow
 		return hi.addToOverflow(bucketPage, bucketNum, record)
 	}
@@ -69,8 +70,154 @@ func (hi *HashIndex) insertIntoBucket(bucketNum uint32, record *IndexRecord) err
 	pageNum := bucketNumberToPageNumber(bucketNum)
 	hi.pageManager.PutPage(pageNum, bucketPage, true)
 
+	// Persist changes to disk immediately
+	if err := hi.flushBucketToDisk(bucketNum, bucketPage); err != nil {
+		return fmt.Errorf("failed to persist bucket %d to disk: %w", bucketNum, err)
+	}
+
+	// Update metadata (document count, load factor, etc.)
+	if err := hi.updateAndPersistMetadata(); err != nil {
+		return fmt.Errorf("failed to update metadata after insertion: %w", err)
+	}
+
 	hi.logger.Debugf("Record inserted into bucket %d", bucketNum)
 	return nil
+}
+
+// flushBucketToDisk writes a bucket page directly to the index file
+// This function follows the Single Responsibility Principle by handling only disk persistence
+// Parameters:
+//   - bucketNum: The bucket number to flush
+//   - bucketPage: The bucket page data to write
+//
+// Returns:
+//   - error: Any error that occurred during writing
+func (hi *HashIndex) flushBucketToDisk(bucketNum uint32, bucketPage *BucketPage) error {
+	hi.logger.Debugf("ENTER flushBucketToDisk: bucket=%d", bucketNum)
+
+	// Validate parameters following SyndrDB defensive programming practices
+	if hi.fileManager == nil {
+		hi.logger.Errorf("CRITICAL: file manager is nil, cannot flush bucket %d to disk", bucketNum)
+		return fmt.Errorf("file manager is nil, cannot flush to disk")
+	}
+
+	if bucketPage == nil {
+		hi.logger.Errorf("CRITICAL: bucket page is nil, cannot flush bucket %d to disk", bucketNum)
+		return fmt.Errorf("bucket page is nil, cannot flush to disk")
+	}
+
+	pageNum := bucketNumberToPageNumber(bucketNum)
+	hi.logger.Debugf("Calculated page number %d for bucket %d", pageNum, bucketNum)
+
+	hi.logger.Debugf("Starting flush of bucket %d (page %d) to disk", bucketNum, pageNum)
+
+	// Write the bucket page to disk using the file manager
+	hi.logger.Debugf("About to call fileManager.WritePage for page %d", pageNum)
+	if err := hi.fileManager.WritePage(pageNum, bucketPage); err != nil {
+		hi.logger.Errorf("FAILED: WritePage returned error for page %d: %v", pageNum, err)
+		return fmt.Errorf("failed to write bucket page %d to disk: %w", pageNum, err)
+	}
+	hi.logger.Debugf("SUCCESS: WritePage completed for page %d", pageNum)
+
+	// Following SyndrDB ACID compliance requirements, ensure data is physically written to disk
+	hi.logger.Debugf("About to call fileManager.Sync for bucket %d", bucketNum)
+	if err := hi.fileManager.Sync(); err != nil {
+		hi.logger.Errorf("FAILED: Sync returned error for bucket %d: %v", bucketNum, err)
+		// Following SyndrDB database integrity requirements, treat sync failures as critical errors
+		return fmt.Errorf("failed to sync bucket %d to disk - data integrity cannot be guaranteed: %w", bucketNum, err)
+	}
+	hi.logger.Debugf("SUCCESS: Sync completed for bucket %d", bucketNum)
+
+	hi.logger.Debugf("Successfully flushed bucket %d to disk", bucketNum)
+	return nil
+}
+
+// updateAndPersistMetadata updates index metadata and writes it to disk
+// This function follows the Single Responsibility Principle by handling only metadata persistence
+// Parameters:
+//   - None (operates on the hash index instance)
+//
+// Returns:
+//   - error: Any error that occurred during metadata update
+func (hi *HashIndex) updateAndPersistMetadata() error {
+	hi.logger.Debugf("ENTER updateAndPersistMetadata")
+
+	// Validate metadata following SyndrDB defensive programming practices
+	if hi.metadata == nil {
+		return fmt.Errorf("metadata is nil, cannot update")
+	}
+
+	// Store old values for logging
+	oldDocCount := hi.metadata.DocumentCount
+	oldLoadFactor := hi.metadata.LoadFactor
+
+	// Update document count
+	hi.metadata.DocumentCount++
+	hi.logger.Debugf("Document count updated: %d -> %d", oldDocCount, hi.metadata.DocumentCount)
+
+	// Recalculate load factor
+	if hi.metadata.BucketCount > 0 {
+		hi.metadata.LoadFactor = float64(hi.metadata.DocumentCount) / float64(hi.metadata.BucketCount)
+		hi.logger.Debugf("Load factor updated: %.2f -> %.2f", oldLoadFactor, hi.metadata.LoadFactor)
+	} else {
+		hi.logger.Warnf("Bucket count is 0, cannot calculate load factor")
+	}
+
+	// CRITICAL: Validate NextPageNum consistency following SyndrDB data integrity requirements
+	expectedMinimum := hi.metadata.BucketCount + 1
+	if hi.metadata.NextPageNum < expectedMinimum {
+		hi.logger.Errorf("CRITICAL: NextPageNum %d is invalid, correcting to %d",
+			hi.metadata.NextPageNum, expectedMinimum)
+		hi.metadata.NextPageNum = expectedMinimum
+	}
+
+	hi.logger.Debugf("Updated metadata: DocumentCount=%d, LoadFactor=%.2f, NextPageNum=%d",
+		hi.metadata.DocumentCount, hi.metadata.LoadFactor, hi.metadata.NextPageNum)
+
+	// CRITICAL: Use the dedicated metadata persistence function to ensure immediate disk sync
+	// This prevents the desynchronization issue where metadata changes are lost on server restart
+	return hi.updateMetadataOnDisk()
+}
+
+// findLastOverflowPage finds the last overflow page in a chain
+// This function follows the Single Responsibility Principle by handling only chain traversal
+// Parameters:
+//   - startPageNum: The first overflow page number
+//
+// Returns:
+//   - *OverflowPage: The last overflow page in the chain
+//   - uint32: The page number of the last overflow page
+//   - error: Any error that occurred during traversal
+func (hi *HashIndex) findLastOverflowPage(startPageNum uint32) (*OverflowPage, uint32, error) {
+	currentPageNum := startPageNum
+	visitedPages := make(map[uint32]bool)
+
+	for {
+		// Check for cycles
+		if visitedPages[currentPageNum] {
+			return nil, 0, fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
+		}
+		visitedPages[currentPageNum] = true
+
+		// Load overflow page
+		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
+		}
+
+		overflowPage, ok := overflowPageData.(*OverflowPage)
+		if !ok {
+			return nil, 0, fmt.Errorf("page %d is not an overflow page", currentPageNum)
+		}
+
+		// If this is the last page in the chain, return it
+		if overflowPage.NextOverflowPage == 0 {
+			return overflowPage, currentPageNum, nil
+		}
+
+		// Move to next overflow page
+		currentPageNum = overflowPage.NextOverflowPage
+	}
 }
 
 // searchInBucket searches for a key in the specified bucket and its overflow chain
@@ -166,7 +313,7 @@ func (hi *HashIndex) searchInOverflowChain(startPageNum uint32, key string) ([]s
 		results = append(results, pageResults...)
 
 		// Move to next overflow page
-		currentPageNum = overflowPage.NextPageNum
+		currentPageNum = overflowPage.NextOverflowPage
 	}
 
 	hi.logger.Debugf("Found %d results in overflow chain", len(results))
@@ -266,7 +413,7 @@ func (hi *HashIndex) findRecordInOverflowChain(startPageNum uint32, key string) 
 		}
 
 		// Move to next overflow page
-		currentPageNum = overflowPage.NextPageNum
+		currentPageNum = overflowPage.NextOverflowPage
 	}
 
 	return nil, 0, -1, nil

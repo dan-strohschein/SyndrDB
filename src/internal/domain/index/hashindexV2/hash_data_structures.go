@@ -83,7 +83,7 @@ func NewIndexMetadata(bucketCount uint32, pageSize uint32, loadFactor float64, d
 		LoadFactor:   loadFactor,
 		PageSize:     pageSize,
 		SplitPointer: 0,
-		HashSeed:     generateHashSeed(),
+		HashSeed:     GenerateHashSeed(),
 		NextPageNum:  bucketCount, // Start after initial buckets
 		DebugMode:    debugMode,
 
@@ -194,15 +194,14 @@ func NewBucketPage(bucketNumber uint32, pageSize uint32) *BucketPage {
 
 // Update the existing OverflowPage to include PageHeader
 type OverflowPage struct {
-	*PageHeader                // Embedded page header
-	RecordCount uint32         // Number of records in this page
-	FreeSpace   uint32         // Remaining free space in bytes
-	NextPageNum uint32         // Next overflow page (0 if last)
-	Records     []*IndexRecord // The actual records stored in this page
-	PageNum     uint32
-	ItemCount   uint32
-	Items       []*IndexRecord
-	NextPage    uint32 // Next overflow page (0 if last)
+	*PageHeader                     // Embedded page header
+	RecordCount      uint32         // Number of records in this page
+	FreeSpace        uint32         // Remaining free space in bytes
+	ParentBucket     uint32         // The bucket index this overflow belongs to
+	NextOverflowPage uint32         // Next overflow page in chain (0 if none)
+	Records          []*IndexRecord // The actual records stored in this page
+	ItemCount        uint32
+	Items            []*IndexRecord
 }
 
 // Update NewOverflowPage to include the header
@@ -214,11 +213,12 @@ func NewOverflowPage(pageNumber uint32, pageSize uint32) *OverflowPage {
 	freeSpace := pageSize - headerSize
 
 	return &OverflowPage{
-		PageHeader:  header,
-		RecordCount: 0,
-		FreeSpace:   freeSpace,
-		NextPageNum: 0,
-		Records:     make([]*IndexRecord, 0),
+		PageHeader:       header,
+		RecordCount:      0,
+		FreeSpace:        freeSpace,
+		ParentBucket:     0,
+		NextOverflowPage: 0,
+		Records:          make([]*IndexRecord, 0),
 	}
 }
 

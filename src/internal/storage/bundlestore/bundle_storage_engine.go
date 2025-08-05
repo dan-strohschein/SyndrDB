@@ -583,17 +583,6 @@ func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bu
 		return err
 	}
 	bs.logger.Infof("Adding document to bundle %s with file ID %d", bundle.Name, fileID)
-	// Serialize the document
-	// docData, err := serializeDocument(document)
-	// if err != nil {
-	// 	return err
-	// }
-
-	// // Insert the data, get page number and offset
-	// pageNum, offset, err := bs.fileManager.InsertData(fileID, docData)
-	// if err != nil {
-	// 	return err
-	// }
 
 	// Add the document to the bundle in memory
 	if bundle.Documents == nil {
@@ -601,12 +590,6 @@ func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bu
 		*bundle.Documents = make(map[string]models.Document)
 	}
 	(*bundle.Documents)[document.DocumentID] = *document
-
-	// Update the index to point to this document
-	// err = bs.updateDocumentIndex(bundleID, document.DocumentID, pageNum, offset)
-	// if err != nil {
-	// 	return err
-	// }
 
 	return nil
 }
@@ -761,9 +744,10 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 	docMap := make(map[string]interface{})
 	for docID, doc := range *bundle.Documents {
 		docMap[docID] = map[string]interface{}{
-			"Fields":    doc.Fields,
-			"CreatedAt": doc.CreatedAt,
-			"UpdatedAt": doc.UpdatedAt,
+			"DocumentID": doc.DocumentID,
+			"Fields":     doc.Fields,
+			"CreatedAt":  doc.CreatedAt,
+			"UpdatedAt":  doc.UpdatedAt,
 		}
 	}
 	convertedBundle["Documents"] = docMap
@@ -1065,7 +1049,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 			for _, doc := range docArray {
 				if docMap, ok := doc.(map[string]interface{}); ok {
 					// Extract document ID
-					docID, ok := docMap["ID"].(string)
+					docID, ok := docMap["DocumentID"].(string)
 					if !ok {
 						continue // Skip documents without valid ID
 					}

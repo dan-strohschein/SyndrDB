@@ -110,7 +110,7 @@ func (hi *HashIndex) searchInBucketChain(bucketPage *BucketPage, documentID stri
 			}
 		}
 
-		currentOverflowPageNum = overflowPage.NextPageNum
+		currentOverflowPageNum = overflowPage.NextOverflowPage
 	}
 
 	return false
@@ -141,6 +141,21 @@ func (hi *HashIndex) addToOverflow(bucketPage *BucketPage, bucketNum uint32, rec
 		hi.pageManager.PutPage(bucketNumberToPageNumber(bucketNum), bucketPage, true)
 		hi.pageManager.PutPage(overflowPageNum, overflowPage, true)
 
+		if err := hi.flushBucketToDisk(bucketNum, bucketPage); err != nil {
+			return fmt.Errorf("failed to persist updated bucket page %d to disk: %w", bucketNum, err)
+		}
+
+		if err := hi.fileManager.WritePage(overflowPageNum, overflowPage); err != nil {
+			return fmt.Errorf("failed to write overflow page %d to disk: %w", overflowPageNum, err)
+		}
+
+		if err := hi.fileManager.Sync(); err != nil {
+			return fmt.Errorf("failed to sync overflow page %d to disk - data integrity cannot be guaranteed: %w", overflowPageNum, err)
+		}
+
+		if err := hi.updateAndPersistMetadata(); err != nil {
+			return fmt.Errorf("failed to update metadata after overflow creation: %w", err)
+		}
 		return nil
 	}
 
@@ -156,9 +171,29 @@ func (hi *HashIndex) addToOverflow(bucketPage *BucketPage, bucketNum uint32, rec
 // Returns:
 //   - error: Any error that occurred
 func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord) error {
+	// Validate parameters following SyndrDB defensive programming practices
+	if startPageNum == 0 {
+		return fmt.Errorf("invalid start page number: 0")
+	}
+
+	if record == nil {
+		return fmt.Errorf("record cannot be nil")
+	}
+
+	if hi.fileManager == nil {
+		return fmt.Errorf("file manager is nil, cannot persist overflow chain changes")
+	}
+
 	currentPageNum := startPageNum
+	visitedPages := make(map[uint32]bool) // Prevent infinite loops
 
 	for {
+
+		if visitedPages[currentPageNum] {
+			return fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
+		}
+		visitedPages[currentPageNum] = true
+
 		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
 		if err != nil {
 			return fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
@@ -170,11 +205,25 @@ func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord
 		if overflowPage.CanFitRecord(record) {
 			overflowPage.AddRecord(record)
 			hi.pageManager.PutPage(currentPageNum, overflowPage, true)
+
+			if err := hi.fileManager.WritePage(currentPageNum, overflowPage); err != nil {
+				return fmt.Errorf("failed to write updated overflow page %d to disk: %w", currentPageNum, err)
+			}
+
+			// CRITICAL: Sync changes to ensure durability (following ACID compliance)
+			if err := hi.fileManager.Sync(); err != nil {
+				return fmt.Errorf("failed to sync overflow page %d to disk - data integrity cannot be guaranteed: %w", currentPageNum, err)
+			}
+
+			// Update metadata to reflect the new document
+			if err := hi.updateAndPersistMetadata(); err != nil {
+				return fmt.Errorf("failed to update metadata after overflow chain insertion: %w", err)
+			}
 			return nil
 		}
 
 		// Move to next page or create new one
-		if overflowPage.NextPageNum == 0 {
+		if overflowPage.NextOverflowPage == 0 {
 			// Create new overflow page
 			newPageNum, err := hi.allocateNewPage()
 			if err != nil {
@@ -184,16 +233,32 @@ func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord
 			newOverflowPage := NewOverflowPage(newPageNum, hi.metadata.PageSize)
 			newOverflowPage.AddRecord(record)
 
-			overflowPage.NextPageNum = newPageNum
+			overflowPage.NextOverflowPage = newPageNum
 
 			// Write both pages
 			hi.pageManager.PutPage(currentPageNum, overflowPage, true)
 			hi.pageManager.PutPage(newPageNum, newOverflowPage, true)
 
+			if err := hi.fileManager.WritePage(currentPageNum, overflowPage); err != nil {
+				return fmt.Errorf("failed to write updated overflow page %d to disk: %w", currentPageNum, err)
+			}
+
+			if err := hi.fileManager.WritePage(newPageNum, newOverflowPage); err != nil {
+				return fmt.Errorf("failed to write new overflow page %d to disk: %w", newPageNum, err)
+			}
+
+			if err := hi.fileManager.Sync(); err != nil {
+				return fmt.Errorf("failed to sync overflow pages to disk - data integrity cannot be guaranteed: %w", err)
+			}
+
+			if err := hi.updateAndPersistMetadata(); err != nil {
+				return fmt.Errorf("failed to update metadata after new overflow page creation: %w", err)
+			}
+
 			return nil
 		}
 
-		currentPageNum = overflowPage.NextPageNum
+		currentPageNum = overflowPage.NextOverflowPage
 	}
 }
 
@@ -256,7 +321,7 @@ func (hi *HashIndex) removeFromOverflowChain(startPageNum uint32, documentID str
 			}
 		}
 
-		currentPageNum = overflowPage.NextPageNum
+		currentPageNum = overflowPage.NextOverflowPage
 	}
 
 	return false, nil
@@ -267,11 +332,96 @@ func (hi *HashIndex) removeFromOverflowChain(startPageNum uint32, documentID str
 //   - uint32: The new page number
 //   - error: Any error that occurred
 func (hi *HashIndex) allocateNewPage() (uint32, error) {
-	// Simple allocation strategy: use next available page number
-	// In a production system, this would track free pages
+	hi.logger.Debugf("ENTER allocateNewPage: current NextPageNum=%d", hi.metadata.NextPageNum)
 
+	// Validate metadata following SyndrDB defensive programming practices
+	if hi.metadata == nil {
+		return 0, fmt.Errorf("metadata is nil, cannot allocate page")
+	}
+
+	if hi.fileManager == nil {
+		return 0, fmt.Errorf("file manager is nil, cannot persist allocation")
+	}
+
+	// CRITICAL: Validate NextPageNum is reasonable following SyndrDB data integrity requirements
+	expectedMinimum := hi.metadata.BucketCount + 1 // Should be at least after all bucket pages
+	if hi.metadata.NextPageNum < expectedMinimum {
+		hi.metadata.NextPageNum = expectedMinimum
+	}
+
+	// Check if we have free pages to reuse (following efficient storage practices)
+	if len(hi.metadata.FreePageList) > 0 {
+		// Reuse a free page
+		pageNum := hi.metadata.FreePageList[0]
+		hi.metadata.FreePageList = hi.metadata.FreePageList[1:]
+		hi.logger.Debugf("Reusing free page %d from free page list", pageNum)
+
+		// CRITICAL: Persist the updated free page list immediately
+		if err := hi.updateMetadataOnDisk(); err != nil {
+			// Rollback the free page list change
+			hi.metadata.FreePageList = append([]uint32{pageNum}, hi.metadata.FreePageList...)
+			hi.logger.Errorf("FAILED to persist free page list update, rolled back: %v", err)
+			return 0, fmt.Errorf("failed to persist free page list update: %w", err)
+		}
+
+		hi.logger.Debugf("Successfully reused and persisted free page %d", pageNum)
+		return pageNum, nil
+	}
+
+	// Store the current NextPageNum before incrementing (for rollback purposes)
+	originalNextPageNum := hi.metadata.NextPageNum
+
+	// Allocate new page number - this should be consecutive and valid
+	newPageNum := hi.metadata.NextPageNum
 	hi.metadata.NextPageNum++
-	return hi.metadata.NextPageNum, nil
+
+	hi.logger.Debugf("Allocated new page %d, incremented NextPageNum from %d to %d",
+		newPageNum, originalNextPageNum, hi.metadata.NextPageNum)
+
+	// CRITICAL: Immediately persist the updated NextPageNum to prevent desynchronization
+	// Following SyndrDB ACID compliance requirements - metadata changes must be durable
+	if err := hi.updateMetadataOnDisk(); err != nil {
+		// Rollback the NextPageNum increment
+		hi.metadata.NextPageNum = originalNextPageNum
+		hi.logger.Errorf("FAILED to persist NextPageNum update, rolled back from %d to %d: %v",
+			hi.metadata.NextPageNum+1, originalNextPageNum, err)
+		return 0, fmt.Errorf("failed to persist page allocation metadata: %w", err)
+	}
+
+	hi.logger.Debugf("Successfully allocated and persisted page %d, NextPageNum now %d",
+		newPageNum, hi.metadata.NextPageNum)
+	return newPageNum, nil
+}
+
+// updateMetadataOnDisk immediately writes metadata changes to disk
+// This function follows the Single Responsibility Principle by handling only metadata disk persistence
+// Returns:
+//   - error: Any error that occurred during persistence
+func (hi *HashIndex) updateMetadataOnDisk() error {
+	hi.logger.Debugf("ENTER updateMetadataOnDisk: NextPageNum=%d, DocumentCount=%d",
+		hi.metadata.NextPageNum, hi.metadata.DocumentCount)
+
+	// Validate components following SyndrDB defensive programming practices
+	if hi.fileManager == nil {
+		return fmt.Errorf("file manager is nil, cannot persist metadata")
+	}
+
+	if hi.metadata == nil {
+		return fmt.Errorf("metadata is nil, cannot persist")
+	}
+
+	// Write metadata to disk (page 0)
+	if err := hi.fileManager.WriteMetadata(hi.metadata); err != nil {
+		return fmt.Errorf("failed to write metadata to disk: %w", err)
+	}
+
+	// CRITICAL: Sync changes to ensure durability following SyndrDB ACID compliance
+	if err := hi.fileManager.Sync(); err != nil {
+		return fmt.Errorf("failed to sync metadata to disk - data integrity cannot be guaranteed: %w", err)
+	}
+
+	hi.logger.Debugf("Successfully persisted metadata to disk")
+	return nil
 }
 
 // VerifyIndex performs integrity checks on the hash index
@@ -407,7 +557,7 @@ func (hi *HashIndex) verifyOverflowChain(startPageNum uint32, bucketNum uint32) 
 			}
 		}
 
-		currentPageNum = overflowPage.NextPageNum
+		currentPageNum = overflowPage.NextOverflowPage
 	}
 
 	return recordCount, nil

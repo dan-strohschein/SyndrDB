@@ -117,6 +117,8 @@ type BucketManager struct {
 	pageManager *PageManager
 	fileManager *FileManager
 	logger      *zap.SugaredLogger
+	metadata    *HashIndexMetadata
+	storage     *HashIndexStorage
 }
 
 // NewBucketManager creates a new bucket manager instance
@@ -127,12 +129,30 @@ type BucketManager struct {
 //
 // Returns:
 //   - *BucketManager: The bucket manager instance
-func NewBucketManager(pageManager *PageManager, fileManager *FileManager, logger *zap.SugaredLogger) *BucketManager {
+func NewBucketManager(storage *HashIndexStorage, pageManager *PageManager, fileManager *FileManager, metadata *HashIndexMetadata, logger *zap.SugaredLogger) (*BucketManager, error) {
+	if storage == nil {
+		return nil, fmt.Errorf("storage manager cannot be nil")
+	}
+
+	if pageManager == nil {
+		return nil, fmt.Errorf("page manager cannot be nil")
+	}
+
+	if metadata == nil {
+		return nil, fmt.Errorf("metadata cannot be nil")
+	}
+
+	if logger == nil {
+		return nil, fmt.Errorf("logger cannot be nil")
+	}
+
 	return &BucketManager{
 		pageManager: pageManager,
 		fileManager: fileManager,
+		storage:     storage,
+		metadata:    metadata,
 		logger:      logger,
-	}
+	}, nil
 }
 
 // GetBucket retrieves a bucket by its bucket number
@@ -149,9 +169,11 @@ func (bm *BucketManager) GetBucket(bucketNum uint32) (*BucketPage, error) {
 	pageNum := bucketNumberToPageNumber(bucketNum)
 
 	// Try to get from cache first, then load from file
-	pageData, err := bm.pageManager.GetPage(pageNum, bm.fileManager.ReadPage)
+	pageData, err := bm.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return bm.fileManager.ReadPage(pn)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load bucket %d (page %d): %w", bucketNum, pageNum, err)
+		return nil, fmt.Errorf("failed to load bucket page %d: %w", pageNum, err)
 	}
 
 	// Type assert to BucketPage
@@ -301,7 +323,7 @@ func (bm *BucketManager) countOverflowRecords(startPageNum uint32) (uint32, erro
 		}
 
 		totalRecords += uint32(len(overflowPage.Records))
-		currentPageNum = overflowPage.NextPageNum
+		currentPageNum = overflowPage.NextOverflowPage
 	}
 
 	return totalRecords, nil
