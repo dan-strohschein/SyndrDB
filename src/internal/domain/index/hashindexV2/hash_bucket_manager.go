@@ -187,8 +187,79 @@ func (bm *BucketManager) GetBucket(bucketNum uint32) (*BucketPage, error) {
 		return nil, fmt.Errorf("bucket number mismatch: expected %d, got %d", bucketNum, bucketPage.BucketNumber)
 	}
 
+	// CRITICAL FIX: Recalculate free space after loading from disk
+	// Following SyndrDB data integrity requirements, ensure accurate capacity tracking
+	originalFreeSpace := bucketPage.FreeSpace
+	bm.recalculateFreeSpace(bucketPage)
+
+	if originalFreeSpace != bucketPage.FreeSpace {
+		bm.logger.Debugf("Free space recalculated for bucket %d: %d -> %d",
+			bucketNum, originalFreeSpace, bucketPage.FreeSpace)
+
+		// Mark as dirty so the corrected free space gets written back
+		bm.pageManager.PutPage(pageNum, bucketPage, true)
+	}
+
 	bm.logger.Debugf("Successfully retrieved bucket %d with %d records", bucketNum, len(bucketPage.Records))
 	return bucketPage, nil
+}
+
+// recalculateFreeSpace calculates the correct free space for a bucket page
+// This function follows the Single Responsibility Principle by handling only free space calculation
+// Following SyndrDB comprehensive error handling, it ensures accurate capacity calculations
+// Parameters:
+//   - bucketPage: The bucket page to recalculate free space for
+func (bm *BucketManager) recalculateFreeSpace(bucketPage *BucketPage) {
+	if bucketPage == nil {
+		bm.logger.Errorf("Cannot recalculate free space for nil bucket page")
+		return
+	}
+
+	// Calculate the space used by the bucket page header
+	// This should match the actual serialization format
+	headerSize := bm.calculateBucketHeaderSize()
+
+	// Calculate space used by records
+	recordsSize := uint32(0)
+	for _, record := range bucketPage.Records {
+		if record != nil {
+			recordsSize += record.Size()
+		}
+	}
+
+	// Calculate total used space
+	totalUsedSpace := headerSize + recordsSize
+
+	// Calculate free space
+	if totalUsedSpace > bm.metadata.PageSize {
+		bm.logger.Errorf("Used space %d exceeds page size %d for bucket %d",
+			totalUsedSpace, bm.metadata.PageSize, bucketPage.BucketNumber)
+		bucketPage.FreeSpace = 0
+	} else {
+		bucketPage.FreeSpace = bm.metadata.PageSize - totalUsedSpace
+	}
+
+	bm.logger.Debugf("Recalculated free space for bucket %d: header=%d, records=%d, total_used=%d, free=%d",
+		bucketPage.BucketNumber, headerSize, recordsSize, totalUsedSpace, bucketPage.FreeSpace)
+}
+
+// calculateBucketHeaderSize calculates the size of the bucket page header
+// This function follows the Single Responsibility Principle by handling only header size calculation
+// Following SyndrDB comprehensive error handling, it provides accurate header size estimation
+// Returns:
+//   - uint32: The estimated header size in bytes
+func (bm *BucketManager) calculateBucketHeaderSize() uint32 {
+	// BucketPage structure fields (this should match the actual serialization):
+	// - PageNumber: 4 bytes (uint32)
+	// - BucketNumber: 4 bytes (uint32)
+	// - RecordCount: 4 bytes (uint32)
+	// - FreeSpace: 4 bytes (uint32)
+	// - OverflowPageNum: 4 bytes (uint32)
+	// - LastModified: 8 bytes (time.Time as int64)
+	// - Records slice header: 24 bytes (slice header in Go)
+	// - Padding/alignment: ~16 bytes (conservative estimate)
+
+	return 68 // Conservative estimate for bucket page header
 }
 
 // CreateBucket creates a new empty bucket
@@ -204,6 +275,10 @@ func (bm *BucketManager) CreateBucket(bucketNum uint32, pageSize uint32) (*Bucke
 
 	// Create new bucket page
 	bucketPage := NewBucketPage(bucketNum, pageSize)
+
+	// CRITICAL: Properly initialize free space for new buckets
+	// Following SyndrDB data integrity requirements, ensure accurate capacity from start
+	bm.recalculateFreeSpace(bucketPage)
 
 	// Convert bucket number to page number
 	pageNum := bucketNumberToPageNumber(bucketNum)
@@ -228,6 +303,14 @@ func (bm *BucketManager) CreateBucket(bucketNum uint32, pageSize uint32) (*Bucke
 //   - error: Any error that occurred during update
 func (bm *BucketManager) UpdateBucket(bucketPage *BucketPage) error {
 	bm.logger.Debugf("Updating bucket %d", bucketPage.BucketNumber)
+
+	if bucketPage == nil {
+		return fmt.Errorf("bucket page cannot be nil")
+	}
+
+	// CRITICAL: Properly initialize free space for new buckets
+	// Following SyndrDB data integrity requirements, ensure accurate capacity from start
+	bm.recalculateFreeSpace(bucketPage)
 
 	// Convert bucket number to page number
 	pageNum := bucketNumberToPageNumber(bucketPage.BucketNumber)
@@ -343,4 +426,40 @@ type BucketStats struct {
 func (bs *BucketStats) String() string {
 	return fmt.Sprintf("BucketStats{Bucket: %d, Records: %d, FreeSpace: %d, Overflow: %t, OverflowRecords: %d}",
 		bs.BucketNumber, bs.RecordCount, bs.FreeSpace, bs.HasOverflow, bs.OverflowRecords)
+}
+
+// ValidateAllBucketFreeSpace validates and fixes free space for all buckets
+// This function follows the Single Responsibility Principle by handling only free space validation
+// Following SyndrDB comprehensive error handling, it ensures system-wide free space accuracy
+// Returns:
+//   - error: Any error that occurred during validation
+func (bm *BucketManager) ValidateAllBucketFreeSpace() error {
+	bm.logger.Infof("Validating free space for all %d buckets", bm.metadata.BucketCount)
+
+	fixedBuckets := 0
+	for bucketNum := uint32(0); bucketNum < bm.metadata.BucketCount; bucketNum++ {
+		bucketPage, err := bm.GetBucket(bucketNum)
+		if err != nil {
+			bm.logger.Warnf("Failed to load bucket %d for validation: %v", bucketNum, err)
+			continue
+		}
+
+		originalFreeSpace := bucketPage.FreeSpace
+		bm.recalculateFreeSpace(bucketPage)
+
+		if originalFreeSpace != bucketPage.FreeSpace {
+			bm.logger.Infof("Fixed free space for bucket %d: %d -> %d",
+				bucketNum, originalFreeSpace, bucketPage.FreeSpace)
+
+			// Update the bucket to persist the fix
+			if err := bm.UpdateBucket(bucketPage); err != nil {
+				bm.logger.Errorf("Failed to update bucket %d after free space fix: %v", bucketNum, err)
+			} else {
+				fixedBuckets++
+			}
+		}
+	}
+
+	bm.logger.Infof("Free space validation completed: fixed %d buckets", fixedBuckets)
+	return nil
 }

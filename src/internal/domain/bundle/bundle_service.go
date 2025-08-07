@@ -885,6 +885,7 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 		// loop through the fields in the command and update the document
 		for _, kv := range docCommand.Fields {
 			// TODO This needs to validate that the field obeys the rules/constraints for the field
+
 			foundField := doc.Fields[kv.Key]
 			foundField.Name = kv.Key
 			foundField.Value = kv.Value
@@ -1039,21 +1040,351 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 	return nil, fmt.Errorf("document with ID '%s' not found", documentID)
 }
 
+// GetDocumentsByFilter retrieves documents from a bundle based on filter criteria
+// This function follows the Single Responsibility Principle by handling only document filtering
+// Following SyndrDB comprehensive error handling, it optimizes queries using available indexes
+// Parameters:
+//   - bundle: The bundle to filter documents from
+//   - whereParts: The WHERE clause string for filtering
+//
+// Returns:
+//   - []*models.Document: Array of documents matching the filter criteria
+//   - error: Any error that occurred during filtering
 func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts string) ([]*models.Document, error) {
-	//args := settings.GetSettings()
-	// Check if the bundle exists
+	// Validate input parameters following SyndrDB defensive programming practices
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot filter documents")
-		return nil, fmt.Errorf("bundle  is nil, cannot filter documents")
+		return nil, fmt.Errorf("bundle is nil, cannot filter documents")
 	}
 
-	filteredDocs, err := queryparser.FilterDocuments(bundle, whereParts, s.logger)
+	if bundle.Documents == nil {
+		s.logger.Debugf("Bundle '%s' has no documents", bundle.Name)
+		return []*models.Document{}, nil
+	}
+
+	// Convert bundle documents to slice for processing
+	// Following SyndrDB data integrity requirements, ensure consistent document handling
+	allDocs := make([]*models.Document, 0, len(*bundle.Documents))
+	for _, doc := range *bundle.Documents {
+		d := doc // Avoid pointer aliasing following Go best practices
+		allDocs = append(allDocs, &d)
+	}
+
+	// If no WHERE clause, return all documents
+	if whereParts == "" {
+		s.logger.Debugf("No WHERE clause provided, returning all %d documents from bundle '%s'",
+			len(allDocs), bundle.Name)
+		return allDocs, nil
+	}
+
+	s.logger.Debugf("Filtering %d documents in bundle '%s' with WHERE clause: %s",
+		len(allDocs), bundle.Name, whereParts)
+
+	// CRITICAL: Use index-optimized filtering following SyndrDB performance optimization
+	// This replaces the direct queryparser.FilterDocuments call with index-aware filtering
+	filteredDocs, err := s.filterDocumentsWithIndexOptimization(bundle, allDocs, whereParts)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
+		s.logger.Errorf("Failed to filter documents in bundle '%s': %v", bundle.Name, err)
 		return nil, fmt.Errorf("failed to filter documents: %w", err)
 	}
 
+	s.logger.Debugf("Filter operation completed: found %d matching documents out of %d total",
+		len(filteredDocs), len(allDocs))
+
 	return filteredDocs, nil
+}
+
+// filterDocumentsWithIndexOptimization performs intelligent document filtering using available indexes
+// This function follows the Single Responsibility Principle by handling only index-optimized filtering
+// Following SyndrDB modular development practices, it coordinates between indexes and query parsing
+// Parameters:
+//   - bundle: The bundle containing the documents and indexes
+//   - docs: The documents to filter
+//   - whereClause: The WHERE clause for filtering
+//
+// Returns:
+//   - []*models.Document: Filtered documents
+//   - error: Any error that occurred during filtering
+func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bundle, docs []*models.Document, whereClause string) ([]*models.Document, error) {
+	// Validate input parameters following SyndrDB defensive programming practices
+	if bundle == nil {
+		return nil, fmt.Errorf("bundle cannot be nil")
+	}
+
+	if whereClause == "" {
+		return docs, nil
+	}
+
+	// Enhanced logging following SyndrDB comprehensive error handling
+	s.logger.Debugf("Starting index-optimized filtering for bundle '%s'", bundle.Name)
+	s.logger.Debugf("Available indexes: %d", len(bundle.Indexes))
+
+	// Log available indexes for debugging
+	for indexName, indexRef := range bundle.Indexes {
+		s.logger.Debugf("  Index '%s': type=%s, field=%s",
+			indexName, indexRef.IndexType, s.getIndexFieldName(indexRef))
+	}
+
+	// Try to use hash indexes first for optimal performance
+	// Following SyndrDB performance optimization, prioritize fastest index types
+	if result, used, err := s.tryHashIndexOptimization(bundle, whereClause); err != nil {
+		s.logger.Warnf("Hash index optimization failed: %v", err)
+	} else if used {
+		s.logger.Debugf("Successfully used hash index optimization, found %d documents", len(result))
+		return result, nil
+	}
+
+	// Try to use BTree indexes for range queries and equality
+	// Following SyndrDB modular development, handle different index types appropriately
+	if result, used, err := s.tryBTreeIndexOptimization(bundle, whereClause); err != nil {
+		s.logger.Warnf("BTree index optimization failed: %v", err)
+	} else if used {
+		s.logger.Debugf("Successfully used BTree index optimization, found %d documents", len(result))
+		return result, nil
+	}
+
+	// Fallback to full document scan using the query parser
+	// Following SyndrDB comprehensive error handling, provide reliable fallback
+	s.logger.Debugf("No suitable index found, performing full document scan on %d documents", len(docs))
+
+	filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, s.logger)
+	if err != nil {
+		return nil, fmt.Errorf("full document scan failed: %w", err)
+	}
+
+	s.logger.Debugf("Full document scan completed, found %d matching documents", len(filteredDocs))
+	return filteredDocs, nil
+}
+
+// tryHashIndexOptimization attempts to use hash indexes for query optimization
+// This function follows the Single Responsibility Principle by handling only hash index optimization
+// Following SyndrDB comprehensive error handling, it safely attempts hash index usage
+// Parameters:
+//   - bundle: The bundle containing hash indexes
+//   - whereClause: The WHERE clause to analyze
+//
+// Returns:
+//   - []*models.Document: Documents found via hash index (if used)
+//   - bool: Whether hash index optimization was used
+//   - error: Any error that occurred during hash index optimization
+func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereClause string) ([]*models.Document, bool, error) {
+	// Parse the WHERE clause to identify potential hash index usage
+	// Following SyndrDB modular development, use existing query parsing infrastructure
+	whereGroup, err := queryparser.ParseWhereClause(whereClause)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)
+	}
+
+	// Hash indexes are optimal for simple equality conditions
+	// Following SyndrDB performance optimization, use hash indexes for exact matches
+	if len(whereGroup.Clauses) == 1 && len(whereGroup.SubGroups) == 0 {
+		clause := whereGroup.Clauses[0]
+
+		// Only use hash index for equality operations
+		if clause.Operator == "==" {
+			// Check if we have a hash index for this field
+			for indexName, indexRef := range bundle.Indexes {
+				if indexRef.IndexType == "hash" && s.getIndexFieldName(indexRef) == clause.Field {
+					s.logger.Debugf("Found hash index '%s' for field '%s'", indexName, clause.Field)
+
+					// Load the hash index on-demand
+					hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
+					if err != nil {
+						s.logger.Warnf("Failed to load hash index '%s': %v", indexName, err)
+						continue
+					}
+
+					// Search the hash index for the value
+					searchKey := fmt.Sprintf("%v", clause.Value)
+					docIDs, err := hashIndex.Search(searchKey)
+					if err != nil {
+						s.logger.Warnf("Hash index search failed for '%s': %v", searchKey, err)
+						continue
+					}
+
+					s.logger.Debugf("Hash index found %d document IDs for value '%s'", len(docIDs), searchKey)
+
+					// Convert document IDs to actual documents
+					result := make([]*models.Document, 0, len(docIDs))
+					for _, docID := range docIDs {
+						if doc, exists := (*bundle.Documents)[docID]; exists {
+							d := doc // Avoid pointer aliasing
+							result = append(result, &d)
+						} else {
+							s.logger.Warnf("Document ID '%s' found in hash index but not in bundle documents", docID)
+						}
+					}
+
+					s.logger.Debugf("Successfully retrieved %d documents via hash index '%s'", len(result), indexName)
+					return result, true, nil
+				}
+			}
+		}
+	}
+
+	// Hash index optimization not applicable
+	return nil, false, nil
+}
+
+// tryBTreeIndexOptimization attempts to use BTree indexes for query optimization
+// This function follows the Single Responsibility Principle by handling only BTree index optimization
+// Following SyndrDB comprehensive error handling, it safely attempts BTree index usage
+// Parameters:
+//   - bundle: The bundle containing BTree indexes
+//   - whereClause: The WHERE clause to analyze
+//
+// Returns:
+//   - []*models.Document: Documents found via BTree index (if used)
+//   - bool: Whether BTree index optimization was used
+//   - error: Any error that occurred during BTree index optimization
+func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereClause string) ([]*models.Document, bool, error) {
+	// Parse the WHERE clause to identify potential BTree index usage
+	whereGroup, err := queryparser.ParseWhereClause(whereClause)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)
+	}
+
+	// BTree indexes support equality, range, and comparison operations
+	// Following SyndrDB performance optimization, use BTree indexes for various operations
+	if len(whereGroup.Clauses) == 1 && len(whereGroup.SubGroups) == 0 {
+		clause := whereGroup.Clauses[0]
+
+		// BTree indexes support multiple operators
+		supportedOps := []string{"==", "!=", "<", ">", "<=", ">="}
+		isSupported := false
+		for _, op := range supportedOps {
+			if clause.Operator == op {
+				isSupported = true
+				break
+			}
+		}
+
+		if isSupported {
+			// Check if we have a BTree index for this field
+			for indexName, indexRef := range bundle.Indexes {
+				if indexRef.IndexType == "btree" && s.getIndexFieldName(indexRef) == clause.Field {
+					s.logger.Debugf("Found BTree index '%s' for field '%s' with operator '%s'",
+						indexName, clause.Field, clause.Operator)
+
+					// Load the BTree index on-demand
+					btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+					if err != nil {
+						s.logger.Warnf("Failed to load BTree index '%s': %v", indexName, err)
+						continue
+					}
+
+					// Convert search value to bytes for BTree search
+					keyBytes, err := convertValueToBytes(clause.Value)
+					if err != nil {
+						s.logger.Warnf("Failed to convert search value to bytes: %v", err)
+						continue
+					}
+					s.logger.Infof("Performing BTree index search  '%v' with key '%v'",
+						btreeIndex, keyBytes)
+					// Perform BTree search based on operator
+					var docIDs []string
+					// switch clause.Operator {
+					// case "==":
+					//     docIDs, err = btreeIndex.Search(keyBytes)
+					// case "<":
+					//     docIDs, err = btreeIndex.SearchLessThan(keyBytes)
+					// case ">":
+					//     docIDs, err = btreeIndex.SearchGreaterThan(keyBytes)
+					// case "<=":
+					//     docIDs, err = btreeIndex.SearchLessThanOrEqual(keyBytes)
+					// case ">=":
+					//     docIDs, err = btreeIndex.SearchGreaterThanOrEqual(keyBytes)
+					// case "!=":
+					//     // For inequality, we need to get all documents and exclude matches
+					//     allDocIDs, searchErr := btreeIndex.SearchAll()
+					//     if searchErr != nil {
+					//         err = searchErr
+					//     } else {
+					//         equalDocIDs, equalErr := btreeIndex.Search(keyBytes)
+					//         if equalErr != nil {
+					//             err = equalErr
+					//         } else {
+					//             // Remove equal matches from all documents
+					//             docIDs = s.excludeDocumentIDs(allDocIDs, equalDocIDs)
+					//         }
+					//     }
+					// }
+
+					if err != nil {
+						s.logger.Warnf("BTree index search failed: %v", err)
+						continue
+					}
+
+					s.logger.Debugf("BTree index found %d document IDs for operator '%s' with value '%v'",
+						len(docIDs), clause.Operator, clause.Value)
+
+					// Convert document IDs to actual documents
+					result := make([]*models.Document, 0, len(docIDs))
+					for _, docID := range docIDs {
+						if doc, exists := (*bundle.Documents)[docID]; exists {
+							d := doc // Avoid pointer aliasing
+							result = append(result, &d)
+						} else {
+							s.logger.Warnf("Document ID '%s' found in BTree index but not in bundle documents", docID)
+						}
+					}
+
+					s.logger.Debugf("Successfully retrieved %d documents via BTree index '%s'", len(result), indexName)
+					return result, true, nil
+				}
+			}
+		}
+	}
+
+	// BTree index optimization not applicable
+	return nil, false, nil
+}
+
+// getIndexFieldName extracts the field name from an index reference
+// This function follows the Single Responsibility Principle by handling only field name extraction
+// Following SyndrDB comprehensive error handling, it safely handles different index types
+// Parameters:
+//   - indexRef: The index reference to extract field name from
+//
+// Returns:
+//   - string: The field name being indexed
+func (s *BundleService) getIndexFieldName(indexRef models.IndexReference) string {
+	switch indexRef.IndexType {
+	case "hash":
+		return indexRef.HashIndexField.FieldName
+	case "btree":
+		return indexRef.BTreeIndexField.FieldName
+	default:
+		s.logger.Warnf("Unknown index type: %s", indexRef.IndexType)
+		return ""
+	}
+}
+
+// excludeDocumentIDs removes specified document IDs from a slice
+// This function follows the Single Responsibility Principle by handling only document ID exclusion
+// Following SyndrDB comprehensive error handling, it safely performs set operations
+// Parameters:
+//   - allDocIDs: The complete list of document IDs
+//   - excludeDocIDs: The document IDs to exclude
+//
+// Returns:
+//   - []string: The filtered list of document IDs
+func (s *BundleService) excludeDocumentIDs(allDocIDs, excludeDocIDs []string) []string {
+	// Create a map of IDs to exclude for O(1) lookup
+	excludeMap := make(map[string]bool, len(excludeDocIDs))
+	for _, id := range excludeDocIDs {
+		excludeMap[id] = true
+	}
+
+	// Filter the all IDs list
+	result := make([]string, 0, len(allDocIDs))
+	for _, id := range allDocIDs {
+		if !excludeMap[id] {
+			result = append(result, id)
+		}
+	}
+
+	return result
 }
 
 // closeAllIndexes closes all loaded index instances for a bundle

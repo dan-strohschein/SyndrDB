@@ -56,6 +56,7 @@ func (hi *HashIndex) insertIntoBucket(bucketNum uint32, record *IndexRecord) err
 		return fmt.Errorf("failed to get bucket %d: %w", bucketNum, err)
 	}
 
+	hi.logger.Infof("DEBUG DEBUG DEBUG || Bucket has %d freeSpace", bucketPage.FreeSpace)
 	// Check if bucket can fit the record
 	if !bucketPage.CanFitRecord(record) {
 
@@ -166,7 +167,7 @@ func (hi *HashIndex) updateAndPersistMetadata() error {
 	// CRITICAL: Validate NextPageNum consistency following SyndrDB data integrity requirements
 	expectedMinimum := hi.metadata.BucketCount + 1
 	if hi.metadata.NextPageNum < expectedMinimum {
-		hi.logger.Errorf("CRITICAL: NextPageNum %d is invalid, correcting to %d",
+		hi.logger.Infof("CRITICAL: NextPageNum %d is invalid, correcting to %d",
 			hi.metadata.NextPageNum, expectedMinimum)
 		hi.metadata.NextPageNum = expectedMinimum
 	}

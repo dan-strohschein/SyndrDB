@@ -116,15 +116,36 @@ func (hi *HashIndex) searchInBucketChain(bucketPage *BucketPage, documentID stri
 	return false
 }
 
-// addToOverflow adds a record to the overflow chain of a bucket
+// addToOverflow adds a record to the overflow chain of a bucket with enhanced validation
+// This function follows the Single Responsibility Principle by handling only bucket overflow operations
+// Following SyndrDB comprehensive error handling, it prevents duplicate records and maintains data integrity
 // Parameters:
 //   - bucketPage: The bucket page
 //   - bucketNum: The bucket number
 //   - record: The record to add
 //
 // Returns:
-//   - error: Any error that occurred
+//   - error: Any error that occurred during overflow addition
 func (hi *HashIndex) addToOverflow(bucketPage *BucketPage, bucketNum uint32, record *IndexRecord) error {
+	// Validate parameters following SyndrDB defensive programming practices
+	if bucketPage == nil {
+		return fmt.Errorf("bucket page cannot be nil")
+	}
+
+	if record == nil {
+		return fmt.Errorf("record cannot be nil")
+	}
+
+	hi.logger.Debugf("Adding record to overflow for bucket %d: DocumentID=%s", bucketNum, record.DocumentID)
+
+	// CRITICAL: Check if record already exists in the bucket before adding to overflow
+	// Following SyndrDB data integrity requirements
+	for _, existingRecord := range bucketPage.Records {
+		if existingRecord != nil && existingRecord.DocumentID == record.DocumentID {
+			return fmt.Errorf("duplicate record: DocumentID %s already exists in bucket %d", record.DocumentID, bucketNum)
+		}
+	}
+
 	if bucketPage.OverflowPageNum == 0 {
 		// Create first overflow page
 		overflowPageNum, err := hi.allocateNewPage()
@@ -132,12 +153,15 @@ func (hi *HashIndex) addToOverflow(bucketPage *BucketPage, bucketNum uint32, rec
 			return fmt.Errorf("failed to allocate overflow page: %w", err)
 		}
 
+		hi.logger.Debugf("Creating first overflow page %d for bucket %d", overflowPageNum, bucketNum)
+
 		overflowPage := NewOverflowPage(overflowPageNum, hi.metadata.PageSize)
+		overflowPage.ParentBucket = bucketNum
 		overflowPage.AddRecord(record)
 
 		bucketPage.OverflowPageNum = overflowPageNum
 
-		// Write pages
+		// Write pages following SyndrDB ACID compliance
 		hi.pageManager.PutPage(bucketNumberToPageNumber(bucketNum), bucketPage, true)
 		hi.pageManager.PutPage(overflowPageNum, overflowPage, true)
 
@@ -153,23 +177,23 @@ func (hi *HashIndex) addToOverflow(bucketPage *BucketPage, bucketNum uint32, rec
 			return fmt.Errorf("failed to sync overflow page %d to disk - data integrity cannot be guaranteed: %w", overflowPageNum, err)
 		}
 
-		if err := hi.updateAndPersistMetadata(); err != nil {
-			return fmt.Errorf("failed to update metadata after overflow creation: %w", err)
-		}
+		hi.logger.Debugf("Successfully created first overflow page %d for bucket %d", overflowPageNum, bucketNum)
 		return nil
 	}
 
-	// Find the last overflow page with space or create a new one
+	// Add to existing overflow chain with duplicate detection
 	return hi.addToOverflowChain(bucketPage.OverflowPageNum, record)
 }
 
-// addToOverflowChain adds a record to an overflow chain
+// addToOverflowChain adds a record to an overflow chain with duplicate detection
+// This function follows the Single Responsibility Principle by handling only overflow chain insertion
+// Following SyndrDB comprehensive error handling, it prevents duplicate records and maintains chain integrity
 // Parameters:
 //   - startPageNum: The first overflow page number
 //   - record: The record to add
 //
 // Returns:
-//   - error: Any error that occurred
+//   - error: Any error that occurred during insertion
 func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord) error {
 	// Validate parameters following SyndrDB defensive programming practices
 	if startPageNum == 0 {
@@ -184,58 +208,83 @@ func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord
 		return fmt.Errorf("file manager is nil, cannot persist overflow chain changes")
 	}
 
+	hi.logger.Debugf("Adding record to overflow chain starting at page %d: DocumentID=%s, HashValue=%d",
+		startPageNum, record.DocumentID, record.HashValue)
+
+	// CRITICAL: Check for duplicate records before adding
+	// Following SyndrDB data integrity requirements, prevent duplicate entries
+	exists, err := hi.recordExistsInOverflowChain(startPageNum, record.DocumentID)
+	if err != nil {
+		return fmt.Errorf("failed to check for duplicate record in overflow chain: %w", err)
+	}
+
+	if exists {
+		hi.logger.Warnf("Record with DocumentID %s already exists in overflow chain starting at page %d",
+			record.DocumentID, startPageNum)
+		return fmt.Errorf("duplicate record: DocumentID %s already exists in overflow chain", record.DocumentID)
+	}
+
 	currentPageNum := startPageNum
 	visitedPages := make(map[uint32]bool) // Prevent infinite loops
 
 	for {
-
+		// Check for cycles following SyndrDB comprehensive error handling
 		if visitedPages[currentPageNum] {
 			return fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
 		}
 		visitedPages[currentPageNum] = true
 
+		// Load current overflow page
 		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
 		if err != nil {
 			return fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
 		}
 
-		overflowPage := overflowPageData.(*OverflowPage)
+		overflowPage, ok := overflowPageData.(*OverflowPage)
+		if !ok {
+			return fmt.Errorf("page %d is not an overflow page, got type %T", currentPageNum, overflowPageData)
+		}
 
-		// Try to add to current page
+		hi.logger.Debugf("Checking overflow page %d: RecordCount=%d, CanFit=%v",
+			currentPageNum, overflowPage.RecordCount, overflowPage.CanFitRecord(record))
+
+		// Try to add to current page if it has space
 		if overflowPage.CanFitRecord(record) {
 			overflowPage.AddRecord(record)
 			hi.pageManager.PutPage(currentPageNum, overflowPage, true)
 
+			// CRITICAL: Persist changes immediately following ACID compliance
 			if err := hi.fileManager.WritePage(currentPageNum, overflowPage); err != nil {
 				return fmt.Errorf("failed to write updated overflow page %d to disk: %w", currentPageNum, err)
 			}
 
-			// CRITICAL: Sync changes to ensure durability (following ACID compliance)
 			if err := hi.fileManager.Sync(); err != nil {
 				return fmt.Errorf("failed to sync overflow page %d to disk - data integrity cannot be guaranteed: %w", currentPageNum, err)
 			}
 
-			// Update metadata to reflect the new document
-			if err := hi.updateAndPersistMetadata(); err != nil {
-				return fmt.Errorf("failed to update metadata after overflow chain insertion: %w", err)
-			}
+			hi.logger.Debugf("Successfully added record to existing overflow page %d", currentPageNum)
 			return nil
 		}
 
-		// Move to next page or create new one
+		// Current page is full, check if there's a next page
 		if overflowPage.NextOverflowPage == 0 {
-			// Create new overflow page
+			// Need to create a new overflow page
 			newPageNum, err := hi.allocateNewPage()
 			if err != nil {
 				return fmt.Errorf("failed to allocate new overflow page: %w", err)
 			}
 
+			hi.logger.Debugf("Creating new overflow page %d for record", newPageNum)
+
+			// Create new overflow page
 			newOverflowPage := NewOverflowPage(newPageNum, hi.metadata.PageSize)
+			newOverflowPage.ParentBucket = overflowPage.ParentBucket
 			newOverflowPage.AddRecord(record)
 
+			// Link the new page to the chain
 			overflowPage.NextOverflowPage = newPageNum
 
-			// Write both pages
+			// Write both pages following SyndrDB ACID compliance
 			hi.pageManager.PutPage(currentPageNum, overflowPage, true)
 			hi.pageManager.PutPage(newPageNum, newOverflowPage, true)
 
@@ -251,15 +300,64 @@ func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord
 				return fmt.Errorf("failed to sync overflow pages to disk - data integrity cannot be guaranteed: %w", err)
 			}
 
-			if err := hi.updateAndPersistMetadata(); err != nil {
-				return fmt.Errorf("failed to update metadata after new overflow page creation: %w", err)
-			}
-
+			hi.logger.Debugf("Successfully created and linked new overflow page %d", newPageNum)
 			return nil
 		}
 
+		// Move to next page in the chain
 		currentPageNum = overflowPage.NextOverflowPage
 	}
+}
+
+// recordExistsInOverflowChain checks if a record already exists in an overflow chain
+// This function follows the Single Responsibility Principle by handling only duplicate detection
+// Following SyndrDB comprehensive error handling, it safely traverses overflow chains
+// Parameters:
+//   - startPageNum: The first overflow page number
+//   - documentID: The document ID to search for
+//
+// Returns:
+//   - bool: Whether the record exists in the chain
+//   - error: Any error that occurred during search
+func (hi *HashIndex) recordExistsInOverflowChain(startPageNum uint32, documentID string) (bool, error) {
+	currentPageNum := startPageNum
+	visitedPages := make(map[uint32]bool)
+
+	hi.logger.Debugf("Checking for existing record with DocumentID %s in overflow chain starting at page %d",
+		documentID, startPageNum)
+
+	for currentPageNum != 0 {
+		// Check for cycles
+		if visitedPages[currentPageNum] {
+			return false, fmt.Errorf("cycle detected in overflow chain at page %d while checking for duplicates", currentPageNum)
+		}
+		visitedPages[currentPageNum] = true
+
+		// Load overflow page
+		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
+		if err != nil {
+			return false, fmt.Errorf("failed to read overflow page %d while checking for duplicates: %w", currentPageNum, err)
+		}
+
+		overflowPage, ok := overflowPageData.(*OverflowPage)
+		if !ok {
+			return false, fmt.Errorf("page %d is not an overflow page while checking for duplicates", currentPageNum)
+		}
+
+		// Check records in this page
+		for _, record := range overflowPage.Records {
+			if record != nil && record.DocumentID == documentID {
+				hi.logger.Debugf("Found existing record with DocumentID %s in overflow page %d", documentID, currentPageNum)
+				return true, nil
+			}
+		}
+
+		// Move to next overflow page
+		currentPageNum = overflowPage.NextOverflowPage
+	}
+
+	hi.logger.Debugf("No existing record found with DocumentID %s in overflow chain", documentID)
+	return false, nil
 }
 
 // removeFromBucketChain removes a document from a bucket chain

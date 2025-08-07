@@ -112,6 +112,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				UPDATE DOCUMENTS IN BUNDLE "BUNDLE_NAME"
 				(<FIELDNAME> = <VALUE>, <FIELDNAME> = <VALUE>, ... )
 			*/
+
 			result1, err := UpdateDocument(commandParts, serviceManager, database, command, logger)
 
 			return result1, err
@@ -140,15 +141,22 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		case "documents":
 			//DELETE DOCUMENTS FROM BUNDLE "BUNDLE_NAME"
 			//WHERE <FIELDNAME> = <VALUE>
-			if len(commandParts) < 5 || !strings.EqualFold(commandParts[2], "FROM") {
-				return nil, fmt.Errorf("DELETE DOCUMENTS requires the spec 'FROM <Bundle_name>'")
+			bundleName, err := parseBundleNameFromCommand(command, "FROM")
+			if err != nil {
+				logger.Errorf("Failed to parse bundle name from SELECT command: %v", err)
+				logger.Debugf("Command was: %s", command)
+				return nil, fmt.Errorf("SELECT DOCUMENTS command parsing failed: %w", err)
 			}
-			bundleName := strings.Trim(commandParts[4], "\"'")
-			bundleName = strings.ReplaceAll(bundleName, "\"", "")
-			bundleName = strings.ReplaceAll(bundleName, "'", "")
-			bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
-			// Get the bundle by name
 
+			// Additional validation following SyndrDB defensive programming practices
+			if bundleName == "" {
+				return nil, fmt.Errorf("bundle name cannot be empty in SELECT DOCUMENTS command")
+			}
+
+			// Additional validation following SyndrDB defensive programming practices
+			if bundleName == "" {
+				return nil, fmt.Errorf("bundle name cannot be empty in UPDATE DOCUMENTS command")
+			}
 			// Parse the document command
 			docCommand, err := bndle.ParseDeleteDocumentCommand(command, logger)
 			if err != nil {
@@ -194,18 +202,34 @@ func AddRelationshipToBundle(serviceManager ServiceManager, database *models.Dat
 }
 
 func UpdateDocument(commandParts []string, serviceManager ServiceManager, database *models.Database, command string, logger *zap.SugaredLogger) (*CommandResponse, error) {
-	if len(commandParts) < 5 || !strings.EqualFold(commandParts[2], "IN") {
-		return nil, fmt.Errorf("UPDATE DOCUMENTS requires the spec 'IN <Bundle_name>'")
+	// if len(commandParts) < 5 || !strings.EqualFold(commandParts[2], "IN") {
+	// 	return nil, fmt.Errorf("UPDATE DOCUMENTS requires the spec 'IN <Bundle_name>'")
+	// }
+	// bundleName := strings.Trim(commandParts[4], "\"'")
+	// bundleName = strings.ReplaceAll(bundleName, "\"", "")
+	// bundleName = strings.ReplaceAll(bundleName, "'", "")
+	// bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
+
+	// Enhanced bundle name parsing following SyndrDB comprehensive error handling
+	// This replaces the fragile index-based parsing with robust string extraction
+	bundleName, err := parseBundleNameFromCommand(command, "IN")
+	if err != nil {
+		logger.Errorf("Failed to parse bundle name from UPDATE command: %v", err)
+		logger.Debugf("Command was: %s", command)
+		return nil, fmt.Errorf("UPDATE DOCUMENTS command parsing failed: %w", err)
 	}
-	bundleName := strings.Trim(commandParts[4], "\"'")
-	bundleName = strings.ReplaceAll(bundleName, "\"", "")
-	bundleName = strings.ReplaceAll(bundleName, "'", "")
-	bundleName = strings.ReplaceAll(bundleName, "”", "") // A very odd type of quote that can appear in text
+
+	// Additional validation following SyndrDB defensive programming practices
+	if bundleName == "" {
+		return nil, fmt.Errorf("bundle name cannot be empty in UPDATE DOCUMENTS command")
+	}
+
 	// Get the bundle by name
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 	}
+
 	// Parse the document command
 	docCommand, err := bndle.ParseUpdateDocumentCommand(command, logger)
 	if err != nil {
@@ -497,4 +521,115 @@ func SelectDatabases(commandParts []string, serviceManager ServiceManager) (*Com
 		return cmdResponse, nil, true
 	}
 	return nil, nil, false
+}
+
+// parseBundleNameFromCommand extracts the bundle name from UPDATE/DELETE commands
+// This function follows the Single Responsibility Principle by handling only bundle name extraction
+// Following SyndrDB comprehensive error handling, it properly handles quoted strings and multi-line commands
+// Parameters:
+//   - command: The full command string to parse
+//   - keyword: The keyword to look for ("IN" for UPDATE, "FROM" for DELETE)
+//
+// Returns:
+//   - string: The extracted bundle name without quotes
+//   - error: Any error that occurred during parsing
+func parseBundleNameFromCommand(command, keyword string) (string, error) {
+	// Normalize the command by removing extra whitespace and newlines
+	// Following SyndrDB data integrity requirements, ensure consistent parsing
+	normalizedCommand := strings.ReplaceAll(command, "\n", " ")
+	normalizedCommand = strings.ReplaceAll(normalizedCommand, "\r", " ")
+	normalizedCommand = strings.ReplaceAll(normalizedCommand, "\t", " ")
+
+	// Collapse multiple spaces into single spaces
+	for strings.Contains(normalizedCommand, "  ") {
+		normalizedCommand = strings.ReplaceAll(normalizedCommand, "  ", " ")
+	}
+	normalizedCommand = strings.TrimSpace(normalizedCommand)
+
+	// Find the position of the keyword (case-insensitive)
+	keywordUpper := strings.ToUpper(keyword)
+	commandUpper := strings.ToUpper(normalizedCommand)
+	keywordPos := strings.Index(commandUpper, keywordUpper)
+
+	if keywordPos == -1 {
+		return "", fmt.Errorf("keyword '%s' not found in command", keyword)
+	}
+
+	// Extract the part after the keyword
+	afterKeyword := normalizedCommand[keywordPos+len(keyword):]
+	afterKeyword = strings.TrimSpace(afterKeyword)
+
+	// Look for "BUNDLE" keyword after the main keyword
+	bundleUpper := "BUNDLE"
+	bundlePos := strings.Index(strings.ToUpper(afterKeyword), bundleUpper)
+
+	if bundlePos == -1 {
+		return "", fmt.Errorf("'BUNDLE' keyword not found after '%s'", keyword)
+	}
+
+	// Extract the part after "BUNDLE"
+	afterBundle := afterKeyword[bundlePos+len(bundleUpper):]
+	afterBundle = strings.TrimSpace(afterBundle)
+
+	// Find the quoted bundle name
+	bundleName, err := extractQuotedString(afterBundle)
+	if err != nil {
+		return "", fmt.Errorf("failed to extract bundle name: %w", err)
+	}
+
+	return bundleName, nil
+}
+
+// extractQuotedString extracts a quoted string from the beginning of a text
+// This function follows the Single Responsibility Principle by handling only quoted string extraction
+// Following SyndrDB comprehensive error handling, it supports multiple quote types
+// Parameters:
+//   - text: The text to extract the quoted string from
+//
+// Returns:
+//   - string: The extracted string without quotes
+//   - error: Any error that occurred during extraction
+func extractQuotedString(text string) (string, error) {
+	text = strings.TrimSpace(text)
+
+	if len(text) == 0 {
+		return "", fmt.Errorf("empty text provided for quote extraction")
+	}
+
+	// Check for different quote types
+	quoteChars := []rune{'"', '\'', '"', '"'} // Regular quotes and smart quotes
+
+	for _, quoteChar := range quoteChars {
+		if rune(text[0]) == quoteChar {
+			// Find the closing quote
+			for i := 1; i < len(text); i++ {
+				if rune(text[i]) == quoteChar {
+					// Found closing quote
+					return text[1:i], nil
+				}
+			}
+			return "", fmt.Errorf("unterminated quoted string starting with %c", quoteChar)
+		}
+	}
+
+	// If no quotes found, look for the first word (until space or special character)
+	words := strings.Fields(text)
+	if len(words) > 0 {
+		// Find where the first word ends (before parentheses, WHERE, etc.)
+		firstWord := words[0]
+		stopChars := []string{"(", "WHERE", "SET"}
+
+		for _, stopChar := range stopChars {
+			if idx := strings.Index(strings.ToUpper(text), stopChar); idx != -1 {
+				beforeStop := strings.TrimSpace(text[:idx])
+				if beforeStop != "" {
+					return beforeStop, nil
+				}
+			}
+		}
+
+		return firstWord, nil
+	}
+
+	return "", fmt.Errorf("no quoted string or valid identifier found in text: %s", text)
 }

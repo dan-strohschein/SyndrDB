@@ -323,6 +323,7 @@ func (b *BundleStorageEngine) BundleFileExists(bundleName string) bool {
 	// Check if the bundle file exists in the data directory
 	args := settings.GetSettings()
 	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
+	b.logger.Infof("Checking if bundle file exists: %s", filePath)
 	return helpers.FileExists(filePath, *b.logger)
 }
 

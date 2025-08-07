@@ -244,7 +244,7 @@ func (s *HashIndexStorage) parseMetadataField(metadata *HashIndexMetadata, key, 
 			return err
 		}
 		metadata.TotalRecords = val
-	case "NumBuckets":
+	case "BucketCount":
 		val, err := strconv.ParseUint(value, 10, 32)
 		if err != nil {
 			return err

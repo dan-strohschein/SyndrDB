@@ -434,7 +434,13 @@ func (fm *FileManager) readPageASCII(pageNum uint32) (interface{}, error) {
 				case "*hashindexV2.HashIndexMetadata":
 					return fm.parseMetadataFromASCII(scanner, key, value)
 				case "*hashindexV2.BucketPage":
-					return fm.parseBucketPageFromASCII(scanner, key, value)
+
+					bp, err := fm.parseBucketPageFromASCII(scanner, key, value)
+
+					if err != nil {
+						return nil, fmt.Errorf("failed to parse bucket page %w", err)
+					}
+					return bp, nil
 				case "*hashindexV2.OverflowPage":
 					return fm.parseOverflowPageFromASCII(scanner, key, value)
 				default:

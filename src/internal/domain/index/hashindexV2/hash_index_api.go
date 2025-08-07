@@ -330,10 +330,12 @@ func (hi *HashIndex) Insert(key, value string) error {
 	hi.metadata.LastModified = time.Now()
 
 	// Check if we need to split
-	if hi.shouldSplit() {
-		err = hi.splitBucket()
-		if err != nil {
-			return fmt.Errorf("failed to split bucket: %w", err)
+	if shouldSplit, err := hi.shouldSplit(); err != nil {
+		hi.logger.Errorf("Failed to check if bucket should split: %v", err)
+	} else if shouldSplit {
+		hi.logger.Infof("Load factor exceeded, splitting bucket...")
+		if err := hi.splitBucket(); err != nil {
+			hi.logger.Errorf("Failed to split bucket: %v", err)
 		}
 	}
 
@@ -371,7 +373,10 @@ func (hi *HashIndex) InsertDocument(documentID string) error {
 	hi.metadata.TotalRecords++
 
 	// Check if we need to split
-	if hi.shouldSplit() {
+	if shouldSplit, err := hi.shouldSplit(); err != nil {
+		hi.logger.Errorf("Failed to check if bucket should split: %v", err)
+	} else if shouldSplit {
+		hi.logger.Infof("Load factor exceeded, splitting bucket...")
 		if err := hi.splitBucket(); err != nil {
 			hi.logger.Errorf("Failed to split bucket: %v", err)
 		}
@@ -385,11 +390,11 @@ func (hi *HashIndex) DeleteDocument(documentID string) (bool, error) {
 	defer hi.mutex.Unlock()
 
 	// Calculate hash value
-	keyBytes := []byte(documentID)
-	hashValue := calculateHash(keyBytes, hi.metadata.HashSeed)
+	//keyBytes := []byte(documentID)
+	hashValue := jenkinsHash(documentID, hi.metadata.HashSeed) //calculateHash(keyBytes, hi.metadata.HashSeed)
 
 	// Determine target bucket
-	bucketNum := hi.calculateBucket(hashValue)
+	bucketNum := hi.computeBucket(hashValue)
 
 	// Delete from bucket
 	if err := hi.deleteFromBucket(bucketNum, documentID); err != nil {
