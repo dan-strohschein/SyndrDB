@@ -90,6 +90,11 @@ func ParseCreateBundleCommand(command string, logger *zap.SugaredLogger) (*model
 	}
 	bundleName := matches[1]
 
+	// Validate bundle name
+	if err := ValidateBundleName(bundleName); err != nil {
+		return nil, fmt.Errorf("invalid bundle name '%s': %w", bundleName, err)
+	}
+
 	// Extract fields section
 	fieldsStartIndex := strings.Index(command, "WITH FIELDS")
 	if fieldsStartIndex == -1 {
@@ -408,97 +413,85 @@ func parseFieldDefinition(fieldText string) (models.FieldDefinition, error) {
 }
 
 func parseFieldValueSets(fieldsText string) ([]models.KeyValue, error) {
-	results := []models.KeyValue{}
-	valueSets := strings.Split(fieldsText, ",")
-	for _, valueSet := range valueSets {
-
-		valueSet = strings.TrimSpace(valueSet)
-		if valueSet == "" {
-			continue
-		}
-
-		valueParts := strings.Split(valueSet, "=")
-		if len(valueParts) != 2 {
-			return nil, fmt.Errorf("invalid field value set format: %s", valueSet)
-		}
-		key := strings.TrimSpace(valueParts[0])
-		value := strings.TrimSpace(valueParts[1])
-
-		// TODO make sure the field part of the valueSet is valid
-		// For example, check if it is a valid field name or a valid value type
-		// if !isValidValueSet(valueSet) {
-		// 	return nil, fmt.Errorf("invalid field value set format: %s", valueSet)
-		// }
-		kv := models.KeyValue{
-			Key:   key,
-			Value: value,
-		}
-		results = append(results, kv)
-
+	// Remove outer braces if present and use the same logic as parseFieldValues
+	fieldsText = strings.TrimSpace(fieldsText)
+	if strings.HasPrefix(fieldsText, "{") && strings.HasSuffix(fieldsText, "}") {
+		fieldsText = fieldsText[1 : len(fieldsText)-1]
 	}
-	return results, nil
+
+	// Use the same parsing logic as parseFieldValues for consistency
+	return parseFieldValues("{" + fieldsText + "}")
 }
 
 func parseFieldValues(fieldsText string) ([]models.KeyValue, error) {
-	// Split the fields by commas, respecting quotes and braces
-	// var fieldParts []string
 	var fieldValues []models.KeyValue
 
 	// Remove any leading/trailing whitespace
 	fieldsText = strings.TrimSpace(fieldsText)
 
-	// Split by closing brace + comma
-	parts := strings.Split(fieldsText, "},")
-	for i, part := range parts {
-		// If this isn't the last part, add the closing brace back
-		if i < len(parts)-1 {
-			part += "}"
+	// Remove outer braces if present
+	if strings.HasPrefix(fieldsText, "{") && strings.HasSuffix(fieldsText, "}") {
+		fieldsText = fieldsText[1 : len(fieldsText)-1]
+	}
+
+	// Split by comma, but we need to be careful about quoted values that might contain commas
+	parts := []string{}
+	currentPart := ""
+	inQuotes := false
+
+	for i, char := range fieldsText {
+		if char == '"' {
+			inQuotes = !inQuotes
 		}
 
-		// Trim whitespace and process if not empty
-		part = strings.TrimSpace(part)
-		if part != "" {
-			// Unconditionally trim leading '{' if present
-			part = strings.TrimPrefix(part, "{")
-
-			// Unconditionally trim trailing '}' if present
-			part = strings.TrimSuffix(part, "}")
-
-			// Parse the key-value pair
-			keyValue := strings.SplitN(part, "=", 2)
-			if len(keyValue) != 2 {
-				return nil, fmt.Errorf("invalid field format: %s", part)
-			}
-
-			key := helpers.StripQuotes(strings.TrimSpace(keyValue[0]))
-			valueStr := strings.TrimSpace(keyValue[1])
-
-			// Convert valueStr to appropriate type
-			var value interface{} = valueStr
-
-			// Remove quotes if present
-			if strings.HasPrefix(valueStr, "\"") && strings.HasSuffix(valueStr, "\"") {
-				value = strings.Trim(valueStr, "\"")
-			} else if strings.EqualFold(valueStr, "true") || strings.EqualFold(valueStr, "false") {
-				// Handle boolean values
-				value = strings.EqualFold(valueStr, "true")
-			} else if strings.Contains(valueStr, ".") {
-				// Try to parse as float
-				if floatVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
-					value = floatVal
-				}
-			} else {
-				// Try to parse as int
-				if intVal, err := strconv.Atoi(valueStr); err == nil {
-					value = intVal
-				}
-			}
-
-			fieldValues = append(fieldValues, models.KeyValue{
-				Key:   key,
-				Value: value,
-			})
+		if char == ',' && !inQuotes {
+			parts = append(parts, strings.TrimSpace(currentPart))
+			currentPart = ""
+		} else {
+			currentPart += string(char)
 		}
+
+		// Add the last part if we're at the end
+		if i == len(fieldsText)-1 {
+			parts = append(parts, strings.TrimSpace(currentPart))
+		}
+	}
+
+	for _, part := range parts {
+		// Parse the key-value pair
+		keyValue := strings.SplitN(part, "=", 2)
+		if len(keyValue) != 2 {
+			return nil, fmt.Errorf("invalid field format: %s", part)
+		}
+
+		key := helpers.StripQuotes(strings.TrimSpace(keyValue[0]))
+		valueStr := strings.TrimSpace(keyValue[1])
+
+		// Convert valueStr to appropriate type
+		var value interface{} = valueStr
+
+		// Remove quotes if present
+		if strings.HasPrefix(valueStr, "\"") && strings.HasSuffix(valueStr, "\"") {
+			value = strings.Trim(valueStr, "\"")
+		} else if strings.EqualFold(valueStr, "true") || strings.EqualFold(valueStr, "false") {
+			// Handle boolean values
+			value = strings.EqualFold(valueStr, "true")
+		} else if strings.Contains(valueStr, ".") {
+			// Try to parse as float
+			if floatVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
+				value = floatVal
+			}
+		} else {
+			// Try to parse as int
+			if intVal, err := strconv.Atoi(valueStr); err == nil {
+				value = intVal
+			}
+		}
+
+		fieldValues = append(fieldValues, models.KeyValue{
+			Key:   key,
+			Value: value,
+		})
 	}
 
 	return fieldValues, nil
@@ -584,7 +577,7 @@ func DetermineDefaultValue(fieldType string, defaultValue interface{}) interface
 				return 0
 			}
 			return intVal
-		case "float":
+		case "float", "number":
 			floatVal, err := strconv.ParseFloat(strValue, 64)
 			if err != nil {
 				// If conversion fails, return zero value
@@ -618,7 +611,7 @@ func DetermineDefaultValue(fieldType string, defaultValue interface{}) interface
 			return int(floatVal)
 		}
 		return 0
-	case "float":
+	case "float", "number":
 		if floatVal, ok := defaultValue.(float64); ok {
 			return floatVal
 		}
@@ -643,11 +636,48 @@ func getZeroValue(fieldType string) interface{} {
 		return ""
 	case "int":
 		return 0
-	case "float":
+	case "float", "number":
 		return 0.0
 	case "bool":
 		return false
 	default:
-		return nil
+		return ""
 	}
+}
+
+// ValidateBundleName checks if a bundle name is valid
+// Bundle names can only contain letters, numbers, underscores (_), and hyphens (-)
+// No spaces or other special characters are allowed
+func ValidateBundleName(name string) error {
+	if len(name) == 0 {
+		return fmt.Errorf("bundle name cannot be empty")
+	}
+
+	if len(name) > 255 {
+		return fmt.Errorf("bundle name cannot exceed 255 characters")
+	}
+
+	// Check for invalid characters
+	if !IsValidBundleName(name) {
+		return fmt.Errorf("bundle name contains invalid characters")
+	}
+
+	return nil
+}
+
+func IsValidBundleName(name string) bool {
+	for _, char := range name {
+		if !isValidBundleNameChar(char) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidBundleNameChar checks if a character is valid in bundle names
+func isValidBundleNameChar(char rune) bool {
+	return (char >= 'a' && char <= 'z') ||
+		(char >= 'A' && char <= 'Z') ||
+		(char >= '0' && char <= '9') ||
+		char == '_' || char == '-'
 }

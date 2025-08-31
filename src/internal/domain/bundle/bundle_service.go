@@ -173,6 +173,8 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 		return fmt.Errorf("failed to remove bundle from store: %w", err)
 	}
 
+	s.store.RemoveBundleFile(db, bundle.Name)
+
 	delete(s.bundles, name)
 	return nil
 }
@@ -788,6 +790,12 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		return fmt.Errorf("bundle '%s' not found", docCommand.BundleName)
 	}
 
+	// Validate document fields against bundle field definitions
+	err = s.validateDocumentFields(bundle, docCommand)
+	if err != nil {
+		return fmt.Errorf("document field validation failed: %w", err)
+	}
+
 	// Add the document to the bundle
 	newDocument := s.documentFactory.NewDocument(*docCommand)
 
@@ -877,14 +885,19 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 	}
 
 	if args.Debug {
-		s.logger.Infof("Deleting %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
+		s.logger.Infof("Updating %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
+	}
+
+	// Validate document update fields against bundle field definitions
+	err = s.validateUpdateFields(bundle, docCommand)
+	if err != nil {
+		return fmt.Errorf("document field validation failed: %w", err)
 	}
 
 	for _, doc := range filteredDocs {
 		// Update the document fields
 		// loop through the fields in the command and update the document
 		for _, kv := range docCommand.Fields {
-			// TODO This needs to validate that the field obeys the rules/constraints for the field
 
 			foundField := doc.Fields[kv.Key]
 			foundField.Name = kv.Key
@@ -1432,6 +1445,139 @@ func (s *BundleService) closeAllIndexes(bundle *models.Bundle) error {
 
 	if len(errors) > 0 {
 		return fmt.Errorf("errors occurred while closing indexes: %v", errors)
+	}
+
+	return nil
+}
+
+// validateDocumentFields validates that document fields match bundle field definitions
+// This function ensures that:
+// 1. All fields in the document command exist in the bundle's field definitions
+// 2. Field data types match the bundle field definition types
+// 3. Required fields are present
+// 4. Field values are compatible with their defined types
+func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand *models.DocumentCommand) error {
+	if bundle.DocumentStructure.FieldDefinitions == nil {
+		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
+	}
+
+	// Track which required fields are provided
+	providedFields := make(map[string]bool)
+
+	// Validate each field in the document command
+	for _, field := range docCommand.Fields {
+		fieldName := field.Key
+		fieldValue := field.Value
+
+		// Check if the field exists in bundle field definitions
+		fieldDef, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]
+		if !exists {
+			return fmt.Errorf("field '%s' is not defined in bundle '%s'", fieldName, bundle.Name)
+		}
+
+		// Validate field data type
+		err := s.validateFieldType(fieldName, fieldValue, fieldDef.Type)
+		if err != nil {
+			return fmt.Errorf("field '%s' type validation failed: %w", fieldName, err)
+		}
+
+		// Mark this field as provided
+		providedFields[fieldName] = true
+	}
+
+	// Check that all required fields are provided
+	for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
+		if fieldDef.IsRequired && !providedFields[fieldName] {
+			// Skip DocumentID if it's auto-generated
+			if fieldName == "DocumentID" {
+				continue
+			}
+			return fmt.Errorf("required field '%s' is missing from document", fieldName)
+		}
+	}
+
+	return nil
+}
+
+// validateFieldType validates that a field value matches the expected data type
+func (s *BundleService) validateFieldType(fieldName string, value interface{}, expectedType string) error {
+	if value == nil {
+		return nil // nil values are handled by required field validation
+	}
+
+	switch expectedType {
+	case "string":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("expected string but got %T", value)
+		}
+	case "int":
+		switch v := value.(type) {
+		case int, int8, int16, int32, int64:
+			// Valid integer types
+		case float64:
+			// Check if float64 represents a whole number (common in JSON parsing)
+			if v != float64(int64(v)) {
+				return fmt.Errorf("expected integer but got float with decimal places: %v", v)
+			}
+		case float32:
+			// Check if float32 represents a whole number
+			if v != float32(int32(v)) {
+				return fmt.Errorf("expected integer but got float with decimal places: %v", v)
+			}
+		default:
+			return fmt.Errorf("expected integer but got %T", value)
+		}
+	case "float", "number":
+		switch value.(type) {
+		case float32, float64, int, int8, int16, int32, int64:
+			// All numeric types can be converted to float
+		default:
+			return fmt.Errorf("expected number but got %T", value)
+		}
+	case "bool":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("expected boolean but got %T", value)
+		}
+	default:
+		// Unknown field type - log warning but allow it
+		s.logger.Warnf("Unknown field type '%s' for field '%s', skipping type validation", expectedType, fieldName)
+	}
+
+	return nil
+}
+
+// validateUpdateFields validates that document update fields match bundle field definitions
+// This function ensures that:
+// 1. All fields being updated exist in the bundle's field definitions
+// 2. Field data types match the bundle field definition types
+// 3. Field values are compatible with their defined types
+// Note: Unlike document creation, updates don't require all required fields to be present
+func (s *BundleService) validateUpdateFields(bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) error {
+	if bundle.DocumentStructure.FieldDefinitions == nil {
+		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
+	}
+
+	// Validate each field in the update command
+	for _, field := range docCommand.Fields {
+		fieldName := field.Key
+		fieldValue := field.Value
+
+		// Check if the field exists in bundle field definitions
+		fieldDef, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]
+		if !exists {
+			return fmt.Errorf("field '%s' is not defined in bundle '%s'", fieldName, bundle.Name)
+		}
+
+		// Validate field data type
+		err := s.validateFieldType(fieldName, fieldValue, fieldDef.Type)
+		if err != nil {
+			return fmt.Errorf("field '%s' type validation failed: %w", fieldName, err)
+		}
+
+		// Additional validation for unique fields could be added here
+		// if fieldDef.IsUnique {
+		//     // TODO: Check if the new value would violate uniqueness constraint
+		// }
 	}
 
 	return nil

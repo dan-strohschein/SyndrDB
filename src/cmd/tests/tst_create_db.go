@@ -9,16 +9,16 @@ import (
 	"syndrdb/src/pkg/settings"
 
 	"github.com/fatih/color"
-	"go.uber.org/zap"
 )
 
-var ColorLogger *zap.Logger
+// var ColorLogger *zap.Logger
 
-var HighlightRed = color.New(color.FgRed).SprintFunc()
-var HighlightBlue = color.New(color.FgBlue).SprintFunc()
+// var HighlightRed = color.New(color.FgRed).SprintFunc()
+// var HighlightBlue = color.New(color.FgBlue).SprintFunc()
 var HighlightWhite = color.New(color.FgWhite).SprintFunc()
-var HighlightGreen = color.New(color.FgGreen).SprintFunc()
-var HighlightYellow = color.New(color.FgYellow).SprintFunc()
+
+// var HighlightGreen = color.New(color.FgGreen).SprintFunc()
+// var HighlightYellow = color.New(color.FgYellow).SprintFunc()
 
 func RunTests() {
 	helpers.Init()
@@ -47,7 +47,8 @@ func StandupTestDatabaseService() (*database.DatabaseService, *databasestore.Dat
 	ColorLogger := helpers.SetupLogger()
 
 	args := settings.GetSettings()
-	args.DataDir = args.TempDir // Use a temp dir for test isolation
+	args.TempDir = "./temp_files" // Use a temp dir for test isolation
+	args.DataDir = args.TempDir   // Use a temp dir for test isolation
 
 	// Create a mock/in-memory store
 	store, err := databasestore.NewDatabaseStore(args.DataDir, ColorLogger.Sugar())
@@ -59,9 +60,10 @@ func StandupTestDatabaseService() (*database.DatabaseService, *databasestore.Dat
 	}
 
 	factory := database.NewDatabaseFactory()
+	db := factory.NewDatabase("testdb", "testing db")
 	service := database.NewDatabaseService(store, factory, args, ColorLogger.Sugar())
-
-	return service, store, nil
+	service.Databases["testdb"] = db
+	return service, store, err
 }
 
 func TestParseAndCreateDatabaseCommand() {

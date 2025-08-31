@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"syndrdb/src/internal/domain/bundle"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/index"
@@ -137,7 +138,22 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			// Execute the database command
 			serviceManager.DatabaseService.DeleteDatabase(dbCommand.DatabaseName)
 		case "bundle":
-			bndle.ParseDeleteBundleCommand(command)
+			bundleName, err := parseBundleNameFromCommand(command, "DELETE")
+			if err != nil {
+				return &result, err
+			}
+
+			//Validate that there are no documents in the bundle
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+			if err != nil {
+				return &result, err
+			}
+
+			if bundle.Documents != nil && len(*bundle.Documents) > 0 {
+				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
+			}
+
+			serviceManager.BundleService.RemoveBundle(database, bundleName)
 		case "documents":
 			//DELETE DOCUMENTS FROM BUNDLE "BUNDLE_NAME"
 			//WHERE <FIELDNAME> = <VALUE>
@@ -344,7 +360,11 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 		return nil, fmt.Errorf("bundle '%s' already exists", bundleCmd.BundleName)
 	}
 
-	//TODO The database pointer is null for some reason here. So we need to fix that shit.
+	// Validate the bundle name with a regex
+	if !bundle.IsValidBundleName(bundleCmd.BundleName) {
+		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names must start with a letter, can be alphanumeric, with underscores and hyphens", bundleCmd.BundleName)
+	}
+
 	// Get database object by name
 	// database, err1 := serviceManager.DatabaseService.GetDatabaseByName(database.Name)
 	// if err1 != nil {
@@ -410,6 +430,10 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	// and then use the execution plan to execute the command. The execution plan
 	// should use the buffer pool to get the bundle and documents, and also
 	// use the indexes if available.
+
+	if !bundle.IsValidBundleName(bundleName) {
+		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
+	}
 
 	// Get the bundle by name
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)

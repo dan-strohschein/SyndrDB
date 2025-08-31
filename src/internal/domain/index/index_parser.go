@@ -58,7 +58,7 @@ func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*m
 	logger.Debugf("Parsing cleaned B-INDEX command: %s", command)
 
 	// Updated regex pattern that's more flexible with whitespace and optional semicolon
-	updateDocRegex := regexp.MustCompile(`(?i)^CREATE\s+B-INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+FIELD\s*\(([^)]+)\)(?:\s*;?\s*)?$`)
+	updateDocRegex := regexp.MustCompile(`(?i)^CREATE\s+B-INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+FIELDS\s*\(([^)]+)\)(?:\s*;?\s*)?$`)
 
 	matches := updateDocRegex.FindStringSubmatch(command)
 	if matches == nil {
