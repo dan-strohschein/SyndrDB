@@ -1,8 +1,12 @@
 .DS_Store
+.github
 
 src/datafiles
 src/log_files
 src/.DS_STORE
+src/cmd/tests/temp_files
+
+temp_files/*
 
 bin/server/data_files
 bin/server/log_files
