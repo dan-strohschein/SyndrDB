@@ -84,10 +84,7 @@ func (fm *BTreeFileManager) AllocatePage() (uint32, error) {
 		return 0, fmt.Errorf("file manager is not open")
 	}
 
-	fm.mutex.Lock()
-	defer fm.mutex.Unlock()
-
-	// Allocate a new page number
+	// Call AllocateNewPage directly since it handles its own locking
 	newPageNum, err := fm.AllocateNewPage()
 	if err != nil {
 		return 0, fmt.Errorf("failed to allocate new page: %w", err)
@@ -144,6 +141,8 @@ type FileHeader struct {
 //   - *BTreeFileManager: The created file manager instance
 //   - error: Any error that occurred during creation
 func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logger *zap.SugaredLogger) (*BTreeFileManager, error) {
+	logger.Infof("DEBUG: NewBTreeFileManager called with filePath=%s, pageSize=%d, debugMode=%t", filePath, pageSize, debugMode)
+
 	if filePath == "" {
 		return nil, fmt.Errorf("file path cannot be empty")
 	}
@@ -164,8 +163,10 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 	}
 
 	// Check if file exists
+	logger.Infof("DEBUG: Checking if file exists: %s", filePath)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		// Create new file
+		logger.Infof("DEBUG: File does not exist, creating new file")
 		if pageSize == 0 {
 			return nil, fmt.Errorf("page size must be specified for new files")
 		}
@@ -173,8 +174,10 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 		if err := fm.createNewFile(); err != nil {
 			return nil, fmt.Errorf("failed to create new file: %w", err)
 		}
+		logger.Infof("DEBUG: New file created successfully")
 	} else {
 		// Open existing file
+		logger.Infof("DEBUG: File exists, opening existing file")
 		if err := fm.openExistingFile(); err != nil {
 			return nil, fmt.Errorf("failed to open existing file: %w", err)
 		}
@@ -183,6 +186,7 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 		if pageSize == 0 {
 			fm.pageSize = fm.fileHeader.PageSize
 		}
+		logger.Infof("DEBUG: Existing file opened successfully")
 	}
 
 	logger.Infof("Successfully created BTree file manager for: %s (pageSize: %d, debugMode: %t)",
@@ -1155,7 +1159,15 @@ func (fm *BTreeFileManager) serializePageBinary(pageData interface{}) ([]byte, e
 	switch data := pageData.(type) {
 	case *BTreeNode:
 		buf := new(bytes.Buffer)
+		// Write magic number first for consistency with deserialization
+		if err := binary.Write(buf, binary.LittleEndian, uint32(0x42545245)); err != nil {
+			return nil, err
+		}
 		if err := binary.Write(buf, binary.LittleEndian, data.PageNum); err != nil {
+			return nil, err
+		}
+		// Write IsLeaf field - CRITICAL for correct deserialization
+		if err := binary.Write(buf, binary.LittleEndian, data.IsLeaf); err != nil {
 			return nil, err
 		}
 		if err := binary.Write(buf, binary.LittleEndian, data.ParentPage); err != nil {
@@ -1190,6 +1202,10 @@ func (fm *BTreeFileManager) serializePageBinary(pageData interface{}) ([]byte, e
 		return buf.Bytes(), nil
 	case *BTreeMetadata:
 		buf := new(bytes.Buffer)
+		// Write magic number first for consistency with deserialization
+		if err := binary.Write(buf, binary.LittleEndian, uint32(0x42545245)); err != nil {
+			return nil, err
+		}
 		if err := binary.Write(buf, binary.LittleEndian, data.Order); err != nil {
 			return nil, err
 		}
@@ -1221,11 +1237,57 @@ func (fm *BTreeFileManager) deserializePageBinary(data []byte) (interface{}, err
 	if magicNumber != 0x42545245 { // "BTRE"
 		return nil, fmt.Errorf("invalid magic number: expected 0x42545245, got 0x%08X", magicNumber)
 	}
-	// Read the rest of the data based on expected structure
-	// For example, if we expect a BTreeNode structure:
-	var pageNum, parentPage, nextLeaf, prevLeaf uint32
+
+	// Try to determine page type by reading the next few fields
+	// Try to read as BTreeNode first (most common case)
+	var pageNum uint32
+	var isLeaf bool
+	var parentPage, nextLeaf, prevLeaf uint32
 	if err := binary.Read(buf, binary.LittleEndian, &pageNum); err != nil {
 		return nil, fmt.Errorf("failed to read page number: %w", err)
+	}
+
+	// If pageNum is 0, this is likely metadata
+	if pageNum == 0 {
+		// Reset and parse as metadata
+		buf = bytes.NewReader(data)
+		// Skip magic number
+		binary.Read(buf, binary.LittleEndian, &magicNumber)
+
+		var order, rootPageNum, totalPages uint32
+		var lastCompaction int64
+		var fragmentationPct float64
+
+		if err := binary.Read(buf, binary.LittleEndian, &order); err != nil {
+			return nil, fmt.Errorf("failed to read order: %w", err)
+		}
+		if err := binary.Read(buf, binary.LittleEndian, &rootPageNum); err != nil {
+			return nil, fmt.Errorf("failed to read root page number: %w", err)
+		}
+		if err := binary.Read(buf, binary.LittleEndian, &totalPages); err != nil {
+			return nil, fmt.Errorf("failed to read total pages: %w", err)
+		}
+		if err := binary.Read(buf, binary.LittleEndian, &lastCompaction); err != nil {
+			return nil, fmt.Errorf("failed to read last compaction: %w", err)
+		}
+		if err := binary.Read(buf, binary.LittleEndian, &fragmentationPct); err != nil {
+			return nil, fmt.Errorf("failed to read fragmentation percentage: %w", err)
+		}
+
+		metadata := &BTreeMetadata{
+			Order:            order,
+			RootPageNum:      rootPageNum,
+			TotalPages:       totalPages,
+			LastCompaction:   time.Unix(lastCompaction, 0),
+			FragmentationPct: fragmentationPct,
+		}
+
+		return metadata, nil
+	}
+
+	// Continue parsing as BTreeNode - read IsLeaf field
+	if err := binary.Read(buf, binary.LittleEndian, &isLeaf); err != nil {
+		return nil, fmt.Errorf("failed to read IsLeaf field: %w", err)
 	}
 	if err := binary.Read(buf, binary.LittleEndian, &parentPage); err != nil {
 		return nil, fmt.Errorf("failed to read parent page: %w", err)
@@ -1267,6 +1329,7 @@ func (fm *BTreeFileManager) deserializePageBinary(data []byte) (interface{}, err
 	// Construct the BTreeNode
 	node := &BTreeNode{
 		PageNum:    pageNum,
+		IsLeaf:     isLeaf, // CRITICAL: Set the IsLeaf field from deserialized data
 		ParentPage: parentPage,
 		NextLeaf:   nextLeaf,
 		PrevLeaf:   prevLeaf,

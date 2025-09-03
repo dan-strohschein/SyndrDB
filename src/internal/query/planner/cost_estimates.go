@@ -48,7 +48,7 @@ func (qp *QueryPlanner) estimateBTreeRows(bundle *models.Bundle, condition query
 
 func (qp *QueryPlanner) isBTreeSuitable(operator string) bool {
 	switch operator {
-	case "=", ">", "<", ">=", "<=":
+	case "=", "==", ">", "<", ">=", "<=":
 		return true
 	default:
 		return false

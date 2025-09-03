@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"syndrdb/src/internal/domain/index"
+	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/index/hashindexV2"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/settings"
@@ -607,16 +608,42 @@ func EnsureHashIndexLoaded(bundle *models.Bundle, idxRef *models.IndexReference,
 // }
 
 // ScanBTreeIndex returns document IDs matching the value in the btree index
+// Updated to use btreeindexV2.BTreeIndex directly instead of the old service pattern
 func ScanBTreeIndex(bundle *models.Bundle, idxRef *models.IndexReference, value interface{}, logger *zap.SugaredLogger) ([]string, error) {
-	// Get the btree index service for this bundle
+	// Check if we have a direct BTreeIndex instance
+	if idxRef.IndexInstance != nil {
+		btreeIndex, ok := idxRef.IndexInstance.(*btreeindexV2.BTreeIndex)
+		if !ok {
+			return nil, fmt.Errorf("index instance is not of type *btreeindexV2.BTreeIndex")
+		}
+
+		// Convert value to bytes for search
+		var keyBytes []byte
+		switch v := value.(type) {
+		case string:
+			keyBytes = []byte(v)
+		case []byte:
+			keyBytes = v
+		default:
+			keyBytes = []byte(fmt.Sprintf("%v", v))
+		}
+
+		// Perform the search
+		results, err := btreeIndex.Search(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("btree search failed: %w", err)
+		}
+
+		return results, nil
+	}
+
+	// Fallback: Try to get from the old registry system (will return nil after migration)
 	btreeService := index.GetBTreeService(bundle.BundleID)
 	if btreeService == nil {
-		return nil, fmt.Errorf("no btree index service for bundle %s", bundle.BundleID)
+		return nil, fmt.Errorf("no btree index available for bundle %s, index %s", bundle.BundleID, idxRef.IndexName)
 	}
-	// Search the btree index
-	docIDs, err := btreeService.SearchIndex(idxRef.IndexName, value, idxRef.BTreeIndexField)
-	if err != nil {
-		return nil, err
-	}
-	return docIDs, nil
+
+	// This is the old system call - should not be reached after migration
+	logger.Warnf("Using deprecated BTreeService for bundle %s - this should be migrated", bundle.BundleID)
+	return nil, fmt.Errorf("deprecated BTreeService no longer supported - index should use btreeindexV2")
 }

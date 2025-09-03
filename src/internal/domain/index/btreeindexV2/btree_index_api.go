@@ -54,6 +54,8 @@ import (
 //   - error: Any error that occurred during creation
 func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeIndex, error) {
 	args := settings.GetSettings()
+	logger.Infof("DEBUG: CreateBTreeIndex V2 started with config: %+v", config)
+
 	if config == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
@@ -63,6 +65,7 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 	}
 
 	// Validate configuration
+	logger.Infof("DEBUG: Validating configuration")
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -71,16 +74,20 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 
 	// Create file manager
 	indexFilePath := config.GetIndexFilePath()
+	logger.Infof("DEBUG: Creating file manager for path: %s", indexFilePath)
 	fileManager, err := NewBTreeFileManager(indexFilePath, config.PageSize, args.Debug, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file manager: %w", err)
 	}
+	logger.Infof("DEBUG: File manager created successfully")
 
 	// Create page manager
+	logger.Infof("DEBUG: Creating page manager")
 	pageManager, err := NewBTreePageManager(config.PageSize, config.CacheSize, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create page manager: %w", err)
 	}
+	logger.Infof("DEBUG: Page manager created successfully")
 
 	// Create metadata
 	metadata := NewBTreeMetadata(config)
@@ -203,6 +210,8 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
 
+	idx.logger.Infof("DEBUG: Insert called with rootPageNum=%d, metadata.RootPageNum=%d", idx.rootPageNum, idx.metadata.RootPageNum)
+
 	// Validate root page number before proceeding
 	if idx.rootPageNum == 0 {
 		idx.logger.Errorf("Invalid root page number: %d, attempting to recover from metadata", idx.rootPageNum)
@@ -242,6 +251,7 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 	}
 
 	// Perform the insertion
+	idx.logger.Infof("DEBUG: About to call insertInternal with rootPageNum=%d", idx.rootPageNum)
 	newRootPageNum, affectsParentNode, nodesCreated, err := idx.insertInternal(key, documentID, idx.rootPageNum)
 	if err != nil {
 		return fmt.Errorf("failed to insert key: %w", err)
@@ -740,9 +750,9 @@ func (idx *BTreeIndex) searchInternal(key []byte, rootPageNum uint32) ([]string,
 }
 
 func (idx *BTreeIndex) insertInternal(key []byte, documentID string, rootPageNum uint32) (uint32, bool, int, error) {
-	pageNum, affectsParentNode, nodesCreated, nil := insertInternal(idx, key, documentID, rootPageNum)
-	if nil != nil {
-		return 0, false, 0, fmt.Errorf("insert failed: %w", nil)
+	pageNum, affectsParentNode, nodesCreated, err := insertInternal(idx, key, documentID, rootPageNum)
+	if err != nil {
+		return 0, false, 0, fmt.Errorf("insert failed: %w", err)
 	}
 	return pageNum, affectsParentNode, nodesCreated, nil
 }

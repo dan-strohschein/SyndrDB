@@ -304,6 +304,11 @@ func RangeSearch(idx *BTreeIndex, startKey, endKey []byte, rootPageNum uint32) (
 
 // searchInternal performs the actual search traversal from root to leaf
 func searchInternal(idx *BTreeIndex, key []byte, pageNum uint32) ([]string, int, error) {
+	// Prevent infinite loop: page 0 is metadata, not a B-Tree node
+	if pageNum == 0 {
+		return nil, 0, fmt.Errorf("CRITICAL: searchInternal called with pageNum=0 (metadata page), this indicates a logic error")
+	}
+
 	nodesVisited := 0
 	idx.logger.Debugf("internalSearch :: Searching for key '%s' starting at page %d", string(key), pageNum)
 	// Load the current node
@@ -334,6 +339,11 @@ func searchInternal(idx *BTreeIndex, key []byte, pageNum uint32) ([]string, int,
 
 // insertInternal performs the actual insertion with potential node splitting
 func insertInternal(idx *BTreeIndex, key []byte, documentID string, pageNum uint32) (uint32, bool, int, error) {
+	// Prevent infinite loop: page 0 is metadata, not a B-Tree node
+	if pageNum == 0 {
+		return pageNum, false, 0, fmt.Errorf("CRITICAL: insertInternal called with pageNum=0 (metadata page), this indicates a logic error")
+	}
+
 	affectsParentNode := false
 	// Load the current node
 	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {

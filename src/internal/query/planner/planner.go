@@ -7,6 +7,12 @@ import (
 	"go.uber.org/zap"
 )
 
+// BundleServiceInterface defines the interface for bundle service operations needed by the query planner
+type BundleServiceInterface interface {
+	GetOrLoadHashIndexInterface(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (interface{}, error)
+	GetOrLoadBTreeIndex(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (interface{}, error)
+}
+
 // ExecutionNode represents a node in the execution plan tree
 type ExecutionNode interface {
 	Execute() (map[string]*models.Document, error)
@@ -45,6 +51,7 @@ type IndexScanNode struct {
 	Cost          float64
 	EstimatedRows int
 	Logger        *zap.SugaredLogger
+	BundleService BundleServiceInterface
 }
 
 // FullScanNode represents a full bundle scan

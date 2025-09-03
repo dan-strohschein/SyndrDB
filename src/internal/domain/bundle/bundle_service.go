@@ -314,6 +314,9 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 
 func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
 	//args := settings.GetSettings()
+	s.logger.Infof("DEBUG: Starting AddIndexToBundle for bundle '%s', index '%s', type '%s'",
+		indexCommand.BundleName, indexCommand.IndexName, indexCommand.IndexType)
+
 	// Check if the bundle exists
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot add index")
@@ -329,7 +332,9 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 
 	switch indexCommand.IndexType {
 	case "btree":
+		s.logger.Infof("DEBUG: Starting BTree index creation")
 		err1 := CreateBTreeIndex(s, bundle, indexCommand)
+		s.logger.Infof("DEBUG: BTree index creation completed with error: %v", err1)
 		return err1
 
 		// Record the created index
@@ -346,8 +351,6 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 	default:
 		return fmt.Errorf("unknown index type: %s", indexCommand.IndexType)
 	}
-
-	return nil
 }
 
 func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
@@ -476,6 +479,7 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 //   - error: Any error that occurred during index creation
 func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
 	args := settings.GetSettings()
+	s.logger.Infof("DEBUG: CreateBTreeIndex started for bundle '%s', index '%s'", bundle.Name, indexCommand.IndexName)
 
 	// Validate input parameters
 	if len(indexCommand.Fields) == 0 {
@@ -488,6 +492,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 	}
 
 	fieldDef := indexCommand.Fields[0]
+	s.logger.Infof("DEBUG: Field definition: %+v", fieldDef)
 
 	// Validate that the field exists in the bundle structure
 	if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldDef.Name]; !exists {
@@ -778,6 +783,16 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 	return btreeIndex, nil
 }
 
+// GetOrLoadBTreeIndex is a public wrapper for getOrLoadBTreeIndex to support query planner
+func (s *BundleService) GetOrLoadBTreeIndex(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (interface{}, error) {
+	return s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+}
+
+// GetOrLoadHashIndexInterface is a wrapper to support query planner interface compatibility
+func (s *BundleService) GetOrLoadHashIndexInterface(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (interface{}, error) {
+	return s.GetOrLoadHashIndex(bundle, indexName, indexRef)
+}
+
 func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentCommand) error {
 	// Check if the bundle exists
 	if bundle == nil {
@@ -895,6 +910,9 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 	}
 
 	for _, doc := range filteredDocs {
+		// Store the original document state for index maintenance
+		originalDoc := *doc
+
 		// Update the document fields
 		// loop through the fields in the command and update the document
 		for _, kv := range docCommand.Fields {
@@ -903,6 +921,84 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 			foundField.Name = kv.Key
 			foundField.Value = kv.Value
 			doc.Fields[kv.Key] = foundField
+		}
+
+		// Update indexes if they exist and if indexed fields have changed
+		if bundle.Indexes != nil {
+			for indexName, indexRef := range bundle.Indexes {
+				s.logger.Debugf("Processing index '%s' of type '%s' for document update", indexName, indexRef.IndexType)
+
+				if indexRef.IndexType == "btree" {
+					// Check if the indexed field was updated
+					fieldName := indexRef.BTreeIndexField.FieldName
+					fieldWasUpdated := false
+
+					// Check if this field was in the update command
+					for _, kv := range docCommand.Fields {
+						if kv.Key == fieldName {
+							fieldWasUpdated = true
+							break
+						}
+					}
+
+					if fieldWasUpdated {
+						s.logger.Debugf("Indexed field '%s' was updated, maintaining BTree index '%s'", fieldName, indexName)
+
+						// Load BTree index on-demand
+						btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+						if err != nil {
+							s.logger.Errorf("Failed to load BTree index '%s': %v", indexName, err)
+							return fmt.Errorf("failed to load BTree index: %w", err)
+						}
+
+						// Extract the old field value for deletion
+						oldFieldValue, err := extractFieldValueForIndex(originalDoc, fieldName)
+						if err != nil {
+							s.logger.Warnf("Failed to extract old field value for document '%s': %v", doc.DocumentID, err)
+						} else {
+							// Convert old field value to bytes for BTree storage
+							oldKeyBytes, err := convertValueToBytes(oldFieldValue)
+							if err != nil {
+								s.logger.Warnf("Failed to convert old field value to bytes for document '%s': %v", doc.DocumentID, err)
+							} else {
+								// Delete old key-value pair from the BTree index
+								err = btreeIndex.Delete(oldKeyBytes, doc.DocumentID)
+								if err != nil {
+									s.logger.Warnf("Failed to delete old entry for document '%s' from BTree index '%s': %v", doc.DocumentID, indexName, err)
+								} else {
+									s.logger.Debugf("Successfully deleted old entry for document '%s' from BTree index '%s'", doc.DocumentID, indexName)
+								}
+							}
+						}
+
+						// Extract the new field value for insertion
+						newFieldValue, err := extractFieldValueForIndex(*doc, fieldName)
+						if err != nil {
+							s.logger.Warnf("Failed to extract new field value for document '%s': %v", doc.DocumentID, err)
+						} else {
+							// Convert new field value to bytes for BTree storage
+							newKeyBytes, err := convertValueToBytes(newFieldValue)
+							if err != nil {
+								s.logger.Warnf("Failed to convert new field value to bytes for document '%s': %v", doc.DocumentID, err)
+							} else {
+								// Insert new key-value pair into the BTree index
+								err = btreeIndex.Insert(newKeyBytes, doc.DocumentID)
+								if err != nil {
+									s.logger.Errorf("Failed to insert new entry for document '%s' into BTree index '%s': %v", doc.DocumentID, indexName, err)
+									return fmt.Errorf("failed to update document in BTree index: %w", err)
+								} else {
+									s.logger.Debugf("Successfully inserted new entry for document '%s' into BTree index '%s'", doc.DocumentID, indexName)
+								}
+							}
+						}
+					} else {
+						s.logger.Debugf("Indexed field '%s' was not updated, skipping BTree index maintenance for '%s'", fieldName, indexName)
+					}
+				} else if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
+					// DocumentID hash indexes don't need update maintenance since DocumentID never changes
+					s.logger.Debugf("Skipping DocumentID hash index '%s' - DocumentID cannot be updated", indexName)
+				}
+			}
 		}
 
 		// Save the updated document back to the bundle

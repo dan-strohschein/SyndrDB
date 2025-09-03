@@ -11,12 +11,20 @@ import (
 )
 
 type QueryPlanner struct {
-	Logger *zap.SugaredLogger
+	Logger        *zap.SugaredLogger
+	BundleService BundleServiceInterface
 }
 
 func NewQueryPlanner(logger *zap.SugaredLogger) *QueryPlanner {
 	return &QueryPlanner{
 		Logger: logger,
+	}
+}
+
+func NewQueryPlannerWithService(logger *zap.SugaredLogger, bundleService BundleServiceInterface) *QueryPlanner {
+	return &QueryPlanner{
+		Logger:        logger,
+		BundleService: bundleService,
 	}
 }
 
@@ -124,6 +132,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 						Cost:          cost,
 						EstimatedRows: 1,
 						Logger:        qp.Logger,
+						BundleService: qp.BundleService,
 					}
 					bestCost = cost
 					indexesUsed = []string{fmt.Sprintf("%s_%s_hidx", helpers.CleanFileName(bundle.Name), condition.Field)}
@@ -134,28 +143,37 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 
 		// Check for B-tree index opportunities
 		if qp.isBTreeSuitable(condition.Operator) {
-			if indexRef, exists := bundle.Indexes[condition.Field+"_btree"]; exists {
-				cost := qp.estimateBTreeIndexCost(bundle, condition)
-				if cost < bestCost {
-					scanType := BTreeIndexScan
-					if condition.Operator != "=" {
-						scanType = BTreeRangeScan
-					}
+			// Look for any B-Tree index that covers this field
+			for indexName, indexRef := range bundle.Indexes {
+				if indexRef.IndexType == "btree" && indexRef.BTreeIndexField.FieldName == condition.Field {
+					qp.Logger.Infof("Found B-tree index '%s' for field '%s'", indexName, condition.Field)
 
-					estimatedRows := qp.estimateBTreeRows(bundle, condition)
-					bestNode = &IndexScanNode{
-						Bundle:        bundle,
-						IndexName:     indexRef.IndexName,
-						ScanType:      scanType,
-						SearchKey:     condition.Value,
-						Operator:      condition.Operator,
-						Cost:          cost,
-						EstimatedRows: estimatedRows,
-						Logger:        qp.Logger,
+					// For now, only support equality searches until range scans are fully implemented
+					if condition.Operator == "==" {
+						cost := qp.estimateBTreeIndexCost(bundle, condition)
+						if cost < bestCost {
+							estimatedRows := qp.estimateBTreeRows(bundle, condition)
+							bestNode = &IndexScanNode{
+								Bundle:        bundle,
+								IndexName:     indexName, // Use the actual index name from the map key
+								ScanType:      BTreeIndexScan,
+								SearchKey:     condition.Value,
+								Operator:      condition.Operator,
+								Cost:          cost,
+								EstimatedRows: estimatedRows,
+								Logger:        qp.Logger,
+								BundleService: qp.BundleService,
+							}
+							bestCost = cost
+							indexesUsed = []string{indexName}
+							usedClause = &clauses[i]
+							qp.Logger.Infof("Selected B-tree index '%s' with cost %.2f for condition %s %s %v",
+								indexName, cost, condition.Field, condition.Operator, condition.Value)
+						}
+					} else {
+						qp.Logger.Infof("B-tree range operations (>, <, >=, <=) not yet fully implemented, skipping index '%s'", indexName)
 					}
-					bestCost = cost
-					indexesUsed = []string{indexRef.IndexName}
-					usedClause = &clauses[i]
+					break // Found suitable index for this field, no need to check others
 				}
 			}
 		}
@@ -227,6 +245,7 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 					Cost:          qp.estimateHashIndexCost(bundle, condition),
 					EstimatedRows: 1,
 					Logger:        qp.Logger,
+					BundleService: qp.BundleService,
 				}
 				indexUsed = []string{indexRef.IndexName}
 			}
@@ -249,6 +268,7 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 					Cost:          qp.estimateBTreeIndexCost(bundle, condition),
 					EstimatedRows: qp.estimateBTreeRows(bundle, condition),
 					Logger:        qp.Logger,
+					BundleService: qp.BundleService,
 				}
 				indexUsed = []string{indexRef.IndexName}
 			}

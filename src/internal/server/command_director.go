@@ -447,7 +447,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		whereClause := strings.Join(commandParts[5:], " ")
 
 		// Create execution planner
-		planner := planner.NewQueryPlanner(logger)
+		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
 
 		// Create execution plan
 		plan, err := planner.CreateExecutionPlan(bundle, whereClause)

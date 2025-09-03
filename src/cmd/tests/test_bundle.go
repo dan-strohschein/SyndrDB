@@ -144,19 +144,19 @@ func GetBundleManagementUseCases() []BundleManagementUseCase {
 			Tags:          []string{"index", "hash", "documentid", "automatic"},
 			Timeout:       30 * time.Second,
 		},
-		// This functionality has not been implemented yet
-		// {
-		// 	Name:          "CreateCustomBTreeIndex",
-		// 	Description:   "Create a BTree index on a custom field for filtering",
-		// 	Category:      "IndexManagement",
-		// 	SetupFunc:     setupBundleWithDocuments,
-		// 	ExecuteFunc:   createCustomBTreeIndex,
-		// 	ValidateFunc:  validateCustomBTreeIndex,
-		// 	CleanupFunc:   cleanupBundleTest,
-		// 	ExpectSuccess: true,
-		// 	Tags:          []string{"index", "btree", "custom", "filtering"},
-		// 	Timeout:       45 * time.Second,
-		// },
+		// B-Tree index test - re-enabled with infinite loop protection
+		{
+			Name:          "CreateCustomBTreeIndex",
+			Description:   "Create a BTree index on a custom field for filtering",
+			Category:      "IndexManagement",
+			SetupFunc:     setupBundleWithDocuments,
+			ExecuteFunc:   createCustomBTreeIndex,
+			ValidateFunc:  validateCustomBTreeIndex,
+			CleanupFunc:   cleanupBundleTest,
+			ExpectSuccess: true,
+			Tags:          []string{"index", "btree", "custom", "filtering"},
+			Timeout:       10 * time.Second,
+		},
 		{
 			Name:          "UpdateHashIndexAfterDocumentOperation",
 			Description:   "Verify hash index updates correctly after document add/remove",

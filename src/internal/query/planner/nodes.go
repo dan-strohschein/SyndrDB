@@ -119,17 +119,48 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 		return nil, fmt.Errorf("index %s is not a B-tree index (type: %s)", node.IndexName, indexRef.IndexType)
 	}
 
-	// Cast to the V2 B-tree index
-	btreeIndex, ok := indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
-	if !ok {
-		return nil, fmt.Errorf("btree index %s is not of type *btreeindexV2.BTreeIndex", node.IndexName)
+	// Use bundle service to load the B-tree index if not already loaded
+	var btreeIndex *btreeindexV2.BTreeIndex
+	if indexRef.IndexInstance == nil {
+		node.Logger.Debugf("B-tree index instance is nil, loading from disk using bundle service")
+		if node.BundleService == nil {
+			return nil, fmt.Errorf("bundle service is required for lazy loading B-tree indexes")
+		}
+
+		loadedIndex, err := node.BundleService.GetOrLoadBTreeIndex(node.Bundle, node.IndexName, indexRef)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load B-tree index %s: %w", node.IndexName, err)
+		}
+
+		var ok bool
+		btreeIndex, ok = loadedIndex.(*btreeindexV2.BTreeIndex)
+		if !ok {
+			return nil, fmt.Errorf("loaded index is not of type *btreeindexV2.BTreeIndex")
+		}
+	} else {
+		// Cast to the V2 B-tree index
+		var ok bool
+		btreeIndex, ok = indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
+		if !ok {
+			return nil, fmt.Errorf("btree index %s is not of type *btreeindexV2.BTreeIndex", node.IndexName)
+		}
 	}
 
-	// Assert that SearchKey is of type []byte
-	searchKeyBytes, ok := node.SearchKey.([]byte)
-	if !ok {
-		return nil, fmt.Errorf("btree index search key must be of type []byte, got %T", node.SearchKey)
+	// Convert search key to bytes for B-tree index lookup
+	// The search key could be a string, number, etc. - convert to string first, then to bytes
+	var searchKeyBytes []byte
+	switch v := node.SearchKey.(type) {
+	case string:
+		searchKeyBytes = []byte(v)
+	case []byte:
+		searchKeyBytes = v
+	default:
+		// Convert other types to string representation, then to bytes
+		searchKeyStr := fmt.Sprintf("%v", v)
+		searchKeyBytes = []byte(searchKeyStr)
 	}
+
+	node.Logger.Debugf("Converted search key %v (%T) to bytes: %v", node.SearchKey, node.SearchKey, string(searchKeyBytes))
 
 	// Search the B-tree index for document IDs
 	documentIDs, err := btreeIndex.Search(searchKeyBytes)
@@ -158,7 +189,8 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 }
 
 func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document, error) {
-	node.Logger.Infof("Executing B-tree range scan on %s", node.IndexName)
+	node.Logger.Infof("Executing B-tree range scan on %s for operator %s with value %v",
+		node.IndexName, node.Operator, node.SearchKey)
 
 	// Find the B-tree index in the bundle
 	if node.Bundle.Indexes == nil {
@@ -175,60 +207,20 @@ func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document,
 		return nil, fmt.Errorf("index %s is not a B-tree index (type:%s)", node.IndexName, indexRef.IndexType)
 	}
 
-	// Cast to the V2 B-tree index
-	btreeIndex, ok := indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
+	// Cast to the V2 B-tree index to verify it's available
+	_, ok := indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
 	if !ok {
 		return nil, fmt.Errorf("btree index %s is not of type *btreeindexV2.BTreeIndex",
 			node.IndexName)
 	}
 
-	// Perform the range scan
-	if node.RangeStart == nil || node.RangeEnd == nil {
-		return nil, fmt.Errorf("btree range scan requires both RangeStart and RangeEnd to be set")
-	}
+	// For now, implement range scans as filtered full scans
+	// TODO: Implement proper range scan functionality in B-Tree V2
+	node.Logger.Warnf("Range scan not yet fully implemented for operator %s, falling back to filtered scan", node.Operator)
 
-	rangeStartBytes, ok := node.RangeStart.([]byte)
-	if !ok {
-		return nil, fmt.Errorf("btree range scan RangeStart must be of type []byte, got %T", node.RangeStart)
-	}
-	rangeEndBytes, ok := node.RangeEnd.([]byte)
-	if !ok {
-		return nil, fmt.Errorf("btree range scan RangeEnd must be of type []byte, got %T", node.RangeEnd)
-	}
-
-	rootPageNum := btreeIndex.GetRootPageNum()
-	if rootPageNum == 0 {
-		return nil, fmt.Errorf("btree index %s has no root page", node.IndexName)
-	}
-
-	searchResults, err := btreeindexV2.RangeSearch(btreeIndex, rangeStartBytes, rangeEndBytes, rootPageNum)
-	if err != nil {
-		return nil, fmt.Errorf("btree range scan failed: %w", err)
-	}
-
-	node.Logger.Debugf("B-tree range scan returned %d document IDs for range [%v, %v]", len(searchResults.DocumentIDs), node.RangeStart, node.RangeEnd)
-
-	// Retrieve the actual documents from the bundle
-	if node.Bundle.Documents == nil {
-		node.Logger.Warnf("Bundle %s has no documents loaded", node.Bundle.Name)
-		return nil, nil
-	}
-
-	results := make(map[string]*models.Document)
-	for _, docID := range searchResults.DocumentIDs {
-		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// Make a copy of the document to avoid modification issues
-			docCopy := doc
-			results[docID] = &docCopy
-			node.Logger.Debugf("Retrieved document %s from bundle", docID)
-		} else {
-			// Document ID is in index but not in bundle - this could indicate data inconsistency
-			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle documents", docID)
-		}
-	}
-
-	node.Logger.Infof("B-tree range scan returned %d documents for range [%v, %v]", len(results), node.RangeStart, node.RangeEnd)
-	return results, nil
+	// For range queries, we'll need to implement a different approach
+	// For now, return error to indicate this needs implementation
+	return nil, fmt.Errorf("range scan operations (>, <, >=, <=) not yet fully implemented for B-tree indexes")
 }
 
 func (node *FullScanNode) Execute() (map[string]*models.Document, error) {

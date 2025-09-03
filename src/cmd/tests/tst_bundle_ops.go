@@ -790,8 +790,8 @@ func createCustomBTreeIndex() error {
 func validateCustomBTreeIndex() error {
 	bundleName := "documents_bundle"
 
-	// Query using the BTree index
-	selectCommand := fmt.Sprintf("SELECT FROM %s WHERE title == 'Document 1'", bundleName)
+	// Query using the BTree index (trying double quotes for string literals)
+	selectCommand := fmt.Sprintf("SELECT DOCUMENTS FROM %s WHERE title == \"Document 1\"", bundleName)
 	result, err := executeClientCommand(selectCommand)
 	if err != nil {
 		return fmt.Errorf("failed to validate custom BTree index: %w", err)

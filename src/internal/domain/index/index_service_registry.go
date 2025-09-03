@@ -1,29 +1,32 @@
 package index
 
 import (
+	"fmt"
 	"sync"
-	"syndrdb/src/internal/domain/index/btreeindex"
+	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/models"
 )
 
-// IndexServiceRegistry keeps track of index services for each bundle
+// IndexServiceRegistry keeps track of index instances for each bundle
+// Updated to use btreeindexV2.BTreeIndex instances instead of services
 type IndexServiceRegistry struct {
-	mu            sync.RWMutex
-	btreeServices map[string]*btreeindex.BTreeService
+	mu           sync.RWMutex
+	btreeIndexes map[string]*btreeindexV2.BTreeIndex
 	//hashServices  map[string]*hashindex.HashService
 }
 
 // Global registry instance
 var registry = &IndexServiceRegistry{
-	btreeServices: make(map[string]*btreeindex.BTreeService),
+	btreeIndexes: make(map[string]*btreeindexV2.BTreeIndex),
 	//hashServices:  make(map[string]*hashindex.HashService),
 }
 
-// RegisterBTreeService registers a BTree service for a bundle
-func (r *IndexServiceRegistry) RegisterBTreeService(bundleID string, service *btreeindex.BTreeService) {
+// RegisterBTreeIndex registers a BTree index for a bundle and index name
+func (r *IndexServiceRegistry) RegisterBTreeIndex(bundleID, indexName string, index *btreeindexV2.BTreeIndex) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.btreeServices[bundleID] = service
+	key := fmt.Sprintf("%s_%s", bundleID, indexName)
+	r.btreeIndexes[key] = index
 }
 
 // RegisterHashService registers a Hash service for a bundle
@@ -33,11 +36,12 @@ func (r *IndexServiceRegistry) RegisterBTreeService(bundleID string, service *bt
 // 	r.hashServices[bundleID] = service
 // }
 
-// GetBTreeService returns the BTree service for a bundle
-func (r *IndexServiceRegistry) GetBTreeService(bundleID string) *btreeindex.BTreeService {
+// GetBTreeIndex returns the BTree index for a bundle and index name
+func (r *IndexServiceRegistry) GetBTreeIndex(bundleID, indexName string) *btreeindexV2.BTreeIndex {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.btreeServices[bundleID]
+	key := fmt.Sprintf("%s_%s", bundleID, indexName)
+	return r.btreeIndexes[key]
 }
 
 // GetHashService returns the Hash service for a bundle
@@ -49,26 +53,34 @@ func (r *IndexServiceRegistry) GetBTreeService(bundleID string) *btreeindex.BTre
 
 // Public convenience functions that use the global registry
 
-// RegisterIndexServices registers index services for use with bundles
-func RegisterIndexServices(bundle *models.Bundle, btreeService *btreeindex.BTreeService) {
-	registry.RegisterBTreeService(bundle.BundleID, btreeService)
-	//registry.RegisterHashService(bundle.BundleID, hashService)
+// RegisterBTreeIndex registers a BTree index for a bundle and index name
+func RegisterBTreeIndex(bundleID, indexName string, index *btreeindexV2.BTreeIndex) {
+	registry.RegisterBTreeIndex(bundleID, indexName, index)
 }
 
-func RegisterBTreeService(bundleID string, service *btreeindex.BTreeService) {
-	registry.RegisterBTreeService(bundleID, service)
+// GetBTreeIndex returns the BTree index for a bundle and index name
+func GetBTreeIndex(bundleID, indexName string) *btreeindexV2.BTreeIndex {
+	return registry.GetBTreeIndex(bundleID, indexName)
 }
 
-// func RegisterHashService(bundleID string, service *hashindex.HashService) {
-// 	registry.RegisterHashService(bundleID, service)
-// }
+// Legacy compatibility functions - marked for deprecation
+// These are kept temporarily for backward compatibility during migration
 
-// GetBTreeService returns the BTree service for a bundle
-func GetBTreeService(bundleID string) *btreeindex.BTreeService {
-	return registry.GetBTreeService(bundleID)
+// RegisterIndexServices is deprecated - use RegisterBTreeIndex instead
+func RegisterIndexServices(bundle *models.Bundle, btreeService interface{}) {
+	// This is now a no-op since we register indexes individually by name
+	// TODO: Remove this function after migration is complete
 }
 
-// GetHashService returns the Hash service for a bundle
-// func GetHashService(bundleID string) *hashindex.HashService {
-// 	return registry.GetHashService(bundleID)
-// }
+// RegisterBTreeService is deprecated - use RegisterBTreeIndex instead
+func RegisterBTreeService(bundleID string, service interface{}) {
+	// This is now a no-op since we register indexes individually by name
+	// TODO: Remove this function after migration is complete
+}
+
+// GetBTreeService is deprecated - use GetBTreeIndex instead
+func GetBTreeService(bundleID string) interface{} {
+	// Return nil since this legacy interface is no longer supported
+	// TODO: Remove this function after migration is complete
+	return nil
+}
