@@ -96,7 +96,17 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			}
 			if bndleCommand.HasRelationshipCommands {
 				//TODO : Don't assume its always a create, it could be to update a relationship
-				RelationshipCommand, err := bndle.ParseCreateRelationshipCommand(command)
+				var RelationshipCommand *models.RelationshipCommand
+				var err error
+
+				// Check if it's the new ADD RELATIONSHIP syntax
+				if strings.Contains(strings.ToUpper(command), "ADD RELATIONSHIP") {
+					RelationshipCommand, err = bndle.ParseAddRelationshipCommand(command)
+				} else {
+					// Use the old CREATE RELATIONSHIP syntax
+					RelationshipCommand, err = bndle.ParseCreateRelationshipCommand(command)
+				}
+
 				if err != nil {
 					return &result, err
 				}
@@ -416,6 +426,15 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 }
 
 func SelectDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+	// First, check if this is a JOIN query by examining the full command
+	fullCommand := strings.Join(commandParts, " ")
+
+	// Detect JOIN queries
+	if strings.Contains(strings.ToUpper(fullCommand), "JOIN") {
+		return SelectDocumentsWithJoin(fullCommand, serviceManager, database, logger)
+	}
+
+	// Handle regular SELECT without JOIN
 	if len(commandParts) < 4 || !strings.EqualFold(commandParts[2], "FROM") {
 		return nil, fmt.Errorf("SELECT DOCUMENTS requires the spec 'FROM <Bundle_name>'")
 	}
@@ -518,6 +537,41 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	// 	result = fmt.Sprintf("Found %d documents in bundle '%s'.", len(documents), bundleName)
 	// }
 	// logger.Infof(result)
+
+	cmdResponse := &CommandResponse{
+		ResultCount: len(documents),
+		Result:      documents,
+	}
+	return cmdResponse, nil
+}
+
+// SelectDocumentsWithJoin handles SELECT queries with JOIN clauses
+func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+	logger.Infof("Processing JOIN query: %s", query)
+
+	// Parse the JOIN query
+	joinQuery, err := queryparser.ParseSelectJoinQuery(query, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JOIN query: %w", err)
+	}
+
+	// Create join-capable query planner
+	joinPlanner := planner.NewJoinQueryPlanner(logger, serviceManager.BundleService)
+
+	// Create execution plan for the JOIN query
+	plan, err := joinPlanner.CreateJoinExecutionPlan(joinQuery, database)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create JOIN execution plan: %w", err)
+	}
+
+	// Execute the plan
+	logger.Infof("Executing JOIN plan with cost %.2f, estimated rows: %d", plan.Cost, plan.EstimatedRows)
+	documents, err := plan.RootNode.Execute()
+	if err != nil {
+		return nil, fmt.Errorf("error executing JOIN query plan: %w", err)
+	}
+
+	logger.Infof("JOIN query executed successfully, returned %d documents", len(documents))
 
 	cmdResponse := &CommandResponse{
 		ResultCount: len(documents),

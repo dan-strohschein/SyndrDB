@@ -90,13 +90,22 @@ type Relationship struct {
 	// Description is the description of the relationship.
 	Description string
 
+	// Source field for the relationship (e.g., "DocumentID")
+	SourceField string
+	// Destination bundle name
+	DestinationBundle string
+	// Destination field for the relationship (e.g., "OrderID")
+	DestinationField string
+	// Source bundle name
+	SourceBundle string
+	// Type is the type of the relationship (e.g., "0toMany", "1toMany", "ManyToMany").
+	RelationshipType string
+
+	// Legacy fields for backward compatibility
 	SourceBundleID   string // Bundle ID of the source document
 	SourceBundleName string // Name of the source bundle
 	TargetBundleID   string // Bundle ID of the target document
 	TargetBundleName string // Name of the target bundle
-
-	// Type is the type of the relationship (e.g., one-to-one, one-to-many, many-to-many).
-	RelationshipType int // 1: one-to-one, 2: one-to-many, 3: many-to-many
 }
 
 // IndexService defines the interface for any index implementation
@@ -136,14 +145,22 @@ type BundleCommand struct {
 }
 
 type RelationshipCommand struct {
-	CommandType      string
-	BundleName       string
-	Name             string
+	CommandType string
+	BundleName  string
+	Name        string
+
+	// New fields for the enhanced relationship system
+	RelationshipType  string // "0toMany", "1toMany", "ManyToMany"
+	SourceBundle      string
+	SourceField       string
+	DestinationBundle string
+	DestinationField  string
+
+	// Legacy fields for backward compatibility
 	SourceBundleID   string
 	SourceBundleName string
 	TargetBundleID   string
 	TargetBundleName string
-	RelationshipType int // 1: one-to-one, 2: one-to-many, 3: many-to-many
 }
 
 // If the Bundle Command is UPDATE, then these changes are used

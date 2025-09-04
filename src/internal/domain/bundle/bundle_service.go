@@ -203,111 +203,139 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 		return fmt.Errorf("relationship command is nil")
 	}
 
+	// Generate relationship name with proper counter
+	relationshipName := s.generateRelationshipName(bundle, relationshipCommand.SourceBundle, relationshipCommand.DestinationBundle)
+
 	// Check if the relationship already exists
 	for _, rel := range bundle.Relationships {
-		if rel.Name == relationshipCommand.Name {
-			return fmt.Errorf("relationship '%s' already exists in bundle '%s'", relationshipCommand.Name, bundle.Name)
+		if rel.Name == relationshipName {
+			return fmt.Errorf("relationship '%s' already exists in bundle '%s'", relationshipName, bundle.Name)
 		}
 	}
-	// Create the relationship
+
+	// Create the relationship with new structure
 	relationship := models.Relationship{
-		Name:             relationshipCommand.Name,
-		SourceBundleID:   relationshipCommand.SourceBundleID,
-		SourceBundleName: relationshipCommand.SourceBundleName,
-		TargetBundleID:   relationshipCommand.TargetBundleID,
-		TargetBundleName: relationshipCommand.TargetBundleName,
-		RelationshipType: relationshipCommand.RelationshipType,
+		Name:              relationshipName,
+		SourceField:       relationshipCommand.SourceField,
+		DestinationBundle: relationshipCommand.DestinationBundle,
+		DestinationField:  relationshipCommand.DestinationField,
+		SourceBundle:      relationshipCommand.SourceBundle,
+		RelationshipType:  relationshipCommand.RelationshipType,
+
+		// Set legacy fields for backward compatibility
+		SourceBundleName: relationshipCommand.SourceBundle,
+		TargetBundleName: relationshipCommand.DestinationBundle,
 	}
 
 	// Add the relationship to the bundle
-	bundle.Relationships[relationship.Name] = relationship //= append(bundle.Relationships, relationship)
-
-	// TODO make the relationship stuff a separate function
-	//if the type is one-to-one, then we need to add the field, and make it unique
-	switch relationship.RelationshipType {
-	case 1: //one to one
-		// In this scenario, the target bundle will have a foreign key field that references the source bundle
-		// and it will be UNIQUE (no duplicates allowed)
-
-		//First we need to find the target bundle
-		targetBundle, err := s.GetBundleByName(bundle.Database, relationship.TargetBundleName)
-		if err != nil {
-			return fmt.Errorf("target bundle '%s' not found: %w", relationship.TargetBundleName, err)
-		}
-		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.SourceBundleName)
-		targetBundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
-			Name:         fk_fieldName,
-			Type:         "relationship",
-			IsRequired:   true,
-			IsUnique:     true,
-			DefaultValue: nil,
-		}
-
-		// Update the bundle in the store
-		err = s.store.UpdateBundleFile(targetBundle.Database, targetBundle)
-		if err != nil {
-			return fmt.Errorf("failed to update bundle in store: %w", err)
-		}
-	case 2: //one to many
-		// In this scenario, the target bundle will have a foreign key field that references the source bundle
-		//First we need to find the target bundle
-		targetBundle, err := s.GetBundleByName(bundle.Database, relationship.TargetBundleName)
-		if err != nil {
-			return fmt.Errorf("target bundle '%s' not found: %w", relationship.TargetBundleName, err)
-		}
-
-		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.SourceBundleID)
-		targetBundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
-			Name:         fk_fieldName,
-			Type:         "relationship",
-			IsRequired:   true,
-			IsUnique:     false, // One-to-many relationships can have multiple entries
-			DefaultValue: nil,
-		}
-
-		// Update the bundle in the store
-		err = s.store.UpdateBundleFile(targetBundle.Database, targetBundle)
-		if err != nil {
-			return fmt.Errorf("failed to update bundle in store: %w", err)
-		}
-	case 3: //many to many
-		// In this scenarion both bundles will have a foreign key field that references the other bundle
-		//Left to right relationship
-		targetBundle, err := s.GetBundleByName(bundle.Database, relationship.TargetBundleName)
-		if err != nil {
-			return fmt.Errorf("target bundle '%s' not found: %w", relationship.TargetBundleName, err)
-		}
-
-		fk_fieldName := fmt.Sprintf("_%s_fk", relationship.SourceBundleID)
-		targetBundle.DocumentStructure.FieldDefinitions[fk_fieldName] = models.FieldDefinition{
-			Name:         fk_fieldName,
-			Type:         "relationship",
-			IsRequired:   true,
-			IsUnique:     false, // One-to-many relationships can have multiple entries
-			DefaultValue: nil,
-		}
-
-		fk_fieldName1 := fmt.Sprintf("_%s_fk", relationship.TargetBundleName)
-		bundle.DocumentStructure.FieldDefinitions[fk_fieldName1] = models.FieldDefinition{
-			Name:         fk_fieldName1,
-			Type:         "relationship",
-			IsRequired:   true,
-			IsUnique:     false, // Many-to-many relationships can have multiple entries
-			DefaultValue: nil,
-		}
-
-		// Update the target bundle in the store
-		err = s.store.UpdateBundleFile(targetBundle.Database, targetBundle)
-		if err != nil {
-			return fmt.Errorf("failed to update target bundle in store: %w", err)
-		}
-
-		// Update the source bundle in the store
-		err = s.store.UpdateBundleFile(bundle.Database, bundle)
-		if err != nil {
-			return fmt.Errorf("failed to update bundle in store: %w", err)
-		}
+	if bundle.Relationships == nil {
+		bundle.Relationships = make(map[string]models.Relationship)
 	}
+	bundle.Relationships[relationship.Name] = relationship
+
+	s.logger.Infof("Adding %s relationship from %s.%s to %s.%s",
+		relationship.RelationshipType,
+		relationship.SourceBundle,
+		relationship.SourceField,
+		relationship.DestinationBundle,
+		relationship.DestinationField)
+
+	// Handle different relationship types and add appropriate fields
+	switch relationship.RelationshipType {
+	case "1toMany":
+		// For 1toMany relationships, add a field to the destination bundle
+		err := s.addFieldToDestinationBundle(bundle, &relationship, true, false) // required=true, unique=false
+		if err != nil {
+			return fmt.Errorf("failed to add field to destination bundle for 1toMany relationship: %w", err)
+		}
+
+	case "0toMany":
+		// For 0toMany relationships, add a field to the destination bundle (not required)
+		err := s.addFieldToDestinationBundle(bundle, &relationship, false, false) // required=false, unique=false
+		if err != nil {
+			return fmt.Errorf("failed to add field to destination bundle for 0toMany relationship: %w", err)
+		}
+
+	case "ManyToMany":
+		// For ManyToMany relationships, add fields to both bundles
+		err := s.addFieldToDestinationBundle(bundle, &relationship, false, false) // required=false, unique=false
+		if err != nil {
+			return fmt.Errorf("failed to add field to destination bundle for ManyToMany relationship: %w", err)
+		}
+
+		// Also add the reverse field to the source bundle
+		reverseFieldName := relationship.DestinationBundle + "ID"
+		bundle.DocumentStructure.FieldDefinitions[reverseFieldName] = models.FieldDefinition{
+			Name:         reverseFieldName,
+			Type:         "relationship",
+			IsRequired:   false,
+			IsUnique:     false,
+			DefaultValue: nil,
+		}
+
+		s.logger.Infof("Added reverse field '%s' to source bundle '%s' for ManyToMany relationship",
+			reverseFieldName, bundle.Name)
+
+	default:
+		return fmt.Errorf("unsupported relationship type: %s", relationship.RelationshipType)
+	}
+
+	// Update the source bundle in the store
+	err := s.store.UpdateBundleFile(bundle.Database, bundle)
+	if err != nil {
+		return fmt.Errorf("failed to update source bundle in store: %w", err)
+	}
+
+	s.logger.Infof("Successfully added relationship '%s' to bundle '%s'", relationshipName, bundle.Name)
+	return nil
+}
+
+// generateRelationshipName generates a unique relationship name with counter
+func (s *BundleService) generateRelationshipName(bundle *models.Bundle, sourceBundle, destinationBundle string) string {
+	baseName := fmt.Sprintf("%s_%s", sourceBundle, destinationBundle)
+	counter := 1
+
+	// Check for existing relationships with similar names and increment counter
+	for {
+		relationshipName := fmt.Sprintf("%s_%d", baseName, counter)
+		if _, exists := bundle.Relationships[relationshipName]; !exists {
+			return relationshipName
+		}
+		counter++
+	}
+}
+
+// addFieldToDestinationBundle adds a relationship field to the destination bundle
+func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle, relationship *models.Relationship, isRequired, isUnique bool) error {
+	// Find the destination bundle
+	destinationBundle, err := s.GetBundleByName(sourceBundle.Database, relationship.DestinationBundle)
+	if err != nil {
+		return fmt.Errorf("destination bundle '%s' not found: %w", relationship.DestinationBundle, err)
+	}
+
+	// Check if field definitions map is initialized
+	if destinationBundle.DocumentStructure.FieldDefinitions == nil {
+		destinationBundle.DocumentStructure.FieldDefinitions = make(map[string]models.FieldDefinition)
+	}
+
+	// Add the relationship field to the destination bundle
+	fieldName := relationship.DestinationField
+	destinationBundle.DocumentStructure.FieldDefinitions[fieldName] = models.FieldDefinition{
+		Name:         fieldName,
+		Type:         "relationship",
+		IsRequired:   isRequired,
+		IsUnique:     isUnique,
+		DefaultValue: nil,
+	}
+
+	// Update the destination bundle in the store
+	err = s.store.UpdateBundleFile(destinationBundle.Database, destinationBundle)
+	if err != nil {
+		return fmt.Errorf("failed to update destination bundle '%s' in store: %w", destinationBundle.Name, err)
+	}
+
+	s.logger.Infof("Added relationship field '%s' to destination bundle '%s' (required=%t, unique=%t)",
+		fieldName, destinationBundle.Name, isRequired, isUnique)
 
 	return nil
 }

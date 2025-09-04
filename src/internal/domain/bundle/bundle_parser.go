@@ -270,7 +270,17 @@ func ParseUpdateBundleCommand(command string) (*models.BundleCommand, error) {
 	}
 	bundleName := matches[1]
 
-	// Extract field changes
+	// Check if this is an ADD RELATIONSHIP command
+	if strings.Contains(strings.ToUpper(command), "ADD RELATIONSHIP") {
+		bundleCommand := &models.BundleCommand{
+			CommandType:             "UPDATE",
+			BundleName:              bundleName,
+			HasRelationshipCommands: true,
+		}
+		return bundleCommand, nil
+	}
+
+	// Extract field changes for regular UPDATE BUNDLE commands
 	changes, err := parseFieldChanges(command)
 	if err != nil {
 		return nil, err
@@ -316,7 +326,7 @@ func ParseCreateRelationshipCommand(command string) (*models.RelationshipCommand
 		SourceBundleName: matches[3],
 		//TargetBundleID:   matches[5],
 		TargetBundleName: matches[5],
-		RelationshipType: parseRelationshipType(matches[7]),
+		RelationshipType: matches[7], // Use the string directly instead of converting to int
 	}, nil
 }
 
@@ -330,6 +340,22 @@ func parseRelationshipType(typeStr string) int {
 		return 3 // Many-to-Many
 	default:
 		return 0 // Unknown type
+	}
+}
+
+// parseRelationshipTypeString converts relationship type string to standardized format
+func parseRelationshipTypeString(typeStr string) string {
+	switch strings.ToLower(typeStr) {
+	case "1to1", "1to_1", "one-to-one", "onetoone":
+		return "1to1"
+	case "1to_many", "1tomany", "one-to-many", "onetomany":
+		return "1toMany"
+	case "many_to_many", "manytomany", "many-to-many":
+		return "ManyToMany"
+	case "0tomany", "0to_many", "zero-to-many", "zerotomany":
+		return "0toMany"
+	default:
+		return typeStr // Return as-is if unknown
 	}
 }
 
@@ -680,4 +706,62 @@ func isValidBundleNameChar(char rune) bool {
 		(char >= 'A' && char <= 'Z') ||
 		(char >= '0' && char <= '9') ||
 		char == '_' || char == '-'
+}
+
+// ParseAddRelationshipCommand parses the new ADD RELATIONSHIP command syntax
+// Supports two formats:
+// 1. UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipType>", "<SourceBundle>", "<SourceFieldName>", "<DestinationBundleName>", "<DestinationFieldName>")
+// 2. UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipType>", "<SourceBundle>", "", "<DestinationBundleName>", "")
+func ParseAddRelationshipCommand(command string) (*models.RelationshipCommand, error) {
+	command = strings.TrimSpace(command)
+	command = strings.ReplaceAll(command, "\n", " ")
+	command = strings.ReplaceAll(command, "\t", " ")
+
+	// Regular expression to parse the ADD RELATIONSHIP command
+	// UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipType>", "<SourceBundle>", "<SourceFieldName>", "<DestinationBundleName>", "<DestinationFieldName>")
+	relationshipRegex := regexp.MustCompile(`UPDATE\s+BUNDLE\s+"([^"]+)"\s+ADD\s+RELATIONSHIP\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*\)`)
+
+	matches := relationshipRegex.FindStringSubmatch(command)
+	if len(matches) < 7 {
+		return nil, fmt.Errorf("invalid ADD RELATIONSHIP command syntax. Expected: UPDATE BUNDLE \"<BundleName>\" ADD RELATIONSHIP (\"<RelationshipType>\", \"<SourceBundle>\", \"<SourceField>\", \"<DestinationBundle>\", \"<DestinationField>\")")
+	}
+
+	sourceBundleName := matches[1]
+	relationshipType := matches[2]
+	sourceBundle := matches[3]
+	sourceField := matches[4]
+	destinationBundle := matches[5]
+	destinationField := matches[6]
+
+	// Validate relationship type
+	if relationshipType != "0toMany" && relationshipType != "1toMany" && relationshipType != "ManyToMany" {
+		return nil, fmt.Errorf("invalid relationship type '%s'. Valid types are: 0toMany, 1toMany, ManyToMany", relationshipType)
+	}
+
+	// Handle default values for empty fields
+	if sourceField == "" {
+		sourceField = "DocumentID"
+	}
+	if destinationField == "" {
+		destinationField = sourceBundle + "ID"
+	}
+
+	// Generate relationship name: <SourceBundle>_<DestinationBundle>_<Counter>
+	// For now, we'll use a simple counter of 1. In the service layer, we can implement proper counter logic
+	relationshipName := fmt.Sprintf("%s_%s_1", sourceBundle, destinationBundle)
+
+	return &models.RelationshipCommand{
+		CommandType:       "ADD",
+		BundleName:        sourceBundleName,
+		Name:              relationshipName,
+		RelationshipType:  relationshipType,
+		SourceBundle:      sourceBundle,
+		SourceField:       sourceField,
+		DestinationBundle: destinationBundle,
+		DestinationField:  destinationField,
+
+		// Set legacy fields for backward compatibility
+		SourceBundleName: sourceBundle,
+		TargetBundleName: destinationBundle,
+	}, nil
 }

@@ -143,32 +143,7 @@ var (
 var ColorLogger *zap.SugaredLogger
 
 func main() {
-	// // Initialize logger
-	// ColorLogger = setupLogger()
 
-	// // Display welcome banner
-	// displayWelcomeBanner()
-
-	// // Stand up test database service
-	// ColorLogger.Info(HighlightBlue("Setting up test database service..."))
-	// dbService, _, err := StandupTestDatabaseService()
-	// if err != nil {
-	// 	ColorLogger.Error(HighlightRed("Failed to setup test database service"), zap.Error(err))
-	// 	return
-	// }
-	// //defer cleanup()
-
-	// ColorLogger.Info(HighlightGreen("✓ Test database service setup complete"))
-
-	// // Execute database creation use case tests
-	// ColorLogger.Info(HighlightBlue("Starting database creation use case tests..."))
-
-	// summary := executeAllDatabaseCreationTests(dbService)
-
-	// // Display comprehensive test results
-	// displayTestSummary(summary)
-
-	// ColorLogger.Info(HighlightBlue("Test execution complete"))
 	// Initialize logger
 	ColorLogger = setupLogger()
 
@@ -194,6 +169,24 @@ func main() {
 	ColorLogger.Info(HighlightBlue("Starting bundle management use case tests..."))
 	bundleUseCases := GetBundleManagementUseCases()
 	bundleSummary := executeAllTests(bundleUseCases)
+
+	// Execute JOIN functionality demonstration
+	ColorLogger.Info(HighlightBlue("Starting JOIN functionality demonstration..."))
+	err = RunJoinDemonstration(ColorLogger)
+	if err != nil {
+		ColorLogger.Error(HighlightRed("JOIN demonstration failed"), zap.Error(err))
+	} else {
+		ColorLogger.Info(HighlightGreen("✓ JOIN demonstration completed successfully"))
+	}
+
+	// Execute comprehensive end-to-end JOIN testing
+	ColorLogger.Info(HighlightBlue("Starting comprehensive end-to-end JOIN testing..."))
+	err = RunComprehensiveJoinTests(ColorLogger)
+	if err != nil {
+		ColorLogger.Error(HighlightRed("Comprehensive JOIN tests failed"), zap.Error(err))
+	} else {
+		ColorLogger.Info(HighlightGreen("✓ Comprehensive JOIN tests completed successfully"))
+	}
 
 	// Display comprehensive test results
 	ColorLogger.Info(HighlightBlue("Database Creation Test Results:"))
@@ -232,48 +225,6 @@ func displayWelcomeBanner() {
 	fmt.Println(HighlightCyan("╚══════════════════════════════════════════════════════════════╝"))
 	fmt.Println()
 }
-
-// executeAllDatabaseCreationTests runs all database creation use cases
-// This function follows the Single Responsibility Principle by handling only test execution
-// Following SyndrDB comprehensive error handling, it executes tests with proper error handling
-// func executeAllDatabaseCreationTests(dbService interface{}) TestSummary[DatabaseCreationUseCase] {
-// 	useCases := GetDatabaseCreationUseCases()
-// 	summary := TestSummary[DatabaseCreationUseCase]{
-// 		TotalTests: len(useCases),
-// 		Results:    make([]TestResult[DatabaseCreationUseCase], 0, len(useCases)),
-// 		Categories: make(map[string]int),
-// 	}
-
-// 	startTime := time.Now()
-
-// 	// Group tests by category for better organization
-// 	categorizedTests := groupTestsByCategory(useCases)
-
-// 	for category, tests := range categorizedTests {
-// 		ColorLogger.Info(HighlightBlue(fmt.Sprintf("\n=== Testing Category: %s ===", category)))
-
-// 		for _, useCase := range tests {
-// 			result := executeTestCase(useCase)
-// 			summary.Results = append(summary.Results, result)
-
-// 			// Update counters
-// 			if result.Success {
-// 				summary.PassedTests++
-// 			} else {
-// 				summary.FailedTests++
-// 			}
-
-// 			// Update category counters
-// 			summary.Categories[category]++
-
-// 			// Display immediate result
-// 			displayTestResult(result)
-// 		}
-// 	}
-
-// 	summary.TotalTime = time.Since(startTime)
-// 	return summary
-// }
 
 // groupTestsByCategory organizes tests by their category
 // This function follows the Single Responsibility Principle by handling only test grouping
@@ -453,114 +404,6 @@ func displayTestResultGeneric[T UseCase](result TestResult[T]) {
 	fmt.Println()
 }
 
-// executeTestCase runs a single test case with full lifecycle management
-// This function follows the Single Responsibility Principle by handling only single test execution
-// Following SyndrDB comprehensive error handling, it manages test lifecycle with proper cleanup
-// func executeTestCase(useCase DatabaseCreationUseCase) TestResult {
-// 	startTime := time.Now()
-// 	result := TestResult{
-// 		UseCase: useCase,
-// 		Success: false,
-// 	}
-
-// 	ColorLogger.Debug(HighlightYellow(fmt.Sprintf("Starting test: %s", useCase.Name)))
-
-// 	// Execute test lifecycle
-// 	defer func() {
-// 		result.ExecutionTime = time.Since(startTime)
-
-// 		// Always attempt cleanup
-// 		if useCase.Cleanup != nil {
-// 			if cleanupErr := useCase.Cleanup(); cleanupErr != nil {
-// 				ColorLogger.Warn(HighlightYellow(fmt.Sprintf("Cleanup warning for %s: %v", useCase.Name, cleanupErr)))
-// 			}
-// 		}
-// 	}()
-
-// 	// Setup phase
-// 	if useCase.Setup != nil {
-// 		if err := useCase.Setup(); err != nil {
-// 			result.Error = fmt.Errorf("setup failed: %w", err)
-// 			result.Details = "Failed during test setup phase"
-// 			return result
-// 		}
-// 	}
-
-// 	// Execute phase
-// 	if useCase.Execute != nil {
-// 		err := useCase.Execute()
-
-// 		// Handle expected vs unexpected errors
-// 		if useCase.ExpectSuccess {
-// 			if err != nil {
-// 				result.Error = fmt.Errorf("execution failed: %w", err)
-// 				result.Details = "Test expected success but execution failed"
-// 				return result
-// 			}
-// 		} else {
-// 			if err == nil {
-// 				result.Error = fmt.Errorf("execution should have failed but succeeded")
-// 				result.Details = "Test expected failure but execution succeeded"
-// 				return result
-// 			}
-// 			// Expected failure occurred - this is actually success for negative tests
-// 		}
-// 	}
-
-// 	// Validate phase
-// 	if useCase.Validate != nil {
-// 		if err := useCase.Validate(); err != nil {
-// 			result.Error = fmt.Errorf("validation failed: %w", err)
-// 			result.Details = "Test execution succeeded but validation failed"
-// 			return result
-// 		}
-// 	}
-
-// 	// Test passed
-// 	result.Success = true
-// 	result.Details = "Test completed successfully"
-// 	return result
-// }
-
-// displayTestResult shows the result of a single test with color coding
-// This function follows the Single Responsibility Principle by handling only result display
-// Following SyndrDB comprehensive error handling, it provides clear visual feedback
-// func displayTestResult(result TestResult) {
-// 	duration := fmt.Sprintf("%.2fms", float64(result.ExecutionTime.Nanoseconds())/1e6)
-
-// 	if result.Success {
-// 		fmt.Printf("  %s %s %s %s\n",
-// 			HighlightGreen("✓"),
-// 			HighlightGreen("PASS"),
-// 			Normal(result.UseCase.Name),
-// 			HighlightBlue(fmt.Sprintf("(%s)", duration)))
-
-// 		if result.UseCase.Description != "" {
-// 			fmt.Printf("    %s\n", Normal(result.UseCase.Description))
-// 		}
-// 	} else {
-// 		fmt.Printf("  %s %s %s %s\n",
-// 			HighlightRed("✗"),
-// 			HighlightRed("FAIL"),
-// 			Normal(result.UseCase.Name),
-// 			HighlightBlue(fmt.Sprintf("(%s)", duration)))
-
-// 		if result.UseCase.Description != "" {
-// 			fmt.Printf("    %s\n", Normal(result.UseCase.Description))
-// 		}
-
-// 		if result.Error != nil {
-// 			fmt.Printf("    %s %s\n", HighlightRed("Error:"), Normal(result.Error.Error()))
-// 		}
-
-// 		if result.Details != "" {
-// 			fmt.Printf("    %s %s\n", HighlightYellow("Details:"), Normal(result.Details))
-// 		}
-// 	}
-
-// 	fmt.Println()
-// }
-
 // displayTestSummary shows comprehensive test results with statistics
 // This function follows the Single Responsibility Principle by handling only summary display
 // Following SyndrDB comprehensive error handling, it provides complete test analysis
@@ -696,21 +539,3 @@ func findFastestTest[T UseCase](results []TestResult[T]) TestResult[T] {
 	}
 	return fastest
 }
-
-// StandupTestDatabaseService initializes the test database service
-// This function follows the Single Responsibility Principle by handling only service initialization
-// Following SyndrDB comprehensive error handling, it provides proper service setup
-// func StandupTestDatabaseService() (interface{}, func(), error) {
-//     ColorLogger.Debug("Initializing test database service...")
-
-//     // TODO: Implement actual database service initialization
-//     // This would create your database service instance, configure it for testing,
-//     // and return the service along with a cleanup function
-
-//     cleanup := func() {
-//         ColorLogger.Debug("Cleaning up test database service...")
-//         // TODO: Implement cleanup logic
-//     }
-
-//     return nil, cleanup, nil
-// }

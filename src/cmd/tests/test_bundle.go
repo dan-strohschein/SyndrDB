@@ -271,6 +271,18 @@ func GetBundleManagementUseCases() []BundleManagementUseCase {
 			Timeout:       60 * time.Second,
 		},
 		{
+			Name:          "AddRelationship1toMany",
+			Description:   "Add a 1toMany relationship using new syntax",
+			Category:      "BundleRelationships",
+			SetupFunc:     setupRelationshipBundles,
+			ExecuteFunc:   addRelationship1toMany,
+			ValidateFunc:  validateAddedRelationship,
+			CleanupFunc:   cleanupRelationshipBundles,
+			ExpectSuccess: true,
+			Tags:          []string{"relationship", "1toMany", "add"},
+			Timeout:       60 * time.Second,
+		},
+		{
 			Name:          "QueryRelatedDocuments",
 			Description:   "Query documents across related bundles",
 			Category:      "BundleRelationships",
