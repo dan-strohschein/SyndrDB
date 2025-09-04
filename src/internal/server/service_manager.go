@@ -4,6 +4,7 @@ import (
 	"sync"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
+	"syndrdb/src/internal/journal"
 
 	"go.uber.org/zap"
 )
@@ -12,6 +13,7 @@ type ServiceManager struct {
 	// Add fields for managing services
 	DatabaseService *database.DatabaseService
 	BundleService   *bundle.BundleService
+	WALManager      *journal.WALManager
 	logger          *zap.SugaredLogger
 }
 
@@ -42,14 +44,29 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		mu.Lock()
 		defer mu.Unlock()
 
+		// Initialize WAL Manager
+		walManager, err := journal.NewWALManager(logger)
+		if err != nil {
+			if logger != nil {
+				logger.Errorf("Failed to initialize WAL Manager: %v", err)
+			}
+			// Continue without WAL for now, but log the error
+			walManager = nil
+		}
+
 		instance = &ServiceManager{
 			DatabaseService: dbService,
 			BundleService:   bundleService,
+			WALManager:      walManager,
 			logger:          logger,
 		}
 
 		if logger != nil {
-			logger.Info("ServiceManager singleton initialized")
+			if walManager != nil {
+				logger.Info("ServiceManager singleton initialized with WAL Manager")
+			} else {
+				logger.Warn("ServiceManager singleton initialized without WAL Manager")
+			}
 		}
 	})
 

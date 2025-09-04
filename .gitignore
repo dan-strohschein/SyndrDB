@@ -11,3 +11,5 @@ temp_files/*
 bin/server/data_files
 bin/server/log_files
 bin/server/.DS_STORE
+
+.venv

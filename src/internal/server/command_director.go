@@ -193,8 +193,25 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
 
-			// Delete the document from the bundle
-			err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand)
+			// Execute with WAL logging if available
+			if serviceManager.WALManager != nil {
+				err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+					// Log the document deletion before execution
+					// Note: We'll log the where clause as metadata for the deletion
+					err := serviceManager.WALManager.LogDocumentDelete(txID, bundleName, "multiple", docCommand.WhereClause)
+					if err != nil {
+						return fmt.Errorf("failed to log document delete: %w", err)
+					}
+
+					// Delete the document from the bundle
+					return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand)
+				})
+			} else {
+				// Fallback to direct execution if WAL is not available
+				logger.Warn("WAL Manager not available, executing without transaction logging")
+				err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand)
+			}
+
 			if err != nil {
 				return nil, fmt.Errorf("error deleting document from bundle '%s': %v", bundleName, err)
 			}
@@ -262,8 +279,25 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, fmt.Errorf("error parsing update document command: %v", err)
 	}
 
-	// Delete the document from the bundle
-	err = serviceManager.BundleService.UpdateDocumentInBundle(bundle, docCommand)
+	// Execute with WAL logging if available
+	if serviceManager.WALManager != nil {
+		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+			// Log the document update before execution
+			// Note: We'll log the fields being updated, actual before/after data is captured by bundle service
+			err := serviceManager.WALManager.LogDocumentUpdate(txID, bundleName, "multiple", nil, docCommand.Fields)
+			if err != nil {
+				return fmt.Errorf("failed to log document update: %w", err)
+			}
+
+			// Update the document in the bundle
+			return serviceManager.BundleService.UpdateDocumentInBundle(bundle, docCommand)
+		})
+	} else {
+		// Fallback to direct execution if WAL is not available
+		logger.Warn("WAL Manager not available, executing without transaction logging")
+		err = serviceManager.BundleService.UpdateDocumentInBundle(bundle, docCommand)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("error updating document in bundle '%s': %v", bundleName, err)
 	}
@@ -292,11 +326,30 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 	}
-	// Add the document to the bundle
-	err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+
+	// Execute with WAL logging if available
+	if serviceManager.WALManager != nil {
+		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+			// Log the document insertion before execution
+			// Note: Document ID will be generated during bundle service execution
+			err := serviceManager.WALManager.LogDocumentInsert(txID, bundleName, "pending", docCommand.Fields)
+			if err != nil {
+				return fmt.Errorf("failed to log document insert: %w", err)
+			}
+
+			// Add the document to the bundle
+			return serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+		})
+	} else {
+		// Fallback to direct execution if WAL is not available
+		logger.Warn("WAL Manager not available, executing without transaction logging")
+		err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
 	}
+
 	result := fmt.Sprintf("Document added successfully to bundle '%s'.", bundleName)
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
@@ -381,8 +434,25 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 	// 	return nil, fmt.Errorf("error retrieving database '%s': %v", database.Name, err)
 	// }
 	logger.Infof("Creating bundle '%s' in database '%s'", bundleCmd.BundleName, database.Name)
-	// Add the bundle to the database
-	err = serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
+
+	// Execute with WAL logging if available
+	if serviceManager.WALManager != nil {
+		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+			// Log the bundle creation before execution
+			err := serviceManager.WALManager.LogBundleCreate(txID, bundleCmd.BundleName, bundleCmd)
+			if err != nil {
+				return fmt.Errorf("failed to log bundle create: %w", err)
+			}
+
+			// Add the bundle to the database
+			return serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
+		})
+	} else {
+		// Fallback to direct execution if WAL is not available
+		logger.Warn("WAL Manager not available, executing without transaction logging")
+		err = serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("error creating bundle: %v", err)
 	}
