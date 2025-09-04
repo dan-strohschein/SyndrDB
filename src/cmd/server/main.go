@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/graphQL"
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/settings"
 
@@ -50,6 +52,7 @@ func main() {
 	flag.BoolVar(&args.PrintToScreen, "print", true, "Print Log Messages to screen")
 	flag.BoolVar(&args.Debug, "debug", true, "Enable debug mode")
 	flag.BoolVar(&args.UserDebug, "userdebug", false, "Enable user debug mode")
+	flag.BoolVar(&args.EnableGraphQL, "graphql", false, "Enable GraphQL API")
 
 	// Parse the command line
 	flag.Parse()
@@ -81,6 +84,8 @@ func main() {
 		log.Printf("  Verbose: %v\n", args.Verbose)
 		log.Printf("  Config File: %s\n", args.ConfigFile)
 		log.Printf("  Mode: %s\n", args.Mode)
+		log.Printf("  Auth Enabled: %v\n", args.AuthEnabled)
+		log.Printf("  GraphQL Enabled: %v\n", args.EnableGraphQL)
 
 	}
 
@@ -143,6 +148,33 @@ func main() {
 	// Start the server
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
+	}
+
+	// Initialize GraphQL endpoints if enabled
+	if args.EnableGraphQL {
+		// Get the default database for GraphQL operations
+		var defaultDB *models.Database
+		for _, db := range srv.Databases {
+			defaultDB = db
+			break // Use the first database as default
+		}
+
+		if defaultDB != nil {
+			// Create GraphQL handler
+			serviceManager := server.GetServiceManager()
+			graphQLHandler, err := graphQL.NewGraphQLHandler(*serviceManager, defaultDB, srv.GetLogger())
+			if err != nil {
+				log.Printf("Warning: Failed to initialize GraphQL handler: %v", err)
+			} else {
+				// Initialize GraphQL endpoints
+				err = srv.InitializeGraphQLEndpoints(defaultDB, graphQLHandler)
+				if err != nil {
+					log.Printf("Warning: Failed to setup GraphQL endpoints: %v", err)
+				}
+			}
+		} else {
+			log.Println("Warning: No database available for GraphQL, using empty database")
+		}
 	}
 
 	// Handle graceful shutdown

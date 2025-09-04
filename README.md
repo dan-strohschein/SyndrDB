@@ -164,3 +164,137 @@ DELETE DOCUMENTS FROM BUNDLE "<BUNDLE_NAME>"
       );
 
 ```
+
+## GraphQL API Implementation
+
+SyndrDB now features a comprehensive GraphQL API that provides a modern, web-friendly interface alongside the native TCP protocol. This implementation makes SyndrDB accessible to web applications, mobile apps, and any system that can consume GraphQL endpoints.
+
+### 🎯 **Core Implementation**
+
+**GraphQL Handler**:
+- Full HTTP request/response handling (GET/POST support)
+- Query validation and parsing using `vektah/gqlparser`
+- CORS support for web applications
+- Comprehensive error handling and reporting
+- Variable support for parameterized queries
+
+**GraphQL Resolvers**:
+- Complete resolver system for all CRUD operations
+- **Query Resolvers**: `databases`, `database`, `bundles`, `bundle`, `documents`, `document`
+- **Mutation Resolvers**: `createDatabase`, `createBundle`, `createDocument`, `updateDocument`, `deleteDocument`
+- Integration with existing SyndrDB `CommandDirector` for native query execution
+
+**GraphQL Schema**:
+- Comprehensive type system: `Database`, `Bundle`, `Document`
+- Scalar types: `JSON`, `DateTime`
+- Input types for mutations
+- Filtering and pagination support
+
+### 🔧 **Server Integration**
+
+**Dual-Protocol Server**:
+- **TCP Server** (port 1776): Original SyndrDB native protocol
+- **HTTP Server** (port 1777): GraphQL API when `-graphql` flag is enabled
+- Graceful shutdown for both servers
+
+**Service Manager Integration**:
+- GraphQL handler uses existing ServiceManager
+- WAL (Write Ahead Logging) integration maintained
+- Same transaction logging for GraphQL operations
+
+**Configuration Support**:
+- `-graphql` command line flag to enable/disable
+- `EnableGraphQL` setting in configuration
+- Automatic port assignment (TCP + 1 for HTTP)
+
+### 🚀 **Usage Examples**
+
+**Starting the server with GraphQL:**
+```bash
+./syndr -graphql -datadir=./data_files -logdir=./log_files
+```
+
+**Query Capabilities:**
+```graphql
+# List all databases
+query { 
+  databases { 
+    name 
+    bundles 
+  } 
+}
+
+# Get specific database
+query { 
+  database(name: "TestDB") { 
+    name 
+    bundles 
+  } 
+}
+
+# Query documents with filtering
+query { 
+  documents(bundle: "users", where: "age > 25", limit: 10) {
+    id 
+    fields
+  }
+}
+```
+
+**Mutation Capabilities:**
+```graphql
+# Create a new bundle
+mutation {
+  createBundle(name: "users", database: "TestDB", fields: "{\"name\":\"string\"}") {
+    name 
+    documentCount
+  }
+}
+
+# Insert document
+mutation {
+  createDocument(bundle: "users", fields: "{\"name\":\"John\"}") {
+    id 
+    fields
+  }
+}
+```
+
+**Testing the GraphQL endpoint:**
+```bash
+# Health check
+curl -X GET "http://127.0.0.1:1777/health"
+
+# GraphQL query
+curl -X POST "http://127.0.0.1:1777/graphql" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "query { databases { name } }"}'
+```
+
+### 🔄 **Architecture Benefits**
+
+1. **Consistency**: GraphQL operations use the same command director and business logic as native SyndrDB operations
+
+2. **Performance**: Direct integration with existing storage layer and index systems
+
+3. **Flexibility**: Supports both native TCP protocol and modern GraphQL HTTP API
+
+4. **Extensibility**: Easy to add new query types and mutations
+
+### ✅ **Error Handling**
+
+- GraphQL-compliant error responses
+- Validation error reporting with locations
+- Integration with SyndrDB native error messages
+
+### 🎉 **Innovation Delivered**
+
+This implementation makes SyndrDB a truly modern document database by adding:
+- **Industry-standard GraphQL API** alongside the native protocol
+- **Type-safe queries** with schema validation
+- **Real-time integration** with existing SyndrDB infrastructure
+- **Production-ready HTTP server** with proper error handling
+
+The GraphQL API opens up SyndrDB to modern web applications, mobile apps, and any system that can consume GraphQL endpoints, while maintaining full compatibility with existing SyndrDB native clients.
+
+**Result**: SyndrDB now offers both a high-performance native TCP interface AND a modern, web-friendly GraphQL API - making it suitable for a much broader range of applications and use cases! 🚀

@@ -35,6 +35,8 @@ type Arguments struct {
 	AuthEnabled bool // Enable authentication
 
 	Version string // Show version information
+
+	EnableGraphQL bool // Enable GraphQL API
 }
 
 var (

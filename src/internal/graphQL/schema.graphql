@@ -1,0 +1,268 @@
+/*
+GraphQL Schema for SyndrDB
+
+This file defines the GraphQL schema for SyndrDB operations.
+It provides a GraphQL interface to the same CRUD operations
+available through the native SyndrDB query language.
+
+The schema supports:
+- Database operations (create, list, delete)
+- Bundle operations (create, list, delete, update)
+- Document operations (create, read, update, delete)
+- Query operations with filtering and ordering
+- Join operations between bundles
+*/
+
+scalar JSON
+scalar DateTime
+
+# Database type represents a SyndrDB database
+type Database {
+  name: String!
+  bundles: [Bundle!]!
+  createdAt: DateTime!
+}
+
+# Bundle type represents a collection of documents (equivalent to a table)
+type Bundle {
+  name: String!
+  database: String!
+  fields: [FieldDefinition!]!
+  documents: [Document!]!
+  documentCount: Int!
+  indexes: [Index!]!
+  relationships: [Relationship!]!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# FieldDefinition represents the schema definition for a bundle field
+type FieldDefinition {
+  name: String!
+  type: FieldType!
+  required: Boolean!
+  unique: Boolean!
+  defaultValue: String
+}
+
+# Document type represents a document within a bundle
+type Document {
+  id: String!
+  bundle: String!
+  fields: JSON!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# Index type represents an index on a bundle
+type Index {
+  name: String!
+  type: IndexType!
+  bundle: String!
+  field: String!
+  unique: Boolean!
+  createdAt: DateTime!
+}
+
+# Relationship type represents a relationship between bundles
+type Relationship {
+  name: String!
+  sourceBundle: String!
+  sourceField: String!
+  destinationBundle: String!
+  destinationField: String!
+  type: RelationshipType!
+  createdAt: DateTime!
+}
+
+# Enums for type safety
+enum FieldType {
+  STRING
+  INT
+  FLOAT
+  BOOLEAN
+  DATETIME
+  JSON
+}
+
+enum IndexType {
+  BTREE
+  HASH
+}
+
+enum RelationshipType {
+  ONE_TO_ONE
+  ONE_TO_MANY
+  MANY_TO_MANY
+}
+
+enum SortDirection {
+  ASC
+  DESC
+}
+
+# Input types for mutations
+input CreateDatabaseInput {
+  name: String!
+}
+
+input CreateBundleInput {
+  name: String!
+  database: String!
+  fields: [FieldDefinitionInput!]!
+}
+
+input FieldDefinitionInput {
+  name: String!
+  type: FieldType!
+  required: Boolean! = true
+  unique: Boolean! = false
+  defaultValue: String
+}
+
+input CreateDocumentInput {
+  bundle: String!
+  fields: JSON!
+}
+
+input UpdateDocumentInput {
+  id: String!
+  bundle: String!
+  fields: JSON!
+}
+
+input DeleteDocumentInput {
+  bundle: String!
+  where: WhereClauseInput
+}
+
+input WhereClauseInput {
+  field: String!
+  operator: ComparisonOperator!
+  value: JSON!
+  logic: LogicalOperator
+}
+
+input OrderByInput {
+  field: String!
+  direction: SortDirection! = ASC
+}
+
+input CreateIndexInput {
+  name: String!
+  bundle: String!
+  field: String!
+  type: IndexType!
+  unique: Boolean! = false
+}
+
+input CreateRelationshipInput {
+  name: String!
+  sourceBundle: String!
+  sourceField: String!
+  destinationBundle: String!
+  destinationField: String!
+  type: RelationshipType!
+}
+
+enum ComparisonOperator {
+  EQ    # ==
+  NE    # !=
+  GT    # >
+  LT    # <
+  GTE   # >=
+  LTE   # <=
+  LIKE  # String matching
+  IN    # Array membership
+}
+
+enum LogicalOperator {
+  AND
+  OR
+}
+
+# Query type - all read operations
+type Query {
+  # Database queries
+  databases: [Database!]!
+  database(name: String!): Database
+  
+  # Bundle queries
+  bundles(database: String!): [Bundle!]!
+  bundle(name: String!, database: String!): Bundle
+  
+  # Document queries
+  documents(
+    bundle: String!
+    where: WhereClauseInput
+    orderBy: [OrderByInput!]
+    limit: Int
+    offset: Int
+  ): [Document!]!
+  
+  document(id: String!, bundle: String!): Document
+  
+  # Join queries
+  joinDocuments(
+    leftBundle: String!
+    rightBundle: String!
+    joinType: JoinType!
+    leftField: String!
+    rightField: String!
+    where: WhereClauseInput
+    orderBy: [OrderByInput!]
+    limit: Int
+    offset: Int
+  ): [JoinResult!]!
+  
+  # Index queries
+  indexes(bundle: String!): [Index!]!
+  
+  # Relationship queries
+  relationships(bundle: String): [Relationship!]!
+}
+
+enum JoinType {
+  INNER
+  LEFT
+  RIGHT
+  FULL
+}
+
+# JoinResult represents the result of a join operation
+type JoinResult {
+  left: Document
+  right: Document
+  matchedOn: String!
+}
+
+# Mutation type - all write operations
+type Mutation {
+  # Database operations
+  createDatabase(input: CreateDatabaseInput!): Database!
+  deleteDatabase(name: String!): Boolean!
+  
+  # Bundle operations
+  createBundle(input: CreateBundleInput!): Bundle!
+  deleteBundle(name: String!, database: String!): Boolean!
+  
+  # Document operations
+  createDocument(input: CreateDocumentInput!): Document!
+  updateDocument(input: UpdateDocumentInput!): Document!
+  deleteDocument(input: DeleteDocumentInput!): Int! # Returns count of deleted documents
+  
+  # Index operations
+  createIndex(input: CreateIndexInput!): Index!
+  dropIndex(name: String!, bundle: String!): Boolean!
+  
+  # Relationship operations
+  createRelationship(input: CreateRelationshipInput!): Relationship!
+  deleteRelationship(name: String!, bundle: String!): Boolean!
+}
+
+# Subscription type - real-time updates (future enhancement)
+type Subscription {
+  documentCreated(bundle: String!): Document!
+  documentUpdated(bundle: String!): Document!
+  documentDeleted(bundle: String!): String! # Returns deleted document ID
+}
