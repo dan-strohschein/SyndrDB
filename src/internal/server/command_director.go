@@ -434,6 +434,11 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		return SelectDocumentsWithJoin(fullCommand, serviceManager, database, logger)
 	}
 
+	// Detect ORDER BY queries
+	if strings.Contains(strings.ToUpper(fullCommand), "ORDER BY") {
+		return SelectDocumentsWithOrderBy(fullCommand, serviceManager, database, logger)
+	}
+
 	// Handle regular SELECT without JOIN
 	if len(commandParts) < 4 || !strings.EqualFold(commandParts[2], "FROM") {
 		return nil, fmt.Errorf("SELECT DOCUMENTS requires the spec 'FROM <Bundle_name>'")
@@ -576,6 +581,103 @@ func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, databa
 	cmdResponse := &CommandResponse{
 		ResultCount: len(documents),
 		Result:      documents,
+	}
+	return cmdResponse, nil
+}
+
+// SelectDocumentsWithOrderBy handles SELECT queries with ORDER BY clauses
+func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+	logger.Infof("Processing ORDER BY query: %s", query)
+
+	// Parse the ORDER BY query
+	selectQuery, err := queryparser.ParseSelectQueryWithOrder(query, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ORDER BY query: %w", err)
+	}
+
+	// Extract bundle name
+	bundleName := selectQuery.FromBundle
+	if !bundle.IsValidBundleName(bundleName) {
+		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
+	}
+
+	// Get the bundle by name
+	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+	}
+
+	var documents map[string]*models.Document
+
+	// Handle WHERE clause if present
+	if selectQuery.WhereClause != nil {
+		// For now, we'll use the original query parsing since the WHERE structure is complex
+		// Extract WHERE clause from the original query string
+		whereStart := strings.Index(strings.ToUpper(query), "WHERE")
+		orderByStart := strings.Index(strings.ToUpper(query), "ORDER BY")
+
+		var whereClause string
+		if whereStart >= 0 {
+			whereEnd := len(query)
+			if orderByStart > whereStart {
+				whereEnd = orderByStart
+			}
+			whereClause = strings.TrimSpace(query[whereStart+5 : whereEnd])
+		}
+
+		if whereClause != "" {
+			// Create execution planner
+			planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+
+			// Create execution plan
+			plan, err := planner.CreateExecutionPlan(bundle, whereClause)
+			if err != nil {
+				logger.Warnf("Failed to create execution plan, falling back to full scan: %v", err)
+				// Fallback to existing filter logic
+				filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
+				if err != nil {
+					return nil, fmt.Errorf("error filtering documents: %v", err)
+				}
+				documents = make(map[string]*models.Document)
+				for _, v := range filteredDocs {
+					documents[v.DocumentID] = v
+				}
+			} else {
+				// Execute the plan
+				logger.Infof("Executing plan with indexes: %v", plan.IndexesUsed)
+				documents, err = plan.RootNode.Execute()
+				if err != nil {
+					return nil, fmt.Errorf("error executing query plan: %v", err)
+				}
+			}
+		}
+	} else {
+		// No WHERE clause - return all documents
+		documents = make(map[string]*models.Document)
+		for k, v := range *bundle.Documents {
+			docCopy := v
+			documents[k] = &docCopy
+		}
+	}
+
+	// Sort the documents according to the ORDER BY clause
+	sorter := queryparser.NewDocumentSorter(selectQuery.OrderBy, logger)
+	sortedDocuments, err := sorter.SortDocumentMap(documents)
+	if err != nil {
+		return nil, fmt.Errorf("error sorting documents: %v", err)
+	}
+
+	logger.Infof("ORDER BY query executed successfully, returned %d sorted documents", len(sortedDocuments))
+
+	// Convert sorted slice back to map for response consistency
+	resultMap := make(map[string]*models.Document)
+	for _, doc := range sortedDocuments {
+		resultMap[doc.DocumentID] = doc
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: len(resultMap),
+		Result:      resultMap,
 	}
 	return cmdResponse, nil
 }

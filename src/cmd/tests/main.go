@@ -188,6 +188,15 @@ func main() {
 		ColorLogger.Info(HighlightGreen("✓ Comprehensive JOIN tests completed successfully"))
 	}
 
+	// Execute ORDER BY functionality demonstration
+	ColorLogger.Info(HighlightBlue("Starting ORDER BY functionality demonstration..."))
+	err = RunOrderByDemo(ColorLogger)
+	if err != nil {
+		ColorLogger.Error(HighlightRed("ORDER BY demonstration failed"), zap.Error(err))
+	} else {
+		ColorLogger.Info(HighlightGreen("✓ ORDER BY demonstration completed successfully"))
+	}
+
 	// Display comprehensive test results
 	ColorLogger.Info(HighlightBlue("Database Creation Test Results:"))
 	displayTestSummaryGeneric(dbSummary)
