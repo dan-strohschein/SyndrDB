@@ -42,9 +42,9 @@ type PageManager struct {
 	maxPages     int
 	mutex        sync.RWMutex
 	logger       *zap.SugaredLogger
-	lruList      *list.List // Doubly-linked list for LRU tracking
-	maxCacheSize int        // Maximum number of pages to cache
-
+	lruList      *list.List                      // Doubly-linked list for LRU tracking
+	maxCacheSize int                             // Maximum number of pages to cache
+	flushFunc    func(uint32, interface{}) error // Function to flush dirty pages
 }
 
 // CachedPage represents a page stored in the cache
@@ -64,6 +64,7 @@ type CachedPage struct {
 //   - *PageManager: The page manager instance
 //   - error: Any error that occurred during creation
 func NewPageManager(pageSize uint32, cacheSize int, logger *zap.SugaredLogger) (*PageManager, error) {
+	logger.Infof("Creating PageManager with cache size: %d pages", cacheSize)
 	return &PageManager{
 		cache:        make(map[uint32]*list.Element),
 		dirty:        make(map[uint32]bool),
@@ -71,7 +72,15 @@ func NewPageManager(pageSize uint32, cacheSize int, logger *zap.SugaredLogger) (
 		maxCacheSize: cacheSize,
 		lruList:      list.New(),
 		logger:       logger,
+		flushFunc:    nil, // Will be set later by the hash index
 	}, nil
+}
+
+// SetFlushFunction sets the function used to flush dirty pages during eviction
+func (pm *PageManager) SetFlushFunction(flushFunc func(uint32, interface{}) error) {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+	pm.flushFunc = flushFunc
 }
 
 // GetBucket is a convenience method that retrieves a bucket page
@@ -197,9 +206,18 @@ func (pm *PageManager) evictLeastRecentlyUsed() {
 	element := pm.lruList.Back()
 	cachedPage := element.Value.(*CachedPage)
 
-	// Log if we're evicting a dirty page (would need to be written to storage)
+	// If page is dirty, attempt to flush it before evicting
 	if cachedPage.Dirty {
-		pm.logger.Warnf("Evicting dirty page %d - changes may be lost", cachedPage.PageNum)
+		if pm.flushFunc != nil {
+			if err := pm.flushFunc(cachedPage.PageNum, cachedPage.Data); err != nil {
+				pm.logger.Errorf("Failed to flush dirty page %d before eviction: %v", cachedPage.PageNum, err)
+			} else {
+				pm.logger.Debugf("Successfully flushed dirty page %d before eviction", cachedPage.PageNum)
+				cachedPage.Dirty = false
+			}
+		} else {
+			pm.logger.Warnf("Evicting dirty page %d - changes may be lost (no flush function set)", cachedPage.PageNum)
+		}
 	}
 
 	// Remove from cache and LRU list

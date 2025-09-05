@@ -179,7 +179,16 @@ func (bm *BucketManager) GetBucket(bucketNum uint32) (*BucketPage, error) {
 	// Type assert to BucketPage
 	bucketPage, ok := pageData.(*BucketPage)
 	if !ok {
-		return nil, fmt.Errorf("page %d is not a bucket page, got type %T", pageNum, pageData)
+		// CRITICAL FIX: Provide more detailed error information for debugging
+		bm.logger.Errorf("Page type mismatch for page %d: expected *BucketPage, got %T", pageNum, pageData)
+
+		// CRITICAL FIX: Check if this is a metadata page that got loaded incorrectly
+		if metadata, isMetadata := pageData.(*HashIndexMetadata); isMetadata {
+			return nil, fmt.Errorf("page %d contains metadata instead of bucket data - hash index corruption detected. Metadata shows %d buckets, page size %d",
+				pageNum, metadata.BucketCount, metadata.PageSize)
+		}
+
+		return nil, fmt.Errorf("page %d is not a bucket page, got type %T - this indicates index file corruption", pageNum, pageData)
 	}
 
 	// Verify the bucket number matches

@@ -29,7 +29,6 @@ import (
 
 	"github.com/fatih/color"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
 // TestResult represents the result of a single test execution
@@ -52,6 +51,31 @@ type TestSummary[T any] struct {
 	TotalTime    time.Duration
 	Results      []TestResult[T]
 	Categories   map[string]int
+}
+
+// WALTestUseCase represents a single test case for WAL operations
+type WALTestUseCase struct {
+	Name          string
+	Description   string
+	Category      string
+	SetupFunc     func() error
+	ExecuteFunc   func() error
+	ValidateFunc  func() error
+	CleanupFunc   func() error
+	ExpectSuccess bool
+	Tags          []string
+	Timeout       time.Duration
+}
+
+// WALTestResult represents the result of a single WAL test execution
+type WALTestResult struct {
+	UseCase   WALTestUseCase
+	Success   bool
+	Duration  time.Duration
+	Error     error
+	StartTime time.Time
+	EndTime   time.Time
+	Details   string
 }
 
 // UseCase defines the interface that all test use cases must implement
@@ -181,21 +205,27 @@ func main() {
 
 	// Execute comprehensive end-to-end JOIN testing
 	ColorLogger.Info(HighlightBlue("Starting comprehensive end-to-end JOIN testing..."))
-	err = RunComprehensiveJoinTests(ColorLogger)
+	err = RunComprehensiveJoinTests()
 	if err != nil {
 		ColorLogger.Error(HighlightRed("Comprehensive JOIN tests failed"), zap.Error(err))
 	} else {
 		ColorLogger.Info(HighlightGreen("✓ Comprehensive JOIN tests completed successfully"))
 	}
 
-	// Execute ORDER BY functionality demonstration
-	ColorLogger.Info(HighlightBlue("Starting ORDER BY functionality demonstration..."))
-	err = RunOrderByDemo(ColorLogger)
+	// Execute ORDER BY functionality demo
+	ColorLogger.Info(HighlightBlue("Starting ORDER BY functionality demo..."))
+	err = RunOrderByDemo()
 	if err != nil {
-		ColorLogger.Error(HighlightRed("ORDER BY demonstration failed"), zap.Error(err))
+		ColorLogger.Error(HighlightRed("ORDER BY demo failed"), zap.Error(err))
 	} else {
-		ColorLogger.Info(HighlightGreen("✓ ORDER BY demonstration completed successfully"))
+		ColorLogger.Info(HighlightGreen("✓ ORDER BY demo completed successfully"))
 	}
+
+	// Execute WAL functionality tests
+	ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
+	walUseCases := GetWALTestUseCases()
+	walResults := executeAllWALTests(walUseCases)
+	_ = walResults // Suppress unused variable warning
 
 	// Display comprehensive test results
 	ColorLogger.Info(HighlightBlue("Database Creation Test Results:"))
@@ -207,13 +237,23 @@ func main() {
 	ColorLogger.Info(HighlightBlue("Test execution complete"))
 }
 
-// setupLogger creates and configures the logger for colorized output
-// This function follows the Single Responsibility Principle by handling only logger setup
+// setupLogger creates a logger that displays only messages without timestamps, levels, or source info
 // Following SyndrDB comprehensive error handling, it provides proper logging configuration
 func setupLogger() *zap.SugaredLogger {
 	config := zap.NewDevelopmentConfig()
-	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
-	config.EncoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("15:04:05.000")
+
+	// Configure encoder to show only the message
+	config.EncoderConfig.TimeKey = ""       // Remove timestamp
+	config.EncoderConfig.LevelKey = ""      // Remove log level
+	config.EncoderConfig.CallerKey = ""     // Remove source file info
+	config.EncoderConfig.NameKey = ""       // Remove logger name
+	config.EncoderConfig.FunctionKey = ""   // Remove function name
+	config.EncoderConfig.StacktraceKey = "" // Remove stack trace
+	config.EncoderConfig.MessageKey = "msg" // Keep only the message
+
+	config.Level, _ = zap.ParseAtomicLevel("Warn") // Set default log level to warn
+	// Use console encoder for clean output
+	config.Encoding = "console"
 
 	logger, err := config.Build()
 	if err != nil {
@@ -332,7 +372,7 @@ func executeAllTests[T UseCase](useCases []T) TestSummary[T] {
 	categorizedTests := groupTestsByCategoryGeneric(useCases)
 
 	for category, tests := range categorizedTests {
-		ColorLogger.Info(HighlightBlue(fmt.Sprintf("\n=== Testing Category: %s ===", category)))
+		ColorLogger.Infof(HighlightBlue(fmt.Sprintf("\n=== Testing Category: %s ===", category)))
 
 		for _, useCase := range tests {
 			result := executeTestCaseGeneric(useCase)

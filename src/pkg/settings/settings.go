@@ -14,6 +14,8 @@ type Arguments struct {
 	Debug     bool // Debug mode
 	UserDebug bool // User debug mode
 
+	LogLevel string // Log level: debug, info, warn, error
+
 	// The mode of operation
 	// standalone, cluster
 	Mode string

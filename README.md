@@ -7,9 +7,12 @@ A relational Document DB with a graphQL interface implemented in Golang. Think M
 Warning: Extremely WIP. This project was just started and is pretty much purely educational for myself. Use at your own risk, contribute if you wish. 
 
 (+Current progress+):
-- Partial SQL Style query language
-- Poor but working filtering
-- Poor but working file storage and retrieval
+- SQL Style query language (Syndr-QL)
+- Hash Index and B-Tree index filtering
+- Postgres-like file storage and retrieval
+- Write Ahead Logging for transactions
+- Relationships between bundles (0ToMany, 1ToMany, ManyToMany)
+- TCP Server (as Syndr-QL) and HTTP Server options (as GraphQL)
 
 
 ## Usage
@@ -39,14 +42,15 @@ Usage of ./syndr:
         Enable verbose logging (default true)
   -version string
         Shows version (default "0.0.1alpha")
+  -graphql
+        Executes the server in http / GraphQL API Mode
 ```
 ## How to install
 
 TO BE DETERMINED - Right now its just a single executable file with command line options.
 
 ## How it works
-This is the current design of the systems within the server so far.
-![image](/Service-Diagram.png)
+Updated diagrams Coming soon
 
 ## How its built
 
@@ -54,7 +58,7 @@ This is the current design of the systems within the server so far.
 
 ## How to use it
 
-It only supports a handful of commands for now. I am adding new commands every week.
+It supports CRUD commands but not yet Authentication Commands. 
 
 To create a Database:
 
@@ -114,7 +118,12 @@ ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>"
 
 As long as the field type matches the data type of the value supplied.
 
-Currently you can do a super simple query:
+Currently we support simple queries, but no grouping or aggregating functions.
+
+In the future, we want to support LIMIT, MIN/MAX, and COUNT
+
+For Now a basic query is like this:
+
 
 ```
  SELECT DOCUMENTS FROM "<BUNDLE_NAME>";
@@ -130,6 +139,20 @@ SELECT DOCUMENTS FROM "<BUNDLE_NAME>"
             (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
             (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
       );
+```
+
+To filter and get results with related bundles use this format:
+
+```
+SELECT DOCUMENTS FROM "<BUNDLE_NAME>" 
+      <JOIN | OUTER JOIN | LEFT JOIN | RIGHT JOIN> "<BUNDLE_NAME_2>
+      ON
+      "<BUNDLE_NAME>"."<FIELD_NAME"> ==  "<BUNDLE_NAME_2>"."<FIELD_NAME">
+      WHERE (
+            (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
+            (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
+      );
+      ORDER BY  "<BUNDLE_NAME>"."<FIELD_NAME"> <ASC | DESC>
 ```
 
 Currently supported operators are:

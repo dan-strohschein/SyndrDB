@@ -68,7 +68,7 @@ func DefaultIndexConfig(bundleName, fieldName, dataDir string) *IndexConfig {
 		InitialSize: 16,   // Start with 16 buckets
 		PageSize:    8192, // 8KB pages (PostgreSQL-style)
 		LoadFactor:  0.75, // Split when 75% full
-		CacheSize:   100,  // Cache 100 pages
+		CacheSize:   2000, // Cache 2000 pages (handles large bulk operations)
 	}
 }
 
@@ -83,7 +83,7 @@ func NewIndexConfig(bundleName, fieldName, dataDir string, isUnique, debugMode b
 		InitialSize: 16,
 		PageSize:    8192,
 		LoadFactor:  0.75,
-		CacheSize:   100,
+		CacheSize:   2000, // Cache 2000 pages (handles large bulk operations)
 	}
 
 	if err := config.Validate(); err != nil {

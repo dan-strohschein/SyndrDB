@@ -38,44 +38,42 @@ import (
 	"fmt"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
-
-	"go.uber.org/zap"
 )
 
 // RunOrderByDemo demonstrates ORDER BY functionality with comprehensive testing
-func RunOrderByDemo(logger *zap.SugaredLogger) error {
-	logger.Info("🚀 Starting ORDER BY Functionality Demo...")
+func RunOrderByDemo() error {
+	ColorLogger.Info(HighlightBlue("🚀 Starting ORDER BY Functionality Demo..."))
 
 	// Test 1: Parse basic ORDER BY queries
-	logger.Infof("\nTest 1: Parsing basic ORDER BY queries")
-	if err := testOrderByParsing(logger); err != nil {
+	ColorLogger.Info(HighlightCyan("\nTest 1: Parsing basic ORDER BY queries"))
+	if err := testOrderByParsing(); err != nil {
 		return fmt.Errorf("ORDER BY parsing test failed: %w", err)
 	}
 
 	// Test 2: Test document sorting functionality
-	logger.Infof("\nTest 2: Testing document sorting")
-	if err := testDocumentSorting(logger); err != nil {
+	ColorLogger.Info(HighlightCyan("\nTest 2: Testing document sorting"))
+	if err := testDocumentSorting(); err != nil {
 		return fmt.Errorf("document sorting test failed: %w", err)
 	}
 
 	// Test 3: Test multi-field sorting
-	logger.Infof("\nTest 3: Testing multi-field sorting")
-	if err := testMultiFieldSorting(logger); err != nil {
+	ColorLogger.Info(HighlightCyan("\nTest 3: Testing multi-field sorting"))
+	if err := testMultiFieldSorting(); err != nil {
 		return fmt.Errorf("multi-field sorting test failed: %w", err)
 	}
 
 	// Test 4: Test error handling
-	logger.Infof("\nTest 4: Testing ORDER BY error handling")
-	if err := testOrderByErrorHandling(logger); err != nil {
+	ColorLogger.Info(HighlightCyan("\nTest 4: Testing ORDER BY error handling"))
+	if err := testOrderByErrorHandling(); err != nil {
 		return fmt.Errorf("ORDER BY error handling test failed: %w", err)
 	}
 
-	logger.Info("✅ All ORDER BY tests completed successfully!")
+	ColorLogger.Info(HighlightGreen("✅ All ORDER BY tests completed successfully!"))
 	return nil
 }
 
 // testOrderByParsing tests the parsing of ORDER BY clauses
-func testOrderByParsing(logger *zap.SugaredLogger) error {
+func testOrderByParsing() error {
 	testCases := []struct {
 		name  string
 		query string
@@ -99,10 +97,11 @@ func testOrderByParsing(logger *zap.SugaredLogger) error {
 	}
 
 	for _, tc := range testCases {
-		logger.Infof("  Testing: %s", tc.name)
+		ColorLogger.Infof(HighlightYellow("  Testing: %s"), tc.name)
 
-		selectQuery, err := queryparser.ParseSelectQueryWithOrder(tc.query, logger)
+		selectQuery, err := queryparser.ParseSelectQueryWithOrder(tc.query, ColorLogger)
 		if err != nil {
+			ColorLogger.Error(HighlightRed("Failed to parse query '%s': %v"), tc.query, err)
 			return fmt.Errorf("failed to parse query '%s': %w", tc.query, err)
 		}
 
@@ -115,14 +114,14 @@ func testOrderByParsing(logger *zap.SugaredLogger) error {
 			return fmt.Errorf("ORDER BY clause not parsed correctly for query '%s'", tc.query)
 		}
 
-		logger.Infof("    ✓ Successfully parsed query with %d ORDER BY fields", len(selectQuery.OrderBy.Fields))
+		ColorLogger.Infof(HighlightGreen("    ✓ Successfully parsed query with %d ORDER BY fields"), len(selectQuery.OrderBy.Fields))
 	}
 
 	return nil
 }
 
 // testDocumentSorting tests the actual document sorting functionality
-func testDocumentSorting(logger *zap.SugaredLogger) error {
+func testDocumentSorting() error {
 	// Create test documents
 	testDocs := createTestDocuments()
 
@@ -136,9 +135,10 @@ func testDocumentSorting(logger *zap.SugaredLogger) error {
 		},
 	}
 
-	sorter := queryparser.NewDocumentSorter(orderBy, logger)
+	sorter := queryparser.NewDocumentSorter(orderBy, ColorLogger)
 	err := sorter.SortDocuments(testDocs)
 	if err != nil {
+		ColorLogger.Error(HighlightRed("Failed to sort documents: %v"), err)
 		return fmt.Errorf("failed to sort documents: %w", err)
 	}
 
@@ -155,7 +155,7 @@ func testDocumentSorting(logger *zap.SugaredLogger) error {
 		return fmt.Errorf("documents not sorted correctly: %s should come before %s", name1, name2)
 	}
 
-	logger.Infof("  ✓ Documents sorted correctly by name ASC")
+	ColorLogger.Info(HighlightGreen("  ✓ Documents sorted correctly by name ASC"))
 
 	// Test sorting by numeric field - salary DESC
 	orderBy = &queryparser.OrderByClause{
@@ -167,19 +167,20 @@ func testDocumentSorting(logger *zap.SugaredLogger) error {
 		},
 	}
 
-	sorter = queryparser.NewDocumentSorter(orderBy, logger)
+	sorter = queryparser.NewDocumentSorter(orderBy, ColorLogger)
 	err = sorter.SortDocuments(testDocs)
 	if err != nil {
+		ColorLogger.Error(HighlightRed("Failed to sort documents by salary: %v"), err)
 		return fmt.Errorf("failed to sort documents by salary: %w", err)
 	}
 
-	logger.Infof("  ✓ Documents sorted correctly by salary DESC")
+	ColorLogger.Info(HighlightGreen("  ✓ Documents sorted correctly by salary DESC"))
 
 	return nil
 }
 
 // testMultiFieldSorting tests sorting by multiple fields
-func testMultiFieldSorting(logger *zap.SugaredLogger) error {
+func testMultiFieldSorting() error {
 	// Create test documents with some having same department
 	testDocs := createTestDocuments()
 
@@ -197,27 +198,28 @@ func testMultiFieldSorting(logger *zap.SugaredLogger) error {
 		},
 	}
 
-	sorter := queryparser.NewDocumentSorter(orderBy, logger)
+	sorter := queryparser.NewDocumentSorter(orderBy, ColorLogger)
 	err := sorter.SortDocuments(testDocs)
 	if err != nil {
+		ColorLogger.Errorf(HighlightRed("Failed to sort documents by multiple fields: %v"), err)
 		return fmt.Errorf("failed to sort documents by multiple fields: %w", err)
 	}
 
-	logger.Infof("  ✓ Documents sorted correctly by multiple fields")
+	ColorLogger.Info(HighlightGreen("  ✓ Documents sorted correctly by multiple fields"))
 
 	// Display the sorted order for verification
 	for i, doc := range testDocs {
 		dept := getDocumentFieldValue(doc, "department")
 		salary := getDocumentFieldValue(doc, "salary")
 		name := getDocumentFieldValue(doc, "name")
-		logger.Infof("    Document %d: %s - %s - %s", i+1, dept, salary, name)
+		ColorLogger.Infof(HighlightCyan("    Document %d: %s - %s - %s"), i+1, dept, salary, name)
 	}
 
 	return nil
 }
 
 // testOrderByErrorHandling tests error cases
-func testOrderByErrorHandling(logger *zap.SugaredLogger) error {
+func testOrderByErrorHandling() error {
 	errorCases := []struct {
 		name  string
 		query string
@@ -233,14 +235,15 @@ func testOrderByErrorHandling(logger *zap.SugaredLogger) error {
 	}
 
 	for _, tc := range errorCases {
-		logger.Infof("  Testing error case: %s", tc.name)
+		ColorLogger.Infof(HighlightYellow("  Testing error case: %s"), tc.name)
 
-		_, err := queryparser.ParseSelectQueryWithOrder(tc.query, logger)
+		_, err := queryparser.ParseSelectQueryWithOrder(tc.query, ColorLogger)
 		if err == nil {
+			ColorLogger.Errorf(HighlightRed("Expected error for invalid query '%s', but got none"), tc.query)
 			return fmt.Errorf("expected error for invalid query '%s', but got none", tc.query)
 		}
 
-		logger.Infof("    ✓ Correctly caught error: %v", err)
+		ColorLogger.Infof(HighlightGreen("    ✓ Correctly caught error: %v"), err)
 	}
 
 	return nil

@@ -97,22 +97,28 @@ func setupBundleTestEnvironment() error {
 
 	// Initialize test settings
 	testSettings = &settings.Arguments{
-		DataDir: dataDir,
-		LogDir:  logDir,
-		Debug:   true,
-		Port:    8080,
+		DataDir:  dataDir,
+		LogDir:   logDir,
+		Debug:    true,
+		Port:     8080,
+		LogLevel: "warn",
 	}
 
 	// Update global settings to match test environment
 	globalSettings := settings.GetSettings()
 	globalSettings.DataDir = dataDir
 	globalSettings.LogDir = logDir
+	globalSettings.LogLevel = "warn"
 
 	// Create logger for services
-	logger, err := zap.NewDevelopment()
+	z := zap.NewDevelopmentConfig()
+	z.OutputPaths = []string{"stdout"}
+	z.Level, _ = zap.ParseAtomicLevel(globalSettings.LogLevel)
+	logger, err := z.Build()
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
+
 	sugar := logger.Sugar()
 
 	// Create file registry first (needed for buffer pool)

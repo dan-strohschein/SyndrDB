@@ -49,6 +49,7 @@ func StandupTestDatabaseService() (*database.DatabaseService, *databasestore.Dat
 	args := settings.GetSettings()
 	args.TempDir = "./temp_files" // Use a temp dir for test isolation
 	args.DataDir = args.TempDir   // Use a temp dir for test isolation
+	args.LogLevel = "warn"
 
 	// Create a mock/in-memory store
 	store, err := databasestore.NewDatabaseStore(args.DataDir, ColorLogger.Sugar())
@@ -73,6 +74,7 @@ func TestParseAndCreateDatabaseCommand() {
 
 	args := settings.GetSettings()
 	args.DataDir = args.TempDir // Use a temp dir for test isolation
+	args.LogLevel = "warn"
 
 	service, _, err := StandupTestDatabaseService()
 	if err != nil {

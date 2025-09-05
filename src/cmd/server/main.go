@@ -53,6 +53,7 @@ func main() {
 	flag.BoolVar(&args.Debug, "debug", true, "Enable debug mode")
 	flag.BoolVar(&args.UserDebug, "userdebug", false, "Enable user debug mode")
 	flag.BoolVar(&args.EnableGraphQL, "graphql", false, "Enable GraphQL API")
+	flag.StringVar(&args.LogLevel, "loglevel", "info", "Log level: debug, info, warn, error")
 
 	// Parse the command line
 	flag.Parse()

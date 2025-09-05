@@ -100,6 +100,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		//logger, err = zap.NewDevelopment()
 		z := zap.NewDevelopmentConfig()
 		z.OutputPaths = []string{"stdout"}
+		z.Level, _ = zap.ParseAtomicLevel(config.LogLevel)
 		logger, err = z.Build()
 	} else {
 		// Production configuration

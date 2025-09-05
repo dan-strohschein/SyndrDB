@@ -174,6 +174,11 @@ func CreateHashIndex(config *IndexConfig, logger *zap.SugaredLogger) (*HashIndex
 		isOpen:        true,
 	}
 
+	// Set up page manager flush function to prevent data loss during eviction
+	pageManager.SetFlushFunction(func(pageNum uint32, pageData interface{}) error {
+		return fileManager.WritePage(pageNum, pageData)
+	})
+
 	// Initialize the index
 	if err := hashIndex.initializeIndex(); err != nil {
 		return nil, fmt.Errorf("failed to initialize index: %w", err)
@@ -242,7 +247,7 @@ func OpenHashIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) (
 	}
 
 	// Initialize page manager
-	pageManager, err := NewPageManager(metadata.PageSize, 100, logger)
+	pageManager, err := NewPageManager(metadata.PageSize, 2000, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create page manager: %w", err)
 	}
@@ -277,6 +282,11 @@ func OpenHashIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) (
 		isOpen:        true,
 		logger:        logger,
 	}
+
+	// Set up page manager flush function to prevent data loss during eviction
+	pageManager.SetFlushFunction(func(pageNum uint32, pageData interface{}) error {
+		return fileManager.WritePage(pageNum, pageData)
+	})
 
 	logger.Infof("Successfully opened hash index with %d buckets", hashIndex.metadata.BucketCount)
 	return hashIndex, nil

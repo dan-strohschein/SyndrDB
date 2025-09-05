@@ -170,6 +170,7 @@ func setupJoinTestData(logger *zap.SugaredLogger) (*models.Database, server.Serv
 	logger.Infof("Setting up JOIN test data...")
 
 	args := settings.GetSettings()
+	args.LogLevel = "warn"
 
 	dbFactory := database.NewDatabaseFactory()
 	store, err := databasestore.NewDatabaseStore("./test_data", logger)
