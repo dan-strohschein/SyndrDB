@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syndrdb/src/data"
+	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
@@ -21,6 +22,7 @@ import (
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/internal/storage/databasestore"
+
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 
@@ -173,12 +175,13 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		log.Printf("Loaded %d databases", len(databases))
 	}
 
-	// If no databases were found, create a default database
+	// If no databases were found, create a default Primary database
 	if len(server.Databases) == 0 && config.CreateDefaultDB {
+
 		defaultDB := &models.Database{
 			DatabaseID:    helpers.GenerateUUID(),
-			Name:          "default",
-			Description:   "Default database created at startup",
+			Name:          "primary",
+			Description:   "Primary database created at startup",
 			DataDirectory: config.DataDir,
 			Bundles:       make(map[string]models.Bundle),
 			BundleFiles:   []string{},
@@ -190,7 +193,12 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 			log.Printf("Warning: Failed to save default database: %v", err)
 		} else {
 			server.Databases[defaultDB.DatabaseID] = defaultDB
-			log.Printf("Created default database with ID %s", defaultDB.DatabaseID)
+			log.Printf("Created primary default database with ID %s", defaultDB.DatabaseID)
+		}
+
+		err = defaultdb.InitPrimaryBundleCatalogs(databaseService, databaseStore, defaultDB, sugar, bundleService)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize default database catalogs: %v", err)
 		}
 	}
 
@@ -707,51 +715,6 @@ func parseConnectionString(server *Server, connStr string) (ConnectionString, er
 	result.Password = optionsParts[4]
 	// TODO Check to make sure the user exists
 	// TODO Check to make sure the user has access to the database
-
-	// connStr = optionsParts[0]
-	// if len(optionsParts) > 1 {
-	// 	optionsStr := optionsParts[1]
-	// 	optionsList := strings.Split(optionsStr, "&")
-	// 	for _, option := range optionsList {
-	// 		keyValue := strings.SplitN(option, "=", 2)
-	// 		if len(keyValue) == 2 {
-	// 			result.Options[keyValue[0]] = keyValue[1]
-	// 		}
-	// 	}
-	// }
-
-	// // Extract database name
-	// dbParts := strings.Split(connStr, "/")
-	// if len(dbParts) > 1 {
-	// 	result.Database = dbParts[1]
-	// }
-	// connStr = dbParts[0]
-
-	// // Extract authentication details and host/port
-	// authParts := strings.Split(connStr, "@")
-	// hostPort := connStr
-
-	// if len(authParts) > 1 {
-	// 	credentialsPart := authParts[0]
-	// 	hostPort = authParts[1]
-
-	// 	credentialsParts := strings.SplitN(credentialsPart, ":", 2)
-	// 	if len(credentialsParts) == 2 {
-	// 		result.Username = credentialsParts[0]
-	// 		result.Password = credentialsParts[1]
-	// 	}
-	// }
-
-	// // Extract host and port
-	// hostPortParts := strings.SplitN(hostPort, ":", 2)
-	// result.Host = hostPortParts[0]
-
-	// if len(hostPortParts) > 1 {
-	// 	_, err := fmt.Sscanf(hostPortParts[1], "%d", &result.Port)
-	// 	if err != nil {
-	// 		return result, fmt.Errorf("invalid port: %v", err)
-	// 	}
-	// }
 
 	return result, nil
 }

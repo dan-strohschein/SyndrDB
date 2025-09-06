@@ -178,15 +178,77 @@ func normalizeQueryForOrder(query string) string {
 
 // parseSelectClauseForOrder parses the SELECT portion of the query
 func parseSelectClauseForOrder(query string, selectQuery *SelectQueryWithOrder, logger *zap.SugaredLogger) error {
-	// For now, we only support "SELECT DOCUMENTS" - future enhancement for specific fields
-	if !strings.HasPrefix(strings.ToUpper(query), "SELECT DOCUMENTS") {
-		return fmt.Errorf("only 'SELECT DOCUMENTS' is currently supported")
+	upperQuery := strings.ToUpper(query)
+
+	// Check if it's the old "SELECT DOCUMENTS" syntax (returns all fields)
+	if strings.HasPrefix(upperQuery, "SELECT DOCUMENTS") {
+		selectQuery.SelectFields = []string{} // Empty means all fields
+		return nil
 	}
 
-	// Future enhancement: parse specific field names
-	selectQuery.SelectFields = []string{} // Empty means all fields
+	// Check if it's the new field-specific syntax "SELECT field1, field2, ..."
+	if strings.HasPrefix(upperQuery, "SELECT ") {
+		// Extract the field list between SELECT and FROM
+		selectPart := query[7:] // Remove "SELECT "
+		fromIndex := strings.Index(strings.ToUpper(selectPart), " FROM ")
+		if fromIndex == -1 {
+			return fmt.Errorf("SELECT clause must be followed by FROM clause")
+		}
 
-	return nil
+		fieldsPart := strings.TrimSpace(selectPart[:fromIndex])
+		if fieldsPart == "" {
+			return fmt.Errorf("SELECT clause cannot be empty")
+		}
+
+		// Parse the field list
+		fields, err := parseFieldListForOrder(fieldsPart, logger)
+		if err != nil {
+			return fmt.Errorf("error parsing field list: %v", err)
+		}
+
+		selectQuery.SelectFields = fields
+		return nil
+	}
+
+	return fmt.Errorf("SELECT clause must start with either 'SELECT DOCUMENTS' or 'SELECT field1, field2, ...'")
+}
+
+// parseFieldListForOrder parses a comma-separated list of field names
+// Field names can be quoted or unquoted. Quotes are stripped if present.
+func parseFieldListForOrder(fieldsPart string, logger *zap.SugaredLogger) ([]string, error) {
+	if fieldsPart == "" {
+		return nil, fmt.Errorf("field list cannot be empty")
+	}
+
+	// Split by comma
+	rawFields := strings.Split(fieldsPart, ",")
+	fields := make([]string, 0, len(rawFields))
+
+	for _, field := range rawFields {
+		// Trim whitespace
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue // Skip empty fields
+		}
+
+		// Remove quotes if present (single or double)
+		field = strings.Trim(field, `"'`)
+
+		// Validate field name is not empty after quote removal
+		if field == "" {
+			return nil, fmt.Errorf("field name cannot be empty")
+		}
+
+		// Add to fields list
+		fields = append(fields, field)
+		logger.Debugf("Parsed field: %s", field)
+	}
+
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no valid fields found in field list")
+	}
+
+	return fields, nil
 }
 
 // parseFromClauseForOrder parses the FROM portion of the query

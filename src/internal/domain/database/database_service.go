@@ -46,10 +46,10 @@ func NewDatabaseService(store databasestore.DatabaseStore, factory DatabaseFacto
 	// Load existing databases
 	databases, err := store.LoadAllDatabaseDataFiles(settings.DataDir, logger)
 	if err != nil {
-		log.Printf("Warning: Error loading databases: %v", err)
+		logger.Warnf("Warning: Error loading databases: %v", err)
 	} else {
 		service.Databases = databases
-		log.Printf("Database service loaded %d databases", len(databases))
+		logger.Debugf("Database service loaded %d databases", len(databases))
 	}
 
 	return service

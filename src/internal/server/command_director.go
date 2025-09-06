@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"syndrdb/src/internal/domain/bundle"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/executor"
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
@@ -424,7 +424,7 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 	}
 
 	// Validate the bundle name with a regex
-	if !bundle.IsValidBundleName(bundleCmd.BundleName) {
+	if !bndle.IsValidBundleName(bundleCmd.BundleName) {
 		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names must start with a letter, can be alphanumeric, with underscores and hyphens", bundleCmd.BundleName)
 	}
 
@@ -495,6 +495,44 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	return cmdResponse, nil
 }
 
+// filterDocumentFields filters documents to only include specified fields
+// Returns a new map with documents containing only the selected fields
+func filterDocumentFields(documents map[string]*models.Document, selectedFields []string, logger *zap.SugaredLogger) map[string]*models.Document {
+	if len(selectedFields) == 0 {
+		return documents // Return all fields if no specific fields requested
+	}
+
+	filteredDocuments := make(map[string]*models.Document)
+
+	for docID, doc := range documents {
+		// Create a new document with only the selected fields
+		filteredFields := make(map[string]models.Field)
+
+		// Add selected fields if they exist in the original document
+		for _, fieldName := range selectedFields {
+			if field, exists := doc.Fields[fieldName]; exists {
+				filteredFields[fieldName] = field
+				logger.Debugf("Including field '%s' for document %s", fieldName, docID)
+			} else {
+				logger.Debugf("Field '%s' not found in document %s", fieldName, docID)
+			}
+		}
+
+		// Create new document with filtered fields
+		filteredDoc := &models.Document{
+			DocumentID: doc.DocumentID,
+			Fields:     filteredFields,
+			CreatedAt:  doc.CreatedAt,
+			UpdatedAt:  doc.UpdatedAt,
+		}
+
+		filteredDocuments[docID] = filteredDoc
+	}
+
+	logger.Infof("Filtered %d documents to include only fields: %v", len(filteredDocuments), selectedFields)
+	return filteredDocuments
+}
+
 func SelectDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
 	// First, check if this is a JOIN query by examining the full command
 	fullCommand := strings.Join(commandParts, " ")
@@ -502,6 +540,11 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	// Detect JOIN queries
 	if strings.Contains(strings.ToUpper(fullCommand), "JOIN") {
 		return SelectDocumentsWithJoin(fullCommand, serviceManager, database, logger)
+	}
+
+	// Detect GROUP BY queries
+	if strings.Contains(strings.ToUpper(fullCommand), "GROUP BY") {
+		return SelectDocumentsWithGroupBy(fullCommand, serviceManager, database, logger)
 	}
 
 	// Detect ORDER BY queries
@@ -525,7 +568,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	// should use the buffer pool to get the bundle and documents, and also
 	// use the indexes if available.
 
-	if !bundle.IsValidBundleName(bundleName) {
+	if !bndle.IsValidBundleName(bundleName) {
 		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
 	}
 
@@ -646,6 +689,11 @@ func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, databa
 		return nil, fmt.Errorf("error executing JOIN query plan: %w", err)
 	}
 
+	// Apply field selection if specific fields were requested
+	if len(joinQuery.SelectFields) > 0 {
+		documents = filterDocumentFields(documents, joinQuery.SelectFields, logger)
+	}
+
 	logger.Infof("JOIN query executed successfully, returned %d documents", len(documents))
 
 	cmdResponse := &CommandResponse{
@@ -667,7 +715,7 @@ func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, dat
 
 	// Extract bundle name
 	bundleName := selectQuery.FromBundle
-	if !bundle.IsValidBundleName(bundleName) {
+	if !bndle.IsValidBundleName(bundleName) {
 		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
 	}
 
@@ -744,6 +792,58 @@ func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, dat
 	for _, doc := range sortedDocuments {
 		resultMap[doc.DocumentID] = doc
 	}
+
+	// Apply field selection if specific fields were requested
+	if len(selectQuery.SelectFields) > 0 {
+		resultMap = filterDocumentFields(resultMap, selectQuery.SelectFields, logger)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: len(resultMap),
+		Result:      resultMap,
+	}
+	return cmdResponse, nil
+}
+
+// SelectDocumentsWithGroupBy handles SELECT queries with GROUP BY clauses
+func SelectDocumentsWithGroupBy(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+	logger.Infof("Processing GROUP BY query: %s", query)
+
+	// Parse the GROUP BY query
+	groupByQuery, err := queryparser.ParseSelectQueryWithGroupBy(query, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse GROUP BY query: %w", err)
+	}
+
+	// Extract bundle name
+	bundleName := groupByQuery.FromBundle
+	if !bndle.IsValidBundleName(bundleName) {
+		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
+	}
+
+	// Get the bundle by name
+	bundleObj, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+	}
+
+	// Get all documents from the bundle
+	allDocuments := make(map[string]*models.Document)
+	for k, v := range *bundleObj.Documents {
+		docCopy := v
+		allDocuments[k] = &docCopy
+	}
+
+	// Create and execute GROUP BY executor
+	groupByExecutor := executor.NewGroupByExecutor(groupByQuery, logger)
+
+	// Execute the GROUP BY query
+	resultMap, err := groupByExecutor.Execute(allDocuments)
+	if err != nil {
+		return nil, fmt.Errorf("error executing GROUP BY query: %v", err)
+	}
+
+	logger.Infof("GROUP BY query returned %d groups", len(resultMap))
 
 	cmdResponse := &CommandResponse{
 		ResultCount: len(resultMap),

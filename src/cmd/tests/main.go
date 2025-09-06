@@ -221,6 +221,11 @@ func main() {
 		ColorLogger.Info(HighlightGreen("✓ ORDER BY demo completed successfully"))
 	}
 
+	// Execute GROUP BY functionality tests
+	ColorLogger.Info(HighlightBlue("Starting GROUP BY functionality tests..."))
+	testGroupByFunctionality()
+	ColorLogger.Info(HighlightGreen("✓ GROUP BY tests completed successfully"))
+
 	// Execute WAL functionality tests
 	ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
 	walUseCases := GetWALTestUseCases()

@@ -2,7 +2,6 @@ package bundle
 
 import (
 	"fmt"
-	"log"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
@@ -45,10 +44,10 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	// Load existing databases
 	bundles, err := store.LoadAllBundleDataFiles(settings.DataDir)
 	if err != nil {
-		log.Printf("Warning: Error loading databases: %v", err)
+		logger.Warnf("Warning: Error loading databases: %v", err)
 	} else {
 		service.bundles = bundles
-		log.Printf("Database service loaded %d databases", len(service.bundles))
+		logger.Debugf("Database service loaded %d databases", len(service.bundles))
 	}
 
 	return service
@@ -109,6 +108,30 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
 
 	s.bundles[bundleCommand.BundleName] = bundle
+	return nil
+}
+
+func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseService, db *models.Database, bundle *models.Bundle) error {
+	// Add the bundle to the database
+	db.Bundles[bundle.Name] = *bundle
+
+	//This needs to be added to a bundle file
+	err := s.store.CreateBundleFile(db, bundle)
+	if err != nil {
+		return fmt.Errorf("error creating bundle file from struct: %w", err)
+	}
+	//logger.Infof("Decoded bundle data from file %v", bundle)
+	// and then the bundle file name needs to be added to the database file
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s.bnd", bundle.Name))
+
+	// Write the updated database file
+	err = databaseService.Store.UpdateDatabaseDataFile(db)
+	if err != nil {
+		return fmt.Errorf("error updating database file: %w", err)
+	}
+
+	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
+
 	return nil
 }
 
@@ -913,6 +936,43 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	return nil
 }
 
+func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, bundle *models.Bundle, document *models.Document) error {
+	// Add the document to the in-memory bundle
+	(*s.bundles[bundle.Name].Documents)[document.DocumentID] = *document
+
+	if bundle.Indexes != nil {
+		// Look for the DocumentID hash index
+		for indexName, indexRef := range bundle.Indexes {
+			s.logger.Debugf("Processing index '%s' of type '%s'", indexName, indexRef.IndexType)
+
+			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
+				// Load hash index on-demand
+				hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
+				if err != nil {
+					s.logger.Errorf("Failed to load hash index '%s': %v", indexName, err)
+					return fmt.Errorf("failed to load hash index: %w", err)
+				}
+
+				err = hashIndex.InsertDocument(document.DocumentID)
+				if err != nil {
+					s.logger.Warnf("Failed to add DocumentID '%s' to hash index '%s': %v",
+						document.DocumentID, indexName, err)
+				} else {
+					s.logger.Debugf("Successfully added DocumentID '%s' to hash index '%s'",
+						document.DocumentID, indexName)
+				}
+			}
+		}
+	}
+
+	// Add document to bundle file
+	err := s.store.AddDocumentToBundleFile(bundle, document)
+	if err != nil {
+		return fmt.Errorf("failed to add document to bundle: %w", err)
+	}
+
+	return nil
+}
 func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) error {
 	args := settings.GetSettings()
 	// Check if the bundle exists
