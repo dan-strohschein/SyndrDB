@@ -8,6 +8,8 @@ Warning: Extremely WIP. This project was just started and is pretty much purely 
 
 (+Current progress+):
 - SQL Style query language (Syndr-QL)
+- Field selection in SELECT queries (specify which fields to return)
+- GROUP BY aggregation with COUNT, SUM, AVG, MIN, MAX functions
 - Hash Index and B-Tree index filtering
 - Postgres-like file storage and retrieval
 - Write Ahead Logging for transactions
@@ -118,18 +120,27 @@ ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>"
 
 As long as the field type matches the data type of the value supplied.
 
-Currently we support simple queries, but no grouping or aggregating functions.
+SyndrDB supports advanced SQL-like query capabilities including field selection, GROUP BY aggregation, and JOIN operations.
 
-In the future, we want to support LIMIT, MIN/MAX, and COUNT
+### Basic Queries
 
-For Now a basic query is like this:
-
+For basic document retrieval:
 
 ```
  SELECT DOCUMENTS FROM "<BUNDLE_NAME>";
 ```
 
-This will return all of the documents in the bundle. 
+This will return all of the documents in the bundle.
+
+### Field Selection
+
+To select specific fields from documents:
+
+```
+SELECT field1, field2, field3 FROM "<BUNDLE_NAME>";
+```
+
+### Filtering with WHERE Clauses
 
 To filter and get results more accurately, use this format:
 
@@ -140,6 +151,20 @@ SELECT DOCUMENTS FROM "<BUNDLE_NAME>"
             (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
       );
 ```
+
+### GROUP BY Aggregation
+
+For data analysis and aggregation:
+
+```
+SELECT category, COUNT(*), SUM(price), AVG(price)
+FROM "<BUNDLE_NAME>"
+GROUP BY category
+HAVING COUNT(*) > 5
+ORDER BY COUNT(*) DESC;
+```
+
+### JOIN Operations
 
 To filter and get results with related bundles use this format:
 
@@ -321,3 +346,72 @@ This implementation makes SyndrDB a truly modern document database by adding:
 The GraphQL API opens up SyndrDB to modern web applications, mobile apps, and any system that can consume GraphQL endpoints, while maintaining full compatibility with existing SyndrDB native clients.
 
 **Result**: SyndrDB now offers both a high-performance native TCP interface AND a modern, web-friendly GraphQL API - making it suitable for a much broader range of applications and use cases! 🚀
+
+## 📚 Advanced Features Documentation
+
+SyndrDB includes several advanced query features that extend beyond basic CRUD operations. These features provide SQL-like capabilities for complex data analysis and retrieval:
+
+### 🎯 **Field Selection**
+Advanced field selection capabilities allowing you to specify exactly which fields to return from your queries.
+
+📖 **[Field Selection Implementation Guide](FIELD_SELECTION_IMPLEMENTATION.md)**
+
+**Key Features:**
+- Selective field projection in SELECT queries
+- Performance optimization through reduced data transfer
+- Support for nested field selection
+- Integration with JOIN and ORDER BY operations
+
+**Example:**
+```sql
+SELECT name, email, age FROM "Users" WHERE age > 25
+```
+
+### 📊 **GROUP BY Aggregation**
+Comprehensive GROUP BY implementation following PostgreSQL algorithms, providing powerful data aggregation capabilities.
+
+📖 **[GROUP BY Implementation Guide](GROUP_BY_IMPLEMENTATION.md)**
+
+**Key Features:**
+- Full SQL-like GROUP BY syntax
+- Multiple aggregate functions: COUNT, SUM, AVG, MIN, MAX
+- HAVING clause support for post-aggregation filtering
+- Hash and Sort execution strategies for optimal performance
+- Integration with ORDER BY for sorted results
+
+**Examples:**
+```sql
+-- Basic grouping with count
+SELECT category, COUNT(*) FROM "Products" GROUP BY category
+
+-- Multiple aggregates with filtering
+SELECT region, COUNT(*), SUM(sales), AVG(sales) 
+FROM "Revenue" 
+GROUP BY region 
+HAVING COUNT(*) > 5 
+ORDER BY SUM(sales) DESC
+
+-- Complex multi-field grouping
+SELECT region, category, COUNT(*), AVG(price)
+FROM "Sales" 
+GROUP BY region, category
+```
+
+**Aggregate Functions Supported:**
+- `COUNT(*)` - Count all rows in each group
+- `COUNT(field)` - Count non-null values in specified field
+- `SUM(field)` - Sum of numeric values
+- `AVG(field)` - Average of numeric values  
+- `MIN(field)` - Minimum value in each group
+- `MAX(field)` - Maximum value in each group
+
+### 🔧 **Implementation Architecture**
+
+Both features are built with:
+- **PostgreSQL Algorithm Compatibility** - Following industry-standard approaches
+- **Performance Optimization** - Multiple execution strategies based on data characteristics
+- **Memory Management** - Efficient handling of large datasets
+- **Error Handling** - Comprehensive validation and error reporting
+- **Test Coverage** - Extensive test suites for reliability
+
+These advanced features make SyndrDB suitable for analytical workloads and complex data processing scenarios while maintaining the flexibility of document-based storage.
