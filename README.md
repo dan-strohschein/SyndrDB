@@ -64,13 +64,13 @@ It supports CRUD commands but not yet Authentication Commands.
 
 To create a Database:
 
-```
+```sql
  CREATE DATABASE "<Database_Name>";
 ```
 
 To Create a Bundle:
 
-```
+```sql
 CREATE BUNDLE "<BUNDLE_NAME>"
 WITH FIELDS (
 	{"<FIELDNAME>", <FIELDTYPE>, <ISREQUIRED>, <ISUNIQUE>, <DEFAULTVALUE>},
@@ -93,7 +93,7 @@ Field Types:
 ### Indexes 
 
 To Create an Index:
-```
+```sql
 CREATE B-INDEX "INDEX_NAME" ON BUNDLE "BUNDLE_NAME"
 WITH FIELDS (
 	{"<FIELDNAME>", <ISUNIQUE>},
@@ -102,7 +102,7 @@ WITH FIELDS (
 ```
 Or, to create a hash index (Note - hash indexes only operate on one field):
 
-```
+```sql
 CREATE H-INDEX "INDEX_NAME" ON BUNDLE "BUNDLE_NAME"
 WITH FIELDS ({"<FIELDNAME>", <UNIQUE>})
 ```
@@ -110,9 +110,9 @@ WITH FIELDS ({"<FIELDNAME>", <UNIQUE>})
 ### Basic Create, Read, Update, and Delete commands for documents
 To add a Document to a bundle:
 
-```
+```sql
 ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>"
- WITH  (
+WITH  (
     {"<FIELD_NAME>"=<VALUE>},
     ...
 );
@@ -126,7 +126,7 @@ SyndrDB supports advanced SQL-like query capabilities including field selection,
 
 For basic document retrieval:
 
-```
+```sql
  SELECT DOCUMENTS FROM "<BUNDLE_NAME>";
 ```
 
@@ -136,7 +136,7 @@ This will return all of the documents in the bundle.
 
 To select specific fields from documents:
 
-```
+```sql
 SELECT field1, field2, field3 FROM "<BUNDLE_NAME>";
 ```
 
@@ -144,9 +144,10 @@ SELECT field1, field2, field3 FROM "<BUNDLE_NAME>";
 
 To filter and get results more accurately, use this format:
 
-```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" 
-      WHERE (
+```sql
+SELECT DOCUMENTS 
+FROM "<BUNDLE_NAME>" 
+WHERE (
             (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
             (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
       );
@@ -156,7 +157,7 @@ SELECT DOCUMENTS FROM "<BUNDLE_NAME>"
 
 For data analysis and aggregation:
 
-```
+```sql
 SELECT category, COUNT(*), SUM(price), AVG(price)
 FROM "<BUNDLE_NAME>"
 GROUP BY category
@@ -168,16 +169,17 @@ ORDER BY COUNT(*) DESC;
 
 To filter and get results with related bundles use this format:
 
-```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" 
+```sql
+SELECT <Field_List | DOCUMENTS> 
+FROM "<BUNDLE_NAME>" 
       <JOIN | OUTER JOIN | LEFT JOIN | RIGHT JOIN> "<BUNDLE_NAME_2>
       ON
       "<BUNDLE_NAME>"."<FIELD_NAME"> ==  "<BUNDLE_NAME_2>"."<FIELD_NAME">
-      WHERE (
+WHERE (
             (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
             (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
       );
-      ORDER BY  "<BUNDLE_NAME>"."<FIELD_NAME"> <ASC | DESC>
+ORDER BY  "<BUNDLE_NAME>"."<FIELD_NAME"> <ASC | DESC>
 ```
 
 Currently supported operators are:
@@ -193,10 +195,10 @@ Currently supported operators are:
 
 To Update one or more documents in a bundle:
 
-```
+```sql
 UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>"
       (<FIELD> = <NEW_VALUE>, <FIELD> = <NEW_VALUE> )
-      WHERE (
+WHERE (
             (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
             (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
       );
@@ -204,9 +206,10 @@ UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>"
 
 To Delete one or more Documents in a Bundle:
 
-```
-DELETE DOCUMENTS FROM BUNDLE "<BUNDLE_NAME>" 
-     WHERE (
+```sql
+DELETE DOCUMENTS 
+FROM BUNDLE "<BUNDLE_NAME>" 
+WHERE (
             (<FIELD_NAME> <OPERATOR> <VALUE>) <AND/OR> 
             (<FIELD_NAME> <OPERATOR> <VALUE> <AND/OR> <FIELD_NAME> <OPERATOR> <VALUE>)
       );
