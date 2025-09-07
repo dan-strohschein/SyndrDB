@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -72,6 +73,11 @@ type Session struct {
 	DatabaseName string
 	Database     *models.Database
 	ConnectionID string // Associated connection ID
+
+	// Security binding to prevent session hijacking
+	ClientIP         string // IP address bound to this session
+	UserAgent        string // User agent fingerprint for additional validation
+	IPValidationHash string // Hash of IP+session for integrity checking
 
 	// State tracking
 	State        SessionState
@@ -157,8 +163,78 @@ func generateSecureSessionID() string {
 	return fmt.Sprintf("sess_%s", hex.EncodeToString(bytes))
 }
 
-// CreateSession creates a new session for a user
-func (sm *SessionManager) CreateSession(username, userID, databaseName string, database *models.Database, connectionID string, timeout time.Duration) (*Session, error) {
+// generateIPValidationHash creates a hash for IP address validation
+func generateIPValidationHash(sessionID, clientIP, userAgent string) string {
+	hasher := sha256.New()
+	hasher.Write([]byte(sessionID))
+	hasher.Write([]byte(clientIP))
+	hasher.Write([]byte(userAgent))
+	hasher.Write([]byte(time.Now().Format("2006-01-02"))) // Add date salt for daily rotation
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
+// validateSessionBinding validates IP and user agent binding for session security
+func validateSessionBinding(session *Session, clientIP, userAgent string) error {
+	if session == nil {
+		return fmt.Errorf("session is nil")
+	}
+
+	// Check IP address binding
+	if session.ClientIP != clientIP {
+		return fmt.Errorf("session IP mismatch: expected %s, got %s", session.ClientIP, clientIP)
+	}
+
+	// Check user agent binding (allow some variance for browser updates)
+	if session.UserAgent != userAgent {
+		// Calculate similarity score for user agent (basic check for major differences)
+		if !isUserAgentSimilar(session.UserAgent, userAgent) {
+			return fmt.Errorf("session user agent mismatch: significant difference detected")
+		}
+	}
+
+	// Validate IP hash for integrity
+	expectedHash := generateIPValidationHash(session.SessionID, clientIP, userAgent)
+	if session.IPValidationHash != expectedHash {
+		// Re-generate hash with current date in case it's a date change
+		currentHash := generateIPValidationHash(session.SessionID, clientIP, session.UserAgent)
+		if session.IPValidationHash != currentHash {
+			return fmt.Errorf("session validation hash mismatch: potential tampering detected")
+		}
+	}
+
+	return nil
+}
+
+// isUserAgentSimilar checks if user agents are similar enough (basic similarity check)
+func isUserAgentSimilar(original, current string) bool {
+	if original == current {
+		return true
+	}
+
+	// Basic similarity check - allow minor version differences
+	// Extract major components and compare
+	originalLen := len(original)
+	currentLen := len(current)
+
+	// If length difference is too large, consider them different
+	if originalLen > 0 && currentLen > 0 {
+		lengthDiff := originalLen - currentLen
+		if lengthDiff < 0 {
+			lengthDiff = -lengthDiff
+		}
+
+		// Allow up to 30% length difference for minor version updates
+		maxDiff := originalLen * 30 / 100
+		if lengthDiff <= maxDiff {
+			return true
+		}
+	}
+
+	return false
+}
+
+// CreateSession creates a new session for a user with IP binding and user-agent fingerprinting
+func (sm *SessionManager) CreateSession(username, userID, databaseName string, database *models.Database, connectionID string, timeout time.Duration, clientIP, userAgent string) (*Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -174,6 +250,9 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		timeout = sm.defaultTimeout
 	}
 
+	// Generate IP validation hash for integrity checking
+	ipValidationHash := generateIPValidationHash(sessionID, clientIP, userAgent)
+
 	session := &Session{
 		SessionID:          sessionID,
 		UserID:             userID,
@@ -181,6 +260,9 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		DatabaseName:       databaseName,
 		Database:           database,
 		ConnectionID:       connectionID,
+		ClientIP:           clientIP,
+		UserAgent:          userAgent,
+		IPValidationHash:   ipValidationHash,
 		State:              SessionStateActive,
 		CreatedAt:          time.Now(),
 		LastActivity:       time.Now(),
@@ -192,7 +274,7 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		TempFiles:          make([]string, 0),
 		Timeout:            timeout,
 		MaxQueryHistory:    100, // Keep last 100 queries
-		Logger:             sm.logger.With("sessionID", sessionID, "username", username),
+		Logger:             sm.logger.With("sessionID", sessionID, "username", username, "clientIP", clientIP),
 	}
 
 	// Store session
@@ -205,10 +287,17 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 	}
 	sm.userSessions[username] = append(sm.userSessions[username], session)
 
-	session.Logger.Infow("Session created",
+	session.Logger.Infow("Session created with IP binding",
 		"sessionID", sessionID,
 		"username", username,
 		"database", databaseName,
+		"clientIP", clientIP,
+		"userAgent", func() string {
+			if len(userAgent) > 100 {
+				return userAgent[:100]
+			}
+			return userAgent
+		}(), // Truncate user agent for logging
 		"timeout", timeout,
 		"expiresAt", session.ExpiresAt)
 
@@ -282,14 +371,29 @@ func (sm *SessionManager) InvalidateUserSessions(username string) error {
 	return lastError
 }
 
-// UpdateActivity updates the last activity time for a session
-func (sm *SessionManager) UpdateActivity(sessionID string) error {
+// UpdateActivity updates the last activity time for a session with security validation
+func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) error {
 	sm.mu.RLock()
 	session, exists := sm.sessions[sessionID]
 	sm.mu.RUnlock()
 
 	if !exists {
 		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	// Validate session binding before updating activity
+	if err := validateSessionBinding(session, clientIP, userAgent); err != nil {
+		session.Logger.Warnw("Session security validation failed during activity update",
+			"error", err,
+			"clientIP", clientIP,
+			"expectedIP", session.ClientIP,
+			"userAgent", userAgent[:func() int {
+				if len(userAgent) > 50 {
+					return 50
+				}
+				return len(userAgent)
+			}()])
+		return fmt.Errorf("session security validation failed: %v", err)
 	}
 
 	session.mu.Lock()
@@ -299,6 +403,19 @@ func (sm *SessionManager) UpdateActivity(sessionID string) error {
 	session.ExpiresAt = time.Now().Add(session.Timeout)
 
 	return nil
+}
+
+// ValidateSessionSecurity validates session security binding
+func (sm *SessionManager) ValidateSessionSecurity(sessionID, clientIP, userAgent string) error {
+	sm.mu.RLock()
+	session, exists := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	return validateSessionBinding(session, clientIP, userAgent)
 }
 
 // cleanupSession performs cleanup for a session (must be called with sm.mu held)
@@ -693,9 +810,16 @@ func (s *Session) GetSessionInfo() map[string]interface{} {
 	defer s.mu.RUnlock()
 
 	info := map[string]interface{}{
-		"sessionID":          s.SessionID,
-		"username":           s.Username,
-		"database":           s.DatabaseName,
+		"sessionID": s.SessionID,
+		"username":  s.Username,
+		"database":  s.DatabaseName,
+		"clientIP":  s.ClientIP,
+		"userAgent": func() string {
+			if len(s.UserAgent) > 100 {
+				return s.UserAgent[:100] + "..."
+			}
+			return s.UserAgent
+		}(),
 		"state":              s.State.String(),
 		"createdAt":          s.CreatedAt,
 		"lastActivity":       s.LastActivity,

@@ -12,10 +12,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syndrdb/src/data"
+	"syndrdb/src/internal/audit"
+	"syndrdb/src/internal/auth"
 	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
@@ -44,7 +47,8 @@ type Server struct {
 	HTTPServer        *http.Server
 	AuthEnabled       bool
 	GraphQLEnabled    bool
-	Users             map[string]string // username -> hashed password
+	Users             map[string]string // username -> hashed password (legacy, use UserStore instead)
+	UserStore         *auth.UserStore   // Modern user authentication with rate limiting
 	ActiveConnections map[string]*Connection
 	SessionManager    *SessionManager
 	RateLimiter       *RateLimiter
@@ -218,6 +222,42 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 	server.SessionManager = NewSessionManager(sugar, server.SessionTimeout, server.MaxSessions)
 
+	// Initialize UserStore with authentication rate limiting if auth is enabled
+	if config.AuthEnabled {
+		userStorePath := filepath.Join(config.DataDir, "users.dat")
+
+		// Create audit configuration
+		auditConfig := audit.DefaultAuditConfig()
+		auditConfig.LogDirectory = filepath.Join(config.LogDir, "security")
+
+		// Create SecurityAuditor for comprehensive security event logging
+		auditor, err := audit.NewSecurityAuditor(auditConfig, sugar)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize security auditor: %w", err)
+		}
+
+		// Create auth rate limiting config
+		authConfig := auth.DefaultAuthRateLimitConfig()
+
+		// Use a default encryption key for user store (in production, this should be configurable)
+		encryptionKey := "SyndrDB-UserStore-Key-2025"
+
+		// Initialize UserStore with rate limiting and security auditing
+		userStore, err := auth.NewUserStoreWithAuditor(
+			userStorePath,
+			encryptionKey,
+			sugar,
+			authConfig,
+			auditor,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize user store: %w", err)
+		}
+
+		server.UserStore = userStore
+		sugar.Infof("User authentication store initialized with brute force protection and security auditing")
+	}
+
 	// Load all databases
 	databases, err := databaseStore.LoadAllDatabaseDataFiles(config.DataDir, logger.Sugar())
 
@@ -331,6 +371,11 @@ func (s *Server) Stop() error {
 		s.SessionManager.Stop()
 	}
 
+	// Close UserStore and rate limiter
+	if s.UserStore != nil {
+		s.UserStore.Close()
+	}
+
 	// Close all active connections
 	s.mu.Lock()
 	for id, conn := range s.ActiveConnections {
@@ -394,14 +439,58 @@ func (s *Server) AddUser(username, password string) {
 	s.Users[username] = hashedPassword
 }
 
-// Authentication function
+// Authentication function with brute force protection
 func (s *Server) authenticate(username, password string) bool {
+	// Use new UserStore if available
+	if s.UserStore != nil {
+		isValid, _, err := s.UserStore.VerifyCredentials(username, password)
+		if err != nil {
+			s.logger.Warnw("Authentication error", "username", username, "error", err)
+			return false
+		}
+		return isValid
+	}
+
+	// Fallback to legacy authentication
 	hashedPassword, exists := s.Users[username]
 	if !exists {
 		return false
 	}
 
 	return verifyPassword(password, hashedPassword)
+}
+
+// authenticateWithIP provides authentication with IP-based rate limiting
+func (s *Server) authenticateWithIP(username, password, clientIP string) error {
+	// Use new UserStore if available
+	if s.UserStore != nil {
+		isValid, _, err := s.UserStore.VerifyCredentialsWithIP(username, password, clientIP)
+		if err != nil {
+			// Check if this is a delay error and apply the delay
+			if authErr, ok := err.(*auth.AuthLockoutError); ok && authErr.Type == "delay" {
+				s.logger.Infow("Applying progressive authentication delay",
+					"username", username,
+					"ip", clientIP,
+					"delay", authErr.Delay)
+
+				// Actually wait for the delay
+				time.Sleep(authErr.Delay)
+			}
+
+			// Return the error (rate limiting, lockout, etc.)
+			return err
+		}
+		if !isValid {
+			return fmt.Errorf("invalid credentials")
+		}
+		return nil
+	}
+
+	// Fallback to legacy authentication (no rate limiting)
+	if !s.authenticate(username, password) {
+		return fmt.Errorf("authentication failed")
+	}
+	return nil
 }
 
 var wg sync.WaitGroup
@@ -656,12 +745,37 @@ func (s *Server) handleConnection(conn net.Conn) {
 				}
 
 				// TODO: IF the db is legit, check to see if the user is allowed to access it
-				if s.AuthEnabled && !s.authenticate(connStr.Username, connStr.Password) {
-					sendError(writer, "Authentication failed")
-					return
+				clientIP := ExtractIPFromConn(connection.Conn)
+
+				// Use enhanced authentication with rate limiting and progressive delays
+				if s.AuthEnabled {
+					err := s.authenticateWithIP(connStr.Username, connStr.Password, clientIP)
+					if err != nil {
+						// Check if this is a rate limiting error for better user feedback
+						if authErr, ok := err.(*auth.AuthLockoutError); ok {
+							switch authErr.Type {
+							case "user":
+								sendError(writer, fmt.Sprintf("Account locked until %s due to too many failed attempts",
+									authErr.LockedUntil.Format("15:04:05")))
+							case "ip":
+								sendError(writer, fmt.Sprintf("IP address blocked until %s due to suspicious activity",
+									authErr.LockedUntil.Format("15:04:05")))
+							case "delay":
+								sendError(writer, fmt.Sprintf("Too many attempts. Please wait %s before trying again",
+									authErr.Delay.String()))
+							default:
+								sendError(writer, "Authentication blocked due to security restrictions")
+							}
+						} else {
+							sendError(writer, "Authentication failed")
+						}
+						return
+					}
 				}
 
-				// Create a session for the authenticated user
+				// Create a session for the authenticated user with IP binding
+				connectionFingerprint := ExtractConnectionFingerprint(connection.Conn)
+
 				session, err := s.SessionManager.CreateSession(
 					connStr.Username,
 					connStr.Username, // Using username as userID for now
@@ -669,6 +783,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 					connection.Database,
 					connection.ID,
 					s.SessionTimeout,
+					clientIP,
+					connectionFingerprint,
 				)
 				if err != nil {
 					sendError(writer, fmt.Sprintf("Failed to create session: %v", err))
@@ -771,9 +887,20 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 func (s *Server) handleTextCommand(conn *Connection, command string) (interface{}, error) {
 	serviceManager := GetServiceManager()
 
-	// Update session activity
+	// Update session activity with security validation
 	if conn.Session != nil {
-		s.SessionManager.UpdateActivity(conn.Session.SessionID)
+		clientIP := ExtractIPFromConn(conn.Conn)
+		connectionFingerprint := ExtractConnectionFingerprint(conn.Conn)
+
+		err := s.SessionManager.UpdateActivity(conn.Session.SessionID, clientIP, connectionFingerprint)
+		if err != nil {
+			s.logger.Warnw("Session security validation failed",
+				"sessionID", conn.Session.SessionID,
+				"error", err,
+				"clientIP", clientIP)
+			// Return security error - session may be compromised
+			return nil, fmt.Errorf("session security validation failed: %v", err)
+		}
 
 		// Generate a query ID and start tracking the query
 		queryID := fmt.Sprintf("q_%d", time.Now().UnixNano())

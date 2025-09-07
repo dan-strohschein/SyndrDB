@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 	"sync"
-
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -38,12 +38,14 @@ type NewUser struct {
 
 // UserStore manages secure storage of user credentials
 type UserStore struct {
-	encryptionKey []byte       // Key used to encrypt the storage file
-	filePath      string       // Path to the storage file
-	users         []User       // In-memory cache of users
-	mu            sync.RWMutex // Mutex for thread safety
-	dirty         bool         // Whether the store has unsaved changes
-
+	encryptionKey []byte             // Key used to encrypt the storage file
+	filePath      string             // Path to the storage file
+	users         []User             // In-memory cache of users
+	mu            sync.RWMutex       // Mutex for thread safety
+	dirty         bool               // Whether the store has unsaved changes
+	rateLimiter   *AuthRateLimiter   // Authentication rate limiter
+	auditor       SecurityAuditor    // Security auditor for logging
+	logger        *zap.SugaredLogger // Logger for security events
 }
 
 type UserPermissions struct {
@@ -202,4 +204,29 @@ func (s *UserStore) RemoveUser(username string) error {
 	}
 
 	return errors.New("user not found")
+}
+
+// Close shuts down the UserStore and its rate limiter
+func (s *UserStore) Close() {
+	if s.rateLimiter != nil {
+		s.rateLimiter.Stop()
+	}
+}
+
+// GetProgressiveDelay returns the progressive delay for the next authentication attempt
+func (s *UserStore) GetProgressiveDelay(username, ip string) time.Duration {
+	if s.rateLimiter != nil {
+		return s.rateLimiter.GetProgressiveDelay(username, ip)
+	}
+	return 0
+}
+
+// GetAuthStats returns authentication statistics
+func (s *UserStore) GetAuthStats() map[string]interface{} {
+	if s.rateLimiter != nil {
+		return s.rateLimiter.GetStats()
+	}
+	return map[string]interface{}{
+		"rate_limiting_enabled": false,
+	}
 }

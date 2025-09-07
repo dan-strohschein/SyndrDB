@@ -60,11 +60,14 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create users bundle
 	users_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
-			"UserID":       {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"PasswordHash": {Name: "PasswordHash", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
-			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"IsActive":     {Name: "IsActive", Type: "BOOLEAN", IsRequired: false, IsUnique: false, DefaultValue: "true"},
+			"DocumentID":          {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"UserID":              {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"PasswordHash":        {Name: "PasswordHash", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Name":                {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"IsActive":            {Name: "IsActive", Type: "BOOLEAN", IsRequired: false, IsUnique: false, DefaultValue: "true"},
+			"IsLockedOut":         {Name: "IsLockedOut", Type: "BOOLEAN", IsRequired: false, IsUnique: false, DefaultValue: "false"},
+			"FailedLoginAttempts": {Name: "FailedLoginAttempts", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"LockoutExpiresOn":    {Name: "LockoutExpiresOn", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
 		},
 	}
 	users_Bundle := &models.Bundle{

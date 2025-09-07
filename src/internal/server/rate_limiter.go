@@ -282,3 +282,34 @@ func ExtractIPFromConn(conn net.Conn) string {
 
 	return host
 }
+
+// ExtractConnectionFingerprint creates a fingerprint for the connection
+// Since we don't have HTTP headers, we'll use connection properties
+func ExtractConnectionFingerprint(conn net.Conn) string {
+	if conn == nil {
+		return "unknown_connection"
+	}
+
+	// Create fingerprint based on connection properties
+	remoteAddr := "unknown"
+	localAddr := "unknown"
+
+	if conn.RemoteAddr() != nil {
+		remoteAddr = conn.RemoteAddr().String()
+		networkType := conn.RemoteAddr().Network()
+
+		// Create a basic fingerprint - in production, you might want to include
+		// more sophisticated connection properties or protocol-specific information
+		fingerprint := fmt.Sprintf("net:%s|remote:%s|local:%s",
+			networkType, remoteAddr, localAddr)
+
+		return fingerprint
+	}
+
+	if conn.LocalAddr() != nil {
+		localAddr = conn.LocalAddr().String()
+	}
+
+	// Fallback fingerprint
+	return fmt.Sprintf("net:unknown|remote:%s|local:%s", remoteAddr, localAddr)
+}

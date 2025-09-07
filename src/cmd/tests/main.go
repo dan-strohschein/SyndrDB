@@ -194,7 +194,7 @@ func main() {
 	ColorLogger.Info(HighlightBlue("Starting bundle management use case tests..."))
 	bundleUseCases := GetBundleManagementUseCases()
 	bundleSummary := executeAllTests(bundleUseCases)
-	fmt.Printf("DUDE Are we getting here?\n")
+
 	// Execute JOIN functionality demonstration
 	ColorLogger.Info(HighlightBlue("Starting JOIN functionality demonstration..."))
 	err = RunJoinDemonstration(ColorLogger)
@@ -237,6 +237,11 @@ func main() {
 	securityUseCases := GetSecurityTestUseCases()
 	securitySummary := executeAllTests(securityUseCases)
 
+	// Execute Audit Logging tests
+	ColorLogger.Info(HighlightBlue("Starting Audit Logging tests..."))
+	auditUseCases := GetAuditLoggingUseCases()
+	auditSummary := executeAllTests(auditUseCases)
+
 	// Execute WAL functionality tests
 	ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
 	walUseCases := GetWALTestUseCases()
@@ -255,6 +260,9 @@ func main() {
 
 	ColorLogger.Info(HighlightBlue("Security Validation Test Results:"))
 	displayTestSummaryGeneric(securitySummary)
+
+	ColorLogger.Info(HighlightBlue("Audit Logging Test Results:"))
+	displayTestSummaryGeneric(auditSummary)
 
 	ColorLogger.Info(HighlightBlue("Test execution complete"))
 }

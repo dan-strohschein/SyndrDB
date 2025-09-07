@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"go.uber.org/zap"
 )
 
 type UserFactory interface {
@@ -14,6 +16,16 @@ type UserFactory interface {
 
 // NewUserStore creates a new user store
 func NewUserStore(filePath string, encryptionKeyString string) (*UserStore, error) {
+	return NewUserStoreWithRateLimit(filePath, encryptionKeyString, nil, nil)
+}
+
+// NewUserStoreWithRateLimit creates a new user store with authentication rate limiting
+func NewUserStoreWithRateLimit(filePath string, encryptionKeyString string, logger *zap.SugaredLogger, rateLimitConfig *AuthRateLimitConfig) (*UserStore, error) {
+	return NewUserStoreWithAuditor(filePath, encryptionKeyString, logger, rateLimitConfig, nil)
+}
+
+// NewUserStoreWithAuditor creates a new user store with authentication rate limiting and audit logging
+func NewUserStoreWithAuditor(filePath string, encryptionKeyString string, logger *zap.SugaredLogger, rateLimitConfig *AuthRateLimitConfig, auditor SecurityAuditor) (*UserStore, error) {
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -32,11 +44,20 @@ func NewUserStore(filePath string, encryptionKeyString string) (*UserStore, erro
 		encryptionKey = encryptionKey[:32]
 	}
 
+	// Initialize rate limiter if logger is provided
+	var rateLimiter *AuthRateLimiter
+	if logger != nil {
+		rateLimiter = NewAuthRateLimiterWithAuditor(rateLimitConfig, logger, auditor)
+	}
+
 	store := &UserStore{
 		encryptionKey: encryptionKey,
 		filePath:      filePath,
 		users:         []User{},
 		dirty:         false,
+		rateLimiter:   rateLimiter,
+		auditor:       auditor,
+		logger:        logger,
 	}
 
 	// Load existing users if the file exists
