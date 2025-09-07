@@ -162,7 +162,9 @@ func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName strin
 }
 
 func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *models.Database, databaseName string) (*[]byte, *models.Database, error) {
-	dbFile, err := helpers.OpenDataFile(database.DataDirectory, databaseName)
+
+	args := settings.GetSettings()
+	dbFile, err := helpers.OpenDataFile(args.DataDir, databaseName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening database file %s: %w", databaseName, err)
 	}
@@ -199,8 +201,10 @@ func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *models.Database
 }
 
 func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *models.Database) error {
+
+	args := settings.GetSettings()
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.db", database.Name))
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.db", database.Name))
 
 	// Check if the file already exists
 	if helpers.FileExists(filePath, *d.logger) {
@@ -240,8 +244,10 @@ func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *models.Database
 }
 
 func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *models.Database) error {
+
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.db", database.Name))
+	args := settings.GetSettings()
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.db", database.Name))
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *d.logger) {
@@ -277,6 +283,7 @@ func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *models.Database
 }
 
 func DBToMap(database *models.Database) map[string]interface{} {
+	args := settings.GetSettings()
 	// Convert the database object to a map
 	return map[string]interface{}{
 		"DatabaseID":  database.DatabaseID,
@@ -284,7 +291,7 @@ func DBToMap(database *models.Database) map[string]interface{} {
 		"Description": database.Description,
 		"BundleFiles": database.BundleFiles,
 		//"Bundles":       database.Bundles,
-		"DataDirectory": database.DataDirectory,
+		"DataDirectory": args.DataDir,
 	}
 }
 

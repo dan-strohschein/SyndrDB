@@ -35,7 +35,7 @@ func (c colorConsoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Fie
 
 func SetupLogger() *zap.Logger {
 	logCfg := zap.NewDevelopmentConfig()
-
+	logCfg.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
 	logCfg.Encoding = "colorConsole"
 
 	logger, _ := logCfg.Build()

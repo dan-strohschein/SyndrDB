@@ -126,7 +126,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 
 	// Add relationships between bundles as needed
 	userPermissions_relationshipCmd := &models.RelationshipCommand{
-		RelationshipType:  "1ToMany",
+		RelationshipType:  "1toMany",
 		SourceBundle:      "Users",
 		SourceField:       "UserID",
 		DestinationBundle: "UserPermissions",
@@ -138,7 +138,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 
 	userPermissions_relationshipCmd2 := &models.RelationshipCommand{
-		RelationshipType:  "1ToMany",
+		RelationshipType:  "1toMany",
 		SourceBundle:      "Permissions",
 		SourceField:       "PermissionID",
 		DestinationBundle: "UserPermissions",
@@ -150,7 +150,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 
 	databaseUsers_relationshipCmd := &models.RelationshipCommand{
-		RelationshipType:  "1ToMany",
+		RelationshipType:  "1toMany",
 		SourceBundle:      "Users",
 		SourceField:       "UserID",
 		DestinationBundle: "DatabaseUsers",
@@ -162,7 +162,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 
 	databaseUsers_relationshipCmd2 := &models.RelationshipCommand{
-		RelationshipType:  "1ToMany",
+		RelationshipType:  "1toMany",
 		SourceBundle:      "Databases",
 		SourceField:       "DatabaseID",
 		DestinationBundle: "DatabaseUsers",

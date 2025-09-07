@@ -112,6 +112,9 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 }
 
 func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseService, db *models.Database, bundle *models.Bundle) error {
+	// Set the database reference in the bundle
+	bundle.Database = db
+
 	// Add the bundle to the database
 	db.Bundles[bundle.Name] = *bundle
 

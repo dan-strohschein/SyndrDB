@@ -22,6 +22,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -138,6 +140,13 @@ func runSingleJoinTest(test EndToEndJoinTest) error {
 		return fmt.Errorf("setup failed: %w", err)
 	}
 
+	// Aggressive pre-test cleanup to ensure cache is clear (after setup)
+	ColorLogger.Debug(HighlightRed("🔥 Aggressive pre-test cleanup..."))
+	if testServiceManager != nil {
+		_, _ = executeClientCommand(`DELETE BUNDLE "Customers"`)
+		_, _ = executeClientCommand(`DELETE BUNDLE "Orders"`)
+	}
+
 	// Execute
 	ColorLogger.Debug(HighlightBlue("⚡ Executing JOIN operation..."))
 	if err := test.ExecuteFunc(); err != nil {
@@ -161,16 +170,32 @@ func runSingleJoinTest(test EndToEndJoinTest) error {
 	return nil
 }
 
-// setupJoinTestEnvironment creates the test database and bundles with sample data
+// setupJoinTestEnvironment creates the test environment for JOIN operations
 func setupJoinTestEnvironment() error {
-	ColorLogger.Debug(HighlightCyan("Creating test database and bundles for JOIN testing..."))
+	ColorLogger.Debug(HighlightYellow("Setting up JOIN test environment..."))
 
-	// 1. Setup basic test environment
+	// 1. Setup complete bundle test environment (this initializes testServiceManager)
 	if err := setupBundleTestEnvironment(); err != nil {
-		return fmt.Errorf("failed to setup base environment: %w", err)
+		return fmt.Errorf("failed to setup bundle test environment: %w", err)
 	}
 
-	// 2. Create Customers bundle
+	// 2. Clear any existing Customers and Orders bundles completely
+	ColorLogger.Debug(HighlightYellow("Clearing existing Customers and Orders bundles..."))
+	_, _ = executeClientCommand(`DELETE BUNDLE "Customers"`)
+	_, _ = executeClientCommand(`DELETE BUNDLE "Orders"`)
+
+	// Additional cleanup: remove any leftover bundle files
+	bundleFiles := []string{"Customers.bnd", "Orders.bnd"}
+	for _, file := range bundleFiles {
+		os.Remove(file)
+		os.Remove(filepath.Join("bin", "tests", "data_files", file))
+		os.Remove(filepath.Join("temp_files", file))
+	}
+
+	// 3. Wait a moment for cleanup to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// 4. Create Customers bundle
 	customersCommand := `CREATE BUNDLE "Customers" WITH FIELDS (
 		{"id", "int", true, true, 0},
 		{"name", "string", true, false, ""},
@@ -182,7 +207,7 @@ func setupJoinTestEnvironment() error {
 		return fmt.Errorf("failed to create Customers bundle: %w", err)
 	}
 
-	// 3. Create Orders bundle
+	// 4. Create Orders bundle
 	ordersCommand := `CREATE BUNDLE "Orders" WITH FIELDS (
 		{"id", "int", true, true, 0},
 		{"customer_id", "int", true, false, 0},
@@ -195,7 +220,7 @@ func setupJoinTestEnvironment() error {
 		return fmt.Errorf("failed to create Orders bundle: %w", err)
 	}
 
-	// 4. Add Customer data
+	// 5. Add Customer data
 	customers := []map[string]interface{}{
 		{"id": 1, "name": "John Doe", "email": "john@example.com", "city": "New York"},
 		{"id": 2, "name": "Jane Smith", "email": "jane@example.com", "city": "Los Angeles"},
@@ -212,7 +237,7 @@ func setupJoinTestEnvironment() error {
 		}
 	}
 
-	// 5. Add Order data (some orders without matching customers)
+	// 6. Add Order data (some orders without matching customers)
 	orders := []map[string]interface{}{
 		{"id": 101, "customer_id": 1, "product": "Laptop", "total": 1200.00, "order_date": "2024-01-15"},
 		{"id": 102, "customer_id": 2, "product": "Phone", "total": 800.00, "order_date": "2024-01-16"},
@@ -378,8 +403,27 @@ func cleanupJoinTestEnvironment() error {
 	delete(testResults, "right_join")
 	delete(testResults, "join_with_where")
 
-	// Cleanup base environment
-	return cleanupBundleTestEnvironment()
+	// Explicitly delete Customers and Orders bundles from cache
+	ColorLogger.Debug(HighlightYellow("Clearing Customers and Orders bundles from cache..."))
+	_, _ = executeClientCommand(`DELETE BUNDLE "Customers"`)
+	_, _ = executeClientCommand(`DELETE BUNDLE "Orders"`)
+
+	// Additional file cleanup
+	bundleFiles := []string{"Customers.bnd", "Orders.bnd"}
+	for _, file := range bundleFiles {
+		os.Remove(file)
+		os.Remove(filepath.Join("bin", "tests", "data_files", file))
+		os.Remove(filepath.Join("temp_files", file))
+	}
+
+	// Force service manager reset to clear cache completely
+	if testServiceManager != nil {
+		ColorLogger.Debug(HighlightYellow("Resetting service manager to clear all caches..."))
+		testServiceManager = nil
+	}
+
+	// Reinitialize for next test
+	return initializeSharedDatabaseService()
 }
 
 // Global test results storage

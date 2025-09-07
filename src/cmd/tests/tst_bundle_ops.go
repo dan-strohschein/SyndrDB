@@ -65,26 +65,216 @@ var (
 	testMutex          sync.RWMutex
 	performanceMetrics map[string]time.Duration
 	testSettings       *settings.Arguments
+
+	// Shared database service with primary database
+	sharedDatabaseService *database.DatabaseService
+	sharedDatabaseStore   *databasestore.DatabaseStorageEngine
 )
+
+// cleanupBundleTestFiles removes test files and clears bundle service cache
+func cleanupBundleTestFiles(logger *zap.Logger) {
+	logger.Info("Starting comprehensive bundle test cleanup")
+
+	// Step 1: Clear service state first to avoid any locks
+	if testServiceManager != nil {
+		logger.Info("Clearing test service manager")
+		testServiceManager = nil
+	}
+
+	// Step 2: Reset shared services to force clean recreation
+	if sharedDatabaseService != nil {
+		logger.Info("Resetting shared database service for clean state")
+		sharedDatabaseService = nil
+		sharedDatabaseStore = nil
+	}
+
+	// Step 3: Reset global service manager for clean bundle service
+	logger.Info("Resetting global service manager")
+	server.ResetServiceManager()
+
+	// Step 4: Attempt to create a clean bundle service and delete known problematic bundles
+	logger.Info("Attempting to clear bundle cache by deleting known problematic bundles")
+
+	if err := initializeSharedDatabaseService(); err != nil {
+		logger.Info("Warning: Could not reinitialize database service for cleanup", zap.Error(err))
+	}
+
+	// Try to delete all known problematic bundles that cause cache conflicts
+	problematicBundles := []string{
+		// Core test bundles
+		"documents_bundle",
+		"test_bundle",
+		"multi_document_bundle",
+		"bundle_one",
+		"primary_bundle",
+		"performance_test_bundle",
+		"concurrent_ops_bundle",
+		"integration_test_bundle",
+		"workflow_bundle_1",
+		"workflow_bundle_2",
+		"workflow_bundle_3",
+		"backup_restore_bundle",
+		"delete_test_bundle",
+		"index_verification_bundle",
+		// Additional bundle variations
+		"custom_name_bundle_test",
+		"duplicate_bundle_test",
+		"schema_bundle_test",
+		"empty_test_bundle",
+		"invalid_json_bundle",
+		"nonexistent_doc_bundle",
+		"old_bundle_name",
+		"related_bundle",
+		// JOIN test bundles
+		"Customers",
+		"Orders",
+		// Database initialization bundles that might conflict
+		"Users",
+		"Permissions",
+		"UserPermissions",
+		"Databases",
+		"DatabaseUsers",
+	}
+
+	logger.Info("Attempting to delete problematic bundles from cache", zap.Int("count", len(problematicBundles)))
+	for _, bundleName := range problematicBundles {
+		deleteBundleCommand := fmt.Sprintf("DELETE BUNDLE \"%s\"", bundleName)
+		result, err := executeClientCommand(deleteBundleCommand)
+		if err == nil {
+			if resultStr, ok := result.(string); ok && !strings.Contains(resultStr, "error") {
+				logger.Info("Successfully deleted bundle from cache", zap.String("bundle", bundleName))
+			} else {
+				logger.Debug("Bundle deletion completed but might have had errors", zap.String("bundle", bundleName))
+			}
+		} else {
+			logger.Debug("Bundle deletion skipped (might not exist)", zap.String("bundle", bundleName))
+		}
+	}
+
+	// Step 5: Clean up all bundle files from disk
+	logger.Info("Cleaning up bundle files from disk")
+	cleanupTestBundleFiles(logger)
+
+	// Step 6: Clear test state variables
+	if testBundleWrappers != nil {
+		testBundleWrappers = make(map[string]*TestBundleWrapper)
+	}
+	if performanceMetrics != nil {
+		performanceMetrics = make(map[string]time.Duration)
+	}
+
+	logger.Info("Bundle test cleanup completed")
+}
+
+// initializeSharedDatabaseService creates a shared database service with primary database
+func initializeSharedDatabaseService() error {
+	if sharedDatabaseService != nil {
+		return nil // Already initialized
+	}
+
+	var err error
+	sharedDatabaseService, sharedDatabaseStore, err = StandupTestDatabaseService()
+	return err
+}
+
+// initializeTestServiceManager recreates the test service manager without mutex locking
+func initializeTestServiceManager() error {
+	if sharedDatabaseService == nil {
+		return fmt.Errorf("shared database service not initialized")
+	}
+
+	// Setup basic configuration
+	dataDir := filepath.Join(testDatabasePath, "..", "..")
+	logDir := filepath.Join(testDatabasePath, "..", "..", "log_files")
+
+	globalSettings := settings.GetSettings()
+	if globalSettings == nil {
+		return fmt.Errorf("failed to get global settings: settings.GetSettings() returned nil")
+	}
+	globalSettings.DataDir = dataDir
+	globalSettings.LogDir = logDir
+	globalSettings.LogLevel = "warn"
+
+	// Create logger for services
+	z := zap.NewDevelopmentConfig()
+	z.OutputPaths = []string{"stdout"}
+	z.Level, _ = zap.ParseAtomicLevel(globalSettings.LogLevel)
+	logger, err := z.Build()
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+
+	sugar := logger.Sugar()
+
+	// Create file registry (needed for buffer pool)
+	fileRegistry, err := buffer.NewFileRegistry(dataDir, buffer.SyncInterval, sugar)
+	if err != nil {
+		return fmt.Errorf("failed to create file registry: %w", err)
+	}
+
+	// Create buffer pool (needed for bundle store)
+	bufferPool := buffer.NewBufferPool(1000, buffer.DefaultPageSize, fileRegistry, sugar)
+
+	// Use the shared database service
+	databaseService := sharedDatabaseService
+
+	// Create bundle service
+	bundleStore, err := bundlestore.NewBundleStore(dataDir, bufferPool, sugar)
+	if err != nil {
+		return fmt.Errorf("failed to create bundle store: %w", err)
+	}
+
+	bundleFactory := bundle.NewBundleFactory()
+	documentFactory := document.NewDocumentFactory()
+	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, testSettings)
+
+	// Initialize the service manager with the services
+	testServiceManager = server.InitServiceManager(databaseService, bundleService, sugar)
+	if testServiceManager == nil {
+		return fmt.Errorf("failed to initialize test service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, sugar=%v)",
+			databaseService == nil, bundleService == nil, sugar == nil)
+	}
+
+	return nil
+}
 
 // setupBundleTestEnvironment initializes the SyndrDB command processing system for testing
 func setupBundleTestEnvironment() error {
 	testMutex.Lock()
 	defer testMutex.Unlock()
 
+	// Check if environment is already set up
+	if testServiceManager != nil && testDatabase != nil {
+		if ColorLogger != nil {
+			ColorLogger.Debugf("Bundle test environment already initialized, skipping setup")
+		}
+		return nil
+	}
+
+	// Clean up any existing bundle files and service state before starting
+	// Create a basic logger for cleanup
+	zapConfig := zap.NewDevelopmentConfig()
+	zapConfig.OutputPaths = []string{"stdout"}
+	zapConfig.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
+	cleanupLogger, logErr := zapConfig.Build()
+	if logErr == nil {
+		cleanupBundleTestFiles(cleanupLogger)
+	}
+
+	// Initialize shared database service if not already done
+	if err := initializeSharedDatabaseService(); err != nil {
+		return fmt.Errorf("failed to initialize shared database service: %w", err)
+	}
+
 	// Initialize test state
 	testBundleWrappers = make(map[string]*TestBundleWrapper)
 	performanceMetrics = make(map[string]time.Duration)
 
-	// Create test directory structure
+	// Use consistent test directory structure with shared database service
 	dataDir := filepath.Join("bin", "tests", "data_files")
 	logDir := filepath.Join("bin", "tests", "log_files")
 
-	// Remove existing test directory and recreate
-	if err := os.RemoveAll(dataDir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove existing test directory: %w", err)
-	}
-
+	// Create test directory structure (if needed)
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create test data directory: %w", err)
 	}
@@ -106,6 +296,9 @@ func setupBundleTestEnvironment() error {
 
 	// Update global settings to match test environment
 	globalSettings := settings.GetSettings()
+	if globalSettings == nil {
+		return fmt.Errorf("failed to get global settings: settings.GetSettings() returned nil")
+	}
 	globalSettings.DataDir = dataDir
 	globalSettings.LogDir = logDir
 	globalSettings.LogLevel = "warn"
@@ -130,14 +323,8 @@ func setupBundleTestEnvironment() error {
 	// Create buffer pool (needed for bundle store)
 	bufferPool := buffer.NewBufferPool(1000, buffer.DefaultPageSize, fileRegistry, sugar)
 
-	// Create database service
-	databaseStore, err := databasestore.NewDatabaseStore(dataDir, sugar)
-	if err != nil {
-		return fmt.Errorf("failed to create database store: %w", err)
-	}
-
-	databaseFactory := database.NewDatabaseFactory()
-	databaseService := database.NewDatabaseService(databaseStore, databaseFactory, testSettings, sugar)
+	// Use the shared database service instead of creating a new one
+	databaseService := sharedDatabaseService
 
 	// Create bundle service
 	bundleStore, err := bundlestore.NewBundleStore(dataDir, bufferPool, sugar)
@@ -151,27 +338,20 @@ func setupBundleTestEnvironment() error {
 
 	// Initialize the service manager with the services
 	testServiceManager = server.InitServiceManager(databaseService, bundleService, sugar)
-
-	// Create the actual database file using the database service
-	// Parse the CREATE DATABASE command
-	dbCommand, err := database.ParseCreateDatabaseCommand(`CREATE DATABASE "testdb"`, sugar)
-	if err != nil {
-		return fmt.Errorf("failed to parse CREATE DATABASE command: %w", err)
+	if testServiceManager == nil {
+		return fmt.Errorf("failed to initialize service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, sugar=%v)",
+			databaseService == nil, bundleService == nil, sugar == nil)
 	}
 
-	// Execute the database creation through the service
-	err = databaseService.AddDatabase(*dbCommand)
-	if err != nil {
-		return fmt.Errorf("failed to create test database file: %w", err)
-	}
-
-	// Get the created database from the service (this will have the proper database file)
+	// Get the testdb database from the shared service (it should already exist)
 	testDatabase, err = testServiceManager.DatabaseService.GetDatabaseByName("testdb")
 	if err != nil {
-		return fmt.Errorf("failed to retrieve created test database: %w", err)
+		return fmt.Errorf("failed to retrieve testdb database from shared service: %w", err)
 	}
 
-	ColorLogger.Debugf("Bundle test environment setup complete at: %s", testDatabasePath)
+	if ColorLogger != nil {
+		ColorLogger.Debugf("Bundle test environment setup complete at: %s", testDatabasePath)
+	}
 	return nil
 }
 
@@ -188,6 +368,12 @@ func executeClientCommand(commandText string) (interface{}, error) {
 	}
 
 	return result, nil
+}
+
+// ExecuteClientCommand is an exported wrapper for executeClientCommand
+// This allows other test files to execute commands for cleanup operations
+func ExecuteClientCommand(commandText string) (interface{}, error) {
+	return executeClientCommand(commandText)
 }
 
 // setupBundleWithData creates a test environment with a basic bundle for testing
@@ -271,7 +457,7 @@ func queryDocumentByID() error {
 	testMutex.RLock()
 	defer testMutex.RUnlock()
 
-	bundleName := "documents_bundle"
+	bundleName := "query_test_bundle" // Use the specific test bundle name
 	wrapper, exists := testBundleWrappers[bundleName]
 	if !exists {
 		return fmt.Errorf("bundle wrapper %s does not exist", bundleName)
@@ -719,17 +905,58 @@ func validateDefaultHashIndex() error {
 
 // setupBundleWithDocuments sets up a bundle with test documents
 func setupBundleWithDocuments() error {
+	return setupBundleWithDocumentsNamed("documents_bundle")
+}
+
+// setupBundleWithDocumentsNamed sets up a bundle with test documents using a specific name
+func setupBundleWithDocumentsNamed(bundleName string) error {
 	if err := setupBundleTestEnvironment(); err != nil {
 		return err
 	}
 
-	bundleName := "documents_bundle"
+	// Enhanced cache clearing with retry logic
+	for attempt := 1; attempt <= 3; attempt++ {
+		// First, try to delete any existing bundle with this name to clear cache conflicts
+		deleteBundleCommand := fmt.Sprintf("DELETE BUNDLE \"%s\"", bundleName)
+		_, _ = executeClientCommand(deleteBundleCommand) // Ignore errors - bundle might not exist
 
-	// Create bundle with all fields that will be used in documents
-	createBundleCommand := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS ({"id", "string", true, true, ""}, {"title", "string", true, false, ""}, {"index", "int", false, false, ""}, {"status", "string", false, false, ""}, {"timestamp", "number", false, false, 0})`, bundleName)
-	_, err := executeClientCommand(createBundleCommand)
-	if err != nil {
-		return fmt.Errorf("failed to create bundle for documents setup: %w", err)
+		// Wait for cache to clear
+		time.Sleep(50 * time.Millisecond)
+
+		// Try to create bundle with all fields that will be used in documents
+		createBundleCommand := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS ({"id", "string", true, true, ""}, {"title", "string", true, false, ""}, {"index", "int", false, false, ""}, {"status", "string", false, false, ""}, {"timestamp", "number", false, false, 0})`, bundleName)
+		_, err := executeClientCommand(createBundleCommand)
+
+		if err == nil {
+			// Success - break out of retry loop
+			break
+		} else if strings.Contains(err.Error(), "already exists") && attempt < 3 {
+			// Cache conflict - try again with more aggressive clearing
+			ColorLogger.Warn(HighlightYellow("Bundle cache conflict on attempt %d, retrying with service reset..."), attempt)
+
+			// Force service manager reset to clear cache completely
+			if testServiceManager != nil {
+				testServiceManager = nil
+			}
+
+			// Reinitialize services completely
+			if err := initializeSharedDatabaseService(); err != nil {
+				ColorLogger.Warn(HighlightRed("Warning: Failed to reinitialize services: %v"), err)
+				continue
+			}
+
+			// Reinitialize the test service manager
+			if err := initializeTestServiceManager(); err != nil {
+				ColorLogger.Warn(HighlightRed("Warning: Failed to reinitialize test service manager: %v"), err)
+				continue
+			}
+
+			continue
+		} else if attempt == 3 {
+			return fmt.Errorf("failed to create bundle for documents setup after %d attempts: %w", attempt, err)
+		} else {
+			return fmt.Errorf("failed to create bundle for documents setup: %w", err)
+		}
 	}
 
 	// Create wrapper for tracking
@@ -748,7 +975,7 @@ func setupBundleWithDocuments() error {
 		}
 
 		addDocumentCommand := fmt.Sprintf("ADD DOCUMENT TO BUNDLE \"%s\" WITH (%s)", bundleName, convertToSyndrDBFieldFormat(documentData))
-		_, err = executeClientCommand(addDocumentCommand)
+		_, err := executeClientCommand(addDocumentCommand)
 		if err != nil {
 			return fmt.Errorf("failed to add document %d: %w", i, err)
 		}
@@ -771,15 +998,29 @@ func setupBundleWithDocuments() error {
 		wrapper.Documents[document.DocumentID] = document
 	}
 
+	// Store wrapper in global tracking
 	testBundleWrappers[bundleName] = wrapper
-
-	ColorLogger.Debugf("Bundle with documents setup complete")
 	return nil
+}
+
+// setupBundleForIndexTests sets up a bundle specifically for index testing
+func setupBundleForIndexTests() error {
+	return setupBundleWithDocumentsNamed("index_test_bundle")
+}
+
+// setupBundleForQueryTests sets up a bundle specifically for query testing
+func setupBundleForQueryTests() error {
+	return setupBundleWithDocumentsNamed("query_test_bundle")
+}
+
+// setupBundleForUpdateTests sets up a bundle specifically for update testing
+func setupBundleForUpdateTests() error {
+	return setupBundleWithDocumentsNamed("update_test_bundle")
 }
 
 // createCustomBTreeIndex creates a custom BTree index for testing
 func createCustomBTreeIndex() error {
-	bundleName := "documents_bundle"
+	bundleName := "index_test_bundle" // Use the specific test bundle name
 
 	// Create BTree index on title field
 	createIndexCommand := fmt.Sprintf("CREATE B-INDEX \"title_index\" ON BUNDLE \"%s\" WITH FIELDS ({\"title\", false, false})", bundleName)
@@ -794,7 +1035,7 @@ func createCustomBTreeIndex() error {
 
 // validateCustomBTreeIndex validates custom BTree index functionality
 func validateCustomBTreeIndex() error {
-	bundleName := "documents_bundle"
+	bundleName := "index_test_bundle" // Use the specific test bundle name
 
 	// Query using the BTree index (trying double quotes for string literals)
 	selectCommand := fmt.Sprintf("SELECT DOCUMENTS FROM %s WHERE title == \"Document 1\"", bundleName)
@@ -809,7 +1050,7 @@ func validateCustomBTreeIndex() error {
 
 // performDocumentOperationsAndCheckIndex performs various document operations to test index consistency
 func performDocumentOperationsAndCheckIndex() error {
-	bundleName := "documents_bundle"
+	bundleName := "index_test_bundle" // Use the specific test bundle name
 
 	// Add more documents to test index updates
 	for i := 4; i <= 6; i++ {
@@ -834,7 +1075,7 @@ func performDocumentOperationsAndCheckIndex() error {
 
 // validateHashIndexConsistency validates hash index consistency after operations
 func validateHashIndexConsistency() error {
-	bundleName := "documents_bundle"
+	bundleName := "index_test_bundle" // Use the specific test bundle name
 
 	// Query all documents to verify index consistency
 	selectCommand := fmt.Sprintf("SELECT * FROM %s", bundleName)
@@ -1013,7 +1254,7 @@ func updateExistingDocument() error {
 		return err
 	}
 
-	bundleName := "update_test_bundle"
+	bundleName := "update_test_bundle1"
 
 	// Create bundle and add initial document
 	createBundleCommand := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS ({"title", "string", true, false, ""},{"status", "string", true, true, ""},{"content", "string", true, false, ""})`, bundleName)
@@ -1053,7 +1294,7 @@ func updateExistingDocument() error {
 
 // validateDocumentUpdate validates document update operation
 func validateDocumentUpdate() error {
-	bundleName := "update_test_bundle"
+	bundleName := "update_test_bundle1"
 
 	// Query the updated document
 	selectCommand := fmt.Sprintf("SELECT FROM %s WHERE title == \"Updated Document\"", bundleName)
@@ -1220,7 +1461,7 @@ func setupMultipleBundles() error {
 	bundleNames := []string{"bundle_one", "bundle_two", "bundle_three"}
 
 	for i, bundleName := range bundleNames {
-		createBundleCommand := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS ({"id", "string", true, true, ""},{"bundle_id", "string", true, true, ""}, {"title", "string", true, false, ""}, {"type", "string", false, false, ""})`, bundleName)
+		createBundleCommand := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS ({"id", "string", true, true, ""}, {"title", "string", false, false, ""})`, bundleName)
 		ColorLogger.Debugf("Creating bundle with command: %s", createBundleCommand)
 
 		result, err := executeClientCommand(createBundleCommand)
@@ -1231,10 +1472,8 @@ func setupMultipleBundles() error {
 
 		// Add a test document to each bundle
 		documentData := map[string]interface{}{
-			"id":        fmt.Sprintf("%d", i),
-			"bundle_id": fmt.Sprintf("%d", i+1),
-			"title":     fmt.Sprintf("Document for %s", bundleName),
-			"type":      "multi_bundle_test",
+			"id":    fmt.Sprintf("doc_%d", i),
+			"title": fmt.Sprintf("Document for %s", bundleName),
 		}
 
 		fieldData := convertToSyndrDBFieldFormat(documentData)

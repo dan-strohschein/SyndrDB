@@ -78,4 +78,6 @@ func ResetServiceManager() {
 	mu.Lock()
 	defer mu.Unlock()
 	instance = nil
+	// Reset the sync.Once so InitServiceManager can be called again
+	once = sync.Once{}
 }

@@ -1,0 +1,735 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"sync"
+	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/storage/buffer"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+// SessionState represents the current state of a session
+type SessionState int
+
+const (
+	SessionStateActive SessionState = iota
+	SessionStateIdle
+	SessionStateExecuting
+	SessionStateError
+	SessionStateExpired
+	SessionStateTerminated
+)
+
+func (s SessionState) String() string {
+	switch s {
+	case SessionStateActive:
+		return "ACTIVE"
+	case SessionStateIdle:
+		return "IDLE"
+	case SessionStateExecuting:
+		return "EXECUTING"
+	case SessionStateError:
+		return "ERROR"
+	case SessionStateExpired:
+		return "EXPIRED"
+	case SessionStateTerminated:
+		return "TERMINATED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// QueryInfo represents information about a query
+type QueryInfo struct {
+	QueryID      string
+	Query        string
+	StartTime    time.Time
+	EndTime      *time.Time
+	Status       string // "EXECUTING", "COMPLETED", "FAILED"
+	AffectedRows int
+	Error        error
+}
+
+// LockInfo represents a lock held by the session
+type LockInfo struct {
+	LockID       string
+	LockType     string // "DOCUMENT", "BUNDLE", "TABLE"
+	ResourceName string
+	LockMode     string // "READ", "WRITE", "EXCLUSIVE"
+	AcquiredAt   time.Time
+}
+
+// Session represents a user session with comprehensive state tracking
+type Session struct {
+	SessionID    string
+	UserID       string
+	Username     string
+	DatabaseName string
+	Database     *models.Database
+	ConnectionID string // Associated connection ID
+
+	// State tracking
+	State        SessionState
+	CreatedAt    time.Time
+	LastActivity time.Time
+	ExpiresAt    time.Time
+
+	// Query tracking
+	LastSuccessfulQuery *QueryInfo
+	CurrentQuery        *QueryInfo
+	QueryHistory        []*QueryInfo
+
+	// Lock management
+	DocumentLocks map[string]*LockInfo // documentID -> LockInfo
+	BundleLocks   map[string]*LockInfo // bundleName -> LockInfo
+
+	// Error tracking
+	LastError         error
+	ErrorCount        int
+	ConsecutiveErrors int
+
+	// Resource management
+	BufferPool         *buffer.BufferPool
+	TempFiles          []string
+	ActiveTransactions map[string]context.CancelFunc // txID -> cancel function
+
+	// Session configuration
+	Timeout         time.Duration
+	MaxQueryHistory int
+
+	// Synchronization
+	mu     sync.RWMutex
+	Logger *zap.SugaredLogger
+}
+
+// SessionManager manages all active sessions
+type SessionManager struct {
+	sessions           map[string]*Session   // sessionID -> Session
+	userSessions       map[string][]*Session // username -> list of sessions
+	connectionSessions map[string]*Session   // connectionID -> Session
+	mu                 sync.RWMutex
+	logger             *zap.SugaredLogger
+
+	// Configuration
+	defaultTimeout  time.Duration
+	maxSessions     int
+	cleanupInterval time.Duration
+
+	// Cleanup
+	stopCleanup chan struct{}
+	cleanupWG   sync.WaitGroup
+}
+
+// NewSessionManager creates a new session manager
+func NewSessionManager(logger *zap.SugaredLogger, defaultTimeout time.Duration, maxSessions int) *SessionManager {
+	sm := &SessionManager{
+		sessions:           make(map[string]*Session),
+		userSessions:       make(map[string][]*Session),
+		connectionSessions: make(map[string]*Session),
+		logger:             logger,
+		defaultTimeout:     defaultTimeout,
+		maxSessions:        maxSessions,
+		cleanupInterval:    time.Minute * 5, // Cleanup every 5 minutes
+		stopCleanup:        make(chan struct{}),
+	}
+
+	// Start cleanup routine
+	sm.startCleanupRoutine()
+
+	return sm
+}
+
+// generateSecureSessionID generates a cryptographically secure session ID
+func generateSecureSessionID() string {
+	// Generate 32 random bytes (256 bits of entropy)
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to time-based ID if crypto/rand fails
+		return fmt.Sprintf("sess_fallback_%d", time.Now().UnixNano())
+	}
+
+	// Encode as hexadecimal string
+	return fmt.Sprintf("sess_%s", hex.EncodeToString(bytes))
+}
+
+// CreateSession creates a new session for a user
+func (sm *SessionManager) CreateSession(username, userID, databaseName string, database *models.Database, connectionID string, timeout time.Duration) (*Session, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Check if we've hit the max sessions limit
+	if len(sm.sessions) >= sm.maxSessions {
+		return nil, fmt.Errorf("maximum number of sessions (%d) reached", sm.maxSessions)
+	}
+
+	// Generate secure session ID
+	sessionID := generateSecureSessionID()
+
+	if timeout <= 0 {
+		timeout = sm.defaultTimeout
+	}
+
+	session := &Session{
+		SessionID:          sessionID,
+		UserID:             userID,
+		Username:           username,
+		DatabaseName:       databaseName,
+		Database:           database,
+		ConnectionID:       connectionID,
+		State:              SessionStateActive,
+		CreatedAt:          time.Now(),
+		LastActivity:       time.Now(),
+		ExpiresAt:          time.Now().Add(timeout),
+		QueryHistory:       make([]*QueryInfo, 0),
+		DocumentLocks:      make(map[string]*LockInfo),
+		BundleLocks:        make(map[string]*LockInfo),
+		ActiveTransactions: make(map[string]context.CancelFunc),
+		TempFiles:          make([]string, 0),
+		Timeout:            timeout,
+		MaxQueryHistory:    100, // Keep last 100 queries
+		Logger:             sm.logger.With("sessionID", sessionID, "username", username),
+	}
+
+	// Store session
+	sm.sessions[sessionID] = session
+	sm.connectionSessions[connectionID] = session
+
+	// Add to user sessions
+	if sm.userSessions[username] == nil {
+		sm.userSessions[username] = make([]*Session, 0)
+	}
+	sm.userSessions[username] = append(sm.userSessions[username], session)
+
+	session.Logger.Infow("Session created",
+		"sessionID", sessionID,
+		"username", username,
+		"database", databaseName,
+		"timeout", timeout,
+		"expiresAt", session.ExpiresAt)
+
+	return session, nil
+}
+
+// GetSession retrieves a session by ID
+func (sm *SessionManager) GetSession(sessionID string) (*Session, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, exists := sm.sessions[sessionID]
+	return session, exists
+}
+
+// GetSessionByConnection retrieves a session by connection ID
+func (sm *SessionManager) GetSessionByConnection(connectionID string) (*Session, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	session, exists := sm.connectionSessions[connectionID]
+	return session, exists
+}
+
+// GetUserSessions retrieves all sessions for a user
+func (sm *SessionManager) GetUserSessions(username string) []*Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	sessions := sm.userSessions[username]
+	if sessions == nil {
+		return []*Session{}
+	}
+
+	// Return a copy to avoid race conditions
+	result := make([]*Session, len(sessions))
+	copy(result, sessions)
+	return result
+}
+
+// InvalidateSession invalidates a specific session
+func (sm *SessionManager) InvalidateSession(sessionID string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, exists := sm.sessions[sessionID]
+	if !exists {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	return sm.cleanupSession(session)
+}
+
+// InvalidateUserSessions invalidates all sessions for a user
+func (sm *SessionManager) InvalidateUserSessions(username string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sessions := sm.userSessions[username]
+	if sessions == nil {
+		return nil
+	}
+
+	var lastError error
+	for _, session := range sessions {
+		if err := sm.cleanupSession(session); err != nil {
+			lastError = err
+		}
+	}
+
+	return lastError
+}
+
+// UpdateActivity updates the last activity time for a session
+func (sm *SessionManager) UpdateActivity(sessionID string) error {
+	sm.mu.RLock()
+	session, exists := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	session.LastActivity = time.Now()
+	session.ExpiresAt = time.Now().Add(session.Timeout)
+
+	return nil
+}
+
+// cleanupSession performs cleanup for a session (must be called with sm.mu held)
+func (sm *SessionManager) cleanupSession(session *Session) error {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	session.Logger.Infow("Cleaning up session", "state", session.State.String())
+
+	// Set state to terminated
+	session.State = SessionStateTerminated
+
+	// Cancel active transactions
+	for txID, cancelFunc := range session.ActiveTransactions {
+		session.Logger.Infow("Canceling active transaction", "transactionID", txID)
+		cancelFunc()
+	}
+	session.ActiveTransactions = make(map[string]context.CancelFunc)
+
+	// Release all locks
+	for lockID, lockInfo := range session.DocumentLocks {
+		session.Logger.Infow("Releasing document lock", "lockID", lockID, "resource", lockInfo.ResourceName)
+	}
+	session.DocumentLocks = make(map[string]*LockInfo)
+
+	for lockID, lockInfo := range session.BundleLocks {
+		session.Logger.Infow("Releasing bundle lock", "lockID", lockID, "resource", lockInfo.ResourceName)
+	}
+	session.BundleLocks = make(map[string]*LockInfo)
+
+	// Clean up temp files
+	for _, tempFile := range session.TempFiles {
+		session.Logger.Infow("Removing temp file", "file", tempFile)
+		// TODO: Add actual file removal logic
+	}
+	session.TempFiles = []string{}
+
+	// Clean up buffer pool if exists
+	if session.BufferPool != nil {
+		session.Logger.Info("Releasing buffer pool resources")
+		// TODO: Add buffer pool cleanup
+		session.BufferPool = nil
+	}
+
+	// Remove from session manager maps
+	delete(sm.sessions, session.SessionID)
+	delete(sm.connectionSessions, session.ConnectionID)
+
+	// Remove from user sessions
+	userSessions := sm.userSessions[session.Username]
+	for i, s := range userSessions {
+		if s.SessionID == session.SessionID {
+			sm.userSessions[session.Username] = append(userSessions[:i], userSessions[i+1:]...)
+			break
+		}
+	}
+
+	// Clean up empty user session list
+	if len(sm.userSessions[session.Username]) == 0 {
+		delete(sm.userSessions, session.Username)
+	}
+
+	session.Logger.Info("Session cleanup completed")
+	return nil
+}
+
+// startCleanupRoutine starts the background cleanup routine
+func (sm *SessionManager) startCleanupRoutine() {
+	sm.cleanupWG.Add(1)
+	go func() {
+		defer sm.cleanupWG.Done()
+
+		ticker := time.NewTicker(sm.cleanupInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				sm.cleanupExpiredSessions()
+			case <-sm.stopCleanup:
+				return
+			}
+		}
+	}()
+}
+
+// cleanupExpiredSessions removes expired sessions
+func (sm *SessionManager) cleanupExpiredSessions() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	now := time.Now()
+	expiredSessions := make([]*Session, 0)
+
+	for _, session := range sm.sessions {
+		if now.After(session.ExpiresAt) {
+			session.mu.Lock()
+			session.State = SessionStateExpired
+			session.mu.Unlock()
+			expiredSessions = append(expiredSessions, session)
+		}
+	}
+
+	for _, session := range expiredSessions {
+		sm.logger.Infow("Cleaning up expired session",
+			"sessionID", session.SessionID,
+			"username", session.Username,
+			"expiredAt", session.ExpiresAt)
+		sm.cleanupSession(session)
+	}
+
+	if len(expiredSessions) > 0 {
+		sm.logger.Infow("Cleaned up expired sessions", "count", len(expiredSessions))
+	}
+}
+
+// Stop stops the session manager and cleans up all sessions
+func (sm *SessionManager) Stop() {
+	close(sm.stopCleanup)
+	sm.cleanupWG.Wait()
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Clean up all remaining sessions
+	for _, session := range sm.sessions {
+		sm.cleanupSession(session)
+	}
+}
+
+// GetSessionStats returns statistics about sessions
+func (sm *SessionManager) GetSessionStats() map[string]interface{} {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	stats := map[string]interface{}{
+		"total_sessions":   len(sm.sessions),
+		"active_users":     len(sm.userSessions),
+		"max_sessions":     sm.maxSessions,
+		"default_timeout":  sm.defaultTimeout.String(),
+		"cleanup_interval": sm.cleanupInterval.String(),
+	}
+
+	// Count sessions by state
+	stateCounts := make(map[string]int)
+	for _, session := range sm.sessions {
+		session.mu.RLock()
+		state := session.State.String()
+		session.mu.RUnlock()
+		stateCounts[state]++
+	}
+	stats["sessions_by_state"] = stateCounts
+
+	return stats
+}
+
+// Session methods for managing state and resources
+
+// StartQuery starts a new query execution
+func (s *Session) StartQuery(queryID, query string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.State = SessionStateExecuting
+	s.LastActivity = time.Now()
+	s.ExpiresAt = time.Now().Add(s.Timeout)
+
+	s.CurrentQuery = &QueryInfo{
+		QueryID:   queryID,
+		Query:     query,
+		StartTime: time.Now(),
+		Status:    "EXECUTING",
+	}
+
+	s.Logger.Infow("Started query execution",
+		"queryID", queryID,
+		"query", query)
+}
+
+// CompleteQuery marks the current query as completed
+func (s *Session) CompleteQuery(affectedRows int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.CurrentQuery == nil {
+		return
+	}
+
+	now := time.Now()
+	s.CurrentQuery.EndTime = &now
+	s.CurrentQuery.Status = "COMPLETED"
+	s.CurrentQuery.AffectedRows = affectedRows
+
+	// Move to successful query and history
+	s.LastSuccessfulQuery = s.CurrentQuery
+	s.addToHistory(s.CurrentQuery)
+
+	s.CurrentQuery = nil
+	s.State = SessionStateActive
+	s.LastActivity = now
+	s.ExpiresAt = now.Add(s.Timeout)
+
+	// Reset consecutive error count on success
+	s.ConsecutiveErrors = 0
+
+	s.Logger.Infow("Completed query execution",
+		"queryID", s.LastSuccessfulQuery.QueryID,
+		"affectedRows", affectedRows,
+		"duration", s.LastSuccessfulQuery.EndTime.Sub(s.LastSuccessfulQuery.StartTime))
+}
+
+// FailQuery marks the current query as failed
+func (s *Session) FailQuery(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.CurrentQuery == nil {
+		return
+	}
+
+	now := time.Now()
+	s.CurrentQuery.EndTime = &now
+	s.CurrentQuery.Status = "FAILED"
+	s.CurrentQuery.Error = err
+
+	// Update error tracking
+	s.LastError = err
+	s.ErrorCount++
+	s.ConsecutiveErrors++
+
+	s.addToHistory(s.CurrentQuery)
+	s.CurrentQuery = nil
+
+	// Set state based on error count
+	if s.ConsecutiveErrors >= 5 {
+		s.State = SessionStateError
+		s.Logger.Errorw("Session entered error state due to consecutive failures",
+			"consecutiveErrors", s.ConsecutiveErrors)
+	} else {
+		s.State = SessionStateActive
+	}
+
+	s.LastActivity = now
+	s.ExpiresAt = now.Add(s.Timeout)
+
+	s.Logger.Errorw("Query execution failed",
+		"queryID", s.CurrentQuery.QueryID,
+		"error", err,
+		"consecutiveErrors", s.ConsecutiveErrors)
+}
+
+// addToHistory adds a query to the history (must be called with lock held)
+func (s *Session) addToHistory(query *QueryInfo) {
+	s.QueryHistory = append(s.QueryHistory, query)
+
+	// Keep only the last MaxQueryHistory queries
+	if len(s.QueryHistory) > s.MaxQueryHistory {
+		s.QueryHistory = s.QueryHistory[len(s.QueryHistory)-s.MaxQueryHistory:]
+	}
+}
+
+// AcquireDocumentLock acquires a lock on a document
+func (s *Session) AcquireDocumentLock(documentID, lockMode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	lockID := fmt.Sprintf("doc_%s_%s", documentID, lockMode)
+
+	// Check if we already have this lock
+	if _, exists := s.DocumentLocks[lockID]; exists {
+		return fmt.Errorf("document lock already held: %s", documentID)
+	}
+
+	lockInfo := &LockInfo{
+		LockID:       lockID,
+		LockType:     "DOCUMENT",
+		ResourceName: documentID,
+		LockMode:     lockMode,
+		AcquiredAt:   time.Now(),
+	}
+
+	s.DocumentLocks[lockID] = lockInfo
+	s.Logger.Infow("Acquired document lock",
+		"documentID", documentID,
+		"lockMode", lockMode,
+		"lockID", lockID)
+
+	return nil
+}
+
+// ReleaseDocumentLock releases a lock on a document
+func (s *Session) ReleaseDocumentLock(documentID, lockMode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	lockID := fmt.Sprintf("doc_%s_%s", documentID, lockMode)
+
+	if _, exists := s.DocumentLocks[lockID]; !exists {
+		return fmt.Errorf("document lock not held: %s", documentID)
+	}
+
+	delete(s.DocumentLocks, lockID)
+	s.Logger.Infow("Released document lock",
+		"documentID", documentID,
+		"lockMode", lockMode,
+		"lockID", lockID)
+
+	return nil
+}
+
+// AcquireBundleLock acquires a lock on a bundle
+func (s *Session) AcquireBundleLock(bundleName, lockMode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	lockID := fmt.Sprintf("bundle_%s_%s", bundleName, lockMode)
+
+	// Check if we already have this lock
+	if _, exists := s.BundleLocks[lockID]; exists {
+		return fmt.Errorf("bundle lock already held: %s", bundleName)
+	}
+
+	lockInfo := &LockInfo{
+		LockID:       lockID,
+		LockType:     "BUNDLE",
+		ResourceName: bundleName,
+		LockMode:     lockMode,
+		AcquiredAt:   time.Now(),
+	}
+
+	s.BundleLocks[lockID] = lockInfo
+	s.Logger.Infow("Acquired bundle lock",
+		"bundleName", bundleName,
+		"lockMode", lockMode,
+		"lockID", lockID)
+
+	return nil
+}
+
+// ReleaseBundleLock releases a lock on a bundle
+func (s *Session) ReleaseBundleLock(bundleName, lockMode string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	lockID := fmt.Sprintf("bundle_%s_%s", bundleName, lockMode)
+
+	if _, exists := s.BundleLocks[lockID]; !exists {
+		return fmt.Errorf("bundle lock not held: %s", bundleName)
+	}
+
+	delete(s.BundleLocks, lockID)
+	s.Logger.Infow("Released bundle lock",
+		"bundleName", bundleName,
+		"lockMode", lockMode,
+		"lockID", lockID)
+
+	return nil
+}
+
+// AddTransaction adds a transaction to the session
+func (s *Session) AddTransaction(txID string, cancelFunc context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.ActiveTransactions[txID] = cancelFunc
+	s.Logger.Infow("Added transaction to session", "transactionID", txID)
+}
+
+// RemoveTransaction removes a transaction from the session
+func (s *Session) RemoveTransaction(txID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.ActiveTransactions[txID]; exists {
+		delete(s.ActiveTransactions, txID)
+		s.Logger.Infow("Removed transaction from session", "transactionID", txID)
+	}
+}
+
+// AddTempFile adds a temporary file to the session
+func (s *Session) AddTempFile(filePath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.TempFiles = append(s.TempFiles, filePath)
+	s.Logger.Infow("Added temp file to session", "file", filePath)
+}
+
+// GetSessionInfo returns current session information
+func (s *Session) GetSessionInfo() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	info := map[string]interface{}{
+		"sessionID":          s.SessionID,
+		"username":           s.Username,
+		"database":           s.DatabaseName,
+		"state":              s.State.String(),
+		"createdAt":          s.CreatedAt,
+		"lastActivity":       s.LastActivity,
+		"expiresAt":          s.ExpiresAt,
+		"errorCount":         s.ErrorCount,
+		"consecutiveErrors":  s.ConsecutiveErrors,
+		"documentLocks":      len(s.DocumentLocks),
+		"bundleLocks":        len(s.BundleLocks),
+		"activeTransactions": len(s.ActiveTransactions),
+		"tempFiles":          len(s.TempFiles),
+		"queryHistoryCount":  len(s.QueryHistory),
+	}
+
+	if s.CurrentQuery != nil {
+		info["currentQuery"] = map[string]interface{}{
+			"queryID":   s.CurrentQuery.QueryID,
+			"query":     s.CurrentQuery.Query,
+			"startTime": s.CurrentQuery.StartTime,
+			"status":    s.CurrentQuery.Status,
+		}
+	}
+
+	if s.LastSuccessfulQuery != nil {
+		info["lastSuccessfulQuery"] = map[string]interface{}{
+			"queryID":      s.LastSuccessfulQuery.QueryID,
+			"query":        s.LastSuccessfulQuery.Query,
+			"affectedRows": s.LastSuccessfulQuery.AffectedRows,
+			"endTime":      s.LastSuccessfulQuery.EndTime,
+		}
+	}
+
+	if s.LastError != nil {
+		info["lastError"] = s.LastError.Error()
+	}
+
+	return info
+}

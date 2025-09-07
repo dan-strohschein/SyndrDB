@@ -36,6 +36,18 @@ type Arguments struct {
 
 	AuthEnabled bool // Enable authentication
 
+	// Session management configuration
+	SessionTimeoutMinutes int // Session timeout in minutes
+	MaxSessions           int // Maximum number of concurrent sessions
+
+	// TLS/SSL configuration
+	TLSEnabled            bool   // Enable TLS/SSL
+	TLSCertFile           string // Path to TLS certificate file
+	TLSKeyFile            string // Path to TLS private key file
+	TLSGenerateSelfSigned bool   // Generate self-signed certificate if none exists
+	TLSRequireClientCert  bool   // Require client certificates
+	TLSCAFile             string // Path to CA file for client certificate validation
+
 	Version string // Show version information
 
 	EnableGraphQL bool // Enable GraphQL API

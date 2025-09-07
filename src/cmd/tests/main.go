@@ -25,6 +25,7 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/fatih/color"
@@ -193,7 +194,7 @@ func main() {
 	ColorLogger.Info(HighlightBlue("Starting bundle management use case tests..."))
 	bundleUseCases := GetBundleManagementUseCases()
 	bundleSummary := executeAllTests(bundleUseCases)
-
+	fmt.Printf("DUDE Are we getting here?\n")
 	// Execute JOIN functionality demonstration
 	ColorLogger.Info(HighlightBlue("Starting JOIN functionality demonstration..."))
 	err = RunJoinDemonstration(ColorLogger)
@@ -226,6 +227,11 @@ func main() {
 	testGroupByFunctionality()
 	ColorLogger.Info(HighlightGreen("✓ GROUP BY tests completed successfully"))
 
+	// Execute Session Management tests
+	ColorLogger.Info(HighlightBlue("Starting Session Management tests..."))
+	sessionUseCases := GetSessionManagementUseCases()
+	sessionSummary := executeAllTests(sessionUseCases)
+
 	// Execute WAL functionality tests
 	ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
 	walUseCases := GetWALTestUseCases()
@@ -238,6 +244,9 @@ func main() {
 
 	ColorLogger.Info(HighlightBlue("Bundle Management Test Results:"))
 	displayTestSummaryGeneric(bundleSummary)
+
+	ColorLogger.Info(HighlightBlue("Session Management Test Results:"))
+	displayTestSummaryGeneric(sessionSummary)
 
 	ColorLogger.Info(HighlightBlue("Test execution complete"))
 }
@@ -256,7 +265,7 @@ func setupLogger() *zap.SugaredLogger {
 	config.EncoderConfig.StacktraceKey = "" // Remove stack trace
 	config.EncoderConfig.MessageKey = "msg" // Keep only the message
 
-	config.Level, _ = zap.ParseAtomicLevel("Warn") // Set default log level to warn
+	config.Level, _ = zap.ParseAtomicLevel("Info") // Set default log level to warn
 	// Use console encoder for clean output
 	config.Encoding = "console"
 
@@ -592,4 +601,37 @@ func findFastestTest[T UseCase](results []TestResult[T]) TestResult[T] {
 		}
 	}
 	return fastest
+}
+
+// forceCompleteStateReset performs aggressive cache clearing and state reset between tests
+// This function ensures complete isolation between test executions to prevent cache conflicts
+func forceCompleteStateReset() {
+	// Force cleanup of all problematic bundles
+	problematicBundles := []string{
+		"documents_bundle", "test_bundle", "primary_bundle", "related_bundle",
+		"Customer", "Customers", "Order", "Orders", "invalid_json_bundle",
+		"duplicate_bundle_test", "empty_test_bundle", "custom_name_bundle_test",
+		"nonexistent_doc_bundle", "performance_test_bundle", "integration_test_bundle",
+		"concurrent_ops_bundle", "backup_restore_bundle", "delete_test_bundle",
+		"schema_bundle_test", "wal_test", "multi_document_bundle", "old_bundle_name",
+		"workflow_bundle_1", "workflow_bundle_2", "workflow_bundle_3",
+		"index_verification_bundle", "index_test_bundle", "query_test_bundle",
+		"update_test_bundle",
+	}
+
+	ColorLogger.Debug("Performing complete state reset...")
+
+	// Execute DELETE commands for each bundle
+	for _, bundleName := range problematicBundles {
+		deleteCommand := fmt.Sprintf("DELETE BUNDLE %s", bundleName)
+		_, _ = ExecuteClientCommand(deleteCommand) // Ignore errors during cleanup
+	}
+
+	// Add a small delay to ensure operations complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Force garbage collection to clear any cached references
+	runtime.GC()
+
+	ColorLogger.Debug("State reset complete")
 }

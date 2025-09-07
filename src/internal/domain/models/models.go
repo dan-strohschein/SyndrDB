@@ -46,7 +46,7 @@ type Bundle struct {
 	Relationships map[string]Relationship
 	Constraints   map[string]Constraint
 
-	Database *Database // Reference to the parent database
+	Database *Database `json:"-"` // Reference to the parent database
 }
 
 type DocumentStructure struct {

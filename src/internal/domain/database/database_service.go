@@ -68,8 +68,63 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) er
 	// Add to in-memory map
 	s.Databases[db.Name] = db
 
-	return s.Store.CreateDatabaseDataFile(db)
+	// Create the database data file
+	err := s.Store.CreateDatabaseDataFile(db)
+	if err != nil {
+		return fmt.Errorf("failed to create database data file: %w", err)
+	}
 
+	// Register the new database in the Primary database's "Databases" bundle
+	// (Skip this step if we're creating the primary database itself)
+	if strings.ToLower(databaseCommand.DatabaseName) != "primary" {
+		err = s.registerDatabaseInPrimary(db)
+		if err != nil {
+			s.Logger.Warnf("Warning: Failed to register database '%s' in Primary database: %v", db.Name, err)
+			// Don't fail the database creation if registration fails
+		}
+	}
+
+	return nil
+}
+
+// registerDatabaseInPrimary adds the new database to the "Databases" bundle in the Primary database
+func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) error {
+	// Get the Primary database
+	primaryDB, err := s.GetDatabaseByName("primary")
+	if err != nil {
+		return fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Find the "Databases" bundle in the Primary database
+	databasesBundle, exists := primaryDB.Bundles["Databases"]
+	if !exists {
+		return fmt.Errorf("Databases bundle not found in Primary database")
+	}
+
+	// Create a document representing the new database
+	databaseDoc := models.Document{
+		DocumentID: fmt.Sprintf("db_%s", newDB.DatabaseID),
+		Fields: map[string]models.Field{
+			"DocumentID": {Name: "DocumentID", Value: fmt.Sprintf("db_%s", newDB.DatabaseID)},
+			"DatabaseID": {Name: "DatabaseID", Value: newDB.DatabaseID},
+			"Name":       {Name: "Name", Value: newDB.Name},
+			"FilePath":   {Name: "FilePath", Value: newDB.DataDirectory},
+		},
+	}
+
+	// Add the document to the Databases bundle
+	if databasesBundle.Documents == nil {
+		documentsMap := make(map[string]models.Document)
+		databasesBundle.Documents = &documentsMap
+	}
+
+	(*databasesBundle.Documents)[databaseDoc.DocumentID] = databaseDoc
+
+	// Update the bundle back in the database
+	primaryDB.Bundles["Databases"] = databasesBundle
+
+	s.Logger.Infof("Registered database '%s' (ID: %s) in Primary database", newDB.Name, newDB.DatabaseID)
+	return nil
 }
 
 func (s *DatabaseService) UpdateDatabase(databaseCommand models.DatabaseCommand) error {

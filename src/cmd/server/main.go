@@ -48,6 +48,8 @@ func main() {
 	flag.StringVar(&args.ConfigFile, "config", "", "Path to config file")
 	flag.StringVar(&args.Mode, "mode", "standalone", "Operation mode (standalone, cluster)")
 	flag.BoolVar(&args.AuthEnabled, "auth", false, "Enable authentication")
+	flag.IntVar(&args.SessionTimeoutMinutes, "session-timeout", 30, "Session timeout in minutes")
+	flag.IntVar(&args.MaxSessions, "max-sessions", 1000, "Maximum number of concurrent sessions")
 	flag.StringVar(&args.Version, "version", "0.0.1alpha", "Shows version")
 	flag.BoolVar(&args.PrintToScreen, "print", true, "Print Log Messages to screen")
 	flag.BoolVar(&args.Debug, "debug", true, "Enable debug mode")
@@ -86,6 +88,8 @@ func main() {
 		log.Printf("  Config File: %s\n", args.ConfigFile)
 		log.Printf("  Mode: %s\n", args.Mode)
 		log.Printf("  Auth Enabled: %v\n", args.AuthEnabled)
+		log.Printf("  Session Timeout: %d minutes\n", args.SessionTimeoutMinutes)
+		log.Printf("  Max Sessions: %d\n", args.MaxSessions)
 		log.Printf("  GraphQL Enabled: %v\n", args.EnableGraphQL)
 
 	}

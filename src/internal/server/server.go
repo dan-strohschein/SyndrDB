@@ -2,7 +2,10 @@ package server
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -29,6 +32,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/crypto/argon2"
 )
 
 // Server represents the main TCP server for SyndrDB
@@ -42,6 +46,11 @@ type Server struct {
 	GraphQLEnabled    bool
 	Users             map[string]string // username -> hashed password
 	ActiveConnections map[string]*Connection
+	SessionManager    *SessionManager
+	RateLimiter       *RateLimiter
+	TLSConfig         *tls.Config
+	SessionTimeout    time.Duration
+	MaxSessions       int
 	mu                sync.Mutex
 	Running           bool
 	databaseService   *database.DatabaseService
@@ -59,6 +68,7 @@ type Connection struct {
 	Database     *models.Database // Current database for this connection
 	User         string
 	Authorized   bool
+	Session      *Session // Associated session
 	LastActive   time.Time
 	Logger       *zap.SugaredLogger
 }
@@ -159,10 +169,54 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		GraphQLEnabled:    config.EnableGraphQL,
 		Users:             make(map[string]string),
 		ActiveConnections: make(map[string]*Connection),
+		SessionTimeout:    time.Duration(config.SessionTimeoutMinutes) * time.Minute,
+		MaxSessions:       config.MaxSessions,
 		databaseService:   databaseService,
 		logger:            sugar,
 		bufferPool:        bufferPool,
 	}
+
+	// Initialize rate limiter
+	server.RateLimiter = NewRateLimiter(DefaultRateLimitConfig())
+
+	// Initialize TLS configuration
+	tlsConfig := &TLSConfig{
+		Enabled:            config.TLSEnabled,
+		CertFile:           config.TLSCertFile,
+		KeyFile:            config.TLSKeyFile,
+		GenerateSelfSigned: config.TLSGenerateSelfSigned,
+		RequireClientCert:  config.TLSRequireClientCert,
+		CAFile:             config.TLSCAFile,
+	}
+
+	if tlsConfig.CertFile == "" {
+		tlsConfig.CertFile = "server.crt"
+	}
+	if tlsConfig.KeyFile == "" {
+		tlsConfig.KeyFile = "server.key"
+	}
+
+	server.TLSConfig, err = SetupTLS(tlsConfig)
+	if err != nil {
+		sugar.Errorf("Failed to setup TLS: %v", err)
+		return nil, err
+	}
+
+	if server.TLSConfig != nil {
+		sugar.Infof("TLS/SSL encryption enabled")
+	} else {
+		sugar.Warnf("TLS/SSL encryption disabled - connections are not encrypted")
+	}
+
+	// Initialize session manager
+	if server.SessionTimeout <= 0 {
+		server.SessionTimeout = 30 * time.Minute // Default 30 minutes
+	}
+	if server.MaxSessions <= 0 {
+		server.MaxSessions = 1000 // Default max 1000 sessions
+	}
+
+	server.SessionManager = NewSessionManager(sugar, server.SessionTimeout, server.MaxSessions)
 
 	// Load all databases
 	databases, err := databaseStore.LoadAllDatabaseDataFiles(config.DataDir, logger.Sugar())
@@ -209,15 +263,30 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 func (s *Server) Start() error {
 	// Start TCP server
 	addr := fmt.Sprintf("%s:%d", s.Host, s.Port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("error starting TCP server on %s: %w", addr, err)
+
+	var listener net.Listener
+	var err error
+
+	if s.TLSConfig != nil {
+		// Start TLS server
+		listener, err = tls.Listen("tcp", addr, s.TLSConfig)
+		if err != nil {
+			return fmt.Errorf("error starting TLS server on %s: %w", addr, err)
+		}
+		log.Printf("SyndrDB TLS server listening on %s", addr)
+		s.logger.Infof("Server started with TLS encryption on %s", addr)
+	} else {
+		// Start regular TCP server
+		listener, err = net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("error starting TCP server on %s: %w", addr, err)
+		}
+		log.Printf("SyndrDB TCP server listening on %s", addr)
+		s.logger.Warnf("Server started WITHOUT encryption on %s - consider enabling TLS", addr)
 	}
 
 	s.Listener = listener
 	s.Running = true
-
-	log.Printf("SyndrDB TCP server listening on %s", addr)
 
 	// Start HTTP server if GraphQL is enabled
 	if s.GraphQLEnabled {
@@ -256,6 +325,11 @@ func (s *Server) Start() error {
 // Stop gracefully shuts down the server
 func (s *Server) Stop() error {
 	s.Running = false
+
+	// Stop session manager first to cleanup all sessions
+	if s.SessionManager != nil {
+		s.SessionManager.Stop()
+	}
 
 	// Close all active connections
 	s.mu.Lock()
@@ -327,7 +401,7 @@ func (s *Server) authenticate(username, password string) bool {
 		return false
 	}
 
-	return hashedPassword == hashPassword(password)
+	return verifyPassword(password, hashedPassword)
 }
 
 var wg sync.WaitGroup
@@ -346,17 +420,29 @@ func (s *Server) acceptConnections() {
 			}
 			continue
 		}
+
+		// Rate limiting check
+		clientIP := ExtractIPFromConn(conn)
+		if err := s.RateLimiter.CheckConnection(clientIP); err != nil {
+			s.logger.Warnw("Connection rejected due to rate limiting",
+				"ip", clientIP,
+				"error", err)
+			conn.Close()
+			continue
+		}
+
 		wg.Add(1)
 
-		s.logger.Info("New connection received",
-			zap.String("remoteAddr", conn.RemoteAddr().String()))
+		s.logger.Info("New connection accepted",
+			zap.String("remoteAddr", conn.RemoteAddr().String()),
+			zap.String("clientIP", clientIP))
 
 		// Handle each connection in a new goroutine
-		//go s.handleConnection(conn)
-		go func(c net.Conn) {
+		go func(c net.Conn, ip string) {
 			defer wg.Done()
+			defer s.RateLimiter.ReleaseConnection(ip) // Release connection when done
 			s.handleConnection(c)
-		}(conn)
+		}(conn, clientIP)
 	}
 }
 
@@ -575,16 +661,32 @@ func (s *Server) handleConnection(conn net.Conn) {
 					return
 				}
 
+				// Create a session for the authenticated user
+				session, err := s.SessionManager.CreateSession(
+					connStr.Username,
+					connStr.Username, // Using username as userID for now
+					connStr.Database,
+					connection.Database,
+					connection.ID,
+					s.SessionTimeout,
+				)
+				if err != nil {
+					sendError(writer, fmt.Sprintf("Failed to create session: %v", err))
+					return
+				}
+
 				connection.Authorized = true
 				connection.DatabaseName = connStr.Database
 				connection.User = connStr.Username
+				connection.Session = session
 				connection.Logger = connLogger.Desugar().Sugar()
 
-				connLogger.Infow("Client authenticated",
+				connLogger.Infow("Client authenticated and session created",
 					"user", connection.User,
-					"database", connection.DatabaseName)
+					"database", connection.DatabaseName,
+					"sessionID", session.SessionID)
 
-				sendSuccess(writer, "Authentication successful")
+				sendSuccess(writer, fmt.Sprintf("Authentication successful - Session: %s", session.SessionID))
 				continue
 
 			}
@@ -621,13 +723,22 @@ cleanup:
 
 // Process a client command
 func (s *Server) processCommand(conn *Connection, command string) (interface{}, error) {
+	// Rate limiting check for requests
+	clientIP := ExtractIPFromConn(conn.Conn)
+	if err := s.RateLimiter.CheckRequest(clientIP); err != nil {
+		s.logger.Warnw("Request rejected due to rate limiting",
+			"ip", clientIP,
+			"user", conn.User,
+			"error", err)
+		return nil, fmt.Errorf("rate limit exceeded: %v", err)
+	}
+
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty command")
 	}
 	// Use the new function to process and print the client data
 	return s.ProcessClientData(conn, command)
-
 }
 
 func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, error) {
@@ -660,6 +771,15 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 func (s *Server) handleTextCommand(conn *Connection, command string) (interface{}, error) {
 	serviceManager := GetServiceManager()
 
+	// Update session activity
+	if conn.Session != nil {
+		s.SessionManager.UpdateActivity(conn.Session.SessionID)
+
+		// Generate a query ID and start tracking the query
+		queryID := fmt.Sprintf("q_%d", time.Now().UnixNano())
+		conn.Session.StartQuery(queryID, command)
+	}
+
 	//s.logger.Infof("Debugging the command received: %s", command)
 	//s.logger.Sync()
 
@@ -674,8 +794,21 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 	s.logger.Debugf("Buffer stats after command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
 		stats.Hits, stats.Misses, stats.HitRatio, stats.UsedBuffers, stats.TotalBuffers)
 
-	return result, err
+	// Update session with query result
+	if conn.Session != nil {
+		if err != nil {
+			conn.Session.FailQuery(err)
+		} else {
+			// Try to extract affected rows from result if possible
+			affectedRows := 0
+			if cmdResp, ok := result.(*CommandResponse); ok {
+				affectedRows = cmdResp.ResultCount
+			}
+			conn.Session.CompleteQuery(affectedRows)
+		}
+	}
 
+	return result, err
 }
 
 func parseConnectionString(server *Server, connStr string) (ConnectionString, error) {
@@ -776,7 +909,77 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 	}
 }
 
+// Secure password hashing using Argon2id
+type PasswordHash struct {
+	Hash    []byte
+	Salt    []byte
+	Time    uint32
+	Memory  uint32
+	Threads uint8
+	KeyLen  uint32
+}
+
+// hashPassword securely hashes a password using Argon2id
 func hashPassword(password string) string {
+	// Generate a random salt
+	salt := make([]byte, 32)
+	if _, err := rand.Read(salt); err != nil {
+		// Fallback to less secure but functional method
+		return hashPasswordSHA256(password)
+	}
+
+	// Argon2id parameters (recommended values)
+	time := uint32(1)           // Number of iterations
+	memory := uint32(64 * 1024) // Memory usage in KiB (64 MB)
+	threads := uint8(4)         // Number of threads
+	keyLen := uint32(32)        // Length of the derived key
+
+	// Generate the hash
+	hash := argon2.IDKey([]byte(password), salt, time, memory, threads, keyLen)
+
+	// Encode salt and hash together (salt:hash format)
+	encoded := fmt.Sprintf("%s:%s", hex.EncodeToString(salt), hex.EncodeToString(hash))
+	return encoded
+}
+
+// verifyPassword verifies a password against its hash
+func verifyPassword(password, encodedHash string) bool {
+	// Handle legacy SHA-256 hashes (for backward compatibility)
+	if !strings.Contains(encodedHash, ":") {
+		return encodedHash == hashPasswordSHA256(password)
+	}
+
+	// Parse salt and hash
+	parts := strings.Split(encodedHash, ":")
+	if len(parts) != 2 {
+		return false
+	}
+
+	salt, err := hex.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+
+	expectedHash, err := hex.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+
+	// Use same parameters as hashing
+	time := uint32(1)
+	memory := uint32(64 * 1024)
+	threads := uint8(4)
+	keyLen := uint32(32)
+
+	// Generate hash from provided password
+	hash := argon2.IDKey([]byte(password), salt, time, memory, threads, keyLen)
+
+	// Compare hashes (constant time comparison)
+	return subtle.ConstantTimeCompare(hash, expectedHash) == 1
+}
+
+// Legacy SHA-256 hashing (for backward compatibility only)
+func hashPasswordSHA256(password string) string {
 	hash := sha256.Sum256([]byte(password))
 	return hex.EncodeToString(hash[:])
 }

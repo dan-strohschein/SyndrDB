@@ -136,7 +136,8 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 
 // TODO this is the old, pre-buffer manager implementation.
 func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bundleName string) (*[]byte, *models.Bundle, error) {
-	bundleFile, err := helpers.OpenDataFile(database.DataDirectory, fmt.Sprintf("%s.bnd", bundleName))
+	args := settings.GetSettings()
+	bundleFile, err := helpers.OpenDataFile(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening bundle file %s: %w", bundleName, err)
 	}
@@ -328,8 +329,9 @@ func (b *BundleStorageEngine) BundleFileExists(bundleName string) bool {
 }
 
 func (b *BundleStorageEngine) CreateBundleFile(database *models.Database, bundle *models.Bundle) error {
+	args := settings.GetSettings()
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundle.Name))
 
 	// Check if the file already exists
 	if helpers.FileExists(filePath, *b.logger) {
@@ -367,8 +369,9 @@ func (b *BundleStorageEngine) CreateBundleFile(database *models.Database, bundle
 }
 
 func (b *BundleStorageEngine) UpdateBundleFile(database *models.Database, bundle *models.Bundle) error {
+	args := settings.GetSettings()
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundle.Name))
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *b.logger) {
@@ -409,6 +412,7 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *models.Da
 	updatedDocument map[string]interface{},
 	mmapData []byte) error {
 
+	args := settings.GetSettings()
 	convertedBundle := BundleToMap(bundle)
 
 	// Locate the document in the bundle
@@ -460,7 +464,7 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *models.Da
 	}
 
 	// Update the data file
-	filePath := filepath.Join(database.DataDirectory, fmt.Sprintf("%s.bnd", bundle.Name))
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundle.Name))
 	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("error opening bundle file for update: %w", err)
@@ -656,7 +660,7 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *models.Data
 	mmapData []byte) error {
 
 	convertedBundle := BundleToMap(bundle)
-
+	args := settings.GetSettings()
 	// Locate the document in the bundle
 	documents, ok := convertedBundle["Documents"].([]interface{})
 	if !ok {
@@ -709,7 +713,7 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *models.Data
 		return fmt.Errorf("error unmapping memory: %w", err)
 	}
 
-	filePath := filepath.Join(database.DataDirectory, bundle.BundleID)
+	filePath := filepath.Join(args.DataDir, bundle.BundleID)
 	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("error opening bundle file for truncation: %w", err)
@@ -801,8 +805,10 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 }
 
 func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundleName string) error {
+
 	// Create a new data file
-	filePath := filepath.Join(database.DataDirectory, bundleName)
+	args := settings.GetSettings()
+	filePath := filepath.Join(args.DataDir, bundleName)
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *b.logger) {
