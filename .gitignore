@@ -1,6 +1,10 @@
 .DS_Store
 .github
 
+log_files
+data_files
+
+
 src/datafiles
 src/log_files
 src/.DS_STORE
@@ -13,4 +17,7 @@ bin/server/data_files
 bin/server/log_files
 bin/server/.DS_STORE
 
+bin/tests/temp_files
+bin/tests/data_files
+bin/tests/log_files
 .venv
