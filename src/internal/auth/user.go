@@ -65,9 +65,11 @@ func (s *UserStore) GetUser(username string) (*User, error) {
 	for _, storedUser := range s.users {
 		if storedUser.Username == username {
 			return &User{
-				UserID:   storedUser.UserID,
-				Username: storedUser.Username,
-				// Don't include password
+				UserID:         storedUser.UserID,
+				Username:       storedUser.Username,
+				CreatedAt:      storedUser.CreatedAt,
+				LastModifiedAt: storedUser.LastModifiedAt,
+				// Don't include password hash for security reasons
 			}, nil
 		}
 	}

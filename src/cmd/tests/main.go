@@ -232,6 +232,11 @@ func main() {
 	sessionUseCases := GetSessionManagementUseCases()
 	sessionSummary := executeAllTests(sessionUseCases)
 
+	// Execute Security Validation tests
+	ColorLogger.Info(HighlightBlue("Starting Security Validation tests..."))
+	securityUseCases := GetSecurityTestUseCases()
+	securitySummary := executeAllTests(securityUseCases)
+
 	// Execute WAL functionality tests
 	ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
 	walUseCases := GetWALTestUseCases()
@@ -247,6 +252,9 @@ func main() {
 
 	ColorLogger.Info(HighlightBlue("Session Management Test Results:"))
 	displayTestSummaryGeneric(sessionSummary)
+
+	ColorLogger.Info(HighlightBlue("Security Validation Test Results:"))
+	displayTestSummaryGeneric(securitySummary)
 
 	ColorLogger.Info(HighlightBlue("Test execution complete"))
 }
