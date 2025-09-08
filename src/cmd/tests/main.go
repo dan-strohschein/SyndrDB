@@ -24,8 +24,10 @@ error handling and data integrity standards required by the SyndrDB project.
 package main
 
 import (
+	"flag"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -167,13 +169,68 @@ var (
 // ColorLogger is the global logger instance
 var ColorLogger *zap.SugaredLogger
 
+// filterTestsByNames filters test use cases based on provided test names
+// If testNames is empty, returns all use cases
+func filterTestsByNames[T UseCase](useCases []T, testNames []string) []T {
+	if len(testNames) == 0 {
+		return useCases
+	}
+
+	var filtered []T
+	for _, useCase := range useCases {
+		if containsTestName(testNames, useCase.GetName()) {
+			filtered = append(filtered, useCase)
+		}
+	}
+	return filtered
+}
+
+// containsTestName checks if a test name exists in the provided list
+func containsTestName(testNames []string, testName string) bool {
+	for _, name := range testNames {
+		if strings.EqualFold(name, testName) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAnyTestFromCategory checks if any test names contain the category prefix
+func hasAnyTestFromCategory(testNames []string, category string) bool {
+	for _, name := range testNames {
+		if strings.Contains(strings.ToLower(name), strings.ToLower(category)) {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
+	// Parse command-line arguments
+	var testFilter string
+	flag.StringVar(&testFilter, "test", "", "Comma-delimited list of test names to run (e.g., -test=InitializePrimaryDatabase,ValidateSystemBundles)")
+	flag.Parse()
+
+	// Parse test filter into slice
+	var testNames []string
+	if testFilter != "" {
+		testNames = strings.Split(testFilter, ",")
+		// Trim whitespace from test names
+		for i, name := range testNames {
+			testNames[i] = strings.TrimSpace(name)
+		}
+	}
 
 	// Initialize logger
 	ColorLogger = setupLogger()
 
 	// Display welcome banner
 	displayWelcomeBanner()
+
+	// Show filter information if tests are filtered
+	if len(testNames) > 0 {
+		ColorLogger.Info(HighlightYellow(fmt.Sprintf("Running filtered tests: %s", strings.Join(testNames, ", "))))
+	}
 
 	// Stand up test database service
 	ColorLogger.Info(HighlightBlue("Setting up test database service..."))
@@ -188,81 +245,126 @@ func main() {
 	// Execute database creation use case tests
 	ColorLogger.Info(HighlightBlue("Starting database creation use case tests..."))
 	dbUseCases := GetDatabaseCreationUseCases()
-	dbSummary := executeAllTests(dbUseCases)
+	filteredDbUseCases := filterTestsByNames(dbUseCases, testNames)
+	dbSummary := executeAllTests(filteredDbUseCases)
+
+	// Execute primary database initialization tests
+	ColorLogger.Info(HighlightBlue("Starting primary database initialization tests..."))
+	primaryDbUseCases := GetPrimaryDatabaseUseCases()
+	filteredPrimaryDbUseCases := filterTestsByNames(primaryDbUseCases, testNames)
+	primaryDbSummary := executeAllTests(filteredPrimaryDbUseCases)
 
 	// Execute bundle management use case tests
 	ColorLogger.Info(HighlightBlue("Starting bundle management use case tests..."))
 	bundleUseCases := GetBundleManagementUseCases()
-	bundleSummary := executeAllTests(bundleUseCases)
+	filteredBundleUseCases := filterTestsByNames(bundleUseCases, testNames)
+	bundleSummary := executeAllTests(filteredBundleUseCases)
 
-	// Execute JOIN functionality demonstration
-	ColorLogger.Info(HighlightBlue("Starting JOIN functionality demonstration..."))
-	err = RunJoinDemonstration(ColorLogger)
-	if err != nil {
-		ColorLogger.Error(HighlightRed("JOIN demonstration failed"), zap.Error(err))
-	} else {
-		ColorLogger.Info(HighlightGreen("✓ JOIN demonstration completed successfully"))
+	// Execute JOIN functionality demonstration (if not filtered or explicitly included)
+	if len(testNames) == 0 || containsTestName(testNames, "JoinDemonstration") {
+		ColorLogger.Info(HighlightBlue("Starting JOIN functionality demonstration..."))
+		err = RunJoinDemonstration(ColorLogger)
+		if err != nil {
+			ColorLogger.Error(HighlightRed("JOIN demonstration failed"), zap.Error(err))
+		} else {
+			ColorLogger.Info(HighlightGreen("✓ JOIN demonstration completed successfully"))
+		}
 	}
 
-	// Execute comprehensive end-to-end JOIN testing
-	ColorLogger.Info(HighlightBlue("Starting comprehensive end-to-end JOIN testing..."))
-	err = RunComprehensiveJoinTests()
-	if err != nil {
-		ColorLogger.Error(HighlightRed("Comprehensive JOIN tests failed"), zap.Error(err))
-	} else {
-		ColorLogger.Info(HighlightGreen("✓ Comprehensive JOIN tests completed successfully"))
+	// Execute comprehensive end-to-end JOIN testing (if not filtered or explicitly included)
+	if len(testNames) == 0 || containsTestName(testNames, "ComprehensiveJoinTests") {
+		ColorLogger.Info(HighlightBlue("Starting comprehensive end-to-end JOIN testing..."))
+		err = RunComprehensiveJoinTests()
+		if err != nil {
+			ColorLogger.Error(HighlightRed("Comprehensive JOIN tests failed"), zap.Error(err))
+		} else {
+			ColorLogger.Info(HighlightGreen("✓ Comprehensive JOIN tests completed successfully"))
+		}
 	}
 
-	// Execute ORDER BY functionality demo
-	ColorLogger.Info(HighlightBlue("Starting ORDER BY functionality demo..."))
-	err = RunOrderByDemo()
-	if err != nil {
-		ColorLogger.Error(HighlightRed("ORDER BY demo failed"), zap.Error(err))
-	} else {
-		ColorLogger.Info(HighlightGreen("✓ ORDER BY demo completed successfully"))
+	// Execute ORDER BY functionality demo (if not filtered or explicitly included)
+	if len(testNames) == 0 || containsTestName(testNames, "OrderByDemo") {
+		ColorLogger.Info(HighlightBlue("Starting ORDER BY functionality demo..."))
+		err = RunOrderByDemo()
+		if err != nil {
+			ColorLogger.Error(HighlightRed("ORDER BY demo failed"), zap.Error(err))
+		} else {
+			ColorLogger.Info(HighlightGreen("✓ ORDER BY demo completed successfully"))
+		}
 	}
 
-	// Execute GROUP BY functionality tests
-	ColorLogger.Info(HighlightBlue("Starting GROUP BY functionality tests..."))
-	testGroupByFunctionality()
-	ColorLogger.Info(HighlightGreen("✓ GROUP BY tests completed successfully"))
+	// Execute GROUP BY functionality tests (if not filtered or explicitly included)
+	if len(testNames) == 0 || containsTestName(testNames, "GroupByTests") {
+		ColorLogger.Info(HighlightBlue("Starting GROUP BY functionality tests..."))
+		testGroupByFunctionality()
+		ColorLogger.Info(HighlightGreen("✓ GROUP BY tests completed successfully"))
+	}
 
 	// Execute Session Management tests
-	ColorLogger.Info(HighlightBlue("Starting Session Management tests..."))
-	sessionUseCases := GetSessionManagementUseCases()
-	sessionSummary := executeAllTests(sessionUseCases)
+	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "Session") {
+		ColorLogger.Info(HighlightBlue("Starting Session Management tests..."))
+		sessionUseCases := GetSessionManagementUseCases()
+		filteredSessionUseCases := filterTestsByNames(sessionUseCases, testNames)
+		sessionSummary := executeAllTests(filteredSessionUseCases)
+
+		// Display session test results if any were run
+		if len(filteredSessionUseCases) > 0 {
+			ColorLogger.Info(HighlightBlue("Session Management Test Results:"))
+			displayTestSummaryGeneric(sessionSummary)
+		}
+	}
 
 	// Execute Security Validation tests
-	ColorLogger.Info(HighlightBlue("Starting Security Validation tests..."))
-	securityUseCases := GetSecurityTestUseCases()
-	securitySummary := executeAllTests(securityUseCases)
+	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "Security") {
+		ColorLogger.Info(HighlightBlue("Starting Security Validation tests..."))
+		securityUseCases := GetSecurityTestUseCases()
+		filteredSecurityUseCases := filterTestsByNames(securityUseCases, testNames)
+		securitySummary := executeAllTests(filteredSecurityUseCases)
+
+		// Display security test results if any were run
+		if len(filteredSecurityUseCases) > 0 {
+			ColorLogger.Info(HighlightBlue("Security Validation Test Results:"))
+			displayTestSummaryGeneric(securitySummary)
+		}
+	}
 
 	// Execute Audit Logging tests
-	ColorLogger.Info(HighlightBlue("Starting Audit Logging tests..."))
-	auditUseCases := GetAuditLoggingUseCases()
-	auditSummary := executeAllTests(auditUseCases)
+	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "Audit") {
+		ColorLogger.Info(HighlightBlue("Starting Audit Logging tests..."))
+		auditUseCases := GetAuditLoggingUseCases()
+		filteredAuditUseCases := filterTestsByNames(auditUseCases, testNames)
+		auditSummary := executeAllTests(filteredAuditUseCases)
+
+		// Display audit test results if any were run
+		if len(filteredAuditUseCases) > 0 {
+			ColorLogger.Info(HighlightBlue("Audit Logging Test Results:"))
+			displayTestSummaryGeneric(auditSummary)
+		}
+	}
 
 	// Execute WAL functionality tests
-	ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
-	walUseCases := GetWALTestUseCases()
-	walResults := executeAllWALTests(walUseCases)
-	_ = walResults // Suppress unused variable warning
+	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "WAL") {
+		ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
+		walUseCases := GetWALTestUseCases()
+		walResults := executeAllWALTests(walUseCases)
+		_ = walResults // Suppress unused variable warning
+	}
 
-	// Display comprehensive test results
-	ColorLogger.Info(HighlightBlue("Database Creation Test Results:"))
-	displayTestSummaryGeneric(dbSummary)
+	// Display core test results (always shown when tests were run)
+	if len(filteredDbUseCases) > 0 {
+		ColorLogger.Info(HighlightBlue("Database Creation Test Results:"))
+		displayTestSummaryGeneric(dbSummary)
+	}
 
-	ColorLogger.Info(HighlightBlue("Bundle Management Test Results:"))
-	displayTestSummaryGeneric(bundleSummary)
+	if len(filteredPrimaryDbUseCases) > 0 {
+		ColorLogger.Info(HighlightBlue("Primary Database Initialization Test Results:"))
+		displayTestSummaryGeneric(primaryDbSummary)
+	}
 
-	ColorLogger.Info(HighlightBlue("Session Management Test Results:"))
-	displayTestSummaryGeneric(sessionSummary)
-
-	ColorLogger.Info(HighlightBlue("Security Validation Test Results:"))
-	displayTestSummaryGeneric(securitySummary)
-
-	ColorLogger.Info(HighlightBlue("Audit Logging Test Results:"))
-	displayTestSummaryGeneric(auditSummary)
+	if len(filteredBundleUseCases) > 0 {
+		ColorLogger.Info(HighlightBlue("Bundle Management Test Results:"))
+		displayTestSummaryGeneric(bundleSummary)
+	}
 
 	ColorLogger.Info(HighlightBlue("Test execution complete"))
 }
@@ -550,7 +652,7 @@ func displayTestSummaryGeneric[T UseCase](summary TestSummary[T]) {
 
 	// Final verdict
 	if summary.FailedTests == 0 {
-		fmt.Println(HighlightGreen("🎉 All tests passed! Database creation functionality is working correctly."))
+		fmt.Println(HighlightGreen("🎉 All tests passed! SyndrDB functionality is working correctly."))
 	} else {
 		fmt.Printf("%s %d test(s) failed. Please review the errors above.\n",
 			HighlightRed("⚠️"), summary.FailedTests)
