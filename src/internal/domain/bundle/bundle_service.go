@@ -2,19 +2,19 @@ package bundle
 
 import (
 	"fmt"
+	"strings"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/pkg/settings"
+	"time"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	hashindex "syndrdb/src/internal/domain/index/hashindexV2"
 
 	//hashindex "syndrdb/src/hash_index"
-
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -24,8 +24,16 @@ type BundleService struct {
 	factory         BundleFactory
 	documentFactory document.DocumentFactory
 	settings        *settings.Arguments
-	bundles         map[string]*models.Bundle
-	logger          *zap.SugaredLogger
+
+	// Changed: Store only bundle metadata, not full bundles with documents
+	bundleMetadata map[string]*models.Bundle       // Only schema/structure
+	documentPages  map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
+
+	logger *zap.SugaredLogger
+
+	// Configuration for page management
+	defaultPageSize int // Default number of documents per page
+	maxLoadedPages  int // Maximum number of pages to keep in memory
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
@@ -38,16 +46,19 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		documentFactory: docFactory,
 		settings:        settings,
 		logger:          logger,
-		bundles:         make(map[string]*models.Bundle),
+		bundleMetadata:  make(map[string]*models.Bundle),
+		documentPages:   make(map[string]*models.DocumentPage),
+		defaultPageSize: 1000, // Default: 1000 documents per page
+		maxLoadedPages:  100,  // Default: keep max 100 pages in memory
 	}
 
-	// Load existing databases
-	bundles, err := store.LoadAllBundleDataFiles(settings.DataDir)
+	// Load existing bundle metadata (without documents)
+	bundles, err := store.LoadAllBundleMetadata(settings.DataDir)
 	if err != nil {
-		logger.Warnf("Warning: Error loading databases: %v", err)
+		logger.Warnf("Warning: Error loading bundle metadata: %v", err)
 	} else {
-		service.bundles = bundles
-		logger.Debugf("Database service loaded %d databases", len(service.bundles))
+		service.bundleMetadata = bundles
+		logger.Debugf("Bundle service loaded %d bundle metadata", len(service.bundleMetadata))
 	}
 
 	return service
@@ -107,7 +118,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 
 	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
 
-	s.bundles[bundleCommand.BundleName] = bundle
+	s.bundleMetadata[bundleCommand.BundleName] = bundle
 	return nil
 }
 
@@ -117,6 +128,9 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 
 	// Add the bundle to the database
 	db.Bundles[bundle.Name] = *bundle
+
+	// Add the bundle to the service cache so it can be retrieved later with relationships intact
+	s.bundleMetadata[bundle.Name] = bundle
 
 	//This needs to be added to a bundle file
 	err := s.store.CreateBundleFile(db, bundle)
@@ -138,57 +152,212 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 	return nil
 }
 
-func (s *BundleService) GetBundleByName(database *models.Database, name string) (*models.Bundle, error) {
+// GetBundleMetadata retrieves only the bundle structure/metadata without documents
+func (s *BundleService) GetBundleMetadata(database *models.Database, name string) (*models.Bundle, error) {
 	args := settings.GetSettings()
 	fileExists := s.store.BundleFileExists(name)
-	//First, check to see if the bundle file exists in the store
+
+	// Check if the bundle file exists in the store
 	if !fileExists {
 		return nil, fmt.Errorf("bundle file '%s' does not exist on disk", name)
 	}
 
-	bundle, exists := s.bundles[name]
+	bundle, exists := s.bundleMetadata[name]
 	if !exists {
 		if fileExists {
-			// If the bundle exists in the store but not in memory, load it
+			// If the bundle exists in the store but not in memory, load metadata only
 			if args.Debug {
-				s.logger.Infof("Bundle '%s' not found in memory, loading from store", name)
+				s.logger.Infof("Bundle metadata '%s' not found in memory, loading from store", name)
 			}
 
-			bundle, err := s.store.LoadBundleDataFile(database, s.settings.DataDir, fmt.Sprintf("%s.bnd", name))
+			bundle, err := s.store.LoadBundleMetadata(database, s.settings.DataDir, fmt.Sprintf("%s.bnd", name))
 			if err != nil {
-				return nil, fmt.Errorf("failed to load bundle '%s': %w", name, err)
+				return nil, fmt.Errorf("failed to load bundle metadata '%s': %w", name, err)
 			}
 
 			if args.Debug {
-				s.logger.Infof("Loaded bundle '%s' from store", name)
+				s.logger.Infof("Loaded bundle metadata '%s' from store", name)
 			}
 
-			s.bundles[name] = bundle
-
+			s.bundleMetadata[name] = bundle
 			return bundle, nil
 		} else {
 			return nil, fmt.Errorf("bundle file exists in memory but not on disk. '%s'.bnd not found", name)
 		}
-
 	}
 
-	// prettyJSON, err := json.MarshalIndent(s.bundles[name], "", "  ")
-	// if err != nil {
-	// 	s.logger.Warnf("Failed to pretty-print bundle data: %v", err)
-	// } else {
-	// 	s.logger.Infof("RETURNING THE BUNDLE bundle data from file \n%s", string(prettyJSON))
-	// }
+	return bundle, nil
+}
+
+// GetDocumentPage loads a specific page of documents for a bundle
+func (s *BundleService) GetDocumentPage(bundleID string, pageID uint32) (*models.DocumentPage, error) {
+	pageKey := fmt.Sprintf("%s:%d", bundleID, pageID)
+
+	// Check if page is already loaded in memory
+	if page, exists := s.documentPages[pageKey]; exists {
+		s.logger.Debugf("Document page %s already loaded in memory", pageKey)
+		return page, nil
+	}
+
+	// Load the page from disk
+	s.logger.Debugf("Loading document page %s from disk", pageKey)
+	page, err := s.store.LoadDocumentPage(bundleID, pageID, s.settings.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load document page %s: %w", pageKey, err)
+	}
+
+	// Check if we need to evict old pages to stay within memory limits
+	if len(s.documentPages) >= s.maxLoadedPages {
+		s.evictOldestPage()
+	}
+
+	// Store in memory
+	s.documentPages[pageKey] = page
+	return page, nil
+}
+
+// GetDocument retrieves a specific document by ID (loads the page containing it)
+func (s *BundleService) GetDocument(bundleID, documentID string) (*models.Document, error) {
+	// First, find which page contains this document using an index
+	pageID, err := s.findDocumentPage(bundleID, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("could not find document %s in bundle %s: %w", documentID, bundleID, err)
+	}
+
+	// Load the page containing the document
+	page, err := s.GetDocumentPage(bundleID, pageID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract the document from the page
+	if doc, exists := page.Documents[documentID]; exists {
+		return &doc, nil
+	}
+
+	return nil, fmt.Errorf("document %s not found in page %d of bundle %s", documentID, pageID, bundleID)
+}
+
+// evictOldestPage removes the least recently used page from memory
+func (s *BundleService) evictOldestPage() {
+	var oldestKey string
+	var oldestTime time.Time
+
+	// Find the oldest page by LoadedAt timestamp
+	for key, page := range s.documentPages {
+		if oldestKey == "" || page.LoadedAt.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = page.LoadedAt
+		}
+	}
+
+	if oldestKey != "" {
+		s.logger.Debugf("Evicting document page %s from memory", oldestKey)
+
+		// If the page is dirty, write it back to disk first
+		if s.documentPages[oldestKey].IsDirty {
+			// TODO: Implement page write-back
+			s.logger.Debugf("Page %s is dirty, writing back to disk", oldestKey)
+		}
+
+		delete(s.documentPages, oldestKey)
+	}
+}
+
+// findDocumentPage uses indexes to determine which page contains a specific document
+func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, error) {
+	// TODO: Implement index-based page lookup
+	// For now, use a simple hash-based approach
+	// In production, this would use the bundle's indexes
+
+	// Simple hash-based page assignment (temporary implementation)
+	hash := s.simpleHash(documentID)
+
+	// Get bundle metadata to determine page count
+	bundle, exists := s.bundleMetadata[bundleID]
+	if !exists {
+		return 0, fmt.Errorf("bundle metadata not found for %s", bundleID)
+	}
+
+	if bundle.PageCount == 0 {
+		return 0, fmt.Errorf("bundle %s has no pages", bundleID)
+	}
+
+	pageID := uint32(hash % uint64(bundle.PageCount))
+	return pageID, nil
+}
+
+// getAllDocumentsForIndexing loads all documents from all pages for index building
+// This is a temporary method during the transition to page-based architecture
+func (s *BundleService) getAllDocumentsForIndexing(bundleID string) (map[string]models.Document, error) {
+	bundle, exists := s.bundleMetadata[bundleID]
+	if !exists {
+		return nil, fmt.Errorf("bundle metadata not found for %s", bundleID)
+	}
+
+	allDocuments := make(map[string]models.Document)
+
+	// Load all pages for this bundle
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.GetDocumentPage(bundleID, pageID)
+		if err != nil {
+			s.logger.Warnf("Failed to load page %d for bundle %s: %v", pageID, bundleID, err)
+			continue
+		}
+
+		// Add all documents from this page
+		for docID, doc := range page.Documents {
+			allDocuments[docID] = doc
+		}
+	}
+
+	return allDocuments, nil
+}
+
+// simpleHash provides a basic hash function for document ID to page mapping
+func (s *BundleService) simpleHash(input string) uint64 {
+	hash := uint64(0)
+	for _, c := range input {
+		hash = hash*31 + uint64(c)
+	}
+	return hash
+}
+
+// DEPRECATED: GetBundleByName - replaced with GetBundleMetadata
+// This method is kept temporarily for backward compatibility but should not load all documents
+func (s *BundleService) GetBundleByName(database *models.Database, name string) (*models.Bundle, error) {
+	// First, get the bundle metadata
+	bundle, err := s.GetBundleMetadata(database, name)
+	if err != nil {
+		return nil, err
+	}
+
+	// For backward compatibility, load all documents into the Documents field
+	// WARNING: This defeats the purpose of the scalable design and should be avoided
+	if bundle.TotalDocuments > 0 {
+		s.logger.Warnf("Loading ALL documents for bundle '%s' for legacy compatibility - this is not scalable!", name)
+
+		allDocuments, err := s.getAllDocumentsForIndexing(name)
+		if err != nil {
+			s.logger.Warnf("Failed to load documents for legacy compatibility: %v", err)
+			// Return metadata-only bundle
+			return bundle, nil
+		}
+
+		// Populate the deprecated Documents field
+		bundle.Documents = &allDocuments
+	}
 
 	return bundle, nil
 }
 
 func (s *BundleService) GetAllBundles() map[string]*models.Bundle {
-	return s.bundles
+	return s.bundleMetadata
 }
 
 func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
-	// Check if the bundle exists
-	bundle, exists := s.bundles[name]
+	// Check if the bundle exists in metadata
+	bundle, exists := s.bundleMetadata[name]
 	if !exists {
 		return fmt.Errorf("bundle '%s' not found", name)
 	}
@@ -199,9 +368,20 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 		return fmt.Errorf("failed to remove bundle from store: %w", err)
 	}
 
-	s.store.RemoveBundleFile(db, bundle.Name)
+	// Remove from metadata
+	delete(s.bundleMetadata, name)
 
-	delete(s.bundles, name)
+	// Remove any loaded document pages for this bundle
+	keysToDelete := make([]string, 0)
+	for pageKey := range s.documentPages {
+		if strings.HasPrefix(pageKey, name+":") {
+			keysToDelete = append(keysToDelete, pageKey)
+		}
+	}
+	for _, key := range keysToDelete {
+		delete(s.documentPages, key)
+	}
+
 	return nil
 }
 
@@ -581,10 +761,21 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 	}
 
 	// Populate the index with existing documents from the bundle
-	if bundle.Documents != nil && len(*bundle.Documents) > 0 {
-		s.logger.Debugf("Populating BTree index with %d existing documents", len(*bundle.Documents))
+	// TODO: Optimize this to work with paginated documents
+	s.logger.Debugf("Populating BTree index with documents from bundle '%s'", bundle.Name)
 
-		for documentID, document := range *bundle.Documents {
+	// For now, we need to load all documents to build the index
+	// In the future, this should be done incrementally as pages are loaded
+	allDocuments, err := s.getAllDocumentsForIndexing(bundle.Name)
+	if err != nil {
+		s.logger.Warnf("Failed to load documents for indexing: %v", err)
+		return err
+	}
+
+	if len(allDocuments) > 0 {
+		s.logger.Debugf("Populating BTree index with %d existing documents", len(allDocuments))
+
+		for documentID, document := range allDocuments {
 			// Extract the field value for indexing
 			fieldValue, err := extractFieldValueForIndex(document, fieldDef.Name)
 			if err != nil {
@@ -927,12 +1118,28 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		s.logger.Warnf("No indexes found for bundle '%s'", bundle.Name)
 	}
 
-	// Add document to in-memory bundle
-	(*s.bundles[docCommand.BundleName].Documents)[newDocument.DocumentID] = *newDocument
+	// Add document to in-memory bundle metadata (update document count)
+	s.bundleMetadata[docCommand.BundleName].TotalDocuments++
 
-	// Add document to bundle file
+	// Update page count if needed
+	bundleMetadata := s.bundleMetadata[docCommand.BundleName]
+
+	// Ensure PageSize is never zero to prevent divide by zero
+	if bundleMetadata.PageSize == 0 {
+		bundleMetadata.PageSize = 100 // Default page size
+		s.logger.Debugf("Set default PageSize of 100 for bundle '%s'", docCommand.BundleName)
+	}
+
+	newPageCount := (bundleMetadata.TotalDocuments + int64(bundleMetadata.PageSize) - 1) / int64(bundleMetadata.PageSize)
+	if newPageCount > bundleMetadata.PageCount {
+		bundleMetadata.PageCount = newPageCount
+	}
+
+	// Add document to bundle file (storage layer handles page allocation)
 	err = s.store.AddDocumentToBundleFile(bundle, newDocument)
 	if err != nil {
+		// Rollback metadata changes on failure
+		s.bundleMetadata[docCommand.BundleName].TotalDocuments--
 		return fmt.Errorf("failed to add document to bundle: %w", err)
 	}
 
@@ -940,8 +1147,22 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 }
 
 func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, bundle *models.Bundle, document *models.Document) error {
-	// Add the document to the in-memory bundle
-	(*s.bundles[bundle.Name].Documents)[document.DocumentID] = *document
+	// Update bundle metadata (increment document count)
+	s.bundleMetadata[bundle.Name].TotalDocuments++
+
+	// Update page count if needed
+	bundleMetadata := s.bundleMetadata[bundle.Name]
+
+	// Ensure PageSize is never zero to prevent divide by zero
+	if bundleMetadata.PageSize == 0 {
+		bundleMetadata.PageSize = 100 // Default page size
+		s.logger.Debugf("Set default PageSize of 100 for bundle '%s'", bundle.Name)
+	}
+
+	newPageCount := (bundleMetadata.TotalDocuments + int64(bundleMetadata.PageSize) - 1) / int64(bundleMetadata.PageSize)
+	if newPageCount > bundleMetadata.PageCount {
+		bundleMetadata.PageCount = newPageCount
+	}
 
 	if bundle.Indexes != nil {
 		// Look for the DocumentID hash index
@@ -1185,8 +1406,34 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			return fmt.Errorf("failed to remove document from bundle: %w", err)
 		}
 
-		// Remove from in-memory bundle
-		delete(*s.bundles[docCommand.BundleName].Documents, doc.DocumentID)
+		// Update bundle metadata (decrement document count)
+		s.bundleMetadata[docCommand.BundleName].TotalDocuments--
+
+		// Update page count if needed
+		bundleMetadata := s.bundleMetadata[docCommand.BundleName]
+
+		// Ensure PageSize is never zero to prevent divide by zero
+		if bundleMetadata.PageSize == 0 {
+			bundleMetadata.PageSize = 100 // Default page size
+			s.logger.Debugf("Set default PageSize of 100 for bundle '%s'", docCommand.BundleName)
+		}
+
+		newPageCount := (bundleMetadata.TotalDocuments + int64(bundleMetadata.PageSize) - 1) / int64(bundleMetadata.PageSize)
+		if newPageCount < bundleMetadata.PageCount {
+			bundleMetadata.PageCount = newPageCount
+		}
+
+		// Invalidate any loaded pages that might contain this document
+		// TODO: More efficient implementation would find the specific page
+		keysToDelete := make([]string, 0)
+		for pageKey := range s.documentPages {
+			if strings.HasPrefix(pageKey, docCommand.BundleName+":") {
+				keysToDelete = append(keysToDelete, pageKey)
+			}
+		}
+		for _, key := range keysToDelete {
+			delete(s.documentPages, key)
+		}
 	}
 	return nil
 }
@@ -1761,7 +2008,7 @@ func (s *BundleService) validateUpdateFields(bundle *models.Bundle, docCommand *
 			return fmt.Errorf("field '%s' type validation failed: %w", fieldName, err)
 		}
 
-		// Additional validation for unique fields could be added here
+		// todo:Additional validation for unique fields could be added here
 		// if fieldDef.IsUnique {
 		//     // TODO: Check if the new value would violate uniqueness constraint
 		// }

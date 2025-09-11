@@ -20,6 +20,9 @@ type DatabaseServiceInterface interface {
 	GetDatabaseByName(name string) (*models.Database, error)
 	ListDatabases() []*models.Database
 	AddBundleToDatabase(dbName string, bundle models.Bundle, bundleStore bundlestore.BundleStore) error
+	// Introspection methods
+	GetDatabaseBundles(databaseName string) ([]string, error)
+	GetBundleInfo(databaseName, bundleName string) (*models.Bundle, error)
 }
 
 // DatabaseService manages operations on databases
@@ -230,4 +233,43 @@ func (s *DatabaseService) AddBundleToDatabase(dbName string, bundle models.Bundl
 	}
 
 	return err
+}
+
+// GetDatabaseBundles returns a list of bundle names for a given database
+// Note: This method needs access to BundleService to get loaded bundles from buffer
+// The current implementation returns bundle names from the database's BundleFiles list
+func (s *DatabaseService) GetDatabaseBundles(databaseName string) ([]string, error) {
+	db, err := s.GetDatabaseByName(databaseName)
+	if err != nil {
+		return nil, fmt.Errorf("database '%s' not found: %w", databaseName, err)
+	}
+
+	// For now, return the bundle file names from the database metadata
+	// This lists the bundles that should be available for the database
+	bundleNames := make([]string, 0, len(db.BundleFiles))
+	for _, bundleFileName := range db.BundleFiles {
+		// Remove .bnd extension to get bundle name
+		bundleName := bundleFileName
+		if strings.HasSuffix(bundleName, ".bnd") {
+			bundleName = bundleName[:len(bundleName)-4]
+		}
+		bundleNames = append(bundleNames, bundleName)
+	}
+
+	return bundleNames, nil
+}
+
+// GetBundleInfo returns detailed information about a specific bundle
+func (s *DatabaseService) GetBundleInfo(databaseName, bundleName string) (*models.Bundle, error) {
+	db, err := s.GetDatabaseByName(databaseName)
+	if err != nil {
+		return nil, fmt.Errorf("database '%s' not found: %w", databaseName, err)
+	}
+
+	bundle, exists := db.Bundles[bundleName]
+	if !exists {
+		return nil, fmt.Errorf("bundle '%s' not found in database '%s'", bundleName, databaseName)
+	}
+
+	return &bundle, nil
 }

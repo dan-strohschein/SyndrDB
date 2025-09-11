@@ -7,15 +7,17 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/storage/format"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
+	"time"
 
 	// "syndrdb/src/buffermgr"
 	// "syndrdb/src/helpers"
 	// "syndrdb/src/settings"
 	"syscall"
-	"time"
 
 	"syndrdb/src/internal/storage/buffer"
 
@@ -29,6 +31,7 @@ type BundleStorageEngine struct {
 	fileManager   *buffer.FileManager
 	DataDirectory string
 	logger        *zap.SugaredLogger
+	serializer    format.BundleSerializer // Configurable serialization format
 }
 
 type BundleFactory interface {
@@ -36,9 +39,17 @@ type BundleFactory interface {
 }
 
 type BundleStore interface {
+	// Legacy methods for backward compatibility
 	LoadAllBundleDataFiles(dataRootDir string) (map[string]*models.Bundle, error)
 	LoadBundleDataFile(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error)
 	LoadBundleIntoMemory(database *models.Database, bundleName string) (*[]byte, *models.Bundle, error)
+
+	// New scalable methods for page-based bundle management
+	LoadAllBundleMetadata(dataRootDir string) (map[string]*models.Bundle, error)
+	LoadBundleMetadata(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error)
+	LoadDocumentPage(bundleID string, pageID uint32, dataRootDir string) (*models.DocumentPage, error)
+
+	// Bundle management
 	CreateBundleFile(database *models.Database, bundle *models.Bundle) error
 	UpdateBundleFile(database *models.Database, bundle *models.Bundle) error
 	UpdateDocumentDataInBundleFile(database *models.Database, bundle *models.Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
@@ -53,18 +64,23 @@ type BundleStore interface {
 	RemoveBundleFile(database *models.Database, bundleName string) error
 }
 
-func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.SugaredLogger) (*BundleStorageEngine, error) {
+func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.SugaredLogger, storageFormat string) (*BundleStorageEngine, error) {
 	// Create a buffer pool for file management
 	fileManager, err := buffer.NewFileManager(dataDir, bufferPool, logger)
 	if err != nil {
 		return nil, fmt.Errorf("could not create file manager: %w", err)
 	}
 
+	// Get the appropriate serializer based on format
+	serializer := format.GetSerializer(storageFormat)
+	logger.Infof("Bundle storage using %s format", serializer.GetFormatName())
+
 	// Create a new bundle store
 	store := &BundleStorageEngine{
 		DataDirectory: dataDir,
 		fileManager:   fileManager,
 		logger:        logger,
+		serializer:    serializer,
 	}
 
 	// Ensure the data directory exists
@@ -73,6 +89,255 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 	}
 
 	return store, nil
+}
+
+// LoadAllBundleMetadata loads only the bundle structure/metadata without documents
+func (bse *BundleStorageEngine) LoadAllBundleMetadata(dataDir string) (map[string]*models.Bundle, error) {
+	bundles := make(map[string]*models.Bundle)
+
+	// Read all files in the data directory
+	files, err := os.ReadDir(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read data directory '%s': %w", dataDir, err)
+	}
+
+	// Load each bundle metadata file
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".bnd") {
+			continue
+		}
+
+		bundleName := strings.TrimSuffix(file.Name(), ".bnd")
+		bundleMetadata, err := bse.loadBundleMetadataFromFile(dataDir, file.Name())
+		if err != nil {
+			bse.logger.Warnf("Failed to load bundle metadata '%s': %v", file.Name(), err)
+			continue
+		}
+
+		bundles[bundleName] = bundleMetadata
+		bse.logger.Debugf("Loaded bundle metadata for '%s'", bundleName)
+	}
+
+	bse.logger.Infof("Loaded metadata for %d bundles from '%s'", len(bundles), dataDir)
+	return bundles, nil
+}
+
+// LoadBundleMetadata loads only the bundle structure/metadata for a specific bundle
+func (bse *BundleStorageEngine) LoadBundleMetadata(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error) {
+	return bse.loadBundleMetadataFromFile(dataRootDir, fileName)
+}
+
+// loadBundleMetadataFromFile loads bundle metadata without documents using configured format
+func (bse *BundleStorageEngine) loadBundleMetadataFromFile(dataDir, fileName string) (*models.Bundle, error) {
+	filePath := filepath.Join(dataDir, fileName)
+
+	// Read the bundle file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bundle file '%s': %w", filePath, err)
+	}
+
+	// Try to deserialize using the configured format first
+	bundle, err := bse.serializer.DeserializeBundleMetadata(data)
+	if err != nil {
+		// If configured format fails, try legacy BSON format for backward compatibility
+		bse.logger.Debugf("Failed to parse with %s format, trying legacy BSON: %v", bse.serializer.GetFormatName(), err)
+		return bse.loadLegacyBundleMetadata(data, fileName)
+	}
+
+	return bundle, nil
+}
+
+// loadLegacyBundleMetadata handles legacy BSON format for backward compatibility
+func (bse *BundleStorageEngine) loadLegacyBundleMetadata(data []byte, fileName string) (*models.Bundle, error) {
+	// Try to parse as legacy BSON bundle file
+	bundleDataInterface, err := helpers.DecodeBSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse legacy BSON bundle file '%s': %w", fileName, err)
+	}
+
+	// Type assert to map[string]interface{}
+	bundleData, ok := bundleDataInterface.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("legacy bundle data is not a valid map structure")
+	}
+
+	// Extract metadata from legacy format
+	bundle := &models.Bundle{
+		Name:        getString(bundleData, "Name"),
+		Description: getString(bundleData, "Description"),
+		Permissions: getStringSlice(bundleData, "Permissions"),
+		CreatedBy:   getString(bundleData, "CreatedBy"),
+		CreatedAt:   getTime(bundleData, "CreatedAt"),
+		UpdatedAt:   getTime(bundleData, "UpdatedAt"),
+	}
+
+	// Extract document structure
+	if structData, ok := bundleData["DocumentStructure"].(map[string]interface{}); ok {
+		bundle.DocumentStructure = parseDocumentStructure(structData)
+	}
+
+	// Calculate pagination metadata from legacy Documents field
+	if documents, ok := bundleData["Documents"].(map[string]interface{}); ok {
+		bundle.TotalDocuments = int64(len(documents))
+		bundle.PageSize = 100 // Default page size for legacy bundles
+		bundle.PageCount = (bundle.TotalDocuments + int64(bundle.PageSize) - 1) / int64(bundle.PageSize)
+	} else {
+		// Ensure PageSize is set even when Documents field doesn't exist
+		bundle.PageSize = 100 // Default page size
+		bundle.TotalDocuments = 0
+		bundle.PageCount = 0
+	}
+
+	bse.logger.Debugf("Successfully loaded legacy bundle metadata for '%s' with %d documents", bundle.Name, bundle.TotalDocuments)
+	return bundle, nil
+}
+
+// LoadDocumentPage loads a specific page of documents for a bundle
+func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
+	filePath := filepath.Join(dataRootDir, fmt.Sprintf("%s.bnd", bundleID))
+
+	// Read the bundle file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bundle file '%s': %w", filePath, err)
+	}
+
+	// For legacy bundles, we need to load the full bundle with documents and then paginate
+	// Parse the full BSON data to get documents
+	bundleDataInterface, err := helpers.DecodeBSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse legacy BSON bundle file for document extraction: %w", err)
+	}
+
+	bundleData, ok := bundleDataInterface.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("legacy bundle data is not a valid map structure")
+	}
+
+	// Use MapToBundle to properly extract documents
+	fullBundle, err := MapToBundle(bundleData, *bse.logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert bundle data to bundle structure: %w", err)
+	}
+
+	// Extract documents for pagination
+	var allDocuments map[string]models.Document
+	if fullBundle.Documents != nil {
+		allDocuments = *fullBundle.Documents
+	} else {
+		allDocuments = make(map[string]models.Document)
+	}
+
+	// Calculate page boundaries
+	pageSize := uint32(100) // TODO: Make this configurable
+	startIndex := pageID * pageSize
+	endIndex := startIndex + pageSize
+
+	// Extract documents for this page
+	pageDocuments := make(map[string]models.Document)
+	index := uint32(0)
+
+	for docID, doc := range allDocuments {
+		if index >= startIndex && index < endIndex {
+			pageDocuments[docID] = doc
+		}
+		index++
+
+		if index >= endIndex {
+			break
+		}
+	}
+
+	page := &models.DocumentPage{
+		PageID:    pageID,
+		BundleID:  bundleID,
+		Documents: pageDocuments,
+		LoadedAt:  time.Now(),
+		IsDirty:   false,
+	}
+
+	// Set pagination pointers
+	if pageID > 0 {
+		prevPageID := pageID - 1
+		page.PreviousPageID = &prevPageID
+	}
+
+	totalDocs := uint32(len(allDocuments))
+	totalPages := (totalDocs + pageSize - 1) / pageSize
+	if pageID < totalPages-1 {
+		nextPageID := pageID + 1
+		page.NextPageID = &nextPageID
+	}
+
+	return page, nil
+}
+
+// Helper functions for parsing bundle metadata
+func getString(data map[string]interface{}, key string) string {
+	if val, ok := data[key].(string); ok {
+		return val
+	}
+	return ""
+}
+
+func getStringSlice(data map[string]interface{}, key string) []string {
+	if val, ok := data[key].([]interface{}); ok {
+		result := make([]string, len(val))
+		for i, v := range val {
+			if str, ok := v.(string); ok {
+				result[i] = str
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+func getTime(data map[string]interface{}, key string) time.Time {
+	if val, ok := data[key].(string); ok {
+		if t, err := time.Parse(time.RFC3339, val); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func getDatabase(data map[string]interface{}, key string) *models.Database {
+	if val, ok := data[key].(map[string]interface{}); ok {
+		return &models.Database{
+			Name:        getString(val, "Name"),
+			Description: getString(val, "Description"),
+		}
+	}
+	return nil
+}
+
+func parseDocumentStructure(data map[string]interface{}) models.DocumentStructure {
+	structure := models.DocumentStructure{}
+
+	if fields, ok := data["FieldDefinitions"].(map[string]interface{}); ok {
+		structure.FieldDefinitions = make(map[string]models.FieldDefinition)
+		for fieldName, fieldData := range fields {
+			if fieldMap, ok := fieldData.(map[string]interface{}); ok {
+				structure.FieldDefinitions[fieldName] = models.FieldDefinition{
+					Name:       getString(fieldMap, "Name"),
+					Type:       getString(fieldMap, "Type"),
+					IsRequired: getBool(fieldMap, "Required"),
+					IsUnique:   getBool(fieldMap, "Unique"),
+				}
+			}
+		}
+	}
+
+	return structure
+}
+
+func getBool(data map[string]interface{}, key string) bool {
+	if val, ok := data[key].(bool); ok {
+		return val
+	}
+	return false
 }
 
 // LoadAllBundleDataFiles loads all bundle data files from the given directory

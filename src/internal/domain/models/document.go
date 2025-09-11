@@ -7,6 +7,7 @@ import (
 type Document struct {
 	DocumentID string
 	Fields     map[string]Field
+	Data       map[string]interface{} // Raw document data for storage compatibility
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }

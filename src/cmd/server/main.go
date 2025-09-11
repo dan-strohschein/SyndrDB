@@ -56,8 +56,9 @@ func main() {
 	flag.BoolVar(&args.UserDebug, "userdebug", false, "Enable user debug mode")
 	flag.BoolVar(&args.EnableGraphQL, "graphql", false, "Enable GraphQL API")
 	flag.StringVar(&args.LogLevel, "loglevel", "info", "Log level: debug, info, warn, error")
+	flag.StringVar(&args.BundleStorageFormat, "bundle-format", "binary", "Bundle storage format: json or binary")
 
-	// Parse the command line
+	// Parse command line arguments
 	flag.Parse()
 
 	timestamp := time.Now().Format("2006-01-02_15-04-05")

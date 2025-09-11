@@ -51,6 +51,9 @@ type Arguments struct {
 	Version string // Show version information
 
 	EnableGraphQL bool // Enable GraphQL API
+
+	// Bundle storage format configuration
+	BundleStorageFormat string // Storage format: "json" or "binary" (default: "json")
 }
 
 var (
@@ -64,16 +67,17 @@ func GetSettings() *Arguments {
 	once.Do(func() {
 		instance = &Arguments{
 			// Default values
-			DataDir:         "./data",
-			LogDir:          "",
-			ConfigFile:      "",
-			Mode:            "standalone",
-			Host:            "0.0.0.0",
-			Port:            27017,
-			Verbose:         false,
-			AuthEnabled:     false,
-			CreateDefaultDB: true,
-			Version:         "0.1.0",
+			DataDir:             "./data",
+			LogDir:              "",
+			ConfigFile:          "",
+			Mode:                "standalone",
+			Host:                "0.0.0.0",
+			Port:                27017,
+			Verbose:             false,
+			AuthEnabled:         false,
+			CreateDefaultDB:     true,
+			Version:             "0.1.0",
+			BundleStorageFormat: "json", // Default to JSON for development
 		}
 	})
 	return instance
@@ -113,5 +117,9 @@ func UpdateSettings(args Arguments) {
 
 	if args.Version != "" {
 		instance.Version = args.Version
+	}
+
+	if args.BundleStorageFormat != "" {
+		instance.BundleStorageFormat = args.BundleStorageFormat
 	}
 }

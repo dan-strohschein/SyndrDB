@@ -28,12 +28,17 @@ func (f *BundleFactoryImpl) NewBundle(name string, description string) *models.B
 	return &models.Bundle{
 		BundleID:          helpers.GenerateUUID(),
 		Name:              name,
+		Description:       description,
 		DocumentStructure: models.DocumentStructure{FieldDefinitions: make(map[string]models.FieldDefinition)},
 		Documents:         func() *map[string]models.Document { m := make(map[string]models.Document); return &m }(),
 		Relationships:     make(map[string]models.Relationship),
 		Indexes:           make(map[string]models.IndexReference),
 		IndexNames:        []string{},
 		Constraints:       make(map[string]models.Constraint),
+		// Initialize pagination metadata to prevent divide by zero
+		TotalDocuments: 0,
+		PageSize:       100, // Default page size
+		PageCount:      0,
 	}
 }
 

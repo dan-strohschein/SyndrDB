@@ -53,6 +53,10 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	if strings.HasPrefix(strings.ToLower(command), "show") {
 		// Parse SHOW command
 		switch strings.ToLower(commandParts[1]) {
+		case "databases":
+			return ShowDatabases(command, logger, serviceManager)
+		case "bundles":
+			return ShowBundles(command, database, logger, serviceManager)
 		case "sessions":
 			return ShowSessions(command, logger, serviceManager)
 		case "session":
@@ -1564,5 +1568,84 @@ func ShowRateLimit(command string, logger *zap.SugaredLogger, serviceManager Ser
 		},
 	}
 
+	return response, nil
+}
+
+// ShowDatabases shows all available databases
+// Syntax: SHOW DATABASES
+func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing SHOW DATABASES command: %s", command)
+
+	// Get the list of databases from the database service
+	databases := serviceManager.DatabaseService.ListDatabases()
+
+	// Extract database names for the response
+	databaseNames := make([]string, len(databases))
+	for i, db := range databases {
+		databaseNames[i] = db.Name
+	}
+
+	response := &CommandResponse{
+		ResultCount: len(databaseNames),
+		Result:      databaseNames,
+	}
+
+	logger.Infof("Found %d databases", len(databaseNames))
+	return response, nil
+}
+
+// ShowBundles shows all bundles in a specific database
+// Syntax: SHOW BUNDLES
+func ShowBundles(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing SHOW BUNDLES command: %s", command)
+
+	if database == nil {
+		return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
+	}
+
+	// Get the primary database to access the system catalog
+	primaryDB := serviceManager.DatabaseService.Databases["primary"]
+	if primaryDB == nil {
+		return nil, fmt.Errorf("primary database not found - system catalogs unavailable")
+	}
+
+	// Get the Bundles bundle from the primary database
+	bundlesBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Bundles")
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve Bundles catalog: %w", err)
+	}
+
+	// Query for bundles that belong to the current database using WHERE clause
+	whereClause := fmt.Sprintf("DatabaseID == \"%s\"", database.DatabaseID)
+	matchingDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundlesBundle, whereClause)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query bundles for database %s: %w", database.Name, err)
+	}
+
+	// Extract bundle information from the matching documents
+	var bundleInfos []map[string]interface{}
+	for _, doc := range matchingDocs {
+		bundleInfo := make(map[string]interface{})
+
+		// Extract relevant fields from the document
+		if nameField, exists := doc.Fields["Name"]; exists {
+			bundleInfo["Name"] = nameField.Value
+		}
+		if bundleIDField, exists := doc.Fields["BundleID"]; exists {
+			bundleInfo["BundleID"] = bundleIDField.Value
+		}
+		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
+			bundleInfo["DatabaseID"] = dbIDField.Value
+		}
+
+		bundleInfos = append(bundleInfos, bundleInfo)
+	}
+
+	response := &CommandResponse{
+		ResultCount: len(bundleInfos),
+		Result:      bundleInfos,
+	}
+
+	logger.Infof("Found %d bundles in database %s from system catalog", len(bundleInfos), database.Name)
 	return response, nil
 }

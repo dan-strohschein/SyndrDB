@@ -36,26 +36,35 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		Name:              "Databases",
 		DocumentStructure: docStructure,
 		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, dbBundle)
 
 	// create bundles bundle
-	// bundles_docStructure := models.DocumentStructure{
-	// 	FieldDefinitions: map[string]models.FieldDefinition{
-	// 		"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
-	// 		"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-	// 		"BundleID":   {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-	// 		"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-	// 		"FilePath":   {Name: "FilePath", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
-	// 	},
-	// }
-	// bundles_Bundle := &models.Bundle{
-	// 	BundleID:          helpers.GenerateUUID(),
-	// 	Name:              "Bundles",
-	// 	DocumentStructure: bundles_docStructure,
-	// 	Documents:         &map[string]models.Document{},
-	// }
-	// bundleService.AddBundleByStruct(databaseService, db, bundles_Bundle)
+	bundles_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleID":   {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+		},
+	}
+	bundles_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "Bundles",
+		DocumentStructure: bundles_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, bundles_Bundle)
 
 	// create users bundle
 	users_docStructure := models.DocumentStructure{
@@ -75,6 +84,11 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		Name:              "Users",
 		DocumentStructure: users_docStructure,
 		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, users_Bundle)
 
@@ -91,6 +105,11 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		Name:              "Permissions",
 		DocumentStructure: permissions_docStructure,
 		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, permissions_Bundle)
 
@@ -108,6 +127,11 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		Name:              "UserPermissions",
 		DocumentStructure: userPermissions_docStructure,
 		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, userPermissions_Bundle)
 
@@ -124,8 +148,59 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		Name:              "DatabaseUsers",
 		DocumentStructure: databaseUsers_docStructure,
 		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, databaseUsers_Bundle)
+
+	// create roles bundle
+	roles_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"RoleID":       {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"PermissionID": {Name: "PermissionID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+		},
+	}
+	roles_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "Roles",
+		DocumentStructure: roles_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, roles_Bundle)
+
+	usersRoles_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+
+			"RoleID": {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"UserID": {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+		},
+	}
+	userRoles_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "UserRoles",
+		DocumentStructure: usersRoles_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, userRoles_Bundle)
+
+	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
+	// This ensures all bundle files are properly written before we try to add relationships
 
 	// Add relationships between bundles as needed
 	userPermissions_relationshipCmd := &models.RelationshipCommand{
@@ -176,6 +251,278 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		logger.Warnf("Warning: Failed to add relationship to Databases bundle: %v", err)
 	}
 
+	databaseBundles_relationshipCmd1 := &models.RelationshipCommand{
+		RelationshipType:  "1toMany",
+		SourceBundle:      "Databases",
+		SourceField:       "DatabaseID",
+		DestinationBundle: "Bundles",
+		DestinationField:  "DatabaseID",
+	}
+	err = bundleService.AddRelationshipToBundle(dbBundle, databaseBundles_relationshipCmd1)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add relationship to Bundles bundle: %v", err)
+	}
+
+	RolesPermissions_relationshipCmd2 := &models.RelationshipCommand{
+		RelationshipType:  "1toMany",
+		SourceBundle:      "Permissions",
+		SourceField:       "PermissionID",
+		DestinationBundle: "Roles",
+		DestinationField:  "RoleID",
+	}
+	err = bundleService.AddRelationshipToBundle(roles_Bundle, RolesPermissions_relationshipCmd2)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add relationship to Roles bundle: %v", err)
+	}
+
+	UserRolesUser_relationshipCmd2 := &models.RelationshipCommand{
+		RelationshipType:  "1toMany",
+		SourceBundle:      "Users",
+		SourceField:       "UserID",
+		DestinationBundle: "UserRoles",
+		DestinationField:  "UserID",
+	}
+	err = bundleService.AddRelationshipToBundle(users_Bundle, UserRolesUser_relationshipCmd2)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add relationship to Roles bundle: %v", err)
+	}
+
+	UserRolesRole_relationshipCmd2 := &models.RelationshipCommand{
+		RelationshipType:  "1toMany",
+		SourceBundle:      "Roles",
+		SourceField:       "RoleID",
+		DestinationBundle: "UserRoles",
+		DestinationField:  "RoleID",
+	}
+	err = bundleService.AddRelationshipToBundle(roles_Bundle, UserRolesRole_relationshipCmd2)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add relationship to Roles bundle: %v", err)
+	}
+
+	return nil
+}
+
+func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
+	storageEngine *databasestore.DatabaseStorageEngine,
+	logger *zap.SugaredLogger,
+	bundleService *bundle.BundleService) error {
+
+	primaryDBID := databaseService.Databases["primary"].DatabaseID
+	dbBundle := databaseService.Databases["primary"].Bundles["Databases"]
+	bundles_Bundle := databaseService.Databases["primary"].Bundles["Bundles"]
+	permissionsBundle := databaseService.Databases["primary"].Bundles["Permissions"]
+	rolesBundle := databaseService.Databases["primary"].Bundles["Roles"]
+	usersBundle := databaseService.Databases["primary"].Bundles["Users"]
+	userPermissionsBundle := databaseService.Databases["primary"].Bundles["UserPermissions"]
+	databaseUsersBundle := databaseService.Databases["primary"].Bundles["DatabaseUsers"]
+	userRolesBundle := databaseService.Databases["primary"].Bundles["UserRoles"]
+
+	// Database Bundle Document
+	field1 := models.Field{
+		Name:  "DatabaseID",
+		Value: primaryDBID,
+	}
+	dbBundleIdField := models.Field{
+		Name:  "BundleID",
+		Value: dbBundle.BundleID,
+	}
+	field2 := models.Field{
+		Name:  "Name",
+		Value: dbBundle.Name,
+	}
+	fields := map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	dbBundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err := bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, dbBundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add DB document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// Bundles Bundle Document
+
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: bundles_Bundle.BundleID,
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: bundles_Bundle.Name,
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	bundles_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, bundles_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add Bundles document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// permissions Bundle Document
+
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: permissionsBundle.BundleID,
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: permissionsBundle.Name,
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	permissions_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, permissions_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add Permissions document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// Roles Bundle Document
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: rolesBundle.BundleID,
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: rolesBundle.Name,
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	roles_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, roles_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add Roles document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// Users Bundle Document
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: usersBundle.BundleID,
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: usersBundle.Name,
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	users_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, users_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add Users document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// userPermissions Bundle Document
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: userPermissionsBundle.BundleID,
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: userPermissionsBundle.Name,
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	userPermissions_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, userPermissions_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add User Permissions document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// databaseUsers Bundle Document
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: databaseUsersBundle.BundleID,
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: databaseUsersBundle.Name,
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	databaseUsers_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, databaseUsers_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add Database Users document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// userRoles Bundle Document
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: userRolesBundle.BundleID,
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: userRolesBundle.Name,
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	userRoles_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateUUID(),
+		Fields:     fields,
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, userRoles_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add User Roles document to Bundles bundle: %v", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -199,12 +546,12 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 			Value: helpers.GenerateUUID(),
 		}
 		field2 := models.Field{
-			Name:  "Permission",
+			Name:  "Name",
 			Value: permission,
 		}
 		fields := map[string]models.Field{}
 		fields["PermissionID"] = field1
-		fields["Permission"] = field2
+		fields["Name"] = field2
 		doc := &models.Document{
 			DocumentID: helpers.GenerateUUID(),
 			Fields:     fields,
@@ -213,6 +560,47 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], permissionsBundle, doc)
 		if err != nil {
 			logger.Warnf("Warning: Failed to add document to Permissions bundle: %v", err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
+	storageEngine *databasestore.DatabaseStorageEngine,
+
+	logger *zap.SugaredLogger,
+	bundleService *bundle.BundleService) error {
+
+	// Add the roles to the roles bundle. Start with Dbo, Data-Reader, Data-Writer
+	roles := []string{"Dbo", "Data-Reader", "Data-Writer"}
+	rolesBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "Roles")
+	if err != nil {
+		logger.Warnf("Warning: Failed to get Roles bundle: %v", err)
+		return err
+	}
+
+	for _, role := range roles {
+		field1 := models.Field{
+			Name:  "RoleID",
+			Value: helpers.GenerateUUID(),
+		}
+		field2 := models.Field{
+			Name:  "Name",
+			Value: role,
+		}
+		fields := map[string]models.Field{}
+		fields["RoleID"] = field1
+		fields["Name"] = field2
+		doc := &models.Document{
+			DocumentID: helpers.GenerateUUID(),
+			Fields:     fields,
+		}
+
+		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesBundle, doc)
+		if err != nil {
+			logger.Warnf("Warning: Failed to add document to Roles bundle: %v", err)
 			return err
 		}
 	}

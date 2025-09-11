@@ -21,3 +21,5 @@ bin/tests/temp_files
 bin/tests/data_files
 bin/tests/log_files
 .venv
+
+.VSCodeCounter

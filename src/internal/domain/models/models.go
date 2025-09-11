@@ -33,11 +33,28 @@ type Bundle struct {
 	// Name is the name of the bundle.
 	Name string
 
+	// Description is the description of the bundle.
+	Description string
+
+	// Permissions are the permissions for the bundle.
+	Permissions []string
+
+	// CreatedBy is the user who created the bundle.
+	CreatedBy string
+
+	// CreatedAt is when the bundle was created.
+	CreatedAt time.Time
+
+	// UpdatedAt is when the bundle was last updated.
+	UpdatedAt time.Time
+
 	// A description of the document structure, similar to a schema/table definition.
 	DocumentStructure DocumentStructure
 
-	// A list of documents in the bundle, similar to rows in a table.
-	Documents *map[string]Document
+	// Document storage is now page-based for scalability
+	// DEPRECATED: Documents field kept for backward compatibility with legacy storage methods
+	// New code should use DocumentPages via BundleService.GetDocumentPage()
+	Documents *map[string]Document `json:"Documents,omitempty"`
 
 	// Track indexes by name -> reference
 	Indexes    map[string]IndexReference
@@ -47,6 +64,23 @@ type Bundle struct {
 	Constraints   map[string]Constraint
 
 	Database *Database `json:"-"` // Reference to the parent database
+
+	// New fields for scalable document management
+	TotalDocuments int64 // Total number of documents in this bundle
+	PageCount      int64 // Total number of document pages
+	PageSize       int   // Number of documents per page (default: 1000)
+}
+
+// DocumentPage represents a page of documents for scalable loading
+type DocumentPage struct {
+	PageID         uint32              // Unique page identifier within bundle
+	BundleID       string              // Bundle this page belongs to
+	Documents      map[string]Document // Limited set of documents in this page
+	NextPageID     *uint32             // Pointer to next page (for sequential access)
+	PreviousPageID *uint32             // Pointer to previous page (for sequential access)
+	IsDirty        bool                // Whether this page has been modified
+	LoadedAt       time.Time           // When this page was loaded into memory
+	DocumentCount  int                 // Number of documents in this page
 }
 
 type DocumentStructure struct {

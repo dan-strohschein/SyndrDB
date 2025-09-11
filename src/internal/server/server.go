@@ -153,7 +153,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	bufferPool := buffer.NewBufferPool(config.BundleBufferSize, buffer.DefaultPageSize, fileRegistry, sugar)
 
 	// Create bundle service
-	bundleStore, err := bundlestore.NewBundleStore(config.DataDir, bufferPool, logger.Sugar())
+	bundleStore, err := bundlestore.NewBundleStore(config.DataDir, bufferPool, logger.Sugar(), config.BundleStorageFormat)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bundle store: %w", err)
 	}
@@ -290,9 +290,31 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 			log.Printf("Created primary default database with ID %s", defaultDB.DatabaseID)
 		}
 
+		databaseService.Databases[defaultDB.Name] = defaultDB
+
 		err = defaultdb.InitPrimaryBundleCatalogs(databaseService, databaseStore, defaultDB, sugar, bundleService)
 		if err != nil {
 			log.Printf("Warning: Failed to initialize default database catalogs: %v", err)
+		}
+
+		err = defaultdb.HydrateBundlesPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+		if err != nil {
+			log.Printf("Warning: Failed to hydrate default database bundle catalog: %v", err)
+		}
+
+		err = defaultdb.HydratePermissionPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+		if err != nil {
+			log.Printf("Warning: Failed to hydrate default database permission catalog: %v", err)
+		}
+
+		err = defaultdb.HydrateRolesPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+		if err != nil {
+			log.Printf("Warning: Failed to hydrate default database roles catalog: %v", err)
+		}
+
+		err = defaultdb.HydrateUserPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+		if err != nil {
+			log.Printf("Warning: Failed to hydrate default database user catalog: %v", err)
 		}
 	}
 
