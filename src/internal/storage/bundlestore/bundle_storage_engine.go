@@ -175,6 +175,11 @@ func (bse *BundleStorageEngine) loadLegacyBundleMetadata(data []byte, fileName s
 	// Extract document structure
 	if structData, ok := bundleData["DocumentStructure"].(map[string]interface{}); ok {
 		bundle.DocumentStructure = parseDocumentStructure(structData)
+	} else {
+		// Initialize empty DocumentStructure if not present in legacy data
+		bundle.DocumentStructure = models.DocumentStructure{
+			FieldDefinitions: make(map[string]models.FieldDefinition),
+		}
 	}
 
 	// Calculate pagination metadata from legacy Documents field
@@ -316,8 +321,10 @@ func getDatabase(data map[string]interface{}, key string) *models.Database {
 func parseDocumentStructure(data map[string]interface{}) models.DocumentStructure {
 	structure := models.DocumentStructure{}
 
+	// Always initialize FieldDefinitions as an empty map
+	structure.FieldDefinitions = make(map[string]models.FieldDefinition)
+
 	if fields, ok := data["FieldDefinitions"].(map[string]interface{}); ok {
-		structure.FieldDefinitions = make(map[string]models.FieldDefinition)
 		for fieldName, fieldData := range fields {
 			if fieldMap, ok := fieldData.(map[string]interface{}); ok {
 				structure.FieldDefinitions[fieldName] = models.FieldDefinition{

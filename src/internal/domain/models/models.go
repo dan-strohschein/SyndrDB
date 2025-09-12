@@ -28,28 +28,28 @@ type Database struct {
 
 type Bundle struct {
 	// BundleID is the unique identifier for the bundle.
-	BundleID string
+	BundleID string `bson:"BundleID" json:"BundleID"`
 
 	// Name is the name of the bundle.
-	Name string
+	Name string `bson:"Name" json:"Name"`
 
 	// Description is the description of the bundle.
-	Description string
+	Description string `bson:"Description" json:"Description"`
 
 	// Permissions are the permissions for the bundle.
-	Permissions []string
+	Permissions []string `bson:"Permissions" json:"Permissions"`
 
 	// CreatedBy is the user who created the bundle.
-	CreatedBy string
+	CreatedBy string `bson:"CreatedBy" json:"CreatedBy"`
 
 	// CreatedAt is when the bundle was created.
-	CreatedAt time.Time
+	CreatedAt time.Time `bson:"CreatedAt" json:"CreatedAt"`
 
 	// UpdatedAt is when the bundle was last updated.
-	UpdatedAt time.Time
+	UpdatedAt time.Time `bson:"UpdatedAt" json:"UpdatedAt"`
 
 	// A description of the document structure, similar to a schema/table definition.
-	DocumentStructure DocumentStructure
+	DocumentStructure DocumentStructure `bson:"DocumentStructure" json:"DocumentStructure"`
 
 	// Document storage is now page-based for scalability
 	// DEPRECATED: Documents field kept for backward compatibility with legacy storage methods
@@ -84,15 +84,15 @@ type DocumentPage struct {
 }
 
 type DocumentStructure struct {
-	FieldDefinitions map[string]FieldDefinition
+	FieldDefinitions map[string]FieldDefinition `bson:"FieldDefinitions" json:"FieldDefinitions"`
 }
 
 type FieldDefinition struct {
-	Name         string
-	Type         string
-	IsRequired   bool // Indicates if the field can be null
-	IsUnique     bool
-	DefaultValue interface{} // Optional default value for the field
+	Name         string      `bson:"Name" json:"Name"`
+	Type         string      `bson:"Type" json:"Type"`
+	IsRequired   bool        `bson:"Required" json:"Required"` // Indicates if the field can be null
+	IsUnique     bool        `bson:"Unique" json:"Unique"`
+	DefaultValue interface{} `bson:"DefaultValue" json:"DefaultValue"` // Optional default value for the field
 }
 
 type Field struct {

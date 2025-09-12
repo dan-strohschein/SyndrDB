@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
@@ -57,6 +58,8 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			return ShowDatabases(command, logger, serviceManager)
 		case "bundles":
 			return ShowBundles(command, database, logger, serviceManager)
+		case "bundle":
+			return ShowBundle(command, database, logger, serviceManager)
 		case "sessions":
 			return ShowSessions(command, logger, serviceManager)
 		case "session":
@@ -1648,4 +1651,83 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 
 	logger.Infof("Found %d bundles in database %s from system catalog", len(bundleInfos), database.Name)
 	return response, nil
+}
+
+// ShowBundle handles the "SHOW BUNDLE "<BUNDLE_NAME>";" command
+func ShowBundle(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing SHOW BUNDLE command: %s", command)
+
+	if database == nil {
+		return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
+	}
+
+	// Parse the bundle name from the command
+	// Expected format: SHOW BUNDLE "<BUNDLE_NAME>";
+	bundleName, err := parseBundleNameFromShowCommand(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse bundle name from command: %w", err)
+	}
+
+	// Get the bundle metadata (without documents) from the bundle service
+	bundle, err := serviceManager.BundleService.GetBundleMetadata(database, bundleName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve bundle '%s': %w", bundleName, err)
+	}
+
+	// Convert bundle to a response-friendly format
+	bundleInfo := map[string]interface{}{
+		"Name":           bundle.Name,
+		"BundleID":       bundle.BundleID,
+		"Description":    bundle.Description,
+		"CreatedBy":      bundle.CreatedBy,
+		"CreatedAt":      bundle.CreatedAt,
+		"UpdatedAt":      bundle.UpdatedAt,
+		"Permissions":    bundle.Permissions,
+		"PageCount":      bundle.PageCount,
+		"TotalDocuments": bundle.TotalDocuments,
+	}
+
+	// Always include document structure information (even if empty)
+	bundleInfo["DocumentStructure"] = bundle.DocumentStructure
+
+	// Debug logging to see what we have
+	logger.Debugf("Bundle DocumentStructure: %+v", bundle.DocumentStructure)
+	logger.Debugf("FieldDefinitions count: %d", len(bundle.DocumentStructure.FieldDefinitions))
+
+	// Include indexes information if available
+	if len(bundle.Indexes) > 0 {
+		bundleInfo["Indexes"] = bundle.Indexes
+	}
+
+	// Include relationships information if available
+	if len(bundle.Relationships) > 0 {
+		bundleInfo["Relationships"] = bundle.Relationships
+	}
+
+	// Include constraints information if available
+	if len(bundle.Constraints) > 0 {
+		bundleInfo["Constraints"] = bundle.Constraints
+	}
+
+	response := &CommandResponse{
+		ResultCount: 1,
+		Result:      bundleInfo,
+	}
+
+	logger.Infof("Retrieved metadata for bundle '%s' in database %s", bundleName, database.Name)
+	return response, nil
+}
+
+// parseBundleNameFromShowCommand extracts the bundle name from SHOW BUNDLE "<NAME>" command
+func parseBundleNameFromShowCommand(command string) (string, error) {
+	// Expected format: SHOW BUNDLE "<BUNDLE_NAME>";
+	// Find the quoted bundle name
+	re := regexp.MustCompile(`(?i)show\s+bundle\s+"([^"]+)"`)
+	matches := re.FindStringSubmatch(command)
+
+	if len(matches) < 2 {
+		return "", fmt.Errorf("invalid SHOW BUNDLE command format. Expected: SHOW BUNDLE \"<bundle_name>\";")
+	}
+
+	return matches[1], nil
 }
