@@ -64,6 +64,8 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			return ShowSessions(command, logger, serviceManager)
 		case "session":
 			return ShowSession(command, logger, serviceManager)
+		case "users":
+			return ShowUsers(command, database, logger, serviceManager)
 		case "rate":
 			if len(commandParts) > 2 && strings.ToLower(commandParts[2]) == "limit" {
 				return ShowRateLimit(command, logger, serviceManager)
@@ -1715,6 +1717,55 @@ func ShowBundle(command string, database *models.Database, logger *zap.SugaredLo
 	}
 
 	logger.Infof("Retrieved metadata for bundle '%s' in database %s", bundleName, database.Name)
+	return response, nil
+}
+
+// ShowUsers shows all documents in the Users bundle from the primary database
+// Syntax: SHOW USERS;
+func ShowUsers(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing SHOW USERS command: %s", command)
+
+	// Always use the primary database for system catalogs like Users
+	primaryDB := serviceManager.DatabaseService.Databases["primary"]
+	if primaryDB == nil {
+		return nil, fmt.Errorf("primary database not found - system catalogs unavailable")
+	}
+
+	// Get the Users bundle from the primary database
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve Users bundle: %w", err)
+	}
+
+	// Get all documents from the Users bundle (empty WHERE clause returns all)
+	userDocs, err := serviceManager.BundleService.GetDocumentsByFilter(usersBundle, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve user documents: %w", err)
+	}
+
+	// Convert documents to response format
+	var users []map[string]interface{}
+	for _, doc := range userDocs {
+		user := make(map[string]interface{})
+
+		// Extract relevant user fields from the document
+		for fieldName, field := range doc.Fields {
+			// Skip sensitive fields like password hash
+			if fieldName != "PasswordHash" {
+				user[fieldName] = field.Value
+			}
+		}
+
+		users = append(users, user)
+	}
+
+	response := &CommandResponse{
+		ResultCount: len(users),
+		Result:      users,
+	}
+
+	logger.Infof("Retrieved %d users from Users bundle", len(users))
+
 	return response, nil
 }
 
