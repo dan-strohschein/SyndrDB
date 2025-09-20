@@ -53,16 +53,19 @@ func NewDatabaseService(store databasestore.DatabaseStore, factory DatabaseFacto
 	} else {
 		service.Databases = databases
 		logger.Debugf("Database service loaded %d databases", len(databases))
+
+		// Register non-primary databases in the system catalog
+		service.syncDatabaseCatalog(logger)
 	}
 
 	return service
 }
 
-func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) error {
+func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) (*models.Database, error) {
 
 	// Check if the database already exists
 	if _, err := s.GetDatabaseByName(databaseCommand.DatabaseName); err == nil {
-		return fmt.Errorf("database '%s' already exists", databaseCommand.DatabaseName)
+		return nil, fmt.Errorf("database '%s' already exists", databaseCommand.DatabaseName)
 	}
 
 	db := s.Factory.NewDatabase(databaseCommand.DatabaseName, "")
@@ -74,7 +77,7 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) er
 	// Create the database data file
 	err := s.Store.CreateDatabaseDataFile(db)
 	if err != nil {
-		return fmt.Errorf("failed to create database data file: %w", err)
+		return nil, fmt.Errorf("failed to create database data file: %w", err)
 	}
 
 	// Register the new database in the Primary database's "Databases" bundle
@@ -87,7 +90,7 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) er
 		}
 	}
 
-	return nil
+	return db, nil
 }
 
 // registerDatabaseInPrimary adds the new database to the "Databases" bundle in the Primary database
@@ -126,8 +129,58 @@ func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) erro
 	// Update the bundle back in the database
 	primaryDB.Bundles["Databases"] = databasesBundle
 
+	// Persist the updated primary database to disk
+	err = s.Store.UpdateDatabaseDataFile(primaryDB)
+	if err != nil {
+		return fmt.Errorf("failed to persist primary database after registering new database: %w", err)
+	}
+
 	s.Logger.Infof("Registered database '%s' (ID: %s) in Primary database", newDB.Name, newDB.DatabaseID)
 	return nil
+}
+
+// syncDatabaseCatalog ensures all loaded databases are registered in the primary.Databases catalog
+func (s *DatabaseService) syncDatabaseCatalog(logger *zap.SugaredLogger) {
+	// Wait for primary database to be available
+	primaryDB, err := s.GetDatabaseByName("primary")
+	if err != nil {
+		logger.Debugf("Primary database not available yet, skipping catalog sync")
+		return
+	}
+
+	// Check if Databases bundle exists
+	databasesBundle, exists := primaryDB.Bundles["Databases"]
+	if !exists {
+		logger.Debugf("Databases bundle not found in primary database, skipping catalog sync")
+		return
+	}
+
+	// Ensure Documents map exists
+	if databasesBundle.Documents == nil {
+		documentsMap := make(map[string]models.Document)
+		databasesBundle.Documents = &documentsMap
+	}
+
+	// Get existing database IDs from catalog to avoid duplicates
+	existingDatabaseIDs := make(map[string]bool)
+	for _, doc := range *databasesBundle.Documents {
+		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
+			if dbID, ok := dbIDField.Value.(string); ok {
+				existingDatabaseIDs[dbID] = true
+			}
+		}
+	}
+
+	// Register any non-primary databases that aren't already in the catalog
+	for _, db := range s.Databases {
+		if strings.ToLower(db.Name) != "primary" && !existingDatabaseIDs[db.DatabaseID] {
+			logger.Debugf("Registering database '%s' in system catalog during startup", db.Name)
+			err := s.registerDatabaseInPrimary(db)
+			if err != nil {
+				logger.Warnf("Warning: Failed to register database '%s' in catalog during startup: %v", db.Name, err)
+			}
+		}
+	}
 }
 
 func (s *DatabaseService) UpdateDatabase(databaseCommand models.DatabaseCommand) error {

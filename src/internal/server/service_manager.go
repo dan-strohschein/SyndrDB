@@ -2,6 +2,7 @@ package server
 
 import (
 	"sync"
+	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/journal"
@@ -11,10 +12,11 @@ import (
 
 type ServiceManager struct {
 	// Add fields for managing services
-	DatabaseService *database.DatabaseService
-	BundleService   *bundle.BundleService
-	WALManager      *journal.WALManager
-	logger          *zap.SugaredLogger
+	DatabaseService        *database.DatabaseService
+	BundleService          *bundle.BundleService
+	InternalCatalogService *defaultdb.CatalogService
+	WALManager             *journal.WALManager
+	logger                 *zap.SugaredLogger
 }
 
 // Private instance and mutex for thread safety
@@ -38,7 +40,9 @@ func GetServiceManager() *ServiceManager {
 }
 
 // InitServiceManager initializes the ServiceManager singleton with services
-func InitServiceManager(dbService *database.DatabaseService, bundleService *bundle.BundleService, logger *zap.SugaredLogger) *ServiceManager {
+func InitServiceManager(dbService *database.DatabaseService, bundleService *bundle.BundleService,
+	catalogService *defaultdb.CatalogService,
+	logger *zap.SugaredLogger) *ServiceManager {
 	// Use sync.Once to ensure this only happens one time
 	once.Do(func() {
 		mu.Lock()
@@ -55,10 +59,11 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		}
 
 		instance = &ServiceManager{
-			DatabaseService: dbService,
-			BundleService:   bundleService,
-			WALManager:      walManager,
-			logger:          logger,
+			DatabaseService:        dbService,
+			BundleService:          bundleService,
+			InternalCatalogService: catalogService,
+			WALManager:             walManager,
+			logger:                 logger,
 		}
 
 		if logger != nil {

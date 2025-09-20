@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -190,11 +191,30 @@ func main() {
 	<-shutdownSignal
 	fmt.Println("\nShutting down server...")
 
-	if err := srv.Stop(); err != nil {
-		log.Printf("Error stopping server: %v", err)
-	}
+	// Create a context with timeout for graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	fmt.Println("Server shutdown complete")
+	// Create a channel to signal shutdown completion
+	done := make(chan error, 1)
+
+	// Run shutdown in a goroutine
+	go func() {
+		done <- srv.Stop()
+	}()
+
+	// Wait for either shutdown to complete or timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("Error stopping server: %v", err)
+		} else {
+			fmt.Println("Server shutdown complete")
+		}
+	case <-ctx.Done():
+		fmt.Println("Server shutdown timed out after 30 seconds")
+		log.Printf("Forcing server shutdown due to timeout")
+	}
 }
 
 // validateArguments validates the arguments and returns an error if invalid

@@ -57,6 +57,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		case "databases":
 			return ShowDatabases(command, logger, serviceManager)
 		case "bundles":
+
 			return ShowBundles(command, database, logger, serviceManager)
 		case "bundle":
 			return ShowBundle(command, database, logger, serviceManager)
@@ -277,6 +278,10 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			return &result, fmt.Errorf("unknown command format: %s", command)
 		}
 		return &result, nil
+	}
+
+	if strings.HasPrefix(strings.ToLower(command), "use") {
+		return UseDatabase(command, logger, serviceManager)
 	}
 
 	return &result, nil
@@ -950,12 +955,24 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 			}
 
 			// Add the bundle to the database
-			return serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
+			bundle, err := serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
+			if err != nil {
+				return fmt.Errorf("error creating bundle: %v", err)
+			}
+
+			serviceManager.InternalCatalogService.AddBundleToCatalog(bundle)
+
+			return err
 		})
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
-		err = serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
+		bundle, err := serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
+
+		if err != nil {
+			return nil, fmt.Errorf("error creating bundle: %v", err)
+		}
+		serviceManager.InternalCatalogService.AddBundleToCatalog(bundle)
 	}
 
 	if err != nil {
@@ -999,10 +1016,13 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		return nil, fmt.Errorf("invalid database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", dbCommand.DatabaseName)
 	}
 	// Execute the database command
-	err = serviceManager.DatabaseService.AddDatabase(*dbCommand)
+	newDb, err := serviceManager.DatabaseService.AddDatabase(*dbCommand)
 	if err != nil {
 		return nil, fmt.Errorf("error creating database: %v", err)
 	}
+
+	serviceManager.InternalCatalogService.AddDatabaseToCatalog(newDb)
+
 	result = fmt.Sprintf("Database '%s' created successfully.", dbCommand.DatabaseName)
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
@@ -1600,50 +1620,84 @@ func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager Ser
 }
 
 // ShowBundles shows all bundles in a specific database
-// Syntax: SHOW BUNDLES
+// Syntax: SHOW BUNDLES [FOR "<DATABASE_NAME>"]
 func ShowBundles(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW BUNDLES command: %s", command)
 
-	if database == nil {
-		return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
+	var targetDatabase *models.Database
+	var targetDatabaseID string
+
+	// Parse command to check for "FOR <DATABASE_NAME>" syntax
+	commandLower := strings.ToLower(command)
+	if strings.Contains(commandLower, " for ") {
+		// Extract database name from "SHOW BUNDLES FOR "<DATABASE_NAME>""
+		databaseName, err := parseDatabaseNameFromShowBundlesFor(command)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse database name from command: %w", err)
+		}
+
+		// Look up the database ID from the catalog using the database name
+		if serviceManager.InternalCatalogService == nil {
+			return nil, fmt.Errorf("internal catalog service is not available")
+		}
+
+		allDatabases, err := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve databases from catalog: %w", err)
+		}
+
+		// Find the database with the matching name
+		var foundDatabase map[string]interface{}
+		for _, dbInfo := range allDatabases {
+			if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
+				foundDatabase = dbInfo
+				break
+			}
+		}
+
+		if foundDatabase == nil {
+			return nil, fmt.Errorf("database '%s' not found in system catalog", databaseName)
+		}
+
+		// Extract the DatabaseID
+		if dbID, ok := foundDatabase["DatabaseID"].(string); ok {
+			targetDatabaseID = dbID
+		} else {
+			return nil, fmt.Errorf("invalid DatabaseID found for database '%s'", databaseName)
+		}
+
+		logger.Infof("Found database '%s' with ID: %s", databaseName, targetDatabaseID)
+	} else {
+		// Original syntax - use current database
+		if database == nil {
+			return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
+		}
+		targetDatabase = database
+		targetDatabaseID = database.DatabaseID
 	}
 
-	// Get the primary database to access the system catalog
-	primaryDB := serviceManager.DatabaseService.Databases["primary"]
-	if primaryDB == nil {
-		return nil, fmt.Errorf("primary database not found - system catalogs unavailable")
+	// Get bundles from the catalog for the target database ID
+	if serviceManager.InternalCatalogService == nil {
+		return nil, fmt.Errorf("internal catalog service is not available")
 	}
 
-	// Get the Bundles bundle from the primary database
-	bundlesBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Bundles")
+	allBundles, err := serviceManager.InternalCatalogService.ListAllBundlesInCatalog()
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve Bundles catalog: %w", err)
+		return nil, fmt.Errorf("failed to retrieve bundles from catalog: %w", err)
 	}
 
-	// Query for bundles that belong to the current database using WHERE clause
-	whereClause := fmt.Sprintf("DatabaseID == \"%s\"", database.DatabaseID)
-	matchingDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundlesBundle, whereClause)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query bundles for database %s: %w", database.Name, err)
-	}
-
-	// Extract bundle information from the matching documents
+	// Filter bundles for the target database
 	var bundleInfos []map[string]interface{}
-	for _, doc := range matchingDocs {
-		bundleInfo := make(map[string]interface{})
+	for _, bundleInfo := range allBundles {
+		if dbID, ok := bundleInfo["DatabaseID"].(string); ok && dbID == targetDatabaseID {
+			// Create a clean response with relevant fields
+			cleanBundleInfo := make(map[string]interface{})
+			cleanBundleInfo["Name"] = bundleInfo["Name"]
+			cleanBundleInfo["BundleID"] = bundleInfo["BundleID"]
+			cleanBundleInfo["DatabaseID"] = bundleInfo["DatabaseID"]
 
-		// Extract relevant fields from the document
-		if nameField, exists := doc.Fields["Name"]; exists {
-			bundleInfo["Name"] = nameField.Value
+			bundleInfos = append(bundleInfos, cleanBundleInfo)
 		}
-		if bundleIDField, exists := doc.Fields["BundleID"]; exists {
-			bundleInfo["BundleID"] = bundleIDField.Value
-		}
-		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
-			bundleInfo["DatabaseID"] = dbIDField.Value
-		}
-
-		bundleInfos = append(bundleInfos, bundleInfo)
 	}
 
 	response := &CommandResponse{
@@ -1651,7 +1705,11 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 		Result:      bundleInfos,
 	}
 
-	logger.Infof("Found %d bundles in database %s from system catalog", len(bundleInfos), database.Name)
+	if targetDatabase != nil {
+		logger.Infof("Found %d bundles in database %s from system catalog", len(bundleInfos), targetDatabase.Name)
+	} else {
+		logger.Infof("Found %d bundles for database ID %s from system catalog", len(bundleInfos), targetDatabaseID)
+	}
 	return response, nil
 }
 
@@ -1778,6 +1836,80 @@ func parseBundleNameFromShowCommand(command string) (string, error) {
 
 	if len(matches) < 2 {
 		return "", fmt.Errorf("invalid SHOW BUNDLE command format. Expected: SHOW BUNDLE \"<bundle_name>\";")
+	}
+
+	return matches[1], nil
+}
+
+// parseDatabaseNameFromShowBundlesFor extracts the database name from SHOW BUNDLES FOR "<NAME>" command
+func parseDatabaseNameFromShowBundlesFor(command string) (string, error) {
+	// Expected format: SHOW BUNDLES FOR "<DATABASE_NAME>";
+	// Find the quoted database name
+	re := regexp.MustCompile(`(?i)show\s+bundles\s+for\s+"([^"]+)"`)
+	matches := re.FindStringSubmatch(command)
+
+	if len(matches) < 2 {
+		return "", fmt.Errorf("invalid SHOW BUNDLES FOR command format. Expected: SHOW BUNDLES FOR \"<database_name>\";")
+	}
+
+	return matches[1], nil
+}
+
+// UseDatabase handles the USE "<DATABASE_NAME>"; command to switch the current database context
+func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing USE command: %s", command)
+
+	// Parse the database name from the USE command
+	databaseName, err := parseDatabaseNameFromUse(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse database name from USE command: %w", err)
+	}
+
+	// Validate that the database exists by checking the system catalog
+	if serviceManager.InternalCatalogService == nil {
+		return nil, fmt.Errorf("internal catalog service is not available")
+	}
+
+	// Get all databases from the catalog
+	allDatabases, err := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("failed to retrieve databases from catalog: %w", err)
+	}
+
+	// Check if the requested database exists
+	var foundDatabase map[string]interface{}
+	for _, dbInfo := range allDatabases {
+		if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
+			foundDatabase = dbInfo
+			break
+		}
+	}
+
+	if foundDatabase == nil {
+		return nil, fmt.Errorf("database '%s' not found in system catalog", databaseName)
+	}
+
+	// TODO: Set the database as the current session database
+	// This will be implemented in the next step when we add session management
+
+	logger.Infof("Successfully validated database '%s' exists", databaseName)
+
+	response := &CommandResponse{
+		ResultCount: 1,
+		Result:      fmt.Sprintf("Database context switched to '%s'.", databaseName),
+	}
+	return response, nil
+}
+
+// parseDatabaseNameFromUse extracts the database name from USE "<DATABASE_NAME>"; command
+func parseDatabaseNameFromUse(command string) (string, error) {
+	// Expected format: USE "<DATABASE_NAME>";
+	// Find the quoted database name
+	re := regexp.MustCompile(`(?i)use\s+"([^"]+)"`)
+	matches := re.FindStringSubmatch(command)
+
+	if len(matches) < 2 {
+		return "", fmt.Errorf("invalid USE command format. Expected: USE \"<database_name>\";")
 	}
 
 	return matches[1], nil

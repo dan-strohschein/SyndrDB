@@ -405,6 +405,37 @@ func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) 
 	return nil
 }
 
+// SetDatabaseContext changes the database context for an existing session
+func (sm *SessionManager) SetDatabaseContext(sessionID string, databaseName string, database *models.Database) error {
+	sm.mu.RLock()
+	session, exists := sm.sessions[sessionID]
+	sm.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	// Store previous database for logging
+	previousDatabase := session.DatabaseName
+
+	// Update the database context
+	session.DatabaseName = databaseName
+	session.Database = database
+
+	// Update activity time when database context changes
+	session.LastActivity = time.Now()
+	session.ExpiresAt = time.Now().Add(session.Timeout)
+
+	session.Logger.Infow("Database context changed",
+		"previousDatabase", previousDatabase,
+		"newDatabase", databaseName)
+
+	return nil
+}
+
 // ValidateSessionSecurity validates session security binding
 func (sm *SessionManager) ValidateSessionSecurity(sessionID, clientIP, userAgent string) error {
 	sm.mu.RLock()
@@ -646,6 +677,8 @@ func (s *Session) FailQuery(err error) {
 	s.ErrorCount++
 	s.ConsecutiveErrors++
 
+	// Save queryID before setting CurrentQuery to nil
+	queryID := s.CurrentQuery.QueryID
 	s.addToHistory(s.CurrentQuery)
 	s.CurrentQuery = nil
 
@@ -662,7 +695,7 @@ func (s *Session) FailQuery(err error) {
 	s.ExpiresAt = now.Add(s.Timeout)
 
 	s.Logger.Errorw("Query execution failed",
-		"queryID", s.CurrentQuery.QueryID,
+		"queryID", queryID,
 		"error", err,
 		"consecutiveErrors", s.ConsecutiveErrors)
 }

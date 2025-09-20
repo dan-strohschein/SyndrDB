@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,7 @@ type Server struct {
 	databaseService   *database.DatabaseService
 	logger            *zap.SugaredLogger
 	bufferPool        *buffer.BufferPool
+	wg                sync.WaitGroup // WaitGroup for tracking active connections
 }
 
 // Connection represents an active client connection
@@ -161,8 +163,11 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	documentFactory := document.NewDocumentFactory()
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, config)
 
+	// Create the internal catalog service
+	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
+
 	// Initialize the singleton
-	InitServiceManager(databaseService, bundleService, sugar)
+	InitServiceManager(databaseService, bundleService, catalogService, sugar)
 
 	// Create a new server
 	server := &Server{
@@ -270,7 +275,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	}
 
 	// If no databases were found, create a default Primary database
-	if len(server.Databases) == 0 && config.CreateDefaultDB {
+	if (len(server.Databases) == 0 || (len(server.Databases) > 0 && server.Databases["primary"] == nil)) && config.CreateDefaultDB {
 
 		defaultDB := &models.Database{
 			DatabaseID:    helpers.GenerateUUID(),
@@ -315,6 +320,20 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		err = defaultdb.HydrateUserPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
 		if err != nil {
 			log.Printf("Warning: Failed to hydrate default database user catalog: %v", err)
+		}
+
+		// Now register the primary database itself in the system catalog
+		// This needs to happen after the Databases bundle is created
+		catalogService := GetServiceManager().InternalCatalogService
+		if catalogService != nil {
+			err = catalogService.AddDatabaseToCatalog(defaultDB)
+			if err != nil {
+				log.Printf("Warning: Failed to register primary database in system catalog: %v", err)
+			} else {
+				log.Printf("Successfully registered primary database in system catalog")
+			}
+		} else {
+			log.Printf("Warning: CatalogService not available, primary database not registered in system catalog")
 		}
 	}
 
@@ -421,7 +440,7 @@ func (s *Server) Stop() error {
 		}
 	}
 
-	wg.Wait()
+	s.wg.Wait()
 
 	// Flush any dirty pages
 	s.bufferPool.FlushAllDirty()
@@ -515,8 +534,6 @@ func (s *Server) authenticateWithIP(username, password, clientIP string) error {
 	return nil
 }
 
-var wg sync.WaitGroup
-
 // acceptConnections handles incoming connection requests
 func (s *Server) acceptConnections() {
 	s.logger.Info("Server started accepting connections",
@@ -542,7 +559,7 @@ func (s *Server) acceptConnections() {
 			continue
 		}
 
-		wg.Add(1)
+		s.wg.Add(1)
 
 		s.logger.Info("New connection accepted",
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
@@ -550,7 +567,7 @@ func (s *Server) acceptConnections() {
 
 		// Handle each connection in a new goroutine
 		go func(c net.Conn, ip string) {
-			defer wg.Done()
+			defer s.wg.Done()
 			defer s.RateLimiter.ReleaseConnection(ip) // Release connection when done
 			s.handleConnection(c)
 		}(conn, clientIP)
@@ -942,6 +959,36 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 	stats = s.bufferPool.GetStats()
 	s.logger.Debugf("Buffer stats after command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
 		stats.Hits, stats.Misses, stats.HitRatio, stats.UsedBuffers, stats.TotalBuffers)
+
+	// Handle USE command - update session database context after successful execution
+	if err == nil && conn.Session != nil && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(command)), "USE") {
+		// Parse the database name from the USE command
+		re := regexp.MustCompile(`(?i)use\s+"([^"]+)"`)
+		matches := re.FindStringSubmatch(command)
+		if len(matches) >= 2 {
+			databaseName := matches[1]
+
+			// Get the database object
+			targetDatabase, dbErr := serviceManager.DatabaseService.GetDatabaseByName(databaseName)
+			if dbErr == nil {
+				// Update the session's database context
+				sessionErr := s.SessionManager.SetDatabaseContext(conn.Session.SessionID, databaseName, targetDatabase)
+				if sessionErr == nil {
+					// Also update the connection's database reference for immediate use
+					conn.Database = targetDatabase
+					conn.DatabaseName = databaseName
+					s.logger.Infow("Session database context updated",
+						"sessionID", conn.Session.SessionID,
+						"newDatabase", databaseName)
+				} else {
+					s.logger.Warnw("Failed to update session database context",
+						"sessionID", conn.Session.SessionID,
+						"database", databaseName,
+						"error", sessionErr)
+				}
+			}
+		}
+	}
 
 	// Update session with query result
 	if conn.Session != nil {

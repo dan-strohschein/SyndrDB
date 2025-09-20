@@ -59,16 +59,19 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	} else {
 		service.bundleMetadata = bundles
 		logger.Debugf("Bundle service loaded %d bundle metadata", len(service.bundleMetadata))
+
+		// Sync bundle catalog - register any bundles not in the primary catalog
+		service.syncBundleCatalog(logger)
 	}
 
 	return service
 }
 
-func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db *models.Database, bundleCommand *models.BundleCommand) error {
+func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db *models.Database, bundleCommand *models.BundleCommand) (*models.Bundle, error) {
 	args := settings.GetSettings()
 	// Check if the bundle already exists
 	if _, err := s.GetBundleByName(db, bundleCommand.BundleName); err == nil {
-		return fmt.Errorf("bundle '%s' already exists", bundleCommand.BundleName)
+		return nil, fmt.Errorf("bundle '%s' already exists", bundleCommand.BundleName)
 	}
 
 	// Create a new bundle
@@ -104,7 +107,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	//This needs to be added to a bundle file
 	err := s.store.CreateBundleFile(db, bundle)
 	if err != nil {
-		return fmt.Errorf("error creating bundle file: %w", err)
+		return nil, fmt.Errorf("error creating bundle file: %w", err)
 	}
 	//logger.Infof("Decoded bundle data from file %v", bundle)
 	// and then the bundle file name needs to be added to the database file
@@ -113,13 +116,22 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	// Write the updated database file
 	err = databaseService.Store.UpdateDatabaseDataFile(db)
 	if err != nil {
-		return fmt.Errorf("error updating database file: %w", err)
+		return nil, fmt.Errorf("error updating database file: %w", err)
 	}
 
 	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
 
 	s.bundleMetadata[bundleCommand.BundleName] = bundle
-	return nil
+
+	// Register the new bundle in the Primary database's "Bundles" catalog
+	// This will be handled by the catalog service at a higher level to avoid circular imports
+	err = s.registerBundleInPrimary(bundle)
+	if err != nil {
+		s.logger.Warnf("Warning: Failed to register bundle '%s' in Primary catalog: %v", bundle.Name, err)
+		// Don't fail the bundle creation if catalog registration fails
+	}
+
+	return bundle, nil
 }
 
 func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseService, db *models.Database, bundle *models.Bundle) error {
@@ -148,6 +160,14 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 	}
 
 	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
+
+	// Register the new bundle in the Primary database's "Bundles" catalog
+	// This will be handled by the catalog service at a higher level to avoid circular imports
+	err = s.registerBundleInPrimary(bundle)
+	if err != nil {
+		s.logger.Warnf("Warning: Failed to register bundle '%s' in Primary catalog: %v", bundle.Name, err)
+		// Don't fail the bundle creation if catalog registration fails
+	}
 
 	return nil
 }
@@ -492,6 +512,9 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 		return fmt.Errorf("failed to update source bundle in store: %w", err)
 	}
 
+	// Update the cache with the modified bundle
+	s.bundleMetadata[bundle.Name] = bundle
+
 	s.logger.Infof("Successfully added relationship '%s' to bundle '%s'", relationshipName, bundle.Name)
 	return nil
 }
@@ -696,6 +719,9 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 		s.logger.Errorf("Failed to update bundle file after creating index: %v", err)
 		return fmt.Errorf("failed to update bundle file after creating index: %w", err)
 	}
+
+	// Update the cache with the modified bundle
+	s.bundleMetadata[bundle.Name] = bundle
 
 	s.logger.Infof("Successfully created hash index '%s' on field '%s' for bundle '%s'", name, name, bundle.Name)
 	return nil
@@ -1193,6 +1219,18 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 	err := s.store.AddDocumentToBundleFile(bundle, document)
 	if err != nil {
 		return fmt.Errorf("failed to add document to bundle: %w", err)
+	}
+
+	// Update in-memory cache: if the appropriate document page is loaded, add the document to it
+	// This prevents cache inconsistency where disk has the new document but memory cache is stale
+	pageID, err := s.findDocumentPage(bundle.Name, document.DocumentID)
+	if err == nil {
+		pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
+		if page, exists := s.documentPages[pageKey]; exists {
+			// Page is loaded in memory, add the new document to it
+			page.Documents[document.DocumentID] = *document
+			s.logger.Debugf("Added document '%s' to in-memory page %s", document.DocumentID, pageKey)
+		}
 	}
 
 	return nil
@@ -2015,4 +2053,23 @@ func (s *BundleService) validateUpdateFields(bundle *models.Bundle, docCommand *
 	}
 
 	return nil
+}
+
+// registerBundleInPrimary adds the bundle information to the "Bundles" bundle in the Primary database
+func (s *BundleService) registerBundleInPrimary(bundle *models.Bundle) error {
+	// Since we can't directly import the server package due to circular dependency,
+	// this method is meant to be overridden or called through the service manager
+	// The actual registration logic is implemented in CatalogService.AddBundleToCatalog
+
+	s.logger.Debugf("Bundle '%s' needs to be registered in primary catalog (handled by CatalogService)", bundle.Name)
+	return nil
+}
+
+// syncBundleCatalog ensures all loaded bundles are registered in the primary.Bundles catalog
+func (s *BundleService) syncBundleCatalog(logger *zap.SugaredLogger) {
+	// Since we can't directly access the DatabaseService/CatalogService from here due to circular imports,
+	// this sync will be handled at the service manager level by calling CatalogService.AddBundleToCatalog
+	// for each bundle that needs to be registered
+
+	logger.Debugf("Bundle catalog sync initiated - %d bundles need potential registration", len(s.bundleMetadata))
 }
