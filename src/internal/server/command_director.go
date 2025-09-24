@@ -20,6 +20,14 @@ import (
 )
 
 func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger) (interface{}, error) {
+	// Check if this is a GraphQL command first
+	if strings.HasPrefix(command, "GRAPHQL::") {
+		if serviceManager.GraphQLProcessor == nil {
+			return nil, fmt.Errorf("GraphQL is not enabled on this server")
+		}
+		return serviceManager.GraphQLProcessor.ProcessGraphQLCommand(command)
+	}
+
 	// Input validation for security
 	securityConfig := DefaultSecurityConfig()
 	if err := ValidateInput(command, "command", securityConfig); err != nil {

@@ -17,7 +17,7 @@ behavior between GraphQL and native interfaces.
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/server"
 
@@ -36,7 +36,7 @@ type GraphQLHandler struct {
 	logger         *zap.SugaredLogger
 }
 
-// GraphQLRequest represents a GraphQL HTTP request
+// GraphQLRequest represents a GraphQL request from TCP socket
 type GraphQLRequest struct {
 	Query         string                 `json:"query"`
 	OperationName string                 `json:"operationName,omitempty"`
@@ -147,60 +147,45 @@ func loadSchema() (*ast.Schema, error) {
 	return schema, nil
 }
 
-// ServeHTTP implements the HTTP handler for GraphQL requests
-func (h *GraphQLHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Set CORS headers
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-	w.Header().Set("Content-Type", "application/json")
-
-	// Handle preflight OPTIONS request
-	if r.Method == "OPTIONS" {
-		w.WriteHeader(http.StatusOK)
-		return
+// ProcessGraphQLCommand processes a GraphQL command received via TCP socket
+// The input should be in the format: GRAPHQL::{query: "...", variables: {...}}
+func (h *GraphQLHandler) ProcessGraphQLCommand(command string) (interface{}, error) {
+	// Remove the GRAPHQL:: prefix
+	if !strings.HasPrefix(command, "GRAPHQL::") {
+		return nil, fmt.Errorf("invalid GraphQL command format: missing GRAPHQL:: prefix")
 	}
 
-	// Only allow POST and GET methods
-	if r.Method != "POST" && r.Method != "GET" {
-		h.writeError(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+	graphqlPayload := strings.TrimPrefix(command, "GRAPHQL::")
+	graphqlPayload = strings.TrimSpace(graphqlPayload)
+
+	// Remove trailing semicolon if present (common from client code)
+	graphqlPayload = strings.TrimSuffix(graphqlPayload, ";")
+
+	if graphqlPayload == "" {
+		return nil, fmt.Errorf("GraphQL query is required")
 	}
 
 	var req GraphQLRequest
 
-	if r.Method == "POST" {
-		// Parse JSON request body
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			h.writeError(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
-			return
+	// Try to parse as JSON first (for structured requests)
+	if strings.HasPrefix(graphqlPayload, "{") {
+		if err := json.Unmarshal([]byte(graphqlPayload), &req); err != nil {
+			return nil, fmt.Errorf("invalid GraphQL JSON: %v", err)
 		}
-	} else if r.Method == "GET" {
-		// Parse query parameters for GET requests
-		req.Query = r.URL.Query().Get("query")
-		req.OperationName = r.URL.Query().Get("operationName")
-
-		if variablesParam := r.URL.Query().Get("variables"); variablesParam != "" {
-			if err := json.Unmarshal([]byte(variablesParam), &req.Variables); err != nil {
-				h.writeError(w, fmt.Sprintf("Invalid variables JSON: %v", err), http.StatusBadRequest)
-				return
-			}
-		}
+	} else {
+		// Treat as plain query string
+		req.Query = graphqlPayload
 	}
 
 	if req.Query == "" {
-		h.writeError(w, "Query is required", http.StatusBadRequest)
-		return
+		return nil, fmt.Errorf("GraphQL query is required")
 	}
 
 	// Process the GraphQL request
 	response := h.processGraphQLRequest(req)
 
-	// Send the response
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		h.logger.Errorf("Failed to encode GraphQL response: %v", err)
-	}
+	// Return the response (will be JSON encoded by the command director)
+	return response, nil
 }
 
 // processGraphQLRequest processes a GraphQL request and returns a response
@@ -379,16 +364,7 @@ func (h *GraphQLHandler) executeMutationOperation(operation *ast.OperationDefini
 	return result, nil
 }
 
-// writeError writes an error response
-func (h *GraphQLHandler) writeError(w http.ResponseWriter, message string, statusCode int) {
-	response := GraphQLResponse{
-		Errors: []GraphQLError{{Message: message}},
-	}
-
-	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(response)
-	h.logger.Errorf("GraphQL error: %s", message)
-}
+// Note: writeError method removed as we no longer use HTTP responses
 
 // getArgument gets an argument value from a GraphQL field
 func (h *GraphQLHandler) getArgument(field *ast.Field, name string, variables map[string]interface{}) (interface{}, bool) {

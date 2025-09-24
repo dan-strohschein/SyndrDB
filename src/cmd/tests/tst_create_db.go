@@ -214,7 +214,7 @@ func TestParseAndCreateDatabaseCommand() {
 	}
 
 	// Execute the command
-	err = service.AddDatabase(*dbCommand)
+	_, err = service.AddDatabase(*dbCommand)
 	if err != nil {
 		ColorLogger.Info(HighlightRed(fmt.Sprintf("Failed to create database: %v", err)))
 

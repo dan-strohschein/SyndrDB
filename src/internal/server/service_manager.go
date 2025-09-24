@@ -10,12 +10,18 @@ import (
 	"go.uber.org/zap"
 )
 
+// GraphQLProcessor defines the interface for processing GraphQL commands
+type GraphQLProcessor interface {
+	ProcessGraphQLCommand(command string) (interface{}, error)
+}
+
 type ServiceManager struct {
 	// Add fields for managing services
 	DatabaseService        *database.DatabaseService
 	BundleService          *bundle.BundleService
 	InternalCatalogService *defaultdb.CatalogService
 	WALManager             *journal.WALManager
+	GraphQLProcessor       GraphQLProcessor
 	logger                 *zap.SugaredLogger
 }
 
@@ -42,6 +48,7 @@ func GetServiceManager() *ServiceManager {
 // InitServiceManager initializes the ServiceManager singleton with services
 func InitServiceManager(dbService *database.DatabaseService, bundleService *bundle.BundleService,
 	catalogService *defaultdb.CatalogService,
+	graphqlProcessor GraphQLProcessor,
 	logger *zap.SugaredLogger) *ServiceManager {
 	// Use sync.Once to ensure this only happens one time
 	once.Do(func() {
@@ -63,6 +70,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			BundleService:          bundleService,
 			InternalCatalogService: catalogService,
 			WALManager:             walManager,
+			GraphQLProcessor:       graphqlProcessor,
 			logger:                 logger,
 		}
 
@@ -71,6 +79,11 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 				logger.Info("ServiceManager singleton initialized with WAL Manager")
 			} else {
 				logger.Warn("ServiceManager singleton initialized without WAL Manager")
+			}
+			if graphqlProcessor != nil {
+				logger.Info("ServiceManager initialized with GraphQL support")
+			} else {
+				logger.Info("ServiceManager initialized without GraphQL support")
 			}
 		}
 	})
@@ -85,4 +98,16 @@ func ResetServiceManager() {
 	instance = nil
 	// Reset the sync.Once so InitServiceManager can be called again
 	once = sync.Once{}
+}
+
+// SetGraphQLProcessor sets the GraphQL processor for the singleton instance
+func SetGraphQLProcessor(processor GraphQLProcessor) {
+	mu.Lock()
+	defer mu.Unlock()
+	if instance != nil {
+		instance.GraphQLProcessor = processor
+		if instance.logger != nil {
+			instance.logger.Info("GraphQL processor has been set on ServiceManager")
+		}
+	}
 }

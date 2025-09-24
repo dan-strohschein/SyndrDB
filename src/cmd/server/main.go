@@ -157,7 +157,7 @@ func main() {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 
-	// Initialize GraphQL endpoints if enabled
+	// Initialize GraphQL for TCP connections if enabled
 	if args.EnableGraphQL {
 		// Get the default database for GraphQL operations
 		var defaultDB *models.Database
@@ -173,14 +173,12 @@ func main() {
 			if err != nil {
 				log.Printf("Warning: Failed to initialize GraphQL handler: %v", err)
 			} else {
-				// Initialize GraphQL endpoints
-				err = srv.InitializeGraphQLEndpoints(defaultDB, graphQLHandler)
-				if err != nil {
-					log.Printf("Warning: Failed to setup GraphQL endpoints: %v", err)
-				}
+				// Set GraphQL processor for TCP socket connections
+				server.SetGraphQLProcessor(graphQLHandler)
+				log.Println("GraphQL enabled for TCP socket connections with GRAPHQL:: prefix")
 			}
 		} else {
-			log.Println("Warning: No database available for GraphQL, using empty database")
+			log.Println("Warning: No database available for GraphQL")
 		}
 	}
 

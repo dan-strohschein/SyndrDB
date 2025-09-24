@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -45,7 +44,6 @@ type Server struct {
 	Port              int
 	Databases         map[string]*models.Database
 	Listener          net.Listener
-	HTTPServer        *http.Server
 	AuthEnabled       bool
 	GraphQLEnabled    bool
 	Users             map[string]string // username -> hashed password (legacy, use UserStore instead)
@@ -166,8 +164,17 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	// Create the internal catalog service
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
 
+	// Initialize GraphQL processor if enabled
+	var graphqlProcessor GraphQLProcessor
+	if config.EnableGraphQL {
+		// For now, we'll set graphqlProcessor to nil and enable it later
+		// This avoids the import cycle issue
+		graphqlProcessor = nil
+		sugar.Info("GraphQL enabled - processor will be initialized after server creation")
+	}
+
 	// Initialize the singleton
-	InitServiceManager(databaseService, bundleService, catalogService, sugar)
+	InitServiceManager(databaseService, bundleService, catalogService, graphqlProcessor, sugar)
 
 	// Create a new server
 	server := &Server{
@@ -369,33 +376,9 @@ func (s *Server) Start() error {
 	s.Listener = listener
 	s.Running = true
 
-	// Start HTTP server if GraphQL is enabled
+	// GraphQL is now handled via TCP socket with GRAPHQL:: prefix
 	if s.GraphQLEnabled {
-		httpPort := s.Port + 1 // Use next port for HTTP
-		httpAddr := fmt.Sprintf("%s:%d", s.Host, httpPort)
-
-		mux := http.NewServeMux()
-
-		// Health check endpoint
-		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		})
-
-		// GraphQL endpoint placeholder - will be replaced by real handler
-		mux.HandleFunc("/graphql", s.handleGraphQLPlaceholder)
-
-		s.HTTPServer = &http.Server{
-			Addr:    httpAddr,
-			Handler: mux,
-		}
-
-		go func() {
-			log.Printf("SyndrDB HTTP server (GraphQL) listening on %s", httpAddr)
-			if err := s.HTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("HTTP server error: %v", err)
-			}
-		}()
+		s.logger.Info("GraphQL enabled for TCP connections - use GRAPHQL:: prefix in commands")
 	}
 
 	go s.acceptConnections()
@@ -425,13 +408,6 @@ func (s *Server) Stop() error {
 	}
 	s.mu.Unlock()
 
-	// Close the HTTP server if it's running
-	if s.HTTPServer != nil {
-		if err := s.HTTPServer.Close(); err != nil {
-			log.Printf("Error stopping HTTP server: %v", err)
-		}
-	}
-
 	// Close the TCP listener
 	if s.Listener != nil {
 		err := s.Listener.Close()
@@ -457,16 +433,6 @@ func (s *Server) Stop() error {
 	s.logger.Sync()
 
 	return nil
-}
-
-// handleGraphQLPlaceholder is a placeholder handler for GraphQL endpoint
-func (s *Server) handleGraphQLPlaceholder(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	response := map[string]string{
-		"message": "GraphQL endpoint placeholder",
-		"status":  "GraphQL handler will be initialized here",
-	}
-	json.NewEncoder(w).Encode(response)
 }
 
 // GetLogger returns the server's logger

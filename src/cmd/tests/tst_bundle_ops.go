@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
@@ -228,11 +229,14 @@ func initializeTestServiceManager() error {
 	documentFactory := document.NewDocumentFactory()
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, testSettings)
 
-	// Initialize the service manager with the services
-	testServiceManager = server.InitServiceManager(databaseService, bundleService, sugar)
+	// Create the internal catalog service for tests
+	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
+
+	// Initialize the service manager with the services (no GraphQL for tests)
+	testServiceManager = server.InitServiceManager(databaseService, bundleService, catalogService, nil, sugar)
 	if testServiceManager == nil {
-		return fmt.Errorf("failed to initialize test service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, sugar=%v)",
-			databaseService == nil, bundleService == nil, sugar == nil)
+		return fmt.Errorf("failed to initialize test service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, catalogService=%v, sugar=%v)",
+			databaseService == nil, bundleService == nil, catalogService == nil, sugar == nil)
 	}
 
 	return nil
@@ -336,11 +340,14 @@ func setupBundleTestEnvironment() error {
 	documentFactory := document.NewDocumentFactory()
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, testSettings)
 
-	// Initialize the service manager with the services
-	testServiceManager = server.InitServiceManager(databaseService, bundleService, sugar)
+	// Create the internal catalog service for tests
+	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
+
+	// Initialize the service manager with the services (no GraphQL for tests)
+	testServiceManager = server.InitServiceManager(databaseService, bundleService, catalogService, nil, sugar)
 	if testServiceManager == nil {
-		return fmt.Errorf("failed to initialize service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, sugar=%v)",
-			databaseService == nil, bundleService == nil, sugar == nil)
+		return fmt.Errorf("failed to initialize service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, catalogService=%v, sugar=%v)",
+			databaseService == nil, bundleService == nil, catalogService == nil, sugar == nil)
 	}
 
 	// Get the testdb database from the shared service (it should already exist)
