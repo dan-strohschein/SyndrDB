@@ -1207,9 +1207,11 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	} else {
 		// No WHERE clause - return all documents
 		documents = make(map[string]*models.Document)
-		for k, v := range *bundle.Documents {
-			docCopy := v
-			documents[k] = &docCopy
+		if bundle.Documents != nil {
+			for k, v := range *bundle.Documents {
+				docCopy := v
+				documents[k] = &docCopy
+			}
 		}
 	}
 	// var documents map[string]*models.Document
@@ -1369,9 +1371,11 @@ func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, dat
 	} else {
 		// No WHERE clause - return all documents
 		documents = make(map[string]*models.Document)
-		for k, v := range *bundle.Documents {
-			docCopy := v
-			documents[k] = &docCopy
+		if bundle.Documents != nil {
+			for k, v := range *bundle.Documents {
+				docCopy := v
+				documents[k] = &docCopy
+			}
 		}
 	}
 
