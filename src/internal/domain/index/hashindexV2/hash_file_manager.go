@@ -1354,13 +1354,33 @@ func (fm *FileManager) parseMetadata(data []byte) (*HashIndexMetadata, error) {
 }
 
 func (fm *FileManager) parseBucketPage(data []byte, pageNum uint32) (*BucketPage, error) {
-	// TODO: Implement binary parsing of bucket page
-	return NewBucketPage(pageNum-1, fm.pageSize), nil
+	// PERFORMANCE FIX: Use binary deserialization instead of ASCII parsing
+	page := NewBucketPage(pageNum-1, fm.pageSize)
+
+	// Only deserialize if data contains actual content (not all zeros)
+	if len(data) > 36 { // Minimum size for header
+		err := page.DeserializeBinary(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize bucket page: %w", err)
+		}
+	}
+
+	return page, nil
 }
 
 func (fm *FileManager) parseOverflowPage(data []byte, pageNum uint32) (*OverflowPage, error) {
-	// TODO: Implement binary parsing of overflow page
-	return NewOverflowPage(pageNum, fm.pageSize), nil
+	// PERFORMANCE FIX: Use binary deserialization instead of ASCII parsing
+	page := NewOverflowPage(pageNum, fm.pageSize)
+
+	// Only deserialize if data contains actual content (not all zeros)
+	if len(data) > 36 { // Minimum size for header
+		err := page.DeserializeBinary(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to deserialize overflow page: %w", err)
+		}
+	}
+
+	return page, nil
 }
 
 func (fm *FileManager) serializeMetadata(metadata *HashIndexMetadata) ([]byte, error) {
@@ -1369,13 +1389,41 @@ func (fm *FileManager) serializeMetadata(metadata *HashIndexMetadata) ([]byte, e
 }
 
 func (fm *FileManager) serializeBucketPage(page *BucketPage) ([]byte, error) {
-	// TODO: Implement binary serialization of bucket page
-	return make([]byte, fm.pageSize), nil
+	// PERFORMANCE FIX: Use binary serialization instead of ASCII
+	data, err := page.SerializeBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize bucket page: %w", err)
+	}
+
+	// Ensure data doesn't exceed page size
+	if len(data) > int(fm.pageSize) {
+		return nil, fmt.Errorf("serialized bucket page exceeds page size: %d > %d", len(data), fm.pageSize)
+	}
+
+	// Pad to page size for consistent storage
+	paddedData := make([]byte, fm.pageSize)
+	copy(paddedData, data)
+
+	return paddedData, nil
 }
 
 func (fm *FileManager) serializeOverflowPage(page *OverflowPage) ([]byte, error) {
-	// TODO: Implement binary serialization of overflow page
-	return make([]byte, fm.pageSize), nil
+	// PERFORMANCE FIX: Use binary serialization instead of ASCII
+	data, err := page.SerializeBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize overflow page: %w", err)
+	}
+
+	// Ensure data doesn't exceed page size
+	if len(data) > int(fm.pageSize) {
+		return nil, fmt.Errorf("serialized overflow page exceeds page size: %d > %d", len(data), fm.pageSize)
+	}
+
+	// Pad to page size for consistent storage
+	paddedData := make([]byte, fm.pageSize)
+	copy(paddedData, data)
+
+	return paddedData, nil
 }
 
 func (fm *FileManager) parsePageASCII(scanner *bufio.Scanner, pageNum uint32) (interface{}, error) {

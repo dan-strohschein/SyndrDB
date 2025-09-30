@@ -368,133 +368,102 @@ func (hi *HashIndex) splitBucketBAD() error {
 // This function follows the Single Responsibility Principle by handling only bucket splitting
 // Following SyndrDB comprehensive error handling, it ensures proper record redistribution
 func (hi *HashIndex) splitBucket() error {
-	hi.logger.Debugf("Starting correct bucket split, current buckets: %d", hi.metadata.BucketCount)
+	hi.logger.Debugf("Starting linear hash bucket split, current buckets: %d", hi.metadata.BucketCount)
 
+	// PERFORMANCE FIX: In linear hashing, we only split ONE bucket (the split pointer bucket)
+	// This makes splitting O(k) where k is records in one bucket, not O(n) for all records
+	splitBucketNum := hi.metadata.SplitPointer
+	newBucketNum := hi.metadata.BucketCount
+
+	hi.logger.Debugf("Splitting bucket %d, creating new bucket %d", splitBucketNum, newBucketNum)
+
+	// STEP 1: Load the bucket to be split
+	splitBucket, err := hi.bucketManager.GetBucket(splitBucketNum)
+	if err != nil {
+		return fmt.Errorf("failed to load split bucket %d: %w", splitBucketNum, err)
+	}
+
+	// STEP 2: Collect all records from the split bucket (including overflow chain)
+	allRecords, err := hi.collectAllRecords(splitBucket)
+	if err != nil {
+		return fmt.Errorf("failed to collect records from split bucket: %w", err)
+	}
+
+	hi.logger.Debugf("Found %d records in split bucket %d", len(allRecords), splitBucketNum)
+
+	// STEP 3: Create new bucket
+	newBucket := NewBucketPage(newBucketNum, hi.metadata.PageSize)
+
+	// STEP 4: Update metadata FIRST to ensure correct bucket calculations
 	oldBucketCount := hi.metadata.BucketCount
-	newBucketCount := oldBucketCount + 1
-
-	// STEP 1: Collect ALL records that might need redistribution
-	// In linear hashing, we need to check all buckets, not just the split bucket
-	allAffectedRecords := make(map[uint32][]*IndexRecord)
-
-	for bucketNum := uint32(0); bucketNum < oldBucketCount; bucketNum++ {
-		bucketPage, err := hi.bucketManager.GetBucket(bucketNum)
-		if err != nil {
-			return fmt.Errorf("failed to load bucket %d: %w", bucketNum, err)
-		}
-
-		records, err := hi.collectAllRecords(bucketPage)
-		if err != nil {
-			return fmt.Errorf("failed to collect records from bucket %d: %w", bucketNum, err)
-		}
-
-		// Check which records need to move
-		for _, record := range records {
-			oldBucket := record.HashValue % oldBucketCount
-			newBucket := record.HashValue % newBucketCount
-
-			// If bucket assignment changes, this record needs redistribution
-			if oldBucket != newBucket {
-				hi.logger.Debugf("Record %s needs to move: bucket %d -> %d",
-					record.DocumentID, oldBucket, newBucket)
-
-				if allAffectedRecords[oldBucket] == nil {
-					allAffectedRecords[oldBucket] = make([]*IndexRecord, 0)
-				}
-				allAffectedRecords[oldBucket] = append(allAffectedRecords[oldBucket], record)
-			}
-		}
-	}
-
-	// STEP 2: Create new bucket
-	newBucketNum := oldBucketCount
-	newBucketPage := NewBucketPage(newBucketNum, hi.metadata.PageSize)
-
-	// STEP 3: Redistribute affected records
-	for sourceBucketNum, recordsToMove := range allAffectedRecords {
-		// Remove records from source bucket
-		sourceBucket, err := hi.bucketManager.GetBucket(sourceBucketNum)
-		if err != nil {
-			return fmt.Errorf("failed to load source bucket %d: %w", sourceBucketNum, err)
-		}
-
-		// Remove records that are moving
-		newRecords := make([]*IndexRecord, 0)
-		for _, existingRecord := range sourceBucket.Records {
-			shouldMove := false
-			for _, movingRecord := range recordsToMove {
-				if existingRecord.DocumentID == movingRecord.DocumentID {
-					shouldMove = true
-					break
-				}
-			}
-			if !shouldMove {
-				newRecords = append(newRecords, existingRecord)
-			}
-		}
-
-		sourceBucket.Records = newRecords
-		sourceBucket.RecordCount = uint32(len(newRecords))
-
-		// Update source bucket
-		if err := hi.bucketManager.UpdateBucket(sourceBucket); err != nil {
-			return fmt.Errorf("failed to update source bucket %d: %w", sourceBucketNum, err)
-		}
-
-		// Add records to their new buckets
-		for _, record := range recordsToMove {
-			newBucket := record.HashValue % newBucketCount
-
-			if newBucket == newBucketNum {
-				// Goes to the newly created bucket
-				if !newBucketPage.CanFitRecord(record) {
-					if err := hi.addToOverflow(newBucketPage, newBucketNum, record); err != nil {
-						return fmt.Errorf("failed to add to new bucket overflow: %w", err)
-					}
-				} else {
-					newBucketPage.AddRecord(record)
-				}
-			} else {
-				// Goes to an existing bucket
-				targetBucket, err := hi.bucketManager.GetBucket(newBucket)
-				if err != nil {
-					return fmt.Errorf("failed to load target bucket %d: %w", newBucket, err)
-				}
-
-				if !targetBucket.CanFitRecord(record) {
-					if err := hi.addToOverflow(targetBucket, newBucket, record); err != nil {
-						return fmt.Errorf("failed to add to target bucket overflow: %w", err)
-					}
-				} else {
-					targetBucket.AddRecord(record)
-				}
-
-				if err := hi.bucketManager.UpdateBucket(targetBucket); err != nil {
-					return fmt.Errorf("failed to update target bucket %d: %w", newBucket, err)
-				}
-			}
-		}
-	}
-
-	// STEP 4: Persist new bucket
-	newPageNum := bucketNumberToPageNumber(newBucketNum)
-	hi.pageManager.PutPage(newPageNum, newBucketPage, true)
-	if err := hi.fileManager.WritePage(newPageNum, newBucketPage); err != nil {
-		return fmt.Errorf("failed to persist new bucket page: %w", err)
-	}
-
-	// STEP 5: Force sync before updating metadata
-	if err := hi.fileManager.Sync(); err != nil {
-		return fmt.Errorf("failed to sync pages: %w", err)
-	}
-
-	// STEP 6: Update metadata ONLY after successful redistribution
-	hi.metadata.BucketCount = newBucketCount
-
-	// Update linear hashing metadata
+	hi.metadata.BucketCount = newBucketNum + 1
 	hi.updateLinearHashingMetadata()
 
-	hi.logger.Infof("Correct bucket split completed: %d -> %d buckets", oldBucketCount, newBucketCount)
+	// STEP 5: Redistribute records between old and new bucket
+	splitRecords := make([]*IndexRecord, 0)
+	newRecords := make([]*IndexRecord, 0)
+
+	for _, record := range allRecords {
+		// Recalculate bucket assignment with new bucket count
+		targetBucket := hi.computeBucket(record.HashValue)
+
+		if targetBucket == splitBucketNum {
+			splitRecords = append(splitRecords, record)
+		} else if targetBucket == newBucketNum {
+			newRecords = append(newRecords, record)
+		} else {
+			// This shouldn't happen in proper linear hashing
+			hi.logger.Warnf("Record %s maps to unexpected bucket %d during split", record.DocumentID, targetBucket)
+			splitRecords = append(splitRecords, record) // Keep in original bucket
+		}
+	}
+
+	hi.logger.Debugf("Split result: %d records stay in bucket %d, %d records move to bucket %d",
+		len(splitRecords), splitBucketNum, len(newRecords), newBucketNum)
+
+	// STEP 6: Clear the split bucket and repopulate
+	splitBucket.Records = make([]*IndexRecord, 0)
+	splitBucket.RecordCount = 0
+	splitBucket.OverflowPageNum = 0 // Clear overflow chain
+
+	// Add records back to split bucket
+	for _, record := range splitRecords {
+		if !splitBucket.CanFitRecord(record) {
+			if err := hi.addToOverflow(splitBucket, splitBucketNum, record); err != nil {
+				return fmt.Errorf("failed to add record to split bucket overflow: %w", err)
+			}
+		} else {
+			splitBucket.AddRecord(record)
+		}
+	}
+
+	// STEP 7: Populate new bucket
+	for _, record := range newRecords {
+		if !newBucket.CanFitRecord(record) {
+			if err := hi.addToOverflow(newBucket, newBucketNum, record); err != nil {
+				return fmt.Errorf("failed to add record to new bucket overflow: %w", err)
+			}
+		} else {
+			newBucket.AddRecord(record)
+		}
+	}
+
+	// STEP 8: Update split pointer for next split
+	hi.metadata.SplitPointer++
+	if hi.metadata.SplitPointer >= oldBucketCount {
+		hi.metadata.SplitPointer = 0 // Reset for next round
+	}
+
+	// STEP 9: Persist changes (deferred to batch operations when possible)
+	if err := hi.bucketManager.UpdateBucket(splitBucket); err != nil {
+		return fmt.Errorf("failed to update split bucket: %w", err)
+	}
+
+	newPageNum := bucketNumberToPageNumber(newBucketNum)
+	hi.pageManager.PutPage(newPageNum, newBucket, true)
+
+	hi.logger.Infof("Linear hash split completed: bucket %d split, created bucket %d (total: %d buckets)",
+		splitBucketNum, newBucketNum, hi.metadata.BucketCount)
 
 	return nil
 }
@@ -575,8 +544,9 @@ func (hi *HashIndex) computeBucket(hashValue uint32) uint32 {
 
 	// Following SyndrDB data integrity requirements, validate mask consistency
 	if hi.metadata.HighMask == 0 || hi.metadata.MaxBucket == 0 {
-		hi.logger.Infof("Linear hashing metadata not properly initialized, using simple modulo")
-		hi.logger.Infof("  HighMask: %d, LowMask: %d, MaxBucket: %d",
+		// PERFORMANCE FIX: Reduce excessive logging - use Debug instead of Info
+		hi.logger.Debugf("Linear hashing metadata not properly initialized, using simple modulo")
+		hi.logger.Debugf("  HighMask: %d, LowMask: %d, MaxBucket: %d",
 			hi.metadata.HighMask, hi.metadata.LowMask, hi.metadata.MaxBucket)
 
 		// Fallback to simple modulo bucket calculation
@@ -624,7 +594,33 @@ func (hi *HashIndex) deleteFromBucket(bucketNum uint32, documentID string) error
 	return fmt.Errorf("record not found in bucket %d", bucketNum)
 }
 
+// shouldSplitFast determines if a bucket split is needed using fast calculation
+// PERFORMANCE OPTIMIZED: Uses simple math instead of expensive bucket iteration
+// Returns:
+//   - bool: True if a split is needed
+func (hi *HashIndex) shouldSplitFast() (bool, error) {
+	// Fast load factor calculation: total records / total buckets
+	// This is O(1) instead of O(n) bucket iteration
+	currentLoadFactor := float64(hi.metadata.TotalRecords) / float64(hi.metadata.BucketCount)
+	targetLoadFactor := hi.metadata.LoadFactor
+	shouldSplit := currentLoadFactor > targetLoadFactor
+
+	hi.logger.Debugf("Fast split evaluation: records=%d, buckets=%d, current=%.4f, target=%.4f, shouldSplit=%v",
+		hi.metadata.TotalRecords, hi.metadata.BucketCount, currentLoadFactor, targetLoadFactor, shouldSplit)
+
+	// Additional safety check: don't split if we have very few documents
+	minDocumentsForSplit := hi.metadata.BucketCount * 2 // At least 2 documents per bucket
+	if hi.metadata.TotalRecords < uint64(minDocumentsForSplit) {
+		hi.logger.Debugf("Preventing split: only %d documents for %d buckets (minimum: %d)",
+			hi.metadata.TotalRecords, hi.metadata.BucketCount, minDocumentsForSplit)
+		return false, nil
+	}
+
+	return shouldSplit, nil
+}
+
 // shouldSplit determines if a bucket split is needed based on load factor
+// DEPRECATED: Use shouldSplitFast() for better performance
 // Returns true if the current load factor exceeds the target fill factor
 // Returns:
 //   - bool: True if a split is needed

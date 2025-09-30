@@ -3,7 +3,6 @@ package document
 import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
-	"time"
 )
 
 type DocumentFactoryImpl struct {
@@ -22,20 +21,27 @@ func NewDocumentFactory() DocumentFactory {
 }
 
 func (f *DocumentFactoryImpl) NewDocument(docCommand models.DocumentCommand) *models.Document {
-	now := time.Now()
+	// Use cached time to avoid expensive time.Now() calls
+	now := helpers.GetCachedNow()
 
-	newDoc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
-		Fields:     f.MakeDocumentFields(docCommand),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}
+	// Use pooled document to avoid allocation
+	newDoc := GetPooledDocument()
+	newDoc.DocumentID = helpers.GenerateFastUUID()
+	newDoc.Fields = f.MakeDocumentFieldsPooled(docCommand)
+	newDoc.CreatedAt = now
+	newDoc.UpdatedAt = now
 
 	return newDoc
 }
 
 func (f *DocumentFactoryImpl) MakeDocumentFields(docCommand models.DocumentCommand) map[string]models.Field {
-	fields := make(map[string]models.Field)
+	// Legacy method - prefer MakeDocumentFieldsPooled for performance
+	return f.MakeDocumentFieldsPooled(docCommand)
+}
+
+func (f *DocumentFactoryImpl) MakeDocumentFieldsPooled(docCommand models.DocumentCommand) map[string]models.Field {
+	// Use pooled field map to avoid allocation
+	fields := GetPooledFieldMap()
 
 	// Iterate over the field definitions in the document command
 	for _, f := range docCommand.Fields {

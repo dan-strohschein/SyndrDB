@@ -133,12 +133,6 @@ func main() {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
-	// Initialize the database
-	// db := &engine.Database{
-	// 	DataDirectory: args.DataDir,
-	// 	Bundles:       make(map[string]engine.Bundle),
-	// }
-
 	// Create and start the server
 	srv, err := server.InitServer(args)
 	if err != nil {

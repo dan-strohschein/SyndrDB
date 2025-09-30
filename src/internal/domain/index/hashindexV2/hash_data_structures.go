@@ -1,9 +1,77 @@
 package hashindexV2
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"time"
 )
+
+// BINARY SERIALIZATION STRUCTURES
+// These structures provide efficient binary encoding for hash index data
+
+// BinaryIndexRecord represents a fixed-size binary format for index records
+// This optimizes storage and eliminates ASCII parsing overhead
+type BinaryIndexRecord struct {
+	HashValue    uint32   // 4 bytes - precomputed hash
+	DocumentID   [64]byte // 64 bytes - fixed-size DocumentID (null-padded)
+	TimestampSec int64    // 8 bytes - Unix timestamp seconds
+	TimestampNs  int32    // 4 bytes - nanosecond component
+	_            [4]byte  // 4 bytes - padding for alignment
+	// Total: 84 bytes per record (vs ~100+ bytes ASCII)
+}
+
+// ToBinary converts IndexRecord to BinaryIndexRecord
+func (r *IndexRecord) ToBinary() *BinaryIndexRecord {
+	binary := &BinaryIndexRecord{
+		HashValue:    r.HashValue,
+		TimestampSec: r.Timestamp.Unix(),
+		TimestampNs:  int32(r.Timestamp.Nanosecond()),
+	}
+
+	// Copy DocumentID with null-padding
+	copy(binary.DocumentID[:], []byte(r.DocumentID))
+
+	return binary
+}
+
+// ToIndexRecord converts BinaryIndexRecord back to IndexRecord
+func (b *BinaryIndexRecord) ToIndexRecord() *IndexRecord {
+	// Find null terminator for DocumentID
+	docID := string(bytes.TrimRight(b.DocumentID[:], "\x00"))
+
+	return &IndexRecord{
+		DocumentID: docID,
+		HashValue:  b.HashValue,
+		Timestamp:  time.Unix(b.TimestampSec, int64(b.TimestampNs)),
+	}
+}
+
+// BinaryBucketPageHeader represents the fixed header of a bucket page
+type BinaryBucketPageHeader struct {
+	PageNumber      uint32  // 4 bytes
+	BucketNumber    uint32  // 4 bytes
+	RecordCount     uint32  // 4 bytes
+	OverflowPage    uint32  // 4 bytes
+	FreeSpace       uint32  // 4 bytes
+	LastModifiedSec int64   // 8 bytes
+	LastModifiedNs  int32   // 4 bytes
+	_               [4]byte // 4 bytes padding
+	// Total: 36 bytes header
+}
+
+// BinaryOverflowPageHeader represents the fixed header of an overflow page
+type BinaryOverflowPageHeader struct {
+	PageNumber       uint32  // 4 bytes
+	ParentBucket     uint32  // 4 bytes
+	NextOverflowPage uint32  // 4 bytes
+	RecordCount      uint32  // 4 bytes
+	FreeSpace        uint32  // 4 bytes
+	LastModifiedSec  int64   // 8 bytes
+	LastModifiedNs   int32   // 4 bytes
+	_                [4]byte // 4 bytes padding
+	// Total: 36 bytes header
+}
 
 // Add this to the existing hash_data_structures.go file:
 
@@ -259,8 +327,33 @@ func (fs *FileStats) String() string {
 
 // Update the CanFitRecord method for BucketPage:
 func (bp *BucketPage) CanFitRecord(record *IndexRecord) bool {
-	estimatedSize := uint32(32 + len(record.DocumentID)) // Header + document ID
-	return bp.FreeSpace >= estimatedSize
+	// PERFORMANCE FIX: Use binary format size calculations
+	// Each binary record is exactly 84 bytes (fixed size)
+	const binaryRecordSize = 84
+	const binaryHeaderSize = 36
+
+	// Calculate current usage: header + (record count * record size)
+	currentUsage := binaryHeaderSize + (len(bp.Records) * binaryRecordSize)
+
+	// Check if adding one more record would exceed page size
+	newUsage := currentUsage + binaryRecordSize
+
+	// Check against page size limit (8KB = 8192 bytes)
+	return newUsage <= 8192
+} // Add helper method to estimate current page size
+func (bp *BucketPage) EstimateSerializedSize() uint32 {
+	// Base page header size
+	size := uint32(200) // PageNumber, BucketNumber, RecordCount, OverflowPage fields
+
+	// Add size for each existing record
+	for _, record := range bp.Records {
+		size += uint32(70 + len(record.DocumentID)) // Record format in ASCII
+	}
+
+	// Add footer size
+	size += 30
+
+	return size
 }
 
 // Update the AddRecord method for BucketPage:
@@ -281,9 +374,33 @@ func (bp *BucketPage) AddRecord(record *IndexRecord) {
 
 // Update the CanFitRecord method for OverflowPage:
 func (op *OverflowPage) CanFitRecord(record *IndexRecord) bool {
-	estimatedSize := uint32(32 + len(record.DocumentID)) // Header + document ID
-	return op.FreeSpace >= estimatedSize
+	// PERFORMANCE FIX: Use binary format size calculations
+	// Each binary record is exactly 84 bytes (fixed size)
+	const binaryRecordSize = 84
+	const binaryHeaderSize = 36
 
+	// Calculate current usage: header + (record count * record size)
+	currentUsage := binaryHeaderSize + (len(op.Records) * binaryRecordSize)
+
+	// Check if adding one more record would exceed page size
+	newUsage := currentUsage + binaryRecordSize
+
+	// Check against page size limit (8KB = 8192 bytes)
+	return newUsage <= 8192
+} // Add helper method to estimate current overflow page size
+func (op *OverflowPage) EstimateSerializedSize() uint32 {
+	// Base page header size
+	size := uint32(250) // PageNumber, ParentBucket, NextOverflowPage, RecordCount fields
+
+	// Add size for each existing record
+	for _, record := range op.Records {
+		size += uint32(70 + len(record.DocumentID)) // Record format in ASCII
+	}
+
+	// Add footer size
+	size += 30
+
+	return size
 }
 
 // Update the AddRecord method for OverflowPage:
@@ -328,4 +445,129 @@ func (m *HashIndexMetadata) UpdateMasksForSplit() {
 	}
 
 	m.LastModified = time.Now()
+}
+
+// BINARY SERIALIZATION METHODS
+// These methods provide high-performance binary I/O for hash index pages
+
+// SerializeBinary converts BucketPage to binary format for disk storage
+func (bp *BucketPage) SerializeBinary() ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write header
+	header := BinaryBucketPageHeader{
+		PageNumber:      bp.PageNumber,
+		BucketNumber:    bp.BucketNumber,
+		RecordCount:     bp.RecordCount,
+		OverflowPage:    bp.OverflowPageNum,
+		FreeSpace:       bp.FreeSpace,
+		LastModifiedSec: bp.LastModified.Unix(),
+		LastModifiedNs:  int32(bp.LastModified.Nanosecond()),
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, &header); err != nil {
+		return nil, fmt.Errorf("failed to write bucket header: %w", err)
+	}
+
+	// Write records
+	for _, record := range bp.Records {
+		binaryRecord := record.ToBinary()
+		if err := binary.Write(buf, binary.LittleEndian, binaryRecord); err != nil {
+			return nil, fmt.Errorf("failed to write record: %w", err)
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+// DeserializeBinary reconstructs BucketPage from binary data
+func (bp *BucketPage) DeserializeBinary(data []byte) error {
+	buf := bytes.NewReader(data)
+
+	// Read header
+	var header BinaryBucketPageHeader
+	if err := binary.Read(buf, binary.LittleEndian, &header); err != nil {
+		return fmt.Errorf("failed to read bucket header: %w", err)
+	}
+
+	// Set fields from header
+	bp.PageNumber = header.PageNumber
+	bp.BucketNumber = header.BucketNumber
+	bp.RecordCount = header.RecordCount
+	bp.OverflowPageNum = header.OverflowPage
+	bp.FreeSpace = header.FreeSpace
+	bp.LastModified = time.Unix(header.LastModifiedSec, int64(header.LastModifiedNs))
+
+	// Read records
+	bp.Records = make([]*IndexRecord, 0, header.RecordCount)
+	for i := uint32(0); i < header.RecordCount; i++ {
+		var binaryRecord BinaryIndexRecord
+		if err := binary.Read(buf, binary.LittleEndian, &binaryRecord); err != nil {
+			return fmt.Errorf("failed to read record %d: %w", i, err)
+		}
+		bp.Records = append(bp.Records, binaryRecord.ToIndexRecord())
+	}
+
+	return nil
+}
+
+// SerializeBinary converts OverflowPage to binary format for disk storage
+func (op *OverflowPage) SerializeBinary() ([]byte, error) {
+	buf := new(bytes.Buffer)
+
+	// Write header
+	header := BinaryOverflowPageHeader{
+		PageNumber:       op.PageNumber,
+		ParentBucket:     op.ParentBucket,
+		NextOverflowPage: op.NextOverflowPage,
+		RecordCount:      op.RecordCount,
+		FreeSpace:        op.FreeSpace,
+		LastModifiedSec:  op.LastModified.Unix(),
+		LastModifiedNs:   int32(op.LastModified.Nanosecond()),
+	}
+
+	if err := binary.Write(buf, binary.LittleEndian, &header); err != nil {
+		return nil, fmt.Errorf("failed to write overflow header: %w", err)
+	}
+
+	// Write records
+	for _, record := range op.Records {
+		binaryRecord := record.ToBinary()
+		if err := binary.Write(buf, binary.LittleEndian, binaryRecord); err != nil {
+			return nil, fmt.Errorf("failed to write record: %w", err)
+		}
+	}
+
+	return buf.Bytes(), nil
+}
+
+// DeserializeBinary reconstructs OverflowPage from binary data
+func (op *OverflowPage) DeserializeBinary(data []byte) error {
+	buf := bytes.NewReader(data)
+
+	// Read header
+	var header BinaryOverflowPageHeader
+	if err := binary.Read(buf, binary.LittleEndian, &header); err != nil {
+		return fmt.Errorf("failed to read overflow header: %w", err)
+	}
+
+	// Set fields from header
+	op.PageNumber = header.PageNumber
+	op.ParentBucket = header.ParentBucket
+	op.NextOverflowPage = header.NextOverflowPage
+	op.RecordCount = header.RecordCount
+	op.FreeSpace = header.FreeSpace
+	op.LastModified = time.Unix(header.LastModifiedSec, int64(header.LastModifiedNs))
+
+	// Read records
+	op.Records = make([]*IndexRecord, 0, header.RecordCount)
+	for i := uint32(0); i < header.RecordCount; i++ {
+		var binaryRecord BinaryIndexRecord
+		if err := binary.Read(buf, binary.LittleEndian, &binaryRecord); err != nil {
+			return fmt.Errorf("failed to read record %d: %w", i, err)
+		}
+		op.Records = append(op.Records, binaryRecord.ToIndexRecord())
+	}
+
+	return nil
 }

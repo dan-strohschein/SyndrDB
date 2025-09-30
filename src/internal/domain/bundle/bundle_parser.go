@@ -450,69 +450,66 @@ func parseFieldValueSets(fieldsText string) ([]models.KeyValue, error) {
 }
 
 func parseFieldValues(fieldsText string) ([]models.KeyValue, error) {
-	var fieldValues []models.KeyValue
+	// Step 1: Remove ALL forms of whitespace (spaces, tabs, newlines, etc.)
+	// But preserve whitespace within quoted strings
+	normalizedText := normalizeWhitespace(fieldsText)
 
-	// Remove any leading/trailing whitespace
-	fieldsText = strings.TrimSpace(fieldsText)
-
-	// Remove outer braces if present
-	if strings.HasPrefix(fieldsText, "{") && strings.HasSuffix(fieldsText, "}") {
-		fieldsText = fieldsText[1 : len(fieldsText)-1]
+	// Step 2: Check if we have multiple individual braces format by looking for "},{"
+	if strings.Contains(normalizedText, "},{") {
+		return parseMultipleBraces(normalizedText)
 	}
 
-	// Split by comma, but we need to be careful about quoted values that might contain commas
-	parts := []string{}
-	currentPart := ""
+	// Step 3: Handle single brace format: {key=value,key=value}
+	return parseSingleBrace(normalizedText)
+}
+
+// normalizeWhitespace removes all whitespace except within quoted strings
+func normalizeWhitespace(text string) string {
+	var result strings.Builder
 	inQuotes := false
 
-	for i, char := range fieldsText {
+	for _, char := range text {
 		if char == '"' {
 			inQuotes = !inQuotes
-		}
-
-		if char == ',' && !inQuotes {
-			parts = append(parts, strings.TrimSpace(currentPart))
-			currentPart = ""
+			result.WriteRune(char)
+		} else if inQuotes {
+			// Preserve all characters within quotes
+			result.WriteRune(char)
+		} else if char == ' ' || char == '\t' || char == '\n' || char == '\r' {
+			// Skip all forms of whitespace outside quotes
+			continue
 		} else {
-			currentPart += string(char)
-		}
-
-		// Add the last part if we're at the end
-		if i == len(fieldsText)-1 {
-			parts = append(parts, strings.TrimSpace(currentPart))
+			result.WriteRune(char)
 		}
 	}
 
-	for _, part := range parts {
+	return result.String()
+}
+
+// parseMultipleBraces handles format: {key=value},{key=value}
+func parseMultipleBraces(text string) ([]models.KeyValue, error) {
+	var fieldValues []models.KeyValue
+
+	// Split by },{ pattern
+	bracePairs := strings.Split(text, "},{")
+
+	for i, pair := range bracePairs {
+		// Clean up braces from first and last items
+		if i == 0 && strings.HasPrefix(pair, "{") {
+			pair = pair[1:] // Remove leading brace from first item
+		}
+		if i == len(bracePairs)-1 && strings.HasSuffix(pair, "}") {
+			pair = pair[:len(pair)-1] // Remove trailing brace from last item
+		}
+
 		// Parse the key-value pair
-		keyValue := strings.SplitN(part, "=", 2)
+		keyValue := strings.SplitN(pair, "=", 2)
 		if len(keyValue) != 2 {
-			return nil, fmt.Errorf("invalid field format: %s", part)
+			return nil, fmt.Errorf("invalid field format: %s", pair)
 		}
 
-		key := helpers.StripQuotes(strings.TrimSpace(keyValue[0]))
-		valueStr := strings.TrimSpace(keyValue[1])
-
-		// Convert valueStr to appropriate type
-		var value interface{} = valueStr
-
-		// Remove quotes if present
-		if strings.HasPrefix(valueStr, "\"") && strings.HasSuffix(valueStr, "\"") {
-			value = strings.Trim(valueStr, "\"")
-		} else if strings.EqualFold(valueStr, "true") || strings.EqualFold(valueStr, "false") {
-			// Handle boolean values
-			value = strings.EqualFold(valueStr, "true")
-		} else if strings.Contains(valueStr, ".") {
-			// Try to parse as float
-			if floatVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
-				value = floatVal
-			}
-		} else {
-			// Try to parse as int
-			if intVal, err := strconv.Atoi(valueStr); err == nil {
-				value = intVal
-			}
-		}
+		key := helpers.StripQuotes(keyValue[0])
+		value := parseValue(keyValue[1])
 
 		fieldValues = append(fieldValues, models.KeyValue{
 			Key:   key,
@@ -523,7 +520,93 @@ func parseFieldValues(fieldsText string) ([]models.KeyValue, error) {
 	return fieldValues, nil
 }
 
-// parseFieldChanges parses field change operations (CHANGE, ADD, REMOVE)
+// parseSingleBrace handles format: {key=value,key=value}
+func parseSingleBrace(text string) ([]models.KeyValue, error) {
+	var fieldValues []models.KeyValue
+
+	// Remove outer braces if present
+	if strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}") {
+		text = text[1 : len(text)-1]
+	}
+
+	// Split by comma, but be careful about quoted values that might contain commas
+	parts := splitByCommaRespectingQuotes(text)
+
+	for _, part := range parts {
+		// Parse the key-value pair
+		keyValue := strings.SplitN(part, "=", 2)
+		if len(keyValue) != 2 {
+			return nil, fmt.Errorf("invalid field format: %s", part)
+		}
+
+		key := helpers.StripQuotes(keyValue[0])
+		value := parseValue(keyValue[1])
+
+		fieldValues = append(fieldValues, models.KeyValue{
+			Key:   key,
+			Value: value,
+		})
+	}
+
+	return fieldValues, nil
+}
+
+// splitByCommaRespectingQuotes splits text by commas but respects quoted strings
+func splitByCommaRespectingQuotes(text string) []string {
+	var parts []string
+	var currentPart strings.Builder
+	inQuotes := false
+
+	for _, char := range text {
+		if char == '"' {
+			inQuotes = !inQuotes
+			currentPart.WriteRune(char)
+		} else if char == ',' && !inQuotes {
+			parts = append(parts, currentPart.String())
+			currentPart.Reset()
+		} else {
+			currentPart.WriteRune(char)
+		}
+	}
+
+	// Add the last part
+	if currentPart.Len() > 0 {
+		parts = append(parts, currentPart.String())
+	}
+
+	return parts
+}
+
+// parseValue converts a string value to the appropriate Go type
+func parseValue(valueStr string) interface{} {
+	// Input is already normalized, no need for TrimSpace
+
+	// Handle quoted strings
+	if strings.HasPrefix(valueStr, "\"") && strings.HasSuffix(valueStr, "\"") {
+		return valueStr[1 : len(valueStr)-1] // Return string without quotes
+	}
+
+	// Handle boolean values
+	if strings.EqualFold(valueStr, "true") {
+		return true
+	}
+	if strings.EqualFold(valueStr, "false") {
+		return false
+	}
+
+	// Try to parse as integer first
+	if intVal, err := strconv.Atoi(valueStr); err == nil {
+		return intVal
+	}
+
+	// Try to parse as float
+	if floatVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
+		return floatVal
+	}
+
+	// Default to string if no other type matches
+	return valueStr
+} // parseFieldChanges parses field change operations (CHANGE, ADD, REMOVE)
 func parseFieldChanges(command string) ([]models.FieldChange, error) {
 	var changes []models.FieldChange
 

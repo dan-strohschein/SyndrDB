@@ -56,7 +56,16 @@ func (hi *HashIndex) insertIntoBucket(bucketNum uint32, record *IndexRecord) err
 		return fmt.Errorf("failed to get bucket %d: %w", bucketNum, err)
 	}
 
-	hi.logger.Infof("DEBUG DEBUG DEBUG || Bucket has %d freeSpace", bucketPage.FreeSpace)
+	// PERFORMANCE FIX: Remove excessive debug logging that was called on every insert
+
+	// CRITICAL FIX: Check for duplicates before inserting to prevent splitting errors
+	for _, existingRecord := range bucketPage.Records {
+		if existingRecord != nil && existingRecord.DocumentID == record.DocumentID {
+			hi.logger.Debugf("Skipping duplicate record during bucket insert: DocumentID %s already exists in bucket %d", record.DocumentID, bucketNum)
+			return nil // Gracefully handle duplicate
+		}
+	}
+
 	// Check if bucket can fit the record
 	if !bucketPage.CanFitRecord(record) {
 
@@ -71,15 +80,17 @@ func (hi *HashIndex) insertIntoBucket(bucketNum uint32, record *IndexRecord) err
 	pageNum := bucketNumberToPageNumber(bucketNum)
 	hi.pageManager.PutPage(pageNum, bucketPage, true)
 
-	// Persist changes to disk immediately
-	if err := hi.flushBucketToDisk(bucketNum, bucketPage); err != nil {
-		return fmt.Errorf("failed to persist bucket %d to disk: %w", bucketNum, err)
-	}
+	// PERFORMANCE FIX: Remove immediate disk persistence on every insert
+	// Let batch operations and periodic flushes handle disk I/O
+	// if err := hi.flushBucketToDisk(bucketNum, bucketPage); err != nil {
+	//     return fmt.Errorf("failed to persist bucket %d to disk: %w", bucketNum, err)
+	// }
 
-	// Update metadata (document count, load factor, etc.)
-	if err := hi.updateAndPersistMetadata(); err != nil {
-		return fmt.Errorf("failed to update metadata after insertion: %w", err)
-	}
+	// PERFORMANCE FIX: Remove immediate metadata persistence on every insert
+	// Metadata will be updated in memory and persisted during batch operations
+	// if err := hi.updateAndPersistMetadata(); err != nil {
+	//     return fmt.Errorf("failed to update metadata after insertion: %w", err)
+	// }
 
 	hi.logger.Debugf("Record inserted into bucket %d", bucketNum)
 	return nil

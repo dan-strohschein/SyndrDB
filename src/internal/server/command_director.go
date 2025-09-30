@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -198,6 +199,12 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 
 	// Parse ATTACH command
 	if strings.HasPrefix(strings.ToLower(command), "attach") {
+		// Check if this is ATTACH DATABASE syntax by looking for DATABASE keyword
+		commandLower := strings.ToLower(command)
+		if strings.Contains(commandLower, "attach database") {
+			return AttachDatabase(command, logger, serviceManager)
+		}
+		// Default to user attachment for other ATTACH commands
 		return AttachUserToDatabase(command, logger, serviceManager)
 	}
 
@@ -845,6 +852,7 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 	}
 
+	docID := ""
 	// Execute with WAL logging if available
 	if serviceManager.WALManager != nil {
 		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
@@ -856,19 +864,20 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 			}
 
 			// Add the document to the bundle
-			return serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+			docID, err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+			return err
 		})
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
-		err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+		docID, err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
 	}
 
 	if err != nil {
 		return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
 	}
 
-	result := fmt.Sprintf("Document added successfully to bundle '%s'.", bundleName)
+	result := fmt.Sprintf("{\"DocumentID\": \"%s\", \"message\": \"Document added successfully to bundle '%s'.\"}", docID, bundleName)
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
 		Result:      result,
@@ -1613,13 +1622,55 @@ func ShowRateLimit(command string, logger *zap.SugaredLogger, serviceManager Ser
 func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW DATABASES command: %s", command)
 
-	// Get the list of databases from the database service
+	// Get the list of databases from the database service (loaded in memory)
 	databases := serviceManager.DatabaseService.ListDatabases()
 
 	// Extract database names for the response
 	databaseNames := make([]string, len(databases))
 	for i, db := range databases {
 		databaseNames[i] = db.Name
+	}
+
+	// Optional: Check catalog consistency for debugging (if catalog service is available)
+	if serviceManager.InternalCatalogService != nil {
+		catalogDatabases, err := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+		if err != nil {
+			logger.Warnf("Warning: Could not verify catalog consistency: %v", err)
+		} else {
+			catalogNames := make([]string, 0, len(catalogDatabases))
+			for _, dbInfo := range catalogDatabases {
+				if dbName, ok := dbInfo["Name"].(string); ok {
+					catalogNames = append(catalogNames, dbName)
+				}
+			}
+
+			// Check for inconsistencies
+			loadedSet := make(map[string]bool)
+			for _, name := range databaseNames {
+				loadedSet[name] = true
+			}
+
+			catalogSet := make(map[string]bool)
+			for _, name := range catalogNames {
+				catalogSet[name] = true
+			}
+
+			// Find databases in catalog but not loaded
+			for _, name := range catalogNames {
+				if !loadedSet[name] {
+					logger.Warnf("Database '%s' is in catalog but not loaded in memory", name)
+				}
+			}
+
+			// Find databases loaded but not in catalog
+			for _, name := range databaseNames {
+				if !catalogSet[name] {
+					logger.Warnf("Database '%s' is loaded but not found in catalog", name)
+				}
+			}
+
+			logger.Debugf("Catalog consistency check: %d loaded, %d in catalog", len(databaseNames), len(catalogNames))
+		}
 	}
 
 	response := &CommandResponse{
@@ -1648,46 +1699,65 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 			return nil, fmt.Errorf("failed to parse database name from command: %w", err)
 		}
 
-		// Look up the database ID from the catalog using the database name
-		if serviceManager.InternalCatalogService == nil {
-			return nil, fmt.Errorf("internal catalog service is not available")
-		}
-
-		allDatabases, err := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+		// First check if the database exists in the loaded databases (consistent with USE DATABASE)
+		targetDatabase, err = serviceManager.DatabaseService.GetDatabaseByName(databaseName)
 		if err != nil {
-			return nil, fmt.Errorf("failed to retrieve databases from catalog: %w", err)
+			return nil, fmt.Errorf("database '%s' not found in system: %w", databaseName, err)
 		}
 
-		// Find the database with the matching name
-		var foundDatabase map[string]interface{}
-		for _, dbInfo := range allDatabases {
-			if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
-				foundDatabase = dbInfo
-				break
+		// Verify database is also in catalog (for additional validation, similar to UseDatabase)
+		if serviceManager.InternalCatalogService != nil {
+			allDatabases, catalogErr := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+			if catalogErr != nil {
+				logger.Warnf("Warning: Failed to verify database in catalog: %v", catalogErr)
+			} else {
+				// Check if the requested database exists in catalog
+				var foundInCatalog bool
+				for _, dbInfo := range allDatabases {
+					if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
+						foundInCatalog = true
+						break
+					}
+				}
+
+				if !foundInCatalog {
+					logger.Warnf("Warning: Database '%s' is loaded but not found in catalog", databaseName)
+				}
 			}
 		}
 
-		if foundDatabase == nil {
-			return nil, fmt.Errorf("database '%s' not found in system catalog", databaseName)
-		}
-
-		// Extract the DatabaseID
-		if dbID, ok := foundDatabase["DatabaseID"].(string); ok {
-			targetDatabaseID = dbID
-		} else {
-			return nil, fmt.Errorf("invalid DatabaseID found for database '%s'", databaseName)
-		}
-
+		targetDatabaseID = targetDatabase.DatabaseID
 		logger.Infof("Found database '%s' with ID: %s", databaseName, targetDatabaseID)
 	} else {
-		// Original syntax - use current database
+		// Original syntax - use current database and show actual bundles that exist
 		if database == nil {
 			return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
 		}
-		targetDatabase = database
-		targetDatabaseID = database.DatabaseID
+
+		// Get bundles directly from the current database instead of catalog
+		bundleInfos := make([]map[string]interface{}, 0, len(database.Bundles))
+		for bundleName, bundle := range database.Bundles {
+			cleanBundleInfo := map[string]interface{}{
+				"Name":        bundleName,
+				"BundleID":    bundle.BundleID,
+				"DatabaseID":  database.DatabaseID,
+				"Description": bundle.Description,
+				"CreatedAt":   bundle.CreatedAt,
+				"UpdatedAt":   bundle.UpdatedAt,
+			}
+			bundleInfos = append(bundleInfos, cleanBundleInfo)
+		}
+
+		response := &CommandResponse{
+			ResultCount: len(bundleInfos),
+			Result:      bundleInfos,
+		}
+
+		logger.Infof("Found %d bundles in database %s (loaded from database)", len(bundleInfos), database.Name)
+		return response, nil
 	}
 
+	// For "SHOW BUNDLES FOR database" syntax, use catalog approach
 	// Get bundles from the catalog for the target database ID
 	if serviceManager.InternalCatalogService == nil {
 		return nil, fmt.Errorf("internal catalog service is not available")
@@ -1877,40 +1947,205 @@ func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager Servi
 		return nil, fmt.Errorf("failed to parse database name from USE command: %w", err)
 	}
 
-	// Validate that the database exists by checking the system catalog
-	if serviceManager.InternalCatalogService == nil {
-		return nil, fmt.Errorf("internal catalog service is not available")
-	}
-
-	// Get all databases from the catalog
-	allDatabases, err := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+	// Check if the database exists in the loaded databases (consistent with SHOW DATABASES)
+	database, err := serviceManager.DatabaseService.GetDatabaseByName(databaseName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve databases from catalog: %w", err)
+		return nil, fmt.Errorf("database '%s' not found in system: %w", databaseName, err)
 	}
 
-	// Check if the requested database exists
-	var foundDatabase map[string]interface{}
-	for _, dbInfo := range allDatabases {
-		if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
-			foundDatabase = dbInfo
-			break
+	// Verify database is also in catalog (for additional validation)
+	if serviceManager.InternalCatalogService != nil {
+		allDatabases, catalogErr := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+		if catalogErr != nil {
+			logger.Warnf("Warning: Failed to verify database in catalog: %v", catalogErr)
+		} else {
+			// Check if the requested database exists in catalog
+			var foundInCatalog bool
+			for _, dbInfo := range allDatabases {
+				if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
+					foundInCatalog = true
+					break
+				}
+			}
+
+			if !foundInCatalog {
+				logger.Warnf("Warning: Database '%s' is loaded but not found in catalog", databaseName)
+			}
 		}
 	}
 
-	if foundDatabase == nil {
-		return nil, fmt.Errorf("database '%s' not found in system catalog", databaseName)
-	}
-
-	// TODO: Set the database as the current session database
-	// This will be implemented in the next step when we add session management
-
-	logger.Infof("Successfully validated database '%s' exists", databaseName)
+	logger.Infof("Successfully validated database '%s' exists (ID: %s)", databaseName, database.DatabaseID)
 
 	response := &CommandResponse{
 		ResultCount: 1,
 		Result:      fmt.Sprintf("Database context switched to '%s'.", databaseName),
 	}
 	return response, nil
+}
+
+// AttachDatabase handles the ATTACH "<file_path>" "<database_name>" command
+func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing ATTACH DATABASE command: %s", command)
+
+	// Parse the file path and database name from the command
+	// Expected format: ATTACH "<file_path>" "<database_name>";
+	filePath, databaseName, err := parseAttachDatabaseCommand(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ATTACH command: %w", err)
+	}
+
+	// Check if the database file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("database file does not exist: %s", filePath)
+	}
+
+	// Check if database already exists in catalog (optional - continue if catalog is corrupted)
+	catalogAvailable := false
+	if serviceManager.InternalCatalogService != nil {
+		allDatabases, catalogErr := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+		if catalogErr != nil {
+			logger.Warnf("Warning: Failed to check existing databases in catalog (continuing without catalog check): %v", catalogErr)
+		} else {
+			catalogAvailable = true
+			// Check if the database already exists in catalog
+			for _, dbInfo := range allDatabases {
+				if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
+					return nil, fmt.Errorf("database '%s' already exists in system catalog", databaseName)
+				}
+			}
+		}
+	}
+
+	// Generate a new database ID
+	databaseID := generateDatabaseID()
+
+	// Create database entry for catalog
+	newDatabase := &models.Database{
+		DatabaseID:    databaseID,
+		Name:          databaseName,
+		Description:   fmt.Sprintf("Database attached from file: %s", filePath),
+		Bundles:       make(map[string]models.Bundle),
+		DataDirectory: filepath.Dir(filePath),
+	}
+
+	// Add database to catalog (only if catalog is available)
+	if catalogAvailable && serviceManager.InternalCatalogService != nil {
+		err = serviceManager.InternalCatalogService.AddDatabaseToCatalog(newDatabase)
+		if err != nil {
+			logger.Warnf("Warning: Failed to add database to catalog (continuing with in-memory only): %v", err)
+		} else {
+			logger.Infof("Successfully added database '%s' to catalog", databaseName)
+		}
+	}
+
+	// Add the database to the in-memory service without creating files
+	// since the files already exist
+	serviceManager.DatabaseService.Databases[databaseName] = newDatabase
+
+	// Discover and attach bundles from the same directory
+	bundlesAdded := 0
+	dbDir := filepath.Dir(filePath)
+
+	// Look for .bnd files in the same directory
+	bundleFiles, err := filepath.Glob(filepath.Join(dbDir, "*.bnd"))
+	if err != nil {
+		logger.Warnf("Failed to scan for bundle files: %v", err)
+	} else {
+		for _, bundleFile := range bundleFiles {
+			bundleName := strings.TrimSuffix(filepath.Base(bundleFile), ".bnd")
+
+			// Skip system bundles that might conflict
+			if bundleName == "Databases" || bundleName == "Users" || bundleName == "Bundles" {
+				continue
+			}
+
+			// Check if bundle already exists in catalog (optional check)
+			bundleExists := false
+			if catalogAvailable && serviceManager.InternalCatalogService != nil {
+				allBundles, bundleErr := serviceManager.InternalCatalogService.ListAllBundlesInCatalog()
+				if bundleErr == nil {
+					for _, bundleInfo := range allBundles {
+						if bundleName2, ok := bundleInfo["Name"].(string); ok && bundleName2 == bundleName {
+							// Check if it's for this database (use a database-scoped check)
+							bundleExists = true
+							break
+						}
+					}
+				} else {
+					logger.Warnf("Warning: Failed to check existing bundles in catalog for '%s': %v", bundleName, bundleErr)
+				}
+			}
+
+			if !bundleExists {
+				// Create bundle entry for catalog - referencing existing files
+				bundleID := generateBundleID()
+				newBundle := &models.Bundle{
+					BundleID:    bundleID,
+					Name:        bundleName,
+					Description: fmt.Sprintf("Bundle discovered from file: %s", bundleFile),
+					CreatedAt:   time.Now(),
+					UpdatedAt:   time.Now(),
+					Database:    newDatabase, // Set the database reference
+				}
+
+				// Add bundle to the database's bundles map
+				newDatabase.Bundles[bundleName] = *newBundle
+
+				// Add bundle to catalog (only if catalog is available)
+				if catalogAvailable && serviceManager.InternalCatalogService != nil {
+					bundleErr := serviceManager.InternalCatalogService.AddBundleToCatalog(newBundle)
+					if bundleErr != nil {
+						logger.Warnf("Warning: Failed to add bundle '%s' to catalog (continuing with in-memory only): %v", bundleName, bundleErr)
+					} else {
+						logger.Infof("Added bundle '%s' to catalog", bundleName)
+					}
+				}
+				bundlesAdded++
+				logger.Infof("Registered bundle '%s' from file '%s'", bundleName, bundleFile)
+			}
+		}
+	}
+
+	response := &CommandResponse{
+		ResultCount: 1,
+		Result: map[string]interface{}{
+			"DatabaseName": databaseName,
+			"DatabaseID":   databaseID,
+			"FilePath":     filePath,
+			"BundlesAdded": bundlesAdded,
+			"Status":       "Database attached successfully",
+		},
+	}
+
+	logger.Infof("Successfully attached database '%s' from file '%s' with %d bundles", databaseName, filePath, bundlesAdded)
+	return response, nil
+}
+
+// parseAttachDatabaseCommand parses the ATTACH DATABASE command to extract file path and database name
+func parseAttachDatabaseCommand(command string) (string, string, error) {
+	// Expected format: ATTACH DATABASE "<file_path>" "<database_name>";
+	// Use regex to extract both quoted strings after DATABASE keyword
+	re := regexp.MustCompile(`(?i)attach\s+database\s+"([^"]+)"\s+"([^"]+)"`)
+	matches := re.FindStringSubmatch(command)
+
+	if len(matches) < 3 {
+		return "", "", fmt.Errorf("invalid ATTACH DATABASE command format. Expected: ATTACH DATABASE \"<file_path>\" \"<database_name>\";")
+	}
+
+	filePath := matches[1]
+	databaseName := matches[2]
+
+	return filePath, databaseName, nil
+}
+
+// generateDatabaseID generates a unique database ID
+func generateDatabaseID() string {
+	return fmt.Sprintf("db_%d", time.Now().UnixNano())
+}
+
+// generateBundleID generates a unique bundle ID
+func generateBundleID() string {
+	return fmt.Sprintf("bnd_%d", time.Now().UnixNano())
 }
 
 // parseDatabaseNameFromUse extracts the database name from USE "<DATABASE_NAME>"; command
