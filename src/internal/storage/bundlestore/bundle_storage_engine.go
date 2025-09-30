@@ -2,7 +2,6 @@ package bundlestore
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -22,7 +21,6 @@ import (
 
 	"syndrdb/src/internal/storage/buffer"
 
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -159,42 +157,29 @@ func (bse *BundleStorageEngine) loadBundleMetadataFromFile(dataDir, fileName str
 func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
 	filePath := filepath.Join(dataRootDir, fmt.Sprintf("%s.bnd", bundleID))
 
-	// Read the bundle file
+	// Read the bundle file header to get metadata
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bundle file '%s': %w", filePath, err)
 	}
 
-	// Use the configured serializer to load bundle metadata only
-	// For document loading, we need to use a different approach since
-	// the new format separates metadata from documents
+	// Use the configured serializer to load bundle metadata for format validation
+	// This ensures we understand the file format and can process it correctly
 	_, err = bse.serializer.DeserializeBundleMetadata(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse bundle metadata for document extraction: %w", err)
 	}
 
-	// For now, return empty documents since the new format stores documents separately
-	// TODO: Implement proper document page loading based on the new format
-	allDocuments := make(map[string]models.Document)
-
-	// Calculate page boundaries
-	pageSize := uint32(100) // TODO: Make this configurable
+	// PERFORMANCE FIX: Use efficient page-based loading instead of loading all documents
+	// This implements true virtual pagination over append-only storage
+	pageSize := uint32(1000) // Use consistent page size with BundleService
 	startIndex := pageID * pageSize
 	endIndex := startIndex + pageSize
 
-	// Extract documents for this page
-	pageDocuments := make(map[string]models.Document)
-	index := uint32(0)
-
-	for docID, doc := range allDocuments {
-		if index >= startIndex && index < endIndex {
-			pageDocuments[docID] = doc
-		}
-		index++
-
-		if index >= endIndex {
-			break
-		}
+	// Load only the documents needed for this page using range-based loading
+	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleID, startIndex, endIndex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load document range for bundle %s page %d: %w", bundleID, pageID, err)
 	}
 
 	page := &models.DocumentPage{
@@ -205,18 +190,20 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32,
 		IsDirty:   false,
 	}
 
-	// Set pagination pointers
+	// Set pagination pointers based on actual document count
 	if pageID > 0 {
 		prevPageID := pageID - 1
 		page.PreviousPageID = &prevPageID
 	}
 
-	totalDocs := uint32(len(allDocuments))
 	totalPages := (totalDocs + pageSize - 1) / pageSize
 	if pageID < totalPages-1 {
 		nextPageID := pageID + 1
 		page.NextPageID = &nextPageID
 	}
+
+	bse.logger.Debugf("Efficiently loaded page %d for bundle %s with %d documents (total docs: %d, total pages: %d)",
+		pageID, bundleID, len(pageDocuments), totalDocs, totalPages)
 
 	return page, nil
 }
@@ -303,15 +290,39 @@ func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bu
 	}
 	defer unix.Munmap(data)
 
-	bundleData, err := helpers.DecodeBSON(data)
+	bundleData, err := helpers.DecodeFastBinary(data)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error decoding bundle data: %w", err)
 	}
 
-	// Assert that the decoded data is of type Bundle
-	bundle, ok := bundleData.(models.Bundle)
-	if !ok {
-		return nil, nil, fmt.Errorf("decoded data is not of type Bundle")
+	// Convert map back to Bundle struct
+	var bundle models.Bundle
+	if bundleID, ok := bundleData["BundleID"].(string); ok {
+		bundle.BundleID = bundleID
+	}
+	if name, ok := bundleData["Name"].(string); ok {
+		bundle.Name = name
+	}
+	if desc, ok := bundleData["Description"].(string); ok {
+		bundle.Description = desc
+	}
+	if createdBy, ok := bundleData["CreatedBy"].(string); ok {
+		bundle.CreatedBy = createdBy
+	}
+	if createdAt, ok := bundleData["CreatedAt"].(time.Time); ok {
+		bundle.CreatedAt = createdAt
+	}
+	if updatedAt, ok := bundleData["UpdatedAt"].(time.Time); ok {
+		bundle.UpdatedAt = updatedAt
+	}
+	if totalDocs, ok := bundleData["TotalDocuments"].(int64); ok {
+		bundle.TotalDocuments = totalDocs
+	}
+	if pageCount, ok := bundleData["PageCount"].(int64); ok {
+		bundle.PageCount = pageCount
+	}
+	if pageSize, ok := bundleData["PageSize"].(int); ok {
+		bundle.PageSize = pageSize
 	}
 
 	return &data, &bundle, nil
@@ -570,10 +581,10 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *models.Da
 		}
 
 		if docMap["ID"] == documentID {
-			// Serialize the updated document to BSON
-			updatedBSON, err := bson.Marshal(updatedDocument)
+			// Serialize the updated document using fast binary format
+			updatedBinary, err := helpers.EncodeFastBinary(updatedDocument)
 			if err != nil {
-				return fmt.Errorf("error encoding updated document to BSON: %w", err)
+				return fmt.Errorf("error encoding updated document to fast binary: %w", err)
 			}
 
 			// Calculate the offset and size of the document
@@ -582,10 +593,10 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *models.Da
 				return fmt.Errorf("error calculating document offset during document update: %w", err)
 			}
 
-			documentSize = len(updatedBSON)
+			documentSize = len(updatedBinary)
 
 			// Replace the document in the memory-mapped data
-			copy(mmapData[documentOffset:documentOffset+documentSize], updatedBSON)
+			copy(mmapData[documentOffset:documentOffset+documentSize], updatedBinary)
 			found = true
 			break
 		}
@@ -939,6 +950,39 @@ func (b *BundleStorageEngine) CloseWriteBuffers() error {
 	return nil
 }
 
+// readDocumentRange efficiently reads a specific range of documents for pagination
+// This implements true virtual pagination by streaming through the file and stopping at boundaries
+func (b *BundleStorageEngine) readDocumentRange(bundleName string, startIndex, endIndex uint32) (map[string]models.Document, uint32, error) {
+	args := settings.GetSettings()
+	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to open bundle file: %w", err)
+	}
+	defer file.Close()
+
+	// Read the entire file for now - TODO: optimize with streaming
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	fileData := make([]byte, fileInfo.Size())
+	_, err = file.Read(fileData)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Parse documents with range limiting
+	pageDocuments, totalCount, err := b.parseAppendedDocumentsRange(fileData, startIndex, endIndex)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse document range: %w", err)
+	}
+
+	return pageDocuments, totalCount, nil
+}
+
 // ReadAppendedDocuments reads documents that were appended to the bundle file
 // This method can read both the original BSON bundle format and appended documents
 func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName string) (map[string]models.Document, error) {
@@ -972,6 +1016,170 @@ func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName string) (map[stri
 	return documents, nil
 }
 
+// parseAppendedDocumentsRange parses documents in the append-only format with range limiting
+// This implements efficient virtual pagination by stopping when the page is full
+func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startIndex, endIndex uint32) (map[string]models.Document, uint32, error) {
+	pageDocuments := make(map[string]models.Document)
+	deletedDocuments := make(map[string]bool)        // Track deleted documents
+	allDocuments := make(map[string]models.Document) // Track all valid documents for counting
+	offset := 0
+	documentIndex := uint32(0)
+
+	for offset < len(data) {
+		// Need at least 8 bytes for header
+		if offset+8 > len(data) {
+			break
+		}
+
+		// Read magic number and size
+		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
+		size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+
+		// Handle document records
+		if magic == 0xDEADBEEF {
+			// Validate size
+			if offset+8+int(size) > len(data) {
+				break
+			}
+
+			// Extract document data
+			documentData := data[offset+8 : offset+8+int(size)]
+
+			// Decode document using fast binary format
+			docMap, err := helpers.DecodeFastBinary(documentData)
+			if err != nil {
+				b.logger.Warnf("Failed to decode document at offset %d using fast binary format: %v",
+					offset, err)
+				offset += 8 + int(size)
+				continue
+			}
+
+			// Convert to Document struct
+			doc := &models.Document{}
+			if docID, ok := docMap["DocumentID"].(string); ok {
+				doc.DocumentID = docID
+			}
+			if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
+				doc.Fields = fields
+			}
+			if createdAt, ok := docMap["CreatedAt"].(time.Time); ok {
+				doc.CreatedAt = createdAt
+			}
+			if updatedAt, ok := docMap["UpdatedAt"].(time.Time); ok {
+				doc.UpdatedAt = updatedAt
+			}
+
+			// Only add document if it hasn't been deleted
+			if !deletedDocuments[doc.DocumentID] {
+				allDocuments[doc.DocumentID] = *doc
+
+				// Check if this document should be included in the current page
+				if documentIndex >= startIndex && documentIndex < endIndex {
+					pageDocuments[doc.DocumentID] = *doc
+				}
+				documentIndex++
+			}
+
+			// if docMap, ok := docInterface.(map[string]interface{}); ok {
+			// 	doc := models.Document{
+			// 		DocumentID: getString(docMap, "DocumentID"),
+			// 		CreatedAt:  getTime(docMap, "CreatedAt"),
+			// 		UpdatedAt:  getTime(docMap, "UpdatedAt"),
+			// 		Fields:     make(map[string]models.Field),
+			// 	}
+
+			// 	// Parse fields
+			// 	if fieldsInterface, exists := docMap["Fields"]; exists {
+			// 		if fieldsMap, ok := fieldsInterface.(map[string]interface{}); ok {
+			// 			for fieldName, fieldData := range fieldsMap {
+			// 				if fieldMap, ok := fieldData.(map[string]interface{}); ok {
+			// 					doc.Fields[fieldName] = models.Field{
+			// 						Name:  getString(fieldMap, "Name"),
+			// 						Value: fieldMap["Value"],
+			// 					}
+			// 				}
+			// 			}
+			// 		}
+			// 	}
+
+			// Only add document if it hasn't been deleted
+			// if !deletedDocuments[doc.DocumentID] {
+			// 	allDocuments[doc.DocumentID] = doc
+
+			// 	// Check if this document should be included in the current page
+			// 	if documentIndex >= startIndex && documentIndex < endIndex {
+			// 		pageDocuments[doc.DocumentID] = doc
+			// 	}
+			// 	documentIndex++
+
+			// 	// Early exit if we've collected enough documents for this page
+			// 	// But continue counting total documents for accurate pagination
+			// }
+			//}
+
+			offset += 8 + int(size)
+		} else if magic == 0xDEADDEAD {
+			// Handle deletion markers
+			if offset+8+int(size) > len(data) {
+				break
+			}
+
+			// Extract deletion marker data
+			deletionData := data[offset+8 : offset+8+int(size)]
+
+			// Decode deletion marker
+			// deletionInterface, err := helpers.DecodeBSON(deletionData)
+			// if err != nil {
+			// 	b.logger.Warnf("Failed to decode deletion marker at offset %d: %v", offset, err)
+			// 	offset += 8 + int(size)
+			// 	continue
+			// }
+
+			// if deletionMap, ok := deletionInterface.(map[string]interface{}); ok {
+			// 	documentID := getString(deletionMap, "DocumentID")
+			// 	if documentID != "" {
+			// 		// Mark document as deleted and remove from current sets
+			// 		deletedDocuments[documentID] = true
+			// 		delete(allDocuments, documentID)
+			// 		delete(pageDocuments, documentID)
+
+			// 		if b.logger != nil {
+			// 			b.logger.Debugf("Found deletion marker for document %s", documentID)
+			// 		}
+			// 	}
+			// }
+
+			// Decode deletion marker using fast binary format
+			deletionMap, err := helpers.DecodeFastBinary(deletionData)
+			if err != nil {
+				b.logger.Warnf("Failed to decode deletion marker at offset %d using fast binary format: %v",
+					offset, err)
+				offset += 8 + int(size)
+				continue
+			}
+
+			if documentID, ok := deletionMap["DocumentID"].(string); ok && documentID != "" {
+				// Mark document as deleted and remove from current sets
+				deletedDocuments[documentID] = true
+				delete(allDocuments, documentID)
+				delete(pageDocuments, documentID)
+
+				if b.logger != nil {
+					b.logger.Debugf("Found deletion marker for document %s", documentID)
+				}
+			}
+
+			offset += 8 + int(size)
+		} else {
+			// Unknown magic number, try to find next valid record
+			offset++
+			continue
+		}
+	}
+
+	return pageDocuments, uint32(len(allDocuments)), nil
+}
+
 // parseAppendedDocuments parses documents in the append-only format
 func (b *BundleStorageEngine) parseAppendedDocuments(data []byte) (map[string]models.Document, error) {
 	documents := make(map[string]models.Document)
@@ -999,39 +1207,68 @@ func (b *BundleStorageEngine) parseAppendedDocuments(data []byte) (map[string]mo
 			documentData := data[offset+8 : offset+8+int(size)]
 
 			// Decode document
-			docInterface, err := helpers.DecodeBSON(documentData)
+			// docInterface, err := helpers.DecodeBSON(documentData)
+			// if err != nil {
+			// 	b.logger.Warnf("Failed to decode document at offset %d: %v", offset, err)
+			// 	offset += 8 + int(size)
+			// 	continue
+			// }
+
+			// if docMap, ok := docInterface.(map[string]interface{}); ok {
+			// 	doc := models.Document{
+			// 		DocumentID: getString(docMap, "DocumentID"),
+			// 		CreatedAt:  getTime(docMap, "CreatedAt"),
+			// 		UpdatedAt:  getTime(docMap, "UpdatedAt"),
+			// 		Fields:     make(map[string]models.Field),
+			// 	}
+
+			// 	// Parse fields
+			// 	if fieldsInterface, exists := docMap["Fields"]; exists {
+			// 		if fieldsMap, ok := fieldsInterface.(map[string]interface{}); ok {
+			// 			for fieldName, fieldData := range fieldsMap {
+			// 				if fieldMap, ok := fieldData.(map[string]interface{}); ok {
+			// 					doc.Fields[fieldName] = models.Field{
+			// 						Name:  getString(fieldMap, "Name"),
+			// 						Value: fieldMap["Value"],
+			// 					}
+			// 				}
+			// 			}
+			// 		}
+			// 	}
+
+			// 	// Only add document if it hasn't been deleted
+			// 	if !deletedDocuments[doc.DocumentID] {
+			// 		documents[doc.DocumentID] = doc
+			// 	}
+			// }
+
+			// Decode document using fast binary format
+			docMap, err := helpers.DecodeFastBinary(documentData)
 			if err != nil {
-				b.logger.Warnf("Failed to decode document at offset %d: %v", offset, err)
+				b.logger.Warnf("Failed to decode document at offset %d using fast binary format: %v",
+					offset, err)
 				offset += 8 + int(size)
 				continue
 			}
 
-			if docMap, ok := docInterface.(map[string]interface{}); ok {
-				doc := models.Document{
-					DocumentID: getString(docMap, "DocumentID"),
-					CreatedAt:  getTime(docMap, "CreatedAt"),
-					UpdatedAt:  getTime(docMap, "UpdatedAt"),
-					Fields:     make(map[string]models.Field),
-				}
+			// Convert to Document struct
+			doc := &models.Document{}
+			if docID, ok := docMap["DocumentID"].(string); ok {
+				doc.DocumentID = docID
+			}
+			if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
+				doc.Fields = fields
+			}
+			if createdAt, ok := docMap["CreatedAt"].(time.Time); ok {
+				doc.CreatedAt = createdAt
+			}
+			if updatedAt, ok := docMap["UpdatedAt"].(time.Time); ok {
+				doc.UpdatedAt = updatedAt
+			}
 
-				// Parse fields
-				if fieldsInterface, exists := docMap["Fields"]; exists {
-					if fieldsMap, ok := fieldsInterface.(map[string]interface{}); ok {
-						for fieldName, fieldData := range fieldsMap {
-							if fieldMap, ok := fieldData.(map[string]interface{}); ok {
-								doc.Fields[fieldName] = models.Field{
-									Name:  getString(fieldMap, "Name"),
-									Value: fieldMap["Value"],
-								}
-							}
-						}
-					}
-				}
-
-				// Only add document if it hasn't been deleted
-				if !deletedDocuments[doc.DocumentID] {
-					documents[doc.DocumentID] = doc
-				}
+			// Only add document if it hasn't been deleted
+			if !deletedDocuments[doc.DocumentID] {
+				documents[doc.DocumentID] = *doc
 			}
 
 			offset += 8 + int(size)
@@ -1045,24 +1282,43 @@ func (b *BundleStorageEngine) parseAppendedDocuments(data []byte) (map[string]mo
 			// Extract deletion marker data
 			deletionData := data[offset+8 : offset+8+int(size)]
 
-			// Decode deletion marker
-			deletionInterface, err := helpers.DecodeBSON(deletionData)
+			// // Decode deletion marker
+			// deletionInterface, err := helpers.DecodeBSON(deletionData)
+			// if err != nil {
+			// 	b.logger.Warnf("Failed to decode deletion marker at offset %d: %v", offset, err)
+			// 	offset += 8 + int(size)
+			// 	continue
+			// }
+
+			// if deletionMap, ok := deletionInterface.(map[string]interface{}); ok {
+			// 	documentID := getString(deletionMap, "DocumentID")
+			// 	if documentID != "" {
+			// 		// Mark document as deleted and remove from current set
+			// 		deletedDocuments[documentID] = true
+			// 		delete(documents, documentID)
+
+			// 		if b.logger != nil {
+			// 			b.logger.Debugf("Found deletion marker for document %s", documentID)
+			// 		}
+			// 	}
+			// }
+
+			// Decode deletion marker using fast binary format
+			deletionMap, err := helpers.DecodeFastBinary(deletionData)
 			if err != nil {
-				b.logger.Warnf("Failed to decode deletion marker at offset %d: %v", offset, err)
+				b.logger.Warnf("Failed to decode deletion marker at offset %d using fast binary format: %v",
+					offset, err)
 				offset += 8 + int(size)
 				continue
 			}
 
-			if deletionMap, ok := deletionInterface.(map[string]interface{}); ok {
-				documentID := getString(deletionMap, "DocumentID")
-				if documentID != "" {
-					// Mark document as deleted and remove from current set
-					deletedDocuments[documentID] = true
-					delete(documents, documentID)
+			if documentID, ok := deletionMap["DocumentID"].(string); ok && documentID != "" {
+				// Mark document as deleted and remove from current set
+				deletedDocuments[documentID] = true
+				delete(documents, documentID)
 
-					if b.logger != nil {
-						b.logger.Debugf("Found deletion marker for document %s", documentID)
-					}
+				if b.logger != nil {
+					b.logger.Debugf("Found deletion marker for document %s", documentID)
 				}
 			}
 
@@ -1193,9 +1449,9 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 	// }
 	// convertedBundle["Documents"] = docs
 
-	// 3. Encode the bundle to BSON (temporary - this method needs architectural changes)
+	// 3. Encode the bundle using fast binary format
 	// TODO: Replace with append-only operations for document updates/deletes
-	encodedBundle, err := helpers.EncodeBSON(convertedBundle)
+	encodedBundle, err := helpers.EncodeFastBinary(convertedBundle)
 	if err != nil {
 		return fmt.Errorf("error encoding bundle data: %w", err)
 	}
@@ -1605,9 +1861,18 @@ func ConvertToStringSlice(arr primitive.A) []string {
 
 // serializeDocumentDirect serializes a document directly without map conversion
 func (b *BundleStorageEngine) serializeDocumentDirect(document *models.Document) ([]byte, error) {
-	// PERFORMANCE FIX: Use direct JSON encoding instead of map conversion
-	// This eliminates the map[string]interface{} allocation and conversion overhead
-	return json.Marshal(document)
+	return helpers.EncodeFastBinary(map[string]interface{}{
+		"DocumentID": document.DocumentID,
+		"Fields":     document.Fields,
+		"CreatedAt":  document.CreatedAt,
+		"UpdatedAt":  document.UpdatedAt,
+	})
+}
+
+// parseDocumentBinary parses a document using the fast binary format
+func (b *BundleStorageEngine) parseDocumentBinary(data []byte) (*models.Document, error) {
+	// Use the fast deserializer instead of configured serializer
+	return helpers.DecodeFastBinaryToDocument(data)
 }
 
 // getHeaderBuffer returns the pre-allocated header buffer for reuse

@@ -356,15 +356,49 @@ func (s *BundleService) flushMetadataUpdates() {
 		// Recalculate page count if documents changed
 		if docCountDelta != 0 {
 			// Ensure PageSize is never zero to prevent divide by zero
+			// Use consistent PageSize with BundleService and factory defaults
 			if bundle.PageSize == 0 {
-				bundle.PageSize = 100 // Default page size
-				s.logger.Debugf("Set default PageSize of 100 for bundle '%s'", bundleName)
+				bundle.PageSize = s.defaultPageSize // Use service default (1000)
+				s.logger.Debugf("Set default PageSize of %d for bundle '%s'", s.defaultPageSize, bundleName)
 			}
 
+			// CRITICAL: Proper virtual pagination calculation
+			// PageCount = ceil(TotalDocuments / PageSize)
 			newPageCount := (bundle.TotalDocuments + int64(bundle.PageSize) - 1) / int64(bundle.PageSize)
 			if newPageCount != bundle.PageCount {
-				s.logger.Debugf("Updated PageCount for bundle '%s': %d -> %d", bundleName, bundle.PageCount, newPageCount)
+				s.logger.Debugf("Updated PageCount for bundle '%s': %d -> %d (TotalDocuments: %d, PageSize: %d)",
+					bundleName, bundle.PageCount, newPageCount, bundle.TotalDocuments, bundle.PageSize)
 				bundle.PageCount = newPageCount
+			}
+		}
+	}
+
+	// CRITICAL: Persist updated metadata to disk
+	// Without this, metadata updates are lost when bundles are reloaded from storage
+	for bundleName, updates := range bundleUpdates {
+		bundle, exists := s.bundleMetadata[bundleName]
+		if !exists {
+			continue // Already logged warning above
+		}
+
+		// Only persist if there were document count changes
+		docCountChanged := false
+		for _, update := range updates {
+			if update.Operation == "increment_docs" || update.Operation == "decrement_docs" {
+				docCountChanged = true
+				break
+			}
+		}
+
+		if docCountChanged {
+			// Persist the updated metadata to disk using the proper interface method
+			err := s.store.UpdateBundleFile(bundle.Database, bundle)
+			if err != nil {
+				s.logger.Errorf("Failed to persist metadata updates for bundle '%s': %v", bundleName, err)
+				// Continue with other bundles even if one fails
+			} else {
+				s.logger.Debugf("Successfully persisted metadata updates for bundle '%s' (TotalDocuments: %d, PageCount: %d)",
+					bundleName, bundle.TotalDocuments, bundle.PageCount)
 			}
 		}
 	}
@@ -765,28 +799,65 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 
 // getAllDocumentsForIndexing loads all documents from all pages for index building
 // This is a temporary method during the transition to page-based architecture
-func (s *BundleService) getAllDocumentsForIndexing(bundleID string) (map[string]models.Document, error) {
+func (s *BundleService) getAllDocumentsForIndexing(bundleID string) ([]*models.Document, error) {
+
 	bundle, exists := s.bundleMetadata[bundleID]
 	if !exists {
 		return nil, fmt.Errorf("bundle metadata not found for %s", bundleID)
 	}
 
-	allDocuments := make(map[string]models.Document)
+	s.logger.Infof("DEBUG: getAllDocumentsForIndexing ENTRY - bundle '%s'", bundle.Name)
+	s.logger.Infof("DEBUG: Bundle PageCount: %d, TotalDocuments: %d", bundle.PageCount, bundle.TotalDocuments)
 
-	// Load all pages for this bundle
-	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundleID, pageID)
+	// CRITICAL FIX: Force flush pending metadata updates to ensure PageCount is current
+	// This is necessary because document additions schedule deferred metadata updates
+	// and SELECT TOP needs accurate PageCount to work correctly
+	if len(s.metadataUpdateBuffer) > 0 {
+		s.logger.Debugf("Forcing metadata flush for bundle %s to ensure current PageCount", bundleID)
+		s.flushMetadataUpdates()
+	}
+
+	s.logger.Debugf("Bundle %s has PageCount: %d", bundleID, bundle.PageCount)
+
+	// If PageCount is 0, the bundle has no documents - return empty result
+	if bundle.PageCount == 0 {
+		settings := settings.GetSettings()
+		page, err := s.store.LoadDocumentPage(bundle.Name, 0, settings.DataDir)
 		if err != nil {
-			s.logger.Warnf("Failed to load page %d for bundle %s: %v", pageID, bundleID, err)
-			continue
+			s.logger.Errorf("DEBUG: Failed to load page 0 for bundle '%s': %v", bundle.Name, err)
+			return []*models.Document{}, nil
 		}
 
-		// Add all documents from this page
-		for docID, doc := range page.Documents {
-			allDocuments[docID] = doc
+		s.logger.Infof("DEBUG: Loaded page 0 - found %d documents", len(page.Documents))
+		if len(page.Documents) == 0 {
+			s.logger.Infof("DEBUG: No documents found in page 0, returning empty slice")
+			return []*models.Document{}, nil
 		}
 	}
 
+	var allDocuments []*models.Document
+
+	// Load all pages for this bundle using the PageCount from metadata
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		s.logger.Infof("DEBUG: Loading page %d for bundle '%s'", pageID, bundle.Name)
+
+		settings := settings.GetSettings()
+		page, err := s.store.LoadDocumentPage(bundle.Name, pageID, settings.DataDir)
+		if err != nil {
+			s.logger.Errorf("DEBUG: Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
+			continue
+		}
+
+		s.logger.Infof("DEBUG: Page %d loaded with %d documents", pageID, len(page.Documents))
+
+		// Convert map to slice and append
+		for _, doc := range page.Documents {
+			docCopy := doc
+			allDocuments = append(allDocuments, &docCopy)
+		}
+	}
+
+	s.logger.Infof("DEBUG: getAllDocumentsForIndexing - loaded %d total documents from %d pages", len(allDocuments), bundle.PageCount)
 	return allDocuments, nil
 }
 
@@ -1247,7 +1318,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 
 		for documentID, document := range allDocuments {
 			// Extract the field value for indexing
-			fieldValue, err := extractFieldValueForIndex(document, fieldDef.Name)
+			fieldValue, err := extractFieldValueForIndex(*document, fieldDef.Name)
 			if err != nil {
 				s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, err)
 				continue
@@ -1261,7 +1332,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 			}
 
 			// Insert into the BTree index
-			err = btreeIndex.Insert(keyBytes, documentID)
+			err = btreeIndex.Insert(keyBytes, document.DocumentID)
 			if err != nil {
 				s.logger.Errorf("Failed to insert document '%s' into BTree index: %v", documentID, err)
 				// Close the index and return error if population fails
@@ -1906,48 +1977,47 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 		return nil, fmt.Errorf("bundle is nil, cannot filter documents")
 	}
 
+	// Force flush any pending metadata updates to ensure accurate PageCount
+	s.logger.Infof("DEBUG: GetDocumentsByFilter - flushing metadata updates")
+	s.flushMetadataUpdates()
+
 	// Use page-based document loading instead of relying on bundle.Documents
 	// This ensures scalability and consistency with the new architecture
-	allDocuments, err := s.getAllDocumentsForIndexing(bundle.Name)
-	if err != nil {
-		s.logger.Errorf("Failed to load documents for filtering: %v", err)
-		return nil, fmt.Errorf("failed to load documents for filtering: %w", err)
-	}
+	// allDocuments, err := s.getAllDocumentsForIndexing(bundle.Name)
+	// if err != nil {
+	// 	s.logger.Errorf("Failed to load documents for filtering: %v", err)
+	// 	return nil, fmt.Errorf("failed to load documents for filtering: %w", err)
+	// }
 
-	if len(allDocuments) == 0 {
-		s.logger.Debugf("Bundle '%s' has no documents", bundle.Name)
-		return []*models.Document{}, nil
-	}
+	// if len(allDocuments) == 0 {
+	// 	s.logger.Debugf("Bundle '%s' has no documents", bundle.Name)
+	// 	return []*models.Document{}, nil
+	// }
 
-	// Convert documents map to slice for processing
-	allDocs := make([]*models.Document, 0, len(allDocuments))
-	for _, doc := range allDocuments {
-		d := doc // Avoid pointer aliasing following Go best practices
-		allDocs = append(allDocs, &d)
-	}
+	// // Convert documents map to slice for processing
+	// allDocs := make([]*models.Document, 0, len(allDocuments))
+	// for _, doc := range allDocuments {
+	// 	d := doc // Avoid pointer aliasing following Go best practices
+	// 	allDocs = append(allDocs, &d)
+	// }
 
 	// If no WHERE clause, return all documents
 	if whereParts == "" {
-		s.logger.Debugf("No WHERE clause provided, returning all %d documents from bundle '%s'",
-			len(allDocs), bundle.Name)
-		return allDocs, nil
+		s.logger.Infof("DEBUG: GetDocumentsByFilter - empty filter, calling getAllDocumentsForIndexing")
+		result, err := s.getAllDocumentsForIndexing(bundle.Name)
+		s.logger.Infof("DEBUG: GetDocumentsByFilter - getAllDocumentsForIndexing returned %d documents, error: %v", len(result), err)
+		return result, err
 	}
 
-	s.logger.Debugf("Filtering %d documents in bundle '%s' with WHERE clause: %s",
-		len(allDocs), bundle.Name, whereParts)
+	// s.logger.Debugf("Filtering %d documents in bundle '%s' with WHERE clause: %s",
+	// 	len(allDocs), bundle.Name, whereParts)
 
 	// CRITICAL: Use index-optimized filtering following SyndrDB performance optimization
 	// This replaces the direct queryparser.FilterDocuments call with index-aware filtering
-	filteredDocs, err := s.filterDocumentsWithIndexOptimization(bundle, allDocs, whereParts)
-	if err != nil {
-		s.logger.Errorf("Failed to filter documents in bundle '%s': %v", bundle.Name, err)
-		return nil, fmt.Errorf("failed to filter documents: %w", err)
-	}
-
-	s.logger.Debugf("Filter operation completed: found %d matching documents out of %d total",
-		len(filteredDocs), len(allDocs))
-
-	return filteredDocs, nil
+	s.logger.Infof("DEBUG: GetDocumentsByFilter - non-empty filter, calling filterDocumentsWithIndexOptimization")
+	result, err := s.filterDocumentsWithIndexOptimization(bundle, nil, whereParts)
+	s.logger.Infof("DEBUG: GetDocumentsByFilter - filterDocumentsWithIndexOptimization returned %d documents, error: %v", len(result), err)
+	return result, err
 }
 
 // filterDocumentsWithIndexOptimization performs intelligent document filtering using available indexes

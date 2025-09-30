@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
@@ -52,6 +53,9 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			if shouldReturn {
 				return result1, err
 			}
+
+		case "top":
+			return SelectTopDocuments(commandParts, serviceManager, database, logger)
 
 		case "documents":
 
@@ -1147,6 +1151,252 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 	return filteredDocuments
 }
 
+// SelectTopDocuments handles SELECT TOP N DOCUMENTS FROM "bundle" queries
+func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+	logger.Infof("Processing SELECT TOP command with %d parts: %v", len(commandParts), commandParts)
+
+	// Expected syntax: SELECT TOP <number> DOCUMENTS FROM "<bundle_name>" [WHERE conditions] [ORDER BY field]
+	if len(commandParts) < 5 || !strings.EqualFold(commandParts[3], "DOCUMENTS") || !strings.EqualFold(commandParts[4], "FROM") {
+		return nil, fmt.Errorf("SELECT TOP requires the syntax 'SELECT TOP <number> DOCUMENTS FROM \"<bundle_name>\"'")
+	}
+
+	// Parse the number parameter
+	topCount, err := strconv.Atoi(commandParts[2])
+	if err != nil {
+		return nil, fmt.Errorf("SELECT TOP requires a valid number, got: %s", commandParts[2])
+	}
+	if topCount <= 0 {
+		return nil, fmt.Errorf("SELECT TOP number must be positive, got: %d", topCount)
+	}
+
+	logger.Infof("TOP count parsed as: %d", topCount)
+
+	// Get the full command for parsing additional clauses
+	fullCommand := strings.Join(commandParts, " ")
+
+	// Check for ORDER BY or other clauses and delegate to appropriate handlers
+	if strings.Contains(strings.ToUpper(fullCommand), "ORDER BY") {
+		return SelectTopDocumentsWithOrderBy(fullCommand, topCount, serviceManager, database, logger)
+	}
+
+	// Handle basic TOP query without ORDER BY
+	bundleName := strings.Trim(commandParts[5], "\"'")
+	bundleName = strings.ReplaceAll(bundleName, "\"", "")
+	bundleName = strings.ReplaceAll(bundleName, "'", "")
+
+	logger.Infof("Bundle name parsed as: '%s'", bundleName)
+
+	if !bndle.IsValidBundleName(bundleName) {
+		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
+	}
+
+	// Get the bundle by name
+	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+	}
+
+	logger.Infof("Bundle retrieved successfully: %s", bundleName)
+	if bundle.Documents != nil {
+		logger.Infof("Bundle contains %d documents", len(*bundle.Documents))
+	} else {
+		logger.Warnf("Bundle.Documents is nil")
+	}
+
+	var documents map[string]*models.Document
+
+	// Check for WHERE clause
+	if len(commandParts) > 6 && strings.EqualFold(commandParts[6], "WHERE") {
+		whereClause := strings.Join(commandParts[7:], " ")
+
+		// Create execution planner
+		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+
+		// Create execution plan
+		plan, err := planner.CreateExecutionPlan(bundle, whereClause)
+		if err != nil {
+			logger.Warnf("Failed to create execution plan, falling back to full scan: %v", err)
+			// Fallback to existing filter logic
+			filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
+			if err != nil {
+				return nil, fmt.Errorf("error filtering documents: %v", err)
+			}
+			documents = make(map[string]*models.Document)
+			for _, v := range filteredDocs {
+				documents[v.DocumentID] = v
+			}
+		} else {
+			// Execute the plan
+			logger.Infof("Executing plan with indexes: %v", plan.IndexesUsed)
+			documents, err = plan.RootNode.Execute()
+			if err != nil {
+				return nil, fmt.Errorf("error executing query plan: %v", err)
+			}
+		}
+	} else {
+		// No WHERE clause - load all documents using new page-based architecture
+		logger.Infof("Loading all documents using page-based document loading")
+
+		// Use GetDocumentsByFilter with empty filter to get all documents
+		allDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, "")
+		if err != nil {
+			return nil, fmt.Errorf("error loading all documents: %v", err)
+		}
+
+		logger.Infof("Loaded %d documents from bundle using page-based loading", len(allDocs))
+
+		// Convert slice to map for consistency
+		documents = make(map[string]*models.Document)
+		for _, doc := range allDocs {
+			documents[doc.DocumentID] = doc
+		}
+
+		logger.Infof("Converted %d documents to result map", len(documents))
+	}
+
+	logger.Infof("Total documents before TOP limit: %d", len(documents))
+
+	// Convert to slice and limit the results
+	var documentSlice []*models.Document
+	for _, doc := range documents {
+		documentSlice = append(documentSlice, doc)
+	}
+
+	logger.Infof("Converted to slice - length: %d", len(documentSlice))
+
+	// Apply TOP limit
+	if topCount < len(documentSlice) {
+		documentSlice = documentSlice[:topCount]
+		logger.Infof("Applied TOP %d limit - result length: %d", topCount, len(documentSlice))
+	} else {
+		logger.Infof("TOP %d limit not applied - document count (%d) is less than or equal to limit", topCount, len(documentSlice))
+	}
+
+	// Convert back to map for consistent response format
+	limitedDocuments := make(map[string]*models.Document)
+	for _, doc := range documentSlice {
+		limitedDocuments[doc.DocumentID] = doc
+	}
+
+	logger.Infof("Final result: SELECT TOP %d returned %d documents from bundle '%s'", topCount, len(limitedDocuments), bundleName)
+
+	cmdResponse := &CommandResponse{
+		ResultCount: len(limitedDocuments),
+		Result:      limitedDocuments,
+	}
+
+	logger.Infof("Returning CommandResponse with ResultCount: %d", cmdResponse.ResultCount)
+	return cmdResponse, nil
+}
+
+// SelectTopDocumentsWithOrderBy handles SELECT TOP N DOCUMENTS FROM "bundle" ORDER BY queries
+func SelectTopDocumentsWithOrderBy(fullCommand string, topCount int, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+	logger.Infof("Processing SELECT TOP %d with ORDER BY query: %s", topCount, fullCommand)
+
+	// Parse the ORDER BY query using existing parser
+	selectQuery, err := queryparser.ParseSelectQueryWithOrder(fullCommand, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse SELECT TOP ORDER BY query: %w", err)
+	}
+
+	// Extract bundle name
+	bundleName := selectQuery.FromBundle
+	if !bndle.IsValidBundleName(bundleName) {
+		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
+	}
+
+	// Get the bundle by name
+	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+	}
+
+	var documents map[string]*models.Document
+
+	// Handle WHERE clause if present
+	if selectQuery.WhereClause != nil {
+		// Extract WHERE clause from the original query string
+		whereStart := strings.Index(strings.ToUpper(fullCommand), "WHERE")
+		orderByStart := strings.Index(strings.ToUpper(fullCommand), "ORDER BY")
+
+		var whereClause string
+		if whereStart >= 0 {
+			whereEnd := len(fullCommand)
+			if orderByStart > whereStart {
+				whereEnd = orderByStart
+			}
+			whereClause = strings.TrimSpace(fullCommand[whereStart+5 : whereEnd])
+		}
+
+		if whereClause != "" {
+			// Create execution planner
+			planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+
+			// Create execution plan
+			plan, err := planner.CreateExecutionPlan(bundle, whereClause)
+			if err != nil {
+				logger.Warnf("Failed to create execution plan, falling back to full scan: %v", err)
+				// Fallback to existing filter logic
+				filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
+				if err != nil {
+					return nil, fmt.Errorf("error filtering documents: %v", err)
+				}
+				documents = make(map[string]*models.Document)
+				for _, v := range filteredDocs {
+					documents[v.DocumentID] = v
+				}
+			} else {
+				// Execute the plan
+				logger.Infof("Executing plan with indexes: %v", plan.IndexesUsed)
+				documents, err = plan.RootNode.Execute()
+				if err != nil {
+					return nil, fmt.Errorf("error executing query plan: %v", err)
+				}
+			}
+		}
+	} else {
+		// No WHERE clause - return all documents
+		documents = make(map[string]*models.Document)
+		if bundle.Documents != nil {
+			for k, v := range *bundle.Documents {
+				docCopy := v
+				documents[k] = &docCopy
+			}
+		}
+	}
+
+	// Sort the documents according to the ORDER BY clause
+	sorter := queryparser.NewDocumentSorter(selectQuery.OrderBy, logger)
+	sortedDocuments, err := sorter.SortDocumentMap(documents)
+	if err != nil {
+		return nil, fmt.Errorf("error sorting documents: %v", err)
+	}
+
+	// Apply TOP limit to sorted documents
+	if topCount < len(sortedDocuments) {
+		sortedDocuments = sortedDocuments[:topCount]
+	}
+
+	// Convert sorted slice back to map for response consistency
+	limitedDocuments := make(map[string]*models.Document)
+	for _, doc := range sortedDocuments {
+		limitedDocuments[doc.DocumentID] = doc
+	}
+
+	// Apply field selection if specific fields were requested
+	if len(selectQuery.SelectFields) > 0 {
+		limitedDocuments = filterDocumentFields(limitedDocuments, selectQuery.SelectFields, logger)
+	}
+
+	logger.Infof("SELECT TOP %d ORDER BY query executed successfully, returned %d sorted documents", topCount, len(limitedDocuments))
+
+	cmdResponse := &CommandResponse{
+		ResultCount: len(limitedDocuments),
+		Result:      limitedDocuments,
+	}
+	return cmdResponse, nil
+}
+
 func SelectDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
 	// First, check if this is a JOIN query by examining the full command
 	fullCommand := strings.Join(commandParts, " ")
@@ -1222,13 +1472,21 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 			}
 		}
 	} else {
-		// No WHERE clause - return all documents
+		// No WHERE clause - load all documents using new page-based architecture
+		logger.Infof("Loading all documents using page-based document loading")
+
+		// Use GetDocumentsByFilter with empty filter to get all documents
+		allDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, "")
+		if err != nil {
+			return nil, fmt.Errorf("error loading all documents: %v", err)
+		}
+
+		logger.Infof("Loaded %d documents from bundle using page-based loading", len(allDocs))
+
+		// Convert slice to map for consistency
 		documents = make(map[string]*models.Document)
-		if bundle.Documents != nil {
-			for k, v := range *bundle.Documents {
-				docCopy := v
-				documents[k] = &docCopy
-			}
+		for _, doc := range allDocs {
+			documents[doc.DocumentID] = doc
 		}
 	}
 	// var documents map[string]*models.Document
