@@ -66,7 +66,7 @@ func main() {
 	logFilename := fmt.Sprintf("%s_%s_ServerLog.txt", timestamp, args.Host)
 
 	// Combine with the directory path from args.LogFile
-	args.LogDir = filepath.Join(args.LogDir, logFilename)
+	args.LogFile = filepath.Join(args.LogDir, logFilename)
 
 	// Validate the arguments
 	if err := validateArguments(args); err != nil {
@@ -83,7 +83,7 @@ func main() {
 	if args.Verbose {
 		log.Println("SyndrDB starting with options:")
 		log.Printf("  Data Directory: %s\n", args.DataDir)
-		log.Printf("  Log File: %s\n", args.LogDir)
+		log.Printf("  Log File: %s\n", args.LogFile)
 		log.Printf("  Host: %s\n", args.Host)
 		log.Printf("  Port: %d\n", args.Port)
 		log.Printf("  Verbose: %v\n", args.Verbose)
@@ -111,9 +111,9 @@ func main() {
 			log.Fatalf("Failed to create log directory: %v", err)
 		}
 
-		log.Printf("Logging to file: %s", args.LogDir)
+		log.Printf("Logging to file: %s", args.LogFile)
 
-		logFile, err := os.OpenFile(args.LogDir, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
 			log.Fatalf("Failed to open log file: %v", err)
 		}
@@ -240,7 +240,7 @@ func validateArguments(args *settings.Arguments) error {
 		}
 
 		// Check if we can create/open the log file
-		logFile, err := os.OpenFile(args.LogDir, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 		if err != nil {
 			return fmt.Errorf("could not open log file for writing: %w", err)
 		}

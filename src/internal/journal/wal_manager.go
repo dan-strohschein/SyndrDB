@@ -47,7 +47,7 @@ func NewWALManager(logger *zap.SugaredLogger) (*WALManager, error) {
 
 	// Configure WAL based on settings
 	config := WALConfig{
-		LogDir:             settings.LogDir,
+		LogDir:             fmt.Sprintf("%s/%s", settings.LogDir, "wal"),
 		MaxFileSize:        settings.MaxJournalFileSize,
 		FlushInterval:      1 * time.Second,
 		RetentionDays:      30,
@@ -59,7 +59,7 @@ func NewWALManager(logger *zap.SugaredLogger) (*WALManager, error) {
 
 	// Use default log directory if not set
 	if config.LogDir == "" {
-		config.LogDir = "./log_files"
+		config.LogDir = "./log_files/wal"
 	}
 
 	// Use default max file size if not set

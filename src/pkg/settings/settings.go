@@ -5,6 +5,7 @@ import "sync"
 type Arguments struct {
 	DataDir    string
 	LogDir     string
+	LogFile    string
 	TempDir    string // Temporary directory for intermediate files/indexes/sorts
 	ConfigFile string
 
@@ -69,6 +70,7 @@ func GetSettings() *Arguments {
 			// Default values
 			DataDir:             "./data",
 			LogDir:              "",
+			LogFile:             "", // Default to stdout
 			ConfigFile:          "",
 			Mode:                "standalone",
 			Host:                "0.0.0.0",
@@ -94,6 +96,9 @@ func UpdateSettings(args Arguments) {
 	}
 	if args.LogDir != "" {
 		instance.LogDir = args.LogDir
+	}
+	if args.LogFile != "" {
+		instance.LogFile = args.LogFile
 	}
 	if args.ConfigFile != "" {
 		instance.ConfigFile = args.ConfigFile

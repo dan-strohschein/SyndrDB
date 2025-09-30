@@ -110,7 +110,7 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 
 	// Set defaults if not provided
 	if config.LogDir == "" {
-		config.LogDir = "./log_files"
+		config.LogDir = "./log_files/wal"
 	}
 	if config.MaxFileSize <= 0 {
 		config.MaxFileSize = 100 * 1024 * 1024 // 100MB default
@@ -122,11 +122,11 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 		config.RetentionDays = 30 // 30 days default
 	}
 
-	baseFilePath := filepath.Join(config.LogDir, "wal")
+	//baseFilePath := filepath.Join(config.LogDir, "wal")
 
 	wal := &WriteAheadLog{
 		logger:             logger,
-		baseFilePath:       baseFilePath,
+		baseFilePath:       config.LogDir,
 		currentDate:        time.Now().Truncate(24 * time.Hour),
 		currentLSN:         0,
 		maxFileSize:        config.MaxFileSize,
@@ -176,10 +176,10 @@ func (wal *WriteAheadLog) ensureCorrectFileOpen() error {
 
 	// Create the filename with today's date
 	dateStr := today.Format("2006-01-02")
-	fileName := fmt.Sprintf("%s_%s.wal", wal.baseFilePath, dateStr)
+	fileName := fmt.Sprintf("%s/%s.wal", wal.baseFilePath, dateStr)
 
 	// Ensure the directory exists
-	dir := filepath.Dir(fileName)
+	dir := wal.baseFilePath
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create WAL directory: %w", err)
 	}
