@@ -1987,32 +1987,13 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 		targetDatabaseID = targetDatabase.DatabaseID
 		logger.Infof("Found database '%s' with ID: %s", databaseName, targetDatabaseID)
 	} else {
-		// Original syntax - use current database and show actual bundles that exist
+		// Original syntax - use current database and show bundles from catalog for that database
 		if database == nil {
 			return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
 		}
 
-		// Get bundles directly from the current database instead of catalog
-		bundleInfos := make([]map[string]interface{}, 0, len(database.Bundles))
-		for bundleName, bundle := range database.Bundles {
-			cleanBundleInfo := map[string]interface{}{
-				"Name":        bundleName,
-				"BundleID":    bundle.BundleID,
-				"DatabaseID":  database.DatabaseID,
-				"Description": bundle.Description,
-				"CreatedAt":   bundle.CreatedAt,
-				"UpdatedAt":   bundle.UpdatedAt,
-			}
-			bundleInfos = append(bundleInfos, cleanBundleInfo)
-		}
-
-		response := &CommandResponse{
-			ResultCount: len(bundleInfos),
-			Result:      bundleInfos,
-		}
-
-		logger.Infof("Found %d bundles in database %s (loaded from database)", len(bundleInfos), database.Name)
-		return response, nil
+		targetDatabaseID = database.DatabaseID
+		logger.Infof("Using current database '%s' with ID: %s", database.Name, targetDatabaseID)
 	}
 
 	// For "SHOW BUNDLES FOR database" syntax, use catalog approach

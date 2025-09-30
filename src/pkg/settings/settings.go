@@ -55,6 +55,20 @@ type Arguments struct {
 
 	// Bundle storage format configuration
 	BundleStorageFormat string // Storage format: "json" or "binary" (default: "json")
+
+	// PHASE 1 PERFORMANCE OPTIMIZATIONS
+	// WAL Configuration for bulk operations
+	WALEnabled           bool // Enable/disable WAL globally
+	WALBulkModeThreshold int  // Operations per second threshold for bulk mode
+	WALDisableForBulkOps bool // Disable WAL during bulk operations
+
+	// Metadata Update Performance Settings
+	MetadataBatchSize       int // Documents before metadata flush (default: 50 → 500)
+	MetadataPersistInterval int // Documents before disk persistence (default: 1000)
+	MetadataFlushInterval   int // Time in seconds between forced flushes
+
+	// Performance Mode Detection
+	BulkOperationDetection bool // Auto-detect bulk operations for optimization
 }
 
 var (
@@ -80,6 +94,15 @@ func GetSettings() *Arguments {
 			CreateDefaultDB:     true,
 			Version:             "0.1.0",
 			BundleStorageFormat: "json", // Default to JSON for development
+
+			// PHASE 1 PERFORMANCE DEFAULTS
+			WALEnabled:              true, // WAL enabled by default
+			WALBulkModeThreshold:    50,   // >50 ops/sec = bulk mode
+			WALDisableForBulkOps:    true, // Disable WAL during bulk operations
+			MetadataBatchSize:       500,  // Increased from 50 to 500
+			MetadataPersistInterval: 1000, // Persist every 1000 documents
+			MetadataFlushInterval:   10,   // Flush every 10 seconds
+			BulkOperationDetection:  true, // Auto-detect bulk operations
 		}
 	})
 	return instance

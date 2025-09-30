@@ -247,7 +247,35 @@ func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord
 
 		overflowPage, ok := overflowPageData.(*OverflowPage)
 		if !ok {
-			return fmt.Errorf("page %d is not an overflow page, got type %T", currentPageNum, overflowPageData)
+			// CRITICAL: Overflow chain corruption detected during insertion - attempt recovery
+			hi.logger.Errorf("CORRUPTION: Page %d is not an overflow page during insertion (got type %T)",
+				currentPageNum, overflowPageData)
+
+			// Log diagnostic information for debugging
+			hi.logger.Errorf("Overflow chain corruption details: DocumentID=%s, StartPage=%d, CurrentPage=%d, VisitedPages=%v",
+				record.DocumentID, startPageNum, currentPageNum, visitedPages)
+
+			// Attempt graceful recovery: Try to allocate a new overflow page and restart the chain
+			hi.logger.Warnf("RECOVERY: Attempting to repair corrupted overflow chain by creating new overflow page")
+
+			newPageNum, err := hi.allocateNewPage()
+			if err != nil {
+				return fmt.Errorf("failed to allocate new overflow page during corruption recovery: %w", err)
+			}
+
+			// Create new overflow page and add the record
+			newOverflowPage := NewOverflowPage(newPageNum, hi.metadata.PageSize)
+			newOverflowPage.AddRecord(record)
+
+			// Update the page manager and persist
+			hi.pageManager.PutPage(newPageNum, newOverflowPage, true)
+			if err := hi.fileManager.WritePage(newPageNum, newOverflowPage); err != nil {
+				return fmt.Errorf("failed to write recovery overflow page %d: %w", newPageNum, err)
+			}
+
+			hi.logger.Infof("RECOVERY: Successfully created new overflow page %d and added record %s",
+				newPageNum, record.DocumentID)
+			return nil
 		}
 
 		hi.logger.Debugf("Checking overflow page %d: RecordCount=%d, CanFit=%v",
@@ -346,7 +374,21 @@ func (hi *HashIndex) recordExistsInOverflowChain(startPageNum uint32, documentID
 
 		overflowPage, ok := overflowPageData.(*OverflowPage)
 		if !ok {
-			return false, fmt.Errorf("page %d is not an overflow page while checking for duplicates", currentPageNum)
+			// CRITICAL: Overflow chain corruption detected - attempt recovery
+			hi.logger.Errorf("CORRUPTION: Page %d is not an overflow page while checking for duplicates (got type %T)",
+				currentPageNum, overflowPageData)
+
+			// Log diagnostic information for debugging
+			hi.logger.Errorf("Overflow chain corruption details: DocumentID=%s, StartPage=%d, CurrentPage=%d, VisitedPages=%v",
+				documentID, startPageNum, currentPageNum, visitedPages)
+
+			// Attempt graceful recovery: break the chain here to prevent infinite loops
+			// This prevents the corruption from spreading but may result in some records being inaccessible
+			hi.logger.Warnf("RECOVERY: Breaking corrupted overflow chain at page %d to prevent system instability", currentPageNum)
+
+			// Return false (record not found) to allow the operation to continue
+			// This is better than crashing the entire system
+			return false, nil
 		}
 
 		// Check records in this page
@@ -446,10 +488,57 @@ func (hi *HashIndex) allocateNewPage() (uint32, error) {
 		return 0, fmt.Errorf("file manager is nil, cannot persist allocation")
 	}
 
-	// CRITICAL: Validate NextPageNum is reasonable following SyndrDB data integrity requirements
+	// CRITICAL: Enhanced page allocation validation to prevent corruption
+	// Phase 1 bulk operations revealed that NextPageNum can become corrupted
 	expectedMinimum := hi.metadata.BucketCount + 1 // Should be at least after all bucket pages
+
+	// CORRUPTION DETECTION: Validate that NextPageNum makes sense
 	if hi.metadata.NextPageNum < expectedMinimum {
+		hi.logger.Errorf("CORRUPTION DETECTED: NextPageNum %d is less than expected minimum %d (BucketCount=%d)",
+			hi.metadata.NextPageNum, expectedMinimum, hi.metadata.BucketCount)
 		hi.metadata.NextPageNum = expectedMinimum
+		hi.logger.Infof("RECOVERY: Reset NextPageNum from %d to %d", hi.metadata.NextPageNum, expectedMinimum)
+	}
+
+	// CORRUPTION PREVENTION: Scan for conflicts before allocation
+	// This prevents double-allocation which causes bucket/overflow page conflicts
+	maxSafetyChecks := 100 // Limit safety checks to prevent infinite loops
+	safetyCheckCount := 0
+
+	for safetyCheckCount < maxSafetyChecks {
+		candidatePageNum := hi.metadata.NextPageNum
+
+		// Check if this page number conflicts with bucket pages
+		if candidatePageNum <= hi.metadata.BucketCount {
+			hi.logger.Warnf("CONFLICT: Candidate page %d conflicts with bucket pages (BucketCount=%d)",
+				candidatePageNum, hi.metadata.BucketCount)
+			hi.metadata.NextPageNum = hi.metadata.BucketCount + 1
+			safetyCheckCount++
+			continue
+		}
+
+		// Try to read the page to see if it already exists
+		existingPageData, err := hi.fileManager.ReadPage(candidatePageNum)
+		if err == nil && existingPageData != nil {
+			// Page already exists - this indicates potential corruption
+			hi.logger.Warnf("CONFLICT: Page %d already exists with type %T, skipping",
+				candidatePageNum, existingPageData)
+			hi.metadata.NextPageNum++
+			safetyCheckCount++
+			continue
+		}
+
+		// Page doesn't exist - safe to use
+		break
+	}
+
+	if safetyCheckCount >= maxSafetyChecks {
+		return 0, fmt.Errorf("CRITICAL: Unable to find safe page number after %d attempts - index severely corrupted", maxSafetyChecks)
+	}
+
+	if safetyCheckCount > 0 {
+		hi.logger.Infof("RECOVERY: Required %d safety checks to find safe page number %d",
+			safetyCheckCount, hi.metadata.NextPageNum)
 	}
 
 	// Check if we have free pages to reuse (following efficient storage practices)

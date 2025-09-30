@@ -342,6 +342,15 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		} else {
 			log.Printf("Warning: CatalogService not available, primary database not registered in system catalog")
 		}
+
+		// Force flush all pending metadata updates to ensure PageCount and other metadata are correctly calculated
+		// This is critical for primary database catalogs that were just populated with documents
+		err = bundleService.FlushAllBuffers()
+		if err != nil {
+			log.Printf("Warning: Failed to flush bundle metadata after catalog initialization: %v", err)
+		} else {
+			log.Printf("Successfully flushed bundle metadata after catalog initialization")
+		}
 	}
 
 	return server, nil

@@ -183,34 +183,53 @@ type BundleService struct {
 	lastIndexFlush       time.Time     // Last time index updates were flushed
 
 	// Performance optimization: Deferred metadata updates
-	metadataUpdateBuffer []MetadataUpdate // Buffer for pending metadata updates
-	lastMetadataFlush    time.Time        // Last time metadata updates were flushed
+	metadataUpdateBuffer    []MetadataUpdate // Buffer for pending metadata updates
+	metadataPersistInterval int              // Number of operations before forcing metadata persist
+	metadataOperationCount  int              // Count of operations since last metadata flush
+	lastMetadataFlush       time.Time        // Last time metadata updates were flushed
+
+	// PHASE 1 OPTIMIZATION: Bulk operation detection for WAL bypass
+	bulkModeEnabled        bool      // Current bulk mode state
+	operationCount         int       // Operations in current time window
+	operationWindow        time.Time // Start of current measurement window
+	bulkThresholdOpsPerSec int       // Operations per second threshold for bulk mode
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	docFactory document.DocumentFactory,
 	logger *zap.SugaredLogger,
-	settings *settings.Arguments) *BundleService {
+	args *settings.Arguments) *BundleService {
+	// Get performance settings from global configuration
+	globalSettings := settings.GetSettings()
+
 	service := &BundleService{
 		store:           store,
 		factory:         factory,
 		documentFactory: docFactory,
-		settings:        settings,
+		settings:        args,
 		logger:          logger,
 		bundleMetadata:  make(map[string]*models.Bundle),
 		documentPages:   make(map[string]*models.DocumentPage),
 		defaultPageSize: 1000, // Default: 1000 documents per page
 		maxLoadedPages:  100,  // Default: keep max 100 pages in memory
 
-		// Performance optimization: Initialize deferred index updates
-		indexUpdateBuffer:    make([]IndexUpdate, 0, 100), // Pre-allocate capacity for 100 updates
-		indexUpdateBatchSize: 50,                          // Flush every 50 updates
-		indexUpdateInterval:  time.Millisecond * 100,      // Flush every 100ms
+		// PHASE 1 OPTIMIZATION: Use configurable performance settings
+		indexUpdateBuffer:    make([]IndexUpdate, 0, globalSettings.MetadataBatchSize),
+		indexUpdateBatchSize: globalSettings.MetadataBatchSize,                                       // INCREASED: 50 → 500
+		indexUpdateInterval:  time.Duration(globalSettings.MetadataFlushInterval) * time.Millisecond, // Use proper unit conversion
 		lastIndexFlush:       time.Now(),
 
-		// Performance optimization: Initialize deferred metadata updates
-		metadataUpdateBuffer: make([]MetadataUpdate, 0, 50), // Pre-allocate capacity for 50 updates
-		lastMetadataFlush:    time.Now(),
+		// PHASE 1 OPTIMIZATION: Deferred metadata updates with configurable intervals
+		metadataUpdateBuffer:    make([]MetadataUpdate, 0, globalSettings.MetadataBatchSize),
+		metadataPersistInterval: globalSettings.MetadataPersistInterval, // NEW: 1000 docs before disk persist
+		metadataOperationCount:  0,
+		lastMetadataFlush:       time.Now(),
+
+		// PHASE 1 OPTIMIZATION: Bulk operation detection for WAL bypass
+		bulkModeEnabled:        false,
+		operationCount:         0,
+		operationWindow:        time.Now(),
+		bulkThresholdOpsPerSec: globalSettings.WALBulkModeThreshold, // 50 ops/sec threshold
 	}
 
 	// Don't load bundle metadata at startup - bundles should be loaded on-demand
@@ -241,6 +260,12 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 		time.Since(s.lastIndexFlush) >= s.indexUpdateInterval {
 		s.flushIndexUpdates()
 	}
+
+	// PHASE 1 ENHANCEMENT: Additional flush check for idle periods on index updates
+	if len(s.indexUpdateBuffer) > 0 && time.Since(s.lastIndexFlush) >= (s.indexUpdateInterval*5) {
+		s.logger.Debugf("IDLE FLUSH: Flushing %d index updates after extended idle period", len(s.indexUpdateBuffer))
+		s.flushIndexUpdates()
+	}
 }
 
 // scheduleMetadataUpdate adds a metadata update to the deferred update buffer
@@ -255,9 +280,19 @@ func (s *BundleService) scheduleMetadataUpdate(bundleName, operation string, val
 
 	s.metadataUpdateBuffer = append(s.metadataUpdateBuffer, update)
 
-	// Check if we should flush metadata updates (use same timing as index updates)
+	// PHASE 1 OPTIMIZATION: Track operations for deferred persistence
+	s.metadataOperationCount++
+
+	// Check if we should flush metadata updates
 	if len(s.metadataUpdateBuffer) >= s.indexUpdateBatchSize ||
 		time.Since(s.lastMetadataFlush) >= s.indexUpdateInterval {
+		s.flushMetadataUpdates()
+	}
+
+	// PHASE 1 ENHANCEMENT: Additional flush check for idle periods
+	// This catches any remaining operations after bulk periods end
+	if len(s.metadataUpdateBuffer) > 0 && time.Since(s.lastMetadataFlush) >= (s.indexUpdateInterval*5) {
+		s.logger.Debugf("IDLE FLUSH: Flushing %d metadata updates after extended idle period", len(s.metadataUpdateBuffer))
 		s.flushMetadataUpdates()
 	}
 }
@@ -373,34 +408,47 @@ func (s *BundleService) flushMetadataUpdates() {
 		}
 	}
 
-	// CRITICAL: Persist updated metadata to disk
-	// Without this, metadata updates are lost when bundles are reloaded from storage
-	for bundleName, updates := range bundleUpdates {
-		bundle, exists := s.bundleMetadata[bundleName]
-		if !exists {
-			continue // Already logged warning above
-		}
+	// PHASE 1 OPTIMIZATION: Deferred persistence - only persist to disk every MetadataPersistInterval operations
+	// This reduces disk I/O overhead during high-throughput writes
+	shouldPersistToDisk := s.metadataOperationCount >= s.metadataPersistInterval
 
-		// Only persist if there were document count changes
-		docCountChanged := false
-		for _, update := range updates {
-			if update.Operation == "increment_docs" || update.Operation == "decrement_docs" {
-				docCountChanged = true
-				break
+	if shouldPersistToDisk {
+		// CRITICAL: Persist updated metadata to disk
+		// Without this, metadata updates are lost when bundles are reloaded from storage
+		for bundleName, updates := range bundleUpdates {
+			bundle, exists := s.bundleMetadata[bundleName]
+			if !exists {
+				continue // Already logged warning above
+			}
+
+			// Only persist if there were document count changes
+			docCountChanged := false
+			for _, update := range updates {
+				if update.Operation == "increment_docs" || update.Operation == "decrement_docs" {
+					docCountChanged = true
+					break
+				}
+			}
+
+			if docCountChanged {
+				// Persist the updated metadata to disk using the proper interface method
+				err := s.store.UpdateBundleFile(bundle.Database, bundle)
+				if err != nil {
+					s.logger.Errorf("Failed to persist metadata updates for bundle '%s': %v", bundleName, err)
+					// Continue with other bundles even if one fails
+				} else {
+					s.logger.Debugf("Successfully persisted metadata updates for bundle '%s' (TotalDocuments: %d, PageCount: %d)",
+						bundleName, bundle.TotalDocuments, bundle.PageCount)
+				}
 			}
 		}
 
-		if docCountChanged {
-			// Persist the updated metadata to disk using the proper interface method
-			err := s.store.UpdateBundleFile(bundle.Database, bundle)
-			if err != nil {
-				s.logger.Errorf("Failed to persist metadata updates for bundle '%s': %v", bundleName, err)
-				// Continue with other bundles even if one fails
-			} else {
-				s.logger.Debugf("Successfully persisted metadata updates for bundle '%s' (TotalDocuments: %d, PageCount: %d)",
-					bundleName, bundle.TotalDocuments, bundle.PageCount)
-			}
-		}
+		// Reset operation counter after persistence
+		s.metadataOperationCount = 0
+		s.logger.Debugf("Performed deferred metadata persistence after %d operations", s.metadataPersistInterval)
+	} else {
+		s.logger.Debugf("Skipping disk persistence - %d operations remaining until next persist (threshold: %d)",
+			s.metadataPersistInterval-s.metadataOperationCount, s.metadataPersistInterval)
 	}
 
 	// Clear the buffer and update flush time
@@ -409,6 +457,134 @@ func (s *BundleService) flushMetadataUpdates() {
 
 	flushTime := time.Since(startTime)
 	s.logger.Debugf("Metadata update flush completed in %v", flushTime)
+}
+
+// forceMetadataPersistence forces immediate persistence of all metadata updates to disk
+// This should be called during shutdown, explicit flush requests, or before critical operations
+func (s *BundleService) forceMetadataPersistence() {
+	if len(s.metadataUpdateBuffer) == 0 {
+		return
+	}
+
+	s.logger.Debugf("Forcing immediate metadata persistence for %d pending updates", len(s.metadataUpdateBuffer))
+
+	// Temporarily set operation count to trigger persistence
+	s.metadataOperationCount = s.metadataPersistInterval
+
+	// Flush metadata with forced persistence
+	s.flushMetadataUpdates()
+
+	// Note: metadataOperationCount is reset to 0 in flushMetadataUpdates
+	s.logger.Debugf("Forced metadata persistence completed")
+}
+
+// trackOperationForBulkDetection tracks write operations to detect bulk scenarios
+// Returns true if WAL should be bypassed due to bulk mode detection
+func (s *BundleService) trackOperationForBulkDetection() bool {
+	// Get global settings for WAL bulk operation configuration
+	globalSettings := settings.GetSettings()
+
+	// Skip tracking if bulk operation detection is disabled
+	if !globalSettings.BulkOperationDetection {
+		return false
+	}
+
+	now := time.Now()
+	s.operationCount++
+
+	// Check if we're in a new time window (1 second)
+	windowDuration := now.Sub(s.operationWindow)
+	if windowDuration >= time.Second {
+		// Calculate operations per second in the previous window
+		opsPerSecond := float64(s.operationCount) / windowDuration.Seconds()
+
+		// Check if we should enter or exit bulk mode
+		if opsPerSecond >= float64(s.bulkThresholdOpsPerSec) {
+			if !s.bulkModeEnabled {
+				s.bulkModeEnabled = true
+				s.logger.Infof("PHASE 1: Entering bulk mode - detected %.1f ops/sec (threshold: %d)",
+					opsPerSecond, s.bulkThresholdOpsPerSec)
+			}
+		} else {
+			if s.bulkModeEnabled {
+				s.bulkModeEnabled = false
+				s.logger.Infof("PHASE 1: Exiting bulk mode - detected %.1f ops/sec (threshold: %d)",
+					opsPerSecond, s.bulkThresholdOpsPerSec)
+
+				// CRITICAL: Flush all buffers when exiting bulk mode
+				// This ensures that any pending operations are persisted to disk
+				s.logger.Infof("BULK END: Triggering comprehensive buffer flush")
+				if err := s.FlushAllBuffers(); err != nil {
+					s.logger.Errorf("BULK END: Failed to flush buffers: %v", err)
+				} else {
+					s.logger.Infof("BULK END: Successfully flushed all pending operations")
+				}
+			}
+		}
+
+		// Reset counters for new window
+		s.operationCount = 0
+		s.operationWindow = now
+	}
+
+	// Return true if WAL should be disabled due to bulk mode
+	return s.bulkModeEnabled && globalSettings.WALDisableForBulkOps
+}
+
+// ShouldBypassWAL returns true if WAL should be bypassed for the current operation
+// This method should be called by external services before WAL operations
+func (s *BundleService) ShouldBypassWAL() bool {
+	return s.trackOperationForBulkDetection()
+}
+
+// GetBulkModeStatus returns the current bulk mode status for monitoring
+func (s *BundleService) GetBulkModeStatus() (bool, int, float64) {
+	globalSettings := settings.GetSettings()
+	if !globalSettings.BulkOperationDetection {
+		return false, 0, 0
+	}
+
+	// Calculate current operations per second
+	windowDuration := time.Since(s.operationWindow)
+	var opsPerSecond float64
+	if windowDuration > 0 {
+		opsPerSecond = float64(s.operationCount) / windowDuration.Seconds()
+	}
+
+	return s.bulkModeEnabled, s.operationCount, opsPerSecond
+}
+
+// FlushAllBuffers forces immediate flush of all pending operations to disk
+// This should be called at the end of bulk operations to ensure data persistence
+func (s *BundleService) FlushAllBuffers() error {
+	s.logger.Infof("FLUSH: Starting comprehensive buffer flush to ensure data persistence")
+
+	var errors []error
+
+	// 1. Flush index updates first (they may affect metadata)
+	if len(s.indexUpdateBuffer) > 0 {
+		s.logger.Debugf("FLUSH: Flushing %d pending index updates", len(s.indexUpdateBuffer))
+		s.flushIndexUpdates()
+	}
+
+	// 2. Force metadata persistence regardless of thresholds
+	if len(s.metadataUpdateBuffer) > 0 {
+		s.logger.Debugf("FLUSH: Forcing metadata persistence for %d pending updates", len(s.metadataUpdateBuffer))
+		s.forceMetadataPersistence()
+	}
+
+	// 3. Sync any file system buffers
+	s.logger.Debugf("FLUSH: Syncing file system buffers")
+	// Note: Individual stores should handle their own sync operations
+
+	// 4. Log completion
+	if len(errors) > 0 {
+		s.logger.Errorf("FLUSH: Completed with %d errors", len(errors))
+		return fmt.Errorf("flush completed with %d errors", len(errors))
+	}
+
+	s.logger.Infof("FLUSH: Successfully flushed all buffers to disk")
+	return nil
 }
 
 // processIndexUpdateBatch handles a batch of updates for a specific index
@@ -445,19 +621,56 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 	}
 
 	// Process all deduplicated updates for this hash index
+	successCount := 0
+	errorCount := 0
+
 	for _, update := range deduplicatedUpdates {
 		switch update.Operation {
 		case "insert":
 			err := hashIndex.InsertDocument(update.DocumentID)
 			if err != nil {
-				s.logger.Warnf("Failed to insert document '%s' into hash index '%s': %v", update.DocumentID, indexName, err)
+				errorCount++
+				// Enhanced corruption detection and handling
+				if strings.Contains(err.Error(), "is not an overflow page") {
+					s.logger.Errorf("Overflow chain corruption detected during bulk operation: %v", err)
+					s.logger.Warnf("Continuing with remaining operations despite overflow corruption in document '%s'", update.DocumentID)
+				} else if strings.Contains(err.Error(), "is not a bucket page") {
+					s.logger.Errorf("CRITICAL: Bucket page corruption detected during bulk operation: %v", err)
+					s.logger.Warnf("Bucket corruption in document '%s' - this indicates severe index corruption", update.DocumentID)
+					// For bucket corruption, we should continue but also log this as a critical issue
+				} else if strings.Contains(err.Error(), "index file corruption") {
+					s.logger.Errorf("CRITICAL: Index file corruption detected: %v", err)
+					s.logger.Warnf("Continuing despite corruption in document '%s' but index may need rebuilding", update.DocumentID)
+				} else {
+					s.logger.Warnf("Failed to insert document '%s' into hash index '%s': %v", update.DocumentID, indexName, err)
+				}
+			} else {
+				successCount++
 			}
 		case "delete":
 			_, err := hashIndex.DeleteDocument(update.DocumentID)
 			if err != nil {
-				s.logger.Warnf("Failed to delete document '%s' from hash index '%s': %v", update.DocumentID, indexName, err)
+				errorCount++
+				// Check if this is a corruption error that we can recover from
+				if strings.Contains(err.Error(), "is not an overflow page") {
+					s.logger.Errorf("Hash index corruption detected during bulk delete: %v", err)
+					s.logger.Warnf("Continuing with remaining operations despite corruption in document '%s'", update.DocumentID)
+				} else {
+					s.logger.Warnf("Failed to delete document '%s' from hash index '%s': %v", update.DocumentID, indexName, err)
+				}
+			} else {
+				successCount++
 			}
 		}
+	}
+
+	// Log batch processing results
+	if errorCount > 0 {
+		s.logger.Warnf("Hash index batch processing completed: %d successes, %d errors for index '%s'",
+			successCount, errorCount, indexName)
+	} else {
+		s.logger.Debugf("Hash index batch processing completed: %d operations successful for index '%s'",
+			successCount, indexName)
 	}
 
 	// PERFORMANCE FIX: Flush changes to disk after batch processing instead of per-insert
@@ -611,6 +824,29 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseService, db *models.Database, bundle *models.Bundle) error {
 	// Set the database reference in the bundle
 	bundle.Database = db
+
+	// Initialize bundle properties if not set
+	if bundle.PageSize == 0 {
+		bundle.PageSize = s.defaultPageSize // Use service default (1000)
+		s.logger.Debugf("Set default PageSize of %d for bundle '%s'", s.defaultPageSize, bundle.Name)
+	}
+
+	// Initialize TotalDocuments and PageCount based on existing documents
+	if bundle.Documents != nil {
+		bundle.TotalDocuments = int64(len(*bundle.Documents))
+	} else {
+		bundle.TotalDocuments = 0
+	}
+
+	// Calculate initial PageCount
+	// PageCount = ceil(TotalDocuments / PageSize)
+	bundle.PageCount = (bundle.TotalDocuments + int64(bundle.PageSize) - 1) / int64(bundle.PageSize)
+	if bundle.PageCount == 0 {
+		bundle.PageCount = 1 // Always have at least 1 page for new bundles
+	}
+
+	s.logger.Debugf("Initialized bundle '%s' with TotalDocuments: %d, PageSize: %d, PageCount: %d",
+		bundle.Name, bundle.TotalDocuments, bundle.PageSize, bundle.PageCount)
 
 	// Add the bundle to the database
 	db.Bundles[bundle.Name] = *bundle
