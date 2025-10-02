@@ -331,63 +331,63 @@ func (fm *FileManager) Sync() error {
 }
 
 // readPageBinary reads a page in binary format
-func (fm *FileManager) readPageBinary(pageNum uint32) (interface{}, error) {
-	offset := int64(pageNum) * int64(fm.pageSize)
+// func (fm *FileManager) readPageBinary(pageNum uint32) (interface{}, error) {
+// 	offset := int64(pageNum) * int64(fm.pageSize)
 
-	// Seek to page position
-	_, err := fm.file.Seek(offset, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to seek to page %d: %w", pageNum, err)
-	}
+// 	// Seek to page position
+// 	_, err := fm.file.Seek(offset, 0)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to seek to page %d: %w", pageNum, err)
+// 	}
 
-	// Read page data
-	pageData := make([]byte, fm.pageSize)
-	n, err := fm.file.Read(pageData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read page %d: %w", pageNum, err)
-	}
+// 	// Read page data
+// 	pageData := make([]byte, fm.pageSize)
+// 	n, err := fm.file.Read(pageData)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to read page %d: %w", pageNum, err)
+// 	}
 
-	if uint32(n) < fm.pageSize {
-		// Pad with zeros if file is shorter
-		for i := n; i < int(fm.pageSize); i++ {
-			pageData[i] = 0
-		}
-	}
+// 	if uint32(n) < fm.pageSize {
+// 		// Pad with zeros if file is shorter
+// 		for i := n; i < int(fm.pageSize); i++ {
+// 			pageData[i] = 0
+// 		}
+// 	}
 
-	// Parse based on page type
-	return fm.parsePageData(pageData, pageNum)
-}
+// 	// Parse based on page type
+// 	return fm.parsePageData(pageData, pageNum)
+// }
 
 // writePageBinary writes a page in binary format
-func (fm *FileManager) writePageBinary(pageNum uint32, pageData interface{}) error {
-	offset := int64(pageNum) * int64(fm.pageSize)
+// func (fm *FileManager) writePageBinary(pageNum uint32, pageData interface{}) error {
+// 	offset := int64(pageNum) * int64(fm.pageSize)
 
-	// Seek to page position
-	_, err := fm.file.Seek(offset, 0)
-	if err != nil {
-		return fmt.Errorf("failed to seek to page %d: %w", pageNum, err)
-	}
+// 	// Seek to page position
+// 	_, err := fm.file.Seek(offset, 0)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to seek to page %d: %w", pageNum, err)
+// 	}
 
-	// Serialize page data
-	serializedData, err := fm.serializePageData(pageData)
-	if err != nil {
-		return fmt.Errorf("failed to serialize page data: %w", err)
-	}
+// 	// Serialize page data
+// 	serializedData, err := fm.serializePageData(pageData)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to serialize page data: %w", err)
+// 	}
 
-	// Pad to page size
-	if len(serializedData) < int(fm.pageSize) {
-		padding := make([]byte, int(fm.pageSize)-len(serializedData))
-		serializedData = append(serializedData, padding...)
-	}
+// 	// Pad to page size
+// 	if len(serializedData) < int(fm.pageSize) {
+// 		padding := make([]byte, int(fm.pageSize)-len(serializedData))
+// 		serializedData = append(serializedData, padding...)
+// 	}
 
-	// Write to file
-	_, err = fm.file.Write(serializedData)
-	if err != nil {
-		return fmt.Errorf("failed to write page %d: %w", pageNum, err)
-	}
+// 	// Write to file
+// 	_, err = fm.file.Write(serializedData)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to write page %d: %w", pageNum, err)
+// 	}
 
-	return fm.file.Sync()
-}
+// 	return fm.file.Sync()
+// }
 
 // readPageASCIISafe reads a page in ASCII format with enhanced corruption detection and recovery
 func (fm *FileManager) readPageASCIISafe(pageNum uint32) (interface{}, error) {
@@ -510,96 +510,96 @@ func (fm *FileManager) readPageBinarySafe(pageNum uint32) (interface{}, error) {
 }
 
 // readPageASCII reads a page in ASCII format
-func (fm *FileManager) readPageASCII(pageNum uint32) (interface{}, error) {
-	if fm == nil {
-		return nil, fmt.Errorf("file manager is nil")
-	}
+// func (fm *FileManager) readPageASCII(pageNum uint32) (interface{}, error) {
+// 	if fm == nil {
+// 		return nil, fmt.Errorf("file manager is nil")
+// 	}
 
-	if fm.file == nil {
-		return nil, fmt.Errorf("file handle is nil")
-	}
+// 	if fm.file == nil {
+// 		return nil, fmt.Errorf("file handle is nil")
+// 	}
 
-	fm.logger.Debugf("Reading page %d in ASCII format", pageNum)
+// 	fm.logger.Debugf("Reading page %d in ASCII format", pageNum)
 
-	// Calculate page offset and seek to it
-	offset := int64(pageNum) * int64(fm.pageSize)
-	if _, err := fm.file.Seek(offset, 0); err != nil {
-		return nil, fmt.Errorf("failed to seek to page %d offset %d: %w", pageNum, offset, err)
-	}
+// 	// Calculate page offset and seek to it
+// 	offset := int64(pageNum) * int64(fm.pageSize)
+// 	if _, err := fm.file.Seek(offset, 0); err != nil {
+// 		return nil, fmt.Errorf("failed to seek to page %d offset %d: %w", pageNum, offset, err)
+// 	}
 
-	// Read the entire page
-	pageData := make([]byte, fm.pageSize)
-	if _, err := fm.file.Read(pageData); err != nil {
-		return nil, fmt.Errorf("failed to read page %d: %w", pageNum, err)
-	}
+// 	// Read the entire page
+// 	pageData := make([]byte, fm.pageSize)
+// 	if _, err := fm.file.Read(pageData); err != nil {
+// 		return nil, fmt.Errorf("failed to read page %d: %w", pageNum, err)
+// 	}
 
-	// Parse the ASCII data
-	scanner := bufio.NewScanner(bytes.NewReader(pageData))
-	var pageType string
+// 	// Parse the ASCII data
+// 	scanner := bufio.NewScanner(bytes.NewReader(pageData))
+// 	var pageType string
 
-	// Find the page type first
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+// 	// Find the page type first
+// 	for scanner.Scan() {
+// 		line := strings.TrimSpace(scanner.Text())
 
-		// Skip empty lines and padding
-		if line == "" || line == " " {
-			continue
-		}
+// 		// Skip empty lines and padding
+// 		if line == "" || line == " " {
+// 			continue
+// 		}
 
-		// Parse page header to get type
-		if strings.HasPrefix(line, "TYPE: ") {
-			pageType = strings.TrimPrefix(line, "TYPE: ")
-			break
-		}
-	}
+// 		// Parse page header to get type
+// 		if strings.HasPrefix(line, "TYPE: ") {
+// 			pageType = strings.TrimPrefix(line, "TYPE: ")
+// 			break
+// 		}
+// 	}
 
-	if pageType == "" {
-		return nil, fmt.Errorf("failed to determine page type for page %d", pageNum)
-	}
+// 	if pageType == "" {
+// 		return nil, fmt.Errorf("failed to determine page type for page %d", pageNum)
+// 	}
 
-	// Reset scanner to beginning
-	scanner = bufio.NewScanner(bytes.NewReader(pageData))
+// 	// Reset scanner to beginning
+// 	scanner = bufio.NewScanner(bytes.NewReader(pageData))
 
-	// Parse data fields based on page type
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+// 	// Parse data fields based on page type
+// 	for scanner.Scan() {
+// 		line := strings.TrimSpace(scanner.Text())
 
-		// Skip empty lines, padding, and header lines
-		if line == "" || line == " " || strings.HasPrefix(line, "===") ||
-			strings.HasPrefix(line, "TYPE:") || strings.HasPrefix(line, "TIMESTAMP:") {
-			continue
-		}
+// 		// Skip empty lines, padding, and header lines
+// 		if line == "" || line == " " || strings.HasPrefix(line, "===") ||
+// 			strings.HasPrefix(line, "TYPE:") || strings.HasPrefix(line, "TIMESTAMP:") {
+// 			continue
+// 		}
 
-		// Parse first data field to determine parsing strategy
-		if strings.Contains(line, ":") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				key := strings.TrimSpace(parts[0])
-				value := strings.TrimSpace(parts[1])
+// 		// Parse first data field to determine parsing strategy
+// 		if strings.Contains(line, ":") {
+// 			parts := strings.SplitN(line, ":", 2)
+// 			if len(parts) == 2 {
+// 				key := strings.TrimSpace(parts[0])
+// 				value := strings.TrimSpace(parts[1])
 
-				switch pageType {
-				case "*hashindexV2.HashIndexMetadata":
-					return fm.parseMetadataFromASCII(scanner, key, value)
-				case "*hashindexV2.BucketPage":
+// 				switch pageType {
+// 				case "*hashindexV2.HashIndexMetadata":
+// 					return fm.parseMetadataFromASCII(scanner, key, value)
+// 				case "*hashindexV2.BucketPage":
 
-					bp, err := fm.parseBucketPageFromASCII(scanner, key, value)
+// 					bp, err := fm.parseBucketPageFromASCII(scanner, key, value)
 
-					if err != nil {
-						return nil, fmt.Errorf("failed to parse bucket page %w", err)
-					}
-					return bp, nil
-				case "*hashindexV2.OverflowPage":
-					return fm.parseOverflowPageFromASCII(scanner, key, value)
-				default:
-					return nil, fmt.Errorf("unknown page type: %s", pageType)
-				}
-			}
-		}
-	}
+// 					if err != nil {
+// 						return nil, fmt.Errorf("failed to parse bucket page %w", err)
+// 					}
+// 					return bp, nil
+// 				case "*hashindexV2.OverflowPage":
+// 					return fm.parseOverflowPageFromASCII(scanner, key, value)
+// 				default:
+// 					return nil, fmt.Errorf("unknown page type: %s", pageType)
+// 				}
+// 			}
+// 		}
+// 	}
 
-	return nil, fmt.Errorf("failed to parse page %d: no valid data found", pageNum)
+// 	return nil, fmt.Errorf("failed to parse page %d: no valid data found", pageNum)
 
-}
+// }
 
 // writePageASCII writes a page in ASCII format with complete hash data
 // This function follows the Single Responsibility Principle by handling only ASCII serialization
@@ -730,106 +730,106 @@ func (fm *FileManager) writePageBinarySafe(pageNum uint32, pageData interface{})
 	return fm.writePageASCIISafe(pageNum, pageData)
 }
 
-func (fm *FileManager) writePageASCII(pageNum uint32, pageData interface{}) error {
-	if fm == nil {
-		return fmt.Errorf("file manager is nil")
-	}
+// func (fm *FileManager) writePageASCII(pageNum uint32, pageData interface{}) error {
+// 	if fm == nil {
+// 		return fmt.Errorf("file manager is nil")
+// 	}
 
-	if fm.file == nil {
-		return fmt.Errorf("file handle is nil")
-	}
+// 	if fm.file == nil {
+// 		return fmt.Errorf("file handle is nil")
+// 	}
 
-	fm.logger.Debugf("Writing page %d in ASCII format", pageNum)
+// 	fm.logger.Debugf("Writing page %d in ASCII format", pageNum)
 
-	var buffer bytes.Buffer
+// 	var buffer bytes.Buffer
 
-	// Write page header
-	buffer.WriteString(fmt.Sprintf("=== PAGE %d ===\n", pageNum))
-	buffer.WriteString(fmt.Sprintf("TYPE: %T\n", pageData))
-	buffer.WriteString(fmt.Sprintf("TIMESTAMP: %s\n", time.Now().Format(time.RFC3339)))
+// 	// Write page header
+// 	buffer.WriteString(fmt.Sprintf("=== PAGE %d ===\n", pageNum))
+// 	buffer.WriteString(fmt.Sprintf("TYPE: %T\n", pageData))
+// 	buffer.WriteString(fmt.Sprintf("TIMESTAMP: %s\n", time.Now().Format(time.RFC3339)))
 
-	// Serialize the actual page data based on its type
-	switch data := pageData.(type) {
-	case *HashIndexMetadata:
-		buffer.WriteString(fmt.Sprintf("HashSeed: %d\n", data.HashSeed))
-		buffer.WriteString(fmt.Sprintf("BucketCount: %d\n", data.BucketCount))
-		buffer.WriteString(fmt.Sprintf("PageSize: %d\n", data.PageSize))
-		buffer.WriteString(fmt.Sprintf("LoadFactor: %.2f\n", data.LoadFactor))
-		buffer.WriteString(fmt.Sprintf("DocumentCount: %d\n", data.DocumentCount))
-		buffer.WriteString(fmt.Sprintf("NextPageNum: %d\n", data.NextPageNum))
+// 	// Serialize the actual page data based on its type
+// 	switch data := pageData.(type) {
+// 	case *HashIndexMetadata:
+// 		buffer.WriteString(fmt.Sprintf("HashSeed: %d\n", data.HashSeed))
+// 		buffer.WriteString(fmt.Sprintf("BucketCount: %d\n", data.BucketCount))
+// 		buffer.WriteString(fmt.Sprintf("PageSize: %d\n", data.PageSize))
+// 		buffer.WriteString(fmt.Sprintf("LoadFactor: %.2f\n", data.LoadFactor))
+// 		buffer.WriteString(fmt.Sprintf("DocumentCount: %d\n", data.DocumentCount))
+// 		buffer.WriteString(fmt.Sprintf("NextPageNum: %d\n", data.NextPageNum))
 
-		// Serialize free page list
-		buffer.WriteString("FreePageList: [")
-		for i, pageNum := range data.FreePageList {
-			if i > 0 {
-				buffer.WriteString(", ")
-			}
-			buffer.WriteString(fmt.Sprintf("%d", pageNum))
-		}
-		buffer.WriteString("]\n")
+// 		// Serialize free page list
+// 		buffer.WriteString("FreePageList: [")
+// 		for i, pageNum := range data.FreePageList {
+// 			if i > 0 {
+// 				buffer.WriteString(", ")
+// 			}
+// 			buffer.WriteString(fmt.Sprintf("%d", pageNum))
+// 		}
+// 		buffer.WriteString("]\n")
 
-	case *BucketPage:
-		buffer.WriteString(fmt.Sprintf("PageNumber: %d\n", data.PageNumber))
-		buffer.WriteString(fmt.Sprintf("BucketNumber: %d\n", data.BucketNumber))
-		buffer.WriteString(fmt.Sprintf("RecordCount: %d\n", data.RecordCount))
-		buffer.WriteString(fmt.Sprintf("OverflowPage: %d\n", data.OverflowPage))
+// 	case *BucketPage:
+// 		buffer.WriteString(fmt.Sprintf("PageNumber: %d\n", data.PageNumber))
+// 		buffer.WriteString(fmt.Sprintf("BucketNumber: %d\n", data.BucketNumber))
+// 		buffer.WriteString(fmt.Sprintf("RecordCount: %d\n", data.RecordCount))
+// 		buffer.WriteString(fmt.Sprintf("OverflowPage: %d\n", data.OverflowPage))
 
-		// Serialize hash entries with both hash values and DocumentIDs
-		buffer.WriteString("Records: [\n")
-		for i, entry := range data.Records {
-			buffer.WriteString(fmt.Sprintf("  Entry %d:\n", i))
-			buffer.WriteString(fmt.Sprintf("    HashValue: %d\n", entry.HashValue))
-			buffer.WriteString(fmt.Sprintf("    DocumentID: %s\n", entry.DocumentID))
-		}
-		buffer.WriteString("]\n")
+// 		// Serialize hash entries with both hash values and DocumentIDs
+// 		buffer.WriteString("Records: [\n")
+// 		for i, entry := range data.Records {
+// 			buffer.WriteString(fmt.Sprintf("  Entry %d:\n", i))
+// 			buffer.WriteString(fmt.Sprintf("    HashValue: %d\n", entry.HashValue))
+// 			buffer.WriteString(fmt.Sprintf("    DocumentID: %s\n", entry.DocumentID))
+// 		}
+// 		buffer.WriteString("]\n")
 
-	case *OverflowPage:
-		buffer.WriteString(fmt.Sprintf("PageNumber: %d\n", data.PageNumber))
-		buffer.WriteString(fmt.Sprintf("ParentBucket: %d\n", data.ParentBucket))
-		buffer.WriteString(fmt.Sprintf("NextOverflowPage: %d\n", data.NextOverflowPage))
-		buffer.WriteString(fmt.Sprintf("RecordCount: %d\n", data.RecordCount))
+// 	case *OverflowPage:
+// 		buffer.WriteString(fmt.Sprintf("PageNumber: %d\n", data.PageNumber))
+// 		buffer.WriteString(fmt.Sprintf("ParentBucket: %d\n", data.ParentBucket))
+// 		buffer.WriteString(fmt.Sprintf("NextOverflowPage: %d\n", data.NextOverflowPage))
+// 		buffer.WriteString(fmt.Sprintf("RecordCount: %d\n", data.RecordCount))
 
-		// Serialize overflow hash entries
-		buffer.WriteString("Records: [\n")
-		for i, entry := range data.Records {
-			buffer.WriteString(fmt.Sprintf("  Entry %d:\n", i))
-			buffer.WriteString(fmt.Sprintf("    HashValue: %d\n", entry.HashValue))
-			buffer.WriteString(fmt.Sprintf("    DocumentID: %s\n", entry.DocumentID))
-		}
-		buffer.WriteString("]\n")
+// 		// Serialize overflow hash entries
+// 		buffer.WriteString("Records: [\n")
+// 		for i, entry := range data.Records {
+// 			buffer.WriteString(fmt.Sprintf("  Entry %d:\n", i))
+// 			buffer.WriteString(fmt.Sprintf("    HashValue: %d\n", entry.HashValue))
+// 			buffer.WriteString(fmt.Sprintf("    DocumentID: %s\n", entry.DocumentID))
+// 		}
+// 		buffer.WriteString("]\n")
 
-	default:
-		return fmt.Errorf("unsupported page type for ASCII serialization: %T", pageData)
-	}
+// 	default:
+// 		return fmt.Errorf("unsupported page type for ASCII serialization: %T", pageData)
+// 	}
 
-	// Write page footer
-	buffer.WriteString("=== END PAGE ===\n\n")
+// 	// Write page footer
+// 	buffer.WriteString("=== END PAGE ===\n\n")
 
-	// Calculate page offset and write to file
-	offset := int64(pageNum) * int64(fm.pageSize)
-	if _, err := fm.file.Seek(offset, 0); err != nil {
-		return fmt.Errorf("failed to seek to page %d offset %d: %w", pageNum, offset, err)
-	}
+// 	// Calculate page offset and write to file
+// 	offset := int64(pageNum) * int64(fm.pageSize)
+// 	if _, err := fm.file.Seek(offset, 0); err != nil {
+// 		return fmt.Errorf("failed to seek to page %d offset %d: %w", pageNum, offset, err)
+// 	}
 
-	// Pad or truncate to exact page size
-	data := buffer.Bytes()
-	if len(data) > int(fm.pageSize) {
-		return fmt.Errorf("page data exceeds page size: %d > %d", len(data), fm.pageSize)
-	}
+// 	// Pad or truncate to exact page size
+// 	data := buffer.Bytes()
+// 	if len(data) > int(fm.pageSize) {
+// 		return fmt.Errorf("page data exceeds page size: %d > %d", len(data), fm.pageSize)
+// 	}
 
-	// Pad with spaces to fill the page
-	for len(data) < int(fm.pageSize) {
-		data = append(data, ' ')
-	}
+// 	// Pad with spaces to fill the page
+// 	for len(data) < int(fm.pageSize) {
+// 		data = append(data, ' ')
+// 	}
 
-	// Write the page data
-	if _, err := fm.file.Write(data); err != nil {
-		return fmt.Errorf("failed to write page %d: %w", pageNum, err)
-	}
+// 	// Write the page data
+// 	if _, err := fm.file.Write(data); err != nil {
+// 		return fmt.Errorf("failed to write page %d: %w", pageNum, err)
+// 	}
 
-	fm.logger.Debugf("Successfully wrote page %d in ASCII format (%d bytes)", pageNum, len(data))
-	return nil
-}
+// 	fm.logger.Debugf("Successfully wrote page %d in ASCII format (%d bytes)", pageNum, len(data))
+// 	return nil
+// }
 
 // parseBucketPageFromASCII parses bucket page data from ASCII format
 // This function handles the parsing of bucket-specific fields following SRP
@@ -993,26 +993,26 @@ func (fm *FileManager) setBucketPageField(bucketPage *BucketPage, key, value str
 }
 
 // Helper methods for parsing and serialization
-func (fm *FileManager) parsePageData(data []byte, pageNum uint32) (interface{}, error) {
-	if len(data) < 8 {
-		return nil, fmt.Errorf("page data too short")
-	}
+// func (fm *FileManager) parsePageData(data []byte, pageNum uint32) (interface{}, error) {
+// 	if len(data) < 8 {
+// 		return nil, fmt.Errorf("page data too short")
+// 	}
 
-	// Read page type from first 4 bytes
-	pageType := binary.LittleEndian.Uint32(data[0:4])
+// 	// Read page type from first 4 bytes
+// 	pageType := binary.LittleEndian.Uint32(data[0:4])
 
-	switch pageType {
-	case PageTypeMetadata:
-		return fm.parseMetadata(data)
-	case PageTypeBucket:
-		return fm.parseBucketPage(data, pageNum)
-	case PageTypeOverflow:
-		return fm.parseOverflowPage(data, pageNum)
-	default:
-		// Default to bucket page for compatibility
-		return NewBucketPage(pageNum-1, fm.pageSize), nil
-	}
-}
+// 	switch pageType {
+// 	case PageTypeMetadata:
+// 		return fm.parseMetadata(data)
+// 	case PageTypeBucket:
+// 		return fm.parseBucketPage(data, pageNum)
+// 	case PageTypeOverflow:
+// 		return fm.parseOverflowPage(data, pageNum)
+// 	default:
+// 		// Default to bucket page for compatibility
+// 		return NewBucketPage(pageNum-1, fm.pageSize), nil
+// 	}
+// }
 
 // parseMetadataFromASCII parses metadata from ASCII format
 // This function handles the parsing of metadata-specific fields following SRP
@@ -1333,112 +1333,112 @@ func (fm *FileManager) setOverflowPageField(overflowPage *OverflowPage, key, val
 	return nil
 }
 
-func (fm *FileManager) serializePageData(pageData interface{}) ([]byte, error) {
-	// Implementation for binary serialization
-	switch page := pageData.(type) {
-	case *HashIndexMetadata:
-		return fm.serializeMetadata(page)
-	case *BucketPage:
-		return fm.serializeBucketPage(page)
-	case *OverflowPage:
-		return fm.serializeOverflowPage(page)
-	default:
-		return nil, fmt.Errorf("unknown page type: %T", pageData)
-	}
-}
+// func (fm *FileManager) serializePageData(pageData interface{}) ([]byte, error) {
+// 	// Implementation for binary serialization
+// 	switch page := pageData.(type) {
+// 	case *HashIndexMetadata:
+// 		return fm.serializeMetadata(page)
+// 	case *BucketPage:
+// 		return fm.serializeBucketPage(page)
+// 	case *OverflowPage:
+// 		return fm.serializeOverflowPage(page)
+// 	default:
+// 		return nil, fmt.Errorf("unknown page type: %T", pageData)
+// 	}
+// }
 
 // Placeholder implementations - these would need to be completed
-func (fm *FileManager) parseMetadata(data []byte) (*HashIndexMetadata, error) {
-	// TODO: Implement binary parsing of metadata
-	return NewIndexMetadata(16, fm.pageSize, 0.75, fm.debugMode), nil
-}
+// func (fm *FileManager) parseMetadata(data []byte) (*HashIndexMetadata, error) {
+// 	// TODO: Implement binary parsing of metadata
+// 	return NewIndexMetadata(16, fm.pageSize, 0.75, fm.debugMode), nil
+// }
 
-func (fm *FileManager) parseBucketPage(data []byte, pageNum uint32) (*BucketPage, error) {
-	// PERFORMANCE FIX: Use binary deserialization instead of ASCII parsing
-	page := NewBucketPage(pageNum-1, fm.pageSize)
+// func (fm *FileManager) parseBucketPage(data []byte, pageNum uint32) (*BucketPage, error) {
+// 	// PERFORMANCE FIX: Use binary deserialization instead of ASCII parsing
+// 	page := NewBucketPage(pageNum-1, fm.pageSize)
 
-	// Only deserialize if data contains actual content (not all zeros)
-	if len(data) > 36 { // Minimum size for header
-		err := page.DeserializeBinary(data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize bucket page: %w", err)
-		}
-	}
+// 	// Only deserialize if data contains actual content (not all zeros)
+// 	if len(data) > 36 { // Minimum size for header
+// 		err := page.DeserializeBinary(data)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to deserialize bucket page: %w", err)
+// 		}
+// 	}
 
-	return page, nil
-}
+// 	return page, nil
+// }
 
-func (fm *FileManager) parseOverflowPage(data []byte, pageNum uint32) (*OverflowPage, error) {
-	// PERFORMANCE FIX: Use binary deserialization instead of ASCII parsing
-	page := NewOverflowPage(pageNum, fm.pageSize)
+// func (fm *FileManager) parseOverflowPage(data []byte, pageNum uint32) (*OverflowPage, error) {
+// 	// PERFORMANCE FIX: Use binary deserialization instead of ASCII parsing
+// 	page := NewOverflowPage(pageNum, fm.pageSize)
 
-	// Only deserialize if data contains actual content (not all zeros)
-	if len(data) > 36 { // Minimum size for header
-		err := page.DeserializeBinary(data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to deserialize overflow page: %w", err)
-		}
-	}
+// 	// Only deserialize if data contains actual content (not all zeros)
+// 	if len(data) > 36 { // Minimum size for header
+// 		err := page.DeserializeBinary(data)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to deserialize overflow page: %w", err)
+// 		}
+// 	}
 
-	return page, nil
-}
+// 	return page, nil
+// }
 
-func (fm *FileManager) serializeMetadata(metadata *HashIndexMetadata) ([]byte, error) {
-	// TODO: Implement binary serialization of metadata
-	return make([]byte, fm.pageSize), nil
-}
+// func (fm *FileManager) serializeMetadata(metadata *HashIndexMetadata) ([]byte, error) {
+// 	// TODO: Implement binary serialization of metadata
+// 	return make([]byte, fm.pageSize), nil
+// }
 
-func (fm *FileManager) serializeBucketPage(page *BucketPage) ([]byte, error) {
-	// PERFORMANCE FIX: Use binary serialization instead of ASCII
-	data, err := page.SerializeBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize bucket page: %w", err)
-	}
+// func (fm *FileManager) serializeBucketPage(page *BucketPage) ([]byte, error) {
+// 	// PERFORMANCE FIX: Use binary serialization instead of ASCII
+// 	data, err := page.SerializeBinary()
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to serialize bucket page: %w", err)
+// 	}
 
-	// Ensure data doesn't exceed page size
-	if len(data) > int(fm.pageSize) {
-		return nil, fmt.Errorf("serialized bucket page exceeds page size: %d > %d", len(data), fm.pageSize)
-	}
+// 	// Ensure data doesn't exceed page size
+// 	if len(data) > int(fm.pageSize) {
+// 		return nil, fmt.Errorf("serialized bucket page exceeds page size: %d > %d", len(data), fm.pageSize)
+// 	}
 
-	// Pad to page size for consistent storage
-	paddedData := make([]byte, fm.pageSize)
-	copy(paddedData, data)
+// 	// Pad to page size for consistent storage
+// 	paddedData := make([]byte, fm.pageSize)
+// 	copy(paddedData, data)
 
-	return paddedData, nil
-}
+// 	return paddedData, nil
+// }
 
-func (fm *FileManager) serializeOverflowPage(page *OverflowPage) ([]byte, error) {
-	// PERFORMANCE FIX: Use binary serialization instead of ASCII
-	data, err := page.SerializeBinary()
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize overflow page: %w", err)
-	}
+// func (fm *FileManager) serializeOverflowPage(page *OverflowPage) ([]byte, error) {
+// 	// PERFORMANCE FIX: Use binary serialization instead of ASCII
+// 	data, err := page.SerializeBinary()
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to serialize overflow page: %w", err)
+// 	}
 
-	// Ensure data doesn't exceed page size
-	if len(data) > int(fm.pageSize) {
-		return nil, fmt.Errorf("serialized overflow page exceeds page size: %d > %d", len(data), fm.pageSize)
-	}
+// 	// Ensure data doesn't exceed page size
+// 	if len(data) > int(fm.pageSize) {
+// 		return nil, fmt.Errorf("serialized overflow page exceeds page size: %d > %d", len(data), fm.pageSize)
+// 	}
 
-	// Pad to page size for consistent storage
-	paddedData := make([]byte, fm.pageSize)
-	copy(paddedData, data)
+// 	// Pad to page size for consistent storage
+// 	paddedData := make([]byte, fm.pageSize)
+// 	copy(paddedData, data)
 
-	return paddedData, nil
-}
+// 	return paddedData, nil
+// }
 
-func (fm *FileManager) parsePageASCII(scanner *bufio.Scanner, pageNum uint32) (interface{}, error) {
-	// TODO: Implement ASCII parsing
-	if pageNum == 0 {
-		return NewIndexMetadata(16, fm.pageSize, 0.75, fm.debugMode), nil
-	}
-	return NewBucketPage(pageNum-1, fm.pageSize), nil
-}
+// func (fm *FileManager) parsePageASCII(scanner *bufio.Scanner, pageNum uint32) (interface{}, error) {
+// 	// TODO: Implement ASCII parsing
+// 	if pageNum == 0 {
+// 		return NewIndexMetadata(16, fm.pageSize, 0.75, fm.debugMode), nil
+// 	}
+// 	return NewBucketPage(pageNum-1, fm.pageSize), nil
+// }
 
-func (fm *FileManager) writePageDataASCII(file *os.File, pageNum uint32, pageData interface{}) error {
-	// TODO: Implement ASCII writing
-	fmt.Fprintf(file, "=== PAGE %d ===\n", pageNum)
-	fmt.Fprintf(file, "TYPE: %T\n", pageData)
-	fmt.Fprintf(file, "TIMESTAMP: %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(file, "=== END PAGE ===\n\n")
-	return nil
-}
+// func (fm *FileManager) writePageDataASCII(file *os.File, pageNum uint32, pageData interface{}) error {
+// 	// TODO: Implement ASCII writing
+// 	fmt.Fprintf(file, "=== PAGE %d ===\n", pageNum)
+// 	fmt.Fprintf(file, "TYPE: %T\n", pageData)
+// 	fmt.Fprintf(file, "TIMESTAMP: %s\n", time.Now().Format(time.RFC3339))
+// 	fmt.Fprintf(file, "=== END PAGE ===\n\n")
+// 	return nil
+// }

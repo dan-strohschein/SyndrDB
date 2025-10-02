@@ -981,7 +981,14 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 				return fmt.Errorf("error creating bundle: %v", err)
 			}
 
-			serviceManager.InternalCatalogService.AddBundleToCatalog(bundle)
+			// CRITICAL FIX: Check for errors when adding bundle to catalog
+			// Without this, bundles may be created but not registered in the system catalog
+			err = serviceManager.InternalCatalogService.RegisterBundleInCatalog(bundle)
+			if err != nil {
+				// Bundle was created but catalog registration failed
+				logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundle.Name, err)
+				return fmt.Errorf("bundle created but catalog registration failed: %v", err)
+			}
 
 			return err
 		})
@@ -993,7 +1000,15 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 		if err != nil {
 			return nil, fmt.Errorf("error creating bundle: %v", err)
 		}
-		serviceManager.InternalCatalogService.AddBundleToCatalog(bundle)
+
+		// CRITICAL FIX: Check for errors when adding bundle to catalog
+		// Without this, bundles may be created but not registered in the system catalog
+		err = serviceManager.InternalCatalogService.RegisterBundleInCatalog(bundle)
+		if err != nil {
+			// Bundle was created but catalog registration failed
+			logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundle.Name, err)
+			return nil, fmt.Errorf("bundle created but catalog registration failed: %v", err)
+		}
 	}
 
 	if err != nil {
@@ -1042,7 +1057,15 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		return nil, fmt.Errorf("error creating database: %v", err)
 	}
 
-	serviceManager.InternalCatalogService.AddDatabaseToCatalog(newDb)
+	// CRITICAL FIX: Check for errors when adding database to catalog
+	// Without this, databases may be created but not registered in the system catalog
+	err = serviceManager.InternalCatalogService.AddDatabaseToCatalog(newDb)
+	if err != nil {
+		// Database was created but catalog registration failed
+		// This is a critical issue as the database won't be discoverable
+		logger.Errorf("Database '%s' created but failed to register in catalog: %v", newDb.Name, err)
+		return nil, fmt.Errorf("database created but catalog registration failed: %v", err)
+	}
 
 	result = fmt.Sprintf("Database '%s' created successfully.", dbCommand.DatabaseName)
 	cmdResponse := &CommandResponse{
@@ -1947,6 +1970,7 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 
 	var targetDatabase *models.Database
 	var targetDatabaseID string
+	var targetDatabaseName string
 
 	// Parse command to check for "FOR <DATABASE_NAME>" syntax
 	commandLower := strings.ToLower(command)
@@ -1965,26 +1989,35 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 
 		// Verify database is also in catalog (for additional validation, similar to UseDatabase)
 		if serviceManager.InternalCatalogService != nil {
-			allDatabases, catalogErr := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
-			if catalogErr != nil {
-				logger.Warnf("Warning: Failed to verify database in catalog: %v", catalogErr)
-			} else {
-				// Check if the requested database exists in catalog
-				var foundInCatalog bool
-				for _, dbInfo := range allDatabases {
-					if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
-						foundInCatalog = true
-						break
-					}
-				}
-
-				if !foundInCatalog {
-					logger.Warnf("Warning: Database '%s' is loaded but not found in catalog", databaseName)
-				}
+			dbDocument, dbErr := serviceManager.InternalCatalogService.GetDatabaseFromCatalogByName(databaseName)
+			if dbErr != nil {
+				return nil, fmt.Errorf("database '%s' not found in catalog: %w", databaseName, dbErr)
 			}
+			if dbDocument == nil {
+				logger.Warnf("Warning: Database '%s' is loaded but not found in catalog", databaseName)
+			}
+
+			// allDatabases, catalogErr := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
+			// if catalogErr != nil {
+			// 	logger.Warnf("Warning: Failed to verify database in catalog: %v", catalogErr)
+			// } else {
+			// 	// Check if the requested database exists in catalog
+			// 	var foundInCatalog bool
+			// 	for _, dbInfo := range allDatabases {
+			// 		if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
+			// 			foundInCatalog = true
+			// 			break
+			// 		}
+			// 	}
+
+			// 	if !foundInCatalog {
+			// 		logger.Warnf("Warning: Database '%s' is loaded but not found in catalog", databaseName)
+			// 	}
+			// }
 		}
 
 		targetDatabaseID = targetDatabase.DatabaseID
+		targetDatabaseName = targetDatabase.Name
 		logger.Infof("Found database '%s' with ID: %s", databaseName, targetDatabaseID)
 	} else {
 		// Original syntax - use current database and show bundles from catalog for that database
@@ -1993,6 +2026,7 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 		}
 
 		targetDatabaseID = database.DatabaseID
+		targetDatabaseName = database.Name
 		logger.Infof("Using current database '%s' with ID: %s", database.Name, targetDatabaseID)
 	}
 
@@ -2002,34 +2036,42 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 		return nil, fmt.Errorf("internal catalog service is not available")
 	}
 
-	allBundles, err := serviceManager.InternalCatalogService.ListAllBundlesInCatalog()
+	// allBundles, err := serviceManager.InternalCatalogService.ListAllBundlesInCatalog()
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to retrieve bundles from catalog: %w", err)
+	// }
+	allBundles, err := serviceManager.InternalCatalogService.GetBundlesFromCatalogByDatabaseName(targetDatabaseName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve bundles from catalog: %w", err)
+		return nil, fmt.Errorf("failed to retrieve bundles for database '%s' from catalog: %w", targetDatabaseName, err)
 	}
-
+	logger.Debugf("DEBUG DEBUG DEBUG Retrieved %d bundles from catalog for database '%s'", len(*allBundles), targetDatabaseName)
 	// Filter bundles for the target database
-	var bundleInfos []map[string]interface{}
-	for _, bundleInfo := range allBundles {
-		if dbID, ok := bundleInfo["DatabaseID"].(string); ok && dbID == targetDatabaseID {
-			// Create a clean response with relevant fields
-			cleanBundleInfo := make(map[string]interface{})
-			cleanBundleInfo["Name"] = bundleInfo["Name"]
-			cleanBundleInfo["BundleID"] = bundleInfo["BundleID"]
-			cleanBundleInfo["DatabaseID"] = bundleInfo["DatabaseID"]
+	// var bundleInfos []models.Document
+	// for _, bundleInfo := range *allBundles {
+	// 	// Type assert bundleInfo to map[string]interface{}
 
-			bundleInfos = append(bundleInfos, cleanBundleInfo)
-		}
-	}
+	// 	if bundleMap, ok := bundleInfo.(map[string]interface{}); ok {
+	// 		//if dbID, ok := bundleMap["DatabaseID"].(string); ok && dbID == targetDatabaseID {
+	// 		// Create a clean response with relevant fields
+	// 		cleanBundleInfo := make(map[string]interface{})
+	// 		cleanBundleInfo["Name"] = bundleMap["Name"]
+	// 		cleanBundleInfo["BundleID"] = bundleMap["BundleID"]
+	// 		cleanBundleInfo["DatabaseID"] = bundleMap["DatabaseID"]
+	// 		cleanBundleInfo["DatabaseName"] = bundleMap["DatabaseName"]
+	// 		bundleInfos = append(bundleInfos, cleanBundleInfo)
+	// 		//}
+	// 	}
+	// }
 
 	response := &CommandResponse{
-		ResultCount: len(bundleInfos),
-		Result:      bundleInfos,
+		ResultCount: len(*allBundles),
+		Result:      *allBundles,
 	}
 
 	if targetDatabase != nil {
-		logger.Infof("Found %d bundles in database %s from system catalog", len(bundleInfos), targetDatabase.Name)
+		logger.Infof("Found %d bundles in database %s from system catalog", len(*allBundles), targetDatabase.Name)
 	} else {
-		logger.Infof("Found %d bundles for database ID %s from system catalog", len(bundleInfos), targetDatabaseID)
+		logger.Infof("Found %d bundles for database ID %s from system catalog", len(*allBundles), targetDatabaseID)
 	}
 	return response, nil
 }
@@ -2332,7 +2374,7 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 
 				// Add bundle to catalog (only if catalog is available)
 				if catalogAvailable && serviceManager.InternalCatalogService != nil {
-					bundleErr := serviceManager.InternalCatalogService.AddBundleToCatalog(newBundle)
+					bundleErr := serviceManager.InternalCatalogService.RegisterBundleInCatalog(newBundle)
 					if bundleErr != nil {
 						logger.Warnf("Warning: Failed to add bundle '%s' to catalog (continuing with in-memory only): %v", bundleName, bundleErr)
 					} else {

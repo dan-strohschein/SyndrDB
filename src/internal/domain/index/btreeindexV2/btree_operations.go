@@ -996,7 +996,7 @@ func insertUint32At(slice []uint32, index int, value uint32) []uint32 {
 func insertIntoInternal(idx *BTreeIndex, internal *BTreeNode, childPageNum uint32, nodesCreated int) (uint32, bool, int, error) {
 	// This is a placeholder implementation
 	// In a full implementation, this would handle internal node insertions
-
+	// TODO Come back to this.....
 	idx.logger.Debugf("Inserting into internal node %d (placeholder)", internal.PageNum)
 	return internal.PageNum, false, nodesCreated, nil
 }
@@ -1026,7 +1026,7 @@ func updateInternalAfterMerge(idx *BTreeIndex, internal *BTreeNode, oldChildPage
 	}
 
 	// Remove the key that was associated with the old child
-	for i, _ := range internal.Keys {
+	for i := range internal.Keys {
 		if internal.Children[i] == oldChildPageNum {
 			// Remove the key at this position
 			internal.Keys = removeByteSliceAt(internal.Keys, i)

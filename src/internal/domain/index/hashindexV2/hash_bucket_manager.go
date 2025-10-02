@@ -33,6 +33,8 @@ During splits, overflow pages are also redistributed appropriately.
 import (
 	"fmt"
 
+	"time"
+
 	"go.uber.org/zap"
 )
 
@@ -343,11 +345,11 @@ func (bm *BucketManager) CreateBucket(bucketNum uint32, pageSize uint32) (*Bucke
 // Returns:
 //   - error: Any error that occurred during update
 func (bm *BucketManager) UpdateBucket(bucketPage *BucketPage) error {
-	bm.logger.Debugf("Updating bucket %d", bucketPage.BucketNumber)
 
 	if bucketPage == nil {
 		return fmt.Errorf("bucket page cannot be nil")
 	}
+	bm.logger.Debugf("Updating bucket %d", bucketPage.BucketNumber)
 
 	// CRITICAL: Properly initialize free space for new buckets
 	// Following SyndrDB data integrity requirements, ensure accurate capacity from start
@@ -357,7 +359,7 @@ func (bm *BucketManager) UpdateBucket(bucketPage *BucketPage) error {
 	pageNum := bucketNumberToPageNumber(bucketPage.BucketNumber)
 
 	// Update timestamp
-	bucketPage.LastModified = bucketPage.LastModified // Should be time.Now(), but maintaining existing
+	bucketPage.LastModified = time.Now() // Should be time.Now(), but maintaining existing
 
 	// Mark page as dirty in cache
 	bm.pageManager.PutPage(pageNum, bucketPage, true)

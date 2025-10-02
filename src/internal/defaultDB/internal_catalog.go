@@ -1,6 +1,7 @@
 package defaultdb
 
 import (
+	"fmt"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
@@ -25,6 +26,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create databases bundle
 	docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
+			//"BundleID":    {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
 			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
 			"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
@@ -48,9 +50,13 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	bundles_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
 			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
-			"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"BundleID":   {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+
+			"DatabaseID":   {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleID":     {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"DatabaseName": {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"FieldCount":   {Name: "FieldCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"FilePath":     {Name: "FilePath", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 		},
 	}
 	bundles_Bundle := &models.Bundle{
@@ -69,6 +75,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create users bundle
 	users_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
+
 			"DocumentID":          {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
 			"UserID":              {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"PasswordHash":        {Name: "PasswordHash", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
@@ -340,6 +347,12 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Fields:     fields,
 	}
 
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	dbBundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: dbBundle_doc.DocumentID,
+	}
+
 	err := bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, dbBundle_doc)
 	if err != nil {
 		logger.Warnf("Warning: Failed to add DB document to Bundles bundle: %v", err)
@@ -356,14 +369,35 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: bundles_Bundle.Name,
 	}
+	field3 := models.Field{
+		Name:  "FieldCount",
+		Value: len(bundles_Bundle.DocumentStructure.FieldDefinitions),
+	}
+	field4 := models.Field{
+		Name:  "DatabaseName",
+		Value: databaseService.Databases["primary"].Name,
+	}
+	field5 := models.Field{
+		Name:  "FilePath",
+		Value: fmt.Sprintf("%s.bnd", bundles_Bundle.Name),
+	}
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	bundles_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateUUID(),
 		Fields:     fields,
+	}
+
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	bundles_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: bundles_Bundle_doc.DocumentID,
 	}
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, bundles_Bundle_doc)
@@ -392,6 +426,12 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Fields:     fields,
 	}
 
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	permissions_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: permissions_Bundle_doc.DocumentID,
+	}
+
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, permissions_Bundle_doc)
 	if err != nil {
 		logger.Warnf("Warning: Failed to add Permissions document to Bundles bundle: %v", err)
@@ -415,6 +455,12 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	roles_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateUUID(),
 		Fields:     fields,
+	}
+
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	roles_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: roles_Bundle_doc.DocumentID,
 	}
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, roles_Bundle_doc)
@@ -442,6 +488,12 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Fields:     fields,
 	}
 
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	users_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: users_Bundle_doc.DocumentID,
+	}
+
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, users_Bundle_doc)
 	if err != nil {
 		logger.Warnf("Warning: Failed to add Users document to Bundles bundle: %v", err)
@@ -465,6 +517,12 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	userPermissions_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateUUID(),
 		Fields:     fields,
+	}
+
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	userPermissions_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: userPermissions_Bundle_doc.DocumentID,
 	}
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, userPermissions_Bundle_doc)
@@ -492,6 +550,12 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Fields:     fields,
 	}
 
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	databaseUsers_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: databaseUsers_Bundle_doc.DocumentID,
+	}
+
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, databaseUsers_Bundle_doc)
 	if err != nil {
 		logger.Warnf("Warning: Failed to add Database Users document to Bundles bundle: %v", err)
@@ -515,6 +579,12 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	userRoles_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateUUID(),
 		Fields:     fields,
+	}
+
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	userRoles_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: userRoles_Bundle_doc.DocumentID,
 	}
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, userRoles_Bundle_doc)
@@ -557,6 +627,12 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 			Fields:     fields,
 		}
 
+		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+		doc.Fields["DocumentID"] = models.Field{
+			Name:  "DocumentID",
+			Value: doc.DocumentID,
+		}
+
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], permissionsBundle, doc)
 		if err != nil {
 			logger.Warnf("Warning: Failed to add document to Permissions bundle: %v", err)
@@ -596,6 +672,12 @@ func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
 		doc := &models.Document{
 			DocumentID: helpers.GenerateUUID(),
 			Fields:     fields,
+		}
+
+		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+		doc.Fields["DocumentID"] = models.Field{
+			Name:  "DocumentID",
+			Value: doc.DocumentID,
 		}
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesBundle, doc)
@@ -709,14 +791,22 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 						Value: permDoc.Fields["PermissionID"].Value,
 					}
 
-					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userPermissionsBundle, &models.Document{
+					userPermDoc := &models.Document{
 						DocumentID: helpers.GenerateUUID(),
 						Fields: map[string]models.Field{
 							"UserPermissionID": field1,
 							"UserID":           field2,
 							"PermissionID":     field3,
 						},
-					})
+					}
+
+					// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+					userPermDoc.Fields["DocumentID"] = models.Field{
+						Name:  "DocumentID",
+						Value: userPermDoc.DocumentID,
+					}
+
+					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userPermissionsBundle, userPermDoc)
 					if err != nil {
 						logger.Warnf("Warning: Failed to add document to UserPermissions bundle: %v", err)
 						return err
@@ -766,14 +856,22 @@ func HydrateDatabaseUsersPrimaryCatalogs(databaseService *database.DatabaseServi
 			Value: primaryDBID,
 		}
 
-		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], databaseUsersBundle, &models.Document{
+		dbUserDoc := &models.Document{
 			DocumentID: helpers.GenerateUUID(),
 			Fields: map[string]models.Field{
 				"DatabaseUserID": field1,
 				"UserID":         field2,
 				"DatabaseID":     field3,
 			},
-		})
+		}
+
+		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+		dbUserDoc.Fields["DocumentID"] = models.Field{
+			Name:  "DocumentID",
+			Value: dbUserDoc.DocumentID,
+		}
+
+		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], databaseUsersBundle, dbUserDoc)
 		if err != nil {
 			logger.Warnf("Warning: Failed to add document to DatabaseUsers bundle: %v", err)
 			return err

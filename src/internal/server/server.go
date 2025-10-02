@@ -736,7 +736,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 				// Read client input
 
-				line = strings.TrimSpace(line)
+				//line = strings.TrimSpace(line)
 				connection.LastActive = time.Now()
 				connection.DatabaseName = connStr.Database
 				//connection.Database = s.Databases[connStr.Database]

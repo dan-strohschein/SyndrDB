@@ -139,14 +139,14 @@ func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 	tokens := tokenizeWhereClause(whereClause)
 
 	// Parse the tokens into a tree structure
-	rootGroup := &WhereGroup{}
+	//rootGroup := &WhereGroup{}
 
 	// Track our position in the token stream
-	pos := 0
+	//pos := 0
 
 	// Parse recursively
-	var err error
-	rootGroup, pos, err = parseWhereGroup(tokens, pos)
+	//var err error
+	rootGroup, pos, err := parseWhereGroup(tokens, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +334,7 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 	if strings.EqualFold(clause.Field, "documentid") {
 		// Special case for document ID
 		field = models.Field{
-			Name:  "DocumentID",
+			//Name:  "DocumentID",
 			Value: document.DocumentID,
 		}
 	}

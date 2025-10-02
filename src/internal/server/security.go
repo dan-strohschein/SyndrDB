@@ -43,9 +43,9 @@ func ValidateInput(input string, inputType string, config *SecurityConfig) error
 	case "password":
 		return validatePassword(input, config)
 	case "database_name":
-		return validateDatabaseName(input, config)
+		return validateDatabaseName(input)
 	case "bundle_name":
-		return validateBundleName(input, config)
+		return validateBundleName(input)
 	default:
 		return validateGenericInput(input, config)
 	}
@@ -196,7 +196,7 @@ func validatePassword(password string, config *SecurityConfig) error {
 }
 
 // validateDatabaseName validates database name format
-func validateDatabaseName(name string, config *SecurityConfig) error {
+func validateDatabaseName(name string) error {
 	if len(name) == 0 {
 		return fmt.Errorf("database name cannot be empty")
 	}
@@ -220,7 +220,7 @@ func validateDatabaseName(name string, config *SecurityConfig) error {
 }
 
 // validateBundleName validates bundle name format
-func validateBundleName(name string, config *SecurityConfig) error {
+func validateBundleName(name string) error {
 	if len(name) == 0 {
 		return fmt.Errorf("bundle name cannot be empty")
 	}

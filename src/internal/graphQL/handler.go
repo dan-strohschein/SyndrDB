@@ -261,7 +261,7 @@ func (h *GraphQLHandler) executeQueryOperation(operation *ast.OperationDefinitio
 
 		switch field.Name {
 		case "databases":
-			data, err := h.resolveDatabases(field, variables)
+			data, err := h.resolveDatabases() // previously field, variables
 			if err != nil {
 				return nil, err
 			}

@@ -269,6 +269,7 @@ func isAggregateFunction(field string) bool {
 
 // parseAggregateFunction parses an aggregate function like COUNT(*) or SUM(field)
 func parseAggregateFunction(field string, logger *zap.SugaredLogger) (AggregateFunction, error) {
+	logger.Infof("Parsing aggregate function: %s", field)
 	// Pattern to match aggregate functions with optional alias
 	// Example: COUNT(*) AS count_all, SUM(amount) as total
 	pattern := `(?i)(COUNT|SUM|AVG|MIN|MAX)\s*\(\s*([^)]+)\s*\)(?:\s+AS\s+(\w+))?`
@@ -508,6 +509,7 @@ func parseOrderByFieldsForGroupBy(orderByPart string, logger *zap.SugaredLogger)
 
 // validateGroupByQuery validates the GROUP BY query structure
 func validateGroupByQuery(selectQuery *SelectQueryWithGroupBy, logger *zap.SugaredLogger) error {
+	logger.Infof("Validating GROUP BY query structure")
 	// Ensure all non-aggregate SELECT fields are in GROUP BY
 	for _, selectField := range selectQuery.SelectFields {
 		found := false

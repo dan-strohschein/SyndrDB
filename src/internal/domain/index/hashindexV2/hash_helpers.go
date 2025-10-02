@@ -34,79 +34,79 @@ import (
 )
 
 // createBucket creates a new empty bucket using the bucket manager
-func (hi *HashIndex) createBucket(bucketNum uint32) error {
-	_, err := hi.bucketManager.CreateBucket(bucketNum, hi.metadata.PageSize)
-	return err
-}
+// func (hi *HashIndex) createBucket(bucketNum uint32) error {
+// 	_, err := hi.bucketManager.CreateBucket(bucketNum, hi.metadata.PageSize)
+// 	return err
+// }
 
-// clearBucket removes all records from a bucket and its overflow pages
-func (hi *HashIndex) clearBucket(bucketNum uint32) error {
-	// Load the bucket using correct types
-	bucketPage, err := hi.bucketManager.GetBucket(bucketNum)
-	if err != nil {
-		return fmt.Errorf("failed to load bucket %d: %w", bucketNum, err)
-	}
+// // clearBucket removes all records from a bucket and its overflow pages
+// func (hi *HashIndex) clearBucket(bucketNum uint32) error {
+// 	// Load the bucket using correct types
+// 	bucketPage, err := hi.bucketManager.GetBucket(bucketNum)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to load bucket %d: %w", bucketNum, err)
+// 	}
 
-	// Clear overflow pages if they exist
-	if bucketPage.OverflowPageNum != 0 {
-		err = hi.clearOverflowChain(bucketPage.OverflowPageNum)
-		if err != nil {
-			return fmt.Errorf("failed to clear overflow chain: %w", err)
-		}
-	}
+// 	// Clear overflow pages if they exist
+// 	if bucketPage.OverflowPageNum != 0 {
+// 		err = hi.clearOverflowChain(bucketPage.OverflowPageNum)
+// 		if err != nil {
+// 			return fmt.Errorf("failed to clear overflow chain: %w", err)
+// 		}
+// 	}
 
-	// Clear the bucket itself - use CORRECT field names
-	bucketPage.RecordCount = 0                       // Not ItemCount
-	bucketPage.Records = make([]*IndexRecord, 0)     // Not Items
-	bucketPage.OverflowPageNum = 0                   // Not OverflowPage
-	bucketPage.FreeSpace = hi.metadata.PageSize - 64 // Reset free space
+// 	// Clear the bucket itself - use CORRECT field names
+// 	bucketPage.RecordCount = 0                       // Not ItemCount
+// 	bucketPage.Records = make([]*IndexRecord, 0)     // Not Items
+// 	bucketPage.OverflowPageNum = 0                   // Not OverflowPage
+// 	bucketPage.FreeSpace = hi.metadata.PageSize - 64 // Reset free space
 
-	// Update using bucket manager
-	return hi.bucketManager.UpdateBucket(bucketPage)
-}
+// 	// Update using bucket manager
+// 	return hi.bucketManager.UpdateBucket(bucketPage)
+// }
 
 // clearOverflowChain removes all overflow pages in a chain
-func (hi *HashIndex) clearOverflowChain(firstOverflowPageNum uint32) error {
-	currentPageNum := firstOverflowPageNum
-	visitedPages := make(map[uint32]bool) // Prevent infinite loops
+// func (hi *HashIndex) clearOverflowChain(firstOverflowPageNum uint32) error {
+// 	currentPageNum := firstOverflowPageNum
+// 	visitedPages := make(map[uint32]bool) // Prevent infinite loops
 
-	for currentPageNum != 0 {
-		if visitedPages[currentPageNum] {
-			return fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
-		}
-		visitedPages[currentPageNum] = true
+// 	for currentPageNum != 0 {
+// 		if visitedPages[currentPageNum] {
+// 			return fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
+// 		}
+// 		visitedPages[currentPageNum] = true
 
-		// Load overflow page using correct method
-		pageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
-		if err != nil {
-			return fmt.Errorf("failed to load overflow page %d: %w", currentPageNum, err)
-		}
+// 		// Load overflow page using correct method
+// 		pageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
+// 		if err != nil {
+// 			return fmt.Errorf("failed to load overflow page %d: %w", currentPageNum, err)
+// 		}
 
-		overflowPage, ok := pageData.(*OverflowPage)
-		if !ok {
-			return fmt.Errorf("page %d is not an overflow page", currentPageNum)
-		}
+// 		overflowPage, ok := pageData.(*OverflowPage)
+// 		if !ok {
+// 			return fmt.Errorf("page %d is not an overflow page", currentPageNum)
+// 		}
 
-		nextPageNum := overflowPage.NextOverflowPage
+// 		nextPageNum := overflowPage.NextOverflowPage
 
-		// Clear the page and mark for deletion
-		overflowPage.Records = make([]*IndexRecord, 0)
-		overflowPage.RecordCount = 0
-		overflowPage.NextOverflowPage = 0
+// 		// Clear the page and mark for deletion
+// 		overflowPage.Records = make([]*IndexRecord, 0)
+// 		overflowPage.RecordCount = 0
+// 		overflowPage.NextOverflowPage = 0
 
-		// Write cleared page (or implement page deletion)
-		err = hi.fileManager.WritePage(currentPageNum, overflowPage)
-		if err != nil {
-			return fmt.Errorf("failed to clear overflow page %d: %w", currentPageNum, err)
-		}
+// 		// Write cleared page (or implement page deletion)
+// 		err = hi.fileManager.WritePage(currentPageNum, overflowPage)
+// 		if err != nil {
+// 			return fmt.Errorf("failed to clear overflow page %d: %w", currentPageNum, err)
+// 		}
 
-		// Update metadata
-		hi.metadata.OverflowPages-- // Use correct field name
-		currentPageNum = nextPageNum
-	}
+// 		// Update metadata
+// 		hi.metadata.OverflowPages-- // Use correct field name
+// 		currentPageNum = nextPageNum
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 // calculateHash computes the hash value for a given key using FNV-1a algorithm
 // Parameters:
@@ -213,18 +213,18 @@ func validateDocumentID(documentID string) error {
 //
 // Returns:
 //   - []byte: The normalized key
-func normalizeKey(key []byte) []byte {
-	// Trim null terminators and whitespace
-	result := make([]byte, 0, len(key))
+// func normalizeKey(key []byte) []byte {
+// 	// Trim null terminators and whitespace
+// 	result := make([]byte, 0, len(key))
 
-	for _, b := range key {
-		if b != 0 && b != ' ' && b != '\t' && b != '\n' && b != '\r' {
-			result = append(result, b)
-		}
-	}
+// 	for _, b := range key {
+// 		if b != 0 && b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+// 			result = append(result, b)
+// 		}
+// 	}
 
-	return result
-}
+// 	return result
+// }
 
 // pageNumberToBucketNumber converts a page number to bucket number
 // Parameters:
@@ -232,12 +232,12 @@ func normalizeKey(key []byte) []byte {
 //
 // Returns:
 //   - uint32: The bucket number (0-based)
-func pageNumberToBucketNumber(pageNum uint32) uint32 {
-	if pageNum == 0 {
-		panic("page 0 is metadata page, not a bucket")
-	}
-	return pageNum - 1
-}
+// func pageNumberToBucketNumber(pageNum uint32) uint32 {
+// 	if pageNum == 0 {
+// 		panic("page 0 is metadata page, not a bucket")
+// 	}
+// 	return pageNum - 1
+// }
 
 // bucketNumberToPageNumber converts a bucket number to page number
 // Parameters:
@@ -269,100 +269,100 @@ func bucketNumberToPageNumber(bucketNum uint32) uint32 {
 // }
 
 // Fix the estimateRecordSize function (line 219):
-func estimateRecordSize(record *IndexRecord) uint32 {
-	return record.Size() // Use the record's own size calculation
-}
+// func estimateRecordSize(record *IndexRecord) uint32 {
+// 	return record.Size() // Use the record's own size calculation
+// }
 
-// splitBucket implements bucket splitting for linear hashing
-// Returns:
-//   - error: Any error that occurred during splitting
-func (hi *HashIndex) splitBucketBAD() error {
-	hi.logger.Debugf("Splitting bucket %d", hi.metadata.SplitPointer)
+// // splitBucket implements bucket splitting for linear hashing
+// // Returns:
+// //   - error: Any error that occurred during splitting
+// func (hi *HashIndex) splitBucketBAD() error {
+// 	hi.logger.Debugf("Splitting bucket %d", hi.metadata.SplitPointer)
 
-	// Load the bucket to split
-	oldBucketPage, err := hi.loadBucketPage(hi.metadata.SplitPointer)
-	if err != nil {
-		return fmt.Errorf("failed to load bucket for splitting: %w", err)
-	}
+// 	// Load the bucket to split
+// 	oldBucketPage, err := hi.loadBucketPage(hi.metadata.SplitPointer)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to load bucket for splitting: %w", err)
+// 	}
 
-	// Create new bucket
-	newBucketNum := hi.metadata.BucketCount
-	newBucketPage := NewBucketPage(newBucketNum, hi.metadata.PageSize)
+// 	// Create new bucket
+// 	newBucketNum := hi.metadata.BucketCount
+// 	newBucketPage := NewBucketPage(newBucketNum, hi.metadata.PageSize)
 
-	// Collect all records from old bucket and its overflow chain
-	allRecords, err := hi.collectAllRecords(oldBucketPage)
-	if err != nil {
-		return fmt.Errorf("failed to collect records: %w", err)
-	}
+// 	// Collect all records from old bucket and its overflow chain
+// 	allRecords, err := hi.collectAllRecords(oldBucketPage)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to collect records: %w", err)
+// 	}
 
-	// Clear old bucket
-	oldBucketPage.Records = make([]*IndexRecord, 0)
-	oldBucketPage.RecordCount = 0
-	oldBucketPage.OverflowPageNum = 0
+// 	// Clear old bucket
+// 	oldBucketPage.Records = make([]*IndexRecord, 0)
+// 	oldBucketPage.RecordCount = 0
+// 	oldBucketPage.OverflowPageNum = 0
 
-	// Redistribute records
-	for _, record := range allRecords {
-		bucketNum := calculateBucket(record.HashValue, hi.metadata.BucketCount*2, 0)
+// 	// Redistribute records
+// 	for _, record := range allRecords {
+// 		bucketNum := calculateBucket(record.HashValue, hi.metadata.BucketCount*2, 0)
 
-		if bucketNum == hi.metadata.SplitPointer {
-			// Stays in old bucket
-			if !oldBucketPage.CanFitRecord(record) {
-				if err := hi.addToOverflow(oldBucketPage, hi.metadata.SplitPointer, record); err != nil {
-					return fmt.Errorf("failed to add to old bucket overflow: %w", err)
-				}
-			} else {
-				oldBucketPage.AddRecord(record)
-			}
-		} else {
-			// Goes to new bucket
-			if !newBucketPage.CanFitRecord(record) {
-				if err := hi.addToOverflow(newBucketPage, newBucketNum, record); err != nil {
-					return fmt.Errorf("failed to add to new bucket overflow: %w", err)
-				}
-			} else {
-				newBucketPage.AddRecord(record)
-			}
-		}
-	}
+// 		if bucketNum == hi.metadata.SplitPointer {
+// 			// Stays in old bucket
+// 			if !oldBucketPage.CanFitRecord(record) {
+// 				if err := hi.addToOverflow(oldBucketPage, hi.metadata.SplitPointer, record); err != nil {
+// 					return fmt.Errorf("failed to add to old bucket overflow: %w", err)
+// 				}
+// 			} else {
+// 				oldBucketPage.AddRecord(record)
+// 			}
+// 		} else {
+// 			// Goes to new bucket
+// 			if !newBucketPage.CanFitRecord(record) {
+// 				if err := hi.addToOverflow(newBucketPage, newBucketNum, record); err != nil {
+// 					return fmt.Errorf("failed to add to new bucket overflow: %w", err)
+// 				}
+// 			} else {
+// 				newBucketPage.AddRecord(record)
+// 			}
+// 		}
+// 	}
 
-	// Write pages
-	// hi.pageManager.PutPage(hi.metadata.SplitPointer, oldBucketPage, true)
-	// hi.pageManager.PutPage(newBucketNum, newBucketPage, true)
+// 	// Write pages
+// 	// hi.pageManager.PutPage(hi.metadata.SplitPointer, oldBucketPage, true)
+// 	// hi.pageManager.PutPage(newBucketNum, newBucketPage, true)
 
-	// Write old bucket page (corrected)
-	oldPageNum := bucketNumberToPageNumber(hi.metadata.SplitPointer)
-	hi.pageManager.PutPage(oldPageNum, oldBucketPage, true)
-	if err := hi.fileManager.WritePage(oldPageNum, oldBucketPage); err != nil {
-		return fmt.Errorf("failed to persist old bucket page: %w", err)
-	}
+// 	// Write old bucket page (corrected)
+// 	oldPageNum := bucketNumberToPageNumber(hi.metadata.SplitPointer)
+// 	hi.pageManager.PutPage(oldPageNum, oldBucketPage, true)
+// 	if err := hi.fileManager.WritePage(oldPageNum, oldBucketPage); err != nil {
+// 		return fmt.Errorf("failed to persist old bucket page: %w", err)
+// 	}
 
-	// Write new bucket page (corrected)
-	newPageNum := bucketNumberToPageNumber(newBucketNum)
-	hi.pageManager.PutPage(newPageNum, newBucketPage, true)
-	if err := hi.fileManager.WritePage(newPageNum, newBucketPage); err != nil {
-		return fmt.Errorf("failed to persist new bucket page: %w", err)
-	}
+// 	// Write new bucket page (corrected)
+// 	newPageNum := bucketNumberToPageNumber(newBucketNum)
+// 	hi.pageManager.PutPage(newPageNum, newBucketPage, true)
+// 	if err := hi.fileManager.WritePage(newPageNum, newBucketPage); err != nil {
+// 		return fmt.Errorf("failed to persist new bucket page: %w", err)
+// 	}
 
-	// Force sync to ensure buckets are on disk before committing bucket count change
-	if err := hi.fileManager.Sync(); err != nil {
+// 	// Force sync to ensure buckets are on disk before committing bucket count change
+// 	if err := hi.fileManager.Sync(); err != nil {
 
-		return fmt.Errorf("failed to sync bucket pages: %w", err)
-	}
+// 		return fmt.Errorf("failed to sync bucket pages: %w", err)
+// 	}
 
-	// Update metadata
-	hi.metadata.BucketCount++
-	hi.metadata.SplitPointer++
+// 	// Update metadata
+// 	hi.metadata.BucketCount++
+// 	hi.metadata.SplitPointer++
 
-	// Reset split pointer if we've split all buckets in this round
-	if hi.metadata.SplitPointer >= hi.metadata.BucketCount/2 {
-		hi.metadata.SplitPointer = 0
-	}
+// 	// Reset split pointer if we've split all buckets in this round
+// 	if hi.metadata.SplitPointer >= hi.metadata.BucketCount/2 {
+// 		hi.metadata.SplitPointer = 0
+// 	}
 
-	hi.logger.Debugf("Split complete. New bucket count: %d, split pointer: %d",
-		hi.metadata.BucketCount, hi.metadata.SplitPointer)
+// 	hi.logger.Debugf("Split complete. New bucket count: %d, split pointer: %d",
+// 		hi.metadata.BucketCount, hi.metadata.SplitPointer)
 
-	return nil
-}
+// 	return nil
+// }
 
 // splitBucket implements proper linear hashing bucket splitting
 // This function follows the Single Responsibility Principle by handling only bucket splitting
@@ -624,43 +624,43 @@ func (hi *HashIndex) shouldSplitFast() (bool, error) {
 // Returns true if the current load factor exceeds the target fill factor
 // Returns:
 //   - bool: True if a split is needed
-func (hi *HashIndex) shouldSplit() (bool, error) {
-	hi.logger.Debugf("Evaluating split decision with %d documents across %d buckets",
-		hi.metadata.DocumentCount, hi.metadata.BucketCount)
+// func (hi *HashIndex) shouldSplit() (bool, error) {
+// 	hi.logger.Debugf("Evaluating split decision with %d documents across %d buckets",
+// 		hi.metadata.DocumentCount, hi.metadata.BucketCount)
 
-	// CRITICAL FIX: Use proper load factor calculation
-	currentLoadFactor, err := hi.CalculateCurrentLoadFactor(hi.bucketManager)
-	if err != nil {
-		return false, fmt.Errorf("failed to calculate current load factor: %w", err)
-	}
+// 	// CRITICAL FIX: Use proper load factor calculation
+// 	currentLoadFactor, err := hi.CalculateCurrentLoadFactor(hi.bucketManager)
+// 	if err != nil {
+// 		return false, fmt.Errorf("failed to calculate current load factor: %w", err)
+// 	}
 
-	targetLoadFactor := hi.metadata.LoadFactor
-	shouldSplit := currentLoadFactor > targetLoadFactor
+// 	targetLoadFactor := hi.metadata.LoadFactor
+// 	shouldSplit := currentLoadFactor > targetLoadFactor
 
-	hi.logger.Infof("Split evaluation: current=%.4f, target=%.4f, shouldSplit=%v",
-		currentLoadFactor, targetLoadFactor, shouldSplit)
+// 	hi.logger.Infof("Split evaluation: current=%.4f, target=%.4f, shouldSplit=%v",
+// 		currentLoadFactor, targetLoadFactor, shouldSplit)
 
-	// Additional safety check: don't split if we have very few documents
-	minDocumentsForSplit := hi.metadata.BucketCount / 2 // At least half the buckets should have documents
-	if hi.metadata.DocumentCount < uint64(minDocumentsForSplit) {
-		hi.logger.Infof("Preventing split: only %d documents for %d buckets (minimum: %d)",
-			hi.metadata.DocumentCount, hi.metadata.BucketCount, minDocumentsForSplit)
-		return false, nil
-	}
+// 	// Additional safety check: don't split if we have very few documents
+// 	minDocumentsForSplit := hi.metadata.BucketCount / 2 // At least half the buckets should have documents
+// 	if hi.metadata.DocumentCount < uint64(minDocumentsForSplit) {
+// 		hi.logger.Infof("Preventing split: only %d documents for %d buckets (minimum: %d)",
+// 			hi.metadata.DocumentCount, hi.metadata.BucketCount, minDocumentsForSplit)
+// 		return false, nil
+// 	}
 
-	// Additional safety check: don't split if most buckets are empty
-	nonEmptyBuckets := hi.countNonEmptyBuckets(hi.bucketManager)
-	emptyBucketThreshold := float64(0.5) // Allow split only if less than 50% buckets are empty
-	emptyBucketRatio := float64(hi.metadata.BucketCount-nonEmptyBuckets) / float64(hi.metadata.BucketCount)
+// 	// Additional safety check: don't split if most buckets are empty
+// 	nonEmptyBuckets := hi.countNonEmptyBuckets(hi.bucketManager)
+// 	emptyBucketThreshold := float64(0.5) // Allow split only if less than 50% buckets are empty
+// 	emptyBucketRatio := float64(hi.metadata.BucketCount-nonEmptyBuckets) / float64(hi.metadata.BucketCount)
 
-	if emptyBucketRatio > emptyBucketThreshold {
-		hi.logger.Infof("Preventing split: %.1f%% buckets are empty (threshold: %.1f%%)",
-			emptyBucketRatio*100, emptyBucketThreshold*100)
-		return false, nil
-	}
+// 	if emptyBucketRatio > emptyBucketThreshold {
+// 		hi.logger.Infof("Preventing split: %.1f%% buckets are empty (threshold: %.1f%%)",
+// 			emptyBucketRatio*100, emptyBucketThreshold*100)
+// 		return false, nil
+// 	}
 
-	return shouldSplit, nil
-}
+// 	return shouldSplit, nil
+// }
 
 // CalculateCurrentLoadFactor computes the actual load factor based on bucket utilization
 // This function follows the Single Responsibility Principle by handling only load factor calculation
@@ -685,7 +685,7 @@ func (hi *HashIndex) CalculateCurrentLoadFactor(bucketManager *BucketManager) (f
 		}
 
 		// Calculate bucket capacity (approximate)
-		bucketCapacity := hi.calculateBucketCapacity(bucket)
+		bucketCapacity := hi.calculateBucketCapacity()
 		bucketUsed := hi.calculateBucketUsage(bucket)
 
 		totalCapacity += uint64(bucketCapacity)
@@ -716,7 +716,7 @@ func (hi *HashIndex) CalculateCurrentLoadFactor(bucketManager *BucketManager) (f
 // calculateBucketCapacity estimates the capacity of a single bucket
 // This function follows the Single Responsibility Principle by handling only capacity calculation
 // Following SyndrDB comprehensive error handling, it provides accurate capacity estimates
-func (hi *HashIndex) calculateBucketCapacity(bucket *BucketPage) uint32 {
+func (hi *HashIndex) calculateBucketCapacity() uint32 {
 	// Account for bucket page header overhead
 	headerSize := uint32(100) // Approximate header size
 
@@ -753,60 +753,60 @@ func (hi *HashIndex) calculateBucketUsage(bucket *BucketPage) uint32 {
 // countNonEmptyBuckets counts how many buckets actually contain documents
 // This function follows the Single Responsibility Principle by handling only bucket counting
 // Following SyndrDB comprehensive error handling, it provides accurate bucket counts
-func (hi *HashIndex) countNonEmptyBuckets(bucketManager *BucketManager) uint32 {
-	nonEmptyCount := uint32(0)
+// func (hi *HashIndex) countNonEmptyBuckets(bucketManager *BucketManager) uint32 {
+// 	nonEmptyCount := uint32(0)
 
-	for bucketNum := uint32(0); bucketNum < hi.metadata.BucketCount; bucketNum++ {
-		bucket, err := bucketManager.GetBucket(bucketNum)
-		if err != nil {
-			hi.logger.Warnf("Failed to load bucket %d for counting: %v", bucketNum, err)
-			continue
-		}
+// 	for bucketNum := uint32(0); bucketNum < hi.metadata.BucketCount; bucketNum++ {
+// 		bucket, err := bucketManager.GetBucket(bucketNum)
+// 		if err != nil {
+// 			hi.logger.Warnf("Failed to load bucket %d for counting: %v", bucketNum, err)
+// 			continue
+// 		}
 
-		if bucket.RecordCount > 0 {
-			nonEmptyCount++
-		}
-	}
+// 		if bucket.RecordCount > 0 {
+// 			nonEmptyCount++
+// 		}
+// 	}
 
-	hi.logger.Debugf("Non-empty buckets: %d/%d", nonEmptyCount, hi.metadata.BucketCount)
-	return nonEmptyCount
-}
+// 	hi.logger.Debugf("Non-empty buckets: %d/%d", nonEmptyCount, hi.metadata.BucketCount)
+// 	return nonEmptyCount
+// }
 
-// calculateSplitBucket determines which bucket should be split next
-// In linear hashing, buckets are split in round-robin order
-// Returns:
-//   - uint32: The bucket number to split
-func (hi *HashIndex) calculateSplitBucket() uint32 {
-	// In linear hashing, we split buckets in order starting from 0
-	// The split bucket is determined by the current state of the masks
-	if hi.metadata.LowMask == 0 {
-		return 0 // First split of the round
-	}
+// // calculateSplitBucket determines which bucket should be split next
+// // In linear hashing, buckets are split in round-robin order
+// // Returns:
+// //   - uint32: The bucket number to split
+// func (hi *HashIndex) calculateSplitBucket() uint32 {
+// 	// In linear hashing, we split buckets in order starting from 0
+// 	// The split bucket is determined by the current state of the masks
+// 	if hi.metadata.LowMask == 0 {
+// 		return 0 // First split of the round
+// 	}
 
-	// Continue the round-robin split sequence
-	return hi.metadata.MaxBucket + 1 - hi.metadata.HighMask
-}
+// 	// Continue the round-robin split sequence
+// 	return hi.metadata.MaxBucket + 1 - hi.metadata.HighMask
+// }
 
-// updateMetadataForSplit updates the hash index metadata after a bucket split
-// This includes updating masks, bucket counts, and other tracking information
-func (hi *HashIndex) updateMetadataForSplit() {
-	oldMaxBucket := hi.metadata.MaxBucket
-	hi.metadata.MaxBucket = hi.metadata.BucketCount // New bucket becomes the max
-	hi.metadata.BucketCount++
+// // updateMetadataForSplit updates the hash index metadata after a bucket split
+// // This includes updating masks, bucket counts, and other tracking information
+// func (hi *HashIndex) updateMetadataForSplit() {
+// 	oldMaxBucket := hi.metadata.MaxBucket
+// 	hi.metadata.MaxBucket = hi.metadata.BucketCount // New bucket becomes the max
+// 	hi.metadata.BucketCount++
 
-	// Update masks according to linear hashing algorithm
-	if (oldMaxBucket + 1) >= hi.metadata.HighMask {
-		// We've completed a round of splits, double the high mask
-		hi.metadata.HighMask = 2*hi.metadata.HighMask + 1
-		hi.metadata.LowMask = 0
-	} else {
-		// Still in the middle of a round, increment low mask
-		hi.metadata.LowMask++
-	}
+// 	// Update masks according to linear hashing algorithm
+// 	if (oldMaxBucket + 1) >= hi.metadata.HighMask {
+// 		// We've completed a round of splits, double the high mask
+// 		hi.metadata.HighMask = 2*hi.metadata.HighMask + 1
+// 		hi.metadata.LowMask = 0
+// 	} else {
+// 		// Still in the middle of a round, increment low mask
+// 		hi.metadata.LowMask++
+// 	}
 
-	hi.logger.Debugf("Updated metadata - MaxBucket: %d, HighMask: %d, LowMask: %d",
-		hi.metadata.MaxBucket, hi.metadata.HighMask, hi.metadata.LowMask)
-}
+// 	hi.logger.Debugf("Updated metadata - MaxBucket: %d, HighMask: %d, LowMask: %d",
+// 		hi.metadata.MaxBucket, hi.metadata.HighMask, hi.metadata.LowMask)
+// }
 
 // redistributeItems distributes items between the split bucket and new bucket
 // Items are redistributed based on their hash values and the new mask
@@ -817,33 +817,33 @@ func (hi *HashIndex) updateMetadataForSplit() {
 //
 // Returns:
 //   - error: Any error that occurred during redistribution
-func (hi *HashIndex) redistributeItems(items []*IndexRecord, splitBucketNum, newBucketNum uint32) error {
-	splitCount := 0
-	newCount := 0
+// func (hi *HashIndex) redistributeItems(items []*IndexRecord, splitBucketNum, newBucketNum uint32) error {
+// 	splitCount := 0
+// 	newCount := 0
 
-	for _, item := range items {
-		// Recalculate which bucket this item belongs to with new masks
-		targetBucket := hi.computeBucket(item.HashValue)
+// 	for _, item := range items {
+// 		// Recalculate which bucket this item belongs to with new masks
+// 		targetBucket := hi.computeBucket(item.HashValue)
 
-		var err error
-		if targetBucket == splitBucketNum {
-			err = hi.insertIntoBucket(splitBucketNum, item)
-			splitCount++
-		} else if targetBucket == newBucketNum {
-			err = hi.insertIntoBucket(newBucketNum, item)
-			newCount++
-		} else {
-			// This should not happen in linear hashing
-			return fmt.Errorf("item hash %d maps to unexpected bucket %d", item.HashValue, targetBucket)
-		}
+// 		var err error
+// 		if targetBucket == splitBucketNum {
+// 			err = hi.insertIntoBucket(splitBucketNum, item)
+// 			splitCount++
+// 		} else if targetBucket == newBucketNum {
+// 			err = hi.insertIntoBucket(newBucketNum, item)
+// 			newCount++
+// 		} else {
+// 			// This should not happen in linear hashing
+// 			return fmt.Errorf("item hash %d maps to unexpected bucket %d", item.HashValue, targetBucket)
+// 		}
 
-		if err != nil {
-			return fmt.Errorf("failed to insert item during redistribution: %w", err)
-		}
-	}
+// 		if err != nil {
+// 			return fmt.Errorf("failed to insert item during redistribution: %w", err)
+// 		}
+// 	}
 
-	hi.logger.Debugf("Redistributed %d items: %d to split bucket, %d to new bucket",
-		len(items), splitCount, newCount)
+// 	hi.logger.Debugf("Redistributed %d items: %d to split bucket, %d to new bucket",
+// 		len(items), splitCount, newCount)
 
-	return nil
-}
+// 	return nil
+// }

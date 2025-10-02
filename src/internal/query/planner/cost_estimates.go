@@ -7,13 +7,13 @@ import (
 
 // Cost estimation methods for the query planner
 
-func (qp *QueryPlanner) estimateHashIndexCost(bundle *models.Bundle, condition queryparser.WhereClause) float64 {
+func (qp *QueryPlanner) estimateHashIndexCost() float64 {
 	// Hash index lookup is typically O(1)
 	// Add small cost for index traversal
 	return 1.0 + 0.1 // Base cost + lookup cost
 }
 
-func (qp *QueryPlanner) estimateBTreeIndexCost(bundle *models.Bundle, condition queryparser.WhereClause) float64 {
+func (qp *QueryPlanner) estimateBTreeIndexCost(bundle *models.Bundle) float64 {
 	// B-tree lookup is typically O(log n)
 	bundleSize := float64(len(*bundle.Documents))
 	if bundleSize <= 1 {

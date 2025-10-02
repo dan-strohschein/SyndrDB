@@ -209,21 +209,21 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32,
 }
 
 // Helper functions for parsing bundle metadata
-func getString(data map[string]interface{}, key string) string {
-	if val, ok := data[key].(string); ok {
-		return val
-	}
-	return ""
-}
+// func getString(data map[string]interface{}, key string) string {
+// 	if val, ok := data[key].(string); ok {
+// 		return val
+// 	}
+// 	return ""
+// }
 
-func getTime(data map[string]interface{}, key string) time.Time {
-	if val, ok := data[key].(string); ok {
-		if t, err := time.Parse(time.RFC3339, val); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
-}
+// func getTime(data map[string]interface{}, key string) time.Time {
+// 	if val, ok := data[key].(string); ok {
+// 		if t, err := time.Parse(time.RFC3339, val); err == nil {
+// 			return t
+// 		}
+// 	}
+// 	return time.Time{}
+// }
 
 // LoadAllBundleDataFiles loads all bundle data files from the given directory
 func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[string]*models.Bundle, error) {
@@ -1870,10 +1870,10 @@ func (b *BundleStorageEngine) serializeDocumentDirect(document *models.Document)
 }
 
 // parseDocumentBinary parses a document using the fast binary format
-func (b *BundleStorageEngine) parseDocumentBinary(data []byte) (*models.Document, error) {
-	// Use the fast deserializer instead of configured serializer
-	return helpers.DecodeFastBinaryToDocument(data)
-}
+// func (b *BundleStorageEngine) parseDocumentBinary(data []byte) (*models.Document, error) {
+// 	// Use the fast deserializer instead of configured serializer
+// 	return helpers.DecodeFastBinaryToDocument(data)
+// }
 
 // getHeaderBuffer returns the pre-allocated header buffer for reuse
 func (b *BundleStorageEngine) getHeaderBuffer() []byte {

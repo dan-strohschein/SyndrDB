@@ -121,7 +121,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 			qp.Logger.Infof("CONDITION: %s %s |%s|", condition.Field, condition.Operator, condition.Value)
 			if doesIndexExist(bundle, condition.Field) {
 				qp.Logger.Infof("Found hash index for field %s", condition.Field)
-				cost := qp.estimateHashIndexCost(bundle, condition)
+				cost := qp.estimateHashIndexCost()
 				if cost < bestCost {
 					bestNode = &IndexScanNode{
 						Bundle:        bundle,
@@ -150,7 +150,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 
 					// For now, only support equality searches until range scans are fully implemented
 					if condition.Operator == "==" {
-						cost := qp.estimateBTreeIndexCost(bundle, condition)
+						cost := qp.estimateBTreeIndexCost(bundle)
 						if cost < bestCost {
 							estimatedRows := qp.estimateBTreeRows(bundle, condition)
 							bestNode = &IndexScanNode{
@@ -242,7 +242,7 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 					ScanType:      HashIndexScan,
 					SearchKey:     condition.Value,
 					Operator:      condition.Operator,
-					Cost:          qp.estimateHashIndexCost(bundle, condition),
+					Cost:          qp.estimateHashIndexCost(),
 					EstimatedRows: 1,
 					Logger:        qp.Logger,
 					BundleService: qp.BundleService,
@@ -265,7 +265,7 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 					ScanType:      scanType,
 					SearchKey:     condition.Value,
 					Operator:      condition.Operator,
-					Cost:          qp.estimateBTreeIndexCost(bundle, condition),
+					Cost:          qp.estimateBTreeIndexCost(bundle),
 					EstimatedRows: qp.estimateBTreeRows(bundle, condition),
 					Logger:        qp.Logger,
 					BundleService: qp.BundleService,

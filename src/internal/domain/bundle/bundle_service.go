@@ -1035,11 +1035,11 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 
 // getAllDocumentsForIndexing loads all documents from all pages for index building
 // This is a temporary method during the transition to page-based architecture
-func (s *BundleService) getAllDocumentsForIndexing(bundleID string) ([]*models.Document, error) {
+func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models.Document, error) {
 
-	bundle, exists := s.bundleMetadata[bundleID]
+	bundle, exists := s.bundleMetadata[bundleName]
 	if !exists {
-		return nil, fmt.Errorf("bundle metadata not found for %s", bundleID)
+		return nil, fmt.Errorf("bundle metadata not found for %s", bundleName)
 	}
 
 	s.logger.Infof("DEBUG: getAllDocumentsForIndexing ENTRY - bundle '%s'", bundle.Name)
@@ -1049,11 +1049,11 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleID string) ([]*models.D
 	// This is necessary because document additions schedule deferred metadata updates
 	// and SELECT TOP needs accurate PageCount to work correctly
 	if len(s.metadataUpdateBuffer) > 0 {
-		s.logger.Debugf("Forcing metadata flush for bundle %s to ensure current PageCount", bundleID)
+		s.logger.Debugf("Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
 		s.flushMetadataUpdates()
 	}
 
-	s.logger.Debugf("Bundle %s has PageCount: %d", bundleID, bundle.PageCount)
+	s.logger.Debugf("Bundle %s has PageCount: %d", bundleName, bundle.PageCount)
 
 	// If PageCount is 0, the bundle has no documents - return empty result
 	if bundle.PageCount == 0 {
@@ -1095,6 +1095,11 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleID string) ([]*models.D
 
 	s.logger.Infof("DEBUG: getAllDocumentsForIndexing - loaded %d total documents from %d pages", len(allDocuments), bundle.PageCount)
 	return allDocuments, nil
+}
+
+func (s *BundleService) LoadCatalogBundleDocuments(bundleName string) ([]*models.Document, error) {
+	// Load all documents for the specified catalog bundle
+	return s.getAllDocumentsForIndexing(bundleName)
 }
 
 // simpleHash provides a basic hash function for document ID to page mapping
@@ -2444,7 +2449,7 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 					s.logger.Infof("Performing BTree index search  '%v' with key '%v'",
 						btreeIndex, keyBytes)
 					// Perform BTree search based on operator
-					var docIDs []string
+					var docIDs []string = []string{}
 					// switch clause.Operator {
 					// case "==":
 					//     docIDs, err = btreeIndex.Search(keyBytes)
@@ -2482,6 +2487,11 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 
 					// Convert document IDs to actual documents
 					// Convert document IDs to actual documents using page-based loading
+					if len(docIDs) == 0 {
+						s.logger.Debugf("BTree index search returned no document IDs")
+						return []*models.Document{}, true, nil
+					}
+
 					result := make([]*models.Document, 0, len(docIDs))
 					for _, docID := range docIDs {
 						doc, err := s.GetDocument(bundle.Name, docID)
@@ -2532,23 +2542,23 @@ func (s *BundleService) getIndexFieldName(indexRef models.IndexReference) string
 //
 // Returns:
 //   - []string: The filtered list of document IDs
-func (s *BundleService) excludeDocumentIDs(allDocIDs, excludeDocIDs []string) []string {
-	// Create a map of IDs to exclude for O(1) lookup
-	excludeMap := make(map[string]bool, len(excludeDocIDs))
-	for _, id := range excludeDocIDs {
-		excludeMap[id] = true
-	}
+// func (s *BundleService) excludeDocumentIDs(allDocIDs, excludeDocIDs []string) []string {
+// 	// Create a map of IDs to exclude for O(1) lookup
+// 	excludeMap := make(map[string]bool, len(excludeDocIDs))
+// 	for _, id := range excludeDocIDs {
+// 		excludeMap[id] = true
+// 	}
 
-	// Filter the all IDs list
-	result := make([]string, 0, len(allDocIDs))
-	for _, id := range allDocIDs {
-		if !excludeMap[id] {
-			result = append(result, id)
-		}
-	}
+// 	// Filter the all IDs list
+// 	result := make([]string, 0, len(allDocIDs))
+// 	for _, id := range allDocIDs {
+// 		if !excludeMap[id] {
+// 			result = append(result, id)
+// 		}
+// 	}
 
-	return result
-}
+// 	return result
+// }
 
 // closeAllIndexes closes all loaded index instances for a bundle
 // This function ensures proper resource cleanup when bundles are unloaded
@@ -2557,48 +2567,48 @@ func (s *BundleService) excludeDocumentIDs(allDocIDs, excludeDocIDs []string) []
 //
 // Returns:
 //   - error: Any error that occurred during closing
-func (s *BundleService) closeAllIndexes(bundle *models.Bundle) error {
-	if bundle.Indexes == nil {
-		return nil
-	}
+// func (s *BundleService) closeAllIndexes(bundle *models.Bundle) error {
+// 	if bundle.Indexes == nil {
+// 		return nil
+// 	}
 
-	var errors []string
+// 	var errors []string
 
-	for indexName, indexRef := range bundle.Indexes {
-		if indexRef.IndexInstance != nil {
-			switch index := indexRef.IndexInstance.(type) {
-			case *hashindex.HashIndex:
-				if err := index.Close(); err != nil {
-					errorMsg := fmt.Sprintf("failed to close hash index '%s': %v", indexName, err)
-					s.logger.Errorf(errorMsg)
-					errors = append(errors, errorMsg)
-				} else {
-					s.logger.Debugf("Successfully closed hash index '%s'", indexName)
-				}
-			case *btreeindexV2.BTreeIndex:
-				if err := index.Close(); err != nil {
-					errorMsg := fmt.Sprintf("failed to close BTree index '%s': %v", indexName, err)
-					s.logger.Errorf(errorMsg)
-					errors = append(errors, errorMsg)
-				} else {
-					s.logger.Debugf("Successfully closed BTree index '%s'", indexName)
-				}
-			default:
-				s.logger.Warnf("Unknown index type for index '%s': %T", indexName, indexRef.IndexInstance)
-			}
+// 	for indexName, indexRef := range bundle.Indexes {
+// 		if indexRef.IndexInstance != nil {
+// 			switch index := indexRef.IndexInstance.(type) {
+// 			case *hashindex.HashIndex:
+// 				if err := index.Close(); err != nil {
+// 					errorMsg := fmt.Sprintf("failed to close hash index '%s': %v", indexName, err)
+// 					s.logger.Errorf(errorMsg)
+// 					errors = append(errors, errorMsg)
+// 				} else {
+// 					s.logger.Debugf("Successfully closed hash index '%s'", indexName)
+// 				}
+// 			case *btreeindexV2.BTreeIndex:
+// 				if err := index.Close(); err != nil {
+// 					errorMsg := fmt.Sprintf("failed to close BTree index '%s': %v", indexName, err)
+// 					s.logger.Errorf(errorMsg)
+// 					errors = append(errors, errorMsg)
+// 				} else {
+// 					s.logger.Debugf("Successfully closed BTree index '%s'", indexName)
+// 				}
+// 			default:
+// 				s.logger.Warnf("Unknown index type for index '%s': %T", indexName, indexRef.IndexInstance)
+// 			}
 
-			// Clear the instance reference
-			indexRef.IndexInstance = nil
-			bundle.Indexes[indexName] = indexRef
-		}
-	}
+// 			// Clear the instance reference
+// 			indexRef.IndexInstance = nil
+// 			bundle.Indexes[indexName] = indexRef
+// 		}
+// 	}
 
-	if len(errors) > 0 {
-		return fmt.Errorf("errors occurred while closing indexes: %v", errors)
-	}
+// 	if len(errors) > 0 {
+// 		return fmt.Errorf("errors occurred while closing indexes: %v", errors)
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 // validateDocumentFields validates that document fields match bundle field definitions
 // This function ensures that:
@@ -2722,13 +2732,13 @@ func (s *BundleService) registerBundleInPrimary(bundle *models.Bundle) error {
 }
 
 // syncBundleCatalog ensures all loaded bundles are registered in the primary.Bundles catalog
-func (s *BundleService) syncBundleCatalog(logger *zap.SugaredLogger) {
-	// Since we can't directly access the DatabaseService/CatalogService from here due to circular imports,
-	// this sync will be handled at the service manager level by calling CatalogService.AddBundleToCatalog
-	// for each bundle that needs to be registered
+// func (s *BundleService) syncBundleCatalog(logger *zap.SugaredLogger) {
+// 	// Since we can't directly access the DatabaseService/CatalogService from here due to circular imports,
+// 	// this sync will be handled at the service manager level by calling CatalogService.AddBundleToCatalog
+// 	// for each bundle that needs to be registered
 
-	logger.Debugf("Bundle catalog sync initiated - %d bundles need potential registration", len(s.bundleMetadata))
-}
+// 	logger.Debugf("Bundle catalog sync initiated - %d bundles need potential registration", len(s.bundleMetadata))
+// }
 
 // discoverBundleIndexes scans for existing index files and populates the bundle's Indexes field
 func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {

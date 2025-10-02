@@ -8,6 +8,8 @@ import (
 	"syndrdb/src/pkg/common/helpers"
 	"time"
 
+	"strings"
+
 	"go.uber.org/zap"
 )
 
@@ -81,6 +83,7 @@ func (cs *CatalogService) RemoveDatabaseFromCatalog(databaseID string) error {
 		return fmt.Errorf("failed to get primary.Databases bundle: %w", err)
 	}
 
+	// TODO Use the LoadCatalogBundleDocuments function to ensure we have the latest documents
 	// Find the document for this database
 	var docIDToRemove string
 	var databaseName string
@@ -120,8 +123,8 @@ func (cs *CatalogService) RemoveDatabaseFromCatalog(databaseID string) error {
 	return nil
 }
 
-// AddBundleToCatalog adds a new bundle to the primary.Bundles bundle to maintain the system catalog
-func (cs *CatalogService) AddBundleToCatalog(bundle *models.Bundle) error {
+// RegisterBundleInCatalog registers a new bundle to the primary.Bundles bundle to maintain the system catalog
+func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 	// Get the primary database
 	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
 	if err != nil {
@@ -164,7 +167,7 @@ func (cs *CatalogService) AddBundleToCatalog(bundle *models.Bundle) error {
 }
 
 // GetDatabaseFromCatalog retrieves a database document from the catalog by DatabaseID
-func (cs *CatalogService) GetDatabaseFromCatalog(databaseID string) (map[string]interface{}, error) {
+func (cs *CatalogService) GetDatabaseFromCatalog(databaseID string) (*models.Document, error) {
 	// Get the primary database
 	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
 	if err != nil {
@@ -177,28 +180,56 @@ func (cs *CatalogService) GetDatabaseFromCatalog(databaseID string) (map[string]
 		return nil, fmt.Errorf("failed to get primary.Databases bundle: %w", err)
 	}
 
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(databasesBundle.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", databasesBundle.Name, err)
+	}
+
 	// Find the document for this database
-	if databasesBundle.Documents != nil {
-		for _, doc := range *databasesBundle.Documents {
-			// Access the DatabaseID field from the Document struct
-			if dbIDField, exists := doc.Fields["DatabaseID"]; exists && dbIDField.Value == databaseID {
-				// Convert document to map for return
-				result := make(map[string]interface{})
-				result["DocumentID"] = doc.DocumentID
-				result["CreatedAt"] = doc.CreatedAt
-				result["UpdatedAt"] = doc.UpdatedAt
 
-				// Add all fields to the result
-				for fieldName, field := range doc.Fields {
-					result[fieldName] = field.Value
-				}
+	for _, doc := range docs {
+		// Access the DatabaseID field from the Document struct
+		if dbIDField, exists := doc.Fields["DatabaseID"]; exists && dbIDField.Value == databaseID {
+			// Convert document to map for return
 
-				return result, nil
-			}
+			return doc, nil
 		}
 	}
 
 	return nil, fmt.Errorf("database with ID '%s' not found in catalog", databaseID)
+}
+
+// GetDatabaseFromCatalog retrieves a database document from the catalog by DatabaseID
+func (cs *CatalogService) GetDatabaseFromCatalogByName(databaseName string) (*models.Document, error) {
+	// Get the primary database
+	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary database: %w", err)
+	}
+
+	// Get the Databases bundle from primary database
+	databasesBundle, err := cs.bundleService.GetBundleByName(primaryDB, "Databases")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary.Databases bundle: %w", err)
+	}
+
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(databasesBundle.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", databasesBundle.Name, err)
+	}
+
+	// Find the document for this database
+
+	for _, doc := range docs {
+		// Access the DatabaseID field from the Document struct
+		if dbIDField, exists := doc.Fields["Name"]; exists && strings.EqualFold(dbIDField.Value.(string), databaseName) {
+			// Found it!
+
+			return doc, nil
+		}
+	}
+
+	return nil, fmt.Errorf("database with Name '%s' not found in catalog", databaseName)
 }
 
 // ListAllDatabasesInCatalog retrieves all database documents from the catalog
@@ -268,7 +299,7 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
 	}
-
+	//TODO Fix this to use the separate load function like the other functions in this file
 	// Find the document for this bundle
 	var docIDToRemove string
 	var bundleName string
@@ -309,7 +340,7 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 }
 
 // GetBundleFromCatalog retrieves a bundle document from the catalog by BundleID
-func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (map[string]interface{}, error) {
+func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (*models.Document, error) {
 	// Get the primary database
 	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
 	if err != nil {
@@ -322,28 +353,68 @@ func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (map[string]inte
 		return nil, fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
 	}
 
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
+	}
+
 	// Find the document for this bundle
-	if bundlesBundle.Documents != nil {
-		for _, doc := range *bundlesBundle.Documents {
-			// Access the BundleID field from the Document struct
-			if bundleIDField, exists := doc.Fields["BundleID"]; exists && bundleIDField.Value == bundleID {
-				// Convert document to map for return
-				result := make(map[string]interface{})
-				result["DocumentID"] = doc.DocumentID
-				result["CreatedAt"] = doc.CreatedAt
-				result["UpdatedAt"] = doc.UpdatedAt
 
-				// Add all fields to the result
-				for fieldName, field := range doc.Fields {
-					result[fieldName] = field.Value
-				}
+	for _, doc := range docs {
+		// Access the BundleID field from the Document struct
+		if bundleIDField, exists := doc.Fields["BundleID"]; exists && bundleIDField.Value == bundleID {
+			// Convert document to map for return
+			// result := make(map[string]interface{})
+			// result["DocumentID"] = doc.DocumentID
+			// result["CreatedAt"] = doc.CreatedAt
+			// result["UpdatedAt"] = doc.UpdatedAt
 
-				return result, nil
-			}
+			// // Add all fields to the result
+			// for fieldName, field := range doc.Fields {
+			// 	result[fieldName] = field.Value
+			// }
+
+			return doc, nil
 		}
 	}
 
 	return nil, fmt.Errorf("bundle with ID '%s' not found in catalog", bundleID)
+}
+
+// GetBundleFromCatalog retrieves a bundle document from the catalog by BundleID
+func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName string) (*[]models.Document, error) {
+	// Get the primary database
+	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary database: %w", err)
+	}
+
+	// Get the Bundles bundle metadata from primary database. THIS CALL IS DEPRECATED AND SHOULD BE REPLACED
+	bundlesBundle, err := cs.bundleService.GetBundleByName(primaryDB, "Bundles")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
+	}
+
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
+	}
+
+	result := make([]models.Document, 0)
+	// Find the document for this bundle
+
+	for _, doc := range docs {
+
+		// Access the DatabaseName field from the Document struct
+		if databaseNameField, exists := doc.Fields["DatabaseName"]; exists && databaseNameField.Value == databaseName {
+			// Add doc to slice for return
+			result = append(result, *doc)
+		}
+	}
+
+	cs.logger.Infof("DEBUG DEBUG DEBUG Found %d documents with DatabaseName of '%s' in catalog", len(result), databaseName)
+
+	return &result, nil
 }
 
 // ListAllBundlesInCatalog retrieves all bundle documents from the catalog
@@ -396,7 +467,7 @@ func (cs *CatalogService) AddBundleToCatalogByParams(bundleID, name, databaseID 
 		Database: db,
 	}
 
-	return cs.AddBundleToCatalog(tempBundle)
+	return cs.RegisterBundleInCatalog(tempBundle)
 }
 
 // RemoveBundleFromCatalogByID is a convenience method to remove a bundle from catalog by ID

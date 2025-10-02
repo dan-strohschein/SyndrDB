@@ -984,29 +984,29 @@ func calculateMinimumDegree(pageSize uint32) uint32 {
 //
 // Returns:
 //   - int: Actual node size in bytes
-func calculateActualNodeSize(node *BTreeNode) uint32 {
-	size := calculateNodeHeaderSize()
+// func calculateActualNodeSize(node *BTreeNode) uint32 {
+// 	size := calculateNodeHeaderSize()
 
-	// Add size of all keys
-	for _, key := range node.Keys {
-		size += 8 + 4 + uint32(len(key)) // slice element + length + key data
-	}
+// 	// Add size of all keys
+// 	for _, key := range node.Keys {
+// 		size += 8 + 4 + uint32(len(key)) // slice element + length + key data
+// 	}
 
-	if node.IsLeaf {
-		// Add size of all document ID lists
-		for _, docList := range node.Values {
-			size += 8 + 4 // slice element + length
-			for _, docID := range docList {
-				size += 8 + uint32(len(docID)) // string pointer + string data
-			}
-		}
-	} else {
-		// Add size of child pointers
-		size += uint32(len(node.Children)) * 4 // uint32 per child
-	}
+// 	if node.IsLeaf {
+// 		// Add size of all document ID lists
+// 		for _, docList := range node.Values {
+// 			size += 8 + 4 // slice element + length
+// 			for _, docID := range docList {
+// 				size += 8 + uint32(len(docID)) // string pointer + string data
+// 			}
+// 		}
+// 	} else {
+// 		// Add size of child pointers
+// 		size += uint32(len(node.Children)) * 4 // uint32 per child
+// 	}
 
-	return size
-}
+// 	return size
+// }
 
 // calculateOptimalKeyCapacity calculates the optimal number of keys for best performance
 // This balances space utilization with performance characteristics
@@ -1017,20 +1017,20 @@ func calculateActualNodeSize(node *BTreeNode) uint32 {
 //
 // Returns:
 //   - int: Optimal number of keys for the node
-func calculateOptimalKeyCapacity(node *BTreeNode, pageSize uint32, targetFillFactor float64) uint32 {
-	maxKeys := calculateMaxKeysForNode(node, pageSize)
+// func calculateOptimalKeyCapacity(node *BTreeNode, pageSize uint32, targetFillFactor float64) uint32 {
+// 	maxKeys := calculateMaxKeysForNode(node, pageSize)
 
-	// Apply target fill factor
-	optimalKeys := uint32(float64(maxKeys) * targetFillFactor)
+// 	// Apply target fill factor
+// 	optimalKeys := uint32(float64(maxKeys) * targetFillFactor)
 
-	// Ensure we meet minimum requirements
-	minDegree := calculateMinimumDegree(pageSize)
-	if optimalKeys < minDegree {
-		optimalKeys = minDegree
-	}
+// 	// Ensure we meet minimum requirements
+// 	minDegree := calculateMinimumDegree(pageSize)
+// 	if optimalKeys < minDegree {
+// 		optimalKeys = minDegree
+// 	}
 
-	return optimalKeys
-}
+// 	return optimalKeys
+// }
 
 // validateNodeCapacity validates that a node's current size fits within the page
 // This function helps detect capacity issues and corruption
@@ -1042,22 +1042,22 @@ func calculateOptimalKeyCapacity(node *BTreeNode, pageSize uint32, targetFillFac
 //   - bool: Whether the node fits within the page size
 //   - int: Actual size of the node
 //   - error: Any validation errors found
-func validateNodeCapacity(node *BTreeNode, pageSize uint32) (bool, uint32, error) {
-	actualSize := calculateActualNodeSize(node)
+// func validateNodeCapacity(node *BTreeNode, pageSize uint32) (bool, uint32, error) {
+// 	actualSize := calculateActualNodeSize(node)
 
-	if actualSize > pageSize {
-		return false, actualSize, fmt.Errorf("node size %d exceeds page size %d", actualSize, pageSize)
-	}
+// 	if actualSize > pageSize {
+// 		return false, actualSize, fmt.Errorf("node size %d exceeds page size %d", actualSize, pageSize)
+// 	}
 
-	// Check for reasonable utilization
-	utilizationPercent := float64(actualSize) / float64(pageSize) * 100
+// 	// Check for reasonable utilization
+// 	utilizationPercent := float64(actualSize) / float64(pageSize) * 100
 
-	if utilizationPercent > 90 {
-		return true, actualSize, fmt.Errorf("warning: node utilization is very high (%.1f%%)", utilizationPercent)
-	}
+// 	if utilizationPercent > 90 {
+// 		return true, actualSize, fmt.Errorf("warning: node utilization is very high (%.1f%%)", utilizationPercent)
+// 	}
 
-	return true, actualSize, nil
-}
+// 	return true, actualSize, nil
+// }
 
 // Helper function for max calculation
 func max(a, b uint32) uint32 {

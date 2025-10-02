@@ -30,11 +30,6 @@ REFERENCES:
 - Public domain algorithm
 */
 
-import (
-	"crypto/rand"
-	"time"
-)
-
 // jenkinsHash implements the Bob Jenkins hash function (lookup3.c)
 // This is the same hash function used by PostgreSQL for hash indexes
 // Parameters:
@@ -155,16 +150,16 @@ func rotateLeft(value uint32, bits uint) uint32 {
 // This ensures different index instances have different hash distributions
 // Returns:
 //   - uint32: A random seed value
-func generateHashFunctionSeed() uint32 {
-	var seedBytes [4]byte
-	_, err := rand.Read(seedBytes[:])
-	if err != nil {
-		// Fallback to time-based seed if crypto/rand fails
-		return uint32(time.Now().UnixNano())
-	}
+// func generateHashFunctionSeed() uint32 {
+// 	var seedBytes [4]byte
+// 	_, err := rand.Read(seedBytes[:])
+// 	if err != nil {
+// 		// Fallback to time-based seed if crypto/rand fails
+// 		return uint32(time.Now().UnixNano())
+// 	}
 
-	return uint32(seedBytes[0]) |
-		uint32(seedBytes[1])<<8 |
-		uint32(seedBytes[2])<<16 |
-		uint32(seedBytes[3])<<24
-}
+// 	return uint32(seedBytes[0]) |
+// 		uint32(seedBytes[1])<<8 |
+// 		uint32(seedBytes[2])<<16 |
+// 		uint32(seedBytes[3])<<24
+// }

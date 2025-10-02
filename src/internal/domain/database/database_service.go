@@ -104,7 +104,7 @@ func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) erro
 	// Find the "Databases" bundle in the Primary database
 	databasesBundle, exists := primaryDB.Bundles["Databases"]
 	if !exists {
-		return fmt.Errorf("Databases bundle not found in Primary database")
+		return fmt.Errorf("databases bundle not found in Primary database")
 	}
 
 	// Create a document representing the new database
@@ -302,10 +302,7 @@ func (s *DatabaseService) GetDatabaseBundles(databaseName string) ([]string, err
 	bundleNames := make([]string, 0, len(db.BundleFiles))
 	for _, bundleFileName := range db.BundleFiles {
 		// Remove .bnd extension to get bundle name
-		bundleName := bundleFileName
-		if strings.HasSuffix(bundleName, ".bnd") {
-			bundleName = bundleName[:len(bundleName)-4]
-		}
+		bundleName := strings.TrimSuffix(bundleFileName, ".bnd")
 		bundleNames = append(bundleNames, bundleName)
 	}
 

@@ -31,6 +31,14 @@ func (f *DocumentFactoryImpl) NewDocument(docCommand models.DocumentCommand) *mo
 	newDoc.CreatedAt = now
 	newDoc.UpdatedAt = now
 
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	// This ensures DocumentID can be accessed via document.Fields["DocumentID"]
+	// just like other fields, fixing query filter issues
+	newDoc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: newDoc.DocumentID,
+	}
+
 	return newDoc
 }
 
@@ -64,6 +72,14 @@ func (f *DocumentFactoryImpl) NewDocumentWithFields(docCommand models.DocumentCo
 	// Add fields to the new document
 	for fieldName, field := range fields {
 		newDoc.Fields[fieldName] = field
+	}
+
+	// Ensure DocumentID field is present (NewDocument already adds it, but ensure it's not overwritten)
+	if _, exists := newDoc.Fields["DocumentID"]; !exists {
+		newDoc.Fields["DocumentID"] = models.Field{
+			Name:  "DocumentID",
+			Value: newDoc.DocumentID,
+		}
 	}
 
 	return newDoc

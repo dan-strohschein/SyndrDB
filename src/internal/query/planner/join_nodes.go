@@ -334,8 +334,8 @@ func (m *MergeJoinNode) Execute() (map[string]*models.Document, error) {
 		}
 
 		// Sort both sides by join key
-		m.sortDocuments(m.leftDocs, true)   // true for left side
-		m.sortDocuments(m.rightDocs, false) // false for right side
+		m.sortDocuments(m.leftDocs)
+		m.sortDocuments(m.rightDocs)
 
 		m.processed = true
 	}
@@ -456,7 +456,7 @@ func (h *HashJoinNode) getHashKey(doc *models.Document, isLeftSide bool) string 
 }
 
 // sortDocuments sorts documents by join key
-func (m *MergeJoinNode) sortDocuments(docs []*models.Document, isLeftSide bool) {
+func (m *MergeJoinNode) sortDocuments(docs []*models.Document) {
 	sort.Slice(docs, func(i, j int) bool {
 		return m.compareJoinKeys(docs[i], docs[j]) < 0
 	})
@@ -545,6 +545,7 @@ func evaluateComparison(leftValue interface{}, operator string, rightValue inter
 
 // createJoinedDocument combines fields from two documents
 func createJoinedDocument(leftDoc, rightDoc *models.Document, leftDocID, rightDocID string, logger *zap.SugaredLogger) *models.Document {
+	logger.Infof("Creating joined document from left ID: %s and right ID: %s", leftDocID, rightDocID)
 	joinedDoc := &models.Document{
 		DocumentID: fmt.Sprintf("joined_%s_%s", leftDocID, rightDocID),
 		Fields:     make(map[string]models.Field),

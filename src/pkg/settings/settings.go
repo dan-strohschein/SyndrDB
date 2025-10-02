@@ -62,6 +62,11 @@ type Arguments struct {
 	WALBulkModeThreshold int  // Operations per second threshold for bulk mode
 	WALDisableForBulkOps bool // Disable WAL during bulk operations
 
+	// PHASE 2 ASYNC WAL CONFIGURATION
+	WALMode           string // WAL mode: "sync" or "async" (default: "sync")
+	AsyncWALWorkers   int    // Number of async WAL workers (default: 2)
+	AsyncWALQueueSize int    // Async WAL queue size (default: 1000)
+
 	// Metadata Update Performance Settings
 	MetadataBatchSize       int // Documents before metadata flush (default: 50 → 500)
 	MetadataPersistInterval int // Documents before disk persistence (default: 1000)
@@ -96,9 +101,15 @@ func GetSettings() *Arguments {
 			BundleStorageFormat: "json", // Default to JSON for development
 
 			// PHASE 1 PERFORMANCE DEFAULTS
-			WALEnabled:              true, // WAL enabled by default
-			WALBulkModeThreshold:    50,   // >50 ops/sec = bulk mode
-			WALDisableForBulkOps:    true, // Disable WAL during bulk operations
+			WALEnabled:           true, // WAL enabled by default
+			WALBulkModeThreshold: 50,   // >50 ops/sec = bulk mode
+			WALDisableForBulkOps: true, // Disable WAL during bulk operations
+
+			// PHASE 2 ASYNC WAL DEFAULTS
+			WALMode:           "sync", // Start with sync mode for safety
+			AsyncWALWorkers:   2,      // 2 workers for async WAL
+			AsyncWALQueueSize: 1000,   // 1000 operation queue
+
 			MetadataBatchSize:       500,  // Increased from 50 to 500
 			MetadataPersistInterval: 1000, // Persist every 1000 documents
 			MetadataFlushInterval:   10,   // Flush every 10 seconds

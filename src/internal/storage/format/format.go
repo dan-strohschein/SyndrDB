@@ -43,6 +43,7 @@ func (j *JSONSerializer) GetFormatName() string {
 func (j *JSONSerializer) SerializeBundleMetadata(bundle *models.Bundle) ([]byte, error) {
 	// Create a metadata-only version without Documents
 	metadata := map[string]interface{}{
+		"BundleID":          bundle.BundleID,
 		"Name":              bundle.Name,
 		"Description":       bundle.Description,
 		"Permissions":       bundle.Permissions,
@@ -69,6 +70,7 @@ func (j *JSONSerializer) DeserializeBundleMetadata(data []byte) (*models.Bundle,
 	}
 
 	bundle := &models.Bundle{
+		BundleID:    getString(bundleData, "BundleID"),
 		Name:        getString(bundleData, "Name"),
 		Description: getString(bundleData, "Description"),
 		Permissions: getStringSlice(bundleData, "Permissions"),
@@ -155,6 +157,7 @@ func (b *BinarySerializer) GetFormatName() string {
 func (b *BinarySerializer) SerializeBundleMetadata(bundle *models.Bundle) ([]byte, error) {
 	// Create a metadata-only version for binary serialization
 	metadata := map[string]interface{}{
+		"BundleID":          bundle.BundleID,
 		"Name":              bundle.Name,
 		"Description":       bundle.Description,
 		"Permissions":       bundle.Permissions,
@@ -208,6 +211,7 @@ func (b *BinarySerializer) DeserializeBundleMetadata(data []byte) (*models.Bundl
 	}
 
 	bundle := &models.Bundle{
+		BundleID:    getString(bundleData, "BundleID"),
 		Name:        getString(bundleData, "Name"),
 		Description: getString(bundleData, "Description"),
 		Permissions: getStringSlice(bundleData, "Permissions"),

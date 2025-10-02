@@ -75,9 +75,9 @@ func (hi *HashIndex) loadBucketPage(bucketNum uint32) (*BucketPage, error) {
 //
 // Returns:
 //   - bool: Whether the document exists
-func (hi *HashIndex) documentExistsInBucket(bucketPage *BucketPage, documentID string) bool {
-	return hi.searchInBucketChain(bucketPage, documentID)
-}
+// func (hi *HashIndex) documentExistsInBucket(bucketPage *BucketPage, documentID string) bool {
+// 	return hi.searchInBucketChain(bucketPage, documentID)
+// }
 
 // searchInBucketChain searches for a document in a bucket and its overflow chain
 // Parameters:
@@ -86,35 +86,35 @@ func (hi *HashIndex) documentExistsInBucket(bucketPage *BucketPage, documentID s
 //
 // Returns:
 //   - bool: Whether the document was found
-func (hi *HashIndex) searchInBucketChain(bucketPage *BucketPage, documentID string) bool {
-	// Search in main bucket page
-	for _, record := range bucketPage.Records {
-		if record.DocumentID == documentID {
-			return true
-		}
-	}
+// func (hi *HashIndex) searchInBucketChain(bucketPage *BucketPage, documentID string) bool {
+// 	// Search in main bucket page
+// 	for _, record := range bucketPage.Records {
+// 		if record.DocumentID == documentID {
+// 			return true
+// 		}
+// 	}
 
-	// Search in overflow chain
-	currentOverflowPageNum := bucketPage.OverflowPageNum
-	for currentOverflowPageNum != 0 {
-		overflowPageData, err := hi.pageManager.GetPage(currentOverflowPageNum, hi.fileManager.ReadPage)
-		if err != nil {
-			hi.logger.Errorf("Failed to read overflow page %d: %v", currentOverflowPageNum, err)
-			return false
-		}
+// 	// Search in overflow chain
+// 	currentOverflowPageNum := bucketPage.OverflowPageNum
+// 	for currentOverflowPageNum != 0 {
+// 		overflowPageData, err := hi.pageManager.GetPage(currentOverflowPageNum, hi.fileManager.ReadPage)
+// 		if err != nil {
+// 			hi.logger.Errorf("Failed to read overflow page %d: %v", currentOverflowPageNum, err)
+// 			return false
+// 		}
 
-		overflowPage := overflowPageData.(*OverflowPage)
-		for _, record := range overflowPage.Records {
-			if record.DocumentID == documentID {
-				return true
-			}
-		}
+// 		overflowPage := overflowPageData.(*OverflowPage)
+// 		for _, record := range overflowPage.Records {
+// 			if record.DocumentID == documentID {
+// 				return true
+// 			}
+// 		}
 
-		currentOverflowPageNum = overflowPage.NextOverflowPage
-	}
+// 		currentOverflowPageNum = overflowPage.NextOverflowPage
+// 	}
 
-	return false
-}
+// 	return false
+// }
 
 // addToOverflow adds a record to the overflow chain of a bucket with enhanced validation
 // This function follows the Single Responsibility Principle by handling only bucket overflow operations
@@ -416,25 +416,25 @@ func (hi *HashIndex) recordExistsInOverflowChain(startPageNum uint32, documentID
 // Returns:
 //   - bool: Whether the document was found and removed
 //   - error: Any error that occurred
-func (hi *HashIndex) removeFromBucketChain(bucketPage *BucketPage, bucketNum uint32, documentID string) (bool, error) {
-	// Try to remove from main bucket page
-	for i, record := range bucketPage.Records {
-		if record.DocumentID == documentID {
-			// Remove record
-			bucketPage.Records = append(bucketPage.Records[:i], bucketPage.Records[i+1:]...)
-			bucketPage.RecordCount--
-			hi.pageManager.PutPage(bucketNumberToPageNumber(bucketNum), bucketPage, true)
-			return true, nil
-		}
-	}
+// func (hi *HashIndex) removeFromBucketChain(bucketPage *BucketPage, bucketNum uint32, documentID string) (bool, error) {
+// 	// Try to remove from main bucket page
+// 	for i, record := range bucketPage.Records {
+// 		if record.DocumentID == documentID {
+// 			// Remove record
+// 			bucketPage.Records = append(bucketPage.Records[:i], bucketPage.Records[i+1:]...)
+// 			bucketPage.RecordCount--
+// 			hi.pageManager.PutPage(bucketNumberToPageNumber(bucketNum), bucketPage, true)
+// 			return true, nil
+// 		}
+// 	}
 
-	// Search and remove from overflow chain
-	if bucketPage.OverflowPageNum != 0 {
-		return hi.removeFromOverflowChain(bucketPage.OverflowPageNum, documentID)
-	}
+// 	// Search and remove from overflow chain
+// 	if bucketPage.OverflowPageNum != 0 {
+// 		return hi.removeFromOverflowChain(bucketPage.OverflowPageNum, documentID)
+// 	}
 
-	return false, nil
-}
+// 	return false, nil
+// }
 
 // removeFromOverflowChain removes a document from an overflow chain
 // Parameters:
@@ -444,33 +444,33 @@ func (hi *HashIndex) removeFromBucketChain(bucketPage *BucketPage, bucketNum uin
 // Returns:
 //   - bool: Whether the document was found and removed
 //   - error: Any error that occurred
-func (hi *HashIndex) removeFromOverflowChain(startPageNum uint32, documentID string) (bool, error) {
-	currentPageNum := startPageNum
+// func (hi *HashIndex) removeFromOverflowChain(startPageNum uint32, documentID string) (bool, error) {
+// 	currentPageNum := startPageNum
 
-	for currentPageNum != 0 {
-		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
-		if err != nil {
-			return false, fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
-		}
+// 	for currentPageNum != 0 {
+// 		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
+// 		if err != nil {
+// 			return false, fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
+// 		}
 
-		overflowPage := overflowPageData.(*OverflowPage)
+// 		overflowPage := overflowPageData.(*OverflowPage)
 
-		// Try to remove from current page
-		for i, record := range overflowPage.Records {
-			if record.DocumentID == documentID {
-				// Remove record
-				overflowPage.Records = append(overflowPage.Records[:i], overflowPage.Records[i+1:]...)
-				overflowPage.RecordCount--
-				hi.pageManager.PutPage(currentPageNum, overflowPage, true)
-				return true, nil
-			}
-		}
+// 		// Try to remove from current page
+// 		for i, record := range overflowPage.Records {
+// 			if record.DocumentID == documentID {
+// 				// Remove record
+// 				overflowPage.Records = append(overflowPage.Records[:i], overflowPage.Records[i+1:]...)
+// 				overflowPage.RecordCount--
+// 				hi.pageManager.PutPage(currentPageNum, overflowPage, true)
+// 				return true, nil
+// 			}
+// 		}
 
-		currentPageNum = overflowPage.NextOverflowPage
-	}
+// 		currentPageNum = overflowPage.NextOverflowPage
+// 	}
 
-	return false, nil
-}
+// 	return false, nil
+// }
 
 // allocateNewPage allocates a new page number for overflow pages
 // Returns:

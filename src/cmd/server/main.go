@@ -59,6 +59,11 @@ func main() {
 	flag.StringVar(&args.LogLevel, "loglevel", "info", "Log level: debug, info, warn, error")
 	flag.StringVar(&args.BundleStorageFormat, "bundle-format", "binary", "Bundle storage format: json or binary")
 
+	// PHASE 2 ASYNC WAL FLAGS
+	flag.StringVar(&args.WALMode, "wal-mode", "sync", "WAL mode: sync or async")
+	flag.IntVar(&args.AsyncWALWorkers, "async-wal-workers", 2, "Number of async WAL worker threads")
+	flag.IntVar(&args.AsyncWALQueueSize, "async-wal-queue", 1000, "Async WAL queue size")
+
 	// Parse command line arguments
 	flag.Parse()
 

@@ -48,8 +48,9 @@ type DocumentResponse struct {
 	UpdatedAt time.Time              `json:"updatedAt"`
 }
 
+// Previously:resolveDatabases(field *ast.Field, variables map[string]interface{})
 // resolveDatabases resolves the "databases" query field
-func (h *GraphQLHandler) resolveDatabases(field *ast.Field, variables map[string]interface{}) (interface{}, error) {
+func (h *GraphQLHandler) resolveDatabases() (interface{}, error) {
 	h.logger.Info("Resolving databases query")
 
 	// Use the service manager to get all databases

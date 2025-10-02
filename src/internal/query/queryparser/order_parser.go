@@ -359,6 +359,7 @@ func parseOrderByFields(orderByClause string, logger *zap.SugaredLogger) (*Order
 func parseOrderByField(fieldSpec string, logger *zap.SugaredLogger) (*OrderByField, error) {
 	// Regular expression to match field name and optional direction
 	// Handles both quoted and unquoted field names
+	logger.Infof("Parsing ORDER BY field spec: %s", fieldSpec)
 	fieldRegex := regexp.MustCompile(`^"?([^"]+)"?\s*(ASC|DESC)?$`)
 	matches := fieldRegex.FindStringSubmatch(strings.TrimSpace(fieldSpec))
 

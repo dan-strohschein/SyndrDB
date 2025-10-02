@@ -27,7 +27,6 @@ package executor
 
 import (
 	"fmt"
-	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
@@ -464,8 +463,8 @@ func (e *GroupByExecutor) applySorting(documents map[string]*models.Document) (m
 }
 
 // hashGroupKey creates a hash of the group key for memory management
-func (e *GroupByExecutor) hashGroupKey(key GroupKey) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return h.Sum32()
-}
+// func (e *GroupByExecutor) hashGroupKey(key GroupKey) uint32 {
+// 	h := fnv.New32a()
+// 	h.Write([]byte(key))
+// 	return h.Sum32()
+// }

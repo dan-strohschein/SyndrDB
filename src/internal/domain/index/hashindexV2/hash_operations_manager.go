@@ -151,45 +151,45 @@ func (hi *HashIndex) flushBucketToDisk(bucketNum uint32, bucketPage *BucketPage)
 //
 // Returns:
 //   - error: Any error that occurred during metadata update
-func (hi *HashIndex) updateAndPersistMetadata() error {
-	hi.logger.Debugf("ENTER updateAndPersistMetadata")
+// func (hi *HashIndex) updateAndPersistMetadata() error {
+// 	hi.logger.Debugf("ENTER updateAndPersistMetadata")
 
-	// Validate metadata following SyndrDB defensive programming practices
-	if hi.metadata == nil {
-		return fmt.Errorf("metadata is nil, cannot update")
-	}
+// 	// Validate metadata following SyndrDB defensive programming practices
+// 	if hi.metadata == nil {
+// 		return fmt.Errorf("metadata is nil, cannot update")
+// 	}
 
-	// Store old values for logging
-	oldDocCount := hi.metadata.DocumentCount
-	oldLoadFactor := hi.metadata.LoadFactor
+// 	// Store old values for logging
+// 	oldDocCount := hi.metadata.DocumentCount
+// 	oldLoadFactor := hi.metadata.LoadFactor
 
-	// Update document count
-	hi.metadata.DocumentCount++
-	hi.logger.Debugf("Document count updated: %d -> %d", oldDocCount, hi.metadata.DocumentCount)
+// 	// Update document count
+// 	hi.metadata.DocumentCount++
+// 	hi.logger.Debugf("Document count updated: %d -> %d", oldDocCount, hi.metadata.DocumentCount)
 
-	// Recalculate load factor
-	if hi.metadata.BucketCount > 0 {
-		hi.metadata.LoadFactor = float64(hi.metadata.DocumentCount) / float64(hi.metadata.BucketCount)
-		hi.logger.Debugf("Load factor updated: %.2f -> %.2f", oldLoadFactor, hi.metadata.LoadFactor)
-	} else {
-		hi.logger.Warnf("Bucket count is 0, cannot calculate load factor")
-	}
+// 	// Recalculate load factor
+// 	if hi.metadata.BucketCount > 0 {
+// 		hi.metadata.LoadFactor = float64(hi.metadata.DocumentCount) / float64(hi.metadata.BucketCount)
+// 		hi.logger.Debugf("Load factor updated: %.2f -> %.2f", oldLoadFactor, hi.metadata.LoadFactor)
+// 	} else {
+// 		hi.logger.Warnf("Bucket count is 0, cannot calculate load factor")
+// 	}
 
-	// CRITICAL: Validate NextPageNum consistency following SyndrDB data integrity requirements
-	expectedMinimum := hi.metadata.BucketCount + 1
-	if hi.metadata.NextPageNum < expectedMinimum {
-		hi.logger.Infof("CRITICAL: NextPageNum %d is invalid, correcting to %d",
-			hi.metadata.NextPageNum, expectedMinimum)
-		hi.metadata.NextPageNum = expectedMinimum
-	}
+// 	// CRITICAL: Validate NextPageNum consistency following SyndrDB data integrity requirements
+// 	expectedMinimum := hi.metadata.BucketCount + 1
+// 	if hi.metadata.NextPageNum < expectedMinimum {
+// 		hi.logger.Infof("CRITICAL: NextPageNum %d is invalid, correcting to %d",
+// 			hi.metadata.NextPageNum, expectedMinimum)
+// 		hi.metadata.NextPageNum = expectedMinimum
+// 	}
 
-	hi.logger.Debugf("Updated metadata: DocumentCount=%d, LoadFactor=%.2f, NextPageNum=%d",
-		hi.metadata.DocumentCount, hi.metadata.LoadFactor, hi.metadata.NextPageNum)
+// 	hi.logger.Debugf("Updated metadata: DocumentCount=%d, LoadFactor=%.2f, NextPageNum=%d",
+// 		hi.metadata.DocumentCount, hi.metadata.LoadFactor, hi.metadata.NextPageNum)
 
-	// CRITICAL: Use the dedicated metadata persistence function to ensure immediate disk sync
-	// This prevents the desynchronization issue where metadata changes are lost on server restart
-	return hi.updateMetadataOnDisk()
-}
+// 	// CRITICAL: Use the dedicated metadata persistence function to ensure immediate disk sync
+// 	// This prevents the desynchronization issue where metadata changes are lost on server restart
+// 	return hi.updateMetadataOnDisk()
+// }
 
 // findLastOverflowPage finds the last overflow page in a chain
 // This function follows the Single Responsibility Principle by handling only chain traversal
@@ -200,37 +200,37 @@ func (hi *HashIndex) updateAndPersistMetadata() error {
 //   - *OverflowPage: The last overflow page in the chain
 //   - uint32: The page number of the last overflow page
 //   - error: Any error that occurred during traversal
-func (hi *HashIndex) findLastOverflowPage(startPageNum uint32) (*OverflowPage, uint32, error) {
-	currentPageNum := startPageNum
-	visitedPages := make(map[uint32]bool)
+// func (hi *HashIndex) findLastOverflowPage(startPageNum uint32) (*OverflowPage, uint32, error) {
+// 	currentPageNum := startPageNum
+// 	visitedPages := make(map[uint32]bool)
 
-	for {
-		// Check for cycles
-		if visitedPages[currentPageNum] {
-			return nil, 0, fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
-		}
-		visitedPages[currentPageNum] = true
+// 	for {
+// 		// Check for cycles
+// 		if visitedPages[currentPageNum] {
+// 			return nil, 0, fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
+// 		}
+// 		visitedPages[currentPageNum] = true
 
-		// Load overflow page
-		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
-		}
+// 		// Load overflow page
+// 		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
+// 		if err != nil {
+// 			return nil, 0, fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
+// 		}
 
-		overflowPage, ok := overflowPageData.(*OverflowPage)
-		if !ok {
-			return nil, 0, fmt.Errorf("page %d is not an overflow page", currentPageNum)
-		}
+// 		overflowPage, ok := overflowPageData.(*OverflowPage)
+// 		if !ok {
+// 			return nil, 0, fmt.Errorf("page %d is not an overflow page", currentPageNum)
+// 		}
 
-		// If this is the last page in the chain, return it
-		if overflowPage.NextOverflowPage == 0 {
-			return overflowPage, currentPageNum, nil
-		}
+// 		// If this is the last page in the chain, return it
+// 		if overflowPage.NextOverflowPage == 0 {
+// 			return overflowPage, currentPageNum, nil
+// 		}
 
-		// Move to next overflow page
-		currentPageNum = overflowPage.NextOverflowPage
-	}
-}
+// 		// Move to next overflow page
+// 		currentPageNum = overflowPage.NextOverflowPage
+// 	}
+// }
 
 // searchInBucket searches for a key in the specified bucket and its overflow chain
 // Parameters:
@@ -357,32 +357,32 @@ func (hi *HashIndex) keyExists(key string) (bool, error) {
 //   - uint32: Page number where the record was found (0 if not found)
 //   - int: Index of the record in the page (-1 if not found)
 //   - error: Any error that occurred during search
-func (hi *HashIndex) findRecordInBucket(bucketNum uint32, key string) (*IndexRecord, uint32, int, error) {
-	hi.logger.Debugf("Finding record for key '%s' in bucket %d", key, bucketNum)
+// func (hi *HashIndex) findRecordInBucket(bucketNum uint32, key string) (*IndexRecord, uint32, int, error) {
+// 	hi.logger.Debugf("Finding record for key '%s' in bucket %d", key, bucketNum)
 
-	// Load bucket page
-	bucketPage, err := hi.loadBucketPage(bucketNum)
-	if err != nil {
-		return nil, 0, -1, fmt.Errorf("failed to load bucket %d: %w", bucketNum, err)
-	}
+// 	// Load bucket page
+// 	bucketPage, err := hi.loadBucketPage(bucketNum)
+// 	if err != nil {
+// 		return nil, 0, -1, fmt.Errorf("failed to load bucket %d: %w", bucketNum, err)
+// 	}
 
-	// Search in main bucket page
-	for i, record := range bucketPage.Records {
-		if record.DocumentID == key {
-			pageNum := bucketNumberToPageNumber(bucketNum)
-			hi.logger.Debugf("Found record in main bucket page %d at index %d", pageNum, i)
-			return record, pageNum, i, nil
-		}
-	}
+// 	// Search in main bucket page
+// 	for i, record := range bucketPage.Records {
+// 		if record.DocumentID == key {
+// 			pageNum := bucketNumberToPageNumber(bucketNum)
+// 			hi.logger.Debugf("Found record in main bucket page %d at index %d", pageNum, i)
+// 			return record, pageNum, i, nil
+// 		}
+// 	}
 
-	// Search in overflow chain
-	if bucketPage.OverflowPageNum != 0 {
-		return hi.findRecordInOverflowChain(bucketPage.OverflowPageNum, key)
-	}
+// 	// Search in overflow chain
+// 	if bucketPage.OverflowPageNum != 0 {
+// 		return hi.findRecordInOverflowChain(bucketPage.OverflowPageNum, key)
+// 	}
 
-	hi.logger.Debugf("Record not found for key '%s' in bucket %d", key, bucketNum)
-	return nil, 0, -1, nil
-}
+// 	hi.logger.Debugf("Record not found for key '%s' in bucket %d", key, bucketNum)
+// 	return nil, 0, -1, nil
+// }
 
 // findRecordInOverflowChain finds a record in an overflow chain
 // Parameters:
@@ -394,39 +394,39 @@ func (hi *HashIndex) findRecordInBucket(bucketNum uint32, key string) (*IndexRec
 //   - uint32: Page number where the record was found (0 if not found)
 //   - int: Index of the record in the page (-1 if not found)
 //   - error: Any error that occurred during search
-func (hi *HashIndex) findRecordInOverflowChain(startPageNum uint32, key string) (*IndexRecord, uint32, int, error) {
-	currentPageNum := startPageNum
-	visitedPages := make(map[uint32]bool)
+// func (hi *HashIndex) findRecordInOverflowChain(startPageNum uint32, key string) (*IndexRecord, uint32, int, error) {
+// 	currentPageNum := startPageNum
+// 	visitedPages := make(map[uint32]bool)
 
-	for currentPageNum != 0 {
-		// Check for cycles
-		if visitedPages[currentPageNum] {
-			return nil, 0, -1, fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
-		}
-		visitedPages[currentPageNum] = true
+// 	for currentPageNum != 0 {
+// 		// Check for cycles
+// 		if visitedPages[currentPageNum] {
+// 			return nil, 0, -1, fmt.Errorf("cycle detected in overflow chain at page %d", currentPageNum)
+// 		}
+// 		visitedPages[currentPageNum] = true
 
-		// Load overflow page
-		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
-		if err != nil {
-			return nil, 0, -1, fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
-		}
+// 		// Load overflow page
+// 		overflowPageData, err := hi.pageManager.GetPage(currentPageNum, hi.fileManager.ReadPage)
+// 		if err != nil {
+// 			return nil, 0, -1, fmt.Errorf("failed to read overflow page %d: %w", currentPageNum, err)
+// 		}
 
-		overflowPage, ok := overflowPageData.(*OverflowPage)
-		if !ok {
-			return nil, 0, -1, fmt.Errorf("page %d is not an overflow page", currentPageNum)
-		}
+// 		overflowPage, ok := overflowPageData.(*OverflowPage)
+// 		if !ok {
+// 			return nil, 0, -1, fmt.Errorf("page %d is not an overflow page", currentPageNum)
+// 		}
 
-		// Search records in this overflow page
-		for i, record := range overflowPage.Records {
-			if record.DocumentID == key {
-				hi.logger.Debugf("Found record in overflow page %d at index %d", currentPageNum, i)
-				return record, currentPageNum, i, nil
-			}
-		}
+// 		// Search records in this overflow page
+// 		for i, record := range overflowPage.Records {
+// 			if record.DocumentID == key {
+// 				hi.logger.Debugf("Found record in overflow page %d at index %d", currentPageNum, i)
+// 				return record, currentPageNum, i, nil
+// 			}
+// 		}
 
-		// Move to next overflow page
-		currentPageNum = overflowPage.NextOverflowPage
-	}
+// 		// Move to next overflow page
+// 		currentPageNum = overflowPage.NextOverflowPage
+// 	}
 
-	return nil, 0, -1, nil
-}
+// 	return nil, 0, -1, nil
+// }

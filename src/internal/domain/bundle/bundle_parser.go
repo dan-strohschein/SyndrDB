@@ -330,34 +330,34 @@ func ParseCreateRelationshipCommand(command string) (*models.RelationshipCommand
 	}, nil
 }
 
-func parseRelationshipType(typeStr string) int {
-	switch strings.ToLower(typeStr) {
-	case "1to1":
-		return 1 // One-to-One
-	case "1to_many":
-		return 2 // One-to-Many
-	case "many_to_many":
-		return 3 // Many-to-Many
-	default:
-		return 0 // Unknown type
-	}
-}
+// func parseRelationshipType(typeStr string) int {
+// 	switch strings.ToLower(typeStr) {
+// 	case "1to1":
+// 		return 1 // One-to-One
+// 	case "1to_many":
+// 		return 2 // One-to-Many
+// 	case "many_to_many":
+// 		return 3 // Many-to-Many
+// 	default:
+// 		return 0 // Unknown type
+// 	}
+// }
 
-// parseRelationshipTypeString converts relationship type string to standardized format
-func parseRelationshipTypeString(typeStr string) string {
-	switch strings.ToLower(typeStr) {
-	case "1to1", "1to_1", "one-to-one", "onetoone":
-		return "1to1"
-	case "1to_many", "1tomany", "one-to-many", "onetomany":
-		return "1toMany"
-	case "many_to_many", "manytomany", "many-to-many":
-		return "ManyToMany"
-	case "0tomany", "0to_many", "zero-to-many", "zerotomany":
-		return "0toMany"
-	default:
-		return typeStr // Return as-is if unknown
-	}
-}
+// // parseRelationshipTypeString converts relationship type string to standardized format
+// func parseRelationshipTypeString(typeStr string) string {
+// 	switch strings.ToLower(typeStr) {
+// 	case "1to1", "1to_1", "one-to-one", "onetoone":
+// 		return "1to1"
+// 	case "1to_many", "1tomany", "one-to-many", "onetomany":
+// 		return "1toMany"
+// 	case "many_to_many", "manytomany", "many-to-many":
+// 		return "ManyToMany"
+// 	case "0tomany", "0to_many", "zero-to-many", "zerotomany":
+// 		return "0toMany"
+// 	default:
+// 		return typeStr // Return as-is if unknown
+// 	}
+// }
 
 // parseDeleteBundleCommand parses DELETE BUNDLE command
 func ParseDeleteBundleCommand(command string) (*models.BundleCommand, error) {

@@ -46,6 +46,8 @@ Usage of ./syndr:
         Shows version (default "0.0.1alpha")
   -graphql
         Executes the server in http / GraphQL API Mode
+  --wal-mode=sync|async
+        Whether the Write Ahead Logging is done asynchronously or synchronously      
 ```
 ## How to install
 

@@ -109,7 +109,7 @@ func parseBIndexFieldDefinitions(fieldsContent string, logger *zap.SugaredLogger
 	fieldRegex := regexp.MustCompile(`\{\s*"([^"]+)"\s*,\s*(true|false)\s*,\s*(true|false)\s*\}`)
 
 	matches := fieldRegex.FindAllStringSubmatch(fieldsContent, -1)
-	if matches == nil || len(matches) == 0 {
+	if len(matches) == 0 {
 		logger.Errorf("No valid field definitions found in: %s", fieldsContent)
 		return nil, fmt.Errorf("invalid field definitions syntax")
 	}

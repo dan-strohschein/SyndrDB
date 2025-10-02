@@ -623,10 +623,10 @@ func (fm *BTreeFileManager) deserializeFileHeaderASCII(data []byte) (*FileHeader
 		}
 
 		// Check for section end
-		if line == "|| END FILE HEADER" {
-			inHeaderSection = false
-			break
-		}
+		// if line == "|| END FILE HEADER" {
+		// 	inHeaderSection = false
+		// 	break
+		// }
 
 		// Parse header fields only when in header section
 		if inHeaderSection && strings.Contains(line, ":") {
@@ -1147,12 +1147,12 @@ func (fm *BTreeFileManager) deserializeFileHeaderBinary(data []byte) error {
 }
 
 // Helper function for minimum calculation
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
+// func min(a, b int) int {
+// 	if a < b {
+// 		return a
+// 	}
+// 	return b
+// }
 
 func (fm *BTreeFileManager) serializePageBinary(pageData interface{}) ([]byte, error) {
 	//  handle different page types
