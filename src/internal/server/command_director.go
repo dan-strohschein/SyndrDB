@@ -21,7 +21,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger) (interface{}, error) {
+func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	// Check if this is a GraphQL command first
 	if strings.HasPrefix(command, "GRAPHQL::") {
 		if serviceManager.GraphQLProcessor == nil {
@@ -55,11 +55,12 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			}
 
 		case "top":
-			return SelectTopDocuments(commandParts, serviceManager, database, logger)
+			return SelectTopDocuments(commandParts, serviceManager, database, logger, startTime)
 
 		case "documents":
-
-			return SelectDocuments(commandParts, serviceManager, database, logger)
+			return SelectDocuments(commandParts, serviceManager, database, logger, startTime)
+		case "count":
+			return SelectDocumentCount(commandParts, serviceManager, database, logger, startTime)
 		}
 		return nil, nil
 	}
@@ -1175,7 +1176,7 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 }
 
 // SelectTopDocuments handles SELECT TOP N DOCUMENTS FROM "bundle" queries
-func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	logger.Infof("Processing SELECT TOP command with %d parts: %v", len(commandParts), commandParts)
 
 	// Expected syntax: SELECT TOP <number> DOCUMENTS FROM "<bundle_name>" [WHERE conditions] [ORDER BY field]
@@ -1199,7 +1200,7 @@ func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, da
 
 	// Check for ORDER BY or other clauses and delegate to appropriate handlers
 	if strings.Contains(strings.ToUpper(fullCommand), "ORDER BY") {
-		return SelectTopDocumentsWithOrderBy(fullCommand, topCount, serviceManager, database, logger)
+		return SelectTopDocumentsWithOrderBy(fullCommand, topCount, serviceManager, database, logger, startTime)
 	}
 
 	// Handle basic TOP query without ORDER BY
@@ -1303,9 +1304,13 @@ func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, da
 
 	logger.Infof("Final result: SELECT TOP %d returned %d documents from bundle '%s'", topCount, len(limitedDocuments), bundleName)
 
+	// Calculate execution time
+	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
+
 	cmdResponse := &CommandResponse{
-		ResultCount: len(limitedDocuments),
-		Result:      limitedDocuments,
+		ResultCount:     len(limitedDocuments),
+		Result:          limitedDocuments,
+		ExecutionTimeMS: executionTime,
 	}
 
 	logger.Infof("Returning CommandResponse with ResultCount: %d", cmdResponse.ResultCount)
@@ -1313,7 +1318,7 @@ func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, da
 }
 
 // SelectTopDocumentsWithOrderBy handles SELECT TOP N DOCUMENTS FROM "bundle" ORDER BY queries
-func SelectTopDocumentsWithOrderBy(fullCommand string, topCount int, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+func SelectTopDocumentsWithOrderBy(fullCommand string, topCount int, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	logger.Infof("Processing SELECT TOP %d with ORDER BY query: %s", topCount, fullCommand)
 
 	// Parse the ORDER BY query using existing parser
@@ -1420,23 +1425,23 @@ func SelectTopDocumentsWithOrderBy(fullCommand string, topCount int, serviceMana
 	return cmdResponse, nil
 }
 
-func SelectDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+func SelectDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	// First, check if this is a JOIN query by examining the full command
 	fullCommand := strings.Join(commandParts, " ")
 
 	// Detect JOIN queries
 	if strings.Contains(strings.ToUpper(fullCommand), "JOIN") {
-		return SelectDocumentsWithJoin(fullCommand, serviceManager, database, logger)
+		return SelectDocumentsWithJoin(fullCommand, serviceManager, database, logger, startTime)
 	}
 
 	// Detect GROUP BY queries
 	if strings.Contains(strings.ToUpper(fullCommand), "GROUP BY") {
-		return SelectDocumentsWithGroupBy(fullCommand, serviceManager, database, logger)
+		return SelectDocumentsWithGroupBy(fullCommand, serviceManager, database, logger, startTime)
 	}
 
 	// Detect ORDER BY queries
 	if strings.Contains(strings.ToUpper(fullCommand), "ORDER BY") {
-		return SelectDocumentsWithOrderBy(fullCommand, serviceManager, database, logger)
+		return SelectDocumentsWithOrderBy(fullCommand, serviceManager, database, logger, startTime)
 	}
 
 	// Handle regular SELECT without JOIN
@@ -1553,15 +1558,159 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	// }
 	// logger.Infof(result)
 
+	// Calculate execution time
+	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
+
 	cmdResponse := &CommandResponse{
-		ResultCount: len(documents),
-		Result:      documents,
+		ResultCount:     len(documents),
+		Result:          documents,
+		ExecutionTimeMS: executionTime,
+	}
+	return cmdResponse, nil
+}
+
+// SelectDocumentCount handles SELECT COUNT FROM "bundle" queries with optional WHERE, ORDER BY, and GROUP BY clauses
+// This function follows SyndrDB comprehensive error handling practices and implements efficient document counting
+// without needing to load full document content when possible. It supports the same filtering and grouping
+// capabilities as other SELECT operations but returns only the count of matching documents.
+//
+// Supported syntax:
+//   - SELECT COUNT FROM "bundle"
+//   - SELECT COUNT FROM "bundle" WHERE conditions
+//   - SELECT COUNT FROM "bundle" ORDER BY field
+//   - SELECT COUNT FROM "bundle" GROUP BY field
+//   - SELECT COUNT FROM "bundle" WHERE conditions ORDER BY field
+//   - SELECT COUNT FROM "bundle" WHERE conditions GROUP BY field
+//
+// Future enhancement: Will support mixed field lists like "SELECT field1, COUNT FROM bundle GROUP BY field1"
+// when accompanied by appropriate GROUP BY clauses.
+//
+// Parameters:
+//   - commandParts: The parsed command parts from the original query
+//   - serviceManager: Service manager containing all database services
+//   - database: Target database context
+//   - logger: Logger for debugging and error reporting
+//
+// Returns:
+//   - interface{}: CommandResponse containing the count result
+//   - error: Any error that occurred during processing
+func SelectDocumentCount(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
+	logger.Infof("Processing SELECT COUNT query: %v", commandParts)
+
+	// Reconstruct full command for advanced parsing
+	fullCommand := strings.Join(commandParts, " ")
+
+	// Validate basic syntax: SELECT COUNT FROM "bundle"
+	if len(commandParts) < 4 || !strings.EqualFold(commandParts[2], "FROM") {
+		return nil, fmt.Errorf("SELECT COUNT requires the syntax 'SELECT COUNT FROM \"<bundle_name>\"'")
+	}
+
+	// Detect and delegate to specialized handlers for complex queries
+	upperCommand := strings.ToUpper(fullCommand)
+
+	// Handle GROUP BY COUNT queries using existing GROUP BY infrastructure
+	if strings.Contains(upperCommand, "GROUP BY") {
+		logger.Infof("Delegating COUNT with GROUP BY to GROUP BY handler")
+		return SelectDocumentsWithGroupBy(fullCommand, serviceManager, database, logger, startTime)
+	}
+
+	// Handle ORDER BY COUNT queries using existing ORDER BY infrastructure
+	if strings.Contains(upperCommand, "ORDER BY") {
+		logger.Infof("Delegating COUNT with ORDER BY to ORDER BY handler (will return count only)")
+		// For ORDER BY, we'll process normally but return only count
+		result, err := SelectDocumentsWithOrderBy(fullCommand, serviceManager, database, logger, startTime)
+		if err != nil {
+			return nil, err
+		}
+
+		// Extract count from the result and return count-only response
+		if cmdResp, ok := result.(*CommandResponse); ok {
+			countResponse := &CommandResponse{
+				ResultCount: 1,
+				Result:      cmdResp.ResultCount,
+			}
+			logger.Infof("ORDER BY COUNT query returned count: %d", cmdResp.ResultCount)
+			return countResponse, nil
+		}
+		return nil, fmt.Errorf("unexpected result type from ORDER BY handler")
+	}
+
+	// Handle basic COUNT queries (with optional WHERE clause)
+	bundleName := strings.Trim(commandParts[3], "\"'")
+	bundleName = strings.ReplaceAll(bundleName, "\"", "")
+	bundleName = strings.ReplaceAll(bundleName, "'", "")
+	bundleName = strings.ReplaceAll(bundleName, "\u201C", "") // Handle unicode left double quote
+	bundleName = strings.ReplaceAll(bundleName, "\u201D", "") // Handle unicode right double quote
+
+	if !bndle.IsValidBundleName(bundleName) {
+		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names can only contain letters, numbers, underscores, and hyphens", bundleName)
+	}
+
+	logger.Infof("Processing COUNT query for bundle: %s", bundleName)
+
+	// Get the bundle by name
+	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+	}
+
+	var documentCount int
+
+	// Check for WHERE clause
+	if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
+		whereClause := strings.Join(commandParts[5:], " ")
+		logger.Infof("Processing COUNT query with WHERE clause: %s", whereClause)
+
+		// Create execution planner for optimized counting
+		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+
+		// Create execution plan
+		plan, err := planner.CreateExecutionPlan(bundle, whereClause)
+		if err != nil {
+			logger.Warnf("Failed to create execution plan for COUNT, falling back to full scan: %v", err)
+			// Fallback to filtering and counting
+			filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
+			if err != nil {
+				return nil, fmt.Errorf("error filtering documents for COUNT: %v", err)
+			}
+			documentCount = len(filteredDocs)
+		} else {
+			// Execute the plan and count results
+			logger.Infof("Executing COUNT plan with indexes: %v", plan.IndexesUsed)
+			documents, err := plan.RootNode.Execute()
+			if err != nil {
+				return nil, fmt.Errorf("error executing COUNT query plan: %v", err)
+			}
+			documentCount = len(documents)
+		}
+	} else {
+		// No WHERE clause - count all documents efficiently
+		logger.Infof("Counting all documents in bundle using optimized method")
+
+		// Use efficient document counting without loading full content
+		allDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, "")
+		if err != nil {
+			return nil, fmt.Errorf("error counting all documents: %v", err)
+		}
+		documentCount = len(allDocs)
+	}
+
+	logger.Infof("COUNT query completed: %d documents found in bundle '%s'", documentCount, bundleName)
+
+	// Calculate execution time
+	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
+
+	// Return count-only response
+	cmdResponse := &CommandResponse{
+		ResultCount:     1,
+		Result:          documentCount,
+		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil
 }
 
 // SelectDocumentsWithJoin handles SELECT queries with JOIN clauses
-func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	logger.Infof("Processing JOIN query: %s", query)
 
 	// Parse the JOIN query
@@ -1593,15 +1742,19 @@ func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, databa
 
 	logger.Infof("JOIN query executed successfully, returned %d documents", len(documents))
 
+	// Calculate execution time
+	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
+
 	cmdResponse := &CommandResponse{
-		ResultCount: len(documents),
-		Result:      documents,
+		ResultCount:     len(documents),
+		Result:          documents,
+		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil
 }
 
 // SelectDocumentsWithOrderBy handles SELECT queries with ORDER BY clauses
-func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	logger.Infof("Processing ORDER BY query: %s", query)
 
 	// Parse the ORDER BY query
@@ -1697,15 +1850,19 @@ func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, dat
 		resultMap = filterDocumentFields(resultMap, selectQuery.SelectFields, logger)
 	}
 
+	// Calculate execution time
+	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
+
 	cmdResponse := &CommandResponse{
-		ResultCount: len(resultMap),
-		Result:      resultMap,
+		ResultCount:     len(resultMap),
+		Result:          resultMap,
+		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil
 }
 
 // SelectDocumentsWithGroupBy handles SELECT queries with GROUP BY clauses
-func SelectDocumentsWithGroupBy(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (interface{}, error) {
+func SelectDocumentsWithGroupBy(query string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	logger.Infof("Processing GROUP BY query: %s", query)
 
 	// Parse the GROUP BY query
@@ -1744,9 +1901,13 @@ func SelectDocumentsWithGroupBy(query string, serviceManager ServiceManager, dat
 
 	logger.Infof("GROUP BY query returned %d groups", len(resultMap))
 
+	// Calculate execution time
+	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
+
 	cmdResponse := &CommandResponse{
-		ResultCount: len(resultMap),
-		Result:      resultMap,
+		ResultCount:     len(resultMap),
+		Result:          resultMap,
+		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil
 }

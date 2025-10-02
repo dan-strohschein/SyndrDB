@@ -369,7 +369,8 @@ func executeClientCommand(commandText string) (interface{}, error) {
 	}
 
 	// Process command through the actual command director
-	result, err := server.CommandDirector(testDatabase, *testServiceManager, commandText, ColorLogger)
+	startTime := time.Now()
+	result, err := server.CommandDirector(testDatabase, *testServiceManager, commandText, ColorLogger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("command failed: %w", err)
 	}
@@ -2684,4 +2685,71 @@ func cleanupRelationshipBundles() error {
 
 	ColorLogger.Debugf("Relationship test cleanup complete")
 	return nil
+}
+
+// testSelectCount tests the SELECT COUNT functionality
+func testSelectCount() error {
+	if err := setupBundleTestEnvironment(); err != nil {
+		return err
+	}
+
+	bundleName := "count_test_bundle"
+
+	// Create bundle
+	createBundleCommand := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS ({"id", "string", true, true, ""}, {"title", "string", true, false, ""}, {"status", "string", true, false, ""})`, bundleName)
+	_, err := executeClientCommand(createBundleCommand)
+	if err != nil {
+		return fmt.Errorf("failed to create bundle for count test: %w", err)
+	}
+
+	// Test 1: Count empty bundle
+	countCommand := fmt.Sprintf("SELECT COUNT FROM \"%s\"", bundleName)
+	result, err := executeClientCommand(countCommand)
+	if err != nil {
+		return fmt.Errorf("failed to execute count on empty bundle: %w", err)
+	}
+	ColorLogger.Infof("Count on empty bundle result: %v", result)
+
+	// Add some test documents
+	for i := 1; i <= 5; i++ {
+		status := "inactive"
+		if i%2 == 0 {
+			status = "active"
+		}
+
+		documentData := map[string]interface{}{
+			"id":     fmt.Sprintf("%d", i),
+			"title":  fmt.Sprintf("Test Document %d", i),
+			"status": status,
+		}
+
+		addDocumentCommand := fmt.Sprintf("ADD DOCUMENT TO BUNDLE \"%s\" WITH (%s)", bundleName, convertToSyndrDBFieldFormat(documentData))
+		_, err = executeClientCommand(addDocumentCommand)
+		if err != nil {
+			return fmt.Errorf("failed to add test document %d: %w", i, err)
+		}
+	}
+
+	// Test 2: Count all documents
+	result, err = executeClientCommand(countCommand)
+	if err != nil {
+		return fmt.Errorf("failed to execute count on populated bundle: %w", err)
+	}
+	ColorLogger.Infof("Count on populated bundle result: %v", result)
+
+	// Test 3: Count with WHERE clause
+	countWithWhereCommand := fmt.Sprintf("SELECT COUNT FROM \"%s\" WHERE status == \"active\"", bundleName)
+	result, err = executeClientCommand(countWithWhereCommand)
+	if err != nil {
+		return fmt.Errorf("failed to execute count with WHERE clause: %w", err)
+	}
+	ColorLogger.Infof("Count with WHERE clause result: %v", result)
+
+	ColorLogger.Infof("SELECT COUNT test completed successfully")
+	return nil
+}
+
+// validateSelectCount validates the SELECT COUNT functionality
+func validateSelectCount() error {
+	return testSelectCount()
 }

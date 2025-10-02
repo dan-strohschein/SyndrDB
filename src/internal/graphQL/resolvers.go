@@ -248,7 +248,8 @@ func (h *GraphQLHandler) resolveDocuments(field *ast.Field, variables map[string
 	}
 
 	// Execute the query using the command director
-	response, err := server.CommandDirector(h.database, h.serviceManager, query, h.logger)
+	startTime := time.Now()
+	response, err := server.CommandDirector(h.database, h.serviceManager, query, h.logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute documents query: %w", err)
 	}
@@ -307,7 +308,8 @@ func (h *GraphQLHandler) resolveDocument(field *ast.Field, variables map[string]
 	query := fmt.Sprintf("SELECT * FROM %s WHERE id = '%s'", bundleName, documentID)
 
 	// Execute the query using the command director
-	response, err := server.CommandDirector(h.database, h.serviceManager, query, h.logger)
+	startTime := time.Now()
+	response, err := server.CommandDirector(h.database, h.serviceManager, query, h.logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute document query: %w", err)
 	}
@@ -353,7 +355,8 @@ func (h *GraphQLHandler) mutateCreateDatabase(field *ast.Field, variables map[st
 	command := fmt.Sprintf("CREATE DATABASE %s", databaseName)
 
 	// Execute the command using the command director
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger)
+	startTime := time.Now()
+	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
@@ -413,7 +416,8 @@ func (h *GraphQLHandler) mutateCreateBundle(field *ast.Field, variables map[stri
 	command := fmt.Sprintf("CREATE BUNDLE %s %s", bundleName, fieldsStr)
 
 	// Execute the command using the command director
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger)
+	startTime := time.Now()
+	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bundle: %w", err)
 	}
@@ -470,7 +474,8 @@ func (h *GraphQLHandler) mutateCreateDocument(field *ast.Field, variables map[st
 	command := fmt.Sprintf("INSERT INTO %s %s", bundleName, fieldsStr)
 
 	// Execute the command using the command director
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger)
+	startTime := time.Now()
+	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create document: %w", err)
 	}
@@ -541,7 +546,8 @@ func (h *GraphQLHandler) mutateUpdateDocument(field *ast.Field, variables map[st
 	command := fmt.Sprintf("UPDATE %s SET %s WHERE id = '%s'", bundleName, fieldsStr, documentID)
 
 	// Execute the command using the command director
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger)
+	startTime := time.Now()
+	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update document: %w", err)
 	}
@@ -592,7 +598,8 @@ func (h *GraphQLHandler) mutateDeleteDocument(field *ast.Field, variables map[st
 	command := fmt.Sprintf("DELETE FROM %s WHERE %s", bundleName, whereClause)
 
 	// Execute the command using the command director
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger)
+	startTime := time.Now()
+	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to delete document: %w", err)
 	}

@@ -1055,7 +1055,10 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 
 	s.logger.Debugf("Bundle %s has PageCount: %d", bundleName, bundle.PageCount)
 
-	// If PageCount is 0, the bundle has no documents - return empty result
+	var allDocuments []*models.Document
+
+	// Special handling: If PageCount is 0, still check page 0 for documents
+	// This handles cases where metadata might be out of sync
 	if bundle.PageCount == 0 {
 		settings := settings.GetSettings()
 		page, err := s.store.LoadDocumentPage(bundle.Name, 0, settings.DataDir)
@@ -1069,13 +1072,20 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 			s.logger.Infof("DEBUG: No documents found in page 0, returning empty slice")
 			return []*models.Document{}, nil
 		}
-	}
 
-	var allDocuments []*models.Document
+		// FIXED: Actually process the documents found in page 0
+		for _, doc := range page.Documents {
+			docCopy := doc
+			allDocuments = append(allDocuments, &docCopy)
+		}
+
+		s.logger.Infof("DEBUG: getAllDocumentsForIndexing - loaded %d documents from page 0 (PageCount was 0)", len(allDocuments))
+		return allDocuments, nil
+	}
 
 	// Load all pages for this bundle using the PageCount from metadata
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		s.logger.Infof("DEBUG: Loading page %d for bundle '%s'", pageID, bundle.Name)
+		//s.logger.Infof("DEBUG: Loading page %d for bundle '%s'", pageID, bundle.Name)
 
 		settings := settings.GetSettings()
 		page, err := s.store.LoadDocumentPage(bundle.Name, pageID, settings.DataDir)
@@ -1084,7 +1094,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 			continue
 		}
 
-		s.logger.Infof("DEBUG: Page %d loaded with %d documents", pageID, len(page.Documents))
+		//s.logger.Infof("DEBUG: Page %d loaded with %d documents", pageID, len(page.Documents))
 
 		// Convert map to slice and append
 		for _, doc := range page.Documents {

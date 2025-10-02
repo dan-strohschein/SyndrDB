@@ -340,7 +340,7 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 }
 
 // GetBundleFromCatalog retrieves a bundle document from the catalog by BundleID
-func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (*models.Document, error) {
+func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (map[string]interface{}, error) {
 	// Get the primary database
 	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
 	if err != nil {
@@ -363,18 +363,26 @@ func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (*models.Documen
 	for _, doc := range docs {
 		// Access the BundleID field from the Document struct
 		if bundleIDField, exists := doc.Fields["BundleID"]; exists && bundleIDField.Value == bundleID {
+			actualBundle, err1 := cs.bundleService.GetBundleByName(primaryDB, doc.Fields["Name"].Value.(string))
+			if err1 != nil {
+				return nil, fmt.Errorf("failed to get bundle Metadata from Catalog by name '%s': %w", doc.Fields["Name"].Value.(string), err1)
+			}
 			// Convert document to map for return
-			// result := make(map[string]interface{})
-			// result["DocumentID"] = doc.DocumentID
-			// result["CreatedAt"] = doc.CreatedAt
-			// result["UpdatedAt"] = doc.UpdatedAt
+			result := make(map[string]interface{})
+			result["BundleMetadata"] = actualBundle
+			result["CreatedAt"] = doc.CreatedAt
+			result["UpdatedAt"] = doc.UpdatedAt
+			result["DatabaseName"] = doc.Fields["DatabaseName"].Value
+			result["DatabaseID"] = doc.Fields["DatabaseID"].Value
+			result["FieldCount"] = doc.Fields["FieldCount"].Value
+			result["FilePath"] = doc.Fields["FilePath"].Value
 
 			// // Add all fields to the result
 			// for fieldName, field := range doc.Fields {
 			// 	result[fieldName] = field.Value
 			// }
 
-			return doc, nil
+			return result, nil
 		}
 	}
 
@@ -382,7 +390,7 @@ func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (*models.Documen
 }
 
 // GetBundleFromCatalog retrieves a bundle document from the catalog by BundleID
-func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName string) (*[]models.Document, error) {
+func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName string) (*[]map[string]interface{}, error) {
 	// Get the primary database
 	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
 	if err != nil {
@@ -400,7 +408,7 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
 	}
 
-	result := make([]models.Document, 0)
+	results := make([]map[string]interface{}, 0)
 	// Find the document for this bundle
 
 	for _, doc := range docs {
@@ -408,13 +416,32 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 		// Access the DatabaseName field from the Document struct
 		if databaseNameField, exists := doc.Fields["DatabaseName"]; exists && databaseNameField.Value == databaseName {
 			// Add doc to slice for return
-			result = append(result, *doc)
+			actualBundle, err1 := cs.bundleService.GetBundleByName(primaryDB, doc.Fields["Name"].Value.(string))
+			if err1 != nil {
+				return nil, fmt.Errorf("failed to get bundle Metadata from Catalog by name '%s': %w", doc.Fields["Name"].Value.(string), err1)
+			}
+			// Convert document to map for return
+			result := make(map[string]interface{})
+			result["BundleMetadata"] = actualBundle
+			result["CreatedAt"] = doc.CreatedAt
+			result["UpdatedAt"] = doc.UpdatedAt
+			result["DatabaseName"] = doc.Fields["DatabaseName"].Value
+			result["DatabaseID"] = doc.Fields["DatabaseID"].Value
+			result["FieldCount"] = doc.Fields["FieldCount"].Value
+			result["FilePath"] = doc.Fields["FilePath"].Value
+
+			// // Add all fields to the result
+			// for fieldName, field := range doc.Fields {
+			// 	result[fieldName] = field.Value
+			// }
+
+			results = append(results, result)
 		}
 	}
 
-	cs.logger.Infof("DEBUG DEBUG DEBUG Found %d documents with DatabaseName of '%s' in catalog", len(result), databaseName)
+	cs.logger.Infof("DEBUG DEBUG DEBUG Found %d documents with DatabaseName of '%s' in catalog", len(results), databaseName)
 
-	return &result, nil
+	return &results, nil
 }
 
 // ListAllBundlesInCatalog retrieves all bundle documents from the catalog

@@ -1,13 +1,15 @@
 package server
 
 type CommandResponse struct {
-	ResultCount int
-	Result      interface{}
+	ResultCount     int
+	Result          interface{}
+	ExecutionTimeMS float64
 }
 
 type QueryResponse struct {
-	ResultCount int
-	Results     *[]DocumentResponse
+	ResultCount     int
+	Results         *[]DocumentResponse
+	ExecutionTimeMS float64
 }
 
 type DocumentResponse struct {

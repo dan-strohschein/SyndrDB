@@ -35,6 +35,7 @@ import (
 	"syndrdb/src/internal/server"
 	"syndrdb/src/internal/storage/databasestore"
 	"syndrdb/src/pkg/settings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -339,7 +340,8 @@ func cleanupJoinTestData(db *models.Database, serviceManager server.ServiceManag
 func executeJoinQuery(query string, serviceManager server.ServiceManager, db *models.Database, logger *zap.SugaredLogger) (*server.CommandResponse, error) {
 	logger.Infof("Executing JOIN query: %s", query)
 
-	result, err := server.SelectDocumentsWithJoin(query, serviceManager, db, logger)
+	startTime := time.Now()
+	result, err := server.SelectDocumentsWithJoin(query, serviceManager, db, logger, startTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute JOIN query: %w", err)
 	}

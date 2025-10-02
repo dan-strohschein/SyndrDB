@@ -839,9 +839,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 			//connLogger.Errorw("Error reading from client", "error", err)
 			return
 
-		case <-time.After(30 * time.Second):
+		case <-time.After(300 * time.Second):
 			// Idle timeout - send ping or check connection health
-			connLogger.Info("Connection idle for 30 seconds")
+			connLogger.Info("Connection idle for 5 minutes")
 		}
 	}
 
@@ -928,8 +928,11 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 	s.logger.Debugf("Buffer stats before command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
 		stats.Hits, stats.Misses, stats.HitRatio, stats.UsedBuffers, stats.TotalBuffers)
 
+	// Start timing for execution measurement
+	startTime := time.Now()
+	
 	// TODO pull this from the original architecture
-	result, err := CommandDirector(conn.Database, *serviceManager, command, s.logger)
+	result, err := CommandDirector(conn.Database, *serviceManager, command, s.logger, startTime)
 
 	stats = s.bufferPool.GetStats()
 	s.logger.Debugf("Buffer stats after command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
