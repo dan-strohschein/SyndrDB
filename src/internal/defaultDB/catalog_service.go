@@ -150,7 +150,7 @@ func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 			"DatabaseID":   {Name: "DatabaseID", Value: bundle.Database.DatabaseID},
 			"DatabaseName": {Name: "DatabaseName", Value: bundle.Database.Name},
 			"FieldCount":   {Name: "FieldCount", Value: len(bundle.DocumentStructure.FieldDefinitions)},
-			"FilePath":     {Name: "FilePath", Value: fmt.Sprintf("%s.bnd", bundle.Name)},
+			"FilePath":     {Name: "FilePath", Value: fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name)},
 		},
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),

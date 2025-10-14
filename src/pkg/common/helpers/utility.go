@@ -1,7 +1,9 @@
 package helpers
 
 import (
+	"fmt"
 	"strings"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,4 +38,13 @@ func ParseBool(value string) bool {
 func CleanFileName(name string) string {
 	// Replace characters that might be problematic in filenames
 	return strings.ReplaceAll(name, "-", "_")
+}
+
+func GetDatabaseFolderPath(databaseName string) string {
+	var results string
+
+	args := settings.GetSettings()
+	results = fmt.Sprintf("%s/%s/", args.DataDir, databaseName)
+
+	return results
 }

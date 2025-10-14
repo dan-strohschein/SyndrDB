@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syndrdb/src/pkg/common/helpers"
 )
 
 // IndexConfig contains configuration parameters for creating a BTree index
@@ -46,9 +47,10 @@ import (
 // a BTree index for optimal performance in the SyndrDB environment
 type IndexConfig struct {
 	// Index identification
-	BundleName string // Name of the bundle this index belongs to
-	FieldName  string // Name of the field being indexed
-	IndexName  string // Optional custom name for the index (auto-generated if empty)
+	DatabaseName string // Name of the database this index belongs to
+	BundleName   string // Name of the bundle this index belongs to
+	FieldName    string // Name of the field being indexed
+	IndexName    string // Optional custom name for the index (auto-generated if empty)
 
 	// Storage configuration
 	DataDir   string // Directory where index files are stored
@@ -86,7 +88,7 @@ type IndexConfig struct {
 //
 // Returns:
 //   - *IndexConfig: Configuration with sensible defaults
-func DefaultIndexConfig(bundleName, fieldName, dataDir string) *IndexConfig {
+func DefaultIndexConfig(bundleName, fieldName, dataDir, databaseName string) *IndexConfig {
 	// Determine optimal page size based on system characteristics
 	pageSize := uint32(8192) // 8KB pages (PostgreSQL standard)
 
@@ -97,6 +99,7 @@ func DefaultIndexConfig(bundleName, fieldName, dataDir string) *IndexConfig {
 	maxKeyLength := pageSize / 8 // Conservative estimate
 
 	return &IndexConfig{
+		DatabaseName:     databaseName,
 		BundleName:       bundleName,
 		FieldName:        fieldName,
 		IndexName:        "", // Will be auto-generated
@@ -129,8 +132,8 @@ func DefaultIndexConfig(bundleName, fieldName, dataDir string) *IndexConfig {
 // Returns:
 //   - *IndexConfig: The validated configuration
 //   - error: Any validation error that occurred
-func NewIndexConfig(bundleName, fieldName, dataDir string, isUnique, debugMode bool) (*IndexConfig, error) {
-	config := DefaultIndexConfig(bundleName, fieldName, dataDir)
+func NewIndexConfig(bundleName, fieldName, dataDir, databaseName string, isUnique, debugMode bool) (*IndexConfig, error) {
+	config := DefaultIndexConfig(bundleName, fieldName, dataDir, databaseName)
 	config.IsUnique = isUnique
 	config.DebugMode = debugMode
 
@@ -151,8 +154,8 @@ func NewIndexConfig(bundleName, fieldName, dataDir string, isUnique, debugMode b
 // Returns:
 //   - *IndexConfig: The configured index config
 //   - error: Any validation error that occurred
-func NewIndexConfigWithOptions(bundleName, fieldName, dataDir string, options map[string]interface{}) (*IndexConfig, error) {
-	config := DefaultIndexConfig(bundleName, fieldName, dataDir)
+func NewIndexConfigWithOptions(bundleName, fieldName, dataDir, databaseName string, options map[string]interface{}) (*IndexConfig, error) {
+	config := DefaultIndexConfig(bundleName, fieldName, dataDir, databaseName)
 
 	// Apply custom options
 	if err := config.ApplyOptions(options); err != nil {
@@ -173,6 +176,10 @@ func (config *IndexConfig) Validate() error {
 	// Validate required fields
 	if config.BundleName == "" {
 		return fmt.Errorf("bundle name cannot be empty")
+	}
+
+	if config.DatabaseName == "" {
+		return fmt.Errorf("database name cannot be empty")
 	}
 
 	if config.FieldName == "" {
@@ -240,7 +247,8 @@ func (config *IndexConfig) Validate() error {
 	}
 
 	// Validate data directory accessibility
-	if err := validateDataDirectory(config.DataDir); err != nil {
+	databasePath := helpers.GetDatabaseFolderPath(config.DatabaseName)
+	if err := validateDataDirectory(databasePath); err != nil {
 		return fmt.Errorf("invalid data directory: %w", err)
 	}
 
@@ -256,8 +264,10 @@ func (config *IndexConfig) GetIndexFilePath() string {
 		indexName = config.generateIndexName()
 	}
 
+	databaseName := helpers.GetDatabaseFolderPath(config.DatabaseName)
+
 	filename := fmt.Sprintf("%s.btidx", indexName)
-	return filepath.Join(config.DataDir, filename)
+	return filepath.Join(databaseName, filename)
 }
 
 // GetTempFilePath returns the path for temporary files during operations
@@ -269,8 +279,10 @@ func (config *IndexConfig) GetTempFilePath() string {
 		indexName = config.generateIndexName()
 	}
 
+	databasePath := helpers.GetDatabaseFolderPath(config.DatabaseName)
+
 	filename := fmt.Sprintf("%s.tmp", indexName)
-	return filepath.Join(config.DataDir, filename)
+	return filepath.Join(databasePath, filename)
 }
 
 // GetBackupFilePath returns the path for backup files
@@ -282,8 +294,10 @@ func (config *IndexConfig) GetBackupFilePath() string {
 		indexName = config.generateIndexName()
 	}
 
+	databasePath := helpers.GetDatabaseFolderPath(config.DatabaseName)
+
 	filename := fmt.Sprintf("%s.bak", indexName)
-	return filepath.Join(config.DataDir, filename)
+	return filepath.Join(databasePath, filename)
 }
 
 // ApplyOptions applies a map of configuration options
@@ -306,6 +320,7 @@ func (config *IndexConfig) ApplyOptions(options map[string]interface{}) error {
 //   - *IndexConfig: A complete copy of the configuration
 func (config *IndexConfig) Clone() *IndexConfig {
 	return &IndexConfig{
+		DatabaseName:     config.DatabaseName,
 		BundleName:       config.BundleName,
 		FieldName:        config.FieldName,
 		IndexName:        config.IndexName,

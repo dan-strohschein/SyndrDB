@@ -379,7 +379,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	}
 	field5 := models.Field{
 		Name:  "FilePath",
-		Value: fmt.Sprintf("%s.bnd", bundles_Bundle.Name),
+		Value: fmt.Sprintf("%s_%s.bnd", "primary", bundles_Bundle.Name),
 	}
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1

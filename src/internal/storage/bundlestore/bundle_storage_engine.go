@@ -52,7 +52,7 @@ type BundleStore interface {
 	// New scalable methods for page-based bundle management
 	LoadAllBundleMetadata(dataRootDir string) (map[string]*models.Bundle, error)
 	LoadBundleMetadata(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error)
-	LoadDocumentPage(bundleID string, pageID uint32, dataRootDir string) (*models.DocumentPage, error)
+	LoadDocumentPage(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error)
 
 	// Bundle management
 	CreateBundleFile(database *models.Database, bundle *models.Bundle) error
@@ -66,8 +66,12 @@ type BundleStore interface {
 	AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) error
 
 	RemoveDocumentFromBundleFile(database *models.Database, bundle *models.Bundle, documentID string, mmapData []byte) error
-	BundleFileExists(bundleName string) bool
+	BundleFileExists(bundleName string, databaseName string) bool
 	RemoveBundleFile(database *models.Database, bundleName string) error
+
+	FlushWriteBuffers(bundleName string) error
+	FlushAllWriteBuffers() error
+	CloseWriteBuffers() error
 }
 
 func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.SugaredLogger, storageFormat string) (*BundleStorageEngine, error) {
@@ -99,6 +103,7 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 }
 
 // LoadAllBundleMetadata loads only the bundle structure/metadata without documents
+// DEPRECATED: Use LoadAllBundleDataFiles or page-based loading instead
 func (bse *BundleStorageEngine) LoadAllBundleMetadata(dataDir string) (map[string]*models.Bundle, error) {
 	bundles := make(map[string]*models.Bundle)
 
@@ -115,6 +120,8 @@ func (bse *BundleStorageEngine) LoadAllBundleMetadata(dataDir string) (map[strin
 		}
 
 		bundleName := strings.TrimSuffix(file.Name(), ".bnd")
+		bundleDatabase := strings.SplitN(bundleName, "_", 2)[0]
+		bundleName = strings.TrimPrefix(bundleName, bundleDatabase+"_") // Remove database name prefix if present
 		bundleMetadata, err := bse.loadBundleMetadataFromFile(dataDir, file.Name())
 		if err != nil {
 			bse.logger.Warnf("Failed to load bundle metadata '%s': %v", file.Name(), err)
@@ -131,7 +138,16 @@ func (bse *BundleStorageEngine) LoadAllBundleMetadata(dataDir string) (map[strin
 
 // LoadBundleMetadata loads only the bundle structure/metadata for a specific bundle
 func (bse *BundleStorageEngine) LoadBundleMetadata(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error) {
-	return bse.loadBundleMetadataFromFile(dataRootDir, fileName)
+	bundle, err := bse.loadBundleMetadataFromFile(dataRootDir, fileName)
+	if err != nil {
+		return nil, err
+	}
+
+	// CRITICAL FIX: Set the database reference that was missing!
+	// This ensures bundle.Database is not nil when the bundle is used later
+	bundle.Database = database
+
+	return bundle, nil
 }
 
 // loadBundleMetadataFromFile loads bundle metadata without documents using configured format
@@ -154,15 +170,17 @@ func (bse *BundleStorageEngine) loadBundleMetadataFromFile(dataDir, fileName str
 }
 
 // LoadDocumentPage loads a specific page of documents for a bundle
-func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
-	filePath := filepath.Join(dataRootDir, fmt.Sprintf("%s.bnd", bundleID))
+func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 
 	// Read the bundle file header to get metadata
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bundle file '%s': %w", filePath, err)
 	}
-
+	//	testRawBundleData(data)
 	// Use the configured serializer to load bundle metadata for format validation
 	// This ensures we understand the file format and can process it correctly
 	_, err = bse.serializer.DeserializeBundleMetadata(data)
@@ -177,14 +195,14 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32,
 	endIndex := startIndex + pageSize
 
 	// Load only the documents needed for this page using range-based loading
-	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleID, startIndex, endIndex)
+	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load document range for bundle %s page %d: %w", bundleID, pageID, err)
+		return nil, fmt.Errorf("failed to load document range for bundle %s page %d: %w", bundleName, pageID, err)
 	}
 
 	page := &models.DocumentPage{
 		PageID:    pageID,
-		BundleID:  bundleID,
+		BundleID:  bundleName,
 		Documents: pageDocuments,
 		LoadedAt:  time.Now(),
 		IsDirty:   false,
@@ -202,10 +220,15 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32,
 		page.NextPageID = &nextPageID
 	}
 
-	bse.logger.Debugf("Efficiently loaded page %d for bundle %s with %d documents (total docs: %d, total pages: %d)",
-		pageID, bundleID, len(pageDocuments), totalDocs, totalPages)
+	bse.logger.Infof("Efficiently loaded page %d for bundle %s with %d documents (total docs: %d, total pages: %d)",
+		pageID, bundleName, len(pageDocuments), totalDocs, totalPages)
 
 	return page, nil
+}
+
+func testRawBundleData(data []byte) {
+	// convert the []bytes to ascii and print it to the screen
+	fmt.Println(string(data))
 }
 
 // Helper functions for parsing bundle metadata
@@ -226,6 +249,7 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleID string, pageID uint32,
 // }
 
 // LoadAllBundleDataFiles loads all bundle data files from the given directory
+// DEPRECATED: Use page-based loading or LoadAllBundleMetadata instead
 func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[string]*models.Bundle, error) {
 	bundles := make(map[string]*models.Bundle)
 	// Implementation for loading all bundle data files
@@ -233,9 +257,12 @@ func (bse *BundleStorageEngine) LoadAllBundleDataFiles(dataDir string) (map[stri
 	return bundles, nil
 }
 
-// TODO This is the old, pre-buffer manager implementation.
+// TODO DEPRECATED This is the old, pre-buffer manager implementation.
 func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, dataRootDir string, fileName string) (*models.Bundle, error) {
-	filePath := filepath.Join(dataRootDir, fileName)
+
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	filePath := filepath.Join(databasePath, fileName)
 	// Check if the file exists
 	if !helpers.FileExists(filePath, *b.logger) {
 		return nil, fmt.Errorf("bundle file %s does not exist", fileName)
@@ -251,7 +278,7 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 	}
 
 	// Load documents using the new append-only method
-	documents, err := b.ReadAppendedDocuments(bundleName)
+	documents, err := b.ReadAppendedDocuments(bundleName, database.Name)
 	if err != nil {
 		return nil, fmt.Errorf("error loading documents from bundle file %s: %w", fileName, err)
 	}
@@ -267,8 +294,10 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 
 // TODO this is the old, pre-buffer manager implementation.
 func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bundleName string) (*[]byte, *models.Bundle, error) {
-	args := settings.GetSettings()
-	bundleFile, err := helpers.OpenDataFile(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
+	//args := settings.GetSettings()
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	bundleFile, err := helpers.OpenDataFile(databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, bundleName))
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening bundle file %s: %w", bundleName, err)
 	}
@@ -475,18 +504,24 @@ func (bs *BundleStorageEngine) processDocumentPage(pageData []byte, docs map[str
 	return docsInPage, nil
 }
 
-func (b *BundleStorageEngine) BundleFileExists(bundleName string) bool {
+func (b *BundleStorageEngine) BundleFileExists(bundleName string, databaseName string) bool {
 	// Check if the bundle file exists in the data directory
-	args := settings.GetSettings()
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 	b.logger.Infof("Checking if bundle file exists: %s", filePath)
 	return helpers.FileExists(filePath, *b.logger)
 }
 
 func (b *BundleStorageEngine) CreateBundleFile(database *models.Database, bundle *models.Bundle) error {
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
 	// Create a new data file
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, bundle.Name))
 
 	// Check if the file already exists
 	if helpers.FileExists(filePath, *b.logger) {
@@ -521,9 +556,12 @@ func (b *BundleStorageEngine) CreateBundleFile(database *models.Database, bundle
 }
 
 func (b *BundleStorageEngine) UpdateBundleFile(database *models.Database, bundle *models.Bundle) error {
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
 	// Create a new data file
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, bundle.Name))
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *b.logger) {
@@ -555,13 +593,14 @@ func (b *BundleStorageEngine) UpdateBundleFile(database *models.Database, bundle
 	return nil
 }
 
+// DEPRECATED: Use UpdateDocumentInBundleFile with append-only logic instead
 func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *models.Database,
 	bundle *models.Bundle,
 	documentID string,
 	updatedDocument map[string]interface{},
 	mmapData []byte) error {
 
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
 	convertedBundle := BundleToMap(bundle)
 
 	// Locate the document in the bundle
@@ -613,7 +652,9 @@ func (b *BundleStorageEngine) UpdateDocumentDataInBundleFile(database *models.Da
 	}
 
 	// Update the data file
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("error opening bundle file for update: %w", err)
@@ -654,11 +695,13 @@ func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *models.Bundle, 
 		return fmt.Errorf("bundle has no associated database directory")
 	}
 
-	filePath := filepath.Join(dataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 
 	// Check if the file exists
 	if !helpers.FileExists(filePath, *b.logger) {
-		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s.bnd", bundle.Name))
+		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 	}
 
 	// Update the document in the bundle in memory
@@ -697,7 +740,7 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 	}
 
 	args := settings.GetSettings()
-	dataDir := args.DataDir
+	//dataDir := args.DataDir
 
 	if bundle.Documents == nil {
 		return fmt.Errorf("bundle %s has no documents. Cannot delete from nothing.", bundle.Name)
@@ -713,11 +756,13 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		}
 	}
 
-	filePath := filepath.Join(dataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 
 	// Check if the file exists
 	if !helpers.FileExists(filePath, *b.logger) {
-		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s.bnd", bundle.Name))
+		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 	}
 
 	// Performance optimization: Use append-only tombstone approach instead of full bundle rewrite
@@ -779,9 +824,12 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 
 // this version of the functino uses the file manager to add a document to a bundle file
 // AddDocumentToBundleFile2 adds a document to a bundle file using the file manager
-func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bundleID string, document *models.Document) error {
+func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bundleName string, document *models.Document) error {
 	// Get file ID for this bundle
-	fileID, err := bs.fileManager.GetFileID(bundleID + ".bnd")
+
+	//databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	fileID, err := bs.fileManager.GetFileID(fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundleName))
 	if err != nil {
 		return err
 	}
@@ -810,6 +858,7 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 	if b.logger != nil && settings.GetSettings().Debug {
 		b.logger.Infow("Appending document to bundle file",
 			"bundle", bundle.Name,
+			"for database", bundle.Database.Name,
 			"documentID", document.DocumentID)
 	}
 
@@ -825,18 +874,20 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 	}
 
 	// PERFORMANCE FIX: Cache file path calculation
-	args := settings.GetSettings()
-	dataDir := args.DataDir
-	if dataDir == "" {
-		return fmt.Errorf("bundle has no associated database directory")
-	}
+	// args := settings.GetSettings()
+	// dataDir := args.DataDir
+	// if dataDir == "" {
+	// 	return fmt.Errorf("bundle has no associated database directory")
+	// }
 
-	filePath := filepath.Join(dataDir, fmt.Sprintf("%s.bnd", bundle.Name))
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 
 	// PERFORMANCE FIX: Skip file existence check for known bundles
 	// Trust that bundle files exist if bundle object is valid
 	// if !helpers.FileExists(filePath, *b.logger) {
-	//     return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s.bnd", bundle.Name))
+	//     return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 	// }
 
 	// Add the document to the bundle in memory (for queries)
@@ -934,6 +985,38 @@ func (b *BundleStorageEngine) FlushWriteBuffers(bundleName string) error {
 	return nil
 }
 
+// FlushAllWriteBuffers flushes all write buffers for all bundles
+func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
+	b.bufferMutex.RLock()
+	defer b.bufferMutex.RUnlock()
+
+	var errors []string
+	flushedCount := 0
+
+	for bundleName, buffer := range b.writeBuffers {
+		if err := buffer.Flush(); err != nil {
+			errorMsg := fmt.Sprintf("failed to flush buffer for bundle '%s': %v", bundleName, err)
+			b.logger.Warnf(errorMsg)
+			errors = append(errors, errorMsg)
+		} else {
+			flushedCount++
+			if b.logger != nil && settings.GetSettings().Debug {
+				b.logger.Debugf("Successfully flushed write buffer for bundle '%s'", bundleName)
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to flush %d of %d write buffers: %v", len(errors), len(b.writeBuffers), errors)
+	}
+
+	if b.logger != nil && settings.GetSettings().Debug {
+		b.logger.Infof("Successfully flushed all %d write buffers", flushedCount)
+	}
+
+	return nil
+}
+
 // CloseWriteBuffers closes and flushes all write buffers
 func (b *BundleStorageEngine) CloseWriteBuffers() error {
 	b.bufferMutex.Lock()
@@ -952,9 +1035,12 @@ func (b *BundleStorageEngine) CloseWriteBuffers() error {
 
 // readDocumentRange efficiently reads a specific range of documents for pagination
 // This implements true virtual pagination by streaming through the file and stopping at boundaries
-func (b *BundleStorageEngine) readDocumentRange(bundleName string, startIndex, endIndex uint32) (map[string]models.Document, uint32, error) {
-	args := settings.GetSettings()
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
+func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName string, startIndex, endIndex uint32) (map[string]models.Document, uint32, error) {
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -985,9 +1071,12 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, startIndex, e
 
 // ReadAppendedDocuments reads documents that were appended to the bundle file
 // This method can read both the original BSON bundle format and appended documents
-func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName string) (map[string]models.Document, error) {
-	args := settings.GetSettings()
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleName))
+func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName, databaseName string) (map[string]models.Document, error) {
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -1339,7 +1428,7 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *models.Data
 	mmapData []byte) error {
 
 	convertedBundle := BundleToMap(bundle)
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
 	// Locate the document in the bundle
 	documents, ok := convertedBundle["Documents"].([]interface{})
 	if !ok {
@@ -1392,7 +1481,9 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *models.Data
 		return fmt.Errorf("error unmapping memory: %w", err)
 	}
 
-	filePath := filepath.Join(args.DataDir, bundle.BundleID)
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	filePath := filepath.Join(databasePath, bundle.BundleID)
 	file, err := os.OpenFile(filePath, os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("error opening bundle file for truncation: %w", err)
@@ -1420,6 +1511,7 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *models.Data
 }
 
 // WriteBundleToFile encodes a bundle and writes it to a file
+// DEPRECATED: Use AppendDocumentToBundleFile for better performance
 func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath string) error {
 	// 1. Convert the bundle to a map for BSON encoding
 	convertedBundle := BundleToMap(bundle)
@@ -1487,8 +1579,11 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundleName string) error {
 
 	// Create a new data file
-	args := settings.GetSettings()
-	filePath := filepath.Join(args.DataDir, bundleName)
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	filePath := filepath.Join(databasePath, bundleName)
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *b.logger) {

@@ -15,7 +15,6 @@ import (
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
-	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
@@ -942,14 +941,15 @@ func CreateBTreeIndex(command string, logger *zap.SugaredLogger, serviceManager 
 }
 
 func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, result string) (*CommandResponse, error) {
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
 	bundleCmd, err := bndle.ParseCreateBundleCommand(command, logger)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing bundle command: %v", err)
 	}
 
 	//Check if the bundle already exists
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.bnd", bundleCmd.BundleName))
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, bundleCmd.BundleName))
 	existingBundle := helpers.FileExists(filePath, *logger)
 	if existingBundle {
 		return nil, fmt.Errorf("bundle '%s' already exists", bundleCmd.BundleName)
@@ -2205,7 +2205,7 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve bundles for database '%s' from catalog: %w", targetDatabaseName, err)
 	}
-	logger.Debugf("DEBUG DEBUG DEBUG Retrieved %d bundles from catalog for database '%s'", len(*allBundles), targetDatabaseName)
+	//logger.Debugf("DEBUG DEBUG DEBUG Retrieved %d bundles from catalog for database '%s'", len(*allBundles), targetDatabaseName)
 	// Filter bundles for the target database
 	// var bundleInfos []models.Document
 	// for _, bundleInfo := range *allBundles {

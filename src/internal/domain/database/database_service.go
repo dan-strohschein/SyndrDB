@@ -277,7 +277,7 @@ func (s *DatabaseService) AddBundleToDatabase(dbName string, bundle models.Bundl
 	}
 	//logger.Infof("Decoded bundle data from file %v", bundle)
 	// and then the bundle file name needs to be added to the database file
-	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s.bnd", bundle.Name))
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s_%s.bnd", db.Name, bundle.Name))
 
 	// Write the updated database file
 	err = s.Store.UpdateDatabaseDataFile(db)
@@ -303,6 +303,7 @@ func (s *DatabaseService) GetDatabaseBundles(databaseName string) ([]string, err
 	for _, bundleFileName := range db.BundleFiles {
 		// Remove .bnd extension to get bundle name
 		bundleName := strings.TrimSuffix(bundleFileName, ".bnd")
+		bundleName = strings.TrimPrefix(bundleName, db.Name+"_") // Remove database name prefix if present
 		bundleNames = append(bundleNames, bundleName)
 	}
 

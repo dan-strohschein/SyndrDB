@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/index/hashindexV2"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -561,7 +562,7 @@ func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value i
 // This function follows the Single Responsibility Principle by handling only index loading
 // Following SyndrDB comprehensive error handling, it validates and loads indexes as needed
 func EnsureHashIndexLoaded(bundle *models.Bundle, idxRef *models.IndexReference, logger *zap.SugaredLogger) (*hashindexV2.HashIndex, error) {
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
 	// Check if IndexInstance is already properly loaded and typed
 	if idxRef.IndexInstance != nil {
 		if hashIndex, ok := idxRef.IndexInstance.(*hashindexV2.HashIndex); ok {
@@ -577,9 +578,9 @@ func EnsureHashIndexLoaded(bundle *models.Bundle, idxRef *models.IndexReference,
 
 	// IndexInstance is nil or wrong type - need to load from disk
 	// Following SyndrDB project structure, construct the expected file path
-
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	indexFileName := fmt.Sprintf("%s_%s.hidx", bundle.Name, idxRef.HashIndexField.FieldName)
-	indexFilePath := filepath.Join(args.DataDir, indexFileName)
+	indexFilePath := filepath.Join(databasePath, indexFileName)
 
 	// Attempt to open the hash index from disk
 	// Following SyndrDB modular development, use the proper constructor

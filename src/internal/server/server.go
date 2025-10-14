@@ -930,7 +930,7 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 
 	// Start timing for execution measurement
 	startTime := time.Now()
-	
+
 	// TODO pull this from the original architecture
 	result, err := CommandDirector(conn.Database, *serviceManager, command, s.logger, startTime)
 

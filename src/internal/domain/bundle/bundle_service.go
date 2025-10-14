@@ -18,6 +18,8 @@ import (
 
 	//hashindex "syndrdb/src/hash_index"
 
+	"syndrdb/src/pkg/common/helpers"
+
 	"go.uber.org/zap"
 )
 
@@ -575,7 +577,9 @@ func (s *BundleService) FlushAllBuffers() error {
 
 	// 3. Sync any file system buffers
 	s.logger.Debugf("FLUSH: Syncing file system buffers")
+
 	// Note: Individual stores should handle their own sync operations
+	s.store.FlushAllWriteBuffers()
 
 	// 4. Log completion
 	if len(errors) > 0 {
@@ -798,7 +802,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	}
 	//logger.Infof("Decoded bundle data from file %v", bundle)
 	// and then the bundle file name needs to be added to the database file
-	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s.bnd", bundle.Name))
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s_%s.bnd", db.Name, bundle.Name))
 
 	// Write the updated database file
 	err = databaseService.Store.UpdateDatabaseDataFile(db)
@@ -861,7 +865,7 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 	}
 	//logger.Infof("Decoded bundle data from file %v", bundle)
 	// and then the bundle file name needs to be added to the database file
-	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s.bnd", bundle.Name))
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s_%s.bnd", db.Name, bundle.Name))
 
 	// Write the updated database file
 	err = databaseService.Store.UpdateDatabaseDataFile(db)
@@ -885,7 +889,7 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 // GetBundleMetadata retrieves only the bundle structure/metadata without documents
 func (s *BundleService) GetBundleMetadata(database *models.Database, name string) (*models.Bundle, error) {
 	args := settings.GetSettings()
-	fileExists := s.store.BundleFileExists(name)
+	fileExists := s.store.BundleFileExists(name, database.Name)
 
 	// Check if the bundle file exists in the store
 	if !fileExists {
@@ -900,7 +904,9 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 				s.logger.Infof("Bundle metadata '%s' not found in memory, loading from store", name)
 			}
 
-			bundle, err := s.store.LoadBundleMetadata(database, s.settings.DataDir, fmt.Sprintf("%s.bnd", name))
+			databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+			bundle, err := s.store.LoadBundleMetadata(database, databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, name))
 			if err != nil {
 				return nil, fmt.Errorf("failed to load bundle metadata '%s': %w", name, err)
 			}
@@ -919,7 +925,7 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 			s.bundleMetadata[name] = bundle
 			return bundle, nil
 		} else {
-			return nil, fmt.Errorf("bundle file exists in memory but not on disk. '%s'.bnd not found", name)
+			return nil, fmt.Errorf("bundle file exists in memory but not on disk. '%s_%s.bnd' not found", database.Name, name)
 		}
 	}
 
@@ -936,8 +942,8 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 }
 
 // GetDocumentPage loads a specific page of documents for a bundle
-func (s *BundleService) GetDocumentPage(bundleID string, pageID uint32) (*models.DocumentPage, error) {
-	pageKey := fmt.Sprintf("%s:%d", bundleID, pageID)
+func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, pageID uint32) (*models.DocumentPage, error) {
+	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 
 	// Check if page is already loaded in memory
 	if page, exists := s.documentPages[pageKey]; exists {
@@ -947,7 +953,10 @@ func (s *BundleService) GetDocumentPage(bundleID string, pageID uint32) (*models
 
 	// Load the page from disk
 	s.logger.Debugf("Loading document page %s from disk", pageKey)
-	page, err := s.store.LoadDocumentPage(bundleID, pageID, s.settings.DataDir)
+
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+
+	page, err := s.store.LoadDocumentPage(bundleName, databaseName, pageID, databasePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load document page %s: %w", pageKey, err)
 	}
@@ -963,15 +972,15 @@ func (s *BundleService) GetDocumentPage(bundleID string, pageID uint32) (*models
 }
 
 // GetDocument retrieves a specific document by ID (loads the page containing it)
-func (s *BundleService) GetDocument(bundleID, documentID string) (*models.Document, error) {
+func (s *BundleService) GetDocument(bundleName, databaseName, documentID string) (*models.Document, error) {
 	// First, find which page contains this document using an index
-	pageID, err := s.findDocumentPage(bundleID, documentID)
+	pageID, err := s.findDocumentPage(bundleName, documentID)
 	if err != nil {
-		return nil, fmt.Errorf("could not find document %s in bundle %s: %w", documentID, bundleID, err)
+		return nil, fmt.Errorf("could not find document %s in bundle %s: %w", documentID, bundleName, err)
 	}
 
 	// Load the page containing the document
-	page, err := s.GetDocumentPage(bundleID, pageID)
+	page, err := s.GetDocumentPage(bundleName, databaseName, pageID)
 	if err != nil {
 		return nil, err
 	}
@@ -981,7 +990,7 @@ func (s *BundleService) GetDocument(bundleID, documentID string) (*models.Docume
 		return &doc, nil
 	}
 
-	return nil, fmt.Errorf("document %s not found in page %d of bundle %s", documentID, pageID, bundleID)
+	return nil, fmt.Errorf("document %s not found in page %d of bundle %s", documentID, pageID, bundleName)
 }
 
 // evictOldestPage removes the least recently used page from memory
@@ -1041,9 +1050,9 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	if !exists {
 		return nil, fmt.Errorf("bundle metadata not found for %s", bundleName)
 	}
-
-	s.logger.Infof("DEBUG: getAllDocumentsForIndexing ENTRY - bundle '%s'", bundle.Name)
-	s.logger.Infof("DEBUG: Bundle PageCount: %d, TotalDocuments: %d", bundle.PageCount, bundle.TotalDocuments)
+	s.logger.Infof("getAllDocumentsForIndexing called for bundle '%s'", bundle.Name)
+	//s.logger.Infof("DEBUG: getAllDocumentsForIndexing ENTRY - bundle '%s'", bundle.Name)
+	//s.logger.Infof("DEBUG: Bundle PageCount: %d, TotalDocuments: %d", bundle.PageCount, bundle.TotalDocuments)
 
 	// CRITICAL FIX: Force flush pending metadata updates to ensure PageCount is current
 	// This is necessary because document additions schedule deferred metadata updates
@@ -1053,15 +1062,18 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		s.flushMetadataUpdates()
 	}
 
-	s.logger.Debugf("Bundle %s has PageCount: %d", bundleName, bundle.PageCount)
+	s.logger.Infof("Bundle %s has PageCount: %d", bundleName, bundle.PageCount)
 
 	var allDocuments []*models.Document
 
 	// Special handling: If PageCount is 0, still check page 0 for documents
 	// This handles cases where metadata might be out of sync
 	if bundle.PageCount == 0 {
-		settings := settings.GetSettings()
-		page, err := s.store.LoadDocumentPage(bundle.Name, 0, settings.DataDir)
+
+		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+		s.logger.Infof("DEBUG DEBUG DEBUG ::(P0) Loading Database name %s,page %d for bundle '%s'", bundle.Database.Name, 0, bundle.Name)
+		//settings := settings.GetSettings()
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, 0, databasePath)
 		if err != nil {
 			s.logger.Errorf("DEBUG: Failed to load page 0 for bundle '%s': %v", bundle.Name, err)
 			return []*models.Document{}, nil
@@ -1087,8 +1099,11 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		//s.logger.Infof("DEBUG: Loading page %d for bundle '%s'", pageID, bundle.Name)
 
-		settings := settings.GetSettings()
-		page, err := s.store.LoadDocumentPage(bundle.Name, pageID, settings.DataDir)
+		//settings := settings.GetSettings()
+		s.logger.Infof("DEBUG DEBUG DEBUG :: Loading Database name %s,page %d for bundle '%s'", bundle.Database.Name, pageID, bundle.Name)
+		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
 		if err != nil {
 			s.logger.Errorf("DEBUG: Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
 			continue
@@ -1103,7 +1118,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		}
 	}
 
-	s.logger.Infof("DEBUG: getAllDocumentsForIndexing - loaded %d total documents from %d pages", len(allDocuments), bundle.PageCount)
+	s.logger.Infof("DEBUG: FINAL RETURN getAllDocumentsForIndexing - loaded %d total documents from %d pages", len(allDocuments), bundle.PageCount)
 	return allDocuments, nil
 }
 
@@ -1433,17 +1448,21 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 
 func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name string) error {
 	args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
 	// Create configuration for the new hash index
 	config := hashindex.IndexConfig{
-		BundleName:  bundle.Name,
-		FieldName:   name,
-		IsUnique:    true,
-		DataDir:     args.DataDir,
-		DebugMode:   args.Debug,
-		InitialSize: 16,   // Start with 16 buckets
-		PageSize:    8192, // 8KB pages (PostgreSQL-style)
-		LoadFactor:  0.75, // Split when 75% full
-		CacheSize:   100,  // Cache 100 pages
+		DatabaseName: bundle.Database.Name,
+		BundleName:   bundle.Name,
+		FieldName:    name,
+		IsUnique:     true,
+		DataDir:      databasePath,
+		DebugMode:    args.Debug,
+		InitialSize:  16,   // Start with 16 buckets
+		PageSize:     8192, // 8KB pages (PostgreSQL-style)
+		LoadFactor:   0.75, // Split when 75% full
+		CacheSize:    100,  // Cache 100 pages
 	}
 
 	// Create the hash index using the new V2 implementation
@@ -1767,7 +1786,8 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 
 	// Load the hash index from disk using the index name and bundle information
 	args := settings.GetSettings()
-	indexFilePath := fmt.Sprintf("%s/%s_%s.hidx", args.DataDir, bundle.Name, indexRef.HashIndexField.FieldName)
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	indexFilePath := fmt.Sprintf("%s/%s_%s.hidx", databasePath, bundle.Name, indexRef.HashIndexField.FieldName)
 
 	hashIndex, err := hashindex.OpenHashIndex(indexFilePath, args.Debug, s.logger)
 	if err != nil {
@@ -2198,7 +2218,7 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 
 				if len(results) > 0 {
 					// Found in index, now get the actual document using page-based loading
-					return s.GetDocument(bundle.Name, documentID)
+					return s.GetDocument(bundle.Name, bundle.Database.Name, documentID)
 				} else {
 					// Not found in index
 					return nil, fmt.Errorf("document with ID '%s' not found", documentID)
@@ -2208,7 +2228,7 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 	}
 
 	// Fall back to page-based document lookup if hash index is not available or failed
-	return s.GetDocument(bundle.Name, documentID)
+	return s.GetDocument(bundle.Name, bundle.Database.Name, documentID)
 }
 
 // GetDocumentsByFilter retrieves documents from a bundle based on filter criteria
@@ -2229,7 +2249,7 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 	}
 
 	// Force flush any pending metadata updates to ensure accurate PageCount
-	s.logger.Infof("DEBUG: GetDocumentsByFilter - flushing metadata updates")
+	//s.logger.Infof("DEBUG: GetDocumentsByFilter - flushing metadata updates")
 	s.flushMetadataUpdates()
 
 	// Use page-based document loading instead of relying on bundle.Documents
@@ -2254,9 +2274,9 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 
 	// If no WHERE clause, return all documents
 	if whereParts == "" {
-		s.logger.Infof("DEBUG: GetDocumentsByFilter - empty filter, calling getAllDocumentsForIndexing")
+		//s.logger.Infof("DEBUG: GetDocumentsByFilter - empty filter, calling getAllDocumentsForIndexing")
 		result, err := s.getAllDocumentsForIndexing(bundle.Name)
-		s.logger.Infof("DEBUG: GetDocumentsByFilter - getAllDocumentsForIndexing returned %d documents, error: %v", len(result), err)
+		//s.logger.Infof("DEBUG: GetDocumentsByFilter - getAllDocumentsForIndexing returned %d documents, error: %v", len(result), err)
 		return result, err
 	}
 
@@ -2265,9 +2285,9 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 
 	// CRITICAL: Use index-optimized filtering following SyndrDB performance optimization
 	// This replaces the direct queryparser.FilterDocuments call with index-aware filtering
-	s.logger.Infof("DEBUG: GetDocumentsByFilter - non-empty filter, calling filterDocumentsWithIndexOptimization")
+	//s.logger.Infof("DEBUG: GetDocumentsByFilter - non-empty filter, calling filterDocumentsWithIndexOptimization")
 	result, err := s.filterDocumentsWithIndexOptimization(bundle, nil, whereParts)
-	s.logger.Infof("DEBUG: GetDocumentsByFilter - filterDocumentsWithIndexOptimization returned %d documents, error: %v", len(result), err)
+	//s.logger.Infof("DEBUG: GetDocumentsByFilter - filterDocumentsWithIndexOptimization returned %d documents, error: %v", len(result), err)
 	return result, err
 }
 
@@ -2384,7 +2404,7 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 					// Convert document IDs to actual documents using page-based loading
 					result := make([]*models.Document, 0, len(docIDs))
 					for _, docID := range docIDs {
-						doc, err := s.GetDocument(bundle.Name, docID)
+						doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
 						if err != nil {
 							s.logger.Warnf("Document ID '%s' found in hash index but could not be loaded: %v", docID, err)
 							continue
@@ -2504,7 +2524,7 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 
 					result := make([]*models.Document, 0, len(docIDs))
 					for _, docID := range docIDs {
-						doc, err := s.GetDocument(bundle.Name, docID)
+						doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
 						if err != nil {
 							s.logger.Warnf("Document ID '%s' found in BTree index but could not be loaded: %v", docID, err)
 							continue
@@ -2752,15 +2772,17 @@ func (s *BundleService) registerBundleInPrimary(bundle *models.Bundle) error {
 
 // discoverBundleIndexes scans for existing index files and populates the bundle's Indexes field
 func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
 
 	// Initialize indexes map if nil
 	if bundle.Indexes == nil {
 		bundle.Indexes = make(map[string]models.IndexReference)
 	}
 
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
 	// Look for hash index files: BundleName_FieldName.hidx
-	hashPattern := fmt.Sprintf("%s/%s_*.hidx", args.DataDir, bundle.Name)
+	hashPattern := fmt.Sprintf("%s/%s_*.hidx", databasePath, bundle.Name)
 	hashFiles, err := filepath.Glob(hashPattern)
 	if err != nil {
 		return fmt.Errorf("failed to scan for hash index files: %w", err)

@@ -58,6 +58,10 @@ func NewDatabaseStore(dataDir string, logger *zap.SugaredLogger) (*DatabaseStora
 
 // LoadAllDatabaseDataFiles scans the data directory and loads all database metadata files
 func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string, logger *zap.SugaredLogger) (map[string]*models.Database, error) {
+
+	// TODO this is not an efficient way to do this. Rather, databases should be loaded on demand,
+	// ideally when the session database context is set. We will update this later on.
+
 	// Create map to hold databases
 	databases := make(map[string]*models.Database)
 
@@ -66,40 +70,65 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string, log
 		return nil, fmt.Errorf("failed to create data directory %s: %w", dataRootDir, err)
 	}
 
-	// Get all files in the directory
-	files, err := os.ReadDir(dataRootDir)
+	// Should we assume that all subfolders are database folders? Yes, for now at least
+	// Loop through all of the subfolders in the data directory
+	// and look for database metadata files
+	// Each database should have its own folder named after the database
+	// e.g. data/<database_name>/
+	// and inside that folder should be the database metadata file
+	// e.g. data/<database_name>/<database_name>.db
+
+	// Get all directoryEntries/folders in the directory
+	directoryEntries, err := os.ReadDir(dataRootDir)
 	if err != nil {
 		return nil, fmt.Errorf("error reading data directory %s: %w", dataRootDir, err)
 	}
 
 	// Process each file that could be a database metadata file
-	for _, file := range files {
-		logger.Infof("Processing file: %s", file.Name())
+	for _, dirEntry := range directoryEntries {
+		logger.Infof("Processing file: %s", dirEntry.Name())
 		// Skip directories and hidden files
-		if file.IsDir() || strings.HasPrefix(file.Name(), ".") {
+
+		var DBFolder string = dataRootDir
+		if dirEntry.IsDir() {
+			DBFolder = filepath.Join(dataRootDir, dirEntry.Name())
+		}
+
+		if strings.HasPrefix(dirEntry.Name(), ".") {
 			continue
 		}
 
-		// Check file extension if you have a specific extension for database files
-		if !strings.HasSuffix(file.Name(), ".db") {
-			continue
-		}
-		logger.Infof("Trying to load database file: %s", file.Name())
-		// Load the database
-		db, err := d.LoadDatabaseDataFile(dataRootDir, file.Name())
+		files, err := os.ReadDir(DBFolder)
 		if err != nil {
-			log.Printf("Warning: Failed to load database from %s: %v", file.Name(), err)
+			log.Printf("Warning: Failed to read directory %s: %v", DBFolder, err)
 			continue
 		}
 
-		// Add to map using the database ID as key
-		databases[db.Name] = db
+		for _, file := range files {
+			logger.Infof("Found file in directory: %s", file.Name())
 
-		// Also create a name-based lookup if needed
-		// This is useful for case-insensitive lookups later
-		// databases[strings.ToLower(db.Name)] = db
+			if !strings.HasSuffix(file.Name(), ".db") || strings.HasPrefix(file.Name(), ".") {
+				// This is not a database file
+				continue
+			}
+			dbFileName := fmt.Sprintf("%s.db", dirEntry.Name())
+			logger.Infof("Trying to load database file: %s", dbFileName)
+			// Load the database
+			db, err := d.LoadDatabaseDataFile(DBFolder, dbFileName)
+			if err != nil {
+				log.Printf("Warning: Failed to load database from %s: %v", dbFileName, err)
+				continue
+			}
 
-		log.Printf("Loaded database: %s (ID: %s)", db.Name, db.DatabaseID)
+			// Add to map using the database ID as key
+			databases[db.Name] = db
+
+			// Also create a name-based lookup if needed
+			// This is useful for case-insensitive lookups later
+			// databases[strings.ToLower(db.Name)] = db
+
+			log.Printf("Loaded database: %s (ID: %s)", db.Name, db.DatabaseID)
+		}
 	}
 
 	return databases, nil
@@ -163,8 +192,11 @@ func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName strin
 
 func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *models.Database, databaseName string) (*[]byte, *models.Database, error) {
 
-	args := settings.GetSettings()
-	dbFile, err := helpers.OpenDataFile(args.DataDir, databaseName)
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	dbFile, err := helpers.OpenDataFile(databasePath, databaseName)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error opening database file %s: %w", databaseName, err)
 	}
@@ -202,9 +234,16 @@ func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *models.Database
 
 func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *models.Database) error {
 
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	// Ensure the database directory exists
+	if err := os.MkdirAll(databasePath, 0755); err != nil {
+		return fmt.Errorf("failed to create database directory %s: %w", databasePath, err)
+	}
+
 	// Create a new data file
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.db", database.Name))
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s.db", database.Name))
 
 	// Check if the file already exists
 	if helpers.FileExists(filePath, *d.logger) {
@@ -246,8 +285,11 @@ func (d *DatabaseStorageEngine) CreateDatabaseDataFile(database *models.Database
 func (d *DatabaseStorageEngine) UpdateDatabaseDataFile(database *models.Database) error {
 
 	// Create a new data file
-	args := settings.GetSettings()
-	filePath := filepath.Join(args.DataDir, fmt.Sprintf("%s.db", database.Name))
+	//args := settings.GetSettings()
+
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s.db", database.Name))
 
 	// Check if the file already exists
 	if !helpers.FileExists(filePath, *d.logger) {

@@ -167,7 +167,8 @@ func StandupTestDatabaseService() (*database.DatabaseService, *databasestore.Dat
 		testDB := factory.NewDatabase("testdb", "testing db")
 
 		// Check if the database file already exists before creating it
-		dbFilePath := filepath.Join(testDB.DataDirectory, fmt.Sprintf("%s.db", testDB.Name))
+		databasePath := fmt.Sprintf("%s/%s", args.DataDir, testDB.Name)
+		dbFilePath := filepath.Join(databasePath, fmt.Sprintf("%s.db", testDB.Name))
 		sugaredLogger := ColorLogger.Sugar()
 		if !helpers.FileExists(dbFilePath, *sugaredLogger) {
 			// Save testdb to disk only if file doesn't exist
