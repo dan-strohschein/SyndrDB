@@ -123,11 +123,11 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 	var btreeIndex *btreeindexV2.BTreeIndex
 	if indexRef.IndexInstance == nil {
 		node.Logger.Debugf("B-tree index instance is nil, loading from disk using bundle service")
-		if node.BundleService == nil {
+		if node.BundleServiceInt == nil {
 			return nil, fmt.Errorf("bundle service is required for lazy loading B-tree indexes")
 		}
 
-		loadedIndex, err := node.BundleService.GetOrLoadBTreeIndex(node.Bundle, node.IndexName, indexRef)
+		loadedIndex, err := node.BundleServiceInt.GetOrLoadBTreeIndex(node.Bundle, node.IndexName, indexRef)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load B-tree index %s: %w", node.IndexName, err)
 		}
@@ -224,16 +224,81 @@ func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document,
 }
 
 func (node *FullScanNode) Execute() (map[string]*models.Document, error) {
-	node.Logger.Infof("Executing full bundle scan on %s", node.Bundle.Name)
+	node.Logger.Infof("Executing optimized full bundle scan on %s using document scanner", node.Bundle.Name)
 
-	// Return all documents from the bundle
 	results := make(map[string]*models.Document)
-	for docID, doc := range *node.Bundle.Documents {
-		docCopy := doc
-		results[docID] = &docCopy
+
+	// Check if documents are already loaded in memory (fast path)
+	// TODO This is DEPRECRATED - prefer using DocumentScanner for bundles now
+	if node.Bundle.Documents != nil {
+		node.Logger.Debugf("Using in-memory documents for bundle %s", node.Bundle.Name)
+		for docID, doc := range *node.Bundle.Documents {
+			docCopy := doc
+			results[docID] = &docCopy
+		}
+		return results, nil
 	}
 
+	// Use document scanner for optimized scanning with batching and caching
+	if node.DocumentScanner == nil {
+		return nil, fmt.Errorf("document scanner is required for paginated document scanning")
+	}
+
+	// Use predicate-based scan to get all documents
+	// This leverages the scanner's batching, caching, and memory management
+	scanResult, err := node.DocumentScanner.ScanWithPredicate(func(doc *models.Document) bool {
+		return true // Accept all documents for full scan
+	})
+	if err != nil {
+		return nil, fmt.Errorf("document scanner failed: %w", err)
+	}
+
+	// Convert scanner result to the expected map format
+	for i, doc := range scanResult.Documents {
+		docID := scanResult.DocumentIDs[i]
+		results[docID] = doc
+	}
+
+	node.Logger.Infof("Document scanner completed full scan: %d documents in %v (batches: %d, cache hits: %d)",
+		len(results), scanResult.ScanLatency, scanResult.BatchesUsed, scanResult.CacheHits)
+
 	return results, nil
+}
+
+// ExecuteStreaming processes documents in batches using the document scanner
+// This approach is memory-efficient for very large bundles
+func (node *FullScanNode) ExecuteStreaming(callback func(map[string]*models.Document) error) error {
+	node.Logger.Infof("Executing streaming scan on bundle %s", node.Bundle.Name)
+
+	if node.DocumentScanner == nil {
+		return fmt.Errorf("document scanner is required for streaming scan")
+	}
+
+	// Use the scanner's built-in batching for memory-efficient processing
+	scanResult, err := node.DocumentScanner.ScanWithPredicate(func(doc *models.Document) bool {
+		return true // Accept all documents
+	})
+	if err != nil {
+		return fmt.Errorf("document scanner streaming failed: %w", err)
+	}
+
+	// Convert scanner result to map format and process
+	documents := make(map[string]*models.Document)
+	for i, doc := range scanResult.Documents {
+		docID := scanResult.DocumentIDs[i]
+		documents[docID] = doc
+	}
+
+	// Process the complete result set
+	// Note: The scanner already handles batching internally for memory efficiency
+	if err := callback(documents); err != nil {
+		return err
+	}
+
+	node.Logger.Infof("Streaming scan completed: %d documents processed in %d batches",
+		len(documents), scanResult.BatchesUsed)
+
+	return nil
 }
 
 func (node *FilterNode) Execute() (map[string]*models.Document, error) {

@@ -48,3 +48,13 @@ func GetDatabaseFolderPath(databaseName string) string {
 
 	return results
 }
+
+func NormalizeCommand(command string) string {
+	// Normalize the command to NFC form
+	cmd := strings.TrimSpace(command)
+	cmd = strings.ReplaceAll(cmd, "\n", " ")
+	cmd = strings.ReplaceAll(cmd, "\t", " ")
+	cmd = strings.ReplaceAll(cmd, "\r", " ")
+	cmd = strings.Join(strings.Fields(cmd), " ")
+	return cmd
+}

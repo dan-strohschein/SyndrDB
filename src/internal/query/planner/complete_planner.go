@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
+	documentscanner "syndrdb/src/internal/query/documentScanner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
 
@@ -11,20 +12,28 @@ import (
 )
 
 type QueryPlanner struct {
-	Logger        *zap.SugaredLogger
-	BundleService BundleServiceInterface
+	Logger           *zap.SugaredLogger
+	BundleServiceInt BundleServiceInterface
+	ScannerFactory   *documentscanner.ScannerFactory
+	BundleService    interface {
+		GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error)
+	}
 }
 
 func NewQueryPlanner(logger *zap.SugaredLogger) *QueryPlanner {
 	return &QueryPlanner{
-		Logger: logger,
+		Logger:         logger,
+		ScannerFactory: documentscanner.NewScannerFactory(logger, documentscanner.DefaultScannerConfig()),
 	}
 }
 
-func NewQueryPlannerWithService(logger *zap.SugaredLogger, bundleService BundleServiceInterface) *QueryPlanner {
+func NewQueryPlannerWithService(logger *zap.SugaredLogger, bundleServiceInt BundleServiceInterface, bundleService interface {
+	GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error)
+}) *QueryPlanner {
 	return &QueryPlanner{
-		Logger:        logger,
-		BundleService: bundleService,
+		Logger:           logger,
+		BundleServiceInt: bundleServiceInt,
+		BundleService:    bundleService,
 	}
 }
 
@@ -124,15 +133,15 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 				cost := qp.estimateHashIndexCost()
 				if cost < bestCost {
 					bestNode = &IndexScanNode{
-						Bundle:        bundle,
-						IndexName:     condition.Field,
-						ScanType:      HashIndexScan,
-						SearchKey:     condition.Value,
-						Operator:      condition.Operator,
-						Cost:          cost,
-						EstimatedRows: 1,
-						Logger:        qp.Logger,
-						BundleService: qp.BundleService,
+						Bundle:           bundle,
+						IndexName:        condition.Field,
+						ScanType:         HashIndexScan,
+						SearchKey:        condition.Value,
+						Operator:         condition.Operator,
+						Cost:             cost,
+						EstimatedRows:    1,
+						Logger:           qp.Logger,
+						BundleServiceInt: qp.BundleServiceInt,
 					}
 					bestCost = cost
 					indexesUsed = []string{fmt.Sprintf("%s_%s_hidx", helpers.CleanFileName(bundle.Name), condition.Field)}
@@ -154,15 +163,15 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 						if cost < bestCost {
 							estimatedRows := qp.estimateBTreeRows(bundle, condition)
 							bestNode = &IndexScanNode{
-								Bundle:        bundle,
-								IndexName:     indexName, // Use the actual index name from the map key
-								ScanType:      BTreeIndexScan,
-								SearchKey:     condition.Value,
-								Operator:      condition.Operator,
-								Cost:          cost,
-								EstimatedRows: estimatedRows,
-								Logger:        qp.Logger,
-								BundleService: qp.BundleService,
+								Bundle:           bundle,
+								IndexName:        indexName, // Use the actual index name from the map key
+								ScanType:         BTreeIndexScan,
+								SearchKey:        condition.Value,
+								Operator:         condition.Operator,
+								Cost:             cost,
+								EstimatedRows:    estimatedRows,
+								Logger:           qp.Logger,
+								BundleServiceInt: qp.BundleServiceInt,
 							}
 							bestCost = cost
 							indexesUsed = []string{indexName}
@@ -195,12 +204,22 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 		return bestNode, indexesUsed
 	}
 
+	// Create scanner for this bundle
+	scanner, err := qp.BundleService.GetOrCreateDocumentScanner(bundle)
+	if err != nil {
+		qp.Logger.Warnf("Failed to create document scanner for bundle '%s': %v", bundle.Name, err)
+		scanner = nil // Fall back to in-memory documents if available
+	}
+
 	// No suitable index found, use full scan with all conditions as filters
 	fullScan := &FullScanNode{
-		Bundle:        bundle,
-		Cost:          float64(len(*bundle.Documents)),
-		EstimatedRows: len(*bundle.Documents),
-		Logger:        qp.Logger,
+		Bundle:           bundle,
+		Cost:             float64(int(bundle.TotalDocuments)),
+		EstimatedRows:    int(bundle.TotalDocuments),
+		Logger:           qp.Logger,
+		BundleServiceInt: qp.BundleServiceInt,
+		// DOCUMENT SCANNER INTEGRATION: Assign scanner to node
+		DocumentScanner: scanner,
 	}
 
 	if len(clauses) > 0 {
@@ -237,15 +256,15 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 		if condition.Operator == "==" {
 			if indexRef, exists := bundle.Indexes[condition.Field]; exists {
 				indexNode = &IndexScanNode{
-					Bundle:        bundle,
-					IndexName:     indexRef.IndexName,
-					ScanType:      HashIndexScan,
-					SearchKey:     condition.Value,
-					Operator:      condition.Operator,
-					Cost:          qp.estimateHashIndexCost(),
-					EstimatedRows: 1,
-					Logger:        qp.Logger,
-					BundleService: qp.BundleService,
+					Bundle:           bundle,
+					IndexName:        indexRef.IndexName,
+					ScanType:         HashIndexScan,
+					SearchKey:        condition.Value,
+					Operator:         condition.Operator,
+					Cost:             qp.estimateHashIndexCost(),
+					EstimatedRows:    1,
+					Logger:           qp.Logger,
+					BundleServiceInt: qp.BundleServiceInt,
 				}
 				indexUsed = []string{indexRef.IndexName}
 			}
@@ -260,15 +279,15 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 				}
 
 				indexNode = &IndexScanNode{
-					Bundle:        bundle,
-					IndexName:     indexRef.IndexName,
-					ScanType:      scanType,
-					SearchKey:     condition.Value,
-					Operator:      condition.Operator,
-					Cost:          qp.estimateBTreeIndexCost(bundle),
-					EstimatedRows: qp.estimateBTreeRows(bundle, condition),
-					Logger:        qp.Logger,
-					BundleService: qp.BundleService,
+					Bundle:           bundle,
+					IndexName:        indexRef.IndexName,
+					ScanType:         scanType,
+					SearchKey:        condition.Value,
+					Operator:         condition.Operator,
+					Cost:             qp.estimateBTreeIndexCost(bundle),
+					EstimatedRows:    qp.estimateBTreeRows(bundle, condition),
+					Logger:           qp.Logger,
+					BundleServiceInt: qp.BundleServiceInt,
 				}
 				indexUsed = []string{indexRef.IndexName}
 			}
@@ -322,10 +341,11 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 
 	// No indexes available, use full scan with OR filter
 	fullScan := &FullScanNode{
-		Bundle:        bundle,
-		Cost:          float64(len(*bundle.Documents)),
-		EstimatedRows: len(*bundle.Documents),
-		Logger:        qp.Logger,
+		Bundle:           bundle,
+		Cost:             qp.getEstimatedCost(bundle),
+		EstimatedRows:    qp.getEstimatedRowsAsInt(bundle),
+		Logger:           qp.Logger,
+		BundleServiceInt: qp.BundleServiceInt,
 	}
 
 	filterNode := &FilterNode{
@@ -437,4 +457,24 @@ func (qp *QueryPlanner) findMostSelectiveChild(children []ExecutionNode) Executi
 		}
 	}
 	return best
+}
+
+// getBundleDocumentCount safely returns the total document count for a bundle
+func (qp *QueryPlanner) getBundleDocumentCount(bundle *models.Bundle) int64 {
+	if bundle.Documents != nil {
+		// If documents are loaded in memory, use actual count
+		return int64(len(*bundle.Documents))
+	}
+	// Use metadata count when documents aren't loaded
+	return bundle.TotalDocuments
+}
+
+// getEstimatedRowsAsInt returns the document count as int for EstimatedRows
+func (qp *QueryPlanner) getEstimatedRowsAsInt(bundle *models.Bundle) int {
+	return int(qp.getBundleDocumentCount(bundle))
+}
+
+// getEstimatedCost returns the document count as float64 for Cost calculations
+func (qp *QueryPlanner) getEstimatedCost(bundle *models.Bundle) float64 {
+	return float64(qp.getBundleDocumentCount(bundle))
 }

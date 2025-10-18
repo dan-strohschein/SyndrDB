@@ -55,8 +55,9 @@ import (
 // 	Value interface{} // Field value, can be any type
 // }
 
+// DEPRECATED: Use models.DetermineDefaultValue instead
 // ParseBundleCommand parses a bundle command (CREATE, UPDATE, DELETE)
-func ParseBundleCommand(command string) (*models.BundleCommand, error) {
+func ParseBundleCommand(command string, logger *zap.SugaredLogger) (*models.BundleCommand, error) {
 	command = strings.TrimSpace(command)
 
 	// Parse CREATE BUNDLE command
@@ -66,7 +67,7 @@ func ParseBundleCommand(command string) (*models.BundleCommand, error) {
 
 	// Parse UPDATE BUNDLE command
 	if strings.HasPrefix(command, "UPDATE BUNDLE") {
-		return ParseUpdateBundleCommand(command)
+		return ParseUpdateBundleCommand(command, logger)
 	}
 
 	// Parse DELETE BUNDLE command
@@ -261,12 +262,19 @@ func ParseUpdateDocumentCommand(command string, logger *zap.SugaredLogger) (*mod
 }
 
 // parseUpdateBundleCommand parses UPDATE BUNDLE command
-func ParseUpdateBundleCommand(command string) (*models.BundleCommand, error) {
+func ParseUpdateBundleCommand(command string, logger *zap.SugaredLogger) (*models.BundleCommand, error) {
+
+	// command = strings.TrimSpace(command)
+	// command = strings.ReplaceAll(command, "\n", " ")
+	// command = strings.ReplaceAll(command, "\t", " ")
+	command = strings.TrimSuffix(command, ";") // Remove trailing semicolon
+
 	// Regular expression to extract bundle name
-	bundleNameRegex := regexp.MustCompile(`UPDATE BUNDLE\s+"([^"]+)"`)
+	bundleNameRegex := regexp.MustCompile(`UPDATE BUNDLE\s+"([^"]+)"*`)
 	matches := bundleNameRegex.FindStringSubmatch(command)
+
 	if len(matches) < 2 {
-		return nil, fmt.Errorf("invalid UPDATE BUNDLE command syntax")
+		return nil, fmt.Errorf("DEBUGGING invalid UPDATE BUNDLE command syntax")
 	}
 	bundleName := matches[1]
 
@@ -310,6 +318,12 @@ func ParseCreateRelationshipCommand(command string) (*models.RelationshipCommand
 		WITH FIELD "<FIELDNAME>"
 		AS "1TO1"/"1TO_MANY"/"MANY_TO_MANY"
 	*/
+
+	command = strings.TrimSpace(command)
+	command = strings.ReplaceAll(command, "\n", " ")
+	command = strings.ReplaceAll(command, "\t", " ")
+	command = strings.TrimSuffix(command, ";") // Remove trailing semicolon
+
 	relationshipRegex := regexp.MustCompile(
 		`UPDATE BUNDLE\s+"([^"]+)"\s+CREATE RELATIONSHIP\s+"([^"]+)"\s+FROM BUNDLE\s+"([^"]+)"\s+WITH FIELD\s+"([^"]+)"\s+TO BUNDLE\s+"([^"]+)"\s+WITH FIELD\s+"([^"]+)"\s+AS\s+"([^"]+)"`,
 	)
@@ -796,9 +810,16 @@ func isValidBundleNameChar(char rune) bool {
 // 1. UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipType>", "<SourceBundle>", "<SourceFieldName>", "<DestinationBundleName>", "<DestinationFieldName>")
 // 2. UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipType>", "<SourceBundle>", "", "<DestinationBundleName>", "")
 func ParseAddRelationshipCommand(command string) (*models.RelationshipCommand, error) {
-	command = strings.TrimSpace(command)
-	command = strings.ReplaceAll(command, "\n", " ")
-	command = strings.ReplaceAll(command, "\t", " ")
+	// command = strings.TrimSpace(command)
+	// command = strings.ReplaceAll(command, "\n", " ")
+	// command = strings.ReplaceAll(command, "\t", " ")
+	command = strings.TrimSuffix(command, ";")
+
+	/*
+	   UPDATE BUNDLE "Authors"
+	   ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");
+
+	*/
 
 	// Regular expression to parse the ADD RELATIONSHIP command
 	// UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipType>", "<SourceBundle>", "<SourceFieldName>", "<DestinationBundleName>", "<DestinationFieldName>")

@@ -54,8 +54,9 @@ func NewDatabaseService(store databasestore.DatabaseStore, factory DatabaseFacto
 		service.Databases = databases
 		logger.Debugf("Database service loaded %d databases", len(databases))
 
+		// Deprecated - I don't think this is necessary anymore
 		// Register non-primary databases in the system catalog
-		service.syncDatabaseCatalog(logger)
+		//service.syncDatabaseCatalog(logger)
 	}
 
 	return service
@@ -83,11 +84,12 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) (*
 	// Register the new database in the Primary database's "Databases" bundle
 	// (Skip this step if we're creating the primary database itself)
 	if strings.ToLower(databaseCommand.DatabaseName) != "primary" {
-		err = s.registerDatabaseInPrimary(db)
-		if err != nil {
-			s.Logger.Warnf("Warning: Failed to register database '%s' in Primary database: %v", db.Name, err)
-			// Don't fail the database creation if registration fails
-		}
+		// Remove this as it is already done in the catalog_service.AddDatabaseToCatalog func
+		// err = s.registerDatabaseInPrimary(db)
+		// if err != nil {
+		// 	s.Logger.Warnf("Warning: Failed to register database '%s' in Primary database: %v", db.Name, err)
+		// 	// Don't fail the database creation if registration fails
+		// }
 	}
 
 	return db, nil
@@ -114,7 +116,7 @@ func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) erro
 			"DocumentID": {Name: "DocumentID", Value: fmt.Sprintf("db_%s", newDB.DatabaseID)},
 			"DatabaseID": {Name: "DatabaseID", Value: newDB.DatabaseID},
 			"Name":       {Name: "Name", Value: newDB.Name},
-			"FilePath":   {Name: "FilePath", Value: newDB.DataDirectory},
+			"FilePath":   {Name: "FilePath", Value: fmt.Sprintf("%s/%s/%s.db", newDB.DataDirectory, newDB.Name, newDB.Name)},
 		},
 	}
 
@@ -128,6 +130,9 @@ func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) erro
 
 	// Update the bundle back in the database
 	primaryDB.Bundles["Databases"] = databasesBundle
+
+	//Persiste the updated bundle to disk.
+	// First get the serviceManager, then get the BundleService, then call UpdateBundleFile
 
 	// Persist the updated primary database to disk
 	err = s.Store.UpdateDatabaseDataFile(primaryDB)

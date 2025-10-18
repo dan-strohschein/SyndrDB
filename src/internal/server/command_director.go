@@ -21,6 +21,10 @@ import (
 )
 
 func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
+	if database == nil {
+		// Get the database from the session.
+	}
+
 	// Check if this is a GraphQL command first
 	if strings.HasPrefix(command, "GRAPHQL::") {
 		if serviceManager.GraphQLProcessor == nil {
@@ -150,7 +154,9 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			// Execute the database command
 			serviceManager.DatabaseService.UpdateDatabase(*dbCommand)
 		case "bundle":
-			bndleCommand, err := bndle.ParseUpdateBundleCommand(command)
+			normalizedCommand := helpers.NormalizeCommand(command) // Normalize once
+			//logger.Infof("DEBUG COMMAND IS :: %s", normalizedCommand)
+			bndleCommand, err := bndle.ParseUpdateBundleCommand(normalizedCommand, logger)
 			if err != nil {
 				return &result, err
 			}
@@ -160,11 +166,11 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				var err error
 
 				// Check if it's the new ADD RELATIONSHIP syntax
-				if strings.Contains(strings.ToUpper(command), "ADD RELATIONSHIP") {
-					RelationshipCommand, err = bndle.ParseAddRelationshipCommand(command)
+				if strings.Contains(strings.ToUpper(normalizedCommand), "ADD RELATIONSHIP") {
+					RelationshipCommand, err = bndle.ParseAddRelationshipCommand(normalizedCommand)
 				} else {
 					// Use the old CREATE RELATIONSHIP syntax
-					RelationshipCommand, err = bndle.ParseCreateRelationshipCommand(command)
+					RelationshipCommand, err = bndle.ParseCreateRelationshipCommand(normalizedCommand)
 				}
 
 				if err != nil {
@@ -839,6 +845,8 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 }
 
 func AddDocument(commandParts []string, command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error) {
+	logger.Infof("Trying to add document to %s.%s", database.Name, commandParts[3])
+
 	if len(commandParts) < 4 {
 		return nil, fmt.Errorf("ADD DOCUMENT requires the spec 'TO <bundle_name>'")
 	}
@@ -1234,7 +1242,7 @@ func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, da
 		whereClause := strings.Join(commandParts[7:], " ")
 
 		// Create execution planner
-		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService, serviceManager.BundleService)
 
 		// Create execution plan
 		plan, err := planner.CreateExecutionPlan(bundle, whereClause)
@@ -1304,12 +1312,15 @@ func SelectTopDocuments(commandParts []string, serviceManager ServiceManager, da
 
 	logger.Infof("Final result: SELECT TOP %d returned %d documents from bundle '%s'", topCount, len(limitedDocuments), bundleName)
 
+	// Transform documents to flattened format
+	flattenedDocs := helpers.TransformDocumentsToFlatFormat(limitedDocuments)
+
 	// Calculate execution time
 	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
 
 	cmdResponse := &CommandResponse{
-		ResultCount:     len(limitedDocuments),
-		Result:          limitedDocuments,
+		ResultCount:     len(flattenedDocs),
+		Result:          flattenedDocs,
 		ExecutionTimeMS: executionTime,
 	}
 
@@ -1358,7 +1369,7 @@ func SelectTopDocumentsWithOrderBy(fullCommand string, topCount int, serviceMana
 
 		if whereClause != "" {
 			// Create execution planner
-			planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+			planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService, serviceManager.BundleService)
 
 			// Create execution plan
 			plan, err := planner.CreateExecutionPlan(bundle, whereClause)
@@ -1476,7 +1487,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		whereClause := strings.Join(commandParts[5:], " ")
 
 		// Create execution planner
-		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService, serviceManager.BundleService)
 
 		// Create execution plan
 		plan, err := planner.CreateExecutionPlan(bundle, whereClause)
@@ -1517,53 +1528,16 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 			documents[doc.DocumentID] = doc
 		}
 	}
-	// var documents map[string]*models.Document
-	// if len(commandParts) > 4 && strings.EqualFold(commandParts[4], "WHERE") {
-	// 	//logger.Infof("Filtering documents in bundle '%s' with WHERE clause: %s", bundleName, strings.Join(commandParts[5:], " "))
-	// 	whereClause := strings.Join(commandParts[5:], " ")
-	// 	filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, logger)
-	// 	if err != nil {
-	// 		return nil, fmt.Errorf("error filtering documents: %v", err)
-	// 	}
 
-	// 	// if len(filteredDocs) > 0 {
-	// 	// 	prettyJSON, err := json.MarshalIndent(filteredDocs, "", "  ")
-	// 	// 	if err != nil {
-	// 	// 		logger.Warnf("Failed to convert documents to JSON: %v", err)
-	// 	// 	} else {
-	// 	// 		logger.Infof("Found %d documents: \n%s", len(filteredDocs), string(prettyJSON))
-	// 	// 	}
-	// 	// } else {
-	// 	// 	logger.Infof("No documents found matching the filter")
-	// 	// }
-
-	// 	documents = make(map[string]*models.Document)
-	// 	for _, v := range filteredDocs {
-	// 		docCopy := v
-	// 		documents[docCopy.DocumentID] = v
-	// 	}
-	// } else {
-	// 	// Get documents from the bundle
-	// 	documents = make(map[string]*models.Document)
-	// 	for k, v := range *bundle.Documents {
-	// 		docCopy := v
-	// 		documents[k] = &docCopy
-	// 	}
-	// }
-
-	// if len(documents) == 0 {
-	// 	result = fmt.Sprintf("No documents found in bundle '%s'.", bundleName)
-	// } else {
-	// 	result = fmt.Sprintf("Found %d documents in bundle '%s'.", len(documents), bundleName)
-	// }
-	// logger.Infof(result)
+	// Transform documents to flattened format
+	flattenedDocs := helpers.TransformDocumentsToFlatFormat(documents)
 
 	// Calculate execution time
 	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
 
 	cmdResponse := &CommandResponse{
-		ResultCount:     len(documents),
-		Result:          documents,
+		ResultCount:     len(flattenedDocs),
+		Result:          flattenedDocs,
 		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil
@@ -1662,7 +1636,7 @@ func SelectDocumentCount(commandParts []string, serviceManager ServiceManager, d
 		logger.Infof("Processing COUNT query with WHERE clause: %s", whereClause)
 
 		// Create execution planner for optimized counting
-		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+		planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService, serviceManager.BundleService)
 
 		// Create execution plan
 		plan, err := planner.CreateExecutionPlan(bundle, whereClause)
@@ -1720,7 +1694,7 @@ func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, databa
 	}
 
 	// Create join-capable query planner
-	joinPlanner := planner.NewJoinQueryPlanner(logger, serviceManager.BundleService)
+	joinPlanner := planner.NewJoinQueryPlanner(logger, serviceManager.BundleService, serviceManager.BundleService)
 
 	// Create execution plan for the JOIN query
 	plan, err := joinPlanner.CreateJoinExecutionPlan(joinQuery, database)
@@ -1735,6 +1709,7 @@ func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, databa
 		return nil, fmt.Errorf("error executing JOIN query plan: %w", err)
 	}
 
+	// TODO This seems to be missing the filtering of fields in the JOIN query with a WHERE CLAUSE
 	// Apply field selection if specific fields were requested
 	if len(joinQuery.SelectFields) > 0 {
 		documents = filterDocumentFields(documents, joinQuery.SelectFields, logger)
@@ -1742,12 +1717,15 @@ func SelectDocumentsWithJoin(query string, serviceManager ServiceManager, databa
 
 	logger.Infof("JOIN query executed successfully, returned %d documents", len(documents))
 
+	// Transform documents to flattened format
+	flattenedDocs := helpers.TransformDocumentsToFlatFormat(documents)
+
 	// Calculate execution time
 	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
 
 	cmdResponse := &CommandResponse{
-		ResultCount:     len(documents),
-		Result:          documents,
+		ResultCount:     len(flattenedDocs),
+		Result:          flattenedDocs,
 		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil
@@ -1795,7 +1773,7 @@ func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, dat
 
 		if whereClause != "" {
 			// Create execution planner
-			planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService)
+			planner := planner.NewQueryPlannerWithService(logger, serviceManager.BundleService, serviceManager.BundleService)
 
 			// Create execution plan
 			plan, err := planner.CreateExecutionPlan(bundle, whereClause)
@@ -1821,15 +1799,31 @@ func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, dat
 		}
 	} else {
 		// No WHERE clause - return all documents
+		// documents = make(map[string]*models.Document)
+		// if bundle.Documents != nil {
+		// 	for k, v := range *bundle.Documents {
+		// 		docCopy := v
+		// 		documents[k] = &docCopy
+		// 	}
+		// }
+		// No WHERE clause - load all documents using new page-based architecture
+		logger.Infof("Loading all documents using page-based document loading")
+
+		// Use GetDocumentsByFilter with empty filter to get all documents
+		allDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, "")
+		if err != nil {
+			return nil, fmt.Errorf("error loading all documents: %v", err)
+		}
+
+		logger.Infof("Loaded %d documents from bundle using page-based loading", len(allDocs))
+
+		// Convert slice to map for consistency
 		documents = make(map[string]*models.Document)
-		if bundle.Documents != nil {
-			for k, v := range *bundle.Documents {
-				docCopy := v
-				documents[k] = &docCopy
-			}
+		for _, doc := range allDocs {
+			documents[doc.DocumentID] = doc
 		}
 	}
-
+	//logger.Infof("DEBUG DEBUG DEBUG:: Documents prior to sort count %d", len(documents))
 	// Sort the documents according to the ORDER BY clause
 	sorter := queryparser.NewDocumentSorter(selectQuery.OrderBy, logger)
 	sortedDocuments, err := sorter.SortDocumentMap(documents)
@@ -1850,12 +1844,16 @@ func SelectDocumentsWithOrderBy(query string, serviceManager ServiceManager, dat
 		resultMap = filterDocumentFields(resultMap, selectQuery.SelectFields, logger)
 	}
 
+	// Transform documents to flattened format
+	//TODO this is a bit inefficient as we already looped through the docs above online 1811. Fix this later
+	flattenedDocs := helpers.TransformDocumentsToFlatFormat(resultMap)
+
 	// Calculate execution time
 	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
 
 	cmdResponse := &CommandResponse{
-		ResultCount:     len(resultMap),
-		Result:          resultMap,
+		ResultCount:     len(flattenedDocs),
+		Result:          flattenedDocs,
 		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil
@@ -1883,11 +1881,28 @@ func SelectDocumentsWithGroupBy(query string, serviceManager ServiceManager, dat
 		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 	}
 
+	// TODO THis isn't right - we need to handle WHERE clauses too
 	// Get all documents from the bundle
+	// allDocuments := make(map[string]*models.Document)
+	// for k, v := range *bundleObj.Documents {
+	// 	docCopy := v
+	// 	allDocuments[k] = &docCopy
+	// }
+
+	logger.Infof("Loading all documents using page-based document loading")
+
+	// Use GetDocumentsByFilter with empty filter to get all documents
+	allDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundleObj, "")
+	if err != nil {
+		return nil, fmt.Errorf("error loading all documents: %v", err)
+	}
+
+	logger.Infof("Loaded %d documents from bundle using page-based loading", len(allDocs))
+
+	// Convert slice to map for consistency
 	allDocuments := make(map[string]*models.Document)
-	for k, v := range *bundleObj.Documents {
-		docCopy := v
-		allDocuments[k] = &docCopy
+	for _, doc := range allDocs {
+		allDocuments[doc.DocumentID] = doc
 	}
 
 	// Create and execute GROUP BY executor
@@ -1901,12 +1916,16 @@ func SelectDocumentsWithGroupBy(query string, serviceManager ServiceManager, dat
 
 	logger.Infof("GROUP BY query returned %d groups", len(resultMap))
 
+	// Transform documents to flattened format
+	//TODO This is a bit inefficient as we already looped through the docs above online 1869. Fix this later
+	flattenedDocs := helpers.TransformDocumentsToFlatFormat(resultMap)
+
 	// Calculate execution time
 	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6 // Convert to milliseconds
 
 	cmdResponse := &CommandResponse{
-		ResultCount:     len(resultMap),
-		Result:          resultMap,
+		ResultCount:     len(flattenedDocs),
+		Result:          flattenedDocs,
 		ExecutionTimeMS: executionTime,
 	}
 	return cmdResponse, nil

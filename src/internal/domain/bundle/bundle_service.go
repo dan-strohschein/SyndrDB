@@ -8,6 +8,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	documentscanner "syndrdb/src/internal/query/documentScanner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/pkg/settings"
@@ -19,6 +20,8 @@ import (
 	//hashindex "syndrdb/src/hash_index"
 
 	"syndrdb/src/pkg/common/helpers"
+
+	"sync"
 
 	"go.uber.org/zap"
 )
@@ -195,6 +198,11 @@ type BundleService struct {
 	operationCount         int       // Operations in current time window
 	operationWindow        time.Time // Start of current measurement window
 	bulkThresholdOpsPerSec int       // Operations per second threshold for bulk mode
+
+	// DOCUMENT SCANNER INTEGRATION: Add scanner management
+	scannerIntegration *documentscanner.ScannerIntegration                 // Scanner integration instance
+	bundleScanners     map[string]documentscanner.DocumentScannerInterface // Per-bundle scanners
+	scannerMutex       sync.RWMutex                                        // Protects bundleScanners map
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
@@ -232,6 +240,10 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		operationCount:         0,
 		operationWindow:        time.Now(),
 		bulkThresholdOpsPerSec: globalSettings.WALBulkModeThreshold, // 50 ops/sec threshold
+
+		// DOCUMENT SCANNER INTEGRATION: Initialize scanner management
+		scannerIntegration: documentscanner.NewScannerIntegration(logger),
+		bundleScanners:     make(map[string]documentscanner.DocumentScannerInterface),
 	}
 
 	// Don't load bundle metadata at startup - bundles should be loaded on-demand
@@ -1122,6 +1134,16 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	return allDocuments, nil
 }
 
+// GetAllDocumentsForIndexing is a public wrapper for document scanner integration
+func (s *BundleService) GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error) {
+	return s.getAllDocumentsForIndexing(bundleName)
+}
+
+func (s *BundleService) LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error) {
+	// Load the specified document page from the store
+	return s.store.LoadDocumentPage(bundleName, databaseName, pageID, databasePath)
+}
+
 func (s *BundleService) LoadCatalogBundleDocuments(bundleName string) ([]*models.Document, error) {
 	// Load all documents for the specified catalog bundle
 	return s.getAllDocumentsForIndexing(bundleName)
@@ -1787,7 +1809,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 	// Load the hash index from disk using the index name and bundle information
 	args := settings.GetSettings()
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	indexFilePath := fmt.Sprintf("%s/%s_%s.hidx", databasePath, bundle.Name, indexRef.HashIndexField.FieldName)
+	indexFilePath := fmt.Sprintf("%s%s_%s.hidx", databasePath, bundle.Name, indexRef.HashIndexField.FieldName)
 
 	hashIndex, err := hashindex.OpenHashIndex(indexFilePath, args.Debug, s.logger)
 	if err != nil {
@@ -2761,15 +2783,6 @@ func (s *BundleService) registerBundleInPrimary(bundle *models.Bundle) error {
 	return nil
 }
 
-// syncBundleCatalog ensures all loaded bundles are registered in the primary.Bundles catalog
-// func (s *BundleService) syncBundleCatalog(logger *zap.SugaredLogger) {
-// 	// Since we can't directly access the DatabaseService/CatalogService from here due to circular imports,
-// 	// this sync will be handled at the service manager level by calling CatalogService.AddBundleToCatalog
-// 	// for each bundle that needs to be registered
-
-// 	logger.Debugf("Bundle catalog sync initiated - %d bundles need potential registration", len(s.bundleMetadata))
-// }
-
 // discoverBundleIndexes scans for existing index files and populates the bundle's Indexes field
 func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 	//args := settings.GetSettings()
@@ -2833,6 +2846,9 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 func (s *BundleService) Shutdown() error {
 	s.logger.Infof("Shutting down BundleService, flushing pending operations...")
 
+	// Close scanners before other cleanup
+	s.CloseAllScanners()
+
 	// Force flush any pending index updates
 	s.forceFlushIndexUpdates()
 
@@ -2857,4 +2873,70 @@ func (s *BundleService) Shutdown() error {
 
 	s.logger.Infof("BundleService shutdown completed")
 	return nil
+}
+
+// DOCUMENT SCANNER INTEGRATION: Scanner management methods
+
+// GetOrCreateDocumentScanner returns a document scanner for the specified bundle
+// Creates and caches scanners per bundle for optimal performance
+func (s *BundleService) GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error) {
+	s.scannerMutex.RLock()
+	if scanner, exists := s.bundleScanners[bundle.Name]; exists {
+		s.scannerMutex.RUnlock()
+		return scanner, nil
+	}
+	s.scannerMutex.RUnlock()
+
+	// Create new scanner
+	s.scannerMutex.Lock()
+	defer s.scannerMutex.Unlock()
+
+	// Double-check after acquiring write lock
+	if scanner, exists := s.bundleScanners[bundle.Name]; exists {
+		return scanner, nil
+	}
+
+	// Create scanner using integration
+	scanner, err := s.scannerIntegration.CreateScannerForBundle(bundle, s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create document scanner for bundle '%s': %w", bundle.Name, err)
+	}
+
+	// Cache the scanner
+	s.bundleScanners[bundle.Name] = scanner
+	s.logger.Infof("Created and cached document scanner for bundle '%s'", bundle.Name)
+
+	return scanner, nil
+}
+
+// GetScannerMetrics returns metrics manager for performance monitoring
+func (s *BundleService) GetScannerMetrics() *documentscanner.MetricsManager {
+	return s.scannerIntegration.GetMetricsManager()
+}
+
+// RemoveDocumentScanner removes a cached scanner (called when bundle is deleted)
+func (s *BundleService) RemoveDocumentScanner(bundleName string) {
+	s.scannerMutex.Lock()
+	defer s.scannerMutex.Unlock()
+
+	if scanner, exists := s.bundleScanners[bundleName]; exists {
+		scanner.Close()
+		delete(s.bundleScanners, bundleName)
+		s.logger.Infof("Removed document scanner for bundle '%s'", bundleName)
+	}
+}
+
+// CloseAllScanners closes all document scanners (called during service shutdown)
+func (s *BundleService) CloseAllScanners() {
+	s.scannerMutex.Lock()
+	defer s.scannerMutex.Unlock()
+
+	for bundleName, scanner := range s.bundleScanners {
+		scanner.Close()
+		s.logger.Debugf("Closed document scanner for bundle '%s'", bundleName)
+	}
+
+	s.bundleScanners = make(map[string]documentscanner.DocumentScannerInterface)
+	s.scannerIntegration.Close()
+	s.logger.Info("Closed all document scanners")
 }

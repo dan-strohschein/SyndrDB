@@ -225,6 +225,14 @@ func (b *BinarySerializer) DeserializeBundleMetadata(data []byte) (*models.Bundl
 		bundle.DocumentStructure = parseDocumentStructure(structData)
 	}
 
+	// Parse RELATIONSHIPS
+	var err error
+	bundle.Relationships = make(map[string]models.Relationship)
+	bundle.Relationships, err = parseRelationshipsFromData(bundleData["Relationships"])
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse relationships: %w", err)
+	}
+
 	// Parse pagination metadata
 	bundle.TotalDocuments = getInt64(bundleData, "TotalDocuments")
 	bundle.PageCount = getInt64(bundleData, "PageCount")
@@ -403,6 +411,43 @@ func parseDocumentStructure(data map[string]interface{}) models.DocumentStructur
 	}
 
 	return structure
+}
+
+func parseRelationshipsFromData(relationData interface{}) (map[string]models.Relationship, error) {
+	relationships := make(map[string]models.Relationship)
+
+	if relationData == nil {
+		return relationships, nil
+	}
+
+	relMap, ok := relationData.(map[string]interface{})
+	if !ok {
+		return relationships, fmt.Errorf("relationships data is not a valid map")
+	}
+
+	for key, val := range relMap {
+		if relData, ok := val.(map[string]interface{}); ok {
+			rel := models.Relationship{
+				RelationshipID:    getString(relData, "relationshipid"),    // lowercase
+				Name:              getString(relData, "name"),              // lowercase
+				Description:       getString(relData, "description"),       // lowercase
+				SourceField:       getString(relData, "sourcefield"),       // lowercase
+				DestinationBundle: getString(relData, "destinationbundle"), // lowercase
+				DestinationField:  getString(relData, "destinationfield"),  // lowercase
+				SourceBundle:      getString(relData, "sourcebundle"),      // lowercase
+				RelationshipType:  getString(relData, "relationshiptype"),  // lowercase
+
+				// Legacy fields
+				// SourceBundleID:   getString(relData, "SourceBundleID"),
+				// SourceBundleName: getString(relData, "SourceBundleName"),
+				// TargetBundleID:   getString(relData, "TargetBundleID"),
+				// TargetBundleName: getString(relData, "TargetBundleName"),
+			}
+			relationships[key] = rel
+		}
+	}
+
+	return relationships, nil
 }
 
 // GetSerializer returns the appropriate serializer based on format string

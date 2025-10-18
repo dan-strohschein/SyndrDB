@@ -367,7 +367,7 @@ func TestJoinPerformance(logger *zap.SugaredLogger) error {
 	defer cleanupJoinTestData(db, serviceManager, logger)
 
 	// Test different join algorithms
-	joinPlanner := planner.NewJoinQueryPlanner(logger, serviceManager.BundleService)
+	joinPlanner := planner.NewJoinQueryPlanner(logger, serviceManager.BundleService, serviceManager.BundleService)
 
 	// Parse a test query
 	query := `SELECT DOCUMENTS FROM "Orders" JOIN "Customers" ON "Orders"."customer_id" == "Customers"."id"`

@@ -745,18 +745,18 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 				//if connection.Authorized { }
 
-				if !strings.EqualFold(connStr.Database, "default") {
-					db, err := s.databaseService.GetDatabaseByName(connStr.Database)
-					if err != nil {
-						sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
-						return
-					}
-					if db == nil {
-						sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
-						return
-					}
-					connection.Database = db
+				//if !strings.EqualFold(connStr.Database, "primary") {
+				db, err := s.databaseService.GetDatabaseByName(connStr.Database)
+				if err != nil {
+					sendError(writer, fmt.Sprintf("encountered error while looking for Database %s: %v", connStr.Database, err))
+					return
 				}
+				if db == nil {
+					sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
+					return
+				}
+				connection.Database = db
+				//}
 
 				// TODO: IF the db is legit, check to see if the user is allowed to access it
 				clientIP := ExtractIPFromConn(connection.Conn)
@@ -989,7 +989,7 @@ func parseConnectionString(server *Server, connStr string) (ConnectionString, er
 	result := ConnectionString{
 		Options: make(map[string]string),
 	}
-
+	server.logger.Infof("Parsing Connection Strin: %s", connStr)
 	// Strip syndr:// prefix if present
 
 	// if strings.HasPrefix(connStr, prefix) {

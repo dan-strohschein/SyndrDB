@@ -65,6 +65,8 @@ func (cs *CatalogService) AddDatabaseToCatalog(db *models.Database) error {
 		return fmt.Errorf("failed to add database to catalog: %w", err)
 	}
 
+	cs.bundleService.FlushAllBuffers()
+
 	cs.logger.Infof("Added database '%s' (ID: %s) to system catalog", db.Name, db.DatabaseID)
 	return nil
 }
@@ -115,6 +117,8 @@ func (cs *CatalogService) RemoveDatabaseFromCatalog(databaseID string) error {
 			return fmt.Errorf("failed to delete database from catalog: %w", err)
 		}
 
+		// TODO We may need to flush the buffers here to ensure data is written
+
 		cs.logger.Infof("Removed database '%s' (ID: %s) from system catalog", databaseName, databaseID)
 	} else {
 		cs.logger.Warnf("Database with ID '%s' not found in system catalog", databaseID)
@@ -148,7 +152,7 @@ func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 			"BundleID":     {Name: "BundleID", Value: bundle.BundleID},
 			"Name":         {Name: "Name", Value: bundle.Name},
 			"DatabaseID":   {Name: "DatabaseID", Value: bundle.Database.DatabaseID},
-			"DatabaseName": {Name: "DatabaseName", Value: bundle.Database.Name},
+			"DatabaseName": {Name: "DatabaseName", Value: bundle.Database.Name}, // This doesn't actually exist on the bundle struct but we can get it from the Database reference
 			"FieldCount":   {Name: "FieldCount", Value: len(bundle.DocumentStructure.FieldDefinitions)},
 			"FilePath":     {Name: "FilePath", Value: fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name)},
 		},
@@ -161,6 +165,9 @@ func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 	if err != nil {
 		return fmt.Errorf("failed to add bundle to catalog: %w", err)
 	}
+
+	// Flush buffers to ensure data is written
+	cs.bundleService.FlushAllBuffers()
 
 	cs.logger.Infof("Added bundle '%s' (ID: %s) to system catalog", bundle.Name, bundle.BundleID)
 	return nil
@@ -331,6 +338,8 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 			return fmt.Errorf("failed to delete bundle from catalog: %w", err)
 		}
 
+		// TODO We may need to flush the buffers here to ensure data is written
+
 		cs.logger.Infof("Removed bundle '%s' (ID: %s) from system catalog", bundleName, bundleID)
 	} else {
 		cs.logger.Warnf("Bundle with ID '%s' not found in system catalog", bundleID)
@@ -397,6 +406,12 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 		return nil, fmt.Errorf("failed to get primary database: %w", err)
 	}
 
+	// Get the database in the query
+	targetDB, err := cs.databaseService.GetDatabaseByName(databaseName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get target database by name '%s': %w", databaseName, err)
+	}
+
 	// Get the Bundles bundle metadata from primary database. THIS CALL IS DEPRECATED AND SHOULD BE REPLACED
 	bundlesBundle, err := cs.bundleService.GetBundleByName(primaryDB, "Bundles")
 	if err != nil {
@@ -416,7 +431,7 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 		// Access the DatabaseName field from the Document struct
 		if databaseNameField, exists := doc.Fields["DatabaseName"]; exists && databaseNameField.Value == databaseName {
 			// Add doc to slice for return
-			actualBundle, err1 := cs.bundleService.GetBundleByName(primaryDB, doc.Fields["Name"].Value.(string))
+			actualBundle, err1 := cs.bundleService.GetBundleByName(targetDB, doc.Fields["Name"].Value.(string))
 			if err1 != nil {
 				return nil, fmt.Errorf("failed to get bundle Metadata from Catalog by name '%s': %w", doc.Fields["Name"].Value.(string), err1)
 			}

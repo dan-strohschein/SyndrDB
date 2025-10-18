@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
+	documentscanner "syndrdb/src/internal/query/documentScanner"
 	"syndrdb/src/internal/query/queryparser"
 
 	"go.uber.org/zap"
@@ -52,9 +53,11 @@ type JoinQueryPlanner struct {
 }
 
 // NewJoinQueryPlanner creates a new join-capable query planner
-func NewJoinQueryPlanner(logger *zap.SugaredLogger, bundleService BundleServiceInterface) *JoinQueryPlanner {
+func NewJoinQueryPlanner(logger *zap.SugaredLogger, bundleServiceInt BundleServiceInterface, bundleService interface {
+	GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error)
+}) *JoinQueryPlanner {
 	return &JoinQueryPlanner{
-		QueryPlanner: NewQueryPlannerWithService(logger, bundleService),
+		QueryPlanner: NewQueryPlannerWithService(logger, bundleServiceInt, bundleService),
 	}
 }
 
@@ -107,19 +110,21 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		} else {
 			// No applicable WHERE conditions - use full scan
 			currentNode = &FullScanNode{
-				Bundle:        currentBundle,
-				Cost:          float64(len(*currentBundle.Documents)),
-				EstimatedRows: len(*currentBundle.Documents),
-				Logger:        jp.Logger,
+				Bundle:           currentBundle,
+				Cost:             float64(len(*currentBundle.Documents)),
+				EstimatedRows:    len(*currentBundle.Documents),
+				Logger:           jp.Logger,
+				BundleServiceInt: jp.BundleServiceInt,
 			}
 		}
 	} else {
 		// No WHERE clause - use full scan
 		currentNode = &FullScanNode{
-			Bundle:        currentBundle,
-			Cost:          float64(len(*currentBundle.Documents)),
-			EstimatedRows: len(*currentBundle.Documents),
-			Logger:        jp.Logger,
+			Bundle:           currentBundle,
+			Cost:             float64(len(*currentBundle.Documents)),
+			EstimatedRows:    len(*currentBundle.Documents),
+			Logger:           jp.Logger,
+			BundleServiceInt: jp.BundleServiceInt,
 		}
 	}
 
@@ -243,10 +248,11 @@ func (jp *JoinQueryPlanner) createRightSideNode(bundle *models.Bundle, whereClau
 
 	// Default to full scan
 	return &FullScanNode{
-		Bundle:        bundle,
-		Cost:          float64(len(*bundle.Documents)),
-		EstimatedRows: len(*bundle.Documents),
-		Logger:        jp.Logger,
+		Bundle:           bundle,
+		Cost:             float64(len(*bundle.Documents)),
+		EstimatedRows:    len(*bundle.Documents),
+		Logger:           jp.Logger,
+		BundleServiceInt: jp.BundleServiceInt,
 	}
 }
 
