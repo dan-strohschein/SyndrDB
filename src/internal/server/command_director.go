@@ -11,7 +11,7 @@ import (
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/models"
-	documentscanner "syndrdb/src/internal/query/documentScanner"
+	"syndrdb/src/internal/query/documentscanner"
 
 	//"syndrdb/src/internal/query/executor"
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: Import our JOIN executor

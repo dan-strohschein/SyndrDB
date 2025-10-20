@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
-	documentscanner "syndrdb/src/internal/query/documentScanner"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
 

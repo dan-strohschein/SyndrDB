@@ -35,7 +35,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
-	documentscanner "syndrdb/src/internal/query/documentScanner"
+	"syndrdb/src/internal/query/documentscanner"
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: For JOIN executor integration
 	"syndrdb/src/internal/query/queryparser"
 	"time" // NEW: For document timestamps

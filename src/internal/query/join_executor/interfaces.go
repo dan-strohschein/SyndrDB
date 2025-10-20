@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"syndrdb/src/internal/domain/models"
-	documentscanner "syndrdb/src/internal/query/documentScanner"
+	"syndrdb/src/internal/query/documentscanner"
 )
 
 // JoinType represents the type of join operation

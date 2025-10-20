@@ -3,7 +3,7 @@ package planner
 import (
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
-	documentscanner "syndrdb/src/internal/query/documentScanner"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
 
 	"go.uber.org/zap"

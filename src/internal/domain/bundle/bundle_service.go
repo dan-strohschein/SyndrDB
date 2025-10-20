@@ -8,7 +8,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
-	documentscanner "syndrdb/src/internal/query/documentScanner"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/pkg/settings"
