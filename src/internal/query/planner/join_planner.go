@@ -116,6 +116,67 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 	estimatedCost := float64(leftSize + rightSize)
 	estimatedRows := leftSize / 10 // Assume 10% selectivity as default
 
+	// NEW: Predicate pushdown optimization for WHERE clause
+	var leftBundleInterface, rightBundleInterface documentscanner.BundleInterface
+	remainingWhereClauses := []queryparser.WhereClause{}
+
+	if query.WhereClause != nil && (len(query.WhereClause.Clauses) > 0 || len(query.WhereClause.SubGroups) > 0) {
+		// Analyze WHERE clause for predicate pushdown opportunities
+		jp.Logger.Info("Analyzing WHERE clause for predicate pushdown optimization")
+		
+		if len(query.JoinClauses) > 0 {
+			whereAnalysis := AnalyzeWhereClauseForJoin(
+				query.WhereClause,
+				query.FromBundle,
+				query.JoinClauses[0].RightBundle,
+				jp.Logger,
+			)
+
+			jp.Logger.Infof("Predicate pushdown analysis: LEFT=%d, RIGHT=%d, CROSS=%d, REMAINING=%d",
+				len(whereAnalysis.LeftBundleConditions),
+				len(whereAnalysis.RightBundleConditions),
+				len(whereAnalysis.CrossBundleConditions),
+				len(whereAnalysis.RemainingConditions))
+
+			// Create filtered bundle adapters when applicable
+			if len(whereAnalysis.LeftBundleConditions) > 0 {
+				filtered, err := NewFilteredBundleAdapter(
+					bundles[query.FromBundle],
+					whereAnalysis.LeftBundleConditions,
+					jp.BundleServiceInt,
+					jp.Logger,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create filtered adapter for LEFT bundle: %w", err)
+				}
+				leftBundleInterface = filtered
+				jp.Logger.Infof("Pushed %d conditions to LEFT bundle '%s'", 
+					len(whereAnalysis.LeftBundleConditions), query.FromBundle)
+			}
+
+			if len(whereAnalysis.RightBundleConditions) > 0 {
+				filtered, err := NewFilteredBundleAdapter(
+					bundles[query.JoinClauses[0].RightBundle],
+					whereAnalysis.RightBundleConditions,
+					jp.BundleServiceInt,
+					jp.Logger,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create filtered adapter for RIGHT bundle: %w", err)
+				}
+				rightBundleInterface = filtered
+				jp.Logger.Infof("Pushed %d conditions to RIGHT bundle '%s'", 
+					len(whereAnalysis.RightBundleConditions), query.JoinClauses[0].RightBundle)
+			}
+
+			// Combine cross-bundle and remaining conditions for post-JOIN filtering
+			remainingWhereClauses = append(whereAnalysis.CrossBundleConditions, whereAnalysis.RemainingConditions...)
+		} else {
+			// No JOIN - extract all WHERE clauses for post-scan filtering
+			remainingWhereClauses = jp.extractAllWhereClauses(query.WhereClause)
+		}
+	}
+
 	// NEW: Create service manager adapter for the execution node
 	serviceManager := &PlannerServiceManager{
 		bundles:       bundles,
@@ -123,42 +184,42 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		bundleService: jp.BundleServiceInt,
 	}
 
-	// Create the new JOIN execution node
+	// Create the new JOIN execution node with optional filtered bundle interfaces
 	joinNode := &JoinExecutionNode{
-		Query:          query,
-		Database:       database,
-		ServiceManager: serviceManager,
-		Logger:         jp.Logger,
-		Cost:           estimatedCost,
-		EstimatedRows:  estimatedRows,
-		JoinExecutor:   joinExecutor,
+		Query:                query,
+		Database:             database,
+		ServiceManager:       serviceManager,
+		Logger:               jp.Logger,
+		Cost:                 estimatedCost,
+		EstimatedRows:        estimatedRows,
+		JoinExecutor:         joinExecutor,
+		LeftBundleInterface:  leftBundleInterface,  // May be nil or FilteredBundleAdapter
+		RightBundleInterface: rightBundleInterface, // May be nil or FilteredBundleAdapter
 	}
 
 	jp.Logger.Infof("Created JOIN execution plan: cost=%.2f, estimated_rows=%d, algorithm=hash_join",
 		estimatedCost, estimatedRows)
 
-	// Wrap with FilterNode if WHERE clause exists
+	// Wrap with FilterNode only if there are remaining WHERE conditions
 	var rootNode ExecutionNode = joinNode
 	finalCost := estimatedCost
 	finalEstimatedRows := estimatedRows
 
-	if query.WhereClause != nil && (len(query.WhereClause.Clauses) > 0 || len(query.WhereClause.SubGroups) > 0) {
-		// Extract all WHERE clauses for filtering
-		whereClauses := jp.extractAllWhereClauses(query.WhereClause)
-		if len(whereClauses) > 0 {
-			// Create FilterNode to apply WHERE conditions after JOIN
-			filterNode := &FilterNode{
-				Child:         joinNode,
-				Clauses:       whereClauses,
-				Cost:          estimatedCost + float64(estimatedRows)*0.1, // Add filter cost
-				EstimatedRows: estimatedRows / 10,                         // Assume 10% selectivity
-				Logger:        jp.Logger,
-			}
-			rootNode = filterNode
-			finalCost = filterNode.Cost
-			finalEstimatedRows = filterNode.EstimatedRows
-			jp.Logger.Infof("Wrapped JOIN with FilterNode: %d WHERE conditions, selectivity=10%%", len(whereClauses))
+	if len(remainingWhereClauses) > 0 {
+		// Create FilterNode to apply remaining WHERE conditions after JOIN
+		filterNode := &FilterNode{
+			Child:         joinNode,
+			Clauses:       remainingWhereClauses,
+			Cost:          estimatedCost + float64(estimatedRows)*0.1, // Add filter cost
+			EstimatedRows: estimatedRows / 10,                         // Assume 10% selectivity
+			Logger:        jp.Logger,
 		}
+		rootNode = filterNode
+		finalCost = filterNode.Cost
+		finalEstimatedRows = filterNode.EstimatedRows
+		jp.Logger.Infof("Wrapped JOIN with FilterNode: %d remaining WHERE conditions (after pushdown)", len(remainingWhereClauses))
+	} else if leftBundleInterface != nil || rightBundleInterface != nil {
+		jp.Logger.Info("All WHERE conditions pushed down - no post-JOIN filtering needed")
 	}
 
 	// Create the final execution plan using the wrapped node
@@ -377,11 +438,13 @@ type JoinExecutionNode struct {
 	ServiceManager interface {                  // Service manager for bundle operations
 		GetBundleByName(database *models.Database, name string) (*models.Bundle, error)
 	}
-	Logger        *zap.SugaredLogger             // Logger for debugging
-	Cost          float64                        // Estimated execution cost
-	EstimatedRows int                            // Estimated result rows
-	JoinExecutor  joinexecutor.JoinExecutor      // NEW: The Phase 1 JOIN executor
-	joinedResults []*joinexecutor.JoinedDocument // PHASE 3: Store JoinedDocument results for hierarchical transformation
+	Logger               *zap.SugaredLogger                // Logger for debugging
+	Cost                 float64                           // Estimated execution cost
+	EstimatedRows        int                               // Estimated result rows
+	JoinExecutor         joinexecutor.JoinExecutor         // NEW: The Phase 1 JOIN executor
+	joinedResults        []*joinexecutor.JoinedDocument    // PHASE 3: Store JoinedDocument results for hierarchical transformation
+	LeftBundleInterface  documentscanner.BundleInterface   // NEW: Optional filtered bundle for LEFT side (predicate pushdown)
+	RightBundleInterface documentscanner.BundleInterface   // NEW: Optional filtered bundle for RIGHT side (predicate pushdown)
 }
 
 // Execute implements ExecutionNode interface using the new JOIN executor
@@ -461,15 +524,34 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		bundleService = psm.bundleService
 	}
 
-	leftAdapter := &PlannerBundleAdapter{
-		bundle:        leftBundle,
-		logger:        jen.Logger,
-		bundleService: bundleService,
+	// Use filtered bundle interfaces if predicate pushdown was applied
+	// Otherwise create standard adapters from bundles
+	var leftAdapter, rightAdapter documentscanner.BundleInterface
+	
+	if jen.LeftBundleInterface != nil {
+		// Use the filtered adapter created during query planning (predicate pushdown)
+		leftAdapter = jen.LeftBundleInterface
+		jen.Logger.Infof("Using predicate-filtered LEFT bundle adapter")
+	} else {
+		// Create standard adapter
+		leftAdapter = &PlannerBundleAdapter{
+			bundle:        leftBundle,
+			logger:        jen.Logger,
+			bundleService: bundleService,
+		}
 	}
-	rightAdapter := &PlannerBundleAdapter{
-		bundle:        rightBundle,
-		logger:        jen.Logger,
-		bundleService: bundleService,
+
+	if jen.RightBundleInterface != nil {
+		// Use the filtered adapter created during query planning (predicate pushdown)
+		rightAdapter = jen.RightBundleInterface
+		jen.Logger.Infof("Using predicate-filtered RIGHT bundle adapter")
+	} else {
+		// Create standard adapter
+		rightAdapter = &PlannerBundleAdapter{
+			bundle:        rightBundle,
+			logger:        jen.Logger,
+			bundleService: bundleService,
+		}
 	}
 
 	// Convert JOIN conditions

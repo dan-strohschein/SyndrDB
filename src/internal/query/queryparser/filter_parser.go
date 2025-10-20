@@ -64,7 +64,7 @@ func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLog
 			Value: document.DocumentID,
 		}
 		document.Fields["DocumentID"] = field
-		logger.Infof("DocumentID '%s' is added", document.DocumentID)
+		//logger.Infof("DocumentID '%s' is added", document.DocumentID)
 	}
 
 	if _, exists := document.Fields[wc.Field]; !exists {
