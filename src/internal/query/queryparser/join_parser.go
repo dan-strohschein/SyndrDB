@@ -90,13 +90,14 @@ type JoinClause struct {
 
 // SelectJoinQuery represents a complete SELECT query with JOIN
 type SelectJoinQuery struct {
-	SelectFields []string     // Fields to select (empty for all)
-	FromBundle   string       // Primary bundle
-	JoinClauses  []JoinClause // JOIN operations
-	WhereClause  *WhereGroup  // WHERE conditions
-	OrderBy      []string     // ORDER BY fields (future)
-	Limit        int          // LIMIT value (0 for no limit)
-	Offset       int          // OFFSET value (0 for no offset)
+	SelectFields     []string     // Fields to select (empty for all)
+	FromBundle       string       // Primary bundle
+	JoinClauses      []JoinClause // JOIN operations
+	WhereClause      *WhereGroup  // WHERE conditions
+	OrderBy          []string     // ORDER BY fields (future)
+	Limit            int          // LIMIT value (0 for no limit)
+	Offset           int          // OFFSET value (0 for no offset)
+	RelationshipName string       // Name of the relationship for hierarchical results (WITH RELATIONSHIP clause)
 }
 
 // ParseSelectJoinQuery parses a SELECT query with optional JOIN clauses
@@ -112,7 +113,7 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";") // Remove trailing semicolon
 
-	logger.Debugf("Parsing SELECT JOIN query: %s", query)
+	logger.Infof("Parsing SELECT JOIN query: %s", query)
 
 	// Initialize the query structure
 	selectQuery := &SelectJoinQuery{
@@ -122,6 +123,7 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 
 	// Normalize the query for easier parsing
 	normalizedQuery := normalizeQuery(query)
+	logger.Infof("DEBUG: Normalized query: %s", normalizedQuery)
 
 	// Parse SELECT clause
 	if err := parseSelectClause(normalizedQuery, selectQuery, logger); err != nil {
@@ -143,8 +145,13 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 		return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
 	}
 
-	logger.Debugf("Successfully parsed query: FromBundle=%s, JoinClauses=%d, WhereClause=%v",
-		selectQuery.FromBundle, len(selectQuery.JoinClauses), selectQuery.WhereClause != nil)
+	// Parse WITH RELATIONSHIP clause (if any)
+	if err := parseWithRelationshipClause(normalizedQuery, selectQuery, logger); err != nil {
+		return nil, fmt.Errorf("failed to parse WITH RELATIONSHIP clause: %w", err)
+	}
+
+	logger.Infof("Successfully parsed query: FromBundle=%s, JoinClauses=%d, WhereClause=%v, RelationshipName='%s'",
+		selectQuery.FromBundle, len(selectQuery.JoinClauses), selectQuery.WhereClause != nil, selectQuery.RelationshipName)
 
 	return selectQuery, nil
 }
@@ -152,15 +159,22 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 // normalizeQuery normalizes the query string for easier parsing
 // This function standardizes spacing and case for consistent parsing
 func normalizeQuery(query string) string {
+	// First, replace newlines, tabs, and carriage returns with spaces
+	normalized := strings.ReplaceAll(query, "\n", " ")
+	normalized = strings.ReplaceAll(normalized, "\t", " ")
+	normalized = strings.ReplaceAll(normalized, "\r", " ")
+
 	// Replace multiple spaces with single space
 	re := regexp.MustCompile(`\s+`)
-	normalized := re.ReplaceAllString(query, " ")
+	normalized = re.ReplaceAllString(normalized, " ")
 
-	// Ensure proper spacing around keywords
-	normalized = regexp.MustCompile(`\s*JOIN\s*`).ReplaceAllString(normalized, " JOIN ")
-	normalized = regexp.MustCompile(`\s*ON\s*`).ReplaceAllString(normalized, " ON ")
-	normalized = regexp.MustCompile(`\s*WHERE\s*`).ReplaceAllString(normalized, " WHERE ")
-	normalized = regexp.MustCompile(`\s*FROM\s*`).ReplaceAllString(normalized, " FROM ")
+	// Now normalize keywords using word boundaries to avoid matching partial words
+	// The \b ensures we only match complete words, not substrings like "ON" in "RELATIONSHIP"
+	normalized = regexp.MustCompile(`(?i)\s+JOIN\s+`).ReplaceAllString(normalized, " JOIN ")
+	normalized = regexp.MustCompile(`(?i)\s+ON\s+`).ReplaceAllString(normalized, " ON ")
+	normalized = regexp.MustCompile(`(?i)\s+WHERE\s+`).ReplaceAllString(normalized, " WHERE ")
+	normalized = regexp.MustCompile(`(?i)\s+FROM\s+`).ReplaceAllString(normalized, " FROM ")
+	normalized = regexp.MustCompile(`(?i)\s+WITH\s+RELATIONSHIP\s+`).ReplaceAllString(normalized, " WITH RELATIONSHIP ")
 
 	return strings.TrimSpace(normalized)
 }
@@ -259,8 +273,12 @@ func parseFromClause(query string, selectQuery *SelectJoinQuery, logger *zap.Sug
 // parseJoinClauses parses all JOIN clauses in the query
 func parseJoinClauses(query string, selectQuery *SelectJoinQuery, logger *zap.SugaredLogger) error {
 	// Regular expression to find all JOIN clauses
-	joinRegex := regexp.MustCompile(`(LEFT\s+JOIN|RIGHT\s+JOIN|FULL\s+OUTER\s+JOIN|JOIN)\s+"([^"]+)"\s+ON\s+([^WHERE]+?)(?:WHERE|$)`)
+	// Updated to support INNER JOIN syntax (case insensitive)
+	// Modified to stop at WITH RELATIONSHIP to avoid capturing it as part of ON clause
+	joinRegex := regexp.MustCompile(`(?i)(LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+OUTER\s+JOIN|JOIN)\s+"([^"]+)"\s+ON\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|\s+WHERE\s+|$)`)
 	matches := joinRegex.FindAllStringSubmatch(query, -1)
+
+	logger.Infof("DEBUG: JOIN regex found %d matches in query: %s", len(matches), query)
 
 	for _, match := range matches {
 		if len(match) < 4 {
@@ -300,6 +318,8 @@ func parseJoinType(joinTypeStr string) JoinType {
 		return LeftJoin
 	case "RIGHT JOIN":
 		return RightJoin
+	case "INNER JOIN":
+		return InnerJoin
 	case "FULL OUTER JOIN":
 		return FullOuterJoin
 	case "JOIN":
@@ -345,8 +365,8 @@ func parseJoinConditions(onClause string, logger *zap.SugaredLogger) ([]JoinCond
 
 // parseWhereClauseFromQuery extracts and parses the WHERE clause from the full query
 func parseWhereClauseFromQuery(query string, selectQuery *SelectJoinQuery, logger *zap.SugaredLogger) error {
-	// Find WHERE clause in the query
-	whereRegex := regexp.MustCompile(`WHERE\s+(.+)$`)
+	// Find WHERE clause in the query - stop at WITH RELATIONSHIP if present
+	whereRegex := regexp.MustCompile(`WHERE\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|$)`)
 	matches := whereRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {
@@ -355,6 +375,7 @@ func parseWhereClauseFromQuery(query string, selectQuery *SelectJoinQuery, logge
 	}
 
 	whereClause := strings.TrimSpace(matches[1])
+	logger.Debugf("Extracted WHERE clause: '%s'", whereClause)
 
 	// Parse the WHERE clause using existing parser
 	whereGroup, err := ParseWhereClause(whereClause)
@@ -427,4 +448,87 @@ func isValidJoinOperator(operator string) bool {
 		}
 	}
 	return false
+}
+
+// parseWithRelationshipClause parses the WITH RELATIONSHIP clause for hierarchical JOIN results
+// Syntax: WITH RELATIONSHIP "RelationshipName"
+// This enables automatic grouping of JOIN results into hierarchical structures
+//
+// Parameters:
+//   - query: The normalized query string
+//   - selectQuery: The query structure to populate
+//   - logger: Logger for debug and error messages
+//
+// Returns:
+//   - error: Any error that occurred during parsing
+func parseWithRelationshipClause(query string, selectQuery *SelectJoinQuery, logger *zap.SugaredLogger) error {
+	upperQuery := strings.ToUpper(query)
+
+	// Check if the query contains WITH RELATIONSHIP clause
+	withIndex := strings.Index(upperQuery, " WITH RELATIONSHIP ")
+	if withIndex == -1 {
+		// No WITH RELATIONSHIP clause found - this is optional
+		logger.Infof("No WITH RELATIONSHIP clause found in query")
+		return nil
+	}
+
+	logger.Infof("Found WITH RELATIONSHIP clause at position %d", withIndex)
+
+	// Extract the part after WITH RELATIONSHIP
+	afterWith := query[withIndex+len(" WITH RELATIONSHIP "):]
+	afterWith = strings.TrimSpace(afterWith)
+
+	if afterWith == "" {
+		return fmt.Errorf("WITH RELATIONSHIP clause requires a relationship name")
+	}
+
+	// Parse the relationship name (should be quoted)
+	relationshipName, err := extractQuotedValue(afterWith)
+	if err != nil {
+		return fmt.Errorf("error parsing relationship name: %w", err)
+	}
+
+	if relationshipName == "" {
+		return fmt.Errorf("relationship name cannot be empty")
+	}
+
+	selectQuery.RelationshipName = relationshipName
+
+	logger.Infof("Parsed relationship name: '%s'", relationshipName)
+	return nil
+}
+
+// extractQuotedValue extracts a quoted string value from the beginning of text
+// Supports both single and double quotes
+//
+// Parameters:
+//   - text: The text to extract from
+//
+// Returns:
+//   - string: The extracted value without quotes
+//   - error: Any error that occurred
+func extractQuotedValue(text string) (string, error) {
+	text = strings.TrimSpace(text)
+	if len(text) == 0 {
+		return "", fmt.Errorf("empty text cannot contain quoted value")
+	}
+
+	// Check for different quote types
+	quoteChars := []rune{'"', '\''}
+
+	for _, quote := range quoteChars {
+		if rune(text[0]) == quote {
+			// Find the closing quote
+			endIndex := strings.IndexRune(text[1:], quote)
+			if endIndex == -1 {
+				return "", fmt.Errorf("missing closing quote for value starting with %c", quote)
+			}
+
+			// Extract the value between quotes
+			value := text[1 : endIndex+1]
+			return value, nil
+		}
+	}
+
+	return "", fmt.Errorf("value must be quoted with single or double quotes")
 }

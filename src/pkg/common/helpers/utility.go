@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"syndrdb/src/pkg/settings"
 	"time"
@@ -55,6 +56,15 @@ func NormalizeCommand(command string) string {
 	cmd = strings.ReplaceAll(cmd, "\n", " ")
 	cmd = strings.ReplaceAll(cmd, "\t", " ")
 	cmd = strings.ReplaceAll(cmd, "\r", " ")
+
+	// Protect WITH RELATIONSHIP before normalizing whitespace
+	cmd = regexp.MustCompile(`(?i)\s*WITH\s+RELATIONSHIP\s+`).ReplaceAllString(cmd, " WITH_RELATIONSHIP ")
+
+	// Now normalize whitespace
 	cmd = strings.Join(strings.Fields(cmd), " ")
+
+	// Restore WITH RELATIONSHIP
+	cmd = strings.ReplaceAll(cmd, " WITH_RELATIONSHIP ", " WITH RELATIONSHIP ")
+
 	return cmd
 }

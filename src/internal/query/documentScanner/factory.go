@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/helpers"
 
 	"go.uber.org/zap"
 )
@@ -170,15 +171,38 @@ type BundleAdapter struct {
 	totalDocuments *int                            // Cached total document count
 	documentIDs    []string                        // Cached document IDs (loaded lazily)
 	cachedPages    map[uint32]*models.DocumentPage // Page-level cache
+	logger         *zap.SugaredLogger              // Logger for debugging and monitoring
 }
 
 // NewBundleAdapter creates a new adapter for a SyndrDB Bundle with streaming support
 // This adapter provides efficient lazy loading without loading all documents at once
-func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterface) *BundleAdapter {
+func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterface, logger *zap.SugaredLogger) *BundleAdapter {
+	// SAFETY: Log bundle metadata immediately to diagnose potential infinite loop causes
+	if bundle != nil {
+		logger.Infof("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
+		logger.Infof("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
+		logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
+		if bundle.Documents != nil {
+			logger.Infof("SAFETY CHECK: Bundle.Documents is not nil, has %d documents", len(*bundle.Documents))
+		} else {
+			logger.Infof("SAFETY CHECK: Bundle.Documents is nil (expected for page-based loading)")
+		}
+
+		// CRITICAL SAFETY: If PageCount is suspiciously high, log error and set reasonable limit
+		if bundle.PageCount > 10000 {
+			logger.Errorf("CRITICAL SAFETY: Bundle PageCount (%d) is dangerously high! This would cause infinite loops.", bundle.PageCount)
+			logger.Errorf("CRITICAL SAFETY: Setting PageCount to safe value of 0 to prevent crashes")
+			bundle.PageCount = 0 // Force safe value
+		}
+	} else {
+		logger.Errorf("SAFETY CHECK: Bundle is nil!")
+	}
+
 	return &BundleAdapter{
 		bundle:        bundle,
 		bundleService: bundleService,
 		cachedPages:   make(map[uint32]*models.DocumentPage),
+		logger:        logger,
 	}
 }
 
@@ -196,7 +220,7 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 	}
 
 	// Get database path from bundle
-	databasePath := fmt.Sprintf("data_files/%s", ba.bundle.Database.Name)
+	databasePath := helpers.GetDatabaseFolderPath(ba.bundle.Name) //fmt.Sprintf("data_files/%s", ba.bundle.Database.Name)
 
 	// Load page from storage
 	page, err := ba.bundleService.LoadDocumentPage(ba.bundle.Name, ba.bundle.Database.Name, pageID, databasePath)
@@ -225,7 +249,15 @@ func (ba *BundleAdapter) getTotalDocumentsCount() int {
 
 	// Fallback: count by iterating pages (but don't load all documents)
 	count := 0
-	for pageID := uint32(0); pageID < uint32(ba.bundle.PageCount); pageID++ {
+	// SAFETY: Prevent infinite loops by limiting page count
+	maxSafePages := uint32(100)
+	pageCount := uint32(ba.bundle.PageCount)
+	if pageCount > maxSafePages {
+		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in getTotalDocumentsCount", pageCount, maxSafePages)
+		pageCount = maxSafePages
+	}
+
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := ba.loadDocumentPage(pageID)
 		if err != nil {
 			continue
@@ -247,7 +279,15 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 	var ids []string
 
 	// Stream through pages and collect only document IDs (not full documents)
-	for pageID := uint32(0); pageID < uint32(ba.bundle.PageCount); pageID++ {
+	// SAFETY: Prevent infinite loops by limiting page count
+	maxSafePages := uint32(100)
+	pageCount := uint32(ba.bundle.PageCount)
+	if pageCount > maxSafePages {
+		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in GetDocumentIDs", pageCount, maxSafePages)
+		pageCount = maxSafePages
+	}
+
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := ba.loadDocumentPage(pageID)
 		if err != nil {
 			continue
@@ -267,7 +307,15 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 // GetDocument returns a single document by ID using streaming approach
 func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 	// Stream through pages to find the specific document
-	for pageID := uint32(0); pageID < uint32(ba.bundle.PageCount); pageID++ {
+	// SAFETY: Prevent infinite loops by limiting page count
+	maxSafePages := uint32(100)
+	pageCount := uint32(ba.bundle.PageCount)
+	if pageCount > maxSafePages {
+		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in GetDocument", pageCount, maxSafePages)
+		pageCount = maxSafePages
+	}
+
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := ba.loadDocumentPage(pageID)
 		if err != nil {
 			continue
@@ -288,10 +336,36 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 	allDocs := make(map[string]*models.Document)
 
+	// FIRST: Check if bundle has legacy Documents field populated (e.g., from filtered bundles)
+	if ba.bundle.Documents != nil && len(*ba.bundle.Documents) > 0 {
+		ba.logger.Infof("Using legacy Documents field with %d documents", len(*ba.bundle.Documents))
+		for docID, doc := range *ba.bundle.Documents {
+			docCopy := doc
+			allDocs[docID] = &docCopy
+		}
+		return allDocs
+	}
+
+	// FALLBACK: Use page-based loading for modern bundles
+	ba.logger.Infof("Using page-based loading (PageCount=%d)", ba.bundle.PageCount)
+
+	// PROTECTION: Limit maximum pages to prevent infinite loops
+	maxPages := uint32(10000) // Reasonable maximum
+	pageCount := uint32(ba.bundle.PageCount)
+	if pageCount > maxPages {
+		ba.logger.Errorf("INFINITE LOOP PROTECTION: PageCount %d exceeds maximum %d, limiting", pageCount, maxPages)
+		pageCount = maxPages
+	}
+	if pageCount == 0 {
+		ba.logger.Infof("PageCount is 0, returning empty result")
+		return allDocs
+	}
+
 	// Stream through pages and collect all documents
-	for pageID := uint32(0); pageID < uint32(ba.bundle.PageCount); pageID++ {
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := ba.loadDocumentPage(pageID)
 		if err != nil {
+			ba.logger.Infof("Failed to load page %d: %v", pageID, err)
 			continue
 		}
 
@@ -344,35 +418,57 @@ type BundleDocumentIterator struct {
 }
 
 func (iter *BundleDocumentIterator) HasNext() bool {
+	// PROTECTION: Prevent infinite loops with reasonable page limits
+	maxPages := uint32(10000)
+	pageCount := uint32(iter.adapter.bundle.PageCount)
+	if pageCount > maxPages {
+		pageCount = maxPages
+	}
+
 	// Check if we have more pages to process
-	return iter.currentPage < uint32(iter.adapter.bundle.PageCount)
+	return iter.currentPage < pageCount
 }
 
 func (iter *BundleDocumentIterator) Next() (*models.Document, error) {
-	if !iter.HasNext() {
-		return nil, fmt.Errorf("no more documents")
+	// PROTECTION: Prevent infinite recursion with maximum attempts
+	maxAttempts := 1000
+	attempts := 0
+
+	for attempts < maxAttempts {
+		if !iter.HasNext() {
+			return nil, fmt.Errorf("no more documents")
+		}
+
+		// Load current page if not loaded or if we've exhausted current page
+		if iter.pageIndex >= len(iter.pageIDs) {
+			page, err := iter.adapter.loadDocumentPage(iter.currentPage)
+			if err != nil {
+				iter.currentPage++
+				attempts++
+				continue // Try next page instead of recursion
+			}
+
+			// Reset page iteration
+			iter.pageIDs = make([]string, 0, len(page.Documents))
+			for docID := range page.Documents {
+				iter.pageIDs = append(iter.pageIDs, docID)
+			}
+			iter.pageIndex = 0
+
+			// If page is empty, move to next page
+			if len(iter.pageIDs) == 0 {
+				iter.currentPage++
+				attempts++
+				continue // Try next page instead of recursion
+			}
+		}
+
+		// If we reach here, we should have a valid page with documents
+		break
 	}
 
-	// Load current page if not loaded or if we've exhausted current page
-	if iter.pageIndex >= len(iter.pageIDs) {
-		page, err := iter.adapter.loadDocumentPage(iter.currentPage)
-		if err != nil {
-			iter.currentPage++
-			return iter.Next() // Try next page
-		}
-
-		// Reset page iteration
-		iter.pageIDs = make([]string, 0, len(page.Documents))
-		for docID := range page.Documents {
-			iter.pageIDs = append(iter.pageIDs, docID)
-		}
-		iter.pageIndex = 0
-
-		// If page is empty, move to next page
-		if len(iter.pageIDs) == 0 {
-			iter.currentPage++
-			return iter.Next()
-		}
+	if attempts >= maxAttempts {
+		return nil, fmt.Errorf("exceeded maximum attempts (%d) to find valid page", maxAttempts)
 	}
 
 	// Get document from current page

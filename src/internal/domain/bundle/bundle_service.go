@@ -1112,12 +1112,12 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		//s.logger.Infof("DEBUG: Loading page %d for bundle '%s'", pageID, bundle.Name)
 
 		//settings := settings.GetSettings()
-		s.logger.Infof("DEBUG DEBUG DEBUG :: Loading Database name %s,page %d for bundle '%s'", bundle.Database.Name, pageID, bundle.Name)
+		//s.logger.Infof("DEBUG DEBUG DEBUG :: Loading Database name %s,page %d for bundle '%s'", bundle.Database.Name, pageID, bundle.Name)
 		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 
 		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
 		if err != nil {
-			s.logger.Errorf("DEBUG: Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
+			//s.logger.Errorf("DEBUG: Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
 			continue
 		}
 
@@ -1130,7 +1130,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		}
 	}
 
-	s.logger.Infof("DEBUG: FINAL RETURN getAllDocumentsForIndexing - loaded %d total documents from %d pages", len(allDocuments), bundle.PageCount)
+	//s.logger.Infof("DEBUG: FINAL RETURN getAllDocumentsForIndexing - loaded %d total documents from %d pages", len(allDocuments), bundle.PageCount)
 	return allDocuments, nil
 }
 
@@ -2362,11 +2362,20 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 		return result, nil
 	}
 
-	// Fallback to full document scan using the query parser
+	// Fallback to full document scan using modern page-based loading
 	// Following SyndrDB comprehensive error handling, provide reliable fallback
-	s.logger.Debugf("No suitable index found, performing full document scan on %d documents", len(docs))
+	s.logger.Debugf("No suitable index found, performing full document scan with page-based loading")
 
-	filteredDocs, err := queryparser.FilterDocuments(bundle, whereClause, s.logger)
+	// Load all documents using the modern page-based system
+	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for filtering: %w", err)
+	}
+
+	s.logger.Debugf("Loaded %d documents for filtering", len(allDocs))
+
+	// Apply filtering using the raw document filter (works with document slice)
+	filteredDocs, err := queryparser.FilterDocumentsRaw(allDocs, whereClause, s.logger)
 	if err != nil {
 		return nil, fmt.Errorf("full document scan failed: %w", err)
 	}
@@ -2897,7 +2906,7 @@ func (s *BundleService) GetOrCreateDocumentScanner(bundle *models.Bundle) (docum
 	}
 
 	// Create scanner using integration
-	scanner, err := s.scannerIntegration.CreateScannerForBundle(bundle, s)
+	scanner, err := s.scannerIntegration.CreateScannerForBundle(bundle, s, s.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create document scanner for bundle '%s': %w", bundle.Name, err)
 	}

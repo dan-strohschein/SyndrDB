@@ -14,6 +14,8 @@ type BundleServiceInterface interface {
 	GetOrLoadHashIndexInterface(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (interface{}, error)
 	GetOrLoadBTreeIndex(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (interface{}, error)
 	GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error)
+	GetBundleByName(database *models.Database, name string) (*models.Bundle, error)
+	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
 }
 
 // ExecutionNode represents a node in the execution plan tree

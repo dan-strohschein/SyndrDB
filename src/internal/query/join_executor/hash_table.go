@@ -1,0 +1,271 @@
+package joinexecutor
+
+import (
+	"fmt"
+	"hash/fnv"
+	"sync"
+
+	"syndrdb/src/internal/domain/models"
+)
+
+// InMemoryHashTable implements the HashTable interface using an in-memory hash table
+// This is optimized for SyndrDB's document storage with support for multiple values per key
+type InMemoryHashTable struct {
+	buckets    []bucket     // Array of buckets for hash table storage
+	size       int          // Number of unique keys stored
+	capacity   int          // Current capacity (number of buckets)
+	loadFactor float64      // Target load factor before resizing
+	memoryUsed int64        // Estimated memory usage in bytes
+	mutex      sync.RWMutex // Protects concurrent access
+
+	// PHASE 2: Disk spillover support
+	// spillManager *DiskSpillManager
+	// isSpilled    bool
+	// spillThreshold int64
+}
+
+// bucket represents a single bucket in the hash table
+type bucket struct {
+	entries []hashEntry // Entries in this bucket (for collision resolution)
+}
+
+// hashEntry represents a single key-value entry
+type hashEntry struct {
+	key       interface{}        // The join key
+	documents []*models.Document // Documents with this key (supports multiple docs per key)
+	keyHash   uint64             // Cached hash value for the key
+}
+
+// NewInMemoryHashTable creates a new in-memory hash table
+// initialCapacity: Initial number of buckets
+// loadFactor: Target load factor before resizing (typically 0.75)
+func NewInMemoryHashTable(initialCapacity int, loadFactor float64) HashTable {
+	if initialCapacity <= 0 {
+		initialCapacity = 16 // Default minimum capacity
+	}
+	if loadFactor <= 0 || loadFactor > 1.0 {
+		loadFactor = 0.75 // Default load factor
+	}
+
+	return &InMemoryHashTable{
+		buckets:    make([]bucket, initialCapacity),
+		size:       0,
+		capacity:   initialCapacity,
+		loadFactor: loadFactor,
+		memoryUsed: int64(initialCapacity * 64), // Estimate initial memory
+	}
+}
+
+// Put stores a key-value pair in the hash table
+func (ht *InMemoryHashTable) Put(key interface{}, value *models.Document) error {
+	if key == nil || value == nil {
+		return fmt.Errorf("key and value cannot be nil")
+	}
+
+	ht.mutex.Lock()
+	defer ht.mutex.Unlock()
+
+	// Check if we need to resize
+	if float64(ht.size) >= float64(ht.capacity)*ht.loadFactor {
+		ht.resize()
+	}
+
+	// Calculate hash and bucket index
+	keyHash := ht.hashKey(key)
+	bucketIndex := int(keyHash % uint64(ht.capacity))
+	bucket := &ht.buckets[bucketIndex]
+
+	// Look for existing entry with this key
+	for i := range bucket.entries {
+		entry := &bucket.entries[i]
+		if entry.keyHash == keyHash && ht.keysEqual(entry.key, key) {
+			// Key already exists, add document to existing entry
+			entry.documents = append(entry.documents, value)
+			ht.memoryUsed += ht.estimateDocumentSize(value)
+			return nil
+		}
+	}
+
+	// Key doesn't exist, create new entry
+	newEntry := hashEntry{
+		key:       key,
+		documents: []*models.Document{value},
+		keyHash:   keyHash,
+	}
+	bucket.entries = append(bucket.entries, newEntry)
+	ht.size++
+	ht.memoryUsed += ht.estimateEntrySize(key, value)
+
+	return nil
+}
+
+// Get retrieves all documents associated with a key
+func (ht *InMemoryHashTable) Get(key interface{}) ([]*models.Document, bool) {
+	if key == nil {
+		return nil, false
+	}
+
+	ht.mutex.RLock()
+	defer ht.mutex.RUnlock()
+
+	// Calculate hash and bucket index
+	keyHash := ht.hashKey(key)
+	bucketIndex := int(keyHash % uint64(ht.capacity))
+	bucket := &ht.buckets[bucketIndex]
+
+	// Search for entry with this key
+	for _, entry := range bucket.entries {
+		if entry.keyHash == keyHash && ht.keysEqual(entry.key, key) {
+			// Return copy of documents slice to prevent external modification
+			docs := make([]*models.Document, len(entry.documents))
+			copy(docs, entry.documents)
+			return docs, true
+		}
+	}
+
+	return nil, false
+}
+
+// Contains checks if a key exists in the hash table
+func (ht *InMemoryHashTable) Contains(key interface{}) bool {
+	_, found := ht.Get(key)
+	return found
+}
+
+// Size returns the number of unique keys in the hash table
+func (ht *InMemoryHashTable) Size() int {
+	ht.mutex.RLock()
+	defer ht.mutex.RUnlock()
+	return ht.size
+}
+
+// GetMemoryUsage returns current memory usage in bytes
+func (ht *InMemoryHashTable) GetMemoryUsage() int64 {
+	ht.mutex.RLock()
+	defer ht.mutex.RUnlock()
+	return ht.memoryUsed
+}
+
+// Clear removes all entries from the hash table
+func (ht *InMemoryHashTable) Clear() {
+	ht.mutex.Lock()
+	defer ht.mutex.Unlock()
+
+	// Reset all buckets
+	for i := range ht.buckets {
+		ht.buckets[i].entries = nil
+	}
+
+	ht.size = 0
+	ht.memoryUsed = int64(ht.capacity * 64) // Reset to base memory usage
+}
+
+// resize increases the capacity of the hash table and rehashes all entries
+func (ht *InMemoryHashTable) resize() {
+	oldBuckets := ht.buckets
+	oldCapacity := ht.capacity
+
+	// Double the capacity
+	ht.capacity = oldCapacity * 2
+	ht.buckets = make([]bucket, ht.capacity)
+	ht.size = 0
+	oldMemoryUsed := ht.memoryUsed
+	ht.memoryUsed = int64(ht.capacity * 64) // Reset base memory
+
+	// Rehash all entries
+	for _, bucket := range oldBuckets {
+		for _, entry := range bucket.entries {
+			// Recalculate bucket index with new capacity
+			bucketIndex := int(entry.keyHash % uint64(ht.capacity))
+			newBucket := &ht.buckets[bucketIndex]
+
+			// Add entry to new bucket
+			newBucket.entries = append(newBucket.entries, entry)
+			ht.size++
+		}
+	}
+
+	// Update memory usage (structure overhead may have changed)
+	ht.memoryUsed = oldMemoryUsed + int64((ht.capacity-oldCapacity)*64)
+}
+
+// hashKey computes the hash value for a key
+func (ht *InMemoryHashTable) hashKey(key interface{}) uint64 {
+	hasher := fnv.New64a()
+
+	// Convert key to string for hashing
+	keyStr := fmt.Sprintf("%v", key)
+	hasher.Write([]byte(keyStr))
+
+	return hasher.Sum64()
+}
+
+// keysEqual compares two keys for equality
+func (ht *InMemoryHashTable) keysEqual(key1, key2 interface{}) bool {
+	return fmt.Sprintf("%v", key1) == fmt.Sprintf("%v", key2)
+}
+
+// estimateEntrySize estimates the memory size of a hash table entry
+func (ht *InMemoryHashTable) estimateEntrySize(key interface{}, doc *models.Document) int64 {
+	// Rough estimate: key + document + overhead
+	keySize := int64(len(fmt.Sprintf("%v", key)))
+	docSize := ht.estimateDocumentSize(doc)
+	overhead := int64(64) // Struct overhead, pointers, etc.
+
+	return keySize + docSize + overhead
+}
+
+// estimateDocumentSize estimates the memory size of a document
+func (ht *InMemoryHashTable) estimateDocumentSize(doc *models.Document) int64 {
+	// Rough estimate based on document fields
+	// This is a simplified calculation - could be enhanced for better accuracy
+	baseSize := int64(200) // Base struct size
+
+	// Add estimated size of string fields
+	baseSize += int64(len(doc.DocumentID) * 2) // Unicode strings are roughly 2 bytes per char
+
+	// Add size of other fields (rough estimates)
+	baseSize += int64(100) // CreatedAt, UpdatedAt, other fields
+
+	return baseSize
+}
+
+// PHASE 2: Disk spillover methods (to be implemented)
+/*
+func (ht *InMemoryHashTable) SpillToDisk() error {
+	// Implementation for spilling hash table to disk when memory pressure is high
+	// This will use the DiskSpillManager to write buckets to cloud storage
+	return fmt.Errorf("disk spillover not yet implemented")
+}
+
+func (ht *InMemoryHashTable) LoadFromDisk() error {
+	// Implementation for loading hash table from disk
+	// This will read spilled buckets from cloud storage back into memory
+	return fmt.Errorf("disk spillover not yet implemented")
+}
+
+func (ht *InMemoryHashTable) IsSpilled() bool {
+	// Returns whether this hash table has been spilled to disk
+	return false // Will be implemented in Phase 2
+}
+*/
+
+// PHASE 4: Advanced optimization methods (to be implemented)
+/*
+func (ht *InMemoryHashTable) CreateBloomFilter() BloomFilter {
+	// Creates a Bloom filter from the keys in this hash table
+	// This can be used to quickly filter probe side documents
+	return nil
+}
+
+func (ht *InMemoryHashTable) GetKeyDistribution() KeyDistribution {
+	// Returns statistics about key distribution for optimization
+	return KeyDistribution{}
+}
+
+func (ht *InMemoryHashTable) Compress() error {
+	// Compresses the hash table to reduce memory usage
+	// Useful when memory is constrained but CPU is available
+	return fmt.Errorf("compression not yet implemented")
+}
+*/

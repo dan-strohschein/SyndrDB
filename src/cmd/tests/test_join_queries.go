@@ -35,7 +35,6 @@ import (
 	"syndrdb/src/internal/server"
 	"syndrdb/src/internal/storage/databasestore"
 	"syndrdb/src/pkg/settings"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -340,18 +339,19 @@ func cleanupJoinTestData(db *models.Database, serviceManager server.ServiceManag
 func executeJoinQuery(query string, serviceManager server.ServiceManager, db *models.Database, logger *zap.SugaredLogger) (*server.CommandResponse, error) {
 	logger.Infof("Executing JOIN query: %s", query)
 
-	startTime := time.Now()
-	result, err := server.SelectDocumentsWithJoin(query, serviceManager, db, logger, startTime)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute JOIN query: %w", err)
-	}
+	// startTime := time.Now()
+	// result, err := server.SelectDocumentsWithJoin(query, serviceManager, db, logger, startTime)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to execute JOIN query: %w", err)
+	// }
 
-	cmdResponse, ok := result.(*server.CommandResponse)
-	if !ok {
-		return nil, fmt.Errorf("unexpected result type from JOIN query")
-	}
+	// cmdResponse, ok := result.(*server.CommandResponse)
+	// if !ok {
+	// 	return nil, fmt.Errorf("unexpected result type from JOIN query")
+	// }
 
-	return cmdResponse, nil
+	// return cmdResponse, nil
+	return nil, fmt.Errorf("JOIN query execution TEST not implemented")
 }
 
 // TestJoinPerformance tests the performance characteristics of different join algorithms

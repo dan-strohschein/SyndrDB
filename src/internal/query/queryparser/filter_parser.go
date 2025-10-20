@@ -44,6 +44,29 @@ type WhereGroup struct {
 // Matches checks if the clause matches a document based on its field value
 func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLogger) bool {
 	// If the field doesn't exist in the document, return false
+
+	// If the bundle name is attached to the field like this "<bundle_name>"."<field_name>", strip it
+	if strings.Contains(wc.Field, ".") {
+		parts := strings.SplitN(wc.Field, ".", 2)
+		wc.Field = parts[1]
+	}
+
+	if strings.Contains(wc.Field, "\"") {
+		parts := strings.Split(wc.Field, "\"")
+		wc.Field = parts[1]
+	}
+
+	if strings.EqualFold(wc.Field, "documentid") {
+		// Special case for document ID
+
+		field := models.Field{
+			//Name:  "DocumentID",
+			Value: document.DocumentID,
+		}
+		document.Fields["DocumentID"] = field
+		logger.Infof("DocumentID '%s' is added", document.DocumentID)
+	}
+
 	if _, exists := document.Fields[wc.Field]; !exists {
 		logger.Infof("Field '%s' does not exist in document, returning false", wc.Field)
 		return false
@@ -204,6 +227,11 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 			operator := tokens[pos+1]
 			valueToken := tokens[pos+2]
 
+			// Strip quotes from field name if present
+			if strings.HasPrefix(field, "\"") && strings.HasSuffix(field, "\"") {
+				field = field[1 : len(field)-1]
+			}
+
 			// Validate operator
 			if !isValidOperator(operator) {
 				return nil, pos, fmt.Errorf("invalid operator: %s", operator)
@@ -294,7 +322,7 @@ func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logg
 	// Evaluate all clauses in this group
 	clauseResults := make([]bool, 0, len(whereGroup.Clauses))
 	for _, clause := range whereGroup.Clauses {
-		logger.Infof("DEBUG DEBUG:: Evaluating clause: %+v", clause)
+		//logger.Infof("DEBUG DEBUG:: Evaluating clause: %+v", clause)
 		clauseResults = append(clauseResults, evaluateClause(document, clause, logger))
 	}
 
@@ -325,6 +353,10 @@ func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logg
 // evaluateClause evaluates a single clause against a document
 func evaluateClause(document *models.Document, clause WhereClause, logger *zap.SugaredLogger) bool {
 	// Get field value from document
+
+	if strings.Contains(clause.Field, "\"") {
+		clause.Field = strings.ReplaceAll(clause.Field, "\"", "")
+	}
 
 	field, exists := document.Fields[clause.Field]
 	if !exists && !strings.EqualFold(clause.Field, "documentid") {
@@ -364,7 +396,7 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericComparison func(float64, float64) bool) bool {
 	settings := settings.GetSettings()
 	if settings.Debug && settings.Verbose {
-		logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
+		//logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
 	}
 
 	// Handle string comparison

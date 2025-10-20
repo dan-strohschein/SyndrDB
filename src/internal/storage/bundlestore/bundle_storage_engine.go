@@ -220,8 +220,8 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 		page.NextPageID = &nextPageID
 	}
 
-	bse.logger.Infof("Efficiently loaded page %d for bundle %s with %d documents (total docs: %d, total pages: %d)",
-		pageID, bundleName, len(pageDocuments), totalDocs, totalPages)
+	// bse.logger.Infof("Efficiently loaded page %d for bundle %s with %d documents (total docs: %d, total pages: %d)",
+	// 	pageID, bundleName, len(pageDocuments), totalDocs, totalPages)
 
 	return page, nil
 }

@@ -1076,7 +1076,8 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 		// For other types, marshal to JSON
 
 		data, _ = json.Marshal(result)
-		logger.Infof("Sending result: %s", data)
+		//logger.Infof("Sending result: %s", data)
+
 		logger.Sync()
 		writer.WriteString(string(data) + "\n")
 		writer.Flush()

@@ -253,22 +253,26 @@ func (cs *CatalogService) ListAllDatabasesInCatalog() ([]map[string]interface{},
 		return nil, fmt.Errorf("failed to get primary.Databases bundle: %w", err)
 	}
 
+	// Load documents using page-based loading (same as other catalog methods)
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(databasesBundle.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", databasesBundle.Name, err)
+	}
+
 	var databases []map[string]interface{}
-	if databasesBundle.Documents != nil {
-		for _, doc := range *databasesBundle.Documents {
-			// Convert document to map
-			docMap := make(map[string]interface{})
-			docMap["DocumentID"] = doc.DocumentID
-			docMap["CreatedAt"] = doc.CreatedAt
-			docMap["UpdatedAt"] = doc.UpdatedAt
+	for _, doc := range docs {
+		// Convert document to map
+		docMap := make(map[string]interface{})
+		docMap["DocumentID"] = doc.DocumentID
+		docMap["CreatedAt"] = doc.CreatedAt
+		docMap["UpdatedAt"] = doc.UpdatedAt
 
-			// Add all fields to the result
-			for fieldName, field := range doc.Fields {
-				docMap[fieldName] = field.Value
-			}
-
-			databases = append(databases, docMap)
+		// Add all fields to the result
+		for fieldName, field := range doc.Fields {
+			docMap[fieldName] = field.Value
 		}
+
+		databases = append(databases, docMap)
 	}
 
 	return databases, nil
@@ -306,22 +310,26 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
 	}
-	//TODO Fix this to use the separate load function like the other functions in this file
+
+	// Load documents using page-based loading (consistent with other catalog methods)
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
+	if err != nil {
+		return fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
+	}
+
 	// Find the document for this bundle
 	var docIDToRemove string
 	var bundleName string
-	if bundlesBundle.Documents != nil {
-		for docID, doc := range *bundlesBundle.Documents {
-			// Access the BundleID field from the Document struct
-			if bundleIDField, exists := doc.Fields["BundleID"]; exists && bundleIDField.Value == bundleID {
-				docIDToRemove = docID
-				if nameField, exists := doc.Fields["Name"]; exists {
-					if name, ok := nameField.Value.(string); ok {
-						bundleName = name
-					}
+	for _, doc := range docs {
+		// Access the BundleID field from the Document struct
+		if bundleIDField, exists := doc.Fields["BundleID"]; exists && bundleIDField.Value == bundleID {
+			docIDToRemove = doc.DocumentID
+			if nameField, exists := doc.Fields["Name"]; exists {
+				if name, ok := nameField.Value.(string); ok {
+					bundleName = name
 				}
-				break
 			}
+			break
 		}
 	}
 
@@ -473,22 +481,26 @@ func (cs *CatalogService) ListAllBundlesInCatalog() ([]map[string]interface{}, e
 		return nil, fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
 	}
 
+	// Load documents using page-based loading (same as other catalog methods)
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
+	}
+
 	var bundles []map[string]interface{}
-	if bundlesBundle.Documents != nil {
-		for _, doc := range *bundlesBundle.Documents {
-			// Convert document to map
-			docMap := make(map[string]interface{})
-			docMap["DocumentID"] = doc.DocumentID
-			docMap["CreatedAt"] = doc.CreatedAt
-			docMap["UpdatedAt"] = doc.UpdatedAt
+	for _, doc := range docs {
+		// Convert document to map
+		docMap := make(map[string]interface{})
+		docMap["DocumentID"] = doc.DocumentID
+		docMap["CreatedAt"] = doc.CreatedAt
+		docMap["UpdatedAt"] = doc.UpdatedAt
 
-			// Add all fields to the result
-			for fieldName, field := range doc.Fields {
-				docMap[fieldName] = field.Value
-			}
-
-			bundles = append(bundles, docMap)
+		// Add all fields to the result
+		for fieldName, field := range doc.Fields {
+			docMap[fieldName] = field.Value
 		}
+
+		bundles = append(bundles, docMap)
 	}
 
 	return bundles, nil

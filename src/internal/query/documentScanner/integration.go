@@ -37,13 +37,13 @@ func NewScannerIntegration(logger *zap.SugaredLogger) *ScannerIntegration {
 
 // CreateScannerForBundle creates and registers a scanner for a specific bundle
 // This is the main entry point for integrating scanning with query execution
-func (si *ScannerIntegration) CreateScannerForBundle(bundle *models.Bundle, bundleService BundleServiceInterface) (DocumentScannerInterface, error) {
+func (si *ScannerIntegration) CreateScannerForBundle(bundle *models.Bundle, bundleService BundleServiceInterface, logger *zap.SugaredLogger) (DocumentScannerInterface, error) {
 	if bundle == nil {
 		return nil, fmt.Errorf("bundle cannot be nil")
 	}
 
 	// Create bundle adapter with BundleService
-	bundleAdapter := NewBundleAdapter(bundle, bundleService)
+	bundleAdapter := NewBundleAdapter(bundle, bundleService, logger)
 
 	// Create scanner with factory
 	scanner, err := si.factory.CreateScanner(bundleAdapter, nil)
@@ -83,7 +83,7 @@ func ExampleUsage(logger *zap.SugaredLogger, bundle *models.Bundle, bundleServic
 	defer integration.Close()
 
 	// Create scanner for bundle
-	scanner, err := integration.CreateScannerForBundle(bundle, bundleService)
+	scanner, err := integration.CreateScannerForBundle(bundle, bundleService, logger)
 	if err != nil {
 		logger.Errorf("Failed to create scanner: %v", err)
 		return

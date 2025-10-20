@@ -14,8 +14,9 @@ import (
 type QueryPlanner struct {
 	Logger           *zap.SugaredLogger
 	BundleServiceInt BundleServiceInterface
-	ScannerFactory   *documentscanner.ScannerFactory
-	BundleService    interface {
+
+	ScannerFactory                 *documentscanner.ScannerFactory
+	GetOrCreateDocumentScannerFunc interface {
 		GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error)
 	}
 }
@@ -27,13 +28,13 @@ func NewQueryPlanner(logger *zap.SugaredLogger) *QueryPlanner {
 	}
 }
 
-func NewQueryPlannerWithService(logger *zap.SugaredLogger, bundleServiceInt BundleServiceInterface, bundleService interface {
+func NewQueryPlannerWithService(logger *zap.SugaredLogger, bundleServiceInt BundleServiceInterface, getOrCreateDocumentScannerFunc interface {
 	GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error)
 }) *QueryPlanner {
 	return &QueryPlanner{
-		Logger:           logger,
-		BundleServiceInt: bundleServiceInt,
-		BundleService:    bundleService,
+		Logger:                         logger,
+		BundleServiceInt:               bundleServiceInt,
+		GetOrCreateDocumentScannerFunc: getOrCreateDocumentScannerFunc,
 	}
 }
 
@@ -205,7 +206,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 	}
 
 	// Create scanner for this bundle
-	scanner, err := qp.BundleService.GetOrCreateDocumentScanner(bundle)
+	scanner, err := qp.GetOrCreateDocumentScannerFunc.GetOrCreateDocumentScanner(bundle)
 	if err != nil {
 		qp.Logger.Warnf("Failed to create document scanner for bundle '%s': %v", bundle.Name, err)
 		scanner = nil // Fall back to in-memory documents if available
