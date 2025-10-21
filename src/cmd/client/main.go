@@ -24,7 +24,7 @@ func main() {
 	flag.StringVar(&args.Database, "database", "testdb", "Database name")
 	flag.StringVar(&args.Username, "username", "user", "Username")
 	flag.StringVar(&args.Password, "password", "password", "Password")
-	flag.BoolVar(&args.PrettyPrintResults, "pretty_print", true, "Pretty print results (default: false)")
+	flag.BoolVar(&args.PrettyPrintResults, "pretty_print", true, "Pretty print JSON results with indentation (default: true)")
 	// Parse the command line
 	flag.Parse()
 

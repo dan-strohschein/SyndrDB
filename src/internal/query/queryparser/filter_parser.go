@@ -396,13 +396,15 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericComparison func(float64, float64) bool) bool {
 	settings := settings.GetSettings()
 	if settings.Debug && settings.Verbose {
-		//logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
+		logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
 	}
 
 	// Handle string comparison
 	aStr, aIsString := a.(string)
 	bStr, bIsString := b.(string)
-	//logger.Infof("DEBUG DEBUG:: Comparing strings: '%s' and '%s'", aStr, bStr)
+	if settings.Debug && settings.Verbose {
+		logger.Infof("DEBUG DEBUG:: String check: aIsString=%v, bIsString=%v", aIsString, bIsString)
+	}
 	if aIsString && bIsString {
 
 		return aStr == bStr
@@ -422,6 +424,8 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 	switch v := a.(type) {
 	case int:
 		aVal = float64(v)
+	case int64:
+		aVal = float64(v)
 	case float64:
 		aVal = v
 	case string:
@@ -435,6 +439,8 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 
 	switch v := b.(type) {
 	case int:
+		bVal = float64(v)
+	case int64:
 		bVal = float64(v)
 	case float64:
 		bVal = v

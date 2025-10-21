@@ -123,7 +123,7 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 	if query.WhereClause != nil && (len(query.WhereClause.Clauses) > 0 || len(query.WhereClause.SubGroups) > 0) {
 		// Analyze WHERE clause for predicate pushdown opportunities
 		jp.Logger.Info("Analyzing WHERE clause for predicate pushdown optimization")
-		
+
 		if len(query.JoinClauses) > 0 {
 			whereAnalysis := AnalyzeWhereClauseForJoin(
 				query.WhereClause,
@@ -150,7 +150,7 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 					return nil, fmt.Errorf("failed to create filtered adapter for LEFT bundle: %w", err)
 				}
 				leftBundleInterface = filtered
-				jp.Logger.Infof("Pushed %d conditions to LEFT bundle '%s'", 
+				jp.Logger.Infof("Pushed %d conditions to LEFT bundle '%s'",
 					len(whereAnalysis.LeftBundleConditions), query.FromBundle)
 			}
 
@@ -165,7 +165,7 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 					return nil, fmt.Errorf("failed to create filtered adapter for RIGHT bundle: %w", err)
 				}
 				rightBundleInterface = filtered
-				jp.Logger.Infof("Pushed %d conditions to RIGHT bundle '%s'", 
+				jp.Logger.Infof("Pushed %d conditions to RIGHT bundle '%s'",
 					len(whereAnalysis.RightBundleConditions), query.JoinClauses[0].RightBundle)
 			}
 
@@ -438,13 +438,13 @@ type JoinExecutionNode struct {
 	ServiceManager interface {                  // Service manager for bundle operations
 		GetBundleByName(database *models.Database, name string) (*models.Bundle, error)
 	}
-	Logger               *zap.SugaredLogger                // Logger for debugging
-	Cost                 float64                           // Estimated execution cost
-	EstimatedRows        int                               // Estimated result rows
-	JoinExecutor         joinexecutor.JoinExecutor         // NEW: The Phase 1 JOIN executor
-	joinedResults        []*joinexecutor.JoinedDocument    // PHASE 3: Store JoinedDocument results for hierarchical transformation
-	LeftBundleInterface  documentscanner.BundleInterface   // NEW: Optional filtered bundle for LEFT side (predicate pushdown)
-	RightBundleInterface documentscanner.BundleInterface   // NEW: Optional filtered bundle for RIGHT side (predicate pushdown)
+	Logger               *zap.SugaredLogger              // Logger for debugging
+	Cost                 float64                         // Estimated execution cost
+	EstimatedRows        int                             // Estimated result rows
+	JoinExecutor         joinexecutor.JoinExecutor       // NEW: The Phase 1 JOIN executor
+	joinedResults        []*joinexecutor.JoinedDocument  // PHASE 3: Store JoinedDocument results for hierarchical transformation
+	LeftBundleInterface  documentscanner.BundleInterface // NEW: Optional filtered bundle for LEFT side (predicate pushdown)
+	RightBundleInterface documentscanner.BundleInterface // NEW: Optional filtered bundle for RIGHT side (predicate pushdown)
 }
 
 // Execute implements ExecutionNode interface using the new JOIN executor
@@ -527,7 +527,7 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 	// Use filtered bundle interfaces if predicate pushdown was applied
 	// Otherwise create standard adapters from bundles
 	var leftAdapter, rightAdapter documentscanner.BundleInterface
-	
+
 	if jen.LeftBundleInterface != nil {
 		// Use the filtered adapter created during query planning (predicate pushdown)
 		leftAdapter = jen.LeftBundleInterface

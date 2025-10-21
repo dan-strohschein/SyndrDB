@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/bloomfilter"
 	"syndrdb/src/internal/query/documentscanner"
 
 	"go.uber.org/zap"
@@ -23,12 +24,14 @@ type HashJoinStrategy struct {
 	initialHashTableSize int     // Initial size for hash table
 	loadFactor           float64 // Target load factor before resizing
 
+	// Bloom filter optimization
+	bloomFilterEnabled bool // Whether to use Bloom filters for probe optimization
+
 	// PHASE 2: Parallel execution support
 	// maxWorkers          int     // Maximum number of parallel workers
 	// partitionStrategy   PartitionStrategy // Strategy for partitioning data
 
 	// PHASE 4: Advanced optimization
-	// bloomFilterEnabled  bool    // Whether to use Bloom filters for optimization
 	// compressionEnabled  bool    // Whether to compress spilled data
 }
 
@@ -42,6 +45,7 @@ func NewHashJoinStrategy(logger *zap.SugaredLogger, memoryLimit int64) *HashJoin
 		spillManager:         NewDiskSpillManager(logger), // PHASE 2: Implementation coming
 		initialHashTableSize: 1000,
 		loadFactor:           0.75,
+		bloomFilterEnabled:   true, // Enable Bloom filter optimization by default
 	}
 }
 
@@ -101,15 +105,15 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 	buildBundle, probeBundle, swapped := hjs.chooseBuildProbe(request.LeftBundle, request.RightBundle)
 	buildKey, probeKey := hjs.getJoinKeys(request.Conditions, swapped)
 
-	// Build phase: Create hash table from smaller bundle
-	hashTable, buildStats, err := hjs.buildHashTable(buildBundle, buildKey, request)
+	// Build phase: Create hash table from smaller bundle (with optional Bloom filter)
+	hashTable, bloom, buildStats, err := hjs.buildHashTable(buildBundle, buildKey, request)
 	if err != nil {
 		return nil, fmt.Errorf("hash table build failed: %w", err)
 	}
 	defer hashTable.Clear() // Cleanup memory
 
-	// Probe phase: Stream through larger bundle and find matches
-	joinedDocs, probeStats, err := hjs.probeHashTable(hashTable, probeBundle, probeKey, request, swapped)
+	// Probe phase: Stream through larger bundle and find matches (using Bloom filter)
+	joinedDocs, probeStats, err := hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
 	if err != nil {
 		return nil, fmt.Errorf("hash table probe failed: %w", err)
 	}
@@ -172,17 +176,29 @@ func (hjs *HashJoinStrategy) getJoinKeys(conditions []JoinCondition, swapped boo
 }
 
 // buildHashTable creates and populates the hash table from the build side bundle
+// Returns: (hashTable, bloomFilter, stats, error)
+// bloomFilter may be nil if optimization is disabled
 func (hjs *HashJoinStrategy) buildHashTable(
 	buildBundle documentscanner.BundleInterface,
 	buildKey string,
 	request *JoinRequest,
-) (HashTable, *ScanStats, error) {
+) (HashTable, *bloomfilter.BloomFilter, *ScanStats, error) {
 
 	hjs.logger.Debugf("Building hash table from bundle %s on key %s",
 		buildBundle.GetName(), buildKey)
 
 	// Create hash table with estimated size
 	hashTable := NewInMemoryHashTable(hjs.initialHashTableSize, hjs.loadFactor)
+
+	// Create Bloom filter if enabled
+	var bloom *bloomfilter.BloomFilter
+	if hjs.bloomFilterEnabled {
+		estimatedItems := buildBundle.GetTotalDocuments()
+		falsePositiveRate := 0.01 // 1% false positive rate
+		bloom = bloomfilter.NewBloomFilter(estimatedItems, falsePositiveRate)
+		hjs.logger.Debugf("Created Bloom filter for %d estimated items (FPR: %.2f%%)",
+			estimatedItems, falsePositiveRate*100)
+	}
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
@@ -192,7 +208,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		// Check for cancellation
 		select {
 		case <-request.Context.Done():
-			return nil, nil, request.Context.Err()
+			return nil, nil, nil, request.Context.Err()
 		default:
 		}
 
@@ -207,7 +223,12 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		// Add to hash table
 		err = hashTable.Put(keyValue, doc)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to add document to hash table: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to add document to hash table: %w", err)
+		}
+
+		// Add to Bloom filter (if enabled)
+		if bloom != nil {
+			bloom.Add(fmt.Sprintf("%v", keyValue))
 		}
 
 		stats.DocumentsScanned++
@@ -219,26 +240,35 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		}
 	}
 
-	hjs.logger.Debugf("Hash table built: %d unique keys, %d documents, %d bytes memory",
-		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage())
+	var bloomStats string
+	if bloom != nil {
+		stats := bloom.GetStats()
+		bloomStats = fmt.Sprintf(", Bloom filter: %d bytes (FPR: %.4f)", stats.MemoryUsedBytes, stats.EstimatedFPR)
+	}
 
-	return hashTable, stats, nil
+	hjs.logger.Debugf("Hash table built: %d unique keys, %d documents, %d bytes memory%s",
+		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats)
+
+	return hashTable, bloom, stats, nil
 }
 
 // probeHashTable streams through the probe side and finds matching documents
+// Uses Bloom filter (if provided) to skip expensive hash table lookups
 func (hjs *HashJoinStrategy) probeHashTable(
 	hashTable HashTable,
+	bloom *bloomfilter.BloomFilter,
 	probeBundle documentscanner.BundleInterface,
 	probeKey string,
 	request *JoinRequest,
 	swapped bool,
 ) ([]*JoinedDocument, *ScanStats, error) {
 
-	hjs.logger.Debugf("Probing hash table with bundle %s on key %s",
-		probeBundle.GetName(), probeKey)
+	hjs.logger.Debugf("Probing hash table with bundle %s on key %s (Bloom filter: %v)",
+		probeBundle.GetName(), probeKey, bloom != nil)
 
 	var joinedDocs []*JoinedDocument
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
+	bloomFilterSkips := int64(0) // Track how many lookups were skipped by Bloom filter
 
 	// Stream through all documents in probe bundle
 	allDocs := probeBundle.GetAllDocuments()
@@ -259,6 +289,17 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		}
 
 		stats.DocumentsScanned++
+
+		// OPTIMIZATION: Check Bloom filter first (if enabled)
+		if bloom != nil {
+			keyStr := fmt.Sprintf("%v", keyValue)
+			if !bloom.MayContain(keyStr) {
+				// Bloom filter says definitely NOT in hash table - skip expensive lookup!
+				bloomFilterSkips++
+				continue
+			}
+			// Bloom filter says "maybe" - proceed with hash table lookup
+		}
 
 		// Look up matching documents in hash table
 		buildDocs, found := hashTable.Get(keyValue)
@@ -287,8 +328,14 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		}
 	}
 
-	hjs.logger.Debugf("Probe completed: %d documents scanned, %d comparisons, %d results",
-		stats.DocumentsScanned, stats.Comparisons, len(joinedDocs))
+	if bloom != nil {
+		skipRate := float64(bloomFilterSkips) / float64(stats.DocumentsScanned) * 100
+		hjs.logger.Infof("Probe completed: %d documents scanned, %d comparisons, %d results, Bloom filter skipped %d lookups (%.1f%%)",
+			stats.DocumentsScanned, stats.Comparisons, len(joinedDocs), bloomFilterSkips, skipRate)
+	} else {
+		hjs.logger.Debugf("Probe completed: %d documents scanned, %d comparisons, %d results",
+			stats.DocumentsScanned, stats.Comparisons, len(joinedDocs))
+	}
 
 	return joinedDocs, stats, nil
 }

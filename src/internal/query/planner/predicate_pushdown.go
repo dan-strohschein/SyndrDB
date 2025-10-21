@@ -18,7 +18,7 @@ PERFORMANCE IMPACT:
 
 Example:
   SELECT * FROM "Authors" JOIN "Books" WHERE "Authors"."DocumentID" == "X"
-  
+
   Without pushdown: Load 1000 authors × 7000 books = 7M comparisons
   With pushdown:    Load 1 author × 7000 books = 7K comparisons
 */
@@ -150,7 +150,7 @@ func NewFilteredBundleAdapter(
 	bundleService BundleServiceInterface,
 	logger *zap.SugaredLogger,
 ) (*FilteredBundleAdapter, error) {
-	
+
 	// Get or create document scanner for this bundle
 	scanner, err := bundleService.GetOrCreateDocumentScanner(bundle)
 	if err != nil {
