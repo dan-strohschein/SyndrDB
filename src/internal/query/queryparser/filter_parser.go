@@ -86,8 +86,12 @@ func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLog
 		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a == b })
 	case "!=":
 		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a != b })
+	case ">=":
+		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a >= b })
 	case ">":
 		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a > b })
+	case "<=":
+		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a <= b })
 	case "<":
 		return compareValues(fieldValue, wc.Value, logger, func(a, b float64) bool { return a < b })
 	default:
@@ -273,7 +277,7 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 
 // Helper function to check if operator is valid
 func isValidOperator(op string) bool {
-	return op == "==" || op == "!=" || op == ">" || op == "<"
+	return op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<="
 }
 
 // Helper function to parse a value token into the right type
@@ -383,8 +387,12 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a == b })
 	case "!=":
 		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a != b })
+	case ">=":
+		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a >= b })
 	case ">":
 		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a > b })
+	case "<=":
+		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a <= b })
 	case "<":
 		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a < b })
 	default:
