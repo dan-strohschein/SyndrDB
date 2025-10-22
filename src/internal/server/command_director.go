@@ -53,19 +53,22 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 
 	if strings.HasPrefix(strings.ToLower(command), "select") {
 		// Parse SELECT command
-		//dbCommand, err := engine.ParseSelectCommand(command)
-
-		switch strings.ToLower(commandParts[1]) {
-		case "databases":
+		// Check for SELECT DATABASES (special case for system catalog)
+		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "databases" {
 			result1, err, shouldReturn := SelectDatabases(commandParts, serviceManager)
 			if shouldReturn {
 				return result1, err
 			}
-
-		case "top", "documents", "count", "count(*)":
-			return SelectDocuments(commandParts, serviceManager, database, logger, startTime)
+			return nil, nil
 		}
-		return nil, nil
+
+		// All other SELECT queries (including field lists) go through unified parser
+		// This handles: SELECT field1, field2 FROM bundle
+		//               SELECT DOCUMENTS FROM bundle
+		//               SELECT COUNT(*) FROM bundle
+		//               SELECT * FROM bundle JOIN...
+		//               SELECT field1, COUNT(*) FROM bundle GROUP BY field1
+		return SelectDocuments(commandParts, serviceManager, database, logger, startTime)
 	}
 
 	if strings.HasPrefix(strings.ToLower(command), "show") {
@@ -1575,8 +1578,9 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 
 	logger.Infof("Query executed successfully: Retrieved %d documents", len(documents))
 
-	// Transform documents to flattened format
-	flattenedDocs := helpers.TransformDocumentsToFlatFormat(documents)
+	// Transform documents to flattened format with field projection
+	// If query.SelectFields is specified, only those fields will be returned
+	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
 	var results interface{}
 	var resultCount int
 

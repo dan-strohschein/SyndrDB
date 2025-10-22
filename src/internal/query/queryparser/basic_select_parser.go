@@ -100,6 +100,16 @@ func parseBasicSelectClause(query string, selectQuery *BasicSelectQuery, logger 
 	if strings.HasPrefix(upperQuery, "SELECT ") {
 		// Extract the field list between SELECT and FROM
 		selectPart := query[7:] // Remove "SELECT "
+
+		// Handle TOP N syntax: SELECT TOP 10 "field1", "field2"
+		// Skip over "TOP N " if present
+		topPattern := regexp.MustCompile(`(?i)^TOP\s+(\d+)\s+`)
+		if matches := topPattern.FindStringSubmatch(selectPart); len(matches) > 0 {
+			// Skip past "TOP N " to get to the field list
+			selectPart = selectPart[len(matches[0]):]
+			logger.Debugf("Skipped TOP clause in SELECT, remaining: %s", selectPart)
+		}
+
 		fromIndex := strings.Index(strings.ToUpper(selectPart), " FROM ")
 		if fromIndex == -1 {
 			return fmt.Errorf("SELECT clause must be followed by FROM clause")
