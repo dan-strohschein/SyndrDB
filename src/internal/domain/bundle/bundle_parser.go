@@ -217,12 +217,15 @@ func ParseUpdateDocumentCommand(command string, logger *zap.SugaredLogger) (*mod
 	args := settings.GetSettings()
 	// Regular expression to match the command structure
 	command = strings.Trim(command, " \n\r\t")
-	command = strings.ReplaceAll(command, "\n", " ")
-	command = strings.ReplaceAll(command, "\t", " ")
-	command = strings.ReplaceAll(command, "\r", " ")
+	// command = strings.ReplaceAll(command, "\n", " ")
+	// command = strings.ReplaceAll(command, "\t", " ")
+	// command = strings.ReplaceAll(command, "\r", " ")
+
+	command = helpers.NormalizeCommand(command)
+	command = strings.TrimSuffix(command, ";") // Remove trailing semicolon
 
 	//updateDocRegex := regexp.MustCompile(`UPDATE DOCUMENTS IN(?:\s+BUNDLE)?\s+"([^"]+)"\s*WHERE\s*(?:\()?([\s\S]+?)(?:\))?(?:;)?$`)
-	updateDocRegex := regexp.MustCompile(`UPDATE DOCUMENTS(?:S)? IN(?:\s+BUNDLE)?\s+"([^"]+)"\s*\(([\s\S]+?)\)\s*WHERE\s*(?:\()?([\s\S]+?)(?:\))?(?:;)?$`)
+	updateDocRegex := regexp.MustCompile(`UPDATE\s+DOCUMENTS?\s+IN\s+(?:BUNDLE\s+)?"([^"]+)"\s*\(([\s\S]+?)\)\s*WHERE\s+(.+?)(?:;)?$`)
 	matches := updateDocRegex.FindStringSubmatch(command)
 	if args.Debug {
 		logger.Debugf("Parsing UPDATE DOCUMENTS command has: %d", len(matches))

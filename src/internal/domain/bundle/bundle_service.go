@@ -2107,6 +2107,20 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 			return fmt.Errorf("failed to update document in bundle: %w", err)
 		}
 
+		// CRITICAL: Invalidate cached pages for this bundle to force reload from disk
+		// Without this, queries will return stale data from the page cache
+		keysToDelete := make([]string, 0)
+		for pageKey := range s.documentPages {
+			if strings.HasPrefix(pageKey, bundle.Name+":") {
+				keysToDelete = append(keysToDelete, pageKey)
+			}
+		}
+		for _, key := range keysToDelete {
+			delete(s.documentPages, key)
+		}
+
+		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update", len(keysToDelete), bundle.Name)
+
 		// Document is now updated in the persistent store and will be loaded from pages as needed
 	}
 
@@ -2860,6 +2874,9 @@ func (s *BundleService) Shutdown() error {
 
 	// Force flush any pending index updates
 	s.forceFlushIndexUpdates()
+
+	// Also flush and close write buffers
+	s.store.CloseWriteBuffers()
 
 	// Also force flush any remaining metadata updates
 	if len(s.metadataUpdateBuffer) > 0 {

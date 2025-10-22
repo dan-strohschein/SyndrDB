@@ -62,7 +62,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				return result1, err
 			}
 
-		case "top", "documents", "count":
+		case "top", "documents", "count", "count(*)":
 			return SelectDocuments(commandParts, serviceManager, database, logger, startTime)
 		}
 		return nil, nil
@@ -1577,14 +1577,42 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 
 	// Transform documents to flattened format
 	flattenedDocs := helpers.TransformDocumentsToFlatFormat(documents)
+	var results interface{}
+	var resultCount int
+
+	if query.IsCountOnly {
+		// Extract the actual COUNT(*) value from the aggregate result
+		// The GROUP BY executor returns 1 document with the count_all field
+		countValue := 0
+		if len(flattenedDocs) > 0 {
+			// Get the first (and only) result document
+			firstDoc := flattenedDocs[0]
+			// Look for count_all field (created by GROUP BY executor for COUNT(*))
+			if count, exists := firstDoc["count_all"]; exists {
+				switch v := count.(type) {
+				case int64:
+					countValue = int(v)
+				case int:
+					countValue = v
+				case float64:
+					countValue = int(v)
+				}
+			}
+		}
+		results = map[string]int{"Count": countValue}
+		resultCount = 1
+	} else {
+		results = flattenedDocs
+		resultCount = len(flattenedDocs)
+	}
 
 	// Calculate execution time
 	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6
 
 	// Create response
 	cmdResponse := &CommandResponse{
-		ResultCount:     len(flattenedDocs),
-		Result:          flattenedDocs,
+		ResultCount:     resultCount,
+		Result:          results,
 		ExecutionTimeMS: executionTime,
 	}
 

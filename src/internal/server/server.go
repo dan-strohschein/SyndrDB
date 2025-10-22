@@ -50,6 +50,7 @@ type Server struct {
 	UserStore         *auth.UserStore   // Modern user authentication with rate limiting
 	ActiveConnections map[string]*Connection
 	SessionManager    *SessionManager
+	ServiceManager    *ServiceManager
 	RateLimiter       *RateLimiter
 	TLSConfig         *tls.Config
 	SessionTimeout    time.Duration
@@ -174,7 +175,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	}
 
 	// Initialize the singleton
-	InitServiceManager(databaseService, bundleService, catalogService, graphqlProcessor, sugar)
+	serviceManager := InitServiceManager(databaseService, bundleService, catalogService, graphqlProcessor, sugar)
 
 	// Create a new server
 	server := &Server{
@@ -190,6 +191,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		databaseService:   databaseService,
 		logger:            sugar,
 		bufferPool:        bufferPool,
+		ServiceManager:    serviceManager,
 	}
 
 	// Initialize rate limiter
@@ -429,6 +431,13 @@ func (s *Server) Stop() error {
 
 	// Flush any dirty pages
 	s.bufferPool.FlushAllDirty()
+
+	// Shutdown bundle service to flush all pending operations
+	if s.ServiceManager != nil && s.ServiceManager.BundleService != nil {
+		if err := s.ServiceManager.BundleService.Shutdown(); err != nil {
+			s.logger.Warnf("Error during bundle service shutdown: %v", err)
+		}
+	}
 
 	// Close the buffer pool & Release buffer memory
 	err := s.bufferPool.ShutDown()

@@ -358,10 +358,24 @@ func parseWhereClauseForGroupBy(query string, selectQuery *SelectQueryWithGroupB
 }
 
 // parseGroupByClause parses the GROUP BY clause
+// Following SQL standard (MS SQL, PostgreSQL): GROUP BY is optional when SELECT contains
+// only aggregate functions (e.g., SELECT COUNT(*) FROM table), but required when mixing
+// regular fields with aggregates (e.g., SELECT field1, COUNT(*) FROM table GROUP BY field1)
 func parseGroupByClause(query string, selectQuery *SelectQueryWithGroupBy, logger *zap.SugaredLogger) error {
 	groupByIndex := strings.Index(strings.ToUpper(query), " GROUP BY ")
 	if groupByIndex == -1 {
-		return fmt.Errorf("GROUP BY clause is required for aggregate queries")
+		// GROUP BY is missing - check if it's required
+		// If SELECT has only aggregates and no regular fields, GROUP BY is optional
+		if len(selectQuery.SelectFields) == 0 && len(selectQuery.AggregateFields) > 0 {
+			logger.Debugf("GROUP BY clause omitted - query has only aggregate functions (implicit grouping of all rows)")
+			// Create an empty GROUP BY to indicate "group all rows"
+			selectQuery.GroupBy = &GroupByClause{
+				Fields: []string{}, // Empty means group all rows together
+			}
+			return nil
+		}
+		// If SELECT has regular fields mixed with aggregates, GROUP BY is required
+		return fmt.Errorf("GROUP BY clause is required when SELECT contains non-aggregate fields with aggregate functions")
 	}
 
 	// Extract GROUP BY portion
@@ -508,9 +522,27 @@ func parseOrderByFieldsForGroupBy(orderByPart string, logger *zap.SugaredLogger)
 }
 
 // validateGroupByQuery validates the GROUP BY query structure
+// Following SQL standard (MS SQL, PostgreSQL):
+// 1. If SELECT has only aggregates (no regular fields), GROUP BY is optional
+// 2. If SELECT mixes regular fields with aggregates, all regular fields must be in GROUP BY
+// 3. Must have at least one aggregate function
 func validateGroupByQuery(selectQuery *SelectQueryWithGroupBy, logger *zap.SugaredLogger) error {
 	logger.Infof("Validating GROUP BY query structure")
-	// Ensure all non-aggregate SELECT fields are in GROUP BY
+
+	// Ensure we have at least one aggregate function
+	if len(selectQuery.AggregateFields) == 0 {
+		return fmt.Errorf("GROUP BY queries must include at least one aggregate function")
+	}
+
+	// If SELECT has only aggregates (no regular fields), validation passes
+	// This allows queries like: SELECT COUNT(*) FROM table (no GROUP BY needed)
+	if len(selectQuery.SelectFields) == 0 {
+		logger.Debugf("Validation passed: Query has only aggregate functions (GROUP BY optional)")
+		return nil
+	}
+
+	// If SELECT has regular fields, ensure all are in GROUP BY
+	// This enforces queries like: SELECT field1, COUNT(*) FROM table GROUP BY field1
 	for _, selectField := range selectQuery.SelectFields {
 		found := false
 		for _, groupByField := range selectQuery.GroupBy.Fields {
@@ -524,11 +556,7 @@ func validateGroupByQuery(selectQuery *SelectQueryWithGroupBy, logger *zap.Sugar
 		}
 	}
 
-	// Ensure we have at least one aggregate function
-	if len(selectQuery.AggregateFields) == 0 {
-		return fmt.Errorf("GROUP BY queries must include at least one aggregate function")
-	}
-
+	logger.Debugf("Validation passed: All non-aggregate fields are in GROUP BY clause")
 	return nil
 }
 

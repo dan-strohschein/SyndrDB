@@ -220,15 +220,32 @@ func detectQueryType(query string, logger *zap.SugaredLogger) QueryType {
 	hasJoin := strings.Contains(upperQuery, " JOIN ")
 	hasGroupBy := strings.Contains(upperQuery, " GROUP BY ")
 
+	// Check for aggregate functions in SELECT clause (COUNT, SUM, AVG, MIN, MAX)
+	// Extract SELECT clause to avoid false positives from WHERE/HAVING clauses
+	selectStart := strings.Index(upperQuery, "SELECT")
+	fromStart := strings.Index(upperQuery, " FROM ")
+	hasAggregates := false
+
+	if selectStart >= 0 && fromStart > selectStart {
+		selectClause := upperQuery[selectStart:fromStart]
+		// Match aggregate functions: COUNT, SUM, AVG, MIN, MAX followed by (
+		aggregatePattern := `(COUNT|SUM|AVG|MIN|MAX)\s*\(`
+		matched, err := regexp.MatchString(aggregatePattern, selectClause)
+		if err == nil && matched {
+			hasAggregates = true
+			logger.Debugf("Detected aggregate functions in SELECT clause")
+		}
+	}
+
 	// Complex query: both JOIN and GROUP BY
 	if hasJoin && hasGroupBy {
 		logger.Debugf("Detected COMPLEX query (JOIN + GROUP BY)")
 		return ComplexQuery
 	}
 
-	// GROUP BY query
-	if hasGroupBy {
-		logger.Debugf("Detected GROUP BY query")
+	// GROUP BY query (explicit GROUP BY or aggregate functions without explicit grouping)
+	if hasGroupBy || hasAggregates {
+		logger.Debugf("Detected GROUP BY query (hasGroupBy=%v, hasAggregates=%v)", hasGroupBy, hasAggregates)
 		return GroupByQuery
 	}
 

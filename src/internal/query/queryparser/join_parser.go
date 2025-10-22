@@ -113,7 +113,7 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";") // Remove trailing semicolon
 
-	logger.Infof("Parsing SELECT JOIN query: %s", query)
+	//logger.Infof("Parsing SELECT JOIN query: %s", query)
 
 	// Initialize the query structure
 	selectQuery := &SelectJoinQuery{
@@ -123,7 +123,7 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 
 	// Normalize the query for easier parsing
 	normalizedQuery := normalizeQuery(query)
-	logger.Infof("DEBUG: Normalized query: %s", normalizedQuery)
+	//logger.Infof("DEBUG: Normalized query: %s", normalizedQuery)
 
 	// Parse SELECT clause
 	if err := parseSelectClause(normalizedQuery, selectQuery, logger); err != nil {
@@ -278,7 +278,7 @@ func parseJoinClauses(query string, selectQuery *SelectJoinQuery, logger *zap.Su
 	joinRegex := regexp.MustCompile(`(?i)(LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+OUTER\s+JOIN|JOIN)\s+"([^"]+)"\s+ON\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|\s+WHERE\s+|$)`)
 	matches := joinRegex.FindAllStringSubmatch(query, -1)
 
-	logger.Infof("DEBUG: JOIN regex found %d matches in query: %s", len(matches), query)
+	//logger.Infof("DEBUG: JOIN regex found %d matches in query: %s", len(matches), query)
 
 	for _, match := range matches {
 		if len(match) < 4 {

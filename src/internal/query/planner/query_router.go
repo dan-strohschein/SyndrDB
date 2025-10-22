@@ -218,7 +218,8 @@ func (qr *QueryRouter) convertWhereClauseToString(whereGroup *queryparser.WhereG
 	// Simple conversion for single clause (most common case)
 	if len(whereGroup.Clauses) == 1 && len(whereGroup.SubGroups) == 0 {
 		clause := whereGroup.Clauses[0]
-		return fmt.Sprintf("\"%s\" %s %v", clause.Field, clause.Operator, clause.Value)
+		valueStr := qr.formatWhereValue(clause.Value)
+		return fmt.Sprintf("\"%s\" %s %s", clause.Field, clause.Operator, valueStr)
 	}
 
 	// For more complex clauses, build a WHERE string
@@ -237,7 +238,8 @@ func (qr *QueryRouter) buildWhereString(whereGroup *queryparser.WhereGroup) stri
 
 	// Add direct clauses
 	for _, clause := range whereGroup.Clauses {
-		parts = append(parts, fmt.Sprintf("\"%s\" %s %v", clause.Field, clause.Operator, clause.Value))
+		valueStr := qr.formatWhereValue(clause.Value)
+		parts = append(parts, fmt.Sprintf("\"%s\" %s %s", clause.Field, clause.Operator, valueStr))
 	}
 
 	// Add subgroups
@@ -262,4 +264,30 @@ func (qr *QueryRouter) buildWhereString(whereGroup *queryparser.WhereGroup) stri
 	}
 
 	return result
+}
+
+// formatWhereValue formats a WHERE clause value for string representation
+// Strings are quoted, other types use their natural representation
+func (qr *QueryRouter) formatWhereValue(value interface{}) string {
+	if value == nil {
+		return "null"
+	}
+
+	switch v := value.(type) {
+	case string:
+		// Strings must be quoted
+		return fmt.Sprintf("\"%s\"", v)
+	case int, int32, int64, uint, uint32, uint64:
+		// Integers don't need quotes
+		return fmt.Sprintf("%d", v)
+	case float32, float64:
+		// Floats don't need quotes
+		return fmt.Sprintf("%f", v)
+	case bool:
+		// Booleans don't need quotes
+		return fmt.Sprintf("%t", v)
+	default:
+		// Fallback: convert to string and quote it
+		return fmt.Sprintf("\"%v\"", v)
+	}
 }

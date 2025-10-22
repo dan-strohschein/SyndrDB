@@ -75,6 +75,12 @@ func (wb *WriteBuffer) flushInternal() error {
 		return err
 	}
 
+	// Force OS to flush to disk - CRITICAL for durability
+	err = wb.file.Sync()
+	if err != nil {
+		return err
+	}
+
 	// Reset buffer
 	wb.buffer = wb.buffer[:0]
 	wb.lastFlush = time.Now()

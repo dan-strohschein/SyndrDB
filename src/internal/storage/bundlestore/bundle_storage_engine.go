@@ -711,18 +711,54 @@ func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *models.Bundle, 
 	}
 	(*bundle.Documents)[document.DocumentID] = *document
 
+	// Get file size before update
+	fileInfo, _ := os.Stat(filePath)
+	sizeBefore := int64(0)
+	if fileInfo != nil {
+		sizeBefore = fileInfo.Size()
+	}
+
 	// Performance optimization: Use append-only approach instead of full bundle rewrite
 	// For updates, we append the new version with a special "UPDATE" header
 	// The reading logic will use the most recent version of each document
+	b.logger.Infow("UPDATING: About to append updated document to file",
+		"bundle", bundle.Name,
+		"documentID", document.DocumentID,
+		"filePath", filePath,
+		"fileSizeBefore", sizeBefore,
+	)
+
 	err := b.AppendDocumentToBundleFile(bundle, document)
 	if err != nil {
 		return fmt.Errorf("failed to append updated document: %w", err)
+	}
+
+	b.logger.Infow("UPDATING: Document appended, now flushing write buffers",
+		"bundle", bundle.Name,
+		"documentID", document.DocumentID,
+	)
+
+	// Flush write buffers to ensure persistence
+	err = b.FlushWriteBuffers(bundle.Name)
+	if err != nil {
+		b.logger.Warnf("Failed to flush write buffers for bundle '%s': %v", bundle.Name, err)
+		// Don't return error - update succeeded, just log the flush failure
+	}
+
+	// Verify file size increased
+	fileInfo, _ = os.Stat(filePath)
+	sizeAfter := int64(0)
+	if fileInfo != nil {
+		sizeAfter = fileInfo.Size()
 	}
 
 	if b.logger != nil {
 		b.logger.Infow("Successfully updated document in bundle",
 			"bundle", bundle.Name,
 			"documentID", document.DocumentID,
+			"fileSizeBefore", sizeBefore,
+			"fileSizeAfter", sizeAfter,
+			"bytesWritten", sizeAfter-sizeBefore,
 		)
 	}
 
@@ -1160,13 +1196,39 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 
 			// Only add document if it hasn't been deleted
 			if !deletedDocuments[doc.DocumentID] {
+				// CRITICAL FIX: Track if this is a new unique document or an update
+				// In append-only storage, same DocumentID can appear multiple times
+				// We count each UNIQUE document only once for pagination
+				isNewDocument := false
+				wasInPageRange := false
+
+				if _, exists := allDocuments[doc.DocumentID]; !exists {
+					// First time seeing this DocumentID
+					isNewDocument = true
+					// Check if this document's index falls in the requested page range
+					if documentIndex >= startIndex && documentIndex < endIndex {
+						wasInPageRange = true
+					}
+				} else {
+					// This is an update of existing document
+					// Check if the original occurrence was in page range
+					if _, inPage := pageDocuments[doc.DocumentID]; inPage {
+						wasInPageRange = true
+					}
+				}
+
+				// Always update to latest version (last version wins)
 				allDocuments[doc.DocumentID] = *doc
 
-				// Check if this document should be included in the current page
-				if documentIndex >= startIndex && documentIndex < endIndex {
+				// If this document belongs in the page range, keep it updated with latest version
+				if wasInPageRange {
 					pageDocuments[doc.DocumentID] = *doc
 				}
-				documentIndex++
+
+				// Only increment index for NEW unique documents
+				if isNewDocument {
+					documentIndex++
+				}
 			}
 
 			// if docMap, ok := docInterface.(map[string]interface{}); ok {

@@ -166,7 +166,14 @@ func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 	// Tokenize the where clause
 	tokens := tokenizeWhereClause(whereClause)
 
-	// Parse the tokens into a tree structure
+	// DEBUG: Log tokens to diagnose parsing issues
+	settings := settings.GetSettings()
+	if settings.Debug {
+		fmt.Printf("DEBUG: Tokenized WHERE clause '%s' into %d tokens:\n", whereClause, len(tokens))
+		for i, token := range tokens {
+			fmt.Printf("  Token[%d]: '%s' (bytes: %v)\n", i, token, []byte(token))
+		}
+	} // Parse the tokens into a tree structure
 	//rootGroup := &WhereGroup{}
 
 	// Track our position in the token stream
@@ -404,14 +411,14 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericComparison func(float64, float64) bool) bool {
 	settings := settings.GetSettings()
 	if settings.Debug && settings.Verbose {
-		logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
+		//logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
 	}
 
 	// Handle string comparison
 	aStr, aIsString := a.(string)
 	bStr, bIsString := b.(string)
 	if settings.Debug && settings.Verbose {
-		logger.Infof("DEBUG DEBUG:: String check: aIsString=%v, bIsString=%v", aIsString, bIsString)
+		//logger.Infof("DEBUG DEBUG:: String check: aIsString=%v, bIsString=%v", aIsString, bIsString)
 	}
 	if aIsString && bIsString {
 
