@@ -26,8 +26,8 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create databases bundle
 	docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			//"BundleID":    {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
-			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			//"BundleID":    {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"FilePath":   {Name: "FilePath", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
@@ -49,7 +49,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create bundles bundle
 	bundles_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 
 			"DatabaseID":   {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
@@ -76,7 +76,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	users_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
 
-			"DocumentID":          {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DocumentID":          {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"UserID":              {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"PasswordHash":        {Name: "PasswordHash", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"Name":                {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
@@ -102,7 +102,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create permissions bundle
 	permissions_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"PermissionID": {Name: "PermissionID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 		},
@@ -123,7 +123,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create userpermissions bundle
 	userPermissions_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID":       {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DocumentID":       {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"UserPermissionID": {Name: "UserPermissionID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"UserID":           {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"PermissionID":     {Name: "PermissionID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
@@ -145,7 +145,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create databaseusers bundle
 	databaseUsers_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"UserID":     {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 		},
@@ -166,7 +166,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create roles bundle
 	roles_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"RoleID":       {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"PermissionID": {Name: "PermissionID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
@@ -187,7 +187,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 
 	usersRoles_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateUUID()},
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 
 			"RoleID": {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"UserID": {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
@@ -343,7 +343,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["Name"] = field2
 
 	dbBundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -390,7 +390,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FilePath"] = field5
 
 	bundles_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -422,7 +422,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["Name"] = field2
 
 	permissions_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -453,7 +453,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["Name"] = field2
 
 	roles_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -484,7 +484,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["Name"] = field2
 
 	users_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -515,7 +515,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["Name"] = field2
 
 	userPermissions_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -546,7 +546,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["Name"] = field2
 
 	databaseUsers_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -577,7 +577,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["Name"] = field2
 
 	userRoles_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateUUID(),
+		DocumentID: helpers.GenerateFastUUID(),
 		Fields:     fields,
 	}
 
@@ -623,7 +623,7 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 		fields["PermissionID"] = field1
 		fields["Name"] = field2
 		doc := &models.Document{
-			DocumentID: helpers.GenerateUUID(),
+			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
 		}
 
@@ -670,7 +670,7 @@ func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
 		fields["RoleID"] = field1
 		fields["Name"] = field2
 		doc := &models.Document{
-			DocumentID: helpers.GenerateUUID(),
+			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
 		}
 
@@ -717,7 +717,7 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 		fields["UserID"] = field1
 		fields["Name"] = field2
 		doc := &models.Document{
-			DocumentID: helpers.GenerateUUID(),
+			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
 		}
 
@@ -792,7 +792,7 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 					}
 
 					userPermDoc := &models.Document{
-						DocumentID: helpers.GenerateUUID(),
+						DocumentID: helpers.GenerateFastUUID(),
 						Fields: map[string]models.Field{
 							"UserPermissionID": field1,
 							"UserID":           field2,
@@ -857,7 +857,7 @@ func HydrateDatabaseUsersPrimaryCatalogs(databaseService *database.DatabaseServi
 		}
 
 		dbUserDoc := &models.Document{
-			DocumentID: helpers.GenerateUUID(),
+			DocumentID: helpers.GenerateFastUUID(),
 			Fields: map[string]models.Field{
 				"DatabaseUserID": field1,
 				"UserID":         field2,

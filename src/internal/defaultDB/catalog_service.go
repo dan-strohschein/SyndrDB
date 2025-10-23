@@ -43,8 +43,8 @@ func (cs *CatalogService) AddDatabaseToCatalog(db *models.Database) error {
 		return fmt.Errorf("failed to get primary.Databases bundle: %w", err)
 	}
 
-	// Generate UUID for the document
-	docID := helpers.GenerateUUID()
+	// Generate document ID using fast UUID
+	docID := helpers.GenerateFastUUID()
 
 	// Create a document for this database in the Databases catalog
 	catalogDoc := models.Document{
@@ -110,9 +110,9 @@ func (cs *CatalogService) RemoveDatabaseFromCatalog(databaseID string) error {
 			BundleName:  "Databases",
 			WhereClause: fmt.Sprintf("DocumentID='%s'", docIDToRemove),
 		}
-
+		//TODO Make this use the same technique as the CommandDirector.DeleteDocument function
 		// Delete the document from the bundle
-		err = cs.bundleService.DeleteDocumentFromBundle(databasesBundle, deleteCommand)
+		err = cs.bundleService.DeleteDocumentFromBundle(databasesBundle, deleteCommand, make([]string, 0))
 		if err != nil {
 			return fmt.Errorf("failed to delete database from catalog: %w", err)
 		}
@@ -141,8 +141,8 @@ func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 		return fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
 	}
 
-	// Generate UUID for the document
-	docID := helpers.GenerateUUID()
+	// Generate document ID using fast UUID
+	docID := helpers.GenerateFastUUID()
 
 	// Create a document for this bundle in the Bundles catalog
 	catalogDoc := models.Document{
@@ -340,8 +340,9 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 			WhereClause: fmt.Sprintf("DocumentID='%s'", docIDToRemove),
 		}
 
+		// TODO FIX THIS TO USE THE SAME TECHNIQUE AS THE CommandDirector.DeleteDocument function
 		// Delete the document from the bundle
-		err = cs.bundleService.DeleteDocumentFromBundle(bundlesBundle, deleteCommand)
+		err = cs.bundleService.DeleteDocumentFromBundle(bundlesBundle, deleteCommand, make([]string, 0))
 		if err != nil {
 			return fmt.Errorf("failed to delete bundle from catalog: %w", err)
 		}

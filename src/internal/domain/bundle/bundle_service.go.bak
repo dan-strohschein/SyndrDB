@@ -35,7 +35,6 @@ type IndexUpdate struct {
 	Operation  string // "insert", "delete", "update"
 	DocumentID string
 	FieldValue interface{}
-	PageID     uint32      // Physical page where document resides
 	OldValue   interface{} // For updates
 	Timestamp  time.Time
 }
@@ -194,7 +193,6 @@ type BundleService struct {
 	metadataPersistInterval int              // Number of operations before forcing metadata persist
 	metadataOperationCount  int              // Count of operations since last metadata flush
 	lastMetadataFlush       time.Time        // Last time metadata updates were flushed
-	metadataUpdateMutex     sync.Mutex       // Protects metadata update buffer and operation count
 
 	// PHASE 1 OPTIMIZATION: Bulk operation detection for WAL bypass
 	bulkModeEnabled        bool      // Current bulk mode state
@@ -265,9 +263,7 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 
 // scheduleIndexUpdate adds an index update to the deferred update buffer
 // This optimizes write performance by batching index updates
-// Parameters:
-//   - pageID: Physical page number where the document resides (use 0 if unknown, will need update later)
-func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, operation, documentID string, fieldValue interface{}, pageID uint32, oldValue interface{}) {
+func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, operation, documentID string, fieldValue, oldValue interface{}) {
 	update := IndexUpdate{
 		BundleName: bundleName,
 		IndexName:  indexName,
@@ -275,7 +271,6 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 		Operation:  operation,
 		DocumentID: documentID,
 		FieldValue: fieldValue,
-		PageID:     pageID,
 		OldValue:   oldValue,
 		Timestamp:  time.Now(),
 	}
@@ -297,11 +292,7 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 
 // scheduleMetadataUpdate adds a metadata update to the deferred update buffer
 // This optimizes write performance by batching metadata calculations
-// Thread-safe: Protected by metadataUpdateMutex
 func (s *BundleService) scheduleMetadataUpdate(bundleName, operation string, value int64) {
-	s.metadataUpdateMutex.Lock()
-	defer s.metadataUpdateMutex.Unlock()
-
 	update := MetadataUpdate{
 		BundleName: bundleName,
 		Operation:  operation,
@@ -315,18 +306,16 @@ func (s *BundleService) scheduleMetadataUpdate(bundleName, operation string, val
 	s.metadataOperationCount++
 
 	// Check if we should flush metadata updates
-	// Release lock before flushing to prevent deadlock (flush will acquire its own lock)
-	shouldFlush := len(s.metadataUpdateBuffer) >= s.indexUpdateBatchSize ||
-		time.Since(s.lastMetadataFlush) >= s.indexUpdateInterval
-
-	shouldIdleFlush := len(s.metadataUpdateBuffer) > 0 &&
-		time.Since(s.lastMetadataFlush) >= (s.indexUpdateInterval*5)
-
-	if shouldFlush || shouldIdleFlush {
-		// Must unlock before calling flush to avoid deadlock
-		s.metadataUpdateMutex.Unlock()
+	if len(s.metadataUpdateBuffer) >= s.indexUpdateBatchSize ||
+		time.Since(s.lastMetadataFlush) >= s.indexUpdateInterval {
 		s.flushMetadataUpdates()
-		s.metadataUpdateMutex.Lock() // Re-acquire for defer
+	}
+
+	// PHASE 1 ENHANCEMENT: Additional flush check for idle periods
+	// This catches any remaining operations after bulk periods end
+	if len(s.metadataUpdateBuffer) > 0 && time.Since(s.lastMetadataFlush) >= (s.indexUpdateInterval*5) {
+		s.logger.Debugf("IDLE FLUSH: Flushing %d metadata updates after extended idle period", len(s.metadataUpdateBuffer))
+		s.flushMetadataUpdates()
 	}
 }
 
@@ -384,42 +373,20 @@ func (s *BundleService) flushIndexUpdates() {
 
 // flushMetadataUpdates processes all pending metadata updates in a batch
 // This significantly improves write performance by reducing metadata calculation overhead
-// Thread-safe: Protected by metadataUpdateMutex
-//
-// DUAL PERSISTENCE STRATEGY:
-//  1. ALWAYS apply updates to in-memory bundle metadata (consistency)
-//  2. Mark affected bundles as dirty (IsDirty = true)
-//  3. Persist to disk when EITHER condition is met:
-//     a) Bundle is dirty AND flush triggered by time/size thresholds (efficiency)
-//     b) Global operation counter >= metadataPersistInterval (safety net)
-//
-// This approach provides:
-// - Single-bundle heavy writes: Immediate persistence after each flush
-// - Multi-bundle operations: Batched persistence for performance
-// - Safety guarantee: Operation counter ensures eventual persistence
 func (s *BundleService) flushMetadataUpdates() {
-	s.metadataUpdateMutex.Lock()
 	if len(s.metadataUpdateBuffer) == 0 {
-		s.metadataUpdateMutex.Unlock()
 		return
 	}
 
 	startTime := time.Now()
-	bufferSize := len(s.metadataUpdateBuffer)
-	s.logger.Debugf("Flushing %d pending metadata updates", bufferSize)
+	s.logger.Debugf("Flushing %d pending metadata updates", len(s.metadataUpdateBuffer))
 
 	// Group updates by bundle for efficient processing
 	bundleUpdates := make(map[string][]MetadataUpdate)
+
 	for _, update := range s.metadataUpdateBuffer {
 		bundleUpdates[update.BundleName] = append(bundleUpdates[update.BundleName], update)
 	}
-
-	// Clear buffer and capture state before releasing lock
-	s.metadataUpdateBuffer = s.metadataUpdateBuffer[:0]
-	s.lastMetadataFlush = time.Now()
-
-	// Release lock before expensive I/O operations
-	s.metadataUpdateMutex.Unlock()
 
 	// Process updates for each bundle
 	for bundleName, updates := range bundleUpdates {
@@ -443,10 +410,6 @@ func (s *BundleService) flushMetadataUpdates() {
 		// Apply the accumulated changes
 		bundle.TotalDocuments += docCountDelta
 
-		// Mark bundle as dirty - needs persistence
-		// This flag is cleared only after successful disk write
-		bundle.IsDirty = true
-
 		// Recalculate page count if documents changed
 		if docCountDelta != 0 {
 			// Ensure PageSize is never zero to prevent divide by zero
@@ -467,79 +430,52 @@ func (s *BundleService) flushMetadataUpdates() {
 		}
 	}
 
-	// DUAL PERSISTENCE TRIGGERS:
-	// Trigger 1: Dirty bundles on flush (efficiency - immediate persistence for active bundles)
-	// Trigger 2: Operation counter threshold (safety - eventual persistence for all)
-	s.metadataUpdateMutex.Lock()
+	// PHASE 1 OPTIMIZATION: Deferred persistence - only persist to disk every MetadataPersistInterval operations
+	// This reduces disk I/O overhead during high-throughput writes
 	shouldPersistToDisk := s.metadataOperationCount >= s.metadataPersistInterval
-	currentOperationCount := s.metadataOperationCount
-	s.metadataUpdateMutex.Unlock()
 
-	// Collect dirty bundles that need persistence
-	var bundlesToPersist []*models.Bundle
-	for bundleName := range bundleUpdates {
-		bundle, exists := s.bundleMetadata[bundleName]
-		if exists && bundle.IsDirty {
-			bundlesToPersist = append(bundlesToPersist, bundle)
-		}
-	}
+	if shouldPersistToDisk {
+		// CRITICAL: Persist updated metadata to disk
+		// Without this, metadata updates are lost when bundles are reloaded from storage
+		for bundleName, updates := range bundleUpdates {
+			bundle, exists := s.bundleMetadata[bundleName]
+			if !exists {
+				continue // Already logged warning above
+			}
 
-	s.logger.Debugf("METADATA FLUSH: operationCount=%d, threshold=%d, shouldPersist=%v, dirtyBundles=%d, bufferSize=%d",
-		currentOperationCount, s.metadataPersistInterval, shouldPersistToDisk, len(bundlesToPersist), bufferSize)
+			// Only persist if there were document count changes
+			docCountChanged := false
+			for _, update := range updates {
+				if update.Operation == "increment_docs" || update.Operation == "decrement_docs" {
+					docCountChanged = true
+					break
+				}
+			}
 
-	// Persist if EITHER dirty bundles exist OR threshold reached
-	if len(bundlesToPersist) > 0 || shouldPersistToDisk {
-		if shouldPersistToDisk {
-			// Threshold reached - collect ALL dirty bundles across entire service
-			bundlesToPersist = s.getAllDirtyBundles()
-			s.logger.Infow("Persisting metadata to disk (threshold reached)",
-				"bundles", len(bundlesToPersist),
-				"operationCount", currentOperationCount,
-				"threshold", s.metadataPersistInterval,
-				"bufferSize", bufferSize)
-		} else {
-			s.logger.Infow("Persisting metadata to disk (dirty bundles on flush)",
-				"bundles", len(bundlesToPersist),
-				"operationCount", currentOperationCount,
-				"bufferSize", bufferSize)
-		}
-
-		// Persist all dirty bundles
-		successCount := 0
-		for _, bundle := range bundlesToPersist {
-			s.logger.Infof("PERSISTING METADATA: bundle='%s', TotalDocuments=%d, PageCount=%d",
-				bundle.Name, bundle.TotalDocuments, bundle.PageCount)
-
-			err := s.store.UpdateBundleFile(bundle.Database, bundle)
-			if err != nil {
-				s.logger.Errorf("Failed to persist metadata updates for bundle '%s': %v", bundle.Name, err)
-				// TODO: Implement retry queue for failed persistence operations
-				// Keep IsDirty = true on failure so next cycle will retry
-			} else {
-				// Clear dirty flag only on successful persistence
-				bundle.IsDirty = false
-				successCount++
-				s.logger.Infof("Successfully persisted metadata for bundle '%s' (TotalDocuments: %d, PageCount: %d)",
-					bundle.Name, bundle.TotalDocuments, bundle.PageCount)
+			if docCountChanged {
+				// Persist the updated metadata to disk using the proper interface method
+				err := s.store.UpdateBundleFile(bundle.Database, bundle)
+				if err != nil {
+					s.logger.Errorf("Failed to persist metadata updates for bundle '%s': %v", bundleName, err)
+					// Continue with other bundles even if one fails
+				} else {
+					s.logger.Debugf("Successfully persisted metadata updates for bundle '%s' (TotalDocuments: %d, PageCount: %d)",
+						bundleName, bundle.TotalDocuments, bundle.PageCount)
+				}
 			}
 		}
 
-		s.logger.Infow("Metadata persistence complete",
-			"attempted", len(bundlesToPersist),
-			"succeeded", successCount,
-			"failed", len(bundlesToPersist)-successCount)
-
 		// Reset operation counter after persistence
-		if shouldPersistToDisk {
-			s.metadataUpdateMutex.Lock()
-			s.metadataOperationCount = 0
-			s.metadataUpdateMutex.Unlock()
-			s.logger.Debugf("Performed deferred metadata persistence after %d operations", s.metadataPersistInterval)
-		}
+		s.metadataOperationCount = 0
+		s.logger.Debugf("Performed deferred metadata persistence after %d operations", s.metadataPersistInterval)
 	} else {
 		s.logger.Debugf("Skipping disk persistence - %d operations remaining until next persist (threshold: %d)",
-			s.metadataPersistInterval-currentOperationCount, s.metadataPersistInterval)
+			s.metadataPersistInterval-s.metadataOperationCount, s.metadataPersistInterval)
 	}
+
+	// Clear the buffer and update flush time
+	s.metadataUpdateBuffer = s.metadataUpdateBuffer[:0] // Reset slice but keep capacity
+	s.lastMetadataFlush = time.Now()
 
 	flushTime := time.Since(startTime)
 	s.logger.Debugf("Metadata update flush completed in %v", flushTime)
@@ -547,65 +483,21 @@ func (s *BundleService) flushMetadataUpdates() {
 
 // forceMetadataPersistence forces immediate persistence of all metadata updates to disk
 // This should be called during shutdown, explicit flush requests, or before critical operations
-// Thread-safe: Uses metadataUpdateMutex for operation count reset
 func (s *BundleService) forceMetadataPersistence() {
-	// First flush any pending updates to memory
-	s.flushMetadataUpdates()
-
-	// Now persist ALL dirty bundles regardless of operation count
-	// This ensures all metadata is saved during shutdown
-	s.logger.Info("Forcing metadata persistence for shutdown")
-
-	// Get all dirty bundles across entire service
-	dirtyBundles := s.getAllDirtyBundles()
-	if len(dirtyBundles) == 0 {
-		s.logger.Info("No dirty bundles to persist")
+	if len(s.metadataUpdateBuffer) == 0 {
 		return
 	}
 
-	s.logger.Infow("Persisting dirty bundles on shutdown",
-		"bundleCount", len(dirtyBundles))
+	s.logger.Debugf("Forcing immediate metadata persistence for %d pending updates", len(s.metadataUpdateBuffer))
 
-	successCount := 0
-	for _, bundle := range dirtyBundles {
-		s.logger.Infof("SHUTDOWN PERSIST: bundle='%s', TotalDocuments=%d, PageCount=%d",
-			bundle.Name, bundle.TotalDocuments, bundle.PageCount)
+	// Temporarily set operation count to trigger persistence
+	s.metadataOperationCount = s.metadataPersistInterval
 
-		err := s.store.UpdateBundleFile(bundle.Database, bundle)
-		if err != nil {
-			s.logger.Errorf("Failed to force persist bundle metadata: %v", err)
-		} else {
-			// Clear dirty flag only on success
-			bundle.IsDirty = false
-			successCount++
-		}
-	}
+	// Flush metadata with forced persistence
+	s.flushMetadataUpdates()
 
-	s.logger.Infow("Shutdown metadata persistence complete",
-		"attempted", len(dirtyBundles),
-		"succeeded", successCount,
-		"failed", len(dirtyBundles)-successCount)
-
-	// Reset operation counter
-	s.metadataUpdateMutex.Lock()
-	s.metadataOperationCount = 0
-	s.metadataUpdateMutex.Unlock()
-}
-
-// getAllDirtyBundles returns all bundles with IsDirty = true across all databases
-// Thread-safe: Only reads bundle metadata, no lock needed (bundles accessed through factory)
-// TODO: Consider adding a dirty bundle tracking map for O(1) access instead of O(n) scan
-func (s *BundleService) getAllDirtyBundles() []*models.Bundle {
-	var dirtyBundles []*models.Bundle
-
-	// Iterate through all bundles in metadata map
-	for _, bundle := range s.bundleMetadata {
-		if bundle.IsDirty {
-			dirtyBundles = append(dirtyBundles, bundle)
-		}
-	}
-
-	return dirtyBundles
+	// Note: metadataOperationCount is reset to 0 in flushMetadataUpdates
+	s.logger.Debugf("Forced metadata persistence completed")
 }
 
 // trackOperationForBulkDetection tracks write operations to detect bulk scenarios
@@ -761,15 +653,15 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 		case "insert":
 			// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
 			// err := hashIndex.InsertDocument(update.DocumentID)
-
+			
 			// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
-			// V3 requires key (field value), document ID, and page ID
+			// V3 requires both key (field value) and document ID
 			// Convert FieldValue to string for the key
 			keyValue := fmt.Sprintf("%v", update.FieldValue)
 			if keyValue == "" || keyValue == "<nil>" {
 				keyValue = update.DocumentID // Fallback to DocumentID for DocumentID indexes
 			}
-			err := hashIndex.Put(keyValue, update.DocumentID, update.PageID)
+			err := hashIndex.Put(keyValue, update.DocumentID)
 			if err != nil {
 				errorCount++
 				// === V2-specific error handling (Sprint 5: Commented out) ===
@@ -786,9 +678,9 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 				// } else {
 				// 	s.logger.Warnf("Failed to insert document '%s' into hash index '%s': %v", update.DocumentID, indexName, err)
 				// }
-
+				
 				// === NEW V3 ERROR HANDLING (Sprint 5) ===
-				s.logger.Warnf("Failed to insert key '%s' (doc '%s') into hash index V3 '%s': %v",
+				s.logger.Warnf("Failed to insert key '%s' (doc '%s') into hash index V3 '%s': %v", 
 					keyValue, update.DocumentID, indexName, err)
 			} else {
 				successCount++
@@ -796,7 +688,7 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 		case "delete":
 			// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
 			// _, err := hashIndex.DeleteDocument(update.DocumentID)
-
+			
 			// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
 			// V3 requires the key (field value) to delete
 			keyValue := fmt.Sprintf("%v", update.FieldValue)
@@ -814,9 +706,9 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 				// } else {
 				// 	s.logger.Warnf("Failed to delete document '%s' from hash index '%s': %v", update.DocumentID, indexName, err)
 				// }
-
+				
 				// === NEW V3 ERROR HANDLING (Sprint 5) ===
-				s.logger.Warnf("Failed to delete key '%s' (doc '%s') from hash index V3 '%s': %v",
+				s.logger.Warnf("Failed to delete key '%s' (doc '%s') from hash index V3 '%s': %v", 
 					keyValue, update.DocumentID, indexName, err)
 			} else {
 				successCount++
@@ -838,7 +730,7 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 	// if err := hashIndex.FlushToDisk(); err != nil {
 	// 	s.logger.Warnf("Failed to flush hash index '%s' to disk: %v", indexName, err)
 	// }
-
+	
 	// === NEW V3 FLUSH (Sprint 5: LSM-style) ===
 	if err := hashIndex.Flush(); err != nil {
 		s.logger.Warnf("Failed to flush hash index V3 '%s' to disk: %v", indexName, err)
@@ -1133,41 +1025,21 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	return page, nil
 }
 
-// GetDocument retrieves a specific document by ID
-// Uses memory-first architecture: checks in-memory documents before hitting disk
-// This ensures dirty documents are readable before flush and provides optimal performance
+// GetDocument retrieves a specific document by ID (loads the page containing it)
 func (s *BundleService) GetDocument(bundleName, databaseName, documentID string) (*models.Document, error) {
-	// Get the bundle metadata
-	bundle, exists := s.bundleMetadata[bundleName]
-	if !exists {
-		return nil, fmt.Errorf("bundle %s not found", bundleName)
-	}
-
-	// MEMORY-FIRST: Check if document is already loaded in memory (hot path)
-	// This includes recently added documents that haven't been flushed to disk yet
-	if bundle.Documents != nil {
-		if doc, exists := (*bundle.Documents)[documentID]; exists {
-			s.logger.Debugf("Document %s found in memory for bundle %s", documentID, bundleName)
-			return &doc, nil
-		}
-	}
-
-	// Document not in memory - need to load from disk using index
-	s.logger.Debugf("Document %s not in memory, loading from disk for bundle %s", documentID, bundleName)
-
-	// Find which page contains this document using the index
+	// First, find which page contains this document using an index
 	pageID, err := s.findDocumentPage(bundleName, documentID)
 	if err != nil {
 		return nil, fmt.Errorf("could not find document %s in bundle %s: %w", documentID, bundleName, err)
 	}
 
-	// Load the page containing the document from disk
+	// Load the page containing the document
 	page, err := s.GetDocumentPage(bundleName, databaseName, pageID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Extract the document from the loaded page
+	// Extract the document from the page
 	if doc, exists := page.Documents[documentID]; exists {
 		return &doc, nil
 	}
@@ -1201,96 +1073,27 @@ func (s *BundleService) evictOldestPage() {
 	}
 }
 
-// findDocumentPage uses the DocumentID hash index to determine which page contains a specific document
-// This provides O(1) document location lookup instead of scanning all pages
+// findDocumentPage uses indexes to determine which page contains a specific document
 func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, error) {
-	// PERFORMANCE OPTIMIZATION: Check the document-page cache first (O(1) lookup)
-	s.pageCacheMutex.RLock()
-	if bundleCache, exists := s.documentPageMap[bundleID]; exists {
-		if pageID, found := bundleCache[documentID]; found {
-			s.pageCacheMutex.RUnlock()
-			s.logger.Debugf("Cache hit: Found document %s in bundle %s at page %d", documentID, bundleID, pageID)
-			return pageID, nil
-		}
-	}
-	s.pageCacheMutex.RUnlock()
+	// TODO: Implement index-based page lookup
+	// For now, use a simple hash-based approach
+	// In production, this would use the bundle's indexes
 
-	// Get bundle metadata
+	// Simple hash-based page assignment (temporary implementation)
+	hash := s.simpleHash(documentID)
+
+	// Get bundle metadata to determine page count
 	bundle, exists := s.bundleMetadata[bundleID]
 	if !exists {
 		return 0, fmt.Errorf("bundle metadata not found for %s", bundleID)
 	}
 
-	// HYBRID APPROACH: Use DocumentID hash index to get page location
-	// This is the proper LSM-based solution that stores page IDs in the index
-	if bundle.Indexes != nil {
-		// Look for DocumentID index
-		for indexName, indexRef := range bundle.Indexes {
-			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
-				// Load the DocumentID index
-				hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
-				if err != nil {
-					s.logger.Warnf("Failed to load DocumentID index for page lookup: %v", err)
-					break // Fall through to fallback
-				}
-
-				// Get document location from index
-				docIDs, pageIDs, err := hashIndex.Get(documentID)
-				if err != nil {
-					s.logger.Warnf("Failed to query DocumentID index: %v", err)
-					break // Fall through to fallback
-				}
-
-				if len(docIDs) > 0 && len(pageIDs) > 0 {
-					pageID := pageIDs[0]
-					s.logger.Debugf("Index lookup: Found document %s in bundle %s at page %d", documentID, bundleID, pageID)
-
-					// Cache the result for future lookups
-					s.pageCacheMutex.Lock()
-					if s.documentPageMap[bundleID] == nil {
-						s.documentPageMap[bundleID] = make(map[string]uint32)
-					}
-					s.documentPageMap[bundleID][documentID] = pageID
-					s.pageCacheMutex.Unlock()
-
-					return pageID, nil
-				}
-				break // Index didn't find it, fall through to fallback
-			}
-		}
-	}
-
-	// FALLBACK: Only used if index lookup fails or PageID is 0 (placeholder)
-	// TODO: This fallback can be removed once all indexes properly track page IDs
-	s.logger.Debugf("FALLBACK: Scanning pages to find document %s in bundle %s", documentID, bundleID)
-
 	if bundle.PageCount == 0 {
 		return 0, fmt.Errorf("bundle %s has no pages", bundleID)
 	}
 
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundleID, bundle.Database.Name, pageID, databasePath)
-		if err != nil {
-			s.logger.Warnf("Failed to load page %d while searching for document %s: %v", pageID, documentID, err)
-			continue
-		}
-
-		// Check if document exists in this page
-		if _, exists := page.Documents[documentID]; exists {
-			// Update the cache with this document's location
-			s.pageCacheMutex.Lock()
-			if s.documentPageMap[bundleID] == nil {
-				s.documentPageMap[bundleID] = make(map[string]uint32)
-			}
-			s.documentPageMap[bundleID][documentID] = pageID
-			s.pageCacheMutex.Unlock()
-
-			return pageID, nil
-		}
-	}
-
-	return 0, fmt.Errorf("document %s not found in any page of bundle %s", documentID, bundleID)
+	pageID := uint32(hash % uint64(bundle.PageCount))
+	return pageID, nil
 }
 
 // getAllDocumentsForIndexing loads all documents from all pages for index building
@@ -1666,12 +1469,12 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 	// 	CacheSize:   100,
 	// }
 	// hashIndex, err := hashindexV2.CreateHashIndex(&config, s.logger)
-
+	
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
 	// Create configuration for hashindexV3
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
-
+	
 	config := hashindex.IndexConfig{
 		IndexName:          indexCommand.IndexName,
 		BundleName:         bundle.Name,
@@ -1679,20 +1482,20 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		FieldName:          indexCommand.Fields[0].Name,
 		DataDir:            indexesPath,
 		MaxFileSize:        128 * 1024 * 1024, // 128MB per entry file
-		WriteBufferSize:    64 * 1024,         // 64KB write buffer
-		MemTableMaxSize:    100000,            // 100K entries in MemTable
+		WriteBufferSize:    64 * 1024,          // 64KB write buffer
+		MemTableMaxSize:    100000,             // 100K entries in MemTable
 		CompactionEnabled:  true,
 		CompactionMaxFiles: 10,
 		Logger:             s.logger,
 	}
-
+	
 	// Create the hash index using hashindexV3 LSM implementation
 	hashIndex, err := hashindex.NewHashIndexV3(config)
 	if err != nil {
 		s.logger.Errorf("Failed to create hash index V3: %v", err)
 		return fmt.Errorf("failed to create hash index: %w", err)
 	}
-
+	
 	// Create the index field structure for compatibility
 	indexField := models.IndexField{
 		FieldName: indexCommand.Fields[0].Name,
@@ -1744,10 +1547,10 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 	// 	CacheSize:    100,
 	// }
 	// hashIndex, err := hashindexV2.CreateHashIndex(&config, s.logger)
-
+	
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
 	config := hashindex.IndexConfig{
-		IndexName:          name, //name + "_idx",
+		IndexName:          name + "_idx",
 		BundleName:         bundle.Name,
 		DatabaseName:       bundle.Database.Name,
 		FieldName:          name,
@@ -2076,7 +1879,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 		// 	s.logger.Debugf("Hash index '%s' already loaded in memory", indexName)
 		// 	return hashIndex, nil
 		// }
-
+		
 		// === NEW V3 TYPE CHECK (Sprint 5: LSM-style) ===
 		if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndexV3); ok {
 			s.logger.Debugf("Hash index V3 '%s' already loaded in memory", indexName)
@@ -2091,7 +1894,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 	// databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	// indexFilePath := fmt.Sprintf("%s%s_%s.hidx", databasePath, bundle.Name, indexRef.HashIndexField.FieldName)
 	// hashIndex, err := hashindexV2.OpenHashIndex(indexFilePath, args.Debug, s.logger)
-
+	
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
@@ -2192,36 +1995,16 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// Add the document to the bundle
 	newDocument := s.documentFactory.NewDocument(*docCommand)
 
-	// DIAGNOSTIC: Log bundle index status
-	s.logger.Infof("DIAGNOSTIC: Bundle '%s' has Indexes map: %v, count: %d", bundle.Name, bundle.Indexes != nil, len(bundle.Indexes))
-	if bundle.Indexes != nil && len(bundle.Indexes) > 0 {
-		for idxName := range bundle.Indexes {
-			s.logger.Infof("DIAGNOSTIC: Found index: %s", idxName)
-		}
-	}
-
 	// Schedule deferred index updates for optimal performance instead of immediate updates
-	// Schedule deferred metadata update instead of immediate calculation
-	s.scheduleMetadataUpdate(docCommand.BundleName, "increment_docs", 1)
-
-	// Add document to bundle file (storage layer handles page allocation and returns pageID)
-	pageID, err := s.store.AddDocumentToBundleFile(bundle, newDocument)
-	if err != nil {
-		// Note: Metadata updates are deferred, so no rollback needed here
-		// Failed operations won't have their metadata updates applied
-		return "", fmt.Errorf("failed to add document to bundle: %w", err)
-	}
-
-	// Now schedule index updates with the actual pageID from storage
 	if bundle.Indexes != nil {
 		// Look for indexes and schedule updates
 		for indexName, indexRef := range bundle.Indexes {
 			s.logger.Debugf("Scheduling deferred update for index '%s' of type '%s'", indexName, indexRef.IndexType)
 
 			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
-				// Schedule DocumentID hash index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, newDocument.DocumentID, pageID, nil)
-				s.logger.Debugf("Scheduled DocumentID hash index update for document '%s' on page %d", newDocument.DocumentID, pageID)
+				// Schedule DocumentID hash index update
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, newDocument.DocumentID, nil)
+				s.logger.Debugf("Scheduled DocumentID hash index update for document '%s'", newDocument.DocumentID)
 
 			} else if indexRef.IndexType == "btree" {
 				// Extract the field value for BTree indexing
@@ -2231,14 +2014,25 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 					continue
 				}
 
-				// Schedule BTree index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
-				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s' (page %d)",
-					newDocument.DocumentID, indexRef.BTreeIndexField.FieldName, pageID)
+				// Schedule BTree index update
+				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", newDocument.DocumentID, fieldValue, nil)
+				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s'",
+					newDocument.DocumentID, indexRef.BTreeIndexField.FieldName)
 			}
 		}
 	} else {
 		s.logger.Warnf("No indexes found for bundle '%s'", bundle.Name)
+	}
+
+	// Schedule deferred metadata update instead of immediate calculation
+	s.scheduleMetadataUpdate(docCommand.BundleName, "increment_docs", 1)
+
+	// Add document to bundle file (storage layer handles page allocation)
+	err = s.store.AddDocumentToBundleFile(bundle, newDocument)
+	if err != nil {
+		// Note: Metadata updates are deferred, so no rollback needed here
+		// Failed operations won't have their metadata updates applied
+		return "", fmt.Errorf("failed to add document to bundle: %w", err)
 	}
 
 	return newDocument.DocumentID, nil
@@ -2248,22 +2042,15 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 	// Schedule deferred metadata update instead of immediate calculation
 	s.scheduleMetadataUpdate(bundle.Name, "increment_docs", 1)
 
-	// Add document to bundle file (storage layer handles page allocation and returns pageID)
-	pageID, err := s.store.AddDocumentToBundleFile(bundle, document)
-	if err != nil {
-		return fmt.Errorf("failed to add document to bundle: %w", err)
-	}
-
-	// Now schedule index updates with the actual pageID from storage
 	if bundle.Indexes != nil {
 		// Schedule deferred index updates instead of immediate updates
 		for indexName, indexRef := range bundle.Indexes {
 			s.logger.Debugf("Scheduling deferred update for index '%s' of type '%s'", indexName, indexRef.IndexType)
 
 			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
-				// Schedule DocumentID hash index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, document.DocumentID, pageID, nil)
-				s.logger.Debugf("Scheduled DocumentID hash index update for document '%s' on page %d", document.DocumentID, pageID)
+				// Schedule DocumentID hash index update
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, document.DocumentID, nil)
+				s.logger.Debugf("Scheduled DocumentID hash index update for document '%s'", document.DocumentID)
 			} else if indexRef.IndexType == "btree" {
 				// Extract the field value for BTree indexing
 				fieldValue, err := extractFieldValueForIndex(*document, indexRef.BTreeIndexField.FieldName)
@@ -2272,22 +2059,30 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 					continue
 				}
 
-				// Schedule BTree index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", document.DocumentID, fieldValue, pageID, nil)
-				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s' (page %d)",
-					document.DocumentID, indexRef.BTreeIndexField.FieldName, pageID)
+				// Schedule BTree index update
+				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", document.DocumentID, fieldValue, nil)
+				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s'",
+					document.DocumentID, indexRef.BTreeIndexField.FieldName)
 			}
 		}
 	}
 
+	// Add document to bundle file
+	err := s.store.AddDocumentToBundleFile(bundle, document)
+	if err != nil {
+		return fmt.Errorf("failed to add document to bundle: %w", err)
+	}
+
 	// Update in-memory cache: if the appropriate document page is loaded, add the document to it
 	// This prevents cache inconsistency where disk has the new document but memory cache is stale
-	// We already have pageID from the storage layer, so use it directly
-	pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
-	if page, exists := s.documentPages[pageKey]; exists {
-		// Page is loaded in memory, add the new document to it
-		page.Documents[document.DocumentID] = *document
-		s.logger.Debugf("Added document '%s' to in-memory page %s", document.DocumentID, pageKey)
+	pageID, err := s.findDocumentPage(bundle.Name, document.DocumentID)
+	if err == nil {
+		pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
+		if page, exists := s.documentPages[pageKey]; exists {
+			// Page is loaded in memory, add the new document to it
+			page.Documents[document.DocumentID] = *document
+			s.logger.Debugf("Added document '%s' to in-memory page %s", document.DocumentID, pageKey)
+		}
 	}
 
 	return nil
@@ -2541,7 +2336,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 
 					// === OLD V2 DELETE (Sprint 5: Commented out) ===
 					// deleted, err := hashIndex.DeleteDocument(documentID)
-
+					
 					// === NEW V3 DELETE (Sprint 5: LSM-style) ===
 					// For DocumentID index, the key is the documentID itself
 					deleted, err := hashIndex.Delete(documentID)
@@ -2943,11 +2738,10 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 					//     }
 					// }
 
-					// Sprint 5: BTree error check commented out since switch above is commented
-					// if err != nil {
-					// s.logger.Warnf("BTree index search failed: %v", err)
-					// continue
-					// }
+					if err != nil {
+						s.logger.Warnf("BTree index search failed: %v", err)
+						continue
+					}
 
 					s.logger.Debugf("BTree index found %d document IDs for operator '%s' with value '%v'",
 						len(docIDs), clause.Operator, clause.Value)
@@ -3209,28 +3003,24 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 
-	// Look for hash index files in: data_files/<Database>/indexes/<Bundle>/<Bundle>_<Field>_idx_<N>.idx
-	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
-	hashPattern := fmt.Sprintf("%s/%s_*_*.idx", indexesPath, bundle.Name)
-	//s.logger.Infof("DIAGNOSTIC: Searching for index files with pattern: %s", hashPattern)
+	// Look for hash index files: BundleName_FieldName.hidx
+	hashPattern := fmt.Sprintf("%s/%s_*.hidx", databasePath, bundle.Name)
 	hashFiles, err := filepath.Glob(hashPattern)
 	if err != nil {
 		return fmt.Errorf("failed to scan for hash index files: %w", err)
 	}
-	//s.logger.Infof("DIAGNOSTIC: Found %d index files matching pattern", len(hashFiles))
 
 	for _, hashFile := range hashFiles {
-		// Extract field name from filename: BundleName_FieldName_idx_N.idx
+		// Extract field name from filename: BundleName_FieldName.hidx
 		baseName := filepath.Base(hashFile)
-		// Remove .idx extension
-		baseName = strings.TrimSuffix(baseName, ".idx")
-		fieldName := ""
-		parts := strings.Split(baseName, "_")
-
-		if len(parts) > 0 {
-			fieldName = parts[1]
-			//s.logger.Infof("DIAGNOSTIC: Processing index file '%s', extracted field name: '%s'", baseName, fieldName)
+		// Remove .hidx extension
+		baseName = strings.TrimSuffix(baseName, ".hidx")
+		// Remove bundle name prefix and underscore
+		prefix := bundle.Name + "_"
+		if !strings.HasPrefix(baseName, prefix) {
+			continue // Skip files that don't match expected pattern
 		}
+		fieldName := strings.TrimPrefix(baseName, prefix)
 
 		// Check if this field exists in the bundle's field definitions
 		if bundle.DocumentStructure.FieldDefinitions != nil {
@@ -3241,7 +3031,7 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 		}
 
 		// Create index reference
-		indexName := fieldName //fmt.Sprintf("%s_%s", bundle.Name, fieldName)
+		indexName := fmt.Sprintf("%s_%s_hash", bundle.Name, fieldName)
 		indexRef := models.IndexReference{
 			IndexType: "hash",
 			HashIndexField: models.IndexField{
@@ -3274,11 +3064,10 @@ func (s *BundleService) Shutdown() error {
 	// Also flush and close write buffers
 	s.store.CloseWriteBuffers()
 
-	// Also force flush any remaining metadata updates during shutdown
-	// CRITICAL: Use forceMetadataPersistence to ensure disk write happens
+	// Also force flush any remaining metadata updates
 	if len(s.metadataUpdateBuffer) > 0 {
 		s.logger.Debugf("Force flushing %d remaining metadata updates during shutdown", len(s.metadataUpdateBuffer))
-		s.forceMetadataPersistence()
+		s.flushMetadataUpdates()
 	}
 
 	// Close all loaded indexes properly
@@ -3416,7 +3205,7 @@ func (s *BundleService) flushHashIndexToDisk(hashIndex *hashindex.HashIndexV3, b
 	// if err := hashIndex.PersistMetadata(); err != nil {
 	// 	return fmt.Errorf("failed to persist metadata for index '%s': %w", indexName, err)
 	// }
-
+	
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
 	// In V3, Flush() handles both memtable and metadata persistence
 	if err := hashIndex.Flush(); err != nil {

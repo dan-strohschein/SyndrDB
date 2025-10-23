@@ -71,7 +71,6 @@ func validateCommand(command string, config *SecurityConfig) error {
 		"\" OR \"1\"=\"1", // Quote variant
 		"UNION SELECT",    // Union-based injection
 		"DROP TABLE",      // Destructive commands
-		"DELETE FROM",     // Mass deletion
 		"TRUNCATE",        // Table truncation
 		"<script",         // XSS attempt
 		"javascript:",     // JavaScript injection
@@ -85,6 +84,12 @@ func validateCommand(command string, config *SecurityConfig) error {
 		if strings.Contains(commandUpper, strings.ToUpper(pattern)) {
 			return fmt.Errorf("potentially malicious pattern detected in command: %s", pattern)
 		}
+	}
+
+	// Special check for DELETE FROM (SQL injection) vs DELETE DOCUMENTS FROM (legitimate SyndrDB command)
+	// Block "DELETE FROM" only if it's NOT part of "DELETE DOCUMENTS FROM"
+	if strings.Contains(commandUpper, "DELETE FROM") && !strings.Contains(commandUpper, "DELETE DOCUMENTS FROM") {
+		return fmt.Errorf("invalid DELETE syntax: use 'DELETE DOCUMENTS FROM <bundle>' instead of 'DELETE FROM'")
 	}
 
 	// Check for excessive special characters (potential obfuscation)

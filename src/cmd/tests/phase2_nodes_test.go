@@ -10,7 +10,7 @@ This file tests all Phase 2 execution nodes:
 Tests cover individual node functionality and node composition patterns.
 */
 
-package planner
+package main
 
 import (
 	"testing"

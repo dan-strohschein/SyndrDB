@@ -69,6 +69,9 @@ type Bundle struct {
 	TotalDocuments int64 // Total number of documents in this bundle
 	PageCount      int64 // Total number of document pages
 	PageSize       int   // Number of documents per page (default: 1000)
+
+	// TODO: Add LastPersisted timestamp to track staleness
+	IsDirty bool // Indicates metadata needs persistence (not serialized)
 }
 
 // DocumentPage represents a page of documents for scalable loading
@@ -211,9 +214,11 @@ type DocumentCommand struct {
 }
 
 type DocumentDeleteCommand struct {
-	BundleName  string
-	Fields      []KeyValue // Fields to be added or updated in the document
-	WhereClause string     // Optional where clause for filtering documents
+	BundleName         string
+	Fields             []KeyValue // Fields to be added or updated in the document
+	WhereClause        string     // Optional where clause for filtering documents
+	DeletedDocumentIDs []string   // Track successfully deleted document IDs for response
+	RawCommand         string     // Store the raw command for logging/debugging
 }
 
 type DocumentUpdateCommand struct {

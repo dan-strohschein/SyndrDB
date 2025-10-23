@@ -63,7 +63,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		}
 
 		// All other SELECT queries (including field lists) go through unified parser
-		// This handles: SELECT field1, field2 FROM bundle
+		// This handles things like: SELECT field1, field2 FROM bundle
 		//               SELECT DOCUMENTS FROM bundle
 		//               SELECT COUNT(*) FROM bundle
 		//               SELECT * FROM bundle JOIN...
@@ -250,32 +250,56 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 
 			serviceManager.BundleService.RemoveBundle(database, bundleName)
 		case "documents":
-			//DELETE DOCUMENTS FROM BUNDLE "BUNDLE_NAME"
-			//WHERE <FIELDNAME> = <VALUE>
-			bundleName, err := parseBundleNameFromCommand(command, "FROM")
-			if err != nil {
-				logger.Errorf("Failed to parse bundle name from SELECT command: %v", err)
-				logger.Debugf("Command was: %s", command)
-				return nil, fmt.Errorf("SELECT DOCUMENTS command parsing failed: %w", err)
-			}
-
-			// Additional validation following SyndrDB defensive programming practices
-			if bundleName == "" {
-				return nil, fmt.Errorf("bundle name cannot be empty in SELECT DOCUMENTS command")
-			}
-
-			// Additional validation following SyndrDB defensive programming practices
-			if bundleName == "" {
-				return nil, fmt.Errorf("bundle name cannot be empty in UPDATE DOCUMENTS command")
-			}
-			// Parse the document command
+			// DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>
+			// Parse the document command first to get bundle name and WHERE clause
 			docCommand, err := bndle.ParseDeleteDocumentCommand(command, logger)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing delete document command: %v", err)
 			}
+
+			// Additional validation following SyndrDB defensive programming practices
+			if docCommand.BundleName == "" {
+				return nil, fmt.Errorf("bundle name cannot be empty in DELETE DOCUMENTS command")
+			}
+
+			bundleName := docCommand.BundleName
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+			}
+
+			filterCmd := fmt.Sprintf("SELECT \"DocumentID\" FROM \"%s\" WHERE %s", docCommand.BundleName, docCommand.WhereClause)
+			logger.Infof("Filter Command for DELETE DOCUMENTS: %s", filterCmd)
+			query, err := queryparser.ParseUnifiedSelectQuery(filterCmd, logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse query: %w", err)
+			}
+
+			// logger.Infof("Parsed unified query: Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
+			// 	query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasOrderBy(), query.HasLimit())
+
+			// STEP 2: Create unified query planner
+			unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, serviceManager.BundleService)
+
+			// STEP 3: Create execution plan
+			plan, err := unifiedPlanner.CreatePlan(query, bundle.Database)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create execution plan: %w", err)
+			}
+
+			logger.Infof("Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
+				plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
+
+			// STEP 4: Execute the plan
+			filteredDocs, err := plan.RootNode.Execute()
+			if err != nil {
+				return nil, fmt.Errorf("failed to execute query plan: %w", err)
+			}
+
+			docIDs := make([]string, 0, len(filteredDocs))
+			for _, doc := range filteredDocs {
+				docIDs = append(docIDs, doc.Fields["DocumentID"].Value.(string))
+				//logger.Infof("FOUND DocumentID '%s'", doc.Fields["DocumentID"].Value.(string))
 			}
 
 			// Execute with WAL logging if available
@@ -289,16 +313,37 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 					}
 
 					// Delete the document from the bundle
-					return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand)
+					return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs)
 				})
 			} else {
 				// Fallback to direct execution if WAL is not available
 				logger.Warn("WAL Manager not available, executing without transaction logging")
-				err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand)
+				err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs)
 			}
 
 			if err != nil {
 				return nil, fmt.Errorf("error deleting document from bundle '%s': %v", bundleName, err)
+			}
+
+			// STEP 6: Format success response with deleted document IDs
+			deletedCount := len(docCommand.DeletedDocumentIDs)
+			if deletedCount == 0 {
+				result = fmt.Sprintf("{\"message\": \"No documents matched the WHERE clause in bundle '%s'\"}", bundleName)
+			} else if deletedCount == 1 {
+				result = fmt.Sprintf("{\"message\": \"Successfully deleted 1 document from bundle '%s'\", \"deleted_ids\": [\"%s\"]}",
+					bundleName, docCommand.DeletedDocumentIDs[0])
+			} else {
+				// Build JSON array of deleted IDs
+				idsJSON := "["
+				for i, id := range docCommand.DeletedDocumentIDs {
+					if i > 0 {
+						idsJSON += ", "
+					}
+					idsJSON += fmt.Sprintf("\"%s\"", id)
+				}
+				idsJSON += "]"
+				result = fmt.Sprintf("{\"message\": \"Successfully deleted %d documents from bundle '%s'\", \"deleted_ids\": %s}",
+					deletedCount, bundleName, idsJSON)
 			}
 		case "user":
 			// ParseCreateRelationshipCommand(command)

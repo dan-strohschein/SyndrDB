@@ -282,6 +282,33 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 	// SAFETY: Prevent infinite loops by limiting page count
 	maxSafePages := uint32(100)
 	pageCount := uint32(ba.bundle.PageCount)
+
+	// CRITICAL FIX: If PageCount is 0 but TotalDocuments > 0, calculate pageCount from documents
+	// This handles cases where metadata persistence failed but documents exist
+	if pageCount == 0 && ba.bundle.TotalDocuments > 0 {
+		pageSize := uint32(1000) // Standard page size
+		pageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
+		ba.logger.Warnf("RECOVERY: PageCount was 0 but TotalDocuments=%d, calculated pageCount=%d",
+			ba.bundle.TotalDocuments, pageCount)
+	}
+
+	// CRITICAL FIX: If both PageCount and TotalDocuments are 0, still try to load page 0
+	// This handles cases where metadata is completely uninitialized but documents exist on disk
+	if pageCount == 0 {
+		ba.logger.Warnf("RECOVERY: Both PageCount and TotalDocuments are 0, attempting to load page 0 anyway")
+		page, err := ba.loadDocumentPage(0)
+		if err == nil && len(page.Documents) > 0 {
+			ba.logger.Warnf("RECOVERY: Found %d documents in page 0 despite metadata showing 0!", len(page.Documents))
+			for docID := range page.Documents {
+				ids = append(ids, docID)
+			}
+			return ids
+		} else {
+			ba.logger.Warnf("RECOVERY: No documents found in page 0, returning empty list")
+			return ids // Return empty list
+		}
+	}
+
 	if pageCount > maxSafePages {
 		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in GetDocumentIDs", pageCount, maxSafePages)
 		pageCount = maxSafePages
@@ -310,6 +337,25 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 	// SAFETY: Prevent infinite loops by limiting page count
 	maxSafePages := uint32(100)
 	pageCount := uint32(ba.bundle.PageCount)
+
+	// CRITICAL FIX: If PageCount is 0 but TotalDocuments > 0, calculate pageCount
+	if pageCount == 0 && ba.bundle.TotalDocuments > 0 {
+		pageSize := uint32(1000)
+		pageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
+	}
+
+	// CRITICAL FIX: If both are 0, still try page 0
+	if pageCount == 0 {
+		page, err := ba.loadDocumentPage(0)
+		if err == nil {
+			if doc, exists := page.Documents[docID]; exists {
+				docCopy := doc
+				return &docCopy
+			}
+		}
+		return nil // Document not found in page 0
+	}
+
 	if pageCount > maxSafePages {
 		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in GetDocument", pageCount, maxSafePages)
 		pageCount = maxSafePages

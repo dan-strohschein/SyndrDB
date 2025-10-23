@@ -431,6 +431,62 @@ func (hi *HashIndex) FlushToDisk() error {
 	return nil
 }
 
+// FlushAllDirtyPages writes all dirty (modified) pages from the cache to disk
+// This ensures durability of index changes without closing the index
+// Should be called after DELETE operations or other modifications that require immediate persistence
+func (hi *HashIndex) FlushAllDirtyPages() error {
+	hi.mutex.Lock()
+	defer hi.mutex.Unlock()
+
+	if hi.pageManager == nil {
+		return fmt.Errorf("page manager not initialized")
+	}
+
+	if hi.fileManager == nil {
+		return fmt.Errorf("file manager not initialized")
+	}
+
+	hi.logger.Debugf("Flushing all dirty pages for hash index")
+
+	// Flush all dirty pages using the file manager's WritePage function
+	err := hi.pageManager.FlushDirtyPages(func(pageNum uint32, pageData interface{}) error {
+		return hi.fileManager.WritePage(pageNum, pageData)
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to flush dirty pages: %w", err)
+	}
+
+	hi.logger.Debugf("Successfully flushed all dirty pages")
+	return nil
+}
+
+// PersistMetadata saves the current index metadata to disk
+// This should be called after operations that modify metadata (inserts, deletes, splits)
+// Ensures metadata changes are durable without requiring a full index flush
+func (hi *HashIndex) PersistMetadata() error {
+	hi.mutex.Lock()
+	defer hi.mutex.Unlock()
+
+	if hi.Storage == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+
+	hi.logger.Debugf("Persisting hash index metadata")
+
+	// Update last modified timestamp
+	hi.metadata.LastModified = time.Now()
+
+	// Save metadata to disk
+	if err := hi.Storage.SaveMetadata(hi.metadata); err != nil {
+		return fmt.Errorf("failed to persist metadata: %w", err)
+	}
+
+	hi.logger.Debugf("Successfully persisted metadata: %d records, %d buckets",
+		hi.metadata.TotalRecords, hi.metadata.BucketCount)
+	return nil
+}
+
 func (hi *HashIndex) DeleteDocument(documentID string) (bool, error) {
 	hi.mutex.Lock()
 	defer hi.mutex.Unlock()

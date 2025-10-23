@@ -170,46 +170,46 @@ func ParseAddDocumentCommand(command string, logger *zap.SugaredLogger) (*models
 
 func ParseDeleteDocumentCommand(command string, logger *zap.SugaredLogger) (*models.DocumentDeleteCommand, error) {
 	args := settings.GetSettings()
-	// Regular expression to match the command structure
+
+	// Normalize the command
 	command = strings.Trim(command, " \n\r\t")
 	command = strings.ReplaceAll(command, "\n", " ")
 	command = strings.ReplaceAll(command, "\t", " ")
+	command = strings.TrimSuffix(command, ";")
 
-	deleteDocRegex := regexp.MustCompile(`DELETE DOCUMENTS FROM(?:\s+BUNDLE)?\s+"([^"]+)"\s*WHERE\s*(?:\()?([\s\S]+?)(?:\))?(?:;)?$`)
+	// Updated regex to match the new simplified syntax:
+	// DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>
+	// The BUNDLE keyword is no longer required
+	deleteDocRegex := regexp.MustCompile(`DELETE\s+DOCUMENTS\s+FROM\s+"([^"]+)"\s+WHERE\s+(.+)$`)
 	matches := deleteDocRegex.FindStringSubmatch(command)
+
 	if args.Debug {
-		logger.Debugf("Parsing DELETE DOCUMENTS command has: %d", len(matches))
-	}
-	if args.Debug {
-		logger.Debugf("DELETE DOCUMENTS command - matches found: %d", len(matches))
+		logger.Debugf("Parsing DELETE DOCUMENTS command - matches found: %d", len(matches))
 		for i, match := range matches {
 			logger.Debugf("Match[%d]: %s", i, match)
 		}
 	}
+
 	if len(matches) < 3 {
-		logger.Errorw("Invalid DELETE DOCUMENTS command syntax", "command", command)
-		return nil, fmt.Errorf("invalid DELETE DOCUMENTS command syntax")
+		logger.Errorw("Invalid DELETE DOCUMENTS command syntax",
+			"command", command,
+			"expected", `DELETE DOCUMENTS FROM "<bundle_name>" WHERE <where_clause>`)
+		return nil, fmt.Errorf("invalid DELETE DOCUMENTS syntax. Expected: DELETE DOCUMENTS FROM \"<bundle_name>\" WHERE <where_clause>")
 	}
 
 	bundleName := matches[1]
-	fieldsText := matches[2]
+	whereClause := strings.TrimSpace(matches[2])
 
 	if args.Debug {
-		logger.Debugf("Parsed DELETE DOCUMENTS command: BundleName=%s, FieldsText=%s", bundleName, fieldsText)
+		logger.Debugf("Parsed DELETE DOCUMENTS command: BundleName=%s, WhereClause=%s", bundleName, whereClause)
 	}
 
-	// Parse the field values from the format {key=value}
-	fieldValues, err := parseFieldValues(fieldsText)
-	if err != nil {
-		logger.Errorw("Error parsing field values", "error", err)
-		return nil, fmt.Errorf("error parsing field values: %w", err)
-	}
-
+	// Return the command with the WHERE clause - it will be parsed later in the service layer
 	return &models.DocumentDeleteCommand{
-
+		RawCommand:  command,
 		BundleName:  bundleName,
-		Fields:      fieldValues,
-		WhereClause: strings.TrimSpace(fieldsText), // Assuming the where clause is the same as fields for simplicity
+		WhereClause: whereClause,
+		Fields:      nil, // Deprecated - WHERE clause is now used instead
 	}, nil
 }
 

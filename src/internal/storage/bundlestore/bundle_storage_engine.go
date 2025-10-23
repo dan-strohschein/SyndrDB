@@ -62,8 +62,9 @@ type BundleStore interface {
 	UpdateDocumentInBundleFile(bundle *models.Bundle, document *models.Document) error
 	DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error
 
-	AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) error
-	AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) error
+	// Returns the physical page ID where the document was stored
+	AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error)
+	AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error)
 
 	RemoveDocumentFromBundleFile(database *models.Database, bundle *models.Bundle, documentID string, mmapData []byte) error
 	BundleFileExists(bundleName string, databaseName string) bool
@@ -357,7 +358,10 @@ func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bu
 	return &data, &bundle, nil
 }
 
-// LoadBundle loads a bundle from disk
+// DEPRECATED: LoadBundle loads a bundle using the old binary page format.
+// This function does NOT respect tombstone deletion markers (0xDEADDEAD).
+// Use LoadDocumentPage() with readDocumentRange() instead, which properly handles
+// the append-only format with deletion markers.
 func (bs *BundleStorageEngine) LoadBundle(bundleName string) (*models.Bundle, error) {
 	// Get the fileID for this bundle
 	bundleFilename := fmt.Sprintf("%s.bun", bundleName)
@@ -433,7 +437,10 @@ func (bs *BundleStorageEngine) parseHeaderPage(pageData []byte) (*models.Bundle,
 	return bundle, docCount, nil
 }
 
-// readDocuments reads all documents from a bundle file
+// DEPRECATED: readDocuments reads documents using the old binary page format.
+// This function does NOT respect tombstone deletion markers (0xDEADDEAD).
+// Use readDocumentRange() with parseAppendedDocumentsRange() instead for proper
+// append-only format support with deletion markers.
 func (bs *BundleStorageEngine) readDocuments(fileID uint32, docCount uint32) (map[string]models.Document, error) {
 	docs := make(map[string]models.Document)
 
@@ -462,7 +469,10 @@ func (bs *BundleStorageEngine) readDocuments(fileID uint32, docCount uint32) (ma
 	return docs, nil
 }
 
-// processDocumentPage extracts documents from a page
+// DEPRECATED: processDocumentPage parses documents using the old binary page format.
+// This function does NOT respect tombstone deletion markers (0xDEADDEAD).
+// Use parseAppendedDocumentsRange() instead for proper append-only format support
+// with deletion markers.
 func (bs *BundleStorageEngine) processDocumentPage(pageData []byte, docs map[string]models.Document) (uint32, error) {
 	// First 4 bytes: document count in this page
 	docsInPage := binary.LittleEndian.Uint32(pageData[:4])
@@ -728,10 +738,16 @@ func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *models.Bundle, 
 		"fileSizeBefore", sizeBefore,
 	)
 
-	err := b.AppendDocumentToBundleFile(bundle, document)
+	pageID, err := b.AppendDocumentToBundleFile(bundle, document)
 	if err != nil {
 		return fmt.Errorf("failed to append updated document: %w", err)
 	}
+
+	b.logger.Infow("UPDATING: Document appended to page",
+		"bundle", bundle.Name,
+		"documentID", document.DocumentID,
+		"pageID", pageID,
+	)
 
 	b.logger.Infow("UPDATING: Document appended, now flushing write buffers",
 		"bundle", bundle.Name,
@@ -772,43 +788,87 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		return fmt.Errorf("bundle cannot be nil")
 	}
 	if documentID == "" {
-		return fmt.Errorf("documentID cannot be nil")
+		return fmt.Errorf("documentID cannot be empty")
 	}
 
 	args := settings.GetSettings()
-	//dataDir := args.DataDir
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 
-	if bundle.Documents == nil {
-		return fmt.Errorf("bundle %s has no documents. Cannot delete from nothing.", bundle.Name)
+	// Verify the bundle file exists
+	if !helpers.FileExists(filePath, *b.logger) {
+		return fmt.Errorf("bundle file does not exist: %s_%s.bnd", bundle.Database.Name, bundle.Name)
+	}
+
+	// PERFORMANCE OPTIMIZATION: Use streaming verification
+	// This avoids loading the entire file into memory
+	documentExists, err := b.verifyDocumentExistsStreaming(bundle.Name, bundle.Database.Name, documentID)
+	if err != nil {
+		return fmt.Errorf("failed to verify document existence: %w", err)
+	}
+	if !documentExists {
+		return fmt.Errorf("document %s not found in bundle %s", documentID, bundle.Name)
 	}
 
 	if args.Debug {
-		b.logger.Infof("Attempting to delete document %s from bundle file", documentID)
+		b.logger.Infof("Deleting document %s from bundle %s", documentID, bundle.Name)
 	}
 
-	for _, doc := range *bundle.Documents {
-		if doc.DocumentID == documentID {
-			delete(*bundle.Documents, documentID)
-		}
-	}
-
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-
-	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
-
-	// Check if the file exists
-	if !helpers.FileExists(filePath, *b.logger) {
-		return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
-	}
-
-	// Performance optimization: Use append-only tombstone approach instead of full bundle rewrite
-	// Append a deletion marker to the file rather than rewriting the entire bundle
-	err := b.appendDeletionMarker(bundle.Name, documentID, filePath)
+	// Append deletion tombstone using write buffer for optimal performance
+	err = b.appendDeletionMarker(bundle.Name, documentID, filePath)
 	if err != nil {
 		return fmt.Errorf("failed to append deletion marker: %w", err)
 	}
 
+	// Flush write buffers to ensure durability
+	err = b.FlushWriteBuffers(bundle.Name)
+	if err != nil {
+		b.logger.Warnf("Failed to flush write buffer for bundle %s: %v", bundle.Name, err)
+		// Don't fail - the deletion marker was written, flush is an optimization
+	}
+
+	if args.Debug {
+		b.logger.Infof("Successfully deleted document %s from bundle %s", documentID, bundle.Name)
+	}
+
 	return nil
+}
+
+// verifyDocumentExistsStreaming verifies that a document exists in the bundle file
+// SIMPLIFIED: Use the same parsing logic as readDocumentRange for consistency
+// This ensures we handle the file format exactly the same way as SELECT operations
+func (b *BundleStorageEngine) verifyDocumentExistsStreaming(bundleName, databaseName, documentID string) (bool, error) {
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return false, fmt.Errorf("failed to open bundle file: %w", err)
+	}
+	defer file.Close()
+
+	// Read the entire file (same as readDocumentRange does)
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	fileData := make([]byte, fileInfo.Size())
+	_, err = file.Read(fileData)
+	if err != nil {
+		return false, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Use the same parser that SELECT operations use
+	// This ensures consistency in how we interpret the file format
+	documents, err := b.parseAppendedDocuments(fileData)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse bundle file: %w", err)
+	}
+
+	// Check if the document exists (and is not deleted)
+	_, exists := documents[documentID]
+	return exists, nil
 }
 
 // appendDeletionMarker appends a deletion marker to mark a document as deleted
@@ -881,14 +941,15 @@ func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bu
 	return nil
 }
 
-func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) error {
+func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error) {
 	// Use the optimized append-only approach for better performance
 	return b.AppendDocumentToBundleFile(bundle, document)
 }
 
 // AppendDocumentToBundleFile adds a document using append-only approach for optimal write performance
 // This eliminates the need to rewrite the entire bundle file on every document insert
-func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) error {
+// Returns the physical page ID where the document was stored (0-based)
+func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error) {
 	// PERFORMANCE FIX: Remove excessive logging in hot path
 	// Only log in debug mode to eliminate I/O overhead
 	if b.logger != nil && settings.GetSettings().Debug {
@@ -900,14 +961,24 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 
 	// Validate inputs (keep critical validation)
 	if bundle == nil {
-		return fmt.Errorf("bundle cannot be nil")
+		return 0, fmt.Errorf("bundle cannot be nil")
 	}
 	if document == nil {
-		return fmt.Errorf("document cannot be nil")
+		return 0, fmt.Errorf("document cannot be nil")
 	}
 	if document.DocumentID == "" {
-		return fmt.Errorf("document must have a valid ID")
+		return 0, fmt.Errorf("document must have a valid ID")
 	}
+
+	// CRITICAL: Calculate page ID BEFORE incrementing document count
+	// Page ID is based on current position: pageID = currentDocCount / pageSize
+	// Use consistent page size with virtual pagination (1000 documents per page)
+	pageSize := uint32(1000)
+	if bundle.PageSize > 0 {
+		pageSize = uint32(bundle.PageSize)
+	}
+	currentDocCount := uint32(bundle.TotalDocuments)
+	pageID := currentDocCount / pageSize
 
 	// PERFORMANCE FIX: Cache file path calculation
 	// args := settings.GetSettings()
@@ -937,7 +1008,7 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 	// Use Go's native binary encoding for maximum speed
 	documentBytes, err := b.serializeDocumentDirect(document)
 	if err != nil {
-		return fmt.Errorf("failed to encode document: %w", err)
+		return 0, fmt.Errorf("failed to encode document: %w", err)
 	}
 
 	// PERFORMANCE FIX: Pre-allocate header buffer to avoid allocations
@@ -949,7 +1020,7 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 	// Use buffered write for optimal I/O performance
 	writeBuffer, err := b.getOrCreateWriteBuffer(bundle.Name, filePath)
 	if err != nil {
-		return fmt.Errorf("failed to get write buffer: %w", err)
+		return 0, fmt.Errorf("failed to get write buffer: %w", err)
 	}
 
 	// PERFORMANCE FIX: Use buffer pool for combined data to avoid allocations
@@ -959,21 +1030,23 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 
 	if err := writeBuffer.Write(combinedData[:len(headerBytes)+len(documentBytes)]); err != nil {
 		b.returnCombinedBuffer(combinedData) // Return buffer to pool
-		return fmt.Errorf("failed to write document data: %w", err)
+		return 0, fmt.Errorf("failed to write document data: %w", err)
 	}
 
 	b.returnCombinedBuffer(combinedData) // Return buffer to pool
 
 	// PERFORMANCE FIX: Remove logging in hot path
 	// Success logging only in debug mode
-	// if b.logger != nil && settings.GetSettings().Debug {
-	//     b.logger.Infow("Successfully appended document to bundle",
-	//         "bundle", bundle.Name,
-	//         "documentID", document.DocumentID,
-	//         "documentSize", headerSize)
-	// }
+	if b.logger != nil && settings.GetSettings().Debug {
+		b.logger.Infow("Successfully appended document to bundle",
+			"bundle", bundle.Name,
+			"documentID", document.DocumentID,
+			"pageID", pageID,
+			"documentSize", headerSize)
+	}
 
-	return nil
+	// Return the page ID where this document was stored
+	return pageID, nil
 }
 
 // getOrCreateWriteBuffer gets or creates a write buffer for the specified bundle
