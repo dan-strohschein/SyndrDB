@@ -91,8 +91,9 @@ type HashIndexV3 struct {
 	mutex sync.RWMutex
 
 	// State management
-	isOpen bool
-	closed bool
+	isOpen  bool
+	closed  bool
+	isDirty bool // Metadata needs persistence
 
 	// Statistics
 	stats      IndexStats
@@ -117,6 +118,9 @@ type IndexConfig struct {
 
 	// MemTable configuration
 	MemTableMaxSize int // Maximum entries in MemTable before flush recommended
+
+	// Sequence recovery configuration
+	SequenceSafetyMargin int // Safety margin for sequence recovery (default: 100)
 
 	// Compaction configuration
 	CompactionEnabled  bool // Enable automatic compaction
@@ -154,6 +158,9 @@ type IndexStats struct {
 	// Compaction metrics
 	CompactionCount    uint64
 	LastCompactionTime time.Time
+
+	// Sequence tracking (for LSM ordering)
+	MaxSequence uint64 // Highest sequence number assigned
 
 	// Lifecycle
 	CreatedAt    time.Time
@@ -253,6 +260,13 @@ func OpenHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 		return nil, err
 	}
 
+	// Restore global sequence from metadata (Option B: hybrid approach)
+	// This ensures new entries always have higher sequence than existing ones
+	err = idx.RestoreGlobalSequence()
+	if err != nil {
+		return nil, fmt.Errorf("failed to restore global sequence: %w", err)
+	}
+
 	// Load entries from disk into MemTable
 	// This provides fast startup for recently accessed data
 	// TODO: Sprint 4 - Add configurable MemTable preloading
@@ -266,7 +280,8 @@ func OpenHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 
 	idx.logger.Infow("Opened existing hash index",
 		"indexName", config.IndexName,
-		"memTableSize", idx.memTable.GetStats().Size)
+		"memTableSize", idx.memTable.GetStats().Size,
+		"globalSequence", atomic.LoadUint64(&idx.globalSequence))
 
 	return idx, nil
 }
@@ -293,6 +308,14 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 
 	// Get next sequence number (atomic for thread safety)
 	sequence := atomic.AddUint64(&idx.globalSequence, 1)
+
+	// Update max sequence in stats and mark dirty
+	idx.statsMutex.Lock()
+	if sequence > idx.stats.MaxSequence {
+		idx.stats.MaxSequence = sequence
+		idx.isDirty = true
+	}
+	idx.statsMutex.Unlock()
 
 	// Create entry with page location
 	entry := NewHashIndexEntry(keyValue, documentID, pageID, sequence)
@@ -438,6 +461,14 @@ func (idx *HashIndexV3) Delete(keyValue string) (bool, error) {
 	// Get next sequence number
 	sequence := atomic.AddUint64(&idx.globalSequence, 1)
 
+	// Update max sequence in stats and mark dirty
+	idx.statsMutex.Lock()
+	if sequence > idx.stats.MaxSequence {
+		idx.stats.MaxSequence = sequence
+		idx.isDirty = true
+	}
+	idx.statsMutex.Unlock()
+
 	// Create tombstone entry
 	tombstone := NewTombstoneEntry(keyValue, sequence)
 
@@ -478,7 +509,17 @@ func (idx *HashIndexV3) Flush() error {
 		return fmt.Errorf("index is closed")
 	}
 
-	return idx.storage.Flush()
+	// Flush entry storage
+	if err := idx.storage.Flush(); err != nil {
+		return err
+	}
+
+	// Save metadata if dirty
+	if idx.isDirty {
+		return idx.SaveMetadata()
+	}
+
+	return nil
 }
 
 // Close closes the index and releases resources
@@ -493,6 +534,11 @@ func (idx *HashIndexV3) Close() error {
 	// Flush any remaining data
 	if err := idx.storage.Flush(); err != nil {
 		idx.logger.Warnw("Failed to flush storage on close", "error", err)
+	}
+
+	// Save metadata before closing
+	if err := idx.SaveMetadata(); err != nil {
+		idx.logger.Warnw("Failed to save metadata on close", "error", err)
 	}
 
 	// Close storage

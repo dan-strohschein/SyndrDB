@@ -223,24 +223,24 @@ func (e *HashIndexEntry) Serialize() ([]byte, error) {
 	// Write variable-length document ID
 	binary.LittleEndian.PutUint32(buffer[offset:], uint32(len(docIDBytes)))
 	offset += 4
-	docIDStart := offset
+	//docIDStart := offset
 	copy(buffer[offset:], docIDBytes)
 
 	// DEBUG: Verify what we're about to write
-	fmt.Printf("SERIALIZE DEBUG:\n")
-	fmt.Printf("  KeyValue: %q (len=%d)\n", e.KeyValue, len(e.KeyValue))
-	fmt.Printf("  DocumentID: %q (len=%d)\n", e.DocumentID, len(e.DocumentID))
-	fmt.Printf("  docIDBytes: %q (len=%d)\n", string(docIDBytes), len(docIDBytes))
-	fmt.Printf("  Buffer total size: %d\n", len(buffer))
-	fmt.Printf("  DocumentID written at offset %d for %d bytes\n", docIDStart, len(docIDBytes))
-	fmt.Printf("  Buffer[%d:%d] (docID in buffer): %q\n", docIDStart, docIDStart+len(docIDBytes), string(buffer[docIDStart:docIDStart+len(docIDBytes)]))
+	// fmt.Printf("SERIALIZE DEBUG:\n")
+	// fmt.Printf("  KeyValue: %q (len=%d)\n", e.KeyValue, len(e.KeyValue))
+	// fmt.Printf("  DocumentID: %q (len=%d)\n", e.DocumentID, len(e.DocumentID))
+	// fmt.Printf("  docIDBytes: %q (len=%d)\n", string(docIDBytes), len(docIDBytes))
+	// fmt.Printf("  Buffer total size: %d\n", len(buffer))
+	// fmt.Printf("  DocumentID written at offset %d for %d bytes\n", docIDStart, len(docIDBytes))
+	// fmt.Printf("  Buffer[%d:%d] (docID in buffer): %q\n", docIDStart, docIDStart+len(docIDBytes), string(buffer[docIDStart:docIDStart+len(docIDBytes)]))
 
 	// Show tail of buffer safely
 	tailSize := 30
 	if len(buffer) < tailSize {
 		tailSize = len(buffer)
 	}
-	fmt.Printf("  Buffer tail (last %d bytes): % X\n", tailSize, buffer[len(buffer)-tailSize:])
+	//fmt.Printf("  Buffer tail (last %d bytes): % X\n", tailSize, buffer[len(buffer)-tailSize:])
 
 	return buffer, nil
 }

@@ -167,13 +167,13 @@ func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 	tokens := tokenizeWhereClause(whereClause)
 
 	// DEBUG: Log tokens to diagnose parsing issues
-	settings := settings.GetSettings()
-	if settings.Debug {
-		fmt.Printf("DEBUG: Tokenized WHERE clause '%s' into %d tokens:\n", whereClause, len(tokens))
-		for i, token := range tokens {
-			fmt.Printf("  Token[%d]: '%s' (bytes: %v)\n", i, token, []byte(token))
-		}
-	} // Parse the tokens into a tree structure
+	//settings := settings.GetSettings()
+	// if settings.Debug {
+	// 	fmt.Printf("DEBUG: Tokenized WHERE clause '%s' into %d tokens:\n", whereClause, len(tokens))
+	// 	for i, token := range tokens {
+	// 		fmt.Printf("  Token[%d]: '%s' (bytes: %v)\n", i, token, []byte(token))
+	// 	}
+	// } // Parse the tokens into a tree structure
 	//rootGroup := &WhereGroup{}
 
 	// Track our position in the token stream

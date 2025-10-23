@@ -64,6 +64,9 @@ func main() {
 	flag.IntVar(&args.AsyncWALWorkers, "async-wal-workers", 2, "Number of async WAL worker threads")
 	flag.IntVar(&args.AsyncWALQueueSize, "async-wal-queue", 1000, "Async WAL queue size")
 
+	// HASH INDEX FLAGS
+	flag.IntVar(&args.IndexSequenceSafetyMargin, "index-seq-margin", 100, "Safety margin for index sequence recovery")
+
 	// Parse command line arguments
 	flag.Parse()
 

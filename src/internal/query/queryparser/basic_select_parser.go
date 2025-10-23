@@ -207,9 +207,9 @@ func parseBasicWhereClause(query string, selectQuery *BasicSelectQuery, logger *
 
 	// DEBUG: Check for quote issues
 
-	fmt.Printf("DEBUG parseBasicWhereClause: Original query: %s\n", query)
-	fmt.Printf("DEBUG parseBasicWhereClause: Extracted WHERE clause: %s\n", whereClause)
-	fmt.Printf("DEBUG parseBasicWhereClause: WHERE clause bytes: %v\n", []byte(whereClause))
+	//fmt.Printf("DEBUG parseBasicWhereClause: Original query: %s\n", query)
+	// fmt.Printf("DEBUG parseBasicWhereClause: Extracted WHERE clause: %s\n", whereClause)
+	// fmt.Printf("DEBUG parseBasicWhereClause: WHERE clause bytes: %v\n", []byte(whereClause))
 
 	return nil
 }

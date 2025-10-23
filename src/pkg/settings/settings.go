@@ -74,6 +74,9 @@ type Arguments struct {
 
 	// Performance Mode Detection
 	BulkOperationDetection bool // Auto-detect bulk operations for optimization
+
+	// Hash Index Configuration
+	IndexSequenceSafetyMargin int // Safety margin for sequence recovery (default: 100)
 }
 
 var (

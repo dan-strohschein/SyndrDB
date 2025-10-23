@@ -53,11 +53,12 @@ type TypeConverter func(interface{}) (interface{}, error)
 
 // Pre-compiled type converters for performance optimization
 var typeConverters = map[string]TypeConverter{
-	"string": convertToString,
-	"int":    convertToInt,
-	"float":  convertToFloat,
-	"number": convertToFloat, // alias for float
-	"bool":   convertToBool,
+	"string":       convertToString,
+	"int":          convertToInt,
+	"float":        convertToFloat,
+	"number":       convertToFloat, // alias for float
+	"bool":         convertToBool,
+	"relationship": convertToString,
 }
 
 // Fast type converter functions - eliminate reflection overhead
@@ -1672,18 +1673,22 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
 
+	// Get global settings for sequence safety margin
+	globalSettings := settings.GetSettings()
+
 	config := hashindex.IndexConfig{
-		IndexName:          indexCommand.IndexName,
-		BundleName:         bundle.Name,
-		DatabaseName:       bundle.Database.Name,
-		FieldName:          indexCommand.Fields[0].Name,
-		DataDir:            indexesPath,
-		MaxFileSize:        128 * 1024 * 1024, // 128MB per entry file
-		WriteBufferSize:    64 * 1024,         // 64KB write buffer
-		MemTableMaxSize:    100000,            // 100K entries in MemTable
-		CompactionEnabled:  true,
-		CompactionMaxFiles: 10,
-		Logger:             s.logger,
+		IndexName:            indexCommand.IndexName,
+		BundleName:           bundle.Name,
+		DatabaseName:         bundle.Database.Name,
+		FieldName:            indexCommand.Fields[0].Name,
+		DataDir:              indexesPath,
+		MaxFileSize:          128 * 1024 * 1024, // 128MB per entry file
+		WriteBufferSize:      64 * 1024,         // 64KB write buffer
+		MemTableMaxSize:      100000,            // 100K entries in MemTable
+		SequenceSafetyMargin: globalSettings.IndexSequenceSafetyMargin,
+		CompactionEnabled:    true,
+		CompactionMaxFiles:   10,
+		Logger:               s.logger,
 	}
 
 	// Create the hash index using hashindexV3 LSM implementation
@@ -1746,18 +1751,22 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 	// hashIndex, err := hashindexV2.CreateHashIndex(&config, s.logger)
 
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
+	// Get global settings for sequence safety margin
+	globalSettings := settings.GetSettings()
+
 	config := hashindex.IndexConfig{
-		IndexName:          name, //name + "_idx",
-		BundleName:         bundle.Name,
-		DatabaseName:       bundle.Database.Name,
-		FieldName:          name,
-		DataDir:            indexesPath,
-		MaxFileSize:        128 * 1024 * 1024,
-		WriteBufferSize:    64 * 1024,
-		MemTableMaxSize:    100000,
-		CompactionEnabled:  true,
-		CompactionMaxFiles: 10,
-		Logger:             s.logger,
+		IndexName:            name, //name + "_idx",
+		BundleName:           bundle.Name,
+		DatabaseName:         bundle.Database.Name,
+		FieldName:            name,
+		DataDir:              indexesPath,
+		MaxFileSize:          128 * 1024 * 1024,
+		WriteBufferSize:      64 * 1024,
+		MemTableMaxSize:      100000,
+		SequenceSafetyMargin: globalSettings.IndexSequenceSafetyMargin,
+		CompactionEnabled:    true,
+		CompactionMaxFiles:   10,
+		Logger:               s.logger,
 	}
 
 	// Create the hash index using hashindexV3
@@ -2466,50 +2475,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			"This feature requires referential integrity validation to prevent orphaned relationships", docCommand.BundleName)
 	}
 
-	// CRITICAL FIX: Use the same filtering logic as SELECT commands
-	// This ensures DELETE and SELECT behave consistently
-	// First, load all documents using page-based architecture
-	// allDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to load documents for filtering: %w", err)
-	// }
-
-	// if len(allDocs) == 0 {
-	// 	s.logger.Infof("Bundle '%s' has no documents", bundle.Name)
-	// 	return fmt.Errorf("no documents found in bundle '%s'", bundle.Name)
-	// }
-
-	// STEP 1: Parse the query using unified parser
-	// Turn the DELETE into a SELECT to get the documents.
-	// filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to filter documents with WHERE clause '%s': %w", docCommand.WhereClause, err)
-	// }
-
-	// Use FilterDocumentsRaw which works with document slices (page-based architecture compatible)
-	// filteredDocs, err := queryparser.FilterDocumentsRaw(allDocs, docCommand.WhereClause, s.logger)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to filter documents with WHERE clause '%s': %w", docCommand.WhereClause, err)
-	// }
-
-	// if len(filteredDocs) == 0 {
-	// 	s.logger.Infof("No documents found matching WHERE clause '%s' in bundle '%s'",
-	// 		docCommand.WhereClause, docCommand.BundleName)
-	// 	return fmt.Errorf("no documents found matching WHERE clause: %s", docCommand.WhereClause)
-	// }
-
-	// s.logger.Infof("Found %d documents matching WHERE clause in bundle '%s'",
-	// 	len(filteredDocs), docCommand.BundleName)
-
-	// if args.Debug {
-	// 	s.logger.Infof("Found %d document(s) to delete from bundle '%s'", len(filteredDocs), docCommand.BundleName)
-	// }
-
-	// Track successfully deleted documents for response
-	//deletedDocumentIDs := make([]string, 0, len(filteredDocs))
-
 	// Process each document
-	//for _, doc := range filteredDocs {
 	for _, documentID := range docIDs {
 		//documentID := doc.DocumentID
 		s.logger.Infof("Trying to delete document '%s'", documentID)
@@ -2538,9 +2504,6 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 						s.logger.Errorf("Failed to load hash index '%s': %v", indexName, err)
 						continue // Continue with other indexes
 					}
-
-					// === OLD V2 DELETE (Sprint 5: Commented out) ===
-					// deleted, err := hashIndex.DeleteDocument(documentID)
 
 					// === NEW V3 DELETE (Sprint 5: LSM-style) ===
 					// For DocumentID index, the key is the documentID itself
@@ -2600,9 +2563,6 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 
 		// Schedule deferred metadata update
 		s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", 1)
-
-		// Track successful deletion
-		//deletedDocumentIDs = append(deletedDocumentIDs, documentID)
 	}
 
 	// STEP 6: Update command with deleted document IDs for response
@@ -2670,28 +2630,7 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 	}
 
 	// Force flush any pending metadata updates to ensure accurate PageCount
-	//s.logger.Infof("DEBUG: GetDocumentsByFilter - flushing metadata updates")
 	s.flushMetadataUpdates()
-
-	// Use page-based document loading instead of relying on bundle.Documents
-	// This ensures scalability and consistency with the new architecture
-	// allDocuments, err := s.getAllDocumentsForIndexing(bundle.Name)
-	// if err != nil {
-	// 	s.logger.Errorf("Failed to load documents for filtering: %v", err)
-	// 	return nil, fmt.Errorf("failed to load documents for filtering: %w", err)
-	// }
-
-	// if len(allDocuments) == 0 {
-	// 	s.logger.Debugf("Bundle '%s' has no documents", bundle.Name)
-	// 	return []*models.Document{}, nil
-	// }
-
-	// // Convert documents map to slice for processing
-	// allDocs := make([]*models.Document, 0, len(allDocuments))
-	// for _, doc := range allDocuments {
-	// 	d := doc // Avoid pointer aliasing following Go best practices
-	// 	allDocs = append(allDocs, &d)
-	// }
 
 	// If no WHERE clause, return all documents
 	if whereParts == "" {
@@ -2700,9 +2639,6 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 		//s.logger.Infof("DEBUG: GetDocumentsByFilter - getAllDocumentsForIndexing returned %d documents, error: %v", len(result), err)
 		return result, err
 	}
-
-	// s.logger.Debugf("Filtering %d documents in bundle '%s' with WHERE clause: %s",
-	// 	len(allDocs), bundle.Name, whereParts)
 
 	// CRITICAL: Use index-optimized filtering following SyndrDB performance optimization
 	// This replaces the direct queryparser.FilterDocuments call with index-aware filtering
@@ -2713,7 +2649,7 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 }
 
 // filterDocumentsWithIndexOptimization performs intelligent document filtering using available indexes
-// This function follows the Single Responsibility Principle by handling only index-optimized filtering
+// This function Handles only index-optimized filtering
 // Following SyndrDB modular development practices, it coordinates between indexes and query parsing
 // Parameters:
 //   - bundle: The bundle containing the documents and indexes
@@ -2784,7 +2720,7 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 }
 
 // tryHashIndexOptimization attempts to use hash indexes for query optimization
-// This function follows the Single Responsibility Principle by handling only hash index optimization
+// This function handles only hash index optimization
 // Following SyndrDB comprehensive error handling, it safely attempts hash index usage
 // Parameters:
 //   - bundle: The bundle containing hash indexes
@@ -2860,7 +2796,7 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 }
 
 // tryBTreeIndexOptimization attempts to use BTree indexes for query optimization
-// This function follows the Single Responsibility Principle by handling only BTree index optimization
+// This function handles only BTree index optimization
 // Following SyndrDB comprehensive error handling, it safely attempts BTree index usage
 // Parameters:
 //   - bundle: The bundle containing BTree indexes
@@ -2999,83 +2935,6 @@ func (s *BundleService) getIndexFieldName(indexRef models.IndexReference) string
 		return ""
 	}
 }
-
-// excludeDocumentIDs removes specified document IDs from a slice
-// This function follows the Single Responsibility Principle by handling only document ID exclusion
-// Following SyndrDB comprehensive error handling, it safely performs set operations
-// Parameters:
-//   - allDocIDs: The complete list of document IDs
-//   - excludeDocIDs: The document IDs to exclude
-//
-// Returns:
-//   - []string: The filtered list of document IDs
-// func (s *BundleService) excludeDocumentIDs(allDocIDs, excludeDocIDs []string) []string {
-// 	// Create a map of IDs to exclude for O(1) lookup
-// 	excludeMap := make(map[string]bool, len(excludeDocIDs))
-// 	for _, id := range excludeDocIDs {
-// 		excludeMap[id] = true
-// 	}
-
-// 	// Filter the all IDs list
-// 	result := make([]string, 0, len(allDocIDs))
-// 	for _, id := range allDocIDs {
-// 		if !excludeMap[id] {
-// 			result = append(result, id)
-// 		}
-// 	}
-
-// 	return result
-// }
-
-// closeAllIndexes closes all loaded index instances for a bundle
-// This function ensures proper resource cleanup when bundles are unloaded
-// Parameters:
-//   - bundle: The bundle whose indexes should be closed
-//
-// Returns:
-//   - error: Any error that occurred during closing
-// func (s *BundleService) closeAllIndexes(bundle *models.Bundle) error {
-// 	if bundle.Indexes == nil {
-// 		return nil
-// 	}
-
-// 	var errors []string
-
-// 	for indexName, indexRef := range bundle.Indexes {
-// 		if indexRef.IndexInstance != nil {
-// 			switch index := indexRef.IndexInstance.(type) {
-// 			case *hashindex.HashIndex:
-// 				if err := index.Close(); err != nil {
-// 					errorMsg := fmt.Sprintf("failed to close hash index '%s': %v", indexName, err)
-// 					s.logger.Errorf(errorMsg)
-// 					errors = append(errors, errorMsg)
-// 				} else {
-// 					s.logger.Debugf("Successfully closed hash index '%s'", indexName)
-// 				}
-// 			case *btreeindexV2.BTreeIndex:
-// 				if err := index.Close(); err != nil {
-// 					errorMsg := fmt.Sprintf("failed to close BTree index '%s': %v", indexName, err)
-// 					s.logger.Errorf(errorMsg)
-// 					errors = append(errors, errorMsg)
-// 				} else {
-// 					s.logger.Debugf("Successfully closed BTree index '%s'", indexName)
-// 				}
-// 			default:
-// 				s.logger.Warnf("Unknown index type for index '%s': %T", indexName, indexRef.IndexInstance)
-// 			}
-
-// 			// Clear the instance reference
-// 			indexRef.IndexInstance = nil
-// 			bundle.Indexes[indexName] = indexRef
-// 		}
-// 	}
-
-// 	if len(errors) > 0 {
-// 		return fmt.Errorf("errors occurred while closing indexes: %v", errors)
-// 	}
-
-// 	return nil
-// }
 
 // validateDocumentFields validates that document fields match bundle field definitions
 // This function ensures that:

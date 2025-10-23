@@ -42,6 +42,7 @@ TODO: Future extensions
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -307,7 +308,7 @@ func (es *EntryStorage) ScanBackward(visitor func(*HashIndexEntry) bool) error {
 	// Scan files from newest to oldest
 	for i := len(es.allFiles) - 1; i >= 0; i-- {
 		filePath := es.allFiles[i]
-
+		filePath = filepath.Join(es.dataDir, filePath)
 		if err := es.scanFileBackward(filePath, visitor); err != nil {
 			return fmt.Errorf("failed to scan file %s: %w", filePath, err)
 		}
@@ -437,8 +438,14 @@ func (es *EntryStorage) discoverFiles() error {
 		return fmt.Errorf("failed to glob files: %w", err)
 	}
 
+	// Extract basenames only (not full paths) for storage
+	baseNames := make([]string, len(matches))
+	for i, fullPath := range matches {
+		baseNames[i] = filepath.Base(fullPath)
+	}
+
 	// Sort files by number (oldest to newest)
-	es.allFiles = matches
+	es.allFiles = baseNames
 
 	// Determine next file number
 	if len(es.allFiles) > 0 {
@@ -480,16 +487,16 @@ func (es *EntryStorage) openCurrentFile() error {
 	es.currentFileSize = fileInfo.Size()
 	es.writeBuffer = bufio.NewWriterSize(file, es.writeBufferSize)
 
-	// Add to file list if not already there
+	// Add to file list if not already there (store only basename)
 	fileAlreadyListed := false
 	for _, f := range es.allFiles {
-		if f == filePath {
+		if f == filename {
 			fileAlreadyListed = true
 			break
 		}
 	}
 	if !fileAlreadyListed {
-		es.allFiles = append(es.allFiles, filePath)
+		es.allFiles = append(es.allFiles, filename)
 	}
 
 	return nil
@@ -601,6 +608,70 @@ func (es *EntryStorage) scanFileForward(filePath string, visitor func(*HashIndex
 	}
 
 	return nil
+}
+
+// GetEntryFiles returns a sorted list of all entry files
+// Files are sorted by creation timestamp (oldest to newest)
+func (es *EntryStorage) GetEntryFiles() ([]string, error) {
+	es.fileMutex.RLock()
+	defer es.fileMutex.RUnlock()
+
+	// Return a copy to avoid concurrent modification
+	files := make([]string, len(es.allFiles))
+	copy(files, es.allFiles)
+
+	return files, nil
+}
+
+// ScanFileForMaxSequence scans a single entry file and returns the maximum sequence number
+// This is used for crash recovery to validate metadata
+func (es *EntryStorage) ScanFileForMaxSequence(filename string) (uint64, error) {
+
+	fullPath := filepath.Join(es.dataDir, filename)
+
+	// Open file for reading
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to open file %s: %w", filename, err)
+	}
+	defer file.Close()
+
+	var maxSeq uint64 = 0
+
+	// Read file info to get size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	// Read entire file into memory (entry files are typically small)
+	data := make([]byte, fileInfo.Size())
+	_, err = file.Read(data)
+	if err != nil && err != io.EOF {
+		return 0, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Deserialize entries one by one
+	offset := 0
+	for offset < len(data) {
+		entry, bytesRead, err := DeserializeEntry(data[offset:])
+		if err != nil {
+			// Skip corrupted entries but continue scanning
+			es.logger.Warnw("Skipping corrupted entry during max sequence scan",
+				"file", filename,
+				"offset", offset,
+				"error", err)
+			break
+		}
+
+		if entry.Sequence > maxSeq {
+			maxSeq = entry.Sequence
+		}
+
+		offset += bytesRead
+	}
+
+	return maxSeq, nil
 }
 
 // TODO: Future extensions

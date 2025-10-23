@@ -268,41 +268,16 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
 
-			filterCmd := fmt.Sprintf("SELECT \"DocumentID\" FROM \"%s\" WHERE %s", docCommand.BundleName, docCommand.WhereClause)
-			logger.Infof("Filter Command for DELETE DOCUMENTS: %s", filterCmd)
-			query, err := queryparser.ParseUnifiedSelectQuery(filterCmd, logger)
+			// OPTIMIZATION: Use dedicated WHERE filter service for efficient ID extraction
+			// This replaces the previous hacky approach of constructing a SELECT query
+			// and extracting IDs from full document results
+			whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
+			docIDs, err := whereService.GetDocumentIDsByFilter(bundle, docCommand.WhereClause)
 			if err != nil {
-				return nil, fmt.Errorf("failed to parse query: %w", err)
+				return nil, fmt.Errorf("failed to filter documents by WHERE clause: %w", err)
 			}
 
-			// logger.Infof("Parsed unified query: Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
-			// 	query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasOrderBy(), query.HasLimit())
-
-			// STEP 2: Create unified query planner
-			unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, serviceManager.BundleService)
-
-			// STEP 3: Create execution plan
-			plan, err := unifiedPlanner.CreatePlan(query, bundle.Database)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create execution plan: %w", err)
-			}
-
-			logger.Infof("Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
-				plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
-
-			// STEP 4: Execute the plan
-			filteredDocs, err := plan.RootNode.Execute()
-			if err != nil {
-				return nil, fmt.Errorf("failed to execute query plan: %w", err)
-			}
-
-			docIDs := make([]string, 0, len(filteredDocs))
-			for _, doc := range filteredDocs {
-				docIDs = append(docIDs, doc.Fields["DocumentID"].Value.(string))
-				//logger.Infof("FOUND DocumentID '%s'", doc.Fields["DocumentID"].Value.(string))
-			}
-
-			// Execute with WAL logging if available
+			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs)) // Execute with WAL logging if available
 			if serviceManager.WALManager != nil {
 				err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
 					// Log the document deletion before execution
