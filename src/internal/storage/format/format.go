@@ -401,10 +401,11 @@ func parseDocumentStructure(data map[string]interface{}) models.DocumentStructur
 		for fieldName, fieldData := range fields {
 			if fieldMap, ok := fieldData.(map[string]interface{}); ok {
 				structure.FieldDefinitions[fieldName] = models.FieldDefinition{
-					Name:       getString(fieldMap, "Name"),
-					Type:       getString(fieldMap, "Type"),
-					IsRequired: getBool(fieldMap, "IsRequired"),
-					IsUnique:   getBool(fieldMap, "IsUnique"),
+					Name:         getString(fieldMap, "Name"),
+					Type:         getString(fieldMap, "Type"),
+					IsRequired:   getBool(fieldMap, "Required"), // JSON tag is "Required" not "IsRequired"
+					IsUnique:     getBool(fieldMap, "Unique"),   // JSON tag is "Unique" not "IsUnique"
+					DefaultValue: fieldMap["DefaultValue"],      // Preserve default value
 				}
 			}
 		}

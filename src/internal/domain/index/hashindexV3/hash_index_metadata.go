@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 )
 
@@ -108,9 +109,31 @@ func (idx *HashIndexV3) LoadMetadata() (*IndexMetadata, error) {
 	}
 
 	// Validate index/bundle names
-	if metadata.IndexName != idx.config.IndexName {
-		return nil, fmt.Errorf("metadata index name mismatch: expected %s, got %s",
-			idx.config.IndexName, metadata.IndexName)
+	// MIGRATION FIX: Handle old naming convention where FK indexes had "_fk" suffix duplicated
+	// Old: "BundleName_FieldName_fk" → New: "FieldName_fk"
+	expectedIndexName := idx.config.IndexName
+	actualIndexName := metadata.IndexName
+
+	// Check for exact match first
+	if actualIndexName != expectedIndexName {
+		// MIGRATION: Check if this is an old-style FK index name
+		// Old format: "{BundleName}_{FieldName}_fk" → New format: "{FieldName}_fk"
+		if strings.HasSuffix(expectedIndexName, "_fk") {
+			// Try to match old naming pattern: BundleName_FieldName_fk
+			oldStyleName := fmt.Sprintf("%s_%s", idx.config.BundleName, expectedIndexName)
+			if actualIndexName == oldStyleName {
+				idx.logger.Warnw("Found old-style FK index metadata, will migrate on next save",
+					"oldName", actualIndexName,
+					"newName", expectedIndexName)
+				// Accept the old name for now - metadata will be updated on next save
+			} else {
+				return nil, fmt.Errorf("metadata index name mismatch: expected %s, got %s (not old format either: %s)",
+					expectedIndexName, actualIndexName, oldStyleName)
+			}
+		} else {
+			return nil, fmt.Errorf("metadata index name mismatch: expected %s, got %s",
+				expectedIndexName, actualIndexName)
+		}
 	}
 
 	if metadata.BundleName != idx.config.BundleName {

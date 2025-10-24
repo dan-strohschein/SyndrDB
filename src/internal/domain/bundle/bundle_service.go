@@ -953,6 +953,9 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 		if args.Debug {
 			s.logger.Infof("Added field '%s' to bundle '%s'", fieldDef.Name, bundleCommand.BundleName)
 		}
+		// DEBUG: Log what was actually stored
+		s.logger.Infof("[BUNDLE CREATE] Field '%s': Type=%s, Required=%v, Unique=%v, Default=%v",
+			fieldDef.Name, fieldDef.Type, fieldDef.IsRequired, fieldDef.IsUnique, fieldDef.DefaultValue)
 	}
 
 	// Add the bundle to the database
@@ -974,6 +977,13 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	}
 
 	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
+
+	// Create unique indexes for all IsUnique fields automatically
+	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
+	err = uniqueValidator.CreateUniqueIndexesForBundle(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create unique indexes for bundle '%s': %w", bundle.Name, err)
+	}
 
 	s.bundleMetadata[bundleCommand.BundleName] = bundle
 
@@ -1578,6 +1588,7 @@ func (s *BundleService) generateRelationshipName(bundle *models.Bundle, sourceBu
 }
 
 // addFieldToDestinationBundle adds a relationship field to the destination bundle
+// and automatically creates a hash index on the foreign key field for referential integrity
 func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle, relationship *models.Relationship, isRequired, isUnique bool) error {
 	// Find the destination bundle
 	destinationBundle, err := s.GetBundleByName(sourceBundle.Database, relationship.DestinationBundle)
@@ -1608,6 +1619,45 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 
 	s.logger.Infof("Added relationship field '%s' to destination bundle '%s' (required=%t, unique=%t)",
 		fieldName, destinationBundle.Name, isRequired, isUnique)
+
+	// Automatically create hash index on the foreign key field for referential integrity
+	// This ensures that ValidateDelete() can perform O(1) lookups
+	// Note: Index name should NOT include bundle name as infrastructure adds it automatically
+	indexName := fmt.Sprintf("%s_fk", fieldName)
+
+	// Check if index already exists
+	if _, exists := destinationBundle.Indexes[indexName]; !exists {
+		s.logger.Infof("Automatically creating hash index '%s' on foreign key field '%s' in bundle '%s'",
+			indexName, fieldName, destinationBundle.Name)
+
+		// Create index command using FieldDefinition type
+		indexCommand := &models.CreateIndexCommand{
+			IndexName:  indexName,
+			BundleName: destinationBundle.Name,
+			IndexType:  "hash",
+			Fields: []models.FieldDefinition{
+				{
+					Name:     fieldName,
+					Type:     "relationship",
+					IsUnique: false, // Foreign keys are typically not unique (1-to-many)
+				},
+			},
+		}
+
+		// Reuse existing AddIndexToBundle infrastructure
+		err = s.AddIndexToBundle(destinationBundle.Database, destinationBundle, indexCommand)
+		if err != nil {
+			// Log the error but don't fail the relationship creation
+			// The relationship will still work, just without automatic referential integrity validation
+			s.logger.Warnf("Failed to automatically create index on foreign key field '%s': %v. "+
+				"Referential integrity validation will require manual index creation.", fieldName, err)
+		} else {
+			s.logger.Infof("Successfully created hash index '%s' for referential integrity validation", indexName)
+		}
+	} else {
+		s.logger.Infof("Hash index '%s' already exists on foreign key field '%s', skipping automatic creation",
+			indexName, fieldName)
+	}
 
 	return nil
 }
@@ -2198,6 +2248,13 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		return "", fmt.Errorf("document field validation failed: %w", err)
 	}
 
+	// Validate unique constraints for all IsUnique fields
+	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
+	err = uniqueValidator.ValidateUniqueConstraints(bundle, docCommand)
+	if err != nil {
+		return "", fmt.Errorf("unique constraint violation: %w", err)
+	}
+
 	// Add the document to the bundle
 	newDocument := s.documentFactory.NewDocument(*docCommand)
 
@@ -2227,10 +2284,28 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		for indexName, indexRef := range bundle.Indexes {
 			s.logger.Debugf("Scheduling deferred update for index '%s' of type '%s'", indexName, indexRef.IndexType)
 
-			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
-				// Schedule DocumentID hash index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, newDocument.DocumentID, pageID, nil)
-				s.logger.Debugf("Scheduled DocumentID hash index update for document '%s' on page %d", newDocument.DocumentID, pageID)
+			if indexRef.IndexType == "hash" {
+				// Handle ALL hash indexes (DocumentID and foreign keys)
+				fieldName := indexRef.HashIndexField.FieldName
+
+				// Extract the field value for hash indexing
+				var fieldValue interface{}
+				if fieldName == "DocumentID" {
+					fieldValue = newDocument.DocumentID
+				} else {
+					// Extract the foreign key or other field value
+					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName)
+					if err != nil {
+						s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, newDocument.DocumentID, err)
+						continue
+					}
+					fieldValue = extractedValue
+				}
+
+				// Schedule hash index update with actual pageID
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
+				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
+					indexName, newDocument.DocumentID, fieldName, pageID)
 
 			} else if indexRef.IndexType == "btree" {
 				// Extract the field value for BTree indexing
@@ -2269,10 +2344,29 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 		for indexName, indexRef := range bundle.Indexes {
 			s.logger.Debugf("Scheduling deferred update for index '%s' of type '%s'", indexName, indexRef.IndexType)
 
-			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
-				// Schedule DocumentID hash index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, document.DocumentID, pageID, nil)
-				s.logger.Debugf("Scheduled DocumentID hash index update for document '%s' on page %d", document.DocumentID, pageID)
+			if indexRef.IndexType == "hash" {
+				// Handle ALL hash indexes (DocumentID and foreign keys)
+				fieldName := indexRef.HashIndexField.FieldName
+
+				// Extract the field value for hash indexing
+				var fieldValue interface{}
+				if fieldName == "DocumentID" {
+					fieldValue = document.DocumentID
+				} else {
+					// Extract the foreign key or other field value
+					extractedValue, err := extractFieldValueForIndex(*document, fieldName)
+					if err != nil {
+						s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, document.DocumentID, err)
+						continue
+					}
+					fieldValue = extractedValue
+				}
+
+				// Schedule hash index update with actual pageID
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, fieldValue, pageID, nil)
+				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
+					indexName, document.DocumentID, fieldName, pageID)
+
 			} else if indexRef.IndexType == "btree" {
 				// Extract the field value for BTree indexing
 				fieldValue, err := extractFieldValueForIndex(*document, indexRef.BTreeIndexField.FieldName)
@@ -2475,17 +2569,32 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			"This feature requires referential integrity validation to prevent orphaned relationships", docCommand.BundleName)
 	}
 
+	// ========== STEP 3: VALIDATE REFERENTIAL INTEGRITY ==========
+	// SPRINT 1: Check that deleting these documents won't break relationships
+	// This prevents orphaned foreign key references in related bundles
+	s.logger.Infof("[REFINT] Starting referential integrity validation for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
+	validator := NewReferentialIntegrityValidator(s, s.logger)
+	for _, documentID := range docIDs {
+		err := validator.ValidateDelete(bundle, documentID)
+		if err != nil {
+			// Referential integrity violation - block deletion
+			s.logger.Warnf("[REFINT] Referential integrity violation for document '%s': %v", documentID, err)
+			return fmt.Errorf("cannot delete document '%s': %w", documentID, err)
+		}
+	}
+	s.logger.Infof("[REFINT] Referential integrity validated successfully for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
+
 	// Process each document
 	for _, documentID := range docIDs {
 		//documentID := doc.DocumentID
 		s.logger.Infof("Trying to delete document '%s'", documentID)
-		// STEP 3: Remove from physical bundle file (append tombstone marker)
+		// STEP 4: Remove from physical bundle file (append tombstone marker)
 		err := s.store.DeleteDocumentFromBundleFile(bundle, documentID)
 		if err != nil {
 			return fmt.Errorf("failed to remove document %s from bundle file: %w", documentID, err)
 		}
 
-		// STEP 4: Remove from in-memory caches
+		// STEP 5: Remove from in-memory caches
 		// Use smart cache invalidation: invalidate specific page if known, otherwise all pages
 		s.invalidateDocumentPage(docCommand.BundleName, documentID)
 
@@ -2494,7 +2603,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		s.RemoveDocumentScanner(docCommand.BundleName)
 		s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after deletion", docCommand.BundleName)
 
-		// STEP 5: Remove from hash indexes with disk persistence
+		// STEP 6: Remove from hash indexes with disk persistence
 		if bundle.Indexes != nil {
 			for indexName, indexRef := range bundle.Indexes {
 				if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
@@ -2526,7 +2635,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 						// Continue - the in-memory deletion was successful
 					}
 				} else if indexRef.IndexType == "btree" {
-					// STEP 5a: TODO - Add B-Tree index deletion with persistence
+					// STEP 6a: TODO - Add B-Tree index deletion with persistence
 					// Load BTree index on-demand
 					// btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
 					// if err != nil {
@@ -2565,7 +2674,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", 1)
 	}
 
-	// STEP 6: Update command with deleted document IDs for response
+	// STEP 7: Update command with deleted document IDs for response
 	docCommand.DeletedDocumentIDs = docIDs //deletedDocumentIDs
 
 	return nil
@@ -2944,7 +3053,16 @@ func (s *BundleService) getIndexFieldName(indexRef models.IndexReference) string
 // 4. Field values are compatible with their defined types
 func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand *models.DocumentCommand) error {
 	if bundle.DocumentStructure.FieldDefinitions == nil {
+		s.logger.Warnf("[VALIDATION] Bundle '%s' has nil FieldDefinitions - cannot validate", bundle.Name)
 		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
+	}
+
+	s.logger.Infof("[VALIDATION] Bundle '%s' has %d field definition(s)", bundle.Name, len(bundle.DocumentStructure.FieldDefinitions))
+
+	// Log all field definitions for debugging
+	for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
+		s.logger.Infof("[VALIDATION] Field '%s': Type=%s, Required=%v, Unique=%v",
+			fieldName, fieldDef.Type, fieldDef.IsRequired, fieldDef.IsUnique)
 	}
 
 	// Track which required fields are provided
@@ -2974,17 +3092,31 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		providedFields[fieldName] = true
 	}
 
+	s.logger.Infof("[VALIDATION] Provided %d field(s) in document command", len(providedFields))
+
 	// Check that all required fields are provided
+	missingFields := make([]string, 0)
 	for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
 		if fieldDef.IsRequired && !providedFields[fieldName] {
 			// Skip DocumentID if it's auto-generated
 			if fieldName == "DocumentID" {
 				continue
 			}
-			return fmt.Errorf("required field '%s' is missing from document", fieldName)
+			missingFields = append(missingFields, fieldName)
 		}
 	}
 
+	// If any required fields are missing, return detailed error
+	if len(missingFields) > 0 {
+		if len(missingFields) == 1 {
+			s.logger.Warnf("[VALIDATION] Required field '%s' is missing from document", missingFields[0])
+			return fmt.Errorf("required field '%s' is missing from document", missingFields[0])
+		}
+		s.logger.Warnf("[VALIDATION] Multiple required fields missing: %v", missingFields)
+		return fmt.Errorf("required fields are missing from document: %v", missingFields)
+	}
+
+	s.logger.Infof("[VALIDATION] All required fields validated successfully")
 	return nil
 }
 

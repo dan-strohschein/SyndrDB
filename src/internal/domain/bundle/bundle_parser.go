@@ -446,6 +446,10 @@ func parseFieldDefinition(fieldText string) (models.FieldDefinition, error) {
 	unique := helpers.ParseBool(parts[3])
 	defaultValue := DetermineDefaultValue(fieldType, parts[4])
 
+	// DEBUG: Log what was parsed
+	fmt.Printf("[PARSER DEBUG] Field: name='%s', type='%s', required=%v (from '%s'), unique=%v (from '%s'), default=%v\n",
+		name, fieldType, required, parts[2], unique, parts[3], defaultValue)
+
 	return models.FieldDefinition{
 		Name:         name,
 		Type:         fieldType,
