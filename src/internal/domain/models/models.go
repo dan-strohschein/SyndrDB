@@ -189,6 +189,7 @@ type BundleCommand struct {
 	Fields                  []FieldDefinition
 	Changes                 []FieldChange // This will be used for UPDATE commands
 	HasRelationshipCommands bool          // Indicates if there are relationship commands
+	HasForceSwitch          bool          // Indicates if FORCE switch is used
 }
 
 type RelationshipCommand struct {

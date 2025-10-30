@@ -56,6 +56,7 @@ const (
 	TOKEN_COMMA     // ,
 	TOKEN_SEMICOLON // ;
 	TOKEN_COLON     // :
+	TOKEN_DOT       // . (for qualified field names like Bundle.Field)
 	TOKEN_LPAREN    // (
 	TOKEN_RPAREN    // )
 	TOKEN_LBRACE    // {
@@ -87,15 +88,16 @@ const (
 	TOKEN_TO     // TO
 
 	// Keywords - Query Modifiers
-	TOKEN_ORDER  // ORDER
-	TOKEN_BY     // BY
-	TOKEN_LIMIT  // LIMIT
-	TOKEN_OFFSET // OFFSET
-	TOKEN_GROUP  // GROUP
-	TOKEN_HAVING // HAVING
-	TOKEN_JOIN   // JOIN
-	TOKEN_ON     // ON
-	TOKEN_AS     // AS
+	TOKEN_ORDER        // ORDER
+	TOKEN_BY           // BY
+	TOKEN_LIMIT        // LIMIT
+	TOKEN_OFFSET       // OFFSET
+	TOKEN_GROUP        // GROUP
+	TOKEN_HAVING       // HAVING
+	TOKEN_JOIN         // JOIN
+	TOKEN_ON           // ON
+	TOKEN_AS           // AS
+	TOKEN_RELATIONSHIP // RELATIONSHIP (for WITH RELATIONSHIP clause)
 
 	// Keywords - Utility (Cold Path)
 	TOKEN_SHOW     // SHOW
@@ -177,6 +179,8 @@ func (tt TokenType) String() string {
 		return ";"
 	case TOKEN_COLON:
 		return ":"
+	case TOKEN_DOT:
+		return "."
 	case TOKEN_LPAREN:
 		return "("
 	case TOKEN_RPAREN:
@@ -245,6 +249,8 @@ func (tt TokenType) String() string {
 		return "ON"
 	case TOKEN_AS:
 		return "AS"
+	case TOKEN_RELATIONSHIP:
+		return "RELATIONSHIP"
 	case TOKEN_SHOW:
 		return "SHOW"
 	case TOKEN_DESCRIBE:
@@ -321,15 +327,16 @@ var keywords = map[string]TokenType{
 	"TO":     TOKEN_TO,
 
 	// Query Modifiers
-	"ORDER":  TOKEN_ORDER,
-	"BY":     TOKEN_BY,
-	"LIMIT":  TOKEN_LIMIT,
-	"OFFSET": TOKEN_OFFSET,
-	"GROUP":  TOKEN_GROUP,
-	"HAVING": TOKEN_HAVING,
-	"JOIN":   TOKEN_JOIN,
-	"ON":     TOKEN_ON,
-	"AS":     TOKEN_AS,
+	"ORDER":        TOKEN_ORDER,
+	"BY":           TOKEN_BY,
+	"LIMIT":        TOKEN_LIMIT,
+	"OFFSET":       TOKEN_OFFSET,
+	"GROUP":        TOKEN_GROUP,
+	"HAVING":       TOKEN_HAVING,
+	"JOIN":         TOKEN_JOIN,
+	"ON":           TOKEN_ON,
+	"AS":           TOKEN_AS,
+	"RELATIONSHIP": TOKEN_RELATIONSHIP,
 
 	// Utility Keywords (Cold Path)
 	"SHOW":     TOKEN_SHOW,

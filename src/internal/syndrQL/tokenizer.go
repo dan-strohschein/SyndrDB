@@ -123,6 +123,8 @@ func (t *Tokenizer) nextToken() Token {
 		tok = t.newToken(TOKEN_SEMICOLON, string(t.ch))
 	case ':':
 		tok = t.newToken(TOKEN_COLON, string(t.ch))
+	case '.':
+		tok = t.newToken(TOKEN_DOT, string(t.ch))
 	case '(':
 		tok = t.newToken(TOKEN_LPAREN, string(t.ch))
 	case ')':

@@ -2,6 +2,7 @@ package server
 
 import (
 	"sync"
+	"sync/atomic"
 	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
@@ -98,6 +99,27 @@ func ResetServiceManager() {
 	instance = nil
 	// Reset the sync.Once so InitServiceManager can be called again
 	once = sync.Once{}
+}
+
+// ParserMetrics tracks usage statistics for the new SyndrQL parser
+type ParserMetrics struct {
+	NewParserAttempts  atomic.Int64 // Total attempts to use new parser
+	NewParserSuccesses atomic.Int64 // Successful parses with new parser
+	NewParserFailures  atomic.Int64 // Failed parses with new parser
+	FallbacksTriggered atomic.Int64 // Times we fell back to legacy parser
+}
+
+// Global parser metrics instance
+var globalParserMetrics = &ParserMetrics{}
+
+// GetParserMetrics returns the current parser metrics
+func GetParserMetrics() map[string]int64 {
+	return map[string]int64{
+		"new_parser_attempts":  globalParserMetrics.NewParserAttempts.Load(),
+		"new_parser_successes": globalParserMetrics.NewParserSuccesses.Load(),
+		"new_parser_failures":  globalParserMetrics.NewParserFailures.Load(),
+		"fallbacks_triggered":  globalParserMetrics.FallbacksTriggered.Load(),
+	}
 }
 
 // SetGraphQLProcessor sets the GraphQL processor for the singleton instance

@@ -3,6 +3,8 @@ package syndrQL
 import (
 	"fmt"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 // SelectStatement represents a parsed SELECT query
@@ -19,14 +21,58 @@ type SelectStatement struct {
 	Offset   int  // OFFSET N (0 means no offset)
 
 	// Advanced features (for extension)
-	OrderBy []OrderByField // ORDER BY clause
-	GroupBy []string       // GROUP BY fields
-	Having  Expression     // HAVING clause
+	JoinClauses      []JoinClause   // JOIN operations - added for JOIN support
+	RelationshipName string         // WITH RELATIONSHIP clause - field name for hierarchical JOIN results
+	OrderBy          []OrderByField // ORDER BY clause
+	GroupBy          []string       // GROUP BY fields
+	Having           Expression     // HAVING clause
 
 	// Pattern recognition metadata
 	Pattern    SelectPattern // Recognized query pattern
 	Complexity int           // Estimated execution cost
 	IndexHints []string      // Suggested indexes to use
+}
+
+// JoinClause represents a JOIN operation in a SELECT query
+// This structure maps to queryparser.JoinClause for compatibility
+type JoinClause struct {
+	JoinType       JoinType       // Type of join (INNER, LEFT, RIGHT, FULL)
+	RightBundle    string         // Bundle being joined
+	JoinConditions []JoinCondition // Join conditions (ON clause)
+}
+
+// JoinType represents the type of JOIN operation
+type JoinType int
+
+const (
+	InnerJoin JoinType = iota // INNER JOIN (default)
+	LeftJoin                  // LEFT JOIN / LEFT OUTER JOIN
+	RightJoin                 // RIGHT JOIN / RIGHT OUTER JOIN
+	FullOuterJoin             // FULL OUTER JOIN
+)
+
+// String returns the string representation of a JoinType
+func (jt JoinType) String() string {
+	switch jt {
+	case InnerJoin:
+		return "INNER JOIN"
+	case LeftJoin:
+		return "LEFT JOIN"
+	case RightJoin:
+		return "RIGHT JOIN"
+	case FullOuterJoin:
+		return "FULL OUTER JOIN"
+	default:
+		return "UNKNOWN JOIN"
+	}
+}
+
+// JoinCondition represents a single condition in the ON clause
+// Example: "Authors"."DocumentID" == "Books"."AuthorID"
+type JoinCondition struct {
+	LeftField  string // Field from left bundle (e.g., "Authors"."DocumentID")
+	RightField string // Field from right bundle (e.g., "Books"."AuthorID")
+	Operator   string // Comparison operator (typically "==")
 }
 
 // SelectField represents a field in the SELECT clause
@@ -104,7 +150,7 @@ func NewSelectParser(tokens []Token) *SelectParser {
 }
 
 // Parse parses a SELECT statement
-func (p *SelectParser) Parse() (*SelectStatement, error) {
+func (p *SelectParser) Parse(logger *zap.SugaredLogger) (*SelectStatement, error) {
 	stmt := &SelectStatement{
 		Fields:  make([]SelectField, 0),
 		OrderBy: make([]OrderByField, 0),
@@ -116,16 +162,18 @@ func (p *SelectParser) Parse() (*SelectStatement, error) {
 	stmt.Pattern = pattern
 
 	// Use fast path for common patterns
-	if pattern == PATTERN_SELECT_ALL || pattern == PATTERN_SELECT_FIELDS {
-		return p.parseFastPath(stmt, pattern)
+	if pattern == PATTERN_SELECT_ALL || pattern == PATTERN_SELECT_FIELDS ||
+		pattern == PATTERN_SELECT_WHERE_SIMPLE {
+		return p.parseFastPath(stmt, pattern, logger)
 	}
 
+	// TODO : Refactor this to get away from the fast path / full path split
 	// Full parsing for complex queries
-	return p.parseFullPath(stmt)
+	return p.parseFullPath(stmt, logger)
 }
 
 // parseFastPath handles common SELECT patterns with minimal overhead
-func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPattern) (*SelectStatement, error) {
+func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPattern, logger *zap.SugaredLogger) (*SelectStatement, error) {
 	// Expect SELECT keyword
 	if p.current.Type != TOKEN_SELECT {
 		return nil, fmt.Errorf("expected SELECT, got %s", p.current.Type.String())
@@ -166,24 +214,26 @@ func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPatter
 	p.advance()
 
 	// Check for WHERE clause (optional)
-	if p.current.Type == TOKEN_WHERE {
-		p.advance()
-		whereExpr, err := p.parseWhereClause()
-		if err != nil {
-			return nil, err
-		}
-		stmt.WhereClause = whereExpr
+	//moved to the optional clauses parser
+	// if p.current.Type == TOKEN_WHERE {
+	// 	p.advance()
+	// 	whereExpr, err := p.parseWhereClause()
+	// 	if err != nil {
+	// 		logger.Errorf("FATAL: Error parsing WHERE clause: %v", err)
+	// 		return nil, err
+	// 	}
+	// 	stmt.WhereClause = whereExpr
 
-		// Update pattern based on WHERE complexity
-		if isSimpleWhereClause(whereExpr) {
-			stmt.Pattern = PATTERN_SELECT_WHERE_SIMPLE
-		} else {
-			stmt.Pattern = PATTERN_SELECT_WHERE_COMPLEX
-		}
-	}
+	// 	// Update pattern based on WHERE complexity
+	// 	if isSimpleWhereClause(whereExpr) {
+	// 		stmt.Pattern = PATTERN_SELECT_WHERE_SIMPLE
+	// 	} else {
+	// 		stmt.Pattern = PATTERN_SELECT_WHERE_COMPLEX
+	// 	}
+	// }
 
 	// Parse optional clauses
-	if err := p.parseOptionalClauses(stmt); err != nil {
+	if err := p.parseOptionalClauses(stmt, logger); err != nil {
 		return nil, err
 	}
 
@@ -194,7 +244,7 @@ func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPatter
 }
 
 // parseFullPath handles complex SELECT queries with all features
-func (p *SelectParser) parseFullPath(stmt *SelectStatement) (*SelectStatement, error) {
+func (p *SelectParser) parseFullPath(stmt *SelectStatement, logger *zap.SugaredLogger) (*SelectStatement, error) {
 	// Expect SELECT keyword
 	if p.current.Type != TOKEN_SELECT {
 		return nil, fmt.Errorf("expected SELECT, got %s", p.current.Type.String())
@@ -206,8 +256,16 @@ func (p *SelectParser) parseFullPath(stmt *SelectStatement) (*SelectStatement, e
 		return nil, err
 	}
 
-	// Parse field list or *
+	// Parse field list, *, or DOCUMENTS
+	// DOCUMENTS is SyndrDB-specific syntax meaning "all fields"
 	if p.current.Type == TOKEN_MULTIPLY {
+		stmt.Fields = []SelectField{{
+			Expression: &IdentifierExpression{Name: "*"},
+		}}
+		p.advance()
+	} else if p.current.Type == TOKEN_DOCUMENTS || p.current.Type == TOKEN_DOCUMENT {
+		// SELECT DOCUMENTS or SELECT DOCUMENT means select all fields
+		// This is SyndrDB's legacy syntax, equivalent to SELECT *
 		stmt.Fields = []SelectField{{
 			Expression: &IdentifierExpression{Name: "*"},
 		}}
@@ -234,7 +292,7 @@ func (p *SelectParser) parseFullPath(stmt *SelectStatement) (*SelectStatement, e
 	p.advance()
 
 	// Parse optional clauses in order
-	if err := p.parseOptionalClauses(stmt); err != nil {
+	if err := p.parseOptionalClauses(stmt, logger); err != nil {
 		return nil, err
 	}
 
@@ -391,7 +449,8 @@ func (p *SelectParser) collectWhereTokens() []Token {
 		p.current.Type != TOKEN_GROUP &&
 		p.current.Type != TOKEN_HAVING &&
 		p.current.Type != TOKEN_LIMIT &&
-		p.current.Type != TOKEN_OFFSET {
+		p.current.Type != TOKEN_OFFSET &&
+		p.current.Type != TOKEN_WITH { // Stop at WITH RELATIONSHIP clause
 
 		tokens = append(tokens, p.current)
 		p.advance()
@@ -404,7 +463,53 @@ func (p *SelectParser) collectWhereTokens() []Token {
 }
 
 // parseOptionalClauses parses optional clauses in SQL execution order
-func (p *SelectParser) parseOptionalClauses(stmt *SelectStatement) error {
+func (p *SelectParser) parseOptionalClauses(stmt *SelectStatement, logger *zap.SugaredLogger) error {
+
+	// Parse JOIN clauses (if present)
+	// JOIN must come before WHERE clause in SQL syntax
+	// Example: SELECT * FROM Authors JOIN Books ON Authors.ID == Books.AuthorID WHERE ...
+	for p.current.Type == TOKEN_JOIN {
+		joinClause, err := p.parseJoinClause(logger)
+		if err != nil {
+			return fmt.Errorf("failed to parse JOIN clause: %w", err)
+		}
+		stmt.JoinClauses = append(stmt.JoinClauses, *joinClause)
+		
+		// Update pattern to indicate this is a JOIN query
+		stmt.Pattern = PATTERN_SELECT_JOIN
+	}
+
+	// Check for WHERE clause (optional)
+	if p.current.Type == TOKEN_WHERE {
+		p.advance()
+		whereExpr, err := p.parseWhereClause()
+		if err != nil {
+			logger.Errorf("FATAL: Error parsing WHERE clause: %v", err)
+			return err
+		}
+		stmt.WhereClause = whereExpr
+
+		// Update pattern based on WHERE complexity (only if not already a JOIN query)
+		// JOIN queries with WHERE keep the JOIN pattern as primary
+		if stmt.Pattern != PATTERN_SELECT_JOIN {
+			if isSimpleWhereClause(whereExpr) {
+				stmt.Pattern = PATTERN_SELECT_WHERE_SIMPLE
+			} else {
+				stmt.Pattern = PATTERN_SELECT_WHERE_COMPLEX
+			}
+		}
+	}
+
+	// Parse WITH RELATIONSHIP clause (if present)
+	// This clause specifies the field name for hierarchical JOIN results
+	// Example: ... JOIN "Books" ON ... WITH RELATIONSHIP "Books"
+	// The relationship name becomes the field that contains child records in 1-to-many JOINs
+	if p.current.Type == TOKEN_WITH {
+		if err := p.parseWithRelationshipClause(stmt, logger); err != nil {
+			return err
+		}
+	}
+
 	// Parse ORDER BY (if present)
 	if p.current.Type == TOKEN_ORDER {
 		if err := p.parseOrderByClause(stmt); err != nil {
@@ -574,6 +679,43 @@ func (p *SelectParser) parseOffsetClause(stmt *SelectStatement) error {
 	return nil
 }
 
+// parseWithRelationshipClause parses the WITH RELATIONSHIP clause for hierarchical JOIN results
+// Syntax: WITH RELATIONSHIP "FieldName"
+// This clause specifies the field name that will contain child records in a 1-to-many JOIN
+// Example: SELECT * FROM "Authors" JOIN "Books" ON ... WITH RELATIONSHIP "Books"
+// Result: Each Author document will have a "Books" field containing an array of Book documents
+func (p *SelectParser) parseWithRelationshipClause(stmt *SelectStatement, logger *zap.SugaredLogger) error {
+	// Verify we're on WITH token
+	if p.current.Type != TOKEN_WITH {
+		return fmt.Errorf("expected WITH keyword, got %s", p.current.Type.String())
+	}
+	p.advance() // consume WITH
+
+	// Verify RELATIONSHIP keyword
+	if p.current.Type != TOKEN_RELATIONSHIP {
+		return fmt.Errorf("expected RELATIONSHIP after WITH, got %s", p.current.Type.String())
+	}
+	p.advance() // consume RELATIONSHIP
+
+	// Parse the relationship field name (can be quoted string or identifier)
+	var relationshipName string
+	if p.current.Type == TOKEN_STRING {
+		relationshipName = p.current.Value
+		logger.Debugf("Parsed WITH RELATIONSHIP: %s", relationshipName)
+	} else if p.current.Type == TOKEN_IDENT {
+		relationshipName = p.current.Value
+		logger.Debugf("Parsed WITH RELATIONSHIP: %s", relationshipName)
+	} else {
+		return fmt.Errorf("expected relationship field name (string or identifier), got %s", p.current.Type.String())
+	}
+	p.advance() // consume field name
+
+	// Store the relationship name in the statement
+	stmt.RelationshipName = relationshipName
+
+	return nil
+}
+
 // Helper methods
 
 func (p *SelectParser) advance() {
@@ -723,7 +865,7 @@ func (spd *SelectPatternDetector) DetectPattern(tokens []Token) SelectPattern {
 }
 
 // ParseSelect is a convenience function for parsing a SELECT statement from a string
-func ParseSelect(input string) (*SelectStatement, error) {
+func ParseSelect(input string, logger *zap.SugaredLogger) (*SelectStatement, error) {
 	tokenizer := NewTokenizer(input)
 	tokens, err := tokenizer.Tokenize()
 	if err != nil {
@@ -731,10 +873,146 @@ func ParseSelect(input string) (*SelectStatement, error) {
 	}
 
 	parser := NewSelectParser(tokens)
-	return parser.Parse()
+	return parser.Parse(logger)
 }
 
-// TODO: I should add support for JOIN clauses (INNER, LEFT, RIGHT, FULL)
+// parseJoinClause parses a single JOIN clause including type, bundle name, and ON conditions
+// Syntax: [INNER|LEFT|RIGHT|FULL [OUTER]] JOIN "BundleName" ON condition [AND condition ...]
+// This function implements JOIN parsing for the new SyndrQL parser
+func (p *SelectParser) parseJoinClause(logger *zap.SugaredLogger) (*JoinClause, error) {
+	joinClause := &JoinClause{
+		JoinType:       InnerJoin, // Default to INNER JOIN
+		JoinConditions: make([]JoinCondition, 0),
+	}
+
+	// Current token should be JOIN
+	if p.current.Type != TOKEN_JOIN {
+		return nil, fmt.Errorf("expected JOIN keyword, got %s", p.current.Type.String())
+	}
+
+	// Check for JOIN type modifier before JOIN keyword
+	// Note: In standard SQL, type comes BEFORE JOIN (e.g., "LEFT JOIN", "INNER JOIN")
+	// We'll look backward at the previous token if we need to support that
+	// For now, we assume standard "JOIN" means INNER JOIN
+	// TODO: I should add support for detecting LEFT/RIGHT/FULL modifiers before JOIN token
+	
+	p.advance() // Consume JOIN keyword
+
+	// Parse bundle name (table being joined)
+	if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+		return nil, fmt.Errorf("expected bundle name after JOIN, got %s", p.current.Type.String())
+	}
+	joinClause.RightBundle = p.current.Value
+	logger.Debugf("Parsing JOIN to bundle: %s", joinClause.RightBundle)
+	p.advance()
+
+	// Expect ON keyword
+	if p.current.Type != TOKEN_ON {
+		return nil, fmt.Errorf("expected ON keyword after JOIN bundle name, got %s", p.current.Type.String())
+	}
+	p.advance() // Consume ON
+
+	// Parse JOIN conditions (ON clause)
+	// Format: field1 == field2 [AND field3 == field4 ...]
+	for {
+		condition, err := p.parseJoinCondition(logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse JOIN condition: %w", err)
+		}
+		joinClause.JoinConditions = append(joinClause.JoinConditions, *condition)
+
+		// Check for AND to continue with more conditions
+		if p.current.Type == TOKEN_AND {
+			p.advance() // Consume AND
+			continue    // Parse next condition
+		}
+
+		// No more conditions, break out
+		break
+	}
+
+	logger.Debugf("Parsed JOIN clause: %s to %s with %d conditions", 
+		joinClause.JoinType.String(), joinClause.RightBundle, len(joinClause.JoinConditions))
+
+	return joinClause, nil
+}
+
+// parseJoinCondition parses a single JOIN condition from the ON clause
+// Format: "Bundle1"."Field1" == "Bundle2"."Field2"
+// This follows the SyndrDB convention of qualified field names
+func (p *SelectParser) parseJoinCondition(logger *zap.SugaredLogger) (*JoinCondition, error) {
+	condition := &JoinCondition{}
+
+	// Parse left field (can be quoted identifier or bundle.field format)
+	leftField, err := p.parseQualifiedFieldName()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse left field in JOIN condition: %w", err)
+	}
+	condition.LeftField = leftField
+
+	// Parse operator (typically ==, but could support !=, <, >, etc.)
+	// TODO: I should add support for other comparison operators in JOIN conditions
+	if p.current.Type != TOKEN_EQ {
+		return nil, fmt.Errorf("expected == operator in JOIN condition, got %s", p.current.Type.String())
+	}
+	condition.Operator = "==" // Store as string for compatibility with queryparser.JoinCondition
+	p.advance()
+
+	// Parse right field
+	rightField, err := p.parseQualifiedFieldName()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse right field in JOIN condition: %w", err)
+	}
+	condition.RightField = rightField
+
+	logger.Debugf("Parsed JOIN condition: %s %s %s", condition.LeftField, condition.Operator, condition.RightField)
+
+	return condition, nil
+}
+
+// parseQualifiedFieldName parses a qualified field name for JOIN conditions
+// Supports formats:
+//   - "BundleName"."FieldName" (quoted bundle and field)
+//   - BundleName.FieldName (unquoted identifiers)
+//   - "FieldName" (just field name, no bundle qualification)
+func (p *SelectParser) parseQualifiedFieldName() (string, error) {
+	var parts []string
+
+	// Parse first identifier or string
+	if p.current.Type == TOKEN_IDENT {
+		parts = append(parts, p.current.Value)
+		p.advance()
+	} else if p.current.Type == TOKEN_STRING {
+		parts = append(parts, p.current.Value)
+		p.advance()
+	} else {
+		return "", fmt.Errorf("expected field name, got %s", p.current.Type.String())
+	}
+
+	// Check for dot notation (bundle.field)
+	if p.current.Type == TOKEN_DOT {
+		p.advance() // Consume dot
+
+		// Parse second part (field name)
+		if p.current.Type == TOKEN_IDENT {
+			parts = append(parts, p.current.Value)
+			p.advance()
+		} else if p.current.Type == TOKEN_STRING {
+			parts = append(parts, p.current.Value)
+			p.advance()
+		} else {
+			return "", fmt.Errorf("expected field name after dot, got %s", p.current.Type.String())
+		}
+
+		// Return as "Bundle"."Field" format for compatibility
+		return fmt.Sprintf("\"%s\".\"%s\"", parts[0], parts[1]), nil
+	}
+
+	// Just a field name without bundle qualification
+	return fmt.Sprintf("\"%s\"", parts[0]), nil
+}
+
+// TODO: I should add support for JOIN type keywords (INNER, LEFT, RIGHT, FULL) before JOIN token
 // TODO: I should add support for subqueries in FROM clause
 // TODO: I should add support for UNION/INTERSECT/EXCEPT operations
 // TODO: I should add support for window functions (OVER, PARTITION BY)

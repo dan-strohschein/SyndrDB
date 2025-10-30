@@ -99,7 +99,17 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 		query.HavingClause = havingClause
 	}
 
-	// TODO: I need to implement JOIN clause conversion when JOIN parser is complete
+	// Convert JOIN clauses
+	if len(stmt.JoinClauses) > 0 {
+		query.JoinClauses = a.convertJoinClauses(stmt.JoinClauses)
+	}
+
+	// Set relationship name for hierarchical JOIN results (WITH RELATIONSHIP clause)
+	// This determines the field name used to nest child records in parent documents
+	if stmt.RelationshipName != "" {
+		query.RelationshipName = stmt.RelationshipName
+	}
+
 	// TODO: I need to implement aggregate field extraction from SelectFields
 
 	return query, nil
@@ -246,6 +256,81 @@ func (a *SelectStatementAdapter) convertHaving(having Expression) (*queryparser.
 	return &queryparser.HavingClause{
 		Condition: condition,
 	}, nil
+}
+
+// convertJoinClauses converts JOIN clauses from new parser format to legacy format
+// Takes the JoinClause array from SelectStatement and converts to queryparser.JoinClause array
+// This enables seamless integration with the existing JOIN execution engine
+func (a *SelectStatementAdapter) convertJoinClauses(joinClauses []JoinClause) []queryparser.JoinClause {
+	if len(joinClauses) == 0 {
+		return nil
+	}
+
+	// Convert each JOIN clause
+	result := make([]queryparser.JoinClause, len(joinClauses))
+	for i, jc := range joinClauses {
+		// Convert JOIN type
+		var joinType queryparser.JoinType
+		switch jc.JoinType {
+		case InnerJoin:
+			joinType = queryparser.InnerJoin
+		case LeftJoin:
+			joinType = queryparser.LeftJoin
+		case RightJoin:
+			joinType = queryparser.RightJoin
+		case FullOuterJoin:
+			joinType = queryparser.FullOuterJoin
+		default:
+			// Default to INNER JOIN for safety
+			joinType = queryparser.InnerJoin
+			a.logger.Warnf("Unknown JOIN type %d, defaulting to INNER JOIN", jc.JoinType)
+		}
+
+		// Convert JOIN conditions
+		conditions := make([]queryparser.JoinCondition, len(jc.JoinConditions))
+		for j, cond := range jc.JoinConditions {
+			// Parse qualified field names to extract bundle and field
+			// Format: "BundleName"."FieldName" or BundleName.FieldName
+			leftBundle, leftField := a.parseQualifiedFieldName(cond.LeftField)
+			rightBundle, rightField := a.parseQualifiedFieldName(cond.RightField)
+
+			conditions[j] = queryparser.JoinCondition{
+				LeftBundle:  leftBundle,
+				LeftField:   leftField,
+				Operator:    cond.Operator,
+				RightBundle: rightBundle,
+				RightField:  rightField,
+			}
+		}
+
+		result[i] = queryparser.JoinClause{
+			JoinType:       joinType,
+			RightBundle:    jc.RightBundle,
+			JoinConditions: conditions,
+		}
+	}
+
+	return result
+}
+
+// parseQualifiedFieldName parses qualified field names like "Bundle"."Field" or Bundle.Field
+// Returns the bundle name and field name as separate strings
+// If no bundle qualifier is present, returns empty string for bundle
+func (a *SelectStatementAdapter) parseQualifiedFieldName(qualifiedName string) (bundle string, field string) {
+	// Split on dot to separate bundle from field
+	parts := strings.Split(qualifiedName, ".")
+	
+	if len(parts) == 2 {
+		// Qualified name: "Bundle"."Field"
+		bundle = strings.Trim(parts[0], "\"")
+		field = strings.Trim(parts[1], "\"")
+	} else {
+		// Unqualified name: just "Field"
+		bundle = ""
+		field = strings.Trim(qualifiedName, "\"")
+	}
+
+	return bundle, field
 }
 
 // AdaptWithFallback attempts to convert SelectStatement, falling back to string parsing on error

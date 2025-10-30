@@ -2,14 +2,16 @@ package syndrQL
 
 import (
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 // Test basic SELECT patterns
 
 func TestSelectParser_SelectAll(t *testing.T) {
 	input := "SELECT * FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -33,8 +35,8 @@ func TestSelectParser_SelectAll(t *testing.T) {
 
 func TestSelectParser_SelectFields(t *testing.T) {
 	input := "SELECT AuthorName, Age, Country FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -61,8 +63,8 @@ func TestSelectParser_SelectFields(t *testing.T) {
 
 func TestSelectParser_SelectWithQuotedBundleName(t *testing.T) {
 	input := `SELECT * FROM "Authors"`
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -76,8 +78,8 @@ func TestSelectParser_SelectWithQuotedBundleName(t *testing.T) {
 
 func TestSelectParser_SimpleWhereClause(t *testing.T) {
 	input := "SELECT * FROM Authors WHERE Age > 25"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -103,8 +105,8 @@ func TestSelectParser_SimpleWhereClause(t *testing.T) {
 
 func TestSelectParser_ComplexWhereClause(t *testing.T) {
 	input := "SELECT * FROM Authors WHERE Age >= 18 AND Country == \"USA\""
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -130,8 +132,8 @@ func TestSelectParser_ComplexWhereClause(t *testing.T) {
 
 func TestSelectParser_WhereWithInClause(t *testing.T) {
 	input := "SELECT * FROM Authors WHERE Age IN [18, 21, 25]"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -160,8 +162,8 @@ func TestSelectParser_WhereWithInClause(t *testing.T) {
 
 func TestSelectParser_SelectDistinct(t *testing.T) {
 	input := "SELECT DISTINCT Country FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -173,8 +175,8 @@ func TestSelectParser_SelectDistinct(t *testing.T) {
 
 func TestSelectParser_SelectTop(t *testing.T) {
 	input := "SELECT TOP 10 * FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -186,8 +188,8 @@ func TestSelectParser_SelectTop(t *testing.T) {
 
 func TestSelectParser_SelectTopWithFields(t *testing.T) {
 	input := "SELECT TOP 5 AuthorName, Age FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -205,8 +207,8 @@ func TestSelectParser_SelectTopWithFields(t *testing.T) {
 
 func TestSelectParser_OrderByAscending(t *testing.T) {
 	input := "SELECT * FROM Authors ORDER BY Age"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -226,8 +228,8 @@ func TestSelectParser_OrderByAscending(t *testing.T) {
 
 func TestSelectParser_OrderByDescending(t *testing.T) {
 	input := "SELECT * FROM Authors ORDER BY Age DESC"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -243,8 +245,8 @@ func TestSelectParser_OrderByDescending(t *testing.T) {
 
 func TestSelectParser_OrderByMultipleFields(t *testing.T) {
 	input := "SELECT * FROM Authors ORDER BY Country ASC, Age DESC"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -266,8 +268,8 @@ func TestSelectParser_OrderByMultipleFields(t *testing.T) {
 
 func TestSelectParser_Limit(t *testing.T) {
 	input := "SELECT * FROM Authors LIMIT 10"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -279,8 +281,8 @@ func TestSelectParser_Limit(t *testing.T) {
 
 func TestSelectParser_LimitOffset(t *testing.T) {
 	input := "SELECT * FROM Authors LIMIT 10 OFFSET 20"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -298,8 +300,8 @@ func TestSelectParser_LimitOffset(t *testing.T) {
 
 func TestSelectParser_GroupBy(t *testing.T) {
 	input := "SELECT Country FROM Authors GROUP BY Country"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -319,8 +321,8 @@ func TestSelectParser_GroupBy(t *testing.T) {
 
 func TestSelectParser_GroupByMultipleFields(t *testing.T) {
 	input := "SELECT Country, Status FROM Authors GROUP BY Country, Status"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -341,8 +343,8 @@ func TestSelectParser_GroupByMultipleFields(t *testing.T) {
 
 func TestSelectParser_Having(t *testing.T) {
 	input := "SELECT Country FROM Authors GROUP BY Country HAVING COUNT(*) > 5"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -366,8 +368,8 @@ func TestSelectParser_Having(t *testing.T) {
 
 func TestSelectParser_FieldAlias(t *testing.T) {
 	input := "SELECT AuthorName AS Name, Age AS Years FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -389,8 +391,8 @@ func TestSelectParser_FieldAlias(t *testing.T) {
 
 func TestSelectParser_FunctionCall(t *testing.T) {
 	input := "SELECT COUNT(*) FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -412,8 +414,8 @@ func TestSelectParser_FunctionCall(t *testing.T) {
 
 func TestSelectParser_MultipleFunctions(t *testing.T) {
 	input := "SELECT COUNT(*), SUM(Age), AVG(Salary) FROM Authors"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -434,8 +436,8 @@ func TestSelectParser_MultipleFunctions(t *testing.T) {
 
 func TestSelectParser_ArithmeticExpression(t *testing.T) {
 	input := "SELECT Price * Quantity FROM Orders"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -457,8 +459,8 @@ func TestSelectParser_ArithmeticExpression(t *testing.T) {
 
 func TestSelectParser_ComplexArithmetic(t *testing.T) {
 	input := "SELECT (Price * Quantity) + Tax AS Total FROM Orders"
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -490,8 +492,8 @@ func TestSelectParser_ComplexQuery(t *testing.T) {
 	          WHERE Age >= 18 AND Country == "USA" 
 	          ORDER BY Age DESC 
 	          LIMIT 10`
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -526,8 +528,8 @@ func TestSelectParser_VeryComplexQuery(t *testing.T) {
 	          HAVING COUNT(*) > 5
 	          ORDER BY Total DESC
 	          LIMIT 20 OFFSET 10`
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -570,8 +572,8 @@ func TestSelectParser_VeryComplexQuery(t *testing.T) {
 
 func TestSelectParser_IndexHints(t *testing.T) {
 	input := "SELECT * FROM Authors WHERE Age > 18 AND Country == \"USA\""
-
-	stmt, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse: %v", err)
 	}
@@ -647,8 +649,8 @@ func TestSelectPatternDetector_DetectGroupByPattern(t *testing.T) {
 
 func TestSelectParser_MissingFrom(t *testing.T) {
 	input := "SELECT * WHERE Age > 18"
-
-	_, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
 	if err == nil {
 		t.Error("Expected error for missing FROM clause")
 	}
@@ -656,8 +658,8 @@ func TestSelectParser_MissingFrom(t *testing.T) {
 
 func TestSelectParser_MissingBundleName(t *testing.T) {
 	input := "SELECT * FROM"
-
-	_, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
 	if err == nil {
 		t.Error("Expected error for missing bundle name")
 	}
@@ -665,8 +667,8 @@ func TestSelectParser_MissingBundleName(t *testing.T) {
 
 func TestSelectParser_EmptyFieldList(t *testing.T) {
 	input := "SELECT FROM Authors"
-
-	_, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
 	if err == nil {
 		t.Error("Expected error for empty field list")
 	}
@@ -674,8 +676,8 @@ func TestSelectParser_EmptyFieldList(t *testing.T) {
 
 func TestSelectParser_InvalidWhereClause(t *testing.T) {
 	input := "SELECT * FROM Authors WHERE"
-
-	_, err := ParseSelect(input)
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
 	if err == nil {
 		t.Error("Expected error for incomplete WHERE clause")
 	}
@@ -685,10 +687,10 @@ func TestSelectParser_InvalidWhereClause(t *testing.T) {
 
 func BenchmarkSelectParser_SimpleSelectAll(b *testing.B) {
 	input := "SELECT * FROM Authors"
-
+	logger := zap.NewExample().Sugar()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := ParseSelect(input)
+		_, err := ParseSelect(input, logger)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -697,10 +699,10 @@ func BenchmarkSelectParser_SimpleSelectAll(b *testing.B) {
 
 func BenchmarkSelectParser_SelectWithWhere(b *testing.B) {
 	input := "SELECT * FROM Authors WHERE Age > 25"
-
+	logger := zap.NewExample().Sugar()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := ParseSelect(input)
+		_, err := ParseSelect(input, logger)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -713,10 +715,10 @@ func BenchmarkSelectParser_ComplexQuery(b *testing.B) {
 	          WHERE Age >= 18 AND Country == "USA" 
 	          ORDER BY Age DESC 
 	          LIMIT 10`
-
+	logger := zap.NewExample().Sugar()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := ParseSelect(input)
+		_, err := ParseSelect(input, logger)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -731,10 +733,10 @@ func BenchmarkSelectParser_VeryComplexQuery(b *testing.B) {
 	          HAVING COUNT(*) > 5
 	          ORDER BY Total DESC
 	          LIMIT 20 OFFSET 10`
-
+	logger := zap.NewExample().Sugar()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := ParseSelect(input)
+		_, err := ParseSelect(input, logger)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -750,5 +752,406 @@ func BenchmarkSelectPatternDetector_Detect(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = detector.DetectPattern(tokens)
+	}
+}
+
+// Test JOIN parsing functionality
+
+// TestSelectParser_BasicJoin tests a simple INNER JOIN query with single condition
+func TestSelectParser_BasicJoin(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."DocumentID" == "Books"."AuthorID"`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse JOIN query: %v", err)
+	}
+
+	// Verify pattern detection
+	if stmt.Pattern != PATTERN_SELECT_JOIN {
+		t.Errorf("Expected PATTERN_SELECT_JOIN, got %s", stmt.Pattern.String())
+	}
+
+	// Verify bundle name
+	if stmt.BundleName != "Authors" {
+		t.Errorf("Expected bundle 'Authors', got '%s'", stmt.BundleName)
+	}
+
+	// Verify JOIN clause count
+	if len(stmt.JoinClauses) != 1 {
+		t.Fatalf("Expected 1 JOIN clause, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify JOIN details
+	join := stmt.JoinClauses[0]
+	if join.JoinType != InnerJoin {
+		t.Errorf("Expected InnerJoin, got %d", join.JoinType)
+	}
+
+	if join.RightBundle != "Books" {
+		t.Errorf("Expected right bundle 'Books', got '%s'", join.RightBundle)
+	}
+
+	// Verify JOIN conditions
+	if len(join.JoinConditions) != 1 {
+		t.Fatalf("Expected 1 JOIN condition, got %d", len(join.JoinConditions))
+	}
+
+	cond := join.JoinConditions[0]
+	if cond.LeftField != "\"Authors\".\"DocumentID\"" {
+		t.Errorf("Expected left field '\"Authors\".\"DocumentID\"', got '%s'", cond.LeftField)
+	}
+
+	if cond.RightField != "\"Books\".\"AuthorID\"" {
+		t.Errorf("Expected right field '\"Books\".\"AuthorID\"', got '%s'", cond.RightField)
+	}
+
+	if cond.Operator != "==" {
+		t.Errorf("Expected operator '==', got '%s'", cond.Operator)
+	}
+}
+
+// TestSelectParser_JoinWithWhere tests JOIN query combined with WHERE clause
+// Note: WHERE clause uses unqualified field names as the WHERE parser doesn't yet support qualified names
+func TestSelectParser_JoinWithWhere(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" WHERE Country == "USA"`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse JOIN with WHERE: %v", err)
+	}
+
+	// Verify pattern
+	if stmt.Pattern != PATTERN_SELECT_JOIN {
+		t.Errorf("Expected PATTERN_SELECT_JOIN, got %s", stmt.Pattern.String())
+	}
+
+	// Verify JOIN clause exists
+	if len(stmt.JoinClauses) != 1 {
+		t.Fatalf("Expected 1 JOIN clause, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify WHERE clause exists
+	if stmt.WhereClause == nil {
+		t.Fatal("Expected WHERE clause to be present")
+	}
+
+	// Verify JOIN details
+	join := stmt.JoinClauses[0]
+	if join.RightBundle != "Books" {
+		t.Errorf("Expected right bundle 'Books', got '%s'", join.RightBundle)
+	}
+}
+
+// TestSelectParser_JoinMultipleConditions tests JOIN with multiple AND conditions
+func TestSelectParser_JoinMultipleConditions(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" AND "Authors"."Country" == "Books"."Country"`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse JOIN with multiple conditions: %v", err)
+	}
+
+	// Verify JOIN clause exists
+	if len(stmt.JoinClauses) != 1 {
+		t.Fatalf("Expected 1 JOIN clause, got %d", len(stmt.JoinClauses))
+	}
+
+	join := stmt.JoinClauses[0]
+
+	// Verify multiple conditions
+	if len(join.JoinConditions) != 2 {
+		t.Fatalf("Expected 2 JOIN conditions, got %d", len(join.JoinConditions))
+	}
+
+	// Verify first condition
+	cond1 := join.JoinConditions[0]
+	if cond1.LeftField != "\"Authors\".\"ID\"" {
+		t.Errorf("Expected first condition left field '\"Authors\".\"ID\"', got '%s'", cond1.LeftField)
+	}
+
+	// Verify second condition
+	cond2 := join.JoinConditions[1]
+	if cond2.LeftField != "\"Authors\".\"Country\"" {
+		t.Errorf("Expected second condition left field '\"Authors\".\"Country\"', got '%s'", cond2.LeftField)
+	}
+}
+
+// TestSelectParser_MultipleJoins tests query with multiple JOIN clauses
+func TestSelectParser_MultipleJoins(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" JOIN "Publishers" ON "Books"."PublisherID" == "Publishers"."ID"`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse multiple JOINs: %v", err)
+	}
+
+	// Verify multiple JOIN clauses
+	if len(stmt.JoinClauses) != 2 {
+		t.Fatalf("Expected 2 JOIN clauses, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify first JOIN
+	join1 := stmt.JoinClauses[0]
+	if join1.RightBundle != "Books" {
+		t.Errorf("Expected first JOIN right bundle 'Books', got '%s'", join1.RightBundle)
+	}
+
+	// Verify second JOIN
+	join2 := stmt.JoinClauses[1]
+	if join2.RightBundle != "Publishers" {
+		t.Errorf("Expected second JOIN right bundle 'Publishers', got '%s'", join2.RightBundle)
+	}
+}
+
+// TestSelectParser_JoinWithOrderBy tests JOIN with ORDER BY clause
+// Note: ORDER BY uses unqualified field names as the ORDER BY parser doesn't yet support quoted strings
+func TestSelectParser_JoinWithOrderBy(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" ORDER BY Name ASC`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse JOIN with ORDER BY: %v", err)
+	}
+
+	// Verify JOIN exists
+	if len(stmt.JoinClauses) != 1 {
+		t.Fatalf("Expected 1 JOIN clause, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify ORDER BY exists
+	if len(stmt.OrderBy) != 1 {
+		t.Fatalf("Expected 1 ORDER BY field, got %d", len(stmt.OrderBy))
+	}
+
+	// Verify ORDER BY field
+	orderBy := stmt.OrderBy[0]
+	if orderBy.Field != "Name" {
+		t.Errorf("Expected ORDER BY field 'Name', got '%s'", orderBy.Field)
+	}
+
+	if orderBy.Descending {
+		t.Error("Expected ascending order, got descending")
+	}
+}
+
+// TestSelectParser_JoinWithLimitOffset tests JOIN with LIMIT and OFFSET
+func TestSelectParser_JoinWithLimitOffset(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" LIMIT 10 OFFSET 5`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse JOIN with LIMIT/OFFSET: %v", err)
+	}
+
+	// Verify JOIN exists
+	if len(stmt.JoinClauses) != 1 {
+		t.Fatalf("Expected 1 JOIN clause, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify LIMIT
+	if stmt.Limit != 10 {
+		t.Errorf("Expected LIMIT 10, got %d", stmt.Limit)
+	}
+
+	// Verify OFFSET
+	if stmt.Offset != 5 {
+		t.Errorf("Expected OFFSET 5, got %d", stmt.Offset)
+	}
+}
+
+// TestSelectParser_JoinErrorCases tests error handling for invalid JOIN queries
+
+// TestSelectParser_JoinMissingON tests error when ON keyword is missing
+func TestSelectParser_JoinMissingON(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" "Authors"."ID" == "Books"."AuthorID"`
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
+	if err == nil {
+		t.Fatal("Expected error for missing ON keyword, got nil")
+	}
+}
+
+// TestSelectParser_JoinInvalidFieldName tests error when field name is invalid
+func TestSelectParser_JoinInvalidFieldName(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON 123 == "Books"."AuthorID"`
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
+	if err == nil {
+		t.Fatal("Expected error for invalid field name, got nil")
+	}
+}
+
+// TestSelectParser_JoinMissingOperator tests error when operator is missing
+func TestSelectParser_JoinMissingOperator(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" "Books"."AuthorID"`
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
+	if err == nil {
+		t.Fatal("Expected error for missing operator, got nil")
+	}
+}
+
+// Test WITH RELATIONSHIP clause functionality
+
+// TestSelectParser_WithRelationship tests basic WITH RELATIONSHIP clause
+func TestSelectParser_WithRelationship(t *testing.T) {
+	input := `SELECT DOCUMENTS FROM "Authors" JOIN "Books" ON "Authors"."DocumentID" == "Books"."AuthorsID" WITH RELATIONSHIP "Books"`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse WITH RELATIONSHIP clause: %v", err)
+	}
+
+	// Verify JOIN exists
+	if len(stmt.JoinClauses) != 1 {
+		t.Fatalf("Expected 1 JOIN clause, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify relationship name
+	if stmt.RelationshipName != "Books" {
+		t.Errorf("Expected relationship name 'Books', got '%s'", stmt.RelationshipName)
+	}
+
+	// Verify pattern still shows JOIN
+	if stmt.Pattern != PATTERN_SELECT_JOIN {
+		t.Errorf("Expected PATTERN_SELECT_JOIN, got %s", stmt.Pattern.String())
+	}
+}
+
+// TestSelectParser_WithRelationshipWhere tests WITH RELATIONSHIP with WHERE clause
+func TestSelectParser_WithRelationshipWhere(t *testing.T) {
+	input := `SELECT DOCUMENTS FROM "Authors" JOIN "Books" ON "Authors"."DocumentID" == "Books"."AuthorsID" WHERE DocumentID == "187320fc9a770e28_2f" WITH RELATIONSHIP "Books"`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse WITH RELATIONSHIP and WHERE: %v", err)
+	}
+
+	// Verify JOIN exists
+	if len(stmt.JoinClauses) != 1 {
+		t.Fatalf("Expected 1 JOIN clause, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify WHERE exists
+	if stmt.WhereClause == nil {
+		t.Fatal("Expected WHERE clause to be present")
+	}
+
+	// Verify relationship name
+	if stmt.RelationshipName != "Books" {
+		t.Errorf("Expected relationship name 'Books', got '%s'", stmt.RelationshipName)
+	}
+}
+
+// TestSelectParser_WithRelationshipUnquoted tests WITH RELATIONSHIP with unquoted identifier
+func TestSelectParser_WithRelationshipUnquoted(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" WITH RELATIONSHIP Books`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse WITH RELATIONSHIP with unquoted name: %v", err)
+	}
+
+	// Verify relationship name (should work with unquoted identifiers too)
+	if stmt.RelationshipName != "Books" {
+		t.Errorf("Expected relationship name 'Books', got '%s'", stmt.RelationshipName)
+	}
+}
+
+// TestSelectParser_WithRelationshipOrderBy tests WITH RELATIONSHIP with ORDER BY
+func TestSelectParser_WithRelationshipOrderBy(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" WITH RELATIONSHIP "Books" ORDER BY Name ASC`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse WITH RELATIONSHIP with ORDER BY: %v", err)
+	}
+
+	// Verify relationship name
+	if stmt.RelationshipName != "Books" {
+		t.Errorf("Expected relationship name 'Books', got '%s'", stmt.RelationshipName)
+	}
+
+	// Verify ORDER BY exists
+	if len(stmt.OrderBy) != 1 {
+		t.Fatalf("Expected 1 ORDER BY field, got %d", len(stmt.OrderBy))
+	}
+}
+
+// TestSelectParser_WithRelationshipLimitOffset tests WITH RELATIONSHIP with LIMIT and OFFSET
+func TestSelectParser_WithRelationshipLimitOffset(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" WITH RELATIONSHIP "Books" LIMIT 10 OFFSET 5`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse WITH RELATIONSHIP with LIMIT/OFFSET: %v", err)
+	}
+
+	// Verify relationship name
+	if stmt.RelationshipName != "Books" {
+		t.Errorf("Expected relationship name 'Books', got '%s'", stmt.RelationshipName)
+	}
+
+	// Verify LIMIT
+	if stmt.Limit != 10 {
+		t.Errorf("Expected LIMIT 10, got %d", stmt.Limit)
+	}
+
+	// Verify OFFSET
+	if stmt.Offset != 5 {
+		t.Errorf("Expected OFFSET 5, got %d", stmt.Offset)
+	}
+}
+
+// TestSelectParser_WithRelationshipMultipleJoins tests WITH RELATIONSHIP with multiple JOINs
+// Note: The relationship name applies to the hierarchical structure of the JOIN results
+func TestSelectParser_WithRelationshipMultipleJoins(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" JOIN "Publishers" ON "Books"."PublisherID" == "Publishers"."ID" WITH RELATIONSHIP "Books"`
+	logger := zap.NewExample().Sugar()
+	stmt, err := ParseSelect(input, logger)
+	if err != nil {
+		t.Fatalf("Failed to parse WITH RELATIONSHIP with multiple JOINs: %v", err)
+	}
+
+	// Verify multiple JOINs
+	if len(stmt.JoinClauses) != 2 {
+		t.Fatalf("Expected 2 JOIN clauses, got %d", len(stmt.JoinClauses))
+	}
+
+	// Verify relationship name
+	if stmt.RelationshipName != "Books" {
+		t.Errorf("Expected relationship name 'Books', got '%s'", stmt.RelationshipName)
+	}
+}
+
+// TestSelectParser_WithRelationshipErrorCases tests error handling for WITH RELATIONSHIP
+
+// TestSelectParser_WithRelationshipMissingKeyword tests error when RELATIONSHIP keyword is missing
+func TestSelectParser_WithRelationshipMissingKeyword(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" WITH "Books"`
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
+	if err == nil {
+		t.Fatal("Expected error for missing RELATIONSHIP keyword, got nil")
+	}
+}
+
+// TestSelectParser_WithRelationshipMissingName tests error when relationship name is missing
+func TestSelectParser_WithRelationshipMissingName(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" WITH RELATIONSHIP`
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
+	if err == nil {
+		t.Fatal("Expected error for missing relationship name, got nil")
+	}
+}
+
+// TestSelectParser_WithRelationshipInvalidName tests error when relationship name is invalid
+func TestSelectParser_WithRelationshipInvalidName(t *testing.T) {
+	input := `SELECT * FROM "Authors" JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID" WITH RELATIONSHIP 123`
+	logger := zap.NewExample().Sugar()
+	_, err := ParseSelect(input, logger)
+	if err == nil {
+		t.Fatal("Expected error for invalid relationship name, got nil")
 	}
 }
