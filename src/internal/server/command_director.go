@@ -14,15 +14,39 @@ import (
 	"syndrdb/src/internal/query/documentscanner"
 
 	//"syndrdb/src/internal/query/executor"
+	"sync/atomic"
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: Import our JOIN executor
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/query/results" // NEW: Import hierarchical results package
+	"syndrdb/src/internal/syndrQL"       // NEW: Import new SyndrQL parser
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+// ParserMetrics tracks usage statistics for the new SyndrQL parser
+type ParserMetrics struct {
+	NewParserAttempts  atomic.Int64 // Total attempts to use new parser
+	NewParserSuccesses atomic.Int64 // Successful parses with new parser
+	NewParserFailures  atomic.Int64 // Failed parses with new parser
+	FallbacksTriggered atomic.Int64 // Times we fell back to legacy parser
+}
+
+// Global parser metrics instance
+var globalParserMetrics = &ParserMetrics{}
+
+// GetParserMetrics returns the current parser metrics
+func GetParserMetrics() map[string]int64 {
+	return map[string]int64{
+		"new_parser_attempts":  globalParserMetrics.NewParserAttempts.Load(),
+		"new_parser_successes": globalParserMetrics.NewParserSuccesses.Load(),
+		"new_parser_failures":  globalParserMetrics.NewParserFailures.Load(),
+		"fallbacks_triggered":  globalParserMetrics.FallbacksTriggered.Load(),
+	}
+}
 
 func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	if database == nil {
@@ -252,7 +276,8 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		case "documents":
 			// DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>
 			// Parse the document command first to get bundle name and WHERE clause
-			docCommand, err := bndle.ParseDeleteDocumentCommand(command, logger)
+			// Use new parser if feature flag is enabled, fallback to legacy on error
+			docCommand, err := parseDeleteDocument(command, logger)
 			if err != nil {
 				return nil, fmt.Errorf("error parsing delete document command: %v", err)
 			}
@@ -831,8 +856,9 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 	}
 
-	// Parse the document command
-	docCommand, err := bndle.ParseUpdateDocumentCommand(command, logger)
+	// Parse the document command using new parser with feature flag support
+	// This will attempt new parser if enabled, fallback to legacy parser on failure
+	docCommand, err := parseUpdateDocument(command, logger)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing update document command: %v", err)
 	}
@@ -874,8 +900,9 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		return nil, fmt.Errorf("ADD DOCUMENT requires the spec 'TO <bundle_name>'")
 	}
 
-	// Parse the document command
-	docCommand, err := bndle.ParseAddDocumentCommand(command, logger)
+	// Parse the document command using new parser with fallback
+	// This uses the same feature flag and fallback pattern as SELECT queries
+	docCommand, err := parseAddDocument(command, logger)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing add document command: %v", err)
 	}
@@ -1459,6 +1486,101 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 // 	return cmdResponse, nil
 // }
 
+// shouldUseNewParser checks if the new SyndrQL parser should be used
+func shouldUseNewParser() bool {
+	return settings.GetSettings().UseNewParser
+}
+
+// parseQueryWithNewParser attempts to parse using the new SyndrQL parser
+func parseQueryWithNewParser(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSelectQuery, error) {
+	// Normalize query syntax for new parser
+	// Convert SyndrDB-specific syntax to standard SQL syntax
+	normalizedQuery := normalizeQueryForNewParser(query)
+
+	logger.Debugf("Original query: %s", query)
+	logger.Debugf("Normalized query: %s", normalizedQuery)
+
+	// Tokenize
+	tokenizer := syndrQL.NewTokenizer(normalizedQuery)
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return nil, fmt.Errorf("tokenization failed: %w", err)
+	}
+
+	// Parse
+	parser := syndrQL.NewSelectParser(tokens)
+	stmt, err := parser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("parsing failed: %w", err)
+	}
+
+	// Convert to UnifiedSelectQuery using adapter
+	adapter := syndrQL.NewSelectStatementAdapter(logger)
+	unifiedQuery, err := adapter.ToUnifiedSelectQuery(stmt)
+	if err != nil {
+		return nil, fmt.Errorf("conversion failed: %w", err)
+	}
+
+	// Log pattern and complexity info
+	logger.Debugf("New parser succeeded: Pattern=%s, Complexity=%d", stmt.Pattern, stmt.Complexity)
+
+	return unifiedQuery, nil
+}
+
+// normalizeQueryForNewParser converts SyndrDB-specific query syntax to standard SQL
+func normalizeQueryForNewParser(query string) string {
+	// Remove trailing semicolon if present
+	query = strings.TrimSpace(query)
+	query = strings.TrimSuffix(query, ";")
+
+	// Convert "SELECT DOCUMENTS FROM" to "SELECT * FROM"
+	// Case-insensitive replacement
+	re := regexp.MustCompile(`(?i)\bSELECT\s+DOCUMENTS\s+FROM\b`)
+	query = re.ReplaceAllString(query, "SELECT * FROM")
+
+	// Convert "SELECT DOCUMENT FROM" to "SELECT * FROM" (singular form)
+	re = regexp.MustCompile(`(?i)\bSELECT\s+DOCUMENT\s+FROM\b`)
+	query = re.ReplaceAllString(query, "SELECT * FROM")
+
+	// Convert "SELECT FROM" to "SELECT * FROM" (bare SELECT with no fields)
+	// This regex ensures we only match SELECT immediately followed by FROM
+	re = regexp.MustCompile(`(?i)\bSELECT\s+FROM\b`)
+	query = re.ReplaceAllString(query, "SELECT * FROM")
+
+	return query
+}
+
+// parseQuery attempts new parser first (if enabled), falls back to legacy on error
+func parseQuery(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSelectQuery, error) {
+	// Check feature flag
+	if !shouldUseNewParser() {
+		logger.Debugf("Using legacy parser (flag disabled)")
+		return queryparser.ParseUnifiedSelectQuery(query, logger)
+	}
+
+	// Try new parser
+	logger.Debugf("Attempting new SyndrQL parser (flag enabled)")
+	globalParserMetrics.NewParserAttempts.Add(1)
+
+	unifiedQuery, err := parseQueryWithNewParser(query, logger)
+	if err != nil {
+		// Record failure and fallback
+		globalParserMetrics.NewParserFailures.Add(1)
+		globalParserMetrics.FallbacksTriggered.Add(1)
+
+		logger.Warnf("New parser failed: %v. Falling back to legacy parser.", err)
+
+		// Fallback to legacy parser
+		return queryparser.ParseUnifiedSelectQuery(query, logger)
+	}
+
+	// Record success
+	globalParserMetrics.NewParserSuccesses.Add(1)
+	logger.Infof("Successfully parsed query using new parser")
+
+	return unifiedQuery, nil
+}
+
 func SelectDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
 	// // First, check if this is a JOIN query by examining the full command
 	// fullCommand := strings.Join(commandParts, " ")
@@ -1569,8 +1691,8 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 
 	logger.Infof("Processing SELECT query: %s", fullCommand)
 
-	// STEP 1: Parse the query using unified parser
-	query, err := queryparser.ParseUnifiedSelectQuery(fullCommand, logger)
+	// STEP 1: Parse the query using parseQuery (respects feature flag, has fallback)
+	query, err := parseQuery(fullCommand, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse query: %w", err)
 	}
@@ -3559,4 +3681,175 @@ func convertToFloat64(value interface{}) (float64, error) {
 	default:
 		return 0, fmt.Errorf("cannot convert %T to float64", value)
 	}
+}
+
+// parseAddDocumentWithNewParser attempts to parse ADD DOCUMENT using the new SyndrQL parser
+// This function follows the same pattern as parseQueryWithNewParser for consistency
+func parseAddDocumentWithNewParser(command string, logger *zap.SugaredLogger) (*models.DocumentCommand, error) {
+	// Create INSERT parser
+	parser, err := syndrQL.NewInsertParser(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create insert parser: %w", err)
+	}
+
+	// Parse the ADD DOCUMENT statement
+	insertStmt, err := parser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ADD DOCUMENT statement: %w", err)
+	}
+
+	// Convert to DocumentCommand using adapter
+	adapter := syndrQL.NewInsertStatementAdapter(logger)
+	docCommand, err := adapter.ToDocumentCommand(insertStmt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert InsertStatement to DocumentCommand: %w", err)
+	}
+
+	return docCommand, nil
+}
+
+// parseAddDocument attempts new parser first (if enabled), falls back to legacy on error
+// This mirrors the parseQuery function pattern for consistency across the codebase
+func parseAddDocument(command string, logger *zap.SugaredLogger) (*models.DocumentCommand, error) {
+	// Check feature flag
+	if !shouldUseNewParser() {
+		logger.Debugf("Using legacy ADD DOCUMENT parser (flag disabled)")
+		return bndle.ParseAddDocumentCommand(command, logger)
+	}
+
+	// Try new parser
+	logger.Debugf("Attempting new SyndrQL ADD DOCUMENT parser (flag enabled)")
+	globalParserMetrics.NewParserAttempts.Add(1)
+
+	docCommand, err := parseAddDocumentWithNewParser(command, logger)
+	if err != nil {
+		// Record failure and fallback
+		globalParserMetrics.NewParserFailures.Add(1)
+		globalParserMetrics.FallbacksTriggered.Add(1)
+
+		logger.Warnf("New ADD DOCUMENT parser failed: %v. Falling back to legacy parser.", err)
+
+		// Fallback to legacy parser
+		return bndle.ParseAddDocumentCommand(command, logger)
+	}
+
+	// Record success
+	globalParserMetrics.NewParserSuccesses.Add(1)
+	logger.Infof("Successfully parsed ADD DOCUMENT using new parser")
+
+	return docCommand, nil
+}
+
+// parseUpdateDocumentWithNewParser uses the new SyndrQL parser to parse UPDATE DOCUMENTS
+// Syntax: UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>" (<FIELD_NAME> = <VALUE>) WHERE <WHERE_CLAUSE>;
+func parseUpdateDocumentWithNewParser(command string, logger *zap.SugaredLogger) (*models.DocumentUpdateCommand, error) {
+	// Create UPDATE parser
+	updateParser, err := syndrQL.NewUpdateParser(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create UPDATE parser: %w", err)
+	}
+
+	// Parse the UPDATE statement
+	updateStmt, err := updateParser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse UPDATE statement: %w", err)
+	}
+
+	// Convert to DocumentUpdateCommand using adapter
+	adapter := syndrQL.NewUpdateStatementAdapter(logger)
+	docUpdateCommand, err := adapter.ToDocumentUpdateCommand(updateStmt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert UpdateStatement to DocumentUpdateCommand: %w", err)
+	}
+
+	return docUpdateCommand, nil
+}
+
+// parseUpdateDocument attempts new parser first (if enabled), falls back to legacy on error
+// This mirrors the parseQuery and parseAddDocument function patterns for consistency
+func parseUpdateDocument(command string, logger *zap.SugaredLogger) (*models.DocumentUpdateCommand, error) {
+	// Check feature flag
+	if !shouldUseNewParser() {
+		logger.Debugf("Using legacy UPDATE DOCUMENTS parser (flag disabled)")
+		return bndle.ParseUpdateDocumentCommand(command, logger)
+	}
+
+	// Try new parser
+	logger.Debugf("Attempting new SyndrQL UPDATE DOCUMENTS parser (flag enabled)")
+	globalParserMetrics.NewParserAttempts.Add(1)
+
+	docUpdateCommand, err := parseUpdateDocumentWithNewParser(command, logger)
+	if err != nil {
+		// Record failure and fallback
+		globalParserMetrics.NewParserFailures.Add(1)
+		globalParserMetrics.FallbacksTriggered.Add(1)
+
+		logger.Warnf("New UPDATE DOCUMENTS parser failed: %v. Falling back to legacy parser.", err)
+
+		// Fallback to legacy parser
+		return bndle.ParseUpdateDocumentCommand(command, logger)
+	}
+
+	// Record success
+	globalParserMetrics.NewParserSuccesses.Add(1)
+	logger.Infof("Successfully parsed UPDATE DOCUMENTS using new parser")
+
+	return docUpdateCommand, nil
+}
+
+// parseDeleteDocumentWithNewParser uses the new SyndrQL parser to parse DELETE DOCUMENTS
+// Syntax: DELETE DOCUMENTS FROM BUNDLE "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>;
+func parseDeleteDocumentWithNewParser(command string, logger *zap.SugaredLogger) (*models.DocumentDeleteCommand, error) {
+	// Create DELETE parser
+	deleteParser, err := syndrQL.NewDeleteParser(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DELETE parser: %w", err)
+	}
+
+	// Parse the DELETE statement
+	deleteStmt, err := deleteParser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DELETE statement: %w", err)
+	}
+
+	// Convert to DocumentDeleteCommand using adapter
+	adapter := syndrQL.NewDeleteStatementAdapter(logger)
+	docDeleteCommand, err := adapter.ToDocumentDeleteCommand(deleteStmt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert DeleteStatement to DocumentDeleteCommand: %w", err)
+	}
+
+	return docDeleteCommand, nil
+}
+
+// parseDeleteDocument attempts new parser first (if enabled), falls back to legacy on error
+// This mirrors the parseQuery, parseAddDocument, and parseUpdateDocument function patterns for consistency
+func parseDeleteDocument(command string, logger *zap.SugaredLogger) (*models.DocumentDeleteCommand, error) {
+	// Check feature flag
+	if !shouldUseNewParser() {
+		logger.Debugf("Using legacy DELETE DOCUMENTS parser (flag disabled)")
+		return bndle.ParseDeleteDocumentCommand(command, logger)
+	}
+
+	// Try new parser
+	logger.Debugf("Attempting new SyndrQL DELETE DOCUMENTS parser (flag enabled)")
+	globalParserMetrics.NewParserAttempts.Add(1)
+
+	docDeleteCommand, err := parseDeleteDocumentWithNewParser(command, logger)
+	if err != nil {
+		// Record failure and fallback
+		globalParserMetrics.NewParserFailures.Add(1)
+		globalParserMetrics.FallbacksTriggered.Add(1)
+
+		logger.Warnf("New DELETE DOCUMENTS parser failed: %v. Falling back to legacy parser.", err)
+
+		// Fallback to legacy parser
+		return bndle.ParseDeleteDocumentCommand(command, logger)
+	}
+
+	// Record success
+	globalParserMetrics.NewParserSuccesses.Add(1)
+	logger.Infof("Successfully parsed DELETE DOCUMENTS using new parser")
+
+	return docDeleteCommand, nil
 }

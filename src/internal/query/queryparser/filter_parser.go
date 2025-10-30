@@ -295,6 +295,13 @@ func parseValue(valueToken string) (interface{}, error) {
 		return valueToken[1 : len(valueToken)-1], nil
 	}
 
+	// Handle NULL keyword (converts to magic value for indexing)
+	// Supports: NULL, null, SYNDR_NULL, ::SYNDR_NULL::
+	upperToken := strings.ToUpper(valueToken)
+	if upperToken == "NULL" || upperToken == "SYNDR_NULL" || upperToken == "::SYNDR_NULL::" {
+		return "::SYNDR_NULL::", nil
+	}
+
 	// Handle boolean
 	if strings.ToLower(valueToken) == "true" {
 		return true, nil
@@ -388,6 +395,23 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 		return true
 	}
 
+	// Handle NULL comparisons using magic value
+	// WHERE "Email" == NULL -> checks if Email field contains ::SYNDR_NULL::
+	if clause.Value != nil {
+		if queryValueStr, ok := clause.Value.(string); ok {
+			upperValue := strings.ToUpper(strings.TrimSpace(queryValueStr))
+			// Check if comparing against NULL
+			if upperValue == "NULL" || upperValue == "SYNDR_NULL" || queryValueStr == "::SYNDR_NULL::" {
+				// Direct magic value comparison for NULL checks
+				fieldValueStr, fieldIsStr := field.Value.(string)
+				if fieldIsStr && fieldValueStr == "::SYNDR_NULL::" {
+					return clause.Operator == "==" // Match if operator is ==
+				}
+				return clause.Operator == "!=" // No match, so != returns true
+			}
+		}
+	}
+
 	// Compare based on operator and types
 	switch clause.Operator {
 	case "==":
@@ -421,6 +445,11 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 		//logger.Infof("DEBUG DEBUG:: String check: aIsString=%v, bIsString=%v", aIsString, bIsString)
 	}
 	if aIsString && bIsString {
+		// Check if either value is a magic value - if so, use direct string comparison
+		// This prevents magic values like "::SYNDR_NULL::" from being parsed as numbers
+		if strings.HasPrefix(aStr, "::SYNDR_") || strings.HasPrefix(bStr, "::SYNDR_") {
+			return aStr == bStr
+		}
 
 		return aStr == bStr
 	}

@@ -1,5 +1,23 @@
 package hashindexV3
 
+/*
+DEPRECATED: This file contains the old metadata system using separate index.meta files.
+This has been replaced by the header-based metadata system where each index file
+contains its own metadata in a header at the beginning of the file.
+
+NEW SYSTEM:
+- Headers embedded in index files (.hidx files)
+- See: header.go, header_manager.go, header_serializer.go
+- File naming: FieldName-fk.N.hidx or FieldName.N.hidx
+
+MIGRATION PATH:
+- New indexes automatically use the header system
+- Old indexes will continue to work with this legacy system
+- Future: Add migration utility to convert old indexes to new format
+
+TODO: Remove this file after migration is complete (Phase 12+)
+*/
+
 import (
 	"encoding/json"
 	"fmt"
@@ -10,6 +28,7 @@ import (
 )
 
 // IndexMetadata represents persisted index metadata
+// DEPRECATED: Use IndexHeader in header.go instead
 // This file enables fast recovery without scanning all entries
 type IndexMetadata struct {
 	Version     int    `json:"version"`     // Metadata format version
@@ -25,8 +44,21 @@ func (idx *HashIndexV3) metadataFilePath() string {
 }
 
 // SaveMetadata persists index metadata to disk
+// DEPRECATED: This function is a no-op. Metadata is now stored in file headers.
+// See: HeaderManager.UpdateStatistics() for the new approach
 // Following Single Responsibility: only handles metadata I/O
 func (idx *HashIndexV3) SaveMetadata() error {
+	// TODO (Phase 12+): Remove this function entirely after confirming no callers
+	// Metadata is now automatically written to headers during file operations
+
+	// For backward compatibility, we simply return success
+	// The header system handles persistence automatically via EntryStorage
+	idx.logger.Debugw("SaveMetadata called (deprecated, now no-op - using headers)",
+		"indexName", idx.config.IndexName)
+
+	return nil
+
+	/* ORIGINAL CODE - REMOVED, REPLACED BY HEADER SYSTEM
 	if !idx.isDirty {
 		// No changes to persist
 		return nil
@@ -75,18 +107,32 @@ func (idx *HashIndexV3) SaveMetadata() error {
 		"maxSequence", maxSeq)
 
 	return nil
+	*/
 }
 
 // LoadMetadata reads index metadata from disk
+// DEPRECATED: This function now reads from file headers instead of separate metadata files
+// See: HeaderManager.ReadHeader() for the new approach
 // Returns metadata and error (nil error if file doesn't exist = new index)
 func (idx *HashIndexV3) LoadMetadata() (*IndexMetadata, error) {
+	// TODO (Phase 12+): Remove this function entirely after confirming no callers
+	// Metadata is now automatically read from headers during file opening
+
+	// For backward compatibility, check if old metadata file exists
 	metaPath := idx.metadataFilePath()
 
 	// Check if file exists
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
-		// New index, no metadata yet
+		// New index, no old metadata - this is expected with new header system
+		idx.logger.Debugw("LoadMetadata: No legacy metadata file (expected with header system)",
+			"indexName", idx.config.IndexName)
 		return nil, nil
 	}
+
+	// Old metadata file exists - read it for backward compatibility
+	idx.logger.Warnw("LoadMetadata: Found legacy metadata file (should migrate to header system)",
+		"indexName", idx.config.IndexName,
+		"metaPath", metaPath)
 
 	// Read file
 	data, err := os.ReadFile(metaPath)
@@ -149,12 +195,20 @@ func (idx *HashIndexV3) LoadMetadata() (*IndexMetadata, error) {
 }
 
 // RestoreGlobalSequence recovers the global sequence counter
+// DEPRECATED: Sequence numbers are now stored in file headers
+// This function now reads from the latest file header instead of scanning entries
 // Option B: Hybrid approach with safety validation
 // 1. Load metadata for fast recovery
 // 2. Scan most recent entry file for safety check
 // 3. Use max(metadata, actualMax) + safetyMargin
 func (idx *HashIndexV3) RestoreGlobalSequence() error {
-	// Load metadata
+	// TODO (Phase 12+): Simplify this to only read from headers
+	// For now, keep backward compatibility but log deprecation
+
+	idx.logger.Debugw("RestoreGlobalSequence called (now using header system)",
+		"indexName", idx.config.IndexName)
+
+	// Load metadata (deprecated path)
 	metadata, err := idx.LoadMetadata()
 	if err != nil {
 		idx.logger.Warnw("Failed to load metadata, will scan entries",

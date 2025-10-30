@@ -77,6 +77,9 @@ type Arguments struct {
 
 	// Hash Index Configuration
 	IndexSequenceSafetyMargin int // Safety margin for sequence recovery (default: 100)
+
+	// Parser Configuration
+	UseNewParser bool // Use new SyndrQL parser instead of legacy parser (default: false)
 }
 
 var (
@@ -117,6 +120,9 @@ func GetSettings() *Arguments {
 			MetadataPersistInterval: 1000, // Persist every 1000 documents
 			MetadataFlushInterval:   10,   // Flush every 10 seconds
 			BulkOperationDetection:  true, // Auto-detect bulk operations
+
+			// Parser Configuration (default to false for safety)
+			UseNewParser: false, // Use legacy parser by default
 		}
 	})
 	return instance

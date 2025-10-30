@@ -111,6 +111,15 @@ type IndexConfig struct {
 	DatabaseName string // Name of the database
 	FieldName    string // Field being indexed
 
+	// Index metadata flags
+	IsForeignKey bool // True if this is a foreign key index
+	IsUnique     bool // True if index enforces uniqueness
+	IsPrimaryKey bool // True if this is the primary key index
+
+	// Foreign key relationship (only if IsForeignKey == true)
+	ReferencedBundle string // Target bundle name
+	ReferencedField  string // Target field name
+
 	// Storage configuration
 	DataDir         string // Directory for index files
 	MaxFileSize     int64  // Maximum entry file size before rotation
@@ -209,12 +218,18 @@ func NewHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 
 	// Create EntryStorage
 	storageConfig := EntryStorageConfig{
-		IndexName:       config.IndexName,
-		BundleName:      config.BundleName,
-		DataDir:         config.DataDir,
-		MaxFileSize:     config.MaxFileSize,
-		WriteBufferSize: config.WriteBufferSize,
-		Logger:          config.Logger,
+		IndexName:        config.IndexName,
+		FieldName:        config.FieldName,
+		BundleName:       config.BundleName,
+		DataDir:          config.DataDir,
+		MaxFileSize:      config.MaxFileSize,
+		WriteBufferSize:  config.WriteBufferSize,
+		IsForeignKey:     config.IsForeignKey,
+		IsUnique:         config.IsUnique,
+		IsPrimaryKey:     config.IsPrimaryKey,
+		ReferencedBundle: config.ReferencedBundle,
+		ReferencedField:  config.ReferencedField,
+		Logger:           config.Logger,
 	}
 
 	storage, err := NewEntryStorage(storageConfig)
@@ -265,6 +280,16 @@ func OpenHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 	err = idx.RestoreGlobalSequence()
 	if err != nil {
 		return nil, fmt.Errorf("failed to restore global sequence: %w", err)
+	}
+
+	// Update header with restored sequence to prevent mismatch warnings on next open
+	// This is especially important for indexes created before the header update fix
+	currentSequence := atomic.LoadUint64(&idx.globalSequence)
+	if err := idx.storage.UpdateHeaderStatistics(currentSequence); err != nil {
+		idx.logger.Warnw("Failed to update header after sequence restoration",
+			"error", err,
+			"sequence", currentSequence)
+		// Don't fail the open operation, just log the warning
 	}
 
 	// Load entries from disk into MemTable
@@ -509,8 +534,11 @@ func (idx *HashIndexV3) Flush() error {
 		return fmt.Errorf("index is closed")
 	}
 
-	// Flush entry storage
-	if err := idx.storage.Flush(); err != nil {
+	// Get current global sequence for header update
+	currentSequence := atomic.LoadUint64(&idx.globalSequence)
+
+	// Flush entry storage with header update to persist current global sequence
+	if err := idx.storage.FlushWithHeaderUpdate(currentSequence); err != nil {
 		return err
 	}
 
@@ -531,8 +559,11 @@ func (idx *HashIndexV3) Close() error {
 		return nil
 	}
 
-	// Flush any remaining data
-	if err := idx.storage.Flush(); err != nil {
+	// Get current global sequence for header update
+	currentSequence := atomic.LoadUint64(&idx.globalSequence)
+
+	// Flush any remaining data with header update
+	if err := idx.storage.FlushWithHeaderUpdate(currentSequence); err != nil {
 		idx.logger.Warnw("Failed to flush storage on close", "error", err)
 	}
 

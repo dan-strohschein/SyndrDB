@@ -68,6 +68,10 @@ func convertToString(value interface{}) (interface{}, error) {
 	}
 	// Fast path: already a string
 	if strVal, ok := value.(string); ok {
+		// Allow NULL magic values to pass through without conversion
+		if strings.HasPrefix(strVal, "::SYNDR_") {
+			return strVal, nil
+		}
 		return strVal, nil
 	}
 	// Convert other types to string without reflection
@@ -103,6 +107,10 @@ func convertToInt(value interface{}) (interface{}, error) {
 		}
 		return int64(v), nil
 	case string:
+		// Allow NULL magic values to pass through - NULLs are valid for any type
+		if strings.HasPrefix(v, "::SYNDR_") {
+			return v, nil
+		}
 		// Parse string as integer - only expensive operation left
 		intVal, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -135,6 +143,10 @@ func convertToFloat(value interface{}) (interface{}, error) {
 	case int64:
 		return float64(v), nil
 	case string:
+		// Allow NULL magic values to pass through - NULLs are valid for any type
+		if strings.HasPrefix(v, "::SYNDR_") {
+			return v, nil
+		}
 		// Parse string as float - only expensive operation left
 		floatVal, err := strconv.ParseFloat(v, 64)
 		if err != nil {
@@ -155,6 +167,10 @@ func convertToBool(value interface{}) (interface{}, error) {
 	case bool:
 		return v, nil
 	case string:
+		// Allow NULL magic values to pass through - NULLs are valid for any type
+		if strings.HasPrefix(v, "::SYNDR_") {
+			return v, nil
+		}
 		// Parse string as boolean
 		if strings.EqualFold(v, "true") {
 			return true, nil
@@ -211,6 +227,9 @@ type BundleService struct {
 	// PERFORMANCE OPTIMIZATION: Document location cache for O(1) page lookups
 	documentPageMap map[string]map[string]uint32 // bundleName -> documentID -> pageID
 	pageCacheMutex  sync.RWMutex                 // Protects documentPageMap
+
+	// NULL HANDLER: Manages magic NULL values and field initialization
+	nullHandler *NullHandler // Handles SYNDR_NULL, SYNDR_MISSING, etc.
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
@@ -255,6 +274,9 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 
 		// PERFORMANCE OPTIMIZATION: Initialize document-page location cache
 		documentPageMap: make(map[string]map[string]uint32),
+
+		// NULL HANDLER: Initialize NULL value handler
+		nullHandler: NewNullHandler(logger),
 	}
 
 	// Don't load bundle metadata at startup - bundles should be loaded on-demand
@@ -262,6 +284,40 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	logger.Debugf("Bundle service initialized - bundles will be loaded on-demand")
 
 	return service
+}
+
+// IsFieldForeignKey checks if a field is a foreign key based on relationships from other bundles
+// Returns true if the field is used as a foreign key in any relationship
+// This function checks both:
+// 1. If this bundle has relationships where this field is a source field (outgoing FK)
+// 2. If other bundles have relationships where this field is a destination field (incoming FK)
+func IsFieldForeignKey(bundle *models.Bundle, fieldName string) (bool, string, string) {
+	// Check if this field is used as a source field in any relationship within this bundle
+	// This means it references another bundle (making it an outgoing foreign key)
+	if bundle.Relationships != nil {
+		for _, relationship := range bundle.Relationships {
+			if relationship.SourceField == fieldName {
+				return true, relationship.DestinationBundle, relationship.DestinationField
+			}
+		}
+	}
+
+	// Check if this field is referenced as a destination field by other bundles
+	// This means other bundles reference this field (making it an incoming foreign key)
+	if bundle.Database != nil {
+		for _, otherBundle := range bundle.Database.Bundles {
+			if otherBundle.Relationships != nil {
+				for _, relationship := range otherBundle.Relationships {
+					// Check if this relationship points to our bundle and field
+					if relationship.DestinationBundle == bundle.Name && relationship.DestinationField == fieldName {
+						return true, relationship.SourceBundle, relationship.SourceField
+					}
+				}
+			}
+		}
+	}
+
+	return false, "", ""
 }
 
 // scheduleIndexUpdate adds an index update to the deferred update buffer
@@ -1085,10 +1141,12 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 			}
 
 			// Discover and populate existing index files
-			err = s.discoverBundleIndexes(bundle)
-			if err != nil {
-				s.logger.Warnf("Failed to discover indexes for bundle '%s': %v", name, err)
-				// Continue loading the bundle even if index discovery fails
+			if len(bundle.Indexes) == 0 {
+				err = s.discoverBundleIndexes(bundle)
+				if err != nil {
+					s.logger.Warnf("Failed to discover indexes for bundle '%s': %v", name, err)
+					// Continue loading the bundle even if index discovery fails
+				}
 			}
 
 			if args.Debug {
@@ -1324,7 +1382,12 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		s.flushMetadataUpdates()
 	}
 
-	s.logger.Infof("Bundle %s has PageCount: %d", bundleName, bundle.PageCount)
+	s.logger.Infof("Bundle %s has PageCount: %d, TotalDocuments: %d", bundleName, bundle.PageCount, bundle.TotalDocuments)
+	s.logger.Infof("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",
+		bundleName, bundle.Documents != nil, bundle.DocumentsComplete)
+	if bundle.Documents != nil {
+		s.logger.Infof("Bundle %s memtable contains %d documents", bundleName, len(*bundle.Documents))
+	}
 
 	var allDocuments []*models.Document
 
@@ -1338,14 +1401,19 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, 0, databasePath)
 		if err != nil {
 			s.logger.Errorf("DEBUG: Failed to load page 0 for bundle '%s': %v", bundle.Name, err)
+			// Even if page 0 fails, check memtable before returning empty
+			if bundle.Documents != nil && !bundle.DocumentsComplete {
+				s.logger.Debugf("Page 0 failed, but memtable has %d documents", len(*bundle.Documents))
+				for _, doc := range *bundle.Documents {
+					docCopy := doc
+					allDocuments = append(allDocuments, &docCopy)
+				}
+				return allDocuments, nil
+			}
 			return []*models.Document{}, nil
 		}
 
 		s.logger.Infof("DEBUG: Loaded page 0 - found %d documents", len(page.Documents))
-		if len(page.Documents) == 0 {
-			s.logger.Infof("DEBUG: No documents found in page 0, returning empty slice")
-			return []*models.Document{}, nil
-		}
 
 		// FIXED: Actually process the documents found in page 0
 		for _, doc := range page.Documents {
@@ -1353,25 +1421,37 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 			allDocuments = append(allDocuments, &docCopy)
 		}
 
-		s.logger.Infof("DEBUG: getAllDocumentsForIndexing - loaded %d documents from page 0 (PageCount was 0)", len(allDocuments))
+		// Merge with memtable even when PageCount is 0
+		if bundle.Documents != nil && !bundle.DocumentsComplete {
+			s.logger.Debugf("Merging %d documents from memtable with %d from page 0",
+				len(*bundle.Documents), len(allDocuments))
+
+			diskDocIDs := make(map[string]bool, len(allDocuments))
+			for _, doc := range allDocuments {
+				diskDocIDs[doc.DocumentID] = true
+			}
+
+			for docID, doc := range *bundle.Documents {
+				if !diskDocIDs[docID] {
+					docCopy := doc
+					allDocuments = append(allDocuments, &docCopy)
+				}
+			}
+		}
+
+		s.logger.Infof("DEBUG: getAllDocumentsForIndexing - loaded %d total documents (PageCount was 0)", len(allDocuments))
 		return allDocuments, nil
 	}
 
-	// Load all pages for this bundle using the PageCount from metadata
+	// CASSANDRA-STYLE MEMTABLE MERGE:
+	// Load all pages from disk first (authoritative source)
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		//s.logger.Infof("DEBUG: Loading page %d for bundle '%s'", pageID, bundle.Name)
-
-		//settings := settings.GetSettings()
-		//s.logger.Infof("DEBUG DEBUG DEBUG :: Loading Database name %s,page %d for bundle '%s'", bundle.Database.Name, pageID, bundle.Name)
 		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 
 		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
 		if err != nil {
-			//s.logger.Errorf("DEBUG: Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
 			continue
 		}
-
-		//s.logger.Infof("DEBUG: Page %d loaded with %d documents", pageID, len(page.Documents))
 
 		// Convert map to slice and append
 		for _, doc := range page.Documents {
@@ -1380,7 +1460,27 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		}
 	}
 
-	//s.logger.Infof("DEBUG: FINAL RETURN getAllDocumentsForIndexing - loaded %d total documents from %d pages", len(allDocuments), bundle.PageCount)
+	// Merge with memtable (recent writes not yet on disk or flushed)
+	// This ensures queries see both persisted data AND recent writes
+	if bundle.Documents != nil && !bundle.DocumentsComplete {
+		s.logger.Debugf("Merging %d documents from memtable with %d from disk for bundle '%s'",
+			len(*bundle.Documents), len(allDocuments), bundle.Name)
+
+		// Create document ID set for deduplication (disk wins for conflicts)
+		diskDocIDs := make(map[string]bool, len(allDocuments))
+		for _, doc := range allDocuments {
+			diskDocIDs[doc.DocumentID] = true
+		}
+
+		// Add memtable documents that aren't already in disk results
+		for docID, doc := range *bundle.Documents {
+			if !diskDocIDs[docID] {
+				docCopy := doc
+				allDocuments = append(allDocuments, &docCopy)
+			}
+		}
+	}
+
 	return allDocuments, nil
 }
 
@@ -1419,6 +1519,13 @@ func (s *BundleService) GetBundleByName(database *models.Database, name string) 
 
 	// Return metadata-only bundle - documents should be loaded on-demand via GetDocumentPage
 	// The Documents field is left nil to encourage use of the paginated document access methods
+	// Initialize DocumentsComplete flag for memtable pattern
+	if bundle.Documents == nil {
+		bundle.DocumentsComplete = false // nil = incomplete (memtable mode)
+	} else {
+		// If Documents exists from serialization, assume it's incomplete unless explicitly marked
+		bundle.DocumentsComplete = false
+	}
 	s.logger.Debugf("Returned metadata-only bundle '%s' - use GetDocumentPage for document access", name)
 
 	return bundle, nil
@@ -1721,7 +1828,10 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
 	// Create configuration for hashindexV3
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
+	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
+
+	// Check if this field is a foreign key
+	isForeignKey, referencedBundle, referencedField := IsFieldForeignKey(bundle, indexCommand.Fields[0].Name)
 
 	// Get global settings for sequence safety margin
 	globalSettings := settings.GetSettings()
@@ -1739,6 +1849,9 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		CompactionEnabled:    true,
 		CompactionMaxFiles:   10,
 		Logger:               s.logger,
+		IsForeignKey:         isForeignKey,
+		ReferencedBundle:     referencedBundle,
+		ReferencedField:      referencedField,
 	}
 
 	// Create the hash index using hashindexV3 LSM implementation
@@ -1783,7 +1896,7 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 
 func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name string) error {
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
+	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
 
 	// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
 	// config := hashindexV2.IndexConfig{
@@ -1801,6 +1914,9 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 	// hashIndex, err := hashindexV2.CreateHashIndex(&config, s.logger)
 
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
+	// Check if this field is a foreign key
+	isForeignKey, referencedBundle, referencedField := IsFieldForeignKey(bundle, name)
+
 	// Get global settings for sequence safety margin
 	globalSettings := settings.GetSettings()
 
@@ -1817,6 +1933,9 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 		CompactionEnabled:    true,
 		CompactionMaxFiles:   10,
 		Logger:               s.logger,
+		IsForeignKey:         isForeignKey,
+		ReferencedBundle:     referencedBundle,
+		ReferencedField:      referencedField,
 	}
 
 	// Create the hash index using hashindexV3
@@ -2048,6 +2167,12 @@ func convertValueToBytes(value interface{}) ([]byte, error) {
 
 	switch v := value.(type) {
 	case string:
+		// Magic values (SYNDR_NULL, SYNDR_MISSING, etc.) get consistent byte representation
+		// This ensures they sort predictably in BTree indexes and can be efficiently queried
+		if strings.HasPrefix(v, "::SYNDR_") {
+			// Store magic values as-is for consistent indexing and querying
+			return []byte(v), nil
+		}
 		return []byte(v), nil
 	case []byte:
 		return v, nil
@@ -2153,7 +2278,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 
 	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
+	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
 
 	config := hashindex.IndexConfig{
 		IndexName:          indexName,
@@ -2242,8 +2367,17 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// 	return "", fmt.Errorf("bundle '%s' not found", docCommand.BundleName)
 	// }
 
+	// CRITICAL: Process NULL values and defaults FIRST, before validation
+	// This allows default value substitution for required fields that are missing or NULL
+	// Must happen before validation so that required fields with defaults can be satisfied
+	err := s.processNullValues(bundle, docCommand)
+	if err != nil {
+		return "", fmt.Errorf("failed to process NULL values: %w", err)
+	}
+
 	// Validate document fields against bundle field definitions
-	err := s.validateDocumentFields(bundle, docCommand)
+	// This runs AFTER processNullValues so that default values are already substituted
+	err = s.validateDocumentFields(bundle, docCommand)
 	if err != nil {
 		return "", fmt.Errorf("document field validation failed: %w", err)
 	}
@@ -2252,7 +2386,7 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
 	err = uniqueValidator.ValidateUniqueConstraints(bundle, docCommand)
 	if err != nil {
-		return "", fmt.Errorf("unique constraint violation: %w", err)
+		return "", fmt.Errorf("failed to process NULL values: %w", err)
 	}
 
 	// Add the document to the bundle
@@ -2324,6 +2458,10 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	} else {
 		s.logger.Warnf("No indexes found for bundle '%s'", bundle.Name)
 	}
+
+	// CRITICAL: Invalidate the document scanner cache to force reload with updated bundle
+	s.RemoveDocumentScanner(docCommand.BundleName)
+	s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after addition", docCommand.BundleName)
 
 	return newDocument.DocumentID, nil
 }
@@ -3079,6 +3217,12 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 			return fmt.Errorf("field '%s' is not defined in bundle '%s'", fieldName, bundle.Name)
 		}
 
+		// Check if user provided explicit NULL for a required field
+		// This should fail just like if the field was missing
+		if fieldDef.IsRequired && s.nullHandler.IsNullValue(fieldValue) {
+			return fmt.Errorf("required field '%s' cannot be set to NULL", fieldName)
+		}
+
 		// Validate and convert field data type using fast pre-compiled converter
 		convertedValue, err := s.validateAndConvertFieldTypeFast(fieldName, fieldValue, fieldDef.Type)
 		if err != nil {
@@ -3088,8 +3232,11 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		// Update the field value with the converted value
 		docCommand.Fields[i].Value = convertedValue
 
-		// Mark this field as provided
-		providedFields[fieldName] = true
+		// Mark this field as provided (only if not NULL)
+		// NULL values should be treated as if the field was not provided for required field validation
+		if !s.nullHandler.IsNullValue(convertedValue) {
+			providedFields[fieldName] = true
+		}
 	}
 
 	s.logger.Infof("[VALIDATION] Provided %d field(s) in document command", len(providedFields))
@@ -3117,6 +3264,125 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 	}
 
 	s.logger.Infof("[VALIDATION] All required fields validated successfully")
+	return nil
+}
+
+// processNullValues handles NULL value processing, default value substitution, and field initialization.
+// Uses a single-pass algorithm for O(n) performance where n is the number of fields in the schema.
+//
+// This function:
+// 1. Substitutes default values for NULL or missing fields (required or optional)
+// 2. Converts user nil values to SYNDR_NULL magic value (if no default exists)
+// 3. Escapes user strings that look like magic values
+// 4. Initializes missing optional fields with defaults or SYNDR_NULL
+//
+// CRITICAL: Must run BEFORE validation so required fields with defaults are satisfied
+//
+// Performance: O(n) time, O(1) space where n = schema field count
+func (s *BundleService) processNullValues(bundle *models.Bundle, docCommand *models.DocumentCommand) error {
+	if bundle.DocumentStructure.FieldDefinitions == nil {
+		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
+	}
+
+	// Build providedFields map while processing existing fields (single pass)
+	providedFields := make(map[string]bool, len(docCommand.Fields))
+
+	// PASS 1: Process provided fields in-place - substitute defaults for NULL values
+	for i := range docCommand.Fields {
+		fieldName := docCommand.Fields[i].Key
+		fieldValue := docCommand.Fields[i].Value
+
+		// Get field definition for default value lookup
+		fieldDef, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]
+		if !exists {
+			// Field doesn't exist in schema - validation will catch this later
+			providedFields[fieldName] = true
+			continue
+		}
+
+		// Mark as provided (even if NULL - we'll check for defaults)
+		providedFields[fieldName] = true
+
+		// Handle nil or SYNDR_NULL -> check for default value substitution
+		if fieldValue == nil || fieldValue == SYNDR_NULL {
+			if fieldDef.DefaultValue != nil {
+				// Substitute the actual default value
+				docCommand.Fields[i].Value = fieldDef.DefaultValue
+				s.logger.Debugf("Substituted default value for field '%s': %v", fieldName, fieldDef.DefaultValue)
+			} else {
+				// No default - use SYNDR_NULL
+				docCommand.Fields[i].Value = SYNDR_NULL
+			}
+			continue
+		}
+
+		// Escape magic-like values (fast path: string prefix check)
+		if strValue, ok := fieldValue.(string); ok {
+			if strings.HasPrefix(strValue, "::SYNDR_") {
+				// Only escape if it's NOT already a valid magic value
+				switch strValue {
+				case SYNDR_NULL, SYNDR_MISSING, SYNDR_DELETED, SYNDR_DEFAULT:
+					// Valid magic value - keep as-is
+					continue
+				default:
+					// User string that looks like magic value - escape it
+					docCommand.Fields[i].Value = SYNDR_ESCAPED + strValue
+				}
+			}
+		}
+	}
+
+	// PASS 2: Add missing fields (required or optional) with defaults or SYNDR_NULL
+	missingFieldCount := 0
+	for fieldName := range bundle.DocumentStructure.FieldDefinitions {
+		// Skip DocumentID (auto-generated)
+		if fieldName == "DocumentID" {
+			continue
+		}
+
+		// Count ALL missing fields (required or optional)
+		if !providedFields[fieldName] {
+			missingFieldCount++
+		}
+	}
+
+	// Pre-allocate slice capacity to avoid multiple allocations
+	if missingFieldCount > 0 {
+		originalLen := len(docCommand.Fields)
+		// Grow slice once with exact capacity needed
+		newFields := make([]models.KeyValue, originalLen, originalLen+missingFieldCount)
+		copy(newFields, docCommand.Fields)
+
+		// Append missing fields with defaults or SYNDR_NULL
+		for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
+			// Skip DocumentID (auto-generated)
+			if fieldName == "DocumentID" {
+				continue
+			}
+
+			// Skip provided fields
+			if providedFields[fieldName] {
+				continue
+			}
+
+			// Determine value: use default if available, otherwise SYNDR_NULL
+			var fieldValue interface{}
+			if fieldDef.DefaultValue != nil {
+				fieldValue = fieldDef.DefaultValue
+				s.logger.Debugf("Using default value for missing field '%s': %v", fieldName, fieldDef.DefaultValue)
+			} else {
+				fieldValue = SYNDR_NULL
+			}
+
+			newFields = append(newFields, models.KeyValue{
+				Key:   fieldName,
+				Value: fieldValue,
+			})
+		}
+
+		docCommand.Fields = newFields
+	}
+
 	return nil
 }
 
@@ -3150,10 +3416,11 @@ func (s *BundleService) validateUpdateFields(bundle *models.Bundle, docCommand *
 		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
 	}
 
-	// Validate each field in the update command
-	for i, field := range docCommand.Fields {
-		fieldName := field.Key
-		fieldValue := field.Value
+	// Single-pass processing: validate, escape, and convert in one loop
+	// Performance: O(m) where m = number of fields being updated
+	for i := range docCommand.Fields {
+		fieldName := docCommand.Fields[i].Key
+		fieldValue := docCommand.Fields[i].Value
 
 		// Check if the field exists in bundle field definitions
 		fieldDef, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]
@@ -3161,7 +3428,30 @@ func (s *BundleService) validateUpdateFields(bundle *models.Bundle, docCommand *
 			return fmt.Errorf("field '%s' is not defined in bundle '%s'", fieldName, bundle.Name)
 		}
 
-		// Validate and convert field data type using fast pre-compiled converter
+		// Handle NULL values (fast path: nil check first)
+		if fieldValue == nil {
+			docCommand.Fields[i].Value = SYNDR_NULL
+			continue // Skip type validation for NULL
+		}
+
+		// Escape magic-like values (inline, no function call overhead)
+		// Fast path: only check strings that start with ::SYNDR_
+		if strValue, ok := fieldValue.(string); ok {
+			if strings.HasPrefix(strValue, "::SYNDR_") {
+				// Check if it's a valid magic value
+				switch strValue {
+				case SYNDR_NULL, SYNDR_MISSING, SYNDR_DELETED, SYNDR_DEFAULT:
+					// Valid magic value - keep as-is, skip type validation
+					continue
+				default:
+					// User string that looks like magic value - escape it
+					docCommand.Fields[i].Value = SYNDR_ESCAPED + strValue
+					fieldValue = docCommand.Fields[i].Value // Update for validation
+				}
+			}
+		}
+
+		// Validate and convert field data type
 		convertedValue, err := s.validateAndConvertFieldTypeFast(fieldName, fieldValue, fieldDef.Type)
 		if err != nil {
 			return fmt.Errorf("field '%s' type validation failed: %w", fieldName, err)
@@ -3170,9 +3460,9 @@ func (s *BundleService) validateUpdateFields(bundle *models.Bundle, docCommand *
 		// Update the field value with the converted value
 		docCommand.Fields[i].Value = convertedValue
 
-		// todo:Additional validation for unique fields could be added here
+		// TODO: Unique constraint validation for updates (future work)
 		// if fieldDef.IsUnique {
-		//     // TODO: Check if the new value would violate uniqueness constraint
+		//     // Validate that new value doesn't violate uniqueness
 		// }
 	}
 
@@ -3190,37 +3480,57 @@ func (s *BundleService) registerBundleInPrimary(bundle *models.Bundle) error {
 }
 
 // discoverBundleIndexes scans for existing index files and populates the bundle's Indexes field
+// UPDATED: Now supports both legacy (.idx) and new header-based (.hidx) index files
+// New naming convention: FieldName-fk.N.hidx (FK) or FieldName.N.hidx (regular)
 func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
-	//args := settings.GetSettings()
-
 	// Initialize indexes map if nil
 	if bundle.Indexes == nil {
 		bundle.Indexes = make(map[string]models.IndexReference)
 	}
 
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
 
-	// Look for hash index files in: data_files/<Database>/indexes/<Bundle>/<Bundle>_<Field>_idx_<N>.idx
-	indexesPath := filepath.Join(databasePath, "indexes", bundle.Name)
-	hashPattern := fmt.Sprintf("%s/%s_*_*.idx", indexesPath, bundle.Name)
-	//s.logger.Infof("DIAGNOSTIC: Searching for index files with pattern: %s", hashPattern)
-	hashFiles, err := filepath.Glob(hashPattern)
+	// Pattern 1: Look for NEW header-based index files (.hidx)
+	// Pattern: *.hidx (includes both FieldName-fk.N.hidx and FieldName.N.hidx)
+	newHashPattern := filepath.Join(indexesPath, "*.hidx")
+	newHashFiles, err := filepath.Glob(newHashPattern)
 	if err != nil {
-		return fmt.Errorf("failed to scan for hash index files: %w", err)
+		s.logger.Warnf("Failed to scan for new hash index files: %v", err)
+		newHashFiles = []string{} // Continue with legacy discovery
 	}
-	//s.logger.Infof("DIAGNOSTIC: Found %d index files matching pattern", len(hashFiles))
 
-	for _, hashFile := range hashFiles {
-		// Extract field name from filename: BundleName_FieldName_idx_N.idx
+	// Process new format files (.hidx with headers)
+	for _, hashFile := range newHashFiles {
 		baseName := filepath.Base(hashFile)
-		// Remove .idx extension
-		baseName = strings.TrimSuffix(baseName, ".idx")
-		fieldName := ""
-		parts := strings.Split(baseName, "_")
 
-		if len(parts) > 0 {
-			fieldName = parts[1]
-			//s.logger.Infof("DIAGNOSTIC: Processing index file '%s', extracted field name: '%s'", baseName, fieldName)
+		// Parse new naming convention: FieldName-fk.N.hidx or FieldName.N.hidx
+		// Remove extension
+		nameWithoutExt := strings.TrimSuffix(baseName, ".hidx")
+
+		// Split by last dot to separate file number
+		parts := strings.Split(nameWithoutExt, ".")
+		if len(parts) != 2 {
+			s.logger.Warnf("Invalid new index file name format: %s", baseName)
+			continue
+		}
+
+		fieldPart := parts[0]
+		// fileNum := parts[1] // Not needed for discovery
+
+		// Check if it's a foreign key index
+		isForeignKey := strings.HasSuffix(fieldPart, "-fk")
+		var fieldName string
+		var indexName string
+
+		if isForeignKey {
+			// Foreign key: FieldName-fk
+			fieldName = strings.TrimSuffix(fieldPart, "-fk")
+			indexName = fieldName + "_fk" // Restore _fk for index name
+		} else {
+			// Regular index: FieldName
+			fieldName = fieldPart
+			indexName = fieldName
 		}
 
 		// Check if this field exists in the bundle's field definitions
@@ -3231,23 +3541,78 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 			}
 		}
 
-		// Create index reference
-		indexName := fieldName //fmt.Sprintf("%s_%s", bundle.Name, fieldName)
+		// Create index reference (preserving _fk suffix in index name)
 		indexRef := models.IndexReference{
 			IndexType: "hash",
 			HashIndexField: models.IndexField{
-				FieldName: fieldName,
+				FieldName: indexName, // Includes _fk if foreign key
 			},
 		}
 
 		bundle.Indexes[indexName] = indexRef
-		s.logger.Debugf("Discovered hash index '%s' for field '%s' in bundle '%s'", indexName, fieldName, bundle.Name)
+		s.logger.Debugf("Discovered NEW hash index '%s' for field '%s' in bundle '%s' (FK=%v)",
+			indexName, fieldName, bundle.Name, isForeignKey)
+	}
+
+	// Pattern 2: Look for LEGACY index files (.idx) - OLD FORMAT
+	// Pattern: BundleName_*_*.idx
+	legacyHashPattern := fmt.Sprintf("%s/%s_*_*.idx", indexesPath, bundle.Name)
+	legacyHashFiles, err := filepath.Glob(legacyHashPattern)
+	if err != nil {
+		return fmt.Errorf("failed to scan for legacy hash index files: %w", err)
+	}
+
+	// Process legacy format files (.idx without headers)
+	for _, hashFile := range legacyHashFiles {
+		var fieldName string
+
+		// Extract field name from filename: BundleName_FieldName_N.idx
+		baseName := filepath.Base(hashFile)
+		// Remove .idx extension
+		baseName = strings.TrimSuffix(baseName, ".idx")
+		// remove the bundle name prefix
+		baseName = strings.TrimPrefix(baseName, bundle.Name+"_")
+
+		// Strip the trailing index number by working backwards from the end of the string
+		underscoreIndex := strings.LastIndex(baseName, "_")
+		if underscoreIndex != -1 {
+			baseName = baseName[:underscoreIndex]
+		}
+
+		// What is left SHOULD be the field name (with _fk if foreign key)
+		indexName := baseName
+
+		// For field validation, strip _fk suffix
+		fieldName = strings.TrimSuffix(baseName, "_fk")
+
+		// Check if this field exists in the bundle's field definitions
+		if bundle.DocumentStructure.FieldDefinitions != nil {
+			if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]; !exists {
+				s.logger.Warnf("Found legacy hash index file for field '%s' but field not defined in bundle '%s'", fieldName, bundle.Name)
+				continue
+			}
+		}
+
+		// Only add if not already discovered as new format
+		if _, exists := bundle.Indexes[indexName]; !exists {
+			// Create index reference (preserving _fk suffix)
+			indexRef := models.IndexReference{
+				IndexType: "hash",
+				HashIndexField: models.IndexField{
+					FieldName: indexName, // Preserve _fk suffix
+				},
+			}
+
+			bundle.Indexes[indexName] = indexRef
+			s.logger.Debugf("Discovered LEGACY hash index '%s' for field '%s' in bundle '%s'", indexName, fieldName, bundle.Name)
+		}
 	}
 
 	// TODO: Add discovery for BTree indexes when they have a consistent file pattern
 	// Look for btree index files if there's a predictable naming pattern
 
-	s.logger.Debugf("Discovered %d indexes for bundle '%s'", len(bundle.Indexes), bundle.Name)
+	s.logger.Debugf("Discovered %d total indexes for bundle '%s' (%d new format, %d legacy format)",
+		len(bundle.Indexes), bundle.Name, len(newHashFiles), len(legacyHashFiles))
 	return nil
 }
 

@@ -607,6 +607,14 @@ func parseValue(valueStr string) interface{} {
 		return valueStr[1 : len(valueStr)-1] // Return string without quotes
 	}
 
+	// Handle NULL keyword (converts to magic value)
+	// Supports: NULL, null, SYNDR_NULL, ::SYNDR_NULL::
+	// When user provides unquoted NULL in ADD DOCUMENT, it means they want to set the field to NULL
+	upperValue := strings.ToUpper(valueStr)
+	if upperValue == "NULL" || upperValue == "SYNDR_NULL" || valueStr == "::SYNDR_NULL::" {
+		return "::SYNDR_NULL::"
+	}
+
 	// Handle boolean values
 	if strings.EqualFold(valueStr, "true") {
 		return true

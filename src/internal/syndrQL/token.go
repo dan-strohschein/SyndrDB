@@ -1,0 +1,369 @@
+package syndrQL
+
+// Token represents a lexical token in SyndrQL
+type Token struct {
+	Type    TokenType
+	Value   string
+	Literal interface{} // Parsed value for literals (int, float, bool, string)
+	Line    int         // Line number for error reporting
+	Column  int         // Column number for error reporting
+}
+
+// TokenType represents the type of token
+type TokenType int
+
+const (
+	// Special tokens
+	TOKEN_ILLEGAL TokenType = iota
+	TOKEN_EOF
+	TOKEN_WHITESPACE // Only used internally, filtered out
+
+	// Identifiers and literals
+	TOKEN_IDENT  // bundle_name, field_name, variable
+	TOKEN_STRING // "quoted string"
+	TOKEN_NUMBER // 123, 45.67
+	TOKEN_TRUE   // true
+	TOKEN_FALSE  // false
+	TOKEN_NULL   // NULL
+
+	// Operators - Arithmetic
+	TOKEN_PLUS     // +
+	TOKEN_MINUS    // -
+	TOKEN_MULTIPLY // *
+	TOKEN_DIVIDE   // /
+	TOKEN_MODULO   // %
+
+	// Operators - Assignment
+	TOKEN_ASSIGN // = (single equals for assignment)
+
+	// Operators - Comparison
+	TOKEN_EQ       // ==
+	TOKEN_NEQ      // !=
+	TOKEN_LT       // <
+	TOKEN_LTE      // <=
+	TOKEN_GT       // >
+	TOKEN_GTE      // >=
+	TOKEN_LIKE     // LIKE
+	TOKEN_IN       // IN
+	TOKEN_CONTAINS // CONTAINS
+
+	// Operators - Logical
+	TOKEN_AND // AND
+	TOKEN_OR  // OR
+	TOKEN_NOT // NOT
+
+	// Delimiters
+	TOKEN_COMMA     // ,
+	TOKEN_SEMICOLON // ;
+	TOKEN_COLON     // :
+	TOKEN_LPAREN    // (
+	TOKEN_RPAREN    // )
+	TOKEN_LBRACE    // {
+	TOKEN_RBRACE    // }
+	TOKEN_LBRACKET  // [
+	TOKEN_RBRACKET  // ]
+
+	// Keywords - DML (Hot Path)
+	TOKEN_SELECT    // SELECT
+	TOKEN_INSERT    // INSERT
+	TOKEN_UPDATE    // UPDATE
+	TOKEN_DELETE    // DELETE
+	TOKEN_FROM      // FROM
+	TOKEN_WHERE     // WHERE
+	TOKEN_INTO      // INTO
+	TOKEN_VALUES    // VALUES
+	TOKEN_SET       // SET
+	TOKEN_DOCUMENT  // DOCUMENT
+	TOKEN_DOCUMENTS // DOCUMENTS
+
+	// Keywords - DDL (Warm Path)
+	TOKEN_CREATE // CREATE
+	TOKEN_ALTER  // ALTER
+	TOKEN_DROP   // DROP
+	TOKEN_BUNDLE // BUNDLE
+	TOKEN_WITH   // WITH
+	TOKEN_FIELDS // FIELDS
+	TOKEN_ADD    // ADD
+	TOKEN_TO     // TO
+
+	// Keywords - Query Modifiers
+	TOKEN_ORDER  // ORDER
+	TOKEN_BY     // BY
+	TOKEN_LIMIT  // LIMIT
+	TOKEN_OFFSET // OFFSET
+	TOKEN_GROUP  // GROUP
+	TOKEN_HAVING // HAVING
+	TOKEN_JOIN   // JOIN
+	TOKEN_ON     // ON
+	TOKEN_AS     // AS
+
+	// Keywords - Utility (Cold Path)
+	TOKEN_SHOW     // SHOW
+	TOKEN_DESCRIBE // DESCRIBE
+	TOKEN_USE      // USE
+	TOKEN_DATABASE // DATABASE
+	TOKEN_BUNDLES  // BUNDLES
+
+	// Keywords - Types
+	TOKEN_STRING_TYPE // STRING
+	TOKEN_INT_TYPE    // INT
+	TOKEN_FLOAT_TYPE  // FLOAT
+	TOKEN_BOOL_TYPE   // BOOL
+	TOKEN_ARRAY_TYPE  // ARRAY
+
+	TOKEN_DATE_TYPE // DATE
+)
+
+// String returns the string representation of a token type
+func (tt TokenType) String() string {
+	switch tt {
+	case TOKEN_ILLEGAL:
+		return "ILLEGAL"
+	case TOKEN_EOF:
+		return "EOF"
+	case TOKEN_WHITESPACE:
+		return "WHITESPACE"
+	case TOKEN_IDENT:
+		return "IDENT"
+	case TOKEN_STRING:
+		return "STRING"
+	case TOKEN_NUMBER:
+		return "NUMBER"
+	case TOKEN_TRUE:
+		return "TRUE"
+	case TOKEN_FALSE:
+		return "FALSE"
+	case TOKEN_NULL:
+		return "NULL"
+	case TOKEN_PLUS:
+		return "+"
+	case TOKEN_MINUS:
+		return "-"
+	case TOKEN_MULTIPLY:
+		return "*"
+	case TOKEN_DIVIDE:
+		return "/"
+	case TOKEN_MODULO:
+		return "%"
+	case TOKEN_ASSIGN:
+		return "="
+	case TOKEN_EQ:
+		return "=="
+	case TOKEN_NEQ:
+		return "!="
+	case TOKEN_LT:
+		return "<"
+	case TOKEN_LTE:
+		return "<="
+	case TOKEN_GT:
+		return ">"
+	case TOKEN_GTE:
+		return ">="
+	case TOKEN_LIKE:
+		return "LIKE"
+	case TOKEN_IN:
+		return "IN"
+	case TOKEN_CONTAINS:
+		return "CONTAINS"
+	case TOKEN_AND:
+		return "AND"
+	case TOKEN_OR:
+		return "OR"
+	case TOKEN_NOT:
+		return "NOT"
+	case TOKEN_COMMA:
+		return ","
+	case TOKEN_SEMICOLON:
+		return ";"
+	case TOKEN_COLON:
+		return ":"
+	case TOKEN_LPAREN:
+		return "("
+	case TOKEN_RPAREN:
+		return ")"
+	case TOKEN_LBRACE:
+		return "{"
+	case TOKEN_RBRACE:
+		return "}"
+	case TOKEN_LBRACKET:
+		return "["
+	case TOKEN_RBRACKET:
+		return "]"
+	case TOKEN_SELECT:
+		return "SELECT"
+	case TOKEN_INSERT:
+		return "INSERT"
+	case TOKEN_UPDATE:
+		return "UPDATE"
+	case TOKEN_DELETE:
+		return "DELETE"
+	case TOKEN_FROM:
+		return "FROM"
+	case TOKEN_WHERE:
+		return "WHERE"
+	case TOKEN_INTO:
+		return "INTO"
+	case TOKEN_VALUES:
+		return "VALUES"
+	case TOKEN_SET:
+		return "SET"
+	case TOKEN_DOCUMENT:
+		return "DOCUMENT"
+	case TOKEN_DOCUMENTS:
+		return "DOCUMENTS"
+	case TOKEN_CREATE:
+		return "CREATE"
+	case TOKEN_ALTER:
+		return "ALTER"
+	case TOKEN_DROP:
+		return "DROP"
+	case TOKEN_BUNDLE:
+		return "BUNDLE"
+	case TOKEN_WITH:
+		return "WITH"
+	case TOKEN_FIELDS:
+		return "FIELDS"
+	case TOKEN_ADD:
+		return "ADD"
+	case TOKEN_TO:
+		return "TO"
+	case TOKEN_ORDER:
+		return "ORDER"
+	case TOKEN_BY:
+		return "BY"
+	case TOKEN_LIMIT:
+		return "LIMIT"
+	case TOKEN_OFFSET:
+		return "OFFSET"
+	case TOKEN_GROUP:
+		return "GROUP"
+	case TOKEN_HAVING:
+		return "HAVING"
+	case TOKEN_JOIN:
+		return "JOIN"
+	case TOKEN_ON:
+		return "ON"
+	case TOKEN_AS:
+		return "AS"
+	case TOKEN_SHOW:
+		return "SHOW"
+	case TOKEN_DESCRIBE:
+		return "DESCRIBE"
+	case TOKEN_USE:
+		return "USE"
+	case TOKEN_DATABASE:
+		return "DATABASE"
+	case TOKEN_BUNDLES:
+		return "BUNDLES"
+	case TOKEN_STRING_TYPE:
+		return "STRING_TYPE"
+	case TOKEN_INT_TYPE:
+		return "INT_TYPE"
+	case TOKEN_FLOAT_TYPE:
+		return "FLOAT_TYPE"
+	case TOKEN_BOOL_TYPE:
+		return "BOOL_TYPE"
+	case TOKEN_ARRAY_TYPE:
+		return "ARRAY_TYPE"
+	case TOKEN_DATE_TYPE:
+		return "DATE_TYPE"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// IsKeyword returns true if the token type is a keyword
+func (tt TokenType) IsKeyword() bool {
+	return tt >= TOKEN_SELECT && tt <= TOKEN_ARRAY_TYPE
+}
+
+// IsOperator returns true if the token type is an operator
+func (tt TokenType) IsOperator() bool {
+	return (tt >= TOKEN_PLUS && tt <= TOKEN_MODULO) ||
+		(tt >= TOKEN_EQ && tt <= TOKEN_CONTAINS) ||
+		(tt >= TOKEN_AND && tt <= TOKEN_NOT)
+}
+
+// IsComparison returns true if the token is a comparison operator
+func (tt TokenType) IsComparison() bool {
+	return tt >= TOKEN_EQ && tt <= TOKEN_CONTAINS
+}
+
+// IsLogical returns true if the token is a logical operator
+func (tt TokenType) IsLogical() bool {
+	return tt >= TOKEN_AND && tt <= TOKEN_NOT
+}
+
+// keywords maps keyword strings to their token types
+// This is used for O(1) keyword lookup during tokenization
+var keywords = map[string]TokenType{
+	// DML Keywords (Hot Path)
+	"SELECT":    TOKEN_SELECT,
+	"INSERT":    TOKEN_INSERT,
+	"UPDATE":    TOKEN_UPDATE,
+	"DELETE":    TOKEN_DELETE,
+	"FROM":      TOKEN_FROM,
+	"WHERE":     TOKEN_WHERE,
+	"INTO":      TOKEN_INTO,
+	"VALUES":    TOKEN_VALUES,
+	"SET":       TOKEN_SET,
+	"DOCUMENT":  TOKEN_DOCUMENT,
+	"DOCUMENTS": TOKEN_DOCUMENTS,
+
+	// DDL Keywords (Warm Path)
+	"CREATE": TOKEN_CREATE,
+	"ALTER":  TOKEN_ALTER,
+	"DROP":   TOKEN_DROP,
+	"BUNDLE": TOKEN_BUNDLE,
+	"WITH":   TOKEN_WITH,
+	"FIELDS": TOKEN_FIELDS,
+	"ADD":    TOKEN_ADD,
+	"TO":     TOKEN_TO,
+
+	// Query Modifiers
+	"ORDER":  TOKEN_ORDER,
+	"BY":     TOKEN_BY,
+	"LIMIT":  TOKEN_LIMIT,
+	"OFFSET": TOKEN_OFFSET,
+	"GROUP":  TOKEN_GROUP,
+	"HAVING": TOKEN_HAVING,
+	"JOIN":   TOKEN_JOIN,
+	"ON":     TOKEN_ON,
+	"AS":     TOKEN_AS,
+
+	// Utility Keywords (Cold Path)
+	"SHOW":     TOKEN_SHOW,
+	"DESCRIBE": TOKEN_DESCRIBE,
+	"USE":      TOKEN_USE,
+	"DATABASE": TOKEN_DATABASE,
+	"BUNDLES":  TOKEN_BUNDLES,
+
+	// Operators as keywords
+	"AND":      TOKEN_AND,
+	"OR":       TOKEN_OR,
+	"NOT":      TOKEN_NOT,
+	"LIKE":     TOKEN_LIKE,
+	"IN":       TOKEN_IN,
+	"CONTAINS": TOKEN_CONTAINS,
+
+	// Literals as keywords
+	"TRUE":  TOKEN_TRUE,
+	"FALSE": TOKEN_FALSE,
+	"NULL":  TOKEN_NULL,
+
+	// Type keywords
+	"STRING": TOKEN_STRING_TYPE,
+	"INT":    TOKEN_INT_TYPE,
+	"FLOAT":  TOKEN_FLOAT_TYPE,
+	"BOOL":   TOKEN_BOOL_TYPE,
+	"ARRAY":  TOKEN_ARRAY_TYPE,
+}
+
+// LookupKeyword checks if an identifier is a keyword and returns its token type
+// Returns TOKEN_IDENT if not a keyword
+func LookupKeyword(ident string) TokenType {
+	if tok, ok := keywords[ident]; ok {
+		return tok
+	}
+	return TOKEN_IDENT
+}

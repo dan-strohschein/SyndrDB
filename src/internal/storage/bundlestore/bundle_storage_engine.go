@@ -997,12 +997,15 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 	//     return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 	// }
 
-	// Add the document to the bundle in memory (for queries)
+	// Add document to memtable (write buffer) for fast access to recent writes
+	// Using Cassandra-style approach: Documents map is a memtable, not a complete cache
 	if bundle.Documents == nil {
 		bundle.Documents = new(map[string]models.Document)
 		*bundle.Documents = make(map[string]models.Document)
 	}
 	(*bundle.Documents)[document.DocumentID] = *document
+	// Mark as incomplete so queries know to merge with disk data
+	bundle.DocumentsComplete = false
 
 	// PERFORMANCE FIX: Direct binary serialization without map conversion
 	// Use Go's native binary encoding for maximum speed

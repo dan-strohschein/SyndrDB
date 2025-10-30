@@ -228,15 +228,23 @@ func (node *FullScanNode) Execute() (map[string]*models.Document, error) {
 
 	results := make(map[string]*models.Document)
 
-	// Check if documents are already loaded in memory (fast path)
-	// TODO This is DEPRECRATED - prefer using DocumentScanner for bundles now
-	if node.Bundle.Documents != nil {
-		node.Logger.Debugf("Using in-memory documents for bundle %s", node.Bundle.Name)
+	// CRITICAL: Check if documents are complete before using fast path
+	// If DocumentsComplete is false, Documents is a memtable (recent writes only), not a complete cache
+	// MUST use scanner to merge memtable with disk data
+	if node.Bundle.Documents != nil && node.Bundle.DocumentsComplete {
+		node.Logger.Debugf("Using complete in-memory documents for bundle %s", node.Bundle.Name)
 		for docID, doc := range *node.Bundle.Documents {
 			docCopy := doc
 			results[docID] = &docCopy
 		}
 		return results, nil
+	}
+
+	// If Documents is nil OR DocumentsComplete is false (memtable mode), use scanner
+	// Scanner will merge memtable with disk data for complete results
+	if node.Bundle.Documents != nil && !node.Bundle.DocumentsComplete {
+		node.Logger.Debugf("Bundle %s has memtable with %d documents - using scanner to merge with disk",
+			node.Bundle.Name, len(*node.Bundle.Documents))
 	}
 
 	// Use document scanner for optimized scanning with batching and caching

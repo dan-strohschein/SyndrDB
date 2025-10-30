@@ -179,9 +179,10 @@ type BundleAdapter struct {
 func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterface, logger *zap.SugaredLogger) *BundleAdapter {
 	// SAFETY: Log bundle metadata immediately to diagnose potential infinite loop causes
 	if bundle != nil {
-		logger.Infof("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
-		logger.Infof("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
-		logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
+		// logger.Infof("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
+		// logger.Infof("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
+		// logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
+		// logger.Infof("SAFETY CHECK: Bundle.DocumentsComplete = %v", bundle.DocumentsComplete)
 		if bundle.Documents != nil {
 			logger.Infof("SAFETY CHECK: Bundle.Documents is not nil, has %d documents", len(*bundle.Documents))
 		} else {
@@ -253,7 +254,7 @@ func (ba *BundleAdapter) getTotalDocumentsCount() int {
 	maxSafePages := uint32(100)
 	pageCount := uint32(ba.bundle.PageCount)
 	if pageCount > maxSafePages {
-		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in getTotalDocumentsCount", pageCount, maxSafePages)
+		//ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in getTotalDocumentsCount", pageCount, maxSafePages)
 		pageCount = maxSafePages
 	}
 
@@ -271,10 +272,19 @@ func (ba *BundleAdapter) getTotalDocumentsCount() int {
 
 // GetDocumentIDs returns all document IDs lazily without loading full documents
 func (ba *BundleAdapter) GetDocumentIDs() []string {
-	// Return cached IDs if available
-	if ba.documentIDs != nil {
-		return ba.documentIDs
-	}
+	// CRITICAL DEBUG: Log entry point
+	//ba.logger.Infof("🔍 GetDocumentIDs CALLED - Bundle: %s, TotalDocuments: %d, PageCount: %d, DocumentsComplete: %v, Documents map size: %d",
+	//ba.bundle.Name, ba.bundle.TotalDocuments, ba.bundle.PageCount, ba.bundle.DocumentsComplete,
+	// func() int {
+	// 	if ba.bundle.Documents != nil {
+	// 		return len(*ba.bundle.Documents)
+	// 	}
+	// 	return 0
+	// }())
+
+	// CASSANDRA-STYLE MEMTABLE MERGE:
+	// Don't use cached IDs - always build fresh list from disk + memtable
+	// This ensures we see both persisted documents AND recent writes
 
 	var ids []string
 
@@ -302,9 +312,24 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 			for docID := range page.Documents {
 				ids = append(ids, docID)
 			}
+			// Still merge memtable even in recovery scenario
+			if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
+				ba.logger.Debugf("MEMTABLE MERGE: Adding %d documents from memtable", len(*ba.bundle.Documents))
+				for docID := range *ba.bundle.Documents {
+					ids = append(ids, docID)
+				}
+			}
 			return ids
 		} else {
-			ba.logger.Warnf("RECOVERY: No documents found in page 0, returning empty list")
+			ba.logger.Warnf("RECOVERY: No documents found in page 0, checking memtable")
+			// Even if page 0 is empty, check memtable
+			if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
+				ba.logger.Debugf("MEMTABLE MERGE: Found %d documents in memtable", len(*ba.bundle.Documents))
+				for docID := range *ba.bundle.Documents {
+					ids = append(ids, docID)
+				}
+				return ids
+			}
 			return ids // Return empty list
 		}
 	}
@@ -314,6 +339,8 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 		pageCount = maxSafePages
 	}
 
+	// Load document IDs from all pages on disk
+	diskIDSet := make(map[string]bool)
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := ba.loadDocumentPage(pageID)
 		if err != nil {
@@ -323,17 +350,43 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 		// Extract only document IDs, not full documents
 		for docID := range page.Documents {
 			ids = append(ids, docID)
+			diskIDSet[docID] = true
 		}
 	}
 
-	// Cache the IDs for future calls
-	ba.documentIDs = ids
+	ba.logger.Debugf("Loaded %d document IDs from disk", len(ids))
+
+	// CASSANDRA-STYLE MEMTABLE MERGE: Add memtable document IDs
+	// Only merge if Documents exists AND is marked as incomplete (memtable mode)
+	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
+		ba.logger.Debugf("MEMTABLE MERGE: Adding documents from memtable (has %d docs)", len(*ba.bundle.Documents))
+		memtableCount := 0
+		for docID := range *ba.bundle.Documents {
+			if !diskIDSet[docID] {
+				ids = append(ids, docID)
+				memtableCount++
+			}
+		}
+		ba.logger.Debugf("MEMTABLE MERGE: Added %d new documents from memtable", memtableCount)
+	}
+
+	//ba.logger.Debugf("Returning %d total document IDs (disk + memtable)", len(ids))
 	return ids
 }
 
 // GetDocument returns a single document by ID using streaming approach
 func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
-	// Stream through pages to find the specific document
+	// CASSANDRA-STYLE MEMTABLE CHECK FIRST:
+	// Check memtable before going to disk (recent writes have priority)
+	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
+		if doc, exists := (*ba.bundle.Documents)[docID]; exists {
+			ba.logger.Debugf("Document '%s' found in memtable", docID)
+			docCopy := doc
+			return &docCopy
+		}
+	}
+
+	// Stream through pages to find the specific document on disk
 	// SAFETY: Prevent infinite loops by limiting page count
 	maxSafePages := uint32(100)
 	pageCount := uint32(ba.bundle.PageCount)
@@ -353,7 +406,7 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 				return &docCopy
 			}
 		}
-		return nil // Document not found in page 0
+		return nil // Document not found in page 0 or memtable
 	}
 
 	if pageCount > maxSafePages {
@@ -380,20 +433,18 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 // GetAllDocuments returns all documents - WARNING: Use sparingly for large bundles!
 // This method is kept for compatibility but should be avoided for large datasets
 func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
-	allDocs := make(map[string]*models.Document)
+	ba.logger.Infof("GetAllDocuments called for bundle '%s'", ba.bundle.Name)
+	ba.logger.Infof("GetAllDocuments: PageCount=%d, TotalDocuments=%d, DocumentsComplete=%v, Documents!=nil=%v",
+		ba.bundle.PageCount, ba.bundle.TotalDocuments, ba.bundle.DocumentsComplete, ba.bundle.Documents != nil)
 
-	// FIRST: Check if bundle has legacy Documents field populated (e.g., from filtered bundles)
-	if ba.bundle.Documents != nil && len(*ba.bundle.Documents) > 0 {
-		ba.logger.Infof("Using legacy Documents field with %d documents", len(*ba.bundle.Documents))
-		for docID, doc := range *ba.bundle.Documents {
-			docCopy := doc
-			allDocs[docID] = &docCopy
-		}
-		return allDocs
+	if ba.bundle.Documents != nil {
+		ba.logger.Infof("GetAllDocuments: Bundle.Documents has %d entries", len(*ba.bundle.Documents))
 	}
 
-	// FALLBACK: Use page-based loading for modern bundles
-	ba.logger.Infof("Using page-based loading (PageCount=%d)", ba.bundle.PageCount)
+	allDocs := make(map[string]*models.Document)
+
+	// CASSANDRA-STYLE MEMTABLE MERGE:
+	// Always load from disk first (authoritative source), then merge memtable
 
 	// PROTECTION: Limit maximum pages to prevent infinite loops
 	maxPages := uint32(10000) // Reasonable maximum
@@ -402,26 +453,60 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 		ba.logger.Errorf("INFINITE LOOP PROTECTION: PageCount %d exceeds maximum %d, limiting", pageCount, maxPages)
 		pageCount = maxPages
 	}
-	if pageCount == 0 {
-		ba.logger.Infof("PageCount is 0, returning empty result")
-		return allDocs
+
+	// Load all pages from disk
+	if pageCount > 0 {
+		ba.logger.Infof("Loading documents from disk (PageCount=%d)", pageCount)
+
+		// Stream through pages and collect all documents
+		for pageID := uint32(0); pageID < pageCount; pageID++ {
+			ba.logger.Infof("Loading page %d...", pageID)
+			page, err := ba.loadDocumentPage(pageID)
+			if err != nil {
+				ba.logger.Errorf("Failed to load page %d: %v", pageID, err)
+				continue
+			}
+
+			ba.logger.Infof("Page %d loaded successfully with %d documents", pageID, len(page.Documents))
+
+			// Copy all documents from this page
+			for docID, doc := range page.Documents {
+				docCopy := doc
+				allDocs[docID] = &docCopy
+			}
+		}
+		ba.logger.Infof("Loaded %d documents from disk", len(allDocs))
 	}
 
-	// Stream through pages and collect all documents
-	for pageID := uint32(0); pageID < pageCount; pageID++ {
-		page, err := ba.loadDocumentPage(pageID)
-		if err != nil {
-			ba.logger.Infof("Failed to load page %d: %v", pageID, err)
-			continue
-		}
+	// Merge with memtable (recent writes not yet flushed to new pages)
+	// Only merge if Documents exists AND is marked as incomplete (memtable mode)
+	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
+		ba.logger.Infof("Merging %d documents from memtable with %d from disk",
+			len(*ba.bundle.Documents), len(allDocs))
 
-		// Copy all documents from this page
-		for docID, doc := range page.Documents {
+		// Add memtable documents that aren't already in disk results
+		// Disk wins for conflicts (should never happen, but defensive)
+		mergedCount := 0
+		for docID, doc := range *ba.bundle.Documents {
+			if _, exists := allDocs[docID]; !exists {
+				docCopy := doc
+				allDocs[docID] = &docCopy
+				mergedCount++
+			}
+		}
+		ba.logger.Infof("Merged %d new documents from memtable", mergedCount)
+	} else if ba.bundle.Documents != nil && ba.bundle.DocumentsComplete {
+		// If Documents is marked complete, use it directly (optimization path)
+		ba.logger.Infof("Using complete Documents cache with %d documents", len(*ba.bundle.Documents))
+		for docID, doc := range *ba.bundle.Documents {
 			docCopy := doc
 			allDocs[docID] = &docCopy
 		}
+	} else {
+		ba.logger.Infof("No memtable to merge (Documents=nil or DocumentsComplete=true)")
 	}
 
+	ba.logger.Infof("Returning %d total documents (disk + memtable)", len(allDocs))
 	return allDocs
 }
 

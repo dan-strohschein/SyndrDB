@@ -67,6 +67,9 @@ func main() {
 	// HASH INDEX FLAGS
 	flag.IntVar(&args.IndexSequenceSafetyMargin, "index-seq-margin", 100, "Safety margin for index sequence recovery")
 
+	// PARSER CONFIGURATION
+	flag.BoolVar(&args.UseNewParser, "use-new-parser", false, "Use new SyndrQL parser (default: false, uses legacy parser)")
+
 	// Parse command line arguments
 	flag.Parse()
 

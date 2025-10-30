@@ -70,6 +70,12 @@ type Bundle struct {
 	PageCount      int64 // Total number of document pages
 	PageSize       int   // Number of documents per page (default: 1000)
 
+	// Cassandra-style memtable approach for write buffering
+	// When false: Documents map is a write buffer (memtable) containing only recent writes
+	// When true: Documents map contains ALL documents and queries can use it directly
+	// This prevents the partial cache bug where Documents has some but not all documents
+	DocumentsComplete bool // Indicates if Documents map is complete or just a memtable (not serialized)
+
 	// TODO: Add LastPersisted timestamp to track staleness
 	IsDirty bool // Indicates metadata needs persistence (not serialized)
 }
@@ -154,16 +160,20 @@ type IndexService interface {
 }
 
 // IndexReference stores information about an index
+// NOTE: With the new header-based metadata system, much of this information
+// is now redundant as it's stored in file headers (.hidx files).
+// Future: Simplify this struct to only store runtime state (IndexInstance)
+// All metadata (CreateTime, Fields, IndexType, etc.) is in file headers
 type IndexReference struct {
 	IndexName  string
 	Fields     []FieldDefinition // List of fields in the index
 	IndexType  string            // "btree", "hash", etc.
-	CreateTime time.Time
+	CreateTime time.Time         // TODO: Remove - now in header.CreatedAt
 	// Reference to the actual index instance
 	// Stored as interface{} to avoid circular imports
-	IndexInstance   interface{} `json:"-"` // Skip serialization
-	HashIndexField  IndexField
-	BTreeIndexField IndexField
+	IndexInstance   interface{} `json:"-"` // Skip serialization - this is the primary useful field
+	HashIndexField  IndexField  // TODO: Consider removing - metadata in headers
+	BTreeIndexField IndexField  // TODO: Consider removing - metadata in headers
 }
 
 type IndexField struct {

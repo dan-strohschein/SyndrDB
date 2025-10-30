@@ -41,10 +41,12 @@ TODO: Future extensions
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,20 +72,35 @@ const (
 type EntryStorage struct {
 	// Configuration
 	indexName       string // Name of the index (e.g., "DocumentID_idx")
+	fieldName       string // Name of the field being indexed
 	bundleName      string // Name of the bundle this index belongs to
 	dataDir         string // Directory where index files are stored
 	maxFileSize     int64  // Maximum file size before rotation
 	writeBufferSize int    // Size of write buffer
+
+	// Index metadata flags
+	isForeignKey bool // True if this is a foreign key index
+	isUnique     bool // True if index enforces uniqueness
+	isPrimaryKey bool // True if this is the primary key index
+
+	// Foreign key relationship (only populated if isForeignKey == true)
+	referencedBundle string // Target bundle name
+	referencedField  string // Target field name
 
 	// Current active file
 	currentFile     *os.File      // Currently active file for writes
 	currentFileNum  int           // Current file number (0, 1, 2, ...)
 	currentFileSize int64         // Current size of active file
 	writeBuffer     *bufio.Writer // Buffered writer for performance
+	currentHeader   *IndexHeader  // Header of current file (cached)
 
 	// File management
 	allFiles  []string     // List of all entry files (ordered oldest to newest)
 	fileMutex sync.RWMutex // Protects file operations
+
+	// Header management (new)
+	headerManager *HeaderManager
+	namingHelper  *FileNamingHelper
 
 	// Statistics
 	totalEntries uint64    // Total entries written
@@ -97,11 +114,22 @@ type EntryStorage struct {
 // EntryStorageConfig holds configuration for EntryStorage
 type EntryStorageConfig struct {
 	IndexName       string // Name of the index
+	FieldName       string // Name of the field being indexed
 	BundleName      string // Name of the bundle
 	DataDir         string // Directory for index files
 	MaxFileSize     int64  // Maximum file size before rotation
 	WriteBufferSize int    // Write buffer size
-	Logger          *zap.SugaredLogger
+
+	// Index metadata flags
+	IsForeignKey bool // True if this is a foreign key index
+	IsUnique     bool // True if index enforces uniqueness
+	IsPrimaryKey bool // True if this is the primary key index
+
+	// Foreign key relationship (only if IsForeignKey == true)
+	ReferencedBundle string // Target bundle name
+	ReferencedField  string // Target field name
+
+	Logger *zap.SugaredLogger
 }
 
 // NewEntryStorage creates a new entry storage manager
@@ -114,11 +142,24 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 	if config.IndexName == "" {
 		return nil, fmt.Errorf("index name cannot be empty")
 	}
+	if config.FieldName == "" {
+		return nil, fmt.Errorf("field name cannot be empty")
+	}
 	if config.BundleName == "" {
 		return nil, fmt.Errorf("bundle name cannot be empty")
 	}
 	if config.DataDir == "" {
 		return nil, fmt.Errorf("data directory cannot be empty")
+	}
+
+	// Validate foreign key relationship if applicable
+	if config.IsForeignKey {
+		if config.ReferencedBundle == "" {
+			return nil, fmt.Errorf("referenced bundle required for foreign key index")
+		}
+		if config.ReferencedField == "" {
+			return nil, fmt.Errorf("referenced field required for foreign key index")
+		}
 	}
 
 	// Set defaults
@@ -130,20 +171,28 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 	}
 
 	// Create data directory if it doesn't exist
-	// config.DataDir already contains: data_files/<Database>/indexes/<Bundle>
+	// config.DataDir already contains: data_files/<Database>/<Bundle>/indexes
 	if err := os.MkdirAll(config.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create index directory: %w", err)
 	}
 
 	storage := &EntryStorage{
-		indexName:       config.IndexName,
-		bundleName:      config.BundleName,
-		dataDir:         config.DataDir,
-		maxFileSize:     config.MaxFileSize,
-		writeBufferSize: config.WriteBufferSize,
-		allFiles:        make([]string, 0),
-		lastRotation:    time.Now(),
-		logger:          config.Logger,
+		indexName:        config.IndexName,
+		fieldName:        config.FieldName,
+		bundleName:       config.BundleName,
+		dataDir:          config.DataDir,
+		maxFileSize:      config.MaxFileSize,
+		writeBufferSize:  config.WriteBufferSize,
+		isForeignKey:     config.IsForeignKey,
+		isUnique:         config.IsUnique,
+		isPrimaryKey:     config.IsPrimaryKey,
+		referencedBundle: config.ReferencedBundle,
+		referencedField:  config.ReferencedField,
+		allFiles:         make([]string, 0),
+		lastRotation:     time.Now(),
+		logger:           config.Logger,
+		headerManager:    NewHeaderManager(config.Logger),
+		namingHelper:     NewFileNamingHelper(config.DataDir, config.BundleName),
 	}
 
 	// Discover existing files
@@ -159,8 +208,10 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 	if storage.logger != nil {
 		storage.logger.Infow("Entry storage initialized",
 			"indexName", config.IndexName,
+			"fieldName", config.FieldName,
 			"bundleName", config.BundleName,
 			"dataDir", config.DataDir,
+			"isForeignKey", config.IsForeignKey,
 			"existingFiles", len(storage.allFiles))
 	}
 
@@ -289,6 +340,63 @@ func (es *EntryStorage) Flush() error {
 	return nil
 }
 
+// UpdateHeaderStatistics updates the header of the current file with latest statistics
+// This should be called periodically to keep header metadata in sync with actual data
+// Note: This is a relatively expensive operation (rewrites header), so call judiciously
+func (es *EntryStorage) UpdateHeaderStatistics(globalSequence uint64) error {
+	es.fileMutex.Lock()
+	defer es.fileMutex.Unlock()
+
+	if es.currentHeader == nil {
+		return fmt.Errorf("no current header to update")
+	}
+
+	// Update header statistics in memory
+	es.currentHeader.TotalEntries = es.totalEntries
+	// DeletedEntries would need to be tracked separately - for now keep existing value
+	es.currentHeader.FileSize = es.currentFileSize
+	es.currentHeader.GlobalSequence = globalSequence
+
+	// Write updated header to file
+	currentPath := es.namingHelper.GenerateIndexFilePath(es.fieldName, es.isForeignKey, es.currentFileNum)
+
+	if err := es.headerManager.UpdateStatistics(
+		currentPath,
+		es.currentHeader.TotalEntries,
+		es.currentHeader.DeletedEntries,
+		es.currentFileSize,
+		globalSequence,
+	); err != nil {
+		return fmt.Errorf("failed to update header statistics: %w", err)
+	}
+
+	if es.logger != nil {
+		es.logger.Debugf("Updated header statistics: entries=%d, size=%d, seq=%d",
+			es.totalEntries, es.currentFileSize, globalSequence)
+	}
+
+	return nil
+}
+
+// FlushWithHeaderUpdate flushes data and updates header statistics atomically
+// This is the recommended way to ensure header stays in sync with data
+func (es *EntryStorage) FlushWithHeaderUpdate(globalSequence uint64) error {
+	// First flush data
+	if err := es.Flush(); err != nil {
+		return fmt.Errorf("failed to flush data: %w", err)
+	}
+
+	// Then update header
+	if err := es.UpdateHeaderStatistics(globalSequence); err != nil {
+		// Log warning but don't fail - data is already flushed
+		if es.logger != nil {
+			es.logger.Warnf("Failed to update header after flush: %v", err)
+		}
+	}
+
+	return nil
+}
+
 // ScanBackward scans entries backward from the end of files
 // This is the primary read path for LSM indexes (latest entry wins)
 //
@@ -307,8 +415,8 @@ func (es *EntryStorage) ScanBackward(visitor func(*HashIndexEntry) bool) error {
 
 	// Scan files from newest to oldest
 	for i := len(es.allFiles) - 1; i >= 0; i-- {
-		filePath := es.allFiles[i]
-		filePath = filepath.Join(es.dataDir, filePath)
+		filename := es.allFiles[i]
+		filePath := filepath.Join(es.dataDir, filename)
 		if err := es.scanFileBackward(filePath, visitor); err != nil {
 			return fmt.Errorf("failed to scan file %s: %w", filePath, err)
 		}
@@ -334,7 +442,8 @@ func (es *EntryStorage) ScanForward(visitor func(*HashIndexEntry) bool) error {
 	}
 
 	// Scan files from oldest to newest
-	for _, filePath := range es.allFiles {
+	for _, filename := range es.allFiles {
+		filePath := filepath.Join(es.dataDir, filename)
 		if err := es.scanFileForward(filePath, visitor); err != nil {
 			return fmt.Errorf("failed to scan file %s: %w", filePath, err)
 		}
@@ -464,27 +573,92 @@ func (es *EntryStorage) discoverFiles() error {
 }
 
 // openCurrentFile opens or creates the current active file
+// Uses new naming convention: FieldName-fk.N.hidx OR FieldName.N.hidx
+// Writes header at the beginning of new files
 func (es *EntryStorage) openCurrentFile() error {
-	// Generate filename
-	filename := fmt.Sprintf("%s_%s_%06d%s",
-		es.bundleName, es.indexName, es.currentFileNum, EntryFileExtension)
+	// Generate filename using new naming convention
+	filename := es.namingHelper.GenerateIndexFileName(es.fieldName, es.isForeignKey, es.currentFileNum)
 	filePath := filepath.Join(es.dataDir, filename)
 
-	// Open file in append mode (create if doesn't exist)
-	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	// Check if file exists
+	fileExists := false
+	if _, err := os.Stat(filePath); err == nil {
+		fileExists = true
+	}
+
+	// Open file in read-write mode (create if doesn't exist)
+	file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open file %s: %w", filePath, err)
 	}
 
-	// Get current file size
-	fileInfo, err := file.Stat()
-	if err != nil {
-		file.Close()
-		return fmt.Errorf("failed to stat file: %w", err)
+	// If file is new, write header first
+	if !fileExists {
+		// Create header for this file
+		var header *IndexHeader
+		if es.isForeignKey {
+			header = es.headerManager.CreateHeaderWithRelationship(
+				es.indexName, es.fieldName, es.bundleName,
+				es.currentFileNum, es.isUnique, es.isPrimaryKey,
+				es.referencedBundle, es.referencedField,
+			)
+		} else {
+			header = es.headerManager.CreateHeader(
+				es.indexName, es.fieldName, es.bundleName,
+				es.currentFileNum, es.isForeignKey, es.isUnique, es.isPrimaryKey,
+			)
+		}
+
+		// Write header to file
+		bytesWritten, err := es.headerManager.WriteHeader(filePath, header)
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("failed to write header: %w", err)
+		}
+
+		es.currentHeader = header
+		es.currentFileSize = bytesWritten
+
+		if es.logger != nil {
+			es.logger.Debugf("Wrote header to new file %s: %d bytes", filename, bytesWritten)
+		}
+
+		// Seek to end for appending entries
+		if _, err := file.Seek(0, io.SeekEnd); err != nil {
+			file.Close()
+			return fmt.Errorf("failed to seek to end: %w", err)
+		}
+	} else {
+		// File exists - read header and seek past it
+		header, headerSize, err := es.headerManager.ReadHeader(filePath)
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("failed to read header from existing file: %w", err)
+		}
+
+		es.currentHeader = header
+
+		// Get current file size
+		fileInfo, err := file.Stat()
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("failed to stat file: %w", err)
+		}
+		es.currentFileSize = fileInfo.Size()
+
+		// Seek to end for appending entries
+		if _, err := file.Seek(0, io.SeekEnd); err != nil {
+			file.Close()
+			return fmt.Errorf("failed to seek to end: %w", err)
+		}
+
+		if es.logger != nil {
+			es.logger.Debugf("Opened existing file %s: header size=%d, file size=%d",
+				filename, headerSize, es.currentFileSize)
+		}
 	}
 
 	es.currentFile = file
-	es.currentFileSize = fileInfo.Size()
 	es.writeBuffer = bufio.NewWriterSize(file, es.writeBufferSize)
 
 	// Add to file list if not already there (store only basename)
@@ -504,7 +678,25 @@ func (es *EntryStorage) openCurrentFile() error {
 
 // rotateFile closes the current file and opens a new one
 // Called automatically when file size exceeds maxFileSize
+// Creates new header for the rotated file
 func (es *EntryStorage) rotateFile() error {
+	// Update statistics in current header before closing
+	if es.currentHeader != nil && es.currentFile != nil {
+		currentPath := es.namingHelper.GenerateIndexFilePath(es.fieldName, es.isForeignKey, es.currentFileNum)
+
+		// Update header with final statistics
+		if err := es.headerManager.UpdateStatistics(
+			currentPath,
+			es.currentHeader.TotalEntries,
+			es.currentHeader.DeletedEntries,
+			es.currentFileSize,
+			es.currentHeader.GlobalSequence,
+		); err != nil {
+			es.logger.Warnf("Failed to update header statistics before rotation: %v", err)
+			// Continue with rotation even if header update fails
+		}
+	}
+
 	// Flush and close current file
 	if es.writeBuffer != nil {
 		if err := es.writeBuffer.Flush(); err != nil {
@@ -529,6 +721,7 @@ func (es *EntryStorage) rotateFile() error {
 	if es.logger != nil {
 		es.logger.Infow("File rotated",
 			"indexName", es.indexName,
+			"fieldName", es.fieldName,
 			"bundleName", es.bundleName,
 			"newFileNum", es.currentFileNum,
 			"totalFiles", len(es.allFiles))
@@ -538,6 +731,7 @@ func (es *EntryStorage) rotateFile() error {
 }
 
 // scanFileBackward scans a single file backward
+// UPDATED: Now skips header for new .hidx files
 func (es *EntryStorage) scanFileBackward(filePath string, visitor func(*HashIndexEntry) bool) error {
 	// Read entire file (TODO: optimize with memory-mapped I/O)
 	data, err := os.ReadFile(filePath)
@@ -545,9 +739,35 @@ func (es *EntryStorage) scanFileBackward(filePath string, visitor func(*HashInde
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
+	// Determine starting offset based on file format
+	offset := 0
+
+	// Check if this is a new format file with header (.hidx extension)
+	if strings.HasSuffix(filePath, ".hidx") {
+		// New format - read header to get offset
+		if len(data) < HeaderMetadataPosition {
+			return fmt.Errorf("file too short to contain header")
+		}
+
+		// Read header size from fixed position
+		headerSizeBytes := data[8:12]
+		headerSize := int32(binary.LittleEndian.Uint32(headerSizeBytes))
+
+		if headerSize <= 0 || int(headerSize) > len(data) {
+			return fmt.Errorf("invalid header size: %d", headerSize)
+		}
+
+		// Start reading entries after header
+		offset = int(headerSize)
+
+		if es.logger != nil {
+			es.logger.Debugf("Scanning new format file, skipping header: %d bytes", headerSize)
+		}
+	}
+	// else: Legacy format (.idx) - no header, start at offset 0
+
 	// Parse all entries first (we need to reverse them)
 	entries := make([]*HashIndexEntry, 0, 1000)
-	offset := 0
 
 	for offset < len(data) {
 		entry, bytesRead, err := DeserializeEntry(data[offset:])
@@ -577,6 +797,7 @@ func (es *EntryStorage) scanFileBackward(filePath string, visitor func(*HashInde
 }
 
 // scanFileForward scans a single file forward
+// UPDATED: Now skips header for new .hidx files
 func (es *EntryStorage) scanFileForward(filePath string, visitor func(*HashIndexEntry) bool) error {
 	// Read entire file
 	data, err := os.ReadFile(filePath)
@@ -584,9 +805,34 @@ func (es *EntryStorage) scanFileForward(filePath string, visitor func(*HashIndex
 		return fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// Parse and visit entries in order
+	// Determine starting offset based on file format
 	offset := 0
 
+	// Check if this is a new format file with header (.hidx extension)
+	if strings.HasSuffix(filePath, ".hidx") {
+		// New format - read header to get offset
+		if len(data) < HeaderMetadataPosition {
+			return fmt.Errorf("file too short to contain header")
+		}
+
+		// Read header size from fixed position
+		headerSizeBytes := data[8:12]
+		headerSize := int32(binary.LittleEndian.Uint32(headerSizeBytes))
+
+		if headerSize <= 0 || int(headerSize) > len(data) {
+			return fmt.Errorf("invalid header size: %d", headerSize)
+		}
+
+		// Start reading entries after header
+		offset = int(headerSize)
+
+		if es.logger != nil {
+			es.logger.Debugf("Scanning new format file forward, skipping header: %d bytes", headerSize)
+		}
+	}
+	// else: Legacy format (.idx) - no header, start at offset 0
+
+	// Parse and visit entries in order
 	for offset < len(data) {
 		entry, bytesRead, err := DeserializeEntry(data[offset:])
 		if err != nil {
@@ -638,17 +884,37 @@ func (es *EntryStorage) ScanFileForMaxSequence(filename string) (uint64, error) 
 
 	var maxSeq uint64 = 0
 
-	// Read file info to get size
+	// Read file info to get total size
 	fileInfo, err := file.Stat()
 	if err != nil {
 		return 0, fmt.Errorf("failed to stat file: %w", err)
 	}
 
-	// Read entire file into memory (entry files are typically small)
-	data := make([]byte, fileInfo.Size())
+	// Get header size to know where entry data begins
+	// This is efficient - only reads first 12 bytes to get header size
+	headerSize, err := es.headerManager.GetHeaderSize(fullPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read header size from %s: %w", filename, err)
+	}
+
+	// Calculate entry data size (total file size - header size)
+	entryDataSize := fileInfo.Size() - headerSize
+	if entryDataSize <= 0 {
+		// File only contains header, no entries yet
+		es.logger.Debugf("File %s contains only header, no entries to scan", filename)
+		return 0, nil
+	}
+
+	// Seek past the header to where entry data begins
+	if _, err := file.Seek(headerSize, io.SeekStart); err != nil {
+		return 0, fmt.Errorf("failed to seek past header: %w", err)
+	}
+
+	// Read entry data (everything after header)
+	data := make([]byte, entryDataSize)
 	_, err = file.Read(data)
 	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("failed to read file: %w", err)
+		return 0, fmt.Errorf("failed to read entry data: %w", err)
 	}
 
 	// Deserialize entries one by one
@@ -670,6 +936,9 @@ func (es *EntryStorage) ScanFileForMaxSequence(filename string) (uint64, error) 
 
 		offset += bytesRead
 	}
+
+	es.logger.Debugf("Scanned %s: found max sequence %d from %d bytes of entry data",
+		filename, maxSeq, entryDataSize)
 
 	return maxSeq, nil
 }

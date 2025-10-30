@@ -37,8 +37,12 @@ func NewJSONSerializer() *JSONSerializer {
 }
 
 func (j *JSONSerializer) GetFormatName() string {
-	return "JSON"
+	return "json"
 }
+
+// DEPRECATED: JSONSerializer is deprecated in favor of BinarySerializer
+// The JSON format has known issues with incomplete deserialization of Indexes, IndexNames, and Constraints
+// Use BinarySerializer for all new code
 
 func (j *JSONSerializer) SerializeBundleMetadata(bundle *models.Bundle) ([]byte, error) {
 	// Create a metadata-only version without Documents
@@ -231,6 +235,23 @@ func (b *BinarySerializer) DeserializeBundleMetadata(data []byte) (*models.Bundl
 	bundle.Relationships, err = parseRelationshipsFromData(bundleData["Relationships"])
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse relationships: %w", err)
+	}
+
+	// Parse INDEXES
+	bundle.Indexes = make(map[string]models.IndexReference)
+	bundle.Indexes, err = parseIndexReferencesFromData(bundleData["Indexes"])
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse indexes: %w", err)
+	}
+
+	// Parse INDEX NAMES
+	bundle.IndexNames = getStringSlice(bundleData, "IndexNames")
+
+	// Parse CONSTRAINTS
+	bundle.Constraints = make(map[string]models.Constraint)
+	bundle.Constraints, err = parseConstraintsFromData(bundleData["Constraints"])
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse constraints: %w", err)
 	}
 
 	// Parse pagination metadata
@@ -449,6 +470,97 @@ func parseRelationshipsFromData(relationData interface{}) (map[string]models.Rel
 	}
 
 	return relationships, nil
+}
+
+func parseIndexReferencesFromData(indexData interface{}) (map[string]models.IndexReference, error) {
+	indexes := make(map[string]models.IndexReference)
+
+	if indexData == nil {
+		return indexes, nil
+	}
+
+	indexMap, ok := indexData.(map[string]interface{})
+	if !ok {
+		return indexes, fmt.Errorf("indexes data is not a valid map")
+	}
+
+	for key, val := range indexMap {
+		if idxData, ok := val.(map[string]interface{}); ok {
+			idx := models.IndexReference{
+				IndexName:  getString(idxData, "indexname"),             // BSON lowercases field names
+				IndexType:  getString(idxData, "indextype"),             // lowercase
+				CreateTime: getTimeFromInterface(idxData["createtime"]), // lowercase
+			}
+
+			// Parse Fields array
+			if fieldsData, ok := idxData["fields"].([]interface{}); ok {
+				idx.Fields = make([]models.FieldDefinition, len(fieldsData))
+				for i, fieldVal := range fieldsData {
+					if fieldMap, ok := fieldVal.(map[string]interface{}); ok {
+						idx.Fields[i] = models.FieldDefinition{
+							Name:         getString(fieldMap, "name"),
+							Type:         getString(fieldMap, "type"),
+							IsRequired:   getBool(fieldMap, "isrequired"),
+							IsUnique:     getBool(fieldMap, "isunique"),
+							DefaultValue: fieldMap["defaultvalue"],
+						}
+					}
+				}
+			}
+
+			// Parse HashIndexField
+			if hashFieldData, ok := idxData["hashindexfield"].(map[string]interface{}); ok {
+				idx.HashIndexField = models.IndexField{
+					FieldName: getString(hashFieldData, "fieldname"),
+					IsUnique:  getBool(hashFieldData, "isunique"),
+					Collation: getString(hashFieldData, "collation"),
+				}
+			}
+
+			// Parse BTreeIndexField
+			if btreeFieldData, ok := idxData["btreeindexfield"].(map[string]interface{}); ok {
+				idx.BTreeIndexField = models.IndexField{
+					FieldName: getString(btreeFieldData, "fieldname"),
+					IsUnique:  getBool(btreeFieldData, "isunique"),
+					Collation: getString(btreeFieldData, "collation"),
+				}
+			}
+
+			// Note: IndexInstance is intentionally not deserialized (it's marked json:"-")
+			// Indexes will be loaded lazily when needed
+
+			indexes[key] = idx
+		}
+	}
+
+	return indexes, nil
+}
+
+func parseConstraintsFromData(constraintData interface{}) (map[string]models.Constraint, error) {
+	constraints := make(map[string]models.Constraint)
+
+	if constraintData == nil {
+		return constraints, nil
+	}
+
+	constMap, ok := constraintData.(map[string]interface{})
+	if !ok {
+		return constraints, fmt.Errorf("constraints data is not a valid map")
+	}
+
+	for key, val := range constMap {
+		if constData, ok := val.(map[string]interface{}); ok {
+			constraint := models.Constraint{
+				ConstraintID:   getString(constData, "constraintid"),   // BSON lowercases field names
+				Name:           getString(constData, "name"),           // lowercase
+				Description:    getString(constData, "description"),    // lowercase
+				ConstraintType: getString(constData, "constrainttype"), // lowercase
+			}
+			constraints[key] = constraint
+		}
+	}
+
+	return constraints, nil
 }
 
 // GetSerializer returns the appropriate serializer based on format string
