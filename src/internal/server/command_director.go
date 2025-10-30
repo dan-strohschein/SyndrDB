@@ -257,22 +257,41 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			// Execute the database command
 			serviceManager.DatabaseService.DeleteDatabase(dbCommand.DatabaseName)
 		case "bundle":
-			bundleName, err := parseBundleNameFromCommand(command, "DELETE")
+			// DROP BUNDLE "<BUNDLE_NAME>"
+			// Use new parser if feature flag is enabled, fallback to legacy on error
+			bundleCmd, err := parseDropBundle(command, logger)
 			if err != nil {
-				return &result, err
+				return &result, fmt.Errorf("error parsing DROP BUNDLE command: %v", err)
 			}
 
-			//Validate that there are no documents in the bundle
+			// Validate bundle name
+			bundleName := bundleCmd.BundleName
+			if bundleName == "" {
+				return &result, fmt.Errorf("bundle name cannot be empty in DROP BUNDLE command")
+			}
+
+			// Validate that the bundle exists
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
-				return &result, err
+				return &result, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 			}
 
+			// Validate that there are no documents in the bundle
 			if bundle.Documents != nil && len(*bundle.Documents) > 0 {
 				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
 			}
 
-			serviceManager.BundleService.RemoveBundle(database, bundleName)
+			// TODO: Finish this implementation next sprint
+			// The actual DROP BUNDLE implementation needs to be completed with:
+			// - WAL logging for transaction safety
+			// - Catalog service deregistration
+			// - Index cleanup
+			// - Relationship cleanup
+			// For now, return an error indicating this is not yet implemented
+			return &result, fmt.Errorf("DROP BUNDLE has not yet been implemented - coming in next sprint")
+
+			// PLACEHOLDER: This is where the actual deletion will happen
+			// serviceManager.BundleService.RemoveBundle(database, bundleName)
 		case "documents":
 			// DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>
 			// Parse the document command first to get bundle name and WHERE clause
@@ -1000,7 +1019,8 @@ func CreateBTreeIndex(command string, logger *zap.SugaredLogger, serviceManager 
 
 func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, result string) (*CommandResponse, error) {
 	//args := settings.GetSettings()
-	bundleCmd, err := bndle.ParseCreateBundleCommand(command, logger)
+	// Use new parser if feature flag is enabled, fallback to legacy on error
+	bundleCmd, err := parseCreateBundle(command, logger)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing bundle command: %v", err)
 	}
@@ -3852,4 +3872,111 @@ func parseDeleteDocument(command string, logger *zap.SugaredLogger) (*models.Doc
 	logger.Infof("Successfully parsed DELETE DOCUMENTS using new parser")
 
 	return docDeleteCommand, nil
+}
+
+// parseCreateBundleWithNewParser uses the new SyndrQL parser to parse CREATE BUNDLE
+// Syntax: CREATE BUNDLE "<BUNDLE_NAME>" WITH FIELDS ( {...}, ... );
+func parseCreateBundleWithNewParser(command string, logger *zap.SugaredLogger) (*models.BundleCommand, error) {
+	// Create CREATE BUNDLE parser
+	createBundleParser, err := syndrQL.NewCreateBundleParser(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CREATE BUNDLE parser: %w", err)
+	}
+
+	// Parse the CREATE BUNDLE statement
+	createBundleStmt, err := createBundleParser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse CREATE BUNDLE statement: %w", err)
+	}
+
+	// Convert to BundleCommand using adapter
+	adapter := syndrQL.NewCreateBundleStatementAdapter(logger)
+	bundleCommand, err := adapter.ToBundleCommand(createBundleStmt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert CreateBundleStatement to BundleCommand: %w", err)
+	}
+
+	return bundleCommand, nil
+}
+
+// parseCreateBundle attempts new parser first (if enabled), falls back to legacy on error
+// This mirrors the parseQuery, parseAddDocument, parseUpdateDocument, and parseDeleteDocument function patterns for consistency
+func parseCreateBundle(command string, logger *zap.SugaredLogger) (*models.BundleCommand, error) {
+	// Check feature flag
+	if !shouldUseNewParser() {
+		logger.Debugf("Using legacy CREATE BUNDLE parser (flag disabled)")
+		return bndle.ParseCreateBundleCommand(command, logger)
+	}
+
+	// Try new parser
+	logger.Debugf("Attempting new SyndrQL CREATE BUNDLE parser (flag enabled)")
+	globalParserMetrics.NewParserAttempts.Add(1)
+
+	bundleCommand, err := parseCreateBundleWithNewParser(command, logger)
+	if err != nil {
+		// Record failure and fallback
+		globalParserMetrics.NewParserFailures.Add(1)
+		globalParserMetrics.FallbacksTriggered.Add(1)
+
+		logger.Warnf("New CREATE BUNDLE parser failed: %v. Falling back to legacy parser.", err)
+
+		// Fallback to legacy parser
+		return bndle.ParseCreateBundleCommand(command, logger)
+	}
+
+	// Record success
+	globalParserMetrics.NewParserSuccesses.Add(1)
+	logger.Infof("Successfully parsed CREATE BUNDLE using new parser")
+
+	return bundleCommand, nil
+}
+
+// parseDropBundleWithNewParser parses a DROP BUNDLE statement using the new SyndrQL parser
+// and converts it to a BundleCommand via the adapter layer
+func parseDropBundleWithNewParser(command string, logger *zap.SugaredLogger) (*models.BundleCommand, error) {
+	// Create parser for DROP BUNDLE statement
+	parser, err := syndrQL.NewDropBundleParser(command)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create DROP BUNDLE parser: %w", err)
+	}
+
+	// Parse the statement
+	dropBundleStmt, err := parser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DROP BUNDLE statement: %w", err)
+	}
+
+	// Convert to BundleCommand using adapter
+	adapter := syndrQL.NewDropBundleStatementAdapter(logger)
+	bundleCommand, err := adapter.ToBundleCommand(dropBundleStmt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert DROP BUNDLE statement to command: %w", err)
+	}
+
+	return bundleCommand, nil
+}
+
+// parseDropBundle attempts to use the new parser, falling back to legacy on error
+// This is the main entry point for DROP BUNDLE parsing with feature flag support
+func parseDropBundle(command string, logger *zap.SugaredLogger) (*models.BundleCommand, error) {
+	if shouldUseNewParser() {
+		// Track parser attempt
+		globalParserMetrics.NewParserAttempts.Add(1)
+
+		cmd, err := parseDropBundleWithNewParser(command, logger)
+		if err != nil {
+			// Track failure and fall back to legacy parser
+			globalParserMetrics.NewParserFailures.Add(1)
+			globalParserMetrics.FallbacksTriggered.Add(1)
+			logger.Warnf("New DROP BUNDLE parser failed, falling back to legacy: %v", err)
+			return bndle.ParseDeleteBundleCommand(command)
+		}
+
+		// Track success
+		globalParserMetrics.NewParserSuccesses.Add(1)
+		return cmd, nil
+	}
+
+	// Use legacy parser directly if new parser is disabled
+	return bndle.ParseDeleteBundleCommand(command)
 }

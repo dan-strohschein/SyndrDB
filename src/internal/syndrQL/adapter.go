@@ -566,3 +566,198 @@ func (a *DeleteStatementAdapter) serializeWhereGroup(whereGroup *queryparser.Whe
 
 	return strings.Join(parts, operator)
 }
+
+// CreateBundleStatementAdapter adapts CreateBundleStatement to BundleCommand
+// This adapter handles the conversion of parsed CREATE BUNDLE statements from the new
+// SyndrQL parser into the BundleCommand structure expected by the bundle service
+type CreateBundleStatementAdapter struct {
+	logger *zap.SugaredLogger
+}
+
+// NewCreateBundleStatementAdapter creates a new CREATE BUNDLE statement adapter
+func NewCreateBundleStatementAdapter(logger *zap.SugaredLogger) *CreateBundleStatementAdapter {
+	return &CreateBundleStatementAdapter{
+		logger: logger,
+	}
+}
+
+// ToBundleCommand converts a CreateBundleStatement to a BundleCommand
+// This maintains compatibility with the existing bundle service interface
+func (a *CreateBundleStatementAdapter) ToBundleCommand(stmt *CreateBundleStatement) (*models.BundleCommand, error) {
+	if stmt == nil {
+		return nil, fmt.Errorf("cannot convert nil CreateBundleStatement")
+	}
+
+	if stmt.BundleName == "" {
+		return nil, fmt.Errorf("bundle name cannot be empty in CREATE BUNDLE statement")
+	}
+
+	if len(stmt.Fields) == 0 {
+		return nil, fmt.Errorf("CREATE BUNDLE statement must specify at least one field")
+	}
+
+	// Convert FieldDefinitionParsed to FieldDefinition
+	fields := make([]models.FieldDefinition, 0, len(stmt.Fields))
+	for i, parsedField := range stmt.Fields {
+		// Validate field properties
+		if parsedField.Name == "" {
+			return nil, fmt.Errorf("field %d: field name cannot be empty", i+1)
+		}
+
+		if parsedField.Type == "" {
+			return nil, fmt.Errorf("field %d (%s): field type cannot be empty", i+1, parsedField.Name)
+		}
+
+		// Validate field type
+		if err := a.validateFieldType(parsedField.Type); err != nil {
+			return nil, fmt.Errorf("field %d (%s): %w", i+1, parsedField.Name, err)
+		}
+
+		// Validate default value matches field type
+		if parsedField.DefaultValue != nil {
+			if err := a.validateDefaultValue(parsedField.Type, parsedField.DefaultValue); err != nil {
+				return nil, fmt.Errorf("field %d (%s): %w", i+1, parsedField.Name, err)
+			}
+		}
+
+		fields = append(fields, models.FieldDefinition{
+			Name:         parsedField.Name,
+			Type:         parsedField.Type,
+			IsRequired:   parsedField.IsRequired,
+			IsUnique:     parsedField.IsUnique,
+			DefaultValue: parsedField.DefaultValue,
+		})
+	}
+
+	return &models.BundleCommand{
+		CommandType: "CREATE",
+		BundleName:  stmt.BundleName,
+		Fields:      fields,
+		Changes:     nil, // Not applicable for CREATE
+	}, nil
+}
+
+// validateFieldType validates that the field type is supported
+func (a *CreateBundleStatementAdapter) validateFieldType(fieldType string) error {
+	// Normalize to lowercase for comparison
+	normalizedType := strings.ToLower(fieldType)
+
+	// TODO: I should maintain this list in a central location for consistency
+	validTypes := map[string]bool{
+		"string":   true,
+		"int":      true,
+		"float":    true,
+		"bool":     true,
+		"boolean":  true,
+		"date":     true,
+		"time":     true,
+		"datetime": true,
+		"blob":     true,
+		"json":     true,
+	}
+
+	if !validTypes[normalizedType] {
+		return fmt.Errorf("unsupported field type: %s", fieldType)
+	}
+
+	return nil
+}
+
+// validateDefaultValue validates that the default value matches the field type
+func (a *CreateBundleStatementAdapter) validateDefaultValue(fieldType string, defaultValue interface{}) error {
+	if defaultValue == nil {
+		return nil // NULL is always valid
+	}
+
+	normalizedType := strings.ToLower(fieldType)
+
+	switch normalizedType {
+	case "string":
+		if _, ok := defaultValue.(string); !ok {
+			return fmt.Errorf("default value must be a string for type 'string', got %T", defaultValue)
+		}
+
+	case "int":
+		// Accept both int64 and float64 (if it's a whole number)
+		switch v := defaultValue.(type) {
+		case int64:
+			// Valid
+		case float64:
+			if v != float64(int64(v)) {
+				return fmt.Errorf("default value must be an integer for type 'int', got float with decimal: %v", v)
+			}
+		default:
+			return fmt.Errorf("default value must be an integer for type 'int', got %T", defaultValue)
+		}
+
+	case "float":
+		// Accept both int64 and float64
+		switch defaultValue.(type) {
+		case int64, float64:
+			// Valid
+		default:
+			return fmt.Errorf("default value must be a number for type 'float', got %T", defaultValue)
+		}
+
+	case "bool", "boolean":
+		if _, ok := defaultValue.(bool); !ok {
+			return fmt.Errorf("default value must be a boolean for type 'bool', got %T", defaultValue)
+		}
+
+	case "date", "time", "datetime":
+		// Date/time values are typically stored as strings in the command
+		if _, ok := defaultValue.(string); !ok {
+			return fmt.Errorf("default value must be a string for type '%s', got %T", fieldType, defaultValue)
+		}
+
+	case "json":
+		// JSON values can be strings or structured data
+		// We'll accept any type here and let the bundle service handle validation
+		// TODO: I should add JSON validation here
+
+	case "blob":
+		// Blob values are typically base64 encoded strings
+		if _, ok := defaultValue.(string); !ok {
+			return fmt.Errorf("default value must be a string (base64) for type 'blob', got %T", defaultValue)
+		}
+
+	default:
+		// Unknown type, skip validation
+		a.logger.Warnf("Unknown field type '%s', skipping default value validation", fieldType)
+	}
+
+	return nil
+}
+
+// DropBundleStatementAdapter adapts DropBundleStatement to BundleCommand
+// This adapter handles the conversion of parsed DROP BUNDLE statements from the new
+// SyndrQL parser into the BundleCommand structure expected by the bundle service
+type DropBundleStatementAdapter struct {
+	logger *zap.SugaredLogger
+}
+
+// NewDropBundleStatementAdapter creates a new DROP BUNDLE statement adapter
+func NewDropBundleStatementAdapter(logger *zap.SugaredLogger) *DropBundleStatementAdapter {
+	return &DropBundleStatementAdapter{
+		logger: logger,
+	}
+}
+
+// ToBundleCommand converts a DropBundleStatement to a BundleCommand
+// This maintains compatibility with the existing bundle service interface
+func (a *DropBundleStatementAdapter) ToBundleCommand(stmt *DropBundleStatement) (*models.BundleCommand, error) {
+	if stmt == nil {
+		return nil, fmt.Errorf("cannot convert nil DropBundleStatement")
+	}
+
+	if stmt.BundleName == "" {
+		return nil, fmt.Errorf("bundle name cannot be empty in DROP BUNDLE statement")
+	}
+
+	return &models.BundleCommand{
+		CommandType: "DELETE",
+		BundleName:  stmt.BundleName,
+		Fields:      nil, // Not applicable for DROP
+		Changes:     nil, // Not applicable for DROP
+	}, nil
+}
