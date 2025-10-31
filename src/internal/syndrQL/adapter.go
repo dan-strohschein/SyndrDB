@@ -319,7 +319,7 @@ func (a *SelectStatementAdapter) convertJoinClauses(joinClauses []JoinClause) []
 func (a *SelectStatementAdapter) parseQualifiedFieldName(qualifiedName string) (bundle string, field string) {
 	// Split on dot to separate bundle from field
 	parts := strings.Split(qualifiedName, ".")
-	
+
 	if len(parts) == 2 {
 		// Qualified name: "Bundle"."Field"
 		bundle = strings.Trim(parts[0], "\"")
@@ -840,9 +840,10 @@ func (a *DropBundleStatementAdapter) ToBundleCommand(stmt *DropBundleStatement) 
 	}
 
 	return &models.BundleCommand{
-		CommandType: "DELETE",
-		BundleName:  stmt.BundleName,
-		Fields:      nil, // Not applicable for DROP
-		Changes:     nil, // Not applicable for DROP
+		CommandType:    "DELETE",
+		BundleName:     stmt.BundleName,
+		Fields:         nil,                 // Not applicable for DROP
+		Changes:        nil,                 // Not applicable for DROP
+		HasForceSwitch: stmt.HasForceSwitch, // Pass FORCE flag for deletion validation
 	}, nil
 }

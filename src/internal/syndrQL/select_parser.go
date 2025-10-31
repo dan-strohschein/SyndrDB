@@ -36,8 +36,8 @@ type SelectStatement struct {
 // JoinClause represents a JOIN operation in a SELECT query
 // This structure maps to queryparser.JoinClause for compatibility
 type JoinClause struct {
-	JoinType       JoinType       // Type of join (INNER, LEFT, RIGHT, FULL)
-	RightBundle    string         // Bundle being joined
+	JoinType       JoinType        // Type of join (INNER, LEFT, RIGHT, FULL)
+	RightBundle    string          // Bundle being joined
 	JoinConditions []JoinCondition // Join conditions (ON clause)
 }
 
@@ -45,10 +45,10 @@ type JoinClause struct {
 type JoinType int
 
 const (
-	InnerJoin JoinType = iota // INNER JOIN (default)
-	LeftJoin                  // LEFT JOIN / LEFT OUTER JOIN
-	RightJoin                 // RIGHT JOIN / RIGHT OUTER JOIN
-	FullOuterJoin             // FULL OUTER JOIN
+	InnerJoin     JoinType = iota // INNER JOIN (default)
+	LeftJoin                      // LEFT JOIN / LEFT OUTER JOIN
+	RightJoin                     // RIGHT JOIN / RIGHT OUTER JOIN
+	FullOuterJoin                 // FULL OUTER JOIN
 )
 
 // String returns the string representation of a JoinType
@@ -474,7 +474,7 @@ func (p *SelectParser) parseOptionalClauses(stmt *SelectStatement, logger *zap.S
 			return fmt.Errorf("failed to parse JOIN clause: %w", err)
 		}
 		stmt.JoinClauses = append(stmt.JoinClauses, *joinClause)
-		
+
 		// Update pattern to indicate this is a JOIN query
 		stmt.Pattern = PATTERN_SELECT_JOIN
 	}
@@ -895,7 +895,7 @@ func (p *SelectParser) parseJoinClause(logger *zap.SugaredLogger) (*JoinClause, 
 	// We'll look backward at the previous token if we need to support that
 	// For now, we assume standard "JOIN" means INNER JOIN
 	// TODO: I should add support for detecting LEFT/RIGHT/FULL modifiers before JOIN token
-	
+
 	p.advance() // Consume JOIN keyword
 
 	// Parse bundle name (table being joined)
@@ -931,7 +931,7 @@ func (p *SelectParser) parseJoinClause(logger *zap.SugaredLogger) (*JoinClause, 
 		break
 	}
 
-	logger.Debugf("Parsed JOIN clause: %s to %s with %d conditions", 
+	logger.Debugf("Parsed JOIN clause: %s to %s with %d conditions",
 		joinClause.JoinType.String(), joinClause.RightBundle, len(joinClause.JoinConditions))
 
 	return joinClause, nil

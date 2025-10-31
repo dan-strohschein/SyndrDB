@@ -33,7 +33,8 @@ TODO: I will add support for RESTRICT option to prevent deletion if dependencies
 
 // DropBundleStatement represents a parsed DROP BUNDLE statement
 type DropBundleStatement struct {
-	BundleName string // Name of the bundle to drop
+	BundleName     string // Name of the bundle to drop
+	HasForceSwitch bool   // Whether WITH FORCE was specified (allows deletion with documents/relationships)
 	// TODO: I will add IfExists bool flag for IF EXISTS support
 	// TODO: I will add Cascade bool flag for CASCADE deletion
 	// TODO: I will add Restrict bool flag to prevent deletion with dependencies
@@ -83,6 +84,27 @@ func (p *DropBundleParser) Parse() (*DropBundleStatement, error) {
 		return nil, fmt.Errorf("bundle name cannot be empty")
 	}
 
+	// Initialize statement
+	stmt := &DropBundleStatement{
+		BundleName:     bundleName,
+		HasForceSwitch: false,
+	}
+
+	// Optional: WITH FORCE clause
+	// Syntax: DROP BUNDLE "BundleName" WITH FORCE;
+	// This allows dropping bundles that have documents or relationships
+	if !p.isAtEnd() && p.peek().Type == TOKEN_WITH {
+		p.advance() // consume WITH
+
+		// Expect: FORCE keyword
+		if p.isAtEnd() || p.peek().Type != TOKEN_FORCE {
+			return nil, fmt.Errorf("expected FORCE after WITH, got %s", p.peek().Type.String())
+		}
+		p.advance() // consume FORCE
+
+		stmt.HasForceSwitch = true
+	}
+
 	// Optional: semicolon
 	if !p.isAtEnd() && p.peek().Type == TOKEN_SEMICOLON {
 		p.advance()
@@ -93,9 +115,7 @@ func (p *DropBundleParser) Parse() (*DropBundleStatement, error) {
 		return nil, fmt.Errorf("unexpected tokens after DROP BUNDLE statement: %s", p.peek().Value)
 	}
 
-	return &DropBundleStatement{
-		BundleName: bundleName,
-	}, nil
+	return stmt, nil
 }
 
 // Helper methods for token navigation and validation
@@ -118,7 +138,7 @@ func (p *DropBundleParser) advance() Token {
 
 // isAtEnd checks if we've reached the end of tokens
 func (p *DropBundleParser) isAtEnd() bool {
-	return p.current >= len(p.tokens) || p.peek().Type == TOKEN_EOF
+	return p.current >= len(p.tokens) || p.tokens[p.current].Type == TOKEN_EOF
 }
 
 // expectKeyword expects a specific keyword token

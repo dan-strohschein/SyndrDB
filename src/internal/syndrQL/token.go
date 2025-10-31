@@ -98,6 +98,7 @@ const (
 	TOKEN_ON           // ON
 	TOKEN_AS           // AS
 	TOKEN_RELATIONSHIP // RELATIONSHIP (for WITH RELATIONSHIP clause)
+	TOKEN_FORCE        // FORCE (for FORCE switch)
 
 	// Keywords - Utility (Cold Path)
 	TOKEN_SHOW     // SHOW
@@ -273,6 +274,8 @@ func (tt TokenType) String() string {
 		return "ARRAY_TYPE"
 	case TOKEN_DATE_TYPE:
 		return "DATE_TYPE"
+	case TOKEN_FORCE:
+		return "FORCE"
 	default:
 		return "UNKNOWN"
 	}
@@ -337,6 +340,7 @@ var keywords = map[string]TokenType{
 	"ON":           TOKEN_ON,
 	"AS":           TOKEN_AS,
 	"RELATIONSHIP": TOKEN_RELATIONSHIP,
+	"FORCE":        TOKEN_FORCE,
 
 	// Utility Keywords (Cold Path)
 	"SHOW":     TOKEN_SHOW,

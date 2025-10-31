@@ -426,3 +426,163 @@ func TestDropBundleParser_CaseSensitivity(t *testing.T) {
 		})
 	}
 }
+
+// Test WITH FORCE clause functionality
+
+// TestDropBundleParser_WithForce tests DROP BUNDLE with WITH FORCE clause
+func TestDropBundleParser_WithForce(t *testing.T) {
+	tests := []struct {
+		name             string
+		input            string
+		expectError      bool
+		expectedBundle   string
+		expectedHasForce bool
+	}{
+		{
+			name:             "DROP BUNDLE with WITH FORCE",
+			input:            `DROP BUNDLE "Authors2" WITH FORCE;`,
+			expectError:      false,
+			expectedBundle:   "Authors2",
+			expectedHasForce: true,
+		},
+		{
+			name:             "DROP BUNDLE with WITH FORCE - no semicolon",
+			input:            `DROP BUNDLE "test_bundle" WITH FORCE`,
+			expectError:      false,
+			expectedBundle:   "test_bundle",
+			expectedHasForce: true,
+		},
+		{
+			name:             "DROP BUNDLE with WITH FORCE - extra whitespace",
+			input:            `DROP BUNDLE "users"    WITH    FORCE;`,
+			expectError:      false,
+			expectedBundle:   "users",
+			expectedHasForce: true,
+		},
+		{
+			name:             "DROP BUNDLE with WITH FORCE - newlines",
+			input:            "DROP BUNDLE \"logs\"\nWITH FORCE\n;",
+			expectError:      false,
+			expectedBundle:   "logs",
+			expectedHasForce: true,
+		},
+		{
+			name:             "DROP BUNDLE without FORCE - should not set flag",
+			input:            `DROP BUNDLE "products";`,
+			expectError:      false,
+			expectedBundle:   "products",
+			expectedHasForce: false,
+		},
+		{
+			name:             "DROP BUNDLE with mixed case FORCE",
+			input:            `DROP BUNDLE "orders" WITH force;`,
+			expectError:      false,
+			expectedBundle:   "orders",
+			expectedHasForce: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser, err := syndrQL.NewDropBundleParser(tt.input)
+			if err != nil {
+				if !tt.expectError {
+					t.Fatalf("Failed to create parser: %v", err)
+				}
+				return
+			}
+
+			stmt, err := parser.Parse()
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("Expected error but got none")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+
+			// Verify bundle name
+			if stmt.BundleName != tt.expectedBundle {
+				t.Errorf("Expected bundle name %s, got %s", tt.expectedBundle, stmt.BundleName)
+			}
+
+			// Verify HasForceSwitch flag
+			if stmt.HasForceSwitch != tt.expectedHasForce {
+				t.Errorf("Expected HasForceSwitch %v, got %v", tt.expectedHasForce, stmt.HasForceSwitch)
+			}
+		})
+	}
+}
+
+// TestDropBundleParser_WithForceErrors tests error cases for WITH FORCE
+func TestDropBundleParser_WithForceErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "WITH without FORCE keyword",
+			input: `DROP BUNDLE "test" WITH;`,
+		},
+		{
+			name:  "WITH followed by invalid keyword",
+			input: `DROP BUNDLE "test" WITH CASCADE;`,
+		},
+		{
+			name:  "WITH FORCE with extra tokens",
+			input: `DROP BUNDLE "test" WITH FORCE EXTRA;`,
+		},
+		{
+			name:  "Multiple WITH FORCE clauses",
+			input: `DROP BUNDLE "test" WITH FORCE WITH FORCE;`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser, err := syndrQL.NewDropBundleParser(tt.input)
+			if err != nil {
+				// Tokenization error is acceptable
+				return
+			}
+
+			stmt, err := parser.Parse()
+			if err == nil {
+				t.Fatalf("Expected error but parsing succeeded. Statement: %+v", stmt)
+			}
+
+			t.Logf("Got expected error: %v", err)
+		})
+	}
+}
+
+// TestDropBundleParser_WithForceIntegration tests adapter integration with FORCE flag
+func TestDropBundleParser_WithForceIntegration(t *testing.T) {
+	input := `DROP BUNDLE "test_bundle" WITH FORCE;`
+
+	// Parse the DROP BUNDLE statement
+	parser, err := syndrQL.NewDropBundleParser(input)
+	if err != nil {
+		t.Fatalf("Failed to create parser: %v", err)
+	}
+
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Failed to parse DROP BUNDLE statement: %v", err)
+	}
+
+	// Verify statement structure
+	if stmt.BundleName != "test_bundle" {
+		t.Errorf("Expected bundle name 'test_bundle', got '%s'", stmt.BundleName)
+	}
+
+	if !stmt.HasForceSwitch {
+		t.Error("Expected HasForceSwitch to be true")
+	}
+
+	t.Logf("Successfully parsed DROP BUNDLE WITH FORCE statement for bundle: %s (HasForceSwitch: %v)",
+		stmt.BundleName, stmt.HasForceSwitch)
+}

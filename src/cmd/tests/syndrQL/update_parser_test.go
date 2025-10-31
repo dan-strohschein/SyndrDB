@@ -2,6 +2,8 @@ package syndrQL_test
 
 import (
 	"testing"
+
+	syndrQL "syndrdb/src/internal/syndrQL"
 )
 
 /*
@@ -137,10 +139,10 @@ func TestUpdateParser_BasicUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := NewUpdateParser(tt.input)
+			parser, err := syndrQL.NewUpdateParser(tt.input)
 			if err != nil {
 				if !tt.expectError {
-					t.Errorf("NewUpdateParser() failed unexpectedly: %v", err)
+					t.Errorf("syndrQL.NewUpdateParser() failed unexpectedly: %v", err)
 				}
 				return
 			}
@@ -200,22 +202,22 @@ func TestUpdateParser_WhereClause(t *testing.T) {
 		name        string
 		input       string
 		expectError bool
-		checkWhere  func(*testing.T, Expression)
+		checkWhere  func(*testing.T, syndrQL.Expression)
 	}{
 		{
 			name:        "Simple equality WHERE",
 			input:       `UPDATE DOCUMENTS IN BUNDLE "users" (name = "John") WHERE id = 1;`,
 			expectError: false,
-			checkWhere: func(t *testing.T, expr Expression) {
+			checkWhere: func(t *testing.T, expr syndrQL.Expression) {
 				if expr == nil {
 					t.Error("WHERE clause is nil")
 				}
 				// Basic check that expression exists
-				binExpr, ok := expr.(*BinaryExpression)
+				binExpr, ok := expr.(*syndrQL.BinaryExpression)
 				if !ok {
-					t.Errorf("Expected BinaryExpression, got %T", expr)
+					t.Errorf("Expected syndrQL.BinaryExpression, got %T", expr)
 				}
-				if binExpr.Operator != TOKEN_EQUAL {
+				if binExpr.Operator != syndrQL.TOKEN_EQ {
 					t.Errorf("Expected EQUAL operator, got %v", binExpr.Operator)
 				}
 			},
@@ -224,16 +226,16 @@ func TestUpdateParser_WhereClause(t *testing.T) {
 			name:        "Complex WHERE with AND",
 			input:       `UPDATE DOCUMENTS IN BUNDLE "users" (active = true) WHERE age > 18 AND status = "active";`,
 			expectError: false,
-			checkWhere: func(t *testing.T, expr Expression) {
+			checkWhere: func(t *testing.T, expr syndrQL.Expression) {
 				if expr == nil {
 					t.Error("WHERE clause is nil")
 				}
-				// Expression should be parsed (detailed validation in expression parser tests)
-				binExpr, ok := expr.(*BinaryExpression)
+				// syndrQL.Expression should be parsed (detailed validation in expression parser tests)
+				binExpr, ok := expr.(*syndrQL.BinaryExpression)
 				if !ok {
-					t.Errorf("Expected BinaryExpression, got %T", expr)
+					t.Errorf("Expected syndrQL.BinaryExpression, got %T", expr)
 				}
-				if binExpr.Operator != TOKEN_AND {
+				if binExpr.Operator != syndrQL.TOKEN_AND {
 					t.Errorf("Expected AND operator, got %v", binExpr.Operator)
 				}
 			},
@@ -242,15 +244,15 @@ func TestUpdateParser_WhereClause(t *testing.T) {
 			name:        "WHERE with OR operator",
 			input:       `UPDATE DOCUMENTS IN BUNDLE "orders" (status = "shipped") WHERE priority = "high" OR amount > 1000;`,
 			expectError: false,
-			checkWhere: func(t *testing.T, expr Expression) {
+			checkWhere: func(t *testing.T, expr syndrQL.Expression) {
 				if expr == nil {
 					t.Error("WHERE clause is nil")
 				}
-				binExpr, ok := expr.(*BinaryExpression)
+				binExpr, ok := expr.(*syndrQL.BinaryExpression)
 				if !ok {
-					t.Errorf("Expected BinaryExpression, got %T", expr)
+					t.Errorf("Expected syndrQL.BinaryExpression, got %T", expr)
 				}
-				if binExpr.Operator != TOKEN_OR {
+				if binExpr.Operator != syndrQL.TOKEN_OR {
 					t.Errorf("Expected OR operator, got %v", binExpr.Operator)
 				}
 			},
@@ -259,7 +261,7 @@ func TestUpdateParser_WhereClause(t *testing.T) {
 			name:        "WHERE with comparison operators",
 			input:       `UPDATE DOCUMENTS IN BUNDLE "products" (stock = 0) WHERE price < 50;`,
 			expectError: false,
-			checkWhere: func(t *testing.T, expr Expression) {
+			checkWhere: func(t *testing.T, expr syndrQL.Expression) {
 				if expr == nil {
 					t.Error("WHERE clause is nil")
 				}
@@ -269,10 +271,10 @@ func TestUpdateParser_WhereClause(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := NewUpdateParser(tt.input)
+			parser, err := syndrQL.NewUpdateParser(tt.input)
 			if err != nil {
 				if !tt.expectError {
-					t.Errorf("NewUpdateParser() failed unexpectedly: %v", err)
+					t.Errorf("syndrQL.NewUpdateParser() failed unexpectedly: %v", err)
 				}
 				return
 			}
@@ -361,7 +363,7 @@ func TestUpdateParser_ErrorCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := NewUpdateParser(tt.input)
+			parser, err := syndrQL.NewUpdateParser(tt.input)
 			if err != nil {
 				// Expected - tokenization can fail for some inputs
 				return
@@ -425,10 +427,10 @@ func TestUpdateParser_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := NewUpdateParser(tt.input)
+			parser, err := syndrQL.NewUpdateParser(tt.input)
 			if err != nil {
 				if !tt.expectError {
-					t.Errorf("NewUpdateParser() failed unexpectedly: %v", err)
+					t.Errorf("syndrQL.NewUpdateParser() failed unexpectedly: %v", err)
 				}
 				return
 			}

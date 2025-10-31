@@ -1,8 +1,8 @@
 package syndrQL_test
 
 import (
-	"testing"
 	syndrQL "syndrdb/src/internal/syndrQL"
+	"testing"
 )
 
 /*
@@ -71,7 +71,7 @@ func TestDeleteParser_BasicDelete(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			parser, err := syndrQL.syndrQL.NewDeleteParser(tt.input)
+			parser, err := syndrQL.NewDeleteParser(tt.input)
 			if err != nil {
 				if !tt.expectError {
 					t.Fatalf("Failed to create parser: %v", err)

@@ -379,10 +379,10 @@ func ParseCreateRelationshipCommand(command string) (*models.RelationshipCommand
 // parseDeleteBundleCommand parses DELETE BUNDLE command
 func ParseDeleteBundleCommand(command string) (*models.BundleCommand, error) {
 	// Regular expression to extract bundle name
-	bundleNameRegex := regexp.MustCompile(`DELETE BUNDLE\s+"([^"]+)"`)
+	bundleNameRegex := regexp.MustCompile(`DROP BUNDLE\s+"([^"]+)"`)
 	matches := bundleNameRegex.FindStringSubmatch(command)
 	if len(matches) < 2 {
-		return nil, fmt.Errorf("invalid DELETE BUNDLE command syntax")
+		return nil, fmt.Errorf("invalid DROP BUNDLE command syntax")
 	}
 	bundleName := matches[1]
 

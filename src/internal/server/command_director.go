@@ -213,20 +213,12 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		return AttachUserToDatabase(command, logger, serviceManager)
 	}
 
-	// Parse DELETE  command
-	if strings.HasPrefix(strings.ToLower(command), "delete") {
-
+	if strings.HasPrefix(strings.ToLower(command), "drop") {
 		switch strings.ToLower(commandParts[1]) {
 		case "database":
-			dbCommand, err := db.ParseDeleteDatabaseCommand(command)
-			if err != nil {
-				return &result, err
-			}
-			// Execute the database command
-			serviceManager.DatabaseService.DeleteDatabase(dbCommand.DatabaseName)
+			break
+			//return DropDatabase(command, logger, serviceManager)
 		case "bundle":
-			// DROP BUNDLE "<BUNDLE_NAME>"
-			// Use new parser if feature flag is enabled, fallback to legacy on error
 			bundleCmd, err := parseDropBundle(command, logger)
 			if err != nil {
 				return &result, fmt.Errorf("error parsing DROP BUNDLE command: %v", err)
@@ -251,14 +243,24 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
 			}
 
-			// TODO: Finish this implementation next sprint
-			// The actual DROP BUNDLE implementation needs to be completed with:
-			// - WAL logging for transaction safety
-			// - Catalog service deregistration
-			// - Index cleanup
-			// - Relationship cleanup
-			// For now, return an error indicating this is not yet implemented
-			return &result, fmt.Errorf("DROP BUNDLE has not yet been implemented - coming in next sprint")
+			return DeleteBundleCommand(bundleCmd, logger, serviceManager, database)
+		}
+	}
+
+	// Parse DELETE  command
+	if strings.HasPrefix(strings.ToLower(command), "delete") {
+
+		switch strings.ToLower(commandParts[1]) {
+		case "database":
+			dbCommand, err := db.ParseDeleteDatabaseCommand(command)
+			if err != nil {
+				return &result, err
+			}
+			// Execute the database command
+			serviceManager.DatabaseService.DeleteDatabase(dbCommand.DatabaseName)
+		case "bundle":
+			// DROP BUNDLE "<BUNDLE_NAME>"
+			// Use new parser if feature flag is enabled, fallback to legacy on error
 
 			// PLACEHOLDER: This is where the actual deletion will happen
 			// serviceManager.BundleService.RemoveBundle(database, bundleName)

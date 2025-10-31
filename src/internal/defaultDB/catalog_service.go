@@ -173,6 +173,51 @@ func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 	return nil
 }
 
+// Removes a bundle registered in the primary db
+func (cs *CatalogService) UnRegisterBundleInCatalog(bundleID, bundleName, databaseID, databaseName string) error {
+	// Get the primary database
+	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return fmt.Errorf("failed to get primary database: %w", err)
+	}
+
+	// Get the Bundles bundle from primary database
+	bundlesBundle, err := cs.bundleService.GetBundleByName(primaryDB, "Bundles")
+	if err != nil {
+		return fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
+	}
+
+	// Load documents using page-based loading (consistent with other catalog methods)
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
+	if err != nil {
+		return fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
+	}
+	docIDs := make([]string, 0)
+	for _, doc := range docs {
+		if doc.Fields["Name"].Value == bundleName && doc.Fields["DatabaseID"].Value == databaseID {
+			// Create a delete command for the bundle using BundleID as the where clause
+			docIDs = append(docIDs, doc.DocumentID)
+		}
+	}
+
+	deleteCommand := &models.DocumentDeleteCommand{
+		BundleName:  "Bundles",
+		WhereClause: fmt.Sprintf("\"DocumentID\" ==\"%s\"", docIDs[0]),
+	}
+
+	// Delete the bundle from the bundle
+	err = cs.bundleService.DeleteDocumentFromBundle(bundlesBundle, deleteCommand, docIDs)
+	if err != nil {
+		return fmt.Errorf("failed to delete bundle from catalog: %w", err)
+	}
+
+	// Flush buffers to ensure data is written
+	cs.bundleService.FlushAllBuffers()
+
+	cs.logger.Infof("Removed bundle '%s' (ID: %s) from system catalog", bundleName, bundleID)
+	return nil
+}
+
 // GetDatabaseFromCatalog retrieves a database document from the catalog by DatabaseID
 func (cs *CatalogService) GetDatabaseFromCatalog(databaseID string) (*models.Document, error) {
 	// Get the primary database

@@ -46,6 +46,14 @@ func FileExists(filename string, logger zap.SugaredLogger) bool {
 	return !info.IsDir() // Return true if it's not a directory
 }
 
+func DirExists(dirPath string) bool {
+	info, err := os.Stat(dirPath)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
 func EncodeBSON(jsonData map[string]interface{}) ([]byte, error) {
 	// Encode the map into BSON
 	bsonData, err := bson.Marshal(jsonData)

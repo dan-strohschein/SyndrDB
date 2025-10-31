@@ -1723,15 +1723,35 @@ func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundle
 
 	filePath := filepath.Join(databasePath, bundleName)
 
-	// Check if the file already exists
-	if !helpers.FileExists(filePath, *b.logger) {
-		return fmt.Errorf("Bundle %s does not exist", bundleName)
+	// Check if the bundle directory or file exists
+	if !helpers.DirExists(filePath) {
+		if b.logger != nil {
+			b.logger.Infof("Bundle %s does not exist, skipping removal", filePath)
+		}
+		return fmt.Errorf("bundle %s does not exist", bundleName)
 	}
 
-	err := os.Remove(filePath)
+	// Use RemoveAll to recursively delete the bundle directory and all its contents
+	// (including document pages, indexes, etc.)
+	err := os.RemoveAll(filePath)
 	if err != nil {
-		return fmt.Errorf("error removing bundle data file %s: %w", bundleName, err)
+		return fmt.Errorf("error removing bundle directory %s: %w", bundleName, err)
 	}
+
+	// Also delete the legacy .bnd metadata file if it exists
+	fileName := fmt.Sprintf("%s_%s.bnd", database.Name, bundleName)
+	bndFilePath := filepath.Join(databasePath, fileName)
+	if helpers.FileExists(bndFilePath, *b.logger) {
+		if err := os.Remove(bndFilePath); err != nil {
+			return fmt.Errorf("error removing bundle metadata file %s: %w", fileName, err)
+		}
+	} else {
+		if b.logger != nil {
+			b.logger.Infof("Bundle file %s does not exist, skipping removal", fileName)
+		}
+	}
+
+	b.logger.Infof("Successfully removed bundle '%s' and all its data files", bundleName)
 
 	return nil
 }

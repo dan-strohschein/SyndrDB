@@ -117,11 +117,7 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 	return cmdResponse, nil
 }
 
-func DeleteBundleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, result string) (*CommandResponse, error) {
-	bundleCmd, err := parseDropBundle(command, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse drop bundle command: %w", err)
-	}
+func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error) {
 
 	// We need to check some things:
 	// 1. If the force command was not present
@@ -143,34 +139,50 @@ func DeleteBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 	if serviceManager.WALManager != nil {
 		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
 			// Log the bundle creation before execution
-			err := serviceManager.WALManager.LogBundleCreate(txID, bundleCmd.BundleName, bundleCmd)
+			err := serviceManager.WALManager.LogBundleDelete(txID, bundleCmd.BundleName, bundleCmd)
 			if err != nil {
 				return fmt.Errorf("failed to log bundle create: %w", err)
 			}
 
-			// Delete the bundle from the database
-			// bundle, err := serviceManager.BundleService.DeleteBundle(serviceManager.DatabaseService, database, bundleCmd)
-			// if err != nil {
-			// 	return fmt.Errorf("error deleting bundle: %v", err)
-			// }
+			//Delete the bundle from the database
+			err = serviceManager.BundleService.DeleteBundle(database, bundleCmd)
+			if err != nil {
+				return fmt.Errorf("error deleting bundle: %v", err)
+			}
 
-			// // CRITICAL FIX: Check for errors when adding bundle to catalog
-			// // Without this, bundles may be created but not registered in the system catalog
-			// err = serviceManager.InternalCatalogService.UnRegisterBundleInCatalog(bundle)
-			// if err != nil {
-			// 	// Bundle was created but catalog registration failed
-			// 	logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundle.Name, err)
-			// 	return fmt.Errorf("bundle created but catalog registration failed: %v", err)
-			// }
+			// CRITICAL FIX: Check for errors when adding bundle to catalog
+			// Without this, bundles may be deleted but not removed from the system catalog
+			err = serviceManager.InternalCatalogService.UnRegisterBundleInCatalog(bundleMetadata.BundleID,
+				bundleCmd.BundleName, database.DatabaseID, database.Name)
+			if err != nil {
+				// Bundle was created but catalog registration failed
+				logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundleMetadata.Name, err)
+				return fmt.Errorf("bundle created but catalog registration failed: %v", err)
+			}
 
 			return err
 		})
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
+
+		err = serviceManager.BundleService.DeleteBundle(database, bundleCmd)
+		if err != nil {
+			return nil, fmt.Errorf("error deleting bundle: %v", err)
+		}
+
+		// CRITICAL FIX: Check for errors when adding bundle to catalog
+		// Without this, bundles may be deleted but not removed from the system catalog
+		err = serviceManager.InternalCatalogService.UnRegisterBundleInCatalog(bundleMetadata.BundleID,
+			bundleCmd.BundleName, database.DatabaseID, database.Name)
+		if err != nil {
+			// Bundle was created but catalog registration failed
+			logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundleMetadata.Name, err)
+			return nil, fmt.Errorf("bundle created but catalog registration failed: %v", err)
+		}
 	}
 
-	result = fmt.Sprintf("Bundle '%s' deleted successfully from database '%s'.", bundleCmd.BundleName, database.Name)
+	result := fmt.Sprintf("Bundle '%s' deleted successfully from database '%s'.", bundleCmd.BundleName, database.Name)
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
 		Result:      result,

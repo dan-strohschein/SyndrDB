@@ -3785,3 +3785,45 @@ func (s *BundleService) flushHashIndexToDisk(hashIndex *hashindex.HashIndexV3, b
 
 	return nil
 }
+
+func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *models.BundleCommand) error {
+
+	bundle, err := s.GetBundleByName(database, bundleCommand.BundleName)
+	if err != nil {
+		return fmt.Errorf("failed to find bundle '%s' for deletion: %w", bundleCommand.BundleName, err)
+	}
+	// Close all indexes for this bundle
+	if bundle.Indexes != nil {
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexInstance != nil {
+				switch idx := indexRef.IndexInstance.(type) {
+				case *hashindex.HashIndexV3:
+					if err := idx.Close(); err != nil {
+						s.logger.Warnf("Failed to close hash index '%s': %v", indexName, err)
+					}
+				case *btreeindexV2.BTreeIndex:
+					if err := idx.Close(); err != nil {
+						s.logger.Warnf("Failed to close btree index '%s': %v", indexName, err)
+					}
+				}
+			}
+		}
+	}
+	s.logger.Infof("DEBUG DEBUG TRYING TO DELETE bundle: %s", bundle.Name)
+	// Remove the bundle from the file system
+	if err := s.store.RemoveBundleFile(database, bundle.Name); err != nil {
+		return fmt.Errorf("failed to delete bundle '%s': %w", bundle.Name, err)
+	}
+
+	// Remove the bundle from in-memory metadata
+	delete(database.Bundles, bundle.Name)
+
+	// Clear the document-page location cache for this bundle
+	s.pageCacheMutex.Lock()
+	delete(s.documentPageMap, bundle.Name)
+	s.pageCacheMutex.Unlock()
+
+	s.logger.Debugf("Cleared document-page cache for deleted bundle: %s", bundle.Name)
+
+	return nil
+}
