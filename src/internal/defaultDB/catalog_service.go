@@ -173,6 +173,100 @@ func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 	return nil
 }
 
+// UpdateBundleNameInCatalog updates the Name and FilePath fields in the primary.Bundles
+// catalog when a bundle is renamed. This ensures the system catalog remains consistent
+// with the actual bundle state on disk.
+//
+// This method is called by BundleService.RenameBundle() after the bundle directory
+// and metadata file have been successfully renamed on disk.
+//
+// Parameters:
+//   - bundleID: The unique identifier of the bundle (doesn't change during rename)
+//   - databaseName: The name of the database containing the bundle
+//   - oldName: The previous bundle name (for logging/validation)
+//   - newName: The new bundle name to update in the catalog
+//
+// Returns an error if the catalog cannot be loaded or updated.
+func (cs *CatalogService) UpdateBundleNameInCatalog(bundleID, databaseName, oldName, newName string) error {
+	cs.logger.Infof("Updating catalog entry for bundle rename: '%s' -> '%s' (ID: %s)", oldName, newName, bundleID)
+
+	// Get the primary database
+	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return fmt.Errorf("failed to get primary database: %w", err)
+	}
+
+	// Get the Bundles bundle from primary database
+	bundlesBundle, err := cs.bundleService.GetBundleByName(primaryDB, "Bundles")
+	if err != nil {
+		return fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
+	}
+
+	// Load all documents from the catalog using page-based loading
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
+	if err != nil {
+		return fmt.Errorf("failed to load catalog documents: %w", err)
+	}
+
+	// Find the document for this bundle by BundleID
+	var targetDoc *models.Document
+	for _, doc := range docs {
+		if bundleIDField, exists := doc.Fields["BundleID"]; exists && bundleIDField.Value == bundleID {
+			targetDoc = doc
+			break
+		}
+	}
+
+	if targetDoc == nil {
+		return fmt.Errorf("bundle with ID '%s' not found in catalog", bundleID)
+	}
+
+	// Verify the old name matches (validation check)
+	if nameField, exists := targetDoc.Fields["Name"]; exists {
+		if currentName, ok := nameField.Value.(string); ok && currentName != oldName {
+			cs.logger.Warnf("Catalog name mismatch: expected '%s' but found '%s' (proceeding with update)", oldName, currentName)
+		}
+	}
+
+	// Update the Name field
+	targetDoc.Fields["Name"] = models.Field{
+		Name:  "Name",
+		Value: newName,
+	}
+
+	// Update the FilePath field (format: <databaseName>_<bundleName>.bnd)
+	newFilePath := fmt.Sprintf("%s_%s.bnd", databaseName, newName)
+	targetDoc.Fields["FilePath"] = models.Field{
+		Name:  "FilePath",
+		Value: newFilePath,
+	}
+
+	// Update the timestamp
+	targetDoc.UpdatedAt = time.Now()
+
+	// Persist the updated document back to the catalog
+	// Create an update command for the document
+	updateCommand := &models.DocumentUpdateCommand{
+		BundleName:  bundlesBundle.Name,
+		WhereClause: fmt.Sprintf("\"DocumentID\" == \"%s\"", targetDoc.DocumentID),
+		Fields: []models.KeyValue{
+			{Key: "Name", Value: newName},
+			{Key: "FilePath", Value: newFilePath},
+		},
+	}
+
+	// Use UpdateDocumentInBundle to persist changes
+	if err := cs.bundleService.UpdateDocumentInBundle(bundlesBundle, updateCommand); err != nil {
+		return fmt.Errorf("failed to update bundle in catalog: %w", err)
+	}
+
+	// Flush buffers to ensure data is written immediately
+	cs.bundleService.FlushAllBuffers()
+
+	cs.logger.Infof("Successfully updated catalog entry for bundle '%s' -> '%s'", oldName, newName)
+	return nil
+}
+
 // Removes a bundle registered in the primary db
 func (cs *CatalogService) UnRegisterBundleInCatalog(bundleID, bundleName, databaseID, databaseName string) error {
 	// Get the primary database

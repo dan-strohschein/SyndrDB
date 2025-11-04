@@ -186,6 +186,7 @@ type IndexField struct {
 type BundleCommand struct {
 	CommandType             string // CREATE, UPDATE, DELETE
 	BundleName              string
+	NewBundleName           string // New name for the bundle (if renaming)
 	Fields                  []FieldDefinition
 	Changes                 []FieldChange // This will be used for UPDATE commands
 	HasRelationshipCommands bool          // Indicates if there are relationship commands

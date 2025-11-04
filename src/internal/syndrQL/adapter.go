@@ -814,6 +814,134 @@ func (a *CreateBundleStatementAdapter) validateDefaultValue(fieldType string, de
 	return nil
 }
 
+// UpdateBundleStatementAdapter adapts UpdateBundleStatement to BundleCommand
+// This adapter handles the conversion of parsed UPDATE BUNDLE statements from the new
+// SyndrQL parser into the BundleCommand structure expected by the bundle service
+type UpdateBundleStatementAdapter struct {
+	logger *zap.SugaredLogger
+}
+
+// NewUpdateBundleStatementAdapter creates a new UPDATE BUNDLE statement adapter
+func NewUpdateBundleStatementAdapter(logger *zap.SugaredLogger) *UpdateBundleStatementAdapter {
+	return &UpdateBundleStatementAdapter{
+		logger: logger,
+	}
+}
+
+// ToBundleCommand converts an UpdateBundleStatement to a BundleCommand
+// This maintains compatibility with the existing bundle service interface
+func (a *UpdateBundleStatementAdapter) ToBundleCommand(stmt *UpdateBundleStatement) (*models.BundleCommand, error) {
+	if stmt == nil {
+		return nil, fmt.Errorf("cannot convert nil UpdateBundleStatement")
+	}
+
+	if stmt.BundleName == "" {
+		return nil, fmt.Errorf("bundle name cannot be empty in UPDATE BUNDLE statement")
+	}
+
+	// Validate that at least one operation is specified
+	if stmt.NewBundleName == "" && len(stmt.Fields) == 0 && len(stmt.Relationships) == 0 {
+		return nil, fmt.Errorf("UPDATE BUNDLE statement must specify at least one operation: SET NAME, field modifications, or relationships")
+	}
+
+	// Convert field modifications to FieldChange structures
+	var changes []models.FieldChange
+	if len(stmt.Fields) > 0 {
+		changes = make([]models.FieldChange, 0, len(stmt.Fields))
+		for _, field := range stmt.Fields {
+			change, err := a.convertFieldModification(field)
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert field modification '%s': %w", field.Name, err)
+			}
+			changes = append(changes, change)
+		}
+	}
+
+	// Determine if this command has relationship operations
+	hasRelationships := len(stmt.Relationships) > 0
+
+	bundleCommand := &models.BundleCommand{
+		CommandType:             "UPDATE",
+		BundleName:              stmt.BundleName,
+		NewBundleName:           stmt.NewBundleName,
+		Fields:                  []models.FieldDefinition{}, // Not used for UPDATE
+		Changes:                 changes,
+		HasRelationshipCommands: hasRelationships,
+		HasForceSwitch:          false, // Not applicable for UPDATE
+	}
+
+	a.logger.Debugf("Converted UpdateBundleStatement to BundleCommand: Bundle=%s, NewName=%s, FieldChanges=%d, HasRelationships=%v",
+		stmt.BundleName, stmt.NewBundleName, len(changes), hasRelationships)
+
+	return bundleCommand, nil
+}
+
+// convertFieldModification converts a parsed field modification to a FieldChange
+func (a *UpdateBundleStatementAdapter) convertFieldModification(field FieldModificationDefinitionParsed) (models.FieldChange, error) {
+	// Map modification type to change type
+	changeType := strings.ToUpper(field.ModificationType)
+
+	// Validate modification type
+	switch changeType {
+	case "ADD", "REMOVE", "MODIFY":
+		// Valid types
+	default:
+		return models.FieldChange{}, fmt.Errorf("invalid modification type: %s (must be ADD, REMOVE, or MODIFY)", field.ModificationType)
+	}
+
+	// Determine the new field name
+	// For MODIFY operations, use NewName if provided, otherwise keep the same name
+	// For ADD operations, NewName is the field name to add
+	// For REMOVE operations, NewName is ignored
+	newFieldName := field.Name
+	if changeType == "MODIFY" && field.NewName != "" {
+		newFieldName = field.NewName
+	} else if changeType == "ADD" && field.NewName != "" {
+		newFieldName = field.NewName
+	}
+
+	// Create the new field definition
+	newField := models.FieldDefinition{
+		Name:         newFieldName,
+		Type:         field.Type,
+		IsRequired:   field.IsRequired,
+		IsUnique:     field.IsUnique,
+		DefaultValue: field.DefaultValue,
+	}
+
+	return models.FieldChange{
+		ChangeType:   changeType,
+		OldFieldName: field.Name, // For MODIFY, this is the field being modified; for REMOVE, this is what's removed
+		NewField:     newField,   // For ADD and MODIFY, this contains the new/updated definition
+	}, nil
+}
+
+// ConvertRelationships converts parsed relationships to RelationshipCommand structures
+// This is used by the command director to process ADD RELATIONSHIP operations
+func (a *UpdateBundleStatementAdapter) ConvertRelationships(stmt *UpdateBundleStatement) ([]*models.RelationshipCommand, error) {
+	if len(stmt.Relationships) == 0 {
+		return nil, nil
+	}
+
+	relationships := make([]*models.RelationshipCommand, 0, len(stmt.Relationships))
+	for _, rel := range stmt.Relationships {
+		relCmd := &models.RelationshipCommand{
+			CommandType:       "CREATE", // ADD RELATIONSHIP is essentially a CREATE operation
+			BundleName:        stmt.BundleName,
+			Name:              fmt.Sprintf("%s_%s_to_%s_%s", rel.SourceBundle, rel.SourceField, rel.DestinationBundle, rel.DestinationField),
+			RelationshipType:  rel.RelationshipType,
+			SourceBundle:      rel.SourceBundle,
+			SourceField:       rel.SourceField,
+			DestinationBundle: rel.DestinationBundle,
+			DestinationField:  rel.DestinationField,
+		}
+		relationships = append(relationships, relCmd)
+	}
+
+	a.logger.Debugf("Converted %d relationships for bundle '%s'", len(relationships), stmt.BundleName)
+	return relationships, nil
+}
+
 // DropBundleStatementAdapter adapts DropBundleStatement to BundleCommand
 // This adapter handles the conversion of parsed DROP BUNDLE statements from the new
 // SyndrQL parser into the BundleCommand structure expected by the bundle service

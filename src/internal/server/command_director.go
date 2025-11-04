@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
@@ -10,6 +11,7 @@ import (
 	//"syndrdb/src/internal/query/executor"
 	// NEW: Import our JOIN executor
 	"syndrdb/src/internal/query/planner" // NEW: Import hierarchical results package
+	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
 	"time"
 
@@ -151,10 +153,58 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		case "bundle":
 			normalizedCommand := helpers.NormalizeCommand(command) // Normalize once
 			//logger.Infof("DEBUG COMMAND IS :: %s", normalizedCommand)
-			bndleCommand, err := bndle.ParseUpdateBundleCommand(normalizedCommand, logger)
+			// bndleCommand, err := bndle.ParseUpdateBundleCommand(normalizedCommand, logger)
+			// if err != nil {
+			// 	return &result, err
+			// }
+
+			bndleCommand, err := parseUpdateBundleWithNewParser(normalizedCommand, logger)
 			if err != nil {
 				return &result, err
 			}
+
+			// Get the bundle first if we need to apply changes
+			var bundle *models.Bundle
+			if bndleCommand.NewBundleName != "" || len(bndleCommand.Changes) > 0 || bndleCommand.HasRelationshipCommands {
+				bundle, err = serviceManager.BundleService.GetBundleByName(database, bndleCommand.BundleName)
+				if err != nil {
+					return &result, fmt.Errorf("bundle '%s' not found: %w", bndleCommand.BundleName, err)
+				}
+			}
+
+			// Rename bundle if new name is provided
+			if bndleCommand.NewBundleName != "" {
+				logger.Infof("Renaming bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
+				err := serviceManager.BundleService.RenameBundle(database, bundle, bndleCommand.NewBundleName)
+				if err != nil {
+					return &result, fmt.Errorf("failed to rename bundle: %w", err)
+				}
+				logger.Infof("Successfully renamed bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
+
+				// Update the bundle reference after rename
+				bundle, err = serviceManager.BundleService.GetBundleByName(database, bndleCommand.NewBundleName)
+				if err != nil {
+					return &result, fmt.Errorf("failed to get renamed bundle: %w", err)
+				}
+				result = fmt.Sprintf("Bundle renamed to '%s' successfully.", bndleCommand.NewBundleName)
+			}
+
+			// Apply field changes if present
+			if len(bndleCommand.Changes) > 0 {
+				logger.Infof("Applying %d field changes to bundle '%s'", len(bndleCommand.Changes), bundle.Name)
+				err := serviceManager.BundleService.ApplyFieldChanges(bundle, bndleCommand.Changes)
+				if err != nil {
+					return &result, fmt.Errorf("failed to apply field changes: %w", err)
+				}
+				logger.Infof("Successfully applied field changes to bundle '%s'", bundle.Name)
+				if len(result) > 0 {
+					result = fmt.Sprintf("%s Bundle '%s' updated successfully.", result, bundle.Name)
+				} else {
+					result = fmt.Sprintf("Bundle '%s' updated successfully.", bundle.Name)
+				}
+			}
+
+			// Handle relationship changes if present
 			if bndleCommand.HasRelationshipCommands {
 				//TODO : Don't assume its always a create, it could be to update a relationship
 				var RelationshipCommand *models.RelationshipCommand
@@ -431,6 +481,39 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	// Transform documents to flattened format with field projection
 	// If query.SelectFields is specified, only those fields will be returned
 	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+
+	// TODO Update the sorting to use a more powerful sorter that can handle different data types
+	// If the dev decided to put an order by on a countOnly query, ignore it
+	if query.HasOrderBy() && len(flattenedDocs) > 0 && !query.IsCountOnly {
+		sort.SliceStable(flattenedDocs, func(i, j int) bool {
+			for _, field := range query.OrderBy.Fields {
+				val1, exists1 := flattenedDocs[i][field.FieldName]
+				val2, exists2 := flattenedDocs[j][field.FieldName]
+
+				// Handle missing fields
+				if !exists1 && !exists2 {
+					continue
+				}
+				if !exists1 {
+					return field.Direction == queryparser.SortDesc
+				}
+				if !exists2 {
+					return field.Direction == queryparser.SortAsc
+				}
+
+				// Compare values
+				cmp := compareValuesForSort(val1, val2)
+				if cmp != 0 {
+					if field.Direction == queryparser.SortAsc {
+						return cmp < 0
+					}
+					return cmp > 0
+				}
+			}
+			return false
+		})
+	}
+
 	var results interface{}
 	var resultCount int
 

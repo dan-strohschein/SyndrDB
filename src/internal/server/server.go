@@ -165,6 +165,9 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	// Create the internal catalog service
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
 
+	// Inject catalog service into bundle service (resolves circular dependency)
+	bundleService.SetCatalogService(catalogService)
+
 	// Initialize GraphQL processor if enabled
 	var graphqlProcessor GraphQLProcessor
 	if config.EnableGraphQL {

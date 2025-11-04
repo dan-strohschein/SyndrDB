@@ -89,7 +89,7 @@ func parseQuery(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSe
 	globalParserMetrics.NewParserAttempts.Add(1)
 
 	unifiedQuery, err := parseQueryWithNewParser(query, logger)
-	logger.Infof("DEBUG DEBUG Do we have a where? %v", unifiedQuery.WhereClause)
+
 	if err != nil {
 		// Record failure and fallback
 		globalParserMetrics.NewParserFailures.Add(1)

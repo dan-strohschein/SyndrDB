@@ -186,3 +186,41 @@ func generateDatabaseID() string {
 func generateBundleID() string {
 	return fmt.Sprintf("bnd_%d", time.Now().UnixNano())
 }
+
+// compareValuesForSort compares two interface{} values for sorting
+func compareValuesForSort(v1, v2 interface{}) int {
+	// Try numeric comparison
+	if n1, ok := toFloat64(v1); ok {
+		if n2, ok := toFloat64(v2); ok {
+			if n1 < n2 {
+				return -1
+			}
+			if n1 > n2 {
+				return 1
+			}
+			return 0
+		}
+	}
+
+	// Try string comparison
+	s1 := fmt.Sprintf("%v", v1)
+	s2 := fmt.Sprintf("%v", v2)
+	return strings.Compare(s1, s2)
+}
+
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	default:
+		return 0, false
+	}
+}

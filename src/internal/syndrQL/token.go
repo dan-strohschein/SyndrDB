@@ -86,6 +86,7 @@ const (
 	TOKEN_FIELDS // FIELDS
 	TOKEN_ADD    // ADD
 	TOKEN_TO     // TO
+	TOKEN_NAME   // NAME
 
 	// Keywords - Query Modifiers
 	TOKEN_ORDER        // ORDER
@@ -115,6 +116,10 @@ const (
 	TOKEN_ARRAY_TYPE  // ARRAY
 
 	TOKEN_DATE_TYPE // DATE
+
+	// Keywords - Field Modification Types
+	TOKEN_REMOVE_FIELD // REMOVE
+	TOKEN_MODIFY_FIELD // MODIFY
 )
 
 // String returns the string representation of a token type
@@ -276,6 +281,12 @@ func (tt TokenType) String() string {
 		return "DATE_TYPE"
 	case TOKEN_FORCE:
 		return "FORCE"
+	case TOKEN_REMOVE_FIELD:
+		return "REMOVE_FIELD"
+	case TOKEN_MODIFY_FIELD:
+		return "MODIFY_FIELD"
+	case TOKEN_NAME:
+		return "NAME"
 	default:
 		return "UNKNOWN"
 	}
@@ -328,6 +339,7 @@ var keywords = map[string]TokenType{
 	"FIELDS": TOKEN_FIELDS,
 	"ADD":    TOKEN_ADD,
 	"TO":     TOKEN_TO,
+	"NAME":   TOKEN_NAME,
 
 	// Query Modifiers
 	"ORDER":        TOKEN_ORDER,
@@ -368,6 +380,9 @@ var keywords = map[string]TokenType{
 	"FLOAT":  TOKEN_FLOAT_TYPE,
 	"BOOL":   TOKEN_BOOL_TYPE,
 	"ARRAY":  TOKEN_ARRAY_TYPE,
+
+	"REMOVE": TOKEN_REMOVE_FIELD,
+	"MODIFY": TOKEN_MODIFY_FIELD,
 }
 
 // LookupKeyword checks if an identifier is a keyword and returns its token type

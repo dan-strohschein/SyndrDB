@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -228,8 +229,17 @@ type BundleService struct {
 	documentPageMap map[string]map[string]uint32 // bundleName -> documentID -> pageID
 	pageCacheMutex  sync.RWMutex                 // Protects documentPageMap
 
+	// OPERATION LOCKING: Fine-grained locks for bundle operations
+	// Tracks active read/write operations to ensure safety during administrative operations
+	bundleLocks     map[string]*BundleOperationLock // bundleName -> operation lock
+	bundleLockMutex sync.RWMutex                    // Protects bundleLocks map
+
 	// NULL HANDLER: Manages magic NULL values and field initialization
 	nullHandler *NullHandler // Handles SYNDR_NULL, SYNDR_MISSING, etc.
+
+	// CATALOG SERVICE: Reference for updating system catalog
+	// Injected after construction to avoid circular dependency
+	catalogService CatalogServiceInterface
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
@@ -275,8 +285,14 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		// PERFORMANCE OPTIMIZATION: Initialize document-page location cache
 		documentPageMap: make(map[string]map[string]uint32),
 
+		// OPERATION LOCKING: Initialize bundle operation locks
+		bundleLocks: make(map[string]*BundleOperationLock),
+
 		// NULL HANDLER: Initialize NULL value handler
 		nullHandler: NewNullHandler(logger),
+
+		// CATALOG SERVICE: Will be injected post-construction via SetCatalogService()
+		catalogService: nil,
 	}
 
 	// Don't load bundle metadata at startup - bundles should be loaded on-demand
@@ -284,6 +300,103 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	logger.Debugf("Bundle service initialized - bundles will be loaded on-demand")
 
 	return service
+}
+
+// SetCatalogService injects the catalog service reference after construction.
+// This is necessary to break the circular dependency between BundleService and CatalogService.
+// Should be called during server initialization after all services are created.
+func (s *BundleService) SetCatalogService(catalogService CatalogServiceInterface) {
+	s.catalogService = catalogService
+	s.logger.Debug("Catalog service injected into BundleService")
+}
+
+// getBundleLock retrieves or creates an operation lock for the specified bundle.
+// This method is thread-safe and uses lazy initialization to create locks on-demand.
+func (s *BundleService) getBundleLock(bundleName string) *BundleOperationLock {
+	// Fast path: read lock to check if lock exists
+	s.bundleLockMutex.RLock()
+	lock, exists := s.bundleLocks[bundleName]
+	s.bundleLockMutex.RUnlock()
+
+	if exists {
+		return lock
+	}
+
+	// Slow path: write lock to create new lock
+	s.bundleLockMutex.Lock()
+	defer s.bundleLockMutex.Unlock()
+
+	// Double-check after acquiring write lock (another goroutine may have created it)
+	lock, exists = s.bundleLocks[bundleName]
+	if exists {
+		return lock
+	}
+
+	// Create new lock
+	lock = NewBundleOperationLock(bundleName)
+	s.bundleLocks[bundleName] = lock
+	s.logger.Debugf("Created operation lock for bundle '%s'", bundleName)
+
+	return lock
+}
+
+// AcquireBundleReadLock acquires a read lock for the specified bundle.
+// Multiple concurrent readers are allowed. Returns an error if a rename
+// operation is in progress or if the bundle doesn't exist.
+//
+// IMPORTANT: Every call to this method must be paired with ReleaseBundle ReadLock()
+// using defer to ensure proper cleanup even in error cases.
+//
+// Example usage:
+//
+//	if err := service.AcquireBundleReadLock(bundle.Name); err != nil {
+//	    return err
+//	}
+//	defer service.ReleaseBundleReadLock(bundle.Name)
+func (s *BundleService) AcquireBundleReadLock(bundleName string) error {
+	lock := s.getBundleLock(bundleName)
+	return lock.AcquireReadLock()
+}
+
+// ReleaseBundleReadLock releases a previously acquired read lock.
+// This should always be called via defer after AcquireBundleReadLock.
+func (s *BundleService) ReleaseBundleReadLock(bundleName string) {
+	lock := s.getBundleLock(bundleName)
+	lock.ReleaseReadLock()
+}
+
+// AcquireBundleWriteLock acquires a write lock for the specified bundle.
+// Only one writer is allowed at a time. Returns an error if a rename
+// operation is in progress.
+//
+// IMPORTANT: Every call to this method must be paired with ReleaseBundleWriteLock()
+// using defer to ensure proper cleanup even in error cases.
+//
+// Example usage:
+//
+//	if err := service.AcquireBundleWriteLock(bundle.Name); err != nil {
+//	    return err
+//	}
+//	defer service.ReleaseBundleWriteLock(bundle.Name)
+func (s *BundleService) AcquireBundleWriteLock(bundleName string) error {
+	lock := s.getBundleLock(bundleName)
+	return lock.AcquireWriteLock()
+}
+
+// ReleaseBundleWriteLock releases a previously acquired write lock.
+// This should always be called via defer after AcquireBundleWriteLock.
+func (s *BundleService) ReleaseBundleWriteLock(bundleName string) {
+	lock := s.getBundleLock(bundleName)
+	lock.ReleaseWriteLock()
+}
+
+// GetBundleOperationStats returns the current number of active readers and writers
+// for a bundle. Useful for monitoring and debugging.
+func (s *BundleService) GetBundleOperationStats(bundleName string) (readers int64, writers int64, renameInProgress bool) {
+	lock := s.getBundleLock(bundleName)
+	readers, writers = lock.GetActiveOperationCounts()
+	renameInProgress = lock.IsRenameInProgress()
+	return
 }
 
 // IsFieldForeignKey checks if a field is a foreign key based on relationships from other bundles
@@ -1581,6 +1694,792 @@ func (s *BundleService) UpdateBundle(db *models.Database, bundleCommand models.B
 	return nil
 }
 
+// RenameBundle renames a bundle and updates all related files and database entries.
+// It validates the new name, updates the bundle metadata file, renames the directory,
+// and updates the entry in the primary database's Bundles bundle.
+func (s *BundleService) RenameBundle(database *models.Database, bundle *models.Bundle, newBundleName string) error {
+	if bundle == nil {
+		return fmt.Errorf("bundle is nil")
+	}
+	if newBundleName == "" {
+		return fmt.Errorf("new bundle name cannot be empty")
+	}
+	if bundle.Name == newBundleName {
+		return fmt.Errorf("new bundle name is the same as current name")
+	}
+
+	oldName := bundle.Name
+
+	s.logger.Infof("Renaming bundle '%s' to '%s' in database '%s'", oldName, newBundleName, database.Name)
+
+	// Validate new bundle name follows naming rules
+	if err := s.validateBundleName(newBundleName); err != nil {
+		return fmt.Errorf("invalid bundle name '%s': %w", newBundleName, err)
+	}
+
+	// Check that new name doesn't already exist
+	existingBundle, _ := s.GetBundleByName(database, newBundleName)
+	if existingBundle != nil {
+		return fmt.Errorf("bundle with name '%s' already exists in database '%s'", newBundleName, database.Name)
+	}
+
+	// OPERATION SAFETY: Wait for all active operations to complete before renaming
+	// This prevents data corruption or inconsistencies during the rename process.
+	// The timeout prevents indefinite waits in case of stuck operations.
+	lock := s.getBundleLock(oldName)
+
+	// TODO: Make timeout configurable via settings (currently 30 seconds)
+	timeout := 30 * time.Second
+	s.logger.Infof("Waiting for active operations on bundle '%s' to complete (timeout: %v)", oldName, timeout)
+
+	if err := lock.WaitForActiveOperations(timeout); err != nil {
+		return fmt.Errorf("cannot rename bundle while operations are active: %w", err)
+	}
+
+	// Ensure we clear the rename flag even if the operation fails
+	defer lock.CompleteAdministrativeOperation()
+
+	s.logger.Debugf("All active operations completed, proceeding with bundle rename")
+
+	// Get the bundle's current directory path
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+	oldBundlePath := filepath.Join(databasePath, oldName)
+	newBundlePath := filepath.Join(databasePath, newBundleName)
+
+	// Verify old directory exists
+	if _, err := os.Stat(oldBundlePath); os.IsNotExist(err) {
+		return fmt.Errorf("bundle directory does not exist: %s", oldBundlePath)
+	}
+
+	// Update bundle metadata
+	bundle.Name = newBundleName
+	bundle.UpdatedAt = time.Now()
+
+	// Rename the bundle directory (this includes indexes subfolder)
+	s.logger.Infof("Renaming bundle directory from '%s' to '%s'", oldBundlePath, newBundlePath)
+	if err := os.Rename(oldBundlePath, newBundlePath); err != nil {
+		return fmt.Errorf("failed to rename bundle directory: %w", err)
+	}
+
+	// Update the bundle metadata file with new name
+	if err := s.store.UpdateBundleFilename(database, bundle, oldName); err != nil {
+		// Try to rollback directory rename
+		if rollbackErr := os.Rename(newBundlePath, oldBundlePath); rollbackErr != nil {
+			s.logger.Errorf("Failed to rollback directory rename: %v", rollbackErr)
+		}
+		bundle.Name = oldName // Restore old name in memory
+		return fmt.Errorf("failed to update bundle metadata file: %w", err)
+	}
+
+	// Update the cache
+	delete(s.bundleMetadata, oldName)
+	s.bundleMetadata[newBundleName] = bundle
+
+	// Invalidate page cache for old name
+	s.invalidateBundlePageCache(oldName)
+
+	// Update entry in primary database's "Bundles" bundle
+	// This updates the system catalog that tracks all bundles
+	if err := s.updateBundleInSystemCatalog(database, oldName, newBundleName); err != nil {
+		s.logger.Warnf("Failed to update system catalog for bundle rename: %v", err)
+		// Don't fail the operation - the bundle is already renamed on disk
+	}
+
+	s.logger.Infof("Successfully renamed bundle '%s' to '%s'", oldName, newBundleName)
+	return nil
+}
+
+// validateBundleName validates that a bundle name follows the naming rules
+func (s *BundleService) validateBundleName(name string) error {
+	if name == "" {
+		return fmt.Errorf("bundle name cannot be empty")
+	}
+
+	// Bundle names should start with a letter and contain only alphanumeric characters and underscores
+	if len(name) == 0 {
+		return fmt.Errorf("bundle name cannot be empty")
+	}
+
+	// Check first character is a letter
+	firstChar := rune(name[0])
+	if !((firstChar >= 'a' && firstChar <= 'z') || (firstChar >= 'A' && firstChar <= 'Z')) {
+		return fmt.Errorf("bundle name must start with a letter")
+	}
+
+	// Check remaining characters are alphanumeric or underscore
+	for _, char := range name {
+		if !((char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			char == '_') {
+			return fmt.Errorf("bundle name can only contain letters, numbers, and underscores")
+		}
+	}
+
+	return nil
+}
+
+// updateBundleInSystemCatalog updates the bundle entry in the primary database's Bundles bundle
+func (s *BundleService) updateBundleInSystemCatalog(database *models.Database, oldName, newName string) error {
+	// Check if catalog service is available (injected via SetCatalogService)
+	if s.catalogService == nil {
+		s.logger.Warnf("Catalog service not available, skipping system catalog update for bundle rename")
+		return fmt.Errorf("catalog service not initialized")
+	}
+
+	// Get the bundle to find its BundleID
+	bundle, err := s.GetBundleByName(database, newName)
+	if err != nil {
+		return fmt.Errorf("failed to get bundle after rename: %w", err)
+	}
+
+	// Update the catalog with the new bundle name
+	if err := s.catalogService.UpdateBundleNameInCatalog(
+		bundle.BundleID,
+		database.Name,
+		oldName,
+		newName,
+	); err != nil {
+		return fmt.Errorf("failed to update bundle in system catalog: %w", err)
+	}
+
+	s.logger.Infof("Updated system catalog for bundle rename: '%s' -> '%s'", oldName, newName)
+	return nil
+}
+
+// ApplyFieldChanges applies ADD/REMOVE/MODIFY field operations to a bundle.
+// It validates constraints, performs type conversions, and rebuilds indexes as needed.
+// This method handles the actual schema modification for UPDATE BUNDLE commands.
+func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []models.FieldChange) error {
+	if bundle == nil {
+		return fmt.Errorf("bundle is nil")
+	}
+	if len(changes) == 0 {
+		return fmt.Errorf("no field changes specified")
+	}
+
+	s.logger.Infof("Applying %d field changes to bundle '%s'", len(changes), bundle.Name)
+
+	// Track which indexes need rebuilding
+	indexesToRebuild := make(map[string]bool)
+
+	// Apply each field change
+	for _, change := range changes {
+		switch change.ChangeType {
+		case "ADD":
+			if err := s.applyAddField(bundle, &change); err != nil {
+				return fmt.Errorf("failed to add field '%s': %w", change.NewField.Name, err)
+			}
+			s.logger.Infof("Added field '%s' to bundle '%s'", change.NewField.Name, bundle.Name)
+
+		case "REMOVE":
+			fieldName := change.OldFieldName
+			if fieldName == "" {
+				fieldName = change.NewField.Name
+			}
+			if err := s.applyRemoveField(bundle, fieldName); err != nil {
+				return fmt.Errorf("failed to remove field '%s': %w", fieldName, err)
+			}
+			// Track if this field was indexed
+			if s.isFieldIndexed(bundle, fieldName) {
+				indexesToRebuild[fieldName] = true
+			}
+			s.logger.Infof("Removed field '%s' from bundle '%s'", fieldName, bundle.Name)
+
+		case "MODIFY":
+			if err := s.applyModifyField(bundle, &change); err != nil {
+				return fmt.Errorf("failed to modify field '%s': %w", change.OldFieldName, err)
+			}
+			// Track if old or new field is indexed (for renames)
+			if s.isFieldIndexed(bundle, change.OldFieldName) {
+				indexesToRebuild[change.OldFieldName] = true
+			}
+			if change.OldFieldName != change.NewField.Name && s.isFieldIndexed(bundle, change.NewField.Name) {
+				indexesToRebuild[change.NewField.Name] = true
+			}
+
+			// Log appropriate message based on whether it's a rename or just a modification
+			if change.OldFieldName != change.NewField.Name {
+				s.logger.Infof("Renamed and modified field '%s' to '%s' in bundle '%s'",
+					change.OldFieldName, change.NewField.Name, bundle.Name)
+			} else {
+				s.logger.Infof("Modified field '%s' in bundle '%s'", change.NewField.Name, bundle.Name)
+			}
+
+		default:
+			return fmt.Errorf("unsupported change type: %s", change.ChangeType)
+		}
+	}
+
+	// Rebuild affected indexes
+	if len(indexesToRebuild) > 0 {
+		s.logger.Infof("Rebuilding %d indexes for bundle '%s'", len(indexesToRebuild), bundle.Name)
+		for fieldName := range indexesToRebuild {
+			if err := s.rebuildFieldIndex(bundle, fieldName); err != nil {
+				s.logger.Warnf("Failed to rebuild index for field '%s': %v", fieldName, err)
+				// Don't fail the entire operation if index rebuild fails
+			}
+		}
+	}
+
+	// Persist bundle metadata changes
+	err := s.store.UpdateBundleFile(bundle.Database, bundle)
+	if err != nil {
+		return fmt.Errorf("failed to persist bundle changes: %w", err)
+	}
+
+	// Update the cache with the modified bundle
+	s.bundleMetadata[bundle.Name] = bundle
+
+	s.logger.Infof("Successfully applied all field changes to bundle '%s'", bundle.Name)
+	return nil
+}
+
+// applyAddField adds a new field to the bundle schema and existing documents
+func (s *BundleService) applyAddField(bundle *models.Bundle, change *models.FieldChange) error {
+	fieldName := change.NewField.Name
+
+	// Validate field doesn't already exist
+	if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]; exists {
+		return fmt.Errorf("field '%s' already exists in bundle '%s'", fieldName, bundle.Name)
+	}
+
+	// If required, must have default value
+	if change.NewField.IsRequired && change.NewField.DefaultValue == nil {
+		return fmt.Errorf("cannot add required field '%s' without default value", fieldName)
+	}
+
+	// Add field to schema
+	if bundle.DocumentStructure.FieldDefinitions == nil {
+		bundle.DocumentStructure.FieldDefinitions = make(map[string]models.FieldDefinition)
+	}
+	bundle.DocumentStructure.FieldDefinitions[fieldName] = change.NewField
+
+	// Apply default value to all existing documents if field is required
+	if change.NewField.IsRequired && change.NewField.DefaultValue != nil {
+		s.logger.Infof("Applying default value to all existing documents in bundle '%s'", bundle.Name)
+		if err := s.applyDefaultToExistingDocuments(bundle, fieldName, change.NewField.DefaultValue); err != nil {
+			return fmt.Errorf("failed to apply default value to existing documents: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// applyRemoveField removes a field from the bundle schema and all documents
+func (s *BundleService) applyRemoveField(bundle *models.Bundle, fieldName string) error {
+	// Validate field exists
+	if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]; !exists {
+		return fmt.Errorf("field '%s' does not exist in bundle '%s'", fieldName, bundle.Name)
+	}
+
+	// Cannot remove DocumentID field
+	if fieldName == "DocumentID" {
+		return fmt.Errorf("cannot remove system field 'DocumentID'")
+	}
+
+	// Remove from schema
+	delete(bundle.DocumentStructure.FieldDefinitions, fieldName)
+
+	// Remove field from all existing documents
+	s.logger.Infof("Removing field '%s' from all documents in bundle '%s'", fieldName, bundle.Name)
+	if err := s.removeFieldFromExistingDocuments(bundle, fieldName); err != nil {
+		return fmt.Errorf("failed to remove field from existing documents: %w", err)
+	}
+
+	return nil
+}
+
+// applyModifyField modifies an existing field's properties
+func (s *BundleService) applyModifyField(bundle *models.Bundle, change *models.FieldChange) error {
+	oldFieldName := change.OldFieldName
+	newFieldName := change.NewField.Name
+	isRenaming := oldFieldName != newFieldName
+
+	// Validate old field exists
+	oldField, exists := bundle.DocumentStructure.FieldDefinitions[oldFieldName]
+	if !exists {
+		return fmt.Errorf("field '%s' does not exist in bundle '%s'", oldFieldName, bundle.Name)
+	}
+
+	// Cannot rename system fields
+	if isRenaming && oldFieldName == "DocumentID" {
+		return fmt.Errorf("cannot rename system field 'DocumentID'")
+	}
+
+	// If renaming, validate new field name doesn't already exist
+	if isRenaming {
+		if _, exists := bundle.DocumentStructure.FieldDefinitions[newFieldName]; exists {
+			return fmt.Errorf("cannot rename field '%s' to '%s': target field name already exists", oldFieldName, newFieldName)
+		}
+		s.logger.Infof("Renaming field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
+	}
+
+	// If type is changing, validate conversion is possible
+	if oldField.Type != change.NewField.Type {
+		s.logger.Infof("Attempting type conversion for field '%s' from %s to %s",
+			oldFieldName, oldField.Type, change.NewField.Type)
+		if err := s.convertFieldType(bundle, oldFieldName, oldField.Type, change.NewField.Type); err != nil {
+			return fmt.Errorf("cannot convert field '%s' from %s to %s - manual migration required: %w",
+				oldFieldName, oldField.Type, change.NewField.Type, err)
+		}
+	}
+
+	// If adding IsUnique constraint, validate no duplicates exist
+	if !oldField.IsUnique && change.NewField.IsUnique {
+		s.logger.Infof("Validating uniqueness for field '%s'", oldFieldName)
+		if err := s.validateFieldUniqueness(bundle, oldFieldName); err != nil {
+			return err
+		}
+	}
+
+	// If making field required, ensure it has a default or all documents have values
+	if !oldField.IsRequired && change.NewField.IsRequired {
+		if change.NewField.DefaultValue == nil {
+			// Check if all documents already have this field
+			if err := s.validateAllDocumentsHaveField(bundle, oldFieldName); err != nil {
+				return fmt.Errorf("cannot make field '%s' required: %w. Provide a default value or ensure all documents have this field", oldFieldName, err)
+			}
+		} else {
+			// Apply default to documents missing this field
+			if err := s.applyDefaultToMissingField(bundle, oldFieldName, change.NewField.DefaultValue); err != nil {
+				return fmt.Errorf("failed to apply default value: %w", err)
+			}
+		}
+	}
+
+	// If renaming, rename field in all documents
+	if isRenaming {
+		if err := s.renameFieldInDocuments(bundle, oldFieldName, newFieldName); err != nil {
+			return fmt.Errorf("failed to rename field in documents: %w", err)
+		}
+	}
+
+	// Update schema: remove old field and add new field definition
+	if isRenaming {
+		delete(bundle.DocumentStructure.FieldDefinitions, oldFieldName)
+	}
+	bundle.DocumentStructure.FieldDefinitions[newFieldName] = change.NewField
+
+	return nil
+}
+
+// applyDefaultToExistingDocuments adds a field with default value to all documents
+func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, fieldName string, defaultValue interface{}) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	// Iterate through all document pages
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			continue // Skip pages that don't exist yet
+		}
+
+		// Update each document in the page
+		for docID, doc := range page.Documents {
+			// Add field with default value if it doesn't exist
+			if doc.Fields == nil {
+				doc.Fields = make(map[string]models.Field)
+			}
+
+			if _, hasField := doc.Fields[fieldName]; !hasField {
+				doc.Fields[fieldName] = models.Field{
+					Name:  fieldName,
+					Value: defaultValue,
+				}
+
+				// Update the document in the bundle file
+				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
+				if err != nil {
+					return fmt.Errorf("failed to update document %s: %w", docID, err)
+				}
+			}
+		}
+	}
+
+	// Invalidate cached pages to force reload
+	s.invalidateBundlePageCache(bundle.Name)
+
+	return nil
+}
+
+// removeFieldFromExistingDocuments removes a field from all documents
+func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, fieldName string) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	// Iterate through all document pages
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			continue // Skip pages that don't exist yet
+		}
+
+		// Update each document in the page
+		for _, doc := range page.Documents {
+			if doc.Fields == nil {
+				continue
+			}
+
+			if _, hasField := doc.Fields[fieldName]; hasField {
+				delete(doc.Fields, fieldName)
+
+				// Update the document in the bundle file
+				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
+				if err != nil {
+					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
+				}
+			}
+		}
+	}
+
+	// Invalidate cached pages to force reload
+	s.invalidateBundlePageCache(bundle.Name)
+
+	return nil
+}
+
+// renameFieldInDocuments renames a field in all documents
+func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldName, newFieldName string) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	s.logger.Infof("Renaming field '%s' to '%s' in all documents of bundle '%s'", oldFieldName, newFieldName, bundle.Name)
+
+	// Iterate through all document pages
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			continue // Skip pages that don't exist yet
+		}
+
+		// Update each document in the page
+		for _, doc := range page.Documents {
+			if doc.Fields == nil {
+				continue
+			}
+
+			// Check if old field exists
+			if oldFieldValue, hasField := doc.Fields[oldFieldName]; hasField {
+				// Copy the field with new name
+				doc.Fields[newFieldName] = models.Field{
+					Name:  newFieldName,
+					Value: oldFieldValue.Value,
+				}
+
+				// Remove old field
+				delete(doc.Fields, oldFieldName)
+
+				// Update the document in the bundle file
+				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
+				if err != nil {
+					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
+				}
+			}
+		}
+	}
+
+	// Invalidate cached pages to force reload
+	s.invalidateBundlePageCache(bundle.Name)
+
+	s.logger.Infof("Successfully renamed field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
+	return nil
+}
+
+// convertFieldType attempts to convert all values of a field to a new type
+func (s *BundleService) convertFieldType(bundle *models.Bundle, fieldName, fromType, toType string) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	conversionErrors := []string{}
+
+	// Iterate through all document pages
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			continue // Skip pages that don't exist yet
+		}
+
+		// Update each document in the page
+		for _, doc := range page.Documents {
+			if doc.Fields == nil {
+				continue
+			}
+
+			field, hasField := doc.Fields[fieldName]
+			if !hasField {
+				continue
+			}
+
+			// Attempt conversion
+			convertedValue, err := s.convertValue(field.Value, fromType, toType)
+			if err != nil {
+				conversionErrors = append(conversionErrors,
+					fmt.Sprintf("doc %s: %v", doc.DocumentID, err))
+				continue
+			}
+
+			// Update field value
+			field.Value = convertedValue
+			doc.Fields[fieldName] = field
+
+			// Persist the change
+			err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
+			if err != nil {
+				return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
+			}
+		}
+	}
+
+	if len(conversionErrors) > 0 {
+		return fmt.Errorf("conversion failed for %d documents: %v", len(conversionErrors), conversionErrors[:min(5, len(conversionErrors))])
+	}
+
+	// Invalidate cached pages to force reload
+	s.invalidateBundlePageCache(bundle.Name)
+
+	return nil
+}
+
+// convertValue attempts to convert a single value from one type to another
+func (s *BundleService) convertValue(value interface{}, fromType, toType string) (interface{}, error) {
+	// Handle nil values
+	if value == nil {
+		return nil, nil
+	}
+
+	switch toType {
+	case "string":
+		return fmt.Sprintf("%v", value), nil
+
+	case "int":
+		switch v := value.(type) {
+		case int, int32, int64:
+			return v, nil
+		case float32, float64:
+			return int(v.(float64)), nil
+		case string:
+			return strconv.Atoi(v)
+		default:
+			return nil, fmt.Errorf("cannot convert %T to int", value)
+		}
+
+	case "float":
+		switch v := value.(type) {
+		case float32, float64:
+			return v, nil
+		case int, int32, int64:
+			return float64(v.(int)), nil
+		case string:
+			return strconv.ParseFloat(v, 64)
+		default:
+			return nil, fmt.Errorf("cannot convert %T to float", value)
+		}
+
+	case "bool":
+		switch v := value.(type) {
+		case bool:
+			return v, nil
+		case string:
+			return strconv.ParseBool(v)
+		case int, int32, int64:
+			return v.(int) != 0, nil
+		default:
+			return nil, fmt.Errorf("cannot convert %T to bool", value)
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported target type: %s", toType)
+	}
+}
+
+// validateFieldUniqueness checks that all values for a field are unique
+func (s *BundleService) validateFieldUniqueness(bundle *models.Bundle, fieldName string) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	valuesSeen := make(map[string][]string) // value -> []documentIDs
+
+	// Iterate through all document pages
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			continue // Skip pages that don't exist yet
+		}
+
+		for _, doc := range page.Documents {
+			if doc.Fields == nil {
+				continue
+			}
+
+			field, hasField := doc.Fields[fieldName]
+			if !hasField {
+				continue
+			}
+
+			// Convert to string for comparison (simple approach)
+			valueKey := fmt.Sprintf("%v", field.Value)
+			valuesSeen[valueKey] = append(valuesSeen[valueKey], doc.DocumentID)
+		}
+	}
+
+	// Check for duplicates
+	duplicates := []string{}
+	for value, docIDs := range valuesSeen {
+		if len(docIDs) > 1 {
+			duplicates = append(duplicates, fmt.Sprintf("%v (in docs: %v)", value, docIDs[:min(3, len(docIDs))]))
+		}
+	}
+
+	if len(duplicates) > 0 {
+		return fmt.Errorf("cannot add IsUnique to field '%s' - duplicate values exist: %v",
+			fieldName, duplicates[:min(5, len(duplicates))])
+	}
+
+	return nil
+}
+
+// validateAllDocumentsHaveField checks that all documents have a non-nil value for a field
+func (s *BundleService) validateAllDocumentsHaveField(bundle *models.Bundle, fieldName string) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	missingCount := 0
+
+	// Iterate through all document pages
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			continue // Skip pages that don't exist yet
+		}
+
+		for _, doc := range page.Documents {
+			if doc.Fields == nil {
+				missingCount++
+				continue
+			}
+
+			field, hasField := doc.Fields[fieldName]
+			if !hasField || field.Value == nil {
+				missingCount++
+			}
+		}
+	}
+
+	if missingCount > 0 {
+		return fmt.Errorf("%d documents are missing field '%s'", missingCount, fieldName)
+	}
+
+	return nil
+}
+
+// applyDefaultToMissingField adds default value to documents missing a field
+func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldName string, defaultValue interface{}) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	// Iterate through all document pages
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			continue // Skip pages that don't exist yet
+		}
+
+		// Update each document in the page
+		for _, doc := range page.Documents {
+			if doc.Fields == nil {
+				doc.Fields = make(map[string]models.Field)
+			}
+
+			field, hasField := doc.Fields[fieldName]
+			if !hasField || field.Value == nil {
+				doc.Fields[fieldName] = models.Field{
+					Name:  fieldName,
+					Value: defaultValue,
+				}
+
+				// Persist the change
+				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
+				if err != nil {
+					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
+				}
+			}
+		}
+	}
+
+	// Invalidate cached pages to force reload
+	s.invalidateBundlePageCache(bundle.Name)
+
+	return nil
+}
+
+// isFieldIndexed checks if a field has an index
+func (s *BundleService) isFieldIndexed(bundle *models.Bundle, fieldName string) bool {
+	if bundle.Indexes == nil {
+		return false
+	}
+
+	// Check if any index references this field
+	for _, index := range bundle.Indexes {
+		// Check BTreeIndexField
+		if index.BTreeIndexField.FieldName == fieldName {
+			return true
+		}
+		// Check HashIndexField
+		if index.HashIndexField.FieldName == fieldName {
+			return true
+		}
+		// Check Fields array
+		for _, field := range index.Fields {
+			if field.Name == fieldName {
+				return true
+			}
+		}
+	}
+
+	// DocumentID always has hash index
+	return fieldName == "DocumentID"
+}
+
+// rebuildFieldIndex rebuilds the index for a specific field
+// NOTE: For now, this is a placeholder. Full index rebuilding requires:
+// 1. Access to index manager to close/reinitialize indexes
+// 2. Knowledge of index storage paths
+// 3. Proper handling of different index types (BTree, Hash)
+// This is a complex operation that should be implemented when index
+// management is refactored to be more modular.
+func (s *BundleService) rebuildFieldIndex(bundle *models.Bundle, fieldName string) error {
+	s.logger.Warnf("Index rebuilding for field '%s' in bundle '%s' not yet fully implemented", fieldName, bundle.Name)
+	s.logger.Infof("Indexes will be rebuilt on next server restart or when accessed")
+
+	// TODO: Implement full index rebuilding
+	// For now, we log a warning. Indexes will be rebuilt when:
+	// 1. Server restarts and reloads bundles
+	// 2. Index is accessed and found to be stale/corrupted
+	// 3. Manual reindex command is run
+
+	return nil
+}
+
+// invalidateBundlePageCache invalidates all cached pages for a bundle
+func (s *BundleService) invalidateBundlePageCache(bundleName string) {
+	if s.documentPages == nil {
+		return
+	}
+
+	keysToDelete := make([]string, 0)
+	for pageKey := range s.documentPages {
+		if strings.HasPrefix(pageKey, bundleName+":") {
+			keysToDelete = append(keysToDelete, pageKey)
+		}
+	}
+
+	for _, key := range keysToDelete {
+		delete(s.documentPages, key)
+	}
+
+	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", len(keysToDelete), bundleName)
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relationshipCommand *models.RelationshipCommand) error {
 	if bundle == nil {
 		return fmt.Errorf("bundle is nil")
@@ -1634,7 +2533,7 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 		if err != nil {
 			return fmt.Errorf("failed to add field to destination bundle for 1toMany relationship: %w", err)
 		}
-
+	// TODO Add a 1To1 relationship type later
 	case "0toMany":
 		// For 0toMany relationships, add a field to the destination bundle (not required)
 		err := s.addFieldToDestinationBundle(bundle, &relationship, false, false) // required=false, unique=false
@@ -2467,6 +3366,12 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 }
 
 func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, bundle *models.Bundle, document *models.Document) error {
+	// Acquire write lock to prevent concurrent modifications during rename
+	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
+		return fmt.Errorf("failed to acquire write lock: %w", err)
+	}
+	defer s.ReleaseBundleWriteLock(bundle.Name)
+
 	// Schedule deferred metadata update instead of immediate calculation
 	s.scheduleMetadataUpdate(bundle.Name, "increment_docs", 1)
 
@@ -2540,6 +3445,12 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 		s.logger.Errorf("Bundle is nil, cannot update document")
 		return fmt.Errorf("bundle '%s' is nil, cannot update document", docCommand.BundleName)
 	}
+
+	// Acquire write lock to prevent concurrent modifications during rename
+	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
+		return fmt.Errorf("failed to acquire write lock: %w", err)
+	}
+	defer s.ReleaseBundleWriteLock(bundle.Name)
 
 	// Get the existing document
 	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause)
@@ -2684,6 +3595,12 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		return fmt.Errorf("bundle '%s' is nil, cannot delete document", docCommand.BundleName)
 	}
 
+	// Acquire write lock to prevent concurrent modifications during rename
+	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
+		return fmt.Errorf("failed to acquire write lock: %w", err)
+	}
+	defer s.ReleaseBundleWriteLock(bundle.Name)
+
 	if args.Debug {
 		s.logger.Infof("Starting document deletion from bundle '%s' with WHERE clause: %s",
 			docCommand.BundleName, docCommand.WhereClause)
@@ -2824,6 +3741,12 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 		return nil, fmt.Errorf("bundle is nil")
 	}
 
+	// Acquire read lock to ensure data consistency during reads
+	if err := s.AcquireBundleReadLock(bundle.Name); err != nil {
+		return nil, fmt.Errorf("failed to acquire read lock: %w", err)
+	}
+	defer s.ReleaseBundleReadLock(bundle.Name)
+
 	// Try to use hash index for fast lookup first
 	if bundle.Indexes != nil {
 		for indexName, indexRef := range bundle.Indexes {
@@ -2875,6 +3798,12 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 		s.logger.Errorf("Bundle is nil, cannot filter documents")
 		return nil, fmt.Errorf("bundle is nil, cannot filter documents")
 	}
+
+	// Acquire read lock to ensure data consistency during reads
+	if err := s.AcquireBundleReadLock(bundle.Name); err != nil {
+		return nil, fmt.Errorf("failed to acquire read lock: %w", err)
+	}
+	defer s.ReleaseBundleReadLock(bundle.Name)
 
 	// Force flush any pending metadata updates to ensure accurate PageCount
 	s.flushMetadataUpdates()

@@ -58,7 +58,7 @@ type BundleStore interface {
 	CreateBundleFile(database *models.Database, bundle *models.Bundle) error
 	UpdateBundleFile(database *models.Database, bundle *models.Bundle) error
 	UpdateDocumentDataInBundleFile(database *models.Database, bundle *models.Bundle, documentID string, updatedDocument map[string]interface{}, mmapData []byte) error
-
+	UpdateBundleFilename(database *models.Database, bundle *models.Bundle, oldBundleName string) error
 	UpdateDocumentInBundleFile(bundle *models.Bundle, document *models.Document) error
 	DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error
 
@@ -598,6 +598,25 @@ func (b *BundleStorageEngine) UpdateBundleFile(database *models.Database, bundle
 
 	if fileLen != len(encodedBundle) {
 		return fmt.Errorf("error writing to bundle data file %s: wrote %d bytes, expected %d", bundle.Name, fileLen, len(encodedBundle))
+	}
+
+	return nil
+}
+
+func (b *BundleStorageEngine) UpdateBundleFilename(database *models.Database, bundle *models.Bundle, oldBundleName string) error {
+	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+
+	// Create a new data file
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, bundle.Name))
+	oldFilePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, oldBundleName))
+	// Check if the file already exists
+	if helpers.FileExists(filePath, *b.logger) {
+		return fmt.Errorf("bundle %s already exists and cannot be renamed to", bundle.Name)
+	}
+
+	err := os.Rename(oldFilePath, filePath)
+	if err != nil {
+		return fmt.Errorf("error renaming bundle file from %s to %s: %w", oldBundleName, filePath, err)
 	}
 
 	return nil

@@ -558,7 +558,7 @@ func (p *SelectParser) parseOrderByClause(stmt *SelectStatement) error {
 	p.advance() // consume BY
 
 	for {
-		if p.current.Type != TOKEN_IDENT {
+		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
 			return fmt.Errorf("expected field name in ORDER BY, got %s", p.current.Type.String())
 		}
 
