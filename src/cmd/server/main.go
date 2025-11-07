@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/graphQL"
+	"syndrdb/src/internal/graphQL/schema"
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/settings"
 
@@ -172,15 +173,22 @@ func main() {
 		}
 
 		if defaultDB != nil {
-			// Create GraphQL handler
-			serviceManager := server.GetServiceManager()
-			graphQLHandler, err := graphQL.NewGraphQLHandler(*serviceManager, defaultDB, srv.GetLogger())
+			// Create GraphQL schema manager
+			schemaFilePath := filepath.Join(defaultDB.DataDirectory, fmt.Sprintf("%s_graphql_schemas.gqls", defaultDB.Name))
+			schemaManager, err := schema.NewSchemaManager(schemaFilePath, defaultDB.Name, defaultDB.DatabaseID)
 			if err != nil {
-				log.Printf("Warning: Failed to initialize GraphQL handler: %v", err)
+				log.Printf("Warning: Failed to initialize GraphQL schema manager: %v", err)
 			} else {
-				// Set GraphQL processor for TCP socket connections
-				server.SetGraphQLProcessor(graphQLHandler)
-				log.Println("GraphQL enabled for TCP socket connections with GRAPHQL:: prefix")
+				// Create GraphQL handler with schema manager
+				serviceManager := server.GetServiceManager()
+				graphQLHandler, err := graphQL.NewGraphQLHandler(*serviceManager, defaultDB, schemaManager, srv.GetLogger())
+				if err != nil {
+					log.Printf("Warning: Failed to initialize GraphQL handler: %v", err)
+				} else {
+					// Set GraphQL processor for TCP socket connections
+					server.SetGraphQLProcessor(graphQLHandler)
+					log.Println("GraphQL enabled for TCP socket connections with GRAPHQL:: prefix")
+				}
 			}
 		} else {
 			log.Println("Warning: No database available for GraphQL")

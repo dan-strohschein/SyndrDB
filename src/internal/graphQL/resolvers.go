@@ -439,6 +439,16 @@ func (h *GraphQLHandler) mutateCreateBundle(field *ast.Field, variables map[stri
 }
 
 // mutateCreateDocument resolves the "createDocument" mutation field
+// mutateCreateDocument creates a new document in a bundle
+//
+// TODO: I will reimplement this mutation using the native mutation pattern when
+// implementing Phase 6 mutation support. The native pattern will:
+// - Parse GraphQL mutations into unified mutation commands
+// - Use Phase 5 schemas for type validation and field mapping
+// - Execute through the same service layer as native SyndrDB mutations
+// - Ensure identical performance to SyndrDB's native CREATE DOCUMENT command
+//
+// Current implementation works but is part of the pre-Phase 6 GraphQL system.
 func (h *GraphQLHandler) mutateCreateDocument(field *ast.Field, variables map[string]interface{}) (interface{}, error) {
 	// Get the bundle name argument
 	bundleArg, ok := h.getArgument(field, "bundle", variables)
@@ -500,6 +510,17 @@ func (h *GraphQLHandler) mutateCreateDocument(field *ast.Field, variables map[st
 }
 
 // mutateUpdateDocument resolves the "updateDocument" mutation field
+// mutateUpdateDocument updates an existing document in a bundle
+//
+// TODO: I will reimplement this mutation using the native mutation pattern when
+// implementing Phase 6 mutation support. The native pattern will:
+// - Parse GraphQL mutations into unified UPDATE commands
+// - Use Phase 5 schemas for field validation and type checking
+// - Support partial updates with proper merge semantics
+// - Execute through the same service layer as native SyndrDB UPDATE DOCUMENT
+// - Ensure identical performance to SyndrDB's native update operations
+//
+// Current implementation works but is part of the pre-Phase 6 GraphQL system.
 func (h *GraphQLHandler) mutateUpdateDocument(field *ast.Field, variables map[string]interface{}) (interface{}, error) {
 	// Get the document ID argument
 	idArg, ok := h.getArgument(field, "id", variables)
@@ -569,6 +590,17 @@ func (h *GraphQLHandler) mutateUpdateDocument(field *ast.Field, variables map[st
 }
 
 // mutateDeleteDocument resolves the "deleteDocument" mutation field
+// mutateDeleteDocument deletes a document from a bundle
+//
+// TODO: I will reimplement this mutation using the native mutation pattern when
+// implementing Phase 6 mutation support. The native pattern will:
+// - Parse GraphQL mutations into unified DELETE commands
+// - Support bulk delete operations with WHERE clause filtering
+// - Handle cascading deletes when implementing relationship support
+// - Execute through the same service layer as native SyndrDB DELETE DOCUMENT
+// - Ensure identical performance to SyndrDB's native delete operations
+//
+// Current implementation works but is part of the pre-Phase 6 GraphQL system.
 func (h *GraphQLHandler) mutateDeleteDocument(field *ast.Field, variables map[string]interface{}) (interface{}, error) {
 	// Get the bundle name argument
 	bundleArg, ok := h.getArgument(field, "bundle", variables)

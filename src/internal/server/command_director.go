@@ -197,6 +197,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 					return &result, fmt.Errorf("failed to apply field changes: %w", err)
 				}
 				logger.Infof("Successfully applied field changes to bundle '%s'", bundle.Name)
+
 				if len(result) > 0 {
 					result = fmt.Sprintf("%s Bundle '%s' updated successfully.", result, bundle.Name)
 				} else {

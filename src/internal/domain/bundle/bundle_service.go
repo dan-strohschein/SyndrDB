@@ -23,6 +23,10 @@ import (
 
 	"syndrdb/src/pkg/common/helpers"
 
+	// PHASE 5: GraphQL Schema Integration
+	// Import the graphQL schema package for automatic schema generation
+	graphQLSchema "syndrdb/src/internal/graphQL/schema"
+
 	"sync"
 
 	"go.uber.org/zap"
@@ -240,6 +244,32 @@ type BundleService struct {
 	// CATALOG SERVICE: Reference for updating system catalog
 	// Injected after construction to avoid circular dependency
 	catalogService CatalogServiceInterface
+
+	// GRAPHQL SCHEMA MANAGEMENT: Manages GraphQL schema generation and storage (Phase 5)
+	// This system automatically generates GraphQL schemas from bundle structures
+	// and maintains them in versioned, tombstone-based file format per database.
+	//
+	// Integration Points:
+	// - AddBundle: Generates initial schema when bundle is created
+	// - UpdateBundle: Creates new schema version when bundle structure changes
+	// - Bundle field modifications: Triggers schema regeneration with breaking change detection
+	//
+	// Schema Lifecycle:
+	// 1. Bundle Created → Generate GraphQL schema → Store in schema file → Cache
+	// 2. Bundle Modified → Detect breaking changes → Create new version → Tombstone old → Update cache
+	// 3. Bundle Deleted → Tombstone all schema versions
+	//
+	// Architecture:
+	// - schemaManagers: One manager per database (lazy initialization on first bundle operation)
+	// - schemaGenerator: Shared stateless generator for all databases
+	// - graphQLEnabled: Global toggle from settings.EnableGraphQL
+	//
+	// The schema system is optional and only initializes if GraphQL support is enabled.
+	// This allows the database to run without GraphQL overhead if not needed.
+	schemaManagers     map[string]*graphQLSchema.SchemaManager // databaseName -> schema manager
+	schemaManagerMutex sync.RWMutex                            // Protects schemaManagers map
+	schemaGenerator    *graphQLSchema.SchemaGenerator          // Shared generator for all databases
+	graphQLEnabled     bool                                    // Global toggle from settings
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
@@ -293,6 +323,23 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 
 		// CATALOG SERVICE: Will be injected post-construction via SetCatalogService()
 		catalogService: nil,
+
+		// PHASE 5 GRAPHQL INTEGRATION: Initialize GraphQL schema system
+		// Schema managers are created lazily per database on first bundle operation
+		// because they require database-specific directory paths not available at construction.
+		// The schema generator is stateless and shared across all databases.
+		schemaManagers:  make(map[string]*graphQLSchema.SchemaManager),
+		schemaGenerator: nil, // Initialized below if GraphQL is enabled
+		graphQLEnabled:  globalSettings.EnableGraphQL,
+	}
+
+	// PHASE 5: Initialize schema generator if GraphQL is enabled
+	// Generator is stateless and can be created once, shared by all databases
+	if service.graphQLEnabled {
+		service.schemaGenerator = graphQLSchema.NewSchemaGenerator()
+		logger.Infof("GraphQL schema generator initialized (managers will be created per database on-demand)")
+	} else {
+		logger.Debugf("GraphQL support disabled - schema generation will be skipped")
 	}
 
 	// Don't load bundle metadata at startup - bundles should be loaded on-demand
@@ -308,6 +355,174 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 func (s *BundleService) SetCatalogService(catalogService CatalogServiceInterface) {
 	s.catalogService = catalogService
 	s.logger.Debug("Catalog service injected into BundleService")
+}
+
+// getOrCreateSchemaManager retrieves or creates a GraphQL schema manager for the specified database.
+// Schema managers are created lazily on first use because they require database-specific directory paths.
+// This method is thread-safe and uses double-checked locking for optimal performance.
+//
+// PHASE 5 INTEGRATION: This method is called automatically by AddBundle and UpdateBundle operations
+// when GraphQL support is enabled. It initializes the schema file in the database's data directory.
+//
+// Parameters:
+//   - db: The database model containing name, ID, and directory path information
+//
+// Returns:
+//   - *graphQLSchema.SchemaManager: The schema manager for this database (may be nil if disabled)
+//   - error: Any initialization errors (logged but operation continues)
+//
+// Thread Safety: Uses schemaManagerMutex to protect concurrent manager creation
+func (s *BundleService) getOrCreateSchemaManager(db *models.Database) (*graphQLSchema.SchemaManager, error) {
+	// Return nil immediately if GraphQL is disabled
+	if !s.graphQLEnabled {
+		return nil, nil
+	}
+
+	// Fast path: check if manager already exists with read lock
+	s.schemaManagerMutex.RLock()
+	manager, exists := s.schemaManagers[db.Name]
+	s.schemaManagerMutex.RUnlock()
+
+	if exists {
+		return manager, nil
+	}
+
+	// Slow path: create new manager with write lock
+	s.schemaManagerMutex.Lock()
+	defer s.schemaManagerMutex.Unlock()
+
+	// Double-check after acquiring write lock (another goroutine may have created it)
+	manager, exists = s.schemaManagers[db.Name]
+	if exists {
+		return manager, nil
+	}
+
+	// PHASE 5: Create schema file path in database directory
+	// Schema files follow the pattern: {database_directory}/{database_name}_graphql.gql
+	// This ensures schemas are stored alongside their respective database bundles
+	schemaFilePath := filepath.Join(s.settings.DataDir, db.Name, db.Name+"_graphql.gql")
+
+	// Initialize the schema manager with database context
+	// The manager handles schema versioning, tombstoning, and caching
+	manager, err := graphQLSchema.NewSchemaManager(schemaFilePath, db.Name, db.DatabaseID)
+	if err != nil {
+		s.logger.Warnf("Failed to initialize GraphQL schema manager for database '%s': %v. Schema generation disabled for this database.", db.Name, err)
+		return nil, err
+	}
+
+	// Cache the manager for future use
+	s.schemaManagers[db.Name] = manager
+	s.logger.Infof("GraphQL schema manager initialized for database '%s' at: %s", db.Name, schemaFilePath)
+
+	return manager, nil
+}
+
+// regenerateGraphQLSchema regenerates the GraphQL schema for a bundle after structure changes.
+// This method implements FR-6: automatic schema regeneration on bundle modifications.
+//
+// It handles the complete schema update lifecycle:
+// 1. Generates new schema from current bundle structure
+// 2. Retrieves old schema for comparison (if exists)
+// 3. Detects breaking changes (field removals, type changes, nullability changes)
+// 4. Creates new schema version with breaking change annotations
+// 5. Tombstones old schema version
+// 6. Updates schema cache for immediate availability
+//
+// Breaking changes are detected and logged but don't fail the operation.
+// This ensures bundle modifications succeed even if clients may need schema updates.
+//
+// Design Principles:
+// - Single Responsibility: Handles only schema regeneration, delegates storage to SchemaManager
+// - DRY: Reuses existing getOrCreateSchemaManager, GenerateSchema, DetectBreakingChanges
+// - Open/Closed: Extensible through SchemaGenerator type mapping
+//
+// Returns error only if schema generation or storage fails critically.
+// Warnings are logged for breaking changes and non-critical failures.
+func (s *BundleService) regenerateGraphQLSchema(bundle *models.Bundle) error {
+	// Early exit if GraphQL is disabled or bundle has no database context
+	if !s.graphQLEnabled || s.schemaGenerator == nil {
+		return nil
+	}
+	if bundle == nil || bundle.Database == nil {
+		return fmt.Errorf("bundle or database is nil")
+	}
+
+	s.logger.Debugf("[GraphQL] Regenerating schema for bundle '%s' in database '%s'",
+		bundle.Name, bundle.Database.Name)
+
+	// Get or create the schema manager for this database (reuses existing infrastructure)
+	schemaManager, err := s.getOrCreateSchemaManager(bundle.Database)
+	if err != nil {
+		return fmt.Errorf("failed to get schema manager: %w", err)
+	}
+	if schemaManager == nil {
+		// GraphQL disabled for this database
+		return nil
+	}
+
+	// Retrieve current active schema for breaking change detection
+	// This may be nil if this is the first schema or if it was tombstoned
+	oldSchema, err := schemaManager.GetActiveSchemaForBundle(bundle.Name)
+	if err != nil {
+		s.logger.Warnf("[GraphQL] Failed to retrieve existing schema for bundle '%s': %v", bundle.Name, err)
+		// Continue with schema generation even if we can't get old schema
+	}
+
+	// Generate new schema from the current bundle structure (reuses existing generator)
+	// This converts SyndrDB field definitions → GraphQL types
+	newSchemaDef, err := s.schemaGenerator.GenerateSchema(bundle)
+	if err != nil {
+		return fmt.Errorf("failed to generate schema: %w", err)
+	}
+
+	// Detect breaking changes by comparing old schema with new schema
+	// Breaking changes: field removals, type changes, nullable → non-nullable
+	var breakingChanges []graphQLSchema.BreakingChange
+	if oldSchema != nil && oldSchema.Payload != nil {
+		breakingChanges = s.schemaGenerator.DetectBreakingChanges(oldSchema.Payload, newSchemaDef)
+
+		// Log breaking changes for visibility (critical for API consumers)
+		if len(breakingChanges) > 0 {
+			s.logger.Warnf("[GraphQL] Breaking changes detected in bundle '%s': %d change(s)",
+				bundle.Name, len(breakingChanges))
+			for _, change := range breakingChanges {
+				s.logger.Warnf("[GraphQL]   - %s: Field '%s' %s → %s (Severity: %s)",
+					change.ChangeType, change.FieldName, change.OldValue, change.NewValue, change.Severity)
+			}
+		} else {
+			s.logger.Debugf("[GraphQL] No breaking changes detected (backward compatible update)")
+		}
+	}
+
+	// Attach breaking changes to schema definition for storage and future reference
+	newSchemaDef.BreakingChanges = breakingChanges
+
+	// Get schema version for update operation
+	var schemaIDBytes [16]byte
+	if oldSchema != nil {
+		// Updating existing schema - use same ID to link versions
+		schemaIDBytes = oldSchema.SchemaID
+	} else {
+		// First schema for this bundle - generate new ID
+		copy(schemaIDBytes[:], []byte(helpers.GenerateFastUUID()))
+	}
+
+	var bundleIDBytes [16]byte
+	copy(bundleIDBytes[:], []byte(bundle.BundleID))
+
+	// Update schema: creates new version, tombstones old, updates cache
+	// This writes to the schema file with versioning and tombstone markers
+	err = schemaManager.UpdateSchema(schemaIDBytes, bundleIDBytes, bundle.Name, newSchemaDef)
+	if err != nil {
+		return fmt.Errorf("failed to update schema: %w", err)
+	}
+
+	// Log success with version information
+	newVersion, _ := schemaManager.GetLatestVersionForBundle(bundle.Name)
+	s.logger.Infof("[GraphQL] Schema updated for bundle '%s' (version %d, %d fields, %d breaking changes)",
+		bundle.Name, newVersion, len(newSchemaDef.Fields), len(breakingChanges))
+
+	return nil
 }
 
 // getBundleLock retrieves or creates an operation lock for the specified bundle.
@@ -1164,6 +1379,51 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 		// Don't fail the bundle creation if catalog registration fails
 	}
 
+	// PHASE 5 GRAPHQL INTEGRATION: Generate and store GraphQL schema for new bundle
+	// This creates the initial schema version (v1) and caches it for query execution.
+	// Schema generation only occurs if GraphQL support is enabled globally.
+	//
+	// Steps:
+	// 1. Get or create schema manager for this database (lazy initialization)
+	// 2. Generate GraphQL schema definition from bundle structure
+	// 3. Create schema ID and store in versioned file format
+	// 4. Cache schema for fast GraphQL query processing
+	//
+	// Note: Schema generation failures are logged but don't fail bundle creation.
+	// This ensures bundles can be created even if GraphQL has issues.
+	if s.graphQLEnabled && s.schemaGenerator != nil {
+		s.logger.Debugf("[GraphQL] Generating schema for new bundle '%s' in database '%s'", bundle.Name, db.Name)
+
+		// Get or create the schema manager for this database (thread-safe lazy init)
+		schemaManager, err := s.getOrCreateSchemaManager(db)
+		if err != nil {
+			s.logger.Warnf("[GraphQL] Failed to initialize schema manager for database '%s': %v. Skipping schema generation.", db.Name, err)
+		} else if schemaManager != nil {
+			// Generate GraphQL schema from bundle structure
+			// Converts SyndrDB types → GraphQL types (string→String, int→Int, etc.)
+			// Applies PascalCase naming convention (users → User, blog_posts → BlogPost)
+			schemaDef, err := s.schemaGenerator.GenerateSchema(bundle)
+			if err != nil {
+				s.logger.Warnf("[GraphQL] Failed to generate schema for bundle '%s': %v", bundle.Name, err)
+			} else {
+				// Create unique schema ID for this schema version
+				// Convert string UUIDs to [16]byte arrays for storage
+				var schemaIDBytes, bundleIDBytes [16]byte
+				copy(schemaIDBytes[:], []byte(helpers.GenerateFastUUID()))
+				copy(bundleIDBytes[:], []byte(bundle.BundleID))
+
+				// Store schema in versioned file format (creates version 1)
+				// This writes to {database_dir}/{database_name}_graphql.gql
+				err = schemaManager.AddNewSchema(schemaIDBytes, bundleIDBytes, bundle.Name, schemaDef)
+				if err != nil {
+					s.logger.Errorf("[GraphQL] Failed to store schema for bundle '%s': %v", bundle.Name, err)
+				} else {
+					s.logger.Infof("[GraphQL] Schema created for bundle '%s' (version 1, %d fields)", bundle.Name, len(schemaDef.Fields))
+				}
+			}
+		}
+	}
+
 	return bundle, nil
 }
 
@@ -1844,6 +2104,18 @@ func (s *BundleService) updateBundleInSystemCatalog(database *models.Database, o
 	}
 
 	s.logger.Infof("Updated system catalog for bundle rename: '%s' -> '%s'", oldName, newName)
+
+	// FR-6 GRAPHQL INTEGRATION: Regenerate GraphQL schema after bundle rename
+	// Bundle rename changes the GraphQL TypeName (e.g., "users" -> "User", "blog_posts" -> "BlogPost")
+	// This creates a new schema version with the updated type name.
+	//
+	// This reuses the regenerateGraphQLSchema method for consistency.
+	// Schema update failures are logged but don't fail the rename operation.
+	if err := s.regenerateGraphQLSchema(bundle); err != nil {
+		s.logger.Warnf("[GraphQL] Failed to regenerate schema after rename to '%s': %v. Rename was successful.",
+			newName, err)
+	}
+
 	return nil
 }
 
@@ -1930,6 +2202,19 @@ func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []model
 
 	// Update the cache with the modified bundle
 	s.bundleMetadata[bundle.Name] = bundle
+
+	// FR-6 GRAPHQL INTEGRATION: Regenerate GraphQL schema after bundle structure changes
+	// This reuses the regenerateGraphQLSchema method which handles:
+	// - Breaking change detection (field removals, type changes, nullability changes)
+	// - Schema versioning (new version creation + old version tombstoning)
+	// - Cache updates for immediate availability
+	//
+	// Schema update failures are logged but don't fail the field change operation.
+	// This ensures bundle modifications succeed even if GraphQL clients may need updates.
+	if err := s.regenerateGraphQLSchema(bundle); err != nil {
+		s.logger.Warnf("[GraphQL] Failed to regenerate schema for bundle '%s': %v. Field changes were applied successfully.",
+			bundle.Name, err)
+	}
 
 	s.logger.Infof("Successfully applied all field changes to bundle '%s'", bundle.Name)
 	return nil
@@ -2573,6 +2858,32 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 
 	// Update the cache with the modified bundle
 	s.bundleMetadata[bundle.Name] = bundle
+
+	// FR-6 GRAPHQL INTEGRATION: Regenerate GraphQL schema after relationship changes
+	// Relationships add new fields to bundles (e.g., user.posts: [Post], post.author: User)
+	// Both source and destination bundles need schema regeneration.
+	//
+	// This reuses the regenerateGraphQLSchema method for consistency.
+	// Schema update failures are logged but don't fail the relationship creation.
+	if err := s.regenerateGraphQLSchema(bundle); err != nil {
+		s.logger.Warnf("[GraphQL] Failed to regenerate schema for source bundle '%s': %v. Relationship was created successfully.",
+			bundle.Name, err)
+	}
+
+	// Regenerate destination bundle schema if it's different from source
+	// (some relationships may be self-referential, e.g., user.manager -> user)
+	if relationshipCommand.DestinationBundle != bundle.Name {
+		destBundle, err := s.GetBundleByName(bundle.Database, relationshipCommand.DestinationBundle)
+		if err == nil {
+			if err := s.regenerateGraphQLSchema(destBundle); err != nil {
+				s.logger.Warnf("[GraphQL] Failed to regenerate schema for destination bundle '%s': %v. Relationship was created successfully.",
+					destBundle.Name, err)
+			}
+		} else {
+			s.logger.Warnf("[GraphQL] Could not get destination bundle '%s' for schema regeneration: %v",
+				relationshipCommand.DestinationBundle, err)
+		}
+	}
 
 	s.logger.Infof("Successfully added relationship '%s' to bundle '%s'", relationshipName, bundle.Name)
 	return nil
@@ -4753,6 +5064,38 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 	s.pageCacheMutex.Unlock()
 
 	s.logger.Debugf("Cleared document-page cache for deleted bundle: %s", bundle.Name)
+
+	// PHASE 5 GRAPHQL INTEGRATION: Tombstone all GraphQL schemas when bundle is deleted
+	// This marks all schema versions as deleted in the schema file, preventing their use in queries.
+	// The schema manager handles tombstoning all versions atomically.
+	//
+	// Important: This doesn't physically delete schemas from the file (they remain for audit/rollback),
+	// but marks them as deleted so GraphQL queries will not use them.
+	//
+	// Note: Tombstoning failures are logged but don't fail the bundle deletion.
+	// The bundle is already deleted from disk, so the operation is considered successful.
+	if s.graphQLEnabled && database != nil {
+		s.logger.Debugf("[GraphQL] Tombstoning schemas for deleted bundle '%s' in database '%s'", bundle.Name, database.Name)
+
+		// Get the schema manager for this database (if it exists)
+		// No need to create a new manager since we're just tombstoning
+		s.schemaManagerMutex.RLock()
+		schemaManager, exists := s.schemaManagers[database.Name]
+		s.schemaManagerMutex.RUnlock()
+
+		if exists && schemaManager != nil {
+			// Tombstone all schema versions for this bundle
+			// This is an atomic operation that marks all versions as deleted
+			err := schemaManager.TombstoneAllSchemasForBundle(bundle.Name)
+			if err != nil {
+				s.logger.Warnf("[GraphQL] Failed to tombstone schemas for deleted bundle '%s': %v. Schemas may remain in cache.", bundle.Name, err)
+			} else {
+				s.logger.Infof("[GraphQL] All schema versions tombstoned for deleted bundle '%s'", bundle.Name)
+			}
+		} else {
+			s.logger.Debugf("[GraphQL] No schema manager found for database '%s' - skipping schema tombstoning", database.Name)
+		}
+	}
 
 	return nil
 }
