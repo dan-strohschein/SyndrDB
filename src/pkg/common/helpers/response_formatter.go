@@ -106,3 +106,55 @@ func isNestedRelationship(value interface{}) bool {
 		return false
 	}
 }
+
+// TransformDocumentSliceToFlatFormat converts a sorted slice of documents to flat format
+// Preserves the order of documents in the slice (used for ORDER BY queries)
+//
+// This function is similar to TransformDocumentsToFlatFormatWithProjection but:
+// - Accepts a slice instead of a map (order is already determined)
+// - Does NOT sort by DocumentID (preserves input order)
+// - Used when query has ORDER BY to maintain sort order
+//
+// Parameters:
+//   - documents: Slice of documents in desired order (e.g., from ORDER BY + LIMIT)
+//   - selectedFields: List of fields to include (nil/empty = all fields)
+//
+// Returns:
+//   - Array of flattened document objects in the same order as input
+func TransformDocumentSliceToFlatFormat(documents []*models.Document, selectedFields []string) []map[string]interface{} {
+	flattenedDocs := make([]map[string]interface{}, 0, len(documents))
+
+	// Build field filter map for O(1) lookup
+	var fieldFilter map[string]bool
+	hasProjection := len(selectedFields) > 0
+	if hasProjection {
+		fieldFilter = make(map[string]bool)
+		for _, field := range selectedFields {
+			fieldFilter[field] = true
+		}
+	}
+
+	// Process documents in input order (PRESERVES ORDER BY SORT!)
+	for _, doc := range documents {
+		flatDoc := make(map[string]interface{})
+
+		// Always include document metadata (not subject to projection)
+		flatDoc["DocumentID"] = doc.DocumentID
+		flatDoc["CreatedAt"] = doc.CreatedAt
+		flatDoc["UpdatedAt"] = doc.UpdatedAt
+
+		// Add fields based on projection
+		for fieldName, field := range doc.Fields {
+			// Check if this field should be included
+			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationship(field.Value)
+
+			if shouldInclude {
+				flatDoc[fieldName] = field.Value
+			}
+		}
+
+		flattenedDocs = append(flattenedDocs, flatDoc)
+	}
+
+	return flattenedDocs
+}

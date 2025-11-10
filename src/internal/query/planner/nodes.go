@@ -4,7 +4,8 @@ import (
 	"fmt"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
-	"syndrdb/src/internal/domain/index/hashindexV2"
+	// "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
+	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 
@@ -44,20 +45,20 @@ func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, 
 		return nil, fmt.Errorf("index %s is not a hash index (type: %s)", node.IndexName, indexRef.IndexType)
 	}
 
-	// Cast to the V2 hash index
+	// SPRINT 5 FIX: Cast to the V3 LSM-style hash index
 	_, ok := indexRef.IndexInstance.(primitive.D)
 	if indexRef.IndexInstance == nil || ok {
-		node.Logger.Infof("IndexRef is NIL - Loading hash index %s for bundle %s", node.IndexName, node.Bundle.Name)
+		node.Logger.Infof("IndexRef is NIL - Loading hash index V3 %s for bundle %s", node.IndexName, node.Bundle.Name)
 		var err error
-		indexRef.IndexInstance, err = queryparser.EnsureHashIndexLoaded(node.Bundle, &indexRef, node.Logger)
+		indexRef.IndexInstance, err = queryparser.EnsureHashIndexV3Loaded(node.Bundle, &indexRef, node.Logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load hash index %s: %w", node.IndexName, err)
+			return nil, fmt.Errorf("failed to load hash index V3 %s: %w", node.IndexName, err)
 		}
 	}
 
-	hashIndex, ok := indexRef.IndexInstance.(*hashindexV2.HashIndex)
+	hashIndex, ok := indexRef.IndexInstance.(*hashindexV3.HashIndexV3)
 	if !ok {
-		return nil, fmt.Errorf("hash index %s is not of type *hashindexV2.HashIndex", node.IndexName)
+		return nil, fmt.Errorf("hash index %s is not of type *hashindexV3.HashIndexV3 (actual type: %T)", node.IndexName, indexRef.IndexInstance)
 	}
 
 	// Convert search key to string

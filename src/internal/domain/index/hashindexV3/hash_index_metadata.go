@@ -247,7 +247,7 @@ func (idx *HashIndexV3) RestoreGlobalSequence() error {
 	recoveredSequence := safeMax + safetyMargin
 
 	// Set global sequence
-	atomic.StoreUint64(&idx.globalSequence, recoveredSequence)
+	atomic.StoreUint64(&idx.GlobalSequence, recoveredSequence)
 
 	// Update stats
 	idx.statsMutex.Lock()

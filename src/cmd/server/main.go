@@ -71,6 +71,27 @@ func main() {
 	// PARSER CONFIGURATION
 	flag.BoolVar(&args.UseNewParser, "use-new-parser", false, "Use new SyndrQL parser (default: false, uses legacy parser)")
 
+	// PHASE 4 SORTING OPTIMIZATION FLAGS
+	// Top-N Heapsort flags
+	flag.Float64Var(&args.SortTopNThreshold, "sort-topn-threshold", 0.1, "Top-N heapsort threshold: LIMIT/total ratio (0.01-0.5)")
+	flag.IntVar(&args.SortTopNMinSize, "sort-topn-minsize", 100, "Minimum dataset size for Top-N optimization (10-10000)")
+	flag.IntVar(&args.SortHeapInitialCapacity, "sort-heap-capacity", 1000, "Initial heap capacity for Top-N queries (10-100000)")
+
+	// Radix Sort flags
+	flag.IntVar(&args.SortRadixMinSize, "sort-radix-minsize", 1000, "Minimum dataset size for radix sort (100-100000)")
+	flag.Float64Var(&args.SortRadixLimitRatio, "sort-radix-limitratio", 0.5, "Minimum LIMIT/total ratio for radix (0.1-1.0)")
+	flag.IntVar(&args.SortRadixMaxPasses, "sort-radix-maxpasses", 8, "Maximum radix sort passes for wide integers (1-8)")
+
+	// SIMD String Sort flags
+	flag.BoolVar(&args.SortSIMDEnabled, "sort-simd-enabled", true, "Enable SIMD string sorting optimization")
+	flag.IntVar(&args.SortSIMDAbbrevBytes, "sort-simd-abbrevbytes", 8, "Bytes for abbreviated string keys (4-16)")
+	flag.IntVar(&args.SortSIMDMinSize, "sort-simd-minsize", 100, "Minimum dataset size for SIMD (10-10000)")
+
+	// Parallel Sort flags (Phase 5 - future)
+	flag.BoolVar(&args.SortEnableParallel, "sort-parallel-enabled", false, "Enable parallel sorting (Phase 5)")
+	flag.IntVar(&args.SortParallelThreshold, "sort-parallel-threshold", 10000, "Minimum size for parallel sort (1000-1000000)")
+	flag.IntVar(&args.SortMaxMemoryMB, "sort-max-memory", 512, "Maximum sort memory in MB (10-10240)")
+
 	// Parse command line arguments
 	flag.Parse()
 

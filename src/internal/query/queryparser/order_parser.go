@@ -88,10 +88,32 @@ func (sd SortDirection) String() string {
 	}
 }
 
+// NullsPosition represents where NULL values should be sorted
+type NullsPosition int
+
+const (
+	NullsDefault NullsPosition = iota // Use default behavior (LAST for ASC, FIRST for DESC)
+	NullsFirst                        // NULL values sort first
+	NullsLast                         // NULL values sort last
+)
+
+// String returns the string representation of NullsPosition
+func (np NullsPosition) String() string {
+	switch np {
+	case NullsFirst:
+		return "NULLS FIRST"
+	case NullsLast:
+		return "NULLS LAST"
+	default:
+		return "NULLS DEFAULT"
+	}
+}
+
 // OrderByField represents a single field in an ORDER BY clause
 type OrderByField struct {
-	FieldName string
-	Direction SortDirection
+	FieldName     string
+	Direction     SortDirection
+	NullsPosition NullsPosition // NEW: Support for NULLS FIRST/LAST
 }
 
 // OrderByClause represents the complete ORDER BY clause

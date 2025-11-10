@@ -77,13 +77,13 @@ type HashIndexV3 struct {
 	config IndexConfig
 
 	// Core components
-	memTable  *HashMemTable     // In-memory cache layer
+	MemTable  *HashMemTable     // In-memory cache layer (exposed for direct access)
 	storage   *EntryStorage     // Disk persistence layer
 	compactor CompactionManager // File optimization (future integration)
 
 	// Sequence management for temporal ordering
 	// Uses atomic operations for thread-safe increments
-	globalSequence uint64
+	GlobalSequence uint64 // Exposed for atomic access from bundle service
 
 	// Concurrency control
 	// Note: Individual components have their own locks
@@ -240,9 +240,9 @@ func NewHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 	// Create index
 	idx := &HashIndexV3{
 		config:         config,
-		memTable:       memTable,
+		MemTable:       memTable,
 		storage:        storage,
-		globalSequence: 0,
+		GlobalSequence: 0,
 		isOpen:         true,
 		closed:         false,
 		stats: IndexStats{
@@ -284,7 +284,7 @@ func OpenHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 
 	// Update header with restored sequence to prevent mismatch warnings on next open
 	// This is especially important for indexes created before the header update fix
-	currentSequence := atomic.LoadUint64(&idx.globalSequence)
+	currentSequence := atomic.LoadUint64(&idx.GlobalSequence)
 	if err := idx.storage.UpdateHeaderStatistics(currentSequence); err != nil {
 		idx.logger.Warnw("Failed to update header after sequence restoration",
 			"error", err,
@@ -305,8 +305,8 @@ func OpenHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 
 	idx.logger.Infow("Opened existing hash index",
 		"indexName", config.IndexName,
-		"memTableSize", idx.memTable.GetStats().Size,
-		"globalSequence", atomic.LoadUint64(&idx.globalSequence))
+		"memTableSize", idx.MemTable.GetStats().Size,
+		"globalSequence", atomic.LoadUint64(&idx.GlobalSequence))
 
 	return idx, nil
 }
@@ -332,7 +332,7 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 	}
 
 	// Get next sequence number (atomic for thread safety)
-	sequence := atomic.AddUint64(&idx.globalSequence, 1)
+	sequence := atomic.AddUint64(&idx.GlobalSequence, 1)
 
 	// Update max sequence in stats and mark dirty
 	idx.statsMutex.Lock()
@@ -357,7 +357,7 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 	}
 
 	// Step 2: Update MemTable
-	err = idx.memTable.Put(entry)
+	err = idx.MemTable.Put(entry)
 	if err != nil {
 		// Entry is on disk but not in cache - this is OK
 		// Future reads will find it via disk scan
@@ -404,7 +404,7 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 	// 3. Cache result in MemTable for future reads
 
 	// Step 1: Check MemTable
-	entry, found := idx.memTable.Get(keyValue)
+	entry, found := idx.MemTable.Get(keyValue)
 	if found {
 		idx.updateCacheHit()
 		idx.updateGetStats()
@@ -439,7 +439,7 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 	}
 
 	// Step 3: Cache in MemTable for future reads
-	err = idx.memTable.Put(latestEntry)
+	err = idx.MemTable.Put(latestEntry)
 	if err != nil {
 		// Just log warning - we still have the result
 		idx.logger.Warnw("Failed to cache entry in MemTable",
@@ -484,7 +484,7 @@ func (idx *HashIndexV3) Delete(keyValue string) (bool, error) {
 	}
 
 	// Get next sequence number
-	sequence := atomic.AddUint64(&idx.globalSequence, 1)
+	sequence := atomic.AddUint64(&idx.GlobalSequence, 1)
 
 	// Update max sequence in stats and mark dirty
 	idx.statsMutex.Lock()
@@ -509,7 +509,7 @@ func (idx *HashIndexV3) Delete(keyValue string) (bool, error) {
 	}
 
 	// Step 2: Update MemTable
-	err = idx.memTable.Put(tombstone)
+	err = idx.MemTable.Put(tombstone)
 	if err != nil {
 		idx.logger.Warnw("Failed to update MemTable with tombstone",
 			"key", keyValue,
@@ -535,7 +535,7 @@ func (idx *HashIndexV3) Flush() error {
 	}
 
 	// Get current global sequence for header update
-	currentSequence := atomic.LoadUint64(&idx.globalSequence)
+	currentSequence := atomic.LoadUint64(&idx.GlobalSequence)
 
 	// Flush entry storage with header update to persist current global sequence
 	if err := idx.storage.FlushWithHeaderUpdate(currentSequence); err != nil {
@@ -560,7 +560,7 @@ func (idx *HashIndexV3) Close() error {
 	}
 
 	// Get current global sequence for header update
-	currentSequence := atomic.LoadUint64(&idx.globalSequence)
+	currentSequence := atomic.LoadUint64(&idx.GlobalSequence)
 
 	// Flush any remaining data with header update
 	if err := idx.storage.FlushWithHeaderUpdate(currentSequence); err != nil {
@@ -617,7 +617,7 @@ func (idx *HashIndexV3) GetStats() IndexStats {
 
 // GetMemTableStats returns MemTable statistics
 func (idx *HashIndexV3) GetMemTableStats() MemTableStats {
-	return idx.memTable.GetStats()
+	return idx.MemTable.GetStats()
 }
 
 // TODO: Sprint 5 - Batch Operations

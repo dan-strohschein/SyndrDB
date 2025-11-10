@@ -38,14 +38,15 @@ func NewMutationGenerator(logger *zap.SugaredLogger) *MutationGenerator {
 // This includes CRUD mutations for all bundles in the database.
 //
 // Generated schema format:
-//   type Mutation {
-//     createUser(input: CreateUserInput!): User!
-//     updateUser(id: ID!, input: UpdateUserInput!): User!
-//     deleteUser(id: ID!): DeleteUserPayload!
 //
-//     createPost(input: CreatePostInput!): Post!
-//     ...
-//   }
+//	type Mutation {
+//	  createUser(input: CreateUserInput!): User!
+//	  updateUser(id: ID!, input: UpdateUserInput!): User!
+//	  deleteUser(id: ID!): DeleteUserPayload!
+//
+//	  createPost(input: CreatePostInput!): Post!
+//	  ...
+//	}
 //
 // Returns GraphQL schema string to be included in the overall schema.
 func (g *MutationGenerator) GenerateMutationSchema(database *models.Database, schemaManager *schema.SchemaManager) string {
@@ -93,17 +94,18 @@ func (g *MutationGenerator) GenerateMutationSchema(database *models.Database, sc
 // Input types are derived from bundle field definitions.
 //
 // Generated format:
-//   input CreateUserInput {
-//     name: String!
-//     email: String!
-//     age: Int
-//   }
 //
-//   input UpdateUserInput {
-//     name: String
-//     email: String
-//     age: Int
-//   }
+//	input CreateUserInput {
+//	  name: String!
+//	  email: String!
+//	  age: Int
+//	}
+//
+//	input UpdateUserInput {
+//	  name: String
+//	  email: String
+//	  age: Int
+//	}
 //
 // Key differences:
 // - CreateInput: Required fields match bundle's required fields
@@ -159,11 +161,12 @@ func (g *MutationGenerator) GenerateInputTypes(database *models.Database, schema
 // Delete mutations return metadata rather than the deleted object.
 //
 // Generated format:
-//   type DeleteUserPayload {
-//     success: Boolean!
-//     deletedId: ID!
-//     message: String
-//   }
+//
+//	type DeleteUserPayload {
+//	  success: Boolean!
+//	  deletedId: ID!
+//	  message: String
+//	}
 func (g *MutationGenerator) GenerateDeletePayloadTypes(database *models.Database) string {
 	var payloadTypes strings.Builder
 
@@ -236,10 +239,11 @@ func (g *MutationGenerator) getBundleSchema(databaseName, bundleName string, sch
 // Custom mutations allow defining arbitrary operations beyond CRUD:
 //
 // Examples:
-//   publishPost(id: ID!): Post!
-//   archiveComment(id: ID!, reason: String): Comment!
-//   approveUser(id: ID!, approvalNotes: String): User!
-//   sendEmail(userId: ID!, template: String!, vars: JSON): EmailPayload!
+//
+//	publishPost(id: ID!): Post!
+//	archiveComment(id: ID!, reason: String): Comment!
+//	approveUser(id: ID!, approvalNotes: String): User!
+//	sendEmail(userId: ID!, template: String!, vars: JSON): EmailPayload!
 //
 // Implementation would require:
 // - Mutation registry to map names to handler functions
@@ -248,7 +252,8 @@ func (g *MutationGenerator) getBundleSchema(databaseName, bundleName string, sch
 // - Handler functions that can access services and execute business logic
 //
 // Custom mutations would be registered like:
-//   mutationRegistry.Register("publishPost", publishPostHandler)
+//
+//	mutationRegistry.Register("publishPost", publishPostHandler)
 //
 // The handler would receive:
 // - Context (user, database, permissions)

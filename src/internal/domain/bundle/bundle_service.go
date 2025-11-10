@@ -28,6 +28,7 @@ import (
 	graphQLSchema "syndrdb/src/internal/graphQL/schema"
 
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 )
@@ -665,9 +666,67 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 		Timestamp:  time.Now(),
 	}
 
+	// CRITICAL FIX: For hash indexes, update MemTable IMMEDIATELY for read-your-own-writes consistency
+	// This ensures LSM semantics where reads always see recent writes via MemTable
+	if indexType == "hash" {
+		// Get the bundle to access the index
+		bundle, exists := s.bundleMetadata[bundleName]
+		if exists {
+			indexRef, indexExists := bundle.Indexes[indexName]
+			if indexExists {
+				// Load or get the hash index
+				hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
+				if err == nil {
+					// Update MemTable synchronously (in-memory operation, very fast)
+					keyValue := fmt.Sprintf("%v", fieldValue)
+					if keyValue == "" || keyValue == "<nil>" {
+						keyValue = documentID // Fallback for DocumentID indexes
+					}
+
+					// Get next sequence number (atomic for thread safety)
+					sequence := atomic.AddUint64(&hashIndex.GlobalSequence, 1)
+
+					// Create entry and add to MemTable
+					entry := hashindex.NewHashIndexEntry(keyValue, documentID, pageID, sequence)
+
+					switch operation {
+					case "insert":
+						err = hashIndex.MemTable.Put(entry)
+						if err != nil {
+							s.logger.Warnw("Failed to update MemTable immediately",
+								zap.String("bundle", bundleName),
+								zap.String("index", indexName),
+								zap.Error(err))
+						} else {
+							s.logger.Debugf("Immediately updated MemTable for key '%s' in index '%s'", keyValue, indexName)
+						}
+					case "delete":
+						// Mark as deleted in MemTable
+						entry.Deleted = true
+						err = hashIndex.MemTable.Put(entry)
+						if err != nil {
+							s.logger.Warnw("Failed to update MemTable with tombstone",
+								zap.String("bundle", bundleName),
+								zap.String("index", indexName),
+								zap.Error(err))
+						} else {
+							s.logger.Debugf("Immediately updated MemTable with tombstone for key '%s' in index '%s'", keyValue, indexName)
+						}
+					}
+				} else {
+					s.logger.Warnw("Failed to load hash index for immediate MemTable update",
+						zap.String("bundle", bundleName),
+						zap.String("index", indexName),
+						zap.Error(err))
+				}
+			}
+		}
+	}
+
+	// Schedule disk persistence (deferred for performance)
 	s.indexUpdateBuffer = append(s.indexUpdateBuffer, update)
 
-	// Check if we should flush updates
+	// Check if we should flush updates to disk
 	if len(s.indexUpdateBuffer) >= s.indexUpdateBatchSize ||
 		time.Since(s.lastIndexFlush) >= s.indexUpdateInterval {
 		s.flushIndexUpdates()
@@ -1117,6 +1176,8 @@ func (s *BundleService) processIndexUpdateBatch(bundle *models.Bundle, indexName
 }
 
 // processHashIndexBatch optimizes hash index updates by batching operations
+// NOTE: MemTable updates are already done synchronously in scheduleIndexUpdate()
+// This function only handles disk persistence for durability
 func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName string, indexRef models.IndexReference, updates []IndexUpdate) error {
 	hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
 	if err != nil {
@@ -1137,71 +1198,36 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 		}
 	}
 
-	// Process all deduplicated updates for this hash index
+	// Process all deduplicated updates for disk persistence
+	// NOTE: MemTable was already updated synchronously in scheduleIndexUpdate()
+	// We use Put/Delete here which will update MemTable again (idempotent) and persist to disk
 	successCount := 0
 	errorCount := 0
 
 	for _, update := range deduplicatedUpdates {
+		keyValue := fmt.Sprintf("%v", update.FieldValue)
+		if keyValue == "" || keyValue == "<nil>" {
+			keyValue = update.DocumentID // Fallback for DocumentID indexes
+		}
+
 		switch update.Operation {
 		case "insert":
-			// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
-			// err := hashIndex.InsertDocument(update.DocumentID)
-
-			// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
-			// V3 requires key (field value), document ID, and page ID
-			// Convert FieldValue to string for the key
-			keyValue := fmt.Sprintf("%v", update.FieldValue)
-			if keyValue == "" || keyValue == "<nil>" {
-				keyValue = update.DocumentID // Fallback to DocumentID for DocumentID indexes
-			}
+			// Put handles both MemTable (already done, idempotent) and disk persistence
 			err := hashIndex.Put(keyValue, update.DocumentID, update.PageID)
 			if err != nil {
 				errorCount++
-				// === V2-specific error handling (Sprint 5: Commented out) ===
-				// Enhanced corruption detection and handling
-				// if strings.Contains(err.Error(), "is not an overflow page") {
-				// 	s.logger.Errorf("Overflow chain corruption detected during bulk operation: %v", err)
-				// 	s.logger.Warnf("Continuing with remaining operations despite overflow corruption in document '%s'", update.DocumentID)
-				// } else if strings.Contains(err.Error(), "is not a bucket page") {
-				// 	s.logger.Errorf("CRITICAL: Bucket page corruption detected during bulk operation: %v", err)
-				// 	s.logger.Warnf("Bucket corruption in document '%s' - this indicates severe index corruption", update.DocumentID)
-				// } else if strings.Contains(err.Error(), "index file corruption") {
-				// 	s.logger.Errorf("CRITICAL: Index file corruption detected: %v", err)
-				// 	s.logger.Warnf("Continuing despite corruption in document '%s' but index may need rebuilding", update.DocumentID)
-				// } else {
-				// 	s.logger.Warnf("Failed to insert document '%s' into hash index '%s': %v", update.DocumentID, indexName, err)
-				// }
-
-				// === NEW V3 ERROR HANDLING (Sprint 5) ===
-				s.logger.Warnf("Failed to insert key '%s' (doc '%s') into hash index V3 '%s': %v",
+				s.logger.Warnf("Failed to persist insert to disk for key '%s' (doc '%s') in index V3 '%s': %v",
 					keyValue, update.DocumentID, indexName, err)
 			} else {
 				successCount++
 			}
-		case "delete":
-			// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
-			// _, err := hashIndex.DeleteDocument(update.DocumentID)
 
-			// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
-			// V3 requires the key (field value) to delete
-			keyValue := fmt.Sprintf("%v", update.FieldValue)
-			if keyValue == "" || keyValue == "<nil>" {
-				keyValue = update.DocumentID // Fallback to DocumentID for DocumentID indexes
-			}
+		case "delete":
+			// Delete handles both MemTable (already done, idempotent) and disk persistence
 			_, err := hashIndex.Delete(keyValue)
 			if err != nil {
 				errorCount++
-				// === V2-specific error handling (Sprint 5: Commented out) ===
-				// Check if this is a corruption error that we can recover from
-				// if strings.Contains(err.Error(), "is not an overflow page") {
-				// 	s.logger.Errorf("Hash index corruption detected during bulk delete: %v", err)
-				// 	s.logger.Warnf("Continuing with remaining operations despite corruption in document '%s'", update.DocumentID)
-				// } else {
-				// 	s.logger.Warnf("Failed to delete document '%s' from hash index '%s': %v", update.DocumentID, indexName, err)
-				// }
-
-				// === NEW V3 ERROR HANDLING (Sprint 5) ===
-				s.logger.Warnf("Failed to delete key '%s' (doc '%s') from hash index V3 '%s': %v",
+				s.logger.Warnf("Failed to persist delete to disk for key '%s' (doc '%s') in index V3 '%s': %v",
 					keyValue, update.DocumentID, indexName, err)
 			} else {
 				successCount++
@@ -1214,17 +1240,11 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 		s.logger.Warnf("Hash index batch processing completed: %d successes, %d errors for index '%s'",
 			successCount, errorCount, indexName)
 	} else {
-		s.logger.Debugf("Hash index batch processing completed: %d operations successful for index '%s'",
+		s.logger.Debugf("Hash index batch processing completed: %d disk operations successful for index '%s'",
 			successCount, indexName)
 	}
 
-	// === OLD V2 FLUSH (Sprint 5: Commented out) ===
-	// PERFORMANCE FIX: Flush changes to disk after batch processing instead of per-insert
-	// if err := hashIndex.FlushToDisk(); err != nil {
-	// 	s.logger.Warnf("Failed to flush hash index '%s' to disk: %v", indexName, err)
-	// }
-
-	// === NEW V3 FLUSH (Sprint 5: LSM-style) ===
+	// Flush disk writes
 	if err := hashIndex.Flush(); err != nil {
 		s.logger.Warnf("Failed to flush hash index V3 '%s' to disk: %v", indexName, err)
 	}

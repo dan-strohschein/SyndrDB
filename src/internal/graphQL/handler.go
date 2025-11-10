@@ -266,7 +266,7 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 
 	// PHASE 11: Generate Mutation type with auto-generated CRUD mutations
 	mutationGenerator := mutations.NewMutationGenerator(logger)
-	
+
 	// Add Mutation type with CRUD operations for each bundle
 	mutationSchema := mutationGenerator.GenerateMutationSchema(database, schemaManager)
 	schemaString += mutationSchema
@@ -988,8 +988,23 @@ func (h *GraphQLHandler) executeUnifiedQuery(query *queryparser.UnifiedSelectQue
 
 	// Step 4: Transform documents to flattened format
 	// This converts map[string]*models.Document to []map[string]interface{}
-	// The SAME transformation used by SyndrQL query results
-	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+	// IMPORTANT: If query has ORDER BY + LIMIT, we must preserve sort order!
+	// Check if RootNode is a LimitNode with sorted documents
+	var flattenedDocs []map[string]interface{}
+	if limitNode, isLimitNode := plan.RootNode.(*planner.LimitNode); isLimitNode {
+		sortedDocs := limitNode.GetSortedDocuments()
+		if sortedDocs != nil {
+			// Use slice-based transformation to preserve ORDER BY sort order
+			h.logger.Debugf("[GraphQL Native Query] Preserving ORDER BY sort order (%d sorted documents)", len(sortedDocs))
+			flattenedDocs = helpers.TransformDocumentSliceToFlatFormat(sortedDocs, query.SelectFields)
+		} else {
+			// No sorted documents, use map-based transformation (sorts by DocumentID)
+			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+		}
+	} else {
+		// Not a LimitNode, use map-based transformation
+		flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+	}
 
 	return flattenedDocs, nil
 }
@@ -1182,7 +1197,7 @@ func (h *GraphQLHandler) executeMutationOperation(operation *ast.OperationDefini
 
 		// Route to appropriate mutation handler based on operation type
 		var data interface{}
-		
+
 		if strings.HasPrefix(mutationName, "create") {
 			data, err = h.executeCreateMutation(field, bundleName, variables)
 		} else if strings.HasPrefix(mutationName, "update") {

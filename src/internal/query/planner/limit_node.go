@@ -67,6 +67,10 @@ type LimitNode struct {
 
 	// Logger for debugging and monitoring
 	Logger *zap.SugaredLogger
+
+	// sortedDocuments stores documents in order when child is SortNode
+	// This preserves ORDER BY sort order for proper result formatting
+	sortedDocuments []*models.Document
 }
 
 // NewLimitNode creates a new limit execution node
@@ -167,29 +171,47 @@ func (n *LimitNode) Execute() (map[string]*models.Document, error) {
 	}
 
 	// Convert map to slice for deterministic processing
-	// Check if child is a SortNode to preserve sort order
+	// Check if child is a SortNode to use Top-N optimization
 	var docSlice []*models.Document
 	if sortNode, isSortNode := n.Child.(*SortNode); isSortNode {
-		// Child is SortNode - use its sorted documents to preserve ORDER BY
-		docSlice = sortNode.GetSortedDocuments()
-		n.Logger.Debugf("LimitNode: using sorted order from SortNode (%d documents)", len(docSlice))
+		// Child is SortNode - use Top-N optimization if beneficial
+		n.Logger.Debugf("LimitNode: child is SortNode, attempting Top-N optimization")
+
+		// Calculate effective limit (LIMIT + OFFSET)
+		effectiveLimit := n.GetEffectiveLimit()
+
+		// Call ExecuteWithLimit to enable Top-N heapsort
+		var err error
+		docSlice, err = sortNode.ExecuteWithLimit(effectiveLimit)
+		if err != nil {
+			return nil, fmt.Errorf("LimitNode: SortNode.ExecuteWithLimit failed: %w", err)
+		}
+
+		n.Logger.Debugf("LimitNode: received %d sorted documents from SortNode (Top-N optimized)", len(docSlice))
+
+		// Store the sorted documents slice to preserve ORDER BY sort order
+		// This is critical! The documents are correctly sorted here, we must preserve that order
+		n.sortedDocuments = docSlice
 	} else {
-		// No SortNode - sort by DocumentID for deterministic ordering
-		// Go map iteration order is randomized, so we need to ensure consistent order
-		docIDs := make([]string, 0, len(documents))
-		for docID := range documents {
-			docIDs = append(docIDs, docID)
+		// Child is not using Top-N optimization
+		// Check if child is a SortNode that has sorted documents available
+		if sortNode, isSortNode := n.Child.(*SortNode); isSortNode {
+			sortedDocs := sortNode.GetSortedDocuments()
+			if sortedDocs != nil {
+				// SortNode executed a full sort - use those sorted documents!
+				n.Logger.Debugf("LimitNode: using sorted documents from SortNode (%d documents)", len(sortedDocs))
+				docSlice = sortedDocs
+				n.sortedDocuments = sortedDocs
+			} else {
+				// SortNode hasn't executed yet? This shouldn't happen, but fall back
+				n.Logger.Warn("LimitNode: SortNode child has no sorted documents, falling back to DocumentID order")
+				docSlice = buildDocSliceByDocumentID(documents)
+			}
+		} else {
+			// No SortNode - sort by DocumentID for deterministic ordering
+			n.Logger.Debugf("LimitNode: using DocumentID order (%d documents)", len(documents))
+			docSlice = buildDocSliceByDocumentID(documents)
 		}
-
-		// Sort document IDs for deterministic ordering
-		sort.Strings(docIDs)
-
-		// Build document slice in sorted ID order
-		docSlice = make([]*models.Document, 0, len(documents))
-		for _, docID := range docIDs {
-			docSlice = append(docSlice, documents[docID])
-		}
-		n.Logger.Debugf("LimitNode: using DocumentID order (%d documents)", len(docSlice))
 	}
 
 	n.Logger.Debugf("LimitNode: processing %d documents", len(docSlice))
@@ -259,9 +281,39 @@ func (n *LimitNode) HasOffset() bool {
 
 // GetEffectiveLimit returns the effective limit considering both limit and offset
 // PHASE 2: Helper method for result set size estimation
+// This is used by SortNode for Top-N heap sizing (must fetch OFFSET + LIMIT docs)
 func (n *LimitNode) GetEffectiveLimit() int {
 	if n.Limit <= 0 {
 		return 0 // No limit
 	}
-	return n.Limit
+	// Effective limit = OFFSET + LIMIT (must fetch both to skip offset docs)
+	return n.Offset + n.Limit
+}
+
+// GetSortedDocuments returns the documents in their sorted order (if available)
+// Returns nil if documents were not sorted or order is not preserved
+// This is used by result formatters to preserve ORDER BY sort order
+func (n *LimitNode) GetSortedDocuments() []*models.Document {
+	return n.sortedDocuments
+}
+
+// buildDocSliceByDocumentID creates a document slice sorted by DocumentID
+// This provides deterministic ordering when no explicit ORDER BY is present
+func buildDocSliceByDocumentID(documents map[string]*models.Document) []*models.Document {
+	// Extract document IDs
+	docIDs := make([]string, 0, len(documents))
+	for docID := range documents {
+		docIDs = append(docIDs, docID)
+	}
+
+	// Sort document IDs for deterministic ordering
+	sort.Strings(docIDs)
+
+	// Build document slice in sorted ID order
+	docSlice := make([]*models.Document, 0, len(documents))
+	for _, docID := range docIDs {
+		docSlice = append(docSlice, documents[docID])
+	}
+
+	return docSlice
 }

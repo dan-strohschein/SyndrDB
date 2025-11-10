@@ -272,10 +272,11 @@ func (e *MutationExecutor) ExecuteDelete(deleteCommand *models.DocumentDeleteCom
 // - Provide better performance than N individual creates
 //
 // Example usage:
-//   createUsers(inputs: [
-//     { name: "Alice", email: "alice@..." }
-//     { name: "Bob", email: "bob@..." }
-//   ])
+//
+//	createUsers(inputs: [
+//	  { name: "Alice", email: "alice@..." }
+//	  { name: "Bob", email: "bob@..." }
+//	])
 //
 // Implementation considerations:
 // - Atomic: All succeed or all fail (with transaction support)
@@ -291,13 +292,14 @@ func (e *MutationExecutor) ExecuteBatchCreate(docCommands []*models.DocumentComm
 // Nested creates would allow creating a parent and children in one mutation:
 //
 // Example:
-//   createUser(input: {
-//     name: "Alice"
-//     posts: [
-//       { title: "First Post", content: "..." }
-//       { title: "Second Post", content: "..." }
-//     ]
-//   })
+//
+//	createUser(input: {
+//	  name: "Alice"
+//	  posts: [
+//	    { title: "First Post", content: "..." }
+//	    { title: "Second Post", content: "..." }
+//	  ]
+//	})
 //
 // Implementation would:
 // - Parse nested input objects

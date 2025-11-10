@@ -219,7 +219,8 @@ func (qr *QueryRouter) convertWhereClauseToString(whereGroup *queryparser.WhereG
 	if len(whereGroup.Clauses) == 1 && len(whereGroup.SubGroups) == 0 {
 		clause := whereGroup.Clauses[0]
 		valueStr := qr.formatWhereValue(clause.Value)
-		return fmt.Sprintf("\"%s\" %s %s", clause.Field, clause.Operator, valueStr)
+		// CRITICAL FIX: Don't add quotes around field name - string will be re-parsed
+		return fmt.Sprintf("%s %s %s", clause.Field, clause.Operator, valueStr)
 	}
 
 	// For more complex clauses, build a WHERE string
@@ -239,7 +240,9 @@ func (qr *QueryRouter) buildWhereString(whereGroup *queryparser.WhereGroup) stri
 	// Add direct clauses
 	for _, clause := range whereGroup.Clauses {
 		valueStr := qr.formatWhereValue(clause.Value)
-		parts = append(parts, fmt.Sprintf("\"%s\" %s %s", clause.Field, clause.Operator, valueStr))
+		// CRITICAL FIX: Don't add quotes around field names - this string will be re-parsed
+		// Adding quotes causes the filter parser to see "age" instead of age
+		parts = append(parts, fmt.Sprintf("%s %s %s", clause.Field, clause.Operator, valueStr))
 	}
 
 	// Add subgroups

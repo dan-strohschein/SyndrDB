@@ -539,5 +539,3 @@ func TestResolveArgumentValue(t *testing.T) {
 		assert.Nil(t, result)
 	})
 }
-
-

@@ -80,6 +80,29 @@ type Arguments struct {
 
 	// Parser Configuration
 	UseNewParser bool // Use new SyndrQL parser instead of legacy parser (default: false)
+
+	// PHASE 4 SORTING OPTIMIZATION CONFIGURATION
+	// Top-N Heapsort Configuration
+	SortTopNThreshold       float64 // Ratio of LIMIT/total_rows for Top-N activation (default: 0.1)
+	SortTopNMinSize         int     // Minimum dataset size for Top-N optimization (default: 100)
+	SortHeapInitialCapacity int     // Initial heap capacity for Top-N queries (default: 1000)
+
+	// Radix Sort Configuration
+	SortRadixMinSize    int     // Minimum dataset size for radix sort (default: 1000)
+	SortRadixLimitRatio float64 // Minimum LIMIT/total_rows ratio for radix (default: 0.5)
+	SortRadixMaxPasses  int     // Maximum radix sort passes for wide integers (default: 8)
+
+	// SIMD String Sort Configuration
+	SortSIMDEnabled     bool // Enable SIMD string sorting optimization (default: true)
+	SortSIMDAbbrevBytes int  // Bytes used for abbreviated string keys (default: 8)
+	SortSIMDMinSize     int  // Minimum dataset size for SIMD activation (default: 100)
+
+	// Parallel Sort Configuration (Phase 5)
+	SortEnableParallel    bool // DEPRECATED: Use SortParallelEnabled instead
+	SortParallelThreshold int  // DEPRECATED: Use SortParallelMinSize instead
+	SortParallelEnabled   bool // Enable parallel sorting for large datasets (default: true)
+	SortParallelMinSize   int  // Minimum dataset size for parallel sort (default: 10000)
+	SortMaxMemoryMB       int  // Maximum memory in MB for sorting operations (default: 512)
 }
 
 var (
@@ -123,6 +146,22 @@ func GetSettings() *Arguments {
 
 			// Parser Configuration (default to false for safety)
 			UseNewParser: false, // Use legacy parser by default
+
+			// PHASE 4 SORTING OPTIMIZATION DEFAULTS
+			SortTopNThreshold:       0.1,   // Top-N when LIMIT < 10% of dataset
+			SortTopNMinSize:         100,   // Minimum 100 docs for Top-N
+			SortHeapInitialCapacity: 1000,  // Pre-allocate heap for 1000 items
+			SortRadixMinSize:        1000,  // Minimum 1000 docs for radix
+			SortRadixLimitRatio:     0.5,   // Radix when LIMIT >= 50% of data
+			SortRadixMaxPasses:      8,     // Support up to 64-bit integers
+			SortSIMDEnabled:         true,  // Enable SIMD string optimization
+			SortSIMDAbbrevBytes:     8,     // 8-byte abbreviated keys
+			SortSIMDMinSize:         100,   // SIMD for datasets >= 100 docs
+			SortEnableParallel:      false, // DEPRECATED: use SortParallelEnabled
+			SortParallelThreshold:   10000, // DEPRECATED: use SortParallelMinSize
+			SortParallelEnabled:     true,  // Phase 5: Enable parallel sorting
+			SortParallelMinSize:     10000, // Phase 5: 10k+ docs for parallel sort
+			SortMaxMemoryMB:         512,   // 512MB memory limit
 		}
 	})
 	return instance

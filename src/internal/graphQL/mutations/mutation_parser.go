@@ -28,7 +28,8 @@ func NewMutationParser(logger *zap.SugaredLogger) *MutationParser {
 
 // ParseCreateMutation parses a GraphQL create mutation into a DocumentCommand.
 // Supports mutations like:
-//   createUser(input: { name: "Alice", email: "alice@example.com" }) { id name }
+//
+//	createUser(input: { name: "Alice", email: "alice@example.com" }) { id name }
 //
 // The parser extracts:
 // - Bundle name from mutation field name (createUser → User bundle)
@@ -71,7 +72,8 @@ func (p *MutationParser) ParseCreateMutation(field *ast.Field, bundleName string
 
 // ParseUpdateMutation parses a GraphQL update mutation into a DocumentUpdateCommand.
 // Supports mutations like:
-//   updateUser(id: "123", input: { name: "Bob" }) { id name }
+//
+//	updateUser(id: "123", input: { name: "Bob" }) { id name }
 //
 // The parser extracts:
 // - Document ID from the id argument
@@ -108,7 +110,7 @@ func (p *MutationParser) ParseUpdateMutation(field *ast.Field, bundleName string
 	}
 
 	// Construct WHERE clause targeting the specific document
-	whereClause := fmt.Sprintf("DocumentID = '%s'", documentID)
+	whereClause := fmt.Sprintf("DocumentID == \"%s\"", documentID)
 
 	// Create DocumentUpdateCommand
 	updateCommand := &models.DocumentUpdateCommand{
@@ -123,7 +125,8 @@ func (p *MutationParser) ParseUpdateMutation(field *ast.Field, bundleName string
 
 // ParseDeleteMutation parses a GraphQL delete mutation into a DocumentDeleteCommand.
 // Supports mutations like:
-//   deleteUser(id: "123")
+//
+//	deleteUser(id: "123")
 //
 // The parser extracts:
 // - Document ID from the id argument
@@ -138,7 +141,7 @@ func (p *MutationParser) ParseDeleteMutation(field *ast.Field, bundleName string
 	}
 
 	// Construct WHERE clause targeting the specific document
-	whereClause := fmt.Sprintf("DocumentID = '%s'", documentID)
+	whereClause := fmt.Sprintf("DocumentID == \"%s\"", documentID)
 
 	// Create DocumentDeleteCommand
 	deleteCommand := &models.DocumentDeleteCommand{
@@ -250,9 +253,10 @@ func (p *MutationParser) resolveArgumentValue(value *ast.Value, variables map[st
 
 // ExtractBundleNameFromMutation extracts the bundle name from a mutation field name.
 // Conventions:
-//   createUser → User
-//   updatePost → Post
-//   deleteComment → Comment
+//
+//	createUser → User
+//	updatePost → Post
+//	deleteComment → Comment
 //
 // This handles both singular and plural forms, and converts to proper case.
 func (p *MutationParser) ExtractBundleNameFromMutation(mutationName string) (string, error) {
@@ -288,14 +292,15 @@ func (p *MutationParser) ExtractBundleNameFromMutation(mutationName string) (str
 // ParseBatchCreateMutation parses a batch create mutation.
 // TODO: I will implement batch mutation support when SyndrDB adds batch operation capabilities.
 // Batch mutations would allow creating multiple documents in a single operation:
-//   createUsers(inputs: [
-//     { name: "Alice", email: "alice@..." }
-//     { name: "Bob", email: "bob@..." }
-//   ]) {
-//     success
-//     count
-//     users { id name }
-//   }
+//
+//	createUsers(inputs: [
+//	  { name: "Alice", email: "alice@..." }
+//	  { name: "Bob", email: "bob@..." }
+//	]) {
+//	  success
+//	  count
+//	  users { id name }
+//	}
 //
 // Implementation would:
 // - Parse array of input objects

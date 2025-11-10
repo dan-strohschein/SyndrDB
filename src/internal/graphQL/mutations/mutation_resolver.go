@@ -40,8 +40,9 @@ func NewMutationResolver(serviceManager server.ServiceManager, database *models.
 //  3. Return formatted response
 //
 // Example:
-//   createUser(input: {...}) { id name email }
-//   -> { "id": "123", "name": "Alice", "email": "alice@..." }
+//
+//	createUser(input: {...}) { id name email }
+//	-> { "id": "123", "name": "Alice", "email": "alice@..." }
 func (r *MutationResolver) ResolveCreateResponse(documentID string, bundleName string, selectionSet ast.SelectionSet, variables map[string]interface{}) (map[string]interface{}, error) {
 	r.logger.Debugf("Resolving create mutation response for document '%s' in bundle '%s'", documentID, bundleName)
 
@@ -52,7 +53,7 @@ func (r *MutationResolver) ResolveCreateResponse(documentID string, bundleName s
 	}
 
 	// Fetch the created document
-	whereClause := fmt.Sprintf("DocumentID = '%s'", documentID)
+	whereClause := fmt.Sprintf("DocumentID == \"%s\"", documentID)
 	documents, err := r.serviceManager.BundleService.GetDocumentsByFilter(bundle, whereClause)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch created document: %w", err)
@@ -83,8 +84,9 @@ func (r *MutationResolver) ResolveCreateResponse(documentID string, bundleName s
 //  4. Return formatted response
 //
 // Example:
-//   updateUser(id: "123", input: {...}) { id name email }
-//   -> { "id": "123", "name": "Bob", "email": "bob@..." }
+//
+//	updateUser(id: "123", input: {...}) { id name email }
+//	-> { "id": "123", "name": "Bob", "email": "bob@..." }
 func (r *MutationResolver) ResolveUpdateResponse(updateCommand *models.DocumentUpdateCommand, bundleName string, selectionSet ast.SelectionSet, variables map[string]interface{}) (map[string]interface{}, error) {
 	r.logger.Debugf("Resolving update mutation response for bundle '%s'", bundleName)
 

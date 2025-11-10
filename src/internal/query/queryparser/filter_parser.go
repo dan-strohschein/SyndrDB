@@ -7,7 +7,9 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
-	"syndrdb/src/internal/domain/index/hashindexV2"
+
+	// "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
+	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
@@ -165,16 +167,6 @@ func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 
 	// Tokenize the where clause
 	tokens := tokenizeWhereClause(whereClause)
-
-	// DEBUG: Log tokens to diagnose parsing issues
-	//settings := settings.GetSettings()
-	// if settings.Debug {
-	// 	fmt.Printf("DEBUG: Tokenized WHERE clause '%s' into %d tokens:\n", whereClause, len(tokens))
-	// 	for i, token := range tokens {
-	// 		fmt.Printf("  Token[%d]: '%s' (bytes: %v)\n", i, token, []byte(token))
-	// 	}
-	// } // Parse the tokens into a tree structure
-	//rootGroup := &WhereGroup{}
 
 	// Track our position in the token stream
 	//pos := 0
@@ -608,11 +600,11 @@ func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value i
 		return nil, fmt.Errorf("index %s is not a hash index (type: %s)", idxRef.IndexName, idxRef.IndexType)
 	}
 
-	// CRITICAL: Ensure the hash index instance is properly loaded
+	// SPRINT 5 FIX: Ensure the V3 LSM-style hash index instance is properly loaded
 	// Following SyndrDB modular development practices, handle index loading transparently
-	hashIndex, err := EnsureHashIndexLoaded(bundle, idxRef, logger)
+	hashIndex, err := EnsureHashIndexV3Loaded(bundle, idxRef, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to ensure hash index %s is loaded: %w", idxRef.IndexName, err)
+		return nil, fmt.Errorf("failed to ensure hash index V3 %s is loaded: %w", idxRef.IndexName, err)
 	}
 
 	// Convert the search value to string for hash index lookup
@@ -624,10 +616,10 @@ func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value i
 		return nil, fmt.Errorf("search key cannot be empty for hash index %s", idxRef.IndexName)
 	}
 
-	// Search the hash index
+	// Search the V3 LSM-style hash index
 	docIDs, err := hashIndex.Search(searchKeyStr)
 	if err != nil {
-		return nil, fmt.Errorf("hash index search failed for value '%v' in index %s: %w", value, idxRef.IndexName, err)
+		return nil, fmt.Errorf("hash index V3 search failed for value '%v' in index %s: %w", value, idxRef.IndexName, err)
 	}
 
 	// Validate the result (defensive programming)
@@ -640,47 +632,72 @@ func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value i
 
 }
 
-// EnsureHashIndexLoaded ensures that a hash index instance is properly loaded and typed
-// This function follows the Single Responsibility Principle by handling only index loading
+// SPRINT 5 FIX: EnsureHashIndexV3Loaded ensures that a V3 LSM-style hash index instance is properly loaded and typed
+// This function handles V3 hash index loading with LSM architecture
 // Following SyndrDB comprehensive error handling, it validates and loads indexes as needed
-func EnsureHashIndexLoaded(bundle *models.Bundle, idxRef *models.IndexReference, logger *zap.SugaredLogger) (*hashindexV2.HashIndex, error) {
-	//args := settings.GetSettings()
-	// Check if IndexInstance is already properly loaded and typed
+func EnsureHashIndexV3Loaded(bundle *models.Bundle, idxRef *models.IndexReference, logger *zap.SugaredLogger) (*hashindexV3.HashIndexV3, error) {
+	// Check if IndexInstance is already properly loaded and typed as V3
 	if idxRef.IndexInstance != nil {
-		if hashIndex, ok := idxRef.IndexInstance.(*hashindexV2.HashIndex); ok {
-			// Already properly loaded and typed
+		if hashIndex, ok := idxRef.IndexInstance.(*hashindexV3.HashIndexV3); ok {
+			// Already properly loaded and typed as V3
+			logger.Debugf("Hash index V3 '%s' already loaded in memory", idxRef.IndexName)
 			return hashIndex, nil
 		}
 
 		// IndexInstance exists but wrong type - log warning and reload
-		// This handles cases where the index was loaded incorrectly
-		fmt.Printf("WARNING: Hash index %s has incorrect type %T, reloading from disk\n",
+		// This handles cases where the index was loaded incorrectly or is an old V2 instance
+		logger.Warnf("Hash index %s has incorrect type %T, reloading as V3 LSM-style from disk",
 			idxRef.IndexName, idxRef.IndexInstance)
 	}
 
-	// IndexInstance is nil or wrong type - need to load from disk
-	// Following SyndrDB project structure, construct the expected file path
+	// IndexInstance is nil or wrong type - need to load from disk as V3
+	// Following SyndrDB Sprint 5 upgrade, use V3 LSM-style loading
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	indexFileName := fmt.Sprintf("%s_%s.hidx", bundle.Name, idxRef.HashIndexField.FieldName)
-	indexFilePath := filepath.Join(databasePath, indexFileName)
+	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
 
-	// Attempt to open the hash index from disk
-	// Following SyndrDB modular development, use the proper constructor
-	hashIndex, err := hashindexV2.OpenHashIndex(indexFilePath, true, logger)
+	// Build V3 configuration using the same pattern as BundleService
+	config := hashindexV3.IndexConfig{
+		IndexName:          idxRef.IndexName,
+		BundleName:         bundle.Name,
+		DatabaseName:       bundle.Database.Name,
+		FieldName:          idxRef.HashIndexField.FieldName,
+		DataDir:            indexesPath,
+		MaxFileSize:        128 * 1024 * 1024, // 128MB
+		WriteBufferSize:    64 * 1024,         // 64KB
+		MemTableMaxSize:    100000,            // 100k entries
+		CompactionEnabled:  true,
+		CompactionMaxFiles: 10,
+		Logger:             logger,
+	}
+
+	// Open the hash index using V3 LSM implementation
+	hashIndex, err := hashindexV3.OpenHashIndexV3(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open hash index from file %s: %w", indexFilePath, err)
+		return nil, fmt.Errorf("failed to open hash index V3 '%s' from disk: %w", idxRef.IndexName, err)
 	}
 
 	// Validate that the opened index is properly initialized
 	if hashIndex == nil {
-		return nil, fmt.Errorf("opened hash index is nil for file %s", indexFilePath)
+		return nil, fmt.Errorf("opened hash index V3 is nil for index '%s'", idxRef.IndexName)
 	}
 
-	// Update the IndexInstance with the properly loaded hash index
+	// Update the IndexInstance with the properly loaded V3 hash index
 	// Following SyndrDB data integrity requirements, ensure the reference is updated
 	idxRef.IndexInstance = hashIndex
 
+	logger.Debugf("Successfully loaded hash index V3 '%s' from disk", idxRef.IndexName)
 	return hashIndex, nil
+}
+
+// DEPRECATED: EnsureHashIndexLoaded - V2 version kept for backward compatibility
+// New code should use EnsureHashIndexV3Loaded instead
+// This function follows the Single Responsibility Principle by handling only index loading
+// Following SyndrDB comprehensive error handling, it validates and loads indexes as needed
+func EnsureHashIndexLoaded(bundle *models.Bundle, idxRef *models.IndexReference, logger *zap.SugaredLogger) (interface{}, error) {
+	// SPRINT 5 UPDATE: Redirect to V3 loader
+	// The old V2 code path is no longer supported as all indexes have been upgraded to V3
+	logger.Warnf("DEPRECATED: EnsureHashIndexLoaded called - redirecting to V3 loader")
+	return EnsureHashIndexV3Loaded(bundle, idxRef, logger)
 }
 
 // ensureBTreeIndexLoaded ensures that a BTree index instance is properly loaded and typed
