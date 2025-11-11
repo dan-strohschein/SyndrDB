@@ -87,7 +87,10 @@ func (v *InputValidator) ValidateUpdateMutation(field *ast.Field) error {
 		return fmt.Errorf("update mutation requires 'id' argument")
 	}
 
-	// Note: ID emptiness is validated by the parser when it extracts the actual value
+	// Validate ID is not empty
+	if idArg.Value.Kind == ast.StringValue && idArg.Value.Raw == "" {
+		return fmt.Errorf("id cannot be empty")
+	}
 
 	// Check that 'input' argument exists
 	inputArg := v.getArgument(field, "input")
@@ -132,7 +135,10 @@ func (v *InputValidator) ValidateDeleteMutation(field *ast.Field) error {
 		return fmt.Errorf("delete mutation requires 'id' argument")
 	}
 
-	// Note: ID emptiness is validated by the parser when it extracts the actual value
+	// Validate ID is not empty
+	if idArg.Value.Kind == ast.StringValue && idArg.Value.Raw == "" {
+		return fmt.Errorf("id cannot be empty")
+	}
 
 	// TODO: I will add permission validation here when SyndrDB implements the permission system.
 	// Permission validation would check if the current user has DELETE permission on the bundle:

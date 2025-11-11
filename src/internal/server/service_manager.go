@@ -7,6 +7,7 @@ import (
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/journal"
+	"syndrdb/src/internal/registry"
 
 	"go.uber.org/zap"
 )
@@ -64,6 +65,17 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			}
 			// Continue without WAL for now, but log the error
 			walManager = nil
+		}
+
+		// Register WAL Manager in global service registry
+		// This allows other services to access WAL without circular dependencies
+		if walManager != nil {
+			serviceRegistry := registry.GetRegistry()
+			serviceRegistry.SetWALManager(walManager)
+			serviceRegistry.SetLogger(logger)
+			if logger != nil {
+				logger.Infof("WAL Manager registered in global service registry")
+			}
 		}
 
 		instance = &ServiceManager{

@@ -208,20 +208,139 @@ func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document,
 		return nil, fmt.Errorf("index %s is not a B-tree index (type:%s)", node.IndexName, indexRef.IndexType)
 	}
 
-	// Cast to the V2 B-tree index to verify it's available
-	_, ok := indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
-	if !ok {
-		return nil, fmt.Errorf("btree index %s is not of type *btreeindexV2.BTreeIndex",
-			node.IndexName)
+	// Use bundle service to load the B-tree index if not already loaded
+	var btreeIndex *btreeindexV2.BTreeIndex
+	if indexRef.IndexInstance == nil {
+		node.Logger.Debugf("B-tree index instance is nil, loading from disk using bundle service")
+		if node.BundleServiceInt == nil {
+			return nil, fmt.Errorf("bundle service is required for lazy loading B-tree indexes")
+		}
+
+		loadedIndex, err := node.BundleServiceInt.GetOrLoadBTreeIndex(node.Bundle, node.IndexName, indexRef)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load B-tree index %s: %w", node.IndexName, err)
+		}
+
+		var ok bool
+		btreeIndex, ok = loadedIndex.(*btreeindexV2.BTreeIndex)
+		if !ok {
+			return nil, fmt.Errorf("loaded index is not of type *btreeindexV2.BTreeIndex")
+		}
+	} else {
+		// Cast to the V2 B-tree index
+		var ok bool
+		btreeIndex, ok = indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
+		if !ok {
+			return nil, fmt.Errorf("btree index %s is not of type *btreeindexV2.BTreeIndex (actual type: %T)",
+				node.IndexName, indexRef.IndexInstance)
+		}
 	}
 
-	// For now, implement range scans as filtered full scans
-	// TODO: Implement proper range scan functionality in B-Tree V2
-	node.Logger.Warnf("Range scan not yet fully implemented for operator %s, falling back to filtered scan", node.Operator)
+	// Convert operator and value to start/end key range for B-tree RangeSearch
+	startKey, endKey, excludeStart, excludeEnd, err := node.operatorToKeyRange(node.Operator, node.SearchKey, node.RangeStart, node.RangeEnd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert operator to key range: %w", err)
+	}
 
-	// For range queries, we'll need to implement a different approach
-	// For now, return error to indicate this needs implementation
-	return nil, fmt.Errorf("range scan operations (>, <, >=, <=) not yet fully implemented for B-tree indexes")
+	node.Logger.Debugf("Range scan: operator=%s, startKey=%s, endKey=%s, excludeStart=%v, excludeEnd=%v",
+		node.Operator, string(startKey), string(endKey), excludeStart, excludeEnd)
+
+	// Perform the range search on the B-tree index with proper bound exclusion
+	documentIDs, err := btreeIndex.RangeSearchWithBounds(startKey, endKey, excludeStart, excludeEnd)
+	if err != nil {
+		return nil, fmt.Errorf("btree range search failed: %w", err)
+	}
+
+	node.Logger.Debugf("B-tree range scan returned %d document IDs", len(documentIDs))
+
+	// Retrieve the actual documents from the bundle
+	results := make(map[string]*models.Document)
+	for _, docID := range documentIDs {
+		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
+			// Make a copy of the document to avoid modification issues
+			docCopy := doc
+			results[docID] = &docCopy
+			node.Logger.Debugf("Retrieved document %s from bundle", docID)
+		} else {
+			// Document ID is in index but not in bundle - this could indicate data inconsistency
+			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle documents", docID)
+		}
+	}
+
+	node.Logger.Infof("B-tree range scan returned %d documents for operator %s", len(results), node.Operator)
+	return results, nil
+}
+
+// operatorToKeyRange converts query operators (>, <, >=, <=, BETWEEN) to B-tree key ranges
+// This function implements the critical operator → key range conversion for range queries
+//
+// B-tree RangeSearchWithBounds(startKey, endKey, excludeStart, excludeEnd) returns all keys where:
+//   - excludeStart=false, excludeEnd=false: startKey <= key <= endKey (both inclusive)
+//   - excludeStart=true, excludeEnd=false:  startKey < key <= endKey  (exclusive start)
+//   - excludeStart=false, excludeEnd=true:  startKey <= key < endKey  (exclusive end)
+//   - excludeStart=true, excludeEnd=true:   startKey < key < endKey   (both exclusive)
+//
+// Operator Mappings:
+//   - ">":  (value, ∞)  - exclusive lower bound → excludeStart=true, excludeEnd=false
+//   - ">=": [value, ∞)  - inclusive lower bound → excludeStart=false, excludeEnd=false
+//   - "<":  (-∞, value) - exclusive upper bound → excludeStart=false, excludeEnd=true
+//   - "<=": (-∞, value] - inclusive upper bound → excludeStart=false, excludeEnd=false
+//   - "BETWEEN": [rangeStart, rangeEnd] - inclusive both bounds → excludeStart=false, excludeEnd=false
+//
+// Returns: startKey, endKey, excludeStart, excludeEnd, error
+func (node *IndexScanNode) operatorToKeyRange(operator string, searchKey, rangeStart, rangeEnd interface{}) ([]byte, []byte, bool, bool, error) {
+	switch operator {
+	case ">":
+		// Greater than: Start from searchKey (exclusive), end at maximum
+		keyBytes := node.convertToBytes(searchKey)
+		startKey := keyBytes
+		endKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF} // Maximum key (8 bytes of 0xFF)
+		return startKey, endKey, true, false, nil                        // excludeStart=true for exclusive lower bound
+
+	case ">=":
+		// Greater than or equal: Start from searchKey (inclusive), end at maximum
+		startKey := node.convertToBytes(searchKey)
+		endKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+		return startKey, endKey, false, false, nil // both inclusive
+
+	case "<":
+		// Less than: Start from minimum, end at searchKey (exclusive)
+		keyBytes := node.convertToBytes(searchKey)
+		startKey := []byte{0x00} // Minimum key
+		endKey := keyBytes
+		return startKey, endKey, false, true, nil // excludeEnd=true for exclusive upper bound
+
+	case "<=":
+		// Less than or equal: Start from minimum, end at searchKey (inclusive)
+		startKey := []byte{0x00}
+		endKey := node.convertToBytes(searchKey)
+		return startKey, endKey, false, false, nil // both inclusive
+
+	case "BETWEEN":
+		// Between: Use rangeStart and rangeEnd (both inclusive)
+		if rangeStart == nil || rangeEnd == nil {
+			return nil, nil, false, false, fmt.Errorf("BETWEEN operator requires both rangeStart and rangeEnd")
+		}
+		startKey := node.convertToBytes(rangeStart)
+		endKey := node.convertToBytes(rangeEnd)
+		return startKey, endKey, false, false, nil // both inclusive
+
+	default:
+		return nil, nil, false, false, fmt.Errorf("unsupported range operator: %s (supported: >, >=, <, <=, BETWEEN)", operator)
+	}
+}
+
+// convertToBytes converts various types to byte slices for B-tree index operations
+// Uses KeyEncoder for proper numeric ordering
+func (node *IndexScanNode) convertToBytes(value interface{}) []byte {
+	encoder := NewKeyEncoder()
+	encoded, err := encoder.EncodeKey(value)
+	if err != nil {
+		// Fallback to string representation if encoding fails
+		node.Logger.Warnf("Failed to encode key value %v: %v, falling back to string", value, err)
+		return []byte(fmt.Sprintf("%v", value))
+	}
+	return encoded
 }
 
 func (node *FullScanNode) Execute() (map[string]*models.Document, error) {

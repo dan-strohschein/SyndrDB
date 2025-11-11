@@ -534,18 +534,52 @@ func OptimizeIndex(idx *BTreeIndex) (*MaintenanceResult, error) {
 // Private helper functions for maintenance operations
 
 // performCompactionOperations executes the actual compaction logic
+//
+// COMPACTION STRATEGY (PostgreSQL-inspired):
+// This function performs a complete index rebuild to eliminate fragmentation and tombstones.
+// The strategy involves:
+// 1. Extract all live entries (skip tombstones) from current index
+// 2. Create new optimized index structure with sorted entries
+// 3. Atomically replace old index with new compacted version
+// 4. Reclaim freed pages and update statistics
+//
+// Single Responsibility: Coordinates compaction workflow
+// DRY Principle: Delegates to compact() method for actual work
+//
+// Parameters:
+//   - idx: The B-tree index to compact
+//   - options: Compaction configuration options
+//   - result: Maintenance result to track metrics
+//
+// Returns:
+//   - error: Any error that occurred during compaction
+//
+// TODO: I could add incremental compaction for large indexes to avoid long locks
 func performCompactionOperations(idx *BTreeIndex, options *CompactionOptions, result *MaintenanceResult) error {
-	// This is a placeholder implementation
-	// In a full implementation, this would:
-	// 1. Identify underutilized pages
-	// 2. Consolidate data from multiple pages
-	// 3. Reclaim freed pages
-	// 4. Update page pointers and tree structure
+	idx.logger.Debugf("Performing B-tree compaction operations")
 
-	idx.logger.Debugf("Performing compaction operations (placeholder)")
-	result.PagesProcessed = 10 // Placeholder
-	result.PagesReclaimed = 2  // Placeholder
-	result.SpaceSaved = 8192   // Placeholder
+	// Track starting state for metrics
+	startPages := idx.metadata.TotalPages
+	startTombstones := idx.metadata.TotalTombstones
+
+	// Delegate to the compact() method which performs the full rebuild
+	// The compact() method handles:
+	// - Extracting all entries (tombstones are automatically excluded)
+	// - Creating optimized index structure
+	// - Atomic replacement of index structure
+	// - Updating metadata and statistics
+	if err := idx.compact(); err != nil {
+		return fmt.Errorf("failed to compact index: %w", err)
+	}
+
+	// Calculate metrics for reporting
+	// Note: compact() resets TotalPages and TotalTombstones, so we use the starting values
+	result.PagesProcessed = int(startPages)
+	result.PagesReclaimed = int(startPages - idx.metadata.TotalPages)
+	result.SpaceSaved = uint64(result.PagesReclaimed) * uint64(idx.metadata.PageSize)
+
+	idx.logger.Infof("Compaction complete: processed %d pages, reclaimed %d pages, removed %d tombstones",
+		result.PagesProcessed, result.PagesReclaimed, startTombstones)
 
 	return nil
 }

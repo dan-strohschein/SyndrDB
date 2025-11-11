@@ -180,9 +180,16 @@ func (p *MutationParser) extractIDArgument(field *ast.Field, variables map[strin
 		if arg.Name == "id" {
 			value := p.resolveArgumentValue(arg.Value, variables)
 			if strValue, ok := value.(string); ok {
+				if strValue == "" {
+					return "", fmt.Errorf("id cannot be empty")
+				}
 				return strValue, nil
 			}
-			return fmt.Sprintf("%v", value), nil
+			idStr := fmt.Sprintf("%v", value)
+			if idStr == "" {
+				return "", fmt.Errorf("id cannot be empty")
+			}
+			return idStr, nil
 		}
 	}
 

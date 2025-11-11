@@ -369,9 +369,11 @@ func insertInternal(idx *BTreeIndex, key []byte, documentID string, pageNum uint
 			return pageNum, false, nodesCreated, err
 		}
 
-		// If child split, we need to insert the new key into this internal node
-		if splitOccurred && newChildRoot != childPageNum {
-			return insertIntoInternal(idx, node, newChildRoot, nodesCreated)
+		// If child split and a new root was created, propagate it upward
+		// The split logic already handled inserting into the parent via insertIntoParent
+		if splitOccurred && newChildRoot != pageNum {
+			// A new root was created somewhere down the tree, propagate it
+			return newChildRoot, true, nodesCreated, nil
 		}
 
 		return pageNum, affectsParentNode, nodesCreated, nil
@@ -459,14 +461,78 @@ func rangeSearchInternal(idx *BTreeIndex, startKey, endKey []byte, rootPageNum u
 	return allDocuments, keysFound, nodesVisited, nil
 }
 
+// rangeSearchInternalWithBounds performs range search with support for exclusive bounds
+func rangeSearchInternalWithBounds(idx *BTreeIndex, startKey, endKey []byte, excludeStart, excludeEnd bool, rootPageNum uint32) ([]string, int, int, error) {
+	// First, find the starting leaf node
+	startLeafPageNum, nodesVisited, err := findLeafForKey(idx, startKey, rootPageNum)
+	if err != nil {
+		return nil, 0, nodesVisited, fmt.Errorf("failed to find starting leaf: %w", err)
+	}
+
+	var allDocuments []string
+	keysFound := 0
+	currentPageNum := startLeafPageNum
+
+	// Traverse leaf nodes until we exceed the end key
+	for currentPageNum != 0 {
+		pageData, err := idx.pageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
+			return idx.fileManager.ReadPage(pn)
+		})
+		if err != nil {
+			return nil, keysFound, nodesVisited, fmt.Errorf("failed to load leaf page %d: %w", currentPageNum, err)
+		}
+
+		leaf, ok := pageData.(*BTreeNode)
+		if !ok || !leaf.IsLeaf {
+			return nil, keysFound, nodesVisited, fmt.Errorf("page %d is not a valid leaf node", currentPageNum)
+		}
+
+		nodesVisited++
+
+		// Collect documents from this leaf within the range
+		leafDocuments, leafKeysFound, exceeded := collectFromLeafInRangeWithBounds(leaf, startKey, endKey, excludeStart, excludeEnd)
+		allDocuments = append(allDocuments, leafDocuments...)
+		keysFound += leafKeysFound
+
+		// If we've exceeded the end key, stop traversing
+		if exceeded {
+			break
+		}
+
+		// Move to next leaf
+		currentPageNum = leaf.NextLeaf
+	}
+
+	return allDocuments, keysFound, nodesVisited, nil
+}
+
 // Helper functions for node operations
 
 // searchInLeaf searches for a key within a leaf node
+// searchInLeaf searches for a key in a leaf node and returns live (non-deleted) document IDs
+//
+// This is the READ path that filters out tombstones to hide deleted entries from queries.
+// Following PostgreSQL's approach where lazy deletion is invisible to readers.
+//
+// Single Responsibility: Handles search and tombstone filtering
+// DRY Principle: Reuses BTreeNode.GetLiveDocumentIDs() for filtering logic
+//
+// Parameters:
+//   - leaf: The leaf node to search in
+//   - key: The key to find
+//
+// Returns:
+//   - []string: List of live (non-deleted) document IDs for the key
+//
+// TODO: I could add caching of live document ID lists for frequently accessed keys
+// to avoid repeated tombstone filtering on hot keys
 func searchInLeaf(leaf *BTreeNode, key []byte) []string {
 	for i, nodeKey := range leaf.Keys {
 		if bytes.Equal(nodeKey, key) {
 			if i < len(leaf.Values) {
-				return leaf.Values[i]
+				// Use helper method to filter out tombstones
+				// DRY Principle: Reuse existing GetLiveDocumentIDs logic
+				return leaf.GetLiveDocumentIDs(i)
 			}
 		}
 	}
@@ -543,22 +609,60 @@ func findChildPage(internal *BTreeNode, key []byte) uint32 {
 
 // insertIntoLeaf inserts a key-document ID pair into a leaf node
 func insertIntoLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID string) (uint32, bool, int, error) {
+	// Pin the page to prevent eviction during modification
+	// This is critical for preventing data loss during cache pressure
+	if err := idx.pageManager.PinPage(leaf.PageNum); err != nil {
+		return leaf.PageNum, false, 0, fmt.Errorf("failed to pin leaf page %d: %w", leaf.PageNum, err)
+	}
+	// Ensure we unpin even on error paths
+	defer func() {
+		if err := idx.pageManager.UnpinPage(leaf.PageNum); err != nil {
+			idx.logger.Warnf("Failed to unpin leaf page %d: %v", leaf.PageNum, err)
+		}
+	}()
+
 	// Find insertion position
 	insertPos := leaf.FindKeyPosition(key)
 
 	// Check if key already exists
 	if insertPos < len(leaf.Keys) && bytes.Equal(leaf.Keys[insertPos], key) {
-		// Key exists - add document ID to existing entry
+		// Key exists - check for tombstone resurrection or add to list
 		if insertPos < len(leaf.Values) {
-			// Check for duplicates if unique index
-			if idx.metadata.IsUnique {
-				return leaf.PageNum, false, 0, fmt.Errorf("duplicate key in unique index")
+			// Check if this document ID was previously tombstoned - if so, resurrect it
+			tombstoneKey := fmt.Sprintf("%s:%s", key, documentID)
+
+			if _, wasTombstoned := leaf.Tombstones[tombstoneKey]; wasTombstoned {
+				// Clear the tombstone (resurrect the entry)
+				delete(leaf.Tombstones, tombstoneKey)
+				leaf.TombstoneCount--
+				idx.logger.Debugf("Resurrected tombstoned entry: key='%s', documentID='%s'", string(key), documentID)
+
+				// Mark page as dirty
+				idx.pageManager.PutPage(leaf.PageNum, leaf, true)
+				return leaf.PageNum, false, 0, nil
 			}
 
-			// Add document ID to existing list
-			leaf.Values[insertPos] = append(leaf.Values[insertPos], documentID)
+			// Not tombstoned - check for duplicates if unique index
+			if idx.metadata.IsUnique {
+				liveIDs := leaf.GetLiveDocumentIDs(insertPos)
+				if len(liveIDs) > 0 {
+					return leaf.PageNum, false, 0, fmt.Errorf("duplicate key in unique index")
+				}
+			}
 
-			// Mark page as dirty
+			// Check if document ID already exists (for non-unique indexes, this is still a duplicate)
+			for _, existingDoc := range leaf.Values[insertPos] {
+				if existingDoc == documentID {
+					idx.logger.Warnf("Document ID '%s' already exists at key '%s'", documentID, string(key))
+					return leaf.PageNum, false, 0, fmt.Errorf("document ID already exists for this key")
+				}
+			}
+
+			// Add new document ID to existing list (normal multi-value insert)
+			leaf.Values[insertPos] = append(leaf.Values[insertPos], documentID)
+			idx.logger.Debugf("Added document ID '%s' to existing key '%s'", documentID, string(key))
+
+			// Mark page as dirty (page is still pinned, safe to modify)
 			idx.pageManager.PutPage(leaf.PageNum, leaf, true)
 
 			return leaf.PageNum, false, 0, nil
@@ -576,15 +680,51 @@ func insertIntoLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID str
 		return splitLeafNode(idx, leaf)
 	}
 
-	// Mark page as dirty
+	// Mark page as dirty (page is still pinned, safe to modify)
 	idx.pageManager.PutPage(leaf.PageNum, leaf, true)
 
 	return leaf.PageNum, false, 0, nil
 }
 
 // deleteFromLeaf removes a key-document ID pair from a leaf node
+// deleteFromLeaf performs lazy deletion by marking entries as deleted (PostgreSQL-style)
+//
+// Following PostgreSQL's deferred merge approach for optimal performance:
+// 1. Mark document ID as deleted (create tombstone)
+// 2. Check fragmentation ratio
+// 3. Flag node for compaction if >50% tombstones
+// 4. DON'T physically remove or merge immediately
+//
+// Physical cleanup happens later during VACUUM/COMPACT operations
+//
+// Single Responsibility: Only handles marking deletion and fragmentation tracking
+//
+// Parameters:
+//   - idx: BTreeIndex instance
+//   - leaf: The leaf node containing the key
+//   - key: The key to delete from
+//   - documentID: The document ID to remove
+//
+// Returns:
+//   - uint32: Page number (unchanged for lazy deletion)
+//   - bool: Whether structural changes occurred (always false for lazy deletion)
+//   - int: Number of nodes deleted (always 0 for lazy deletion)
+//   - error: Any error encountered
+//
+// TODO: I could add batched deletion support to mark multiple document IDs
+// in a single operation for improved performance on bulk deletes
 func deleteFromLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID string) (uint32, bool, int, error) {
-	// Find the key
+	// Pin page to prevent eviction during modification
+	if err := idx.pageManager.PinPage(leaf.PageNum); err != nil {
+		return leaf.PageNum, false, 0, fmt.Errorf("failed to pin leaf page %d: %w", leaf.PageNum, err)
+	}
+	defer func() {
+		if err := idx.pageManager.UnpinPage(leaf.PageNum); err != nil {
+			idx.logger.Warnf("Failed to unpin leaf page %d: %v", leaf.PageNum, err)
+		}
+	}()
+
+	// Find the key position
 	keyPos := -1
 	for i, nodeKey := range leaf.Keys {
 		if bytes.Equal(nodeKey, key) {
@@ -597,29 +737,53 @@ func deleteFromLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID str
 		return leaf.PageNum, false, 0, fmt.Errorf("key not found in leaf node")
 	}
 
-	// Remove document ID from the list
-	if keyPos < len(leaf.Values) {
-		documentList := leaf.Values[keyPos]
-		newList := removeStringFromSlice(documentList, documentID)
-
-		if len(newList) == 0 {
-			// Remove the entire key-value pair
-			leaf.Keys = removeByteSliceAt(leaf.Keys, keyPos)
-			leaf.Values = removeStringSliceAt(leaf.Values, keyPos)
-			leaf.KeyCount--
-		} else {
-			// Update the document list
-			leaf.Values[keyPos] = newList
+	// Verify document ID exists in the value list
+	documentList := leaf.Values[keyPos]
+	found := false
+	for _, docID := range documentList {
+		if docID == documentID {
+			found = true
+			break
 		}
-
-		// Mark page as dirty
-		idx.pageManager.PutPage(leaf.PageNum, leaf, true)
-
-		// Check if node needs merging (placeholder for now)
-		return leaf.PageNum, false, 0, nil
 	}
 
-	return leaf.PageNum, false, 0, fmt.Errorf("document ID not found")
+	if !found {
+		return leaf.PageNum, false, 0, fmt.Errorf("document ID '%s' not found for key", documentID)
+	}
+
+	// LAZY DELETION: Mark as deleted instead of physical removal
+	err := leaf.MarkDeleted(key, documentID)
+	if err != nil {
+		return leaf.PageNum, false, 0, fmt.Errorf("failed to mark deletion: %w", err)
+	}
+
+	// Update index-level tombstone tracking
+	idx.metadata.TotalTombstones++
+
+	// Track tombstone ratio for maintenance decisions
+	if idx.metadata.TotalRecords > 0 {
+		idx.metadata.TombstoneRatio = float64(idx.metadata.TotalTombstones) / float64(idx.metadata.TotalRecords)
+	}
+
+	// Track nodes needing compaction
+	if leaf.NeedsCompaction {
+		idx.metadata.NodesNeedCompaction++
+
+		// Set global compaction flag if tombstone ratio exceeds threshold (20%)
+		if idx.metadata.TombstoneRatio > 0.2 {
+			idx.metadata.CompactionNeeded = true
+		}
+	}
+
+	// Mark page as dirty (tombstone metadata changed)
+	idx.pageManager.PutPage(leaf.PageNum, leaf, true)
+
+	// Log deletion for monitoring
+	idx.logger.Debugf("Lazy deletion: marked key '%s' document '%s' as deleted (tombstones: %d, ratio: %.2f)",
+		string(key), documentID, leaf.TombstoneCount, leaf.GetFragmentationRatio())
+
+	// Return: no structural changes, no nodes deleted (lazy deletion)
+	return leaf.PageNum, false, 0, nil
 }
 
 // findLeafForKey finds the leaf node that should contain a given key
@@ -665,6 +829,48 @@ func collectFromLeafInRange(leaf *BTreeNode, startKey, endKey []byte) ([]string,
 				keysFound++
 			}
 		} else if bytes.Compare(key, endKey) > 0 {
+			exceeded = true
+			break
+		}
+	}
+
+	return documents, keysFound, exceeded
+}
+
+// collectFromLeafInRangeWithBounds collects documents from a leaf node with support for exclusive bounds
+func collectFromLeafInRangeWithBounds(leaf *BTreeNode, startKey, endKey []byte, excludeStart, excludeEnd bool) ([]string, int, bool) {
+	var documents []string
+	keysFound := 0
+	exceeded := false
+
+	for i, key := range leaf.Keys {
+		// Check start boundary condition
+		var startOK bool
+		if excludeStart {
+			startOK = bytes.Compare(key, startKey) > 0
+		} else {
+			startOK = bytes.Compare(key, startKey) >= 0
+		}
+
+		// Check end boundary condition
+		var endOK bool
+		if excludeEnd {
+			endOK = bytes.Compare(key, endKey) < 0
+		} else {
+			endOK = bytes.Compare(key, endKey) <= 0
+		}
+
+		// If key is within range (respecting exclusions), collect documents
+		if startOK && endOK {
+			if i < len(leaf.Values) {
+				// Get only LIVE (non-tombstoned) document IDs
+				// DRY Principle: Reuse GetLiveDocumentIDs for filtering logic
+				liveDocIDs := leaf.GetLiveDocumentIDs(i)
+				documents = append(documents, liveDocIDs...)
+				keysFound++
+			}
+		} else if bytes.Compare(key, endKey) > 0 || (excludeEnd && bytes.Equal(key, endKey)) {
+			// We've exceeded the end boundary
 			exceeded = true
 			break
 		}
@@ -778,11 +984,21 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 			return 0, false, 0, fmt.Errorf("next page %d is not a valid leaf node", leaf.NextLeaf)
 		}
 
+		// Pin next leaf during modification
+		if err := idx.pageManager.PinPage(leaf.NextLeaf); err != nil {
+			idx.logger.Warnf("Failed to pin next leaf %d: %v", leaf.NextLeaf, err)
+		}
+
 		// Update next leaf's previous pointer to point to new leaf
 		nextLeaf.PrevLeaf = newLeafPageNum
 
 		// Mark next leaf as dirty
 		idx.pageManager.PutPage(leaf.NextLeaf, nextLeaf, true)
+
+		// Unpin next leaf
+		if err := idx.pageManager.UnpinPage(leaf.NextLeaf); err != nil {
+			idx.logger.Warnf("Failed to unpin next leaf %d: %v", leaf.NextLeaf, err)
+		}
 	}
 
 	// Update original leaf's next pointer to point to new leaf
@@ -791,9 +1007,19 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 	idx.logger.Debugf("Updated linked list pointers: %d -> %d -> %d",
 		leaf.PageNum, newLeafPageNum, newLeaf.NextLeaf)
 
-	// Save both leaf nodes to storage
+	// Save both leaf nodes to storage (adds to cache if not present)
 	idx.pageManager.PutPage(leaf.PageNum, leaf, true)
 	idx.pageManager.PutPage(newLeafPageNum, newLeaf, true)
+
+	// Pin new leaf AFTER it's in cache to prevent eviction during parent insertion
+	if err := idx.pageManager.PinPage(newLeafPageNum); err != nil {
+		idx.logger.Warnf("Failed to pin new leaf %d: %v", newLeafPageNum, err)
+	}
+	defer func() {
+		if err := idx.pageManager.UnpinPage(newLeafPageNum); err != nil {
+			idx.logger.Warnf("Failed to unpin new leaf %d: %v", newLeafPageNum, err)
+		}
+	}()
 
 	// Step 4: Determine if we need to create a new root or update parent
 	nodesCreated := 1 // We created one new leaf node
@@ -832,17 +1058,21 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 
 		return newRootPageNum, true, nodesCreated, nil
 	} else {
+		// Set parent pointer for new leaf before inserting into parent
+		newLeaf.ParentPage = leaf.ParentPage
+		idx.pageManager.PutPage(newLeafPageNum, newLeaf, true)
+
 		// Insert promoted key into existing parent
-		err := insertIntoParent(idx, leaf.ParentPage, promotedKey, newLeafPageNum)
+		newRootPageNum, err := insertIntoParent(idx, leaf.ParentPage, promotedKey, newLeafPageNum)
 		if err != nil {
 			// Clean up allocated page before returning error
 			idx.fileManager.DeallocatePage(newLeafPageNum)
 			return 0, false, 0, fmt.Errorf("failed to insert into parent: %w", err)
 		}
 
-		idx.logger.Debugf("Inserted promoted key into parent %d", leaf.ParentPage)
+		idx.logger.Debugf("Inserted promoted key into parent %d, new root is %d", leaf.ParentPage, newRootPageNum)
 
-		return leaf.ParentPage, false, nodesCreated, nil
+		return newRootPageNum, true, nodesCreated, nil
 	}
 }
 
@@ -886,8 +1116,21 @@ func createNewRoot(idx *BTreeIndex, leftChildPageNum, rightChildPageNum uint32, 
 	newRoot.Children = append(newRoot.Children, leftChildPageNum)
 	newRoot.Children = append(newRoot.Children, rightChildPageNum)
 
-	// Save new root to storage
+	// Note: Parent pointers for children will be updated by the caller (splitLeafNode or splitInternalNode)
+	// to avoid redundant disk I/O and potential race conditions
+
+	// Save new root to storage (adds to cache)
 	idx.pageManager.PutPage(newRootPageNum, newRoot, true)
+
+	// Pin new root AFTER it's in cache
+	if err := idx.pageManager.PinPage(newRootPageNum); err != nil {
+		idx.logger.Warnf("Failed to pin new root %d: %v", newRootPageNum, err)
+	}
+	defer func() {
+		if err := idx.pageManager.UnpinPage(newRootPageNum); err != nil {
+			idx.logger.Warnf("Failed to unpin new root %d: %v", newRootPageNum, err)
+		}
+	}()
 
 	idx.logger.Debugf("Created new root %d with separator key '%s' and children [%d, %d]",
 		newRootPageNum, string(separatorKey), leftChildPageNum, rightChildPageNum)
@@ -905,23 +1148,39 @@ func createNewRoot(idx *BTreeIndex, leftChildPageNum, rightChildPageNum uint32, 
 //
 // Returns:
 //   - error: Any error that occurred during insertion
-func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightChildPageNum uint32) error {
+func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightChildPageNum uint32) (uint32, error) {
+	idx.logger.Infof("insertIntoParent called: parentPageNum=%d, key='%s', rightChildPageNum=%d",
+		parentPageNum, string(key), rightChildPageNum)
+
 	// Load parent node
 	parentData, err := idx.pageManager.GetPage(parentPageNum, func(pn uint32) (interface{}, error) {
 		return idx.fileManager.ReadPage(pn)
 	})
 	if err != nil {
-		return fmt.Errorf("failed to load parent page %d: %w", parentPageNum, err)
+		return parentPageNum, fmt.Errorf("failed to load parent page %d: %w", parentPageNum, err)
 	}
 
 	parent, ok := parentData.(*BTreeNode)
 	if !ok {
-		return fmt.Errorf("parent page %d is not a valid BTree node", parentPageNum)
+		return parentPageNum, fmt.Errorf("parent page %d is not a valid BTree node", parentPageNum)
 	}
 
 	if parent.IsLeaf {
-		return fmt.Errorf("parent page %d is not an internal node", parentPageNum)
+		return parentPageNum, fmt.Errorf("parent page %d is not an internal node", parentPageNum)
 	}
+
+	idx.logger.Infof("insertIntoParent: parent %d has %d keys before insertion",
+		parentPageNum, parent.KeyCount)
+
+	// Pin parent page during modification
+	if err := idx.pageManager.PinPage(parentPageNum); err != nil {
+		return parentPageNum, fmt.Errorf("failed to pin parent page %d: %w", parentPageNum, err)
+	}
+	defer func() {
+		if err := idx.pageManager.UnpinPage(parentPageNum); err != nil {
+			idx.logger.Warnf("Failed to unpin parent page %d: %v", parentPageNum, err)
+		}
+	}()
 
 	// Find insertion position for the key
 	insertPos := 0
@@ -944,22 +1203,39 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 	// Update key count
 	parent.KeyCount++
 
+	idx.logger.Infof("insertIntoParent MODIFIED: parent %d now has %d keys after inserting '%s' at pos %d (ptr=%p)",
+		parentPageNum, parent.KeyCount, string(key), insertPos, parent)
+
 	// Check if parent node is now full and needs splitting
 	maxKeys := calculateMaxKeysForNode(parent, idx.metadata.PageSize)
 	if parent.KeyCount > maxKeys {
-		// Parent needs splitting - this would require implementing internal node splitting
-		// For now, we'll log this condition and continue
-		idx.logger.Warnf("Parent node %d is full after insertion but internal node splitting not yet implemented",
-			parentPageNum)
+		idx.logger.Debugf("Parent node %d is full (%d > %d) after insertion, triggering split",
+			parentPageNum, parent.KeyCount, maxKeys)
+
+		// Save current state before split
+		idx.pageManager.PutPage(parentPageNum, parent, true)
+
+		// Split the parent internal node
+		// This may recursively split up the tree if ancestors are also full
+		newRootPageNum, _, _, err := splitInternalNode(idx, parent)
+		if err != nil {
+			return parentPageNum, fmt.Errorf("failed to split parent node %d: %w", parentPageNum, err)
+		}
+
+		idx.logger.Debugf("Successfully split parent node %d, new root is %d", parentPageNum, newRootPageNum)
+		return newRootPageNum, nil
 	}
 
 	// Save updated parent
 	idx.pageManager.PutPage(parentPageNum, parent, true)
 
+	idx.logger.Infof("insertIntoParent SAVED: parent %d with %d keys marked dirty (ptr=%p)",
+		parentPageNum, parent.KeyCount, parent)
+
 	idx.logger.Debugf("Inserted key '%s' and child %d into parent %d at position %d",
 		string(key), rightChildPageNum, parentPageNum, insertPos)
 
-	return nil
+	return parentPageNum, nil
 }
 
 // insertUint32At inserts a uint32 value at a specific position in a slice
@@ -1015,6 +1291,16 @@ func updateInternalAfterMerge(idx *BTreeIndex, internal *BTreeNode, oldChildPage
 	if !internal.IsLeaf {
 		return 0, false, nodesDeleted, fmt.Errorf("node %d is not an internal node", internal.PageNum)
 	}
+
+	// Pin internal page during modification
+	if err := idx.pageManager.PinPage(internal.PageNum); err != nil {
+		return 0, false, nodesDeleted, fmt.Errorf("failed to pin internal page %d: %w", internal.PageNum, err)
+	}
+	defer func() {
+		if err := idx.pageManager.UnpinPage(internal.PageNum); err != nil {
+			idx.logger.Warnf("Failed to unpin internal page %d: %v", internal.PageNum, err)
+		}
+	}()
 
 	// handle updating the internal node after a merge
 	for i, childPage := range internal.Children {

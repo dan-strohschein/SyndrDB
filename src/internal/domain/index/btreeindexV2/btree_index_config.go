@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syndrdb/src/internal/journal"
 	"syndrdb/src/pkg/common/helpers"
 )
 
@@ -78,6 +79,9 @@ type IndexConfig struct {
 	// File system options
 	FilePermissions os.FileMode // File permissions for index files
 	SyncWrites      bool        // Whether to sync writes to disk immediately
+
+	// Durability options (added for production readiness)
+	WALManager *journal.WALManager // Write-ahead logging manager for durability (optional)
 }
 
 // DefaultIndexConfig creates a configuration with optimal default values

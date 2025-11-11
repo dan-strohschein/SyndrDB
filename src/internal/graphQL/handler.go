@@ -224,9 +224,9 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 				bundleTypes[bundleName] = bundleSchema.Payload
 
 				// Add query field for this bundle
-				// Example: users(limit: Int, where: String): [User!]!
+				// Example: users(limit: Int, offset: Int, where: String, orderBy: String): [User!]!
 				typeName := bundleSchema.Payload.TypeName
-				schemaString += fmt.Sprintf("\t\t%s(limit: Int, where: String, orderBy: String): [%s!]!\n",
+				schemaString += fmt.Sprintf("\t\t%s(limit: Int, offset: Int, where: String, orderBy: String): [%s!]!\n",
 					bundleName, typeName)
 			}
 		}
@@ -234,7 +234,7 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 		// Fallback: Use generic Document type if no schema manager
 		logger.Warn("No SchemaManager available - using generic Document type for all bundles")
 		for bundleName := range database.Bundles {
-			schemaString += fmt.Sprintf("\t\t%s(limit: Int, where: String, orderBy: String): [Document!]!\n", bundleName)
+			schemaString += fmt.Sprintf("\t\t%s(limit: Int, offset: Int, where: String, orderBy: String): [Document!]!\n", bundleName)
 		}
 	}
 

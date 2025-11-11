@@ -27,6 +27,9 @@ import (
 	// Import the graphQL schema package for automatic schema generation
 	graphQLSchema "syndrdb/src/internal/graphQL/schema"
 
+	// Service Registry for dependency injection (breaks circular dependencies)
+	"syndrdb/src/internal/registry"
+
 	"sync"
 	"sync/atomic"
 
@@ -3265,6 +3268,17 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		FillFactor:   0.7,        // 70% fill factor for optimal balance between space and performance
 		MaxKeyLength: 2048,       // Set maximum key length to 2KB
 		SplitRatio:   splitRatio, // Use the calculated split ratio
+	}
+
+	// Configure WAL manager for durability using dependency injection
+	// DRY Principle: Use shared service registry to access WAL without circular dependencies
+	// Open/Closed: Registry pattern allows adding new services without modifying existing code
+	serviceRegistry := registry.GetRegistry()
+	if serviceRegistry.IsWALAvailable() {
+		config.WALManager = serviceRegistry.GetWALManager()
+		s.logger.Infof("WAL enabled for B-tree index '%s' on field '%s'", indexCommand.IndexName, fieldDef.Name)
+	} else {
+		s.logger.Debugf("WAL not available for B-tree index '%s' (proceeding without durability)", indexCommand.IndexName)
 	}
 
 	// Create the BTree index using the V2 implementation

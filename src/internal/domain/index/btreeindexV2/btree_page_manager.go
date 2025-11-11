@@ -70,6 +70,10 @@ type BTreePageManager struct {
 	mutex       sync.RWMutex           // Thread safety for cache operations
 	logger      *zap.SugaredLogger     // Logger for debug and error messages
 
+	// Writer function for flushing dirty pages during eviction
+	// TODO: I could enhance this to support batched writes for better performance
+	pageWriter func(uint32, interface{}) error
+
 	// Statistics (using atomic operations for thread safety)
 	stats cacheStatistics
 }
@@ -102,6 +106,7 @@ type cacheEntry struct {
 	isDirty     bool        // Whether the page has been modified
 	lastAccess  time.Time   // Last access timestamp for statistics
 	accessCount uint64      // Number of times this page has been accessed
+	pinCount    int         // Number of active pins preventing eviction (PostgreSQL-style)
 
 	// LRU doubly-linked list pointers
 	prev *cacheEntry // Previous entry in LRU list
@@ -187,7 +192,7 @@ func NewBTreePageManager(pageSize uint32, cacheSize int, logger *zap.SugaredLogg
 //
 // Returns:
 //   - interface{}: The page data
-//   - error: Any error that occurred during retrieval
+//   - error: Any error that occurred during loading
 func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interface{}, error)) (interface{}, error) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
@@ -196,23 +201,39 @@ func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interfa
 
 	// Check if page is in cache
 	if entry, exists := pm.cache[pageNum]; exists {
-		// Cache hit - move to front of LRU list
-		pm.moveToFront(entry)
+		// Update access time and count
 		entry.lastAccess = time.Now()
 		atomic.AddUint64(&entry.accessCount, 1)
+
+		// Move to front of LRU list
+		pm.moveToFront(entry)
+
 		atomic.AddUint64(&pm.stats.hits, 1)
 
-		pm.logger.Debugf("Cache hit for page %d", pageNum)
+		// INTENSIVE DEBUG: Log details for internal nodes
+		if node, ok := entry.pageData.(*BTreeNode); ok && !node.IsLeaf {
+			pm.logger.Infof("GetPage CACHE HIT: page %d is internal node with %d keys (ptr=%p)",
+				pageNum, node.KeyCount, entry.pageData)
+		} else {
+			pm.logger.Debugf("Cache hit for page %d", pageNum)
+		}
+
 		return entry.pageData, nil
 	}
 
-	// Cache miss - load page using loader function
+	// Cache miss - load from storage
 	atomic.AddUint64(&pm.stats.misses, 1)
 	pm.logger.Debugf("Cache miss for page %d, loading from storage", pageNum)
 
 	pageData, err := loader(pageNum)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load page %d: %w", pageNum, err)
+		return nil, err
+	}
+
+	// INTENSIVE DEBUG: Log details for loaded internal nodes
+	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+		pm.logger.Infof("GetPage LOADED FROM DISK: page %d is internal node with %d keys (ptr=%p)",
+			pageNum, node.KeyCount, pageData)
 	}
 
 	// Add to cache
@@ -230,12 +251,34 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 
-	pm.logger.Debugf("Putting page %d in cache (dirty: %t)", pageNum, dirty)
+	// INTENSIVE DEBUG: Log details for internal nodes
+	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+		pm.logger.Infof("PutPage CALLED: page %d is internal node with %d keys, dirty=%t (ptr=%p)",
+			pageNum, node.KeyCount, dirty, pageData)
+	} else {
+		pm.logger.Debugf("Putting page %d in cache (dirty: %t)", pageNum, dirty)
+	}
 
 	// Check if page is already in cache
 	if entry, exists := pm.cache[pageNum]; exists {
-		// Update existing entry
-		entry.pageData = pageData
+		// CRITICAL: Only update pageData if it's a different object
+		// If same pointer, just update dirty flag to avoid no-op overwrites
+		if entry.pageData != pageData {
+			oldNode, oldOk := entry.pageData.(*BTreeNode)
+			newNode, newOk := pageData.(*BTreeNode)
+			if oldOk && newOk && !oldNode.IsLeaf && !newNode.IsLeaf {
+				pm.logger.Warnf("PutPage REPLACING: page %d old ptr=%p with %d keys -> new ptr=%p with %d keys",
+					pageNum, entry.pageData, oldNode.KeyCount, pageData, newNode.KeyCount)
+			} else {
+				pm.logger.Debugf("Replacing cached page %d with new object", pageNum)
+			}
+			entry.pageData = pageData
+		} else {
+			if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+				pm.logger.Infof("PutPage SAME POINTER: page %d already cached with same object (ptr=%p), just updating dirty flag",
+					pageNum, pageData)
+			}
+		}
 		entry.isDirty = entry.isDirty || dirty // Once dirty, stays dirty until flushed
 		entry.lastAccess = time.Now()
 		atomic.AddUint64(&entry.accessCount, 1)
@@ -248,7 +291,28 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 	}
 
 	// Add new entry to cache
+	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+		pm.logger.Infof("PutPage ADDING NEW: page %d internal node with %d keys (ptr=%p)",
+			pageNum, node.KeyCount, pageData)
+	}
 	pm.addToCache(pageNum, pageData, dirty)
+}
+
+// MarkPageDirty marks a cached page as dirty without replacing its data
+// This is more efficient than PutPage when you've modified a cached page in-place
+func (pm *BTreePageManager) MarkPageDirty(pageNum uint32) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	entry, exists := pm.cache[pageNum]
+	if !exists {
+		return fmt.Errorf("cannot mark page %d as dirty: not in cache", pageNum)
+	}
+
+	entry.isDirty = true
+	entry.lastAccess = time.Now()
+	pm.logger.Debugf("Marked page %d as dirty", pageNum)
+	return nil
 }
 
 // Flush writes all dirty pages to storage using the provided writer function
@@ -372,6 +436,73 @@ func (pm *BTreePageManager) GetDirtyPageCount() int {
 	return dirtyCount
 }
 
+// PinPage increments the pin count for a page, preventing it from being evicted
+// This is critical for preventing data loss during operations that modify pages.
+// Following PostgreSQL's buffer pool pinning strategy to ensure pages being
+// actively modified cannot be evicted, even under memory pressure.
+//
+// IMPORTANT: Every PinPage call MUST be paired with UnpinPage when done.
+// Failure to unpin will cause memory leaks as pages cannot be evicted.
+//
+// Single Responsibility: Manages pin count to prevent premature eviction
+//
+// Parameters:
+//   - pageNum: The page number to pin
+//
+// Returns:
+//   - error: Returns error if page is not in cache
+//
+// TODO: I could add pin count tracking statistics for monitoring pin/unpin balance
+func (pm *BTreePageManager) PinPage(pageNum uint32) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	entry, exists := pm.cache[pageNum]
+	if !exists {
+		return fmt.Errorf("cannot pin page %d: page not in cache", pageNum)
+	}
+
+	entry.pinCount++
+	pm.logger.Debugf("Pinned page %d (pinCount: %d)", pageNum, entry.pinCount)
+
+	return nil
+}
+
+// UnpinPage decrements the pin count for a page, allowing it to be evicted
+// This releases the eviction protection set by PinPage.
+//
+// IMPORTANT: Must be called exactly once for each PinPage call.
+// Calling UnpinPage without a matching PinPage is a programming error.
+//
+// Single Responsibility: Manages pin count release for eviction eligibility
+//
+// Parameters:
+//   - pageNum: The page number to unpin
+//
+// Returns:
+//   - error: Returns error if page is not in cache or pin count would go negative
+func (pm *BTreePageManager) UnpinPage(pageNum uint32) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	entry, exists := pm.cache[pageNum]
+	if !exists {
+		// Page might have been evicted already - this is not necessarily an error
+		// in normal operation, so we log it but don't return an error
+		pm.logger.Debugf("UnpinPage called for page %d which is not in cache", pageNum)
+		return nil
+	}
+
+	if entry.pinCount <= 0 {
+		return fmt.Errorf("cannot unpin page %d: pin count already zero", pageNum)
+	}
+
+	entry.pinCount--
+	pm.logger.Debugf("Unpinned page %d (pinCount: %d)", pageNum, entry.pinCount)
+
+	return nil
+}
+
 // Clear removes all pages from the cache
 // Note: This does not flush dirty pages - call Flush first if needed
 func (pm *BTreePageManager) Clear() {
@@ -426,22 +557,87 @@ func (pm *BTreePageManager) addToCache(pageNum uint32, pageData interface{}, dir
 }
 
 // evictLRU removes the least recently used page from cache
+//
+// Following PostgreSQL's buffer pool eviction strategy with pinning:
+// 1. Find LRU unpinned page (tail of list, skip pinned pages)
+// 2. If dirty, FLUSH to disk before evicting
+// 3. Remove from cache and free memory
+// 4. Update statistics
+//
+// CRITICAL: Pinned pages are NEVER evicted, preventing data loss during
+// active modifications. This ensures pages being worked on stay in cache.
+//
+// Single Responsibility: Handles eviction logic with pin awareness
+//
+// TODO: I could implement clock-sweep algorithm for better performance on
+// workloads with sequential scans (PostgreSQL uses this in production)
 func (pm *BTreePageManager) evictLRU() {
 	if pm.currentSize == 0 {
 		return
 	}
 
-	// Get the least recently used entry (tail of list)
-	lru := pm.lruTail.prev
-	if lru == pm.lruHead {
-		return // Empty list
+	// Find the least recently used UNPINNED page
+	// Walk backwards through LRU list to find first unpinned page
+	var lru *cacheEntry
+	current := pm.lruTail.prev
+
+	for current != pm.lruHead {
+		if current.pinCount == 0 {
+			lru = current
+			break
+		}
+		pm.logger.Debugf("Skipping pinned page %d (pinCount: %d) during eviction",
+			current.pageNum, current.pinCount)
+		current = current.prev
+	}
+
+	// If all pages are pinned, we cannot evict
+	if lru == nil {
+		pm.logger.Warnf("Cannot evict: all %d cached pages are pinned", pm.currentSize)
+		return
 	}
 
 	pm.logger.Debugf("Evicting LRU page %d from cache", lru.pageNum)
 
-	// Warn if evicting a dirty page (should have been flushed)
+	// CRITICAL: Flush dirty pages before eviction to prevent data loss
 	if lru.isDirty {
-		pm.logger.Warnf("Evicting dirty page %d - data may be lost", lru.pageNum)
+		if pm.pageWriter != nil {
+			node, ok := lru.pageData.(*BTreeNode)
+			keyCount := -1
+			if ok {
+				keyCount = int(node.KeyCount)
+			}
+			pm.logger.Warnf("FLUSHING DIRTY PAGE %d BEFORE EVICTION (IsLeaf=%v, KeyCount=%d, cachePtr=%p)",
+				lru.pageNum, ok && node.IsLeaf, keyCount, lru.pageData)
+
+			// CRITICAL DEBUG: Check if cache entry pointer matches what we're about to flush
+			if cacheEntry, exists := pm.cache[lru.pageNum]; exists {
+				if cacheEntry.pageData != lru.pageData {
+					pm.logger.Errorf("BUG DETECTED: About to flush page %d with ptr=%p but cache has DIFFERENT ptr=%p!",
+						lru.pageNum, lru.pageData, cacheEntry.pageData)
+					if cachedNode, cOk := cacheEntry.pageData.(*BTreeNode); cOk && !cachedNode.IsLeaf {
+						pm.logger.Errorf("  Cache has %d keys at ptr=%p", cachedNode.KeyCount, cacheEntry.pageData)
+					}
+					if node != nil && !node.IsLeaf {
+						pm.logger.Errorf("  Flushing %d keys at ptr=%p", node.KeyCount, lru.pageData)
+					}
+				}
+			}
+
+			if err := pm.pageWriter(lru.pageNum, lru.pageData); err != nil {
+				// Log error but continue with eviction
+				// TODO: I could implement retry logic with exponential backoff
+				// for transient I/O errors to improve reliability
+				pm.logger.Errorf("FLUSH FAILED FOR PAGE %d: %v", lru.pageNum, err)
+			} else {
+				// Successfully flushed
+				atomic.AddUint64(&pm.stats.dirtyWrites, 1)
+				pm.logger.Warnf("SUCCESSFULLY FLUSHED PAGE %d BEFORE EVICTION", lru.pageNum)
+			}
+		} else {
+			// No writer configured - this should not happen in production
+			pm.logger.Errorf("CRITICAL: Evicting dirty page %d without flush - no writer configured (DATA WILL BE LOST)", lru.pageNum)
+		}
 	}
 
 	// Remove from cache map
@@ -454,6 +650,8 @@ func (pm *BTreePageManager) evictLRU() {
 	// Update statistics
 	atomic.AddUint64(&pm.stats.evictions, 1)
 	pm.updateMemoryUsage()
+
+	pm.logger.Debugf("Successfully evicted page %d (currentSize: %d)", lru.pageNum, pm.currentSize)
 }
 
 // moveToFront moves an entry to the front of the LRU list
@@ -487,6 +685,27 @@ func (pm *BTreePageManager) removeFromLRU(entry *cacheEntry) {
 func (pm *BTreePageManager) updateMemoryUsage() {
 	memoryUsage := uint64(pm.currentSize) * uint64(pm.pageSize)
 	atomic.StoreUint64(&pm.stats.memoryUsage, memoryUsage)
+}
+
+// SetWriter configures the page writer function for flushing dirty pages during eviction
+//
+// This allows the page manager to persist dirty pages before evicting them from cache,
+// preventing data loss and ensuring durability.
+//
+// Single Responsibility: Dependency injection for page persistence
+// DRY Principle: Reuses same writer function for both explicit flushes and evictions
+//
+// Parameters:
+//   - writer: Function to write pages to storage (pageNum, pageData) -> error
+//
+// TODO: I could extend this to support batched writes where multiple dirty pages
+// are flushed in a single I/O operation for improved performance
+func (pm *BTreePageManager) SetWriter(writer func(uint32, interface{}) error) {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
+
+	pm.pageWriter = writer
+	pm.logger.Debugf("Configured page writer for dirty page eviction")
 }
 
 // GetMaxSize returns the maximum cache size

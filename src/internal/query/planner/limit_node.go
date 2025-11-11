@@ -243,6 +243,10 @@ func (n *LimitNode) Execute() (map[string]*models.Document, error) {
 	n.Logger.Debugf("LimitNode: extracting documents [%d:%d] from %d total",
 		startIndex, endIndex, len(docSlice))
 
+	// Update sortedDocuments to contain only the limited subset
+	// This is what GetSortedDocuments() will return to preserve ordering
+	n.sortedDocuments = limitedSlice
+
 	// Convert back to map
 	resultMap := make(map[string]*models.Document, len(limitedSlice))
 	for _, doc := range limitedSlice {

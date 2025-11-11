@@ -233,7 +233,7 @@ func (fm *BTreeFileManager) ReadPage(pageNum uint32) (interface{}, error) {
 	if fm.debugMode {
 		return fm.deserializePageASCII(pageData)
 	} else {
-		return fm.deserializePageBinary(pageData)
+		return fm.deserializePageBinary(pageData, pageNum)
 	}
 }
 
@@ -252,7 +252,23 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 	fm.mutex.Lock()
 	defer fm.mutex.Unlock()
 
-	fm.logger.Debugf("Writing page %d to file", pageNum)
+	// INTENSIVE DEBUG: Log what we're writing
+	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+		fm.logger.Infof("WritePage CALLED: page %d internal node with %d keys (ptr=%p)",
+			pageNum, node.KeyCount, pageData)
+	} else {
+		fm.logger.Debugf("Writing page %d to file", pageNum)
+	}
+
+	// Compute and store checksum for BTreeNode pages (skip metadata page 0)
+	if pageNum > 0 {
+		if btreeNode, ok := pageData.(*BTreeNode); ok {
+			// TODO: I need to implement proper CRC32 checksum computation
+			// For now, use simple checksum based on node fields
+			btreeNode.Checksum = btreeNode.PageNum ^ btreeNode.KeyCount ^ btreeNode.NextLeaf ^ btreeNode.PrevLeaf
+			fm.logger.Debugf("Computed checksum 0x%X for page %d", btreeNode.Checksum, pageNum)
+		}
+	}
 
 	// Serialize page data
 	var serialized []byte
@@ -297,9 +313,9 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 		}
 	}
 
-	// Sync to disk if needed
+	// Sync to disk to ensure durability
 	if err := fm.file.Sync(); err != nil {
-		fm.logger.Warnf("Failed to sync file: %v", err)
+		return fmt.Errorf("failed to sync page %d to disk: %w", pageNum, err)
 	}
 
 	fm.logger.Debugf("Successfully wrote page %d to file", pageNum)
@@ -721,6 +737,11 @@ func (fm *BTreeFileManager) parseFileHeaderField(header *FileHeader, key, value 
 // serializePageASCII serializes page data to ASCII format
 // This function creates a human-readable representation of either metadata or node data
 // with unique section boundaries for reliable parsing
+// DEPRECATED: ASCII serialization is only used for debugging (debugMode=true).
+// Production systems should use binary serialization for performance and correctness.
+// This function is incomplete and missing critical fields (e.g., Values for leaf nodes).
+// Consider removing this in a future version once debugging capabilities are no longer needed.
+//
 // Parameters:
 //   - pageData: The page data to serialize (either *BTreeMetadata or *BTreeNode)
 //
@@ -791,6 +812,11 @@ func (fm *BTreeFileManager) serializePageASCII(pageData interface{}) ([]byte, er
 // deserializePageASCII deserializes page data from ASCII format
 // This function parses ASCII data and returns either metadata or node structures
 // based on the section headers found in the data
+// DEPRECATED: ASCII deserialization is only used for debugging (debugMode=true).
+// Production systems should use binary deserialization for performance and correctness.
+// This function is incomplete and missing critical fields (e.g., proper Values handling).
+// Consider removing this in a future version once debugging capabilities are no longer needed.
+//
 // Parameters:
 //   - data: The ASCII data to parse
 //
@@ -1191,6 +1217,24 @@ func (fm *BTreeFileManager) serializePageBinary(pageData interface{}) ([]byte, e
 				return nil, err
 			}
 		}
+		// Write values (for leaf nodes)
+		if err := binary.Write(buf, binary.LittleEndian, uint32(len(data.Values))); err != nil {
+			return nil, err
+		}
+		for _, valueList := range data.Values {
+			if err := binary.Write(buf, binary.LittleEndian, uint32(len(valueList))); err != nil {
+				return nil, err
+			}
+			for _, value := range valueList {
+				valueBytes := []byte(value)
+				if err := binary.Write(buf, binary.LittleEndian, uint32(len(valueBytes))); err != nil {
+					return nil, err
+				}
+				if err := binary.Write(buf, binary.LittleEndian, valueBytes); err != nil {
+					return nil, err
+				}
+			}
+		}
 		if err := binary.Write(buf, binary.LittleEndian, uint32(len(data.Children))); err != nil {
 			return nil, err
 		}
@@ -1199,37 +1243,307 @@ func (fm *BTreeFileManager) serializePageBinary(pageData interface{}) ([]byte, e
 				return nil, err
 			}
 		}
+
+		// Write Tombstones map (map[string]bool where key is "key+docID")
+		if err := binary.Write(buf, binary.LittleEndian, uint32(len(data.Tombstones))); err != nil {
+			return nil, err
+		}
+		for tombstoneKey, isDeleted := range data.Tombstones {
+			// Write tombstone key (format: "key+docID")
+			keyBytes := []byte(tombstoneKey)
+			if err := binary.Write(buf, binary.LittleEndian, uint32(len(keyBytes))); err != nil {
+				return nil, err
+			}
+			if err := binary.Write(buf, binary.LittleEndian, keyBytes); err != nil {
+				return nil, err
+			}
+			// Write boolean value
+			if err := binary.Write(buf, binary.LittleEndian, isDeleted); err != nil {
+				return nil, err
+			}
+		}
+
+		// Write TombstoneCount
+		if err := binary.Write(buf, binary.LittleEndian, data.TombstoneCount); err != nil {
+			return nil, err
+		}
+
 		return buf.Bytes(), nil
 	case *BTreeMetadata:
 		buf := new(bytes.Buffer)
-		// Write magic number first for consistency with deserialization
-		if err := binary.Write(buf, binary.LittleEndian, uint32(0x42545245)); err != nil {
+
+		// Write all metadata fields in order matching the struct definition
+		// File integrity and versioning
+		if err := binary.Write(buf, binary.LittleEndian, data.MagicNumber); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.Version); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.CreatedAt.Unix()); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.LastModified.Unix()); err != nil {
+			return nil, err
+		}
+
+		// Tree configuration
+		if err := binary.Write(buf, binary.LittleEndian, data.PageSize); err != nil {
 			return nil, err
 		}
 		if err := binary.Write(buf, binary.LittleEndian, data.Order); err != nil {
 			return nil, err
 		}
+		if err := binary.Write(buf, binary.LittleEndian, data.TreeHeight); err != nil {
+			return nil, err
+		}
 		if err := binary.Write(buf, binary.LittleEndian, data.RootPageNum); err != nil {
+			return nil, err
+		}
+
+		// Storage management
+		if err := binary.Write(buf, binary.LittleEndian, data.NextPageNum); err != nil {
 			return nil, err
 		}
 		if err := binary.Write(buf, binary.LittleEndian, data.TotalPages); err != nil {
 			return nil, err
 		}
-		if err := binary.Write(buf, binary.LittleEndian, data.LastCompaction.Unix()); err != nil {
+		// FreePages slice
+		if err := binary.Write(buf, binary.LittleEndian, uint32(len(data.FreePages))); err != nil {
 			return nil, err
 		}
-		if err := binary.Write(buf, binary.LittleEndian, data.FragmentationPct); err != nil {
+		for _, pageNum := range data.FreePages {
+			if err := binary.Write(buf, binary.LittleEndian, pageNum); err != nil {
+				return nil, err
+			}
+		}
+
+		// Statistics
+		if err := binary.Write(buf, binary.LittleEndian, data.TotalRecords); err != nil {
 			return nil, err
 		}
+		if err := binary.Write(buf, binary.LittleEndian, data.TotalNodes); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.LeafNodes); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.InternalNodes); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.TotalKeys); err != nil {
+			return nil, err
+		}
+
+		// Performance metrics
+		if err := binary.Write(buf, binary.LittleEndian, data.SplitCount); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.MergeCount); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.SearchCount); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.InsertCount); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.DeleteCount); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.TotalKeysFound); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.TotalNodesVisited); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.AverageSearchEfficiency); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.MaxNodesVisited); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.TotalNodesDeleted); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.StructuralChanges); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.AverageNodesDeleted); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.CompactionCount); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.RecordCount); err != nil {
+			return nil, err
+		}
+
+		// Insertion performance metrics
+		if err := binary.Write(buf, binary.LittleEndian, data.TotalNodesCreated); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.AverageNodesCreated); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(buf, binary.LittleEndian, data.TreeGrowthEvents); err != nil {
+			return nil, err
+		}
+
 		return buf.Bytes(), nil
 	default:
 		return nil, fmt.Errorf("unsupported page data type for binary serialization: %T", data)
 	}
 }
 
-func (fm *BTreeFileManager) deserializePageBinary(data []byte) (interface{}, error) {
-	// parse binary format
+func (fm *BTreeFileManager) deserializePageBinary(data []byte, pageNum uint32) (interface{}, error) {
+	// Page 0 is ALWAYS metadata, all other pages are nodes
+	// This is the definitive way to distinguish them
+	if pageNum == 0 {
+		buf := bytes.NewReader(data)
+		return fm.deserializeMetadataBinary(buf)
+	}
+
+	// All other pages are nodes
 	buf := bytes.NewReader(data)
+	return fm.deserializeNodeBinary(buf)
+}
+
+// deserializeMetadataBinary deserializes metadata from binary format
+func (fm *BTreeFileManager) deserializeMetadataBinary(buf *bytes.Reader) (*BTreeMetadata, error) {
+	metadata := &BTreeMetadata{}
+
+	// Read all fields in the same order as serialization
+	// File integrity and versioning
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.MagicNumber); err != nil {
+		return nil, fmt.Errorf("failed to read magic number: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.Version); err != nil {
+		return nil, fmt.Errorf("failed to read version: %w", err)
+	}
+
+	var createdAtUnix, lastModifiedUnix int64
+	if err := binary.Read(buf, binary.LittleEndian, &createdAtUnix); err != nil {
+		return nil, fmt.Errorf("failed to read created at: %w", err)
+	}
+	metadata.CreatedAt = time.Unix(createdAtUnix, 0)
+
+	if err := binary.Read(buf, binary.LittleEndian, &lastModifiedUnix); err != nil {
+		return nil, fmt.Errorf("failed to read last modified: %w", err)
+	}
+	metadata.LastModified = time.Unix(lastModifiedUnix, 0)
+
+	// Tree configuration
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.PageSize); err != nil {
+		return nil, fmt.Errorf("failed to read page size: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.Order); err != nil {
+		return nil, fmt.Errorf("failed to read order: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TreeHeight); err != nil {
+		return nil, fmt.Errorf("failed to read tree height: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.RootPageNum); err != nil {
+		return nil, fmt.Errorf("failed to read root page num: %w", err)
+	}
+
+	// Storage management
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.NextPageNum); err != nil {
+		return nil, fmt.Errorf("failed to read next page num: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalPages); err != nil {
+		return nil, fmt.Errorf("failed to read total pages: %w", err)
+	}
+
+	// FreePages slice
+	var freePagesLen uint32
+	if err := binary.Read(buf, binary.LittleEndian, &freePagesLen); err != nil {
+		return nil, fmt.Errorf("failed to read free pages length: %w", err)
+	}
+	metadata.FreePages = make([]uint32, freePagesLen)
+	for i := uint32(0); i < freePagesLen; i++ {
+		if err := binary.Read(buf, binary.LittleEndian, &metadata.FreePages[i]); err != nil {
+			return nil, fmt.Errorf("failed to read free page %d: %w", i, err)
+		}
+	}
+
+	// Statistics
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalRecords); err != nil {
+		return nil, fmt.Errorf("failed to read total records: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalNodes); err != nil {
+		return nil, fmt.Errorf("failed to read total nodes: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.LeafNodes); err != nil {
+		return nil, fmt.Errorf("failed to read leaf nodes: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.InternalNodes); err != nil {
+		return nil, fmt.Errorf("failed to read internal nodes: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalKeys); err != nil {
+		return nil, fmt.Errorf("failed to read total keys: %w", err)
+	}
+
+	// Performance metrics
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.SplitCount); err != nil {
+		return nil, fmt.Errorf("failed to read split count: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.MergeCount); err != nil {
+		return nil, fmt.Errorf("failed to read merge count: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.SearchCount); err != nil {
+		return nil, fmt.Errorf("failed to read search count: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.InsertCount); err != nil {
+		return nil, fmt.Errorf("failed to read insert count: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.DeleteCount); err != nil {
+		return nil, fmt.Errorf("failed to read delete count: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalKeysFound); err != nil {
+		return nil, fmt.Errorf("failed to read total keys found: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalNodesVisited); err != nil {
+		return nil, fmt.Errorf("failed to read total nodes visited: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.AverageSearchEfficiency); err != nil {
+		return nil, fmt.Errorf("failed to read average search efficiency: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.MaxNodesVisited); err != nil {
+		return nil, fmt.Errorf("failed to read max nodes visited: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalNodesDeleted); err != nil {
+		return nil, fmt.Errorf("failed to read total nodes deleted: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.StructuralChanges); err != nil {
+		return nil, fmt.Errorf("failed to read structural changes: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.AverageNodesDeleted); err != nil {
+		return nil, fmt.Errorf("failed to read average nodes deleted: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.CompactionCount); err != nil {
+		return nil, fmt.Errorf("failed to read compaction count: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.RecordCount); err != nil {
+		return nil, fmt.Errorf("failed to read record count: %w", err)
+	}
+
+	// Insertion performance metrics
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TotalNodesCreated); err != nil {
+		return nil, fmt.Errorf("failed to read total nodes created: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.AverageNodesCreated); err != nil {
+		return nil, fmt.Errorf("failed to read average nodes created: %w", err)
+	}
+	if err := binary.Read(buf, binary.LittleEndian, &metadata.TreeGrowthEvents); err != nil {
+		return nil, fmt.Errorf("failed to read tree growth events: %w", err)
+	}
+
+	return metadata, nil
+}
+
+// deserializeNodeBinary deserializes a BTree node from binary format
+func (fm *BTreeFileManager) deserializeNodeBinary(buf *bytes.Reader) (*BTreeNode, error) {
 	var magicNumber uint32
 	if err := binary.Read(buf, binary.LittleEndian, &magicNumber); err != nil {
 		return nil, fmt.Errorf("failed to read magic number: %w", err)
@@ -1238,51 +1552,13 @@ func (fm *BTreeFileManager) deserializePageBinary(data []byte) (interface{}, err
 		return nil, fmt.Errorf("invalid magic number: expected 0x42545245, got 0x%08X", magicNumber)
 	}
 
-	// Try to determine page type by reading the next few fields
-	// Try to read as BTreeNode first (most common case)
+	// Read node fields
 	var pageNum uint32
 	var isLeaf bool
 	var parentPage, nextLeaf, prevLeaf uint32
+
 	if err := binary.Read(buf, binary.LittleEndian, &pageNum); err != nil {
 		return nil, fmt.Errorf("failed to read page number: %w", err)
-	}
-
-	// If pageNum is 0, this is likely metadata
-	if pageNum == 0 {
-		// Reset and parse as metadata
-		buf = bytes.NewReader(data)
-		// Skip magic number
-		binary.Read(buf, binary.LittleEndian, &magicNumber)
-
-		var order, rootPageNum, totalPages uint32
-		var lastCompaction int64
-		var fragmentationPct float64
-
-		if err := binary.Read(buf, binary.LittleEndian, &order); err != nil {
-			return nil, fmt.Errorf("failed to read order: %w", err)
-		}
-		if err := binary.Read(buf, binary.LittleEndian, &rootPageNum); err != nil {
-			return nil, fmt.Errorf("failed to read root page number: %w", err)
-		}
-		if err := binary.Read(buf, binary.LittleEndian, &totalPages); err != nil {
-			return nil, fmt.Errorf("failed to read total pages: %w", err)
-		}
-		if err := binary.Read(buf, binary.LittleEndian, &lastCompaction); err != nil {
-			return nil, fmt.Errorf("failed to read last compaction: %w", err)
-		}
-		if err := binary.Read(buf, binary.LittleEndian, &fragmentationPct); err != nil {
-			return nil, fmt.Errorf("failed to read fragmentation percentage: %w", err)
-		}
-
-		metadata := &BTreeMetadata{
-			Order:            order,
-			RootPageNum:      rootPageNum,
-			TotalPages:       totalPages,
-			LastCompaction:   time.Unix(lastCompaction, 0),
-			FragmentationPct: fragmentationPct,
-		}
-
-		return metadata, nil
 	}
 
 	// Continue parsing as BTreeNode - read IsLeaf field
@@ -1315,6 +1591,31 @@ func (fm *BTreeFileManager) deserializePageBinary(data []byte) (interface{}, err
 		}
 		keys[i] = keyBytes
 	}
+	// Read values (for leaf nodes)
+	var valueCount uint32
+	if err := binary.Read(buf, binary.LittleEndian, &valueCount); err != nil {
+		return nil, fmt.Errorf("failed to read value count: %w", err)
+	}
+	values := make([][]string, valueCount)
+	for i := uint32(0); i < valueCount; i++ {
+		var valueListLen uint32
+		if err := binary.Read(buf, binary.LittleEndian, &valueListLen); err != nil {
+			return nil, fmt.Errorf("failed to read value list length: %w", err)
+		}
+		valueList := make([]string, valueListLen)
+		for j := uint32(0); j < valueListLen; j++ {
+			var valueLen uint32
+			if err := binary.Read(buf, binary.LittleEndian, &valueLen); err != nil {
+				return nil, fmt.Errorf("failed to read value length: %w", err)
+			}
+			valueBytes := make([]byte, valueLen)
+			if err := binary.Read(buf, binary.LittleEndian, &valueBytes); err != nil {
+				return nil, fmt.Errorf("failed to read value bytes: %w", err)
+			}
+			valueList[j] = string(valueBytes)
+		}
+		values[i] = valueList
+	}
 	// Read children
 	var childCount uint32
 	if err := binary.Read(buf, binary.LittleEndian, &childCount); err != nil {
@@ -1326,15 +1627,48 @@ func (fm *BTreeFileManager) deserializePageBinary(data []byte) (interface{}, err
 			return nil, fmt.Errorf("failed to read child page number: %w", err)
 		}
 	}
+
+	// Read Tombstones map
+	var tombstoneMapCount uint32
+	if err := binary.Read(buf, binary.LittleEndian, &tombstoneMapCount); err != nil {
+		return nil, fmt.Errorf("failed to read tombstone map count: %w", err)
+	}
+	tombstones := make(map[string]bool)
+	for i := uint32(0); i < tombstoneMapCount; i++ {
+		var keyLen uint32
+		if err := binary.Read(buf, binary.LittleEndian, &keyLen); err != nil {
+			return nil, fmt.Errorf("failed to read tombstone key length: %w", err)
+		}
+		keyBytes := make([]byte, keyLen)
+		if err := binary.Read(buf, binary.LittleEndian, &keyBytes); err != nil {
+			return nil, fmt.Errorf("failed to read tombstone key bytes: %w", err)
+		}
+		var isDeleted bool
+		if err := binary.Read(buf, binary.LittleEndian, &isDeleted); err != nil {
+			return nil, fmt.Errorf("failed to read tombstone boolean: %w", err)
+		}
+		tombstones[string(keyBytes)] = isDeleted
+	}
+
+	// Read TombstoneCount
+	var tombstoneCount uint32
+	if err := binary.Read(buf, binary.LittleEndian, &tombstoneCount); err != nil {
+		return nil, fmt.Errorf("failed to read tombstone count: %w", err)
+	}
+
 	// Construct the BTreeNode
 	node := &BTreeNode{
-		PageNum:    pageNum,
-		IsLeaf:     isLeaf, // CRITICAL: Set the IsLeaf field from deserialized data
-		ParentPage: parentPage,
-		NextLeaf:   nextLeaf,
-		PrevLeaf:   prevLeaf,
-		Keys:       keys,
-		Children:   children,
+		PageNum:        pageNum,
+		IsLeaf:         isLeaf,   // CRITICAL: Set the IsLeaf field from deserialized data
+		KeyCount:       keyCount, // CRITICAL: Set the KeyCount field from deserialized data
+		ParentPage:     parentPage,
+		NextLeaf:       nextLeaf,
+		PrevLeaf:       prevLeaf,
+		Keys:           keys,
+		Values:         values, // CRITICAL: Set the Values field from deserialized data
+		Children:       children,
+		Tombstones:     tombstones,     // CRITICAL: Set the Tombstones field from deserialized data
+		TombstoneCount: tombstoneCount, // CRITICAL: Set the TombstoneCount field from deserialized data
 	}
 	// Return the constructed node
 	return node, nil

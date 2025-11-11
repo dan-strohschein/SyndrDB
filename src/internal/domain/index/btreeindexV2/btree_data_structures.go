@@ -56,6 +56,13 @@ type BTreeIndex struct {
 	bundleName  string             // Name of the bundle this index belongs to
 	fieldName   string             // Name of the field being indexed
 	logger      *zap.SugaredLogger // Logger for debug and error messages
+
+	// WAL integration for durability and crash recovery
+	// Following PostgreSQL's WAL design: log BEFORE modifying index
+	// TODO: I could add async WAL writing with batching for higher throughput
+	walManager *BTreeWALManager // WAL manager for logging index operations
+	walEnabled bool             // Whether WAL is enabled (mandatory for production)
+	nextLSN    uint64           // Next Log Sequence Number to assign
 }
 
 func (idx *BTreeIndex) GetRootPageNum() uint32 {
@@ -65,6 +72,8 @@ func (idx *BTreeIndex) GetRootPageNum() uint32 {
 // BTreeMetadata contains index configuration and runtime statistics
 // This structure is persisted to disk and loaded when the index is opened
 type BTreeMetadata struct {
+	// File integrity and versioning
+	MagicNumber  uint32    // Magic number for file validation (0x42545245 = "BTRE")
 	Version      uint32    // File format version for compatibility
 	CreatedAt    time.Time // When the index was created
 	LastModified time.Time // Last modification timestamp
@@ -125,6 +134,14 @@ type BTreeMetadata struct {
 	MaintenanceNeeded bool      // Whether maintenance is needed
 	FillFactor        float64   `json:"fill_factor"`        // Average node utilization (0.0 to 1.0)
 	AverageKeyLength  float64   `json:"average_key_length"` // Average length of keys in bytes
+
+	// Lazy deletion tracking (PostgreSQL-style)
+	TotalTombstones     uint64  // Total number of tombstones across all nodes
+	TombstoneRatio      float64 // Ratio of tombstones to live records (triggers compaction)
+	NodesNeedCompaction uint32  // Number of nodes flagged for compaction
+
+	// Performance optimization: throttle expensive maintenance checks
+	OperationsSinceLastCheck uint64 // Counter to throttle checkMaintenanceNeeded() calls
 }
 
 // BTreeNode represents a node in the BTree (internal or leaf)
@@ -142,6 +159,12 @@ type BTreeNode struct {
 	ParentPage   uint32     // Page number of parent node (0 for root)
 	LastModified time.Time  // When this node was last modified
 	FreeSpace    uint32     // Available space in bytes for new entries
+	Checksum     uint32     // CRC32 checksum for corruption detection
+
+	// Lazy deletion support (PostgreSQL-style deferred merging)
+	Tombstones      map[string]bool // Map of deleted document IDs (key: key+docID)
+	TombstoneCount  uint32          // Number of tombstones in this node
+	NeedsCompaction bool            // Flag indicating node should be compacted during VACUUM
 }
 
 // BTreePage represents the on-disk format of a BTree node
@@ -380,6 +403,7 @@ func NewBTreeMetadata(config *IndexConfig) *BTreeMetadata {
 	order := calculateTreeOrder(config.PageSize, config.MaxKeyLength)
 
 	return &BTreeMetadata{
+		MagicNumber:      0x42545245, // "BTRE" - file integrity validation
 		Version:          1,
 		CreatedAt:        time.Now(),
 		LastModified:     time.Now(),
@@ -705,4 +729,123 @@ func serializeIndexEntry(entry *IndexEntry) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// ========================================================================================
+// BTREE NODE HELPER METHODS - Lazy Deletion & Tombstone Management
+// Following PostgreSQL's deferred merge approach for optimal delete performance
+// ========================================================================================
+
+// makeTombstoneKey creates a unique key for tombstone tracking
+// DRY Principle: Centralized key generation for tombstone map
+func makeTombstoneKey(key []byte, documentID string) string {
+	return string(key) + ":" + documentID
+}
+
+// MarkDeleted marks a document ID as deleted using lazy deletion (PostgreSQL-style)
+// This is faster than physical deletion and enables deferred merging during VACUUM.
+//
+// Single Responsibility: Only marks deletion, doesn't restructure tree
+//
+// TODO: I could add timestamp tracking for tombstones to enable time-based
+// compaction strategies (e.g., compact only tombstones older than 1 hour)
+func (node *BTreeNode) MarkDeleted(key []byte, documentID string) error {
+	if !node.IsLeaf {
+		return fmt.Errorf("can only mark deletions in leaf nodes")
+	}
+
+	// Initialize tombstones map if needed
+	if node.Tombstones == nil {
+		node.Tombstones = make(map[string]bool)
+	}
+
+	// Create tombstone key and mark as deleted
+	tombstoneKey := makeTombstoneKey(key, documentID)
+	if !node.Tombstones[tombstoneKey] {
+		node.Tombstones[tombstoneKey] = true
+		node.TombstoneCount++
+		node.LastModified = time.Now()
+
+		// Check if node needs compaction (>50% tombstones - PostgreSQL threshold)
+		totalEntries := node.KeyCount + node.TombstoneCount
+		if totalEntries > 0 && float64(node.TombstoneCount)/float64(totalEntries) > 0.5 {
+			node.NeedsCompaction = true
+		}
+	}
+
+	return nil
+}
+
+// IsDeleted checks if a specific document ID is marked as deleted
+// DRY Principle: Centralized deletion check logic
+func (node *BTreeNode) IsDeleted(key []byte, documentID string) bool {
+	if node.Tombstones == nil {
+		return false
+	}
+
+	tombstoneKey := makeTombstoneKey(key, documentID)
+	return node.Tombstones[tombstoneKey]
+}
+
+// GetFragmentationRatio calculates the ratio of tombstones to total entries
+// This metric determines when compaction is beneficial
+//
+// Returns: ratio between 0.0 and 1.0 where higher means more fragmentation
+//
+// TODO: I could enhance this to consider free space fragmentation in addition
+// to tombstone count for a more comprehensive fragmentation metric
+func (node *BTreeNode) GetFragmentationRatio() float64 {
+	if node.TombstoneCount == 0 {
+		return 0.0
+	}
+
+	totalEntries := node.KeyCount + node.TombstoneCount
+	if totalEntries == 0 {
+		return 0.0
+	}
+
+	return float64(node.TombstoneCount) / float64(totalEntries)
+}
+
+// GetLiveDocumentIDs returns document IDs for a key, excluding tombstones
+// Single Responsibility: Filters out deleted entries during reads
+//
+// This is the READ path filter that hides deleted entries from queries
+// without physically removing them from the index
+func (node *BTreeNode) GetLiveDocumentIDs(keyIndex int) []string {
+	if keyIndex < 0 || keyIndex >= len(node.Values) {
+		return []string{}
+	}
+
+	if node.Tombstones == nil || node.TombstoneCount == 0 {
+		// Fast path: no tombstones, return all IDs
+		return node.Values[keyIndex]
+	}
+
+	// Filter out tombstones
+	key := node.Keys[keyIndex]
+	liveIDs := make([]string, 0, len(node.Values[keyIndex]))
+
+	for _, docID := range node.Values[keyIndex] {
+		if !node.IsDeleted(key, docID) {
+			liveIDs = append(liveIDs, docID)
+		}
+	}
+
+	return liveIDs
+}
+
+// ShouldCompact determines if this node should be compacted
+// Open/Closed Principle: Extensible compaction criteria
+//
+// Returns true if:
+// - Tombstone ratio > 50% (PostgreSQL threshold)
+// - Explicitly flagged for compaction
+//
+// TODO: I could add additional criteria:
+// - Time since last compaction
+// - Absolute tombstone count threshold
+// - Free space fragmentation level
+func (node *BTreeNode) ShouldCompact() bool {
+	return node.NeedsCompaction || node.GetFragmentationRatio() > 0.5
 }
