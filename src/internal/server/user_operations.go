@@ -93,158 +93,22 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	return response, nil
 }
 
-// GrantPermission processes a GRANT command
-// Syntax: GRANT permission TO USER username
+// GrantPermission processes a GRANT command using the new parser-based implementation
+// Syntax:
+//
+//	GRANT "permission" TO USER "username";
+//	GRANT ROLE "role" TO USER "username";
 func GrantPermission(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
 	logger.Infof("Processing GRANT command: %s", command)
 
-	// Parse the command: GRANT permission TO USER username
-	parts := strings.Fields(command)
-	if len(parts) < 5 {
-		return nil, fmt.Errorf("invalid GRANT syntax: expected 'GRANT permission TO USER username'")
-	}
-
-	if !strings.EqualFold(parts[0], "GRANT") || !strings.EqualFold(parts[2], "TO") || !strings.EqualFold(parts[3], "USER") {
-		return nil, fmt.Errorf("invalid GRANT command format")
-	}
-
-	permission := parts[1]
-	username := parts[4]
-
-	// Get the Primary database
+	// Get the Primary database for context
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
 		return nil, fmt.Errorf("primary database not found: %w", err)
 	}
 
-	// Find the user first
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	if !exists {
-		return nil, fmt.Errorf("Users bundle not found in Primary database")
-	}
-
-	var userID string
-	if usersBundle.Documents != nil {
-		found := false
-		for _, doc := range *usersBundle.Documents {
-			if usernameField, ok := doc.Fields["Username"]; ok {
-				if usernameField.Value == username {
-					if userIDField, ok := doc.Fields["UserID"]; ok {
-						userID = userIDField.Value.(string)
-						found = true
-						break
-					}
-				}
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("user '%s' not found", username)
-		}
-	} else {
-		return nil, fmt.Errorf("user '%s' not found", username)
-	}
-
-	// Find or create the permission in Permissions bundle
-	permissionsBundle, exists := primaryDB.Bundles["Permissions"]
-	if !exists {
-		return nil, fmt.Errorf("Permissions bundle not found in Primary database")
-	}
-
-	var permissionID string
-	if permissionsBundle.Documents != nil {
-		found := false
-		for _, doc := range *permissionsBundle.Documents {
-			if nameField, ok := doc.Fields["PermissionName"]; ok {
-				if nameField.Value == permission {
-					if idField, ok := doc.Fields["PermissionID"]; ok {
-						permissionID = idField.Value.(string)
-						found = true
-						break
-					}
-				}
-			}
-		}
-		if !found {
-			// Create the permission if it doesn't exist
-			permissionID = fmt.Sprintf("perm_%s_%d", permission, time.Now().Unix())
-			permissionDoc := models.Document{
-				DocumentID: permissionID,
-				Fields: map[string]models.Field{
-					"DocumentID":     {Name: "DocumentID", Value: permissionID},
-					"PermissionID":   {Name: "PermissionID", Value: permissionID},
-					"PermissionName": {Name: "PermissionName", Value: permission},
-					"Description":    {Name: "Description", Value: fmt.Sprintf("Permission for %s", permission)},
-				},
-			}
-			(*permissionsBundle.Documents)[permissionDoc.DocumentID] = permissionDoc
-			primaryDB.Bundles["Permissions"] = permissionsBundle
-		}
-	} else {
-		// Create the permission since bundle is empty
-		documentsMap := make(map[string]models.Document)
-		permissionsBundle.Documents = &documentsMap
-
-		permissionID = fmt.Sprintf("perm_%s_%d", permission, time.Now().Unix())
-		permissionDoc := models.Document{
-			DocumentID: permissionID,
-			Fields: map[string]models.Field{
-				"DocumentID":     {Name: "DocumentID", Value: permissionID},
-				"PermissionID":   {Name: "PermissionID", Value: permissionID},
-				"PermissionName": {Name: "PermissionName", Value: permission},
-				"Description":    {Name: "Description", Value: fmt.Sprintf("Permission for %s", permission)},
-			},
-		}
-		(*permissionsBundle.Documents)[permissionDoc.DocumentID] = permissionDoc
-		primaryDB.Bundles["Permissions"] = permissionsBundle
-	}
-
-	// Add the user-permission relationship to UserPermissions bundle
-	userPermissionsBundle, exists := primaryDB.Bundles["UserPermissions"]
-	if !exists {
-		return nil, fmt.Errorf("UserPermissions bundle not found in Primary database")
-	}
-
-	// Check if the relationship already exists
-	if userPermissionsBundle.Documents != nil {
-		for _, doc := range *userPermissionsBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					if userIDField.Value == userID && permIDField.Value == permissionID {
-						return nil, fmt.Errorf("user '%s' already has permission '%s'", username, permission)
-					}
-				}
-			}
-		}
-	}
-
-	// Create the user-permission relationship
-	relationshipID := fmt.Sprintf("userperm_%s_%s_%d", userID, permissionID, time.Now().Unix())
-	relationshipDoc := models.Document{
-		DocumentID: relationshipID,
-		Fields: map[string]models.Field{
-			"DocumentID":   {Name: "DocumentID", Value: relationshipID},
-			"UserID":       {Name: "UserID", Value: userID},
-			"PermissionID": {Name: "PermissionID", Value: permissionID},
-			"GrantedAt":    {Name: "GrantedAt", Value: time.Now().Format(time.RFC3339)},
-		},
-	}
-
-	if userPermissionsBundle.Documents == nil {
-		documentsMap := make(map[string]models.Document)
-		userPermissionsBundle.Documents = &documentsMap
-	}
-
-	(*userPermissionsBundle.Documents)[relationshipDoc.DocumentID] = relationshipDoc
-	primaryDB.Bundles["UserPermissions"] = userPermissionsBundle
-
-	logger.Infof("Permission '%s' granted to user '%s'", permission, username)
-
-	response := &CommandResponse{
-		ResultCount: 1,
-		Result:      fmt.Sprintf("Permission '%s' granted to user '%s'", permission, username),
-	}
-
-	return response, nil
+	// Use the new parser-based handler with debug mode disabled (secure errors)
+	return GrantPermissionOrRoleCommand(command, logger, serviceManager, primaryDB, false)
 }
 
 // AttachUserToDatabase processes an ATTACH command

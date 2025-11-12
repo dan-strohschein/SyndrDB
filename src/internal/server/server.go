@@ -177,8 +177,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		sugar.Info("GraphQL enabled - processor will be initialized after server creation")
 	}
 
-	// Initialize the singleton
-	serviceManager := InitServiceManager(databaseService, bundleService, catalogService, graphqlProcessor, sugar)
+	// Initialize the singleton (UserStore will be set later if auth is enabled)
+	serviceManager := InitServiceManager(databaseService, bundleService, catalogService, graphqlProcessor, nil, sugar, false)
 
 	// Create a new server
 	server := &Server{
@@ -273,6 +273,24 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 		server.UserStore = userStore
 		sugar.Infof("User authentication store initialized with brute force protection and security auditing")
+
+		// Update ServiceManager with UserStore for RBAC functionality
+		// TODO: Determine debug mode from config
+		debugMode := false
+		server.ServiceManager.UserService = NewUserService(
+			server.ServiceManager.BundleService,
+			server.ServiceManager.DatabaseService,
+			userStore,
+			sugar,
+			debugMode,
+		)
+		server.ServiceManager.PermissionService = NewPermissionService(
+			server.ServiceManager.BundleService,
+			server.ServiceManager.DatabaseService,
+			sugar,
+			debugMode,
+		)
+		sugar.Info("RBAC services initialized with UserStore")
 	}
 
 	// Load all databases

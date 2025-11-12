@@ -108,6 +108,13 @@ const (
 	TOKEN_DATABASE // DATABASE
 	TOKEN_BUNDLES  // BUNDLES
 
+	// Keywords - RBAC
+	TOKEN_USER     // USER
+	TOKEN_PASSWORD // PASSWORD
+	TOKEN_GRANT    // GRANT
+	TOKEN_REVOKE   // REVOKE
+	TOKEN_ROLE     // ROLE
+
 	// Keywords - Types
 	TOKEN_STRING_TYPE // STRING
 	TOKEN_INT_TYPE    // INT
@@ -267,6 +274,16 @@ func (tt TokenType) String() string {
 		return "DATABASE"
 	case TOKEN_BUNDLES:
 		return "BUNDLES"
+	case TOKEN_USER:
+		return "USER"
+	case TOKEN_PASSWORD:
+		return "PASSWORD"
+	case TOKEN_GRANT:
+		return "GRANT"
+	case TOKEN_REVOKE:
+		return "REVOKE"
+	case TOKEN_ROLE:
+		return "ROLE"
 	case TOKEN_STRING_TYPE:
 		return "STRING_TYPE"
 	case TOKEN_INT_TYPE:
@@ -360,6 +377,13 @@ var keywords = map[string]TokenType{
 	"USE":      TOKEN_USE,
 	"DATABASE": TOKEN_DATABASE,
 	"BUNDLES":  TOKEN_BUNDLES,
+
+	// RBAC Keywords
+	"USER":     TOKEN_USER,
+	"PASSWORD": TOKEN_PASSWORD,
+	"GRANT":    TOKEN_GRANT,
+	"REVOKE":   TOKEN_REVOKE,
+	"ROLE":     TOKEN_ROLE,
 
 	// Operators as keywords
 	"AND":      TOKEN_AND,

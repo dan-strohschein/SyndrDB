@@ -3,6 +3,7 @@ package server
 import (
 	"sync"
 	"sync/atomic"
+	"syndrdb/src/internal/auth"
 	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
@@ -24,6 +25,8 @@ type ServiceManager struct {
 	InternalCatalogService *defaultdb.CatalogService
 	WALManager             *journal.WALManager
 	GraphQLProcessor       GraphQLProcessor
+	UserService            *UserService       // RBAC: Manages user creation and authentication
+	PermissionService      *PermissionService // RBAC: Manages permissions and roles
 	logger                 *zap.SugaredLogger
 }
 
@@ -51,7 +54,9 @@ func GetServiceManager() *ServiceManager {
 func InitServiceManager(dbService *database.DatabaseService, bundleService *bundle.BundleService,
 	catalogService *defaultdb.CatalogService,
 	graphqlProcessor GraphQLProcessor,
-	logger *zap.SugaredLogger) *ServiceManager {
+	userStore *auth.UserStore,
+	logger *zap.SugaredLogger,
+	debugMode bool) *ServiceManager {
 	// Use sync.Once to ensure this only happens one time
 	once.Do(func() {
 		mu.Lock()
@@ -78,12 +83,18 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			}
 		}
 
+		// Initialize RBAC services
+		userService := NewUserService(bundleService, dbService, userStore, logger, debugMode)
+		permissionService := NewPermissionService(bundleService, dbService, logger, debugMode)
+
 		instance = &ServiceManager{
 			DatabaseService:        dbService,
 			BundleService:          bundleService,
 			InternalCatalogService: catalogService,
 			WALManager:             walManager,
 			GraphQLProcessor:       graphqlProcessor,
+			UserService:            userService,
+			PermissionService:      permissionService,
 			logger:                 logger,
 		}
 

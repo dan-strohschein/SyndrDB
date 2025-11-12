@@ -121,7 +121,10 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				return result1, err
 			}
 		case "user":
-			// ParseCreateRelationshipCommand(command)
+			// CREATE USER "username" WITH PASSWORD 'password';
+			// TODO: Determine debug mode from server configuration
+			debugMode := false
+			return CreateUserCommand(command, logger, serviceManager, database, debugMode)
 		default:
 
 			return &result, fmt.Errorf("unknown command format: %s", command)

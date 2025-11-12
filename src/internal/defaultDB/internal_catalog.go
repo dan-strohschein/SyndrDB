@@ -166,10 +166,9 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create roles bundle
 	roles_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
-			"RoleID":       {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"PermissionID": {Name: "PermissionID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
-			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"RoleID":     {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 		},
 	}
 	roles_Bundle := &models.Bundle{
@@ -205,6 +204,27 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		Database:          db,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, userRoles_Bundle)
+
+	// create rolesPermissions bundle (Many-to-Many junction table for Roles <-> Permissions)
+	rolesPermissions_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"RoleID":       {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"PermissionID": {Name: "PermissionID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+		},
+	}
+	rolesPermissions_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "RolesPermissions",
+		DocumentStructure: rolesPermissions_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, rolesPermissions_Bundle)
 
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
@@ -270,16 +290,29 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		logger.Warnf("Warning: Failed to add relationship to Bundles bundle: %v", err)
 	}
 
-	RolesPermissions_relationshipCmd2 := &models.RelationshipCommand{
+	// RolesPermissions junction table relationships
+	RolesPermissions_relationshipCmd_Roles := &models.RelationshipCommand{
+		RelationshipType:  "1toMany",
+		SourceBundle:      "Roles",
+		SourceField:       "RoleID",
+		DestinationBundle: "RolesPermissions",
+		DestinationField:  "RoleID",
+	}
+	err = bundleService.AddRelationshipToBundle(roles_Bundle, RolesPermissions_relationshipCmd_Roles)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add relationship from Roles to RolesPermissions bundle: %v", err)
+	}
+
+	RolesPermissions_relationshipCmd_Permissions := &models.RelationshipCommand{
 		RelationshipType:  "1toMany",
 		SourceBundle:      "Permissions",
 		SourceField:       "PermissionID",
-		DestinationBundle: "Roles",
-		DestinationField:  "RoleID",
+		DestinationBundle: "RolesPermissions",
+		DestinationField:  "PermissionID",
 	}
-	err = bundleService.AddRelationshipToBundle(roles_Bundle, RolesPermissions_relationshipCmd2)
+	err = bundleService.AddRelationshipToBundle(permissions_Bundle, RolesPermissions_relationshipCmd_Permissions)
 	if err != nil {
-		logger.Warnf("Warning: Failed to add relationship to Roles bundle: %v", err)
+		logger.Warnf("Warning: Failed to add relationship from Permissions to RolesPermissions bundle: %v", err)
 	}
 
 	UserRolesUser_relationshipCmd2 := &models.RelationshipCommand{
@@ -684,6 +717,88 @@ func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
 		if err != nil {
 			logger.Warnf("Warning: Failed to add document to Roles bundle: %v", err)
 			return err
+		}
+	}
+
+	return nil
+}
+
+func HydrateRolesPermissionsPrimaryCatalogs(databaseService *database.DatabaseService,
+	storageEngine *databasestore.DatabaseStorageEngine,
+	logger *zap.SugaredLogger,
+	bundleService *bundle.BundleService) error {
+
+	// Link roles to permissions in the RolesPermissions junction bundle
+	// Dbo role gets all permissions: Read, Write, Admin, Read-Write
+	// Data-Reader role gets: Read
+	// Data-Writer role gets: Write, Read-Write
+
+	rolesPermissionsBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "RolesPermissions")
+	if err != nil {
+		logger.Warnf("Warning: Failed to get RolesPermissions bundle: %v", err)
+		return err
+	}
+
+	rolesBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "Roles")
+	if err != nil {
+		logger.Warnf("Warning: Failed to get Roles bundle: %v", err)
+		return err
+	}
+
+	permissionsBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "Permissions")
+	if err != nil {
+		logger.Warnf("Warning: Failed to get Permissions bundle: %v", err)
+		return err
+	}
+
+	// Define role-permission mappings
+	rolePermissionMap := map[string][]string{
+		"Dbo":         {"Read", "Write", "Admin", "Read-Write"},
+		"Data-Reader": {"Read"},
+		"Data-Writer": {"Write", "Read-Write"},
+	}
+
+	roleDocs := *rolesBundle.Documents
+	permissionDocs := *permissionsBundle.Documents
+
+	// TODO: I will add support for dynamic role-permission assignment via SyndrQL commands
+	// TODO: I will add role inheritance (e.g., Admin inherits all permissions from other roles)
+
+	for _, roleDoc := range roleDocs {
+		roleName := roleDoc.Fields["Name"].Value.(string)
+		permissionNames, exists := rolePermissionMap[roleName]
+		if !exists {
+			continue
+		}
+
+		for _, permName := range permissionNames {
+			for _, permDoc := range permissionDocs {
+				if permDoc.Fields["Name"].Value.(string) == permName {
+					rolePermDoc := &models.Document{
+						DocumentID: helpers.GenerateFastUUID(),
+						Fields: map[string]models.Field{
+							"DocumentID": {
+								Name:  "DocumentID",
+								Value: helpers.GenerateFastUUID(),
+							},
+							"RoleID": {
+								Name:  "RoleID",
+								Value: roleDoc.Fields["RoleID"].Value,
+							},
+							"PermissionID": {
+								Name:  "PermissionID",
+								Value: permDoc.Fields["PermissionID"].Value,
+							},
+						},
+					}
+
+					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesPermissionsBundle, rolePermDoc)
+					if err != nil {
+						logger.Warnf("Warning: Failed to add document to RolesPermissions bundle: %v", err)
+						return err
+					}
+				}
+			}
 		}
 	}
 
