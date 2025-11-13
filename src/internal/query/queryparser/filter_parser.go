@@ -44,9 +44,11 @@ type WhereClause struct {
 	Operator             string
 	Value                interface{} // Can be string, int, float64, bool, or []interface{} for IN operator
 	Logic                string      // "AND" or "OR"
-	CaseInsensitive      bool        // For IN N(...) case-insensitive matching
+	CaseInsensitive      bool        // For IN N(...) and LIKE N"pattern" case-insensitive matching
 	OriginalListSize     int         // For IN operator: original list size before deduplication
 	SingleValueOptimized bool        // For IN operator: whether single-value optimization was applied
+	PatternType          string      // For LIKE operator: "prefix", "suffix", "contains", "exact", "match_all"
+	EscapeChar           string      // For LIKE operator: escape character (default: "\")
 }
 
 // WhereGroup represents a group of clauses joined by the same logical operator
@@ -312,7 +314,75 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 				continue
 			}
 
-			// Validate operator for non-IN operators
+			// Handle LIKE and NOT LIKE operators
+			if upperOp == "LIKE" || (upperOp == "NOT" && pos+2 < len(tokens) && strings.ToUpper(tokens[pos+2]) == "LIKE") {
+				// Handle NOT LIKE
+				if upperOp == "NOT" {
+					operator = "NOT LIKE"
+					pos++ // Skip "NOT"
+					pos++ // Skip field and "NOT", now at "LIKE"
+				} else {
+					operator = "LIKE"
+					pos++ // Skip field, now at "LIKE"
+				}
+
+				// Parse pattern value (should be next token)
+				if pos+1 >= len(tokens) {
+					return nil, pos, fmt.Errorf("LIKE operator missing pattern at position %d", pos)
+				}
+
+				patternToken := tokens[pos+1]
+
+				// Check for N prefix for case-insensitive matching
+				caseInsensitive := false
+				if strings.HasPrefix(patternToken, "N\"") || strings.HasPrefix(patternToken, "n\"") {
+					caseInsensitive = true
+					// Remove N prefix from pattern
+					patternToken = patternToken[1:]
+				}
+
+				// Parse pattern value
+				pattern, err := parseValue(patternToken)
+				if err != nil {
+					return nil, pos, fmt.Errorf("failed to parse LIKE pattern: %w", err)
+				}
+
+				// Validate pattern is a string
+				patternStr, ok := pattern.(string)
+				if !ok {
+					return nil, pos, fmt.Errorf("LIKE pattern must be a string, got %T", pattern)
+				}
+
+				// Analyze pattern type
+				patternType, _, _, err := ParseLikePattern(patternStr)
+				if err != nil {
+					return nil, pos, fmt.Errorf("invalid LIKE pattern: %w", err)
+				}
+
+				// Create LIKE clause
+				clause := WhereClause{
+					Field:           field,
+					Operator:        operator,
+					Value:           patternStr,
+					CaseInsensitive: caseInsensitive,
+					PatternType:     patternType,
+					EscapeChar:      "\\", // Fixed backslash escape
+				}
+
+				// Move position past pattern
+				pos += 2
+
+				// Check for logical joiner
+				if pos < len(tokens) && (strings.ToUpper(tokens[pos]) == "AND" || strings.ToUpper(tokens[pos]) == "OR") {
+					clause.Logic = strings.ToUpper(tokens[pos])
+					pos++
+				}
+
+				group.Clauses = append(group.Clauses, clause)
+				continue
+			}
+
+			// Validate operator for non-IN/non-LIKE operators
 			if !isValidOperator(operator) {
 				return nil, pos, fmt.Errorf("invalid operator: %s", operator)
 			}
@@ -360,7 +430,7 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 func isValidOperator(op string) bool {
 	upperOp := strings.ToUpper(op)
 	return op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<=" ||
-		upperOp == "IN" || upperOp == "NOT IN"
+		upperOp == "IN" || upperOp == "NOT IN" || upperOp == "LIKE" || upperOp == "NOT LIKE"
 }
 
 // isNullValue checks if a value is a magic NULL value
@@ -639,9 +709,354 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 	case "NOT IN":
 		return evaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
 			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
+	case "LIKE":
+		return evaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
+			clause.Field, clause.PatternType, logger)
+	case "NOT LIKE":
+		return evaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
+			clause.Field, clause.PatternType, logger)
 	default:
 		return false
 	}
+}
+
+// ParseLikePattern analyzes a LIKE pattern and returns its type, normalized form, and validates it.
+// This function is exported for use by the SyndrQL evaluator.
+// Parameters:
+//   - pattern: The LIKE pattern string (may include % and _ wildcards)
+//
+// Returns:
+//   - patternType: One of "prefix", "suffix", "contains", "exact", "match_all"
+//   - normalized: The pattern with wildcards removed and escape sequences processed
+//   - wildcardCount: Number of wildcards in the pattern
+//   - err: Error if pattern is invalid (too long, invalid escape sequence)
+//
+// Pattern Types:
+//   - "prefix": Pattern like "text%" (matches strings starting with "text")
+//   - "suffix": Pattern like "%text" (matches strings ending with "text")
+//   - "contains": Pattern like "%text%" (matches strings containing "text")
+//   - "exact": Pattern like "text" (exact match, no wildcards)
+//   - "match_all": Pattern like "%" or "%%" or "%_%"  (matches all non-null strings)
+//
+// Escape Handling:
+//   - Backslash (\) is the fixed escape character
+//   - \% -> literal % character
+//   - \_ -> literal _ character
+//   - \" -> literal " character
+//   - \\ -> literal \ character
+//   - Trailing unescaped \ is an error
+//
+// TODO: Make pattern length limit configurable
+func ParseLikePattern(pattern string) (patternType string, normalized string, wildcardCount int, err error) {
+	// Validate pattern length (max 1000 characters)
+	if len(pattern) > 1000 {
+		return "", "", 0, fmt.Errorf("LIKE pattern exceeds maximum length of 1000 characters (got %d)", len(pattern))
+	}
+
+	// Remove surrounding quotes if present
+	pattern = strings.Trim(pattern, "\"'")
+
+	// Process escape sequences and count wildcards
+	var processedPattern strings.Builder
+	var unescapedPattern strings.Builder
+	wildcardCount = 0
+	i := 0
+	runes := []rune(pattern)
+
+	for i < len(runes) {
+		ch := runes[i]
+
+		// Handle escape sequences
+		if ch == '\\' {
+			if i+1 >= len(runes) {
+				return "", "", 0, fmt.Errorf("LIKE pattern has trailing unescaped backslash")
+			}
+
+			nextCh := runes[i+1]
+			switch nextCh {
+			case '%', '_', '"', '\\':
+				// Escaped special character - add literal to processed pattern
+				processedPattern.WriteRune(nextCh)
+				unescapedPattern.WriteRune(nextCh)
+				i += 2
+				continue
+			default:
+				// Unknown escape sequence
+				return "", "", 0, fmt.Errorf("LIKE pattern has invalid escape sequence: \\%c", nextCh)
+			}
+		}
+
+		// Handle wildcards
+		if ch == '%' {
+			wildcardCount++
+			processedPattern.WriteRune('%')
+			i++
+			continue
+		}
+
+		if ch == '_' {
+			wildcardCount++
+			processedPattern.WriteRune('_')
+			i++
+			continue
+		}
+
+		// Regular character
+		processedPattern.WriteRune(ch)
+		unescapedPattern.WriteRune(ch)
+		i++
+	}
+
+	processedStr := processedPattern.String()
+	unescapedStr := unescapedPattern.String()
+
+	// Normalize consecutive % to single %
+	for strings.Contains(processedStr, "%%") {
+		processedStr = strings.ReplaceAll(processedStr, "%%", "%")
+	}
+
+	// Determine pattern type
+	hasPrefix := strings.HasPrefix(processedStr, "%")
+	hasSuffix := strings.HasSuffix(processedStr, "%")
+
+	// Check for match_all patterns (only wildcards, no literals)
+	if len(unescapedStr) == 0 {
+		// Pattern is all wildcards (e.g., "%", "%%", "%_%", "___")
+		return "match_all", "", wildcardCount, nil
+	}
+
+	// No wildcards - exact match
+	if wildcardCount == 0 {
+		return "exact", unescapedStr, 0, nil
+	}
+
+	// Determine pattern type based on wildcard positions
+	if hasPrefix && hasSuffix {
+		// Contains pattern: "%text%"
+		normalized = strings.Trim(processedStr, "%")
+		// Remove internal underscores for the normalized form (keep for matching)
+		normalizedClean := strings.ReplaceAll(normalized, "_", "")
+		return "contains", normalizedClean, wildcardCount, nil
+	}
+
+	if hasPrefix {
+		// Suffix pattern: "%text"
+		normalized = strings.TrimPrefix(processedStr, "%")
+		normalizedClean := strings.ReplaceAll(normalized, "_", "")
+		return "suffix", normalizedClean, wildcardCount, nil
+	}
+
+	if hasSuffix {
+		// Prefix pattern: "text%"
+		normalized = strings.TrimSuffix(processedStr, "%")
+		normalizedClean := strings.ReplaceAll(normalized, "_", "")
+		return "prefix", normalizedClean, wildcardCount, nil
+	}
+
+	// Pattern has _ wildcards but no % wildcards at edges
+	// Treat as exact with wildcard characters
+	return "exact", processedStr, wildcardCount, nil
+}
+
+// MatchLikePattern performs pattern matching for LIKE operator
+// This function is exported for use by the SyndrQL evaluator.
+// Parameters:
+//   - value: The string value to match against
+//   - pattern: The LIKE pattern (with % and _ wildcards)
+//   - patternType: The pattern type from ParseLikePattern
+//   - caseInsensitive: Whether to perform case-insensitive matching
+//
+// Returns:
+//   - bool: true if value matches pattern, false otherwise
+//
+// Wildcard Semantics:
+//   - % matches zero or more characters
+//   - _ matches exactly one Unicode rune
+//
+// Optimization:
+//   - match_all patterns return true immediately
+//   - Prefix patterns use strings.HasPrefix (fast)
+//   - Suffix patterns use strings.HasSuffix (fast)
+//   - Contains patterns use strings.Contains (fast)
+//   - Complex patterns with _ wildcards use rune-by-rune matching with fail-fast
+//
+// TODO: Implement trigram index optimization for contains/suffix patterns
+func MatchLikePattern(value string, pattern string, patternType string, caseInsensitive bool) bool {
+	// Handle case-insensitive matching
+	if caseInsensitive {
+		value = strings.ToLower(value)
+		pattern = strings.ToLower(pattern)
+	}
+
+	// Handle match_all - matches any non-empty or empty string
+	if patternType == "match_all" {
+		return true
+	}
+
+	// Parse pattern to get normalized form
+	_, normalized, wildcardCount, err := ParseLikePattern(pattern)
+	if err != nil {
+		// Invalid pattern - return false
+		return false
+	}
+
+	// Handle exact match (no wildcards at all)
+	if wildcardCount == 0 {
+		return value == pattern
+	}
+
+	// Fast path for simple patterns without _ wildcards and no internal % wildcards
+	if !strings.Contains(pattern, "_") && !strings.Contains(normalized, "%") {
+		switch patternType {
+		case "prefix":
+			return strings.HasPrefix(value, normalized)
+		case "suffix":
+			return strings.HasSuffix(value, normalized)
+		case "contains":
+			return strings.Contains(value, normalized)
+		}
+	}
+
+	// Complex pattern with _ wildcards or internal % wildcards - use rune-by-rune matching
+	return matchLikePatternComplex(value, pattern)
+}
+
+// matchLikePatternComplex performs rune-by-rune pattern matching for complex LIKE patterns
+// This handles patterns with _ (single character) and % (zero-or-more) wildcards
+// Uses fail-fast optimization to exit early on non-match
+func matchLikePatternComplex(value string, pattern string) bool {
+	valueRunes := []rune(value)
+	patternRunes := []rune(pattern)
+
+	// Use dynamic programming approach for pattern matching
+	return matchLikePatternRecursive(valueRunes, patternRunes, 0, 0)
+}
+
+// matchLikePatternRecursive is a recursive helper for complex pattern matching
+// Parameters:
+//   - valueRunes: The value as rune slice
+//   - patternRunes: The pattern as rune slice
+//   - vIdx: Current index in value
+//   - pIdx: Current index in pattern
+//
+// Returns:
+//   - bool: true if remaining value matches remaining pattern
+func matchLikePatternRecursive(valueRunes []rune, patternRunes []rune, vIdx int, pIdx int) bool {
+	// Base case: reached end of pattern
+	if pIdx >= len(patternRunes) {
+		return vIdx >= len(valueRunes) // Match if we've also consumed all of value
+	}
+
+	// Get current pattern character
+	pCh := patternRunes[pIdx]
+
+	// Handle % wildcard (zero or more characters)
+	if pCh == '%' {
+		// Try matching zero characters (skip %)
+		if matchLikePatternRecursive(valueRunes, patternRunes, vIdx, pIdx+1) {
+			return true
+		}
+
+		// Try matching one or more characters
+		for i := vIdx; i < len(valueRunes); i++ {
+			if matchLikePatternRecursive(valueRunes, patternRunes, i+1, pIdx+1) {
+				return true
+			}
+		}
+
+		// Fail-fast: % can match remaining string
+		return false
+	}
+
+	// Reached end of value but pattern has more non-% characters
+	if vIdx >= len(valueRunes) {
+		return false
+	}
+
+	vCh := valueRunes[vIdx]
+
+	// Handle _ wildcard (exactly one character)
+	if pCh == '_' {
+		// Match any single character and continue
+		return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
+	}
+
+	// Handle literal character match
+	if pCh == vCh {
+		return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
+	}
+
+	// Fail-fast: character mismatch
+	return false
+}
+
+// evaluateLikeOperator evaluates LIKE and NOT LIKE operators
+// Parameters:
+//   - fieldValue: The value from the document field
+//   - patternValue: The LIKE pattern string
+//   - caseInsensitive: Whether to perform case-insensitive matching
+//   - negate: true for NOT LIKE, false for LIKE
+//   - fieldName: The name of the field being queried (for statistics)
+//   - patternType: The pattern type (prefix/suffix/contains/exact/match_all)
+//   - logger: Logger for debugging
+//
+// Returns:
+//   - bool: true if the condition matches, false otherwise
+//
+// NULL Handling:
+//   - Returns false if field value is NULL (SQL standard behavior)
+//   - Logs warning for debugging
+//
+// Statistics:
+//   - Records execution time, pattern type, hit/miss counts
+//   - Aggregates by field name + pattern type combination
+//
+// TODO: When full-text search is implemented, recommend SEARCH() for word-based matching
+func evaluateLikeOperator(fieldValue interface{}, patternValue interface{}, caseInsensitive bool, negate bool,
+	fieldName string, patternType string, logger *zap.SugaredLogger) bool {
+
+	startTime := time.Now()
+
+	// Type validation - both field value and pattern must be strings
+	fieldStr, fieldOk := fieldValue.(string)
+	if !fieldOk {
+		logger.Warnf("LIKE operator requires string field value, got %T for field '%s'", fieldValue, fieldName)
+		// Record as miss
+		executionTime := time.Since(startTime).Nanoseconds()
+		RecordLikeQuery(fieldName, patternType, 0, executionTime, caseInsensitive, false, false)
+		return false
+	}
+
+	patternStr, patternOk := patternValue.(string)
+	if !patternOk {
+		logger.Warnf("LIKE operator requires string pattern, got %T", patternValue)
+		// Record as miss
+		executionTime := time.Since(startTime).Nanoseconds()
+		RecordLikeQuery(fieldName, patternType, 0, executionTime, caseInsensitive, false, false)
+		return false
+	}
+
+	// Handle NULL values - return false (SQL standard behavior)
+	if isNullValue(fieldValue) {
+		logger.Debugf("LIKE operator: field '%s' is NULL, returning false", fieldName)
+		executionTime := time.Since(startTime).Nanoseconds()
+		RecordLikeQuery(fieldName, patternType, len(patternStr), executionTime, caseInsensitive, false, false)
+		return negate // false for LIKE, true for NOT LIKE (since !false = true)
+	}
+
+	// Perform pattern matching
+	matched := MatchLikePattern(fieldStr, patternStr, patternType, caseInsensitive)
+
+	// Apply negation for NOT LIKE
+	if negate {
+		matched = !matched
+	}
+
+	// Record statistics
+	executionTime := time.Since(startTime).Nanoseconds()
+	RecordLikeQuery(fieldName, patternType, len(patternStr), executionTime, caseInsensitive, matched, false)
+
+	return matched
 }
 
 // evaluateInOperator evaluates IN and NOT IN operators

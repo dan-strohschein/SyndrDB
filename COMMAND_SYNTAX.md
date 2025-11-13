@@ -308,6 +308,209 @@ SELECT DOCUMENTS FROM "Products" WHERE "Status" == "active" AND "CategoryID" IN 
 4. Use case-insensitive matching (N prefix) only when necessary
 5. For negation, prefer NOT IN over multiple != conditions
 
+### LIKE and NOT LIKE Operators
+
+The LIKE and NOT LIKE operators enable pattern matching and wildcard searches on string fields. They support two types of wildcards: `%` (matches zero or more characters) and `_` (matches exactly one character).
+
+**Basic Syntax:**
+```
+SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" LIKE "pattern";
+SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" NOT LIKE "pattern";
+```
+
+**Wildcard Characters:**
+
+- **`%` (Percent)**: Matches zero or more characters
+  - `"John%"` matches "John", "Johnny", "Johnson"
+  - `"%son"` matches "Johnson", "Anderson", "son"
+  - `"%middle%"` matches any string containing "middle"
+
+- **`_` (Underscore)**: Matches exactly one character (single Unicode rune)
+  - `"J_hn"` matches "John" but not "Johnson"
+  - `"___-2024"` matches "ABC-2024", "XYZ-2024"
+  - Handles Unicode: `"Hello_World"` matches "Hello😊World"
+
+**Pattern Types:**
+
+1. **Prefix Match** (pattern ends with `%`):
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE "John%";
+```
+Matches: "John", "Johnny", "John Doe", "Johnson"
+
+2. **Suffix Match** (pattern starts with `%`):
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Email" LIKE "%@company.com";
+```
+Matches: "john@company.com", "admin@company.com"
+
+3. **Contains Match** (pattern starts and ends with `%`):
+```
+SELECT DOCUMENTS FROM "Products" WHERE "Description" LIKE "%premium%";
+```
+Matches any description containing "premium"
+
+4. **Exact Match** (no wildcards):
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE "John Doe";
+```
+Equivalent to: `"Name" == "John Doe"`
+
+5. **Match All** (only `%`):
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Email" LIKE "%";
+```
+Matches all non-NULL string values
+
+6. **Complex Patterns** (multiple wildcards):
+```
+SELECT DOCUMENTS FROM "Products" WHERE "Code" LIKE "PRD-___-2024";
+SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE "J_hn%";
+SELECT DOCUMENTS FROM "Messages" WHERE "Text" LIKE "%hello%world%";
+```
+
+**Examples:**
+
+1. **Simple prefix search:**
+```
+SELECT DOCUMENTS FROM "Customers" WHERE "LastName" LIKE "Smith%";
+```
+
+2. **Email domain filtering:**
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Email" LIKE "%@gmail.com";
+```
+
+3. **Pattern with underscores:**
+```
+SELECT DOCUMENTS FROM "Products" WHERE "SKU" LIKE "PRD-____";
+```
+
+4. **Case-insensitive matching (N prefix):**
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE N"john%";
+```
+Matches: "John", "JOHN", "johnny", "Johnny Doe"
+
+5. **NOT LIKE to exclude patterns:**
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Email" NOT LIKE "%@spam.com";
+```
+
+6. **Combined with other conditions:**
+```
+SELECT DOCUMENTS FROM "Products" WHERE "Status" == "active" AND "Name" LIKE "%premium%";
+```
+
+7. **Multiple LIKE conditions:**
+```
+SELECT DOCUMENTS FROM "Users" WHERE "FirstName" LIKE "J%" AND "LastName" LIKE "%son";
+```
+
+**Escape Sequences:**
+
+Use backslash (`\`) to match literal wildcard characters:
+
+```
+SELECT DOCUMENTS FROM "Products" WHERE "Discount" LIKE "50\\% off";  // Matches "50% off"
+SELECT DOCUMENTS FROM "Files" WHERE "Name" LIKE "test\\_file.txt";   // Matches "test_file.txt"
+SELECT DOCUMENTS FROM "Paths" WHERE "Path" LIKE "C:\\\\Users\\\\%";  // Matches "C:\Users\..." (Windows paths)
+```
+
+**Supported Escape Sequences:**
+- `\\%` → Literal `%`
+- `\\_` → Literal `_`
+- `\\\\` → Literal `\`
+- `\\"` → Literal `"`
+
+**Important Features:**
+
+- **Case Sensitivity**: String matching is case-sensitive by default. Use the `N` prefix for case-insensitive:
+  ```
+  LIKE N"john%"     // Case-insensitive
+  LIKE "john%"      // Case-sensitive
+  ```
+
+- **NULL Handling**: LIKE returns `false` for NULL fields (NOT LIKE returns `true`):
+  ```
+  WHERE "Email" LIKE "%"           // Excludes NULL emails
+  WHERE "Email" NOT LIKE "%"       // Includes NULL emails
+  ```
+
+- **Unicode Support**: The `_` wildcard matches a single Unicode rune, not byte:
+  ```
+  "Hello_World" LIKE "Hello_World"  // Matches emoji: "Hello😊World"
+  ```
+
+- **Pattern Validation**: 
+  - Maximum 1,000 characters per pattern
+  - Trailing unescaped backslash generates error
+  - Invalid escape sequences generate error
+
+- **Pattern Normalization**: Consecutive `%` wildcards are automatically collapsed:
+  ```
+  "Name" LIKE "John%%%Doe"  // Normalized to: "John%Doe"
+  ```
+
+**Performance Characteristics:**
+
+| Pattern Type | Performance | Index Usage | Notes |
+|-------------|-------------|-------------|-------|
+| Prefix (`text%`) | ⚡ **Excellent** | ✅ B-tree index | Fastest for case-sensitive |
+| Exact (`text`) | ⚡ **Excellent** | ✅ Hash/B-tree index | Optimized to `==` |
+| Match All (`%`) | ⚡ **Excellent** | ❌ No scan needed | Always returns true |
+| Suffix (`%text`) | 🔶 **Good** | ❌ Full scan | Requires scanning all documents |
+| Contains (`%text%`) | 🔶 **Good** | ❌ Full scan | Requires scanning all documents |
+| Underscore (`_`) | 🔶 **Good** | ❌ Full scan | Rune-by-rune matching |
+| Complex patterns | 🔶 **Good** | ❌ Full scan | Fail-fast optimization |
+
+**Performance Considerations:**
+
+- **Index Optimization**: Only case-sensitive prefix patterns can utilize B-tree indexes
+- **Case-Insensitive Warning**: Using `N` prefix prevents index usage even for prefix patterns
+- **Full Scan Warning**: Contains and suffix patterns trigger performance warnings (deduplicated)
+- **Fail-Fast Matching**: Complex patterns exit early on first non-match
+- **Statistics Tracking**: Query patterns are tracked for optimization (aggregated by field + pattern type)
+
+**Best Practices:**
+
+1. **Prefer Prefix Patterns** when possible for best performance (e.g., `"Name" LIKE "John%"`)
+2. **Use Indexes** on fields frequently queried with prefix patterns
+3. **Avoid Leading Wildcards** unless necessary (e.g., `"%text"` or `"%text%"`)
+4. **Use Case-Sensitive** matching when possible to enable index usage
+5. **Keep Patterns Short** (<1,000 characters) for optimal performance
+6. **Combine with Other Filters** to reduce scan size before LIKE evaluation
+7. **Consider Full-Text Search** for complex text searching requirements (future feature)
+
+**Comparison with SQL Standards:**
+
+SyndrDB LIKE is designed to be compatible with SQL standard LIKE operators while adding SyndrDB-specific optimizations:
+
+- **PostgreSQL Compatible**: Pattern syntax matches PostgreSQL LIKE
+- **MySQL Compatible**: Escape sequences work like MySQL LIKE
+- **SQL Server Compatible**: Case sensitivity configurable via N prefix
+- **Performance**: Competitive with PostgreSQL for indexed prefix patterns
+
+**Migration Examples:**
+
+From PostgreSQL:
+```sql
+-- PostgreSQL
+SELECT * FROM users WHERE name LIKE 'John%';
+
+-- SyndrDB
+SELECT DOCUMENTS FROM "users" WHERE "name" LIKE "John%";
+```
+
+From MySQL:
+```sql
+-- MySQL (case-insensitive by default)
+SELECT * FROM users WHERE name LIKE 'john%';
+
+-- SyndrDB (use N prefix for case-insensitive)
+SELECT DOCUMENTS FROM "users" WHERE "name" LIKE N"john%";
+```
+
 ## Notes
 - All database and bundle names must be enclosed in double quotes
 - Commands are case-insensitive but conventionally written in UPPERCASE

@@ -178,6 +178,77 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 			}
 		}
 
+		// Check for LIKE operator optimization
+		if condition.Operator == "LIKE" || condition.Operator == "NOT LIKE" {
+			// Get pattern information
+			_, ok := condition.Value.(string)
+			if !ok {
+				qp.Logger.Warnf("LIKE pattern is not a string: %T", condition.Value)
+				continue
+			}
+
+			// Handle match_all patterns - no filtering needed
+			if condition.PatternType == "match_all" {
+				qp.Logger.Infof("LIKE query with match_all pattern detected on field '%s' - matches all records", condition.Field)
+				// Cost is zero since no filtering is done
+				// Skip this condition - it doesn't restrict results
+				continue
+			}
+
+			// Prefix patterns can use B-tree index if available and case-sensitive
+			if condition.PatternType == "prefix" && !condition.CaseInsensitive {
+				// Check for B-tree index
+				for indexName, indexRef := range bundle.Indexes {
+					if indexRef.IndexType == "btree" && indexRef.BTreeIndexField.FieldName == condition.Field {
+						qp.Logger.Infof("Found B-tree index '%s' for LIKE prefix pattern on field '%s'", indexName, condition.Field)
+
+						cost := qp.estimateBTreeIndexCost(bundle)
+						if cost < bestCost {
+							// Estimate rows based on prefix selectivity (rough estimate)
+							estimatedRows := len(*bundle.Documents) / 10 // Assume prefix matches ~10% of records
+
+							bestNode = &IndexScanNode{
+								Bundle:           bundle,
+								IndexName:        indexName,
+								ScanType:         BTreeIndexScan,
+								SearchKey:        condition.Value,
+								Operator:         condition.Operator,
+								Cost:             cost,
+								EstimatedRows:    estimatedRows,
+								Logger:           qp.Logger,
+								BundleServiceInt: qp.BundleServiceInt,
+							}
+							bestCost = cost
+							indexesUsed = []string{indexName}
+							usedClause = &clauses[i]
+
+							qp.Logger.Infof("Selected B-tree index '%s' for LIKE prefix pattern with cost %.2f", indexName, cost)
+						}
+						break
+					}
+				}
+			}
+
+			// Warn about case-insensitive prefix patterns (cannot use index)
+			if condition.PatternType == "prefix" && condition.CaseInsensitive {
+				if queryparser.ShouldWarnAboutPattern(condition.Field, condition.PatternType, condition.CaseInsensitive) {
+					qp.Logger.Warnf("Case-insensitive LIKE prevents B-tree index usage even for prefix pattern on field '%s'", condition.Field)
+				}
+			}
+
+			// Warn about contains/suffix patterns requiring full table scan
+			if condition.PatternType == "contains" || condition.PatternType == "suffix" {
+				if queryparser.ShouldWarnAboutPattern(condition.Field, condition.PatternType, condition.CaseInsensitive) {
+					bundleSize := len(*bundle.Documents)
+					qp.Logger.Warnf("LIKE query with %s pattern on field '%s' requires full table scan (%d documents). "+
+						"Consider using equality/prefix matching or filtering on another indexed field first.",
+						condition.PatternType, condition.Field, bundleSize)
+					// TODO: When full-text search is implemented, recommend SEARCH() for word-based matching
+					// TODO: Implement trigram index optimization for contains/suffix patterns
+				}
+			}
+		}
+
 		// Check for hash index opportunities (equality conditions)
 		if condition.Operator == "==" {
 			qp.Logger.Infof("Loading Indexes %v with size %d", bundle.IndexNames, len(bundle.IndexNames))

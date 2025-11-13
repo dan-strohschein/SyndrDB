@@ -299,6 +299,17 @@ func main() {
 		}
 	}
 
+	// Execute LIKE query functionality demo (if not filtered or explicitly included)
+	if len(testNames) == 0 || containsTestName(testNames, "LikeQueryDemo") {
+		ColorLogger.Info(HighlightBlue("Starting LIKE query functionality demo..."))
+		err = RunLikeQueryDemo()
+		if err != nil {
+			ColorLogger.Error(HighlightRed("LIKE query demo failed"), zap.Error(err))
+		} else {
+			ColorLogger.Info(HighlightGreen("✓ LIKE query demo completed successfully"))
+		}
+	}
+
 	// Execute GROUP BY functionality tests (if not filtered or explicitly included)
 	if len(testNames) == 0 || containsTestName(testNames, "GroupByTests") {
 		ColorLogger.Info(HighlightBlue("Starting GROUP BY functionality tests..."))

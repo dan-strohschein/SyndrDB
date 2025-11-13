@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/queryparser"
 
 	"go.uber.org/zap"
 )
@@ -180,6 +181,10 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 	case TOKEN_GTE: // >=
 		return e.compareValues(left, right, func(a, b float64) bool { return a >= b })
 
+	// LIKE operator for pattern matching
+	case TOKEN_LIKE:
+		return e.evaluateLike(left, right, false)
+
 	// Arithmetic operators (for computed expressions)
 	case TOKEN_PLUS:
 		return e.arithmeticOp(left, right, func(a, b float64) float64 { return a + b })
@@ -332,6 +337,59 @@ func (e *ExpressionEvaluator) arithmeticOp(a, b interface{}, op func(float64, fl
 	}
 
 	return op(aNum, bNum), nil
+}
+
+// evaluateLike evaluates LIKE pattern matching
+// Parameters:
+//   - left: The value to match (should be a string)
+//   - right: The pattern (should be a string with % and _ wildcards)
+//   - negate: true for NOT LIKE, false for LIKE
+//
+// Returns:
+//   - bool: whether the pattern matches
+//   - error: if either operand is not a string
+func (e *ExpressionEvaluator) evaluateLike(left interface{}, right interface{}, negate bool) (interface{}, error) {
+	// Type validation - both operands must be strings
+	leftStr, leftOk := left.(string)
+	if !leftOk {
+		return nil, fmt.Errorf("LIKE operator requires string operands, got %T for left side", left)
+	}
+
+	rightStr, rightOk := right.(string)
+	if !rightOk {
+		return nil, fmt.Errorf("LIKE operator requires string operands, got %T for right side (pattern)", right)
+	}
+
+	// Handle NULL values - return false (SQL standard)
+	if leftStr == "::SYNDR_NULL::" || rightStr == "::SYNDR_NULL::" {
+		e.logger.Debugf("LIKE operator: NULL value detected, returning false")
+		return negate, nil // false for LIKE, true for NOT LIKE
+	}
+
+	// Parse pattern to determine type
+	// Note: Case sensitivity is handled in the pattern string itself (N prefix would be in the pattern)
+	// For SyndrQL expressions, we'll assume case-sensitive matching unless pattern starts with special marker
+	caseInsensitive := false
+	pattern := rightStr
+
+	// Check for N prefix marker (if implemented in expression parsing)
+	// For now, we'll keep it case-sensitive
+
+	// Analyze pattern
+	patternType, _, _, err := queryparser.ParseLikePattern(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("invalid LIKE pattern: %w", err)
+	}
+
+	// Perform pattern matching
+	matched := queryparser.MatchLikePattern(leftStr, pattern, patternType, caseInsensitive)
+
+	// Apply negation for NOT LIKE
+	if negate {
+		matched = !matched
+	}
+
+	return matched, nil
 }
 
 // toBool converts a value to boolean

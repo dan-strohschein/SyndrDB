@@ -53,3 +53,29 @@ ATTACH <RESOURCE_SPECIFICATION>;
 INVALIDATE SESSION;
 
 INVALIDATE SESSION "<SESSION_ID>";
+
+# WHERE Clause Operators
+
+# Comparison: ==, !=, <, >, <=, >=
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD>" == "value";
+
+# Logical: AND, OR, NOT
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD1>" == "value1" AND "<FIELD2>" == "value2";
+
+# IN operator
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD>" IN ("value1", "value2", "value3");
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD>" NOT IN ("value1", "value2");
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD>" IN N("value1", "value2");  # Case-insensitive
+
+# LIKE operator (pattern matching with % and _ wildcards)
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD>" LIKE "pattern";
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD>" NOT LIKE "pattern";
+SELECT DOCUMENTS FROM "<BUNDLE>" WHERE "<FIELD>" LIKE N"pattern";  # Case-insensitive
+
+# LIKE Pattern Examples:
+# Prefix: "John%" matches "John", "Johnny", "Johnson"
+# Suffix: "%@company.com" matches emails ending with @company.com
+# Contains: "%premium%" matches any string containing "premium"
+# Underscore: "J_hn" matches "John" but not "Johnson"
+# Complex: "PRD-___-2024" matches product codes like "PRD-ABC-2024"
+# Escape: "50\\% off" matches literal "50% off"
