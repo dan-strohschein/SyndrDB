@@ -1,0 +1,118 @@
+{
+  "BundleID": "ddfa5c2a-2081-4b0e-bea8-996da6170f05",
+  "Constraints": {},
+  "CreatedAt": "0001-01-01T00:00:00Z",
+  "CreatedBy": "",
+  "Description": "",
+  "DocumentStructure": {
+    "FieldDefinitions": {
+      "DatabaseID": {
+        "Name": "DatabaseID",
+        "Type": "relationship",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": null
+      },
+      "DocumentID": {
+        "Name": "DocumentID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": "1877547ccf4ea068_6"
+      },
+      "UserID": {
+        "Name": "UserID",
+        "Type": "relationship",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": null
+      }
+    }
+  },
+  "IndexNames": [
+    "DocumentID",
+    "UserID_fk",
+    "DatabaseID_fk"
+  ],
+  "Indexes": {
+    "DatabaseID_fk": {
+      "IndexName": "DatabaseID_fk",
+      "Fields": [
+        {
+          "Name": "DatabaseID",
+          "Type": "relationship",
+          "Required": false,
+          "Unique": false,
+          "DefaultValue": null
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.175713-05:00",
+      "HashIndexField": {
+        "FieldName": "DatabaseID",
+        "IsUnique": false,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    },
+    "DocumentID": {
+      "IndexName": "DocumentID",
+      "Fields": [
+        {
+          "Name": "DocumentID",
+          "Type": "STRING",
+          "Required": true,
+          "Unique": true,
+          "DefaultValue": "1877547ccf4ea068_6"
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.173458-05:00",
+      "HashIndexField": {
+        "FieldName": "DocumentID",
+        "IsUnique": true,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    },
+    "UserID_fk": {
+      "IndexName": "UserID_fk",
+      "Fields": [
+        {
+          "Name": "UserID",
+          "Type": "relationship",
+          "Required": false,
+          "Unique": false,
+          "DefaultValue": null
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.175464-05:00",
+      "HashIndexField": {
+        "FieldName": "UserID",
+        "IsUnique": false,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    }
+  },
+  "Name": "DatabaseUsers",
+  "PageCount": 1,
+  "PageSize": 1000,
+  "Permissions": null,
+  "Relationships": {},
+  "TotalDocuments": 0,
+  "UpdatedAt": "0001-01-01T00:00:00Z"
+}

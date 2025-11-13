@@ -103,6 +103,14 @@ type Arguments struct {
 	SortParallelEnabled   bool // Enable parallel sorting for large datasets (default: true)
 	SortParallelMinSize   int  // Minimum dataset size for parallel sort (default: 10000)
 	SortMaxMemoryMB       int  // Maximum memory in MB for sorting operations (default: 512)
+
+	// Backup & Restore Configuration
+	BackupDir            string // Directory for backup files (default: "./backups")
+	BackupCompression    string // Compression format: "gzip", "zstd", "none" (default: "gzip")
+	BackupIncludeIndexes bool   // Include index files in backups (default: true)
+	// TODO: I will add BackupRetentionDays for automatic backup cleanup
+	// TODO: I will add BackupEncryption settings for encrypted backups
+	// TODO: I will add BackupCloudProvider for S3/GCS/Azure integration
 }
 
 var (
@@ -162,6 +170,11 @@ func GetSettings() *Arguments {
 			SortParallelEnabled:     true,  // Phase 5: Enable parallel sorting
 			SortParallelMinSize:     10000, // Phase 5: 10k+ docs for parallel sort
 			SortMaxMemoryMB:         512,   // 512MB memory limit
+
+			// Backup & Restore Defaults
+			BackupDir:            "./backups", // Default backup directory
+			BackupCompression:    "gzip",      // Use gzip compression by default
+			BackupIncludeIndexes: true,        // Include indexes in backups
 		}
 	})
 	return instance
@@ -209,4 +222,13 @@ func UpdateSettings(args Arguments) {
 	if args.BundleStorageFormat != "" {
 		instance.BundleStorageFormat = args.BundleStorageFormat
 	}
+
+	// Backup settings
+	if args.BackupDir != "" {
+		instance.BackupDir = args.BackupDir
+	}
+	if args.BackupCompression != "" {
+		instance.BackupCompression = args.BackupCompression
+	}
+	instance.BackupIncludeIndexes = args.BackupIncludeIndexes
 }

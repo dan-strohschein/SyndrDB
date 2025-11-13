@@ -481,6 +481,6 @@ func TestPermissionService_ConcurrentGrants(t *testing.T) {
 	// TODO: I will implement comprehensive concurrent grant tests
 	// This will verify thread-safety of the PermissionService when multiple
 	// goroutines attempt to grant permissions/roles simultaneously
-	
+
 	t.Skip("Concurrent grant tests not yet implemented")
 }

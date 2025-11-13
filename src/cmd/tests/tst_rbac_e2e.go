@@ -596,9 +596,9 @@ func testRBACE2E_ErrorScenarios() error {
 	// Test 4: Invalid CREATE USER syntax
 	ColorLogger.Info("Test 4: Testing invalid CREATE USER syntax")
 	invalidCommands := []string{
-		"CREATE USER;",                         // Missing username and password
-		"CREATE USER testuser;",                // Missing password
-		"CREATE USER testuser WITH PASSWORD;",  // Missing password value
+		"CREATE USER;",                          // Missing username and password
+		"CREATE USER testuser;",                 // Missing password
+		"CREATE USER testuser WITH PASSWORD;",   // Missing password value
 		"CREATE USER testuser WITH PASSWORD ''", // Missing semicolon
 	}
 
@@ -613,10 +613,10 @@ func testRBACE2E_ErrorScenarios() error {
 	// Test 5: Invalid GRANT syntax
 	ColorLogger.Info("Test 5: Testing invalid GRANT syntax")
 	invalidGrantCommands := []string{
-		"GRANT;",                              // Missing everything
-		"GRANT PERMISSION;",                   // Missing permission and user
-		"GRANT PERMISSION Read;",              // Missing TO USER clause
-		"GRANT PERMISSION Read TO USER",       // Missing username and semicolon
+		"GRANT;",                        // Missing everything
+		"GRANT PERMISSION;",             // Missing permission and user
+		"GRANT PERMISSION Read;",        // Missing TO USER clause
+		"GRANT PERMISSION Read TO USER", // Missing username and semicolon
 	}
 
 	for i, cmd := range invalidGrantCommands {

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -120,7 +121,7 @@ func (s *UserStore) VerifyCredentialsWithIP(username, password, clientIP string)
 	defer s.mu.RUnlock()
 
 	for _, storedUser := range s.users {
-		if storedUser.Username == username {
+		if strings.EqualFold(storedUser.Username, username) {
 			// Hash the password using the same parameters and salt
 			hash := argon2.IDKey(
 				[]byte(password),

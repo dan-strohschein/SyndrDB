@@ -398,6 +398,31 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		return &result, nil
 	}
 
+	// Parse CHECKPOINT command
+	if strings.HasPrefix(strings.ToLower(command), "checkpoint") {
+		return Checkpoint(command, logger, &serviceManager)
+	}
+
+	// Parse BACKUP command
+	if strings.HasPrefix(strings.ToLower(command), "backup") {
+		return BackupDatabase(command, logger, &serviceManager)
+	}
+
+	// Parse RESTORE command
+	if strings.HasPrefix(strings.ToLower(command), "restore") {
+		return RestoreDatabase(command, logger, &serviceManager)
+	}
+
+	// Parse LOCK command
+	if strings.HasPrefix(strings.ToLower(command), "lock") {
+		return LockDatabaseCommand(command, logger, &serviceManager)
+	}
+
+	// Parse UNLOCK command
+	if strings.HasPrefix(strings.ToLower(command), "unlock") {
+		return UnlockDatabaseCommand(command, logger, &serviceManager)
+	}
+
 	if strings.HasPrefix(strings.ToLower(command), "use") {
 		return UseDatabase(command, logger, serviceManager)
 	}

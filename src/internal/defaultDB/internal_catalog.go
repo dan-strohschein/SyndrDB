@@ -2,6 +2,7 @@ package defaultdb
 
 import (
 	"fmt"
+	"syndrdb/src/internal/auth"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
@@ -658,12 +659,18 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 		doc := &models.Document{
 			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
+			Data:       make(map[string]interface{}),
 		}
 
 		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
 		doc.Fields["DocumentID"] = models.Field{
 			Name:  "DocumentID",
 			Value: doc.DocumentID,
+		}
+
+		// Populate Data map from Fields
+		for key, field := range doc.Fields {
+			doc.Data[key] = field.Value
 		}
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], permissionsBundle, doc)
@@ -705,12 +712,18 @@ func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
 		doc := &models.Document{
 			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
+			Data:       make(map[string]interface{}),
 		}
 
 		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
 		doc.Fields["DocumentID"] = models.Field{
 			Name:  "DocumentID",
 			Value: doc.DocumentID,
+		}
+
+		// Populate Data map from Fields
+		for key, field := range doc.Fields {
+			doc.Data[key] = field.Value
 		}
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesBundle, doc)
@@ -790,6 +803,12 @@ func HydrateRolesPermissionsPrimaryCatalogs(databaseService *database.DatabaseSe
 								Value: permDoc.Fields["PermissionID"].Value,
 							},
 						},
+						Data: make(map[string]interface{}),
+					}
+
+					// Populate Data map from Fields
+					for key, field := range rolePermDoc.Fields {
+						rolePermDoc.Data[key] = field.Value
 					}
 
 					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesPermissionsBundle, rolePermDoc)
@@ -807,42 +826,181 @@ func HydrateRolesPermissionsPrimaryCatalogs(databaseService *database.DatabaseSe
 
 func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 	storageEngine *databasestore.DatabaseStorageEngine,
-
 	logger *zap.SugaredLogger,
-	bundleService *bundle.BundleService) error {
+	bundleService *bundle.BundleService,
+	userStore *auth.UserStore) error {
 
-	// Add the users to the users bundle. Start with Admin, Reader, Writer
-	users := []string{"Admin", "Reader", "Writer"}
-	usersBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "Users")
-	if err != nil {
-		logger.Warnf("Warning: Failed to get Users bundle: %v", err)
-		return err
+	logger.Info("Starting user catalog hydration using UserStore API...")
+
+	if userStore == nil {
+		logger.Warn("UserStore is nil - users will be created in bundles only (no password hashing)")
+		logger.Warn("This is acceptable for testing but NOT for production use")
 	}
 
-	for _, user := range users {
-		field1 := models.Field{
-			Name:  "UserID",
-			Value: helpers.GenerateUUID(),
+	// Define default users with their roles
+	// Root user gets Dbo role (full admin privileges)
+	// Admin, Reader, Writer users get their respective roles
+	defaultUsers := []struct {
+		Username string
+		Password string
+		Role     string
+	}{
+		{"Root", "root", "Dbo"},                // Root user with full admin privileges
+		{"Admin", "admin123", "Dbo"},           // Admin user with full privileges
+		{"Reader", "reader123", "Data-Reader"}, // Reader with read-only access
+		{"Writer", "writer123", "Data-Writer"}, // Writer with write access
+	}
+
+	// Create users using UserStore API (ensures proper password hashing)
+	for _, user := range defaultUsers {
+		logger.Infof("Creating default user: %s with role: %s", user.Username, user.Role)
+
+		// Generate UserID
+		userID := helpers.GenerateUUID()
+
+		// Create user in UserStore if available (this handles Argon2id password hashing automatically)
+		if userStore != nil {
+			newUser := auth.NewUser{
+				UserID:   userID,
+				Username: user.Username,
+				Password: user.Password,
+			}
+
+			storedUser, err := userStore.AddUser(newUser)
+			if err != nil {
+				// User might already exist - that's okay for idempotency
+				logger.Infof("User %s may already exist in UserStore: %v", user.Username, err)
+				// Try to get existing user to get their UserID
+				existingUser, getErr := userStore.GetUser(user.Username)
+				if getErr != nil {
+					logger.Warnf("Failed to get existing user %s: %v", user.Username, getErr)
+					continue
+				}
+				if existingUser != nil {
+					userID = existingUser.UserID
+					logger.Infof("Using existing user %s with ID %s", user.Username, userID)
+				} else {
+					logger.Warnf("Could not create or retrieve user %s, skipping", user.Username)
+					continue
+				}
+			} else {
+				logger.Infof("✓ Created user %s in UserStore with Argon2id hashed password", storedUser.Username)
+			}
 		}
-		field2 := models.Field{
-			Name:  "Name",
-			Value: user,
+
+		// Now create the user document in Users bundle for RBAC metadata
+		usersBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "Users")
+		if err != nil {
+			logger.Warnf("Warning: Failed to get Users bundle: %v", err)
+			return err
 		}
-		fields := map[string]models.Field{}
-		fields["UserID"] = field1
-		fields["Name"] = field2
+
+		// Create user document with metadata (no password - that's in UserStore)
+		fields := map[string]models.Field{
+			"UserID": {
+				Name:  "UserID",
+				Value: userID,
+			},
+			"Username": {
+				Name:  "Username",
+				Value: user.Username,
+			},
+			"IsActive": {
+				Name:  "IsActive",
+				Value: true,
+			},
+			"IsLockedOut": {
+				Name:  "IsLockedOut",
+				Value: false,
+			},
+			"FailedLoginAttempts": {
+				Name:  "FailedLoginAttempts",
+				Value: 0,
+			},
+		}
+
 		doc := &models.Document{
 			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
+			Data:       make(map[string]interface{}),
 		}
+
+		// Populate Data map for consistent access
+		for key, field := range fields {
+			doc.Data[key] = field.Value
+		}
+		doc.Data["DocumentID"] = doc.DocumentID
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], usersBundle, doc)
 		if err != nil {
-			logger.Warnf("Warning: Failed to add document to Users bundle: %v", err)
-			return err
+			logger.Warnf("Warning: Failed to add user %s to Users bundle: %v", user.Username, err)
+			continue
 		}
+
+		// Grant the role to the user
+		// Create role assignment in UserRoles bundle
+		// First, look up the role to get its RoleID
+		rolesBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "Roles")
+		if err != nil {
+			logger.Warnf("Warning: Failed to get Roles bundle for user %s: %v", user.Username, err)
+			continue
+		}
+
+		// Find the role document by name to get its RoleID
+		roleDocs := *rolesBundle.Documents
+		var roleID string
+		for _, roleDoc := range roleDocs {
+			if roleName, ok := roleDoc.Fields["Name"].Value.(string); ok && roleName == user.Role {
+				roleID = roleDoc.Fields["RoleID"].Value.(string)
+				break
+			}
+		}
+
+		if roleID == "" {
+			logger.Warnf("Warning: Role %s not found in Roles bundle for user %s", user.Role, user.Username)
+			continue
+		}
+
+		userRolesBundle, err := bundleService.GetBundleByName(databaseService.Databases["primary"], "UserRoles")
+		if err != nil {
+			logger.Warnf("Warning: Failed to get UserRoles bundle for user %s: %v", user.Username, err)
+			continue
+		}
+
+		userRoleDoc := &models.Document{
+			DocumentID: helpers.GenerateFastUUID(),
+			Fields: map[string]models.Field{
+				"DocumentID": {
+					Name:  "DocumentID",
+					Value: helpers.GenerateFastUUID(),
+				},
+				"RoleID": {
+					Name:  "RoleID",
+					Value: roleID,
+				},
+				"UserID": {
+					Name:  "UserID",
+					Value: userID,
+				},
+			},
+			Data: make(map[string]interface{}),
+		}
+
+		// Populate Data map
+		for key, field := range userRoleDoc.Fields {
+			userRoleDoc.Data[key] = field.Value
+		}
+
+		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userRolesBundle, userRoleDoc)
+		if err != nil {
+			logger.Warnf("Warning: Failed to grant role %s to user %s: %v", user.Role, user.Username, err)
+			continue
+		}
+
+		logger.Infof("✓ Successfully created user %s with role %s (RoleID: %s, password hashed in UserStore)", user.Username, user.Role, roleID)
 	}
 
+	logger.Info("✓ User catalog hydration completed using UserStore API")
 	return nil
 }
 
@@ -876,10 +1034,13 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 	permissionDocs := *permissionsBundle.Documents
 
 	for _, userDoc := range userDocs {
-		userName := userDoc.Fields["Name"].Value.(string)
+		userName := userDoc.Fields["Username"].Value.(string)
 		var permissionNames []string
 
 		switch userName {
+		case "Root":
+			// Root user gets all permissions (full system access)
+			permissionNames = []string{"Read", "Write", "Admin", "Read-Write"}
 		case "Admin":
 			permissionNames = []string{"Read", "Write", "Admin", "Read-Write"}
 		case "Reader":
@@ -913,12 +1074,18 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 							"UserID":           field2,
 							"PermissionID":     field3,
 						},
+						Data: make(map[string]interface{}),
 					}
 
 					// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
 					userPermDoc.Fields["DocumentID"] = models.Field{
 						Name:  "DocumentID",
 						Value: userPermDoc.DocumentID,
+					}
+
+					// Populate Data map from Fields
+					for key, field := range userPermDoc.Fields {
+						userPermDoc.Data[key] = field.Value
 					}
 
 					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userPermissionsBundle, userPermDoc)

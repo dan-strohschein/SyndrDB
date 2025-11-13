@@ -233,7 +233,7 @@ func initializeTestServiceManager() error {
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
 
 	// Initialize the service manager with the services (no GraphQL for tests)
-	testServiceManager = server.InitServiceManager(databaseService, bundleService, catalogService, nil, sugar)
+	testServiceManager = server.InitServiceManager(databaseService, bundleService, catalogService, nil, nil, sugar, false)
 	if testServiceManager == nil {
 		return fmt.Errorf("failed to initialize test service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, catalogService=%v, sugar=%v)",
 			databaseService == nil, bundleService == nil, catalogService == nil, sugar == nil)
@@ -344,7 +344,7 @@ func setupBundleTestEnvironment() error {
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
 
 	// Initialize the service manager with the services (no GraphQL for tests)
-	testServiceManager = server.InitServiceManager(databaseService, bundleService, catalogService, nil, sugar)
+	testServiceManager = server.InitServiceManager(databaseService, bundleService, catalogService, nil, nil, sugar, false)
 	if testServiceManager == nil {
 		return fmt.Errorf("failed to initialize service manager - InitServiceManager returned nil (databaseService=%v, bundleService=%v, catalogService=%v, sugar=%v)",
 			databaseService == nil, bundleService == nil, catalogService == nil, sugar == nil)

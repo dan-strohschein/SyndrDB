@@ -8,6 +8,7 @@ import (
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/journal"
+	"syndrdb/src/internal/lock"
 	"syndrdb/src/internal/registry"
 
 	"go.uber.org/zap"
@@ -24,6 +25,7 @@ type ServiceManager struct {
 	BundleService          *bundle.BundleService
 	InternalCatalogService *defaultdb.CatalogService
 	WALManager             *journal.WALManager
+	LockService            *lock.LockService // Database locking for maintenance operations
 	GraphQLProcessor       GraphQLProcessor
 	UserService            *UserService       // RBAC: Manages user creation and authentication
 	PermissionService      *PermissionService // RBAC: Manages permissions and roles
@@ -87,11 +89,15 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		userService := NewUserService(bundleService, dbService, userStore, logger, debugMode)
 		permissionService := NewPermissionService(bundleService, dbService, logger, debugMode)
 
+		// Initialize Lock service
+		lockService := lock.NewLockService(logger.Desugar())
+
 		instance = &ServiceManager{
 			DatabaseService:        dbService,
 			BundleService:          bundleService,
 			InternalCatalogService: catalogService,
 			WALManager:             walManager,
+			LockService:            lockService,
 			GraphQLProcessor:       graphqlProcessor,
 			UserService:            userService,
 			PermissionService:      permissionService,

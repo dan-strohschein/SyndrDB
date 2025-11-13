@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"syndrdb/src/internal/auth"
 	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/server"
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/internal/storage/databasestore"
@@ -154,11 +156,80 @@ func StandupTestDatabaseService() (*database.DatabaseService, *databasestore.Dat
 	documentFactory := document.NewDocumentFactory()
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, ColorLogger.Sugar(), args)
 
-	// Initialize primary database catalogs
+	// Initialize primary database catalogs (creates RBAC bundles)
 	err = defaultdb.InitPrimaryBundleCatalogs(service, store, primaryDB, ColorLogger.Sugar(), bundleService)
 	if err != nil {
 		ColorLogger.Info(HighlightRed(fmt.Sprintf("Failed to initialize primary database catalogs: %v", err)))
 		return nil, nil, err
+	}
+
+	// Initialize UserStore for authentication (required for RBAC tests)
+	// This mirrors what the server does in server.go
+	userStorePath := filepath.Join(args.DataDir, "users.db")
+	encryptionKey := "SyndrDB-Test-UserStore-Key"
+	authConfig := auth.DefaultAuthRateLimitConfig()
+
+	// Create a test auditor (or nil for tests)
+	userStore, err := auth.NewUserStoreWithAuditor(
+		userStorePath,
+		encryptionKey,
+		ColorLogger.Sugar(),
+		authConfig,
+		nil, // No auditor for tests
+	)
+	if err != nil {
+		ColorLogger.Info(HighlightRed(fmt.Sprintf("Failed to initialize user store: %v", err)))
+		return nil, nil, err
+	}
+
+	// Initialize ServiceManager with all services
+	catalogService := defaultdb.NewCatalogService(service, bundleService, ColorLogger.Sugar())
+	serviceManager := server.InitServiceManager(service, bundleService, catalogService, nil, userStore, ColorLogger.Sugar(), false)
+
+	// Initialize UserService and PermissionService (required for RBAC)
+	serviceManager.UserService = server.NewUserService(
+		bundleService,
+		service,
+		userStore,
+		ColorLogger.Sugar(),
+		false, // debug mode off
+	)
+	serviceManager.PermissionService = server.NewPermissionService(
+		bundleService,
+		service,
+		ColorLogger.Sugar(),
+		false, // debug mode off
+	)
+
+	// Hydrate RBAC catalogs in the correct order (permissions -> roles -> users)
+	ColorLogger.Info(HighlightBlue("Hydrating RBAC permissions..."))
+	err = defaultdb.HydratePermissionPrimaryCatalogs(service, store, ColorLogger.Sugar(), bundleService)
+	if err != nil {
+		ColorLogger.Info(HighlightRed(fmt.Sprintf("Failed to hydrate permission catalogs: %v", err)))
+		return nil, nil, err
+	}
+
+	ColorLogger.Info(HighlightBlue("Hydrating RBAC roles..."))
+	err = defaultdb.HydrateRolesPrimaryCatalogs(service, store, ColorLogger.Sugar(), bundleService)
+	if err != nil {
+		ColorLogger.Info(HighlightRed(fmt.Sprintf("Failed to hydrate roles catalogs: %v", err)))
+		return nil, nil, err
+	}
+
+	ColorLogger.Info(HighlightBlue("Hydrating RBAC users..."))
+	err = defaultdb.HydrateUserPrimaryCatalogs(service, store, ColorLogger.Sugar(), bundleService, userStore)
+	if err != nil {
+		ColorLogger.Info(HighlightRed(fmt.Sprintf("Failed to hydrate user catalogs: %v", err)))
+		return nil, nil, err
+	}
+	ColorLogger.Info(HighlightGreen("✓ Default users (Root, Admin, Reader, Writer) created with Argon2id hashed passwords"))
+
+	// NOTE: UpdateDefaultUserPasswords no longer needed - HydrateUserPrimaryCatalogs handles it
+
+	// Verify default users exist
+	err = defaultdb.VerifyDefaultUsersExist(userStore, ColorLogger.Sugar())
+	if err != nil {
+		ColorLogger.Info(HighlightRed(fmt.Sprintf("Warning: Failed to verify default users: %v", err)))
 	}
 
 	// Create testdb (only if it doesn't exist)

@@ -1,0 +1,125 @@
+{
+  "BundleID": "0d8bb15c-0803-4df1-a9c6-426319ae3f25",
+  "Constraints": {},
+  "CreatedAt": "0001-01-01T00:00:00Z",
+  "CreatedBy": "",
+  "Description": "",
+  "DocumentStructure": {
+    "FieldDefinitions": {
+      "DocumentID": {
+        "Name": "DocumentID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": "1877547ccf4ea068_5"
+      },
+      "PermissionID": {
+        "Name": "PermissionID",
+        "Type": "relationship",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": null
+      },
+      "UserID": {
+        "Name": "UserID",
+        "Type": "relationship",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": null
+      },
+      "UserPermissionID": {
+        "Name": "UserPermissionID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": ""
+      }
+    }
+  },
+  "IndexNames": [
+    "DocumentID",
+    "UserID_fk",
+    "PermissionID_fk"
+  ],
+  "Indexes": {
+    "DocumentID": {
+      "IndexName": "DocumentID",
+      "Fields": [
+        {
+          "Name": "DocumentID",
+          "Type": "STRING",
+          "Required": true,
+          "Unique": true,
+          "DefaultValue": "1877547ccf4ea068_5"
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.173148-05:00",
+      "HashIndexField": {
+        "FieldName": "DocumentID",
+        "IsUnique": true,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    },
+    "PermissionID_fk": {
+      "IndexName": "PermissionID_fk",
+      "Fields": [
+        {
+          "Name": "PermissionID",
+          "Type": "relationship",
+          "Required": false,
+          "Unique": false,
+          "DefaultValue": null
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.175215-05:00",
+      "HashIndexField": {
+        "FieldName": "PermissionID",
+        "IsUnique": false,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    },
+    "UserID_fk": {
+      "IndexName": "UserID_fk",
+      "Fields": [
+        {
+          "Name": "UserID",
+          "Type": "relationship",
+          "Required": false,
+          "Unique": false,
+          "DefaultValue": null
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.174819-05:00",
+      "HashIndexField": {
+        "FieldName": "UserID",
+        "IsUnique": false,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    }
+  },
+  "Name": "UserPermissions",
+  "PageCount": 1,
+  "PageSize": 1000,
+  "Permissions": null,
+  "Relationships": {},
+  "TotalDocuments": 0,
+  "UpdatedAt": "0001-01-01T00:00:00Z"
+}

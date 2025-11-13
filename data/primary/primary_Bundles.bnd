@@ -1,0 +1,121 @@
+{
+  "BundleID": "271e1a7c-9bb0-4dda-804e-0ef98fb9ae09",
+  "Constraints": {},
+  "CreatedAt": "0001-01-01T00:00:00Z",
+  "CreatedBy": "",
+  "Description": "",
+  "DocumentStructure": {
+    "FieldDefinitions": {
+      "BundleID": {
+        "Name": "BundleID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": ""
+      },
+      "DatabaseID": {
+        "Name": "DatabaseID",
+        "Type": "relationship",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": null
+      },
+      "DatabaseName": {
+        "Name": "DatabaseName",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": ""
+      },
+      "DocumentID": {
+        "Name": "DocumentID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": "1877547ccf4ea068_2"
+      },
+      "FieldCount": {
+        "Name": "FieldCount",
+        "Type": "INT",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": 0
+      },
+      "FilePath": {
+        "Name": "FilePath",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": ""
+      },
+      "Name": {
+        "Name": "Name",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": ""
+      }
+    }
+  },
+  "IndexNames": [
+    "DocumentID",
+    "DatabaseID_fk"
+  ],
+  "Indexes": {
+    "DatabaseID_fk": {
+      "IndexName": "DatabaseID_fk",
+      "Fields": [
+        {
+          "Name": "DatabaseID",
+          "Type": "relationship",
+          "Required": false,
+          "Unique": false,
+          "DefaultValue": null
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.17595-05:00",
+      "HashIndexField": {
+        "FieldName": "DatabaseID",
+        "IsUnique": false,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    },
+    "DocumentID": {
+      "IndexName": "DocumentID",
+      "Fields": [
+        {
+          "Name": "DocumentID",
+          "Type": "STRING",
+          "Required": true,
+          "Unique": true,
+          "DefaultValue": "1877547ccf4ea068_2"
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.172177-05:00",
+      "HashIndexField": {
+        "FieldName": "DocumentID",
+        "IsUnique": true,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    }
+  },
+  "Name": "Bundles",
+  "PageCount": 1,
+  "PageSize": 1000,
+  "Permissions": null,
+  "Relationships": {},
+  "TotalDocuments": 0,
+  "UpdatedAt": "0001-01-01T00:00:00Z"
+}

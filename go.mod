@@ -15,6 +15,7 @@ require (
 	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/dan-strohschein/syndrdb-simd v0.0.0-20251109221634-d7d56fa53796 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/klauspost/compress v1.18.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

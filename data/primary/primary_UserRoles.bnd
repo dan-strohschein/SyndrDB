@@ -1,0 +1,118 @@
+{
+  "BundleID": "67355d4b-f323-408e-a848-7b432bf7317b",
+  "Constraints": {},
+  "CreatedAt": "0001-01-01T00:00:00Z",
+  "CreatedBy": "",
+  "Description": "",
+  "DocumentStructure": {
+    "FieldDefinitions": {
+      "DocumentID": {
+        "Name": "DocumentID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": "1877547ccf4ea068_8"
+      },
+      "RoleID": {
+        "Name": "RoleID",
+        "Type": "relationship",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": null
+      },
+      "UserID": {
+        "Name": "UserID",
+        "Type": "relationship",
+        "Required": true,
+        "Unique": false,
+        "DefaultValue": null
+      }
+    }
+  },
+  "IndexNames": [
+    "DocumentID",
+    "UserID_fk",
+    "RoleID_fk"
+  ],
+  "Indexes": {
+    "DocumentID": {
+      "IndexName": "DocumentID",
+      "Fields": [
+        {
+          "Name": "DocumentID",
+          "Type": "STRING",
+          "Required": true,
+          "Unique": true,
+          "DefaultValue": "1877547ccf4ea068_8"
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.174095-05:00",
+      "HashIndexField": {
+        "FieldName": "DocumentID",
+        "IsUnique": true,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    },
+    "RoleID_fk": {
+      "IndexName": "RoleID_fk",
+      "Fields": [
+        {
+          "Name": "RoleID",
+          "Type": "relationship",
+          "Required": false,
+          "Unique": false,
+          "DefaultValue": null
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.176933-05:00",
+      "HashIndexField": {
+        "FieldName": "RoleID",
+        "IsUnique": false,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    },
+    "UserID_fk": {
+      "IndexName": "UserID_fk",
+      "Fields": [
+        {
+          "Name": "UserID",
+          "Type": "relationship",
+          "Required": false,
+          "Unique": false,
+          "DefaultValue": null
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-12T13:04:34.176682-05:00",
+      "HashIndexField": {
+        "FieldName": "UserID",
+        "IsUnique": false,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    }
+  },
+  "Name": "UserRoles",
+  "PageCount": 1,
+  "PageSize": 1000,
+  "Permissions": null,
+  "Relationships": {},
+  "TotalDocuments": 4,
+  "UpdatedAt": "0001-01-01T00:00:00Z"
+}

@@ -512,8 +512,14 @@ func testHydrateUsersCatalog() error {
 		return fmt.Errorf("failed to initialize primary bundle catalogs: %v", err)
 	}
 
+	// Hydrate roles first (prerequisite for user role assignment)
+	err = defaultdb.HydrateRolesPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService)
+	if err != nil {
+		return fmt.Errorf("failed to hydrate roles catalog: %v", err)
+	}
+
 	// Now hydrate the users catalog
-	err = defaultdb.HydrateUserPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService)
+	err = defaultdb.HydrateUserPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService, nil)
 	if err != nil {
 		return fmt.Errorf("failed to hydrate users catalog: %v", err)
 	}
@@ -590,8 +596,14 @@ func testHydrateUserPermissionsCatalog() error {
 		return fmt.Errorf("failed to hydrate permissions catalog: %v", err)
 	}
 
+	// Hydrate roles (prerequisite - must come before users)
+	err = defaultdb.HydrateRolesPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService)
+	if err != nil {
+		return fmt.Errorf("failed to hydrate roles catalog: %v", err)
+	}
+
 	// Hydrate users (prerequisite)
-	err = defaultdb.HydrateUserPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService)
+	err = defaultdb.HydrateUserPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService, nil)
 	if err != nil {
 		return fmt.Errorf("failed to hydrate users catalog: %v", err)
 	}
@@ -741,7 +753,7 @@ func testHydrateDatabaseUsersCatalog() error {
 	}
 
 	// Hydrate users (prerequisite)
-	err = defaultdb.HydrateUserPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService)
+	err = defaultdb.HydrateUserPrimaryCatalogs(testDatabaseService, testStorageEngine, testPrimaryLogger, testBundleService, nil)
 	if err != nil {
 		return fmt.Errorf("failed to hydrate users catalog: %v", err)
 	}

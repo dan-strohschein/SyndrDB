@@ -655,7 +655,7 @@ func (ps *PermissionService) getUserID(username string) (string, error) {
 
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
+			if nameField, ok := doc.Fields["Username"]; ok {
 				if strings.EqualFold(nameField.Value.(string), username) {
 					if idField, ok := doc.Fields["UserID"]; ok {
 						return idField.Value.(string), nil

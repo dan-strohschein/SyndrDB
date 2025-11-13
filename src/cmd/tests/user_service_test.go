@@ -219,11 +219,11 @@ func TestCreateUser_PasswordHashing(t *testing.T) {
 	require.True(t, exists, "PasswordHash field should exist")
 
 	passwordHash := passwordHashField.Value.(string)
-	
+
 	// Verify password is hashed (should start with Argon2id prefix)
 	assert.NotEqual(t, password, passwordHash, "Password should be hashed, not stored in plaintext")
 	assert.Greater(t, len(passwordHash), 50, "Hashed password should be significantly longer")
-	
+
 	// TODO: I will add verification that hash follows Argon2id format specification
 }
 
@@ -370,6 +370,6 @@ func TestUserService_ConcurrentCreation(t *testing.T) {
 	// TODO: I will implement comprehensive concurrent user creation tests
 	// This will verify thread-safety of the UserService when multiple
 	// goroutines attempt to create users simultaneously
-	
+
 	t.Skip("Concurrent creation tests not yet implemented")
 }

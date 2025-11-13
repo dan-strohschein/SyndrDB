@@ -232,15 +232,21 @@ func main() {
 		ColorLogger.Info(HighlightYellow(fmt.Sprintf("Running filtered tests: %s", strings.Join(testNames, ", "))))
 	}
 
-	// Stand up test database service
-	ColorLogger.Info(HighlightBlue("Setting up test database service..."))
-	_, _, err := StandupTestDatabaseService()
-	if err != nil {
-		ColorLogger.Error(HighlightRed("Failed to setup test database service"), zap.Error(err))
-		return
-	}
+	var err error
 
-	ColorLogger.Info(HighlightGreen("✓ Test database service setup complete"))
+	// Stand up test database service (skip if only running RootUser tests which have their own isolated environment)
+	skipSharedSetup := len(testNames) == 1 && containsTestName(testNames, "RootUser")
+	if !skipSharedSetup {
+		ColorLogger.Info(HighlightBlue("Setting up test database service..."))
+		_, _, err = StandupTestDatabaseService()
+		if err != nil {
+			ColorLogger.Error(HighlightRed("Failed to setup test database service"), zap.Error(err))
+			return
+		}
+		ColorLogger.Info(HighlightGreen("✓ Test database service setup complete"))
+	} else {
+		ColorLogger.Info(HighlightYellow("Skipping shared test database setup (RootUser tests use isolated environment)"))
+	}
 
 	// Execute database creation use case tests
 	ColorLogger.Info(HighlightBlue("Starting database creation use case tests..."))
@@ -339,6 +345,17 @@ func main() {
 		if len(filteredAuditUseCases) > 0 {
 			ColorLogger.Info(HighlightBlue("Audit Logging Test Results:"))
 			displayTestSummaryGeneric(auditSummary)
+		}
+	}
+
+	// Execute Root User Validation tests (if not filtered or explicitly included)
+	if len(testNames) == 0 || containsTestName(testNames, "RootUser") {
+		ColorLogger.Info(HighlightBlue("Starting Root User Validation tests..."))
+		err = RunRootUserTests()
+		if err != nil {
+			ColorLogger.Error(HighlightRed("Root User tests failed"), zap.Error(err))
+		} else {
+			ColorLogger.Info(HighlightGreen("✓ Root User tests completed successfully"))
 		}
 	}
 

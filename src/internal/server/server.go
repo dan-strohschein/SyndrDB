@@ -347,9 +347,24 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 			log.Printf("Warning: Failed to hydrate default database roles catalog: %v", err)
 		}
 
-		err = defaultdb.HydrateUserPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+		// Hydrate users using UserStore API (ensures Argon2id password hashing)
+		err = defaultdb.HydrateUserPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService, server.UserStore)
 		if err != nil {
 			log.Printf("Warning: Failed to hydrate default database user catalog: %v", err)
+		} else {
+			sugar.Info("✓ Default users (Root, Admin, Reader, Writer) created with Argon2id hashed passwords")
+			sugar.Info("✓ Root user created with default password 'root' - CHANGE THIS IMMEDIATELY")
+		}
+
+		// NOTE: UpdateDefaultUserPasswords is no longer needed since HydrateUserPrimaryCatalogs
+		// now uses the UserStore API directly, which handles password hashing automatically
+
+		// Verify default users exist
+		if server.UserStore != nil {
+			err = defaultdb.VerifyDefaultUsersExist(server.UserStore, sugar)
+			if err != nil {
+				log.Printf("Warning: Failed to verify default users: %v", err)
+			}
 		}
 
 		// Now register the primary database itself in the system catalog
