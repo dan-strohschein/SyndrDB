@@ -160,6 +160,150 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 	return result, nil
 }
 
+// ScanForInList performs an optimized scan for documents matching an IN query
+// This method implements hash set lookups for efficient membership testing
+// Parameters:
+//   - field: The field name to check
+//   - values: The list of values to match against
+//   - caseInsensitive: Whether to perform case-insensitive string matching
+//   - negate: true for NOT IN, false for IN
+//
+// Returns:
+//   - *ScanResult: The scan results with matching documents
+//   - error: Any error that occurred during scanning
+//
+// TODO: Implement bloom filter optimization for >1000 values to reduce memory usage
+// TODO: Add hot query caching for frequently-used IN lists
+// TODO: Implement parallel processing for >5000 values using worker pools
+func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{}, caseInsensitive bool, negate bool) (*ScanResult, error) {
+	startTime := time.Now()
+
+	if field == "" {
+		return nil, fmt.Errorf("field name is required for IN query")
+	}
+
+	if len(values) == 0 {
+		return nil, fmt.Errorf("IN list cannot be empty")
+	}
+
+	sbs.logger.Debugf("Starting IN scan for field='%s', values count=%d, case-insensitive=%v, negate=%v",
+		field, len(values), caseInsensitive, negate)
+
+	// Convert values to hash set for O(1) lookups
+	valueSet := make(map[interface{}]bool, len(values))
+	for _, v := range values {
+		valueSet[v] = true
+	}
+
+	// TODO: For >1000 values, consider using bloom filter to reduce memory
+	// This would provide probabilistic membership testing with much lower memory footprint
+	if len(values) > 1000 {
+		sbs.logger.Infof("Large IN query detected (%d values). Consider implementing bloom filter optimization.", len(values))
+		// TODO: Implement: bloomFilter := createBloomFilter(values)
+	}
+
+	// TODO: Check if this IN query pattern is hot and cached
+	// Hot query caching would store results for frequently-used IN lists
+	// if cachedResult := sbs.checkInQueryCache(field, values); cachedResult != nil {
+	//     return cachedResult, nil
+	// }
+
+	result := &ScanResult{
+		Documents:   make([]*models.Document, 0),
+		DocumentIDs: make([]string, 0),
+		ScanLatency: 0,
+		CacheHits:   0,
+	}
+
+	batchCount := 0
+	totalScanned := 0
+
+	// TODO: For >5000 values, implement parallel processing with worker pools
+	// This would split the document scan across multiple goroutines
+	if len(values) > 5000 {
+		sbs.logger.Infof("Very large IN query (%d values). Parallel processing recommended.", len(values))
+		// TODO: Implement: return sbs.parallelInScan(field, valueSet, caseInsensitive, negate)
+	}
+
+	// Process documents in batches
+	for batch := range sbs.getBatchedDocuments() {
+		batchCount++
+
+		// Check each document in the batch
+		for _, doc := range batch {
+			totalScanned++
+
+			if doc.Data == nil {
+				continue
+			}
+
+			docValue, exists := doc.Data[field]
+			if !exists {
+				continue
+			}
+
+			// Perform membership check with hash set lookup (O(1))
+			matched := false
+
+			if caseInsensitive {
+				// Case-insensitive string matching
+				if docStr, ok := docValue.(string); ok {
+					docStrLower := strings.ToLower(docStr)
+					for value := range valueSet {
+						if valueStr, ok := value.(string); ok {
+							if strings.ToLower(valueStr) == docStrLower {
+								matched = true
+								break
+							}
+						}
+					}
+				} else {
+					// Non-string with case-insensitive flag - use exact match
+					matched = valueSet[docValue]
+				}
+			} else {
+				// Case-sensitive or non-string comparison
+				matched = valueSet[docValue]
+			}
+
+			// Apply negation if NOT IN
+			if negate {
+				matched = !matched
+			}
+
+			if matched {
+				result.Documents = append(result.Documents, doc)
+				result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
+			}
+		}
+
+		// Memory pressure management
+		if len(result.Documents) > sbs.config.MemoryThreshold {
+			sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
+				sbs.config.MemoryThreshold)
+			runtime.GC()
+			sbs.metrics.MemoryPressureGCs++
+		}
+	}
+
+	// Finalize results
+	result.BatchesUsed = batchCount
+	result.TotalScanned = totalScanned
+	result.ScanLatency = time.Since(startTime)
+
+	sbs.updateMetrics(result, 0, result.ScanLatency)
+
+	sbs.logger.Debugf("IN scan completed: found %d/%d documents in %v",
+		len(result.Documents), totalScanned, result.ScanLatency)
+
+	// TODO: Cache result if this IN query pattern is becoming hot
+	// if sbs.shouldCacheInQuery(field, values, result) {
+	//     sbs.cacheInQueryResult(field, values, result)
+	// }
+
+	return result, nil
+}
+
 // performBatchedScan executes the core batched scanning algorithm
 // This implements PostgreSQL-style sequential scanning with predicate pushdown
 func (sbs *SmartBundleScanner) performBatchedScan(query *ScanQuery) (*ScanResult, error) {

@@ -124,6 +124,60 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 
 	// Find the most selective index condition
 	for i, condition := range clauses {
+		// Check for IN operator with hash index opportunities
+		// TODO: Add query throttling for large IN lists (>1000 values) to prevent resource exhaustion
+		if condition.Operator == "IN" || condition.Operator == "NOT IN" {
+			if doesIndexExist(bundle, condition.Field) {
+				qp.Logger.Infof("Found hash index for IN query on field %s", condition.Field)
+
+				// Calculate cardinality-based cost for IN queries
+				// Cost increases with list size but benefits from index
+				listSize := 1
+				if valueList, ok := condition.Value.([]interface{}); ok {
+					listSize = len(valueList)
+				}
+
+				// Base cost: hash lookups are O(1), but we do multiple lookups
+				// Cost = base_index_cost * list_size + overhead
+				baseCost := qp.estimateHashIndexCost()
+				overhead := float64(listSize) * 0.1 // Small overhead per value
+				cost := baseCost*float64(listSize) + overhead
+
+				// Log warning for large IN lists that may need throttling
+				if listSize > 1000 {
+					qp.Logger.Warnf("Large IN query detected: %d values on field '%s'. Consider query throttling.",
+						listSize, condition.Field)
+					// TODO: Implement concurrent query limit (max 5 large IN queries)
+					// TODO: Add query queuing system for >1000 value IN queries
+				}
+
+				if cost < bestCost {
+					estimatedRows := listSize // Assume each value matches ~1 row
+					if condition.Operator == "NOT IN" {
+						estimatedRows = len(*bundle.Documents) - listSize
+					}
+
+					bestNode = &IndexScanNode{
+						Bundle:           bundle,
+						IndexName:        condition.Field,
+						ScanType:         HashIndexScan,
+						SearchKey:        condition.Value,
+						Operator:         condition.Operator,
+						Cost:             cost,
+						EstimatedRows:    estimatedRows,
+						Logger:           qp.Logger,
+						BundleServiceInt: qp.BundleServiceInt,
+					}
+					bestCost = cost
+					indexesUsed = []string{fmt.Sprintf("%s_%s_hidx", helpers.CleanFileName(bundle.Name), condition.Field)}
+					usedClause = &clauses[i]
+
+					qp.Logger.Infof("Selected hash index for IN query on '%s' with %d values, cost %.2f",
+						condition.Field, listSize, cost)
+				}
+			}
+		}
+
 		// Check for hash index opportunities (equality conditions)
 		if condition.Operator == "==" {
 			qp.Logger.Infof("Loading Indexes %v with size %d", bundle.IndexNames, len(bundle.IndexNames))

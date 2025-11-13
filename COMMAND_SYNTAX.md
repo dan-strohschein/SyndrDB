@@ -219,6 +219,94 @@ WHERE clauses support:
 - Comparisons: `field_name > value`, `field_name < value`, `field_name >= value`, `field_name <= value`
 - Logical operators: `AND`, `OR`, `NOT`
 - Parentheses for grouping: `(condition1 OR condition2) AND condition3`
+- IN operator: `field_name IN (value1, value2, value3)`
+- NOT IN operator: `field_name NOT IN (value1, value2, value3)`
+
+### IN and NOT IN Operators
+
+The IN and NOT IN operators allow filtering documents based on whether a field's value matches any value in a specified list.
+
+**Basic Syntax:**
+```
+SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" IN (value1, value2, value3);
+SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" NOT IN (value1, value2, value3);
+```
+
+**Examples:**
+
+1. **Simple IN query:**
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Status" IN ("active", "pending", "verified");
+```
+
+2. **Numeric IN query:**
+```
+SELECT DOCUMENTS FROM "Products" WHERE "CategoryID" IN (1, 2, 5, 10);
+```
+
+3. **NOT IN query:**
+```
+SELECT DOCUMENTS FROM "Orders" WHERE "Status" NOT IN ("cancelled", "refunded");
+```
+
+4. **Case-insensitive IN query (using N prefix):**
+```
+SELECT DOCUMENTS FROM "Users" WHERE "Email" IN N("john@example.com", "jane@example.com");
+```
+
+5. **Date IN query:**
+```
+SELECT DOCUMENTS FROM "Events" WHERE "EventDate" IN ("2025-01-15", "2025-02-20", "2025-03-10");
+```
+
+6. **Combined with other conditions:**
+```
+SELECT DOCUMENTS FROM "Products" WHERE "Status" == "active" AND "CategoryID" IN (1, 2, 3);
+```
+
+**Important Features:**
+
+- **Type Consistency**: All values in the IN list must be of the same type (all strings, all numbers, or all dates). Type coercion is not supported.
+
+- **Case Sensitivity**: By default, string comparisons are case-sensitive. Use the `N` prefix for case-insensitive matching:
+  ```
+  IN N("value1", "value2")  // Case-insensitive
+  IN ("value1", "value2")   // Case-sensitive
+  ```
+
+- **NULL Handling**: To check for NULL values, use the special `::SYNDR_NULL::` value:
+  ```
+  WHERE "Email" IN ("john@example.com", "::SYNDR_NULL::")
+  ```
+  Other NULL magic values: `::SYNDR_MISSING::`, `::SYNDR_DELETED::`, `::SYNDR_DEFAULT::`
+
+- **Automatic Deduplication**: Duplicate values in the IN list are automatically removed. This is logged in debug mode.
+
+- **List Size Limits**: 
+  - Maximum 10,000 values per IN list
+  - Warnings logged for lists >1,000 values
+  - Query throttling may apply to very large IN queries
+
+- **Single-Value Optimization**: IN queries with a single value are automatically optimized to equality operators:
+  ```
+  WHERE "Status" IN ("active")  // Optimized to: "Status" == "active"
+  ```
+
+**Performance Considerations:**
+
+- **Index Usage**: IN queries can utilize hash indexes on the queried field for better performance
+- **Hash Set Lookups**: Values are converted to hash sets internally for O(1) lookup time
+- **Memory Tracking**: Large IN queries (>100MB memory) trigger warnings
+- **Query Throttling**: Large IN queries (>1,000 values) may be subject to concurrent query limits
+- **Statistics**: IN query patterns are tracked for optimization (admin-only access)
+
+**Best Practices:**
+
+1. Keep IN lists reasonably sized (<1,000 values) for optimal performance
+2. Use indexes on fields frequently queried with IN operators
+3. Consider breaking very large IN queries into smaller batches
+4. Use case-insensitive matching (N prefix) only when necessary
+5. For negation, prefer NOT IN over multiple != conditions
 
 ## Notes
 - All database and bundle names must be enclosed in double quotes

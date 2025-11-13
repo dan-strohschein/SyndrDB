@@ -3,10 +3,12 @@ package queryparser
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
+	"time"
 
 	// "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
 	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
@@ -16,6 +18,14 @@ import (
 
 	"go.uber.org/zap"
 	//"syndrdb/src/engine"
+)
+
+// Magic value constants for NULL handling (matching bundle.NullHandler constants)
+const (
+	SYNDR_NULL    = "::SYNDR_NULL::"
+	SYNDR_MISSING = "::SYNDR_MISSING::"
+	SYNDR_DELETED = "::SYNDR_DELETED::"
+	SYNDR_DEFAULT = "::SYNDR_DEFAULT::"
 )
 
 /*
@@ -30,10 +40,13 @@ import (
 */
 // WhereClause represents a single condition in a WHERE clause
 type WhereClause struct {
-	Field    string
-	Operator string
-	Value    interface{} // Can be string, int, float64, bool
-	Logic    string      // "AND" or "OR"
+	Field                string
+	Operator             string
+	Value                interface{} // Can be string, int, float64, bool, or []interface{} for IN operator
+	Logic                string      // "AND" or "OR"
+	CaseInsensitive      bool        // For IN N(...) case-insensitive matching
+	OriginalListSize     int         // For IN operator: original list size before deduplication
+	SingleValueOptimized bool        // For IN operator: whether single-value optimization was applied
 }
 
 // WhereGroup represents a group of clauses joined by the same logical operator
@@ -123,14 +136,14 @@ func tokenizeWhereClause(whereClause string) []string {
 			continue
 		}
 
-		// Handle parentheses as separate tokens
-		if ch == '(' || ch == ')' {
+		// Handle parentheses and commas as separate tokens
+		if ch == '(' || ch == ')' || ch == ',' {
 			// Add current token if not empty
 			if currentToken.Len() > 0 {
 				tokens = append(tokens, strings.TrimSpace(currentToken.String()))
 				currentToken.Reset()
 			}
-			// Add parenthesis as its own token
+			// Add punctuation as its own token
 			tokens = append(tokens, string(ch))
 			continue
 		}
@@ -224,23 +237,92 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 			continue
 		}
 
-		// Parse a simple condition (Field Operator Value)
-		if pos+2 < len(tokens) {
+		// Parse a simple condition (Field Operator Value) or IN clause
+		if pos+1 < len(tokens) {
 			field := tokens[pos]
 			operator := tokens[pos+1]
-			valueToken := tokens[pos+2]
 
 			// Strip quotes from field name if present
 			if strings.HasPrefix(field, "\"") && strings.HasSuffix(field, "\"") {
 				field = field[1 : len(field)-1]
 			}
 
-			// Validate operator
+			// Handle IN and NOT IN operators
+			upperOp := strings.ToUpper(operator)
+			if upperOp == "IN" || (upperOp == "NOT" && pos+2 < len(tokens) && strings.ToUpper(tokens[pos+2]) == "IN") {
+				// Handle NOT IN
+				isNotIn := false
+				if upperOp == "NOT" {
+					isNotIn = true
+					operator = "NOT IN"
+					pos++ // Skip "NOT"
+					pos++ // Skip field and "NOT", now at "IN"
+				} else {
+					operator = "IN"
+					pos++ // Skip field, now at "IN"
+				}
+
+				// Parse value list
+				logger := zap.NewNop().Sugar() // TODO: Pass logger from caller
+				values, caseInsensitive, originalCount, newPos, err := parseValueList(tokens, pos+1, logger)
+				if err != nil {
+					return nil, pos, err
+				}
+				pos = newPos
+
+				// Optimize single-value IN to equality operator
+				if len(values) == 1 && !isNotIn {
+					operator = "=="
+					clause := WhereClause{
+						Field:                field,
+						Operator:             operator,
+						Value:                values[0],
+						CaseInsensitive:      caseInsensitive,
+						OriginalListSize:     originalCount,
+						SingleValueOptimized: true,
+					}
+
+					// Check for logical joiner
+					if pos < len(tokens) && (strings.ToUpper(tokens[pos]) == "AND" || strings.ToUpper(tokens[pos]) == "OR") {
+						clause.Logic = strings.ToUpper(tokens[pos])
+						pos++
+					}
+
+					group.Clauses = append(group.Clauses, clause)
+					continue
+				}
+
+				// Create IN clause
+				clause := WhereClause{
+					Field:                field,
+					Operator:             operator,
+					Value:                values,
+					CaseInsensitive:      caseInsensitive,
+					OriginalListSize:     originalCount,
+					SingleValueOptimized: false,
+				}
+
+				// Check for logical joiner
+				if pos < len(tokens) && (strings.ToUpper(tokens[pos]) == "AND" || strings.ToUpper(tokens[pos]) == "OR") {
+					clause.Logic = strings.ToUpper(tokens[pos])
+					pos++
+				}
+
+				group.Clauses = append(group.Clauses, clause)
+				continue
+			}
+
+			// Validate operator for non-IN operators
 			if !isValidOperator(operator) {
 				return nil, pos, fmt.Errorf("invalid operator: %s", operator)
 			}
 
-			// Parse value based on type
+			// Parse regular value (non-IN)
+			if pos+2 >= len(tokens) {
+				return nil, pos, fmt.Errorf("incomplete WHERE condition at position %d", pos)
+			}
+
+			valueToken := tokens[pos+2]
 			value, err := parseValue(valueToken)
 			if err != nil {
 				return nil, pos, err
@@ -276,7 +358,140 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 
 // Helper function to check if operator is valid
 func isValidOperator(op string) bool {
-	return op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<="
+	upperOp := strings.ToUpper(op)
+	return op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<=" ||
+		upperOp == "IN" || upperOp == "NOT IN"
+}
+
+// isNullValue checks if a value is a magic NULL value
+func isNullValue(value interface{}) bool {
+	if value == nil {
+		return true
+	}
+	strValue, ok := value.(string)
+	if !ok {
+		return false
+	}
+	switch strValue {
+	case SYNDR_NULL, SYNDR_MISSING, SYNDR_DELETED, SYNDR_DEFAULT:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseValueList parses a comma-delimited list of values for IN operator
+// Supports: IN (val1, val2, val3) or IN N(val1, val2, val3) for case-insensitive
+// Returns: (values []interface{}, caseInsensitive bool, originalCount int, newPos int, error)
+func parseValueList(tokens []string, startPos int, logger *zap.SugaredLogger) ([]interface{}, bool, int, int, error) {
+	caseInsensitive := false
+	values := make([]interface{}, 0)
+	pos := startPos
+
+	// Check for N prefix for case-insensitive matching
+	if pos < len(tokens) && strings.ToUpper(tokens[pos]) == "N" {
+		caseInsensitive = true
+		pos++
+	}
+
+	// Expect opening parenthesis
+	if pos >= len(tokens) || tokens[pos] != "(" {
+		return nil, false, 0, pos, fmt.Errorf("expected '(' after IN operator")
+	}
+	pos++
+
+	// Track original count for deduplication logging
+	originalCount := 0
+	valueMap := make(map[interface{}]bool) // For deduplication
+	var firstType string                   // Track type of first value for consistency
+
+	// Parse values until closing parenthesis
+	for pos < len(tokens) {
+		if tokens[pos] == ")" {
+			pos++
+			break
+		}
+
+		// Skip commas
+		if tokens[pos] == "," {
+			pos++
+			continue
+		}
+
+		// Parse the value
+		value, err := parseValue(tokens[pos])
+		if err != nil {
+			return nil, false, 0, pos, fmt.Errorf("error parsing value in IN list at position %d: %v", originalCount+1, err)
+		}
+
+		originalCount++
+
+		// Type consistency check
+		valueType := getValueType(value)
+		if firstType == "" {
+			firstType = valueType
+		} else if firstType != valueType {
+			return nil, false, 0, pos, fmt.Errorf("type mismatch in IN list at position %d: expected %s, got %s", originalCount, firstType, valueType)
+		}
+
+		// Deduplicate
+		if !valueMap[value] {
+			valueMap[value] = true
+			values = append(values, value)
+		}
+
+		pos++
+	}
+
+	// Check for empty list
+	if len(values) == 0 {
+		return nil, false, 0, pos, fmt.Errorf("IN list cannot be empty")
+	}
+
+	// Check for maximum size limit
+	if len(values) > 10000 {
+		return nil, false, 0, pos, fmt.Errorf("IN list exceeds maximum size of 10,000 values")
+	}
+
+	// Log deduplication if it occurred
+	if originalCount > len(values) && logger != nil {
+		logger.Debugf("Deduplicated IN list from %d to %d values", originalCount, len(values))
+	}
+
+	return values, caseInsensitive, originalCount, pos, nil
+}
+
+// getValueType returns a string representing the type of a value for type checking
+func getValueType(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		// Check if it's a date (ISO 8601 format)
+		if isISO8601Date(v) {
+			return "date"
+		}
+		return "string"
+	case int, int64:
+		return "int"
+	case float64:
+		return "float"
+	case bool:
+		return "bool"
+	default:
+		return "unknown"
+	}
+}
+
+// isISO8601Date checks if a string matches ISO 8601 date format
+func isISO8601Date(s string) bool {
+	// Simple check for ISO 8601 format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
+	if len(s) < 10 {
+		return false
+	}
+	// Check for date pattern
+	if s[4] == '-' && s[7] == '-' {
+		return true
+	}
+	return false
 }
 
 // Helper function to parse a value token into the right type
@@ -418,9 +633,123 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a <= b })
 	case "<":
 		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a < b })
+	case "IN":
+		return evaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
+			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
+	case "NOT IN":
+		return evaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
+			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
 	default:
 		return false
 	}
+}
+
+// evaluateInOperator evaluates IN and NOT IN operators
+// Parameters:
+//   - fieldValue: The value from the document field
+//   - clauseValue: The list of values to check against ([]interface{})
+//   - caseInsensitive: Whether to perform case-insensitive string matching
+//   - negate: true for NOT IN, false for IN
+//   - fieldName: The name of the field being queried (for statistics)
+//   - originalListSize: The original list size before deduplication (for statistics)
+//   - singleValueOptimized: Whether single-value optimization was applied
+//   - logger: Logger for debugging
+//
+// Returns:
+//   - bool: true if the condition matches, false otherwise
+//
+// TODO: Integrate with query plan caching when full caching system is implemented
+// TODO: Add configurable memory threshold for warnings
+func evaluateInOperator(fieldValue interface{}, clauseValue interface{}, caseInsensitive bool, negate bool,
+	fieldName string, originalListSize int, singleValueOptimized bool, logger *zap.SugaredLogger) bool {
+
+	startTime := time.Now()
+
+	// Convert clause value to slice
+	valueList, ok := clauseValue.([]interface{})
+	if !ok {
+		logger.Warnf("IN operator value is not a list: %T", clauseValue)
+		return false
+	}
+
+	// Track memory usage for large IN queries
+	var memStatsBefore runtime.MemStats
+	runtime.ReadMemStats(&memStatsBefore)
+
+	// Convert value list to hash set for O(1) lookups
+	valueSet := make(map[interface{}]bool, len(valueList))
+	for _, v := range valueList {
+		valueSet[v] = true
+	}
+
+	// Track memory usage
+	var memStatsAfter runtime.MemStats
+	runtime.ReadMemStats(&memStatsAfter)
+	memoryUsed := memStatsAfter.Alloc - memStatsBefore.Alloc
+
+	// Log warning if memory usage exceeds threshold (100MB)
+	if memoryUsed > 100*1024*1024 {
+		logger.Warnf("Warning: IN query memory usage exceeded 100MB (field: %s, list size: %d, memory: %.2f MB)",
+			fieldName, len(valueList), float64(memoryUsed)/(1024*1024))
+	}
+
+	// Determine strategy (will be enhanced when query planner is implemented)
+	strategy := "scan" // Default to scan for now
+	// TODO: Set strategy to "index" when query planner determines index usage
+
+	// Check for NULL values using magic value
+	if isNullValue(fieldValue) {
+		// Check if NULL is in the list
+		for _, v := range valueList {
+			if isNullValue(v) {
+				// Record statistics
+				executionTime := time.Since(startTime).Nanoseconds()
+				RecordInQuery(fieldName, originalListSize, len(valueList), executionTime,
+					memoryUsed, caseInsensitive, singleValueOptimized, strategy, true)
+				return !negate // Match found
+			}
+		}
+		// Record statistics
+		executionTime := time.Since(startTime).Nanoseconds()
+		RecordInQuery(fieldName, originalListSize, len(valueList), executionTime,
+			memoryUsed, caseInsensitive, singleValueOptimized, strategy, false)
+		return negate // No match
+	}
+
+	// Perform membership check
+	matched := false
+	if caseInsensitive {
+		// Case-insensitive string matching
+		fieldStr, fieldIsStr := fieldValue.(string)
+		if !fieldIsStr {
+			// Non-string field with case-insensitive flag - just do normal comparison
+			matched = valueSet[fieldValue]
+		} else {
+			// Compare with each value in the set (case-insensitive)
+			fieldStrLower := strings.ToLower(fieldStr)
+			for value := range valueSet {
+				if valueStr, ok := value.(string); ok {
+					if strings.ToLower(valueStr) == fieldStrLower {
+						matched = true
+						break
+					}
+				}
+			}
+		}
+	} else {
+		// Case-sensitive or non-string comparison
+		matched = valueSet[fieldValue]
+	}
+
+	// Record statistics
+	executionTime := time.Since(startTime).Nanoseconds()
+	RecordInQuery(fieldName, originalListSize, len(valueList), executionTime,
+		memoryUsed, caseInsensitive, singleValueOptimized, strategy, matched)
+
+	if matched {
+		return !negate // Match found
+	}
+	return negate // No match
 }
 
 // compareValues handles type conversion and comparison
