@@ -92,6 +92,15 @@ func main() {
 	flag.IntVar(&args.SortParallelThreshold, "sort-parallel-threshold", 10000, "Minimum size for parallel sort (1000-1000000)")
 	flag.IntVar(&args.SortMaxMemoryMB, "sort-max-memory", 512, "Maximum sort memory in MB (10-10240)")
 
+	// Migration System flags
+	flag.IntVar(&args.MaxMigrationCommands, "max-migration-commands", 1000, "Maximum commands per migration (1-10000)")
+	flag.Float64Var(&args.MigrationPerformanceThreshold, "migration-perf-threshold", 1.0, "Performance warning threshold in seconds (0.1-60.0)")
+	flag.Int64Var(&args.MaxValidationReportSize, "max-validation-report-size", 10485760, "Maximum validation report size in bytes (1MB-100MB)")
+	flag.IntVar(&args.ValidationReportRetentionDays, "validation-report-retention", 30, "Days to retain validation reports (1-365)")
+	flag.BoolVar(&args.EnableAutoReverse, "enable-auto-reverse", true, "Enable automatic reverse command generation")
+	flag.BoolVar(&args.RequireExplicitDownCommands, "require-explicit-down", false, "Require explicit DOWN commands in migrations")
+	flag.IntVar(&args.MigrationTimeoutSeconds, "migration-timeout", 300, "Timeout for migration operations in seconds (10-3600)")
+
 	// Parse command line arguments
 	flag.Parse()
 

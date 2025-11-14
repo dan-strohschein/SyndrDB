@@ -14,6 +14,17 @@ import (
 	"go.uber.org/zap"
 )
 
+// MigrationServiceInterface defines the migration service operations needed by command handlers
+type MigrationServiceInterface interface {
+	CreateMigration(cmd interface{}) (interface{}, error)
+	ApplyMigration(databaseName string, version int, force bool) error
+	RollbackToVersion(databaseName string, targetVersion int) error
+	ValidateMigration(databaseName string, version int, validatedBy string) (interface{}, error)
+	ValidateRollback(databaseName string, targetVersion int, validatedBy string) (interface{}, error)
+	ListMigrations(databaseName string, filters map[string]interface{}) (interface{}, error)
+	GetCurrentVersion(databaseName string) (int, error)
+}
+
 // GraphQLProcessor defines the interface for processing GraphQL commands
 type GraphQLProcessor interface {
 	ProcessGraphQLCommand(command string) (interface{}, error)
@@ -27,8 +38,9 @@ type ServiceManager struct {
 	WALManager             *journal.WALManager
 	LockService            *lock.LockService // Database locking for maintenance operations
 	GraphQLProcessor       GraphQLProcessor
-	UserService            *UserService       // RBAC: Manages user creation and authentication
-	PermissionService      *PermissionService // RBAC: Manages permissions and roles
+	UserService            *UserService              // RBAC: Manages user creation and authentication
+	PermissionService      *PermissionService        // RBAC: Manages permissions and roles
+	MigrationService       MigrationServiceInterface // Migration: Database versioning and schema migration
 	logger                 *zap.SugaredLogger
 }
 
@@ -92,6 +104,11 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		// Initialize Lock service
 		lockService := lock.NewLockService(logger.Desugar())
 
+		// TODO: Initialize Migration service here
+		// Example:
+		// migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())
+		// migrationService := migration.NewMigrationService(bundleService, migrationConfig, logger.Desugar())
+
 		instance = &ServiceManager{
 			DatabaseService:        dbService,
 			BundleService:          bundleService,
@@ -101,6 +118,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			GraphQLProcessor:       graphqlProcessor,
 			UserService:            userService,
 			PermissionService:      permissionService,
+			MigrationService:       nil, // TODO: Set to migrationService once initialized
 			logger:                 logger,
 		}
 

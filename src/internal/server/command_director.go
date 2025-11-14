@@ -81,6 +81,9 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			return ShowSession(command, logger, serviceManager)
 		case "users":
 			return ShowUsers(command, database, logger, serviceManager)
+		case "migrations":
+			// SHOW MIGRATIONS FOR "database_name"
+			return ShowMigrationsCommand(command, database, logger, serviceManager)
 		case "rate":
 			if len(commandParts) > 2 && strings.ToLower(commandParts[2]) == "limit" {
 				return ShowRateLimit(command, logger, serviceManager)
@@ -265,6 +268,41 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		}
 		// Default to user attachment for other ATTACH commands
 		return AttachUserToDatabase(command, logger, serviceManager)
+	}
+
+	// Parse START MIGRATION command
+	if strings.HasPrefix(strings.ToLower(command), "start") {
+		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
+			// START MIGRATION [WITH DESCRIPTION "..."] <commands> COMMIT
+			return StartMigrationCommand(command, database, logger, serviceManager)
+		}
+		return nil, fmt.Errorf("unknown START command: %s", command)
+	}
+
+	// Parse APPLY command
+	if strings.HasPrefix(strings.ToLower(command), "apply") {
+		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
+			// APPLY MIGRATION WITH VERSION <number> [FORCE]
+			return ApplyMigrationCommand(command, database, logger, serviceManager)
+		}
+		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "rollback" {
+			// APPLY ROLLBACK TO VERSION <number>
+			return ApplyRollbackCommand(command, database, logger, serviceManager)
+		}
+		return nil, fmt.Errorf("unknown APPLY command: %s", command)
+	}
+
+	// Parse VALIDATE command
+	if strings.HasPrefix(strings.ToLower(command), "validate") {
+		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
+			// VALIDATE MIGRATION WITH VERSION <number>
+			return ValidateMigrationCommand(command, database, logger, serviceManager)
+		}
+		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "rollback" {
+			// VALIDATE ROLLBACK TO VERSION <number>
+			return ValidateRollbackCommand(command, database, logger, serviceManager)
+		}
+		return nil, fmt.Errorf("unknown VALIDATE command: %s", command)
 	}
 
 	if strings.HasPrefix(strings.ToLower(command), "drop") {

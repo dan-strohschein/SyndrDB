@@ -127,6 +127,16 @@ const (
 	// Keywords - Field Modification Types
 	TOKEN_REMOVE_FIELD // REMOVE
 	TOKEN_MODIFY_FIELD // MODIFY
+
+	// Keywords - Migration System
+	TOKEN_MIGRATION  // MIGRATION
+	TOKEN_START      // START
+	TOKEN_COMMIT     // COMMIT
+	TOKEN_VERSION    // VERSION
+	TOKEN_APPLY      // APPLY
+	TOKEN_VALIDATE   // VALIDATE
+	TOKEN_ROLLBACK   // ROLLBACK
+	TOKEN_MIGRATIONS // MIGRATIONS (for SHOW MIGRATIONS)
 )
 
 // String returns the string representation of a token type
@@ -304,6 +314,22 @@ func (tt TokenType) String() string {
 		return "MODIFY_FIELD"
 	case TOKEN_NAME:
 		return "NAME"
+	case TOKEN_MIGRATION:
+		return "MIGRATION"
+	case TOKEN_START:
+		return "START"
+	case TOKEN_COMMIT:
+		return "COMMIT"
+	case TOKEN_VERSION:
+		return "VERSION"
+	case TOKEN_APPLY:
+		return "APPLY"
+	case TOKEN_VALIDATE:
+		return "VALIDATE"
+	case TOKEN_ROLLBACK:
+		return "ROLLBACK"
+	case TOKEN_MIGRATIONS:
+		return "MIGRATIONS"
 	default:
 		return "UNKNOWN"
 	}
@@ -407,6 +433,16 @@ var keywords = map[string]TokenType{
 
 	"REMOVE": TOKEN_REMOVE_FIELD,
 	"MODIFY": TOKEN_MODIFY_FIELD,
+
+	// Migration Keywords
+	"MIGRATION":  TOKEN_MIGRATION,
+	"START":      TOKEN_START,
+	"COMMIT":     TOKEN_COMMIT,
+	"VERSION":    TOKEN_VERSION,
+	"APPLY":      TOKEN_APPLY,
+	"VALIDATE":   TOKEN_VALIDATE,
+	"ROLLBACK":   TOKEN_ROLLBACK,
+	"MIGRATIONS": TOKEN_MIGRATIONS,
 }
 
 // LookupKeyword checks if an identifier is a keyword and returns its token type

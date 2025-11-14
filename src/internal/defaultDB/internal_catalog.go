@@ -227,6 +227,127 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, rolesPermissions_Bundle)
 
+	// ==============================================================
+	// MIGRATION SYSTEM BUNDLES
+	// ==============================================================
+
+	// create migrations bundle
+	migrations_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":          {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"MigrationID":         {Name: "MigrationID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"Version":             {Name: "Version", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"DatabaseName":        {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Description":         {Name: "Description", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"UpCommands":          {Name: "UpCommands", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"DownCommands":        {Name: "DownCommands", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"Status":              {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "PENDING"},
+			"Checksum":            {Name: "Checksum", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"AppliedBy":           {Name: "AppliedBy", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"CreatedAt":           {Name: "CreatedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"AppliedAt":           {Name: "AppliedAt", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"RolledBackAt":        {Name: "RolledBackAt", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"ExecutionTimeMs":     {Name: "ExecutionTimeMs", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"ErrorMessage":        {Name: "ErrorMessage", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"PerformanceWarnings": {Name: "PerformanceWarnings", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: "[]"},
+		},
+	}
+	migrations_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "Migrations",
+		DocumentStructure: migrations_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, migrations_Bundle)
+
+	// create databaseversions bundle
+	databaseVersions_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":      {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"DatabaseName":    {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"CurrentVersion":  {Name: "CurrentVersion", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"LastUpdated":     {Name: "LastUpdated", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"LastMigrationID": {Name: "LastMigrationID", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+		},
+	}
+	databaseVersions_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "DatabaseVersions",
+		DocumentStructure: databaseVersions_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, databaseVersions_Bundle)
+
+	// create migrationlocks bundle
+	migrationLocks_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":       {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"DatabaseName":     {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"LockedAt":         {Name: "LockedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"LockedBy":         {Name: "LockedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"MigrationVersion": {Name: "MigrationVersion", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"MigrationID":      {Name: "MigrationID", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"Status":           {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "ACTIVE"},
+		},
+	}
+	migrationLocks_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "MigrationLocks",
+		DocumentStructure: migrationLocks_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, migrationLocks_Bundle)
+
+	// create migrationvalidationreports bundle
+	migrationReports_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":        {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"ReportID":          {Name: "ReportID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"MigrationVersion":  {Name: "MigrationVersion", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"TargetVersion":     {Name: "TargetVersion", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"DatabaseName":      {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ReportType":        {Name: "ReportType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "MIGRATION_VALIDATION"},
+			"GeneratedAt":       {Name: "GeneratedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"GeneratedBy":       {Name: "GeneratedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ValidationResults": {Name: "ValidationResults", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "{}"},
+			"ReportSizeBytes":   {Name: "ReportSizeBytes", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"Status":            {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "ACTIVE"},
+			"ArchivedAt":        {Name: "ArchivedAt", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"ExpiresAt":         {Name: "ExpiresAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	migrationReports_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "MigrationValidationReports",
+		DocumentStructure: migrationReports_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, migrationReports_Bundle)
+
+	// ==============================================================
+	// END MIGRATION SYSTEM BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

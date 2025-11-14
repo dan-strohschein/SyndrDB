@@ -111,6 +111,15 @@ type Arguments struct {
 	// TODO: I will add BackupRetentionDays for automatic backup cleanup
 	// TODO: I will add BackupEncryption settings for encrypted backups
 	// TODO: I will add BackupCloudProvider for S3/GCS/Azure integration
+
+	// Migration System Configuration
+	MaxMigrationCommands          int     // Maximum commands per migration (default: 1000)
+	MigrationPerformanceThreshold float64 // Performance warning threshold in seconds (default: 1.0)
+	MaxValidationReportSize       int64   // Maximum validation report size in bytes (default: 10MB)
+	ValidationReportRetentionDays int     // Days to retain validation reports (default: 30)
+	EnableAutoReverse             bool    // Enable automatic reverse command generation (default: true)
+	RequireExplicitDownCommands   bool    // Require explicit DOWN commands in migrations (default: false)
+	MigrationTimeoutSeconds       int     // Timeout for migration operations in seconds (default: 300)
 }
 
 var (
@@ -175,6 +184,15 @@ func GetSettings() *Arguments {
 			BackupDir:            "./backups", // Default backup directory
 			BackupCompression:    "gzip",      // Use gzip compression by default
 			BackupIncludeIndexes: true,        // Include indexes in backups
+
+			// Migration System Defaults
+			MaxMigrationCommands:          1000,     // Maximum 1000 commands per migration
+			MigrationPerformanceThreshold: 1.0,      // Warn if operation takes > 1 second
+			MaxValidationReportSize:       10485760, // 10MB max report size
+			ValidationReportRetentionDays: 30,       // Keep reports for 30 days
+			EnableAutoReverse:             true,     // Auto-generate reverse commands
+			RequireExplicitDownCommands:   false,    // Don't require explicit DOWN commands
+			MigrationTimeoutSeconds:       300,      // 5 minute timeout for migrations
 		}
 	})
 	return instance
