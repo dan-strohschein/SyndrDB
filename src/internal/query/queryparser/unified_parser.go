@@ -194,6 +194,8 @@ func ParseUnifiedSelectQuery(query string, logger *zap.SugaredLogger) (*UnifiedS
 		return nil, fmt.Errorf("query validation failed: %w", err)
 	}
 
+	// TODO: I could optimize by caching parsed GROUP BY queries for repeated execution to avoid re-parsing
+
 	logger.Debugf("Successfully parsed unified query: Type=%s, Fields=%d, Joins=%d, HasWhere=%v, HasGroupBy=%v, HasOrderBy=%v",
 		unifiedQuery.QueryType.String(),
 		len(unifiedQuery.SelectFields)+len(unifiedQuery.AggregateFields),
@@ -243,7 +245,8 @@ func detectQueryType(query string, logger *zap.SugaredLogger) QueryType {
 		return ComplexQuery
 	}
 
-	// GROUP BY query (explicit GROUP BY or aggregate functions without explicit grouping)
+	// GROUP BY query (explicit GROUP BY or aggregate functions)
+	// Note: Changed from ComplexQuery to GroupByQuery when GROUP BY is present
 	if hasGroupBy || hasAggregates {
 		logger.Debugf("Detected GROUP BY query (hasGroupBy=%v, hasAggregates=%v)", hasGroupBy, hasAggregates)
 		return GroupByQuery
@@ -539,6 +542,44 @@ func validateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger
 			}
 			if !found {
 				return fmt.Errorf("field '%s' must appear in GROUP BY clause or be used in an aggregate function", field)
+			}
+		}
+
+		// Validation 2b: ORDER BY fields must be in GROUP BY or be aggregate functions
+		if unified.OrderBy != nil {
+			for _, orderField := range unified.OrderBy.Fields {
+				fieldName := orderField.FieldName
+
+				// Check if it's in GROUP BY clause
+				foundInGroupBy := false
+				for _, groupField := range unified.GroupBy.Fields {
+					if strings.EqualFold(fieldName, groupField) {
+						foundInGroupBy = true
+						break
+					}
+				}
+
+				if foundInGroupBy {
+					continue // Valid - field is in GROUP BY
+				}
+
+				// Check if it's an aggregate function
+				// Aggregate functions have format: FUNCTION(field) like COUNT(*), AVG(salary), SUM(amount)
+				isAggregate := false
+				upperFieldName := strings.ToUpper(fieldName)
+				aggregateFuncs := []string{"COUNT(", "SUM(", "AVG(", "MIN(", "MAX("}
+				for _, aggFunc := range aggregateFuncs {
+					if strings.Contains(upperFieldName, aggFunc) {
+						isAggregate = true
+						break
+					}
+				}
+
+				if !isAggregate {
+					return fmt.Errorf("ORDER BY field '%s' must appear in GROUP BY clause or be an aggregate function", fieldName)
+				}
+
+				// TODO: I might want to add more complex validation for nested aggregate functions in the future
 			}
 		}
 	}

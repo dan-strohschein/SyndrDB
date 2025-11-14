@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"syndrdb/src/tests/homegrown"
+
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -80,7 +82,7 @@ func TestStandupTestDatabaseService(t *testing.T) {
 		defer cleanupTestEnvironment(t, ctx)
 
 		// Test the actual StandupTestDatabaseService function
-		service, database, err := StandupTestDatabaseService()
+		service, database, err := homegrown.StandupTestDatabaseService()
 
 		// Validate successful initialization
 		assert.NoError(t, err, "Database service should start without errors")
@@ -99,7 +101,7 @@ func TestStandupTestDatabaseService(t *testing.T) {
 
 		// Test with custom configuration if your service supports it
 		// This would test different initialization parameters
-		service, database, err := StandupTestDatabaseService()
+		service, database, err := homegrown.StandupTestDatabaseService()
 
 		assert.NoError(t, err, "Custom configured database service should start")
 		assert.NotNil(t, service, "Service should be initialized with custom config")
@@ -117,7 +119,7 @@ func TestDatabaseCreationUseCases(t *testing.T) {
 				return setupTestEnvironment(t)
 			},
 			Execute: func(t *testing.T, ctx TestContext) error {
-				_, _, err := StandupTestDatabaseService()
+				_, _, err := homegrown.StandupTestDatabaseService()
 				return err
 			},
 			Validate: func(t *testing.T, ctx TestContext, err error) {
@@ -132,7 +134,7 @@ func TestDatabaseCreationUseCases(t *testing.T) {
 				return setupTestEnvironment(t)
 			},
 			Execute: func(t *testing.T, ctx TestContext) error {
-				service, database, err := StandupTestDatabaseService()
+				service, database, err := homegrown.StandupTestDatabaseService()
 				if err != nil {
 					return err
 				}
@@ -161,7 +163,7 @@ func TestDatabaseCreationUseCases(t *testing.T) {
 				return setupTestEnvironment(t)
 			},
 			Execute: func(t *testing.T, ctx TestContext) error {
-				_, _, err := StandupTestDatabaseService()
+				_, _, err := homegrown.StandupTestDatabaseService()
 				if err != nil {
 					return err
 				}
@@ -185,7 +187,7 @@ func TestDatabaseCreationUseCases(t *testing.T) {
 				return setupTestEnvironment(t)
 			},
 			Execute: func(t *testing.T, ctx TestContext) error {
-				_, _, err := StandupTestDatabaseService()
+				_, _, err := homegrown.StandupTestDatabaseService()
 				if err != nil {
 					return err
 				}
@@ -218,7 +220,7 @@ func TestDatabaseCreationUseCases(t *testing.T) {
 				return setupTestEnvironment(t)
 			},
 			Execute: func(t *testing.T, ctx TestContext) error {
-				_, _, err := StandupTestDatabaseService()
+				_, _, err := homegrown.StandupTestDatabaseService()
 				if err != nil {
 					return err
 				}
@@ -260,7 +262,7 @@ func TestDocumentOperations(t *testing.T) {
 		ctx := setupTestEnvironment(t)
 		defer cleanupTestEnvironment(t, ctx)
 
-		_, _, err := StandupTestDatabaseService()
+		_, _, err := homegrown.StandupTestDatabaseService()
 		require.NoError(t, err, "Database should be initialized")
 
 		// Simulate document creation with auto-generated UUID
@@ -285,7 +287,7 @@ func TestDocumentOperations(t *testing.T) {
 		ctx := setupTestEnvironment(t)
 		defer cleanupTestEnvironment(t, ctx)
 
-		_, _, err := StandupTestDatabaseService()
+		_, _, err := homegrown.StandupTestDatabaseService()
 		require.NoError(t, err, "Database should be initialized")
 
 		// Simulate document update and index maintenance
@@ -302,11 +304,11 @@ func TestErrorHandlingScenarios(t *testing.T) {
 		defer cleanupTestEnvironment(t, ctx)
 
 		// First creation should succeed
-		_, _, err1 := StandupTestDatabaseService()
+		_, _, err1 := homegrown.StandupTestDatabaseService()
 		assert.NoError(t, err1, "First database creation should succeed")
 
 		// Second creation should handle gracefully (based on your implementation)
-		_, _, err2 := StandupTestDatabaseService()
+		_, _, err2 := homegrown.StandupTestDatabaseService()
 		// This assertion depends on your implementation's behavior
 		ctx.Logger.Info("Second database creation result", zap.Error(err2))
 	})
@@ -320,7 +322,7 @@ func TestErrorHandlingScenarios(t *testing.T) {
 
 		// Your specific invalid config tests would go here
 		// For now, we'll just test the basic function
-		_, _, err := StandupTestDatabaseService()
+		_, _, err := homegrown.StandupTestDatabaseService()
 		ctx.Logger.Info("Configuration test result", zap.Error(err))
 	})
 }
@@ -336,7 +338,7 @@ func TestPerformanceBaselines(t *testing.T) {
 		defer cleanupTestEnvironment(t, ctx)
 
 		startTime := time.Now()
-		_, _, err := StandupTestDatabaseService()
+		_, _, err := homegrown.StandupTestDatabaseService()
 		duration := time.Since(startTime)
 
 		assert.NoError(t, err, "Database should start successfully")
@@ -354,7 +356,7 @@ func BenchmarkDatabaseCreation(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _, err := StandupTestDatabaseService()
+		_, _, err := homegrown.StandupTestDatabaseService()
 		if err != nil {
 			logger.Error("Benchmark iteration failed", zap.Error(err))
 			b.Fatal(err)

@@ -260,7 +260,7 @@ func CalculateFillFactor(idx *BTreeIndex) (float64, error) {
 	totalUsed := uint32(0)
 
 	err := traverseAllNodes(idx, idx.rootPageNum, func(node *BTreeNode) error {
-		maxKeys := calculateMaxKeysForNode(node, idx.metadata.PageSize)
+		maxKeys := calculateMaxKeysForNode(node, idx.Metadata.PageSize)
 		totalCapacity += maxKeys
 		totalUsed += node.KeyCount
 		return nil
@@ -341,8 +341,8 @@ func GetNodeInfo(idx *BTreeIndex, pageNum uint32) (*NodeInfo, error) {
 	idx.logger.Debugf("Getting detailed information for node %d", pageNum)
 
 	// Load the node
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -377,7 +377,7 @@ func GetNodeInfo(idx *BTreeIndex, pageNum uint32) (*NodeInfo, error) {
 	copy(info.Children, node.Children)
 
 	// Calculate fill factor for this node
-	maxKeys := calculateMaxKeysForNode(node, idx.metadata.PageSize)
+	maxKeys := calculateMaxKeysForNode(node, idx.Metadata.PageSize)
 	if maxKeys > 0 {
 		info.FillFactor = float64(node.KeyCount) / float64(maxKeys)
 	}
@@ -442,10 +442,10 @@ func validateTreeHeight(idx *BTreeIndex, result *ValidationResult) error {
 		return fmt.Errorf("failed to calculate actual tree height: %w", err)
 	}
 
-	if uint32(actualHeight) != idx.metadata.TreeHeight {
+	if uint32(actualHeight) != idx.Metadata.TreeHeight {
 		result.Warnings = append(result.Warnings,
 			fmt.Sprintf("metadata height (%d) doesn't match actual height (%d)",
-				idx.metadata.TreeHeight, actualHeight))
+				idx.Metadata.TreeHeight, actualHeight))
 	}
 
 	return nil
@@ -505,8 +505,8 @@ func validateParentChildRelationships(idx *BTreeIndex, result *ValidationResult)
 		// For internal nodes, validate that children point back to this node as parent
 		if !node.IsLeaf {
 			for _, childPageNum := range node.Children {
-				childData, err := idx.pageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
-					return idx.fileManager.ReadPage(pn)
+				childData, err := idx.PageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
+					return idx.FileManager.ReadPage(pn)
 				})
 				if err != nil {
 					result.Errors = append(result.Errors,
@@ -587,8 +587,8 @@ func calculateActualTreeHeight(idx *BTreeIndex, rootPageNum uint32) (int, error)
 		return 0, nil
 	}
 
-	pageData, err := idx.pageManager.GetPage(rootPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(rootPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return 0, fmt.Errorf("failed to load root page %d: %w", rootPageNum, err)
@@ -620,8 +620,8 @@ func calculateActualTreeHeight(idx *BTreeIndex, rootPageNum uint32) (int, error)
 
 // collectNodeStatistics collects statistics from all nodes in the tree
 func collectNodeStatistics(idx *BTreeIndex, pageNum uint32, stats *TreeStatistics) error {
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -643,7 +643,7 @@ func collectNodeStatistics(idx *BTreeIndex, pageNum uint32, stats *TreeStatistic
 	}
 
 	// Calculate fill factor for this node
-	maxKeys := calculateMaxKeysForNode(node, idx.metadata.PageSize)
+	maxKeys := calculateMaxKeysForNode(node, idx.Metadata.PageSize)
 	if maxKeys > 0 {
 		fillFactor := float64(node.KeyCount) / float64(maxKeys)
 		stats.AverageFillFactor += fillFactor
@@ -675,8 +675,8 @@ func collectNodeStatistics(idx *BTreeIndex, pageNum uint32, stats *TreeStatistic
 
 // traverseAllNodes traverses all nodes in the tree and calls the provided function
 func traverseAllNodes(idx *BTreeIndex, pageNum uint32, fn func(*BTreeNode) error) error {
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -706,8 +706,8 @@ func traverseAllNodes(idx *BTreeIndex, pageNum uint32, fn func(*BTreeNode) error
 
 // traverseAllNodesWithLevel traverses all nodes with level information
 func traverseAllNodesWithLevel(idx *BTreeIndex, pageNum uint32, level int, fn func(*BTreeNode, int) error) error {
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -1168,8 +1168,8 @@ func CheckTreeBalance(idx *BTreeIndex) *TreeBalanceResult {
 	var analyzeNode func(pageNum uint32, depth uint32) error
 	analyzeNode = func(pageNum uint32, depth uint32) error {
 		// Load the node
-		pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("failed to load page %d: %v", pageNum, err))
@@ -1185,7 +1185,7 @@ func CheckTreeBalance(idx *BTreeIndex) *TreeBalanceResult {
 		nodeCount++
 
 		// Calculate node capacity and utilization
-		maxKeys := calculateMaxKeysForNode(node, idx.metadata.PageSize)
+		maxKeys := calculateMaxKeysForNode(node, idx.Metadata.PageSize)
 		nodeCapacity := maxKeys
 		nodeUsage := uint32(len(node.Keys))
 
@@ -1387,17 +1387,17 @@ func (idx *BTreeIndex) compact() error {
 	compactConfig := &IndexConfig{
 		BundleName: idx.bundleName,
 		FieldName:  idx.fieldName,
-		IsUnique:   idx.metadata.IsUnique,
-		PageSize:   idx.metadata.PageSize,
+		IsUnique:   idx.Metadata.IsUnique,
+		PageSize:   idx.Metadata.PageSize,
 		CacheSize:  1000,  // Use reasonable cache size for compaction
 		DebugMode:  false, // Use binary format for compaction
 	}
 
 	// Calculate optimal page size based on current data characteristics
 	optimalPageSize := calculateOptimalPageSize(allEntries)
-	if optimalPageSize != idx.metadata.PageSize {
+	if optimalPageSize != idx.Metadata.PageSize {
 		idx.logger.Debugf("Using optimal page size %d instead of current %d",
-			optimalPageSize, idx.metadata.PageSize)
+			optimalPageSize, idx.Metadata.PageSize)
 		compactConfig.PageSize = optimalPageSize
 	}
 
@@ -1439,19 +1439,19 @@ func (idx *BTreeIndex) compact() error {
 	}
 
 	// Step 8: Update metadata with compaction results
-	idx.metadata.LastCompaction = time.Now()
-	idx.metadata.FragmentationPct = 0.0 // Reset fragmentation after successful compaction
-	idx.metadata.CompactionCount++
-	idx.metadata.MaintenanceNeeded = false
-	idx.metadata.CompactionNeeded = false
+	idx.Metadata.LastCompaction = time.Now()
+	idx.Metadata.FragmentationPct = 0.0 // Reset fragmentation after successful compaction
+	idx.Metadata.CompactionCount++
+	idx.Metadata.MaintenanceNeeded = false
+	idx.Metadata.CompactionNeeded = false
 
 	// Step 9: Flush all changes to ensure durability
-	if err := idx.fileManager.Sync(); err != nil {
+	if err := idx.FileManager.Sync(); err != nil {
 		idx.logger.Warnf("Failed to sync after compaction: %v", err)
 	}
 
 	// Step 10: Write updated metadata to storage
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		idx.logger.Warnf("Failed to write metadata after compaction: %v", err)
 	}
 

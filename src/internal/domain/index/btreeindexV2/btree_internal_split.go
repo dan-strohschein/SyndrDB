@@ -32,7 +32,7 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 	idx.logger.Debugf("Starting split of internal node %d with %d keys", internal.PageNum, internal.KeyCount)
 
 	// Step 1: Allocate new internal node (right sibling)
-	newInternalPageNum, err := idx.fileManager.AllocatePage()
+	newInternalPageNum, err := idx.FileManager.AllocatePage()
 	if err != nil {
 		return 0, false, 0, fmt.Errorf("failed to allocate page for new internal node: %w", err)
 	}
@@ -53,7 +53,7 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 	midpoint := len(internal.Keys) / 2
 	if midpoint == 0 {
 		// Safety check: ensure we have at least one key to promote
-		idx.fileManager.DeallocatePage(newInternalPageNum)
+		idx.FileManager.DeallocatePage(newInternalPageNum)
 		return 0, false, 0, fmt.Errorf("internal node %d has insufficient keys to split", internal.PageNum)
 	}
 
@@ -91,8 +91,8 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 
 	// Step 4: Update parent pointers for children of new internal node
 	for _, childPageNum := range newInternal.Children {
-		childData, err := idx.pageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		childData, err := idx.PageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			idx.logger.Warnf("Failed to load child %d to update parent pointer: %v", childPageNum, err)
@@ -107,21 +107,21 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 
 		// Update parent pointer
 		child.ParentPage = newInternalPageNum
-		idx.pageManager.PutPage(childPageNum, child, true)
+		idx.PageManager.PutPage(childPageNum, child, true)
 
 		idx.logger.Debugf("Updated child %d parent pointer to new internal node %d", childPageNum, newInternalPageNum)
 	}
 
 	// Step 5: Save both internal nodes to storage
-	idx.pageManager.PutPage(internal.PageNum, internal, true)
-	idx.pageManager.PutPage(newInternalPageNum, newInternal, true)
+	idx.PageManager.PutPage(internal.PageNum, internal, true)
+	idx.PageManager.PutPage(newInternalPageNum, newInternal, true)
 
 	// Pin new internal node to prevent eviction during parent insertion
-	if err := idx.pageManager.PinPage(newInternalPageNum); err != nil {
+	if err := idx.PageManager.PinPage(newInternalPageNum); err != nil {
 		idx.logger.Warnf("Failed to pin new internal node %d: %v", newInternalPageNum, err)
 	}
 	defer func() {
-		if err := idx.pageManager.UnpinPage(newInternalPageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(newInternalPageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin new internal node %d: %v", newInternalPageNum, err)
 		}
 	}()
@@ -135,7 +135,7 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 		newRootPageNum, err := createNewRoot(idx, internal.PageNum, newInternalPageNum, promotedKey)
 		if err != nil {
 			// Clean up allocated page before returning error
-			idx.fileManager.DeallocatePage(newInternalPageNum)
+			idx.FileManager.DeallocatePage(newInternalPageNum)
 			return 0, false, 0, fmt.Errorf("failed to create new root after internal split: %w", err)
 		}
 
@@ -144,8 +144,8 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 		newInternal.ParentPage = newRootPageNum
 
 		// Save updated internal nodes
-		idx.pageManager.PutPage(internal.PageNum, internal, true)
-		idx.pageManager.PutPage(newInternalPageNum, newInternal, true)
+		idx.PageManager.PutPage(internal.PageNum, internal, true)
+		idx.PageManager.PutPage(newInternalPageNum, newInternal, true)
 
 		nodesCreated++ // We also created a new root
 
@@ -159,7 +159,7 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 		newRootPageNum, err := insertIntoParent(idx, internal.ParentPage, promotedKey, newInternalPageNum)
 		if err != nil {
 			// Clean up allocated page before returning error
-			idx.fileManager.DeallocatePage(newInternalPageNum)
+			idx.FileManager.DeallocatePage(newInternalPageNum)
 			return 0, false, 0, fmt.Errorf("failed to insert into parent after internal split: %w", err)
 		}
 
@@ -190,11 +190,11 @@ func insertIntoInternalNode(idx *BTreeIndex, internal *BTreeNode, key []byte, ri
 	}
 
 	// Pin internal node during modification
-	if err := idx.pageManager.PinPage(internal.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(internal.PageNum); err != nil {
 		return 0, false, 0, fmt.Errorf("failed to pin internal node %d: %w", internal.PageNum, err)
 	}
 	defer func() {
-		if err := idx.pageManager.UnpinPage(internal.PageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(internal.PageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin internal node %d: %v", internal.PageNum, err)
 		}
 	}()
@@ -224,20 +224,20 @@ func insertIntoInternalNode(idx *BTreeIndex, internal *BTreeNode, key []byte, ri
 		string(key), rightChildPageNum, internal.PageNum, insertPos)
 
 	// Check if internal node needs to be split
-	maxKeys := calculateMaxKeysForNode(internal, idx.metadata.PageSize)
+	maxKeys := calculateMaxKeysForNode(internal, idx.Metadata.PageSize)
 	if internal.KeyCount > maxKeys {
 		idx.logger.Debugf("Internal node %d is full (%d > %d), splitting",
 			internal.PageNum, internal.KeyCount, maxKeys)
 
 		// Save current state before split
-		idx.pageManager.PutPage(internal.PageNum, internal, true)
+		idx.PageManager.PutPage(internal.PageNum, internal, true)
 
 		// Split the internal node
 		return splitInternalNode(idx, internal)
 	}
 
 	// Save updated internal node
-	idx.pageManager.PutPage(internal.PageNum, internal, true)
+	idx.PageManager.PutPage(internal.PageNum, internal, true)
 
 	return internal.PageNum, false, 0, nil
 }

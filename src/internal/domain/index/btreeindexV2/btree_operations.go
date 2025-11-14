@@ -165,7 +165,7 @@ func Insert(idx *BTreeIndex, key []byte, documentID string, rootPageNum uint32) 
 		Success:      false,
 		NewRoot:      0,
 		NodesCreated: 0,
-		TreeHeight:   idx.metadata.TreeHeight,
+		TreeHeight:   idx.Metadata.TreeHeight,
 	}
 
 	// Perform the insertion
@@ -222,7 +222,7 @@ func Delete(idx *BTreeIndex, key []byte, documentID string, rootPageNum uint32) 
 		Success:      false,
 		NewRoot:      0,
 		NodesDeleted: 0,
-		TreeHeight:   idx.metadata.TreeHeight,
+		TreeHeight:   idx.Metadata.TreeHeight,
 	}
 
 	// Perform the deletion
@@ -312,8 +312,8 @@ func searchInternal(idx *BTreeIndex, key []byte, pageNum uint32) ([]string, int,
 	nodesVisited := 0
 	idx.logger.Debugf("internalSearch :: Searching for key '%s' starting at page %d", string(key), pageNum)
 	// Load the current node
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return nil, nodesVisited, fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -346,8 +346,8 @@ func insertInternal(idx *BTreeIndex, key []byte, documentID string, pageNum uint
 
 	affectsParentNode := false
 	// Load the current node
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return pageNum, false, 0, fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -384,8 +384,8 @@ func insertInternal(idx *BTreeIndex, key []byte, documentID string, pageNum uint
 func deleteInternal(idx *BTreeIndex, key []byte, documentID string, pageNum uint32) (uint32, bool, int, error) {
 	affectsParentNode := false
 	// Load the current node
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return pageNum, false, 0, fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -430,8 +430,8 @@ func rangeSearchInternal(idx *BTreeIndex, startKey, endKey []byte, rootPageNum u
 
 	// Traverse leaf nodes until we exceed the end key
 	for currentPageNum != 0 {
-		pageData, err := idx.pageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		pageData, err := idx.PageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			return nil, keysFound, nodesVisited, fmt.Errorf("failed to load leaf page %d: %w", currentPageNum, err)
@@ -475,8 +475,8 @@ func rangeSearchInternalWithBounds(idx *BTreeIndex, startKey, endKey []byte, exc
 
 	// Traverse leaf nodes until we exceed the end key
 	for currentPageNum != 0 {
-		pageData, err := idx.pageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		pageData, err := idx.PageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			return nil, keysFound, nodesVisited, fmt.Errorf("failed to load leaf page %d: %w", currentPageNum, err)
@@ -611,12 +611,12 @@ func findChildPage(internal *BTreeNode, key []byte) uint32 {
 func insertIntoLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID string) (uint32, bool, int, error) {
 	// Pin the page to prevent eviction during modification
 	// This is critical for preventing data loss during cache pressure
-	if err := idx.pageManager.PinPage(leaf.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(leaf.PageNum); err != nil {
 		return leaf.PageNum, false, 0, fmt.Errorf("failed to pin leaf page %d: %w", leaf.PageNum, err)
 	}
 	// Ensure we unpin even on error paths
 	defer func() {
-		if err := idx.pageManager.UnpinPage(leaf.PageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(leaf.PageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin leaf page %d: %v", leaf.PageNum, err)
 		}
 	}()
@@ -638,12 +638,12 @@ func insertIntoLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID str
 				idx.logger.Debugf("Resurrected tombstoned entry: key='%s', documentID='%s'", string(key), documentID)
 
 				// Mark page as dirty
-				idx.pageManager.PutPage(leaf.PageNum, leaf, true)
+				idx.PageManager.PutPage(leaf.PageNum, leaf, true)
 				return leaf.PageNum, false, 0, nil
 			}
 
 			// Not tombstoned - check for duplicates if unique index
-			if idx.metadata.IsUnique {
+			if idx.Metadata.IsUnique {
 				liveIDs := leaf.GetLiveDocumentIDs(insertPos)
 				if len(liveIDs) > 0 {
 					return leaf.PageNum, false, 0, fmt.Errorf("duplicate key in unique index")
@@ -663,7 +663,7 @@ func insertIntoLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID str
 			idx.logger.Debugf("Added document ID '%s' to existing key '%s'", documentID, string(key))
 
 			// Mark page as dirty (page is still pinned, safe to modify)
-			idx.pageManager.PutPage(leaf.PageNum, leaf, true)
+			idx.PageManager.PutPage(leaf.PageNum, leaf, true)
 
 			return leaf.PageNum, false, 0, nil
 		}
@@ -681,7 +681,7 @@ func insertIntoLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID str
 	}
 
 	// Mark page as dirty (page is still pinned, safe to modify)
-	idx.pageManager.PutPage(leaf.PageNum, leaf, true)
+	idx.PageManager.PutPage(leaf.PageNum, leaf, true)
 
 	return leaf.PageNum, false, 0, nil
 }
@@ -715,11 +715,11 @@ func insertIntoLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID str
 // in a single operation for improved performance on bulk deletes
 func deleteFromLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID string) (uint32, bool, int, error) {
 	// Pin page to prevent eviction during modification
-	if err := idx.pageManager.PinPage(leaf.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(leaf.PageNum); err != nil {
 		return leaf.PageNum, false, 0, fmt.Errorf("failed to pin leaf page %d: %w", leaf.PageNum, err)
 	}
 	defer func() {
-		if err := idx.pageManager.UnpinPage(leaf.PageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(leaf.PageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin leaf page %d: %v", leaf.PageNum, err)
 		}
 	}()
@@ -758,25 +758,25 @@ func deleteFromLeaf(idx *BTreeIndex, leaf *BTreeNode, key []byte, documentID str
 	}
 
 	// Update index-level tombstone tracking
-	idx.metadata.TotalTombstones++
+	idx.Metadata.TotalTombstones++
 
 	// Track tombstone ratio for maintenance decisions
-	if idx.metadata.TotalRecords > 0 {
-		idx.metadata.TombstoneRatio = float64(idx.metadata.TotalTombstones) / float64(idx.metadata.TotalRecords)
+	if idx.Metadata.TotalRecords > 0 {
+		idx.Metadata.TombstoneRatio = float64(idx.Metadata.TotalTombstones) / float64(idx.Metadata.TotalRecords)
 	}
 
 	// Track nodes needing compaction
 	if leaf.NeedsCompaction {
-		idx.metadata.NodesNeedCompaction++
+		idx.Metadata.NodesNeedCompaction++
 
 		// Set global compaction flag if tombstone ratio exceeds threshold (20%)
-		if idx.metadata.TombstoneRatio > 0.2 {
-			idx.metadata.CompactionNeeded = true
+		if idx.Metadata.TombstoneRatio > 0.2 {
+			idx.Metadata.CompactionNeeded = true
 		}
 	}
 
 	// Mark page as dirty (tombstone metadata changed)
-	idx.pageManager.PutPage(leaf.PageNum, leaf, true)
+	idx.PageManager.PutPage(leaf.PageNum, leaf, true)
 
 	// Log deletion for monitoring
 	idx.logger.Debugf("Lazy deletion: marked key '%s' document '%s' as deleted (tombstones: %d, ratio: %.2f)",
@@ -792,8 +792,8 @@ func findLeafForKey(idx *BTreeIndex, key []byte, rootPageNum uint32) (uint32, in
 	currentPageNum := rootPageNum
 
 	for {
-		pageData, err := idx.pageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		pageData, err := idx.PageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			return 0, nodesVisited, fmt.Errorf("failed to load page %d: %w", currentPageNum, err)
@@ -914,7 +914,7 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 		leaf.PageNum, len(leaf.Keys))
 
 	// Step 1: Allocate a new leaf node
-	newLeafPageNum, err := idx.fileManager.AllocatePage()
+	newLeafPageNum, err := idx.FileManager.AllocatePage()
 	if err != nil {
 		return 0, false, 0, fmt.Errorf("failed to allocate new leaf page: %w", err)
 	}
@@ -969,23 +969,23 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 	// Step 3: Update the linked list pointers
 	// Update the next leaf's previous pointer if it exists
 	if leaf.NextLeaf != 0 {
-		nextLeafData, err := idx.pageManager.GetPage(leaf.NextLeaf, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		nextLeafData, err := idx.PageManager.GetPage(leaf.NextLeaf, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			// Clean up allocated page before returning error
-			idx.fileManager.DeallocatePage(newLeafPageNum)
+			idx.FileManager.DeallocatePage(newLeafPageNum)
 			return 0, false, 0, fmt.Errorf("failed to load next leaf %d: %w", leaf.NextLeaf, err)
 		}
 
 		nextLeaf, ok := nextLeafData.(*BTreeNode)
 		if !ok {
-			idx.fileManager.DeallocatePage(newLeafPageNum)
+			idx.FileManager.DeallocatePage(newLeafPageNum)
 			return 0, false, 0, fmt.Errorf("next page %d is not a valid leaf node", leaf.NextLeaf)
 		}
 
 		// Pin next leaf during modification
-		if err := idx.pageManager.PinPage(leaf.NextLeaf); err != nil {
+		if err := idx.PageManager.PinPage(leaf.NextLeaf); err != nil {
 			idx.logger.Warnf("Failed to pin next leaf %d: %v", leaf.NextLeaf, err)
 		}
 
@@ -993,10 +993,10 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 		nextLeaf.PrevLeaf = newLeafPageNum
 
 		// Mark next leaf as dirty
-		idx.pageManager.PutPage(leaf.NextLeaf, nextLeaf, true)
+		idx.PageManager.PutPage(leaf.NextLeaf, nextLeaf, true)
 
 		// Unpin next leaf
-		if err := idx.pageManager.UnpinPage(leaf.NextLeaf); err != nil {
+		if err := idx.PageManager.UnpinPage(leaf.NextLeaf); err != nil {
 			idx.logger.Warnf("Failed to unpin next leaf %d: %v", leaf.NextLeaf, err)
 		}
 	}
@@ -1008,15 +1008,15 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 		leaf.PageNum, newLeafPageNum, newLeaf.NextLeaf)
 
 	// Save both leaf nodes to storage (adds to cache if not present)
-	idx.pageManager.PutPage(leaf.PageNum, leaf, true)
-	idx.pageManager.PutPage(newLeafPageNum, newLeaf, true)
+	idx.PageManager.PutPage(leaf.PageNum, leaf, true)
+	idx.PageManager.PutPage(newLeafPageNum, newLeaf, true)
 
 	// Pin new leaf AFTER it's in cache to prevent eviction during parent insertion
-	if err := idx.pageManager.PinPage(newLeafPageNum); err != nil {
+	if err := idx.PageManager.PinPage(newLeafPageNum); err != nil {
 		idx.logger.Warnf("Failed to pin new leaf %d: %v", newLeafPageNum, err)
 	}
 	defer func() {
-		if err := idx.pageManager.UnpinPage(newLeafPageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(newLeafPageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin new leaf %d: %v", newLeafPageNum, err)
 		}
 	}()
@@ -1026,7 +1026,7 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 
 	// Get the key that will be promoted to parent (first key of new leaf)
 	if len(newLeaf.Keys) == 0 {
-		idx.fileManager.DeallocatePage(newLeafPageNum)
+		idx.FileManager.DeallocatePage(newLeafPageNum)
 		return 0, false, 0, fmt.Errorf("new leaf has no keys after split")
 	}
 
@@ -1039,7 +1039,7 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 		newRootPageNum, err := createNewRoot(idx, leaf.PageNum, newLeafPageNum, promotedKey)
 		if err != nil {
 			// Clean up allocated page before returning error
-			idx.fileManager.DeallocatePage(newLeafPageNum)
+			idx.FileManager.DeallocatePage(newLeafPageNum)
 			return 0, false, 0, fmt.Errorf("failed to create new root: %w", err)
 		}
 
@@ -1048,8 +1048,8 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 		newLeaf.ParentPage = newRootPageNum
 
 		// Save updated leaf nodes
-		idx.pageManager.PutPage(leaf.PageNum, leaf, true)
-		idx.pageManager.PutPage(newLeafPageNum, newLeaf, true)
+		idx.PageManager.PutPage(leaf.PageNum, leaf, true)
+		idx.PageManager.PutPage(newLeafPageNum, newLeaf, true)
 
 		nodesCreated++ // We also created a new root
 
@@ -1060,13 +1060,13 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 	} else {
 		// Set parent pointer for new leaf before inserting into parent
 		newLeaf.ParentPage = leaf.ParentPage
-		idx.pageManager.PutPage(newLeafPageNum, newLeaf, true)
+		idx.PageManager.PutPage(newLeafPageNum, newLeaf, true)
 
 		// Insert promoted key into existing parent
 		newRootPageNum, err := insertIntoParent(idx, leaf.ParentPage, promotedKey, newLeafPageNum)
 		if err != nil {
 			// Clean up allocated page before returning error
-			idx.fileManager.DeallocatePage(newLeafPageNum)
+			idx.FileManager.DeallocatePage(newLeafPageNum)
 			return 0, false, 0, fmt.Errorf("failed to insert into parent: %w", err)
 		}
 
@@ -1089,7 +1089,7 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 //   - error: Any error that occurred during root creation
 func createNewRoot(idx *BTreeIndex, leftChildPageNum, rightChildPageNum uint32, separatorKey []byte) (uint32, error) {
 	// Allocate page for new root
-	newRootPageNum, err := idx.fileManager.AllocatePage()
+	newRootPageNum, err := idx.FileManager.AllocatePage()
 	if err != nil {
 		return 0, fmt.Errorf("failed to allocate new root page: %w", err)
 	}
@@ -1120,14 +1120,14 @@ func createNewRoot(idx *BTreeIndex, leftChildPageNum, rightChildPageNum uint32, 
 	// to avoid redundant disk I/O and potential race conditions
 
 	// Save new root to storage (adds to cache)
-	idx.pageManager.PutPage(newRootPageNum, newRoot, true)
+	idx.PageManager.PutPage(newRootPageNum, newRoot, true)
 
 	// Pin new root AFTER it's in cache
-	if err := idx.pageManager.PinPage(newRootPageNum); err != nil {
+	if err := idx.PageManager.PinPage(newRootPageNum); err != nil {
 		idx.logger.Warnf("Failed to pin new root %d: %v", newRootPageNum, err)
 	}
 	defer func() {
-		if err := idx.pageManager.UnpinPage(newRootPageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(newRootPageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin new root %d: %v", newRootPageNum, err)
 		}
 	}()
@@ -1153,8 +1153,8 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 		parentPageNum, string(key), rightChildPageNum)
 
 	// Load parent node
-	parentData, err := idx.pageManager.GetPage(parentPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	parentData, err := idx.PageManager.GetPage(parentPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return parentPageNum, fmt.Errorf("failed to load parent page %d: %w", parentPageNum, err)
@@ -1173,11 +1173,11 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 		parentPageNum, parent.KeyCount)
 
 	// Pin parent page during modification
-	if err := idx.pageManager.PinPage(parentPageNum); err != nil {
+	if err := idx.PageManager.PinPage(parentPageNum); err != nil {
 		return parentPageNum, fmt.Errorf("failed to pin parent page %d: %w", parentPageNum, err)
 	}
 	defer func() {
-		if err := idx.pageManager.UnpinPage(parentPageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(parentPageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin parent page %d: %v", parentPageNum, err)
 		}
 	}()
@@ -1207,13 +1207,13 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 		parentPageNum, parent.KeyCount, string(key), insertPos, parent)
 
 	// Check if parent node is now full and needs splitting
-	maxKeys := calculateMaxKeysForNode(parent, idx.metadata.PageSize)
+	maxKeys := calculateMaxKeysForNode(parent, idx.Metadata.PageSize)
 	if parent.KeyCount > maxKeys {
 		idx.logger.Debugf("Parent node %d is full (%d > %d) after insertion, triggering split",
 			parentPageNum, parent.KeyCount, maxKeys)
 
 		// Save current state before split
-		idx.pageManager.PutPage(parentPageNum, parent, true)
+		idx.PageManager.PutPage(parentPageNum, parent, true)
 
 		// Split the parent internal node
 		// This may recursively split up the tree if ancestors are also full
@@ -1227,7 +1227,7 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 	}
 
 	// Save updated parent
-	idx.pageManager.PutPage(parentPageNum, parent, true)
+	idx.PageManager.PutPage(parentPageNum, parent, true)
 
 	idx.logger.Infof("insertIntoParent SAVED: parent %d with %d keys marked dirty (ptr=%p)",
 		parentPageNum, parent.KeyCount, parent)
@@ -1293,11 +1293,11 @@ func updateInternalAfterMerge(idx *BTreeIndex, internal *BTreeNode, oldChildPage
 	}
 
 	// Pin internal page during modification
-	if err := idx.pageManager.PinPage(internal.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(internal.PageNum); err != nil {
 		return 0, false, nodesDeleted, fmt.Errorf("failed to pin internal page %d: %w", internal.PageNum, err)
 	}
 	defer func() {
-		if err := idx.pageManager.UnpinPage(internal.PageNum); err != nil {
+		if err := idx.PageManager.UnpinPage(internal.PageNum); err != nil {
 			idx.logger.Warnf("Failed to unpin internal page %d: %v", internal.PageNum, err)
 		}
 	}()
@@ -1323,7 +1323,7 @@ func updateInternalAfterMerge(idx *BTreeIndex, internal *BTreeNode, oldChildPage
 	}
 
 	// Mark the internal node as dirty
-	idx.pageManager.PutPage(internal.PageNum, internal, true)
+	idx.PageManager.PutPage(internal.PageNum, internal, true)
 	// Log the update
 	idx.logger.Debugf("Updating internal node %d after merge (placeholder)", internal.PageNum)
 

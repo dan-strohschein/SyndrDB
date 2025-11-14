@@ -27,6 +27,7 @@ package planner
 import (
 	"fmt"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
 
 	"go.uber.org/zap"
@@ -151,6 +152,11 @@ func (qr *QueryRouter) routeSimpleQuery(
 		return nil, nil, fmt.Errorf("failed to create document scanner for bundle '%s': %w", query.FromBundle, err)
 	}
 
+	// Handle GROUP BY queries with manual tree construction
+	if query.HasGroupBy() {
+		return qr.routeGroupByQuery(query, database, bundle, docScanner)
+	}
+
 	// If there's no WHERE clause, create a simple full scan
 	if !query.HasWhere() {
 		fullScan := &FullScanNode{
@@ -177,6 +183,71 @@ func (qr *QueryRouter) routeSimpleQuery(
 	}
 
 	return plan.RootNode, plan.IndexesUsed, nil
+}
+
+// routeGroupByQuery handles GROUP BY queries by creating a base execution tree
+// PHASE 3: GROUP BY query routing
+//
+// Execution tree structure:
+//
+//	ScanNode → FilterNode (if WHERE exists) → [AggregationNode added by PlanBuilder]
+//
+// The QueryRouter only creates the base tree (scan + filter).
+// The PlanBuilder will add AggregationNode, SortNode, and LimitNode on top.
+//
+// TODO: Phase 2 - Add intelligent index selection for GROUP BY fields to optimize aggregation
+// TODO: Phase 2 - Consider cost-based optimization for choosing between index scan vs full scan
+// TODO: Phase 2 - Add support for covering indexes that include both WHERE and GROUP BY fields
+func (qr *QueryRouter) routeGroupByQuery(
+	query *queryparser.UnifiedSelectQuery,
+	database *models.Database,
+	bundle *models.Bundle,
+	docScanner documentscanner.DocumentScannerInterface,
+) (ExecutionNode, []string, error) {
+
+	qr.logger.Debugf("Routing GROUP BY query for bundle '%s'", query.FromBundle)
+
+	var rootNode ExecutionNode
+	var indexesUsed []string
+
+	// Step 1: Create scan node (either index scan or full scan)
+	// TODO: Phase 2 - Optimize scan selection based on WHERE clause and GROUP BY fields
+	// For now, I'll create a full scan as the base
+	scanNode := &FullScanNode{
+		Bundle:           bundle,
+		Cost:             float64(bundle.TotalDocuments),
+		EstimatedRows:    int(bundle.TotalDocuments),
+		Logger:           qr.logger,
+		BundleServiceInt: qr.bundleService,
+		DocumentScanner:  docScanner,
+	}
+
+	rootNode = scanNode
+
+	// Step 2: Add FilterNode if WHERE clause exists
+	if query.HasWhere() {
+		qr.logger.Debug("Adding FilterNode for WHERE clause in GROUP BY query")
+
+		// For now, use the direct clauses from the WHERE group
+		// TODO: Phase 2 - I should enhance FilterNode to handle nested WhereGroup subgroups
+		// Currently FilterNode only handles flat []WhereClause, not nested subgroups
+		filterNode := &FilterNode{
+			Child:         scanNode,
+			Clauses:       query.WhereClause.Clauses,
+			Cost:          scanNode.GetCost(),
+			EstimatedRows: scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
+			Logger:        qr.logger,
+		}
+
+		rootNode = filterNode
+
+		// TODO: Phase 2 - Track which indexes were considered for the WHERE clause
+		// TODO: Phase 2 - Add index statistics to improve EstimatedRows calculation
+	}
+
+	qr.logger.Debugf("Created base execution tree for GROUP BY")
+
+	return rootNode, indexesUsed, nil
 }
 
 // convertToJoinQuery converts UnifiedSelectQuery to SelectJoinQuery

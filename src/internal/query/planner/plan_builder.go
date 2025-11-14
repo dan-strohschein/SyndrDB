@@ -140,12 +140,13 @@ func (pb *PlanBuilder) addAggregationNode(
 ) (ExecutionNode, error) {
 
 	// Create aggregation node with GROUP BY clause
+	// Note: ORDER BY is handled separately by SortNode (added after aggregation)
 	aggNode := NewAggregationNode(
 		child,
 		query.GroupBy,
 		query.AggregateFields,
 		query.HavingClause,
-		query.OrderBy,
+		nil, // OrderBy handled by SortNode
 		pb.logger,
 	)
 

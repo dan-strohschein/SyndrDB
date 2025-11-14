@@ -96,9 +96,9 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 	// Create BTree index instance
 	index := &BTreeIndex{
 		FilePath:    indexFilePath,
-		metadata:    metadata,
-		fileManager: fileManager,
-		pageManager: pageManager,
+		Metadata:    metadata,
+		FileManager: fileManager,
+		PageManager: pageManager,
 		rootPageNum: metadata.RootPageNum, //1, // Page 0 is metadata, root starts at page 1
 		mutex:       sync.RWMutex{},
 		isOpen:      true,
@@ -192,9 +192,9 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 	// Create BTree index instance
 	index := &BTreeIndex{
 		FilePath:    filePath,
-		metadata:    metadata,
-		fileManager: fileManager,
-		pageManager: pageManager,
+		Metadata:    metadata,
+		FileManager: fileManager,
+		PageManager: pageManager,
 		rootPageNum: metadata.RootPageNum,
 		mutex:       sync.RWMutex{},
 		isOpen:      true,
@@ -247,7 +247,7 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 //
 // TODO: I could add parallel page validation for faster recovery on large indexes
 func (idx *BTreeIndex) performCrashRecovery() error {
-	idx.logger.Infof("Starting crash recovery for index '%s'", idx.metadata.IndexName)
+	idx.logger.Infof("Starting crash recovery for index '%s'", idx.Metadata.IndexName)
 
 	// Step 1: Validate file header magic number
 	if err := idx.validateFileHeader(); err != nil {
@@ -317,9 +317,9 @@ func (idx *BTreeIndex) validateFileHeader() error {
 	// TODO: I could add version compatibility checking to support index format migrations
 	expectedMagic := uint32(0x42545245) // "BTRE" in hex
 
-	if idx.metadata.MagicNumber != expectedMagic {
+	if idx.Metadata.MagicNumber != expectedMagic {
 		return fmt.Errorf("invalid magic number: got 0x%X, expected 0x%X",
-			idx.metadata.MagicNumber, expectedMagic)
+			idx.Metadata.MagicNumber, expectedMagic)
 	}
 
 	idx.logger.Debugf("File header validation passed: magic number 0x%X", expectedMagic)
@@ -347,7 +347,7 @@ func (idx *BTreeIndex) validateFileHeader() error {
 // TODO: I could add parallel validation using goroutines for large indexes
 func (idx *BTreeIndex) verifyPageChecksums() ([]uint32, error) {
 	corruptPages := []uint32{}
-	totalPages := idx.metadata.TotalPages
+	totalPages := idx.Metadata.TotalPages
 
 	idx.logger.Debugf("Verifying checksums for %d pages", totalPages)
 
@@ -358,7 +358,7 @@ func (idx *BTreeIndex) verifyPageChecksums() ([]uint32, error) {
 		}
 
 		// Read page from disk
-		node, err := idx.fileManager.ReadPage(pageNum)
+		node, err := idx.FileManager.ReadPage(pageNum)
 		if err != nil {
 			idx.logger.Warnf("Failed to read page %d: %v", pageNum, err)
 			corruptPages = append(corruptPages, pageNum)
@@ -471,7 +471,7 @@ func (idx *BTreeIndex) repairCorruptPages(corruptPages []uint32) error {
 
 		// Mark page as free if repair not possible
 		idx.logger.Warnf("Marking corrupt page %d as free (repair not possible)", pageNum)
-		idx.metadata.FreePages = append(idx.metadata.FreePages, pageNum)
+		idx.Metadata.FreePages = append(idx.Metadata.FreePages, pageNum)
 		repairedCount++
 	}
 
@@ -532,7 +532,7 @@ func (idx *BTreeIndex) validateNodeRecursive(pageNum uint32, level uint32, visit
 	visitedPages[pageNum] = true
 
 	// Read node
-	node, err := idx.fileManager.ReadPage(pageNum)
+	node, err := idx.FileManager.ReadPage(pageNum)
 	if err != nil {
 		return fmt.Errorf("failed to read page %d: %w", pageNum, err)
 	}
@@ -604,7 +604,7 @@ func (idx *BTreeIndex) replayWALEntries() error {
 		return fmt.Errorf("WAL manager not available for replay")
 	}
 
-	idx.logger.Infof("Replaying WAL entries for index '%s'", idx.metadata.IndexName)
+	idx.logger.Infof("Replaying WAL entries for index '%s'", idx.Metadata.IndexName)
 
 	// TODO: I need to implement GetUncommittedEntries method on BTreeWALManager
 	// For now, log that WAL replay is not yet implemented
@@ -633,9 +633,9 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 		return fmt.Errorf("document ID cannot be empty")
 	}
 
-	if uint32(len(key)) > idx.metadata.PageSize/4 {
+	if uint32(len(key)) > idx.Metadata.PageSize/4 {
 		return fmt.Errorf("key length (%d) exceeds maximum allowed (%d)",
-			len(key), idx.metadata.PageSize/4)
+			len(key), idx.Metadata.PageSize/4)
 	}
 
 	idx.mutex.Lock()
@@ -648,7 +648,7 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 		lsn := idx.nextLSN
 		idx.nextLSN++ // Increment LSN for next operation
 
-		if err := idx.walManager.LogInsert(idx.metadata.IndexName, idx.bundleName, key, documentID, lsn); err != nil {
+		if err := idx.walManager.LogInsert(idx.Metadata.IndexName, idx.bundleName, key, documentID, lsn); err != nil {
 			idx.logger.Errorf("Failed to log insert to WAL: %v", err)
 			return fmt.Errorf("WAL insert failed: %w", err)
 		}
@@ -656,13 +656,13 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 		idx.logger.Debugf("Logged insert to WAL: LSN=%d, key=%s, docID=%s", lsn, string(key), documentID)
 	}
 
-	idx.logger.Infof("DEBUG: Insert called with rootPageNum=%d, metadata.RootPageNum=%d", idx.rootPageNum, idx.metadata.RootPageNum)
+	idx.logger.Infof("DEBUG: Insert called with rootPageNum=%d, metadata.RootPageNum=%d", idx.rootPageNum, idx.Metadata.RootPageNum)
 
 	// Validate root page number before proceeding
 	if idx.rootPageNum == 0 {
 		idx.logger.Errorf("Invalid root page number: %d, attempting to recover from metadata", idx.rootPageNum)
-		if idx.metadata.RootPageNum > 0 {
-			idx.rootPageNum = idx.metadata.RootPageNum
+		if idx.Metadata.RootPageNum > 0 {
+			idx.rootPageNum = idx.Metadata.RootPageNum
 			idx.logger.Infof("Recovered root page number from metadata: %d", idx.rootPageNum)
 		} else {
 			return fmt.Errorf("invalid root page number: metadata also indicates root page 0")
@@ -672,14 +672,14 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 	idx.logger.Debugf("Inserting key '%s' with document ID '%s'", string(key), documentID)
 
 	// Check for uniqueness if required
-	if idx.metadata.IsUnique {
+	if idx.Metadata.IsUnique {
 		existing, totalNodesVisited, err := idx.searchInternal(key, idx.rootPageNum)
 		if err != nil {
 			return fmt.Errorf("failed to check for existing key: %w", err)
 		}
 
 		// Update search metrics for uniqueness check
-		idx.metadata.UpdateSearchMetrics(len(existing), totalNodesVisited)
+		idx.Metadata.UpdateSearchMetrics(len(existing), totalNodesVisited)
 
 		// Log performance metrics for uniqueness check
 		idx.logger.Debugf("Uniqueness check for key '%s': visited %d nodes, found %d existing entries",
@@ -711,7 +711,7 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 		idx.logger.Warnf("ROOT CHANGE: Root page changed from %d to %d due to insertion",
 			idx.rootPageNum, newRootPageNum)
 		idx.rootPageNum = newRootPageNum
-		idx.metadata.RootPageNum = newRootPageNum
+		idx.Metadata.RootPageNum = newRootPageNum
 	}
 
 	// Log structural changes for monitoring and debugging
@@ -722,16 +722,16 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 	// Track nodes created for maintenance and statistics
 	if nodesCreated > 0 {
 		idx.logger.Debugf("Insertion resulted in %d new nodes being created", nodesCreated)
-		idx.metadata.TotalNodes += uint32(nodesCreated)
+		idx.Metadata.TotalNodes += uint32(nodesCreated)
 
 		// Update fragmentation metrics after node creation
 		idx.updateFragmentationAfterInsertion(nodesCreated)
 	}
 
 	// Update metadata statistics
-	idx.metadata.IncrementRecordCount()
-	idx.metadata.UpdateStatistics("insert")
-	idx.metadata.UpdateInsertionMetrics(nodesCreated, affectsParentNode)
+	idx.Metadata.IncrementRecordCount()
+	idx.Metadata.UpdateStatistics("insert")
+	idx.Metadata.UpdateInsertionMetrics(nodesCreated, affectsParentNode)
 
 	// Check if tree needs maintenance after significant structural changes
 	if affectsParentNode || nodesCreated > 0 {
@@ -739,7 +739,7 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 	}
 
 	// Write updated metadata
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		idx.logger.Warnf("Failed to update metadata after insert: %v", err)
 	}
 
@@ -779,20 +779,20 @@ func (meta *BTreeMetadata) UpdateInsertionMetrics(nodesCreated int, structuralCh
 // Parameters:
 //   - nodesCreated: Number of nodes that were created during insertion
 func (idx *BTreeIndex) updateFragmentationAfterInsertion(nodesCreated int) {
-	if idx.metadata.TotalNodes == 0 {
-		idx.metadata.FragmentationPct = 0.0
+	if idx.Metadata.TotalNodes == 0 {
+		idx.Metadata.FragmentationPct = 0.0
 		return
 	}
 
 	// Node creation typically reduces fragmentation by filling existing space
 	// or creating well-balanced new nodes
-	fragmentationReduction := float64(nodesCreated) / float64(idx.metadata.TotalNodes) * 5.0 // Small reduction per new node
+	fragmentationReduction := float64(nodesCreated) / float64(idx.Metadata.TotalNodes) * 5.0 // Small reduction per new node
 
 	// Update fragmentation percentage (clamped to 0.0 minimum)
-	idx.metadata.FragmentationPct = MaxFloat(0.0, idx.metadata.FragmentationPct-fragmentationReduction)
+	idx.Metadata.FragmentationPct = MaxFloat(0.0, idx.Metadata.FragmentationPct-fragmentationReduction)
 
 	idx.logger.Debugf("Updated fragmentation: reduced by %.2f%% to %.2f%% after creating %d nodes",
-		fragmentationReduction, idx.metadata.FragmentationPct, nodesCreated)
+		fragmentationReduction, idx.Metadata.FragmentationPct, nodesCreated)
 }
 
 // Delete removes a key-value pair from the BTree index
@@ -825,7 +825,7 @@ func (idx *BTreeIndex) Delete(key []byte, documentID string) error {
 		lsn := idx.nextLSN
 		idx.nextLSN++ // Increment LSN for next operation
 
-		if err := idx.walManager.LogDelete(idx.metadata.IndexName, idx.bundleName, key, documentID, lsn); err != nil {
+		if err := idx.walManager.LogDelete(idx.Metadata.IndexName, idx.bundleName, key, documentID, lsn); err != nil {
 			idx.logger.Errorf("Failed to log delete to WAL: %v", err)
 			return fmt.Errorf("WAL delete failed: %w", err)
 		}
@@ -846,7 +846,7 @@ func (idx *BTreeIndex) Delete(key []byte, documentID string) error {
 		idx.logger.Debugf("Root page changed from %d to %d due to deletion",
 			idx.rootPageNum, newRootPageNum)
 		idx.rootPageNum = newRootPageNum
-		idx.metadata.RootPageNum = newRootPageNum
+		idx.Metadata.RootPageNum = newRootPageNum
 	}
 
 	// Log structural changes for monitoring and debugging
@@ -857,16 +857,16 @@ func (idx *BTreeIndex) Delete(key []byte, documentID string) error {
 	// Track nodes deleted for maintenance and statistics
 	if nodesDeleted > 0 {
 		idx.logger.Debugf("Deletion resulted in %d nodes being removed/merged", nodesDeleted)
-		idx.metadata.TotalNodes -= uint32(nodesDeleted)
+		idx.Metadata.TotalNodes -= uint32(nodesDeleted)
 
 		// Update fragmentation metrics
 		idx.updateFragmentationAfterDeletion(nodesDeleted)
 	}
 
 	// Update metadata statistics
-	idx.metadata.DecrementRecordCount()
-	idx.metadata.UpdateStatistics("delete")
-	idx.metadata.UpdateDeletionMetrics(nodesDeleted, affectsParentNode)
+	idx.Metadata.DecrementRecordCount()
+	idx.Metadata.UpdateStatistics("delete")
+	idx.Metadata.UpdateDeletionMetrics(nodesDeleted, affectsParentNode)
 
 	// Check if tree needs maintenance after significant structural changes
 	if affectsParentNode || nodesDeleted > 0 {
@@ -874,7 +874,7 @@ func (idx *BTreeIndex) Delete(key []byte, documentID string) error {
 	}
 
 	// Write updated metadata
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		idx.logger.Warnf("Failed to update metadata after delete: %v", err)
 	}
 
@@ -889,19 +889,19 @@ func (idx *BTreeIndex) Delete(key []byte, documentID string) error {
 // Parameters:
 //   - nodesDeleted: Number of nodes that were deleted or merged
 func (idx *BTreeIndex) updateFragmentationAfterDeletion(nodesDeleted int) {
-	if idx.metadata.TotalNodes == 0 {
-		idx.metadata.FragmentationPct = 0.0
+	if idx.Metadata.TotalNodes == 0 {
+		idx.Metadata.FragmentationPct = 0.0
 		return
 	}
 
 	// Calculate fragmentation reduction due to node consolidation
-	fragmentationReduction := float64(nodesDeleted) / float64(idx.metadata.TotalNodes) * 100.0
+	fragmentationReduction := float64(nodesDeleted) / float64(idx.Metadata.TotalNodes) * 100.0
 
 	// Update fragmentation percentage (clamped to 0.0 minimum)
-	idx.metadata.FragmentationPct = MaxFloat(0.0, idx.metadata.FragmentationPct-fragmentationReduction)
+	idx.Metadata.FragmentationPct = MaxFloat(0.0, idx.Metadata.FragmentationPct-fragmentationReduction)
 
 	idx.logger.Debugf("Updated fragmentation: reduced by %.2f%% to %.2f%% after deleting %d nodes",
-		fragmentationReduction, idx.metadata.FragmentationPct, nodesDeleted)
+		fragmentationReduction, idx.Metadata.FragmentationPct, nodesDeleted)
 }
 
 // checkMaintenanceNeeded determines if the index needs maintenance after structural changes
@@ -910,20 +910,20 @@ func (idx *BTreeIndex) updateFragmentationAfterDeletion(nodesDeleted int) {
 func (idx *BTreeIndex) checkMaintenanceNeeded() {
 	// Throttle: only check every 1000 operations to avoid expensive calculateFillFactor() calls
 	const maintenanceCheckInterval = 1000
-	idx.metadata.OperationsSinceLastCheck++
+	idx.Metadata.OperationsSinceLastCheck++
 
-	if idx.metadata.OperationsSinceLastCheck < maintenanceCheckInterval {
+	if idx.Metadata.OperationsSinceLastCheck < maintenanceCheckInterval {
 		return // Skip expensive checks
 	}
 
 	// Reset counter
-	idx.metadata.OperationsSinceLastCheck = 0
+	idx.Metadata.OperationsSinceLastCheck = 0
 
 	// Check if fragmentation is too high
-	if idx.metadata.FragmentationPct > 25.0 {
+	if idx.Metadata.FragmentationPct > 25.0 {
 		idx.logger.Infof("High fragmentation detected (%.2f%%), maintenance recommended",
-			idx.metadata.FragmentationPct)
-		idx.metadata.MaintenanceNeeded = true
+			idx.Metadata.FragmentationPct)
+		idx.Metadata.MaintenanceNeeded = true
 	}
 
 	// Check if tree height is becoming unbalanced
@@ -936,7 +936,7 @@ func (idx *BTreeIndex) checkMaintenanceNeeded() {
 
 	if fillFactor < 0.5 {
 		idx.logger.Infof("Low fill factor detected (%.2f%%), compaction recommended", fillFactor)
-		idx.metadata.CompactionNeeded = true
+		idx.Metadata.CompactionNeeded = true
 	}
 }
 
@@ -968,8 +968,8 @@ func (idx *BTreeIndex) Search(key []byte) ([]string, error) {
 	}
 
 	// Update metadata statistics
-	idx.metadata.UpdateStatistics("search")
-	idx.metadata.UpdateSearchMetrics(len(results), totalNodesVisited)
+	idx.Metadata.UpdateStatistics("search")
+	idx.Metadata.UpdateSearchMetrics(len(results), totalNodesVisited)
 
 	idx.logger.Debugf("Search for key '%s' returned %d results", string(key), len(results))
 
@@ -1036,8 +1036,8 @@ func (idx *BTreeIndex) RangeSearchWithBounds(startKey, endKey []byte, excludeSta
 	}
 
 	// Update metadata statistics with detailed metrics
-	idx.metadata.UpdateStatistics("search")
-	idx.metadata.UpdateSearchMetrics(keysFound, nodesVisited)
+	idx.Metadata.UpdateStatistics("search")
+	idx.Metadata.UpdateSearchMetrics(keysFound, nodesVisited)
 
 	// Log performance metrics for monitoring and optimization
 	idx.logger.Debugf("Range search completed: found %d results from %d keys, visited %d nodes",
@@ -1090,18 +1090,18 @@ func (idx *BTreeIndex) Close() error {
 	idx.logger.Debugf("Closing BTree index '%s'", idx.FilePath)
 
 	// Flush any dirty pages
-	if err := idx.pageManager.Flush(idx.fileManager.WritePage); err != nil {
+	if err := idx.PageManager.Flush(idx.FileManager.WritePage); err != nil {
 		idx.logger.Warnf("Failed to flush pages during close: %v", err)
 	}
 
 	// Update and write final metadata
-	idx.metadata.LastModified = time.Now()
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	idx.Metadata.LastModified = time.Now()
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		idx.logger.Warnf("Failed to write metadata during close: %v", err)
 	}
 
 	// Close file manager
-	if err := idx.fileManager.Close(); err != nil {
+	if err := idx.FileManager.Close(); err != nil {
 		return fmt.Errorf("failed to close file manager: %w", err)
 	}
 
@@ -1128,7 +1128,7 @@ func (idx *BTreeIndex) GetStats() *BTreeStats {
 		idx.logger.Warnf("Failed to calculate fill factor: %v", err)
 		fillFactor = 0.0
 	}
-	cacheStats := idx.pageManager.GetCacheStats()
+	cacheStats := idx.PageManager.GetCacheStats()
 
 	avgKeyLength, err := idx.calculateAverageKeyLength()
 	if err != nil {
@@ -1137,18 +1137,57 @@ func (idx *BTreeIndex) GetStats() *BTreeStats {
 	}
 
 	return &BTreeStats{
-		TotalRecords:      idx.metadata.TotalRecords,
-		TotalNodes:        idx.metadata.TotalNodes,
-		TreeHeight:        idx.metadata.TreeHeight,
+		TotalRecords:      idx.Metadata.TotalRecords,
+		TotalNodes:        idx.Metadata.TotalNodes,
+		TreeHeight:        idx.Metadata.TreeHeight,
 		AverageKeyLength:  avgKeyLength,
 		FillFactor:        fillFactor,
-		FragmentationPct:  idx.metadata.FragmentationPct,
+		FragmentationPct:  idx.Metadata.FragmentationPct,
 		CacheHitRate:      cacheStats.HitRate,
-		TotalSearches:     idx.metadata.SearchCount,
-		TotalInserts:      idx.metadata.InsertCount,
-		TotalDeletes:      idx.metadata.DeleteCount,
+		TotalSearches:     idx.Metadata.SearchCount,
+		TotalInserts:      idx.Metadata.InsertCount,
+		TotalDeletes:      idx.Metadata.DeleteCount,
 		AverageSearchTime: 0, // Would need to track timing
 		LastUpdated:       time.Now(),
+	}
+}
+
+// GetCacheStats returns detailed cache performance statistics
+// Returns:
+//   - *CacheStats: Current cache statistics including hits, misses, evictions
+func (idx *BTreeIndex) GetCacheStats() *CacheStats {
+	if !idx.isOpen {
+		return nil
+	}
+	return idx.PageManager.GetPageManagerCacheStats()
+}
+
+// DeletionStats represents tombstone and deletion-related metrics
+type DeletionStats struct {
+	TotalTombstones     uint64  // Total number of tombstones
+	TotalRecords        uint64  // Total number of records
+	TombstoneRatio      float64 // Ratio of tombstones to live records
+	CompactionNeeded    bool    // Whether compaction is needed
+	NodesNeedCompaction uint32  // Number of nodes needing compaction
+}
+
+// GetDeletionStats returns deletion and tombstone-related statistics
+// Returns:
+//   - *DeletionStats: Current deletion statistics
+func (idx *BTreeIndex) GetDeletionStats() *DeletionStats {
+	if !idx.isOpen {
+		return nil
+	}
+
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+
+	return &DeletionStats{
+		TotalTombstones:     idx.Metadata.TotalTombstones,
+		TotalRecords:        idx.Metadata.TotalRecords,
+		TombstoneRatio:      idx.Metadata.TombstoneRatio,
+		CompactionNeeded:    idx.Metadata.CompactionNeeded,
+		NodesNeedCompaction: idx.Metadata.NodesNeedCompaction,
 	}
 }
 
@@ -1204,16 +1243,16 @@ func (idx *BTreeIndex) Compact() error {
 	}
 
 	// Update metadata
-	idx.metadata.LastCompaction = time.Now()
-	idx.metadata.FragmentationPct = 0.0 // Reset after compaction
-	idx.metadata.CompactionCount++
-	idx.metadata.CompactionNeeded = false
-	idx.metadata.NodesNeedCompaction = 0
-	idx.metadata.TotalTombstones = 0  // Reset tombstone count after compaction
-	idx.metadata.TombstoneRatio = 0.0 // Reset tombstone ratio
+	idx.Metadata.LastCompaction = time.Now()
+	idx.Metadata.FragmentationPct = 0.0 // Reset after compaction
+	idx.Metadata.CompactionCount++
+	idx.Metadata.CompactionNeeded = false
+	idx.Metadata.NodesNeedCompaction = 0
+	idx.Metadata.TotalTombstones = 0  // Reset tombstone count after compaction
+	idx.Metadata.TombstoneRatio = 0.0 // Reset tombstone ratio
 
 	// Write updated metadata
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		return fmt.Errorf("failed to update metadata after compaction: %w", err)
 	}
 
@@ -1227,7 +1266,7 @@ func (idx *BTreeIndex) Compact() error {
 // initializeIndex creates the initial index structure
 func (idx *BTreeIndex) initializeIndex() error {
 	// Check if index file already has valid data (for crash recovery)
-	existingMetadata, err := idx.fileManager.ReadMetadata()
+	existingMetadata, err := idx.FileManager.ReadMetadata()
 	if err == nil && existingMetadata != nil {
 		idx.logger.Debugf("Read existing metadata: RootPageNum=%d, TotalRecords=%d", existingMetadata.RootPageNum, existingMetadata.TotalRecords)
 
@@ -1235,7 +1274,7 @@ func (idx *BTreeIndex) initializeIndex() error {
 			// Index file exists with valid metadata - use existing data (recovery scenario)
 			idx.logger.Infof("Index file exists with valid metadata, recovering from existing data (root page: %d, records: %d)",
 				existingMetadata.RootPageNum, existingMetadata.TotalRecords)
-			idx.metadata = existingMetadata
+			idx.Metadata = existingMetadata
 			idx.rootPageNum = existingMetadata.RootPageNum
 			return nil
 		}
@@ -1247,24 +1286,24 @@ func (idx *BTreeIndex) initializeIndex() error {
 	idx.logger.Debugf("Initializing new index file with fresh root node")
 
 	// Ensure metadata has correct root page number
-	if idx.metadata.RootPageNum == 0 {
-		idx.metadata.RootPageNum = 1 // Page 0 is metadata, root starts at page 1
+	if idx.Metadata.RootPageNum == 0 {
+		idx.Metadata.RootPageNum = 1 // Page 0 is metadata, root starts at page 1
 	}
 
 	// Ensure index root page number matches metadata
-	idx.rootPageNum = idx.metadata.RootPageNum
+	idx.rootPageNum = idx.Metadata.RootPageNum
 
 	// Write metadata to page 0
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		return fmt.Errorf("failed to write initial metadata: %w", err)
 	}
 
 	// Create root node (empty leaf node)
-	rootNode := NewBTreeNode(true, idx.metadata.PageSize) // Start with leaf node
+	rootNode := NewBTreeNode(true, idx.Metadata.PageSize) // Start with leaf node
 	rootNode.PageNum = idx.rootPageNum
 
 	// Write root node to page 1
-	if err := idx.fileManager.WritePage(idx.rootPageNum, rootNode); err != nil {
+	if err := idx.FileManager.WritePage(idx.rootPageNum, rootNode); err != nil {
 		return fmt.Errorf("failed to write initial root node: %w", err)
 	}
 
@@ -1329,14 +1368,14 @@ func (idx *BTreeIndex) checkTreeBalance() error {
 		return fmt.Errorf("tree balance validation failed: %v", result.Errors)
 	}
 	idx.logger.Debugf("Tree balance validation passed: height %d, nodes %d",
-		idx.metadata.TreeHeight, idx.metadata.TotalNodes)
+		idx.Metadata.TreeHeight, idx.Metadata.TotalNodes)
 
-	idx.metadata.TreeHeight = result.Height
-	idx.metadata.TotalNodes = result.TotalNodes
-	idx.metadata.FragmentationPct = result.FragmentationPct
-	idx.metadata.FillFactor = result.FillFactor
-	idx.metadata.AverageKeyLength = result.AverageKeyLength
-	idx.metadata.LastValidation = time.Now()
+	idx.Metadata.TreeHeight = result.Height
+	idx.Metadata.TotalNodes = result.TotalNodes
+	idx.Metadata.FragmentationPct = result.FragmentationPct
+	idx.Metadata.FillFactor = result.FillFactor
+	idx.Metadata.AverageKeyLength = result.AverageKeyLength
+	idx.Metadata.LastValidation = time.Now()
 	return nil
 }
 

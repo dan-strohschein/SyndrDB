@@ -479,7 +479,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	logger.Infof("Processing SELECT query: %s", fullCommand)
 
 	// STEP 1: Parse the query using parseQuery (respects feature flag, has fallback)
-	query, err := parseQuery(fullCommand, logger)
+	query, err := ParseQuery(fullCommand, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse query: %w", err)
 	}

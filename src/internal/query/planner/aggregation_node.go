@@ -45,6 +45,9 @@ package planner
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/executor"
 	"syndrdb/src/internal/query/queryparser"
@@ -155,23 +158,23 @@ func NewAggregationNode(
 }
 
 // Execute performs the aggregation operation
-// PHASE 2: Main execution method for AggregationNode
+// PHASE 3: Main execution method for AggregationNode
 //
 // Execution flow:
 // 1. Execute child node to get input documents
-// 2. Convert query components to SelectQueryWithGroupBy format
-// 3. Create GroupByExecutor with proper configuration
-// 4. Delegate to GroupByExecutor for aggregation
+// 2. Execute aggregation based on strategy (hash vs sort)
+// 3. Apply HAVING clause filtering if present
+// 4. Convert group results to documents
 // 5. Return aggregated results
 //
 // Returns:
 //   - map[string]*models.Document: Aggregated group documents
 //   - error: Any error during execution
 func (n *AggregationNode) Execute() (map[string]*models.Document, error) {
-	n.Logger.Infof("Executing AggregationNode with %d GROUP BY fields, %d aggregates",
-		len(n.GroupBy.Fields), len(n.AggregateFields))
+	n.Logger.Infof("Executing AggregationNode with %d GROUP BY fields, %d aggregates, strategy=%s",
+		len(n.GroupBy.Fields), len(n.AggregateFields), n.executionStrategy.String())
 
-	// Execute child node to get input documents
+	// Execute child node to get input documents (WHERE already applied by FilterNode)
 	documents, err := n.Child.Execute()
 	if err != nil {
 		return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
@@ -185,17 +188,30 @@ func (n *AggregationNode) Execute() (map[string]*models.Document, error) {
 		return documents, nil
 	}
 
-	// Build SelectQueryWithGroupBy structure for GroupByExecutor
-	// This is an adapter to convert unified query format to legacy format
-	groupByQuery := n.buildGroupByQuery()
+	// Execute aggregation based on chosen strategy
+	var groupResults map[groupKey]*groupResult
+	switch n.executionStrategy {
+	case queryparser.HashAggregate:
+		groupResults, err = n.executeHashAggregate(documents)
+	case queryparser.SortGroupAggregate:
+		groupResults, err = n.executeSortGroupAggregate(documents)
+	default:
+		return nil, fmt.Errorf("unsupported execution strategy: %s", n.executionStrategy.String())
+	}
 
-	// Create GroupByExecutor (reuses existing, well-tested component)
-	n.executor = executor.NewGroupByExecutor(groupByQuery, n.Logger)
-
-	// Delegate to GroupByExecutor for actual aggregation
-	resultDocs, err := n.executor.Execute(documents)
 	if err != nil {
-		return nil, fmt.Errorf("AggregationNode: aggregation execution failed: %w", err)
+		return nil, fmt.Errorf("AggregationNode: aggregation failed: %w", err)
+	}
+
+	// Convert group results to documents first (needed for HAVING evaluation)
+	resultDocs := n.convertGroupResultsToDocuments(groupResults)
+
+	// Apply HAVING clause if present
+	if n.HavingClause != nil && n.HavingClause.Condition != "" {
+		resultDocs, err = n.applyHavingClause(resultDocs)
+		if err != nil {
+			return nil, fmt.Errorf("AggregationNode: HAVING clause failed: %w", err)
+		}
 	}
 
 	n.Logger.Infof("AggregationNode completed: produced %d groups from %d documents",
@@ -204,26 +220,390 @@ func (n *AggregationNode) Execute() (map[string]*models.Document, error) {
 	return resultDocs, nil
 }
 
-// buildGroupByQuery converts unified query components to SelectQueryWithGroupBy format
-// PHASE 2: Adapter method for query structure conversion
+// groupKey represents the key for grouping (combination of GROUP BY field values)
+type groupKey string
+
+// aggregateValue stores intermediate aggregated values for a group
+type aggregateValue struct {
+	Count  int64       // For COUNT(*)
+	Sum    float64     // For SUM()
+	Min    interface{} // For MIN()
+	Max    interface{} // For MAX()
+	Values []float64   // For AVG() calculation
+}
+
+// groupResult represents the final result for a group
+type groupResult struct {
+	GroupFields     map[string]interface{}     // GROUP BY field values
+	AggregateValues map[string]*aggregateValue // Intermediate aggregate values
+}
+
+// executeHashAggregate implements hash-based aggregation strategy
+// PHASE 3: Hash aggregate implementation
 //
-// This method bridges the unified query system with the existing GroupByExecutor.
-// It constructs a SelectQueryWithGroupBy from the node's configuration.
+// Algorithm:
+// 1. Create hash table with group key → group result mapping
+// 2. For each document, compute group key and update aggregates
+// 3. Finalize aggregate calculations (e.g., AVG = SUM / COUNT)
 //
-// Returns:
-//   - *queryparser.SelectQueryWithGroupBy: Query structure for GroupByExecutor
-func (n *AggregationNode) buildGroupByQuery() *queryparser.SelectQueryWithGroupBy {
-	query := &queryparser.SelectQueryWithGroupBy{
-		FromBundle:        "", // Not used by executor
-		GroupBy:           n.GroupBy,
-		AggregateFields:   n.AggregateFields,
-		HavingClause:      n.HavingClause,
-		OrderBy:           n.OrderBy,
-		WhereClause:       "", // WHERE is already applied by child node
-		ExecutionStrategy: n.executionStrategy,
+// Performance: O(n) time, O(distinct_groups) space
+//
+// TODO: Phase 2 - I should implement memory management with spill-to-disk for large datasets
+// TODO: Phase 2 - Add work_mem limit checking and automatic fallback to sort-aggregate
+// TODO: Phase 2 - Consider using sync.Map for concurrent aggregation in parallel execution
+func (n *AggregationNode) executeHashAggregate(documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
+	n.Logger.Debugf("Executing Hash Aggregate strategy")
+
+	groupMap := make(map[groupKey]*groupResult)
+
+	for _, doc := range documents {
+		// Create group key from GROUP BY fields
+		gKey, groupFields, err := n.createGroupKey(doc)
+		if err != nil {
+			n.Logger.Warnf("Skipping document %s: %v", doc.DocumentID, err)
+			continue
+		}
+
+		// Get or create group result
+		gResult, exists := groupMap[gKey]
+		if !exists {
+			gResult = &groupResult{
+				GroupFields:     groupFields,
+				AggregateValues: make(map[string]*aggregateValue),
+			}
+			// Initialize aggregate values
+			for _, aggFunc := range n.AggregateFields {
+				gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+			}
+			groupMap[gKey] = gResult
+		}
+
+		// Update aggregates
+		err = n.updateAggregates(gResult, doc)
+		if err != nil {
+			n.Logger.Warnf("Error updating aggregates for document %s: %v", doc.DocumentID, err)
+		}
 	}
 
-	return query
+	n.Logger.Debugf("Hash aggregate created %d groups from %d documents", len(groupMap), len(documents))
+
+	return groupMap, nil
+}
+
+// executeSortGroupAggregate implements sort-based aggregation strategy
+// PHASE 3: Sort + group aggregate implementation
+//
+// Algorithm:
+// 1. Convert documents map to slice
+// 2. Sort documents by GROUP BY fields
+// 3. Sequentially scan sorted documents, detecting group boundaries
+// 4. Aggregate each group as we encounter it
+//
+// Performance: O(n log n) time, O(1) space (excluding sort buffer)
+//
+// TODO: Phase 2 - I should implement external merge sort for datasets larger than memory
+// TODO: Phase 2 - Add streaming aggregation to reduce memory footprint
+// TODO: Phase 2 - Consider index scans when GROUP BY fields match an index for pre-sorted data
+func (n *AggregationNode) executeSortGroupAggregate(documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
+	n.Logger.Debugf("Executing Sort + GroupAggregate strategy")
+
+	// Convert documents to sortable slice
+	docSlice := make([]*models.Document, 0, len(documents))
+	for _, doc := range documents {
+		docSlice = append(docSlice, doc)
+	}
+
+	// Sort by GROUP BY fields
+	err := n.sortDocumentsByGroupFields(docSlice)
+	if err != nil {
+		return nil, fmt.Errorf("error sorting documents: %w", err)
+	}
+
+	// Group and aggregate sorted documents
+	groupMap := make(map[groupKey]*groupResult)
+	var currentGroup *groupResult
+	var currentGroupKey groupKey
+
+	for _, doc := range docSlice {
+		// Create group key
+		gKey, groupFields, err := n.createGroupKey(doc)
+		if err != nil {
+			n.Logger.Warnf("Skipping document %s: %v", doc.DocumentID, err)
+			continue
+		}
+
+		// Check if we're starting a new group
+		if gKey != currentGroupKey {
+			// Start new group
+			currentGroup = &groupResult{
+				GroupFields:     groupFields,
+				AggregateValues: make(map[string]*aggregateValue),
+			}
+			// Initialize aggregate values
+			for _, aggFunc := range n.AggregateFields {
+				currentGroup.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+			}
+			groupMap[gKey] = currentGroup
+			currentGroupKey = gKey
+		}
+
+		// Update aggregates for current group
+		err = n.updateAggregates(currentGroup, doc)
+		if err != nil {
+			n.Logger.Warnf("Error updating aggregates for document %s: %v", doc.DocumentID, err)
+		}
+	}
+
+	n.Logger.Debugf("Sort aggregate created %d groups from %d documents", len(groupMap), len(documents))
+
+	return groupMap, nil
+}
+
+// createGroupKey creates a unique key for the group based on GROUP BY fields
+// PHASE 3: Group key generation
+func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[string]interface{}, error) {
+	groupFields := make(map[string]interface{})
+	keyParts := make([]string, 0, len(n.GroupBy.Fields))
+
+	for _, fieldName := range n.GroupBy.Fields {
+		field, exists := doc.Fields[fieldName]
+		if !exists {
+			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fieldName)
+		}
+
+		groupFields[fieldName] = field.Value
+		keyParts = append(keyParts, fmt.Sprintf("%s=%v", fieldName, field.Value))
+	}
+
+	gKey := groupKey(strings.Join(keyParts, "|"))
+	return gKey, groupFields, nil
+}
+
+// updateAggregates updates aggregate values for a group with data from a document
+// PHASE 3: Aggregate accumulation
+func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Document) error {
+	for _, aggFunc := range n.AggregateFields {
+		aggKey := n.getAggregateKey(aggFunc)
+		aggVal := gResult.AggregateValues[aggKey]
+
+		switch aggFunc.Function {
+		case "COUNT":
+			if aggFunc.Field == "*" {
+				aggVal.Count++
+			} else {
+				// COUNT(field) - count non-null values
+				if field, exists := doc.Fields[aggFunc.Field]; exists && field.Value != nil {
+					aggVal.Count++
+				}
+			}
+
+		case "SUM", "AVG":
+			if field, exists := doc.Fields[aggFunc.Field]; exists {
+				if numValue, err := n.convertToFloat(field.Value); err == nil {
+					aggVal.Sum += numValue
+					aggVal.Values = append(aggVal.Values, numValue)
+				}
+			}
+
+		case "MIN":
+			if field, exists := doc.Fields[aggFunc.Field]; exists {
+				if aggVal.Min == nil || n.isLess(field.Value, aggVal.Min) {
+					aggVal.Min = field.Value
+				}
+			}
+
+		case "MAX":
+			if field, exists := doc.Fields[aggFunc.Field]; exists {
+				if aggVal.Max == nil || n.isGreater(field.Value, aggVal.Max) {
+					aggVal.Max = field.Value
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// getAggregateKey creates a key for the aggregate function result
+// PHASE 3: Aggregate field naming
+func (n *AggregationNode) getAggregateKey(aggFunc queryparser.AggregateFunction) string {
+	if aggFunc.Alias != "" {
+		return aggFunc.Alias
+	}
+	if aggFunc.Field == "*" {
+		return strings.ToLower(aggFunc.Function) + "_all"
+	}
+	return strings.ToLower(aggFunc.Function) + "_" + aggFunc.Field
+}
+
+// convertGroupResultsToDocuments converts group results to document format
+// PHASE 3: Result conversion
+func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupKey]*groupResult) map[string]*models.Document {
+	resultDocs := make(map[string]*models.Document)
+	groupIndex := 0
+
+	for _, gResult := range groupResults {
+		docID := fmt.Sprintf("group_%d", groupIndex)
+		fields := make(map[string]models.Field)
+
+		// Add GROUP BY fields
+		for fieldName, value := range gResult.GroupFields {
+			fields[fieldName] = models.Field{
+				Name:  fieldName,
+				Value: value,
+			}
+		}
+
+		// Add aggregate fields (finalize calculations)
+		for _, aggFunc := range n.AggregateFields {
+			aggKey := n.getAggregateKey(aggFunc)
+			aggVal := gResult.AggregateValues[aggKey]
+
+			var finalValue interface{}
+			switch aggFunc.Function {
+			case "COUNT":
+				finalValue = aggVal.Count
+			case "SUM":
+				finalValue = aggVal.Sum
+			case "AVG":
+				if len(aggVal.Values) > 0 {
+					finalValue = aggVal.Sum / float64(len(aggVal.Values))
+				} else {
+					finalValue = nil
+				}
+			case "MIN":
+				finalValue = aggVal.Min
+			case "MAX":
+				finalValue = aggVal.Max
+			}
+
+			fields[aggKey] = models.Field{
+				Name:  aggKey,
+				Value: finalValue,
+			}
+		}
+
+		resultDocs[docID] = &models.Document{
+			DocumentID: docID,
+			Fields:     fields,
+		}
+
+		groupIndex++
+	}
+
+	return resultDocs
+}
+
+// sortDocumentsByGroupFields sorts documents by GROUP BY fields
+// PHASE 3: Document sorting for sort-aggregate strategy
+func (n *AggregationNode) sortDocumentsByGroupFields(docs []*models.Document) error {
+	sort.Slice(docs, func(i, j int) bool {
+		for _, fieldName := range n.GroupBy.Fields {
+			fieldI, existsI := docs[i].Fields[fieldName]
+			fieldJ, existsJ := docs[j].Fields[fieldName]
+
+			if !existsI && !existsJ {
+				continue
+			}
+			if !existsI {
+				return true
+			}
+			if !existsJ {
+				return false
+			}
+
+			valueI := fmt.Sprintf("%v", fieldI.Value)
+			valueJ := fmt.Sprintf("%v", fieldJ.Value)
+
+			if valueI != valueJ {
+				return valueI < valueJ
+			}
+		}
+		return false
+	})
+
+	return nil
+}
+
+// convertToFloat converts various numeric types to float64
+// PHASE 3: Type conversion helper
+func (n *AggregationNode) convertToFloat(value interface{}) (float64, error) {
+	switch v := value.(type) {
+	case float64:
+		return v, nil
+	case float32:
+		return float64(v), nil
+	case int:
+		return float64(v), nil
+	case int32:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	case string:
+		return strconv.ParseFloat(v, 64)
+	default:
+		return 0, fmt.Errorf("cannot convert %T to float64", value)
+	}
+}
+
+// isLess compares two values for MIN operation
+// PHASE 3: Comparison helper
+func (n *AggregationNode) isLess(a, b interface{}) bool {
+	// Simple comparison - handles string representation
+	return fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b)
+}
+
+// isGreater compares two values for MAX operation
+// PHASE 3: Comparison helper
+func (n *AggregationNode) isGreater(a, b interface{}) bool {
+	// Simple comparison - handles string representation
+	return fmt.Sprintf("%v", a) > fmt.Sprintf("%v", b)
+}
+
+// applyHavingClause filters aggregated groups based on HAVING conditions
+// PHASE 3: Post-aggregation filtering
+//
+// Algorithm:
+// 1. Parse HAVING condition string into WhereGroup structure
+// 2. Evaluate WhereGroup against each aggregated document (group)
+// 3. Keep only groups that match the HAVING condition
+//
+// HAVING operates on aggregated results, so it can reference:
+// - GROUP BY fields (e.g., HAVING city = 'Seattle')
+// - Aggregate functions (e.g., HAVING COUNT(*) > 5, HAVING AVG(age) < 30)
+//
+// TODO: Phase 2 - I should optimize HAVING pushdown for conditions that can be evaluated earlier
+// TODO: Phase 2 - Consider caching parsed HAVING clauses for repeated queries
+// TODO: Phase 2 - Add support for complex aggregate expressions in HAVING (e.g., HAVING SUM(x) > AVG(y))
+func (n *AggregationNode) applyHavingClause(documents map[string]*models.Document) (map[string]*models.Document, error) {
+	if n.HavingClause == nil || n.HavingClause.Condition == "" {
+		return documents, nil
+	}
+
+	n.Logger.Debugf("Applying HAVING clause: %s", n.HavingClause.Condition)
+
+	// Parse HAVING condition into WhereGroup structure
+	// Reuse the existing WHERE clause parser since HAVING has the same syntax
+	havingWhereGroup, err := queryparser.ParseWhereClause(n.HavingClause.Condition)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse HAVING condition '%s': %w", n.HavingClause.Condition, err)
+	}
+
+	// Filter documents based on HAVING condition
+	filteredDocs := make(map[string]*models.Document)
+	for docID, doc := range documents {
+		// Evaluate HAVING condition against the aggregated document
+		// The document contains both GROUP BY fields and aggregate function results
+		matches := queryparser.EvaluateWhereClause(doc, havingWhereGroup, n.Logger)
+
+		if matches {
+			filteredDocs[docID] = doc
+		}
+	}
+
+	n.Logger.Debugf("HAVING clause filtered %d groups to %d groups", len(documents), len(filteredDocs))
+
+	return filteredDocs, nil
 }
 
 // GetCost returns the estimated execution cost

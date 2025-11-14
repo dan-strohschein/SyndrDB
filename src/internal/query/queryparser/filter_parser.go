@@ -266,7 +266,7 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 
 				// Parse value list
 				logger := zap.NewNop().Sugar() // TODO: Pass logger from caller
-				values, caseInsensitive, originalCount, newPos, err := parseValueList(tokens, pos+1, logger)
+				values, caseInsensitive, originalCount, newPos, err := ParseValueList(tokens, pos+1, logger)
 				if err != nil {
 					return nil, pos, err
 				}
@@ -450,10 +450,10 @@ func isNullValue(value interface{}) bool {
 	}
 }
 
-// parseValueList parses a comma-delimited list of values for IN operator
+// ParseValueList parses a comma-delimited list of values for IN operator
 // Supports: IN (val1, val2, val3) or IN N(val1, val2, val3) for case-insensitive
 // Returns: (values []interface{}, caseInsensitive bool, originalCount int, newPos int, error)
-func parseValueList(tokens []string, startPos int, logger *zap.SugaredLogger) ([]interface{}, bool, int, int, error) {
+func ParseValueList(tokens []string, startPos int, logger *zap.SugaredLogger) ([]interface{}, bool, int, int, error) {
 	caseInsensitive := false
 	values := make([]interface{}, 0)
 	pos := startPos
@@ -704,16 +704,16 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 	case "<":
 		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a < b })
 	case "IN":
-		return evaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
+		return EvaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
 			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
 	case "NOT IN":
-		return evaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
+		return EvaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
 			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
 	case "LIKE":
-		return evaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
+		return EvaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
 			clause.Field, clause.PatternType, logger)
 	case "NOT LIKE":
-		return evaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
+		return EvaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
 			clause.Field, clause.PatternType, logger)
 	default:
 		return false
@@ -990,7 +990,7 @@ func matchLikePatternRecursive(valueRunes []rune, patternRunes []rune, vIdx int,
 	return false
 }
 
-// evaluateLikeOperator evaluates LIKE and NOT LIKE operators
+// EvaluateLikeOperator evaluates LIKE and NOT LIKE operators
 // Parameters:
 //   - fieldValue: The value from the document field
 //   - patternValue: The LIKE pattern string
@@ -1012,7 +1012,7 @@ func matchLikePatternRecursive(valueRunes []rune, patternRunes []rune, vIdx int,
 //   - Aggregates by field name + pattern type combination
 //
 // TODO: When full-text search is implemented, recommend SEARCH() for word-based matching
-func evaluateLikeOperator(fieldValue interface{}, patternValue interface{}, caseInsensitive bool, negate bool,
+func EvaluateLikeOperator(fieldValue interface{}, patternValue interface{}, caseInsensitive bool, negate bool,
 	fieldName string, patternType string, logger *zap.SugaredLogger) bool {
 
 	startTime := time.Now()
@@ -1059,7 +1059,7 @@ func evaluateLikeOperator(fieldValue interface{}, patternValue interface{}, case
 	return matched
 }
 
-// evaluateInOperator evaluates IN and NOT IN operators
+// EvaluateInOperator evaluates IN and NOT IN operators
 // Parameters:
 //   - fieldValue: The value from the document field
 //   - clauseValue: The list of values to check against ([]interface{})
@@ -1075,7 +1075,7 @@ func evaluateLikeOperator(fieldValue interface{}, patternValue interface{}, case
 //
 // TODO: Integrate with query plan caching when full caching system is implemented
 // TODO: Add configurable memory threshold for warnings
-func evaluateInOperator(fieldValue interface{}, clauseValue interface{}, caseInsensitive bool, negate bool,
+func EvaluateInOperator(fieldValue interface{}, clauseValue interface{}, caseInsensitive bool, negate bool,
 	fieldName string, originalListSize int, singleValueOptimized bool, logger *zap.SugaredLogger) bool {
 
 	startTime := time.Now()

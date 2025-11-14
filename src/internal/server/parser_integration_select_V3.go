@@ -21,7 +21,7 @@ func shouldUseNewParser() bool {
 func parseQueryWithNewParser(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSelectQuery, error) {
 	// Normalize query syntax for new parser
 	// Convert SyndrDB-specific syntax to standard SQL syntax
-	normalizedQuery := normalizeQueryForNewParser(query)
+	normalizedQuery := NormalizeQueryForNewParser(query)
 
 	logger.Debugf("Original query: %s", query)
 	logger.Debugf("Normalized query: %s", normalizedQuery)
@@ -53,8 +53,8 @@ func parseQueryWithNewParser(query string, logger *zap.SugaredLogger) (*querypar
 	return unifiedQuery, nil
 }
 
-// normalizeQueryForNewParser converts SyndrDB-specific query syntax to standard SQL
-func normalizeQueryForNewParser(query string) string {
+// NormalizeQueryForNewParser converts SyndrDB-specific query syntax to standard SQL
+func NormalizeQueryForNewParser(query string) string {
 	// Remove trailing semicolon if present
 	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";")
@@ -76,8 +76,8 @@ func normalizeQueryForNewParser(query string) string {
 	return query
 }
 
-// parseQuery attempts new parser first (if enabled), falls back to legacy on error
-func parseQuery(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSelectQuery, error) {
+// ParseQuery attempts new parser first (if enabled), falls back to legacy on error
+func ParseQuery(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSelectQuery, error) {
 	// Check feature flag
 	if !shouldUseNewParser() {
 		logger.Debugf("Using legacy parser (flag disabled)")

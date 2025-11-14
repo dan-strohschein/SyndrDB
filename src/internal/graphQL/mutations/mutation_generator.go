@@ -125,7 +125,7 @@ func (g *MutationGenerator) GenerateInputTypes(database *models.Database, schema
 				continue
 			}
 
-			graphqlType := g.mapFieldTypeToGraphQL(fieldDef.Type)
+			graphqlType := g.MapFieldTypeToGraphQL(fieldDef.Type)
 			requiredMarker := ""
 			if fieldDef.IsRequired {
 				requiredMarker = "!"
@@ -146,7 +146,7 @@ func (g *MutationGenerator) GenerateInputTypes(database *models.Database, schema
 				continue
 			}
 
-			graphqlType := g.mapFieldTypeToGraphQL(fieldDef.Type)
+			graphqlType := g.MapFieldTypeToGraphQL(fieldDef.Type)
 			// All fields optional in update (partial updates)
 			inputTypes.WriteString(fmt.Sprintf("\t\t%s: %s\n", fieldName, graphqlType))
 		}
@@ -182,9 +182,9 @@ func (g *MutationGenerator) GenerateDeletePayloadTypes(database *models.Database
 	return payloadTypes.String()
 }
 
-// mapFieldTypeToGraphQL maps SyndrDB field types to GraphQL types.
+// MapFieldTypeToGraphQL maps SyndrDB field types to GraphQL types.
 // This ensures type consistency between queries and mutations.
-func (g *MutationGenerator) mapFieldTypeToGraphQL(syndrType string) string {
+func (g *MutationGenerator) MapFieldTypeToGraphQL(syndrType string) string {
 	switch strings.ToUpper(syndrType) {
 	case "STRING", "TEXT":
 		return "String"

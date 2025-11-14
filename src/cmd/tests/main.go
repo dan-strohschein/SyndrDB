@@ -30,7 +30,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
+	"syndrdb/src/tests/homegrown"
+
 	"go.uber.org/zap"
 )
 
@@ -56,122 +57,9 @@ type TestSummary[T any] struct {
 	Categories   map[string]int
 }
 
-// WALTestUseCase represents a single test case for WAL operations
-type WALTestUseCase struct {
-	Name          string
-	Description   string
-	Category      string
-	SetupFunc     func() error
-	ExecuteFunc   func() error
-	ValidateFunc  func() error
-	CleanupFunc   func() error
-	ExpectSuccess bool
-	Tags          []string
-	Timeout       time.Duration
-}
-
-// WALTestResult represents the result of a single WAL test execution
-type WALTestResult struct {
-	UseCase   WALTestUseCase
-	Success   bool
-	Duration  time.Duration
-	Error     error
-	StartTime time.Time
-	EndTime   time.Time
-	Details   string
-}
-
-// UseCase defines the interface that all test use cases must implement
-// Following SyndrDB comprehensive error handling, standardizes use case behavior
-// This implementation follows the Single Responsibility Principle by defining only use case contract
-type UseCase interface {
-	GetName() string
-	GetDescription() string
-	GetCategory() string
-	GetExpectSuccess() bool
-	Setup() error
-	Execute() error
-	Validate() error
-	Cleanup() error
-}
-
-// DatabaseCreationUseCase implements the UseCase interface with method receivers
-func (d DatabaseCreationUseCase) GetName() string        { return d.Name }
-func (d DatabaseCreationUseCase) GetDescription() string { return d.Description }
-func (d DatabaseCreationUseCase) GetCategory() string    { return d.Category }
-func (d DatabaseCreationUseCase) GetExpectSuccess() bool { return d.ExpectSuccess }
-func (d DatabaseCreationUseCase) Setup() error {
-	if d.SetupFunc != nil {
-		return d.SetupFunc()
-	}
-	return nil
-}
-func (d DatabaseCreationUseCase) Execute() error {
-	if d.ExecuteFunc != nil {
-		return d.ExecuteFunc()
-	}
-	return nil
-}
-func (d DatabaseCreationUseCase) Validate() error {
-	if d.ValidateFunc != nil {
-		return d.ValidateFunc()
-	}
-	return nil
-}
-func (d DatabaseCreationUseCase) Cleanup() error {
-	if d.CleanupFunc != nil {
-		return d.CleanupFunc()
-	}
-	return nil
-}
-
-// BundleManagementUseCase implements the UseCase interface with method receivers
-
-func (b BundleManagementUseCase) GetName() string        { return b.Name }
-func (b BundleManagementUseCase) GetDescription() string { return b.Description }
-func (b BundleManagementUseCase) GetCategory() string    { return b.Category }
-func (b BundleManagementUseCase) GetExpectSuccess() bool { return b.ExpectSuccess }
-func (b BundleManagementUseCase) Setup() error {
-	if b.SetupFunc != nil {
-		return b.SetupFunc()
-	}
-	return nil
-}
-func (b BundleManagementUseCase) Execute() error {
-	if b.ExecuteFunc != nil {
-		return b.ExecuteFunc()
-	}
-	return nil
-}
-func (b BundleManagementUseCase) Validate() error {
-	if b.ValidateFunc != nil {
-		return b.ValidateFunc()
-	}
-	return nil
-}
-func (b BundleManagementUseCase) Cleanup() error {
-	if b.CleanupFunc != nil {
-		return b.CleanupFunc()
-	}
-	return nil
-}
-
-// Color functions for console output
-var (
-	HighlightGreen  = color.New(color.FgGreen, color.Bold).SprintFunc()
-	HighlightRed    = color.New(color.FgRed, color.Bold).SprintFunc()
-	HighlightYellow = color.New(color.FgYellow, color.Bold).SprintFunc()
-	HighlightBlue   = color.New(color.FgBlue, color.Bold).SprintFunc()
-	HighlightCyan   = color.New(color.FgCyan, color.Bold).SprintFunc()
-	Normal          = color.New(color.Reset).SprintFunc()
-)
-
-// ColorLogger is the global logger instance
-var ColorLogger *zap.SugaredLogger
-
 // filterTestsByNames filters test use cases based on provided test names
 // If testNames is empty, returns all use cases
-func filterTestsByNames[T UseCase](useCases []T, testNames []string) []T {
+func filterTestsByNames[T homegrown.UseCase](useCases []T, testNames []string) []T {
 	if len(testNames) == 0 {
 		return useCases
 	}
@@ -222,14 +110,14 @@ func main() {
 	}
 
 	// Initialize logger
-	ColorLogger = setupLogger()
+	homegrown.ColorLogger = setupLogger()
 
 	// Display welcome banner
 	displayWelcomeBanner()
 
 	// Show filter information if tests are filtered
 	if len(testNames) > 0 {
-		ColorLogger.Info(HighlightYellow(fmt.Sprintf("Running filtered tests: %s", strings.Join(testNames, ", "))))
+		homegrown.ColorLogger.Info(homegrown.HighlightYellow(fmt.Sprintf("Running filtered tests: %s", strings.Join(testNames, ", "))))
 	}
 
 	var err error
@@ -237,164 +125,164 @@ func main() {
 	// Stand up test database service (skip if only running RootUser tests which have their own isolated environment)
 	skipSharedSetup := len(testNames) == 1 && containsTestName(testNames, "RootUser")
 	if !skipSharedSetup {
-		ColorLogger.Info(HighlightBlue("Setting up test database service..."))
-		_, _, err = StandupTestDatabaseService()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Setting up test database service..."))
+		_, _, err = homegrown.StandupTestDatabaseService()
 		if err != nil {
-			ColorLogger.Error(HighlightRed("Failed to setup test database service"), zap.Error(err))
+			homegrown.ColorLogger.Error(homegrown.HighlightRed("Failed to setup test database service"), zap.Error(err))
 			return
 		}
-		ColorLogger.Info(HighlightGreen("✓ Test database service setup complete"))
+		homegrown.ColorLogger.Info(homegrown.HighlightGreen("✓ Test database service setup complete"))
 	} else {
-		ColorLogger.Info(HighlightYellow("Skipping shared test database setup (RootUser tests use isolated environment)"))
+		homegrown.ColorLogger.Info(homegrown.HighlightYellow("Skipping shared test database setup (RootUser tests use isolated environment)"))
 	}
 
 	// Execute database creation use case tests
-	ColorLogger.Info(HighlightBlue("Starting database creation use case tests..."))
-	dbUseCases := GetDatabaseCreationUseCases()
+	homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting database creation use case tests..."))
+	dbUseCases := homegrown.GetDatabaseCreationUseCases()
 	filteredDbUseCases := filterTestsByNames(dbUseCases, testNames)
 	dbSummary := executeAllTests(filteredDbUseCases)
 
 	// Execute primary database initialization tests
-	ColorLogger.Info(HighlightBlue("Starting primary database initialization tests..."))
-	primaryDbUseCases := GetPrimaryDatabaseUseCases()
+	homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting primary database initialization tests..."))
+	primaryDbUseCases := homegrown.GetPrimaryDatabaseUseCases()
 	filteredPrimaryDbUseCases := filterTestsByNames(primaryDbUseCases, testNames)
 	primaryDbSummary := executeAllTests(filteredPrimaryDbUseCases)
 
 	// Execute bundle management use case tests
-	ColorLogger.Info(HighlightBlue("Starting bundle management use case tests..."))
-	bundleUseCases := GetBundleManagementUseCases()
+	homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting bundle management use case tests..."))
+	bundleUseCases := homegrown.GetBundleManagementUseCases()
 	filteredBundleUseCases := filterTestsByNames(bundleUseCases, testNames)
 	bundleSummary := executeAllTests(filteredBundleUseCases)
 
 	// Execute JOIN functionality demonstration (if not filtered or explicitly included)
 	if len(testNames) == 0 || containsTestName(testNames, "JoinDemonstration") {
-		ColorLogger.Info(HighlightBlue("Starting JOIN functionality demonstration..."))
-		err = RunJoinDemonstration(ColorLogger)
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting JOIN functionality demonstration..."))
+		err = homegrown.RunJoinDemonstration(homegrown.ColorLogger)
 		if err != nil {
-			ColorLogger.Error(HighlightRed("JOIN demonstration failed"), zap.Error(err))
+			homegrown.ColorLogger.Error(homegrown.HighlightRed("JOIN demonstration failed"), zap.Error(err))
 		} else {
-			ColorLogger.Info(HighlightGreen("✓ JOIN demonstration completed successfully"))
+			homegrown.ColorLogger.Info(homegrown.HighlightGreen("✓ JOIN demonstration completed successfully"))
 		}
 	}
 
 	// Execute comprehensive end-to-end JOIN testing (if not filtered or explicitly included)
 	if len(testNames) == 0 || containsTestName(testNames, "ComprehensiveJoinTests") {
-		ColorLogger.Info(HighlightBlue("Starting comprehensive end-to-end JOIN testing..."))
-		err = RunComprehensiveJoinTests()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting comprehensive end-to-end JOIN testing..."))
+		err = homegrown.RunComprehensiveJoinTests()
 		if err != nil {
-			ColorLogger.Error(HighlightRed("Comprehensive JOIN tests failed"), zap.Error(err))
+			homegrown.ColorLogger.Error(homegrown.HighlightRed("Comprehensive JOIN tests failed"), zap.Error(err))
 		} else {
-			ColorLogger.Info(HighlightGreen("✓ Comprehensive JOIN tests completed successfully"))
+			homegrown.ColorLogger.Info(homegrown.HighlightGreen("✓ Comprehensive JOIN tests completed successfully"))
 		}
 	}
 
 	// Execute ORDER BY functionality demo (if not filtered or explicitly included)
 	if len(testNames) == 0 || containsTestName(testNames, "OrderByDemo") {
-		ColorLogger.Info(HighlightBlue("Starting ORDER BY functionality demo..."))
-		err = RunOrderByDemo()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting ORDER BY functionality demo..."))
+		err = homegrown.RunOrderByDemo()
 		if err != nil {
-			ColorLogger.Error(HighlightRed("ORDER BY demo failed"), zap.Error(err))
+			homegrown.ColorLogger.Error(homegrown.HighlightRed("ORDER BY demo failed"), zap.Error(err))
 		} else {
-			ColorLogger.Info(HighlightGreen("✓ ORDER BY demo completed successfully"))
+			homegrown.ColorLogger.Info(homegrown.HighlightGreen("✓ ORDER BY demo completed successfully"))
 		}
 	}
 
 	// Execute LIKE query functionality demo (if not filtered or explicitly included)
 	if len(testNames) == 0 || containsTestName(testNames, "LikeQueryDemo") {
-		ColorLogger.Info(HighlightBlue("Starting LIKE query functionality demo..."))
-		err = RunLikeQueryDemo()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting LIKE query functionality demo..."))
+		err = homegrown.RunLikeQueryDemo()
 		if err != nil {
-			ColorLogger.Error(HighlightRed("LIKE query demo failed"), zap.Error(err))
+			homegrown.ColorLogger.Error(homegrown.HighlightRed("LIKE query demo failed"), zap.Error(err))
 		} else {
-			ColorLogger.Info(HighlightGreen("✓ LIKE query demo completed successfully"))
+			homegrown.ColorLogger.Info(homegrown.HighlightGreen("✓ LIKE query demo completed successfully"))
 		}
 	}
 
 	// Execute GROUP BY functionality tests (if not filtered or explicitly included)
 	if len(testNames) == 0 || containsTestName(testNames, "GroupByTests") {
-		ColorLogger.Info(HighlightBlue("Starting GROUP BY functionality tests..."))
-		testGroupByFunctionality()
-		ColorLogger.Info(HighlightGreen("✓ GROUP BY tests completed successfully"))
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting GROUP BY functionality tests..."))
+		homegrown.TestGroupByFunctionality()
+		homegrown.ColorLogger.Info(homegrown.HighlightGreen("✓ GROUP BY tests completed successfully"))
 	}
 
 	// Execute Session Management tests
 	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "Session") {
-		ColorLogger.Info(HighlightBlue("Starting Session Management tests..."))
-		sessionUseCases := GetSessionManagementUseCases()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting Session Management tests..."))
+		sessionUseCases := homegrown.GetSessionManagementUseCases()
 		filteredSessionUseCases := filterTestsByNames(sessionUseCases, testNames)
 		sessionSummary := executeAllTests(filteredSessionUseCases)
 
 		// Display session test results if any were run
 		if len(filteredSessionUseCases) > 0 {
-			ColorLogger.Info(HighlightBlue("Session Management Test Results:"))
+			homegrown.ColorLogger.Info(homegrown.HighlightBlue("Session Management Test Results:"))
 			displayTestSummaryGeneric(sessionSummary)
 		}
 	}
 
 	// Execute Security Validation tests
 	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "Security") {
-		ColorLogger.Info(HighlightBlue("Starting Security Validation tests..."))
-		securityUseCases := GetSecurityTestUseCases()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting Security Validation tests..."))
+		securityUseCases := homegrown.GetSecurityTestUseCases()
 		filteredSecurityUseCases := filterTestsByNames(securityUseCases, testNames)
 		securitySummary := executeAllTests(filteredSecurityUseCases)
 
 		// Display security test results if any were run
 		if len(filteredSecurityUseCases) > 0 {
-			ColorLogger.Info(HighlightBlue("Security Validation Test Results:"))
+			homegrown.ColorLogger.Info(homegrown.HighlightBlue("Security Validation Test Results:"))
 			displayTestSummaryGeneric(securitySummary)
 		}
 	}
 
 	// Execute Audit Logging tests
 	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "Audit") {
-		ColorLogger.Info(HighlightBlue("Starting Audit Logging tests..."))
-		auditUseCases := GetAuditLoggingUseCases()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting Audit Logging tests..."))
+		auditUseCases := homegrown.GetAuditLoggingUseCases()
 		filteredAuditUseCases := filterTestsByNames(auditUseCases, testNames)
 		auditSummary := executeAllTests(filteredAuditUseCases)
 
 		// Display audit test results if any were run
 		if len(filteredAuditUseCases) > 0 {
-			ColorLogger.Info(HighlightBlue("Audit Logging Test Results:"))
+			homegrown.ColorLogger.Info(homegrown.HighlightBlue("Audit Logging Test Results:"))
 			displayTestSummaryGeneric(auditSummary)
 		}
 	}
 
 	// Execute Root User Validation tests (if not filtered or explicitly included)
 	if len(testNames) == 0 || containsTestName(testNames, "RootUser") {
-		ColorLogger.Info(HighlightBlue("Starting Root User Validation tests..."))
-		err = RunRootUserTests()
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting Root User Validation tests..."))
+		err = homegrown.RunRootUserTests()
 		if err != nil {
-			ColorLogger.Error(HighlightRed("Root User tests failed"), zap.Error(err))
+			homegrown.ColorLogger.Error(homegrown.HighlightRed("Root User tests failed"), zap.Error(err))
 		} else {
-			ColorLogger.Info(HighlightGreen("✓ Root User tests completed successfully"))
+			homegrown.ColorLogger.Info(homegrown.HighlightGreen("✓ Root User tests completed successfully"))
 		}
 	}
 
 	// Execute WAL functionality tests
 	if len(testNames) == 0 || hasAnyTestFromCategory(testNames, "WAL") {
-		ColorLogger.Info(HighlightBlue("Starting Write Ahead Logging functionality tests..."))
-		walUseCases := GetWALTestUseCases()
-		walResults := executeAllWALTests(walUseCases)
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Starting Write Ahead Logging functionality tests..."))
+		walUseCases := homegrown.GetWALTestUseCases()
+		walResults := homegrown.ExecuteAllWALTests(walUseCases)
 		_ = walResults // Suppress unused variable warning
 	}
 
 	// Display core test results (always shown when tests were run)
 	if len(filteredDbUseCases) > 0 {
-		ColorLogger.Info(HighlightBlue("Database Creation Test Results:"))
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Database Creation Test Results:"))
 		displayTestSummaryGeneric(dbSummary)
 	}
 
 	if len(filteredPrimaryDbUseCases) > 0 {
-		ColorLogger.Info(HighlightBlue("Primary Database Initialization Test Results:"))
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Primary Database Initialization Test Results:"))
 		displayTestSummaryGeneric(primaryDbSummary)
 	}
 
 	if len(filteredBundleUseCases) > 0 {
-		ColorLogger.Info(HighlightBlue("Bundle Management Test Results:"))
+		homegrown.ColorLogger.Info(homegrown.HighlightBlue("Bundle Management Test Results:"))
 		displayTestSummaryGeneric(bundleSummary)
 	}
 
-	ColorLogger.Info(HighlightBlue("Test execution complete"))
+	homegrown.ColorLogger.Info(homegrown.HighlightBlue("Test execution complete"))
 }
 
 // setupLogger creates a logger that displays only messages without timestamps, levels, or source info
@@ -428,22 +316,22 @@ func setupLogger() *zap.SugaredLogger {
 // Following SyndrDB comprehensive error handling, it provides clear test identification
 func displayWelcomeBanner() {
 	fmt.Println()
-	fmt.Println(HighlightCyan("╔══════════════════════════════════════════════════════════════╗"))
-	fmt.Println(HighlightCyan("║") + "                    " + HighlightGreen("SyndrDB Test Runner") + "                    " + HighlightCyan("║"))
-	fmt.Println(HighlightCyan("║") + "              " + Normal("Database Creation Use Cases") + "               " + HighlightCyan("║"))
-	fmt.Println(HighlightCyan("╚══════════════════════════════════════════════════════════════╝"))
+	fmt.Println(homegrown.HighlightCyan("╔══════════════════════════════════════════════════════════════╗"))
+	fmt.Println(homegrown.HighlightCyan("║") + "                    " + homegrown.HighlightGreen("SyndrDB Test Runner") + "                    " + homegrown.HighlightCyan("║"))
+	fmt.Println(homegrown.HighlightCyan("║") + "              " + homegrown.Normal("Database Creation Use Cases") + "               " + homegrown.HighlightCyan("║"))
+	fmt.Println(homegrown.HighlightCyan("╚══════════════════════════════════════════════════════════════╝"))
 	fmt.Println()
 }
 
 // groupTestsByCategory organizes tests by their category
 // This function follows the Single Responsibility Principle by handling only test grouping
 // Following SyndrDB comprehensive error handling, it organizes tests for better execution flow
-func groupTestsByCategory(useCases []DatabaseCreationUseCase) map[string][]DatabaseCreationUseCase {
-	categories := make(map[string][]DatabaseCreationUseCase)
+func groupTestsByCategory(useCases []homegrown.DatabaseCreationUseCase) map[string][]homegrown.DatabaseCreationUseCase {
+	categories := make(map[string][]homegrown.DatabaseCreationUseCase)
 
 	for _, useCase := range useCases {
 		if categories[useCase.Category] == nil {
-			categories[useCase.Category] = make([]DatabaseCreationUseCase, 0)
+			categories[useCase.Category] = make([]homegrown.DatabaseCreationUseCase, 0)
 		}
 		categories[useCase.Category] = append(categories[useCase.Category], useCase)
 	}
@@ -454,14 +342,14 @@ func groupTestsByCategory(useCases []DatabaseCreationUseCase) map[string][]Datab
 // executeTestCaseGeneric runs a single test case with full lifecycle management for any use case type
 // This function follows the Single Responsibility Principle by handling only single test execution
 // Following SyndrDB comprehensive error handling, it manages test lifecycle with proper cleanup
-func executeTestCaseGeneric[T UseCase](useCase T) TestResult[T] {
+func executeTestCaseGeneric[T homegrown.UseCase](useCase T) TestResult[T] {
 	startTime := time.Now()
 	result := TestResult[T]{
 		UseCase: useCase,
 		Success: false,
 	}
 
-	ColorLogger.Debug(HighlightYellow(fmt.Sprintf("Starting test: %s", useCase.GetName())))
+	homegrown.ColorLogger.Debug(homegrown.HighlightYellow(fmt.Sprintf("Starting test: %s", useCase.GetName())))
 
 	// Execute test lifecycle
 	defer func() {
@@ -469,7 +357,7 @@ func executeTestCaseGeneric[T UseCase](useCase T) TestResult[T] {
 
 		// Always attempt cleanup
 		if cleanupErr := useCase.Cleanup(); cleanupErr != nil {
-			ColorLogger.Warn(HighlightYellow(fmt.Sprintf("Cleanup warning for %s: %v", useCase.GetName(), cleanupErr)))
+			homegrown.ColorLogger.Warn(homegrown.HighlightYellow(fmt.Sprintf("Cleanup warning for %s: %v", useCase.GetName(), cleanupErr)))
 		}
 	}()
 
@@ -519,7 +407,7 @@ func executeTestCaseGeneric[T UseCase](useCase T) TestResult[T] {
 // executeAllTests runs all test cases for a specific use case type
 // This function follows the Single Responsibility Principle by handling only test execution
 // Following SyndrDB comprehensive error handling, it executes tests with proper error handling
-func executeAllTests[T UseCase](useCases []T) TestSummary[T] {
+func executeAllTests[T homegrown.UseCase](useCases []T) TestSummary[T] {
 	summary := TestSummary[T]{
 		TotalTests: len(useCases),
 		Results:    make([]TestResult[T], 0, len(useCases)),
@@ -532,7 +420,7 @@ func executeAllTests[T UseCase](useCases []T) TestSummary[T] {
 	categorizedTests := groupTestsByCategoryGeneric(useCases)
 
 	for category, tests := range categorizedTests {
-		ColorLogger.Infof(HighlightBlue(fmt.Sprintf("\n=== Testing Category: %s ===", category)))
+		homegrown.ColorLogger.Infof(homegrown.HighlightBlue(fmt.Sprintf("\n=== Testing Category: %s ===", category)))
 
 		for _, useCase := range tests {
 			result := executeTestCaseGeneric(useCase)
@@ -560,7 +448,7 @@ func executeAllTests[T UseCase](useCases []T) TestSummary[T] {
 // groupTestsByCategoryGeneric organizes tests by their category for any use case type
 // This function follows the Single Responsibility Principle by handling only test grouping
 // Following SyndrDB comprehensive error handling, it organizes tests for better execution flow
-func groupTestsByCategoryGeneric[T UseCase](useCases []T) map[string][]T {
+func groupTestsByCategoryGeneric[T homegrown.UseCase](useCases []T) map[string][]T {
 	categories := make(map[string][]T)
 
 	for _, useCase := range useCases {
@@ -577,36 +465,36 @@ func groupTestsByCategoryGeneric[T UseCase](useCases []T) map[string][]T {
 // displayTestResultGeneric shows the result of a single test with color coding for any use case type
 // This function follows the Single Responsibility Principle by handling only result display
 // Following SyndrDB comprehensive error handling, it provides clear visual feedback
-func displayTestResultGeneric[T UseCase](result TestResult[T]) {
+func displayTestResultGeneric[T homegrown.UseCase](result TestResult[T]) {
 	duration := fmt.Sprintf("%.2fms", float64(result.ExecutionTime.Nanoseconds())/1e6)
 
 	if result.Success {
 		fmt.Printf("  %s %s %s %s\n",
-			HighlightGreen("✓"),
-			HighlightGreen("PASS"),
-			Normal(result.UseCase.GetName()),
-			HighlightBlue(fmt.Sprintf("(%s)", duration)))
+			homegrown.HighlightGreen("✓"),
+			homegrown.HighlightGreen("PASS"),
+			homegrown.Normal(result.UseCase.GetName()),
+			homegrown.HighlightBlue(fmt.Sprintf("(%s)", duration)))
 
 		if result.UseCase.GetDescription() != "" {
-			fmt.Printf("    %s\n", Normal(result.UseCase.GetDescription()))
+			fmt.Printf("    %s\n", homegrown.Normal(result.UseCase.GetDescription()))
 		}
 	} else {
 		fmt.Printf("  %s %s %s %s\n",
-			HighlightRed("✗"),
-			HighlightRed("FAIL"),
-			Normal(result.UseCase.GetName()),
-			HighlightBlue(fmt.Sprintf("(%s)", duration)))
+			homegrown.HighlightRed("✗"),
+			homegrown.HighlightRed("FAIL"),
+			homegrown.Normal(result.UseCase.GetName()),
+			homegrown.HighlightBlue(fmt.Sprintf("(%s)", duration)))
 
 		if result.UseCase.GetDescription() != "" {
-			fmt.Printf("    %s\n", Normal(result.UseCase.GetDescription()))
+			fmt.Printf("    %s\n", homegrown.Normal(result.UseCase.GetDescription()))
 		}
 
 		if result.Error != nil {
-			fmt.Printf("    %s %s\n", HighlightRed("Error:"), Normal(result.Error.Error()))
+			fmt.Printf("    %s %s\n", homegrown.HighlightRed("Error:"), homegrown.Normal(result.Error.Error()))
 		}
 
 		if result.Details != "" {
-			fmt.Printf("    %s %s\n", HighlightYellow("Details:"), Normal(result.Details))
+			fmt.Printf("    %s %s\n", homegrown.HighlightYellow("Details:"), homegrown.Normal(result.Details))
 		}
 	}
 
@@ -616,46 +504,46 @@ func displayTestResultGeneric[T UseCase](result TestResult[T]) {
 // displayTestSummary shows comprehensive test results with statistics
 // This function follows the Single Responsibility Principle by handling only summary display
 // Following SyndrDB comprehensive error handling, it provides complete test analysis
-func displayTestSummaryGeneric[T UseCase](summary TestSummary[T]) {
+func displayTestSummaryGeneric[T homegrown.UseCase](summary TestSummary[T]) {
 	fmt.Println()
-	fmt.Println(HighlightCyan("╔══════════════════════════════════════════════════════════════╗"))
-	fmt.Println(HighlightCyan("║") + "                     " + HighlightGreen("Test Summary") + "                   		" + HighlightCyan("║"))
-	fmt.Println(HighlightCyan("╚══════════════════════════════════════════════════════════════╝"))
+	fmt.Println(homegrown.HighlightCyan("╔══════════════════════════════════════════════════════════════╗"))
+	fmt.Println(homegrown.HighlightCyan("║") + "                     " + homegrown.HighlightGreen("Test Summary") + "                   		" + homegrown.HighlightCyan("║"))
+	fmt.Println(homegrown.HighlightCyan("╚══════════════════════════════════════════════════════════════╝"))
 	fmt.Println()
 
 	// Overall statistics
 	successRate := float64(summary.PassedTests) / float64(summary.TotalTests) * 100
 	totalTime := fmt.Sprintf("%.2fs", summary.TotalTime.Seconds())
 
-	fmt.Printf("Total Tests:     %s\n", HighlightBlue(fmt.Sprintf("%d", summary.TotalTests)))
-	fmt.Printf("Passed:          %s\n", HighlightGreen(fmt.Sprintf("%d", summary.PassedTests)))
-	fmt.Printf("Failed:          %s\n", HighlightRed(fmt.Sprintf("%d", summary.FailedTests)))
+	fmt.Printf("Total Tests:     %s\n", homegrown.HighlightBlue(fmt.Sprintf("%d", summary.TotalTests)))
+	fmt.Printf("Passed:          %s\n", homegrown.HighlightGreen(fmt.Sprintf("%d", summary.PassedTests)))
+	fmt.Printf("Failed:          %s\n", homegrown.HighlightRed(fmt.Sprintf("%d", summary.FailedTests)))
 	fmt.Printf("Success Rate:    %s\n", getColoredSuccessRate(successRate))
-	fmt.Printf("Total Time:      %s\n", HighlightBlue(totalTime))
+	fmt.Printf("Total Time:      %s\n", homegrown.HighlightBlue(totalTime))
 	fmt.Println()
 
 	// Category breakdown
-	fmt.Println(HighlightYellow("Test Results by Category:"))
+	fmt.Println(homegrown.HighlightYellow("Test Results by Category:"))
 	for category, count := range summary.Categories {
 		categoryPassed := countPassedInCategory(summary.Results, category)
 		categoryRate := float64(categoryPassed) / float64(count) * 100
 
 		fmt.Printf("  %s: %s/%s %s\n",
-			Normal(category),
-			HighlightGreen(fmt.Sprintf("%d", categoryPassed)),
-			Normal(fmt.Sprintf("%d", count)),
+			homegrown.Normal(category),
+			homegrown.HighlightGreen(fmt.Sprintf("%d", categoryPassed)),
+			homegrown.Normal(fmt.Sprintf("%d", count)),
 			getColoredSuccessRate(categoryRate))
 	}
 	fmt.Println()
 
 	// Failed tests details
 	if summary.FailedTests > 0 {
-		fmt.Println(HighlightRed("Failed Tests:"))
+		fmt.Println(homegrown.HighlightRed("Failed Tests:"))
 		for _, result := range summary.Results {
 			if !result.Success {
-				fmt.Printf("  %s %s\n", HighlightRed("✗"), Normal(result.UseCase.GetName()))
+				fmt.Printf("  %s %s\n", homegrown.HighlightRed("✗"), homegrown.Normal(result.UseCase.GetName()))
 				if result.Error != nil {
-					fmt.Printf("    %s\n", HighlightRed(result.Error.Error()))
+					fmt.Printf("    %s\n", homegrown.HighlightRed(result.Error.Error()))
 				}
 			}
 		}
@@ -667,23 +555,23 @@ func displayTestSummaryGeneric[T UseCase](summary TestSummary[T]) {
 		slowestTest := findSlowestTest(summary.Results)
 		fastestTest := findFastestTest(summary.Results)
 
-		fmt.Println(HighlightYellow("Performance Insights:"))
+		fmt.Println(homegrown.HighlightYellow("Performance Insights:"))
 		fmt.Printf("  Slowest: %s %s\n",
-			Normal(slowestTest.UseCase.GetName()),
-			HighlightRed(fmt.Sprintf("%.2fms", float64(slowestTest.ExecutionTime.Nanoseconds())/1e6)))
+			homegrown.Normal(slowestTest.UseCase.GetName()),
+			homegrown.HighlightRed(fmt.Sprintf("%.2fms", float64(slowestTest.ExecutionTime.Nanoseconds())/1e6)))
 		fmt.Printf("  Fastest: %s %s\n",
-			Normal(fastestTest.UseCase.GetName()),
-			HighlightGreen(fmt.Sprintf("%.2fms", float64(fastestTest.ExecutionTime.Nanoseconds())/1e6)))
+			homegrown.Normal(fastestTest.UseCase.GetName()),
+			homegrown.HighlightGreen(fmt.Sprintf("%.2fms", float64(fastestTest.ExecutionTime.Nanoseconds())/1e6)))
 	}
 
 	fmt.Println()
 
 	// Final verdict
 	if summary.FailedTests == 0 {
-		fmt.Println(HighlightGreen("🎉 All tests passed! SyndrDB functionality is working correctly."))
+		fmt.Println(homegrown.HighlightGreen("🎉 All tests passed! SyndrDB functionality is working correctly."))
 	} else {
 		fmt.Printf("%s %d test(s) failed. Please review the errors above.\n",
-			HighlightRed("⚠️"), summary.FailedTests)
+			homegrown.HighlightRed("⚠️"), summary.FailedTests)
 	}
 }
 
@@ -694,18 +582,18 @@ func getColoredSuccessRate(rate float64) string {
 	rateStr := fmt.Sprintf("(%.1f%%)", rate)
 
 	if rate >= 90.0 {
-		return HighlightGreen(rateStr)
+		return homegrown.HighlightGreen(rateStr)
 	} else if rate >= 70.0 {
-		return HighlightYellow(rateStr)
+		return homegrown.HighlightYellow(rateStr)
 	} else {
-		return HighlightRed(rateStr)
+		return homegrown.HighlightRed(rateStr)
 	}
 }
 
 // countPassedInCategory counts passed tests in a specific category
 // This function follows the Single Responsibility Principle by handling only category counting
 // Following SyndrDB comprehensive error handling, it accurately counts category results
-func countPassedInCategory[T UseCase](results []TestResult[T], category string) int {
+func countPassedInCategory[T homegrown.UseCase](results []TestResult[T], category string) int {
 	count := 0
 	for _, result := range results {
 		if result.UseCase.GetCategory() == category && result.Success {
@@ -718,7 +606,7 @@ func countPassedInCategory[T UseCase](results []TestResult[T], category string) 
 // findSlowestTest finds the test with the longest execution time
 // This function follows the Single Responsibility Principle by handling only performance analysis
 // Following SyndrDB comprehensive error handling, it identifies performance outliers
-func findSlowestTest[T UseCase](results []TestResult[T]) TestResult[T] {
+func findSlowestTest[T homegrown.UseCase](results []TestResult[T]) TestResult[T] {
 	if len(results) == 0 {
 		return TestResult[T]{}
 	}
@@ -735,7 +623,7 @@ func findSlowestTest[T UseCase](results []TestResult[T]) TestResult[T] {
 // findFastestTest finds the test with the shortest execution time
 // This function follows the Single Responsibility Principle by handling only performance analysis
 // Following SyndrDB comprehensive error handling, it identifies performance benchmarks
-func findFastestTest[T UseCase](results []TestResult[T]) TestResult[T] {
+func findFastestTest[T homegrown.UseCase](results []TestResult[T]) TestResult[T] {
 	if len(results) == 0 {
 		return TestResult[T]{}
 	}
@@ -765,12 +653,12 @@ func forceCompleteStateReset() {
 		"update_test_bundle",
 	}
 
-	ColorLogger.Debug("Performing complete state reset...")
+	homegrown.ColorLogger.Debug("Performing complete state reset...")
 
 	// Execute DELETE commands for each bundle
 	for _, bundleName := range problematicBundles {
 		deleteCommand := fmt.Sprintf("DELETE BUNDLE %s", bundleName)
-		_, _ = ExecuteClientCommand(deleteCommand) // Ignore errors during cleanup
+		_, _ = homegrown.ExecuteClientCommand(deleteCommand) // Ignore errors during cleanup
 	}
 
 	// Add a small delay to ensure operations complete
@@ -779,5 +667,5 @@ func forceCompleteStateReset() {
 	// Force garbage collection to clear any cached references
 	runtime.GC()
 
-	ColorLogger.Debug("State reset complete")
+	homegrown.ColorLogger.Debug("State reset complete")
 }

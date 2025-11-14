@@ -43,18 +43,18 @@ func mergeInternalNodes(idx *BTreeIndex, leftInternal, rightInternal *BTreeNode,
 		leftInternal.PageNum, rightInternal.PageNum, string(separatorKey))
 
 	// Pin both nodes to prevent eviction during merge
-	if err := idx.pageManager.PinPage(leftInternal.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(leftInternal.PageNum); err != nil {
 		return false, fmt.Errorf("failed to pin left node %d: %w", leftInternal.PageNum, err)
 	}
-	defer idx.pageManager.UnpinPage(leftInternal.PageNum)
+	defer idx.PageManager.UnpinPage(leftInternal.PageNum)
 
-	if err := idx.pageManager.PinPage(rightInternal.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(rightInternal.PageNum); err != nil {
 		return false, fmt.Errorf("failed to pin right node %d: %w", rightInternal.PageNum, err)
 	}
-	defer idx.pageManager.UnpinPage(rightInternal.PageNum)
+	defer idx.PageManager.UnpinPage(rightInternal.PageNum)
 
 	// Step 1: Verify merge is safe (combined size doesn't exceed capacity)
-	maxKeys := calculateMaxKeysForNode(leftInternal, idx.metadata.PageSize)
+	maxKeys := calculateMaxKeysForNode(leftInternal, idx.Metadata.PageSize)
 	combinedKeyCount := leftInternal.KeyCount + rightInternal.KeyCount + 1 // +1 for separator key
 
 	if combinedKeyCount > maxKeys {
@@ -86,8 +86,8 @@ func mergeInternalNodes(idx *BTreeIndex, leftInternal, rightInternal *BTreeNode,
 
 	// Step 5: Update parent pointers for all children that moved from right to left
 	for _, childPageNum := range rightInternal.Children {
-		childData, err := idx.pageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		childData, err := idx.PageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			idx.logger.Warnf("Failed to load child %d to update parent pointer: %v", childPageNum, err)
@@ -102,11 +102,11 @@ func mergeInternalNodes(idx *BTreeIndex, leftInternal, rightInternal *BTreeNode,
 
 		// Update parent pointer to left node
 		child.ParentPage = leftInternal.PageNum
-		idx.pageManager.PutPage(childPageNum, child, true)
+		idx.PageManager.PutPage(childPageNum, child, true)
 	}
 
 	// Step 6: Save the merged left node
-	idx.pageManager.PutPage(leftInternal.PageNum, leftInternal, true)
+	idx.PageManager.PutPage(leftInternal.PageNum, leftInternal, true)
 
 	// Step 7: Remove separator key and right node from parent
 	if err := removeKeyFromInternalNode(idx, parentPageNum, separatorKey, rightInternal.PageNum); err != nil {
@@ -114,7 +114,7 @@ func mergeInternalNodes(idx *BTreeIndex, leftInternal, rightInternal *BTreeNode,
 	}
 
 	// Step 8: Deallocate the right node (no longer needed)
-	if err := idx.fileManager.DeallocatePage(rightInternal.PageNum); err != nil {
+	if err := idx.FileManager.DeallocatePage(rightInternal.PageNum); err != nil {
 		idx.logger.Warnf("Failed to deallocate merged node %d: %v", rightInternal.PageNum, err)
 	}
 
@@ -137,8 +137,8 @@ func mergeInternalNodes(idx *BTreeIndex, leftInternal, rightInternal *BTreeNode,
 //   - error: Any error that occurred
 func removeKeyFromInternalNode(idx *BTreeIndex, parentPageNum uint32, key []byte, childPageNum uint32) error {
 	// Load parent node
-	parentData, err := idx.pageManager.GetPage(parentPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	parentData, err := idx.PageManager.GetPage(parentPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load parent %d: %w", parentPageNum, err)
@@ -154,10 +154,10 @@ func removeKeyFromInternalNode(idx *BTreeIndex, parentPageNum uint32, key []byte
 	}
 
 	// Pin parent during modification
-	if err := idx.pageManager.PinPage(parentPageNum); err != nil {
+	if err := idx.PageManager.PinPage(parentPageNum); err != nil {
 		return fmt.Errorf("failed to pin parent %d: %w", parentPageNum, err)
 	}
-	defer idx.pageManager.UnpinPage(parentPageNum)
+	defer idx.PageManager.UnpinPage(parentPageNum)
 
 	// Find the key position
 	keyPos := -1
@@ -197,13 +197,13 @@ func removeKeyFromInternalNode(idx *BTreeIndex, parentPageNum uint32, key []byte
 		keyPos, parentPageNum, parent.KeyCount)
 
 	// Save modified parent
-	idx.pageManager.PutPage(parentPageNum, parent, true)
+	idx.PageManager.PutPage(parentPageNum, parent, true)
 
 	// Check if parent is now underutilized and needs rebalancing
 	// TODO: I could implement adaptive thresholds based on workload patterns to optimize merge frequency
-	if shouldRebalanceInternal(parent, idx.metadata.PageSize) {
+	if shouldRebalanceInternal(parent, idx.Metadata.PageSize) {
 		idx.logger.Debugf("Parent %d is underutilized after merge, may need rebalancing", parentPageNum)
-		
+
 		// If parent is root and has no keys, make the only child the new root
 		if parent.ParentPage == 0 && parent.KeyCount == 0 {
 			if len(parent.Children) == 1 {
@@ -256,8 +256,8 @@ func promoteChildToRoot(idx *BTreeIndex, childPageNum uint32) error {
 	idx.logger.Infof("Promoting child %d to new root (tree height decreasing)", childPageNum)
 
 	// Load the child node
-	childData, err := idx.pageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	childData, err := idx.PageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load child %d: %w", childPageNum, err)
@@ -272,15 +272,15 @@ func promoteChildToRoot(idx *BTreeIndex, childPageNum uint32) error {
 	child.ParentPage = 0
 
 	// Save the new root
-	idx.pageManager.PutPage(childPageNum, child, true)
+	idx.PageManager.PutPage(childPageNum, child, true)
 
 	// Update metadata to point to new root
-	oldRootPageNum := idx.metadata.RootPageNum
-	idx.metadata.RootPageNum = childPageNum
+	oldRootPageNum := idx.Metadata.RootPageNum
+	idx.Metadata.RootPageNum = childPageNum
 
 	// TODO: I could implement root page recycling to reuse the old root page number for consistency
 	// For now, we just deallocate it
-	if err := idx.fileManager.DeallocatePage(oldRootPageNum); err != nil {
+	if err := idx.FileManager.DeallocatePage(oldRootPageNum); err != nil {
 		idx.logger.Warnf("Failed to deallocate old root %d: %v", oldRootPageNum, err)
 	}
 
@@ -307,8 +307,8 @@ func rebalanceInternalNode(idx *BTreeIndex, node *BTreeNode) error {
 	idx.logger.Debugf("Attempting to rebalance internal node %d", node.PageNum)
 
 	// Load parent to find siblings
-	parentData, err := idx.pageManager.GetPage(node.ParentPage, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	parentData, err := idx.PageManager.GetPage(node.ParentPage, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load parent %d: %w", node.ParentPage, err)
@@ -353,13 +353,13 @@ func rebalanceInternalNode(idx *BTreeIndex, node *BTreeNode) error {
 	if ourPos > 0 {
 		leftSiblingPageNum := parent.Children[ourPos-1]
 		separatorKey := parent.Keys[ourPos-1]
-		
+
 		return mergeWithLeftInternalSibling(idx, node, leftSiblingPageNum, separatorKey, parent.PageNum)
 	} else if ourPos < len(parent.Children)-1 {
 		// Merge with right sibling (we become the left sibling in the merge)
 		rightSiblingPageNum := parent.Children[ourPos+1]
 		separatorKey := parent.Keys[ourPos]
-		
+
 		return mergeWithRightInternalSibling(idx, node, rightSiblingPageNum, separatorKey, parent.PageNum)
 	}
 
@@ -375,8 +375,8 @@ func rebalanceInternalNode(idx *BTreeIndex, node *BTreeNode) error {
 // Returns:
 //   - bool: True if sibling can lend a key
 func canBorrowFromSibling(idx *BTreeIndex, siblingPageNum uint32) bool {
-	siblingData, err := idx.pageManager.GetPage(siblingPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	siblingData, err := idx.PageManager.GetPage(siblingPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return false
@@ -387,7 +387,7 @@ func canBorrowFromSibling(idx *BTreeIndex, siblingPageNum uint32) bool {
 		return false
 	}
 
-	maxKeys := calculateMaxKeysForNode(sibling, idx.metadata.PageSize)
+	maxKeys := calculateMaxKeysForNode(sibling, idx.Metadata.PageSize)
 	minKeys := maxKeys / 2
 
 	// Can borrow if sibling has more than minimum keys
@@ -410,8 +410,8 @@ func canBorrowFromSibling(idx *BTreeIndex, siblingPageNum uint32) bool {
 //   - error: Any error that occurred
 func borrowFromRightInternalSibling(idx *BTreeIndex, node *BTreeNode, rightSiblingPageNum uint32, parent *BTreeNode, nodePos int) error {
 	// Load right sibling
-	rightSiblingData, err := idx.pageManager.GetPage(rightSiblingPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	rightSiblingData, err := idx.PageManager.GetPage(rightSiblingPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load right sibling %d: %w", rightSiblingPageNum, err)
@@ -423,15 +423,15 @@ func borrowFromRightInternalSibling(idx *BTreeIndex, node *BTreeNode, rightSibli
 	}
 
 	// Pin both nodes during operation
-	if err := idx.pageManager.PinPage(node.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(node.PageNum); err != nil {
 		return fmt.Errorf("failed to pin node %d: %w", node.PageNum, err)
 	}
-	defer idx.pageManager.UnpinPage(node.PageNum)
+	defer idx.PageManager.UnpinPage(node.PageNum)
 
-	if err := idx.pageManager.PinPage(rightSiblingPageNum); err != nil {
+	if err := idx.PageManager.PinPage(rightSiblingPageNum); err != nil {
 		return fmt.Errorf("failed to pin right sibling %d: %w", rightSiblingPageNum, err)
 	}
-	defer idx.pageManager.UnpinPage(rightSiblingPageNum)
+	defer idx.PageManager.UnpinPage(rightSiblingPageNum)
 
 	// Rotation: parent key comes down, first key of right sibling goes up
 	separatorKey := parent.Keys[nodePos]
@@ -448,13 +448,13 @@ func borrowFromRightInternalSibling(idx *BTreeIndex, node *BTreeNode, rightSibli
 		node.Children = append(node.Children, firstChild)
 
 		// Update child's parent pointer
-		childData, err := idx.pageManager.GetPage(firstChild, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		childData, err := idx.PageManager.GetPage(firstChild, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err == nil {
 			if child, ok := childData.(*BTreeNode); ok {
 				child.ParentPage = node.PageNum
-				idx.pageManager.PutPage(firstChild, child, true)
+				idx.PageManager.PutPage(firstChild, child, true)
 			}
 		}
 	}
@@ -472,9 +472,9 @@ func borrowFromRightInternalSibling(idx *BTreeIndex, node *BTreeNode, rightSibli
 	rightSibling.KeyCount = uint32(len(rightSibling.Keys))
 
 	// Save all modified nodes
-	idx.pageManager.PutPage(node.PageNum, node, true)
-	idx.pageManager.PutPage(rightSiblingPageNum, rightSibling, true)
-	idx.pageManager.PutPage(parent.PageNum, parent, true)
+	idx.PageManager.PutPage(node.PageNum, node, true)
+	idx.PageManager.PutPage(rightSiblingPageNum, rightSibling, true)
+	idx.PageManager.PutPage(parent.PageNum, parent, true)
 
 	idx.logger.Debugf("Borrowed key from right sibling %d to node %d", rightSiblingPageNum, node.PageNum)
 
@@ -494,8 +494,8 @@ func borrowFromRightInternalSibling(idx *BTreeIndex, node *BTreeNode, rightSibli
 //   - error: Any error that occurred
 func borrowFromLeftInternalSibling(idx *BTreeIndex, node *BTreeNode, leftSiblingPageNum uint32, parent *BTreeNode, nodePos int) error {
 	// Load left sibling
-	leftSiblingData, err := idx.pageManager.GetPage(leftSiblingPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	leftSiblingData, err := idx.PageManager.GetPage(leftSiblingPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load left sibling %d: %w", leftSiblingPageNum, err)
@@ -507,15 +507,15 @@ func borrowFromLeftInternalSibling(idx *BTreeIndex, node *BTreeNode, leftSibling
 	}
 
 	// Pin both nodes during operation
-	if err := idx.pageManager.PinPage(node.PageNum); err != nil {
+	if err := idx.PageManager.PinPage(node.PageNum); err != nil {
 		return fmt.Errorf("failed to pin node %d: %w", node.PageNum, err)
 	}
-	defer idx.pageManager.UnpinPage(node.PageNum)
+	defer idx.PageManager.UnpinPage(node.PageNum)
 
-	if err := idx.pageManager.PinPage(leftSiblingPageNum); err != nil {
+	if err := idx.PageManager.PinPage(leftSiblingPageNum); err != nil {
 		return fmt.Errorf("failed to pin left sibling %d: %w", leftSiblingPageNum, err)
 	}
-	defer idx.pageManager.UnpinPage(leftSiblingPageNum)
+	defer idx.PageManager.UnpinPage(leftSiblingPageNum)
 
 	// Rotation: parent key comes down, last key of left sibling goes up
 	separatorKey := parent.Keys[nodePos-1]
@@ -532,13 +532,13 @@ func borrowFromLeftInternalSibling(idx *BTreeIndex, node *BTreeNode, leftSibling
 		node.Children = append([]uint32{lastChild}, node.Children...)
 
 		// Update child's parent pointer
-		childData, err := idx.pageManager.GetPage(lastChild, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		childData, err := idx.PageManager.GetPage(lastChild, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err == nil {
 			if child, ok := childData.(*BTreeNode); ok {
 				child.ParentPage = node.PageNum
-				idx.pageManager.PutPage(lastChild, child, true)
+				idx.PageManager.PutPage(lastChild, child, true)
 			}
 		}
 	}
@@ -556,9 +556,9 @@ func borrowFromLeftInternalSibling(idx *BTreeIndex, node *BTreeNode, leftSibling
 	leftSibling.KeyCount = uint32(len(leftSibling.Keys))
 
 	// Save all modified nodes
-	idx.pageManager.PutPage(node.PageNum, node, true)
-	idx.pageManager.PutPage(leftSiblingPageNum, leftSibling, true)
-	idx.pageManager.PutPage(parent.PageNum, parent, true)
+	idx.PageManager.PutPage(node.PageNum, node, true)
+	idx.PageManager.PutPage(leftSiblingPageNum, leftSibling, true)
+	idx.PageManager.PutPage(parent.PageNum, parent, true)
 
 	idx.logger.Debugf("Borrowed key from left sibling %d to node %d", leftSiblingPageNum, node.PageNum)
 
@@ -577,8 +577,8 @@ func borrowFromLeftInternalSibling(idx *BTreeIndex, node *BTreeNode, leftSibling
 // Returns:
 //   - error: Any error that occurred
 func mergeWithLeftInternalSibling(idx *BTreeIndex, node *BTreeNode, leftSiblingPageNum uint32, separatorKey []byte, parentPageNum uint32) error {
-	leftSiblingData, err := idx.pageManager.GetPage(leftSiblingPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	leftSiblingData, err := idx.PageManager.GetPage(leftSiblingPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load left sibling %d: %w", leftSiblingPageNum, err)
@@ -606,8 +606,8 @@ func mergeWithLeftInternalSibling(idx *BTreeIndex, node *BTreeNode, leftSiblingP
 // Returns:
 //   - error: Any error that occurred
 func mergeWithRightInternalSibling(idx *BTreeIndex, node *BTreeNode, rightSiblingPageNum uint32, separatorKey []byte, parentPageNum uint32) error {
-	rightSiblingData, err := idx.pageManager.GetPage(rightSiblingPageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	rightSiblingData, err := idx.PageManager.GetPage(rightSiblingPageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to load right sibling %d: %w", rightSiblingPageNum, err)

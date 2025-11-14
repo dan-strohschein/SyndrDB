@@ -68,8 +68,8 @@ import (
 // This structure manages all file operations including reading, writing,
 // and maintaining the index file format
 type BTreeFileManager struct {
-	filePath   string             // Path to the index file
-	file       *os.File           // File handle for I/O operations
+	FilePath   string             // Path to the index file
+	File       *os.File           // File handle for I/O operations
 	pageSize   uint32             // Size of each page in bytes
 	debugMode  bool               // Whether to use ASCII format
 	isOpen     bool               // Whether the file is currently open
@@ -107,7 +107,7 @@ func (fm *BTreeFileManager) Sync() error {
 	defer fm.mutex.Unlock()
 
 	// Sync the file to ensure all changes are written to disk
-	if err := fm.file.Sync(); err != nil {
+	if err := fm.File.Sync(); err != nil {
 		fm.logger.Warnf("Failed to sync file: %v", err)
 		return fmt.Errorf("failed to sync file: %w", err)
 	}
@@ -154,7 +154,7 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 	logger.Debugf("Creating BTree file manager for: %s", filePath)
 
 	fm := &BTreeFileManager{
-		filePath:  filePath,
+		FilePath:  filePath,
 		pageSize:  pageSize,
 		debugMode: debugMode,
 		isOpen:    false,
@@ -217,7 +217,7 @@ func (fm *BTreeFileManager) ReadPage(pageNum uint32) (interface{}, error) {
 
 	// Read page data
 	pageData := make([]byte, fm.pageSize)
-	n, err := fm.file.ReadAt(pageData, offset)
+	n, err := fm.File.ReadAt(pageData, offset)
 	if err != nil && err != io.EOF {
 		return nil, fmt.Errorf("failed to read page %d: %w", pageNum, err)
 	}
@@ -298,7 +298,7 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 	offset := fm.calculatePageOffset(pageNum)
 
 	// Write to file
-	if _, err := fm.file.WriteAt(padded, offset); err != nil {
+	if _, err := fm.File.WriteAt(padded, offset); err != nil {
 		return fmt.Errorf("failed to write page %d: %w", pageNum, err)
 	}
 
@@ -314,7 +314,7 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 	}
 
 	// Sync to disk to ensure durability
-	if err := fm.file.Sync(); err != nil {
+	if err := fm.File.Sync(); err != nil {
 		return fmt.Errorf("failed to sync page %d to disk: %w", pageNum, err)
 	}
 
@@ -426,12 +426,12 @@ func (fm *BTreeFileManager) Close() error {
 	fm.logger.Debugf("Closing BTree file manager")
 
 	// Sync any pending changes
-	if err := fm.file.Sync(); err != nil {
+	if err := fm.File.Sync(); err != nil {
 		fm.logger.Warnf("Failed to sync file during close: %v", err)
 	}
 
 	// Close the file
-	if err := fm.file.Close(); err != nil {
+	if err := fm.File.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
 
@@ -445,7 +445,7 @@ func (fm *BTreeFileManager) Close() error {
 // Returns:
 //   - string: The file path
 func (fm *BTreeFileManager) GetFilePath() string {
-	return fm.filePath
+	return fm.FilePath
 }
 
 // GetPageSize returns the page size
@@ -470,7 +470,7 @@ func (fm *BTreeFileManager) GetTotalPages() uint32 {
 // createNewFile creates a new index file with proper header
 func (fm *BTreeFileManager) createNewFile() error {
 	var err error
-	fm.file, err = os.Create(fm.filePath)
+	fm.File, err = os.Create(fm.FilePath)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
@@ -496,7 +496,7 @@ func (fm *BTreeFileManager) createNewFile() error {
 // openExistingFile opens an existing index file and reads header
 func (fm *BTreeFileManager) openExistingFile() error {
 	var err error
-	fm.file, err = os.OpenFile(fm.filePath, os.O_RDWR, 0644)
+	fm.File, err = os.OpenFile(fm.FilePath, os.O_RDWR, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
@@ -526,7 +526,7 @@ func (fm *BTreeFileManager) writeFileHeader() error {
 	}
 
 	// Write at beginning of file
-	if _, err := fm.file.WriteAt(headerData, 0); err != nil {
+	if _, err := fm.File.WriteAt(headerData, 0); err != nil {
 		return fmt.Errorf("failed to write file header: %w", err)
 	}
 
@@ -538,7 +538,7 @@ func (fm *BTreeFileManager) readFileHeader() error {
 
 	// Read initial bytes to determine format
 	headerBytes := make([]byte, 1024) // Should be enough for header
-	n, err := fm.file.ReadAt(headerBytes, 0)
+	n, err := fm.File.ReadAt(headerBytes, 0)
 	if err != nil && err != io.EOF {
 		return fmt.Errorf("failed to read file header: %w", err)
 	}
@@ -550,7 +550,7 @@ func (fm *BTreeFileManager) readFileHeader() error {
 		// ASCII format
 		fm.debugMode = true
 		// Deserialize ASCII header
-		fm.logger.Debugf("Detected ASCII format for file: %s", fm.filePath)
+		fm.logger.Debugf("Detected ASCII format for file: %s", fm.FilePath)
 		fileHeader, err := fm.deserializeFileHeaderASCII(headerBytes)
 		if err != nil {
 			return fmt.Errorf("failed to deserialize ASCII file header: %w", err)

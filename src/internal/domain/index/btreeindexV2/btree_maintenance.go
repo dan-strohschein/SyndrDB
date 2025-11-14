@@ -351,7 +351,7 @@ func RebuildIndex(idx *BTreeIndex, options *RebuildOptions) (*MaintenanceResult,
 	}
 
 	// Calculate optimal page size if requested
-	optimalPageSize := idx.metadata.PageSize
+	optimalPageSize := idx.Metadata.PageSize
 	if options.UseOptimalPageSize {
 		optimalPageSize = calculateOptimalPageSize(allEntries)
 		idx.logger.Debugf("Calculated optimal page size: %d bytes", optimalPageSize)
@@ -559,8 +559,8 @@ func performCompactionOperations(idx *BTreeIndex, options *CompactionOptions, re
 	idx.logger.Debugf("Performing B-tree compaction operations")
 
 	// Track starting state for metrics
-	startPages := idx.metadata.TotalPages
-	startTombstones := idx.metadata.TotalTombstones
+	startPages := idx.Metadata.TotalPages
+	startTombstones := idx.Metadata.TotalTombstones
 
 	// Delegate to the compact() method which performs the full rebuild
 	// The compact() method handles:
@@ -575,8 +575,8 @@ func performCompactionOperations(idx *BTreeIndex, options *CompactionOptions, re
 	// Calculate metrics for reporting
 	// Note: compact() resets TotalPages and TotalTombstones, so we use the starting values
 	result.PagesProcessed = int(startPages)
-	result.PagesReclaimed = int(startPages - idx.metadata.TotalPages)
-	result.SpaceSaved = uint64(result.PagesReclaimed) * uint64(idx.metadata.PageSize)
+	result.PagesReclaimed = int(startPages - idx.Metadata.TotalPages)
+	result.SpaceSaved = uint64(result.PagesReclaimed) * uint64(idx.Metadata.PageSize)
 
 	idx.logger.Infof("Compaction complete: processed %d pages, reclaimed %d pages, removed %d tombstones",
 		result.PagesProcessed, result.PagesReclaimed, startTombstones)
@@ -687,8 +687,8 @@ func extractAllEntries(idx *BTreeIndex) ([]IndexEntry, error) {
 
 	for currentPageNum != 0 {
 		// Load the current leaf node
-		pageData, err := idx.pageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
-			return idx.fileManager.ReadPage(pn)
+		pageData, err := idx.PageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to load leaf page %d: %w", currentPageNum, err)
@@ -745,8 +745,8 @@ func findLeftmostLeaf(idx *BTreeIndex, pageNum uint32) (uint32, error) {
 	}
 
 	// Load the current node
-	pageData, err := idx.pageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
-		return idx.fileManager.ReadPage(pn)
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return 0, fmt.Errorf("failed to load page %d: %w", pageNum, err)
@@ -971,21 +971,21 @@ func validateNewIndexStructure(newIndex *BTreeIndex) error {
 		return fmt.Errorf("new index has no root page")
 	}
 
-	if newIndex.metadata == nil {
+	if newIndex.Metadata == nil {
 		return fmt.Errorf("new index has no metadata")
 	}
 
-	if newIndex.fileManager == nil {
+	if newIndex.FileManager == nil {
 		return fmt.Errorf("new index has no file manager")
 	}
 
-	if newIndex.pageManager == nil {
+	if newIndex.PageManager == nil {
 		return fmt.Errorf("new index has no page manager")
 	}
 
 	// Validate that the root page is accessible
-	_, err := newIndex.pageManager.GetPage(newIndex.rootPageNum, func(pn uint32) (interface{}, error) {
-		return newIndex.fileManager.ReadPage(pn)
+	_, err := newIndex.PageManager.GetPage(newIndex.rootPageNum, func(pn uint32) (interface{}, error) {
+		return newIndex.FileManager.ReadPage(pn)
 	})
 	if err != nil {
 		return fmt.Errorf("cannot access new index root page %d: %w", newIndex.rootPageNum, err)
@@ -1002,23 +1002,23 @@ func validateNewIndexStructure(newIndex *BTreeIndex) error {
 // Returns:
 //   - *BTreeMetadata: A copy of the current metadata
 func createMetadataBackup(idx *BTreeIndex) *BTreeMetadata {
-	if idx.metadata == nil {
+	if idx.Metadata == nil {
 		return nil
 	}
 
 	// Create a deep copy of the metadata
 	backup := &BTreeMetadata{
-		Version:         idx.metadata.Version,
-		IndexName:       idx.metadata.IndexName,
-		BundleName:      idx.metadata.BundleName,
-		FieldName:       idx.metadata.FieldName,
-		IsUnique:        idx.metadata.IsUnique,
-		PageSize:        idx.metadata.PageSize,
-		TotalKeys:       idx.metadata.TotalKeys,
-		TreeHeight:      idx.metadata.TreeHeight,
-		RootPageNum:     idx.metadata.RootPageNum,
-		CreatedAt:       idx.metadata.CreatedAt,
-		LastMaintenance: idx.metadata.LastMaintenance,
+		Version:         idx.Metadata.Version,
+		IndexName:       idx.Metadata.IndexName,
+		BundleName:      idx.Metadata.BundleName,
+		FieldName:       idx.Metadata.FieldName,
+		IsUnique:        idx.Metadata.IsUnique,
+		PageSize:        idx.Metadata.PageSize,
+		TotalKeys:       idx.Metadata.TotalKeys,
+		TreeHeight:      idx.Metadata.TreeHeight,
+		RootPageNum:     idx.Metadata.RootPageNum,
+		CreatedAt:       idx.Metadata.CreatedAt,
+		LastMaintenance: idx.Metadata.LastMaintenance,
 	}
 
 	return backup
@@ -1037,14 +1037,14 @@ func prepareNewIndexForSwap(currentIdx *BTreeIndex, newIdx *BTreeIndex) error {
 	newIdx.logger = currentIdx.logger
 
 	// Update the new index metadata to match current index identity
-	newIdx.metadata.IndexName = currentIdx.metadata.IndexName
-	newIdx.metadata.BundleName = currentIdx.metadata.BundleName
-	newIdx.metadata.FieldName = currentIdx.metadata.FieldName
-	newIdx.metadata.IsUnique = currentIdx.metadata.IsUnique
-	newIdx.metadata.CreatedAt = currentIdx.metadata.CreatedAt
+	newIdx.Metadata.IndexName = currentIdx.Metadata.IndexName
+	newIdx.Metadata.BundleName = currentIdx.Metadata.BundleName
+	newIdx.Metadata.FieldName = currentIdx.Metadata.FieldName
+	newIdx.Metadata.IsUnique = currentIdx.Metadata.IsUnique
+	newIdx.Metadata.CreatedAt = currentIdx.Metadata.CreatedAt
 
 	// Flush any pending changes in the new index
-	if err := newIdx.fileManager.Sync(); err != nil {
+	if err := newIdx.FileManager.Sync(); err != nil {
 		return fmt.Errorf("failed to sync new index file manager: %w", err)
 	}
 
@@ -1082,19 +1082,19 @@ func performAtomicSwap(currentIdx *BTreeIndex, newIdx *BTreeIndex, result *Maint
 	currentIdx.rootPageNum = newIdx.rootPageNum
 
 	// Swap metadata
-	currentIdx.metadata = newIdx.metadata
+	currentIdx.Metadata = newIdx.Metadata
 
 	// Swap file manager (contains the actual data)
-	currentIdx.fileManager = newIdx.fileManager
+	currentIdx.FileManager = newIdx.FileManager
 
 	// Swap page manager (contains cached pages)
-	currentIdx.pageManager = newIdx.pageManager
+	currentIdx.PageManager = newIdx.PageManager
 
 	// Update maintenance result metrics
 	result.PagesProcessed += oldPagesCount + newPagesCount
 	if oldPagesCount > newPagesCount {
 		result.PagesReclaimed += oldPagesCount - newPagesCount
-		result.SpaceSaved += uint64(oldPagesCount-newPagesCount) * uint64(currentIdx.metadata.PageSize)
+		result.SpaceSaved += uint64(oldPagesCount-newPagesCount) * uint64(currentIdx.Metadata.PageSize)
 	}
 
 	currentIdx.logger.Debugf("Atomic swap completed: old pages=%d, new pages=%d",
@@ -1119,18 +1119,18 @@ func updateInternalReferences(idx *BTreeIndex, result *MaintenanceResult) error 
 	}
 
 	// Update metadata with accurate statistics
-	idx.metadata.TotalKeys = uint64(stats.TotalKeys)
-	idx.metadata.TreeHeight = uint32(stats.TreeHeight)
-	idx.metadata.RootPageNum = idx.rootPageNum
-	idx.metadata.LastMaintenance = time.Now()
+	idx.Metadata.TotalKeys = uint64(stats.TotalKeys)
+	idx.Metadata.TreeHeight = uint32(stats.TreeHeight)
+	idx.Metadata.RootPageNum = idx.rootPageNum
+	idx.Metadata.LastMaintenance = time.Now()
 
 	// Write updated metadata to storage
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		return fmt.Errorf("failed to write updated metadata: %w", err)
 	}
 
 	// Clear page manager cache to ensure consistency
-	idx.pageManager.ClearCache()
+	idx.PageManager.ClearCache()
 
 	idx.logger.Debugf("Updated internal references: %d keys, height %d",
 		stats.TotalKeys, stats.TreeHeight)
@@ -1175,7 +1175,7 @@ func cleanupOldStructure(idx *BTreeIndex, backupMetadata *BTreeMetadata, backupR
 //   - error: Any finalization errors
 func finalizeIndexReplacement(idx *BTreeIndex, result *MaintenanceResult) error {
 	// Sync all changes to disk
-	if err := idx.fileManager.Sync(); err != nil {
+	if err := idx.FileManager.Sync(); err != nil {
 		return fmt.Errorf("failed to sync after replacement: %w", err)
 	}
 
@@ -1201,15 +1201,15 @@ func finalizeIndexReplacement(idx *BTreeIndex, result *MaintenanceResult) error 
 //   - error: Any restore errors
 func restoreFromBackup(idx *BTreeIndex, backupMetadata *BTreeMetadata, backupRootPageNum uint32, backupIsOpen bool) error {
 	if backupMetadata != nil {
-		idx.metadata = backupMetadata
+		idx.Metadata = backupMetadata
 	}
 
 	idx.rootPageNum = backupRootPageNum
 	idx.isOpen = backupIsOpen
 
 	// Clear cache to avoid inconsistent state
-	if idx.pageManager != nil {
-		idx.pageManager.ClearCache()
+	if idx.PageManager != nil {
+		idx.PageManager.ClearCache()
 	}
 
 	idx.logger.Debugf("Restored index from backup")
@@ -1257,12 +1257,12 @@ func updateIndexStatistics(idx *BTreeIndex) error {
 	}
 
 	// Update metadata with new statistics
-	idx.metadata.LastMaintenance = time.Now()
-	idx.metadata.TotalKeys = uint64(stats.TotalKeys)
-	idx.metadata.TreeHeight = uint32(stats.TreeHeight)
+	idx.Metadata.LastMaintenance = time.Now()
+	idx.Metadata.TotalKeys = uint64(stats.TotalKeys)
+	idx.Metadata.TreeHeight = uint32(stats.TreeHeight)
 
 	// Write updated metadata to storage
-	if err := idx.fileManager.WriteMetadata(idx.metadata); err != nil {
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		return fmt.Errorf("failed to write updated metadata: %w", err)
 	}
 

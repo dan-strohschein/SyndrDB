@@ -47,9 +47,9 @@ import (
 // This is the primary interface for all BTree operations
 type BTreeIndex struct {
 	FilePath    string             // Path to the index file
-	metadata    *BTreeMetadata     // Index configuration and statistics
-	fileManager *BTreeFileManager  // Handles file I/O operations
-	pageManager *BTreePageManager  // Manages page caching
+	Metadata    *BTreeMetadata     // Index configuration and statistics
+	FileManager *BTreeFileManager  // Handles file I/O operations
+	PageManager *BTreePageManager  // Manages page caching
 	rootPageNum uint32             // Page number of the root node
 	mutex       sync.RWMutex       // Thread safety for concurrent access
 	isOpen      bool               // Whether the index is currently open
@@ -302,9 +302,9 @@ func NewBTreeIndex(config *BTreeConfig, fileManager *BTreeFileManager, pageManag
 
 	index := &BTreeIndex{
 		FilePath:    fileManager.GetFilePath(),
-		metadata:    metadata,
-		fileManager: fileManager,
-		pageManager: pageManager,
+		Metadata:    metadata,
+		FileManager: fileManager,
+		PageManager: pageManager,
 		rootPageNum: 1,
 		mutex:       sync.RWMutex{},
 		isOpen:      true,

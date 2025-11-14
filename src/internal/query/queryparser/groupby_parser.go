@@ -1,6 +1,45 @@
 /*
 GROUP BY PARSER AND EXECUTION SYSTEM
 
+⚠️  DEPRECATION NOTICE ⚠️
+
+This file contains the LEGACY GROUP BY parser implementation.
+It has been SUPERSEDED by the new unified parser:
+
+  src/internal/query/queryparser/unified_parser.go
+
+MIGRATION STATUS:
+- ✅ New implementation: UnifiedSelectQuery parser (ACTIVE)
+- ⚠️  This implementation: Kept for compatibility (DEPRECATED)
+- 🗑️  Removal planned: Version 2.0 (2-3 releases from now)
+
+MIGRATION GUIDE:
+Instead of calling ParseGroupByQuery directly, use ParseUnifiedSelectQuery:
+
+  OLD (deprecated):
+    query, err := queryparser.ParseGroupByQuery(sqlQuery, logger)
+
+  NEW (recommended):
+    query, err := queryparser.ParseUnifiedSelectQuery(sqlQuery, logger)
+    // query.GroupBy contains the GROUP BY clause
+    // query.AggregateFields contains aggregate functions
+    // query.HavingClause contains the HAVING clause
+
+WHY DEPRECATED:
+- New unified parser handles all query types (simple, JOIN, GROUP BY)
+- Better validation and error messages
+- Consistent structure across all query types
+- Improved ORDER BY validation for GROUP BY queries
+- Integration with planner-based execution
+
+NOTE: This code is still functional and will be maintained until removal.
+Structures like GroupByClause, AggregateFunction, and HavingClause are still
+used by the new parser and will NOT be removed.
+
+---
+
+ORIGINAL IMPLEMENTATION NOTES:
+
 This file implements the parsing and execution logic for GROUP BY clauses in SyndrDB.
 It follows PostgreSQL-style GROUP BY algorithms including Hash Aggregate and Sort + GroupAggregate
 optimizations for efficient data aggregation.

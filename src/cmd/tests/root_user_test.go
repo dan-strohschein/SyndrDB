@@ -10,6 +10,7 @@ import (
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/server"
+	"syndrdb/src/tests/homegrown"
 )
 
 /*
@@ -46,7 +47,7 @@ func setupRootUserTest(t *testing.T) (*server.UserService, *server.PermissionSer
 	require.NoError(t, err, "Failed to create temp directory")
 
 	// Use the standard test database service which initializes with default users
-	databaseService, _, err := StandupTestDatabaseService()
+	databaseService, _, err := homegrown.StandupTestDatabaseService()
 	require.NoError(t, err, "Failed to setup database service")
 
 	// Get primary database

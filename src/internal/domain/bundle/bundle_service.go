@@ -361,6 +361,18 @@ func (s *BundleService) SetCatalogService(catalogService CatalogServiceInterface
 	s.logger.Debug("Catalog service injected into BundleService")
 }
 
+func (s *BundleService) GetMetadataPersistInterval() int {
+	return s.metadataPersistInterval
+}
+
+// SetMetadataPersistInterval updates the metadata persist interval threshold.
+// This should only be called during configuration or testing.
+func (s *BundleService) SetMetadataPersistInterval(interval int) {
+	s.metadataUpdateMutex.Lock()
+	defer s.metadataUpdateMutex.Unlock()
+	s.metadataPersistInterval = interval
+}
+
 // getOrCreateSchemaManager retrieves or creates a GraphQL schema manager for the specified database.
 // Schema managers are created lazily on first use because they require database-specific directory paths.
 // This method is thread-safe and uses double-checked locking for optimal performance.
@@ -772,7 +784,7 @@ func (s *BundleService) scheduleMetadataUpdate(bundleName, operation string, val
 	if shouldFlush || shouldIdleFlush {
 		// Must unlock before calling flush to avoid deadlock
 		s.metadataUpdateMutex.Unlock()
-		s.flushMetadataUpdates()
+		s.FlushMetadataUpdates()
 		s.metadataUpdateMutex.Lock() // Re-acquire for defer
 	}
 }
@@ -829,7 +841,7 @@ func (s *BundleService) flushIndexUpdates() {
 	s.logger.Debugf("Index update flush completed in %v", flushTime)
 }
 
-// flushMetadataUpdates processes all pending metadata updates in a batch
+// FlushMetadataUpdates processes all pending metadata updates in a batch
 // This significantly improves write performance by reducing metadata calculation overhead
 // Thread-safe: Protected by metadataUpdateMutex
 //
@@ -844,7 +856,7 @@ func (s *BundleService) flushIndexUpdates() {
 // - Single-bundle heavy writes: Immediate persistence after each flush
 // - Multi-bundle operations: Batched persistence for performance
 // - Safety guarantee: Operation counter ensures eventual persistence
-func (s *BundleService) flushMetadataUpdates() {
+func (s *BundleService) FlushMetadataUpdates() {
 	s.metadataUpdateMutex.Lock()
 	if len(s.metadataUpdateBuffer) == 0 {
 		s.metadataUpdateMutex.Unlock()
@@ -992,12 +1004,12 @@ func (s *BundleService) flushMetadataUpdates() {
 	s.logger.Debugf("Metadata update flush completed in %v", flushTime)
 }
 
-// forceMetadataPersistence forces immediate persistence of all metadata updates to disk
+// ForceMetadataPersistence forces immediate persistence of all metadata updates to disk
 // This should be called during shutdown, explicit flush requests, or before critical operations
 // Thread-safe: Uses metadataUpdateMutex for operation count reset
-func (s *BundleService) forceMetadataPersistence() {
+func (s *BundleService) ForceMetadataPersistence() {
 	// First flush any pending updates to memory
-	s.flushMetadataUpdates()
+	s.FlushMetadataUpdates()
 
 	// Now persist ALL dirty bundles regardless of operation count
 	// This ensures all metadata is saved during shutdown
@@ -1147,7 +1159,7 @@ func (s *BundleService) FlushAllBuffers() error {
 	// 2. Force metadata persistence regardless of thresholds
 	if len(s.metadataUpdateBuffer) > 0 {
 		s.logger.Debugf("FLUSH: Forcing metadata persistence for %d pending updates", len(s.metadataUpdateBuffer))
-		s.forceMetadataPersistence()
+		s.ForceMetadataPersistence()
 	}
 
 	// 3. Sync any file system buffers
@@ -1324,7 +1336,7 @@ func (s *BundleService) forceFlushIndexUpdates() {
 	}
 	if len(s.metadataUpdateBuffer) > 0 {
 		s.logger.Debugf("Force flushing %d pending metadata updates", len(s.metadataUpdateBuffer))
-		s.flushMetadataUpdates()
+		s.FlushMetadataUpdates()
 	}
 }
 
@@ -1775,7 +1787,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	// and SELECT TOP needs accurate PageCount to work correctly
 	if len(s.metadataUpdateBuffer) > 0 {
 		s.logger.Debugf("Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
-		s.flushMetadataUpdates()
+		s.FlushMetadataUpdates()
 	}
 
 	s.logger.Infof("Bundle %s has PageCount: %d, TotalDocuments: %d", bundleName, bundle.PageCount, bundle.TotalDocuments)
@@ -4151,7 +4163,7 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 	defer s.ReleaseBundleReadLock(bundle.Name)
 
 	// Force flush any pending metadata updates to ensure accurate PageCount
-	s.flushMetadataUpdates()
+	s.FlushMetadataUpdates()
 
 	// If no WHERE clause, return all documents
 	if whereParts == "" {
@@ -4908,7 +4920,7 @@ func (s *BundleService) Shutdown() error {
 	// CRITICAL: Use forceMetadataPersistence to ensure disk write happens
 	if len(s.metadataUpdateBuffer) > 0 {
 		s.logger.Debugf("Force flushing %d remaining metadata updates during shutdown", len(s.metadataUpdateBuffer))
-		s.forceMetadataPersistence()
+		s.ForceMetadataPersistence()
 	}
 
 	// Close all loaded indexes properly

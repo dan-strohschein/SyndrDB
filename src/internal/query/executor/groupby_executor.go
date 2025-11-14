@@ -1,6 +1,44 @@
 /*
 GROUP BY EXECUTION ENGINE
 
+⚠️  DEPRECATION NOTICE ⚠️
+
+This file contains the LEGACY GROUP BY executor implementation.
+It has been SUPERSEDED by the new planner-based architecture:
+
+  src/internal/query/planner/aggregation_node.go
+
+MIGRATION STATUS:
+- ✅ New implementation: AggregationNode in query planner (ACTIVE)
+- ⚠️  This implementation: Kept for compatibility (DEPRECATED)
+- 🗑️  Removal planned: Version 2.0 (2-3 releases from now)
+
+MIGRATION GUIDE:
+Instead of calling GroupByExecutor directly, use the UnifiedQueryPlanner:
+
+  OLD (deprecated):
+    executor := executor.NewGroupByExecutor(groupByQuery, logger)
+    results, err := executor.Execute(documents)
+
+  NEW (recommended):
+    query, _ := queryparser.ParseUnifiedSelectQuery(sqlQuery, logger)
+    planner := planner.NewUnifiedQueryPlanner(bundleService, logger)
+    plan, _ := planner.CreatePlan(query, database)
+    results, err := plan.RootNode.Execute()
+
+WHY DEPRECATED:
+- New architecture integrates GROUP BY into unified execution pipeline
+- Better integration with WHERE clause, ORDER BY, and LIMIT
+- Improved cost estimation and index utilization
+- Consistent error handling across all query types
+
+NOTE: This code is still functional and will be maintained until removal.
+Test files using this executor will continue to work.
+
+---
+
+ORIGINAL IMPLEMENTATION NOTES:
+
 This file implements the execution logic for GROUP BY queries in SyndrDB,
 following PostgreSQL's approach with Hash Aggregate and Sort+GroupAggregate strategies.
 It includes memory management, spill-to-disk capabilities, and cost-based optimization.
