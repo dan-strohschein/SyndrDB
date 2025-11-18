@@ -196,6 +196,49 @@ func (t *Tokenizer) readIdentifier() Token {
 	upperLiteral := strings.ToUpper(literal)
 	tokenType := LookupKeyword(upperLiteral)
 
+	// Special handling for NOT IN - check if NOT is followed by IN
+	if tokenType == TOKEN_NOT {
+		// Save current position
+		savedPos := t.pos
+		savedCh := t.ch
+		savedLine := t.line
+		savedColumn := t.column
+
+		// Skip whitespace and check if next token is IN
+		t.skipWhitespace()
+
+		if isLetter(t.ch) {
+			nextStartPos := t.pos
+			for isLetter(t.ch) || isDigit(t.ch) || t.ch == '_' {
+				t.readChar()
+			}
+			nextLiteral := t.input[nextStartPos:t.pos]
+			nextUpperLiteral := strings.ToUpper(nextLiteral)
+
+			if nextUpperLiteral == "IN" {
+				// Merge NOT IN into single token
+				return Token{
+					Type:   TOKEN_NOTIN,
+					Value:  literal + " " + nextLiteral,
+					Line:   startLine,
+					Column: startColumn,
+				}
+			}
+
+			// Not followed by IN, restore position
+			t.pos = savedPos
+			t.ch = savedCh
+			t.line = savedLine
+			t.column = savedColumn
+		} else {
+			// Not a letter, restore position
+			t.pos = savedPos
+			t.ch = savedCh
+			t.line = savedLine
+			t.column = savedColumn
+		}
+	}
+
 	tok := Token{
 		Type:   tokenType,
 		Value:  literal,
@@ -290,7 +333,13 @@ func (t *Tokenizer) readString(quote byte) Token {
 				builder.WriteByte('"')
 			case '\'':
 				builder.WriteByte('\'')
+			case '_', '%':
+				// Preserve backslash for LIKE pattern escapes
+				builder.WriteByte('\\')
+				builder.WriteByte(t.ch)
 			default:
+				// Unknown escape - preserve backslash
+				builder.WriteByte('\\')
 				builder.WriteByte(t.ch)
 			}
 		} else {

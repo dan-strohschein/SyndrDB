@@ -160,10 +160,11 @@ func (p *GraphQLParser) ParseGraphQLQuery(field *ast.Field, variables map[string
 		QueryType:    queryparser.SimpleQuery, // GraphQL queries are simple queries for MVP
 		FromBundle:   bundleName,
 		SelectFields: selectFields,
-		WhereClause:  whereClause,
-		Limit:        limit,
-		Offset:       offset,
-		OrderBy:      orderBy,
+		// LEGACY: GraphQL parser produces WhereGroup type, store as interface{}
+		WhereExpression: whereClause,
+		Limit:           limit,
+		Offset:          offset,
+		OrderBy:         orderBy,
 	}
 
 	p.logger.Debugf("[GraphQL Parser] Successfully parsed query: bundle=%s, fields=%d, hasWhere=%v, limit=%d",
@@ -507,7 +508,13 @@ func (p *GraphQLParser) parseIntArgument(value interface{}, argName string) (int
 // Returns:
 //   - *queryparser.WhereGroup: Parsed WHERE clause
 //   - error: Parsing errors
+//
+// DEPRECATED: This method uses old string-based WHERE parsing
+// TODO: Replace with syndrQL.SelectParser to return Expression AST
+// GraphQL queries should translate GraphQL filters to SyndrQL Expressions
 func (p *GraphQLParser) parseWhereClause(whereStr string) (*queryparser.WhereGroup, error) {
+	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 513
+
 	// For MVP: Parse WHERE clause using existing SyndrQL WHERE parser
 	// This ensures consistent behavior between GraphQL and SyndrQL
 	whereGroup, err := queryparser.ParseWhereClause(whereStr)

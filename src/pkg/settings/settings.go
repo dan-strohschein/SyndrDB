@@ -162,7 +162,7 @@ func GetSettings() *Arguments {
 			BulkOperationDetection:  true, // Auto-detect bulk operations
 
 			// Parser Configuration (default to false for safety)
-			UseNewParser: false, // Use legacy parser by default
+			UseNewParser: true, // Use new parser by default
 
 			// PHASE 4 SORTING OPTIMIZATION DEFAULTS
 			SortTopNThreshold:       0.1,   // Top-N when LIMIT < 10% of dataset

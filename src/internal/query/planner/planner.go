@@ -72,12 +72,15 @@ type FullScanNode struct {
 	DocumentScanner  documentscanner.DocumentScannerInterface
 } // FilterNode represents post-scan filtering
 type FilterNode struct {
-	Child         ExecutionNode
-	Conditions    []FilterCondition
-	Clauses       []queryparser.WhereClause
-	Cost          float64
-	EstimatedRows int
-	Logger        *zap.SugaredLogger
+	Child      ExecutionNode
+	Conditions []FilterCondition
+	Clauses    []queryparser.WhereClause // DEPRECATED: Will be removed
+	// NEW: Expression-based filtering
+	WhereExpression interface{} // syndrQL.Expression - use type assertion
+	BundleContext   interface{} // syndrQL.BundleContext - use type assertion
+	Cost            float64
+	EstimatedRows   int
+	Logger          *zap.SugaredLogger
 	// DOCUMENT SCANNER INTEGRATION: Add document scanner for paginated operations
 	DocumentScanner documentscanner.DocumentScannerInterface
 }

@@ -194,6 +194,26 @@ func (a *ExpressionAdapter) convertGroupedExpression(expr *GroupedExpression, gr
 // This handles both "field == value" and "value == field" orderings
 // Field names can be either unquoted identifiers or quoted strings
 func (a *ExpressionAdapter) extractFieldAndValue(expr *BinaryExpression) (string, interface{}, error) {
+	// Try left side as qualified identifier ("Bundle"."Field")
+	if qualIdent, ok := expr.Left.(*QualifiedIdentifierExpression); ok {
+		value, err := a.extractLiteralValue(expr.Right)
+		if err != nil {
+			return "", nil, fmt.Errorf("right side is not a literal value: %w", err)
+		}
+		// Format as "Bundle"."Field"
+		return fmt.Sprintf(`"%s"."%s"`, qualIdent.Bundle, qualIdent.Field), value, nil
+	}
+
+	// Try right side as qualified identifier (reversed comparison)
+	if qualIdent, ok := expr.Right.(*QualifiedIdentifierExpression); ok {
+		value, err := a.extractLiteralValue(expr.Left)
+		if err != nil {
+			return "", nil, fmt.Errorf("left side is not a literal value: %w", err)
+		}
+		// Format as "Bundle"."Field"
+		return fmt.Sprintf(`"%s"."%s"`, qualIdent.Bundle, qualIdent.Field), value, nil
+	}
+
 	// Try left side as field (unquoted identifier)
 	if ident, ok := expr.Left.(*IdentifierExpression); ok {
 		value, err := a.extractLiteralValue(expr.Right)

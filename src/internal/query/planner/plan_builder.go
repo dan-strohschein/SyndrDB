@@ -145,7 +145,7 @@ func (pb *PlanBuilder) addAggregationNode(
 		child,
 		query.GroupBy,
 		query.AggregateFields,
-		query.HavingClause,
+		query.HavingExpression,
 		nil, // OrderBy handled by SortNode
 		pb.logger,
 	)

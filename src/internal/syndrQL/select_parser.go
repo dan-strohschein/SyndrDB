@@ -558,15 +558,40 @@ func (p *SelectParser) parseOrderByClause(stmt *SelectStatement) error {
 	p.advance() // consume BY
 
 	for {
-		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+		// Handle qualified identifiers: "Bundle"."Field" or just Field
+		var fieldName string
+
+		if p.current.Type == TOKEN_STRING {
+			// Could be qualified identifier: "Bundle"."Field"
+			bundleName := p.current.Value
+			p.advance() // consume first part
+
+			if p.current.Type == TOKEN_DOT {
+				// Qualified identifier
+				p.advance() // consume dot
+
+				if p.current.Type != TOKEN_STRING && p.current.Type != TOKEN_IDENT {
+					return fmt.Errorf("expected field name after '.' in ORDER BY, got %s", p.current.Type.String())
+				}
+
+				fieldName = fmt.Sprintf(`"%s"."%s"`, bundleName, p.current.Value)
+				p.advance()
+			} else {
+				// Just a quoted field name
+				fieldName = bundleName
+			}
+		} else if p.current.Type == TOKEN_IDENT {
+			// Unqualified identifier
+			fieldName = p.current.Value
+			p.advance()
+		} else {
 			return fmt.Errorf("expected field name in ORDER BY, got %s", p.current.Type.String())
 		}
 
 		orderField := OrderByField{
-			Field:      p.current.Value,
+			Field:      fieldName,
 			Descending: false,
 		}
-		p.advance()
 
 		// Check for ASC/DESC
 		if p.current.Type == TOKEN_IDENT {
@@ -601,12 +626,34 @@ func (p *SelectParser) parseGroupByClause(stmt *SelectStatement) error {
 	p.advance() // consume BY
 
 	for {
-		if p.current.Type != TOKEN_IDENT {
+		// Handle qualified identifiers: "Bundle"."Field" or just Field
+		var fieldName string
+
+		if p.current.Type == TOKEN_STRING {
+			// Qualified identifier: "Bundle"."Field"
+			bundleName := p.current.Value
+			p.advance() // consume bundle name
+
+			if p.current.Type != TOKEN_DOT {
+				return fmt.Errorf("expected '.' after bundle name in GROUP BY, got %s", p.current.Type.String())
+			}
+			p.advance() // consume dot
+
+			if p.current.Type != TOKEN_STRING && p.current.Type != TOKEN_IDENT {
+				return fmt.Errorf("expected field name after '.' in GROUP BY, got %s", p.current.Type.String())
+			}
+
+			fieldName = fmt.Sprintf(`"%s"."%s"`, bundleName, p.current.Value)
+			p.advance()
+		} else if p.current.Type == TOKEN_IDENT {
+			// Unqualified identifier
+			fieldName = p.current.Value
+			p.advance()
+		} else {
 			return fmt.Errorf("expected field name in GROUP BY, got %s", p.current.Type.String())
 		}
 
-		stmt.GroupBy = append(stmt.GroupBy, p.current.Value)
-		p.advance()
+		stmt.GroupBy = append(stmt.GroupBy, fieldName)
 
 		// Check for comma (more fields)
 		if p.current.Type != TOKEN_COMMA {

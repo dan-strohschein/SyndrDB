@@ -69,7 +69,7 @@ func main() {
 	flag.IntVar(&args.IndexSequenceSafetyMargin, "index-seq-margin", 100, "Safety margin for index sequence recovery")
 
 	// PARSER CONFIGURATION
-	flag.BoolVar(&args.UseNewParser, "use-new-parser", false, "Use new SyndrQL parser (default: false, uses legacy parser)")
+	flag.BoolVar(&args.UseNewParser, "use-new-parser", true, "Use new SyndrQL parser (default: false, uses legacy parser)")
 
 	// PHASE 4 SORTING OPTIMIZATION FLAGS
 	// Top-N Heapsort flags

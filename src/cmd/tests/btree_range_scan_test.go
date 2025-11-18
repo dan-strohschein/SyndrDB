@@ -1,5 +1,3 @@
-
-
 // B-tree Range Scan Integration Tests
 //
 // NOTE: This test file is currently disabled because it tests query planner
@@ -29,8 +27,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// Testplanner.BTreeRangeScanIntegration tests the integration between query planner and B-tree range scans
-func Testplanner.BTreeRangeScanIntegration(t *testing.T) {
+// TestBTreeRangeScanIntegration tests the integration between query planner and B-tree range scans
+func TestBTreeRangeScanIntegration(t *testing.T) {
 	// Setup test environment
 	testDir := "data/testdb/planner_range_test"
 	os.RemoveAll(testDir)

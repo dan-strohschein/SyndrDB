@@ -41,6 +41,7 @@ func NewQueryPlannerWithService(logger *zap.SugaredLogger, bundleServiceInt Bund
 // CreateExecutionPlan analyzes the query and creates an optimal execution plan
 func (qp *QueryPlanner) CreateExecutionPlan(bundle *models.Bundle, whereClause string) (*ExecutionPlan, error) {
 	// Parse WHERE clause into whereGroups
+	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 44
 	whereGroups, err := queryparser.ParseWhereClause(whereClause)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)

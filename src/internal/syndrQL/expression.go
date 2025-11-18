@@ -110,6 +110,17 @@ func (ge *GroupedExpression) String() string {
 	return fmt.Sprintf("(%s)", ge.Expression.String())
 }
 
+// QualifiedIdentifierExpression represents a qualified field name like "Bundle"."Field"
+type QualifiedIdentifierExpression struct {
+	Bundle string
+	Field  string
+}
+
+func (qie *QualifiedIdentifierExpression) expressionNode() {}
+func (qie *QualifiedIdentifierExpression) String() string {
+	return fmt.Sprintf("\"%s\".\"%s\"", qie.Bundle, qie.Field)
+}
+
 // Precedence levels for operator precedence parsing (Pratt parser)
 type Precedence int
 
@@ -124,6 +135,7 @@ const (
 	PRECEDENCE_UNARY                  // NOT -expr
 	PRECEDENCE_CALL                   // function()
 	PRECEDENCE_INDEX                  // array[index]
+	PRECEDENCE_MEMBER                 // Bundle.Field (member access - highest precedence)
 )
 
 // precedences maps token types to their precedence levels
@@ -139,6 +151,7 @@ var precedences = map[TokenType]Precedence{
 	TOKEN_GTE:      PRECEDENCE_COMPARISON,
 	TOKEN_LIKE:     PRECEDENCE_COMPARISON,
 	TOKEN_IN:       PRECEDENCE_COMPARISON,
+	TOKEN_NOTIN:    PRECEDENCE_COMPARISON,
 	TOKEN_CONTAINS: PRECEDENCE_COMPARISON,
 	TOKEN_PLUS:     PRECEDENCE_SUM,
 	TOKEN_MINUS:    PRECEDENCE_SUM,
@@ -147,6 +160,7 @@ var precedences = map[TokenType]Precedence{
 	TOKEN_MODULO:   PRECEDENCE_PRODUCT,
 	TOKEN_LPAREN:   PRECEDENCE_CALL,
 	TOKEN_LBRACKET: PRECEDENCE_INDEX,
+	TOKEN_DOT:      PRECEDENCE_MEMBER, // Member access (Bundle.Field)
 }
 
 // ExpressionParser parses expressions using Pratt parsing algorithm
@@ -187,7 +201,7 @@ func NewExpressionParser(tokens []Token) *ExpressionParser {
 	// Register prefix parsers (tokens that can start an expression)
 	p.registerPrefix(TOKEN_IDENT, p.parseIdentifier)
 	p.registerPrefix(TOKEN_NUMBER, p.parseLiteral)
-	p.registerPrefix(TOKEN_STRING, p.parseLiteral)
+	p.registerPrefix(TOKEN_STRING, p.parseQuotedIdentifierOrLiteral)
 	p.registerPrefix(TOKEN_TRUE, p.parseLiteral)
 	p.registerPrefix(TOKEN_FALSE, p.parseLiteral)
 	p.registerPrefix(TOKEN_NULL, p.parseLiteral)
@@ -212,12 +226,13 @@ func NewExpressionParser(tokens []Token) *ExpressionParser {
 	p.registerInfix(TOKEN_AND, p.parseBinaryExpression)
 	p.registerInfix(TOKEN_OR, p.parseBinaryExpression)
 	p.registerInfix(TOKEN_LIKE, p.parseBinaryExpression)
-	p.registerInfix(TOKEN_IN, p.parseBinaryExpression)
+	p.registerInfix(TOKEN_IN, p.parseInExpression)
+	p.registerInfix(TOKEN_NOTIN, p.parseInExpression)
 	p.registerInfix(TOKEN_CONTAINS, p.parseBinaryExpression)
 	p.registerInfix(TOKEN_LPAREN, p.parseCallExpression)
+	p.registerInfix(TOKEN_DOT, p.parseQualifiedIdentifier)
 
 	// TODO: I should add support for array indexing (field[0])
-	// TODO: I should add support for object member access (field.subfield)
 
 	return p
 }
@@ -273,6 +288,37 @@ func (p *ExpressionParser) parseIdentifier() (Expression, error) {
 	expr := &IdentifierExpression{Name: p.current.Value}
 	p.advance()
 	return expr, nil
+}
+
+// parseQuotedIdentifierOrLiteral handles TOKEN_STRING which can be either:
+// - An identifier (field/table name) when followed by operators like IN, =, <, >, etc.
+// - A literal string value when used as a value (e.g., in IN clause values, comparison values)
+// In SyndrQL, double quotes are used for both purposes - context determines meaning.
+func (p *ExpressionParser) parseQuotedIdentifierOrLiteral() (Expression, error) {
+	value := p.current.Value
+
+	// Look ahead to see what comes next
+	p.advance()
+
+	// If followed by an operator that takes a field on the left side, treat as identifier
+	// Examples: "Genre" IN (...), "Name" = "value", "Price" > 10
+	switch p.current.Type {
+	case TOKEN_IN, TOKEN_NOTIN, TOKEN_EQ, TOKEN_NEQ,
+		TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE, TOKEN_LIKE:
+		// This is a field identifier
+		return &IdentifierExpression{Name: value}, nil
+
+	case TOKEN_DOT:
+		// This is a qualified identifier like "Books"."Genre"
+		return &IdentifierExpression{Name: value}, nil
+
+	default:
+		// This is a literal string value
+		return &LiteralExpression{
+			Token: TOKEN_STRING,
+			Value: value,
+		}, nil
+	}
 }
 
 func (p *ExpressionParser) parseLiteral() (Expression, error) {
@@ -371,6 +417,61 @@ func (p *ExpressionParser) parseBinaryExpression(left Expression) (Expression, e
 	}, nil
 }
 
+// parseInExpression parses IN and NOT IN expressions
+// Syntax: field IN (value1, value2, ...) or field NOT IN (value1, value2, ...)
+func (p *ExpressionParser) parseInExpression(left Expression) (Expression, error) {
+	operator := p.current.Type // Either TOKEN_IN or TOKEN_NOTIN
+	p.advance()                // consume 'IN' or 'NOT IN'
+
+	// Expect opening parenthesis
+	if p.current.Type != TOKEN_LPAREN {
+		return nil, fmt.Errorf("expected '(' after %s, got %s", operator.String(), p.current.Type.String())
+	}
+	p.advance() // consume '('
+
+	// Parse list of values
+	values := make([]Expression, 0)
+
+	// Empty list
+	if p.current.Type == TOKEN_RPAREN {
+		p.advance()
+		return &BinaryExpression{
+			Left:     left,
+			Operator: operator,
+			Right:    &ArrayExpression{Elements: values},
+		}, nil
+	}
+
+	// Parse first value
+	val, err := p.parseExpression(PRECEDENCE_LOWEST)
+	if err != nil {
+		return nil, err
+	}
+	values = append(values, val)
+
+	// Parse remaining values
+	for p.current.Type == TOKEN_COMMA {
+		p.advance() // consume ','
+
+		val, err := p.parseExpression(PRECEDENCE_LOWEST)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, val)
+	}
+
+	if p.current.Type != TOKEN_RPAREN {
+		return nil, fmt.Errorf("expected ')', got %s", p.current.Type.String())
+	}
+	p.advance() // consume ')'
+
+	return &BinaryExpression{
+		Left:     left,
+		Operator: operator,
+		Right:    &ArrayExpression{Elements: values},
+	}, nil
+}
+
 func (p *ExpressionParser) parseCallExpression(left Expression) (Expression, error) {
 	// Function name must be an identifier
 	ident, ok := left.(*IdentifierExpression)
@@ -417,6 +518,44 @@ func (p *ExpressionParser) parseCallExpression(left Expression) (Expression, err
 	return &CallExpression{
 		Function:  ident.Name,
 		Arguments: args,
+	}, nil
+}
+
+// parseQualifiedIdentifier parses qualified field names like "Bundle"."Field"
+func (p *ExpressionParser) parseQualifiedIdentifier(left Expression) (Expression, error) {
+	// Bundle name can be an identifier or a string literal (quoted identifier)
+	var bundleName string
+	switch expr := left.(type) {
+	case *IdentifierExpression:
+		bundleName = expr.Name
+	case *LiteralExpression:
+		// Handle quoted identifiers like "Authors" (TOKEN_STRING)
+		if strVal, ok := expr.Value.(string); ok {
+			bundleName = strVal
+		} else {
+			return nil, fmt.Errorf("expected bundle name before '.', got literal %T", expr.Value)
+		}
+	default:
+		return nil, fmt.Errorf("expected bundle name before '.', got %T", left)
+	}
+
+	p.advance() // consume '.'
+
+	// Field name can be an identifier or string literal (quoted identifier)
+	var fieldName string
+	if p.current.Type == TOKEN_IDENT {
+		fieldName = p.current.Value
+	} else if p.current.Type == TOKEN_STRING {
+		fieldName = p.current.Value
+	} else {
+		return nil, fmt.Errorf("expected field name after '.', got %s", p.current.Type.String())
+	}
+
+	p.advance() // consume field name
+
+	return &QualifiedIdentifierExpression{
+		Bundle: bundleName,
+		Field:  fieldName,
 	}, nil
 }
 

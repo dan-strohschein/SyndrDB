@@ -27,10 +27,10 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 	expr := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "age"},
 		Operator: syndrQL.TOKEN_EQ,
-		Right:    &syndrQL.LiteralExpression{Value: int64(25)},
+		Right:    &syndrQL.LiteralExpression{Value: int64(42)},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: int64(30)},
 	}
 
-	result2, err := evaluator.EvaluateAsBool(expr2, doc)
+	result2, err := evaluator.EvaluateAsBool(expr2, doc, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestEvaluatorLogicalOperators(t *testing.T) {
 		},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -204,8 +204,8 @@ func TestSelectStatementAdapter(t *testing.T) {
 		t.Errorf("Expected Limit 10, got %d", query.Limit)
 	}
 
-	if query.WhereClause == nil {
-		t.Error("Expected non-nil WhereClause")
+	if query.WhereExpression == nil {
+		t.Error("Expected non-nil WhereExpression")
 	}
 
 	if query.QueryType != queryparser.SimpleQuery {
@@ -294,7 +294,7 @@ func TestEvaluatorNullHandling(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: "::SYNDR_NULL::"},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestEvaluatorTypeCoercion(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: int64(42)},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -361,7 +361,7 @@ func BenchmarkEvaluatorSimpleComparison(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = evaluator.EvaluateAsBool(expr, doc)
+		_, _ = evaluator.EvaluateAsBool(expr, doc, nil)
 	}
 }
 
@@ -411,6 +411,6 @@ func BenchmarkEvaluatorComplexExpression(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = evaluator.EvaluateAsBool(expr, doc)
+		_, _ = evaluator.EvaluateAsBool(expr, doc, nil)
 	}
 }

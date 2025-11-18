@@ -10,6 +10,7 @@ src/log_files
 src/.DS_STORE
 src/cmd/tests/temp_files
 src/cmd/tests/bin
+src/cmd/test/data
 
 temp_files/*
 

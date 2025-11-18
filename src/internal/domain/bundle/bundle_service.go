@@ -12,6 +12,7 @@ import (
 	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/storage/bundlestore"
+	syndrQL "syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -4264,62 +4265,65 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 //   - bool: Whether hash index optimization was used
 //   - error: Any error that occurred during hash index optimization
 func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereClause string) ([]*models.Document, bool, error) {
-	// Parse the WHERE clause to identify potential hash index usage
-	// Following SyndrDB modular development, use existing query parsing infrastructure
-	whereGroup, err := queryparser.ParseWhereClause(whereClause)
+	// Parse WHERE clause using SyndrQL for Expression-based optimization
+	// Following SyndrDB modular development, use SyndrQL tokenizer + parser for AST generation
+	tokenizer := syndrQL.NewTokenizer(whereClause)
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to tokenize WHERE clause: %w", err)
+	}
+
+	parser := syndrQL.NewExpressionParser(tokens)
+	expr, err := parser.Parse()
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)
 	}
 
-	// Hash indexes are optimal for simple equality conditions
-	// Following SyndrDB performance optimization, use hash indexes for exact matches
-	if len(whereGroup.Clauses) == 1 && len(whereGroup.SubGroups) == 0 {
-		clause := whereGroup.Clauses[0]
+	// Use Expression helper to extract simple equality conditions
+	// Hash indexes are optimal for simple equality conditions (field == value)
+	fieldName, value, ok := syndrQL.ExtractSimpleEquality(expr)
+	if ok {
+		// Check if we have a hash index for this field
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "hash" && s.getIndexFieldName(indexRef) == fieldName {
+				s.logger.Debugf("Found hash index '%s' for field '%s'", indexName, fieldName)
 
-		// Only use hash index for equality operations
-		if clause.Operator == "==" {
-			// Check if we have a hash index for this field
-			for indexName, indexRef := range bundle.Indexes {
-				if indexRef.IndexType == "hash" && s.getIndexFieldName(indexRef) == clause.Field {
-					s.logger.Debugf("Found hash index '%s' for field '%s'", indexName, clause.Field)
-
-					// Load the hash index on-demand
-					hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
-					if err != nil {
-						s.logger.Warnf("Failed to load hash index '%s': %v", indexName, err)
-						continue
-					}
-
-					// Search the hash index for the value
-					// CRITICAL FIX: Remove surrounding quotes from the search key if present
-					// The parser might include quotes in the value, but DocumentIDs are stored without quotes
-					searchKey := fmt.Sprintf("%v", clause.Value)
-					searchKey = strings.Trim(searchKey, "\"'") // Remove both double and single quotes
-
-					s.logger.Debugf("Hash index searching for key '%s' (original value: %v)", searchKey, clause.Value)
-
-					docIDs, err := hashIndex.Search(searchKey)
-					if err != nil {
-						s.logger.Warnf("Hash index search failed for '%s': %v", searchKey, err)
-						continue
-					}
-
-					s.logger.Debugf("Hash index found %d document IDs for value '%s'", len(docIDs), searchKey)
-
-					// Convert document IDs to actual documents using page-based loading
-					result := make([]*models.Document, 0, len(docIDs))
-					for _, docID := range docIDs {
-						doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
-						if err != nil {
-							s.logger.Warnf("Document ID '%s' found in hash index but could not be loaded: %v", docID, err)
-							continue
-						}
-						result = append(result, doc)
-					}
-
-					s.logger.Debugf("Successfully retrieved %d documents via hash index '%s'", len(result), indexName)
-					return result, true, nil
+				// Load the hash index on-demand
+				hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
+				if err != nil {
+					s.logger.Warnf("Failed to load hash index '%s': %v", indexName, err)
+					continue
 				}
+
+				// Search the hash index for the value
+				// CRITICAL FIX: Remove surrounding quotes from the search key if present
+				// The parser might include quotes in the value, but DocumentIDs are stored without quotes
+				searchKey := fmt.Sprintf("%v", value)
+				searchKey = strings.Trim(searchKey, "\"'") // Remove both double and single quotes
+
+				s.logger.Debugf("Hash index searching for key '%s' (original value: %v)", searchKey, value)
+
+				docIDs, err := hashIndex.Search(searchKey)
+				if err != nil {
+					s.logger.Warnf("Hash index search failed for '%s': %v", searchKey, err)
+					continue
+				}
+
+				s.logger.Debugf("Hash index found %d document IDs for value '%s'", len(docIDs), searchKey)
+
+				// Convert document IDs to actual documents using page-based loading
+				result := make([]*models.Document, 0, len(docIDs))
+				for _, docID := range docIDs {
+					doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
+					if err != nil {
+						s.logger.Warnf("Document ID '%s' found in hash index but could not be loaded: %v", docID, err)
+						continue
+					}
+					result = append(result, doc)
+				}
+
+				s.logger.Debugf("Successfully retrieved %d documents via hash index '%s'", len(result), indexName)
+				return result, true, nil
 			}
 		}
 	}
@@ -4340,113 +4344,146 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 //   - bool: Whether BTree index optimization was used
 //   - error: Any error that occurred during BTree index optimization
 func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereClause string) ([]*models.Document, bool, error) {
-	// Parse the WHERE clause to identify potential BTree index usage
-	whereGroup, err := queryparser.ParseWhereClause(whereClause)
+	// Parse WHERE clause using SyndrQL for Expression-based optimization
+	// Following SyndrDB modular development, use SyndrQL tokenizer + parser for AST generation
+	tokenizer := syndrQL.NewTokenizer(whereClause)
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to tokenize WHERE clause: %w", err)
+	}
+
+	parser := syndrQL.NewExpressionParser(tokens)
+	expr, err := parser.Parse()
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)
 	}
 
-	// BTree indexes support equality, range, and comparison operations
-	// Following SyndrDB performance optimization, use BTree indexes for various operations
-	if len(whereGroup.Clauses) == 1 && len(whereGroup.SubGroups) == 0 {
-		clause := whereGroup.Clauses[0]
+	// Try simple equality first (can use BTree as well as hash)
+	// Following SyndrDB performance optimization, check for equality before range
+	if fieldName, value, ok := syndrQL.ExtractSimpleEquality(expr); ok {
+		// Check if we have a BTree index for this field
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "btree" && s.getIndexFieldName(indexRef) == fieldName {
+				s.logger.Debugf("Found BTree index '%s' for field '%s' with equality operator",
+					indexName, fieldName)
 
-		// BTree indexes support multiple operators
-		supportedOps := []string{"==", "!=", "<", ">", "<=", ">="}
-		isSupported := false
-		for _, op := range supportedOps {
-			if clause.Operator == op {
-				isSupported = true
-				break
+				// Load the BTree index on-demand
+				btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+				if err != nil {
+					s.logger.Warnf("Failed to load BTree index '%s': %v", indexName, err)
+					continue
+				}
+
+				// Convert search value to bytes for BTree search
+				keyBytes, err := convertValueToBytes(value)
+				if err != nil {
+					s.logger.Warnf("Failed to convert search value to bytes: %v", err)
+					continue
+				}
+
+				s.logger.Infof("Performing BTree equality search on '%v' with key '%v'",
+					btreeIndex, keyBytes)
+
+				// NOTE: Sprint 5 - BTree search methods are commented out in the original code
+				// This is placeholder code that will be activated when BTree V2 is fully implemented
+				var docIDs []string = []string{}
+				// docIDs, err = btreeIndex.Search(keyBytes)
+				// if err != nil {
+				//     s.logger.Warnf("BTree index search failed: %v", err)
+				//     continue
+				// }
+
+				return s.convertDocIDsToDocuments(bundle, docIDs, indexName)
 			}
 		}
+	}
 
-		if isSupported {
-			// Check if we have a BTree index for this field
-			for indexName, indexRef := range bundle.Indexes {
-				if indexRef.IndexType == "btree" && s.getIndexFieldName(indexRef) == clause.Field {
-					s.logger.Debugf("Found BTree index '%s' for field '%s' with operator '%s'",
-						indexName, clause.Field, clause.Operator)
+	// Try range conditions (>, >=, <, <=, !=)
+	// Use Expression helper to extract range query information
+	if fieldName, operator, value, ok := syndrQL.ExtractRangeCondition(expr); ok {
+		// Check if we have a BTree index for this field
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "btree" && s.getIndexFieldName(indexRef) == fieldName {
+				s.logger.Debugf("Found BTree index '%s' for field '%s' with operator '%s'",
+					indexName, fieldName, operator)
 
-					// Load the BTree index on-demand
-					btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
-					if err != nil {
-						s.logger.Warnf("Failed to load BTree index '%s': %v", indexName, err)
-						continue
-					}
-
-					// Convert search value to bytes for BTree search
-					keyBytes, err := convertValueToBytes(clause.Value)
-					if err != nil {
-						s.logger.Warnf("Failed to convert search value to bytes: %v", err)
-						continue
-					}
-					s.logger.Infof("Performing BTree index search  '%v' with key '%v'",
-						btreeIndex, keyBytes)
-					// Perform BTree search based on operator
-					var docIDs []string = []string{}
-					// switch clause.Operator {
-					// case "==":
-					//     docIDs, err = btreeIndex.Search(keyBytes)
-					// case "<":
-					//     docIDs, err = btreeIndex.SearchLessThan(keyBytes)
-					// case ">":
-					//     docIDs, err = btreeIndex.SearchGreaterThan(keyBytes)
-					// case "<=":
-					//     docIDs, err = btreeIndex.SearchLessThanOrEqual(keyBytes)
-					// case ">=":
-					//     docIDs, err = btreeIndex.SearchGreaterThanOrEqual(keyBytes)
-					// case "!=":
-					//     // For inequality, we need to get all documents and exclude matches
-					//     allDocIDs, searchErr := btreeIndex.SearchAll()
-					//     if searchErr != nil {
-					//         err = searchErr
-					//     } else {
-					//         equalDocIDs, equalErr := btreeIndex.Search(keyBytes)
-					//         if equalErr != nil {
-					//             err = equalErr
-					//         } else {
-					//             // Remove equal matches from all documents
-					//             docIDs = s.excludeDocumentIDs(allDocIDs, equalDocIDs)
-					//         }
-					//     }
-					// }
-
-					// Sprint 5: BTree error check commented out since switch above is commented
-					// if err != nil {
-					// s.logger.Warnf("BTree index search failed: %v", err)
-					// continue
-					// }
-
-					s.logger.Debugf("BTree index found %d document IDs for operator '%s' with value '%v'",
-						len(docIDs), clause.Operator, clause.Value)
-
-					// Convert document IDs to actual documents
-					// Convert document IDs to actual documents using page-based loading
-					if len(docIDs) == 0 {
-						s.logger.Debugf("BTree index search returned no document IDs")
-						return []*models.Document{}, true, nil
-					}
-
-					result := make([]*models.Document, 0, len(docIDs))
-					for _, docID := range docIDs {
-						doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
-						if err != nil {
-							s.logger.Warnf("Document ID '%s' found in BTree index but could not be loaded: %v", docID, err)
-							continue
-						}
-						result = append(result, doc)
-					}
-
-					s.logger.Debugf("Successfully retrieved %d documents via BTree index '%s'", len(result), indexName)
-					return result, true, nil
+				// Load the BTree index on-demand
+				btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+				if err != nil {
+					s.logger.Warnf("Failed to load BTree index '%s': %v", indexName, err)
+					continue
 				}
+
+				// Convert search value to bytes for BTree search
+				keyBytes, err := convertValueToBytes(value)
+				if err != nil {
+					s.logger.Warnf("Failed to convert search value to bytes: %v", err)
+					continue
+				}
+
+				s.logger.Infof("Performing BTree range search with operator '%s' on '%v' with key '%v'",
+					operator, btreeIndex, keyBytes)
+
+				// NOTE: Sprint 5 - BTree search methods are commented out in the original code
+				// This is placeholder code that will be activated when BTree V2 is fully implemented
+				var docIDs []string = []string{}
+				// switch operator {
+				// case ">":
+				//     docIDs, err = btreeIndex.SearchGreaterThan(keyBytes)
+				// case ">=":
+				//     docIDs, err = btreeIndex.SearchGreaterThanOrEqual(keyBytes)
+				// case "<":
+				//     docIDs, err = btreeIndex.SearchLessThan(keyBytes)
+				// case "<=":
+				//     docIDs, err = btreeIndex.SearchLessThanOrEqual(keyBytes)
+				// case "!=":
+				//     // For inequality, get all documents and exclude matches
+				//     allDocIDs, searchErr := btreeIndex.SearchAll()
+				//     if searchErr != nil {
+				//         err = searchErr
+				//     } else {
+				//         equalDocIDs, equalErr := btreeIndex.Search(keyBytes)
+				//         if equalErr != nil {
+				//             err = equalErr
+				//         } else {
+				//             docIDs = s.excludeDocumentIDs(allDocIDs, equalDocIDs)
+				//         }
+				//     }
+				// }
+				// if err != nil {
+				//     s.logger.Warnf("BTree index search failed: %v", err)
+				//     continue
+				// }
+
+				return s.convertDocIDsToDocuments(bundle, docIDs, indexName)
 			}
 		}
 	}
 
 	// BTree index optimization not applicable
 	return nil, false, nil
+}
+
+// convertDocIDsToDocuments is a helper to convert document IDs to documents
+// Following Single Responsibility Principle, handles only document ID to document conversion
+func (s *BundleService) convertDocIDsToDocuments(bundle *models.Bundle, docIDs []string, indexName string) ([]*models.Document, bool, error) {
+	if len(docIDs) == 0 {
+		s.logger.Debugf("BTree index search returned no document IDs")
+		return []*models.Document{}, true, nil
+	}
+
+	result := make([]*models.Document, 0, len(docIDs))
+	for _, docID := range docIDs {
+		doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
+		if err != nil {
+			s.logger.Warnf("Document ID '%s' found in index but could not be loaded: %v", docID, err)
+			continue
+		}
+		result = append(result, doc)
+	}
+
+	s.logger.Debugf("Successfully retrieved %d documents via BTree index '%s'", len(result), indexName)
+	return result, true, nil
 }
 
 // getIndexFieldName extracts the field name from an index reference

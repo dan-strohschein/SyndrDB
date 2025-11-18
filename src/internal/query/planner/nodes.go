@@ -8,6 +8,7 @@ import (
 	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/syndrQL"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	// Import your B-tree index package when ready
@@ -449,12 +450,37 @@ func (node *FilterNode) Execute() (map[string]*models.Document, error) {
 }
 
 func (node *FilterNode) matchesConditions(doc *models.Document) bool {
-	for _, clause := range node.Clauses {
-		if !clause.Matches(doc, node.Logger) {
+	// Require Expression-based evaluation
+	if node.WhereExpression == nil {
+		// No filter conditions - match all documents
+		return true
+	}
+
+	expr, ok := node.WhereExpression.(syndrQL.Expression)
+	if !ok {
+		node.Logger.Errorf("WhereExpression is not a syndrQL.Expression: %T", node.WhereExpression)
+		return false
+	}
+
+	// Get BundleContext if available (for qualified field resolution)
+	var bundleCtx *syndrQL.BundleContext
+	if node.BundleContext != nil {
+		bundleCtx, ok = node.BundleContext.(*syndrQL.BundleContext)
+		if !ok {
+			node.Logger.Errorf("BundleContext is not a *syndrQL.BundleContext: %T", node.BundleContext)
 			return false
 		}
 	}
-	return true
+
+	// Create evaluator with logger and evaluate the expression
+	evaluator := syndrQL.NewExpressionEvaluator(node.Logger)
+	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx)
+	if err != nil {
+		node.Logger.Errorf("Expression evaluation failed: %v", err)
+		return false
+	}
+
+	return result
 }
 
 func (node *UnionNode) Execute() (map[string]*models.Document, error) {

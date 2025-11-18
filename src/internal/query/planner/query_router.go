@@ -29,6 +29,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/syndrQL"
 
 	"go.uber.org/zap"
 )
@@ -170,19 +171,23 @@ func (qr *QueryRouter) routeSimpleQuery(
 		return fullScan, []string{}, nil
 	}
 
-	// Convert WHERE clause to string for existing planner
-	// Note: Existing planner expects string WHERE clause
-	// For now, we'll use a simplified conversion
-	// TODO: Enhance to preserve full WhereGroup structure
-	whereClause := qr.convertWhereClauseToString(query.WhereClause)
-
-	// Delegate to existing base planner
-	plan, err := qr.basePlanner.CreateExecutionPlan(bundle, whereClause)
-	if err != nil {
-		return nil, nil, fmt.Errorf("base planner failed: %w", err)
+	// NEW: Use Expression-based planning if WhereExpression is available
+	if query.WhereExpression != nil {
+		return qr.createExpressionBasedPlan(query, bundle, docScanner)
 	}
 
-	return plan.RootNode, plan.IndexesUsed, nil
+	// No WHERE clause - create simple full scan
+	qr.logger.Debug("No WHERE clause, creating full scan plan")
+	scanNode := &FullScanNode{
+		Bundle:           bundle,
+		Cost:             float64(bundle.TotalDocuments),
+		EstimatedRows:    int(bundle.TotalDocuments),
+		Logger:           qr.logger,
+		BundleServiceInt: qr.bundleService,
+		DocumentScanner:  docScanner,
+	}
+
+	return scanNode, nil, nil
 }
 
 // routeGroupByQuery handles GROUP BY queries by creating a base execution tree
@@ -228,15 +233,16 @@ func (qr *QueryRouter) routeGroupByQuery(
 	if query.HasWhere() {
 		qr.logger.Debug("Adding FilterNode for WHERE clause in GROUP BY query")
 
-		// For now, use the direct clauses from the WHERE group
-		// TODO: Phase 2 - I should enhance FilterNode to handle nested WhereGroup subgroups
-		// Currently FilterNode only handles flat []WhereClause, not nested subgroups
+		// Create BundleContext for qualified field resolution
+		bundleCtx := syndrQL.NewBundleContextForSingleBundle(bundle)
+
 		filterNode := &FilterNode{
-			Child:         scanNode,
-			Clauses:       query.WhereClause.Clauses,
-			Cost:          scanNode.GetCost(),
-			EstimatedRows: scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
-			Logger:        qr.logger,
+			Child:           scanNode,
+			WhereExpression: query.WhereExpression,
+			BundleContext:   bundleCtx,
+			Cost:            scanNode.GetCost(),
+			EstimatedRows:   scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
+			Logger:          qr.logger,
 		}
 
 		rootNode = filterNode
@@ -252,19 +258,165 @@ func (qr *QueryRouter) routeGroupByQuery(
 
 // convertToJoinQuery converts UnifiedSelectQuery to SelectJoinQuery
 // PHASE 3: Query format conversion
+// LEGACY: JOIN queries still use old parser, so WhereExpression may contain WhereGroup
 func (qr *QueryRouter) convertToJoinQuery(query *queryparser.UnifiedSelectQuery) *queryparser.SelectJoinQuery {
+	// Try to convert WhereExpression to WhereGroup for legacy JOIN parser
+	var whereClause *queryparser.WhereGroup
+	if query.WhereExpression != nil {
+		if wg, ok := query.WhereExpression.(*queryparser.WhereGroup); ok {
+			whereClause = wg
+		}
+	}
+
 	joinQuery := &queryparser.SelectJoinQuery{
 		SelectFields:     query.SelectFields,
 		FromBundle:       query.FromBundle,
 		JoinClauses:      query.JoinClauses,
-		WhereClause:      query.WhereClause,
-		OrderBy:          []string{}, // ORDER BY handled by PlanBuilder
+		WhereClause:      whereClause,
+		WhereExpression:  query.WhereExpression, // Pass Expression for new executor
+		OrderBy:          []string{},            // ORDER BY handled by PlanBuilder
 		Limit:            query.Limit,
 		Offset:           query.Offset,
 		RelationshipName: query.RelationshipName,
 	}
 
 	return joinQuery
+}
+
+// createExpressionBasedPlan creates an execution plan using Expression-based WHERE evaluation
+// NEW: Expression-based query planning (replaces old string-based approach)
+//
+// This method uses the new SyndrQL Expression AST for WHERE clause evaluation,
+// enabling qualified field names, better error messages, and improved performance.
+//
+// Plan structure:
+//   - Try to optimize with index scan (hash or BTree)
+//   - Fall back to full scan + filter if no index available
+//   - Create BundleContext for qualified field resolution
+func (qr *QueryRouter) createExpressionBasedPlan(
+	query *queryparser.UnifiedSelectQuery,
+	bundle *models.Bundle,
+	docScanner documentscanner.DocumentScannerInterface,
+) (ExecutionNode, []string, error) {
+
+	expr, ok := query.WhereExpression.(syndrQL.Expression)
+	if !ok {
+		return nil, nil, fmt.Errorf("WhereExpression is not a syndrQL.Expression: %T", query.WhereExpression)
+	}
+
+	qr.logger.Debugf("Creating Expression-based execution plan for bundle '%s'", bundle.Name)
+
+	// Create BundleContext for qualified field resolution
+	// For simple queries, we only have one bundle
+	bundleCtx := syndrQL.NewBundleContextForSingleBundle(bundle)
+
+	// Try to optimize with indexes using expression helpers
+	indexNode, indexName := qr.tryIndexOptimization(bundle, expr, docScanner)
+	if indexNode != nil {
+		qr.logger.Infof("Using index '%s' for WHERE clause optimization", indexName)
+		// No FilterNode needed - index scan already filters
+		return indexNode, []string{indexName}, nil
+	}
+
+	// Fall back to full scan + filter
+	qr.logger.Debug("No suitable index found, using full scan + filter")
+
+	fullScan := &FullScanNode{
+		Bundle:           bundle,
+		Cost:             float64(bundle.TotalDocuments),
+		EstimatedRows:    int(bundle.TotalDocuments),
+		Logger:           qr.logger,
+		BundleServiceInt: qr.bundleService,
+		DocumentScanner:  docScanner,
+	}
+
+	// Create FilterNode with Expression
+	filterNode := &FilterNode{
+		Child:           fullScan,
+		WhereExpression: expr,
+		BundleContext:   bundleCtx,
+		Cost:            fullScan.Cost + (float64(bundle.TotalDocuments) * 0.01), // Small cost for filtering
+		EstimatedRows:   int(bundle.TotalDocuments) / 2,                          // Assume 50% selectivity
+		Logger:          qr.logger,
+		DocumentScanner: docScanner,
+	}
+
+	return filterNode, []string{}, nil
+}
+
+// tryIndexOptimization attempts to use an index for the WHERE expression
+// Returns (IndexScanNode, indexName) if optimization is possible, (nil, "") otherwise
+func (qr *QueryRouter) tryIndexOptimization(
+	bundle *models.Bundle,
+	expr syndrQL.Expression,
+	docScanner documentscanner.DocumentScannerInterface,
+) (ExecutionNode, string) {
+
+	// Try hash index optimization for simple equality
+	if field, value, ok := syndrQL.ExtractSimpleEquality(expr); ok {
+		qr.logger.Debugf("Found simple equality: %s == %v", field, value)
+
+		// Check if hash index exists for this field
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "hash" && len(indexRef.Fields) == 1 && indexRef.Fields[0].Name == field {
+				qr.logger.Debugf("Found hash index '%s' on field '%s'", indexName, field)
+
+				return &IndexScanNode{
+					Bundle:           bundle,
+					IndexName:        indexName,
+					ScanType:         HashIndexScan,
+					SearchKey:        value,
+					Cost:             1.0, // Hash lookup is O(1)
+					EstimatedRows:    1,   // Exact match
+					Logger:           qr.logger,
+					BundleServiceInt: qr.bundleService,
+					DocumentScanner:  docScanner,
+				}, indexName
+			}
+		}
+	}
+
+	// Try BTree index optimization for range conditions
+	if field, operator, value, ok := syndrQL.ExtractRangeCondition(expr); ok {
+		qr.logger.Debugf("Found range condition: %s %s %v", field, operator, value)
+
+		// Check if BTree index exists for this field
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "btree" && len(indexRef.Fields) == 1 && indexRef.Fields[0].Name == field {
+				qr.logger.Debugf("Found BTree index '%s' on field '%s'", indexName, field)
+
+				return &IndexScanNode{
+					Bundle:           bundle,
+					IndexName:        indexName,
+					ScanType:         BTreeRangeScan,
+					Operator:         operator,
+					RangeStart:       value,
+					RangeEnd:         value,
+					Cost:             float64(bundle.TotalDocuments) * 0.1, // BTree scan
+					EstimatedRows:    int(bundle.TotalDocuments) / 10,      // Estimate
+					Logger:           qr.logger,
+					BundleServiceInt: qr.bundleService,
+					DocumentScanner:  docScanner,
+				}, indexName
+			}
+		}
+	}
+
+	// Try to optimize AND clauses (can use multiple indexes)
+	clauses := syndrQL.ExtractANDClauses(expr)
+	if len(clauses) > 1 {
+		// Try to find an index for any of the AND clauses
+		for _, clause := range clauses {
+			if node, indexName := qr.tryIndexOptimization(bundle, clause, docScanner); node != nil {
+				// Found an index for one clause
+				// TODO: Add FilterNode for remaining clauses
+				return node, indexName
+			}
+		}
+	}
+
+	// No index optimization possible
+	return nil, ""
 }
 
 // convertWhereClauseToString converts WhereGroup to string format

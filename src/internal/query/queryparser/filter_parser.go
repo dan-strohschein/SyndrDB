@@ -20,6 +20,11 @@ import (
 	//"syndrdb/src/engine"
 )
 
+// Package-level cache for processed LIKE pattern
+// Used to pass processed pattern from ParseLikePattern to MatchLikePattern
+// TODO: Make this thread-safe or pass through function parameters
+var lastProcessedPattern string
+
 // Magic value constants for NULL handling (matching bundle.NullHandler constants)
 const (
 	SYNDR_NULL    = "::SYNDR_NULL::"
@@ -756,6 +761,12 @@ func ParseLikePattern(pattern string) (patternType string, normalized string, wi
 	// Remove surrounding quotes if present
 	pattern = strings.Trim(pattern, "\"'")
 
+	// Placeholder runes for escaped wildcards (use private use area Unicode)
+	const (
+		escapedUnderscore = '\uE000' // Private Use Area
+		escapedPercent    = '\uE001'
+	)
+
 	// Process escape sequences and count wildcards
 	var processedPattern strings.Builder
 	var unescapedPattern strings.Builder
@@ -774,7 +785,19 @@ func ParseLikePattern(pattern string) (patternType string, normalized string, wi
 
 			nextCh := runes[i+1]
 			switch nextCh {
-			case '%', '_', '"', '\\':
+			case '%':
+				// Escaped % - treat as literal, use placeholder
+				processedPattern.WriteRune(escapedPercent)
+				unescapedPattern.WriteRune('%')
+				i += 2
+				continue
+			case '_':
+				// Escaped _ - treat as literal, use placeholder
+				processedPattern.WriteRune(escapedUnderscore)
+				unescapedPattern.WriteRune('_')
+				i += 2
+				continue
+			case '"', '\\':
 				// Escaped special character - add literal to processed pattern
 				processedPattern.WriteRune(nextCh)
 				unescapedPattern.WriteRune(nextCh)
@@ -830,27 +853,30 @@ func ParseLikePattern(pattern string) (patternType string, normalized string, wi
 		return "exact", unescapedStr, 0, nil
 	}
 
+	// CACHE: Store processed pattern for use by complex matcher
+	// We'll use a package-level variable (not ideal but simple)
+	lastProcessedPattern = processedStr
+
 	// Determine pattern type based on wildcard positions
 	if hasPrefix && hasSuffix {
 		// Contains pattern: "%text%"
 		normalized = strings.Trim(processedStr, "%")
-		// Remove internal underscores for the normalized form (keep for matching)
-		normalizedClean := strings.ReplaceAll(normalized, "_", "")
-		return "contains", normalizedClean, wildcardCount, nil
+		// Don't remove underscores - they might be literal escaped characters
+		return "contains", normalized, wildcardCount, nil
 	}
 
 	if hasPrefix {
 		// Suffix pattern: "%text"
 		normalized = strings.TrimPrefix(processedStr, "%")
-		normalizedClean := strings.ReplaceAll(normalized, "_", "")
-		return "suffix", normalizedClean, wildcardCount, nil
+		// Don't remove underscores - they might be literal escaped characters
+		return "suffix", normalized, wildcardCount, nil
 	}
 
 	if hasSuffix {
 		// Prefix pattern: "text%"
 		normalized = strings.TrimSuffix(processedStr, "%")
-		normalizedClean := strings.ReplaceAll(normalized, "_", "")
-		return "prefix", normalizedClean, wildcardCount, nil
+		// Don't remove underscores - they might be literal escaped characters
+		return "prefix", normalized, wildcardCount, nil
 	}
 
 	// Pattern has _ wildcards but no % wildcards at edges
@@ -893,12 +919,15 @@ func MatchLikePattern(value string, pattern string, patternType string, caseInse
 		return true
 	}
 
-	// Parse pattern to get normalized form
+	// Parse pattern to get normalized form and cache processed pattern
 	_, normalized, wildcardCount, err := ParseLikePattern(pattern)
 	if err != nil {
 		// Invalid pattern - return false
 		return false
 	}
+
+	// Use the cached processed pattern (set by ParseLikePattern)
+	processedPattern := lastProcessedPattern
 
 	// Handle exact match (no wildcards at all)
 	if wildcardCount == 0 {
@@ -906,7 +935,13 @@ func MatchLikePattern(value string, pattern string, patternType string, caseInse
 	}
 
 	// Fast path for simple patterns without _ wildcards and no internal % wildcards
-	if !strings.Contains(pattern, "_") && !strings.Contains(normalized, "%") {
+	// Check the PROCESSED pattern for unescaped wildcards (not the raw pattern)
+	// Also check if there are any escaped wildcards (placeholders) - if so, must use complex path
+	hasUnescapedUnderscore := strings.ContainsRune(processedPattern, '_')
+	hasInternalPercent := strings.Contains(normalized, "%")
+	hasEscapedWildcards := strings.ContainsRune(processedPattern, '\uE000') || strings.ContainsRune(processedPattern, '\uE001')
+
+	if !hasUnescapedUnderscore && !hasInternalPercent && !hasEscapedWildcards {
 		switch patternType {
 		case "prefix":
 			return strings.HasPrefix(value, normalized)
@@ -918,7 +953,8 @@ func MatchLikePattern(value string, pattern string, patternType string, caseInse
 	}
 
 	// Complex pattern with _ wildcards or internal % wildcards - use rune-by-rune matching
-	return matchLikePatternComplex(value, pattern)
+	// Use the processed pattern which has escaped wildcards replaced with placeholders
+	return matchLikePatternComplex(value, processedPattern)
 }
 
 // matchLikePatternComplex performs rune-by-rune pattern matching for complex LIKE patterns
@@ -942,6 +978,12 @@ func matchLikePatternComplex(value string, pattern string) bool {
 // Returns:
 //   - bool: true if remaining value matches remaining pattern
 func matchLikePatternRecursive(valueRunes []rune, patternRunes []rune, vIdx int, pIdx int) bool {
+	// Placeholder runes for escaped wildcards (must match ParseLikePattern)
+	const (
+		escapedUnderscore = '\uE000' // Private Use Area
+		escapedPercent    = '\uE001'
+	)
+
 	// Base case: reached end of pattern
 	if pIdx >= len(patternRunes) {
 		return vIdx >= len(valueRunes) // Match if we've also consumed all of value
@@ -979,6 +1021,23 @@ func matchLikePatternRecursive(valueRunes []rune, patternRunes []rune, vIdx int,
 	if pCh == '_' {
 		// Match any single character and continue
 		return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
+	}
+
+	// Handle escaped wildcards (they match literally)
+	if pCh == escapedUnderscore {
+		// Must match literal underscore
+		if vCh == '_' {
+			return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
+		}
+		return false
+	}
+
+	if pCh == escapedPercent {
+		// Must match literal percent
+		if vCh == '%' {
+			return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
+		}
+		return false
 	}
 
 	// Handle literal character match
@@ -1239,6 +1298,7 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 // FilterDocuments filters documents based on a WHERE clause
 func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	// Parse the WHERE clause
+	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1242
 	whereGroup, err := ParseWhereClause(whereClause)
 	if err != nil {
 		return nil, err
@@ -1267,6 +1327,7 @@ func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.Suga
 
 func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	var result []*models.Document
+	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1270
 	whereGroup, err := ParseWhereClause(where)
 	if err != nil {
 		return nil, err
@@ -1281,6 +1342,7 @@ func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.Sugar
 }
 
 func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, where string, logger *zap.SugaredLogger) ([]*models.Document, error) {
+	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1284
 	whereGroup, err := ParseWhereClause(where)
 	if err != nil {
 		return nil, err

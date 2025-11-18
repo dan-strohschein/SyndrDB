@@ -302,6 +302,11 @@ func parseWhereClauseForOrder(query string, selectQuery *SelectQueryWithOrder, l
 
 	whereClause := strings.TrimSpace(matches[1])
 
+	// DEPRECATED: This uses old string-based WHERE parsing
+	// TODO: Replace with SyndrQL SelectParser that returns Expression AST
+	// Then set selectQuery.WhereExpression instead of WhereClause
+	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 306
+
 	// Parse the WHERE clause using existing parser
 	whereGroup, err := ParseWhereClause(whereClause)
 	if err != nil {

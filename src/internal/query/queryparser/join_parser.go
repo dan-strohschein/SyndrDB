@@ -93,7 +93,8 @@ type SelectJoinQuery struct {
 	SelectFields     []string     // Fields to select (empty for all)
 	FromBundle       string       // Primary bundle
 	JoinClauses      []JoinClause // JOIN operations
-	WhereClause      *WhereGroup  // WHERE conditions
+	WhereClause      *WhereGroup  // WHERE conditions (legacy - keep for backward compatibility)
+	WhereExpression  interface{}  // syndrQL.Expression from unified parser (preferred)
 	OrderBy          []string     // ORDER BY fields (future)
 	Limit            int          // LIMIT value (0 for no limit)
 	Offset           int          // OFFSET value (0 for no offset)
@@ -386,6 +387,11 @@ func parseWhereClauseFromQuery(query string, selectQuery *SelectJoinQuery, logge
 
 	whereClause := strings.TrimSpace(matches[1])
 	logger.Debugf("Extracted WHERE clause: '%s'", whereClause)
+
+	// DEPRECATED: This uses old string-based WHERE parsing
+	// TODO: Replace with SyndrQL SelectParser that returns Expression AST
+	// Then set selectQuery.WhereExpression instead of WhereClause
+	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 391
 
 	// Parse the WHERE clause using existing parser
 	whereGroup, err := ParseWhereClause(whereClause)

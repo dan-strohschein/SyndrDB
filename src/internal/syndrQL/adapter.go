@@ -71,13 +71,9 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 		Offset:   stmt.Offset,
 	}
 
-	// Convert WHERE clause if present
+	// Convert WHERE clause if present - Store Expression directly
 	if stmt.WhereClause != nil {
-		whereGroup, err := a.expressionAdapter.ToWhereGroup(stmt.WhereClause)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert WHERE clause: %w", err)
-		}
-		query.WhereClause = whereGroup
+		query.WhereExpression = stmt.WhereClause
 	}
 
 	// Convert ORDER BY clause
@@ -90,13 +86,9 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 		query.GroupBy = a.convertGroupBy(stmt.GroupBy)
 	}
 
-	// Convert HAVING clause
+	// Convert HAVING clause if present - Store Expression directly
 	if stmt.Having != nil {
-		havingClause, err := a.convertHaving(stmt.Having)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert HAVING clause: %w", err)
-		}
-		query.HavingClause = havingClause
+		query.HavingExpression = stmt.Having
 	}
 
 	// Convert JOIN clauses
@@ -375,7 +367,7 @@ func (a *SelectStatementAdapter) ValidateConversion(stmt *SelectStatement, query
 	}
 
 	// Validate WHERE clause presence
-	if (stmt.WhereClause != nil) != (query.WhereClause != nil) {
+	if (stmt.WhereClause != nil) != (query.WhereExpression != nil) {
 		return fmt.Errorf("WHERE clause presence mismatch")
 	}
 

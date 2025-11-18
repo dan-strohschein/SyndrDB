@@ -115,12 +115,18 @@ type UnifiedSelectQuery struct {
 	JoinClauses      []JoinClause // JOIN operations (INNER, LEFT, RIGHT, FULL OUTER)
 	RelationshipName string       // WITH RELATIONSHIP clause (hierarchical results)
 
-	// WHERE clause
-	WhereClause *WhereGroup // Pre-aggregation filtering conditions
+	// WHERE clause - Expression AST from SyndrQL parser
+	// WhereExpression contains a syndrQL.Expression interface value
+	// Use type assertion: expr := query.WhereExpression.(syndrQL.Expression)
+	WhereExpression interface{} // Pre-aggregation filtering (syndrQL.Expression from parser)
 
 	// GROUP BY clause
-	GroupBy      *GroupByClause // Grouping fields
-	HavingClause *HavingClause  // Post-aggregation filtering conditions
+	GroupBy *GroupByClause // Grouping fields
+
+	// HAVING clause - Expression AST from SyndrQL parser
+	// HavingExpression contains a syndrQL.Expression interface value
+	// Use type assertion: expr := query.HavingExpression.(syndrQL.Expression)
+	HavingExpression interface{} // Post-aggregation filtering (syndrQL.Expression from parser)
 
 	// ORDER BY clause
 	OrderBy *OrderByClause // Sorting specification
@@ -200,7 +206,7 @@ func ParseUnifiedSelectQuery(query string, logger *zap.SugaredLogger) (*UnifiedS
 		unifiedQuery.QueryType.String(),
 		len(unifiedQuery.SelectFields)+len(unifiedQuery.AggregateFields),
 		len(unifiedQuery.JoinClauses),
-		unifiedQuery.WhereClause != nil,
+		unifiedQuery.WhereExpression != nil,
 		unifiedQuery.GroupBy != nil,
 		unifiedQuery.OrderBy != nil)
 
@@ -345,11 +351,14 @@ func basicToUnified(basic *BasicSelectQuery, logger *zap.SugaredLogger) *Unified
 
 	// Parse WHERE clause if present
 	if basic.WhereClause != "" {
+		// LEGACY PATH: Old parser doesn't create Expression AST
+		// This path should only be hit when UseNewParser=false
 		whereGroup, err := ParseWhereClause(basic.WhereClause)
 		if err != nil {
 			logger.Warnf("Failed to parse WHERE clause in basic query: %v", err)
 		} else {
-			unified.WhereClause = whereGroup
+			// Store in WhereExpression as interface{} - legacy WhereGroup type
+			unified.WhereExpression = whereGroup
 		}
 	}
 
@@ -360,12 +369,13 @@ func basicToUnified(basic *BasicSelectQuery, logger *zap.SugaredLogger) *Unified
 // joinToUnified converts SelectJoinQuery to UnifiedSelectQuery
 func joinToUnified(join *SelectJoinQuery, logger *zap.SugaredLogger) *UnifiedSelectQuery {
 	unified := &UnifiedSelectQuery{
-		QueryType:        JoinQuery,
-		SelectFields:     join.SelectFields,
-		AggregateFields:  make([]AggregateFunction, 0),
-		FromBundle:       join.FromBundle,
-		JoinClauses:      join.JoinClauses,
-		WhereClause:      join.WhereClause,
+		QueryType:       JoinQuery,
+		SelectFields:    join.SelectFields,
+		AggregateFields: make([]AggregateFunction, 0),
+		FromBundle:      join.FromBundle,
+		JoinClauses:     join.JoinClauses,
+		// LEGACY: join.WhereClause is WhereGroup type, store as interface{}
+		WhereExpression:  join.WhereClause,
 		RelationshipName: join.RelationshipName,
 		Limit:            join.Limit,
 		Offset:           join.Offset,
@@ -384,17 +394,21 @@ func groupByToUnified(groupBy *SelectQueryWithGroupBy, logger *zap.SugaredLogger
 		FromBundle:      groupBy.FromBundle,
 		JoinClauses:     make([]JoinClause, 0),
 		GroupBy:         groupBy.GroupBy,
-		HavingClause:    groupBy.HavingClause,
-		OrderBy:         groupBy.OrderBy,
+		// LEGACY: groupBy.HavingClause is HavingClause type, store as interface{}
+		HavingExpression: groupBy.HavingClause,
+		OrderBy:          groupBy.OrderBy,
 	}
 
 	// Parse WHERE clause if present
 	if groupBy.WhereClause != "" {
+		// LEGACY PATH: Old parser doesn't create Expression AST
+		// This path should only be hit when UseNewParser=false
 		whereGroup, err := ParseWhereClause(groupBy.WhereClause)
 		if err != nil {
 			logger.Warnf("Failed to parse WHERE clause in GROUP BY query: %v", err)
 		} else {
-			unified.WhereClause = whereGroup
+			// Store in WhereExpression as interface{} - legacy WhereGroup type
+			unified.WhereExpression = whereGroup
 		}
 	}
 
@@ -444,12 +458,17 @@ func enhanceWithAdditionalClauses(query string, unified *UnifiedSelectQuery, log
 	}
 
 	// Detect COUNT(*) only queries
+	// NOTE: If GROUP BY has fields, we need multiple rows (one per group), not a single count
+	// If GROUP BY is empty or nil, it's COUNT(*) aggregating all rows into one result
+	hasGroupByFields := unified.GroupBy != nil && len(unified.GroupBy.Fields) > 0
+
 	if len(unified.AggregateFields) == 1 &&
 		unified.AggregateFields[0].Function == "COUNT" &&
 		unified.AggregateFields[0].Field == "*" &&
-		len(unified.SelectFields) == 0 {
+		len(unified.SelectFields) == 0 &&
+		!hasGroupByFields { // Don't treat as count-only if GROUP BY has fields
 		unified.IsCountOnly = true
-		logger.Debugf("Detected COUNT(*) only query")
+		logger.Debugf("Detected COUNT(*) only query (no GROUP BY fields)")
 	}
 
 	// Parse ORDER BY if not already set by specialized parser
@@ -515,7 +534,8 @@ func parseGroupByClausesForUnified(query string, unified *UnifiedSelectQuery, lo
 	}
 
 	unified.GroupBy = groupByQuery.GroupBy
-	unified.HavingClause = groupByQuery.HavingClause
+	// LEGACY: groupByQuery.HavingClause is HavingClause type, store as interface{}
+	unified.HavingExpression = groupByQuery.HavingClause
 	unified.AggregateFields = groupByQuery.AggregateFields
 
 	logger.Debugf("Added GROUP BY clause with %d fields to unified query", len(groupByQuery.GroupBy.Fields))
@@ -585,7 +605,7 @@ func validateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger
 	}
 
 	// Validation 3: HAVING without GROUP BY is invalid
-	if unified.HavingClause != nil && unified.GroupBy == nil {
+	if unified.HavingExpression != nil && unified.GroupBy == nil {
 		return fmt.Errorf("HAVING clause requires GROUP BY clause")
 	}
 
@@ -639,7 +659,7 @@ func (usq *UnifiedSelectQuery) HasOrderBy() bool {
 
 // HasWhere returns true if the query includes WHERE clause
 func (usq *UnifiedSelectQuery) HasWhere() bool {
-	return usq.WhereClause != nil
+	return usq.WhereExpression != nil
 }
 
 // IsAggregateQuery returns true if the query uses aggregate functions
@@ -683,7 +703,7 @@ func (usq *UnifiedSelectQuery) String() string {
 		parts = append(parts, fmt.Sprintf("GROUP BY: %v", usq.GroupBy.Fields))
 	}
 
-	if usq.HavingClause != nil {
+	if usq.HavingExpression != nil {
 		parts = append(parts, "HAVING: yes")
 	}
 

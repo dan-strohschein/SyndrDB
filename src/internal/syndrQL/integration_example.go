@@ -55,7 +55,7 @@ func ExampleWhereClauseEvaluation(whereExpr Expression, doc *models.Document, lo
 	evaluator := NewExpressionEvaluator(logger)
 
 	// Evaluate expression against document
-	matches, err := evaluator.EvaluateAsBool(whereExpr, doc)
+	matches, err := evaluator.EvaluateAsBool(whereExpr, doc, nil)
 	if err != nil {
 		return false, fmt.Errorf("evaluation failed: %w", err)
 	}
@@ -98,7 +98,7 @@ func ExampleManualFiltering(documents []*models.Document, whereExpr Expression, 
 	filtered := make([]*models.Document, 0, len(documents))
 
 	for _, doc := range documents {
-		matches, err := evaluator.EvaluateAsBool(whereExpr, doc)
+		matches, err := evaluator.EvaluateAsBool(whereExpr, doc, nil)
 		if err != nil {
 			logger.Warnf("Failed to evaluate expression for document %s: %v", doc.DocumentID, err)
 			continue

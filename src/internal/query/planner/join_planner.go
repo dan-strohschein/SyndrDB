@@ -117,64 +117,15 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 	estimatedRows := leftSize / 10 // Assume 10% selectivity as default
 
 	// NEW: Predicate pushdown optimization for WHERE clause
+	// NOTE: For now, we apply WHERE filtering after JOIN using WhereExpression
+	// TODO: Implement Expression-based predicate pushdown analysis in future
 	var leftBundleInterface, rightBundleInterface documentscanner.BundleInterface
-	remainingWhereClauses := []queryparser.WhereClause{}
+	hasWhereExpression := query.WhereExpression != nil
 
-	if query.WhereClause != nil && (len(query.WhereClause.Clauses) > 0 || len(query.WhereClause.SubGroups) > 0) {
-		// Analyze WHERE clause for predicate pushdown opportunities
-		jp.Logger.Info("Analyzing WHERE clause for predicate pushdown optimization")
-
-		if len(query.JoinClauses) > 0 {
-			whereAnalysis := AnalyzeWhereClauseForJoin(
-				query.WhereClause,
-				query.FromBundle,
-				query.JoinClauses[0].RightBundle,
-				jp.Logger,
-			)
-
-			jp.Logger.Infof("Predicate pushdown analysis: LEFT=%d, RIGHT=%d, CROSS=%d, REMAINING=%d",
-				len(whereAnalysis.LeftBundleConditions),
-				len(whereAnalysis.RightBundleConditions),
-				len(whereAnalysis.CrossBundleConditions),
-				len(whereAnalysis.RemainingConditions))
-
-			// Create filtered bundle adapters when applicable
-			if len(whereAnalysis.LeftBundleConditions) > 0 {
-				filtered, err := NewFilteredBundleAdapter(
-					bundles[query.FromBundle],
-					whereAnalysis.LeftBundleConditions,
-					jp.BundleServiceInt,
-					jp.Logger,
-				)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create filtered adapter for LEFT bundle: %w", err)
-				}
-				leftBundleInterface = filtered
-				jp.Logger.Infof("Pushed %d conditions to LEFT bundle '%s'",
-					len(whereAnalysis.LeftBundleConditions), query.FromBundle)
-			}
-
-			if len(whereAnalysis.RightBundleConditions) > 0 {
-				filtered, err := NewFilteredBundleAdapter(
-					bundles[query.JoinClauses[0].RightBundle],
-					whereAnalysis.RightBundleConditions,
-					jp.BundleServiceInt,
-					jp.Logger,
-				)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create filtered adapter for RIGHT bundle: %w", err)
-				}
-				rightBundleInterface = filtered
-				jp.Logger.Infof("Pushed %d conditions to RIGHT bundle '%s'",
-					len(whereAnalysis.RightBundleConditions), query.JoinClauses[0].RightBundle)
-			}
-
-			// Combine cross-bundle and remaining conditions for post-JOIN filtering
-			remainingWhereClauses = append(whereAnalysis.CrossBundleConditions, whereAnalysis.RemainingConditions...)
-		} else {
-			// No JOIN - extract all WHERE clauses for post-scan filtering
-			remainingWhereClauses = jp.extractAllWhereClauses(query.WhereClause)
-		}
+	if hasWhereExpression {
+		jp.Logger.Info("WHERE expression detected - will apply post-JOIN filtering")
+		// Predicate pushdown for Expressions is not yet implemented
+		// For now, we'll apply the entire WHERE clause after JOIN execution
 	}
 
 	// NEW: Create service manager adapter for the execution node
@@ -205,19 +156,20 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 	finalCost := estimatedCost
 	finalEstimatedRows := estimatedRows
 
-	if len(remainingWhereClauses) > 0 {
-		// Create FilterNode to apply remaining WHERE conditions after JOIN
+	// Check for Expression-based WHERE filtering (new unified parser)
+	if hasWhereExpression {
+		// Create FilterNode to apply WHERE expression after JOIN
 		filterNode := &FilterNode{
-			Child:         joinNode,
-			Clauses:       remainingWhereClauses,
-			Cost:          estimatedCost + float64(estimatedRows)*0.1, // Add filter cost
-			EstimatedRows: estimatedRows / 10,                         // Assume 10% selectivity
-			Logger:        jp.Logger,
+			Child:           joinNode,
+			WhereExpression: query.WhereExpression,
+			Cost:            estimatedCost + float64(estimatedRows)*0.1, // Add filter cost
+			EstimatedRows:   estimatedRows / 10,                         // Assume 10% selectivity
+			Logger:          jp.Logger,
 		}
 		rootNode = filterNode
 		finalCost = filterNode.Cost
 		finalEstimatedRows = filterNode.EstimatedRows
-		jp.Logger.Infof("Wrapped JOIN with FilterNode: %d remaining WHERE conditions (after pushdown)", len(remainingWhereClauses))
+		jp.Logger.Info("Wrapped JOIN with FilterNode using WhereExpression (unified parser)")
 	} else if leftBundleInterface != nil || rightBundleInterface != nil {
 		jp.Logger.Info("All WHERE conditions pushed down - no post-JOIN filtering needed")
 	}

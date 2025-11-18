@@ -1,0 +1,97 @@
+{
+  "BundleID": "a420f334-3eab-4d4e-bff7-dbcf0d775db6",
+  "Constraints": {},
+  "CreatedAt": "0001-01-01T00:00:00Z",
+  "CreatedBy": "",
+  "Description": "",
+  "DocumentStructure": {
+    "FieldDefinitions": {
+      "DocumentID": {
+        "Name": "DocumentID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": "1877fb49fa1b7798_7"
+      },
+      "Name": {
+        "Name": "Name",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": ""
+      },
+      "RoleID": {
+        "Name": "RoleID",
+        "Type": "STRING",
+        "Required": true,
+        "Unique": true,
+        "DefaultValue": ""
+      }
+    }
+  },
+  "IndexNames": [
+    "DocumentID"
+  ],
+  "Indexes": {
+    "DocumentID": {
+      "IndexName": "DocumentID",
+      "Fields": [
+        {
+          "Name": "DocumentID",
+          "Type": "STRING",
+          "Required": true,
+          "Unique": true,
+          "DefaultValue": "1877fb49fa1b7798_7"
+        }
+      ],
+      "IndexType": "hash",
+      "CreateTime": "2025-11-14T16:01:14.292851-05:00",
+      "HashIndexField": {
+        "FieldName": "DocumentID",
+        "IsUnique": true,
+        "Collation": ""
+      },
+      "BTreeIndexField": {
+        "FieldName": "",
+        "IsUnique": false,
+        "Collation": ""
+      }
+    }
+  },
+  "Name": "Roles",
+  "PageCount": 1,
+  "PageSize": 1000,
+  "Permissions": null,
+  "Relationships": {
+    "Roles_RolesPermissions_1": {
+      "RelationshipID": "",
+      "Name": "Roles_RolesPermissions_1",
+      "Description": "",
+      "SourceField": "RoleID",
+      "DestinationBundle": "RolesPermissions",
+      "DestinationField": "RoleID",
+      "SourceBundle": "Roles",
+      "RelationshipType": "1toMany",
+      "SourceBundleID": "",
+      "SourceBundleName": "Roles",
+      "TargetBundleID": "",
+      "TargetBundleName": "RolesPermissions"
+    },
+    "Roles_UserRoles_1": {
+      "RelationshipID": "",
+      "Name": "Roles_UserRoles_1",
+      "Description": "",
+      "SourceField": "RoleID",
+      "DestinationBundle": "UserRoles",
+      "DestinationField": "RoleID",
+      "SourceBundle": "Roles",
+      "RelationshipType": "1toMany",
+      "SourceBundleID": "",
+      "SourceBundleName": "Roles",
+      "TargetBundleID": "",
+      "TargetBundleName": "UserRoles"
+    }
+  },
+  "TotalDocuments": 0,
+  "UpdatedAt": "0001-01-01T00:00:00Z"
+}

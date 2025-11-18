@@ -272,7 +272,7 @@ func TestGroupByWithWhere(t *testing.T) {
 			}
 
 			// Validate WHERE clause exists
-			if unifiedQuery.WhereClause == nil {
+			if unifiedQuery.WhereExpression == nil {
 				t.Error("Expected WHERE clause to be present")
 			}
 
@@ -342,7 +342,7 @@ func TestGroupByWithHaving(t *testing.T) {
 			}
 
 			// Validate HAVING clause exists
-			if unifiedQuery.HavingClause == nil {
+			if unifiedQuery.HavingExpression == nil {
 				t.Error("Expected HAVING clause to be present")
 			}
 
@@ -350,7 +350,6 @@ func TestGroupByWithHaving(t *testing.T) {
 			if unifiedQuery.GroupBy == nil {
 				t.Error("Expected GROUP BY clause to be present")
 			}
-
 			logger.Infof("✓ GROUP BY with HAVING parsed successfully: %s", tt.name)
 		})
 	}
@@ -580,11 +579,11 @@ func TestGroupByExecutionPipeline(t *testing.T) {
 			t.Fatal("GROUP BY clause missing")
 		}
 
-		if unifiedQuery.WhereClause == nil {
+		if unifiedQuery.WhereExpression == nil {
 			t.Error("WHERE clause missing")
 		}
 
-		if unifiedQuery.HavingClause == nil {
+		if unifiedQuery.HavingExpression == nil {
 			t.Error("HAVING clause missing")
 		}
 

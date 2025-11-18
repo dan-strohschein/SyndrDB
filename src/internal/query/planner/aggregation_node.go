@@ -51,6 +51,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/executor"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/syndrQL"
 
 	"go.uber.org/zap"
 )
@@ -67,8 +68,12 @@ type AggregationNode struct {
 	// AggregateFields specifies aggregate functions to compute
 	AggregateFields []queryparser.AggregateFunction
 
-	// HavingClause filters groups after aggregation
+	// HavingClause filters groups after aggregation - DEPRECATED
 	HavingClause *queryparser.HavingClause
+
+	// NEW: Expression-based HAVING filtering
+	HavingExpression interface{} // syndrQL.Expression - use type assertion
+	BundleContext    interface{} // syndrQL.BundleContext - use type assertion
 
 	// OrderBy clause for result ordering (optional)
 	OrderBy *queryparser.OrderByClause
@@ -106,7 +111,7 @@ func NewAggregationNode(
 	child ExecutionNode,
 	groupBy *queryparser.GroupByClause,
 	aggregateFields []queryparser.AggregateFunction,
-	havingClause *queryparser.HavingClause,
+	havingExpression interface{}, // syndrQL.Expression or legacy HavingClause
 	orderBy *queryparser.OrderByClause,
 	logger *zap.SugaredLogger,
 ) *AggregationNode {
@@ -140,7 +145,7 @@ func NewAggregationNode(
 		Child:             child,
 		GroupBy:           groupBy,
 		AggregateFields:   aggregateFields,
-		HavingClause:      havingClause,
+		HavingExpression:  havingExpression,
 		OrderBy:           orderBy,
 		Logger:            logger,
 		EstimatedRows:     estimatedGroups,
@@ -365,10 +370,13 @@ func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[st
 	groupFields := make(map[string]interface{})
 	keyParts := make([]string, 0, len(n.GroupBy.Fields))
 
-	for _, fieldName := range n.GroupBy.Fields {
+	for _, qualifiedFieldName := range n.GroupBy.Fields {
+		// Extract the actual field name from qualified identifier (e.g., "Authors"."Name" -> Name)
+		fieldName := n.extractFieldName(qualifiedFieldName)
+
 		field, exists := doc.Fields[fieldName]
 		if !exists {
-			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fieldName)
+			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", qualifiedFieldName)
 		}
 
 		groupFields[fieldName] = field.Value
@@ -377,6 +385,26 @@ func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[st
 
 	gKey := groupKey(strings.Join(keyParts, "|"))
 	return gKey, groupFields, nil
+}
+
+// extractFieldName extracts the actual field name from a qualified identifier
+// Handles formats like "Authors"."Name" -> Name, or just "Name" -> Name
+func (n *AggregationNode) extractFieldName(qualifiedName string) string {
+	// Remove surrounding quotes first
+	qualifiedName = strings.Trim(qualifiedName, "\"'")
+
+	// Handle qualified names: "BundleName"."FieldName" or BundleName.FieldName
+	// Split by dots and take the last part
+	parts := strings.Split(qualifiedName, ".")
+	if len(parts) > 1 {
+		// Get the last part and remove any remaining quotes
+		fieldName := parts[len(parts)-1]
+		fieldName = strings.Trim(fieldName, "\"'")
+		return fieldName
+	}
+
+	// Simple field name, already trimmed
+	return qualifiedName
 }
 
 // updateAggregates updates aggregate values for a group with data from a document
@@ -392,13 +420,17 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 				aggVal.Count++
 			} else {
 				// COUNT(field) - count non-null values
-				if field, exists := doc.Fields[aggFunc.Field]; exists && field.Value != nil {
+				// Extract actual field name from qualified identifier
+				fieldName := n.extractFieldName(aggFunc.Field)
+				if field, exists := doc.Fields[fieldName]; exists && field.Value != nil {
 					aggVal.Count++
 				}
 			}
 
 		case "SUM", "AVG":
-			if field, exists := doc.Fields[aggFunc.Field]; exists {
+			// Extract actual field name from qualified identifier
+			fieldName := n.extractFieldName(aggFunc.Field)
+			if field, exists := doc.Fields[fieldName]; exists {
 				if numValue, err := n.convertToFloat(field.Value); err == nil {
 					aggVal.Sum += numValue
 					aggVal.Values = append(aggVal.Values, numValue)
@@ -406,14 +438,18 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 			}
 
 		case "MIN":
-			if field, exists := doc.Fields[aggFunc.Field]; exists {
+			// Extract actual field name from qualified identifier
+			fieldName := n.extractFieldName(aggFunc.Field)
+			if field, exists := doc.Fields[fieldName]; exists {
 				if aggVal.Min == nil || n.isLess(field.Value, aggVal.Min) {
 					aggVal.Min = field.Value
 				}
 			}
 
 		case "MAX":
-			if field, exists := doc.Fields[aggFunc.Field]; exists {
+			// Extract actual field name from qualified identifier
+			fieldName := n.extractFieldName(aggFunc.Field)
+			if field, exists := doc.Fields[fieldName]; exists {
 				if aggVal.Max == nil || n.isGreater(field.Value, aggVal.Max) {
 					aggVal.Max = field.Value
 				}
@@ -498,7 +534,10 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 // PHASE 3: Document sorting for sort-aggregate strategy
 func (n *AggregationNode) sortDocumentsByGroupFields(docs []*models.Document) error {
 	sort.Slice(docs, func(i, j int) bool {
-		for _, fieldName := range n.GroupBy.Fields {
+		for _, qualifiedFieldName := range n.GroupBy.Fields {
+			// Extract actual field name from qualified identifier
+			fieldName := n.extractFieldName(qualifiedFieldName)
+
 			fieldI, existsI := docs[i].Fields[fieldName]
 			fieldJ, existsJ := docs[j].Fields[fieldName]
 
@@ -576,33 +615,45 @@ func (n *AggregationNode) isGreater(a, b interface{}) bool {
 // TODO: Phase 2 - Consider caching parsed HAVING clauses for repeated queries
 // TODO: Phase 2 - Add support for complex aggregate expressions in HAVING (e.g., HAVING SUM(x) > AVG(y))
 func (n *AggregationNode) applyHavingClause(documents map[string]*models.Document) (map[string]*models.Document, error) {
-	if n.HavingClause == nil || n.HavingClause.Condition == "" {
+	// Check if HAVING clause exists
+	if n.HavingExpression == nil {
+		// No HAVING clause - return all documents
 		return documents, nil
 	}
 
-	n.Logger.Debugf("Applying HAVING clause: %s", n.HavingClause.Condition)
-
-	// Parse HAVING condition into WhereGroup structure
-	// Reuse the existing WHERE clause parser since HAVING has the same syntax
-	havingWhereGroup, err := queryparser.ParseWhereClause(n.HavingClause.Condition)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse HAVING condition '%s': %w", n.HavingClause.Condition, err)
+	expr, ok := n.HavingExpression.(syndrQL.Expression)
+	if !ok {
+		return nil, fmt.Errorf("HavingExpression is not a syndrQL.Expression: %T", n.HavingExpression)
 	}
 
-	// Filter documents based on HAVING condition
+	n.Logger.Debugf("Applying HAVING expression")
+
+	// Get BundleContext if available (for qualified field resolution)
+	var bundleCtx *syndrQL.BundleContext
+	if n.BundleContext != nil {
+		bundleCtx, ok = n.BundleContext.(*syndrQL.BundleContext)
+		if !ok {
+			return nil, fmt.Errorf("BundleContext is not a *syndrQL.BundleContext: %T", n.BundleContext)
+		}
+	}
+
+	// Create evaluator and filter documents
+	evaluator := &syndrQL.ExpressionEvaluator{}
 	filteredDocs := make(map[string]*models.Document)
+
 	for docID, doc := range documents {
-		// Evaluate HAVING condition against the aggregated document
-		// The document contains both GROUP BY fields and aggregate function results
-		matches := queryparser.EvaluateWhereClause(doc, havingWhereGroup, n.Logger)
+		// Evaluate HAVING expression against the aggregated document
+		matches, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx)
+		if err != nil {
+			return nil, fmt.Errorf("HAVING expression evaluation failed for group %s: %w", docID, err)
+		}
 
 		if matches {
 			filteredDocs[docID] = doc
 		}
 	}
 
-	n.Logger.Debugf("HAVING clause filtered %d groups to %d groups", len(documents), len(filteredDocs))
-
+	n.Logger.Debugf("HAVING expression filtered %d groups to %d groups", len(documents), len(filteredDocs))
 	return filteredDocs, nil
 }
 

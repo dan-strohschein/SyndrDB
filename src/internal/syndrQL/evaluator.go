@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/query/resolver"
 
 	"go.uber.org/zap"
 )
@@ -27,6 +28,39 @@ The evaluator follows the Visitor pattern, with each Expression type implementin
 its own evaluation logic through the Evaluate method.
 */
 
+// BundleContext provides context about available bundles for field resolution
+// This enables qualified field name validation and ambiguity detection
+type BundleContext struct {
+	Bundles       map[string]*models.Bundle // All bundles involved in the query
+	PrimaryBundle string                    // The primary bundle from FROM clause
+	JoinedBundles []string                  // Bundles added via JOIN clauses
+	fieldResolver *resolver.FieldResolver   // Cached field resolver instance
+	fieldMapCache map[string][]string       // Cache of bundle name -> field names
+	// TODO: I should cache field maps when bundle schemas evolve to avoid repeated lookups
+}
+
+// NewBundleContext creates a new bundle context with the given bundles
+func NewBundleContext(bundles map[string]*models.Bundle, primaryBundle string, joinedBundles []string) *BundleContext {
+	ctx := &BundleContext{
+		Bundles:       bundles,
+		PrimaryBundle: primaryBundle,
+		JoinedBundles: joinedBundles,
+		fieldResolver: resolver.NewFieldResolver(bundles),
+		fieldMapCache: make(map[string][]string),
+	}
+	// Pre-cache field maps for performance
+	for bundleName, bundle := range bundles {
+		if bundle != nil && bundle.DocumentStructure.FieldDefinitions != nil {
+			fields := make([]string, 0, len(bundle.DocumentStructure.FieldDefinitions))
+			for fieldName := range bundle.DocumentStructure.FieldDefinitions {
+				fields = append(fields, fieldName)
+			}
+			ctx.fieldMapCache[bundleName] = fields
+		}
+	}
+	return ctx
+}
+
 // ExpressionEvaluator evaluates Expression AST nodes against document data
 type ExpressionEvaluator struct {
 	logger *zap.SugaredLogger
@@ -41,7 +75,8 @@ func NewExpressionEvaluator(logger *zap.SugaredLogger) *ExpressionEvaluator {
 
 // Evaluate evaluates an expression against a document and returns the result
 // This is the main entry point for expression evaluation
-func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document) (interface{}, error) {
+// bundleContext is optional - when nil, single-bundle behavior is maintained for backward compatibility
+func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
 	if expr == nil {
 		return nil, fmt.Errorf("cannot evaluate nil expression")
 	}
@@ -54,17 +89,19 @@ func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document) (i
 	case *LiteralExpression:
 		return e.evaluateLiteral(expr)
 	case *IdentifierExpression:
-		return e.evaluateIdentifier(expr, doc)
+		return e.evaluateIdentifier(expr, doc, bundleContext)
+	case *QualifiedIdentifierExpression:
+		return e.evaluateQualifiedIdentifier(expr, doc, bundleContext)
 	case *BinaryExpression:
-		return e.evaluateBinary(expr, doc)
+		return e.evaluateBinary(expr, doc, bundleContext)
 	case *UnaryExpression:
-		return e.evaluateUnary(expr, doc)
+		return e.evaluateUnary(expr, doc, bundleContext)
 	case *GroupedExpression:
-		return e.evaluateGrouped(expr, doc)
+		return e.evaluateGrouped(expr, doc, bundleContext)
 	case *CallExpression:
-		return e.evaluateCall(expr, doc)
+		return e.evaluateCall(expr, doc, bundleContext)
 	case *ArrayExpression:
-		return e.evaluateArray(expr, doc)
+		return e.evaluateArray(expr, doc, bundleContext)
 	default:
 		return nil, fmt.Errorf("unsupported expression type: %T", expr)
 	}
@@ -76,7 +113,7 @@ func (e *ExpressionEvaluator) evaluateLiteral(expr *LiteralExpression) (interfac
 }
 
 // evaluateIdentifier evaluates an identifier (field name) by looking it up in the document
-func (e *ExpressionEvaluator) evaluateIdentifier(expr *IdentifierExpression, doc *models.Document) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateIdentifier(expr *IdentifierExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
 	fieldName := expr.Name
 
 	// Handle bundle.field notation - strip bundle prefix
@@ -84,6 +121,51 @@ func (e *ExpressionEvaluator) evaluateIdentifier(expr *IdentifierExpression, doc
 		parts := strings.SplitN(fieldName, ".", 2)
 		fieldName = parts[1]
 	}
+
+	// Remove quotes if present
+	fieldName = strings.Trim(fieldName, "\"")
+
+	// If we have bundle context, check for ambiguous fields
+	if bundleContext != nil && bundleContext.fieldResolver != nil {
+		if bundleContext.fieldResolver.IsAmbiguous(fieldName) {
+			// Field is ambiguous - must use qualified name
+			_, err := bundleContext.fieldResolver.ResolveField(fieldName)
+			return nil, err // This will return the helpful error message with suggestions
+		}
+	}
+
+	// Special case: DocumentID field
+	if strings.EqualFold(fieldName, "documentid") {
+		return doc.DocumentID, nil
+	}
+
+	// Look up field in document
+	if field, exists := doc.Fields[fieldName]; exists {
+		return field.Value, nil
+	}
+
+	// Field not found - return nil (will be treated as NULL in comparisons)
+	if e.logger != nil {
+		e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
+	}
+	return nil, nil
+}
+
+// evaluateQualifiedIdentifier evaluates a qualified identifier (Bundle.Field notation)
+func (e *ExpressionEvaluator) evaluateQualifiedIdentifier(expr *QualifiedIdentifierExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+	// If we have bundle context, validate the qualified field
+	if bundleContext != nil && bundleContext.fieldResolver != nil {
+		bundleName := strings.Trim(expr.Bundle, "\"")
+		fieldName := strings.Trim(expr.Field, "\"")
+		if err := bundleContext.fieldResolver.ValidateQualifiedField(bundleName, fieldName); err != nil {
+			return nil, err
+		}
+	}
+
+	// In the context of evaluating against a single document,
+	// we ignore the bundle name and just look up the field
+	// (the bundle filtering happens at the SELECT query execution level)
+	fieldName := expr.Field
 
 	// Remove quotes if present
 	fieldName = strings.Trim(fieldName, "\"")
@@ -99,14 +181,16 @@ func (e *ExpressionEvaluator) evaluateIdentifier(expr *IdentifierExpression, doc
 	}
 
 	// Field not found - return nil (will be treated as NULL in comparisons)
-	e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
+	if e.logger != nil {
+		e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
+	}
 	return nil, nil
 }
 
-// evaluateBinary evaluates a binary expression (e.g., a == b, x AND y)
-func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models.Document) (interface{}, error) {
-	// Evaluate left side
-	left, err := e.Evaluate(expr.Left, doc)
+// evaluateCall evaluates a function call expression (e.g., COUNT(*), SUM(Price))
+func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+	// Evaluate left side first
+	left, err := e.Evaluate(expr.Left, doc, bundleContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating left side of binary expression: %w", err)
 	}
@@ -123,7 +207,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 		}
 
 		// Left is true, evaluate right
-		right, err := e.Evaluate(expr.Right, doc)
+		right, err := e.Evaluate(expr.Right, doc, bundleContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating right side of AND: %w", err)
 		}
@@ -147,7 +231,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 		}
 
 		// Left is false, evaluate right
-		right, err := e.Evaluate(expr.Right, doc)
+		right, err := e.Evaluate(expr.Right, doc, bundleContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating right side of OR: %w", err)
 		}
@@ -161,7 +245,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 	}
 
 	// For all other operators, evaluate right side
-	right, err := e.Evaluate(expr.Right, doc)
+	right, err := e.Evaluate(expr.Right, doc, bundleContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating right side of binary expression: %w", err)
 	}
@@ -185,6 +269,12 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 	case TOKEN_LIKE:
 		return e.evaluateLike(left, right, false)
 
+	// IN and NOT IN operators for membership testing
+	case TOKEN_IN:
+		return e.evaluateIn(left, right, false)
+	case TOKEN_NOTIN:
+		return e.evaluateIn(left, right, true)
+
 	// Arithmetic operators (for computed expressions)
 	case TOKEN_PLUS:
 		return e.arithmeticOp(left, right, func(a, b float64) float64 { return a + b })
@@ -203,9 +293,9 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 }
 
 // evaluateUnary evaluates a unary expression (e.g., NOT, -, +)
-func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.Document) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
 	// Evaluate operand (Right field in UnaryExpression)
-	operand, err := e.Evaluate(expr.Right, doc)
+	operand, err := e.Evaluate(expr.Right, doc, bundleContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating unary operand: %w", err)
 	}
@@ -238,13 +328,13 @@ func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.D
 }
 
 // evaluateGrouped evaluates a grouped expression (parenthesized)
-func (e *ExpressionEvaluator) evaluateGrouped(expr *GroupedExpression, doc *models.Document) (interface{}, error) {
-	return e.Evaluate(expr.Expression, doc)
+func (e *ExpressionEvaluator) evaluateGrouped(expr *GroupedExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+	return e.Evaluate(expr.Expression, doc, bundleContext)
 }
 
 // evaluateCall evaluates a function call expression
 // TODO: I need to implement function evaluation when we add support for functions like UPPER(), LOWER(), etc.
-func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Document) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
 	// TODO: I will implement built-in functions here (UPPER, LOWER, CONCAT, etc.)
 	// TODO: I might want to support user-defined functions in the future
 	return nil, fmt.Errorf("function calls not yet implemented: %s", expr.Function)
@@ -252,10 +342,17 @@ func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Doc
 
 // evaluateArray evaluates an array expression
 // TODO: I need to implement array evaluation for IN clauses and array operations
-func (e *ExpressionEvaluator) evaluateArray(expr *ArrayExpression, doc *models.Document) (interface{}, error) {
-	// TODO: I will implement array element evaluation here
-	// TODO: I might want to support array operations like CONTAINS, ANY, ALL
-	return nil, fmt.Errorf("array expressions not yet implemented")
+func (e *ExpressionEvaluator) evaluateArray(expr *ArrayExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+	// Evaluate each element in the array
+	result := make([]interface{}, len(expr.Elements))
+	for i, elem := range expr.Elements {
+		val, err := e.Evaluate(elem, doc, bundleContext)
+		if err != nil {
+			return nil, fmt.Errorf("error evaluating array element %d: %w", i, err)
+		}
+		result[i] = val
+	}
+	return result, nil
 }
 
 // compareValues compares two values using the provided comparison function
@@ -362,7 +459,9 @@ func (e *ExpressionEvaluator) evaluateLike(left interface{}, right interface{}, 
 
 	// Handle NULL values - return false (SQL standard)
 	if leftStr == "::SYNDR_NULL::" || rightStr == "::SYNDR_NULL::" {
-		e.logger.Debugf("LIKE operator: NULL value detected, returning false")
+		if e.logger != nil {
+			e.logger.Debugf("LIKE operator: NULL value detected, returning false")
+		}
 		return negate, nil // false for LIKE, true for NOT LIKE
 	}
 
@@ -385,6 +484,52 @@ func (e *ExpressionEvaluator) evaluateLike(left interface{}, right interface{}, 
 	matched := queryparser.MatchLikePattern(leftStr, pattern, patternType, caseInsensitive)
 
 	// Apply negation for NOT LIKE
+	if negate {
+		matched = !matched
+	}
+
+	return matched, nil
+}
+
+// evaluateIn evaluates IN and NOT IN operators
+// Checks if left value is a member of right array
+func (e *ExpressionEvaluator) evaluateIn(left interface{}, right interface{}, negate bool) (interface{}, error) {
+	// Right side should be an array
+	rightArr, ok := right.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("IN operator requires array on right side, got %T", right)
+	}
+
+	// Handle NULL values on left side - return false (SQL standard)
+	if left == nil || left == "::SYNDR_NULL::" {
+		if e.logger != nil {
+			e.logger.Debugf("IN operator: NULL value on left side, returning false")
+		}
+		return negate, nil // false for IN, true for NOT IN
+	}
+
+	// Check if left value is in the array
+	matched := false
+	for _, item := range rightArr {
+		// Use compareValues for consistent comparison logic
+		result, err := e.compareValues(left, item, func(a, b float64) bool { return a == b })
+		if err != nil {
+			// If comparison fails, try direct equality
+			if left == item {
+				matched = true
+				break
+			}
+			continue
+		}
+
+		// If result is true, we found a match
+		if result {
+			matched = true
+			break
+		}
+	}
+
+	// Apply negation for NOT IN
 	if negate {
 		matched = !matched
 	}
@@ -455,8 +600,8 @@ func (e *ExpressionEvaluator) toFloat64(v interface{}) (float64, error) {
 
 // EvaluateAsBool evaluates an expression and returns the result as a boolean
 // This is a convenience method for WHERE clause evaluation
-func (e *ExpressionEvaluator) EvaluateAsBool(expr Expression, doc *models.Document) (bool, error) {
-	result, err := e.Evaluate(expr, doc)
+func (e *ExpressionEvaluator) EvaluateAsBool(expr Expression, doc *models.Document, bundleContext *BundleContext) (bool, error) {
+	result, err := e.Evaluate(expr, doc, bundleContext)
 	if err != nil {
 		return false, err
 	}

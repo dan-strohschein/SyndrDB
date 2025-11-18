@@ -814,7 +814,7 @@ func (h *GraphQLHandler) executeQueryWithStructuredFiltering(ctx context.Context
 	// Override WHERE and ORDER BY with translated values
 	if whereGroup != nil {
 		// Convert models.WhereGroup to queryparser.WhereGroup
-		unifiedQuery.WhereClause = h.convertWhereGroup(whereGroup)
+		unifiedQuery.WhereExpression = h.convertWhereGroup(whereGroup)
 	}
 	// TODO: Parse orderByStr back to OrderByClause when refactoring query pipeline
 

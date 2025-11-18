@@ -93,6 +93,15 @@ func validateCommand(command string, config *SecurityConfig) error {
 	}
 
 	// Check for excessive special characters (potential obfuscation)
+	// TODO: I should consider implementing context-aware character validation instead of simple ratio checking.
+	// This would involve: (1) Checking if special characters are balanced (matching quotes, braces, parentheses),
+	// (2) Validating that special characters appear in expected positions (quotes around identifiers/values,
+	// braces for JSON structures, equals for assignments), (3) Rejecting suspicious patterns like unbalanced
+	// quotes or injection attempts ('; DROP TABLE) rather than treating all special characters equally,
+	// (4) Maintaining a state machine to track whether we're inside quoted strings, JSON objects, or raw
+	// command syntax, and (5) Applying different validation rules based on context (e.g., allowing more
+	// special chars inside data payloads vs command structure). This approach would be more sophisticated
+	// and catch actual malicious input while being more permissive of legitimate structured data.
 	specialCharCount := 0
 	for _, char := range command {
 		if !unicode.IsLetter(char) && !unicode.IsDigit(char) && !unicode.IsSpace(char) {
@@ -100,7 +109,19 @@ func validateCommand(command string, config *SecurityConfig) error {
 		}
 	}
 
-	if float64(specialCharCount)/float64(len(command)) > 0.3 {
+	// Determine command type and apply appropriate threshold
+	// Data manipulation commands (ADD/UPDATE) legitimately need more special characters for JSON-like syntax
+	threshold := 0.3 // default for most commands
+
+	if strings.HasPrefix(commandUpper, "ADD DOCUMENT") ||
+		strings.HasPrefix(commandUpper, "UPDATE DOCUMENT") {
+		threshold = 0.55 // More permissive for data commands with structured payloads
+	} else if strings.HasPrefix(commandUpper, "CREATE BUNDLE") ||
+		strings.HasPrefix(commandUpper, "ALTER BUNDLE") {
+		threshold = 0.35 // Slightly higher for DDL with field definitions
+	}
+
+	if float64(specialCharCount)/float64(len(command)) > threshold {
 		return fmt.Errorf("command contains excessive special characters")
 	}
 

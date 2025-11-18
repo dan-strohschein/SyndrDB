@@ -45,6 +45,7 @@ const (
 	TOKEN_GTE      // >=
 	TOKEN_LIKE     // LIKE
 	TOKEN_IN       // IN
+	TOKEN_NOTIN    // NOT IN
 	TOKEN_CONTAINS // CONTAINS
 
 	// Operators - Logical
@@ -188,6 +189,8 @@ func (tt TokenType) String() string {
 		return "LIKE"
 	case TOKEN_IN:
 		return "IN"
+	case TOKEN_NOTIN:
+		return "NOT IN"
 	case TOKEN_CONTAINS:
 		return "CONTAINS"
 	case TOKEN_AND:

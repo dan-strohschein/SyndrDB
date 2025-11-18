@@ -522,8 +522,8 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		return nil, fmt.Errorf("failed to parse query: %w", err)
 	}
 
-	logger.Infof("Parsed unified query: WHERE:%s, Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
-		query.WhereClause, query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasOrderBy(), query.HasLimit())
+	logger.Infof("Parsed unified query: WHERE:%v, Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
+		query.WhereExpression, query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasOrderBy(), query.HasLimit())
 
 	// STEP 2: Create unified query planner
 	unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, serviceManager.BundleService)

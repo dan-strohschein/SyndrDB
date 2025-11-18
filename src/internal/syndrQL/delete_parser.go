@@ -76,9 +76,9 @@ func (p *DeleteParser) Parse() (*DeleteStatement, error) {
 	}
 
 	// Expect: BUNDLE
-	if err := p.expectKeyword(TOKEN_BUNDLE, "BUNDLE"); err != nil {
-		return nil, err
-	}
+	// if err := p.expectKeyword(TOKEN_BUNDLE, "BUNDLE"); err != nil {
+	// 	return nil, err
+	// }
 
 	// Expect: bundle name (string)
 	bundleName, err := p.expectString()
