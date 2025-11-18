@@ -206,7 +206,7 @@ func createTestBundleForMutations(t *testing.T, env *TestEnvironment, bundleName
 
 	// Now initialize the GraphQL handler with the schema that was generated
 	if env.GraphQLHandler == nil {
-		graphQLHandler, err := graphQL.NewGraphQLHandler(*env.ServiceManager, env.Database, env.SchemaManager, env.Logger)
+		graphQLHandler, err := graphQL.NewGraphQLHandler(*env.ServiceManager, env.Database, env.SchemaManager, env.Logger, nil)
 		require.NoError(t, err, "Failed to create GraphQL handler")
 		env.GraphQLHandler = graphQLHandler
 	}

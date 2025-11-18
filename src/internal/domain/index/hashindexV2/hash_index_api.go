@@ -1,7 +1,26 @@
 package hashindexV2
 
 /*
-HASH INDEX SYSTEM - MAIN API
+⚠️  DEPRECATED - NON-LSM HASH INDEX IMPLEMENTATION ⚠️
+
+This package (hashindexV2) is DEPRECATED and replaced by hashindexV3.
+
+REPLACED BY: src/internal/domain/index/hashindexV3 (LSM-style hash index)
+
+REASON FOR DEPRECATION:
+- hashindexV2 uses traditional bucket-based linear hashing
+- hashindexV3 uses modern LSM (Log-Structured Merge) architecture
+- LSM provides better write performance and simpler recovery
+- LSM architecture is more suitable for append-only operations
+
+DO NOT USE THIS PACKAGE FOR NEW CODE.
+All references to hashindexV2 have been commented out in the codebase.
+
+TODO: Remove this package entirely after migration is complete (Phase 12+)
+
+═══════════════════════════════════════════════════════════════════
+
+HASH INDEX SYSTEM - MAIN API (LEGACY)
 
 This file provides the primary interface for hash index operations in SyndrDB.
 It implements a PostgreSQL-style linear hashing algorithm with the following features:

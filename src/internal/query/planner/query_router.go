@@ -96,7 +96,7 @@ func (qr *QueryRouter) RouteQuery(
 	database *models.Database,
 ) (ExecutionNode, []string, error) {
 
-	qr.logger.Infof("Routing query: Type=%s, HasJoin=%v, HasGroupBy=%v, HasWhere=%v",
+	qr.logger.Debugf("Routing query: Type=%s, HasJoin=%v, HasGroupBy=%v, HasWhere=%v",
 		query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasWhere())
 
 	// Route based on query characteristics

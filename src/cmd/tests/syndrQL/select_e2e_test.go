@@ -1226,7 +1226,7 @@ func TestWhere_MultipleFields(t *testing.T) {
 	// Verify all results match both conditions
 	for i, doc := range docs {
 		country, okCountry := doc["Country"].(string)
-		
+
 		// Handle both int and int64 types for BirthYear
 		var year int64
 		var okYear bool

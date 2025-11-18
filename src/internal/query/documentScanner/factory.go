@@ -51,7 +51,7 @@ func (sf *ScannerFactory) CreateScanner(bundle BundleInterface, config *ScannerC
 	// Create and return scanner
 	scanner := NewSmartBundleScanner(bundle, config, cache, sf.logger)
 
-	sf.logger.Infof("Created scanner for bundle '%s' with %d documents",
+	sf.logger.Debugf("Created smart scanner for bundle '%s' with %d documents",
 		bundle.GetName(), bundle.GetTotalDocuments())
 
 	return scanner, nil
@@ -184,9 +184,9 @@ func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterfac
 		// logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
 		// logger.Infof("SAFETY CHECK: Bundle.DocumentsComplete = %v", bundle.DocumentsComplete)
 		if bundle.Documents != nil {
-			logger.Infof("SAFETY CHECK: Bundle.Documents is not nil, has %d documents", len(*bundle.Documents))
+			logger.Debugf("SAFETY CHECK: Bundle.Documents is not nil, has %d documents", len(*bundle.Documents))
 		} else {
-			logger.Infof("SAFETY CHECK: Bundle.Documents is nil (expected for page-based loading)")
+			logger.Debugf("SAFETY CHECK: Bundle.Documents is nil (expected for page-based loading)")
 		}
 
 		// CRITICAL SAFETY: If PageCount is suspiciously high, log error and set reasonable limit

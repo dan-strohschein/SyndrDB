@@ -86,7 +86,7 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string, log
 
 	// Process each file that could be a database metadata file
 	for _, dirEntry := range directoryEntries {
-		logger.Infof("Processing file: %s", dirEntry.Name())
+		//logger.Infof("Processing file: %s", dirEntry.Name())
 		// Skip directories and hidden files
 
 		var DBFolder string = dataRootDir
@@ -100,19 +100,19 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string, log
 
 		files, err := os.ReadDir(DBFolder)
 		if err != nil {
-			log.Printf("Warning: Failed to read directory %s: %v", DBFolder, err)
+			//log.Printf("Warning: Failed to read directory %s: %v", DBFolder, err)
 			continue
 		}
 
 		for _, file := range files {
-			logger.Infof("Found file in directory: %s", file.Name())
+			//logger.Infof("Found file in directory: %s", file.Name())
 
 			if !strings.HasSuffix(file.Name(), ".db") || strings.HasPrefix(file.Name(), ".") {
 				// This is not a database file
 				continue
 			}
 			dbFileName := fmt.Sprintf("%s.db", dirEntry.Name())
-			logger.Infof("Trying to load database file: %s", dbFileName)
+			//logger.Infof("Trying to load database file: %s", dbFileName)
 			// Load the database
 			db, err := d.LoadDatabaseDataFile(DBFolder, dbFileName)
 			if err != nil {
@@ -127,7 +127,7 @@ func (d *DatabaseStorageEngine) LoadAllDatabaseDataFiles(dataRootDir string, log
 			// This is useful for case-insensitive lookups later
 			// databases[strings.ToLower(db.Name)] = db
 
-			log.Printf("Loaded database: %s (ID: %s)", db.Name, db.DatabaseID)
+			//log.Printf("Loaded database: %s (ID: %s)", db.Name, db.DatabaseID)
 		}
 	}
 
@@ -173,7 +173,7 @@ func (d *DatabaseStorageEngine) LoadDatabaseDataFile(dataRootDir, fileName strin
 	}
 
 	if args.Debug {
-		log.Printf("Loaded database metadata from file %s: %v", fileName, dbMap)
+		log.Printf("Loaded database metadata from file %s", fileName)
 	}
 
 	// Convert map to Database object

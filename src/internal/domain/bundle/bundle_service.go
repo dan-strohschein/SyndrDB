@@ -17,14 +17,10 @@ import (
 	"time"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
-	// hashindexV2 "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
+
 	hashindex "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
-
-	//hashindex "syndrdb/src/hash_index"
-
 	"syndrdb/src/pkg/common/helpers"
 
-	// PHASE 5: GraphQL Schema Integration
 	// Import the graphQL schema package for automatic schema generation
 	graphQLSchema "syndrdb/src/internal/graphQL/schema"
 
@@ -295,19 +291,19 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		defaultPageSize: 1000, // Default: 1000 documents per page
 		maxLoadedPages:  100,  // Default: keep max 100 pages in memory
 
-		// PHASE 1 OPTIMIZATION: Use configurable performance settings
+		// OPTIMIZATION: Use configurable performance settings
 		indexUpdateBuffer:    make([]IndexUpdate, 0, globalSettings.MetadataBatchSize),
 		indexUpdateBatchSize: globalSettings.MetadataBatchSize,                                       // INCREASED: 50 → 500
 		indexUpdateInterval:  time.Duration(globalSettings.MetadataFlushInterval) * time.Millisecond, // Use proper unit conversion
 		lastIndexFlush:       time.Now(),
 
-		// PHASE 1 OPTIMIZATION: Deferred metadata updates with configurable intervals
+		// OPTIMIZATION: Deferred metadata updates with configurable intervals
 		metadataUpdateBuffer:    make([]MetadataUpdate, 0, globalSettings.MetadataBatchSize),
 		metadataPersistInterval: globalSettings.MetadataPersistInterval, // NEW: 1000 docs before disk persist
 		metadataOperationCount:  0,
 		lastMetadataFlush:       time.Now(),
 
-		// PHASE 1 OPTIMIZATION: Bulk operation detection for WAL bypass
+		// OPTIMIZATION: Bulk operation detection for WAL bypass
 		bulkModeEnabled:        false,
 		operationCount:         0,
 		operationWindow:        time.Now(),
@@ -329,7 +325,7 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		// CATALOG SERVICE: Will be injected post-construction via SetCatalogService()
 		catalogService: nil,
 
-		// PHASE 5 GRAPHQL INTEGRATION: Initialize GraphQL schema system
+		// GRAPHQL INTEGRATION: Initialize GraphQL schema system
 		// Schema managers are created lazily per database on first bundle operation
 		// because they require database-specific directory paths not available at construction.
 		// The schema generator is stateless and shared across all databases.
@@ -338,7 +334,7 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		graphQLEnabled:  globalSettings.EnableGraphQL,
 	}
 
-	// PHASE 5: Initialize schema generator if GraphQL is enabled
+	// Initialize schema generator if GraphQL is enabled
 	// Generator is stateless and can be created once, shared by all databases
 	if service.graphQLEnabled {
 		service.schemaGenerator = graphQLSchema.NewSchemaGenerator()
@@ -414,7 +410,7 @@ func (s *BundleService) getOrCreateSchemaManager(db *models.Database) (*graphQLS
 		return manager, nil
 	}
 
-	// PHASE 5: Create schema file path in database directory
+	// Create schema file path in database directory
 	// Schema files follow the pattern: {database_directory}/{database_name}_graphql.gql
 	// This ensures schemas are stored alongside their respective database bundles
 	schemaFilePath := filepath.Join(s.settings.DataDir, db.Name, db.Name+"_graphql.gql")
@@ -567,7 +563,6 @@ func (s *BundleService) getBundleLock(bundleName string) *BundleOperationLock {
 	// Create new lock
 	lock = NewBundleOperationLock(bundleName)
 	s.bundleLocks[bundleName] = lock
-	s.logger.Debugf("Created operation lock for bundle '%s'", bundleName)
 
 	return lock
 }
@@ -952,23 +947,11 @@ func (s *BundleService) FlushMetadataUpdates() {
 		if shouldPersistToDisk {
 			// Threshold reached - collect ALL dirty bundles across entire service
 			bundlesToPersist = s.getAllDirtyBundles()
-			s.logger.Infow("Persisting metadata to disk (threshold reached)",
-				"bundles", len(bundlesToPersist),
-				"operationCount", currentOperationCount,
-				"threshold", s.metadataPersistInterval,
-				"bufferSize", bufferSize)
-		} else {
-			s.logger.Infow("Persisting metadata to disk (dirty bundles on flush)",
-				"bundles", len(bundlesToPersist),
-				"operationCount", currentOperationCount,
-				"bufferSize", bufferSize)
 		}
 
 		// Persist all dirty bundles
 		successCount := 0
 		for _, bundle := range bundlesToPersist {
-			s.logger.Infof("PERSISTING METADATA: bundle='%s', TotalDocuments=%d, PageCount=%d",
-				bundle.Name, bundle.TotalDocuments, bundle.PageCount)
 
 			err := s.store.UpdateBundleFile(bundle.Database, bundle)
 			if err != nil {
@@ -979,15 +962,9 @@ func (s *BundleService) FlushMetadataUpdates() {
 				// Clear dirty flag only on successful persistence
 				bundle.IsDirty = false
 				successCount++
-				s.logger.Infof("Successfully persisted metadata for bundle '%s' (TotalDocuments: %d, PageCount: %d)",
-					bundle.Name, bundle.TotalDocuments, bundle.PageCount)
+
 			}
 		}
-
-		s.logger.Infow("Metadata persistence complete",
-			"attempted", len(bundlesToPersist),
-			"succeeded", successCount,
-			"failed", len(bundlesToPersist)-successCount)
 
 		// Reset operation counter after persistence
 		if shouldPersistToDisk {
@@ -1028,8 +1005,6 @@ func (s *BundleService) ForceMetadataPersistence() {
 
 	successCount := 0
 	for _, bundle := range dirtyBundles {
-		s.logger.Infof("SHUTDOWN PERSIST: bundle='%s', TotalDocuments=%d, PageCount=%d",
-			bundle.Name, bundle.TotalDocuments, bundle.PageCount)
 
 		err := s.store.UpdateBundleFile(bundle.Database, bundle)
 		if err != nil {
@@ -1092,18 +1067,17 @@ func (s *BundleService) trackOperationForBulkDetection() bool {
 		if opsPerSecond >= float64(s.bulkThresholdOpsPerSec) {
 			if !s.bulkModeEnabled {
 				s.bulkModeEnabled = true
-				s.logger.Infof("PHASE 1: Entering bulk mode - detected %.1f ops/sec (threshold: %d)",
+				s.logger.Infof("Entering bulk mode - detected %.1f ops/sec (threshold: %d)",
 					opsPerSecond, s.bulkThresholdOpsPerSec)
 			}
 		} else {
 			if s.bulkModeEnabled {
 				s.bulkModeEnabled = false
-				s.logger.Infof("PHASE 1: Exiting bulk mode - detected %.1f ops/sec (threshold: %d)",
+				s.logger.Infof("Exiting bulk mode - detected %.1f ops/sec (threshold: %d)",
 					opsPerSecond, s.bulkThresholdOpsPerSec)
 
 				// CRITICAL: Flush all buffers when exiting bulk mode
 				// This ensures that any pending operations are persisted to disk
-				s.logger.Infof("BULK END: Triggering comprehensive buffer flush")
 				if err := s.FlushAllBuffers(); err != nil {
 					s.logger.Errorf("BULK END: Failed to flush buffers: %v", err)
 				} else {
@@ -1147,25 +1121,22 @@ func (s *BundleService) GetBulkModeStatus() (bool, int, float64) {
 // FlushAllBuffers forces immediate flush of all pending operations to disk
 // This should be called at the end of bulk operations to ensure data persistence
 func (s *BundleService) FlushAllBuffers() error {
-	s.logger.Infof("FLUSH: Starting comprehensive buffer flush to ensure data persistence")
 
 	var errors []error
 
 	// 1. Flush index updates first (they may affect metadata)
 	if len(s.indexUpdateBuffer) > 0 {
-		s.logger.Debugf("FLUSH: Flushing %d pending index updates", len(s.indexUpdateBuffer))
+
 		s.flushIndexUpdates()
 	}
 
 	// 2. Force metadata persistence regardless of thresholds
 	if len(s.metadataUpdateBuffer) > 0 {
-		s.logger.Debugf("FLUSH: Forcing metadata persistence for %d pending updates", len(s.metadataUpdateBuffer))
+
 		s.ForceMetadataPersistence()
 	}
 
 	// 3. Sync any file system buffers
-	s.logger.Debugf("FLUSH: Syncing file system buffers")
-
 	// Note: Individual stores should handle their own sync operations
 	s.store.FlushAllWriteBuffers()
 
@@ -1175,7 +1146,6 @@ func (s *BundleService) FlushAllBuffers() error {
 		return fmt.Errorf("flush completed with %d errors", len(errors))
 	}
 
-	s.logger.Infof("FLUSH: Successfully flushed all buffers to disk")
 	return nil
 }
 
@@ -1373,9 +1343,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 		if args.Debug {
 			s.logger.Infof("Added field '%s' to bundle '%s'", fieldDef.Name, bundleCommand.BundleName)
 		}
-		// DEBUG: Log what was actually stored
-		s.logger.Infof("[BUNDLE CREATE] Field '%s': Type=%s, Required=%v, Unique=%v, Default=%v",
-			fieldDef.Name, fieldDef.Type, fieldDef.IsRequired, fieldDef.IsUnique, fieldDef.DefaultValue)
+
 	}
 
 	// Add the bundle to the database
@@ -1386,7 +1354,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	if err != nil {
 		return nil, fmt.Errorf("error creating bundle file: %w", err)
 	}
-	//logger.Infof("Decoded bundle data from file %v", bundle)
+
 	// and then the bundle file name needs to be added to the database file
 	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s_%s.bnd", db.Name, bundle.Name))
 
@@ -1415,7 +1383,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 		// Don't fail the bundle creation if catalog registration fails
 	}
 
-	// PHASE 5 GRAPHQL INTEGRATION: Generate and store GraphQL schema for new bundle
+	// GRAPHQL INTEGRATION: Generate and store GraphQL schema for new bundle
 	// This creates the initial schema version (v1) and caches it for query execution.
 	// Schema generation only occurs if GraphQL support is enabled globally.
 	//
@@ -1470,7 +1438,7 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 	// Initialize bundle properties if not set
 	if bundle.PageSize == 0 {
 		bundle.PageSize = s.defaultPageSize // Use service default (1000)
-		s.logger.Debugf("Set default PageSize of %d for bundle '%s'", s.defaultPageSize, bundle.Name)
+
 	}
 
 	// Initialize TotalDocuments and PageCount based on existing documents
@@ -1487,9 +1455,6 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 		bundle.PageCount = 1 // Always have at least 1 page for new bundles
 	}
 
-	s.logger.Debugf("Initialized bundle '%s' with TotalDocuments: %d, PageSize: %d, PageCount: %d",
-		bundle.Name, bundle.TotalDocuments, bundle.PageSize, bundle.PageCount)
-
 	// Add the bundle to the database
 	db.Bundles[bundle.Name] = *bundle
 
@@ -1501,7 +1466,7 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 	if err != nil {
 		return fmt.Errorf("error creating bundle file from struct: %w", err)
 	}
-	//logger.Infof("Decoded bundle data from file %v", bundle)
+
 	// and then the bundle file name needs to be added to the database file
 	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s_%s.bnd", db.Name, bundle.Name))
 
@@ -1526,7 +1491,7 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 
 // GetBundleMetadata retrieves only the bundle structure/metadata without documents
 func (s *BundleService) GetBundleMetadata(database *models.Database, name string) (*models.Bundle, error) {
-	args := settings.GetSettings()
+	//args := settings.GetSettings()
 	fileExists := s.store.BundleFileExists(name, database.Name)
 
 	// Check if the bundle file exists in the store
@@ -1538,9 +1503,9 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 	if !exists {
 		if fileExists {
 			// If the bundle exists in the store but not in memory, load metadata only
-			if args.Debug {
-				s.logger.Infof("Bundle metadata '%s' not found in memory, loading from store", name)
-			}
+			// if args.Debug {
+			// 	s.logger.Infof("Bundle metadata '%s' not found in memory, loading from store", name)
+			// }
 
 			databasePath := helpers.GetDatabaseFolderPath(database.Name)
 
@@ -1558,9 +1523,9 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 				}
 			}
 
-			if args.Debug {
-				s.logger.Infof("Loaded bundle metadata '%s' from store", name)
-			}
+			// if args.Debug {
+			// 	s.logger.Infof("Loaded bundle metadata '%s' from store", name)
+			// }
 
 			s.bundleMetadata[name] = bundle
 			return bundle, nil
@@ -1587,7 +1552,7 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 
 	// Check if page is already loaded in memory
 	if page, exists := s.documentPages[pageKey]; exists {
-		s.logger.Debugf("Document page %s already loaded in memory", pageKey)
+		//s.logger.Debugf("Document page %s already loaded in memory", pageKey)
 		return page, nil
 	}
 
@@ -1625,13 +1590,13 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string)
 	// This includes recently added documents that haven't been flushed to disk yet
 	if bundle.Documents != nil {
 		if doc, exists := (*bundle.Documents)[documentID]; exists {
-			s.logger.Debugf("Document %s found in memory for bundle %s", documentID, bundleName)
+			//s.logger.Debugf("Document %s found in memory for bundle %s", documentID, bundleName)
 			return &doc, nil
 		}
 	}
 
 	// Document not in memory - need to load from disk using index
-	s.logger.Debugf("Document %s not in memory, loading from disk for bundle %s", documentID, bundleName)
+	//s.logger.Debugf("Document %s not in memory, loading from disk for bundle %s", documentID, bundleName)
 
 	// Find which page contains this document using the index
 	pageID, err := s.findDocumentPage(bundleName, documentID)
@@ -1779,11 +1744,11 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	if !exists {
 		return nil, fmt.Errorf("bundle metadata not found for %s", bundleName)
 	}
-	s.logger.Infof("getAllDocumentsForIndexing called for bundle '%s'", bundle.Name)
+	//s.logger.Infof("getAllDocumentsForIndexing called for bundle '%s'", bundle.Name)
 	//s.logger.Infof("DEBUG: getAllDocumentsForIndexing ENTRY - bundle '%s'", bundle.Name)
 	//s.logger.Infof("DEBUG: Bundle PageCount: %d, TotalDocuments: %d", bundle.PageCount, bundle.TotalDocuments)
 
-	// CRITICAL FIX: Force flush pending metadata updates to ensure PageCount is current
+	// CRITICAL: Force flush pending metadata updates to ensure PageCount is current
 	// This is necessary because document additions schedule deferred metadata updates
 	// and SELECT TOP needs accurate PageCount to work correctly
 	if len(s.metadataUpdateBuffer) > 0 {
@@ -1791,12 +1756,12 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		s.FlushMetadataUpdates()
 	}
 
-	s.logger.Infof("Bundle %s has PageCount: %d, TotalDocuments: %d", bundleName, bundle.PageCount, bundle.TotalDocuments)
-	s.logger.Infof("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",
-		bundleName, bundle.Documents != nil, bundle.DocumentsComplete)
-	if bundle.Documents != nil {
-		s.logger.Infof("Bundle %s memtable contains %d documents", bundleName, len(*bundle.Documents))
-	}
+	//s.logger.Infof("Bundle %s has PageCount: %d, TotalDocuments: %d", bundleName, bundle.PageCount, bundle.TotalDocuments)
+	//s.logger.Infof("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",
+	//	bundleName, bundle.Documents != nil, bundle.DocumentsComplete)
+	// if bundle.Documents != nil {
+	// 	s.logger.Infof("Bundle %s memtable contains %d documents", bundleName, len(*bundle.Documents))
+	// }
 
 	var allDocuments []*models.Document
 
@@ -1805,11 +1770,11 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	if bundle.PageCount == 0 {
 
 		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-		s.logger.Infof("DEBUG DEBUG DEBUG ::(P0) Loading Database name %s,page %d for bundle '%s'", bundle.Database.Name, 0, bundle.Name)
+
 		//settings := settings.GetSettings()
 		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, 0, databasePath)
 		if err != nil {
-			s.logger.Errorf("DEBUG: Failed to load page 0 for bundle '%s': %v", bundle.Name, err)
+
 			// Even if page 0 fails, check memtable before returning empty
 			if bundle.Documents != nil && !bundle.DocumentsComplete {
 				s.logger.Debugf("Page 0 failed, but memtable has %d documents", len(*bundle.Documents))
@@ -1822,9 +1787,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 			return []*models.Document{}, nil
 		}
 
-		s.logger.Infof("DEBUG: Loaded page 0 - found %d documents", len(page.Documents))
-
-		// FIXED: Actually process the documents found in page 0
+		// Actually process the documents found in page 0 - COULD BE FASTER
 		for _, doc := range page.Documents {
 			docCopy := doc
 			allDocuments = append(allDocuments, &docCopy)
@@ -1848,7 +1811,6 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 			}
 		}
 
-		s.logger.Infof("DEBUG: getAllDocumentsForIndexing - loaded %d total documents (PageCount was 0)", len(allDocuments))
 		return allDocuments, nil
 	}
 
@@ -1935,7 +1897,6 @@ func (s *BundleService) GetBundleByName(database *models.Database, name string) 
 		// If Documents exists from serialization, assume it's incomplete unless explicitly marked
 		bundle.DocumentsComplete = false
 	}
-	s.logger.Debugf("Returned metadata-only bundle '%s' - use GetDocumentPage for document access", name)
 
 	return bundle, nil
 }
@@ -2006,8 +1967,6 @@ func (s *BundleService) RenameBundle(database *models.Database, bundle *models.B
 
 	oldName := bundle.Name
 
-	s.logger.Infof("Renaming bundle '%s' to '%s' in database '%s'", oldName, newBundleName, database.Name)
-
 	// Validate new bundle name follows naming rules
 	if err := s.validateBundleName(newBundleName); err != nil {
 		return fmt.Errorf("invalid bundle name '%s': %w", newBundleName, err)
@@ -2026,7 +1985,6 @@ func (s *BundleService) RenameBundle(database *models.Database, bundle *models.B
 
 	// TODO: Make timeout configurable via settings (currently 30 seconds)
 	timeout := 30 * time.Second
-	s.logger.Infof("Waiting for active operations on bundle '%s' to complete (timeout: %v)", oldName, timeout)
 
 	if err := lock.WaitForActiveOperations(timeout); err != nil {
 		return fmt.Errorf("cannot rename bundle while operations are active: %w", err)
@@ -2034,8 +1992,6 @@ func (s *BundleService) RenameBundle(database *models.Database, bundle *models.B
 
 	// Ensure we clear the rename flag even if the operation fails
 	defer lock.CompleteAdministrativeOperation()
-
-	s.logger.Debugf("All active operations completed, proceeding with bundle rename")
 
 	// Get the bundle's current directory path
 	databasePath := helpers.GetDatabaseFolderPath(database.Name)
@@ -2052,7 +2008,6 @@ func (s *BundleService) RenameBundle(database *models.Database, bundle *models.B
 	bundle.UpdatedAt = time.Now()
 
 	// Rename the bundle directory (this includes indexes subfolder)
-	s.logger.Infof("Renaming bundle directory from '%s' to '%s'", oldBundlePath, newBundlePath)
 	if err := os.Rename(oldBundlePath, newBundlePath); err != nil {
 		return fmt.Errorf("failed to rename bundle directory: %w", err)
 	}
@@ -2141,7 +2096,7 @@ func (s *BundleService) updateBundleInSystemCatalog(database *models.Database, o
 
 	s.logger.Infof("Updated system catalog for bundle rename: '%s' -> '%s'", oldName, newName)
 
-	// FR-6 GRAPHQL INTEGRATION: Regenerate GraphQL schema after bundle rename
+	// GRAPHQL INTEGRATION: Regenerate GraphQL schema after bundle rename
 	// Bundle rename changes the GraphQL TypeName (e.g., "users" -> "User", "blog_posts" -> "BlogPost")
 	// This creates a new schema version with the updated type name.
 	//
@@ -2166,8 +2121,6 @@ func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []model
 		return fmt.Errorf("no field changes specified")
 	}
 
-	s.logger.Infof("Applying %d field changes to bundle '%s'", len(changes), bundle.Name)
-
 	// Track which indexes need rebuilding
 	indexesToRebuild := make(map[string]bool)
 
@@ -2178,7 +2131,6 @@ func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []model
 			if err := s.applyAddField(bundle, &change); err != nil {
 				return fmt.Errorf("failed to add field '%s': %w", change.NewField.Name, err)
 			}
-			s.logger.Infof("Added field '%s' to bundle '%s'", change.NewField.Name, bundle.Name)
 
 		case "REMOVE":
 			fieldName := change.OldFieldName
@@ -2192,7 +2144,6 @@ func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []model
 			if s.isFieldIndexed(bundle, fieldName) {
 				indexesToRebuild[fieldName] = true
 			}
-			s.logger.Infof("Removed field '%s' from bundle '%s'", fieldName, bundle.Name)
 
 		case "MODIFY":
 			if err := s.applyModifyField(bundle, &change); err != nil {
@@ -2208,10 +2159,8 @@ func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []model
 
 			// Log appropriate message based on whether it's a rename or just a modification
 			if change.OldFieldName != change.NewField.Name {
-				s.logger.Infof("Renamed and modified field '%s' to '%s' in bundle '%s'",
+				s.logger.Debugf("Renamed and modified field '%s' to '%s' in bundle '%s'",
 					change.OldFieldName, change.NewField.Name, bundle.Name)
-			} else {
-				s.logger.Infof("Modified field '%s' in bundle '%s'", change.NewField.Name, bundle.Name)
 			}
 
 		default:
@@ -2221,7 +2170,7 @@ func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []model
 
 	// Rebuild affected indexes
 	if len(indexesToRebuild) > 0 {
-		s.logger.Infof("Rebuilding %d indexes for bundle '%s'", len(indexesToRebuild), bundle.Name)
+		//s.logger.Infof("Rebuilding %d indexes for bundle '%s'", len(indexesToRebuild), bundle.Name)
 		for fieldName := range indexesToRebuild {
 			if err := s.rebuildFieldIndex(bundle, fieldName); err != nil {
 				s.logger.Warnf("Failed to rebuild index for field '%s': %v", fieldName, err)
@@ -2278,7 +2227,7 @@ func (s *BundleService) applyAddField(bundle *models.Bundle, change *models.Fiel
 
 	// Apply default value to all existing documents if field is required
 	if change.NewField.IsRequired && change.NewField.DefaultValue != nil {
-		s.logger.Infof("Applying default value to all existing documents in bundle '%s'", bundle.Name)
+		//s.logger.Infof("Applying default value to all existing documents in bundle '%s'", bundle.Name)
 		if err := s.applyDefaultToExistingDocuments(bundle, fieldName, change.NewField.DefaultValue); err != nil {
 			return fmt.Errorf("failed to apply default value to existing documents: %w", err)
 		}
@@ -2303,7 +2252,7 @@ func (s *BundleService) applyRemoveField(bundle *models.Bundle, fieldName string
 	delete(bundle.DocumentStructure.FieldDefinitions, fieldName)
 
 	// Remove field from all existing documents
-	s.logger.Infof("Removing field '%s' from all documents in bundle '%s'", fieldName, bundle.Name)
+	//s.logger.Infof("Removing field '%s' from all documents in bundle '%s'", fieldName, bundle.Name)
 	if err := s.removeFieldFromExistingDocuments(bundle, fieldName); err != nil {
 		return fmt.Errorf("failed to remove field from existing documents: %w", err)
 	}
@@ -2333,12 +2282,12 @@ func (s *BundleService) applyModifyField(bundle *models.Bundle, change *models.F
 		if _, exists := bundle.DocumentStructure.FieldDefinitions[newFieldName]; exists {
 			return fmt.Errorf("cannot rename field '%s' to '%s': target field name already exists", oldFieldName, newFieldName)
 		}
-		s.logger.Infof("Renaming field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
+		s.logger.Debugf("Renaming field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
 	}
 
 	// If type is changing, validate conversion is possible
 	if oldField.Type != change.NewField.Type {
-		s.logger.Infof("Attempting type conversion for field '%s' from %s to %s",
+		s.logger.Debugf("Attempting type conversion for field '%s' from %s to %s",
 			oldFieldName, oldField.Type, change.NewField.Type)
 		if err := s.convertFieldType(bundle, oldFieldName, oldField.Type, change.NewField.Type); err != nil {
 			return fmt.Errorf("cannot convert field '%s' from %s to %s - manual migration required: %w",
@@ -2348,7 +2297,7 @@ func (s *BundleService) applyModifyField(bundle *models.Bundle, change *models.F
 
 	// If adding IsUnique constraint, validate no duplicates exist
 	if !oldField.IsUnique && change.NewField.IsUnique {
-		s.logger.Infof("Validating uniqueness for field '%s'", oldFieldName)
+		s.logger.Debugf("Validating uniqueness for field '%s'", oldFieldName)
 		if err := s.validateFieldUniqueness(bundle, oldFieldName); err != nil {
 			return err
 		}
@@ -2463,7 +2412,7 @@ func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, 
 func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldName, newFieldName string) error {
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 
-	s.logger.Infof("Renaming field '%s' to '%s' in all documents of bundle '%s'", oldFieldName, newFieldName, bundle.Name)
+	s.logger.Debugf("Renaming field '%s' to '%s' in all documents of bundle '%s'", oldFieldName, newFieldName, bundle.Name)
 
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
@@ -2794,6 +2743,7 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 }
 
 // min returns the minimum of two integers
+// I should probably redo this in assembly for speed
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -2895,7 +2845,7 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 	// Update the cache with the modified bundle
 	s.bundleMetadata[bundle.Name] = bundle
 
-	// FR-6 GRAPHQL INTEGRATION: Regenerate GraphQL schema after relationship changes
+	// GRAPHQL INTEGRATION: Regenerate GraphQL schema after relationship changes
 	// Relationships add new fields to bundles (e.g., user.posts: [Post], post.author: User)
 	// Both source and destination bundles need schema regeneration.
 	//
@@ -2926,6 +2876,7 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 }
 
 // generateRelationshipName generates a unique relationship name with counter
+// TODO This should go into a seperate bundle utilities file
 func (s *BundleService) generateRelationshipName(bundle *models.Bundle, sourceBundle, destinationBundle string) string {
 	baseName := fmt.Sprintf("%s_%s", sourceBundle, destinationBundle)
 	counter := 1
@@ -2970,8 +2921,8 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 		return fmt.Errorf("failed to update destination bundle '%s' in store: %w", destinationBundle.Name, err)
 	}
 
-	s.logger.Infof("Added relationship field '%s' to destination bundle '%s' (required=%t, unique=%t)",
-		fieldName, destinationBundle.Name, isRequired, isUnique)
+	// s.logger.Infof("Added relationship field '%s' to destination bundle '%s' (required=%t, unique=%t)",
+	// 	fieldName, destinationBundle.Name, isRequired, isUnique)
 
 	// Automatically create hash index on the foreign key field for referential integrity
 	// This ensures that ValidateDelete() can perform O(1) lookups
@@ -3017,8 +2968,6 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 
 func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
 	//args := settings.GetSettings()
-	s.logger.Infof("DEBUG: Starting AddIndexToBundle for bundle '%s', index '%s', type '%s'",
-		indexCommand.BundleName, indexCommand.IndexName, indexCommand.IndexType)
 
 	// Check if the bundle exists
 	if bundle == nil {
@@ -3035,9 +2984,9 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 
 	switch indexCommand.IndexType {
 	case "btree":
-		s.logger.Infof("DEBUG: Starting BTree index creation")
+
 		err1 := CreateBTreeIndex(s, bundle, indexCommand)
-		s.logger.Infof("DEBUG: BTree index creation completed with error: %v", err1)
+
 		return err1
 
 		// Record the created index
@@ -3057,7 +3006,7 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 }
 
 func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
-	// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
+	// === OLD V2 IMPLEMENTATION (Commented out) ===
 	// config := hashindexV2.IndexConfig{
 	// 	BundleName:  bundle.Name,
 	// 	FieldName:   indexCommand.Fields[0].Name,
@@ -3071,7 +3020,7 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 	// }
 	// hashIndex, err := hashindexV2.CreateHashIndex(&config, s.logger)
 
-	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
+	// === NEW V3 IMPLEMENTATION (LSM-style) ===
 	// Create configuration for hashindexV3
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
@@ -3135,7 +3084,7 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		return fmt.Errorf("failed to update bundle file after creating index: %w", err)
 	}
 
-	s.logger.Infof("Successfully created hash index '%s' on field '%s' for bundle '%s'",
+	s.logger.Infof("Successfully created V3 hash index '%s' on field '%s' for bundle '%s'",
 		indexCommand.IndexName, indexCommand.Fields[0].Name, bundle.Name)
 	return nil
 }
@@ -3243,7 +3192,6 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 //   - error: Any error that occurred during index creation
 func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
 	args := settings.GetSettings()
-	s.logger.Infof("DEBUG: CreateBTreeIndex started for bundle '%s', index '%s'", bundle.Name, indexCommand.IndexName)
 
 	// Validate input parameters
 	if len(indexCommand.Fields) == 0 {
@@ -3256,7 +3204,6 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 	}
 
 	fieldDef := indexCommand.Fields[0]
-	s.logger.Infof("DEBUG: Field definition: %+v", fieldDef)
 
 	// Validate that the field exists in the bundle structure
 	if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldDef.Name]; !exists {
@@ -3469,7 +3416,7 @@ func calculateOptimalSplitRatio(fieldDef models.FieldDefinition, isUnique bool) 
 	}
 
 	/*
-		Split Ratio = 0.5 (50%) is the recommended value because:
+		Split Ratio = 0.5 (50%) is the recommended value from Copilot because:
 
 		1.Balanced Tree Structure: When a node becomes full and needs to split, a 50% ratio creates two nodes
 		that are equally balanced, maintaining optimal B+ tree characteristics.
@@ -3481,6 +3428,8 @@ func calculateOptimalSplitRatio(fieldDef models.FieldDefinition, isUnique bool) 
 		insertions and searches.
 
 		4.Space Efficiency: Balanced splits ensure good space utilization without excessive fragmentation.
+
+		I will use this for now, but will eventually make it more intelligent, despite copilots claims
 	*/
 
 	// For non-unique indexes with potential duplicates, slightly favor left split
@@ -3512,13 +3461,13 @@ func calculateOptimalSplitRatio(fieldDef models.FieldDefinition, isUnique bool) 
 func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (*hashindex.HashIndexV3, error) {
 	// Check if the index instance is already loaded in memory
 	if indexRef.IndexInstance != nil {
-		// === OLD V2 TYPE CHECK (Sprint 5: Commented out) ===
+		// === OLD V2 TYPE CHECK (Commented out) ===
 		// if hashIndex, ok := indexRef.IndexInstance.(*hashindexV2.HashIndex); ok {
 		// 	s.logger.Debugf("Hash index '%s' already loaded in memory", indexName)
 		// 	return hashIndex, nil
 		// }
 
-		// === NEW V3 TYPE CHECK (Sprint 5: LSM-style) ===
+		// === NEW V3 TYPE CHECK (LSM-style) ===
 		if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndexV3); ok {
 			s.logger.Debugf("Hash index V3 '%s' already loaded in memory", indexName)
 			return hashIndex, nil
@@ -3527,7 +3476,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 
 	s.logger.Debugf("Loading hash index V3 '%s' from disk for bundle '%s'", indexName, bundle.Name)
 
-	// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
+	// === OLD V2 IMPLEMENTATION (Commented out) ===
 	// args := settings.GetSettings()
 	// databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	// indexFilePath := fmt.Sprintf("%s%s_%s.hidx", databasePath, bundle.Name, indexRef.HashIndexField.FieldName)
@@ -3947,7 +3896,7 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string) error {
 	args := settings.GetSettings()
 
-	// ========== STEP 1: VALIDATE BUNDLE EXISTS ==========
+	// ========== VALIDATE BUNDLE EXISTS ==========
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot delete document")
 		return fmt.Errorf("bundle '%s' is nil, cannot delete document", docCommand.BundleName)
@@ -3964,9 +3913,9 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			docCommand.BundleName, docCommand.WhereClause)
 	}
 
-	// ========== STEP 2: FIND DOCUMENTS MATCHING WHERE CLAUSE ==========
+	// ========== FIND DOCUMENTS MATCHING WHERE CLAUSE ==========
 
-	// STEP 2a: Check for empty WHERE clause (delete all)
+	// STEP 2 Notes: Check for empty WHERE clause (delete all)
 	if docCommand.WhereClause == "" || strings.TrimSpace(docCommand.WhereClause) == "" {
 		// TODO: Implement bulk delete with referential integrity checks
 		// Before allowing DELETE ALL, I need to:
@@ -3974,18 +3923,19 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		// 2. Verify that no foreign key constraints would be violated
 		// 3. Check if cascade delete is configured for dependent relationships
 		// 4. Optionally require explicit confirmation (e.g., DELETE ALL CONFIRMED)
-		// 5. Consider implementing soft deletes first for safety
+		// 5. Maybe implement a switch for soft deletes always to ensure safety
 		// 6. Add transaction support to rollback if any constraint fails
 		// 7. Implement batch tombstone writing for performance
 		// For now, this operation is too dangerous without proper safeguards.
+		// TODO must implement this before full MVP launch
 		return fmt.Errorf("DELETE ALL DOCUMENTS from bundle '%s' is not yet supported - WHERE clause is required for safety. "+
 			"This feature requires referential integrity validation to prevent orphaned relationships", docCommand.BundleName)
 	}
 
-	// ========== STEP 3: VALIDATE REFERENTIAL INTEGRITY ==========
-	// SPRINT 1: Check that deleting these documents won't break relationships
+	// ==========  VALIDATE REFERENTIAL INTEGRITY ==========
+	//  Check that deleting these documents won't break relationships
 	// This prevents orphaned foreign key references in related bundles
-	s.logger.Infof("[REFINT] Starting referential integrity validation for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
+	s.logger.Debugf("[REFINT] Starting referential integrity validation for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
 	validator := NewReferentialIntegrityValidator(s, s.logger)
 	for _, documentID := range docIDs {
 		err := validator.ValidateDelete(bundle, documentID)
@@ -3995,28 +3945,29 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			return fmt.Errorf("cannot delete document '%s': %w", documentID, err)
 		}
 	}
-	s.logger.Infof("[REFINT] Referential integrity validated successfully for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
+	s.logger.Debugf("[REFINT] Referential integrity validated successfully for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
 
 	// Process each document
 	for _, documentID := range docIDs {
 		//documentID := doc.DocumentID
-		s.logger.Infof("Trying to delete document '%s'", documentID)
-		// STEP 4: Remove from physical bundle file (append tombstone marker)
+
+		//  Remove from physical bundle file (append tombstone marker)
 		err := s.store.DeleteDocumentFromBundleFile(bundle, documentID)
 		if err != nil {
 			return fmt.Errorf("failed to remove document %s from bundle file: %w", documentID, err)
 		}
 
-		// STEP 5: Remove from in-memory caches
+		//  Remove from in-memory caches
 		// Use smart cache invalidation: invalidate specific page if known, otherwise all pages
 		s.invalidateDocumentPage(docCommand.BundleName, documentID)
 
-		// CRITICAL: Invalidate the document scanner cache to force reload from disk
+		// CRITICAL: Invalidate the document scanner cache to force reload from disk on next call
+		// TODO This may be a bad idea for performance. Have to test
 		// Without this, queries will serve stale cached documents and won't see the deletion
 		s.RemoveDocumentScanner(docCommand.BundleName)
 		s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after deletion", docCommand.BundleName)
 
-		// STEP 6: Remove from hash indexes with disk persistence
+		//  Remove from hash indexes with disk persistence
 		if bundle.Indexes != nil {
 			for indexName, indexRef := range bundle.Indexes {
 				if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
@@ -4027,7 +3978,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 						continue // Continue with other indexes
 					}
 
-					// === NEW V3 DELETE (Sprint 5: LSM-style) ===
+					// === NEW V3 DELETE (LSM-style) ===
 					// For DocumentID index, the key is the documentID itself
 					deleted, err := hashIndex.Delete(documentID)
 					if err != nil {
@@ -4048,7 +3999,8 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 						// Continue - the in-memory deletion was successful
 					}
 				} else if indexRef.IndexType == "btree" {
-					// STEP 6a: TODO - Add B-Tree index deletion with persistence
+					// TODO - Add B-Tree index deletion with persistence
+					// TODO MVP feature, must be done by launch
 					// Load BTree index on-demand
 					// btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
 					// if err != nil {
@@ -4194,7 +4146,8 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 //   - []*models.Document: Filtered documents
 //   - error: Any error that occurred during filtering
 func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bundle, docs []*models.Document, whereClause string) ([]*models.Document, error) {
-	// Validate input parameters following SyndrDB defensive programming practices
+	// TODO This whole function may not be necessary anymore with the new execution model
+	// Validate input parameters
 	if bundle == nil {
 		return nil, fmt.Errorf("bundle cannot be nil")
 	}
@@ -4232,7 +4185,7 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 	}
 
 	// Fallback to full document scan using modern page-based loading
-	// Following SyndrDB comprehensive error handling, provide reliable fallback
+	// provide some fallback
 	s.logger.Debugf("No suitable index found, performing full document scan with page-based loading")
 
 	// Load all documents using the modern page-based system
@@ -4296,7 +4249,7 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 				}
 
 				// Search the hash index for the value
-				// CRITICAL FIX: Remove surrounding quotes from the search key if present
+				// CRITICAL: Remove surrounding quotes from the search key if present
 				// The parser might include quotes in the value, but DocumentIDs are stored without quotes
 				searchKey := fmt.Sprintf("%v", value)
 				searchKey = strings.Trim(searchKey, "\"'") // Remove both double and single quotes
@@ -4384,7 +4337,7 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 				s.logger.Infof("Performing BTree equality search on '%v' with key '%v'",
 					btreeIndex, keyBytes)
 
-				// NOTE: Sprint 5 - BTree search methods are commented out in the original code
+				// NOTE: BTree search methods are commented out in the original code
 				// This is placeholder code that will be activated when BTree V2 is fully implemented
 				var docIDs []string = []string{}
 				// docIDs, err = btreeIndex.Search(keyBytes)
@@ -4421,11 +4374,9 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 					continue
 				}
 
-				s.logger.Infof("Performing BTree range search with operator '%s' on '%v' with key '%v'",
+				s.logger.Debugf("Performing BTree range search with operator '%s' on '%v' with key '%v'",
 					operator, btreeIndex, keyBytes)
 
-				// NOTE: Sprint 5 - BTree search methods are commented out in the original code
-				// This is placeholder code that will be activated when BTree V2 is fully implemented
 				var docIDs []string = []string{}
 				// switch operator {
 				// case ">":
@@ -4518,13 +4469,13 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
 	}
 
-	s.logger.Infof("[VALIDATION] Bundle '%s' has %d field definition(s)", bundle.Name, len(bundle.DocumentStructure.FieldDefinitions))
+	//s.logger.Infof("[VALIDATION] Bundle '%s' has %d field definition(s)", bundle.Name, len(bundle.DocumentStructure.FieldDefinitions))
 
 	// Log all field definitions for debugging
-	for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
-		s.logger.Infof("[VALIDATION] Field '%s': Type=%s, Required=%v, Unique=%v",
-			fieldName, fieldDef.Type, fieldDef.IsRequired, fieldDef.IsUnique)
-	}
+	// for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
+	// 	s.logger.Infof("[VALIDATION] Field '%s': Type=%s, Required=%v, Unique=%v",
+	// 		fieldName, fieldDef.Type, fieldDef.IsRequired, fieldDef.IsUnique)
+	// }
 
 	// Track which required fields are provided
 	providedFields := make(map[string]bool)
@@ -4562,7 +4513,7 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		}
 	}
 
-	s.logger.Infof("[VALIDATION] Provided %d field(s) in document command", len(providedFields))
+	//s.logger.Infof("[VALIDATION] Provided %d field(s) in document command", len(providedFields))
 
 	// Check that all required fields are provided
 	missingFields := make([]string, 0)
@@ -4586,7 +4537,7 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		return fmt.Errorf("required fields are missing from document: %v", missingFields)
 	}
 
-	s.logger.Infof("[VALIDATION] All required fields validated successfully")
+	//s.logger.Infof("[VALIDATION] All required fields validated successfully")
 	return nil
 }
 
@@ -4798,12 +4749,13 @@ func (s *BundleService) registerBundleInPrimary(bundle *models.Bundle) error {
 	// this method is meant to be overridden or called through the service manager
 	// The actual registration logic is implemented in CatalogService.AddBundleToCatalog
 
+	// TODO There are better ways to do this, gotta clean up the architecture in places
 	s.logger.Debugf("Bundle '%s' needs to be registered in primary catalog (handled by CatalogService)", bundle.Name)
 	return nil
 }
 
 // discoverBundleIndexes scans for existing index files and populates the bundle's Indexes field
-// UPDATED: Now supports both legacy (.idx) and new header-based (.hidx) index files
+// UPDATED By Dan: Now supports both legacy (.idx) and new header-based (.hidx) index files
 // New naming convention: FieldName-fk.N.hidx (FK) or FieldName.N.hidx (regular)
 func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 	// Initialize indexes map if nil
@@ -4814,7 +4766,7 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
 
-	// Pattern 1: Look for NEW header-based index files (.hidx)
+	// 1: Look for NEW header-based index files (.hidx)
 	// Pattern: *.hidx (includes both FieldName-fk.N.hidx and FieldName.N.hidx)
 	newHashPattern := filepath.Join(indexesPath, "*.hidx")
 	newHashFiles, err := filepath.Glob(newHashPattern)
@@ -4877,7 +4829,7 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 			indexName, fieldName, bundle.Name, isForeignKey)
 	}
 
-	// Pattern 2: Look for LEGACY index files (.idx) - OLD FORMAT
+	// 2: Look for LEGACY index files (.idx) - OLD FORMAT
 	// Pattern: BundleName_*_*.idx
 	legacyHashPattern := fmt.Sprintf("%s/%s_*_*.idx", indexesPath, bundle.Name)
 	legacyHashFiles, err := filepath.Glob(legacyHashPattern)
@@ -4966,7 +4918,7 @@ func (s *BundleService) Shutdown() error {
 			for indexName, indexRef := range bundle.Indexes {
 				if indexRef.IndexInstance != nil {
 					s.logger.Debugf("Closing index '%s' for bundle '%s'", indexName, bundleName)
-					// Proper index closing would go here based on index type
+					// TODO Proper index closing would go here based on index type
 					// For now, just log the action
 				}
 			}
@@ -4978,7 +4930,7 @@ func (s *BundleService) Shutdown() error {
 }
 
 // DOCUMENT SCANNER INTEGRATION: Scanner management methods
-
+// This should be put in its own file. Clean up phase coming soon!
 // GetOrCreateDocumentScanner returns a document scanner for the specified bundle
 // Creates and caches scanners per bundle for optimal performance
 func (s *BundleService) GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error) {
@@ -5006,7 +4958,7 @@ func (s *BundleService) GetOrCreateDocumentScanner(bundle *models.Bundle) (docum
 
 	// Cache the scanner
 	s.bundleScanners[bundle.Name] = scanner
-	s.logger.Infof("Created and cached document scanner for bundle '%s'", bundle.Name)
+	s.logger.Debugf("Created and cached document scanner for bundle '%s'", bundle.Name)
 
 	return scanner, nil
 }
@@ -5024,7 +4976,7 @@ func (s *BundleService) RemoveDocumentScanner(bundleName string) {
 	if scanner, exists := s.bundleScanners[bundleName]; exists {
 		scanner.Close()
 		delete(s.bundleScanners, bundleName)
-		s.logger.Infof("Removed document scanner for bundle '%s'", bundleName)
+		s.logger.Debugf("Removed document scanner for bundle '%s'", bundleName)
 	}
 }
 
@@ -5040,7 +4992,7 @@ func (s *BundleService) CloseAllScanners() {
 
 	s.bundleScanners = make(map[string]documentscanner.DocumentScannerInterface)
 	s.scannerIntegration.Close()
-	s.logger.Info("Closed all document scanners")
+	s.logger.Debug("Closed all document scanners")
 }
 
 // invalidateDocumentPage invalidates the page cache for a specific document
@@ -5086,7 +5038,7 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 
 // flushHashIndexToDisk persists hash index changes to disk for durability
 func (s *BundleService) flushHashIndexToDisk(hashIndex *hashindex.HashIndexV3, bundle *models.Bundle, indexName string) error {
-	// === OLD V2 IMPLEMENTATION (Sprint 5: Commented out) ===
+	// === OLD V2 IMPLEMENTATION (Commented out) ===
 	// Flush all dirty pages to ensure index changes are persisted
 	// if err := hashIndex.FlushAllDirtyPages(); err != nil {
 	// 	return fmt.Errorf("failed to flush dirty pages for index '%s': %w", indexName, err)
@@ -5096,7 +5048,7 @@ func (s *BundleService) flushHashIndexToDisk(hashIndex *hashindex.HashIndexV3, b
 	// 	return fmt.Errorf("failed to persist metadata for index '%s': %w", indexName, err)
 	// }
 
-	// === NEW V3 IMPLEMENTATION (Sprint 5: LSM-style) ===
+	// === NEW V3 IMPLEMENTATION (LSM-style) ===
 	// In V3, Flush() handles both memtable and metadata persistence
 	if err := hashIndex.Flush(); err != nil {
 		return fmt.Errorf("failed to flush hash index V3 '%s': %w", indexName, err)
@@ -5132,7 +5084,7 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 			}
 		}
 	}
-	s.logger.Infof("DEBUG DEBUG TRYING TO DELETE bundle: %s", bundle.Name)
+
 	// Remove the bundle from the file system
 	if err := s.store.RemoveBundleFile(database, bundle.Name); err != nil {
 		return fmt.Errorf("failed to delete bundle '%s': %w", bundle.Name, err)
@@ -5148,7 +5100,7 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 
 	s.logger.Debugf("Cleared document-page cache for deleted bundle: %s", bundle.Name)
 
-	// PHASE 5 GRAPHQL INTEGRATION: Tombstone all GraphQL schemas when bundle is deleted
+	// GRAPHQL INTEGRATION: Tombstone all GraphQL schemas when bundle is deleted
 	// This marks all schema versions as deleted in the schema file, preventing their use in queries.
 	// The schema manager handles tombstoning all versions atomically.
 	//
@@ -5173,7 +5125,7 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 			if err != nil {
 				s.logger.Warnf("[GraphQL] Failed to tombstone schemas for deleted bundle '%s': %v. Schemas may remain in cache.", bundle.Name, err)
 			} else {
-				s.logger.Infof("[GraphQL] All schema versions tombstoned for deleted bundle '%s'", bundle.Name)
+				s.logger.Debugf("[GraphQL] All schema versions tombstoned for deleted bundle '%s'", bundle.Name)
 			}
 		} else {
 			s.logger.Debugf("[GraphQL] No schema manager found for database '%s' - skipping schema tombstoning", database.Name)

@@ -210,6 +210,7 @@ func setupRootUserTestEnvironment() error {
 	testRootUserPermService = server.NewPermissionService(
 		bundleService,
 		testRootUserDatabaseService,
+		nil, // SessionManager not needed in tests
 		ColorLogger,
 		false,
 	)

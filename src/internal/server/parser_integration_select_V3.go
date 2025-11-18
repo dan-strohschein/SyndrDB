@@ -103,7 +103,7 @@ func ParseQuery(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSe
 
 	// Record success
 	globalParserMetrics.NewParserSuccesses.Add(1)
-	logger.Infof("Successfully parsed query using new parser")
+	//logger.Infof("Successfully parsed query using new parser")
 
 	return unifiedQuery, nil
 }

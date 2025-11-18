@@ -287,22 +287,23 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		server.ServiceManager.PermissionService = NewPermissionService(
 			server.ServiceManager.BundleService,
 			server.ServiceManager.DatabaseService,
+			server.SessionManager,
 			sugar,
 			debugMode,
 		)
 		sugar.Info("RBAC services initialized with UserStore")
 	}
 
-	// Load all databases
-	databases, err := databaseStore.LoadAllDatabaseDataFiles(config.DataDir, logger.Sugar())
-
-	if err != nil {
-		log.Printf("Warning: Error loading databases: %v", err)
-		// Continue with empty database map - this allows creating new databases
-	} else {
-		server.Databases = databases
-		log.Printf("Loaded %d databases", len(databases))
-	}
+	// Load all databases (already done in the setup for newDatabaseService above)
+	// databases, err := databaseStore.LoadAllDatabaseDataFiles(config.DataDir, logger.Sugar())
+	server.Databases = databaseService.Databases
+	// if err != nil {
+	// 	log.Printf("Warning: Error loading databases: %v", err)
+	// 	// Continue with empty database map - this allows creating new databases
+	// } else {
+	// 	server.Databases = databases
+	// 	log.Printf("Loaded %d databases", len(databases))
+	// }
 
 	// If no databases were found, create a default Primary database
 	if (len(server.Databases) == 0 || (len(server.Databases) > 0 && server.Databases["primary"] == nil)) && config.CreateDefaultDB {
@@ -679,7 +680,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 				if n > 0 {
 					data := string(buffer[:n])
-					connLogger.Infof("Read %d bytes", n)
+					//connLogger.Infof("Read %d bytes", n)
 					connLogger.Sync()
 					// Append to any previous partial data
 					data = partialData + data
@@ -752,7 +753,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				goto cleanup
 			}
 			// Process the line
-			connLogger.Infof("Received: %s", line)
+			//connLogger.Debugf("Received: %s", line)
 
 			// Your existing logic for handling commands
 			//When the client connects, it should send the connection string
@@ -773,7 +774,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 					return
 				}
 
-				connLogger.Infof("Client %s: Connected:", connection.ID)
+				connLogger.Infof("Client %s Connected", connection.ID)
 				connLogger.Infof("Database: %s", connStr.Database)
 				connLogger.Infof("User: %s", connStr.Username)
 
@@ -919,10 +920,10 @@ func (s *Server) processCommand(conn *Connection, command string) (interface{}, 
 func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, error) {
 	// Log the received data
 	// Get logger with connection context
-	logger := s.logger.With("connID", conn.ID)
+	//logger := s.logger.With("connID", conn.ID)
 
 	// Log the received data
-	logger.Infow("Received from client", "data", data)
+	//logger.Infow("Received from client", "data", data)
 
 	// If not JSON, treat as plain text command
 	//fmt.Printf("\n--- Client Data (Plain Text) ---\n%s\n------------------------------\n", data)
@@ -976,8 +977,14 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 	// Start timing for execution measurement
 	startTime := time.Now()
 
+	// Extract client IP for command processing (reuse if session exists)
+	clientIP := ""
+	if conn.Session != nil {
+		clientIP = ExtractIPFromConn(conn.Conn)
+	}
+
 	// TODO pull this from the original architecture
-	result, err := CommandDirector(conn.Database, *serviceManager, command, s.logger, startTime)
+	result, err := CommandDirector(conn.Database, *serviceManager, command, s.logger, startTime, conn.Session, clientIP)
 
 	stats = s.bufferPool.GetStats()
 	s.logger.Debugf("Buffer stats after command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",
@@ -1000,9 +1007,7 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 					// Also update the connection's database reference for immediate use
 					conn.Database = targetDatabase
 					conn.DatabaseName = databaseName
-					s.logger.Infow("Session database context updated",
-						"sessionID", conn.Session.SessionID,
-						"newDatabase", databaseName)
+					s.logger.Debugf("Session database context updated to db: %s", databaseName)
 				} else {
 					s.logger.Warnw("Failed to update session database context",
 						"sessionID", conn.Session.SessionID,

@@ -103,7 +103,7 @@ func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager Servi
 		}
 	}
 
-	logger.Infof("Successfully validated database '%s' exists (ID: %s)", databaseName, database.DatabaseID)
+	logger.Debugf("Successfully validated database '%s' exists (ID: %s)", databaseName, database.DatabaseID)
 
 	response := &CommandResponse{
 		ResultCount: 1,

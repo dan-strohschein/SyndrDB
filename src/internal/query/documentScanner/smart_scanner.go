@@ -52,8 +52,8 @@ func NewSmartBundleScanner(
 		startTime:     time.Now(),
 	}
 
-	logger.Infof("Created SmartBundleScanner for bundle '%s' with batch size %d",
-		bundle.GetName(), config.BatchSize)
+	// logger.Infof("Created SmartBundleScanner for bundle '%s' with batch size %d",
+	// 	bundle.GetName(), config.BatchSize)
 
 	return scanner
 }

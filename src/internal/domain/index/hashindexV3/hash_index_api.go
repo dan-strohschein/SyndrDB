@@ -366,6 +366,25 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 			"error", err)
 	}
 
+	// Step 3: Periodically update header with current global sequence
+	// This ensures the header stays reasonably in sync with actual data
+	// We do this after every N entries to balance durability vs performance
+	count := atomic.AddUint64(&idx.storage.entriesSinceHeaderUpdate, 1)
+	if count >= idx.storage.headerUpdateInterval {
+		// Reset counter atomically
+		atomic.StoreUint64(&idx.storage.entriesSinceHeaderUpdate, 0)
+
+		// Update header with current sequence
+		currentSequence := atomic.LoadUint64(&idx.GlobalSequence)
+		if err := idx.storage.UpdateHeaderStatistics(currentSequence); err != nil {
+			// Log warning but don't fail the Put operation
+			// Header update is important but not critical for correctness
+			idx.logger.Warnw("Failed to update header statistics",
+				"error", err,
+				"sequence", currentSequence)
+		}
+	}
+
 	// Update statistics
 	idx.updatePutStats()
 

@@ -1,6 +1,9 @@
 package settings
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type Arguments struct {
 	DataDir    string
@@ -120,6 +123,14 @@ type Arguments struct {
 	EnableAutoReverse             bool    // Enable automatic reverse command generation (default: true)
 	RequireExplicitDownCommands   bool    // Require explicit DOWN commands in migrations (default: false)
 	MigrationTimeoutSeconds       int     // Timeout for migration operations in seconds (default: 300)
+
+	// GraphQL Security Configuration (Layers 1-5)
+	EnableComplexityLimit  bool   // Enable query complexity analysis (Layer 1, default: true)
+	EnableDepthLimit       bool   // Enable query depth limiting (Layer 2, default: true)
+	EnableGraphQLRateLimit bool   // Enable per-user rate limiting (Layer 3, default: true)
+	EnableQueryTimeout     bool   // Enable query execution timeout (Layer 4, default: true)
+	EnableQueryMonitoring  bool   // Enable query metrics monitoring (Layer 5, default: true)
+	GraphQLRateAlgorithm   string // Rate limiting algorithm: "token-bucket" or "time-bucket" (default: "token-bucket")
 }
 
 var (
@@ -193,6 +204,14 @@ func GetSettings() *Arguments {
 			EnableAutoReverse:             true,     // Auto-generate reverse commands
 			RequireExplicitDownCommands:   false,    // Don't require explicit DOWN commands
 			MigrationTimeoutSeconds:       300,      // 5 minute timeout for migrations
+
+			// GraphQL Security Defaults (all layers enabled by default)
+			EnableComplexityLimit:  true,           // Layer 1: Query complexity analysis ON
+			EnableDepthLimit:       true,           // Layer 2: Query depth limiting ON
+			EnableGraphQLRateLimit: true,           // Layer 3: Per-user rate limiting ON
+			EnableQueryTimeout:     true,           // Layer 4: Query execution timeout ON
+			EnableQueryMonitoring:  true,           // Layer 5: Query metrics monitoring ON
+			GraphQLRateAlgorithm:   "token-bucket", // Default to token bucket algorithm
 		}
 	})
 	return instance
@@ -249,4 +268,135 @@ func UpdateSettings(args Arguments) {
 		instance.BackupCompression = args.BackupCompression
 	}
 	instance.BackupIncludeIndexes = args.BackupIncludeIndexes
+}
+
+// GraphQLSecurityConfig contains configuration for GraphQL security layers
+type GraphQLSecurityConfig struct {
+	// Layer enable/disable flags (from Arguments)
+	EnableComplexityLimit  bool
+	EnableDepthLimit       bool
+	EnableGraphQLRateLimit bool
+	EnableQueryTimeout     bool
+	EnableQueryMonitoring  bool
+	RateAlgorithm          string // "token-bucket" or "time-bucket"
+
+	// Role-based complexity limits (Layer 1 & 2)
+	AdminComplexityLimit         int // Unlimited (0 = no limit)
+	AuthenticatedComplexityLimit int // Default: 200
+	AnonymousComplexityLimit     int // Default: 50
+	DepthLimit                   int // Default: 7 levels
+
+	// Role-based rate limits (Layer 3) - queries per minute
+	AdminQueryRateLimit         int // Unlimited (0 = no limit)
+	AuthenticatedQueryRateLimit int // Default: 100/min
+	AnonymousQueryRateLimit     int // Default: 20/min
+
+	// Role-based rate limits - mutations per minute
+	AdminMutationRateLimit         int // Unlimited (0 = no limit)
+	AuthenticatedMutationRateLimit int // Default: 10/min
+	AnonymousMutationRateLimit     int // Default: 2/min
+
+	// Burst capacity multipliers for token bucket
+	AuthenticatedBurstMultiplier float64 // Default: 2.0x (200 tokens for 100/min rate)
+	AnonymousBurstMultiplier     float64 // Default: 1.5x (30 tokens for 20/min rate)
+
+	// Operation costs for rate limiting
+	QueryCost    int // Default: 1 token
+	MutationCost int // Default: 5 tokens
+	DDLCost      int // Default: 10 tokens
+
+	// Rate limiter cleanup
+	InactivityTimeout time.Duration // Default: 5 minutes
+
+	// Role-based timeouts (Layer 4)
+	AdminTimeout                 time.Duration // Default: 10 minutes
+	AuthenticatedQueryTimeout    time.Duration // Default: 30 seconds
+	AuthenticatedMutationTimeout time.Duration // Default: 60 seconds
+	AnonymousQueryTimeout        time.Duration // Default: 5 seconds
+	AnonymousMutationTimeout     time.Duration // Default: 10 seconds
+	TimeoutWarningThreshold      float64       // Default: 0.8 (80%)
+
+	// Monitoring configuration (Layer 5)
+	MaxMetricsRetained       int           // Default: 100,000
+	MaxMemoryMB              int           // Default: 250 MB
+	MetricsPurgeInterval     time.Duration // Default: 5 minutes
+	MetricsRetentionDuration time.Duration // Default: 30 minutes
+	ExpensiveQueryThreshold  float64       // Default: 0.7 (70% of limit)
+	ExpensiveQueryDuration   time.Duration // Default: 1 second
+	AbuseWarningThreshold    int           // Default: 10 expensive queries in 5min
+	AbuseErrorThreshold      int           // Default: 20 expensive queries in 5min
+}
+
+// DefaultGraphQLSecurityConfig returns the default security configuration
+func DefaultGraphQLSecurityConfig() *GraphQLSecurityConfig {
+	return &GraphQLSecurityConfig{
+		// Layer flags (default all enabled)
+		EnableComplexityLimit:  true,
+		EnableDepthLimit:       true,
+		EnableGraphQLRateLimit: true,
+		EnableQueryTimeout:     true,
+		EnableQueryMonitoring:  true,
+		RateAlgorithm:          "token-bucket",
+
+		// Complexity limits
+		AdminComplexityLimit:         0, // Unlimited
+		AuthenticatedComplexityLimit: 200,
+		AnonymousComplexityLimit:     50,
+		DepthLimit:                   7,
+
+		// Query rate limits
+		AdminQueryRateLimit:         0,   // Unlimited
+		AuthenticatedQueryRateLimit: 100, // 100 queries per minute
+		AnonymousQueryRateLimit:     20,  // 20 queries per minute
+
+		// Mutation rate limits
+		AdminMutationRateLimit:         0,  // Unlimited
+		AuthenticatedMutationRateLimit: 10, // 10 mutations per minute
+		AnonymousMutationRateLimit:     2,  // 2 mutations per minute
+
+		// Burst multipliers for token bucket
+		AuthenticatedBurstMultiplier: 2.0, // 200 token capacity for 100/min rate
+		AnonymousBurstMultiplier:     1.5, // 30 token capacity for 20/min rate
+
+		// Operation costs
+		QueryCost:    1,
+		MutationCost: 5,
+		DDLCost:      10,
+
+		// Rate limiter cleanup
+		InactivityTimeout: 5 * time.Minute,
+
+		// Timeouts
+		AdminTimeout:                 10 * time.Minute,
+		AuthenticatedQueryTimeout:    30 * time.Second,
+		AuthenticatedMutationTimeout: 60 * time.Second,
+		AnonymousQueryTimeout:        5 * time.Second,
+		AnonymousMutationTimeout:     10 * time.Second,
+		TimeoutWarningThreshold:      0.8, // Warn at 80% of timeout
+
+		// Monitoring
+		MaxMetricsRetained:       100000,
+		MaxMemoryMB:              250,
+		MetricsPurgeInterval:     5 * time.Minute,
+		MetricsRetentionDuration: 30 * time.Minute,
+		ExpensiveQueryThreshold:  0.7, // 70% of user's limit
+		ExpensiveQueryDuration:   1 * time.Second,
+		AbuseWarningThreshold:    10,
+		AbuseErrorThreshold:      20,
+	}
+}
+
+// BuildGraphQLSecurityConfig creates a GraphQLSecurityConfig from Arguments
+func BuildGraphQLSecurityConfig(args *Arguments) *GraphQLSecurityConfig {
+	config := DefaultGraphQLSecurityConfig()
+
+	// Override with CLI flags
+	config.EnableComplexityLimit = args.EnableComplexityLimit
+	config.EnableDepthLimit = args.EnableDepthLimit
+	config.EnableGraphQLRateLimit = args.EnableGraphQLRateLimit
+	config.EnableQueryTimeout = args.EnableQueryTimeout
+	config.EnableQueryMonitoring = args.EnableQueryMonitoring
+	config.RateAlgorithm = args.GraphQLRateAlgorithm
+
+	return config
 }

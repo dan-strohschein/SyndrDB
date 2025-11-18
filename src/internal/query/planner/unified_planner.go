@@ -113,7 +113,7 @@ func (uqp *UnifiedQueryPlanner) CreatePlan(
 	database *models.Database,
 ) (*ExecutionPlan, error) {
 
-	uqp.logger.Infof("Creating unified execution plan for query type: %s", query.QueryType)
+	uqp.logger.Debugf("Creating unified execution plan for query type: %s", query.QueryType)
 
 	// Step 1: Route to appropriate planner and get base execution tree
 	baseNode, indexesUsed, err := uqp.router.RouteQuery(query, database)
@@ -142,7 +142,7 @@ func (uqp *UnifiedQueryPlanner) CreatePlan(
 		Logger:        uqp.logger,
 	}
 
-	uqp.logger.Infof("Unified execution plan created successfully: "+
+	uqp.logger.Debugf("Unified execution plan created successfully: "+
 		"Type=%s, Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		query.QueryType, plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 

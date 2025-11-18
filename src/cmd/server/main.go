@@ -101,6 +101,14 @@ func main() {
 	flag.BoolVar(&args.RequireExplicitDownCommands, "require-explicit-down", false, "Require explicit DOWN commands in migrations")
 	flag.IntVar(&args.MigrationTimeoutSeconds, "migration-timeout", 300, "Timeout for migration operations in seconds (10-3600)")
 
+	// GraphQL Security Flags (Layers 1-5)
+	flag.BoolVar(&args.EnableComplexityLimit, "enable-complexity-limit", true, "Enable GraphQL query complexity analysis (Layer 1)")
+	flag.BoolVar(&args.EnableDepthLimit, "enable-depth-limit", true, "Enable GraphQL query depth limiting (Layer 2)")
+	flag.BoolVar(&args.EnableGraphQLRateLimit, "enable-graphql-rate-limit", true, "Enable per-user GraphQL rate limiting (Layer 3)")
+	flag.BoolVar(&args.EnableQueryTimeout, "enable-query-timeout", true, "Enable GraphQL query execution timeout (Layer 4)")
+	flag.BoolVar(&args.EnableQueryMonitoring, "enable-query-monitoring", true, "Enable GraphQL query metrics monitoring (Layer 5)")
+	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", "token-bucket", "GraphQL rate limiting algorithm: token-bucket or time-bucket")
+
 	// Parse command line arguments
 	flag.Parse()
 
@@ -209,9 +217,10 @@ func main() {
 			if err != nil {
 				log.Printf("Warning: Failed to initialize GraphQL schema manager: %v", err)
 			} else {
-				// Create GraphQL handler with schema manager
+				// Create GraphQL handler with schema manager and security config
 				serviceManager := server.GetServiceManager()
-				graphQLHandler, err := graphQL.NewGraphQLHandler(*serviceManager, defaultDB, schemaManager, srv.GetLogger())
+				gqlSecurityConfig := settings.BuildGraphQLSecurityConfig(args)
+				graphQLHandler, err := graphQL.NewGraphQLHandler(*serviceManager, defaultDB, schemaManager, srv.GetLogger(), gqlSecurityConfig)
 				if err != nil {
 					log.Printf("Warning: Failed to initialize GraphQL handler: %v", err)
 				} else {

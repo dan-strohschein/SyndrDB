@@ -97,6 +97,17 @@ func (pb *PlanBuilder) BuildPlan(
 		pb.logger.Debug("Added AggregationNode to tree")
 	}
 
+	// Add DISTINCT deduplication if SELECT DISTINCT present
+	// Must come after aggregation but before sorting for correctness
+	if query.IsDistinct {
+		distinctNode, err := pb.addDistinctNode(currentTree, query, database)
+		if err != nil {
+			return nil, fmt.Errorf("failed to add distinct: %w", err)
+		}
+		currentTree = distinctNode
+		pb.logger.Debug("Added DistinctNode to tree")
+	}
+
 	// Add sorting if ORDER BY present
 	if query.HasOrderBy() {
 		sortNode, err := pb.addSortNode(currentTree, query)
@@ -151,6 +162,42 @@ func (pb *PlanBuilder) addAggregationNode(
 	)
 
 	return aggNode, nil
+}
+
+// addDistinctNode wraps tree with DISTINCT deduplication
+// PHASE 3: Deduplication composition
+func (pb *PlanBuilder) addDistinctNode(
+	child ExecutionNode,
+	query *queryparser.UnifiedSelectQuery,
+	database *models.Database,
+) (ExecutionNode, error) {
+
+	// Get bundle for index-based optimization
+	bundle, err := pb.bundleService.GetBundleByName(database, query.FromBundle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get bundle '%s': %w", query.FromBundle, err)
+	}
+
+	// Extract DISTINCT fields from SelectFields
+	// If SelectFields is empty, extractDistinctFields will handle SELECT DISTINCT *
+	distinctFields := query.SelectFields
+
+	// Calculate memory limit: use conservative 256MB default
+	// TODO: Could make this configurable via query planner settings
+	memoryLimitMB := 256                                             // 256MB default
+	memoryLimit := int64(float64(memoryLimitMB) * 0.8 * 1024 * 1024) // Convert MB to bytes, use 80%
+
+	// Create DISTINCT node
+	// Note: BloomFilterEnabled parameter removed - always enabled internally
+	distinctNode := NewDistinctNode(
+		child,
+		distinctFields,
+		memoryLimit,
+		bundle,
+		pb.logger,
+	)
+
+	return distinctNode, nil
 }
 
 // addSortNode wraps tree with sorting

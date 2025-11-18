@@ -48,6 +48,7 @@ TODO: I will add permission templates for common role combinations
 type PermissionService struct {
 	bundleService   *bundle.BundleService
 	databaseService *database.DatabaseService
+	sessionManager  *SessionManager
 	logger          *zap.SugaredLogger
 	debugMode       bool
 }
@@ -56,12 +57,14 @@ type PermissionService struct {
 func NewPermissionService(
 	bundleService *bundle.BundleService,
 	databaseService *database.DatabaseService,
+	sessionManager *SessionManager,
 	logger *zap.SugaredLogger,
 	debugMode bool,
 ) *PermissionService {
 	return &PermissionService{
 		bundleService:   bundleService,
 		databaseService: databaseService,
+		sessionManager:  sessionManager,
 		logger:          logger,
 		debugMode:       debugMode,
 	}
@@ -187,6 +190,18 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	}
 
 	ps.logger.Infof("Permission '%s' granted to user '%s'", permissionName, username)
+
+	// Invalidate role cache for all sessions of this user
+	if ps.sessionManager != nil {
+		sessions := ps.sessionManager.GetSessionsByUser(username)
+		for _, session := range sessions {
+			session.InvalidateRoleCache()
+		}
+		if len(sessions) > 0 {
+			ps.logger.Debugf("Invalidated role cache for %d sessions of user '%s'", len(sessions), username)
+		}
+	}
+
 	return nil
 }
 
@@ -309,6 +324,18 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	}
 
 	ps.logger.Infof("Role '%s' granted to user '%s'", roleName, username)
+
+	// Invalidate role cache for all sessions of this user
+	if ps.sessionManager != nil {
+		sessions := ps.sessionManager.GetSessionsByUser(username)
+		for _, session := range sessions {
+			session.InvalidateRoleCache()
+		}
+		if len(sessions) > 0 {
+			ps.logger.Debugf("Invalidated role cache for %d sessions of user '%s'", len(sessions), username)
+		}
+	}
+
 	return nil
 }
 
@@ -381,6 +408,18 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 	}
 
 	ps.logger.Infof("Permission '%s' revoked from user '%s'", permissionName, username)
+
+	// Invalidate role cache for all sessions of this user
+	if ps.sessionManager != nil {
+		sessions := ps.sessionManager.GetSessionsByUser(username)
+		for _, session := range sessions {
+			session.InvalidateRoleCache()
+		}
+		if len(sessions) > 0 {
+			ps.logger.Debugf("Invalidated role cache for %d sessions of user '%s'", len(sessions), username)
+		}
+	}
+
 	return nil
 }
 
@@ -451,6 +490,18 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 	}
 
 	ps.logger.Infof("Role '%s' revoked from user '%s'", roleName, username)
+
+	// Invalidate role cache for all sessions of this user
+	if ps.sessionManager != nil {
+		sessions := ps.sessionManager.GetSessionsByUser(username)
+		for _, session := range sessions {
+			session.InvalidateRoleCache()
+		}
+		if len(sessions) > 0 {
+			ps.logger.Debugf("Invalidated role cache for %d sessions of user '%s'", len(sessions), username)
+		}
+	}
+
 	return nil
 }
 

@@ -27,7 +27,7 @@ type MigrationServiceInterface interface {
 
 // GraphQLProcessor defines the interface for processing GraphQL commands
 type GraphQLProcessor interface {
-	ProcessGraphQLCommand(command string) (interface{}, error)
+	ProcessGraphQLCommand(command string, session *Session, clientIP string) (interface{}, error)
 }
 
 type ServiceManager struct {
@@ -99,9 +99,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 
 		// Initialize RBAC services
 		userService := NewUserService(bundleService, dbService, userStore, logger, debugMode)
-		permissionService := NewPermissionService(bundleService, dbService, logger, debugMode)
-
-		// Initialize Lock service
+		permissionService := NewPermissionService(bundleService, dbService, nil, logger, debugMode) // Initialize Lock service
 		lockService := lock.NewLockService(logger.Desugar())
 
 		// TODO: Initialize Migration service here

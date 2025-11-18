@@ -32,6 +32,9 @@ locking at the higher level (implemented in hash_index.go).
 
 package hashindexV2
 
+// DEPRECATED: This file is part of the old hashindexV2 (non-LSM) implementation.
+// Use hashindexV3 (LSM-style) instead. See hash_index_api.go for details.
+
 import (
 	"fmt"
 	"os"

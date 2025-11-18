@@ -30,12 +30,15 @@ import (
 	"syndrdb/src/internal/domain/models"
 	gqlcontext "syndrdb/src/internal/graphQL/context"
 	"syndrdb/src/internal/graphQL/mutations"
+	"syndrdb/src/internal/graphQL/optimization"
 	graphqlparser "syndrdb/src/internal/graphQL/parser"
 	"syndrdb/src/internal/graphQL/schema"
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
+	"time"
 
 	"github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
@@ -61,17 +64,25 @@ import (
 // The handler is designed for SyndrDB's native protocol, not HTTP endpoints.
 // Queries are received as "GRAPHQL::{...}" commands through the TCP socket.
 type GraphQLHandler struct {
-	schema         *ast.Schema           // Dynamically generated GraphQL schema
-	schemaManager  *schema.SchemaManager // Phase 5 schema manager for bundle schemas
-	serviceManager server.ServiceManager // Access to bundle and database services
-	database       *models.Database      // Current database context
-	logger         *zap.SugaredLogger    // Structured logging
+	schema             *ast.Schema                      // Dynamically generated GraphQL schema
+	schemaManager      *schema.SchemaManager            // Phase 5 schema manager for bundle schemas
+	serviceManager     server.ServiceManager            // Access to bundle and database services
+	database           *models.Database                 // Current database context
+	logger             *zap.SugaredLogger               // Structured logging
+	securityConfig     *settings.GraphQLSecurityConfig  // GraphQL security configuration
+	complexityAnalyzer *optimization.ComplexityAnalyzer // Query complexity analyzer
+	rateLimiter        *RateLimiter                     // Per-user rate limiter
+	queryMonitor       *QueryMonitor                    // Query metrics monitor
 
 	// Phase 11: Mutation support components
 	mutationParser   *mutations.MutationParser   // Parses GraphQL mutations
 	mutationExecutor *mutations.MutationExecutor // Executes mutations
 	mutationResolver *mutations.MutationResolver // Resolves mutation responses
 	inputValidator   *mutations.InputValidator   // Validates mutation inputs
+
+	// Per-request context (set during processGraphQLRequest)
+	currentSession  *server.Session // Current request's session (nil for anonymous)
+	currentClientIP string          // Current request's client IP
 }
 
 // GraphQLRequest represents a GraphQL request from TCP socket
@@ -79,6 +90,14 @@ type GraphQLRequest struct {
 	Query         string                 `json:"query"`
 	OperationName string                 `json:"operationName,omitempty"`
 	Variables     map[string]interface{} `json:"variables,omitempty"`
+
+	// Security context fields (populated by server, not from client JSON)
+	UserID    string
+	Username  string
+	ClientIP  string
+	SessionID string
+	UserRole  string
+	IsAdmin   bool
 }
 
 // GraphQLResponse represents a GraphQL HTTP response
@@ -123,13 +142,18 @@ type GraphQLLocation struct {
 // 2. Converting Phase 5 schema definitions to gqlparser AST format
 // 3. Building Query type with fields for each bundle
 // 4. Adding introspection support (__schema, __type)
-func NewGraphQLHandler(serviceManager server.ServiceManager, database *models.Database, schemaManager *schema.SchemaManager, logger *zap.SugaredLogger) (*GraphQLHandler, error) {
+func NewGraphQLHandler(serviceManager server.ServiceManager, database *models.Database, schemaManager *schema.SchemaManager, logger *zap.SugaredLogger, securityConfig *settings.GraphQLSecurityConfig) (*GraphQLHandler, error) {
 	if logger == nil {
 		return nil, fmt.Errorf("logger cannot be nil")
 	}
 
 	if database == nil {
 		return nil, fmt.Errorf("database cannot be nil")
+	}
+
+	// Use default security config if not provided
+	if securityConfig == nil {
+		securityConfig = settings.DefaultGraphQLSecurityConfig()
 	}
 
 	// PHASE 6: SchemaManager is optional - if nil, we'll generate a basic schema
@@ -151,12 +175,31 @@ func NewGraphQLHandler(serviceManager server.ServiceManager, database *models.Da
 	mutationResolver := mutations.NewMutationResolver(serviceManager, database, logger)
 	inputValidator := mutations.NewInputValidator(logger)
 
+	// Initialize complexity analyzer with role-based config
+	complexityConfig := &optimization.ComplexityConfig{
+		MaxDepth:      securityConfig.DepthLimit,
+		MaxBreadth:    50,                                          // Fixed breadth limit
+		MaxComplexity: securityConfig.AuthenticatedComplexityLimit, // Will be checked per-role
+		WarnThreshold: int(float64(securityConfig.AuthenticatedComplexityLimit) * securityConfig.ExpensiveQueryThreshold),
+	}
+	complexityAnalyzer := optimization.NewComplexityAnalyzer(complexityConfig)
+
+	// Initialize rate limiter
+	rateLimiter := NewRateLimiter(securityConfig, logger)
+
+	// Initialize query monitor
+	queryMonitor := NewQueryMonitor(securityConfig, logger)
+
 	handler := &GraphQLHandler{
-		schema:         gqlSchema,
-		schemaManager:  schemaManager,
-		serviceManager: serviceManager,
-		database:       database,
-		logger:         logger,
+		schema:             gqlSchema,
+		schemaManager:      schemaManager,
+		serviceManager:     serviceManager,
+		database:           database,
+		logger:             logger,
+		securityConfig:     securityConfig,
+		complexityAnalyzer: complexityAnalyzer,
+		rateLimiter:        rateLimiter,
+		queryMonitor:       queryMonitor,
 
 		// Phase 11: Mutation components
 		mutationParser:   mutationParser,
@@ -295,7 +338,7 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 
 // ProcessGraphQLCommand processes a GraphQL command received via TCP socket
 // The input should be in the format: GRAPHQL::{query: "...", variables: {...}}
-func (h *GraphQLHandler) ProcessGraphQLCommand(command string) (interface{}, error) {
+func (h *GraphQLHandler) ProcessGraphQLCommand(command string, session *server.Session, clientIP string) (interface{}, error) {
 	// Remove the GRAPHQL:: prefix
 	if !strings.HasPrefix(command, "GRAPHQL::") {
 		return nil, fmt.Errorf("invalid GraphQL command format: missing GRAPHQL:: prefix")
@@ -327,8 +370,33 @@ func (h *GraphQLHandler) ProcessGraphQLCommand(command string) (interface{}, err
 		return nil, fmt.Errorf("GraphQL query is required")
 	}
 
+	// Populate security context from session
+	if session != nil {
+		req.SessionID = session.SessionID
+		req.UserID = session.UserID
+		req.Username = session.Username
+		req.ClientIP = clientIP
+
+		// Get role with caching - ignore error, default to empty string
+		role, _ := session.GetRole()
+		req.UserRole = role
+		req.IsAdmin = session.GetIsAdmin()
+	} else {
+		// Anonymous user
+		req.ClientIP = clientIP
+		req.UserRole = "anonymous"
+		req.IsAdmin = false
+	}
+
+	// Store session for resolvers to access
+	h.currentSession = session
+
 	// Process the GraphQL request
 	response := h.processGraphQLRequest(req)
+
+	// Clear session after request
+	h.currentSession = nil
+	h.currentClientIP = ""
 
 	// Return the response (will be JSON encoded by the command director)
 	return response, nil
@@ -337,7 +405,33 @@ func (h *GraphQLHandler) ProcessGraphQLCommand(command string) (interface{}, err
 // processGraphQLRequest processes a GraphQL request and returns a response
 //
 // PHASE 10 UPDATE: Creates RequestContext with DataLoaders for N+1 elimination
+// SECURITY LAYERS: Orchestrates all 5 security layers with metrics recording
 func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLResponse {
+	// Store request context for resolvers (will be cleared at end of request)
+	h.currentClientIP = req.ClientIP
+	// Note: currentSession set in ProcessGraphQLCommand if authenticated
+
+	// Layer 5: Initialize query metrics (always collected if monitoring enabled)
+	startTime := time.Now()
+	queryID := fmt.Sprintf("gql_%d", startTime.UnixNano())
+
+	metric := &QueryMetric{
+		QueryID:   queryID,
+		Username:  req.Username,
+		ClientIP:  req.ClientIP,
+		Role:      req.UserRole,
+		IsAdmin:   req.IsAdmin,
+		Query:     req.Query,
+		StartTime: startTime,
+		Success:   false, // Will be set to true on success
+	}
+
+	// Defer metric recording to capture final state
+	defer func() {
+		metric.Duration = time.Since(startTime)
+		h.queryMonitor.RecordQuery(metric)
+	}()
+
 	// PHASE 10: Create request context with DataLoaders
 	reqCtx := gqlcontext.NewRequestContext(&h.serviceManager, h.database, h.logger)
 	defer reqCtx.Cleanup() // Always cleanup to prevent memory leaks
@@ -351,6 +445,8 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 		Input: req.Query,
 	})
 	if err != nil {
+		metric.ErrorCode = "PARSE_ERROR"
+		metric.ErrorMessage = err.Error()
 		return GraphQLResponse{
 			Errors: []GraphQLError{{
 				Message: fmt.Sprintf("Query parsing error: %v", err),
@@ -358,9 +454,21 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 		}
 	}
 
+	// Determine operation type and DDL status for metrics
+	metric.OperationType = "query"
+	for _, operation := range query.Operations {
+		if operation.Operation == ast.Mutation {
+			metric.OperationType = "mutation"
+			metric.IsDDL = h.isDDLMutation(operation)
+			break
+		}
+	}
+
 	// Validate the query against the schema
 	validationErrors := validator.Validate(h.schema, query)
 	if len(validationErrors) > 0 {
+		metric.ErrorCode = "VALIDATION_ERROR"
+		metric.ErrorMessage = validationErrors[0].Message
 		var errors []GraphQLError
 		for _, validationError := range validationErrors {
 			errors = append(errors, GraphQLError{
@@ -374,9 +482,209 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 		return GraphQLResponse{Errors: errors}
 	}
 
-	// Execute the query
+	// Layer 1 & 2: Check query complexity and depth (skip for admins)
+	if (h.securityConfig.EnableComplexityLimit || h.securityConfig.EnableDepthLimit) && !req.IsAdmin {
+		// Determine role-specific complexity limit
+		maxComplexity := h.securityConfig.AnonymousComplexityLimit
+		if req.UserRole != "anonymous" && req.UserRole != "" {
+			maxComplexity = h.securityConfig.AuthenticatedComplexityLimit
+		}
+
+		// Update analyzer config with role-specific limits
+		h.complexityAnalyzer = optimization.NewComplexityAnalyzer(&optimization.ComplexityConfig{
+			MaxDepth:      h.securityConfig.DepthLimit,
+			MaxBreadth:    50,
+			MaxComplexity: maxComplexity,
+			WarnThreshold: int(float64(maxComplexity) * h.securityConfig.ExpensiveQueryThreshold),
+		})
+
+		// Analyze query complexity
+		complexityResult := h.complexityAnalyzer.AnalyzeQuery(query, h.database)
+
+		// Record complexity metrics
+		metric.Complexity = complexityResult.Complexity
+		metric.Depth = complexityResult.Depth
+
+		// Log warnings for high complexity
+		for _, warning := range complexityResult.Warnings {
+			h.logger.Warnw("GraphQL query complexity warning",
+				"warning", warning,
+				"username", req.Username,
+				"clientIP", req.ClientIP,
+				"complexity", complexityResult.Complexity,
+				"depth", complexityResult.Depth,
+			)
+		}
+
+		// Reject if exceeds limits
+		if !complexityResult.IsAllowed {
+			metric.ErrorCode = "COMPLEXITY_LIMIT_EXCEEDED"
+			metric.ErrorMessage = complexityResult.Reason
+			h.logger.Warnw("GraphQL query rejected - complexity exceeded",
+				"reason", complexityResult.Reason,
+				"username", req.Username,
+				"clientIP", req.ClientIP,
+				"role", req.UserRole,
+				"complexity", complexityResult.Complexity,
+				"depth", complexityResult.Depth,
+				"maxComplexity", maxComplexity,
+			)
+			return GraphQLResponse{
+				Errors: []GraphQLError{{
+					Message: fmt.Sprintf("Query too complex: %s", complexityResult.Reason),
+					Extensions: map[string]interface{}{
+						"code":       "COMPLEXITY_LIMIT_EXCEEDED",
+						"complexity": complexityResult.Complexity,
+						"depth":      complexityResult.Depth,
+						"limit":      maxComplexity,
+					},
+				}},
+			}
+		}
+	}
+
+	// Layer 3: Check rate limiting (skip for admins)
+	if h.securityConfig.EnableGraphQLRateLimit && !req.IsAdmin {
+		// Determine operation type from query
+		operationType := "query"
+		isDDL := false
+
+		for _, operation := range query.Operations {
+			if operation.Operation == ast.Mutation {
+				operationType = "mutation"
+				// Check if mutation contains DDL operations (10x cost)
+				isDDL = h.isDDLMutation(operation)
+			}
+		}
+
+		// Calculate token cost for metrics
+		cost := h.rateLimiter.getOperationCost(operationType, isDDL)
+		metric.TokensCost = cost
+
+		// Check rate limit
+		allowed, err := h.rateLimiter.CheckRateLimit(
+			req.Username,
+			req.ClientIP,
+			req.UserRole,
+			req.IsAdmin,
+			operationType,
+			isDDL,
+		)
+
+		// Record available tokens for metrics
+		bucketStats := h.rateLimiter.GetBucketStats(req.Username, req.ClientIP)
+		if bucketStats != nil {
+			if tokens, ok := bucketStats["availableTokens"].(float64); ok {
+				metric.TokensAvailable = tokens
+			}
+		}
+
+		if err != nil {
+			h.logger.Errorw("Rate limiter error",
+				"error", err,
+				"username", req.Username,
+				"clientIP", req.ClientIP,
+			)
+		}
+
+		if !allowed {
+			metric.ErrorCode = "RATE_LIMIT_EXCEEDED"
+			metric.ErrorMessage = "Rate limit exceeded"
+			return GraphQLResponse{
+				Errors: []GraphQLError{{
+					Message: "Rate limit exceeded. Please try again later.",
+					Extensions: map[string]interface{}{
+						"code":            "RATE_LIMIT_EXCEEDED",
+						"availableTokens": bucketStats["availableTokens"],
+						"retryAfter":      "60s",
+					},
+				}},
+			}
+		}
+	}
+
+	// Layer 4: Apply role-aware execution timeout
+	if h.securityConfig.EnableQueryTimeout {
+		// Determine timeout based on role and operation type
+		var timeout time.Duration
+		operationType := "query"
+
+		for _, operation := range query.Operations {
+			if operation.Operation == ast.Mutation {
+				operationType = "mutation"
+				break
+			}
+		}
+
+		// Select timeout based on role
+		if req.IsAdmin {
+			// Admins get 10-minute timeout (enforced, not unlimited)
+			timeout = h.securityConfig.AdminTimeout
+		} else if req.UserRole == "anonymous" {
+			if operationType == "mutation" {
+				timeout = h.securityConfig.AnonymousMutationTimeout
+			} else {
+				timeout = h.securityConfig.AnonymousQueryTimeout
+			}
+		} else {
+			// Authenticated users
+			if operationType == "mutation" {
+				timeout = h.securityConfig.AuthenticatedMutationTimeout
+			} else {
+				timeout = h.securityConfig.AuthenticatedQueryTimeout
+			}
+		}
+
+		// Create timeout context
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		// Log warning at threshold (skip for admins to reduce noise)
+		if !req.IsAdmin {
+			go func() {
+				warningTime := time.Duration(float64(timeout) * h.securityConfig.TimeoutWarningThreshold)
+				select {
+				case <-time.After(warningTime):
+					h.logger.Warnw("GraphQL query approaching timeout",
+						"username", req.Username,
+						"clientIP", req.ClientIP,
+						"role", req.UserRole,
+						"timeout", timeout,
+						"elapsed", warningTime,
+					)
+				case <-ctx.Done():
+					// Context completed before warning
+					return
+				}
+			}()
+		}
+	}
+
+	// Execute the query with timeout context
 	data, err := h.executeQuery(ctx, query, req.Variables)
 	if err != nil {
+		// Check if error is due to timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			metric.ErrorCode = "TIMEOUT_EXCEEDED"
+			metric.ErrorMessage = "Query execution timed out"
+			h.logger.Warnw("GraphQL query timed out",
+				"username", req.Username,
+				"clientIP", req.ClientIP,
+				"role", req.UserRole,
+			)
+			return GraphQLResponse{
+				Errors: []GraphQLError{{
+					Message: "Query execution timed out",
+					Extensions: map[string]interface{}{
+						"code": "TIMEOUT_EXCEEDED",
+					},
+				}},
+			}
+		}
+
+		metric.ErrorCode = "EXECUTION_ERROR"
+		metric.ErrorMessage = err.Error()
 		return GraphQLResponse{
 			Errors: []GraphQLError{{
 				Message: fmt.Sprintf("Execution error: %v", err),
@@ -384,7 +692,39 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 		}
 	}
 
+	// Mark as successful
+	metric.Success = true
+
 	return GraphQLResponse{Data: data}
+} // isDDLMutation checks if a mutation involves DDL operations (CREATE/ALTER/DROP/GRANT/REVOKE)
+func (h *GraphQLHandler) isDDLMutation(operation *ast.OperationDefinition) bool {
+	if operation.Operation != ast.Mutation {
+		return false
+	}
+
+	// Check if any mutation field is a DDL operation
+	for _, selection := range operation.SelectionSet {
+		field, ok := selection.(*ast.Field)
+		if !ok {
+			continue
+		}
+
+		mutationName := strings.ToLower(field.Name)
+
+		// DDL operations: CREATE/ALTER/DROP for databases/bundles
+		if strings.Contains(mutationName, "createdatabase") ||
+			strings.Contains(mutationName, "alterdatabase") ||
+			strings.Contains(mutationName, "dropdatabase") ||
+			strings.Contains(mutationName, "createbundle") ||
+			strings.Contains(mutationName, "alterbundle") ||
+			strings.Contains(mutationName, "dropbundle") ||
+			strings.Contains(mutationName, "grant") ||
+			strings.Contains(mutationName, "revoke") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // executeQuery executes a validated GraphQL query

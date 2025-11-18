@@ -81,6 +81,7 @@ func setupPermissionServiceTest(t *testing.T) (*server.PermissionService, *serve
 	permissionService := server.NewPermissionService(
 		serviceManager.BundleService,
 		databaseService,
+		nil, // SessionManager not needed in tests
 		logger,
 		debugMode,
 	)

@@ -197,6 +197,7 @@ func StandupTestDatabaseService() (*database.DatabaseService, *databasestore.Dat
 	serviceManager.PermissionService = server.NewPermissionService(
 		bundleService,
 		service,
+		nil, // SessionManager not needed in tests
 		ColorLogger.Sugar(),
 		false, // debug mode off
 	)

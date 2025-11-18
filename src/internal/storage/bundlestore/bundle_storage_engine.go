@@ -84,7 +84,7 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 
 	// Get the appropriate serializer based on format
 	serializer := format.GetSerializer(storageFormat)
-	logger.Infof("Bundle storage using %s format", serializer.GetFormatName())
+	//logger.Infof("Bundle storage using %s format", serializer.GetFormatName())
 
 	// Create a new bundle store
 	store := &BundleStorageEngine{
@@ -521,7 +521,7 @@ func (b *BundleStorageEngine) BundleFileExists(bundleName string, databaseName s
 	databasePath := helpers.GetDatabaseFolderPath(databaseName)
 
 	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
-	b.logger.Infof("Checking if bundle file exists: %s", filePath)
+	b.logger.Debugf("Checking if bundle file exists: %s", filePath)
 	return helpers.FileExists(filePath, *b.logger)
 }
 

@@ -48,6 +48,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -106,6 +107,10 @@ type EntryStorage struct {
 	totalEntries uint64    // Total entries written
 	totalBytes   uint64    // Total bytes written
 	lastRotation time.Time // Last file rotation time
+
+	// Header update tracking
+	entriesSinceHeaderUpdate uint64 // Entries written since last header update
+	headerUpdateInterval     uint64 // Update header every N entries
 
 	// Logging
 	logger *zap.SugaredLogger
@@ -177,22 +182,24 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 	}
 
 	storage := &EntryStorage{
-		indexName:        config.IndexName,
-		fieldName:        config.FieldName,
-		bundleName:       config.BundleName,
-		dataDir:          config.DataDir,
-		maxFileSize:      config.MaxFileSize,
-		writeBufferSize:  config.WriteBufferSize,
-		isForeignKey:     config.IsForeignKey,
-		isUnique:         config.IsUnique,
-		isPrimaryKey:     config.IsPrimaryKey,
-		referencedBundle: config.ReferencedBundle,
-		referencedField:  config.ReferencedField,
-		allFiles:         make([]string, 0),
-		lastRotation:     time.Now(),
-		logger:           config.Logger,
-		headerManager:    NewHeaderManager(config.Logger),
-		namingHelper:     NewFileNamingHelper(config.DataDir, config.BundleName),
+		indexName:                config.IndexName,
+		fieldName:                config.FieldName,
+		bundleName:               config.BundleName,
+		dataDir:                  config.DataDir,
+		maxFileSize:              config.MaxFileSize,
+		writeBufferSize:          config.WriteBufferSize,
+		isForeignKey:             config.IsForeignKey,
+		isUnique:                 config.IsUnique,
+		isPrimaryKey:             config.IsPrimaryKey,
+		referencedBundle:         config.ReferencedBundle,
+		referencedField:          config.ReferencedField,
+		allFiles:                 make([]string, 0),
+		lastRotation:             time.Now(),
+		logger:                   config.Logger,
+		headerManager:            NewHeaderManager(config.Logger),
+		namingHelper:             NewFileNamingHelper(config.DataDir, config.BundleName),
+		entriesSinceHeaderUpdate: 0,
+		headerUpdateInterval:     100, // Update header every 100 entries
 	}
 
 	// Discover existing files
@@ -393,6 +400,9 @@ func (es *EntryStorage) FlushWithHeaderUpdate(globalSequence uint64) error {
 			es.logger.Warnf("Failed to update header after flush: %v", err)
 		}
 	}
+
+	// Reset the counter since we just updated the header
+	atomic.StoreUint64(&es.entriesSinceHeaderUpdate, 0)
 
 	return nil
 }
@@ -713,6 +723,9 @@ func (es *EntryStorage) rotateFile() error {
 	// Increment file number and open new file
 	es.currentFileNum++
 	es.lastRotation = time.Now()
+
+	// Reset header update counter since we're creating a new file with a fresh header
+	atomic.StoreUint64(&es.entriesSinceHeaderUpdate, 0)
 
 	if err := es.openCurrentFile(); err != nil {
 		return fmt.Errorf("failed to open new file: %w", err)

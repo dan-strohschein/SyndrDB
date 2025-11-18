@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
+func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	if database == nil {
 		// Get the database from the session.
 	}
@@ -28,7 +28,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		if serviceManager.GraphQLProcessor == nil {
 			return nil, fmt.Errorf("GraphQL is not enabled on this server")
 		}
-		return serviceManager.GraphQLProcessor.ProcessGraphQLCommand(command)
+		return serviceManager.GraphQLProcessor.ProcessGraphQLCommand(command, session, clientIP)
 	}
 
 	// Input validation for security
@@ -514,7 +514,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 
 	fullCommand := strings.Join(commandParts, " ")
 
-	logger.Infof("Processing SELECT query: %s", fullCommand)
+	logger.Debugf("Processing SELECT query: %s", fullCommand)
 
 	// STEP 1: Parse the query using parseQuery (respects feature flag, has fallback)
 	query, err := ParseQuery(fullCommand, logger)
@@ -522,7 +522,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		return nil, fmt.Errorf("failed to parse query: %w", err)
 	}
 
-	logger.Infof("Parsed unified query: WHERE:%v, Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
+	logger.Debugf("Parsed unified query: WHERE:%v, Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
 		query.WhereExpression, query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasOrderBy(), query.HasLimit())
 
 	// STEP 2: Create unified query planner
@@ -534,7 +534,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		return nil, fmt.Errorf("failed to create execution plan: %w", err)
 	}
 
-	logger.Infof("Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
+	logger.Debugf("Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 
 	// STEP 4: Execute the plan
@@ -543,7 +543,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		return nil, fmt.Errorf("failed to execute query plan: %w", err)
 	}
 
-	logger.Infof("Query executed successfully: Retrieved %d documents", len(documents))
+	logger.Debugf("Query executed successfully: Retrieved %d documents", len(documents))
 
 	// Transform documents to flattened format with field projection
 	// If query.SelectFields is specified, only those fields will be returned
@@ -620,7 +620,7 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		ExecutionTimeMS: executionTime,
 	}
 
-	logger.Infof("Returning %d documents (execution time: %.2fms)",
+	logger.Debugf("Returning %d documents (execution time: %.2fms)",
 		cmdResponse.ResultCount, cmdResponse.ExecutionTimeMS)
 
 	return cmdResponse, nil

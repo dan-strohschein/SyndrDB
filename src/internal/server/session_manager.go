@@ -108,6 +108,13 @@ type Session struct {
 	Timeout         time.Duration
 	MaxQueryHistory int
 
+	// Role caching for GraphQL security (5-minute TTL)
+	CachedRole        string             // Cached user role string
+	IsAdmin           bool               // Cached admin status
+	RoleCacheTime     time.Time          // When the role was cached
+	RoleCacheTTL      time.Duration      // TTL for role cache (default: 5 minutes)
+	PermissionService *PermissionService // Reference to permission service for role lookup
+
 	// Synchronization
 	mu     sync.RWMutex
 	Logger *zap.SugaredLogger
@@ -116,7 +123,8 @@ type Session struct {
 // SessionManager manages all active sessions
 type SessionManager struct {
 	sessions           map[string]*Session   // sessionID -> Session
-	userSessions       map[string][]*Session // username -> list of sessions
+	userSessions       map[string][]*Session // username -> list of sessions (already exists!)
+	sessionsByUser     map[string][]*Session // username -> list of sessions (alias for consistency)
 	connectionSessions map[string]*Session   // connectionID -> Session
 	mu                 sync.RWMutex
 	logger             *zap.SugaredLogger
@@ -136,15 +144,14 @@ func NewSessionManager(logger *zap.SugaredLogger, defaultTimeout time.Duration, 
 	sm := &SessionManager{
 		sessions:           make(map[string]*Session),
 		userSessions:       make(map[string][]*Session),
+		sessionsByUser:     make(map[string][]*Session),
 		connectionSessions: make(map[string]*Session),
 		logger:             logger,
 		defaultTimeout:     defaultTimeout,
 		maxSessions:        maxSessions,
 		cleanupInterval:    time.Minute * 5, // Cleanup every 5 minutes
 		stopCleanup:        make(chan struct{}),
-	}
-
-	// Start cleanup routine
+	} // Start cleanup routine
 	sm.startCleanupRoutine()
 
 	return sm
@@ -275,6 +282,13 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		Timeout:            timeout,
 		MaxQueryHistory:    100, // Keep last 100 queries
 		Logger:             sm.logger.With("sessionID", sessionID, "username", username, "clientIP", clientIP),
+
+		// Initialize role caching fields
+		RoleCacheTTL:      5 * time.Minute, // 5-minute TTL for role cache
+		CachedRole:        "",              // Will be populated on first GetRole() call
+		IsAdmin:           false,           // Will be set by GetRole()
+		RoleCacheTime:     time.Time{},     // Zero time means cache is empty
+		PermissionService: nil,             // Will be set by server initialization
 	}
 
 	// Store session
@@ -621,9 +635,7 @@ func (s *Session) StartQuery(queryID, query string) {
 		Status:    "EXECUTING",
 	}
 
-	s.Logger.Infow("Started query execution",
-		"queryID", queryID,
-		"query", query)
+	s.Logger.Debugf("Started query execution '%s'", query)
 }
 
 // CompleteQuery marks the current query as completed
@@ -652,10 +664,11 @@ func (s *Session) CompleteQuery(affectedRows int) {
 	// Reset consecutive error count on success
 	s.ConsecutiveErrors = 0
 
-	s.Logger.Infow("Completed query execution",
-		"queryID", s.LastSuccessfulQuery.QueryID,
-		"affectedRows", affectedRows,
-		"duration", s.LastSuccessfulQuery.EndTime.Sub(s.LastSuccessfulQuery.StartTime))
+	// s.Logger.Infow("Completed query execution",
+	//
+	//	"queryID", s.LastSuccessfulQuery.QueryID,
+	//	"affectedRows", affectedRows,
+	//	"duration", s.LastSuccessfulQuery.EndTime.Sub(s.LastSuccessfulQuery.StartTime))
 }
 
 // FailQuery marks the current query as failed
@@ -889,4 +902,100 @@ func (s *Session) GetSessionInfo() map[string]interface{} {
 	}
 
 	return info
+}
+
+// GetRole returns the cached role for this session, fetching from PermissionService if cache is expired
+// This implements the lazy role caching pattern with 5-minute TTL
+func (s *Session) GetRole() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if role cache is still valid
+	if !s.RoleCacheTime.IsZero() && time.Since(s.RoleCacheTime) < s.RoleCacheTTL {
+		// Cache is still fresh, return cached role
+		return s.CachedRole, nil
+	}
+
+	// Cache expired or empty, fetch role from PermissionService
+	if s.PermissionService == nil {
+		// No permission service available, default to "anonymous"
+		s.CachedRole = "anonymous"
+		s.IsAdmin = false
+		s.RoleCacheTime = time.Now()
+		return s.CachedRole, nil
+	}
+
+	// Query permission service to determine if user is admin
+	isAdmin, err := s.PermissionService.UserHasPermission(s.Username, "Administrator")
+	if err != nil {
+		// Error checking permissions, but don't fail - default to authenticated non-admin
+		if s.Username != "" {
+			s.CachedRole = "authenticated"
+			s.IsAdmin = false
+		} else {
+			s.CachedRole = "anonymous"
+			s.IsAdmin = false
+		}
+		s.RoleCacheTime = time.Now()
+		return s.CachedRole, err
+	}
+
+	// Set role based on admin status
+	if isAdmin {
+		s.CachedRole = "admin"
+		s.IsAdmin = true
+	} else if s.Username != "" {
+		s.CachedRole = "authenticated"
+		s.IsAdmin = false
+	} else {
+		s.CachedRole = "anonymous"
+		s.IsAdmin = false
+	}
+
+	// Update cache timestamp
+	s.RoleCacheTime = time.Now()
+
+	return s.CachedRole, nil
+}
+
+// GetIsAdmin returns the cached admin status for this session
+func (s *Session) GetIsAdmin() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// If cache is expired, trigger a role refresh (but don't block on it)
+	if s.RoleCacheTime.IsZero() || time.Since(s.RoleCacheTime) >= s.RoleCacheTTL {
+		// Cache is stale, but return current value and let next GetRole() refresh it
+		// This prevents blocking during IsAdmin checks
+		return s.IsAdmin
+	}
+
+	return s.IsAdmin
+}
+
+// InvalidateRoleCache clears the role cache, forcing a refresh on next GetRole() call
+// This is called when GRANT/REVOKE commands modify user permissions
+func (s *Session) InvalidateRoleCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Clear cache timestamp to force refresh
+	s.RoleCacheTime = time.Time{} // Zero value
+	s.CachedRole = ""
+	s.IsAdmin = false
+}
+
+// GetSessionsByUser returns all active sessions for a given username
+func (sm *SessionManager) GetSessionsByUser(username string) []*Session {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	// Return sessions from userSessions map (which is already maintained)
+	sessions := sm.userSessions[username]
+
+	// Return a copy to prevent external modification
+	result := make([]*Session, len(sessions))
+	copy(result, sessions)
+
+	return result
 }

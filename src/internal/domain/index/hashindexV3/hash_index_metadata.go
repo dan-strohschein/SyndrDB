@@ -208,7 +208,29 @@ func (idx *HashIndexV3) RestoreGlobalSequence() error {
 	idx.logger.Debugw("RestoreGlobalSequence called (now using header system)",
 		"indexName", idx.config.IndexName)
 
-	// Load metadata (deprecated path)
+	// Try to read from file header first (new system)
+	var headerMax uint64 = 0
+	files, err := idx.storage.GetEntryFiles()
+	if err == nil && len(files) > 0 {
+		// Get the latest file
+		latestFile := files[len(files)-1]
+		latestFilePath := filepath.Join(idx.config.DataDir, latestFile)
+
+		// Read header from latest file
+		header, _, err := idx.storage.headerManager.ReadHeader(latestFilePath)
+		if err != nil {
+			idx.logger.Warnw("Failed to read header from latest file",
+				"file", latestFile,
+				"error", err)
+		} else if header != nil {
+			headerMax = header.GlobalSequence
+			idx.logger.Debugw("Read max sequence from header",
+				"file", latestFile,
+				"headerSequence", headerMax)
+		}
+	}
+
+	// Load old metadata (deprecated path) for backward compatibility
 	metadata, err := idx.LoadMetadata()
 	if err != nil {
 		idx.logger.Warnw("Failed to load metadata, will scan entries",
@@ -221,21 +243,39 @@ func (idx *HashIndexV3) RestoreGlobalSequence() error {
 		metadataMax = metadata.MaxSequence
 	}
 
+	// Take the maximum of header and old metadata
+	maxFromPersistence := headerMax
+	if metadataMax > maxFromPersistence {
+		maxFromPersistence = metadataMax
+	}
+
 	// Scan most recent entry file for safety check
 	actualMax, err := idx.scanLatestFileForMaxSequence()
 	if err != nil {
-		idx.logger.Warnw("Failed to scan latest file, using metadata only",
+		idx.logger.Warnw("Failed to scan latest file, using header/metadata only",
 			"error", err)
 		actualMax = 0
 	}
 
-	// Take the maximum of both
-	safeMax := metadataMax
+	// Take the maximum of all sources
+	safeMax := maxFromPersistence
 	if actualMax > safeMax {
 		safeMax = actualMax
-		idx.logger.Warnw("Actual max sequence exceeds metadata",
-			"metadataMax", metadataMax,
-			"actualMax", actualMax)
+		// Only warn if the discrepancy is significant (header not updated recently)
+		// Don't warn if it's within our update interval (100 entries)
+		discrepancy := actualMax - maxFromPersistence
+		if discrepancy > 100 {
+			idx.logger.Warnw("Actual max sequence exceeds header/metadata",
+				"headerMax", headerMax,
+				"metadataMax", metadataMax,
+				"actualMax", actualMax,
+				"discrepancy", discrepancy)
+		} else {
+			idx.logger.Debugw("Actual max sequence slightly exceeds header (expected)",
+				"headerMax", headerMax,
+				"actualMax", actualMax,
+				"discrepancy", discrepancy)
+		}
 	}
 
 	// Apply safety margin
@@ -256,6 +296,7 @@ func (idx *HashIndexV3) RestoreGlobalSequence() error {
 
 	idx.logger.Infow("Restored global sequence",
 		"indexName", idx.config.IndexName,
+		"headerMax", headerMax,
 		"metadataMax", metadataMax,
 		"actualMax", actualMax,
 		"safeMax", safeMax,

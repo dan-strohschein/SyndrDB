@@ -104,7 +104,7 @@ func (mm *MetricsManager) RegisterScanner(bundleName string, scanner DocumentSca
 	defer mm.mu.Unlock()
 
 	mm.scanners[bundleName] = scanner
-	mm.logger.Infof("Registered scanner for bundle '%s'", bundleName)
+	mm.logger.Debugf("Registered scanner for bundle '%s'", bundleName)
 
 	// Start metrics collection if not already running
 	if !mm.running {
@@ -198,7 +198,7 @@ func (mm *MetricsManager) startMetricsCollection() {
 	mm.running = true
 	mm.mu.Unlock()
 
-	mm.logger.Infof("Started metrics collection with interval %v", mm.metricsInterval)
+	//mm.logger.Infof("Started metrics collection with interval %v", mm.metricsInterval)
 
 	ticker := time.NewTicker(mm.metricsInterval)
 	defer ticker.Stop()

@@ -370,7 +370,7 @@ func executeClientCommand(commandText string) (interface{}, error) {
 
 	// Process command through the actual command director
 	startTime := time.Now()
-	result, err := server.CommandDirector(testDatabase, *testServiceManager, commandText, ColorLogger, startTime)
+	result, err := server.CommandDirector(testDatabase, *testServiceManager, commandText, ColorLogger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		return nil, fmt.Errorf("command failed: %w", err)
 	}

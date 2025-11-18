@@ -4,26 +4,29 @@
 
 A relational Document DB with a graphQL interface implemented in Golang. Think MongoDB, Postgres, and GraphQL had a baby.
 
-Warning: Extremely WIP. This project was just started and is pretty much purely educational for myself. Use at your own risk, contribute if you wish. 
+Disclaimer: WIP. The project is getting closer to MVP with an alpha release soon, but it is not there yet. Performance benchmarks and full testing still need to complete.
 
 (+Current progress+):
-- SQL Style query language (Syndr-QL)
-- Field selection in SELECT queries (specify which fields to return)
-- GROUP BY aggregation with COUNT, SUM, AVG, MIN, MAX functions
+- SQL Style query language (SyndrQL)
+- All basic SQL commands for querying data
+- Basic DDL and DML commands in SyndrQL
 - Hash Index and B-Tree index filtering
 - Postgres-like file storage and retrieval
 - Write Ahead Logging for transactions
 - Relationships between bundles (0ToMany, 1ToMany, ManyToMany)
-- TCP Server (as Syndr-QL) and HTTP Server options (as GraphQL)
+- GraphQL Interface
+- ACID compliance
+- Native Migration (Version tracking) with roll up/roll down
+- backup & Restore with varying compression options
 
 
 ## Usage
 ``` 
 Usage of ./syndr:
   -auth
-        Enable authentication (Not yet working)
+        Enable authentication (on by default)
   -config string
-        Path to config file (Not yet working)
+        Path to config file (Not yet implemented)
   -datadir string
         Directory to store data files (default "./datafiles")
   -debug
@@ -172,7 +175,7 @@ ORDER BY COUNT(*) DESC;
 To filter and get results with related bundles use this format:
 
 ```sql
-SELECT <Field_List | DOCUMENTS> 
+SELECT <Field_List | DOCUMENTS | * | TOP N | COUNT(*) > 
 FROM "<BUNDLE_NAME>" 
       <JOIN | OUTER JOIN | LEFT JOIN | RIGHT JOIN> "<BUNDLE_NAME_2>
       ON
@@ -190,6 +193,8 @@ Currently supported operators are:
 * != (Not equals)
 * \> (Greater Than)
 * < (Less Than)
+* \>= (Greater Than or equal to)
+* <= (Less Than or equal to)
 
 - String values are double quoted
 - DateTimes are double quoted (**Coming soon**)
@@ -225,9 +230,7 @@ SyndrDB now features a comprehensive GraphQL API that provides a modern, web-fri
 ### 🎯 **Core Implementation**
 
 **GraphQL Handler**:
-- Full HTTP request/response handling (GET/POST support)
 - Query validation and parsing using `vektah/gqlparser`
-- CORS support for web applications
 - Comprehensive error handling and reporting
 - Variable support for parameterized queries
 
@@ -245,10 +248,9 @@ SyndrDB now features a comprehensive GraphQL API that provides a modern, web-fri
 
 ### 🔧 **Server Integration**
 
-**Dual-Protocol Server**:
+**Server**:
 - **TCP Server** (port 1776): Original SyndrDB native protocol
-- **HTTP Server** (port 1777): GraphQL API when `-graphql` flag is enabled
-- Graceful shutdown for both servers
+
 
 **Service Manager Integration**:
 - GraphQL handler uses existing ServiceManager
@@ -258,7 +260,6 @@ SyndrDB now features a comprehensive GraphQL API that provides a modern, web-fri
 **Configuration Support**:
 - `-graphql` command line flag to enable/disable
 - `EnableGraphQL` setting in configuration
-- Automatic port assignment (TCP + 1 for HTTP)
 
 ### 🚀 **Usage Examples**
 
@@ -330,9 +331,7 @@ curl -X POST "http://127.0.0.1:1777/graphql" \
 
 2. **Performance**: Direct integration with existing storage layer and index systems
 
-3. **Flexibility**: Supports both native TCP protocol and modern GraphQL HTTP API
-
-4. **Extensibility**: Easy to add new query types and mutations
+3. **Extensibility**: Easy to add new query types and mutations
 
 ### ✅ **Error Handling**
 
@@ -346,7 +345,6 @@ This implementation makes SyndrDB a truly modern document database by adding:
 - **Industry-standard GraphQL API** alongside the native protocol
 - **Type-safe queries** with schema validation
 - **Real-time integration** with existing SyndrDB infrastructure
-- **Production-ready HTTP server** with proper error handling
 
 The GraphQL API opens up SyndrDB to modern web applications, mobile apps, and any system that can consume GraphQL endpoints, while maintaining full compatibility with existing SyndrDB native clients.
 
@@ -354,69 +352,393 @@ The GraphQL API opens up SyndrDB to modern web applications, mobile apps, and an
 
 ## 📚 Advanced Features Documentation
 
-SyndrDB includes several advanced query features that extend beyond basic CRUD operations. These features provide SQL-like capabilities for complex data analysis and retrieval:
+## FULL FEATURE LIST
 
-### 🎯 **Field Selection**
-Advanced field selection capabilities allowing you to specify exactly which fields to return from your queries.
+### Core Database Features
+- **Database Management**
+  - CREATE DATABASE
+  - DROP DATABASE (partially implemented)
+  - USE DATABASE
+  - SHOW DATABASES
+  - SELECT DATABASES (system catalog query)
 
-📖 **[Field Selection Implementation Guide](FIELD_SELECTION_IMPLEMENTATION.md)**
+- **Bundle (Table) Management**
+  - CREATE BUNDLE with field definitions (name, type, required, unique, default values)
+  - UPDATE BUNDLE (rename, add/remove/modify fields, add relationships)
+  - DROP BUNDLE (with FORCE option)
+  - SHOW BUNDLES
+  - Field types: STRING, INT, FLOAT, BOOL (DATETIME coming soon)
 
-**Key Features:**
-- Selective field projection in SELECT queries
-- Performance optimization through reduced data transfer
-- Support for nested field selection
-- Integration with JOIN and ORDER BY operations
+### Data Manipulation (DML)
+- **INSERT Operations**
+  - ADD DOCUMENT TO BUNDLE with field validation
+  - Automatic field validation (required, unique, type checking)
+  - Default value assignment
 
-**Example:**
-```sql
-SELECT name, email, age FROM "Users" WHERE age > 25
-```
+- **SELECT Operations**
+  - SELECT * / SELECT DOCUMENTS (all fields)
+  - SELECT specific fields (field1, field2, ...)
+  - SELECT DISTINCT
+  - SELECT TOP N
+  - SELECT COUNT(*)
+  - Aggregate functions: COUNT(*), SUM(field), AVG(field), MIN(field), MAX(field)
+  - Arithmetic expressions in SELECT (e.g., Price * Quantity + Tax)
+  - Field aliases (AS alias_name)
 
-### 📊 **GROUP BY Aggregation**
-Comprehensive GROUP BY implementation following PostgreSQL algorithms, providing powerful data aggregation capabilities.
+- **UPDATE Operations**
+  - UPDATE DOCUMENTS IN BUNDLE with WHERE clause
+  - Update multiple fields in single statement
+  - Conditional updates with complex WHERE clauses
 
-📖 **[GROUP BY Implementation Guide](GROUP_BY_IMPLEMENTATION.md)**
+- **DELETE Operations**
+  - DELETE DOCUMENTS FROM BUNDLE with WHERE clause
+  - Conditional deletion with complex WHERE clauses
 
-**Key Features:**
-- Full SQL-like GROUP BY syntax
-- Multiple aggregate functions: COUNT, SUM, AVG, MIN, MAX
-- HAVING clause support for post-aggregation filtering
-- Hash and Sort execution strategies for optimal performance
-- Integration with ORDER BY for sorted results
+### Query Features
+- **WHERE Clause Support**
+  - Comparison operators: ==, !=, >, <, >=, <=
+  - Logical operators: AND, OR
+  - Nested conditions with parentheses
+  - Complex expression evaluation
 
-**Examples:**
-```sql
--- Basic grouping with count
-SELECT category, COUNT(*) FROM "Products" GROUP BY category
+- **JOIN Operations**
+  - INNER JOIN
+  - LEFT JOIN (partially implemented)
+  - RIGHT JOIN (partially implemented)
+  - OUTER JOIN (partially implemented)
+  - Multi-table joins
+  - ON clause with field comparisons
+  - WITH RELATIONSHIP clause for hierarchical results
 
--- Multiple aggregates with filtering
-SELECT region, COUNT(*), SUM(sales), AVG(sales) 
-FROM "Revenue" 
-GROUP BY region 
-HAVING COUNT(*) > 5 
-ORDER BY SUM(sales) DESC
+- **Aggregation and Grouping**
+  - GROUP BY (single and multiple fields)
+  - HAVING clause for filtered aggregation
+  - Aggregate functions with GROUP BY
 
--- Complex multi-field grouping
-SELECT region, category, COUNT(*), AVG(price)
-FROM "Sales" 
-GROUP BY region, category
-```
+- **Sorting and Pagination**
+  - ORDER BY (ASC/DESC)
+  - Multiple field sorting
+  - LIMIT (result count limiting)
+  - OFFSET (result skipping)
 
-**Aggregate Functions Supported:**
-- `COUNT(*)` - Count all rows in each group
-- `COUNT(field)` - Count non-null values in specified field
-- `SUM(field)` - Sum of numeric values
-- `AVG(field)` - Average of numeric values  
-- `MIN(field)` - Minimum value in each group
-- `MAX(field)` - Maximum value in each group
+### Indexing System
+- **B-Tree Indexes**
+  - CREATE B-INDEX with multiple fields
+  - Unique and non-unique indexes
+  - Range query optimization
+  - Automatic index updates on document changes
+  - Index-aware query planning
 
-### 🔧 **Implementation Architecture**
+- **Hash Indexes**
+  - CREATE H-INDEX (single field only)
+  - Exact match optimization
+  - Unique constraint enforcement
+  - Fast equality lookups
 
-Both features are built with:
-- **PostgreSQL Algorithm Compatibility** - Following industry-standard approaches
-- **Performance Optimization** - Multiple execution strategies based on data characteristics
-- **Memory Management** - Efficient handling of large datasets
-- **Error Handling** - Comprehensive validation and error reporting
-- **Test Coverage** - Extensive test suites for reliability
+- **Index Management**
+  - Automatic index selection by query planner
+  - Batched index updates for performance
+  - Index rebuild capability
+  - Index cost estimation
 
-These advanced features make SyndrDB suitable for analytical workloads and complex data processing scenarios while maintaining the flexibility of document-based storage.
+### Relationships
+- **Relationship Types**
+  - 1-to-Many
+  - 0-to-Many
+  - 1-to-1 (partially implemented)
+  - Many-to-Many (partially implemented)
+
+- **Relationship Operations**
+  - ADD RELATIONSHIP via UPDATE BUNDLE
+  - Foreign key tracking
+  - Relationship-aware query execution
+  - Hierarchical result formatting (WITH RELATIONSHIP)
+
+### Transaction & Durability
+- **Write-Ahead Logging (WAL)**
+  - Synchronous WAL mode
+  - Asynchronous WAL mode (with async writer)
+  - Binary log format
+  - LSN (Log Sequence Number) tracking
+  - WAL replay for recovery
+
+- **ACID Compliance**
+  - Atomicity through WAL
+  - Consistency through validation
+  - Isolation (partially implemented)
+  - Durability through WAL and fsync
+
+- **Transaction Management**
+  - Transaction tracking per session
+  - BEGIN/COMMIT semantics (via migrations)
+  - Rollback support (via migration rollback)
+
+### Migration System
+- **Version Control**
+  - START MIGRATION ... COMMIT (create versioned migration)
+  - Migration description and metadata
+  - Automatic version numbering
+  - Migration command batching
+
+- **Migration Application**
+  - APPLY MIGRATION WITH VERSION
+  - FORCE option for risky migrations
+  - Migration validation before apply
+  - Checksum verification
+
+- **Rollback Support**
+  - APPLY ROLLBACK TO VERSION
+  - Automatic down-migration generation
+  - Rollback validation
+  - Point-in-time recovery
+
+- **Migration Tracking**
+  - SHOW MIGRATIONS FOR database
+  - Migration status tracking
+  - Validation reports
+  - Migration history
+
+### Backup & Restore
+- **Backup Operations**
+  - BACKUP DATABASE command
+  - Multiple compression formats: gzip, zstd, none
+  - Include/exclude indexes option
+  - Manifest generation with metadata
+  - Checkpoint before backup
+
+- **Restore Operations**
+  - RESTORE DATABASE FROM backup
+  - Automatic database creation
+  - Index restoration
+  - Metadata validation
+  - Version compatibility checking
+
+### Authentication & Authorization (RBAC)
+- **User Management**
+  - CREATE USER with password
+  - Argon2id password hashing
+  - User storage in Primary database
+  - Automatic "Data-Reader" role assignment
+
+- **Permission System**
+  - GRANT permission TO USER
+  - Role-based access control
+  - Permission validation on commands
+  - User-Permission junction tables
+
+- **Role Management**
+  - GRANT ROLE TO USER
+  - Pre-defined roles (Data-Reader, etc.)
+  - Role-Permission mapping
+  - User-Role assignments
+
+### Security Features
+- **Authentication Security**
+  - Argon2id password hashing with salt
+  - Configurable hash parameters
+  - Constant-time password comparison
+  - Session-based authentication
+
+- **Rate Limiting**
+  - Per-IP connection rate limiting
+  - Per-user authentication rate limiting
+  - Progressive delay on failed attempts
+  - Account lockout after threshold
+  - Automatic unlock after time period
+
+- **Session Management**
+  - Session creation and tracking
+  - Session expiration
+  - Session activity updates
+  - Connection fingerprinting
+  - Session hijack detection
+  - Active query tracking per session
+
+- **Security Auditing**
+  - Security event logging
+  - Authentication event tracking
+  - Rate limit violation logging
+  - Session event tracking
+  - Audit trail with rotation
+
+- **Database Locking**
+  - LOCK DATABASE command
+  - UNLOCK DATABASE command
+  - Lock reasons and comments
+  - Prevent writes during maintenance
+
+### GraphQL Interface
+- **Query Support**
+  - Dynamic schema generation from bundles
+  - All CRUD operations via GraphQL
+  - Introspection queries (__schema, __type)
+  - Field selection and filtering
+  - Variable support
+
+- **Pagination**
+  - Legacy pagination (limit/offset)
+  - Relay-style cursor pagination
+  - Connection/Edge/PageInfo pattern
+  - Forward pagination (first/after)
+  - Backward pagination (last/before)
+
+- **Mutations**
+  - createDatabase
+  - createBundle
+  - create<Bundle> (dynamic per bundle)
+  - update<Bundle> (dynamic per bundle)
+  - delete<Bundle> (dynamic per bundle)
+  - Input validation
+
+- **Advanced Features**
+  - DataLoader for N+1 query elimination
+  - Batched relationship loading
+  - Structured filtering (WhereInput)
+  - Deep relationship queries
+  - Native integration with SyndrQL execution path
+
+### Storage & Performance
+- **Storage Format**
+  - Postgres-inspired file format
+  - Bundle files (.bnd)
+  - Separate document files
+  - Binary serialization
+  - Page-based storage
+
+- **Query Planning & Execution**
+  - Cost-based query optimizer
+  - Index selection algorithm
+  - Execution plan generation
+  - Full scan vs index scan decisions
+  - JOIN execution strategies
+
+- **Caching & Buffering**
+  - Document scanner caching
+  - Index page caching
+  - Configurable cache sizes
+  - LRU eviction (partially implemented)
+
+- **Async Operations**
+  - Async WAL writer with ordered queue
+  - Worker pool for parallel operations
+  - Sequence generator for ordering
+  - Consistent reader for async reads
+  - Batched index updates
+
+### SyndrQL Parser
+- **New Unified Parser**
+  - Tokenizer with comprehensive token types
+  - Recursive descent parser
+  - Expression AST (Abstract Syntax Tree)
+  - Pattern detection for hot-path optimization
+  - Fast path for common queries
+
+- **Parser Components**
+  - SELECT parser with full feature support
+  - INSERT parser (ADD DOCUMENT)
+  - UPDATE parser with WHERE clauses
+  - DELETE parser with WHERE clauses
+  - CREATE BUNDLE parser
+  - UPDATE BUNDLE parser
+  - DROP BUNDLE parser
+  - CREATE USER parser
+  - GRANT parser (permissions and roles)
+  - Migration parser (placeholder)
+
+- **Expression Support**
+  - Binary expressions (AND, OR, +, -, *, /, ==, !=, >, <, >=, <=)
+  - Unary expressions (NOT, -)
+  - Function calls (COUNT, SUM, AVG, MIN, MAX)
+  - Identifier expressions
+  - Literal expressions (string, int, float, bool)
+  - Parenthesized expressions
+
+- **Adapter Layer**
+  - Converts new parser AST to legacy query structures
+  - SelectStatement to UnifiedSelectQuery
+  - Expression to WhereGroup conversion
+  - Maintains backward compatibility
+  - Feature flag support for gradual migration
+
+### System Features
+- **Command Line Interface**
+  - TCP socket server (port 1776)
+  - Native protocol (SyndrQL commands)
+  - Authentication handshake
+  - Session management
+  - Multi-database support
+
+- **Configuration**
+  - Command-line flags for all options
+  - Configurable data directory
+  - Configurable log directory
+  - Debug mode
+  - Verbose logging
+  - WAL mode selection (sync/async)
+  - Authentication enable/disable
+
+- **Logging**
+  - Structured logging with Zap
+  - Per-session query logging
+  - Server event logging
+  - WAL operation logging
+  - Security audit logging
+  - Log file rotation
+
+- **System Management**
+  - CHECKPOINT command (flush all data)
+  - SHOW SESSIONS (active session listing)
+  - SHOW RATE LIMIT (rate limit statistics)
+  - Graceful shutdown
+  - Connection tracking
+
+### Data Validation
+- **Field Validation**
+  - Type checking (STRING, INT, FLOAT, BOOL)
+  - Required field enforcement
+  - Unique constraint checking
+  - Default value assignment
+  - Foreign key validation (via relationships)
+
+- **Command Validation**
+  - Syntax validation
+  - Semantic validation
+  - Permission validation
+  - Migration validation
+  - Checksum verification for migrations
+
+### Error Handling
+- **Comprehensive Error Types**
+  - Syntax errors with line/column info
+  - Validation errors with field details
+  - Authentication errors
+  - Rate limit errors with retry info
+  - User lockout errors with unlock time
+  - Migration conflict errors
+
+- **Error Reporting**
+  - Structured error messages
+  - Debug mode for verbose errors
+  - User-friendly error messages in production
+  - GraphQL-compliant error format
+
+### Testing Infrastructure
+- **Test Coverage**
+  - Unit tests for parsers
+  - Integration tests for queries
+  - End-to-end SELECT tests
+  - JOIN operation tests
+  - Migration validation tests
+  - Performance benchmarks
+
+### Features Partially Implemented
+- **Transaction isolation levels** - basic transaction tracking exists
+- **Stored procedures** - framework exists but not exposed
+- **Triggers** - not implemented
+- **Views** - documentation exists but not implemented
+- **Full-text search** - documentation exists but not implemented
+- **Pub/Sub** - documentation exists but not implemented
+- **DATETIME field type** - planned but not implemented
+- **Cluster mode** - flag exists but not implemented
+- **Custom mutations in GraphQL** - registry placeholder exists
+- **Complete cursor pagination** - Relay pattern supported but cursors not fully encoded/decoded
