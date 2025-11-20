@@ -83,6 +83,8 @@ type FilterNode struct {
 	Logger          *zap.SugaredLogger
 	// DOCUMENT SCANNER INTEGRATION: Add document scanner for paginated operations
 	DocumentScanner documentscanner.DocumentScannerInterface
+	// PRIORITY 4: Query cache for expression caching and predicate reordering
+	QueryCache *QueryCache
 }
 
 // FilterCondition represents a single filter condition

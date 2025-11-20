@@ -30,6 +30,7 @@ import (
 	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -45,6 +46,9 @@ type QueryRouter struct {
 
 	// bundleService for bundle metadata access
 	bundleService BundleServiceInterface
+
+	// queryCache for expression caching and predicate reordering (Priority 4)
+	queryCache *QueryCache
 
 	// logger for debugging
 	logger *zap.SugaredLogger
@@ -67,10 +71,15 @@ func NewQueryRouter(
 	bundleService BundleServiceInterface,
 	logger *zap.SugaredLogger,
 ) *QueryRouter {
+	// Initialize QueryCache with configured size
+	args := settings.GetSettings()
+	queryCache := NewQueryCache(args.WhereExpressionCacheSize, logger)
+
 	return &QueryRouter{
 		basePlanner:   basePlanner,
 		joinPlanner:   joinPlanner,
 		bundleService: bundleService,
+		queryCache:    queryCache,
 		logger:        logger,
 	}
 }
@@ -243,6 +252,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 			Cost:            scanNode.GetCost(),
 			EstimatedRows:   scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
 			Logger:          qr.logger,
+			QueryCache:      qr.queryCache, // Priority 4: Enable expression caching
 		}
 
 		rootNode = filterNode
@@ -339,6 +349,7 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 		EstimatedRows:   int(bundle.TotalDocuments) / 2,                          // Assume 50% selectivity
 		Logger:          qr.logger,
 		DocumentScanner: docScanner,
+		QueryCache:      qr.queryCache, // Priority 4: Enable expression caching
 	}
 
 	return filterNode, []string{}, nil

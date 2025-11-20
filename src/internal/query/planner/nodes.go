@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/settings"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	// Import your B-tree index package when ready
@@ -434,7 +435,62 @@ func (node *FilterNode) Execute() (map[string]*models.Document, error) {
 		return nil, err
 	}
 
-	// Apply filters
+	// Get settings for optimization configuration
+	args := settings.GetSettings()
+
+	// PRIORITY 4: Expression caching and predicate reordering (applied before evaluation)
+	var optimizedExpr syndrQL.Expression
+	if args.WhereExpressionCacheEnabled && node.QueryCache != nil && node.WhereExpression != nil {
+		if expr, ok := node.WhereExpression.(syndrQL.Expression); ok {
+			// Get or compile expression with predicate reordering
+			compiled, err := node.QueryCache.GetOrCompileExpression(expr)
+			if err != nil {
+				node.Logger.Warnf("Query cache compilation failed, using original expression: %v", err)
+				optimizedExpr = expr
+			} else {
+				optimizedExpr = compiled.AST
+				if compiled.Optimized {
+					node.Logger.Debugf("Using reordered predicates (selectivity: %.4f, fields: %v)",
+						compiled.Selectivity, compiled.FieldRefs)
+				}
+			}
+			// Temporarily replace WhereExpression with optimized version
+			node.WhereExpression = optimizedExpr
+		}
+	}
+
+	// PRIORITY 2: Bloom filter pre-filtering for multi-condition AND queries (cheapest, run first)
+	if args.WhereBloomEnabled && len(documents) >= args.WhereBloomMinDocuments && node.WhereExpression != nil {
+		// Create Bloom optimizer
+		bloomOpt := NewWhereBloomOptimizer(args.WhereBloomMinDocuments, 0.01, node.Logger)
+
+		// Check if this query benefits from Bloom pre-filtering
+		if bloomOpt.ShouldUseBloom(len(documents), node.WhereExpression) {
+			// Build Bloom filter for most selective condition
+			bloom, selectivePred, err := bloomOpt.BuildBloomForMostSelective(
+				documents,
+				node.WhereExpression,
+				node.BundleContext,
+			)
+
+			if err == nil && bloom != nil {
+				// Pre-filter documents using Bloom filter
+				originalCount := len(documents)
+				documents = bloomOpt.PrefilterWithBloom(documents, bloom)
+
+				node.Logger.Debugf("Bloom filter pre-filter: %d → %d documents (%.1f%% reduction) on condition: %s %s %v",
+					originalCount,
+					len(documents),
+					(1.0-float64(len(documents))/float64(originalCount))*100,
+					selectivePred.FieldName,
+					selectivePred.Operator,
+					selectivePred.Value,
+				)
+			}
+		}
+	}
+
+	// Apply full WHERE expression to remaining documents (post-optimization or all if skipped)
 	filtered := make(map[string]*models.Document)
 	for docID, doc := range documents {
 		if node.matchesConditions(doc) {
@@ -469,8 +525,9 @@ func (node *FilterNode) matchesConditions(doc *models.Document) bool {
 		}
 	}
 
-	// Create evaluator with logger and evaluate the expression
-	evaluator := syndrQL.NewExpressionEvaluator(node.Logger)
+	// NEW: Create evaluator with SIMD configuration from settings (Phase 1 WHERE optimization)
+	args := settings.GetSettings()
+	evaluator := syndrQL.NewExpressionEvaluatorWithSIMD(node.Logger, args.WhereSIMDEnabled)
 	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx)
 	if err != nil {
 		node.Logger.Errorf("Expression evaluation failed: %v", err)

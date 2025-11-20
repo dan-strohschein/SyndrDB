@@ -104,6 +104,22 @@ type Arguments struct {
 	JoinSIMDEnabled    bool // Enable SIMD acceleration for JOIN operations (default: auto-detect)
 	JoinSIMDAutoDetect bool // Auto-detect CPU SIMD support (default: true)
 
+	// WHERE SIMD Configuration
+	WhereSIMDEnabled    bool // Enable SIMD acceleration for WHERE clause comparisons (default: true)
+	WhereSIMDAutoDetect bool // Auto-detect CPU SIMD support for WHERE clauses (default: true)
+
+	// WHERE Bloom Filter Configuration
+	WhereBloomEnabled      bool // Enable Bloom filter pre-filtering for multi-condition WHERE clauses (default: true)
+	WhereBloomMinDocuments int  // Minimum document count to activate Bloom filtering (default: 500)
+
+	// WHERE Batch/Columnar SIMD Configuration (Priority 3)
+	WhereBatchSIMDEnabled bool // Enable batch/columnar SIMD processing for WHERE clauses (default: true)
+	WhereBatchMinSize     int  // Minimum document count for batch SIMD processing (default: 100)
+
+	// WHERE Expression Caching Configuration (Priority 4)
+	WhereExpressionCacheEnabled bool // Enable expression caching and predicate reordering (default: true)
+	WhereExpressionCacheSize    int  // LRU cache size for compiled expressions (default: 1000)
+
 	// Parallel Sort Configuration (Phase 5)
 	SortEnableParallel    bool // DEPRECATED: Use SortParallelEnabled instead
 	SortParallelThreshold int  // DEPRECATED: Use SortParallelMinSize instead
@@ -180,20 +196,40 @@ func GetSettings() *Arguments {
 			UseNewParser: true, // Use new parser by default
 
 			// PHASE 4 SORTING OPTIMIZATION DEFAULTS
-			SortTopNThreshold:       0.1,   // Top-N when LIMIT < 10% of dataset
-			SortTopNMinSize:         100,   // Minimum 100 docs for Top-N
-			SortHeapInitialCapacity: 1000,  // Pre-allocate heap for 1000 items
-			SortRadixMinSize:        1000,  // Minimum 1000 docs for radix
-			SortRadixLimitRatio:     0.5,   // Radix when LIMIT >= 50% of data
-			SortRadixMaxPasses:      8,     // Support up to 64-bit integers
-			SortSIMDEnabled:         true,  // Enable SIMD string optimization
-			SortSIMDAbbrevBytes:     8,     // 8-byte abbreviated keys
-			SortSIMDMinSize:         100,   // SIMD for datasets >= 100 docs
-			SortEnableParallel:      false, // DEPRECATED: use SortParallelEnabled
-			SortParallelThreshold:   10000, // DEPRECATED: use SortParallelMinSize
-			SortParallelEnabled:     true,  // Phase 5: Enable parallel sorting
-			SortParallelMinSize:     10000, // Phase 5: 10k+ docs for parallel sort
-			SortMaxMemoryMB:         512,   // 512MB memory limit
+			SortTopNThreshold:       0.1,  // Top-N when LIMIT < 10% of dataset
+			SortTopNMinSize:         100,  // Minimum 100 docs for Top-N
+			SortHeapInitialCapacity: 1000, // Pre-allocate heap for 1000 items
+			SortRadixMinSize:        1000, // Minimum 1000 docs for radix
+			SortRadixLimitRatio:     0.5,  // Radix when LIMIT >= 50% of data
+			SortRadixMaxPasses:      8,    // Support up to 64-bit integers
+			SortSIMDEnabled:         true, // Enable SIMD string optimization
+			SortSIMDAbbrevBytes:     8,    // 8-byte abbreviated keys
+			SortSIMDMinSize:         100,  // SIMD for datasets >= 100 docs
+
+			// JOIN SIMD Configuration
+			JoinSIMDEnabled:    true, // Enable SIMD for JOIN operations
+			JoinSIMDAutoDetect: true, // Auto-detect CPU capabilities
+
+			// WHERE SIMD Configuration
+			WhereSIMDEnabled:    true, // Enable SIMD for WHERE comparisons
+			WhereSIMDAutoDetect: true, // Auto-detect CPU capabilities
+
+			// WHERE Bloom Filter Configuration
+			WhereBloomEnabled:      true, // Enable Bloom pre-filtering
+			WhereBloomMinDocuments: 500,  // Activate Bloom for 500+ documents
+
+			// WHERE Batch/Columnar SIMD Configuration
+			WhereBatchSIMDEnabled: true, // Enable batch SIMD for WHERE clauses
+			WhereBatchMinSize:     100,  // Activate batch SIMD for 100+ documents
+
+			// WHERE Expression Caching Configuration (Priority 4)
+			WhereExpressionCacheEnabled: true,  // Enable expression caching and predicate reordering
+			WhereExpressionCacheSize:    1000,  // Cache 1000 compiled expressions
+			SortEnableParallel:          false, // DEPRECATED: use SortParallelEnabled
+			SortParallelThreshold:       10000, // DEPRECATED: use SortParallelMinSize
+			SortParallelEnabled:         true,  // Phase 5: Enable parallel sorting
+			SortParallelMinSize:         10000, // Phase 5: 10k+ docs for parallel sort
+			SortMaxMemoryMB:             512,   // 512MB memory limit
 
 			// Backup & Restore Defaults
 			BackupDir:            "./backups", // Default backup directory

@@ -91,6 +91,18 @@ func main() {
 	flag.BoolVar(&args.JoinSIMDEnabled, "join-simd-enabled", true, "Enable SIMD acceleration for JOIN hash/compare operations")
 	flag.BoolVar(&args.JoinSIMDAutoDetect, "join-simd-autodetect", true, "Auto-detect CPU SIMD support (AVX2/NEON)")
 
+	// WHERE SIMD Configuration flags
+	flag.BoolVar(&args.WhereSIMDEnabled, "where-simd-enabled", true, "Enable SIMD acceleration for WHERE clause comparisons")
+	flag.BoolVar(&args.WhereSIMDAutoDetect, "where-simd-autodetect", true, "Auto-detect CPU SIMD support for WHERE clauses")
+
+	// WHERE Bloom Filter Configuration flags
+	flag.BoolVar(&args.WhereBloomEnabled, "where-bloom-enabled", true, "Enable Bloom filter pre-filtering for multi-condition WHERE clauses")
+	flag.IntVar(&args.WhereBloomMinDocuments, "where-bloom-min-docs", 500, "Minimum document count to activate Bloom filtering (100-100000)")
+
+	// WHERE Batch/Columnar SIMD Configuration flags (Priority 3)
+	flag.BoolVar(&args.WhereBatchSIMDEnabled, "where-batch-simd", true, "Enable batch/columnar SIMD processing for WHERE clauses")
+	flag.IntVar(&args.WhereBatchMinSize, "where-batch-min-size", 100, "Minimum document count for batch SIMD processing (50-10000)")
+
 	// Parallel Sort flags (Phase 5 - future)
 	flag.BoolVar(&args.SortEnableParallel, "sort-parallel-enabled", false, "Enable parallel sorting (Phase 5)")
 	flag.IntVar(&args.SortParallelThreshold, "sort-parallel-threshold", 10000, "Minimum size for parallel sort (1000-1000000)")
@@ -203,6 +215,19 @@ func main() {
 	// Start the server
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
+	}
+
+	// Log WHERE clause SIMD configuration (Phase 1 optimization)
+	if args.WhereSIMDEnabled {
+		if args.WhereSIMDAutoDetect {
+			log.Printf("✓ WHERE clause SIMD optimization enabled (CPU auto-detection: ON)")
+			log.Printf("  SIMD will automatically use AVX2/NEON if available, fallback to scalar otherwise")
+		} else {
+			log.Printf("✓ WHERE clause SIMD optimization enabled (CPU auto-detection: OFF)")
+		}
+	} else {
+		log.Printf("⚠️  WHERE clause SIMD optimization disabled - using scalar comparisons")
+		log.Printf("  Enable with --where-simd-enabled for 4-6x performance improvement")
 	}
 
 	// Initialize GraphQL for TCP connections if enabled

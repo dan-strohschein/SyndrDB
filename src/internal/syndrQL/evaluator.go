@@ -63,13 +63,25 @@ func NewBundleContext(bundles map[string]*models.Bundle, primaryBundle string, j
 
 // ExpressionEvaluator evaluates Expression AST nodes against document data
 type ExpressionEvaluator struct {
-	logger *zap.SugaredLogger
+	logger  *zap.SugaredLogger
+	useSIMD bool // Enable SIMD acceleration for string comparisons
 }
 
-// NewExpressionEvaluator creates a new expression evaluator
+// NewExpressionEvaluator creates a new expression evaluator with SIMD disabled
+// This maintains backward compatibility for existing code
 func NewExpressionEvaluator(logger *zap.SugaredLogger) *ExpressionEvaluator {
 	return &ExpressionEvaluator{
-		logger: logger,
+		logger:  logger,
+		useSIMD: false,
+	}
+}
+
+// NewExpressionEvaluatorWithSIMD creates a new expression evaluator with SIMD configuration
+// useSIMD: Enable SIMD-accelerated string comparisons (recommended: true)
+func NewExpressionEvaluatorWithSIMD(logger *zap.SugaredLogger, useSIMD bool) *ExpressionEvaluator {
+	return &ExpressionEvaluator{
+		logger:  logger,
+		useSIMD: useSIMD,
 	}
 }
 
@@ -387,7 +399,8 @@ func (e *ExpressionEvaluator) evaluateArray(expr *ArrayExpression, doc *models.D
 }
 
 // compareValues compares two values using the provided comparison function
-// This is the same logic as the existing filter_parser.go compareValues function
+// Supports SIMD-accelerated comparisons when e.useSIMD is true
+// This function integrates Phase 1 SIMD optimization for WHERE clause performance
 func (e *ExpressionEvaluator) compareValues(a, b interface{}, compare func(float64, float64) bool) (bool, error) {
 	// Handle NULL comparisons using SyndrDB's magic value
 	aStr, aIsString := a.(string)
@@ -408,6 +421,20 @@ func (e *ExpressionEvaluator) compareValues(a, b interface{}, compare func(float
 		return false, nil
 	}
 
+	// NEW: SIMD-accelerated comparison path (Phase 1 optimization)
+	if e.useSIMD {
+		// Infer operator from comparison function by testing with sample values
+		operator := e.inferOperatorFromCompareFunc(compare)
+		result, err := queryparser.CompareFieldValuesSIMD(a, b, operator, true)
+		if err == nil {
+			return result, nil
+		}
+		// On error, fall through to scalar path
+		// This handles mixed types and unsupported operations gracefully
+		e.logger.Debugf("SIMD comparison failed, using scalar fallback: %v", err)
+	}
+
+	// FALLBACK: Scalar comparison path (existing logic)
 	// Try string comparison first (most common case)
 	if aIsString && bIsString {
 		// For string comparisons, use lexicographical ordering
@@ -450,6 +477,39 @@ func (e *ExpressionEvaluator) compareValues(a, b interface{}, compare func(float
 	// If we can't compare, return false
 	e.logger.Debugf("Cannot compare values of types %T and %T", a, b)
 	return false, nil
+}
+
+// inferOperatorFromCompareFunc infers the comparison operator from a comparison function
+// by testing it with sample values. This is necessary because the comparison is passed as a lambda.
+//
+// Parameters:
+//   - compare: Comparison function that takes two float64 values
+//
+// Returns:
+//   - string: Operator string (==, !=, <, >, <=, >=)
+//
+// TODO: I could optimize this by caching operator inference results for repeated comparisons
+func (e *ExpressionEvaluator) inferOperatorFromCompareFunc(compare func(float64, float64) bool) string {
+	// Test with sample values to determine the operator
+	// This is a heuristic approach since we receive a lambda function
+	switch {
+	case compare(0, 0) && !compare(1, 0) && !compare(0, 1):
+		return "==" // Equality: 0==0 is true, 1==0 is false, 0==1 is false
+	case !compare(0, 0) && compare(1, 0) && !compare(0, 1):
+		return ">" // Greater than: 0>0 is false, 1>0 is true, 0>1 is false
+	case !compare(0, 0) && !compare(1, 0) && compare(0, 1):
+		return "<" // Less than: 0<0 is false, 1<0 is false, 0<1 is true
+	case compare(0, 0) && compare(1, 0) && !compare(0, 1):
+		return ">=" // Greater than or equal: 0>=0 is true, 1>=0 is true, 0>=1 is false
+	case compare(0, 0) && !compare(1, 0) && compare(0, 1):
+		return "<=" // Less than or equal: 0<=0 is true, 1<=0 is false, 0<=1 is true
+	case !compare(0, 0):
+		return "!=" // Not equal: 0!=0 is false
+	default:
+		// Default to equality if we can't determine
+		e.logger.Debugf("Could not infer operator from comparison function, defaulting to ==")
+		return "=="
+	}
 }
 
 // arithmeticOp performs arithmetic operations on two values

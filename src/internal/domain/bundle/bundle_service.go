@@ -3228,6 +3228,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 
 	// Create configuration for the new BTree index
 	config := btreeindexV2.IndexConfig{
+		DatabaseName: bundle.Database.Name,
 		BundleName:   bundle.Name,
 		FieldName:    fieldDef.Name,
 		IsUnique:     fieldDef.IsUnique,
