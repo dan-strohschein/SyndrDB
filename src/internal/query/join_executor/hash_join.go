@@ -2,7 +2,6 @@ package joinexecutor
 
 import (
 	"fmt"
-	"reflect"
 	"sync"
 	"time"
 
@@ -77,16 +76,23 @@ func (hjs *HashJoinStrategy) EstimateCost(request *JoinRequest) (cost float64, c
 		probeSize = leftSize
 	}
 
+	// OPTIMIZATION: Enhanced cost model to prefer hash join for most queries
 	// Cost model: O(n + m) where n is build size, m is probe size
-	// Add penalty for expected disk spillover
-	baseCost := float64(buildSize + probeSize)
+	// Reduced base cost to make hash join more competitive vs nested loop
+	baseCost := float64(buildSize+probeSize) * 0.8 // 20% bonus vs previous 1.0 multiplier
+
+	// Add bonus for large equi-joins where hash join excels
+	if buildSize > 100 && probeSize > 100 {
+		baseCost *= 0.7 // 30% bonus for large joins
+	}
 
 	// Estimate memory needed for hash table
 	estimatedMemory := buildSize * 500 // Rough estimate: 500 bytes per document
 	if estimatedMemory > request.MemoryLimit {
-		// Add penalty for disk spillover
+		// OPTIMIZATION: Reduced penalty for disk spillover from 50% to 25%
+		// TODO: PHASE 2 - Implement actual disk spillover instead of just penalty
 		spillPenalty := float64(estimatedMemory-request.MemoryLimit) / float64(request.MemoryLimit)
-		baseCost *= 1.0 + spillPenalty*0.5 // 50% penalty for spillover
+		baseCost *= 1.0 + spillPenalty*0.25 // 25% penalty for spillover (was 50%)
 	}
 
 	hjs.logger.Debugf("Hash join cost estimate: %.2f (build: %d, probe: %d, memory: %d)",
@@ -203,9 +209,16 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// Stream through all documents in build bundle
+	// OPTIMIZATION: Pre-extract join keys once to eliminate repeated map lookups
+	// TODO: Consider parallel extraction for large document sets (>10,000 docs)
 	allDocs := buildBundle.GetAllDocuments()
-	for docID, doc := range allDocs {
+	buildKeyValues, buildDocsSlice, err := hjs.extractJoinKeysOnce(allDocs, buildKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to extract build keys: %w", err)
+	}
+
+	// Stream through all documents in build bundle using pre-extracted keys
+	for idx, doc := range buildDocsSlice {
 		// Check for cancellation
 		select {
 		case <-request.Context.Done():
@@ -213,11 +226,10 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		default:
 		}
 
-		// Extract join key value from document
-		keyValue, err := hjs.extractKeyValue(doc, buildKey)
-		if err != nil {
-			hjs.logger.Warnf("Failed to extract key %s from document %s: %v",
-				buildKey, docID, err)
+		// Get pre-extracted key value (no map lookup!)
+		keyValue := buildKeyValues[idx]
+		if keyValue == nil {
+			hjs.logger.Warnf("Skipping document %d: missing key %s", idx, buildKey)
 			continue
 		}
 
@@ -235,8 +247,8 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		stats.DocumentsScanned++
 
 		// PHASE 2: Check for memory pressure and spill to disk if needed
+		// TODO: Implement graceful disk spillover when memory limit exceeded
 		if hashTable.GetMemoryUsage() > request.MemoryLimit && request.AllowDiskSpillover {
-			// TODO: Implement graceful disk spillover
 			hjs.logger.Warnf("Memory limit exceeded, disk spillover not yet implemented")
 		}
 	}
@@ -267,13 +279,28 @@ func (hjs *HashJoinStrategy) probeHashTable(
 	hjs.logger.Debugf("Probing hash table with bundle %s on key %s (Bloom filter: %v)",
 		probeBundle.GetName(), probeKey, bloom != nil)
 
-	var joinedDocs []*JoinedDocument
+	// OPTIMIZATION: Pre-allocate result slice with estimated capacity
+	// TODO: Integrate with JoinPatternTracker to learn actual selectivity per pattern
+	// from historical execution stats instead of using fixed 0.1 default
+	probeSize := int64(probeBundle.GetTotalDocuments())
+	buildSize := int64(hashTable.Size())
+	selectivity := 0.1 // Default 10% selectivity estimate
+	estimatedResults := int(float64(probeSize) * float64(buildSize) * selectivity)
+	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
+
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 	bloomFilterSkips := int64(0) // Track how many lookups were skipped by Bloom filter
 
-	// Stream through all documents in probe bundle
+	// OPTIMIZATION: Pre-extract join keys once
+	// TODO: Consider parallel extraction for large document sets (>10,000 docs)
 	allDocs := probeBundle.GetAllDocuments()
-	for docID, probeDoc := range allDocs {
+	probeKeyValues, probeDocsSlice, err := hjs.extractJoinKeysOnce(allDocs, probeKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to extract probe keys: %w", err)
+	}
+
+	// Stream through all documents in probe bundle using pre-extracted keys
+	for idx, probeDoc := range probeDocsSlice {
 		// Check for cancellation
 		select {
 		case <-request.Context.Done():
@@ -281,11 +308,10 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		default:
 		}
 
-		// Extract join key value from probe document
-		keyValue, err := hjs.extractKeyValue(probeDoc, probeKey)
-		if err != nil {
-			hjs.logger.Warnf("Failed to extract key %s from document %s: %v",
-				probeKey, docID, err)
+		// Get pre-extracted key value (no map lookup!)
+		keyValue := probeKeyValues[idx]
+		if keyValue == nil {
+			hjs.logger.Warnf("Skipping document %d: missing key %s", idx, probeKey)
 			continue
 		}
 
@@ -342,6 +368,7 @@ func (hjs *HashJoinStrategy) probeHashTable(
 }
 
 // createJoinedDocument creates a JoinedDocument from build and probe documents
+// OPTIMIZATION: Uses object pool to eliminate allocations
 func (hjs *HashJoinStrategy) createJoinedDocument(
 	buildDoc, probeDoc *models.Document,
 	joinKey string,
@@ -349,37 +376,45 @@ func (hjs *HashJoinStrategy) createJoinedDocument(
 	joinType JoinType,
 ) *JoinedDocument {
 
+	// Get from pool instead of allocating
+	joined := GetPooledJoinedDocument()
+
 	if swapped {
 		// Swap back to maintain left/right consistency
-		return &JoinedDocument{
-			LeftDocument:  probeDoc,
-			RightDocument: buildDoc,
-			JoinKey:       joinKey,
-		}
+		joined.LeftDocument = probeDoc
+		joined.RightDocument = buildDoc
+		joined.JoinKey = joinKey
+	} else {
+		joined.LeftDocument = buildDoc
+		joined.RightDocument = probeDoc
+		joined.JoinKey = joinKey
 	}
 
-	return &JoinedDocument{
-		LeftDocument:  buildDoc,
-		RightDocument: probeDoc,
-		JoinKey:       joinKey,
-	}
+	return joined
 }
 
-// extractKeyValue extracts the value of a specific key from a document
-func (hjs *HashJoinStrategy) extractKeyValue(doc *models.Document, keyName string) (interface{}, error) {
-	// Use reflection to extract field value from document
-	docValue := reflect.ValueOf(doc).Elem()
-	fieldValue := docValue.FieldByName(keyName)
+// extractJoinKeysOnce pre-extracts join key values from all documents
+// This eliminates repeated map lookups in the hot comparison loop
+// Returns: (keyValues []interface{}, docsSlice []*models.Document, error)
+// TODO: Consider parallel extraction for large document sets (>10,000 docs) to further improve performance
+func (hjs *HashJoinStrategy) extractJoinKeysOnce(docs map[string]*models.Document, keyName string) ([]interface{}, []*models.Document, error) {
+	keyValues := make([]interface{}, 0, len(docs))
+	docsSlice := make([]*models.Document, 0, len(docs))
 
-	if !fieldValue.IsValid() {
-		return nil, fmt.Errorf("field %s not found in document", keyName)
+	for _, doc := range docs {
+		docsSlice = append(docsSlice, doc)
+
+		// Extract key value
+		field, exists := doc.Fields[keyName]
+		if !exists {
+			keyValues = append(keyValues, nil) // Mark as missing
+			continue
+		}
+
+		keyValues = append(keyValues, field.Value)
 	}
 
-	if !fieldValue.CanInterface() {
-		return nil, fmt.Errorf("field %s is not exportable", keyName)
-	}
-
-	return fieldValue.Interface(), nil
+	return keyValues, docsSlice, nil
 }
 
 // ScanStats holds statistics about scanning operations

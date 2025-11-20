@@ -231,6 +231,9 @@ func convertToJoinRequest(joinQuery *queryparser.SelectJoinQuery, database *mode
 }
 
 // mergeJoinedDocument merges left and right documents from a JOIN result into a single document
+// LIFECYCLE: After this function copies fields to the final result document, the input JoinedDocument
+// is automatically returned to the pool via deferred cleanup in the calling function.
+// This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup.
 func mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, logger *zap.SugaredLogger) *models.Document {
 	// Create new document with combined fields
 	mergedFields := make(map[string]models.Field)

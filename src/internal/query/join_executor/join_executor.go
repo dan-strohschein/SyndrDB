@@ -224,6 +224,23 @@ func (dje *DefaultJoinExecutor) selectBestStrategy(request *JoinRequest) (JoinSt
 	})
 
 	bestStrategy := candidates[0].strategy
+
+	// OPTIMIZATION: Bias toward hash join when costs are within 10% of each other
+	// Hash join typically has better scalability and memory characteristics
+	// TODO: Make this threshold configurable via JoinRequest for query-specific tuning
+	if len(candidates) > 1 {
+		for i := 1; i < len(candidates); i++ {
+			if candidates[i].strategy.GetName() == "HashJoin" {
+				costDiff := (candidates[i].cost - candidates[0].cost) / candidates[0].cost
+				if costDiff <= 0.10 { // Within 10%
+					bestStrategy = candidates[i].strategy
+					dje.logger.Debugf("Biasing toward HashJoin (cost diff: %.1f%%)", costDiff*100)
+					break
+				}
+			}
+		}
+	}
+
 	dje.logger.Debugf("Selected strategy %s with cost %.2f",
 		bestStrategy.GetName(), candidates[0].cost)
 

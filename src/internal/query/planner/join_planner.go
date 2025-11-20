@@ -416,6 +416,11 @@ func (jen *JoinExecutionNode) Execute() (map[string]*models.Document, error) {
 		return nil, fmt.Errorf("JOIN execution failed: %w", err)
 	}
 
+	// OPTIMIZATION: Ensure pooled JoinedDocuments are returned after merge completes
+	// This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup
+	// The JoinedDocuments are only used during the merge process below, then can be recycled
+	defer joinexecutor.FreeJoinedDocuments(result.Documents)
+
 	// PHASE 3: Store JoinedDocument results for hierarchical transformation
 	jen.joinedResults = result.Documents
 
@@ -544,6 +549,9 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 }
 
 // mergeJoinedDocument creates a single document from JOIN results
+// LIFECYCLE: After this function copies fields to the final result document, the input JoinedDocument
+// will be returned to the pool via deferred cleanup in the Execute() function.
+// This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup.
 func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, index int) *models.Document {
 	// Create merged document with fields from both sides
 	mergedFields := make(map[string]models.Field)

@@ -1,4 +1,31 @@
 /*
+⚠️ DEPRECATED: JOIN EXECUTION NODES - NOT USED IN PRODUCTION ⚠️
+
+This file contains legacy JOIN execution node implementations that are NOT actively used
+in the current SyndrDB execution engine. The active JOIN implementation is located in:
+
+	src/internal/query/join_executor/
+
+Actual execution flow:
+	1. Query parsing creates UnifiedSelectQuery
+	2. QueryRouter detects JOIN and routes to JoinQueryPlanner
+	3. JoinQueryPlanner creates JoinExecutionNode
+	4. JoinExecutionNode.Execute() calls DefaultJoinExecutor.Execute()
+	5. DefaultJoinExecutor selects strategy (HashJoin or NestedLoop)
+	6. Strategy executes and returns JoinResult
+
+This file is preserved for historical reference and potential future use. The implementations
+below (NestedLoopJoinNode, HashJoinNode, MergeJoinNode) are complete but unused.
+
+For active JOIN implementation, see:
+	- src/internal/query/join_executor/join_executor.go (coordinator)
+	- src/internal/query/join_executor/hash_join.go (primary strategy)
+	- src/internal/query/join_executor/nested_loop_join.go (fallback strategy)
+
+---
+
+ORIGINAL DOCUMENTATION (for reference):
+
 JOIN EXECUTION NODES SYSTEM
 
 This file implements the execution nodes for JOIN operations in SyndrDB's query planner.
