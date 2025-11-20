@@ -18,6 +18,7 @@ type DefaultJoinExecutor struct {
 	// Configuration
 	defaultMemoryLimit    int64 // Default memory limit for joins
 	enablePatternTracking bool  // Whether to track join patterns
+	useSIMD               bool  // Enable SIMD acceleration for hash/compare operations
 
 	// PHASE 2: Parallel execution coordination
 	// maxConcurrentJoins int           // Maximum concurrent joins
@@ -34,21 +35,23 @@ type DefaultJoinExecutor struct {
 // NewDefaultJoinExecutor creates a new join executor with default configuration
 // logger: Logger for debugging and monitoring
 // defaultMemoryLimit: Default memory limit for join operations (bytes)
-func NewDefaultJoinExecutor(logger *zap.SugaredLogger, defaultMemoryLimit int64) JoinExecutor {
+// useSIMD: Enable SIMD acceleration (AVX2/NEON) for hash/compare operations
+func NewDefaultJoinExecutor(logger *zap.SugaredLogger, defaultMemoryLimit int64, useSIMD bool) JoinExecutor {
 	executor := &DefaultJoinExecutor{
 		strategies:            make([]JoinStrategy, 0),
 		patternTracker:        NewJoinPatternTracker(logger, 5, 10), // Hot after 5, optimize after 10
 		logger:                logger,
 		defaultMemoryLimit:    defaultMemoryLimit,
 		enablePatternTracking: true,
+		useSIMD:               useSIMD,
 	}
 
-	// Register default strategies
-	executor.RegisterStrategy(NewHashJoinStrategy(logger, defaultMemoryLimit))
-	executor.RegisterStrategy(NewNestedLoopJoinStrategy(logger, 1000)) // Max 1000 docs in inner loop
+	// Register default strategies (pass SIMD flag to strategies)
+	executor.RegisterStrategy(NewHashJoinStrategy(logger, defaultMemoryLimit, useSIMD))
+	executor.RegisterStrategy(NewNestedLoopJoinStrategy(logger, 1000, useSIMD)) // Max 1000 docs in inner loop
 
-	logger.Infof("Created join executor with %d strategies, memory limit: %d bytes",
-		len(executor.strategies), defaultMemoryLimit)
+	logger.Infof("Created join executor with %d strategies, memory limit: %d bytes, SIMD: %v",
+		len(executor.strategies), defaultMemoryLimit, useSIMD)
 
 	return executor
 }
@@ -227,12 +230,14 @@ func (dje *DefaultJoinExecutor) selectBestStrategy(request *JoinRequest) (JoinSt
 
 	// OPTIMIZATION: Bias toward hash join when costs are within 10% of each other
 	// Hash join typically has better scalability and memory characteristics
+	// OPTIMIZATION: Increased bias threshold from 10%→25% to more aggressively prefer hash join
+	// Hash join's O(n+m) algorithmic advantage justifies higher tolerance vs nested loop O(n×m)
 	// TODO: Make this threshold configurable via JoinRequest for query-specific tuning
 	if len(candidates) > 1 {
 		for i := 1; i < len(candidates); i++ {
 			if candidates[i].strategy.GetName() == "HashJoin" {
 				costDiff := (candidates[i].cost - candidates[0].cost) / candidates[0].cost
-				if costDiff <= 0.10 { // Within 10%
+				if costDiff <= 0.25 { // Within 25% (was 10%)
 					bestStrategy = candidates[i].strategy
 					dje.logger.Debugf("Biasing toward HashJoin (cost diff: %.1f%%)", costDiff*100)
 					break

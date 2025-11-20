@@ -102,8 +102,10 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		return nil, fmt.Errorf("query validation failed: %w", err)
 	}
 
-	// NEW: Create JOIN executor with pattern tracking
-	joinExecutor := joinexecutor.NewDefaultJoinExecutor(jp.Logger, 64*1024*1024) // 64MB memory limit
+	// NEW: Create JOIN executor with pattern tracking and SIMD support
+	// TODO: Pass SIMD configuration from server settings instead of hardcoding true
+	useSIMD := true                                                                       // Enable SIMD acceleration by default (auto-detects AVX2/NEON support)
+	joinExecutor := joinexecutor.NewDefaultJoinExecutor(jp.Logger, 64*1024*1024, useSIMD) // 64MB memory limit
 
 	// Estimate execution cost based on bundle sizes
 	// NOTE: Use TotalDocuments metadata instead of Documents field (which is nil for paginated bundles)

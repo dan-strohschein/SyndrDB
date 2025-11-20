@@ -87,6 +87,10 @@ func main() {
 	flag.IntVar(&args.SortSIMDAbbrevBytes, "sort-simd-abbrevbytes", 8, "Bytes for abbreviated string keys (4-16)")
 	flag.IntVar(&args.SortSIMDMinSize, "sort-simd-minsize", 100, "Minimum dataset size for SIMD (10-10000)")
 
+	// JOIN SIMD Configuration flags
+	flag.BoolVar(&args.JoinSIMDEnabled, "join-simd-enabled", true, "Enable SIMD acceleration for JOIN hash/compare operations")
+	flag.BoolVar(&args.JoinSIMDAutoDetect, "join-simd-autodetect", true, "Auto-detect CPU SIMD support (AVX2/NEON)")
+
 	// Parallel Sort flags (Phase 5 - future)
 	flag.BoolVar(&args.SortEnableParallel, "sort-parallel-enabled", false, "Enable parallel sorting (Phase 5)")
 	flag.IntVar(&args.SortParallelThreshold, "sort-parallel-threshold", 10000, "Minimum size for parallel sort (1000-1000000)")

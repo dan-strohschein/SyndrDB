@@ -100,6 +100,10 @@ type Arguments struct {
 	SortSIMDAbbrevBytes int  // Bytes used for abbreviated string keys (default: 8)
 	SortSIMDMinSize     int  // Minimum dataset size for SIMD activation (default: 100)
 
+	// JOIN SIMD Configuration
+	JoinSIMDEnabled    bool // Enable SIMD acceleration for JOIN operations (default: auto-detect)
+	JoinSIMDAutoDetect bool // Auto-detect CPU SIMD support (default: true)
+
 	// Parallel Sort Configuration (Phase 5)
 	SortEnableParallel    bool // DEPRECATED: Use SortParallelEnabled instead
 	SortParallelThreshold int  // DEPRECATED: Use SortParallelMinSize instead

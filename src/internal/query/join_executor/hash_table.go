@@ -2,11 +2,12 @@ package joinexecutor
 
 import (
 	"fmt"
-	"hash/fnv"
 	"sync"
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/conversion"
+
+	syndrdbsimd "github.com/dan-strohschein/syndrdb-simd"
 )
 
 // InMemoryHashTable implements the HashTable interface using an in-memory hash table
@@ -190,19 +191,51 @@ func (ht *InMemoryHashTable) resize() {
 	ht.memoryUsed = oldMemoryUsed + int64((ht.capacity-oldCapacity)*64)
 }
 
-// hashKey computes the hash value for a key
+// hashKey computes the hash value for a key using SIMD-accelerated hashing when available
 func (ht *InMemoryHashTable) hashKey(key interface{}) uint64 {
-	hasher := fnv.New64a()
-
-	// Convert key to string for hashing
-	keyStr := conversion.ValueToString(key)
-	hasher.Write([]byte(keyStr))
-
-	return hasher.Sum64()
+	// Use SIMD-accelerated hashing for common types
+	switch v := key.(type) {
+	case string:
+		// SIMD XXHash for strings (UUIDs, etc.) - 4x faster than FNV
+		// XXHash64Bytes accepts []byte and returns uint64
+		return syndrdbsimd.XXHash64Bytes([]byte(v))
+	case int64, int, int32, int16, int8:
+		// For integer types, convert to string and use XXHash
+		// (CRC32Int64 is batch-only, needs slice input)
+		keyStr := conversion.ValueToString(key)
+		return syndrdbsimd.XXHash64Bytes([]byte(keyStr))
+	default:
+		// Fallback: Convert to string and use SIMD XXHash
+		keyStr := conversion.ValueToString(key)
+		return syndrdbsimd.XXHash64Bytes([]byte(keyStr))
+	}
 }
 
-// keysEqual compares two keys for equality
+// keysEqual compares two keys for equality using SIMD when available
 func (ht *InMemoryHashTable) keysEqual(key1, key2 interface{}) bool {
+	// Fast path: use SIMD equality for common types
+	switch v1 := key1.(type) {
+	case string:
+		if v2, ok := key2.(string); ok {
+			// SIMD string equality - 4-6x faster for UUIDs
+			return syndrdbsimd.StrEq([]byte(v1), []byte(v2))
+		}
+	case int64:
+		// For now, use standard comparison for integers (batch SIMD not beneficial for single values)
+		if v2, ok := key2.(int64); ok {
+			return v1 == v2
+		}
+	case int:
+		if v2, ok := key2.(int); ok {
+			return v1 == v2
+		}
+	case int32:
+		if v2, ok := key2.(int32); ok {
+			return v1 == v2
+		}
+	}
+
+	// Fallback to string conversion for other types
 	return conversion.ValueToString(key1) == conversion.ValueToString(key2)
 }
 

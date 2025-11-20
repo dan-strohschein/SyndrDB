@@ -1,5 +1,22 @@
 # **Complete SIMD Optimization Map for SyndrDB** 🚀
 
+ MISSING FROM CURRENT SIMD IMPLEMENTATION - Need Workarounds
+Batch String Hashing:
+
+❌ No HashStringBatch([][]byte) []uint64 function
+✅ Workaround: Use XXHash64Bytes(data []byte) uint64 in a loop
+Direct Int64 Equality Checking:
+
+❌ No EqualInt64Batch(a, b []int64) []bool
+✅ Available: CmpEqInt64(values []int64, threshold int64) []bool (single threshold only)
+✅ Workaround: Use standard Go comparison in loop
+Missing for JOINs:
+
+❌ No specialized "find matching pairs" function
+✅ Workaround: Combine HashInt64 with hash table lookups
+
+
+
 You're asking the **right question**. SIMD isn't just for sorting—it can accelerate **almost every critical path** in SyndrDB. Let me show you **every opportunity** with realistic speedup estimates.
 
 ---
