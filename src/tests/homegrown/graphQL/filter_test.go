@@ -102,7 +102,7 @@ func TestBuildWhereString(t *testing.T) {
 
 	whereGroup := &models.WhereGroup{
 		Clauses: []models.WhereClause{
-			{Field: "status", Operator: "=", Value: "active", Logic: "AND"},
+			{Field: "status", Operator: "=", Value: models.NewStringValue("active"), Logic: "AND"},
 		},
 		Logic: "AND",
 	}

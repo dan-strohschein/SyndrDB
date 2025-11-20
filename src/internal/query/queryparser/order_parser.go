@@ -3,23 +3,7 @@ ORDER BY PARSER SYSTEM
 
 This file implements the parsing logic for ORDER BY clauses in SyndrDB.
 It handles the parsing of SELECT statements with ORDER BY clauses, following
-PostgreSQL-style syntax while adapting to 	// Extract ORDER BY clause using regex
-	// The regex requires at least one non-whitespace character after "ORDER BY"
-	orderByRegex := regexp.MustCompile(`ORDER\s+BY\s+(.+\S.*)$`)
-	matches := orderByRegex.FindStringSubmatch(query)
-
-	if len(matches) < 2 {
-		// Check if there's a malformed ORDER BY (just "ORDER BY" without fields)
-		malformedRegex := regexp.MustCompile(`ORDER\s+BY\s*$`)
-		if malformedRegex.MatchString(query) {
-			return fmt.Errorf("ORDER BY clause must specify at least one field")
-		}
-		// No ORDER BY clause found
-		return nil
-	}
-
-	orderByClause := strings.TrimSpace(matches[1])
-	logger.Debugf("Found ORDER BY clause: %s", orderByClause)undle-based document architecture.
+PostgreSQL-style syntax while adapting to SyndrDB's bundle-based document architecture.
 
 SUPPORTED ORDER BY SYNTAX:
 SELECT DOCUMENTS FROM "Bundle_Name"
@@ -64,6 +48,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"syndrdb/src/pkg/common/helpers"
 
 	"go.uber.org/zap"
 )
@@ -181,7 +166,7 @@ func ParseSelectQueryWithOrder(query string, logger *zap.SugaredLogger) (*Select
 // normalizeQueryForOrder normalizes the query string for easier parsing
 func normalizeQueryForOrder(query string) string {
 	// Normalize whitespace and case for keywords
-	query = regexp.MustCompile(`\s+`).ReplaceAllString(query, " ")
+	query = helpers.MustCompileCached(`\s+`).ReplaceAllString(query, " ")
 	query = strings.TrimSpace(query)
 
 	// Normalize keywords while preserving quoted strings
@@ -189,7 +174,7 @@ func normalizeQueryForOrder(query string) string {
 	for _, keyword := range keywords {
 		// Use regex to match keywords not inside quotes
 		pattern := fmt.Sprintf(`(?i)\b%s\b`, regexp.QuoteMeta(keyword))
-		re := regexp.MustCompile(pattern)
+		re := helpers.MustCompileCached(pattern)
 		query = re.ReplaceAllStringFunc(query, func(match string) string {
 			return strings.ToUpper(keyword)
 		})
@@ -276,7 +261,7 @@ func parseFieldListForOrder(fieldsPart string, logger *zap.SugaredLogger) ([]str
 // parseFromClauseForOrder parses the FROM portion of the query
 func parseFromClauseForOrder(query string, selectQuery *SelectQueryWithOrder, logger *zap.SugaredLogger) error {
 	// Regular expression to match FROM clause
-	fromRegex := regexp.MustCompile(`FROM\s+"([^"]+)"`)
+	fromRegex := helpers.MustCompileCached(`FROM\s+"([^"]+)"`)
 	matches := fromRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {
@@ -292,7 +277,7 @@ func parseFromClauseForOrder(query string, selectQuery *SelectQueryWithOrder, lo
 // parseWhereClauseForOrder extracts and parses the WHERE clause from the full query
 func parseWhereClauseForOrder(query string, selectQuery *SelectQueryWithOrder, logger *zap.SugaredLogger) error {
 	// Find WHERE clause in the query (before ORDER BY if present)
-	whereRegex := regexp.MustCompile(`WHERE\s+(.+?)(?:\s+ORDER\s+BY|$)`)
+	whereRegex := helpers.MustCompileCached(`WHERE\s+(.+?)(?:\s+ORDER\s+BY|$)`)
 	matches := whereRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {
@@ -323,12 +308,12 @@ func parseWhereClauseForOrder(query string, selectQuery *SelectQueryWithOrder, l
 func parseOrderByClause(query string, selectQuery *SelectQueryWithOrder, logger *zap.SugaredLogger) error {
 	// Find ORDER BY clause in the query
 	// The regex requires at least one non-whitespace character after "ORDER BY"
-	orderByRegex := regexp.MustCompile(`ORDER\s+BY\s+(.+\S.*)$`)
+	orderByRegex := helpers.MustCompileCached(`ORDER\s+BY\s+(.+\S.*)$`)
 	matches := orderByRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {
 		// Check if there's a malformed ORDER BY (just "ORDER BY" without fields)
-		malformedRegex := regexp.MustCompile(`ORDER\s+BY\s*$`)
+		malformedRegex := helpers.MustCompileCached(`ORDER\s+BY\s*$`)
 		if malformedRegex.MatchString(query) {
 			return fmt.Errorf("ORDER BY clause must specify at least one field")
 		}
@@ -354,7 +339,7 @@ func parseOrderByClause(query string, selectQuery *SelectQueryWithOrder, logger 
 // parseOrderByFields parses the ORDER BY field list
 func parseOrderByFields(orderByClause string, logger *zap.SugaredLogger) (*OrderByClause, error) {
 	orderBy := &OrderByClause{
-		Fields: make([]OrderByField, 0),
+		Fields: make([]OrderByField, 0, 5),
 	}
 
 	// Split by comma to get individual field specifications
@@ -387,7 +372,7 @@ func parseOrderByField(fieldSpec string, logger *zap.SugaredLogger) (*OrderByFie
 	// Regular expression to match field name and optional direction
 	// Handles both quoted and unquoted field names
 	logger.Infof("Parsing ORDER BY field spec: %s", fieldSpec)
-	fieldRegex := regexp.MustCompile(`^"?([^"]+)"?\s*(ASC|DESC)?$`)
+	fieldRegex := helpers.MustCompileCached(`^"?([^"]+)"?\s*(ASC|DESC)?$`)
 	matches := fieldRegex.FindStringSubmatch(strings.TrimSpace(fieldSpec))
 
 	if len(matches) < 2 {

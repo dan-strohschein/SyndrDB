@@ -334,7 +334,7 @@ func (n *SortNode) tryRadixSort(documents map[string]*models.Document, limit int
 	}
 
 	// Only use radix sort for integer types
-	switch field.Value.(type) {
+	switch field.Value.AsInterface().(type) {
 	case int, int32, int64:
 		// Integer field - check if radix sort is beneficial
 		if !sorting.ShouldUseRadixSort(len(documents), limit, n.config.RadixMinSize, n.config.RadixLimitRatio) {
@@ -441,7 +441,7 @@ func (n *SortNode) selectTopNAlgorithm(documents map[string]*models.Document, li
 	}
 
 	// Select algorithm based on field value type
-	switch field.Value.(type) {
+	switch field.Value.AsInterface().(type) {
 	case string, []byte:
 		// Check if parallel string sort should be used
 		// Parallel benefits: 2-6x speedup with SIMD acceleration

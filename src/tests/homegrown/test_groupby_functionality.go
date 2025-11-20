@@ -339,10 +339,10 @@ func createGroupByTestDocuments() map[string]*models.Document {
 
 	for _, data := range testData {
 		fields := map[string]models.Field{
-			"category": {Name: "category", Value: data.category},
-			"price":    {Name: "price", Value: data.price},
-			"status":   {Name: "status", Value: data.status},
-			"region":   {Name: "region", Value: data.region},
+			"category": {Name: "category", Value: models.NewStringValue(data.category)},
+			"price":    {Name: "price", Value: models.NewFloatValue(data.price)},
+			"status":   {Name: "status", Value: models.NewStringValue(data.status)},
+			"region":   {Name: "region", Value: models.NewStringValue(data.region)},
 		}
 
 		docs[data.id] = &models.Document{
@@ -433,13 +433,13 @@ func executeAndDisplayResults(query string, testDocs map[string]*models.Document
 
 		// Extract category
 		if catField, exists := doc.Fields["category"]; exists {
-			category = catField.Value.(string)
+			category, _ = catField.Value.AsString()
 		}
 
 		// Extract aggregate value (find the first non-category field)
 		for fieldName, field := range doc.Fields {
 			if fieldName != "category" {
-				aggregateValue = field.Value
+				aggregateValue = field.Value.AsInterface()
 				break
 			}
 		}
@@ -463,12 +463,12 @@ func verifyCountResults(results map[string]*models.Document, expected map[string
 		var count int64
 
 		if catField, exists := doc.Fields["category"]; exists {
-			category = catField.Value.(string)
+			category, _ = catField.Value.AsString()
 		}
 
 		for fieldName, field := range doc.Fields {
 			if fieldName != "category" {
-				count = field.Value.(int64)
+				count, _ = field.Value.AsInt()
 				break
 			}
 		}
@@ -499,12 +499,12 @@ func verifyFloatResults(results map[string]*models.Document, expected map[string
 		var value float64
 
 		if catField, exists := doc.Fields["category"]; exists {
-			category = catField.Value.(string)
+			category, _ = catField.Value.AsString()
 		}
 
 		for fieldName, field := range doc.Fields {
 			if fieldName != "category" {
-				value = field.Value.(float64)
+				value, _ = field.Value.AsFloat()
 				break
 			}
 		}
@@ -552,8 +552,8 @@ func createKnownValueDocuments() map[string]*models.Document {
 
 	for _, data := range testData {
 		fields := map[string]models.Field{
-			"category": {Name: "category", Value: data.category},
-			"price":    {Name: "price", Value: data.price},
+			"category": {Name: "category", Value: models.NewStringValue(data.category)},
+			"price":    {Name: "price", Value: models.NewFloatValue(data.price)},
 		}
 
 		docs[data.id] = &models.Document{

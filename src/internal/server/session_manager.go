@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/buffer"
+	"syndrdb/src/pkg/common/helpers"
 	"time"
 
 	"go.uber.org/zap"
@@ -67,12 +68,13 @@ type LockInfo struct {
 
 // Session represents a user session with comprehensive state tracking
 type Session struct {
-	SessionID    string
-	UserID       string
-	Username     string
-	DatabaseName string
-	Database     *models.Database
-	ConnectionID string // Associated connection ID
+	SessionID          string
+	UserID             string
+	Username           string
+	DatabaseName       string
+	Database           *models.Database
+	DatabaseFolderPath string // STEP 4: Cached database folder path (avoid repeated filepath.Join)
+	ConnectionID       string // Associated connection ID
 
 	// Security binding to prevent session hijacking
 	ClientIP         string // IP address bound to this session
@@ -266,6 +268,7 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		Username:           username,
 		DatabaseName:       databaseName,
 		Database:           database,
+		DatabaseFolderPath: helpers.GetDatabaseFolderPath(databaseName), // STEP 4: Cache on creation
 		ConnectionID:       connectionID,
 		ClientIP:           clientIP,
 		UserAgent:          userAgent,
@@ -274,11 +277,11 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		CreatedAt:          time.Now(),
 		LastActivity:       time.Now(),
 		ExpiresAt:          time.Now().Add(timeout),
-		QueryHistory:       make([]*QueryInfo, 0),
+		QueryHistory:       make([]*QueryInfo, 0, 100),
 		DocumentLocks:      make(map[string]*LockInfo),
 		BundleLocks:        make(map[string]*LockInfo),
 		ActiveTransactions: make(map[string]context.CancelFunc),
-		TempFiles:          make([]string, 0),
+		TempFiles:          make([]string, 0, 10),
 		Timeout:            timeout,
 		MaxQueryHistory:    100, // Keep last 100 queries
 		Logger:             sm.logger.With("sessionID", sessionID, "username", username, "clientIP", clientIP),
@@ -297,7 +300,7 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 
 	// Add to user sessions
 	if sm.userSessions[username] == nil {
-		sm.userSessions[username] = make([]*Session, 0)
+		sm.userSessions[username] = make([]*Session, 0, 5)
 	}
 	sm.userSessions[username] = append(sm.userSessions[username], session)
 
@@ -438,6 +441,7 @@ func (sm *SessionManager) SetDatabaseContext(sessionID string, databaseName stri
 	// Update the database context
 	session.DatabaseName = databaseName
 	session.Database = database
+	session.DatabaseFolderPath = helpers.GetDatabaseFolderPath(databaseName) // STEP 4: Update cache
 
 	// Update activity time when database context changes
 	session.LastActivity = time.Now()
@@ -553,7 +557,7 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 	defer sm.mu.Unlock()
 
 	now := time.Now()
-	expiredSessions := make([]*Session, 0)
+	expiredSessions := make([]*Session, 0, 20)
 
 	for _, session := range sm.sessions {
 		if now.After(session.ExpiresAt) {
@@ -596,13 +600,13 @@ func (sm *SessionManager) GetSessionStats() map[string]interface{} {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
-	stats := map[string]interface{}{
-		"total_sessions":   len(sm.sessions),
-		"active_users":     len(sm.userSessions),
-		"max_sessions":     sm.maxSessions,
-		"default_timeout":  sm.defaultTimeout.String(),
-		"cleanup_interval": sm.cleanupInterval.String(),
-	}
+	// PHASE 3: Use pooled map to reduce allocations
+	stats := GetResponseMap()
+	stats["total_sessions"] = len(sm.sessions)
+	stats["active_users"] = len(sm.userSessions)
+	stats["max_sessions"] = sm.maxSessions
+	stats["default_timeout"] = sm.defaultTimeout.String()
+	stats["cleanup_interval"] = sm.cleanupInterval.String()
 
 	// Count sessions by state
 	stateCounts := make(map[string]int)
@@ -855,46 +859,48 @@ func (s *Session) GetSessionInfo() map[string]interface{} {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	info := map[string]interface{}{
-		"sessionID": s.SessionID,
-		"username":  s.Username,
-		"database":  s.DatabaseName,
-		"clientIP":  s.ClientIP,
-		"userAgent": func() string {
-			if len(s.UserAgent) > 100 {
-				return s.UserAgent[:100] + "..."
-			}
-			return s.UserAgent
-		}(),
-		"state":              s.State.String(),
-		"createdAt":          s.CreatedAt,
-		"lastActivity":       s.LastActivity,
-		"expiresAt":          s.ExpiresAt,
-		"errorCount":         s.ErrorCount,
-		"consecutiveErrors":  s.ConsecutiveErrors,
-		"documentLocks":      len(s.DocumentLocks),
-		"bundleLocks":        len(s.BundleLocks),
-		"activeTransactions": len(s.ActiveTransactions),
-		"tempFiles":          len(s.TempFiles),
-		"queryHistoryCount":  len(s.QueryHistory),
-	}
+	// PHASE 3: Use pooled map to reduce allocations
+	info := GetResponseMap()
+	info["sessionID"] = s.SessionID
+	info["username"] = s.Username
+	info["database"] = s.DatabaseName
+	info["clientIP"] = s.ClientIP
+	info["userAgent"] = func() string {
+		if len(s.UserAgent) > 100 {
+			return s.UserAgent[:100] + "..."
+		}
+		return s.UserAgent
+	}()
+	info["state"] = s.State.String()
+	info["createdAt"] = s.CreatedAt
+	info["lastActivity"] = s.LastActivity
+	info["expiresAt"] = s.ExpiresAt
+	info["errorCount"] = s.ErrorCount
+	info["consecutiveErrors"] = s.ConsecutiveErrors
+	info["documentLocks"] = len(s.DocumentLocks)
+	info["bundleLocks"] = len(s.BundleLocks)
+	info["activeTransactions"] = len(s.ActiveTransactions)
+	info["tempFiles"] = len(s.TempFiles)
+	info["queryHistoryCount"] = len(s.QueryHistory)
 
 	if s.CurrentQuery != nil {
-		info["currentQuery"] = map[string]interface{}{
-			"queryID":   s.CurrentQuery.QueryID,
-			"query":     s.CurrentQuery.Query,
-			"startTime": s.CurrentQuery.StartTime,
-			"status":    s.CurrentQuery.Status,
-		}
+		// PHASE 3: Use pooled map for nested query info
+		currentQuery := GetResponseMap()
+		currentQuery["queryID"] = s.CurrentQuery.QueryID
+		currentQuery["query"] = s.CurrentQuery.Query
+		currentQuery["startTime"] = s.CurrentQuery.StartTime
+		currentQuery["status"] = s.CurrentQuery.Status
+		info["currentQuery"] = currentQuery
 	}
 
 	if s.LastSuccessfulQuery != nil {
-		info["lastSuccessfulQuery"] = map[string]interface{}{
-			"queryID":      s.LastSuccessfulQuery.QueryID,
-			"query":        s.LastSuccessfulQuery.Query,
-			"affectedRows": s.LastSuccessfulQuery.AffectedRows,
-			"endTime":      s.LastSuccessfulQuery.EndTime,
-		}
+		// PHASE 3: Use pooled map for last successful query info
+		lastQuery := GetResponseMap()
+		lastQuery["queryID"] = s.LastSuccessfulQuery.QueryID
+		lastQuery["query"] = s.LastSuccessfulQuery.Query
+		lastQuery["affectedRows"] = s.LastSuccessfulQuery.AffectedRows
+		lastQuery["endTime"] = s.LastSuccessfulQuery.EndTime
+		info["lastSuccessfulQuery"] = lastQuery
 	}
 
 	if s.LastError != nil {

@@ -305,14 +305,33 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 		return fmt.Errorf("failed to write binary WAL entry: %w", err)
 	}
 
-	// Flush immediately for commit operations if configured
-	if wal.fsyncOnCommit && operation == OpCommitTx {
-		return wal.flushUnsafe()
+	// PERFORMANCE OPTIMIZATION: Batch flushing (Priority 2 - Speed First Profile)
+	// Increment pending operations counter
+	wal.pendingOps++
+
+	// Determine if we should flush based on multiple triggers:
+	// 1. Batch size reached (default: 10 operations)
+	// 2. Time threshold exceeded (default: 10ms since last flush)
+	// NOTE: fsyncOnCommit check removed per "Speed First" priority - batching always active
+	shouldFlush := wal.pendingOps >= wal.walBatchSize ||
+		time.Since(wal.lastFlush) >= wal.walMaxFlushDelay
+
+	if shouldFlush {
+		if err := wal.flushUnsafe(); err != nil {
+			return err
+		}
+		wal.pendingOps = 0
+		wal.lastFlush = time.Now()
+		return nil
 	}
 
-	// Check if buffer is getting large and flush if needed
+	// Legacy fallback: Check if buffer is getting large
 	if wal.buffer.Buffered() > 8192 { // 8KB buffer
-		return wal.flushUnsafe()
+		if err := wal.flushUnsafe(); err != nil {
+			return err
+		}
+		wal.pendingOps = 0
+		wal.lastFlush = time.Now()
 	}
 
 	return nil

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"time"
@@ -13,12 +14,34 @@ import (
 	// "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
 	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 	//"syndrdb/src/engine"
 )
+
+// PHASE 3: Object pools for reducing allocations in filter parsing
+var stringBuilderPool = sync.Pool{
+	New: func() interface{} {
+		sb := &strings.Builder{}
+		sb.Grow(128) // Pre-allocate for typical token size
+		return sb
+	},
+}
+
+func getStringBuilder() *strings.Builder {
+	sb := stringBuilderPool.Get().(*strings.Builder)
+	sb.Reset()
+	return sb
+}
+
+func putStringBuilder(sb *strings.Builder) {
+	if sb.Cap() <= 4096 { // Only pool up to 4KB
+		stringBuilderPool.Put(sb)
+	}
+}
 
 // Package-level cache for processed LIKE pattern
 // Used to pass processed pattern from ParseLikePattern to MatchLikePattern
@@ -83,7 +106,7 @@ func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLog
 
 		field := models.Field{
 			//Name:  "DocumentID",
-			Value: document.DocumentID,
+			Value: models.NewStringValue(document.DocumentID), // ✅ Convert string to FieldValue
 		}
 		document.Fields["DocumentID"] = field
 		//logger.Infof("DocumentID '%s' is added", document.DocumentID)
@@ -123,8 +146,10 @@ func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLog
 
 // tokenizeWhereClause breaks a WHERE clause into tokens while preserving quoted strings
 func tokenizeWhereClause(whereClause string) []string {
-	var tokens []string
-	var currentToken strings.Builder
+	// PHASE 3: Use pooled string builder to reduce allocations
+	tokens := make([]string, 0, 20) // Pre-allocate for typical WHERE clause
+	currentToken := getStringBuilder()
+	defer putStringBuilder(currentToken)
 	inQuote := false
 
 	for i := 0; i < len(whereClause); i++ {
@@ -147,7 +172,7 @@ func tokenizeWhereClause(whereClause string) []string {
 		if ch == '(' || ch == ')' || ch == ',' {
 			// Add current token if not empty
 			if currentToken.Len() > 0 {
-				tokens = append(tokens, strings.TrimSpace(currentToken.String()))
+				tokens = append(tokens, currentToken.String())
 				currentToken.Reset()
 			}
 			// Add punctuation as its own token
@@ -159,7 +184,7 @@ func tokenizeWhereClause(whereClause string) []string {
 		if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
 			// Only add token if not empty
 			if currentToken.Len() > 0 {
-				tokens = append(tokens, strings.TrimSpace(currentToken.String()))
+				tokens = append(tokens, currentToken.String())
 				currentToken.Reset()
 			}
 			continue
@@ -171,7 +196,7 @@ func tokenizeWhereClause(whereClause string) []string {
 
 	// Add the final token if not empty
 	if currentToken.Len() > 0 {
-		tokens = append(tokens, strings.TrimSpace(currentToken.String()))
+		tokens = append(tokens, currentToken.String())
 	}
 
 	return tokens
@@ -460,7 +485,7 @@ func isNullValue(value interface{}) bool {
 // Returns: (values []interface{}, caseInsensitive bool, originalCount int, newPos int, error)
 func ParseValueList(tokens []string, startPos int, logger *zap.SugaredLogger) ([]interface{}, bool, int, int, error) {
 	caseInsensitive := false
-	values := make([]interface{}, 0)
+	values := make([]interface{}, 0, 10)
 	pos := startPos
 
 	// Check for N prefix for case-insensitive matching
@@ -668,7 +693,7 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 		// Special case for document ID
 		field = models.Field{
 			//Name:  "DocumentID",
-			Value: document.DocumentID,
+			Value: models.NewStringValue(document.DocumentID), // ✅ Convert string to FieldValue
 		}
 	}
 
@@ -685,7 +710,7 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 			// Check if comparing against NULL
 			if upperValue == "NULL" || upperValue == "SYNDR_NULL" || queryValueStr == "::SYNDR_NULL::" {
 				// Direct magic value comparison for NULL checks
-				fieldValueStr, fieldIsStr := field.Value.(string)
+				fieldValueStr, fieldIsStr := field.Value.AsString() // ✅ Use FieldValue accessor
 				if fieldIsStr && fieldValueStr == "::SYNDR_NULL::" {
 					return clause.Operator == "==" // Match if operator is ==
 				}
@@ -767,9 +792,13 @@ func ParseLikePattern(pattern string) (patternType string, normalized string, wi
 		escapedPercent    = '\uE001'
 	)
 
+	// PHASE 3: Use pooled string builders to reduce allocations
+	processedPattern := getStringBuilder()
+	defer putStringBuilder(processedPattern)
+	unescapedPattern := getStringBuilder()
+	defer putStringBuilder(unescapedPattern)
+
 	// Process escape sequences and count wildcards
-	var processedPattern strings.Builder
-	var unescapedPattern strings.Builder
 	wildcardCount = 0
 	i := 0
 	runes := []rune(pattern)
@@ -1415,7 +1444,7 @@ func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value i
 
 	// Convert the search value to string for hash index lookup
 	// Following SyndrDB data integrity requirements, ensure consistent key formatting
-	searchKeyStr := fmt.Sprintf("%v", value)
+	searchKeyStr := conversion.ValueToString(value)
 
 	// Validate that the search key is not empty
 	if searchKeyStr == "" {

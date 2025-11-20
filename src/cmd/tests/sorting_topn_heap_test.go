@@ -28,35 +28,35 @@ func TestTopNHeapSort_ASC(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Alice"},
+				"name": {Name: "name", Value: models.NewStringValue("Alice")},
 				"age":  {Name: "age", Value: 28},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Bob"},
+				"name": {Name: "name", Value: models.NewStringValue("Bob")},
 				"age":  {Name: "age", Value: 35},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Charlie"},
+				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
 				"age":  {Name: "age", Value: 25},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Diana"},
+				"name": {Name: "name", Value: models.NewStringValue("Diana")},
 				"age":  {Name: "age", Value: 42},
 			},
 		},
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Eve"},
+				"name": {Name: "name", Value: models.NewStringValue("Eve")},
 				"age":  {Name: "age", Value: 18},
 			},
 		},
@@ -98,35 +98,35 @@ func TestTopNHeapSort_DESC(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Alice"},
+				"name": {Name: "name", Value: models.NewStringValue("Alice")},
 				"age":  {Name: "age", Value: 28},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Bob"},
+				"name": {Name: "name", Value: models.NewStringValue("Bob")},
 				"age":  {Name: "age", Value: 35},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Charlie"},
+				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
 				"age":  {Name: "age", Value: 25},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Diana"},
+				"name": {Name: "name", Value: models.NewStringValue("Diana")},
 				"age":  {Name: "age", Value: 42},
 			},
 		},
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Eve"},
+				"name": {Name: "name", Value: models.NewStringValue("Eve")},
 				"age":  {Name: "age", Value: 18},
 			},
 		},

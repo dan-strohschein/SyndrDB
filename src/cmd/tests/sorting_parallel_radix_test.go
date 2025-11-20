@@ -155,7 +155,7 @@ func TestParallelRadixSort_MixedTypes(t *testing.T) {
 	doc3 := &models.Document{
 		DocumentID: uuid.New().String(),
 		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: int64(99)},
+			"value": {Name: "value", Value: models.NewIntValue(int64(99))},
 		},
 	}
 	docs[doc3.DocumentID] = doc3

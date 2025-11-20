@@ -80,8 +80,8 @@ package queryparser
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+	"syndrdb/src/pkg/common/helpers"
 
 	"go.uber.org/zap"
 )
@@ -156,8 +156,8 @@ func ParseSelectQueryWithGroupBy(query string, logger *zap.SugaredLogger) (*Sele
 
 	// Initialize the select query structure
 	selectQuery := &SelectQueryWithGroupBy{
-		SelectFields:      make([]string, 0),
-		AggregateFields:   make([]AggregateFunction, 0),
+		SelectFields:      make([]string, 0, 15),
+		AggregateFields:   make([]AggregateFunction, 0, 5),
 		ExecutionStrategy: AutoStrategy,
 	}
 
@@ -312,7 +312,7 @@ func parseAggregateFunction(field string, logger *zap.SugaredLogger) (AggregateF
 	// Pattern to match aggregate functions with optional alias
 	// Example: COUNT(*) AS count_all, SUM(amount) as total
 	pattern := `(?i)(COUNT|SUM|AVG|MIN|MAX)\s*\(\s*([^)]+)\s*\)(?:\s+AS\s+(\w+))?`
-	re := regexp.MustCompile(pattern)
+	re := helpers.MustCompileCached(pattern)
 
 	matches := re.FindStringSubmatch(strings.TrimSpace(field))
 	if len(matches) < 3 {
@@ -354,7 +354,7 @@ func parseAggregateFunction(field string, logger *zap.SugaredLogger) (AggregateF
 
 // parseFromClauseForGroupBy parses the FROM clause for GROUP BY queries
 func parseFromClauseForGroupBy(query string, selectQuery *SelectQueryWithGroupBy, logger *zap.SugaredLogger) error {
-	fromRegex := regexp.MustCompile(`FROM\s+"([^"]+)"`)
+	fromRegex := helpers.MustCompileCached(`FROM\s+"([^"]+)"`)
 	matches := fromRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {

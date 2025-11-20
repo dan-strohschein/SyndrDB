@@ -137,7 +137,7 @@ func TestSchemaRegenerationOnFieldAdd(t *testing.T) {
 				Name:         "age",
 				Type:         "int",
 				IsRequired:   false,
-				DefaultValue: 0,
+				DefaultValue: models.NewIntValue(0),
 			},
 		},
 	}

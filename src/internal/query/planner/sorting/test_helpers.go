@@ -45,7 +45,7 @@ func createTestDocuments(count int, fieldName string) map[string]*models.Documen
 			Fields: map[string]models.Field{
 				fieldName: {
 					Name:  fieldName,
-					Value: int64(i),
+					Value: models.NewIntValue(int64(i)), // ✅ Use NewIntValue
 				},
 			},
 		}
@@ -97,7 +97,7 @@ func createTestDocumentsWithValues(
 		for fieldName, vals := range values {
 			doc.Fields[fieldName] = models.Field{
 				Name:  fieldName,
-				Value: vals[i],
+				Value: models.NewInterfaceValue(vals[i]), // ✅ Use NewInterfaceValue
 			}
 		}
 
@@ -135,7 +135,7 @@ func createTestDocumentsWithStrings(
 			Fields: map[string]models.Field{
 				fieldName: {
 					Name:  fieldName,
-					Value: fmt.Sprintf("%s%03d", prefix, i),
+					Value: models.NewStringValue(fmt.Sprintf("%s%03d", prefix, i)), // ✅ Use NewStringValue
 				},
 			},
 		}

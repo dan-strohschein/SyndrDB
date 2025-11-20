@@ -60,6 +60,11 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, fmt.Errorf("error updating document in bundle '%s': %v", bundleName, err)
 	}
 
+	// STEP 2: Invalidate query plan cache after data mutation
+	if serviceManager.UnifiedPlanner != nil {
+		serviceManager.UnifiedPlanner.InvalidatePlanCache()
+	}
+
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
 		Result:      "Document updated successfully in bundle '" + bundleName + "'.",
@@ -113,6 +118,11 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 
 	if err != nil {
 		return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
+	}
+
+	// STEP 2: Invalidate query plan cache after data mutation
+	if serviceManager.UnifiedPlanner != nil {
+		serviceManager.UnifiedPlanner.InvalidatePlanCache()
 	}
 
 	result := fmt.Sprintf("{\"DocumentID\": \"%s\", \"message\": \"Document added successfully to bundle '%s'.\"}", docID, bundleName)

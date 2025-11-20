@@ -39,9 +39,9 @@ package queryparser
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/helpers"
 
 	"go.uber.org/zap"
 )
@@ -118,8 +118,8 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 
 	// Initialize the query structure
 	selectQuery := &SelectJoinQuery{
-		SelectFields: make([]string, 0),
-		JoinClauses:  make([]JoinClause, 0),
+		SelectFields: make([]string, 0, 30),
+		JoinClauses:  make([]JoinClause, 0, 3),
 	}
 
 	// Normalize the query for easier parsing
@@ -166,16 +166,16 @@ func normalizeQuery(query string) string {
 	normalized = strings.ReplaceAll(normalized, "\r", " ")
 
 	// Replace multiple spaces with single space
-	re := regexp.MustCompile(`\s+`)
+	re := helpers.MustCompileCached(`\s+`)
 	normalized = re.ReplaceAllString(normalized, " ")
 
 	// Now normalize keywords using word boundaries to avoid matching partial words
 	// The \b ensures we only match complete words, not substrings like "ON" in "RELATIONSHIP"
-	normalized = regexp.MustCompile(`(?i)\s+JOIN\s+`).ReplaceAllString(normalized, " JOIN ")
-	normalized = regexp.MustCompile(`(?i)\s+ON\s+`).ReplaceAllString(normalized, " ON ")
-	normalized = regexp.MustCompile(`(?i)\s+WHERE\s+`).ReplaceAllString(normalized, " WHERE ")
-	normalized = regexp.MustCompile(`(?i)\s+FROM\s+`).ReplaceAllString(normalized, " FROM ")
-	normalized = regexp.MustCompile(`(?i)\s+WITH\s+RELATIONSHIP\s+`).ReplaceAllString(normalized, " WITH RELATIONSHIP ")
+	normalized = helpers.MustCompileCached(`(?i)\s+JOIN\s+`).ReplaceAllString(normalized, " JOIN ")
+	normalized = helpers.MustCompileCached(`(?i)\s+ON\s+`).ReplaceAllString(normalized, " ON ")
+	normalized = helpers.MustCompileCached(`(?i)\s+WHERE\s+`).ReplaceAllString(normalized, " WHERE ")
+	normalized = helpers.MustCompileCached(`(?i)\s+FROM\s+`).ReplaceAllString(normalized, " FROM ")
+	normalized = helpers.MustCompileCached(`(?i)\s+WITH\s+RELATIONSHIP\s+`).ReplaceAllString(normalized, " WITH RELATIONSHIP ")
 
 	return strings.TrimSpace(normalized)
 }
@@ -197,7 +197,7 @@ func parseSelectClause(query string, selectQuery *SelectJoinQuery, logger *zap.S
 
 		// Handle TOP N syntax: SELECT TOP 10 "field1", "field2"
 		// Skip over "TOP N " if present
-		topPattern := regexp.MustCompile(`(?i)^TOP\s+(\d+)\s+`)
+		topPattern := helpers.MustCompileCached(`(?i)^TOP\s+(\d+)\s+`)
 		if matches := topPattern.FindStringSubmatch(selectPart); len(matches) > 0 {
 			// Skip past "TOP N " to get to the field list
 			selectPart = selectPart[len(matches[0]):]
@@ -268,7 +268,7 @@ func parseFieldList(fieldsPart string, logger *zap.SugaredLogger) ([]string, err
 // parseFromClause parses the FROM portion of the query
 func parseFromClause(query string, selectQuery *SelectJoinQuery, logger *zap.SugaredLogger) error {
 	// Regular expression to match FROM clause
-	fromRegex := regexp.MustCompile(`FROM\s+"([^"]+)"`)
+	fromRegex := helpers.MustCompileCached(`FROM\s+"([^"]+)"`)
 	matches := fromRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {
@@ -286,7 +286,7 @@ func parseJoinClauses(query string, selectQuery *SelectJoinQuery, logger *zap.Su
 	// Regular expression to find all JOIN clauses
 	// Updated to support INNER JOIN syntax (case insensitive)
 	// Modified to stop at WITH RELATIONSHIP to avoid capturing it as part of ON clause
-	joinRegex := regexp.MustCompile(`(?i)(LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+OUTER\s+JOIN|JOIN)\s+"([^"]+)"\s+ON\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|\s+WHERE\s+|$)`)
+	joinRegex := helpers.MustCompileCached(`(?i)(LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+OUTER\s+JOIN|JOIN)\s+"([^"]+)"\s+ON\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|\s+WHERE\s+|$)`)
 	matches := joinRegex.FindAllStringSubmatch(query, -1)
 
 	//logger.Infof("DEBUG: JOIN regex found %d matches in query: %s", len(matches), query)
@@ -345,7 +345,7 @@ func parseJoinConditions(onClause string, logger *zap.SugaredLogger) ([]JoinCond
 	var conditions []JoinCondition
 
 	// Regular expression to match join conditions like "Bundle1"."Field1" == "Bundle2"."Field2"
-	conditionRegex := regexp.MustCompile(`"([^"]+)"\."([^"]+)"\s*(==|!=|>|<|>=|<=)\s*"([^"]+)"\."([^"]+)"`)
+	conditionRegex := helpers.MustCompileCached(`"([^"]+)"\."([^"]+)"\s*(==|!=|>|<|>=|<=)\s*"([^"]+)"\."([^"]+)"`)
 	matches := conditionRegex.FindAllStringSubmatch(onClause, -1)
 
 	if len(matches) == 0 {
@@ -377,7 +377,7 @@ func parseJoinConditions(onClause string, logger *zap.SugaredLogger) ([]JoinCond
 // parseWhereClauseFromQuery extracts and parses the WHERE clause from the full query
 func parseWhereClauseFromQuery(query string, selectQuery *SelectJoinQuery, logger *zap.SugaredLogger) error {
 	// Find WHERE clause in the query - stop at WITH RELATIONSHIP if present
-	whereRegex := regexp.MustCompile(`WHERE\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|$)`)
+	whereRegex := helpers.MustCompileCached(`WHERE\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|$)`)
 	matches := whereRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {

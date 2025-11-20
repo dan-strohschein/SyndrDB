@@ -308,7 +308,7 @@ func (n *HierarchicalTransformNode) filterJoinResultsByDocumentIDs(
 
 		// Also try: Extract DocumentID from fields (in case it's stored there)
 		if docIDField, exists := doc.Fields["DocumentID"]; exists {
-			if fieldDocID, ok := docIDField.Value.(string); ok {
+			if fieldDocID, ok := docIDField.Value.AsString(); ok {
 				leftDocIDs[fieldDocID] = true
 				n.Logger.Debugf("Extracted DocumentID from field: %s", fieldDocID)
 			}

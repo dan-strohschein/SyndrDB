@@ -331,7 +331,7 @@ func (p *SelectParser) parseSelectModifiers(stmt *SelectStatement) error {
 
 // parseFieldList parses a comma-separated list of fields/expressions
 func (p *SelectParser) parseFieldList() ([]SelectField, error) {
-	fields := make([]SelectField, 0)
+	fields := make([]SelectField, 0, 20)
 
 	for {
 		// Parse field expression

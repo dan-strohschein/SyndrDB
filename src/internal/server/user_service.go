@@ -118,7 +118,7 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if strings.EqualFold(nameField.Value.(string), username) {
+				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
 					if us.debugMode {
 						return "", fmt.Errorf("user '%s' already exists", username)
 					}
@@ -147,41 +147,43 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 		return "", fmt.Errorf("internal error: user creation failed")
 	}
 
+	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
+	// This is a user-facing operation (lower frequency than query hot-path)
 	// Create user document for the primary database Users bundle
 	userDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
 		Fields: map[string]models.Field{
 			"DocumentID": {
 				Name:  "DocumentID",
-				Value: helpers.GenerateFastUUID(),
+				Value: models.NewStringValue(helpers.GenerateFastUUID()),
 			},
 			"UserID": {
 				Name:  "UserID",
-				Value: userID,
+				Value: models.NewStringValue(userID),
 			},
 			"PasswordHash": {
 				Name:  "PasswordHash",
-				Value: string(storedUser.PasswordHash.Hash), // Store the hash
+				Value: models.NewStringValue(string(storedUser.PasswordHash.Hash)), // Store the hash
 			},
 			"Name": {
 				Name:  "Name",
-				Value: username,
+				Value: models.NewStringValue(username),
 			},
 			"IsActive": {
 				Name:  "IsActive",
-				Value: true,
+				Value: models.NewBoolValue(true),
 			},
 			"IsLockedOut": {
 				Name:  "IsLockedOut",
-				Value: false,
+				Value: models.NewBoolValue(false),
 			},
 			"FailedLoginAttempts": {
 				Name:  "FailedLoginAttempts",
-				Value: 0,
+				Value: models.NewIntValue(0),
 			},
 			"LockoutExpiresOn": {
 				Name:  "LockoutExpiresOn",
-				Value: time.Now().Format(time.RFC3339),
+				Value: models.NewStringValue(time.Now().Format(time.RFC3339)),
 			},
 		},
 	}
@@ -234,7 +236,7 @@ func (us *UserService) GetUserByUsername(username string) (*models.Document, err
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if strings.EqualFold(nameField.Value.(string), username) {
+				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
 					docCopy := doc
 					return &docCopy, nil
 				}
@@ -279,7 +281,7 @@ func (us *UserService) GetUserByID(userID string) (*models.Document, error) {
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
 			if idField, ok := doc.Fields["UserID"]; ok {
-				if idField.Value.(string) == userID {
+				if str, ok := idField.Value.AsString(); ok && str == userID {
 					docCopy := doc
 					return &docCopy, nil
 				}

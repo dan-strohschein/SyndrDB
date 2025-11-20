@@ -107,7 +107,7 @@ type FieldDefinition struct {
 type Field struct {
 	Name string
 	//FieldType    string
-	Value interface{}
+	Value FieldValue // ✅ ZERO-ALLOCATION: Typed union instead of interface{}
 	// Description  string
 	// Required     bool
 	// Unique       bool

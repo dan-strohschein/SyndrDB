@@ -108,7 +108,7 @@ func ParallelRadixSort(
 
 		// Extract integer value
 		var intValue int64
-		switch v := field.Value.(type) {
+		switch v := field.Value.AsInterface().(type) { // ✅ Use AsInterface()
 		case int:
 			intValue = int64(v)
 		case int32:

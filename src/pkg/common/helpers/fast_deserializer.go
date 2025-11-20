@@ -125,6 +125,7 @@ func (d *FastDocumentDeserializer) DeserializeDocumentMap(data []byte) (map[stri
 
 // readField reads a single field from the buffer
 func (d *FastDocumentDeserializer) readField() (string, models.Field, error) {
+
 	// Read field name
 	fieldName, err := d.readString()
 	if err != nil {
@@ -149,6 +150,7 @@ func (d *FastDocumentDeserializer) readField() (string, models.Field, error) {
 		if err != nil {
 			return "", models.Field{}, fmt.Errorf("failed to read string value: %w", err)
 		}
+
 		value = string(valueBytes)
 
 	case 2: // int (stored as int32)
@@ -199,7 +201,7 @@ func (d *FastDocumentDeserializer) readField() (string, models.Field, error) {
 
 	return fieldName, models.Field{
 		Name:  fieldName,
-		Value: value,
+		Value: models.NewInterfaceValue(value), // ✅ Convert interface{} to FieldValue
 	}, nil
 }
 

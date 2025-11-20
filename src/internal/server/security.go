@@ -295,8 +295,11 @@ func SanitizeInput(input string) string {
 	// Remove null bytes
 	input = strings.ReplaceAll(input, "\x00", "")
 
+	// PHASE 3: Use pooled string builder to reduce allocations
+	sanitized := GetStringBuilder()
+	defer PutStringBuilder(sanitized)
+
 	// Remove other control characters except tab, newline, carriage return
-	var sanitized strings.Builder
 	for _, char := range input {
 		if !unicode.IsControl(char) || char == '\t' || char == '\n' || char == '\r' {
 			sanitized.WriteRune(char)

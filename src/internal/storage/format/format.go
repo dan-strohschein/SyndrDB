@@ -2,7 +2,6 @@ package format
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -27,124 +26,6 @@ type BundleSerializer interface {
 
 	// GetFormatName returns the format name for logging
 	GetFormatName() string
-}
-
-// JSONSerializer implements JSON-based serialization
-type JSONSerializer struct{}
-
-func NewJSONSerializer() *JSONSerializer {
-	return &JSONSerializer{}
-}
-
-func (j *JSONSerializer) GetFormatName() string {
-	return "json"
-}
-
-// DEPRECATED: JSONSerializer is deprecated in favor of BinarySerializer
-// The JSON format has known issues with incomplete deserialization of Indexes, IndexNames, and Constraints
-// Use BinarySerializer for all new code
-
-func (j *JSONSerializer) SerializeBundleMetadata(bundle *models.Bundle) ([]byte, error) {
-	// Create a metadata-only version without Documents
-	metadata := map[string]interface{}{
-		"BundleID":          bundle.BundleID,
-		"Name":              bundle.Name,
-		"Description":       bundle.Description,
-		"Permissions":       bundle.Permissions,
-		"CreatedBy":         bundle.CreatedBy,
-		"CreatedAt":         bundle.CreatedAt.Format(time.RFC3339),
-		"UpdatedAt":         bundle.UpdatedAt.Format(time.RFC3339),
-		"DocumentStructure": bundle.DocumentStructure,
-		"TotalDocuments":    bundle.TotalDocuments,
-		"PageCount":         bundle.PageCount,
-		"PageSize":          bundle.PageSize,
-		"Relationships":     bundle.Relationships,
-		"Constraints":       bundle.Constraints,
-		"Indexes":           bundle.Indexes,
-		"IndexNames":        bundle.IndexNames,
-	}
-
-	return json.MarshalIndent(metadata, "", "  ")
-}
-
-func (j *JSONSerializer) DeserializeBundleMetadata(data []byte) (*models.Bundle, error) {
-	var bundleData map[string]interface{}
-	if err := json.Unmarshal(data, &bundleData); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON bundle metadata: %w", err)
-	}
-
-	bundle := &models.Bundle{
-		BundleID:    getString(bundleData, "BundleID"),
-		Name:        getString(bundleData, "Name"),
-		Description: getString(bundleData, "Description"),
-		Permissions: getStringSlice(bundleData, "Permissions"),
-		CreatedBy:   getString(bundleData, "CreatedBy"),
-		CreatedAt:   getTime(bundleData, "CreatedAt"),
-		UpdatedAt:   getTime(bundleData, "UpdatedAt"),
-	}
-
-	// Parse document structure
-	if structData, ok := bundleData["DocumentStructure"].(map[string]interface{}); ok {
-		bundle.DocumentStructure = parseDocumentStructure(structData)
-	}
-
-	// Parse pagination metadata
-	bundle.TotalDocuments = getInt64(bundleData, "TotalDocuments")
-	bundle.PageCount = getInt64(bundleData, "PageCount")
-	bundle.PageSize = getInt(bundleData, "PageSize")
-
-	// Ensure PageSize has a default value to prevent divide by zero
-	if bundle.PageSize == 0 {
-		bundle.PageSize = 100 // Default page size
-	}
-
-	return bundle, nil
-}
-
-func (j *JSONSerializer) SerializeDocumentPage(page *models.DocumentPage) ([]byte, error) {
-	pageData := map[string]interface{}{
-		"PageID":         page.PageID,
-		"BundleID":       page.BundleID,
-		"Documents":      page.Documents,
-		"NextPageID":     page.NextPageID,
-		"PreviousPageID": page.PreviousPageID,
-		"IsDirty":        page.IsDirty,
-		"LoadedAt":       page.LoadedAt.Format(time.RFC3339),
-		"DocumentCount":  page.DocumentCount,
-	}
-
-	return json.MarshalIndent(pageData, "", "  ")
-}
-
-func (j *JSONSerializer) DeserializeDocumentPage(data []byte) (*models.DocumentPage, error) {
-	var pageData map[string]interface{}
-	if err := json.Unmarshal(data, &pageData); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON document page: %w", err)
-	}
-
-	page := &models.DocumentPage{
-		PageID:        uint32(getInt64(pageData, "PageID")),
-		BundleID:      getString(pageData, "BundleID"),
-		Documents:     make(map[string]models.Document),
-		IsDirty:       getBool(pageData, "IsDirty"),
-		LoadedAt:      getTime(pageData, "LoadedAt"),
-		DocumentCount: int(getInt64(pageData, "DocumentCount")),
-	}
-
-	// Parse documents
-	if docsData, ok := pageData["Documents"].(map[string]interface{}); ok {
-		for docID, docData := range docsData {
-			if docMap, ok := docData.(map[string]interface{}); ok {
-				doc := models.Document{
-					DocumentID: docID,
-					Data:       docMap,
-				}
-				page.Documents[docID] = doc
-			}
-		}
-	}
-
-	return page, nil
 }
 
 // BinarySerializer implements BSON-based binary serialization
@@ -564,13 +445,11 @@ func parseConstraintsFromData(constraintData interface{}) (map[string]models.Con
 }
 
 // GetSerializer returns the appropriate serializer based on format string
-func GetSerializer(format string) BundleSerializer {
+func GetSerializer(format string) (BundleSerializer, error) {
 	switch format {
-	case "binary":
-		return NewBinarySerializer()
-	case "json":
-		fallthrough
+	case "binary", "":
+		return NewBinarySerializer(), nil
 	default:
-		return NewJSONSerializer()
+		return nil, fmt.Errorf("unsupported bundle storage format: %s (only 'binary' is supported)", format)
 	}
 }

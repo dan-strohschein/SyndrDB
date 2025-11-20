@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/conversion"
 )
 
 // InMemoryHashTable implements the HashTable interface using an in-memory hash table
@@ -194,7 +195,7 @@ func (ht *InMemoryHashTable) hashKey(key interface{}) uint64 {
 	hasher := fnv.New64a()
 
 	// Convert key to string for hashing
-	keyStr := fmt.Sprintf("%v", key)
+	keyStr := conversion.ValueToString(key)
 	hasher.Write([]byte(keyStr))
 
 	return hasher.Sum64()
@@ -202,7 +203,7 @@ func (ht *InMemoryHashTable) hashKey(key interface{}) uint64 {
 
 // keysEqual compares two keys for equality
 func (ht *InMemoryHashTable) keysEqual(key1, key2 interface{}) bool {
-	return fmt.Sprintf("%v", key1) == fmt.Sprintf("%v", key2)
+	return conversion.ValueToString(key1) == conversion.ValueToString(key2)
 }
 
 // estimateEntrySize estimates the memory size of a hash table entry

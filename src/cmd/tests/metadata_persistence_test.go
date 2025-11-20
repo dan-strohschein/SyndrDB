@@ -55,7 +55,7 @@ func TestMetadataPersistence_DirtyFlag(t *testing.T) {
 		CommandType: "ADD_DOCUMENT",
 		BundleName:  bundle.Name,
 		Fields: []models.KeyValue{
-			{Key: "name", Value: "test"},
+			{Key: "name", Value: models.NewStringValue("test")},
 		},
 	}
 

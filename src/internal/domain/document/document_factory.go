@@ -36,7 +36,7 @@ func (f *DocumentFactoryImpl) NewDocument(docCommand models.DocumentCommand) *mo
 	// just like other fields, fixing query filter issues
 	newDoc.Fields["DocumentID"] = models.Field{
 		Name:  "DocumentID",
-		Value: newDoc.DocumentID,
+		Value: models.NewStringValue(newDoc.DocumentID), // ✅ Convert string to FieldValue
 	}
 
 	return newDoc
@@ -56,7 +56,7 @@ func (f *DocumentFactoryImpl) MakeDocumentFieldsPooled(docCommand models.Documen
 		// Create a new field based on the definition
 		field := models.Field{
 			Name:  f.Key,
-			Value: f.Value,
+			Value: models.NewInterfaceValue(f.Value), // ✅ Convert interface{} to FieldValue
 		}
 
 		// Add the field to the map with its name as the key
@@ -78,7 +78,7 @@ func (f *DocumentFactoryImpl) NewDocumentWithFields(docCommand models.DocumentCo
 	if _, exists := newDoc.Fields["DocumentID"]; !exists {
 		newDoc.Fields["DocumentID"] = models.Field{
 			Name:  "DocumentID",
-			Value: newDoc.DocumentID,
+			Value: models.NewStringValue(newDoc.DocumentID), // ✅ Convert string to FieldValue
 		}
 	}
 

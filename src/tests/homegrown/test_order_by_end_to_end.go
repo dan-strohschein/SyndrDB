@@ -255,37 +255,37 @@ func createTestDocuments() []*models.Document {
 		{
 			DocumentID: "emp_1",
 			Fields: map[string]models.Field{
-				"name":       {Name: "name", Value: "Charlie Brown"},
-				"salary":     {Name: "salary", Value: 75000.0},
-				"department": {Name: "department", Value: "Engineering"},
-				"active":     {Name: "active", Value: true},
+				"name":       {Name: "name", Value: models.NewStringValue("Charlie Brown")},
+				"salary":     {Name: "salary", Value: models.NewFloatValue(75000.0)},
+				"department": {Name: "department", Value: models.NewStringValue("Engineering")},
+				"active":     {Name: "active", Value: models.NewBoolValue(true)},
 			},
 		},
 		{
 			DocumentID: "emp_2",
 			Fields: map[string]models.Field{
-				"name":       {Name: "name", Value: "Alice Johnson"},
-				"salary":     {Name: "salary", Value: 65000.0},
-				"department": {Name: "department", Value: "Engineering"},
-				"active":     {Name: "active", Value: true},
+				"name":       {Name: "name", Value: models.NewStringValue("Alice Johnson")},
+				"salary":     {Name: "salary", Value: models.NewFloatValue(65000.0)},
+				"department": {Name: "department", Value: models.NewStringValue("Engineering")},
+				"active":     {Name: "active", Value: models.NewBoolValue(true)},
 			},
 		},
 		{
 			DocumentID: "emp_3",
 			Fields: map[string]models.Field{
-				"name":       {Name: "name", Value: "Bob Smith"},
-				"salary":     {Name: "salary", Value: 55000.0},
-				"department": {Name: "department", Value: "Marketing"},
-				"active":     {Name: "active", Value: false},
+				"name":       {Name: "name", Value: models.NewStringValue("Bob Smith")},
+				"salary":     {Name: "salary", Value: models.NewFloatValue(55000.0)},
+				"department": {Name: "department", Value: models.NewStringValue("Marketing")},
+				"active":     {Name: "active", Value: models.NewBoolValue(false)},
 			},
 		},
 		{
 			DocumentID: "emp_4",
 			Fields: map[string]models.Field{
-				"name":       {Name: "name", Value: "Diana Prince"},
-				"salary":     {Name: "salary", Value: 80000.0},
-				"department": {Name: "department", Value: "Engineering"},
-				"active":     {Name: "active", Value: true},
+				"name":       {Name: "name", Value: models.NewStringValue("Diana Prince")},
+				"salary":     {Name: "salary", Value: models.NewFloatValue(80000.0)},
+				"department": {Name: "department", Value: models.NewStringValue("Engineering")},
+				"active":     {Name: "active", Value: models.NewBoolValue(true)},
 			},
 		},
 	}

@@ -143,31 +143,31 @@ func TestStringHeapSort_ASC(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "zebra"},
+				"name": {Name: "name", Value: models.NewStringValue("zebra")},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "apple"},
+				"name": {Name: "name", Value: models.NewStringValue("apple")},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "mango"},
+				"name": {Name: "name", Value: models.NewStringValue("mango")},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "banana"},
+				"name": {Name: "name", Value: models.NewStringValue("banana")},
 			},
 		},
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "orange"},
+				"name": {Name: "name", Value: models.NewStringValue("orange")},
 			},
 		},
 	}
@@ -222,31 +222,31 @@ func TestStringHeapSort_DESC(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: "boston"},
+				"city": {Name: "city", Value: models.NewStringValue("boston")},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: "seattle"},
+				"city": {Name: "city", Value: models.NewStringValue("seattle")},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: "austin"},
+				"city": {Name: "city", Value: models.NewStringValue("austin")},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: "denver"},
+				"city": {Name: "city", Value: models.NewStringValue("denver")},
 			},
 		},
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: "portland"},
+				"city": {Name: "city", Value: models.NewStringValue("portland")},
 			},
 		},
 	}
@@ -301,19 +301,19 @@ func TestStringHeapSort_SIMD_vs_NonSIMD(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"description": {Name: "description", Value: "database_alpha_version_1"},
+				"description": {Name: "description", Value: models.NewStringValue("database_alpha_version_1")},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"description": {Name: "description", Value: "database_beta_version_2"},
+				"description": {Name: "description", Value: models.NewStringValue("database_beta_version_2")},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"description": {Name: "description", Value: "database_gamma_version_3"},
+				"description": {Name: "description", Value: models.NewStringValue("database_gamma_version_3")},
 			},
 		},
 	}
@@ -373,7 +373,7 @@ func TestStringHeapSort_ZeroLimit(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "test"},
+				"name": {Name: "name", Value: models.NewStringValue("test")},
 			},
 		},
 	}

@@ -132,7 +132,7 @@ func setupGraphQLTestEnvironment(t *testing.T) *TestEnvironment {
 	bufferPool := buffer.NewBufferPool(10, 4096, fileRegistry, sugar)
 
 	// Create bundle store
-	bundleStore, err := bundlestore.NewBundleStore(tmpDir, bufferPool, sugar, "json")
+	bundleStore, err := bundlestore.NewBundleStore(tmpDir, bufferPool, sugar, "binary")
 	require.NoError(t, err, "Failed to create bundle store")
 
 	// Create factories

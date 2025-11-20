@@ -33,6 +33,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 
@@ -546,10 +547,11 @@ func evaluateComparison(leftValue interface{}, operator string, rightValue inter
 // createJoinedDocument combines fields from two documents
 func createJoinedDocument(leftDoc, rightDoc *models.Document, leftDocID, rightDocID string, logger *zap.SugaredLogger) *models.Document {
 	logger.Infof("Creating joined document from left ID: %s and right ID: %s", leftDocID, rightDocID)
-	joinedDoc := &models.Document{
-		DocumentID: fmt.Sprintf("joined_%s_%s", leftDocID, rightDocID),
-		Fields:     make(map[string]models.Field),
-	}
+	// STEP 1: Use document pool to reduce allocations
+	// TODO: Option C - Implement reference counting for automatic pool return
+	joinedDoc := document.GetPooledDocument()
+	joinedDoc.DocumentID = fmt.Sprintf("joined_%s_%s", leftDocID, rightDocID)
+	joinedDoc.Fields = make(map[string]models.Field)
 
 	// Add fields from left document with prefix
 	if leftDoc != nil {
@@ -559,7 +561,7 @@ func createJoinedDocument(leftDoc, rightDoc *models.Document, leftDocID, rightDo
 		}
 		joinedDoc.Fields["left_DocumentID"] = models.Field{
 			Name:  "left_DocumentID",
-			Value: leftDoc.DocumentID,
+			Value: models.NewStringValue(leftDoc.DocumentID),
 		}
 	}
 
@@ -571,7 +573,7 @@ func createJoinedDocument(leftDoc, rightDoc *models.Document, leftDocID, rightDo
 		}
 		joinedDoc.Fields["right_DocumentID"] = models.Field{
 			Name:  "right_DocumentID",
-			Value: rightDoc.DocumentID,
+			Value: models.NewStringValue(rightDoc.DocumentID),
 		}
 	}
 

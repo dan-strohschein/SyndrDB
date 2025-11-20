@@ -113,10 +113,10 @@ func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) erro
 	databaseDoc := models.Document{
 		DocumentID: fmt.Sprintf("db_%s", newDB.DatabaseID),
 		Fields: map[string]models.Field{
-			"DocumentID": {Name: "DocumentID", Value: fmt.Sprintf("db_%s", newDB.DatabaseID)},
-			"DatabaseID": {Name: "DatabaseID", Value: newDB.DatabaseID},
-			"Name":       {Name: "Name", Value: newDB.Name},
-			"FilePath":   {Name: "FilePath", Value: fmt.Sprintf("%s/%s/%s.db", newDB.DataDirectory, newDB.Name, newDB.Name)},
+			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(fmt.Sprintf("db_%s", newDB.DatabaseID))},
+			"DatabaseID": {Name: "DatabaseID", Value: models.NewStringValue(newDB.DatabaseID)},
+			"Name":       {Name: "Name", Value: models.NewStringValue(newDB.Name)},
+			"FilePath":   {Name: "FilePath", Value: models.NewStringValue(fmt.Sprintf("%s/%s/%s.db", newDB.DataDirectory, newDB.Name, newDB.Name))},
 		},
 	}
 
@@ -170,7 +170,7 @@ func (s *DatabaseService) syncDatabaseCatalog(logger *zap.SugaredLogger) {
 	existingDatabaseIDs := make(map[string]bool)
 	for _, doc := range *databasesBundle.Documents {
 		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
-			if dbID, ok := dbIDField.Value.(string); ok {
+			if dbID, ok := dbIDField.Value.AsString(); ok { // ✅ Use AsString()
 				existingDatabaseIDs[dbID] = true
 			}
 		}

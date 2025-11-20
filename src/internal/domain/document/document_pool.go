@@ -96,3 +96,15 @@ func GetPooledFieldMap() map[string]models.Field {
 func ReturnPooledFieldMap(fieldMap map[string]models.Field) {
 	globalDocumentPool.PutFieldMap(fieldMap)
 }
+
+// FreeDocuments returns a batch of documents to the pool
+// STEP 1: Centralized cleanup for query response documents
+// Safe to call with nil or empty slices
+// TODO: Option C: Implement reference counting for automatic pool return when last consumer releases document
+func FreeDocuments(docs []*models.Document) {
+	for _, doc := range docs {
+		if doc != nil {
+			ReturnPooledDocument(doc)
+		}
+	}
+}

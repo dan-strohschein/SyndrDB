@@ -58,7 +58,7 @@ func main() {
 	flag.BoolVar(&args.UserDebug, "userdebug", false, "Enable user debug mode")
 	flag.BoolVar(&args.EnableGraphQL, "graphql", false, "Enable GraphQL API")
 	flag.StringVar(&args.LogLevel, "loglevel", "info", "Log level: debug, info, warn, error")
-	flag.StringVar(&args.BundleStorageFormat, "bundle-format", "binary", "Bundle storage format: json or binary")
+	flag.StringVar(&args.BundleStorageFormat, "bundle-format", "binary", "Bundle storage format (only 'binary' is supported)")
 
 	// PHASE 2 ASYNC WAL FLAGS
 	flag.StringVar(&args.WALMode, "wal-mode", "sync", "WAL mode: sync or async")

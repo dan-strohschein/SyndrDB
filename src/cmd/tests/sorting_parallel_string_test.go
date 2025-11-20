@@ -201,7 +201,7 @@ func TestParallelStringSort_MissingField(t *testing.T) {
 		doc := &models.Document{
 			DocumentID: uuid.New().String(),
 			Fields: map[string]models.Field{
-				"other_field": {Name: "other_field", Value: "value"},
+				"other_field": {Name: "other_field", Value: models.NewStringValue("value")},
 			},
 		}
 		docs[doc.DocumentID] = doc

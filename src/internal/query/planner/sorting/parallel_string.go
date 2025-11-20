@@ -108,7 +108,7 @@ func ParallelStringSort(
 
 		// Convert to string
 		var strValue string
-		switch v := field.Value.(type) {
+		switch v := field.Value.AsInterface().(type) { // ✅ Use AsInterface()
 		case string:
 			strValue = v
 		case []byte:

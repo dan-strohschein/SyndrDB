@@ -214,7 +214,7 @@ func TestBundleRename_ConcurrentOperationsBlocked(t *testing.T) {
 	doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
 		Fields: map[string]models.Field{
-			"name": {Name: "name", Value: "test"},
+			"name": {Name: "name", Value: models.NewStringValue("test")},
 		},
 	}
 	if err := bundleService.AddDocumentToBundleByStruct(testDB, testBundle, doc); err != nil {

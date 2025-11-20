@@ -18,8 +18,8 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 	doc := &models.Document{
 		DocumentID: "test-123",
 		Fields: map[string]models.Field{
-			"age":  {Value: int64(25)},
-			"name": {Value: "Alice"},
+			"age":  {Value: models.NewIntValue(int64(25))},
+			"name": {Value: models.NewStringValue("Alice")},
 		},
 	}
 
@@ -27,7 +27,7 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 	expr := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "age"},
 		Operator: syndrQL.TOKEN_EQ,
-		Right:    &syndrQL.LiteralExpression{Value: int64(42)},
+		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(42))},
 	}
 
 	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
@@ -42,7 +42,7 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 	expr2 := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "age"},
 		Operator: syndrQL.TOKEN_GT,
-		Right:    &syndrQL.LiteralExpression{Value: int64(30)},
+		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(30))},
 	}
 
 	result2, err := evaluator.EvaluateAsBool(expr2, doc, nil)
@@ -61,8 +61,8 @@ func TestEvaluatorLogicalOperators(t *testing.T) {
 
 	doc := &models.Document{
 		Fields: map[string]models.Field{
-			"age":    {Value: int64(25)},
-			"active": {Value: true},
+			"age":    {Value: models.NewIntValue(int64(25))},
+			"active": {Value: models.NewBoolValue(true)},
 		},
 	}
 
@@ -71,13 +71,13 @@ func TestEvaluatorLogicalOperators(t *testing.T) {
 		Left: &syndrQL.BinaryExpression{
 			Left:     &syndrQL.IdentifierExpression{Name: "age"},
 			Operator: syndrQL.TOKEN_EQ,
-			Right:    &syndrQL.LiteralExpression{Value: int64(25)},
+			Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(25))},
 		},
 		Operator: syndrQL.TOKEN_AND,
 		Right: &syndrQL.BinaryExpression{
 			Left:     &syndrQL.IdentifierExpression{Name: "active"},
 			Operator: syndrQL.TOKEN_EQ,
-			Right:    &syndrQL.LiteralExpression{Value: true},
+			Right:    &syndrQL.LiteralExpression{Value: models.NewBoolValue(true)},
 		},
 	}
 
@@ -99,7 +99,7 @@ func TestExpressionAdapterSimpleWhere(t *testing.T) {
 	expr := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "age"},
 		Operator: syndrQL.TOKEN_EQ,
-		Right:    &syndrQL.LiteralExpression{Value: int64(25)},
+		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(25))},
 	}
 
 	whereGroup, err := adapter.ToWhereGroup(expr)
@@ -137,13 +137,13 @@ func TestExpressionAdapterComplexWhere(t *testing.T) {
 		Left: &syndrQL.BinaryExpression{
 			Left:     &syndrQL.IdentifierExpression{Name: "age"},
 			Operator: syndrQL.TOKEN_GTE,
-			Right:    &syndrQL.LiteralExpression{Value: int64(18)},
+			Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(18))},
 		},
 		Operator: syndrQL.TOKEN_AND,
 		Right: &syndrQL.BinaryExpression{
 			Left:     &syndrQL.IdentifierExpression{Name: "age"},
 			Operator: syndrQL.TOKEN_LTE,
-			Right:    &syndrQL.LiteralExpression{Value: int64(65)},
+			Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(65))},
 		},
 	}
 
@@ -180,7 +180,7 @@ func TestSelectStatementAdapter(t *testing.T) {
 		WhereClause: &syndrQL.BinaryExpression{
 			Left:     &syndrQL.IdentifierExpression{Name: "age"},
 			Operator: syndrQL.TOKEN_GT,
-			Right:    &syndrQL.LiteralExpression{Value: int64(18)},
+			Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(18))},
 		},
 		Pattern: syndrQL.PATTERN_SELECT_WHERE_SIMPLE,
 		Limit:   10,
@@ -282,8 +282,8 @@ func TestEvaluatorNullHandling(t *testing.T) {
 
 	doc := &models.Document{
 		Fields: map[string]models.Field{
-			"name":   {Value: "Alice"},
-			"status": {Value: "::SYNDR_NULL::"},
+			"name":   {Value: models.NewStringValue("Alice")},
+			"status": {Value: models.NewStringValue("::SYNDR_NULL::")},
 		},
 	}
 
@@ -291,7 +291,7 @@ func TestEvaluatorNullHandling(t *testing.T) {
 	expr := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "status"},
 		Operator: syndrQL.TOKEN_EQ,
-		Right:    &syndrQL.LiteralExpression{Value: "::SYNDR_NULL::"},
+		Right:    &syndrQL.LiteralExpression{Value: models.NewStringValue("::SYNDR_NULL::")},
 	}
 
 	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
@@ -321,8 +321,8 @@ func TestEvaluatorTypeCoercion(t *testing.T) {
 
 	doc := &models.Document{
 		Fields: map[string]models.Field{
-			"count":  {Value: "42"},     // String that can be parsed as number
-			"active": {Value: int64(1)}, // Number that can be treated as boolean
+			"count":  {Value: models.NewStringValue("42")},     // String that can be parsed as number
+			"active": {Value: models.NewIntValue(int64(1))}, // Number that can be treated as boolean
 		},
 	}
 
@@ -330,7 +330,7 @@ func TestEvaluatorTypeCoercion(t *testing.T) {
 	expr := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "count"},
 		Operator: syndrQL.TOKEN_EQ,
-		Right:    &syndrQL.LiteralExpression{Value: int64(42)},
+		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(42))},
 	}
 
 	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
@@ -349,14 +349,14 @@ func BenchmarkEvaluatorSimpleComparison(b *testing.B) {
 
 	doc := &models.Document{
 		Fields: map[string]models.Field{
-			"age": {Value: int64(25)},
+			"age": {Value: models.NewIntValue(int64(25))},
 		},
 	}
 
 	expr := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "age"},
 		Operator: syndrQL.TOKEN_GT,
-		Right:    &syndrQL.LiteralExpression{Value: int64(18)},
+		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(18))},
 	}
 
 	b.ResetTimer()
@@ -372,9 +372,9 @@ func BenchmarkEvaluatorComplexExpression(b *testing.B) {
 
 	doc := &models.Document{
 		Fields: map[string]models.Field{
-			"age":    {Value: int64(25)},
-			"active": {Value: true},
-			"score":  {Value: int64(85)},
+			"age":    {Value: models.NewIntValue(int64(25))},
+			"active": {Value: models.NewBoolValue(true)},
+			"score":  {Value: models.NewIntValue(int64(85))},
 		},
 	}
 
@@ -384,13 +384,13 @@ func BenchmarkEvaluatorComplexExpression(b *testing.B) {
 			Left: &syndrQL.BinaryExpression{
 				Left:     &syndrQL.IdentifierExpression{Name: "age"},
 				Operator: syndrQL.TOKEN_GTE,
-				Right:    &syndrQL.LiteralExpression{Value: int64(18)},
+				Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(18))},
 			},
 			Operator: syndrQL.TOKEN_AND,
 			Right: &syndrQL.BinaryExpression{
 				Left:     &syndrQL.IdentifierExpression{Name: "age"},
 				Operator: syndrQL.TOKEN_LTE,
-				Right:    &syndrQL.LiteralExpression{Value: int64(65)},
+				Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(65))},
 			},
 		},
 		Operator: syndrQL.TOKEN_AND,
@@ -398,13 +398,13 @@ func BenchmarkEvaluatorComplexExpression(b *testing.B) {
 			Left: &syndrQL.BinaryExpression{
 				Left:     &syndrQL.IdentifierExpression{Name: "active"},
 				Operator: syndrQL.TOKEN_EQ,
-				Right:    &syndrQL.LiteralExpression{Value: true},
+				Right:    &syndrQL.LiteralExpression{Value: models.NewBoolValue(true)},
 			},
 			Operator: syndrQL.TOKEN_OR,
 			Right: &syndrQL.BinaryExpression{
 				Left:     &syndrQL.IdentifierExpression{Name: "score"},
 				Operator: syndrQL.TOKEN_GT,
-				Right:    &syndrQL.LiteralExpression{Value: int64(80)},
+				Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(80))},
 			},
 		},
 	}

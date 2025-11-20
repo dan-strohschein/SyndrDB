@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/bloomfilter"
 	"syndrdb/src/internal/query/documentscanner"
+	"syndrdb/src/pkg/common/conversion"
 
 	"go.uber.org/zap"
 )
@@ -228,7 +229,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 		// Add to Bloom filter (if enabled)
 		if bloom != nil {
-			bloom.Add(fmt.Sprintf("%v", keyValue))
+			bloom.Add(conversion.ValueToString(keyValue))
 		}
 
 		stats.DocumentsScanned++
@@ -292,7 +293,7 @@ func (hjs *HashJoinStrategy) probeHashTable(
 
 		// OPTIMIZATION: Check Bloom filter first (if enabled)
 		if bloom != nil {
-			keyStr := fmt.Sprintf("%v", keyValue)
+			keyStr := conversion.ValueToString(keyValue)
 			if !bloom.MayContain(keyStr) {
 				// Bloom filter says definitely NOT in hash table - skip expensive lookup!
 				bloomFilterSkips++
@@ -308,20 +309,20 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		if found {
 			// Create joined documents for each match
 			for _, buildDoc := range buildDocs {
-				joinedDoc := hjs.createJoinedDocument(buildDoc, probeDoc, fmt.Sprintf("%v", keyValue), swapped, request.JoinType)
+				joinedDoc := hjs.createJoinedDocument(buildDoc, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
 				if joinedDoc != nil {
 					joinedDocs = append(joinedDocs, joinedDoc)
 				}
 			}
 		} else if request.JoinType == LeftJoin && !swapped {
 			// Left outer join: include unmatched documents from left (build) side
-			joinedDoc := hjs.createJoinedDocument(nil, probeDoc, fmt.Sprintf("%v", keyValue), swapped, request.JoinType)
+			joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
 			if joinedDoc != nil {
 				joinedDocs = append(joinedDocs, joinedDoc)
 			}
 		} else if request.JoinType == RightJoin && swapped {
 			// Right outer join: include unmatched documents from right (probe) side
-			joinedDoc := hjs.createJoinedDocument(nil, probeDoc, fmt.Sprintf("%v", keyValue), swapped, request.JoinType)
+			joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
 			if joinedDoc != nil {
 				joinedDocs = append(joinedDocs, joinedDoc)
 			}

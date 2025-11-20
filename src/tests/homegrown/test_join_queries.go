@@ -244,25 +244,25 @@ func setupJoinTestData(logger *zap.SugaredLogger) (*models.Database, server.Serv
 		{
 			DocumentID: "customer_1",
 			Fields: map[string]models.Field{
-				"id":   {Name: "id", Value: 1},
-				"name": {Name: "name", Value: "John Doe"},
-				"city": {Name: "city", Value: "New York"},
+				"id":   {Name: "id", Value: models.NewIntValue(1)},
+				"name": {Name: "name", Value: models.NewStringValue("John Doe")},
+				"city": {Name: "city", Value: models.NewStringValue("New York")},
 			},
 		},
 		{
 			DocumentID: "customer_2",
 			Fields: map[string]models.Field{
-				"id":   {Name: "id", Value: 2},
-				"name": {Name: "name", Value: "Jane Smith"},
-				"city": {Name: "city", Value: "Los Angeles"},
+				"id":   {Name: "id", Value: models.NewIntValue(2)},
+				"name": {Name: "name", Value: models.NewStringValue("Jane Smith")},
+				"city": {Name: "city", Value: models.NewStringValue("Los Angeles")},
 			},
 		},
 		{
 			DocumentID: "customer_3",
 			Fields: map[string]models.Field{
-				"id":   {Name: "id", Value: 3},
-				"name": {Name: "name", Value: "Bob Johnson"},
-				"city": {Name: "city", Value: "Chicago"},
+				"id":   {Name: "id", Value: models.NewIntValue(3)},
+				"name": {Name: "name", Value: models.NewStringValue("Bob Johnson")},
+				"city": {Name: "city", Value: models.NewStringValue("Chicago")},
 			},
 		},
 	}
@@ -272,37 +272,37 @@ func setupJoinTestData(logger *zap.SugaredLogger) (*models.Database, server.Serv
 		{
 			DocumentID: "order_1",
 			Fields: map[string]models.Field{
-				"order_id":    {Name: "order_id", Value: 101},
-				"customer_id": {Name: "customer_id", Value: 1},
-				"total":       {Name: "total", Value: 75.50},
-				"product":     {Name: "product", Value: "Laptop"},
+				"order_id":    {Name: "order_id", Value: models.NewIntValue(101)},
+				"customer_id": {Name: "customer_id", Value: models.NewIntValue(1)},
+				"total":       {Name: "total", Value: models.NewFloatValue(75.50)},
+				"product":     {Name: "product", Value: models.NewStringValue("Laptop")},
 			},
 		},
 		{
 			DocumentID: "order_2",
 			Fields: map[string]models.Field{
-				"order_id":    {Name: "order_id", Value: 102},
-				"customer_id": {Name: "customer_id", Value: 2},
-				"total":       {Name: "total", Value: 25.00},
-				"product":     {Name: "product", Value: "Book"},
+				"order_id":    {Name: "order_id", Value: models.NewIntValue(102)},
+				"customer_id": {Name: "customer_id", Value: models.NewIntValue(2)},
+				"total":       {Name: "total", Value: models.NewFloatValue(25.00)},
+				"product":     {Name: "product", Value: models.NewStringValue("Book")},
 			},
 		},
 		{
 			DocumentID: "order_3",
 			Fields: map[string]models.Field{
-				"order_id":    {Name: "order_id", Value: 103},
-				"customer_id": {Name: "customer_id", Value: 1},
-				"total":       {Name: "total", Value: 120.00},
-				"product":     {Name: "product", Value: "Phone"},
+				"order_id":    {Name: "order_id", Value: models.NewIntValue(103)},
+				"customer_id": {Name: "customer_id", Value: models.NewIntValue(1)},
+				"total":       {Name: "total", Value: models.NewFloatValue(120.00)},
+				"product":     {Name: "product", Value: models.NewStringValue("Phone")},
 			},
 		},
 		{
 			DocumentID: "order_4",
 			Fields: map[string]models.Field{
-				"order_id":    {Name: "order_id", Value: 104},
-				"customer_id": {Name: "customer_id", Value: 99}, // No matching customer
-				"total":       {Name: "total", Value: 45.00},
-				"product":     {Name: "product", Value: "Tablet"},
+				"order_id":    {Name: "order_id", Value: models.NewIntValue(104)},
+				"customer_id": {Name: "customer_id", Value: models.NewIntValue(99)}, // No matching customer
+				"total":       {Name: "total", Value: models.NewFloatValue(45.00)},
+				"product":     {Name: "product", Value: models.NewStringValue("Tablet")},
 			},
 		},
 	}

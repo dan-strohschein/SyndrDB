@@ -47,7 +47,7 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
 			if usernameField, ok := doc.Fields["Username"]; ok {
-				if usernameField.Value == username {
+				if str, ok := usernameField.Value.AsString(); ok && str == username {
 					return nil, fmt.Errorf("user '%s' already exists", username)
 				}
 			}
@@ -64,11 +64,11 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	userDoc := models.Document{
 		DocumentID: userID,
 		Fields: map[string]models.Field{
-			"DocumentID": {Name: "DocumentID", Value: userID},
-			"UserID":     {Name: "UserID", Value: userID},
-			"Username":   {Name: "Username", Value: username},
-			"Password":   {Name: "Password", Value: hashedPassword},
-			"CreatedAt":  {Name: "CreatedAt", Value: time.Now().Format(time.RFC3339)},
+			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(userID)},
+			"UserID":     {Name: "UserID", Value: models.NewStringValue(userID)},
+			"Username":   {Name: "Username", Value: models.NewStringValue(username)},
+			"Password":   {Name: "Password", Value: models.NewStringValue(hashedPassword)},
+			"CreatedAt":  {Name: "CreatedAt", Value: models.NewStringValue(time.Now().Format(time.RFC3339))},
 		},
 	}
 
@@ -147,9 +147,9 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		found := false
 		for _, doc := range *usersBundle.Documents {
 			if usernameField, ok := doc.Fields["Username"]; ok {
-				if usernameField.Value == username {
+				if str, ok := usernameField.Value.AsString(); ok && str == username {
 					if userIDField, ok := doc.Fields["UserID"]; ok {
-						userID = userIDField.Value.(string)
+						userID, _ = userIDField.Value.AsString()
 						found = true
 						break
 					}
@@ -174,9 +174,9 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		found := false
 		for _, doc := range *databasesBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if nameField.Value == databaseName {
+				if str, ok := nameField.Value.AsString(); ok && str == databaseName {
 					if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
-						databaseID = dbIDField.Value.(string)
+						databaseID, _ = dbIDField.Value.AsString()
 						found = true
 						break
 					}
@@ -201,7 +201,9 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		for _, doc := range *databaseUsersBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
-					if userIDField.Value == userID && dbIDField.Value == databaseID {
+					str1, ok1 := userIDField.Value.AsString()
+					str2, ok2 := dbIDField.Value.AsString()
+					if ok1 && ok2 && str1 == userID && str2 == databaseID {
 						return nil, fmt.Errorf("user '%s' is already attached to database '%s'", username, databaseName)
 					}
 				}
@@ -214,10 +216,10 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 	relationshipDoc := models.Document{
 		DocumentID: relationshipID,
 		Fields: map[string]models.Field{
-			"DocumentID": {Name: "DocumentID", Value: relationshipID},
-			"UserID":     {Name: "UserID", Value: userID},
-			"DatabaseID": {Name: "DatabaseID", Value: databaseID},
-			"AttachedAt": {Name: "AttachedAt", Value: time.Now().Format(time.RFC3339)},
+			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(relationshipID)},
+			"UserID":     {Name: "UserID", Value: models.NewStringValue(userID)},
+			"DatabaseID": {Name: "DatabaseID", Value: models.NewStringValue(databaseID)},
+			"AttachedAt": {Name: "AttachedAt", Value: models.NewStringValue(time.Now().Format(time.RFC3339))},
 		},
 	}
 
@@ -258,9 +260,9 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 		found := false
 		for _, doc := range *usersBundle.Documents {
 			if usernameField, ok := doc.Fields["Username"]; ok {
-				if usernameField.Value == username {
+				if str, ok := usernameField.Value.AsString(); ok && str == username {
 					if userIDField, ok := doc.Fields["UserID"]; ok {
-						userID = userIDField.Value.(string)
+						userID, _ = userIDField.Value.AsString()
 						found = true
 						break
 					}
@@ -285,9 +287,9 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 		found := false
 		for _, doc := range *permissionsBundle.Documents {
 			if nameField, ok := doc.Fields["PermissionName"]; ok {
-				if nameField.Value == permission {
+				if str, ok := nameField.Value.AsString(); ok && str == permission {
 					if idField, ok := doc.Fields["PermissionID"]; ok {
-						permissionID = idField.Value.(string)
+						permissionID, _ = idField.Value.AsString()
 						found = true
 						break
 					}
@@ -311,7 +313,9 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 		for _, doc := range *userPermissionsBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					if userIDField.Value == userID && permIDField.Value == permissionID {
+					str1, ok1 := userIDField.Value.AsString()
+					str2, ok2 := permIDField.Value.AsString()
+					if ok1 && ok2 && str1 == userID && str2 == permissionID {
 						return true, nil
 					}
 				}

@@ -77,7 +77,7 @@ func (v *UniqueConstraintValidator) ValidateUniqueConstraints(bundle *models.Bun
 	}
 
 	// Collect all unique constraint violations
-	violations := make([]string, 0)
+	violations := make([]string, 0, 5)
 
 	// Check each field in the document command
 	for _, field := range docCommand.Fields {
@@ -244,7 +244,7 @@ func (v *UniqueConstraintValidator) CreateUniqueIndexesForBundle(bundle *models.
 	}
 
 	// Find all fields marked as unique
-	uniqueFields := make([]models.FieldDefinition, 0)
+	uniqueFields := make([]models.FieldDefinition, 0, 10)
 	for _, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
 		if fieldDef.IsUnique {
 			uniqueFields = append(uniqueFields, fieldDef)

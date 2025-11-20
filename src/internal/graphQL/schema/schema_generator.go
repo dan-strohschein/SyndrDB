@@ -90,7 +90,7 @@ func (sg *SchemaGenerator) GenerateSchema(bundle *models.Bundle) (*GraphQLSchema
 // generateFields converts bundle field definitions into GraphQL fields
 // PHASE 8: Now includes automatic relationship field generation with bidirectional support
 func (sg *SchemaGenerator) generateFields(bundle *models.Bundle) ([]GraphQLField, error) {
-	fields := make([]GraphQLField, 0)
+	fields := make([]GraphQLField, 0, 30)
 
 	// Always include DocumentID as the primary ID field
 	fields = append(fields, GraphQLField{

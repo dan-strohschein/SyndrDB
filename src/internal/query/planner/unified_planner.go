@@ -34,10 +34,12 @@ This is the main component of Phase 3 of the unified query system implementation
 package planner
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"go.uber.org/zap"
 )
 
@@ -51,6 +53,11 @@ type UnifiedQueryPlanner struct {
 	// Phase 3 components
 	router  *QueryRouter // Routes queries to appropriate planner
 	builder *PlanBuilder // Composes plans with additional nodes
+
+	// STEP 2: Query plan cache to reduce planning allocations
+	// LRU cache with 128 entries, keyed by query hash
+	// TODO: Option C - Global plan cache with weak references for cross-session plan reuse
+	planCache *lru.Cache[string, *ExecutionPlan]
 
 	// logger for debugging
 	logger *zap.SugaredLogger
@@ -83,12 +90,22 @@ func NewUnifiedQueryPlanner(
 	// Create builder for execution tree composition
 	builder := NewPlanBuilder(bundleService, logger)
 
+	// STEP 2: Initialize query plan cache (128 entries)
+	// Cache invalidation handled on INSERT/UPDATE/DELETE operations
+	planCache, err := lru.New[string, *ExecutionPlan](128)
+	if err != nil {
+		// Fallback to no caching if LRU init fails (shouldn't happen in practice)
+		logger.Warnf("Failed to initialize query plan cache: %v - proceeding without caching", err)
+		planCache = nil
+	}
+
 	return &UnifiedQueryPlanner{
 		basePlanner: basePlanner,
 		joinPlanner: joinPlanner,
 		router:      router,
 		builder:     builder,
 		logger:      logger,
+		planCache:   planCache,
 	}
 }
 
@@ -114,6 +131,16 @@ func (uqp *UnifiedQueryPlanner) CreatePlan(
 ) (*ExecutionPlan, error) {
 
 	uqp.logger.Debugf("Creating unified execution plan for query type: %s", query.QueryType)
+
+	// STEP 2: Check plan cache first to avoid re-planning identical queries
+	if uqp.planCache != nil {
+		cacheKey := uqp.planCacheKey(query, database)
+		if cachedPlan, ok := uqp.planCache.Get(cacheKey); ok {
+			uqp.logger.Debugf("Query plan cache HIT for key: %s", cacheKey[:16])
+			return cachedPlan, nil
+		}
+		uqp.logger.Debugf("Query plan cache MISS for key: %s", cacheKey[:16])
+	}
 
 	// Step 1: Route to appropriate planner and get base execution tree
 	baseNode, indexesUsed, err := uqp.router.RouteQuery(query, database)
@@ -142,11 +169,94 @@ func (uqp *UnifiedQueryPlanner) CreatePlan(
 		Logger:        uqp.logger,
 	}
 
+	// STEP 2: Store plan in cache for future reuse
+	if uqp.planCache != nil {
+		cacheKey := uqp.planCacheKey(query, database)
+		uqp.planCache.Add(cacheKey, plan)
+		uqp.logger.Debugf("Stored plan in cache with key: %s", cacheKey[:16])
+	}
+
 	uqp.logger.Debugf("Unified execution plan created successfully: "+
 		"Type=%s, Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		query.QueryType, plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 
 	return plan, nil
+}
+
+// planCacheKey generates a cache key from the query structure
+// STEP 2: SHA256 hash of normalized query for cache lookup
+func (uqp *UnifiedQueryPlanner) planCacheKey(query *queryparser.UnifiedSelectQuery, database *models.Database) string {
+	h := sha256.New()
+
+	// Include all query components that affect the execution plan
+	h.Write([]byte(fmt.Sprintf("%d", query.QueryType)))
+	h.Write([]byte(query.FromBundle))
+	h.Write([]byte(database.Name))
+
+	// SELECT fields
+	for _, field := range query.SelectFields {
+		h.Write([]byte(field))
+	}
+
+	// Aggregates
+	for _, agg := range query.AggregateFields {
+		h.Write([]byte(fmt.Sprintf("%s:%s", agg.Function, agg.Field)))
+	}
+
+	// Flags
+	h.Write([]byte(fmt.Sprintf("%t:%t", query.IsDistinct, query.IsCountOnly)))
+
+	// Where clause (if present)
+	if query.WhereExpression != nil {
+		h.Write([]byte(fmt.Sprintf("%v", query.WhereExpression)))
+	}
+
+	// Order by
+	if query.OrderBy != nil {
+		for _, orderBy := range query.OrderBy.Fields {
+			h.Write([]byte(orderBy.FieldName))
+			h.Write([]byte(fmt.Sprintf("%d", orderBy.Direction)))
+		}
+	}
+
+	// Group by
+	if query.GroupBy != nil {
+		for _, groupBy := range query.GroupBy.Fields {
+			h.Write([]byte(groupBy))
+		}
+	}
+
+	// Having clause
+	if query.HavingExpression != nil {
+		h.Write([]byte(fmt.Sprintf("%v", query.HavingExpression)))
+	}
+
+	// JOINs
+	for _, join := range query.JoinClauses {
+		h.Write([]byte(fmt.Sprintf("%d:%s", join.JoinType, join.RightBundle)))
+		for _, cond := range join.JoinConditions {
+			h.Write([]byte(fmt.Sprintf("%s:%s:%s", cond.LeftField, cond.Operator, cond.RightField)))
+		}
+	}
+
+	// Relationship
+	if query.RelationshipName != "" {
+		h.Write([]byte(query.RelationshipName))
+	}
+
+	// Limit/Offset
+	h.Write([]byte(fmt.Sprintf("%d:%d:%d", query.Limit, query.Offset, query.TopCount)))
+
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// InvalidatePlanCache clears the query plan cache
+// STEP 2: Call this on INSERT/UPDATE/DELETE to ensure fresh plans
+func (uqp *UnifiedQueryPlanner) InvalidatePlanCache() {
+	if uqp.planCache != nil {
+		uqp.planCache.Purge()
+		uqp.logger.Debugf("Query plan cache invalidated")
+	}
 }
 
 // GetBasePlanner returns the underlying base planner (for testing/debugging)

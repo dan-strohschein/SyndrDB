@@ -303,6 +303,8 @@ func (rs *RestoreService) restorePrimaryDBDocs(targetDBName string, manifest *Ma
 			}
 		}
 
+		// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
+		// This is a backup/restore operation (infrequent, lower priority than query hot-path)
 		// Create document from data
 		document := &models.Document{
 			DocumentID: doc.DocumentID,
@@ -314,7 +316,7 @@ func (rs *RestoreService) restorePrimaryDBDocs(targetDBName string, manifest *Ma
 		for key, value := range doc.Data {
 			document.Fields[key] = models.Field{
 				Name:  key,
-				Value: value,
+				Value: models.NewInterfaceValue(value),
 			}
 		}
 

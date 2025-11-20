@@ -6,6 +6,7 @@ import (
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
+	"syndrdb/src/pkg/common/conversion"
 
 	"go.uber.org/zap"
 )
@@ -324,9 +325,9 @@ func (nljs *NestedLoopJoinStrategy) executeNestedLoop(
 func (nljs *NestedLoopJoinStrategy) compareValues(left, right interface{}, operator string) (bool, error) {
 	switch operator {
 	case "=", "==":
-		return fmt.Sprintf("%v", left) == fmt.Sprintf("%v", right), nil
+		return conversion.ValueToString(left) == conversion.ValueToString(right), nil
 	case "!=", "<>":
-		return fmt.Sprintf("%v", left) != fmt.Sprintf("%v", right), nil
+		return conversion.ValueToString(left) != conversion.ValueToString(right), nil
 	case "<":
 		return nljs.compareOrdered(left, right, -1)
 	case "<=":
@@ -358,8 +359,8 @@ func (nljs *NestedLoopJoinStrategy) compareValues(left, right interface{}, opera
 func (nljs *NestedLoopJoinStrategy) compareOrdered(left, right interface{}, expected int) (bool, error) {
 	// Simple string comparison for now
 	// PHASE 2: Add type-aware comparison (numbers, dates, etc.)
-	leftStr := fmt.Sprintf("%v", left)
-	rightStr := fmt.Sprintf("%v", right)
+	leftStr := conversion.ValueToString(left)
+	rightStr := conversion.ValueToString(right)
 
 	if leftStr < rightStr {
 		return expected == -1, nil

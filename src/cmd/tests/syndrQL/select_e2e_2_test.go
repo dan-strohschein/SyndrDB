@@ -70,7 +70,7 @@ func seedSimpleAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 		// Debug first document command
 
 		startTime := time.Now()
-		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime)
+		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed author %d: %v", i, err)
 		}
@@ -80,6 +80,45 @@ func seedSimpleAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 			t.Logf("First ADD DOCUMENT response type: %T", response)
 			if cmdResp, ok := response.(*server.CommandResponse); ok {
 				t.Logf("First ADD DOCUMENT result: %+v", cmdResp.Result)
+			}
+
+		}
+	}
+}
+
+func seedSimpleAuthorsBundleTB(tb testing.TB, fixture *TestFixture, count int) {
+	tb.Helper()
+
+	countries := []string{"USA", "UK", "Canada", "France"}
+
+	for i := 1; i <= count; i++ {
+		var name string
+		// Add 3 authors named "Strohschein" at the end
+		if i > count-3 {
+			name = "Strohschein"
+		} else {
+			name = fmt.Sprintf("Author_%03d", i)
+		}
+		country := countries[(i-1)%len(countries)]
+		birthYear := 1950 + i
+
+		// Use correct ADD DOCUMENT syntax with multiple braces (match exact user format)
+		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Authors" WITH ({"ID"=%d}, {"Name"="%s"}, {"Country"="%s"}, {"BirthYear"=%d});`,
+			i, name, country, birthYear)
+
+		// Debug first document command
+
+		startTime := time.Now()
+		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		if err != nil {
+			tb.Fatalf("Failed to seed author %d: %v", i, err)
+		}
+
+		// Debug first document response
+		if i == 1 {
+			tb.Logf("First ADD DOCUMENT response type: %T", response)
+			if cmdResp, ok := response.(*server.CommandResponse); ok {
+				tb.Logf("First ADD DOCUMENT result: %+v", cmdResp.Result)
 			}
 
 		}
@@ -128,7 +167,7 @@ func clearAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 	for i := 1; i <= count; i++ {
 		deleteCmd := fmt.Sprintf(`DELETE DOCUMENTS FROM "Authors" WHERE "ID" == "%d"`, i)
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, deleteCmd, fixture.Logger, startTime)
+		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, deleteCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to clear author %d: %v", i, err)
 		}
@@ -149,9 +188,31 @@ func seedSimpleBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 			i, title, authorID, genre)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime)
+		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed book %d: %v", i, err)
+		}
+	}
+}
+
+func seedSimpleBooksBundleTB(tb testing.TB, fixture *TestFixture, count int) {
+	tb.Helper()
+
+	genres := []string{"Fiction", "NonFiction", "Mystery", "SciFi", "Fantasy"}
+
+	for i := 1; i <= count; i++ {
+		title := fmt.Sprintf("Book_%03d", i)
+		authorID := ((i - 1) % 100) + 1 // Cycle through authors 1-100
+		genre := genres[(i-1)%len(genres)]
+
+		// AuthorsID is the foreign key field created by the relationship
+		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"ID"=%d}, {"Title"="%s"}, {"AuthorID"=%d}, {"AuthorsID"=%d}, {"Genre"="%s"});`,
+			i, title, authorID, authorID, genre)
+
+		startTime := time.Now()
+		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		if err != nil {
+			tb.Fatalf("Failed to seed book %d: %v", i, err)
 		}
 	}
 }
@@ -166,7 +227,7 @@ func setupBundles(t *testing.T, fixture *TestFixture) {
 		dropCmd := fmt.Sprintf(`DROP BUNDLE "%s" WITH FORCE`, bundleName)
 		startTime := time.Now()
 		// Pass fixture.Database to ensure commands operate on correct database
-		_, _ = server.CommandDirector(fixture.Database, *fixture.ServiceManager, dropCmd, fixture.Logger, startTime)
+		_, _ = server.CommandDirector(fixture.Database, *fixture.ServiceManager, dropCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	}
 
 	// Create Authors bundle - must pass database context
@@ -178,7 +239,7 @@ func setupBundles(t *testing.T, fixture *TestFixture) {
 		{"BirthYear", "INT", false, false, 0}
 	);`
 	startTime := time.Now()
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime)
+	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Authors bundle: %v", err)
 	}
@@ -202,7 +263,7 @@ func setupBundles(t *testing.T, fixture *TestFixture) {
 		{"Price", "FLOAT", false, false, null}
 	)`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime)
+	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Books bundle: %v", err)
 	}
@@ -214,16 +275,89 @@ func setupBundles(t *testing.T, fixture *TestFixture) {
 		{"Country", "STRING", false, false, null}
 	)`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime)
+	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Publishers bundle: %v", err)
 	}
 
 	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime)
+	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create relationship: %v", err)
+	}
+
+	fixture.Logger.Infof("✓ Database reset complete (bundles: %v)", bundles)
+}
+
+func setupBundlesTB(tb testing.TB, fixture *TestFixture) {
+	tb.Helper()
+
+	bundles := []string{"Authors", "Books", "Publishers"}
+
+	// Drop existing bundles (ignore errors if they don't exist)
+	for _, bundleName := range bundles {
+		dropCmd := fmt.Sprintf(`DROP BUNDLE "%s" WITH FORCE`, bundleName)
+		startTime := time.Now()
+		// Pass fixture.Database to ensure commands operate on correct database
+		_, _ = server.CommandDirector(fixture.Database, *fixture.ServiceManager, dropCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	}
+
+	// Create Authors bundle - must pass database context
+	// NOTE: Avoiding UNIQUE constraint for now due to indexing issues in test environment
+	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
+		{"ID", "INT", true, false, 0},
+		{"Name", "STRING", true, false, ""},
+		{"Country", "STRING", false, false, ""},
+		{"BirthYear", "INT", false, false, 0}
+	);`
+	startTime := time.Now()
+	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	if err != nil {
+		tb.Fatalf("Failed to create Authors bundle: %v", err)
+	}
+
+	// // Debug: Show all bundles to see what was actually created
+	// showBundlesCmd := `SHOW BUNDLES`
+	// startTime = time.Now()
+	// bundlesInfo, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, showBundlesCmd, fixture.Logger, startTime)
+	// if err == nil {
+	// 	tb.Logf("SHOW BUNDLES result: %+v", bundlesInfo)
+	// } else {
+	// 	tb.Logf("SHOW BUNDLES error: %v", err)
+	// }
+
+	// Create Books bundle - must pass database context
+	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
+		{"ID", "INT", true, true, null},
+		{"Title", "STRING", true, false, null},
+		{"AuthorID", "INT", false, false, null},
+		{"Genre", "STRING", false, false, null},
+		{"Price", "FLOAT", false, false, null}
+	)`
+	startTime = time.Now()
+	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	if err != nil {
+		tb.Fatalf("Failed to create Books bundle: %v", err)
+	}
+
+	// Create Publishers bundle - must pass database context
+	createPublishersCmd := `CREATE BUNDLE "Publishers" WITH FIELDS (
+		{"ID", "INT", true, true, null},
+		{"Name", "STRING", true, false, null},
+		{"Country", "STRING", false, false, null}
+	)`
+	startTime = time.Now()
+	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	if err != nil {
+		tb.Fatalf("Failed to create Publishers bundle: %v", err)
+	}
+
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");`
+	startTime = time.Now()
+	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	if err != nil {
+		tb.Fatalf("Failed to create relationship: %v", err)
 	}
 
 	fixture.Logger.Infof("✓ Database reset complete (bundles: %v)", bundles)
@@ -238,6 +372,22 @@ func setupRealServer(t *testing.T) *TestFixture {
 		if fixture.ServiceManager != nil && fixture.ServiceManager.BundleService != nil {
 			if err := fixture.ServiceManager.BundleService.Shutdown(); err != nil {
 				t.Logf("Warning: BundleService shutdown error: %v", err)
+			}
+		}
+	})
+
+	return fixture
+}
+
+func setupRealServerTB(tb testing.TB) *TestFixture {
+	fixture := setupFullServerTB(tb)
+	setupBundlesTB(tb, fixture)
+
+	// Register cleanup to shutdown services before temp directory cleanup
+	tb.Cleanup(func() {
+		if fixture.ServiceManager != nil && fixture.ServiceManager.BundleService != nil {
+			if err := fixture.ServiceManager.BundleService.Shutdown(); err != nil {
+				tb.Logf("Warning: BundleService shutdown error: %v", err)
 			}
 		}
 	})

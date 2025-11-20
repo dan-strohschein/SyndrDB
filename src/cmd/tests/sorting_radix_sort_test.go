@@ -23,36 +23,36 @@ func TestRadixSort_ASC(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Alice"},
-				"age":  {Name: "age", Value: int64(35)},
+				"name": {Name: "name", Value: models.NewStringValue("Alice")},
+				"age":  {Name: "age", Value: models.NewIntValue(int64(35))},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Bob"},
-				"age":  {Name: "age", Value: int64(28)},
+				"name": {Name: "name", Value: models.NewStringValue("Bob")},
+				"age":  {Name: "age", Value: models.NewIntValue(int64(28))},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Charlie"},
-				"age":  {Name: "age", Value: int64(42)},
+				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
+				"age":  {Name: "age", Value: models.NewIntValue(int64(42))},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Diana"},
-				"age":  {Name: "age", Value: int64(18)},
+				"name": {Name: "name", Value: models.NewStringValue("Diana")},
+				"age":  {Name: "age", Value: models.NewIntValue(int64(18))},
 			},
 		},
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Eve"},
-				"age":  {Name: "age", Value: int64(25)},
+				"name": {Name: "name", Value: models.NewStringValue("Eve")},
+				"age":  {Name: "age", Value: models.NewIntValue(int64(25))},
 			},
 		},
 	}
@@ -94,25 +94,25 @@ func TestRadixSort_DESC(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(100)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(100))},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(250)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(250))},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(175)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(175))},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(50)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(50))},
 			},
 		},
 	}
@@ -159,13 +159,13 @@ func TestRadixSort_NegativeNumbers(t *testing.T) {
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: int64(0)},
+				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(0))},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: int64(25)},
+				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(25))},
 			},
 		},
 		"doc4": {
@@ -177,7 +177,7 @@ func TestRadixSort_NegativeNumbers(t *testing.T) {
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: int64(10)},
+				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(10))},
 			},
 		},
 	}
@@ -213,13 +213,13 @@ func TestRadixSort_LargeNumbers(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: int64(9223372036854775807)}, // Max int64
+				"value": {Name: "value", Value: models.NewIntValue(int64(9223372036854775807))}, // Max int64
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: int64(1000000000000)}, // 1 trillion
+				"value": {Name: "value", Value: models.NewIntValue(int64(1000000000000))}, // 1 trillion
 			},
 		},
 		"doc3": {
@@ -231,7 +231,7 @@ func TestRadixSort_LargeNumbers(t *testing.T) {
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: int64(0)},
+				"value": {Name: "value", Value: models.NewIntValue(int64(0))},
 			},
 		},
 	}
@@ -332,13 +332,13 @@ func TestRadixSort_MissingField(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Alice"},
+				"name": {Name: "name", Value: models.NewStringValue("Alice")},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Bob"},
+				"name": {Name: "name", Value: models.NewStringValue("Bob")},
 			},
 		},
 	}
@@ -363,13 +363,13 @@ func TestRadixSort_NonIntegerField(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Alice"},
+				"name": {Name: "name", Value: models.NewStringValue("Alice")},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: "Bob"},
+				"name": {Name: "name", Value: models.NewStringValue("Bob")},
 			},
 		},
 	}
@@ -394,7 +394,7 @@ func TestRadixSort_SingleDocument(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"age": {Name: "age", Value: int64(30)},
+				"age": {Name: "age", Value: models.NewIntValue(int64(30))},
 			},
 		},
 	}
@@ -421,25 +421,25 @@ func TestRadixSort_DuplicateValues(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(100)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(100))},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(200)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(200))},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(100)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(100))},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: int64(200)},
+				"score": {Name: "score", Value: models.NewIntValue(int64(200))},
 			},
 		},
 	}

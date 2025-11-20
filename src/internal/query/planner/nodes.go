@@ -30,7 +30,7 @@ func (node *IndexScanNode) Execute() (map[string]*models.Document, error) {
 }
 
 func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, error) {
-	node.Logger.Infof("Executing hash index scan on %s for key %v", node.IndexName, node.SearchKey)
+	node.Logger.Debugf("Executing hash index scan on %s for key %v", node.IndexName, node.SearchKey)
 
 	// Find the hash index in the bundle
 	if node.Bundle.Indexes == nil {
@@ -49,7 +49,7 @@ func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, 
 	// SPRINT 5 FIX: Cast to the V3 LSM-style hash index
 	_, ok := indexRef.IndexInstance.(primitive.D)
 	if indexRef.IndexInstance == nil || ok {
-		node.Logger.Infof("IndexRef is NIL - Loading hash index V3 %s for bundle %s", node.IndexName, node.Bundle.Name)
+		node.Logger.Debugf("IndexRef is NIL - Loading hash index V3 %s for bundle %s", node.IndexName, node.Bundle.Name)
 		var err error
 		indexRef.IndexInstance, err = queryparser.EnsureHashIndexV3Loaded(node.Bundle, &indexRef, node.Logger)
 		if err != nil {
@@ -83,9 +83,8 @@ func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, 
 
 	for _, docID := range documentIDs {
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// Make a copy of the document to avoid modification issues
-			docCopy := doc
-			results[docID] = &docCopy
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			results[docID] = &doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		} else {
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
@@ -93,7 +92,7 @@ func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, 
 		}
 	}
 
-	node.Logger.Infof("Hash index scan returned %d documents for key %v", len(results), node.SearchKey)
+	node.Logger.Debugf("Hash index scan returned %d documents for key %v", len(results), node.SearchKey)
 	return results, nil
 }
 
@@ -176,9 +175,8 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 	results := make(map[string]*models.Document)
 	for _, docID := range documentIDs {
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// Make a copy of the document to avoid modification issues
-			docCopy := doc
-			results[docID] = &docCopy
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			results[docID] = &doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		} else {
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
@@ -186,12 +184,12 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 		}
 	}
 
-	node.Logger.Infof("B-tree index scan returned %d documents for key %v", len(results), node.SearchKey)
+	node.Logger.Debugf("B-tree index scan returned %d documents for key %v", len(results), node.SearchKey)
 	return results, nil
 }
 
 func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document, error) {
-	node.Logger.Infof("Executing B-tree range scan on %s for operator %s with value %v",
+	node.Logger.Debugf("Executing B-tree range scan on %s for operator %s with value %v",
 		node.IndexName, node.Operator, node.SearchKey)
 
 	// Find the B-tree index in the bundle
@@ -258,9 +256,8 @@ func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document,
 	results := make(map[string]*models.Document)
 	for _, docID := range documentIDs {
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// Make a copy of the document to avoid modification issues
-			docCopy := doc
-			results[docID] = &docCopy
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			results[docID] = &doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		} else {
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
@@ -355,8 +352,8 @@ func (node *FullScanNode) Execute() (map[string]*models.Document, error) {
 	if node.Bundle.Documents != nil && node.Bundle.DocumentsComplete {
 		node.Logger.Debugf("Using complete in-memory documents for bundle %s", node.Bundle.Name)
 		for docID, doc := range *node.Bundle.Documents {
-			docCopy := doc
-			results[docID] = &docCopy
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			results[docID] = &doc
 		}
 		return results, nil
 	}
@@ -388,7 +385,7 @@ func (node *FullScanNode) Execute() (map[string]*models.Document, error) {
 		results[docID] = doc
 	}
 
-	node.Logger.Infof("Document scanner completed full scan: %d documents in %v (batches: %d, cache hits: %d)",
+	node.Logger.Debugf("Document scanner completed full scan: %d documents in %v (batches: %d, cache hits: %d)",
 		len(results), scanResult.ScanLatency, scanResult.BatchesUsed, scanResult.CacheHits)
 
 	return results, nil
@@ -397,7 +394,7 @@ func (node *FullScanNode) Execute() (map[string]*models.Document, error) {
 // ExecuteStreaming processes documents in batches using the document scanner
 // This approach is memory-efficient for very large bundles
 func (node *FullScanNode) ExecuteStreaming(callback func(map[string]*models.Document) error) error {
-	node.Logger.Infof("Executing streaming scan on bundle %s", node.Bundle.Name)
+	node.Logger.Debugf("Executing streaming scan on bundle %s", node.Bundle.Name)
 
 	if node.DocumentScanner == nil {
 		return fmt.Errorf("document scanner is required for streaming scan")
@@ -424,7 +421,7 @@ func (node *FullScanNode) ExecuteStreaming(callback func(map[string]*models.Docu
 		return err
 	}
 
-	node.Logger.Infof("Streaming scan completed: %d documents processed in %d batches",
+	node.Logger.Debugf("Streaming scan completed: %d documents processed in %d batches",
 		len(documents), scanResult.BatchesUsed)
 
 	return nil
@@ -445,7 +442,7 @@ func (node *FilterNode) Execute() (map[string]*models.Document, error) {
 		}
 	}
 
-	node.Logger.Infof("Filter node reduced %d documents to %d", len(documents), len(filtered))
+	node.Logger.Debugf("Filter node reduced %d documents to %d", len(documents), len(filtered))
 	return filtered, nil
 }
 
@@ -498,7 +495,7 @@ func (node *UnionNode) Execute() (map[string]*models.Document, error) {
 		}
 	}
 
-	node.Logger.Infof("Union node combined %d children into %d results", len(node.Children), len(allResults))
+	node.Logger.Debugf("Union node combined %d children into %d results", len(node.Children), len(allResults))
 	return allResults, nil
 }
 

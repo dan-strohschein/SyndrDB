@@ -1,14 +1,39 @@
 package helpers
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"syndrdb/src/pkg/settings"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// STEP 5: Path string interning cache to avoid repeated allocations
+var pathCache sync.Map
+
+// InternPath returns a cached version of the path string to reduce allocations
+func InternPath(path string) string {
+	if cached, ok := pathCache.Load(path); ok {
+		return cached.(string)
+	}
+	pathCache.Store(path, path)
+	return path
+}
+
+func init() {
+	// Pre-populate common path patterns
+	commonPaths := []string{
+		"data_files",
+		"indexes",
+		"primary",
+		"testdb",
+	}
+	for _, p := range commonPaths {
+		pathCache.Store(p, p)
+	}
+}
 
 // Add this function to generate UUIDs
 func GenerateUUID() string {
@@ -42,12 +67,11 @@ func CleanFileName(name string) string {
 }
 
 func GetDatabaseFolderPath(databaseName string) string {
-	var results string
-
+	// STEP 5: Check cache first to avoid repeated string allocations
 	args := settings.GetSettings()
-	results = fmt.Sprintf("%s/%s/", args.DataDir, databaseName)
+	cacheKey := args.DataDir + "/" + databaseName + "/"
 
-	return results
+	return InternPath(cacheKey)
 }
 
 func NormalizeCommand(command string) string {

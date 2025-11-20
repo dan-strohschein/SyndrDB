@@ -330,7 +330,7 @@ func TestCreateBundleParser_DefaultValues(t *testing.T) {
     {"name", "string", TRUE, FALSE, "John Doe"}
 );`,
 			expectError:   false,
-			expectedValue: "John Doe",
+			expectedValue: models.NewStringValue("John Doe"),
 		},
 		{
 			name: "Integer default",
@@ -346,7 +346,7 @@ func TestCreateBundleParser_DefaultValues(t *testing.T) {
     {"price", "float", TRUE, FALSE, 19.99}
 );`,
 			expectError:   false,
-			expectedValue: 19.99,
+			expectedValue: models.NewFloatValue(19.99),
 		},
 		{
 			name: "Boolean TRUE default",
@@ -354,7 +354,7 @@ func TestCreateBundleParser_DefaultValues(t *testing.T) {
     {"active", "bool", TRUE, FALSE, TRUE}
 );`,
 			expectError:   false,
-			expectedValue: true,
+			expectedValue: models.NewBoolValue(true),
 		},
 		{
 			name: "Boolean FALSE default",
@@ -362,7 +362,7 @@ func TestCreateBundleParser_DefaultValues(t *testing.T) {
     {"archived", "bool", TRUE, FALSE, FALSE}
 );`,
 			expectError:   false,
-			expectedValue: false,
+			expectedValue: models.NewBoolValue(false),
 		},
 		{
 			name: "NULL default",

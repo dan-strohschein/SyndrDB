@@ -449,7 +449,7 @@ func addSingleDocument() error {
 	for key, value := range documentData {
 		document.Fields[key] = models.Field{
 			Name:  key,
-			Value: value,
+			Value: models.NewInterfaceValue(value),
 		}
 	}
 
@@ -562,7 +562,7 @@ func addMultipleDocuments() error {
 		// Store the field data as a field for simplicity
 		document.Fields["data"] = models.Field{
 			Name:  "data",
-			Value: fieldData,
+			Value: models.NewStringValue(fieldData),
 		}
 		wrapper.Documents[document.DocumentID] = document
 	}
@@ -999,7 +999,7 @@ func setupBundleWithDocumentsNamed(bundleName string) error {
 		for key, value := range documentData {
 			document.Fields[key] = models.Field{
 				Name:  key,
-				Value: value,
+				Value: models.NewInterfaceValue(value),
 			}
 		}
 

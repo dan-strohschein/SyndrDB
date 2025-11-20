@@ -56,7 +56,6 @@ package queryparser
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"syndrdb/src/pkg/common/helpers"
 
@@ -221,7 +220,7 @@ func detectQueryType(query string, logger *zap.SugaredLogger) QueryType {
 	// normalizedQuery = strings.ReplaceAll(normalizedQuery, "\r", " ")
 
 	normalizedQuery := helpers.NormalizeCommand(query)
-	re := regexp.MustCompile(`\s+`)
+	re := helpers.MustCompileCached(`\s+`)
 	normalizedQuery = re.ReplaceAllString(normalizedQuery, " ")
 	upperQuery := strings.ToUpper(normalizedQuery)
 
@@ -238,8 +237,8 @@ func detectQueryType(query string, logger *zap.SugaredLogger) QueryType {
 		selectClause := upperQuery[selectStart:fromStart]
 		// Match aggregate functions: COUNT, SUM, AVG, MIN, MAX followed by (
 		aggregatePattern := `(COUNT|SUM|AVG|MIN|MAX)\s*\(`
-		matched, err := regexp.MatchString(aggregatePattern, selectClause)
-		if err == nil && matched {
+		matched := helpers.MustCompileCached(aggregatePattern).MatchString(selectClause)
+		if matched {
 			hasAggregates = true
 			logger.Debugf("Detected aggregate functions in SELECT clause")
 		}
@@ -344,9 +343,9 @@ func basicToUnified(basic *BasicSelectQuery, logger *zap.SugaredLogger) *Unified
 	unified := &UnifiedSelectQuery{
 		QueryType:       SimpleQuery,
 		SelectFields:    basic.SelectFields,
-		AggregateFields: make([]AggregateFunction, 0),
+		AggregateFields: make([]AggregateFunction, 0, 15),
 		FromBundle:      basic.FromBundle,
-		JoinClauses:     make([]JoinClause, 0),
+		JoinClauses:     make([]JoinClause, 0, 3),
 	}
 
 	// Parse WHERE clause if present
@@ -371,7 +370,7 @@ func joinToUnified(join *SelectJoinQuery, logger *zap.SugaredLogger) *UnifiedSel
 	unified := &UnifiedSelectQuery{
 		QueryType:       JoinQuery,
 		SelectFields:    join.SelectFields,
-		AggregateFields: make([]AggregateFunction, 0),
+		AggregateFields: make([]AggregateFunction, 0, 15),
 		FromBundle:      join.FromBundle,
 		JoinClauses:     join.JoinClauses,
 		// LEGACY: join.WhereClause is WhereGroup type, store as interface{}
@@ -392,7 +391,7 @@ func groupByToUnified(groupBy *SelectQueryWithGroupBy, logger *zap.SugaredLogger
 		SelectFields:    groupBy.SelectFields,
 		AggregateFields: groupBy.AggregateFields,
 		FromBundle:      groupBy.FromBundle,
-		JoinClauses:     make([]JoinClause, 0),
+		JoinClauses:     make([]JoinClause, 0, 3),
 		GroupBy:         groupBy.GroupBy,
 		// LEGACY: groupBy.HavingClause is HavingClause type, store as interface{}
 		HavingExpression: groupBy.HavingClause,
@@ -427,7 +426,7 @@ func enhanceWithAdditionalClauses(query string, unified *UnifiedSelectQuery, log
 	}
 
 	// Parse TOP clause (SELECT TOP N)
-	topPattern := regexp.MustCompile(`(?i)SELECT\s+TOP\s+(\d+)`)
+	topPattern := helpers.MustCompileCached(`(?i)SELECT\s+TOP\s+(\d+)`)
 	if matches := topPattern.FindStringSubmatch(query); len(matches) > 1 {
 		topCount := 0
 		fmt.Sscanf(matches[1], "%d", &topCount)
@@ -437,7 +436,7 @@ func enhanceWithAdditionalClauses(query string, unified *UnifiedSelectQuery, log
 
 	// Parse LIMIT clause (if not already set by specialized parser)
 	if unified.Limit == 0 {
-		limitPattern := regexp.MustCompile(`(?i)\s+LIMIT\s+(\d+)`)
+		limitPattern := helpers.MustCompileCached(`(?i)\s+LIMIT\s+(\d+)`)
 		if matches := limitPattern.FindStringSubmatch(query); len(matches) > 1 {
 			limit := 0
 			fmt.Sscanf(matches[1], "%d", &limit)
@@ -448,7 +447,7 @@ func enhanceWithAdditionalClauses(query string, unified *UnifiedSelectQuery, log
 
 	// Parse OFFSET clause (if not already set by specialized parser)
 	if unified.Offset == 0 {
-		offsetPattern := regexp.MustCompile(`(?i)\s+OFFSET\s+(\d+)`)
+		offsetPattern := helpers.MustCompileCached(`(?i)\s+OFFSET\s+(\d+)`)
 		if matches := offsetPattern.FindStringSubmatch(query); len(matches) > 1 {
 			offset := 0
 			fmt.Sscanf(matches[1], "%d", &offset)

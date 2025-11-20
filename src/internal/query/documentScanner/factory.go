@@ -380,9 +380,9 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 	// Check memtable before going to disk (recent writes have priority)
 	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
 		if doc, exists := (*ba.bundle.Documents)[docID]; exists {
-			ba.logger.Debugf("Document '%s' found in memtable", docID)
-			docCopy := doc
-			return &docCopy
+			// ba.logger.Debugf("Document '%s' found in memtable", docID) // PERF: Disabled - causes 2.2M allocs/query
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			return &doc
 		}
 	}
 
@@ -402,8 +402,8 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 		page, err := ba.loadDocumentPage(0)
 		if err == nil {
 			if doc, exists := page.Documents[docID]; exists {
-				docCopy := doc
-				return &docCopy
+				// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+				return &doc
 			}
 		}
 		return nil // Document not found in page 0 or memtable
@@ -421,9 +421,8 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 		}
 
 		if doc, exists := page.Documents[docID]; exists {
-			// Return a copy to prevent external modification
-			docCopy := doc
-			return &docCopy
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			return &doc
 		}
 	}
 
@@ -469,10 +468,9 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 
 			ba.logger.Infof("Page %d loaded successfully with %d documents", pageID, len(page.Documents))
 
-			// Copy all documents from this page
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			for docID, doc := range page.Documents {
-				docCopy := doc
-				allDocs[docID] = &docCopy
+				allDocs[docID] = &doc
 			}
 		}
 		ba.logger.Infof("Loaded %d documents from disk", len(allDocs))
@@ -489,8 +487,8 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 		mergedCount := 0
 		for docID, doc := range *ba.bundle.Documents {
 			if _, exists := allDocs[docID]; !exists {
-				docCopy := doc
-				allDocs[docID] = &docCopy
+				// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+				allDocs[docID] = &doc
 				mergedCount++
 			}
 		}
@@ -499,8 +497,8 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 		// If Documents is marked complete, use it directly (optimization path)
 		ba.logger.Infof("Using complete Documents cache with %d documents", len(*ba.bundle.Documents))
 		for docID, doc := range *ba.bundle.Documents {
-			docCopy := doc
-			allDocs[docID] = &docCopy
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			allDocs[docID] = &doc
 		}
 	} else {
 		ba.logger.Infof("No memtable to merge (Documents=nil or DocumentsComplete=true)")

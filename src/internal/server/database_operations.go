@@ -235,15 +235,17 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		}
 	}
 
+	// PHASE 3: Use pooled map to reduce allocation
+	resultMap := GetResponseMap()
+	resultMap["DatabaseName"] = databaseName
+	resultMap["DatabaseID"] = databaseID
+	resultMap["FilePath"] = filePath
+	resultMap["BundlesAdded"] = bundlesAdded
+	resultMap["Status"] = "Database attached successfully"
+
 	response := &CommandResponse{
 		ResultCount: 1,
-		Result: map[string]interface{}{
-			"DatabaseName": databaseName,
-			"DatabaseID":   databaseID,
-			"FilePath":     filePath,
-			"BundlesAdded": bundlesAdded,
-			"Status":       "Database attached successfully",
-		},
+		Result:      resultMap,
 	}
 
 	logger.Infof("Successfully attached database '%s' from file '%s' with %d bundles", databaseName, filePath, bundlesAdded)

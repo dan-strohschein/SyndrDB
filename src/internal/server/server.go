@@ -7,7 +7,6 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -25,6 +24,8 @@ import (
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 
+	jsoniter "github.com/json-iterator/go"
+
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/internal/storage/databasestore"
@@ -37,6 +38,9 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
 )
+
+// PHASE D: Use json-iterator for faster, lower-allocation JSON encoding
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // Server represents the main TCP server for SyndrDB
 type Server struct {
@@ -1109,7 +1113,49 @@ func sendSuccess(writer *bufio.Writer, message string) {
 func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLogger) {
 	var data []byte
 
+	// PHASE A: Return pooled maps after JSON marshaling (no closure = no allocation)
+	defer func() {
+		if cmdResp, ok := result.(*CommandResponse); ok {
+			if len(cmdResp.PooledMaps) > 0 {
+				helpers.FreeResultSet(cmdResp.PooledMaps)
+			}
+			// STEP 1: Return pooled documents after response sent
+			if len(cmdResp.PooledDocuments) > 0 {
+				document.FreeDocuments(cmdResp.PooledDocuments)
+			}
+		}
+	}()
+
 	switch typedResult := result.(type) {
+	case *CommandResponse:
+		// PHASE H: Check if we can use streaming encoder
+		if len(typedResult.StreamDocuments) > 0 {
+			// Stream documents directly to JSON without intermediate maps
+			writer.WriteString("{\"ResultCount\":")
+			writer.WriteString(strconv.Itoa(typedResult.ResultCount))
+			writer.WriteString(",\"Result\":")
+
+			// Stream the documents array
+			err := helpers.StreamDocumentsToJSON(writer, typedResult.StreamDocuments, typedResult.StreamFields)
+			if err != nil {
+				logger.Errorf("Failed to stream documents: %v", err)
+				// Fallback to regular marshaling
+				data, _ = json.Marshal(result)
+				writer.WriteString(string(data) + "\n")
+				writer.Flush()
+				return
+			}
+
+			writer.WriteString(",\"ExecutionTimeMS\":")
+			writer.WriteString(strconv.FormatFloat(typedResult.ExecutionTimeMS, 'f', 2, 64))
+			writer.WriteString("}\n")
+			writer.Flush()
+			return
+		}
+		// Not streaming - use regular JSON marshaling
+		data, _ = json.Marshal(result)
+		writer.WriteString(string(data) + "\n")
+		writer.Flush()
 	case *string:
 		if typedResult != nil {
 			// For string pointers, just write the string directly

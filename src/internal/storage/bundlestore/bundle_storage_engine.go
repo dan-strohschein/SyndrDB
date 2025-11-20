@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/format"
 	"syndrdb/src/pkg/common/helpers"
@@ -83,7 +84,10 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 	}
 
 	// Get the appropriate serializer based on format
-	serializer := format.GetSerializer(storageFormat)
+	serializer, err := format.GetSerializer(storageFormat)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create serializer: %w", err)
+	}
 	//logger.Infof("Bundle storage using %s format", serializer.GetFormatName())
 
 	// Create a new bundle store
@@ -1275,7 +1279,9 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 			}
 
 			// Convert to Document struct
-			doc := &models.Document{}
+			// STEP 1: Use document pool to reduce allocations
+			// TODO: Option C: Implement reference counting for automatic pool return when last consumer releases document
+			doc := document.GetPooledDocument()
 			if docID, ok := docMap["DocumentID"].(string); ok {
 				doc.DocumentID = docID
 			}
@@ -1498,7 +1504,9 @@ func (b *BundleStorageEngine) parseAppendedDocuments(data []byte) (map[string]mo
 			}
 
 			// Convert to Document struct
-			doc := &models.Document{}
+			// STEP 1: Use document pool to reduce allocations
+			// TODO: Option C: Implement reference counting for automatic pool return when last consumer releases document
+			doc := document.GetPooledDocument()
 			if docID, ok := docMap["DocumentID"].(string); ok {
 				doc.DocumentID = docID
 			}
@@ -2035,7 +2043,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
 								field := models.Field{
 									Name:  stringValue(fieldMap, "Name", fieldName),
-									Value: fieldMap["Value"], // This might be null if "Value" doesn't exist
+									Value: models.NewInterfaceValue(fieldMap["Value"]), // ✅ Use NewInterfaceValue
 								}
 
 								document.Fields[fieldName] = field
@@ -2044,7 +2052,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 
 								field := models.Field{
 									Name:  fieldName,
-									Value: fieldValue, // Use the value directly
+									Value: models.NewInterfaceValue(fieldValue), // ✅ Use NewInterfaceValue
 								}
 								document.Fields[fieldName] = field
 							}
@@ -2081,14 +2089,14 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
 								field := models.Field{
 									Name:  stringValue(fieldMap, "Name", fieldName),
-									Value: fieldMap["value"],
+									Value: models.NewInterfaceValue(fieldMap["value"]), // ✅ Use NewInterfaceValue
 								}
 								document.Fields[fieldName] = field
 							} else {
 								// Case 2: Field value is the direct value (not wrapped in a map)
 								field := models.Field{
 									Name:  fieldName,
-									Value: fieldValue, // Use the value directly
+									Value: models.NewInterfaceValue(fieldValue), // ✅ Use NewInterfaceValue
 								}
 
 								document.Fields[fieldName] = field

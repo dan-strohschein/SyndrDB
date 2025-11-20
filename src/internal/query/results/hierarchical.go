@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	joinexecutor "syndrdb/src/internal/query/join_executor"
 
@@ -178,13 +179,14 @@ func (ht *HierarchicalTransformer) createHierarchicalDocument(group []*joinexecu
 		return nil, 0, fmt.Errorf("parent document is nil")
 	}
 
+	// STEP 1: Use document pool to reduce allocations
+	// TODO: Option C - Implement reference counting for automatic pool return
 	// Create a copy of the parent document for the hierarchical result
-	hierarchicalDoc := &models.Document{
-		DocumentID: parentDoc.DocumentID,
-		Fields:     make(map[string]models.Field),
-		CreatedAt:  parentDoc.CreatedAt,
-		UpdatedAt:  parentDoc.UpdatedAt,
-	}
+	hierarchicalDoc := document.GetPooledDocument()
+	hierarchicalDoc.DocumentID = parentDoc.DocumentID
+	hierarchicalDoc.Fields = make(map[string]models.Field)
+	hierarchicalDoc.CreatedAt = parentDoc.CreatedAt
+	hierarchicalDoc.UpdatedAt = parentDoc.UpdatedAt
 
 	// Copy parent fields
 	for fieldName, field := range parentDoc.Fields {
@@ -202,13 +204,14 @@ func (ht *HierarchicalTransformer) createHierarchicalDocument(group []*joinexecu
 		}
 
 		if childDoc != nil {
+			// STEP 1: Use document pool to reduce allocations
+			// TODO: Option C - Implement reference counting for automatic pool return
 			// Create a copy of the child document
-			childCopy := &models.Document{
-				DocumentID: childDoc.DocumentID,
-				Fields:     make(map[string]models.Field),
-				CreatedAt:  childDoc.CreatedAt,
-				UpdatedAt:  childDoc.UpdatedAt,
-			}
+			childCopy := document.GetPooledDocument()
+			childCopy.DocumentID = childDoc.DocumentID
+			childCopy.Fields = make(map[string]models.Field)
+			childCopy.CreatedAt = childDoc.CreatedAt
+			childCopy.UpdatedAt = childDoc.UpdatedAt
 
 			// Copy child fields
 			for fieldName, field := range childDoc.Fields {
@@ -249,7 +252,7 @@ func (ht *HierarchicalTransformer) addChildDocumentsToParent(parentDoc *models.D
 			childFields := ht.documentToFieldValue(childDocuments[0])
 			parentDoc.Fields[relationshipFieldName] = models.Field{
 				Name:  relationshipFieldName,
-				Value: childFields,
+				Value: models.NewInterfaceValue(childFields), // ✅ Use NewInterfaceValue
 			}
 		}
 
@@ -263,7 +266,7 @@ func (ht *HierarchicalTransformer) addChildDocumentsToParent(parentDoc *models.D
 
 		parentDoc.Fields[relationshipFieldName] = models.Field{
 			Name:  relationshipFieldName,
-			Value: childArray,
+			Value: models.NewInterfaceValue(childArray), // ✅ Use NewInterfaceValue
 		}
 
 	default:
@@ -314,12 +317,13 @@ func (ht *HierarchicalTransformer) applyFieldSelection(doc *models.Document, sel
 		return doc
 	}
 
-	filteredDoc := &models.Document{
-		DocumentID: doc.DocumentID,
-		Fields:     make(map[string]models.Field),
-		CreatedAt:  doc.CreatedAt,
-		UpdatedAt:  doc.UpdatedAt,
-	}
+	// STEP 1: Use document pool to reduce allocations
+	// TODO: Option C - Implement reference counting for automatic pool return
+	filteredDoc := document.GetPooledDocument()
+	filteredDoc.DocumentID = doc.DocumentID
+	filteredDoc.Fields = make(map[string]models.Field)
+	filteredDoc.CreatedAt = doc.CreatedAt
+	filteredDoc.UpdatedAt = doc.UpdatedAt
 
 	// Always include the relationship field if it exists
 	relationshipFieldName := relationship.RelationshipName

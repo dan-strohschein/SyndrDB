@@ -93,7 +93,7 @@ func (v *ReferentialIntegrityValidator) ValidateDelete(bundle *models.Bundle, do
 	v.logger.Infof("[REFINT] Validating referential integrity for document '%s' in bundle '%s' (%d relationships)", documentID, bundle.Name, len(bundle.Relationships))
 
 	// Check each relationship where this bundle is the source (referenced by others)
-	violations := make([]string, 0)
+	violations := make([]string, 0, 5)
 	for relationshipName, relationship := range bundle.Relationships {
 		// Determine if this bundle is the source (being referenced)
 		isSource := relationship.SourceBundle == bundle.Name || relationship.SourceBundleName == bundle.Name
@@ -354,7 +354,7 @@ func (v *ReferentialIntegrityValidator) ValidateDeleteWithCascade(bundle *models
 	plan := &CascadeDeletePlan{
 		RootBundle:      bundle.Name,
 		RootDocumentID:  documentID,
-		DependentDocs:   make([]DependentDocument, 0),
+		DependentDocs:   make([]DependentDocument, 0, 100),
 		TotalDeletes:    1, // Includes the root document
 		MaxDepth:        0,
 		AffectedBundles: make(map[string]int),

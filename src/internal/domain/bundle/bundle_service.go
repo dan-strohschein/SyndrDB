@@ -13,6 +13,7 @@ import (
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/storage/bundlestore"
 	syndrQL "syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -81,7 +82,7 @@ func convertToString(value interface{}) (interface{}, error) {
 		return strVal, nil
 	}
 	// Convert other types to string without reflection
-	return fmt.Sprintf("%v", value), nil
+	return conversion.ValueToString(value), nil
 }
 
 func convertToInt(value interface{}) (interface{}, error) {
@@ -271,6 +272,9 @@ type BundleService struct {
 	schemaManagerMutex sync.RWMutex                            // Protects schemaManagers map
 	schemaGenerator    *graphQLSchema.SchemaGenerator          // Shared generator for all databases
 	graphQLEnabled     bool                                    // Global toggle from settings
+
+	// PERFORMANCE OPTIMIZATION: Runtime-toggleable diagnostic logging (Priority 1)
+	verboseLogging bool // Default: false - disable hot path diagnostic logs for performance
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
@@ -689,7 +693,7 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 				hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
 				if err == nil {
 					// Update MemTable synchronously (in-memory operation, very fast)
-					keyValue := fmt.Sprintf("%v", fieldValue)
+					keyValue := conversion.ValueToString(fieldValue)
 					if keyValue == "" || keyValue == "<nil>" {
 						keyValue = documentID // Fallback for DocumentID indexes
 					}
@@ -709,7 +713,9 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 								zap.String("index", indexName),
 								zap.Error(err))
 						} else {
-							s.logger.Debugf("Immediately updated MemTable for key '%s' in index '%s'", keyValue, indexName)
+							s.logger.Debugw("Immediately updated MemTable for key",
+								zap.String("key", keyValue),
+								zap.String("index", indexName))
 						}
 					case "delete":
 						// Mark as deleted in MemTable
@@ -721,7 +727,9 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 								zap.String("index", indexName),
 								zap.Error(err))
 						} else {
-							s.logger.Debugf("Immediately updated MemTable with tombstone for key '%s' in index '%s'", keyValue, indexName)
+							s.logger.Debugw("Immediately updated MemTable with tombstone",
+								zap.String("key", keyValue),
+								zap.String("index", indexName))
 						}
 					}
 				} else {
@@ -793,7 +801,8 @@ func (s *BundleService) flushIndexUpdates() {
 	}
 
 	startTime := time.Now()
-	s.logger.Debugf("Flushing %d pending index updates", len(s.indexUpdateBuffer))
+	s.logger.Debugw("Flushing pending index updates",
+		zap.Int("count", len(s.indexUpdateBuffer)))
 
 	// Group updates by bundle and index for efficient processing
 	updateGroups := make(map[string]map[string][]IndexUpdate)
@@ -834,7 +843,8 @@ func (s *BundleService) flushIndexUpdates() {
 	s.lastIndexFlush = time.Now()
 
 	flushTime := time.Since(startTime)
-	s.logger.Debugf("Index update flush completed in %v", flushTime)
+	s.logger.Debugw("Index update flush completed",
+		zap.Duration("duration", flushTime))
 }
 
 // FlushMetadataUpdates processes all pending metadata updates in a batch
@@ -1922,7 +1932,7 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 	delete(s.bundleMetadata, name)
 
 	// Remove any loaded document pages for this bundle
-	keysToDelete := make([]string, 0)
+	keysToDelete := make([]string, 0, 50)
 	for pageKey := range s.documentPages {
 		if strings.HasPrefix(pageKey, name+":") {
 			keysToDelete = append(keysToDelete, pageKey)
@@ -2355,7 +2365,7 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 			if _, hasField := doc.Fields[fieldName]; !hasField {
 				doc.Fields[fieldName] = models.Field{
 					Name:  fieldName,
-					Value: defaultValue,
+					Value: models.NewInterfaceValue(defaultValue), // ✅ Use NewInterfaceValue
 				}
 
 				// Update the document in the bundle file
@@ -2486,7 +2496,7 @@ func (s *BundleService) convertFieldType(bundle *models.Bundle, fieldName, fromT
 			}
 
 			// Update field value
-			field.Value = convertedValue
+			field.Value = models.NewInterfaceValue(convertedValue) // ✅ Use NewInterfaceValue
 			doc.Fields[fieldName] = field
 
 			// Persist the change
@@ -2516,7 +2526,7 @@ func (s *BundleService) convertValue(value interface{}, fromType, toType string)
 
 	switch toType {
 	case "string":
-		return fmt.Sprintf("%v", value), nil
+		return conversion.ValueToString(value), nil
 
 	case "int":
 		switch v := value.(type) {
@@ -2582,7 +2592,7 @@ func (s *BundleService) validateFieldUniqueness(bundle *models.Bundle, fieldName
 			}
 
 			// Convert to string for comparison (simple approach)
-			valueKey := fmt.Sprintf("%v", field.Value)
+			valueKey := conversion.ValueToString(field.Value)
 			valuesSeen[valueKey] = append(valuesSeen[valueKey], doc.DocumentID)
 		}
 	}
@@ -2622,7 +2632,7 @@ func (s *BundleService) validateAllDocumentsHaveField(bundle *models.Bundle, fie
 			}
 
 			field, hasField := doc.Fields[fieldName]
-			if !hasField || field.Value == nil {
+			if !hasField || field.Value.IsNil() { // ✅ Use IsNil()
 				missingCount++
 			}
 		}
@@ -2653,10 +2663,10 @@ func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldN
 			}
 
 			field, hasField := doc.Fields[fieldName]
-			if !hasField || field.Value == nil {
+			if !hasField || field.Value.IsNil() { // ✅ Use IsNil()
 				doc.Fields[fieldName] = models.Field{
 					Name:  fieldName,
-					Value: defaultValue,
+					Value: models.NewInterfaceValue(defaultValue), // ✅ Use NewInterfaceValue
 				}
 
 				// Persist the change
@@ -2728,7 +2738,7 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 		return
 	}
 
-	keysToDelete := make([]string, 0)
+	keysToDelete := make([]string, 0, 50)
 	for pageKey := range s.documentPages {
 		if strings.HasPrefix(pageKey, bundleName+":") {
 			keysToDelete = append(keysToDelete, pageKey)
@@ -3397,7 +3407,7 @@ func convertValueToBytes(value interface{}) ([]byte, error) {
 		return []byte("false"), nil
 	default:
 		// For complex types, convert to string representation
-		return []byte(fmt.Sprintf("%v", v)), nil
+		return []byte(conversion.ValueToString(v)), nil
 	}
 }
 
@@ -3598,11 +3608,13 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// Add the document to the bundle
 	newDocument := s.documentFactory.NewDocument(*docCommand)
 
-	// DIAGNOSTIC: Log bundle index status
-	s.logger.Infof("DIAGNOSTIC: Bundle '%s' has Indexes map: %v, count: %d", bundle.Name, bundle.Indexes != nil, len(bundle.Indexes))
-	if bundle.Indexes != nil && len(bundle.Indexes) > 0 {
-		for idxName := range bundle.Indexes {
-			s.logger.Infof("DIAGNOSTIC: Found index: %s", idxName)
+	// DIAGNOSTIC: Log bundle index status (only if verbose logging enabled)
+	if s.verboseLogging {
+		s.logger.Infof("DIAGNOSTIC: Bundle '%s' has Indexes map: %v, count: %d", bundle.Name, bundle.Indexes != nil, len(bundle.Indexes))
+		if bundle.Indexes != nil && len(bundle.Indexes) > 0 {
+			for idxName := range bundle.Indexes {
+				s.logger.Infof("DIAGNOSTIC: Found index: %s", idxName)
+			}
 		}
 	}
 
@@ -3636,7 +3648,9 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 					// Extract the foreign key or other field value
 					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName)
 					if err != nil {
-						s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, newDocument.DocumentID, err)
+						if s.verboseLogging {
+							s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, newDocument.DocumentID, err)
+						}
 						continue
 					}
 					fieldValue = extractedValue
@@ -3785,7 +3799,7 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 
 			foundField := doc.Fields[kv.Key]
 			foundField.Name = kv.Key
-			foundField.Value = kv.Value
+			foundField.Value = models.NewInterfaceValue(kv.Value) // ✅ Use NewInterfaceValue
 			doc.Fields[kv.Key] = foundField
 		}
 
@@ -3875,7 +3889,7 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 
 		// CRITICAL: Invalidate cached pages for this bundle to force reload from disk
 		// Without this, queries will return stale data from the page cache
-		keysToDelete := make([]string, 0)
+		keysToDelete := make([]string, 0, 50)
 		for pageKey := range s.documentPages {
 			if strings.HasPrefix(pageKey, bundle.Name+":") {
 				keysToDelete = append(keysToDelete, pageKey)
@@ -4251,7 +4265,7 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 				// Search the hash index for the value
 				// CRITICAL: Remove surrounding quotes from the search key if present
 				// The parser might include quotes in the value, but DocumentIDs are stored without quotes
-				searchKey := fmt.Sprintf("%v", value)
+				searchKey := conversion.ValueToString(value)
 				searchKey = strings.Trim(searchKey, "\"'") // Remove both double and single quotes
 
 				s.logger.Debugf("Hash index searching for key '%s' (original value: %v)", searchKey, value)
@@ -4516,7 +4530,7 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 	//s.logger.Infof("[VALIDATION] Provided %d field(s) in document command", len(providedFields))
 
 	// Check that all required fields are provided
-	missingFields := make([]string, 0)
+	missingFields := make([]string, 0, 5)
 	for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
 		if fieldDef.IsRequired && !providedFields[fieldName] {
 			// Skip DocumentID if it's auto-generated
@@ -5020,7 +5034,7 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	}
 
 	// Fall back to invalidating all pages for this bundle
-	keysToDelete := make([]string, 0)
+	keysToDelete := make([]string, 0, 50)
 	for pageKey := range s.documentPages {
 		if strings.HasPrefix(pageKey, bundleName+":") {
 			keysToDelete = append(keysToDelete, pageKey)

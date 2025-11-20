@@ -68,6 +68,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 
@@ -312,7 +313,7 @@ func (e *GroupByExecutor) updateAggregates(groupResult *GroupResult, doc *models
 				aggValue.Count++
 			} else {
 				// COUNT(field) - count non-null values
-				if field, exists := doc.Fields[aggFunc.Field]; exists && field.Value != nil {
+				if field, exists := doc.Fields[aggFunc.Field]; exists && !field.Value.IsNil() { // ✅ Use IsNil()
 					aggValue.Count++
 				}
 			}
@@ -469,7 +470,7 @@ func (e *GroupByExecutor) convertGroupResultsToDocuments(groupResults map[GroupK
 		for fieldName, value := range groupResult.GroupFields {
 			fields[fieldName] = models.Field{
 				Name:  fieldName,
-				Value: value,
+				Value: models.NewInterfaceValue(value), // ✅ Convert interface{} to FieldValue
 			}
 		}
 
@@ -477,14 +478,16 @@ func (e *GroupByExecutor) convertGroupResultsToDocuments(groupResults map[GroupK
 		for aggKey, value := range groupResult.AggregateValues {
 			fields[aggKey] = models.Field{
 				Name:  aggKey,
-				Value: value,
+				Value: models.NewInterfaceValue(value), // ✅ Convert interface{} to FieldValue
 			}
 		}
 
-		resultDocs[docID] = &models.Document{
-			DocumentID: docID,
-			Fields:     fields,
-		}
+		// STEP 1: Use document pool to reduce allocations
+		// TODO: Option C - Implement reference counting for automatic pool return
+		doc := document.GetPooledDocument()
+		doc.DocumentID = docID
+		doc.Fields = fields
+		resultDocs[docID] = doc
 
 		groupIndex++
 	}

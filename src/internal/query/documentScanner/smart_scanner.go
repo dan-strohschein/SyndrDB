@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/conversion"
 
 	"go.uber.org/zap"
 )
@@ -429,8 +430,8 @@ func (sbs *SmartBundleScanner) compareValues(docValue, queryValue interface{}, o
 	// Type compatibility check
 	if docType != queryType {
 		// Try string conversion for mixed types
-		docStr := fmt.Sprintf("%v", docValue)
-		queryStr := fmt.Sprintf("%v", queryValue)
+		docStr := conversion.ValueToString(docValue)
+		queryStr := conversion.ValueToString(queryValue)
 		return sbs.compareStrings(docStr, queryStr, operator, caseSensitive)
 	}
 
@@ -511,8 +512,8 @@ func (sbs *SmartBundleScanner) compareLessEqual(docValue, queryValue interface{}
 }
 
 func (sbs *SmartBundleScanner) compareLike(docValue, queryValue interface{}, caseSensitive bool) bool {
-	docStr := fmt.Sprintf("%v", docValue)
-	queryStr := fmt.Sprintf("%v", queryValue)
+	docStr := conversion.ValueToString(docValue)
+	queryStr := conversion.ValueToString(queryValue)
 	return sbs.compareStrings(docStr, queryStr, "LIKE", caseSensitive)
 }
 
@@ -535,8 +536,8 @@ func (sbs *SmartBundleScanner) compareNumericOrString(docValue, queryValue inter
 	}
 
 	// Fall back to string comparison
-	docStr := fmt.Sprintf("%v", docValue)
-	queryStr := fmt.Sprintf("%v", queryValue)
+	docStr := conversion.ValueToString(docValue)
+	queryStr := conversion.ValueToString(queryValue)
 	return sbs.compareStrings(docStr, queryStr, operator, true)
 }
 

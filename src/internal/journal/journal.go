@@ -96,6 +96,11 @@ type WriteAheadLog struct {
 	fsyncOnCommit      bool
 	compressionEnabled bool
 	encryptionEnabled  bool
+
+	// PERFORMANCE OPTIMIZATION: Batch flushing (Priority 2)
+	pendingOps       int           // Count of operations since last flush
+	walBatchSize     int           // Number of operations to batch before flush (default: 10)
+	walMaxFlushDelay time.Duration // Maximum time to wait before forcing flush (default: 10ms)
 }
 
 // WALConfig holds configuration for the WAL
@@ -108,6 +113,8 @@ type WALConfig struct {
 	CompressionEnabled bool
 	EncryptionEnabled  bool
 	AutoFlush          bool
+	WALBatchSize       int           // Batch size for flush operations (Priority 2)
+	WALMaxFlushDelay   time.Duration // Max delay before forcing flush (Priority 2)
 }
 
 // NewWriteAheadLog creates a new WAL instance with proper configuration
@@ -132,6 +139,16 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 
 	//baseFilePath := filepath.Join(config.LogDir, "wal")
 
+	// Set batch defaults if not provided (Speed-first profile)
+	walBatchSize := config.WALBatchSize
+	if walBatchSize <= 0 {
+		walBatchSize = 10 // Default: batch 10 operations
+	}
+	walMaxFlushDelay := config.WALMaxFlushDelay
+	if walMaxFlushDelay <= 0 {
+		walMaxFlushDelay = 10 * time.Millisecond // Default: max 10ms delay
+	}
+
 	wal := &WriteAheadLog{
 		logger:             logger,
 		baseFilePath:       config.LogDir,
@@ -146,6 +163,9 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 		autoFlush:          config.AutoFlush,
 		lastFlush:          time.Now(),
 		flushStopChan:      make(chan struct{}),
+		walBatchSize:       walBatchSize,
+		walMaxFlushDelay:   walMaxFlushDelay,
+		pendingOps:         0,
 	}
 
 	// Initialize WAL file

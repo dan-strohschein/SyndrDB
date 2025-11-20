@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
+	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/registry"
 
 	"go.uber.org/zap"
@@ -41,7 +42,11 @@ type ServiceManager struct {
 	UserService            *UserService              // RBAC: Manages user creation and authentication
 	PermissionService      *PermissionService        // RBAC: Manages permissions and roles
 	MigrationService       MigrationServiceInterface // Migration: Database versioning and schema migration
-	logger                 *zap.SugaredLogger
+
+	// STEP 2: Query plan caching - shared planner with cache invalidation
+	UnifiedPlanner *planner.UnifiedQueryPlanner
+
+	logger *zap.SugaredLogger
 }
 
 // Private instance and mutex for thread safety
@@ -102,6 +107,9 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		permissionService := NewPermissionService(bundleService, dbService, nil, logger, debugMode) // Initialize Lock service
 		lockService := lock.NewLockService(logger.Desugar())
 
+		// STEP 2: Initialize unified query planner with plan caching
+		unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, bundleService)
+
 		// TODO: Initialize Migration service here
 		// Example:
 		// migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())
@@ -117,6 +125,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			UserService:            userService,
 			PermissionService:      permissionService,
 			MigrationService:       nil, // TODO: Set to migrationService once initialized
+			UnifiedPlanner:         unifiedPlanner,
 			logger:                 logger,
 		}
 

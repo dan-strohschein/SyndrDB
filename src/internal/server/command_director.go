@@ -6,11 +6,8 @@ import (
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
-
-	//"syndrdb/src/internal/query/executor"
-	// NEW: Import our JOIN executor
-	"syndrdb/src/internal/query/planner" // NEW: Import hierarchical results package
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
 	"time"
@@ -45,7 +42,10 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	commandParts := strings.Split(command, " ")
 	result := ""
 
-	if strings.HasPrefix(strings.ToLower(command), "select") {
+	// OPTIMIZATION: Compute lowercase version once to avoid 40+ allocations
+	commandLower := strings.ToLower(command)
+
+	if strings.HasPrefix(commandLower, "select") {
 		// Parse SELECT command
 		// Check for SELECT DATABASES (special case for system catalog)
 		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "databases" {
@@ -65,7 +65,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		return SelectDocuments(commandParts, serviceManager, database, logger, startTime)
 	}
 
-	if strings.HasPrefix(strings.ToLower(command), "show") {
+	if strings.HasPrefix(commandLower, "show") {
 		// Parse SHOW command
 		switch strings.ToLower(commandParts[1]) {
 		case "databases":
@@ -93,7 +93,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		return nil, fmt.Errorf("unknown SHOW command: %s", command)
 	}
 
-	if strings.HasPrefix(strings.ToLower(command), "invalidate") {
+	if strings.HasPrefix(commandLower, "invalidate") {
 		// Parse INVALIDATE command
 		switch strings.ToLower(commandParts[1]) {
 		case "session":
@@ -102,7 +102,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		return nil, fmt.Errorf("unknown INVALIDATE command: %s", command)
 	}
 
-	if strings.HasPrefix(strings.ToLower(command), "create") {
+	if strings.HasPrefix(commandLower, "create") {
 
 		switch strings.ToLower(commandParts[1]) {
 		case "database":
@@ -136,7 +136,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse Add Document command
-	if strings.HasPrefix(strings.ToLower(command), "add") {
+	if strings.HasPrefix(commandLower, "add") {
 		switch strings.ToLower(commandParts[1]) {
 		case "document":
 
@@ -147,7 +147,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse UPDATE  command
-	if strings.HasPrefix(strings.ToLower(command), "update") {
+	if strings.HasPrefix(commandLower, "update") {
 		switch strings.ToLower(commandParts[1]) {
 		case "database":
 			dbCommand, err := db.ParseUpdateDatabaseCommand(command)
@@ -255,14 +255,13 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse GRANT command
-	if strings.HasPrefix(strings.ToLower(command), "grant") {
+	if strings.HasPrefix(commandLower, "grant") {
 		return GrantPermission(command, logger, serviceManager)
 	}
 
 	// Parse ATTACH command
-	if strings.HasPrefix(strings.ToLower(command), "attach") {
+	if strings.HasPrefix(commandLower, "attach") {
 		// Check if this is ATTACH DATABASE syntax by looking for DATABASE keyword
-		commandLower := strings.ToLower(command)
 		if strings.Contains(commandLower, "attach database") {
 			return AttachDatabase(command, logger, serviceManager)
 		}
@@ -271,7 +270,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse START MIGRATION command
-	if strings.HasPrefix(strings.ToLower(command), "start") {
+	if strings.HasPrefix(commandLower, "start") {
 		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
 			// START MIGRATION [WITH DESCRIPTION "..."] <commands> COMMIT
 			return StartMigrationCommand(command, database, logger, serviceManager)
@@ -280,7 +279,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse APPLY command
-	if strings.HasPrefix(strings.ToLower(command), "apply") {
+	if strings.HasPrefix(commandLower, "apply") {
 		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
 			// APPLY MIGRATION WITH VERSION <number> [FORCE]
 			return ApplyMigrationCommand(command, database, logger, serviceManager)
@@ -293,7 +292,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse VALIDATE command
-	if strings.HasPrefix(strings.ToLower(command), "validate") {
+	if strings.HasPrefix(commandLower, "validate") {
 		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
 			// VALIDATE MIGRATION WITH VERSION <number>
 			return ValidateMigrationCommand(command, database, logger, serviceManager)
@@ -305,7 +304,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		return nil, fmt.Errorf("unknown VALIDATE command: %s", command)
 	}
 
-	if strings.HasPrefix(strings.ToLower(command), "drop") {
+	if strings.HasPrefix(commandLower, "drop") {
 		switch strings.ToLower(commandParts[1]) {
 		case "database":
 			break
@@ -340,7 +339,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse DELETE  command
-	if strings.HasPrefix(strings.ToLower(command), "delete") {
+	if strings.HasPrefix(commandLower, "delete") {
 
 		switch strings.ToLower(commandParts[1]) {
 		case "database":
@@ -408,6 +407,11 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 				return nil, fmt.Errorf("error deleting document from bundle '%s': %v", bundleName, err)
 			}
 
+			// STEP 2: Invalidate query plan cache after data mutation
+			if serviceManager.UnifiedPlanner != nil {
+				serviceManager.UnifiedPlanner.InvalidatePlanCache()
+			}
+
 			// STEP 6: Format success response with deleted document IDs
 			deletedCount := len(docCommand.DeletedDocumentIDs)
 			if deletedCount == 0 {
@@ -437,31 +441,31 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 	}
 
 	// Parse CHECKPOINT command
-	if strings.HasPrefix(strings.ToLower(command), "checkpoint") {
+	if strings.HasPrefix(commandLower, "checkpoint") {
 		return Checkpoint(command, logger, &serviceManager)
 	}
 
 	// Parse BACKUP command
-	if strings.HasPrefix(strings.ToLower(command), "backup") {
+	if strings.HasPrefix(commandLower, "backup") {
 		return BackupDatabase(command, logger, &serviceManager)
 	}
 
 	// Parse RESTORE command
-	if strings.HasPrefix(strings.ToLower(command), "restore") {
+	if strings.HasPrefix(commandLower, "restore") {
 		return RestoreDatabase(command, logger, &serviceManager)
 	}
 
 	// Parse LOCK command
-	if strings.HasPrefix(strings.ToLower(command), "lock") {
+	if strings.HasPrefix(commandLower, "lock") {
 		return LockDatabaseCommand(command, logger, &serviceManager)
 	}
 
 	// Parse UNLOCK command
-	if strings.HasPrefix(strings.ToLower(command), "unlock") {
+	if strings.HasPrefix(commandLower, "unlock") {
 		return UnlockDatabaseCommand(command, logger, &serviceManager)
 	}
 
-	if strings.HasPrefix(strings.ToLower(command), "use") {
+	if strings.HasPrefix(commandLower, "use") {
 		return UseDatabase(command, logger, serviceManager)
 	}
 
@@ -495,13 +499,14 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 			}
 		}
 
+		// STEP 1: Use document pool to reduce allocations
+		// TODO: Option C - Implement reference counting for automatic pool return
 		// Create new document with filtered fields
-		filteredDoc := &models.Document{
-			DocumentID: doc.DocumentID,
-			Fields:     filteredFields,
-			CreatedAt:  doc.CreatedAt,
-			UpdatedAt:  doc.UpdatedAt,
-		}
+		filteredDoc := document.GetPooledDocument()
+		filteredDoc.DocumentID = doc.DocumentID
+		filteredDoc.Fields = filteredFields
+		filteredDoc.CreatedAt = doc.CreatedAt
+		filteredDoc.UpdatedAt = doc.UpdatedAt
 
 		filteredDocuments[docID] = filteredDoc
 	}
@@ -525,8 +530,8 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	logger.Debugf("Parsed unified query: WHERE:%v, Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
 		query.WhereExpression, query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasOrderBy(), query.HasLimit())
 
-	// STEP 2: Create unified query planner
-	unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, serviceManager.BundleService)
+	// STEP 2: Use unified query planner from ServiceManager (with plan caching)
+	unifiedPlanner := serviceManager.UnifiedPlanner
 
 	// STEP 3: Create execution plan
 	plan, err := unifiedPlanner.CreatePlan(query, database)
@@ -545,9 +550,19 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 
 	logger.Debugf("Query executed successfully: Retrieved %d documents", len(documents))
 
-	// Transform documents to flattened format with field projection
-	// If query.SelectFields is specified, only those fields will be returned
-	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+	// PHASE H: For simple SELECT queries, stream documents directly without intermediate transform
+	// Only use streaming when:
+	// 1. Not a COUNT query (needs aggregation)
+	// 2. No ORDER BY (would need sorting which requires materialized slice)
+	// Streaming eliminates ~300 allocations by skipping the map[string]interface{} intermediate layer
+	useStreaming := !query.IsCountOnly && !query.HasOrderBy()
+
+	var flattenedDocs []map[string]interface{}
+
+	if !useStreaming {
+		// Legacy path: Transform to maps for sorting/aggregation
+		flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+	}
 
 	// TODO Update the sorting to use a more powerful sorter that can handle different data types
 	// If the dev decided to put an order by on a countOnly query, ignore it
@@ -584,7 +599,11 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	var results interface{}
 	var resultCount int
 
-	if query.IsCountOnly {
+	if useStreaming {
+		// Streaming path: no intermediate results, will encode directly
+		results = nil
+		resultCount = len(documents)
+	} else if query.IsCountOnly {
 		// Extract the actual COUNT(*) value from the aggregate result
 		// The GROUP BY executor returns 1 document with the count_all field
 		countValue := 0
@@ -600,6 +619,13 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 					countValue = v
 				case float64:
 					countValue = int(v)
+				case models.FieldValue:
+					// ✅ Handle FieldValue from response formatter
+					if intVal, ok := v.AsInt(); ok {
+						countValue = int(intVal)
+					} else if floatVal, ok := v.AsFloat(); ok {
+						countValue = int(floatVal)
+					}
 				}
 			}
 		}
@@ -620,6 +646,18 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		ExecutionTimeMS: executionTime,
 	}
 
+	// PHASE H: For streaming path, store documents for direct encoding
+	if useStreaming {
+		cmdResponse.StreamDocuments = documents
+		cmdResponse.StreamFields = query.SelectFields
+		cmdResponse.ResultCount = len(documents)
+	} else {
+		// PHASE A: Store pooled maps for cleanup after JSON marshaling (avoids closure allocation)
+		if flattenedDocs, ok := results.([]map[string]interface{}); ok {
+			cmdResponse.PooledMaps = flattenedDocs
+		}
+	}
+
 	logger.Debugf("Returning %d documents (execution time: %.2fms)",
 		cmdResponse.ResultCount, cmdResponse.ExecutionTimeMS)
 
@@ -636,7 +674,7 @@ func SelectDatabases(commandParts []string, serviceManager ServiceManager) (*Com
 
 		if len(databases) == 0 {
 			//fmt.Print("No databases found.\n")
-			databases = make([]*models.Database, 0)
+			databases = make([]*models.Database, 0, 10)
 		}
 
 		cmdResponse := &CommandResponse{

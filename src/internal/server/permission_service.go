@@ -108,9 +108,9 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if strings.EqualFold(nameField.Value.(string), username) {
+				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
 					if idField, ok := doc.Fields["UserID"]; ok {
-						userID = idField.Value.(string)
+						userID, _ = idField.Value.AsString()
 						found = true
 						break
 					}
@@ -146,7 +146,9 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 		for _, doc := range *userPermissionsBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					if userIDField.Value.(string) == userID && permIDField.Value.(string) == permissionID {
+					str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := permIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == permissionID {
 						if ps.debugMode {
 							return fmt.Errorf("user '%s' already has permission '%s'", username, permissionName)
 						}
@@ -157,25 +159,27 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 		}
 	}
 
+	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
+	// This is a user-facing operation (lower frequency than query hot-path)
 	// Create UserPermission document
 	userPermDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
 		Fields: map[string]models.Field{
 			"DocumentID": {
 				Name:  "DocumentID",
-				Value: helpers.GenerateFastUUID(),
+				Value: models.NewStringValue(helpers.GenerateFastUUID()),
 			},
 			"UserPermissionID": {
 				Name:  "UserPermissionID",
-				Value: helpers.GenerateUUID(),
+				Value: models.NewStringValue(helpers.GenerateUUID()),
 			},
 			"UserID": {
 				Name:  "UserID",
-				Value: userID,
+				Value: models.NewStringValue(userID),
 			},
 			"PermissionID": {
 				Name:  "PermissionID",
-				Value: permissionID,
+				Value: models.NewStringValue(permissionID),
 			},
 		},
 	}
@@ -243,9 +247,9 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if strings.EqualFold(nameField.Value.(string), username) {
+				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
 					if idField, ok := doc.Fields["UserID"]; ok {
-						userID = idField.Value.(string)
+						userID, _ = idField.Value.AsString()
 						found = true
 						break
 					}
@@ -284,7 +288,9 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 		for _, doc := range *userRolesBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if roleIDField, ok := doc.Fields["RoleID"]; ok {
-					if userIDField.Value.(string) == userID && roleIDField.Value.(string) == roleID {
+					str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := roleIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == roleID {
 						if ps.debugMode {
 							return fmt.Errorf("user '%s' already has role '%s'", username, roleName)
 						}
@@ -295,21 +301,23 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 		}
 	}
 
+	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
+	// This is a user-facing operation (lower frequency than query hot-path)
 	// Create UserRole document
 	userRoleDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
 		Fields: map[string]models.Field{
 			"DocumentID": {
 				Name:  "DocumentID",
-				Value: helpers.GenerateFastUUID(),
+				Value: models.NewStringValue(helpers.GenerateFastUUID()),
 			},
 			"UserID": {
 				Name:  "UserID",
-				Value: userID,
+				Value: models.NewStringValue(userID),
 			},
 			"RoleID": {
 				Name:  "RoleID",
-				Value: roleID,
+				Value: models.NewStringValue(roleID),
 			},
 		},
 	}
@@ -390,7 +398,9 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 		for docID, doc := range *userPermissionsBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					if userIDField.Value.(string) == userID && permIDField.Value.(string) == permissionID {
+					str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := permIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == permissionID {
 						delete(*userPermissionsBundle.Documents, docID)
 						found = true
 						break
@@ -472,7 +482,9 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 		for docID, doc := range *userRolesBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if roleIDField, ok := doc.Fields["RoleID"]; ok {
-					if userIDField.Value.(string) == userID && roleIDField.Value.(string) == roleID {
+					str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := roleIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == roleID {
 						delete(*userRolesBundle.Documents, docID)
 						found = true
 						break
@@ -539,15 +551,18 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 	if permissionsBundle.Documents != nil {
 		for _, doc := range *permissionsBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if nameField.Value.(string) == permissionName {
+				if str, ok := nameField.Value.AsString(); ok && str == permissionName {
 					if idField, ok := doc.Fields["PermissionID"]; ok {
-						return idField.Value.(string), nil
+						str, _ := idField.Value.AsString()
+				return str, nil
 					}
 				}
 			}
 		}
 	}
 
+	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
+	// This is a user-facing operation (lower frequency than query hot-path)
 	// Permission doesn't exist, create it
 	permissionID := helpers.GenerateUUID()
 	permDoc := &models.Document{
@@ -555,15 +570,15 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 		Fields: map[string]models.Field{
 			"DocumentID": {
 				Name:  "DocumentID",
-				Value: helpers.GenerateFastUUID(),
+				Value: models.NewStringValue(helpers.GenerateFastUUID()),
 			},
 			"PermissionID": {
 				Name:  "PermissionID",
-				Value: permissionID,
+				Value: models.NewStringValue(permissionID),
 			},
 			"Name": {
 				Name:  "Name",
-				Value: permissionName,
+				Value: models.NewStringValue(permissionName),
 			},
 		},
 	}
@@ -621,7 +636,9 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 		for _, doc := range *userPermissionsBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					if userIDField.Value.(string) == userID && permIDField.Value.(string) == permissionID {
+					str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := permIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == permissionID {
 						return true, nil // Direct permission found
 					}
 				}
@@ -641,9 +658,11 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 	if userRolesBundle.Documents != nil {
 		for _, doc := range *userRolesBundle.Documents {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if userIDField.Value.(string) == userID {
+				if str, ok := userIDField.Value.AsString(); ok && str == userID {
 					if roleIDField, ok := doc.Fields["RoleID"]; ok {
-						userRoleIDs = append(userRoleIDs, roleIDField.Value.(string))
+						if str, ok := roleIDField.Value.AsString(); ok {
+							userRoleIDs = append(userRoleIDs, str)
+						}
 					}
 				}
 			}
@@ -668,8 +687,8 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 			if roleIDField, ok := doc.Fields["RoleID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
 					// Check if this role-permission mapping matches
-					roleID := roleIDField.Value.(string)
-					permID := permIDField.Value.(string)
+					roleID, _ := roleIDField.Value.AsString()
+					permID, _ := permIDField.Value.AsString()
 
 					// Is this one of the user's roles?
 					for _, userRoleID := range userRoleIDs {
@@ -707,9 +726,10 @@ func (ps *PermissionService) getUserID(username string) (string, error) {
 	if usersBundle.Documents != nil {
 		for _, doc := range *usersBundle.Documents {
 			if nameField, ok := doc.Fields["Username"]; ok {
-				if strings.EqualFold(nameField.Value.(string), username) {
+				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
 					if idField, ok := doc.Fields["UserID"]; ok {
-						return idField.Value.(string), nil
+						str, _ := idField.Value.AsString()
+				return str, nil
 					}
 				}
 			}
@@ -743,9 +763,10 @@ func (ps *PermissionService) getRoleID(roleName string) (string, error) {
 	if rolesBundle.Documents != nil {
 		for _, doc := range *rolesBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if nameField.Value.(string) == roleName {
+				if str, ok := nameField.Value.AsString(); ok && str == roleName {
 					if idField, ok := doc.Fields["RoleID"]; ok {
-						return idField.Value.(string), nil
+						str, _ := idField.Value.AsString()
+				return str, nil
 					}
 				}
 			}
@@ -776,9 +797,10 @@ func (ps *PermissionService) getPermissionID(permissionName string) (string, err
 	if permissionsBundle.Documents != nil {
 		for _, doc := range *permissionsBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
-				if nameField.Value.(string) == permissionName {
+				if str, ok := nameField.Value.AsString(); ok && str == permissionName {
 					if idField, ok := doc.Fields["PermissionID"]; ok {
-						return idField.Value.(string), nil
+						str, _ := idField.Value.AsString()
+				return str, nil
 					}
 				}
 			}

@@ -109,7 +109,8 @@ func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bu
 
 // evaluateLiteral evaluates a literal value (string, number, boolean, null)
 func (e *ExpressionEvaluator) evaluateLiteral(expr *LiteralExpression) (interface{}, error) {
-	return expr.Value, nil
+	// ✅ Convert literals to FieldValue for zero-allocation comparisons
+	return models.NewInterfaceValue(expr.Value), nil
 }
 
 // evaluateIdentifier evaluates an identifier (field name) by looking it up in the document
@@ -136,19 +137,19 @@ func (e *ExpressionEvaluator) evaluateIdentifier(expr *IdentifierExpression, doc
 
 	// Special case: DocumentID field
 	if strings.EqualFold(fieldName, "documentid") {
-		return doc.DocumentID, nil
+		return models.NewStringValue(doc.DocumentID), nil // ✅ Return FieldValue
 	}
 
 	// Look up field in document
 	if field, exists := doc.Fields[fieldName]; exists {
-		return field.Value, nil
+		return field.Value, nil // ✅ Return FieldValue directly (zero allocations!)
 	}
 
 	// Field not found - return nil (will be treated as NULL in comparisons)
 	if e.logger != nil {
 		e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
 	}
-	return nil, nil
+	return models.FieldValue{Type: models.FieldTypeNil}, nil // ✅ Return nil FieldValue
 }
 
 // evaluateQualifiedIdentifier evaluates a qualified identifier (Bundle.Field notation)
@@ -172,19 +173,19 @@ func (e *ExpressionEvaluator) evaluateQualifiedIdentifier(expr *QualifiedIdentif
 
 	// Special case: DocumentID field
 	if strings.EqualFold(fieldName, "documentid") {
-		return doc.DocumentID, nil
+		return models.NewStringValue(doc.DocumentID), nil // ✅ Return FieldValue
 	}
 
 	// Look up field in document
 	if field, exists := doc.Fields[fieldName]; exists {
-		return field.Value, nil
+		return field.Value, nil // ✅ Return FieldValue directly (zero allocations!)
 	}
 
 	// Field not found - return nil (will be treated as NULL in comparisons)
 	if e.logger != nil {
 		e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
 	}
-	return nil, nil
+	return models.FieldValue{Type: models.FieldTypeNil}, nil // ✅ Return nil FieldValue
 }
 
 // evaluateCall evaluates a function call expression (e.g., COUNT(*), SUM(Price))
@@ -251,6 +252,36 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 	}
 
 	// Handle comparison operators
+	// Try zero-allocation FieldValue comparison first
+	leftFV, leftIsFV := left.(models.FieldValue)
+	rightFV, rightIsFV := right.(models.FieldValue)
+
+	if leftIsFV && rightIsFV {
+		// ✅ ZERO-ALLOCATION PATH: Both are FieldValues - use direct comparison
+		switch expr.Operator {
+		case TOKEN_EQ:
+			return leftFV.CompareEqual(rightFV), nil
+		case TOKEN_NEQ:
+			return leftFV.CompareNotEqual(rightFV), nil
+		case TOKEN_LT:
+			return leftFV.CompareLessThan(rightFV), nil
+		case TOKEN_LTE:
+			return leftFV.CompareLessThanOrEqual(rightFV), nil
+		case TOKEN_GT:
+			return leftFV.CompareGreaterThan(rightFV), nil
+		case TOKEN_GTE:
+			return leftFV.CompareGreaterThanOrEqual(rightFV), nil
+		case TOKEN_LIKE:
+			// LIKE needs string values - fall back to interface{} conversion
+			return e.evaluateLike(leftFV.AsInterface(), rightFV.AsInterface(), false)
+		case TOKEN_IN:
+			return e.evaluateIn(leftFV.AsInterface(), rightFV.AsInterface(), false)
+		case TOKEN_NOTIN:
+			return e.evaluateIn(leftFV.AsInterface(), rightFV.AsInterface(), true)
+		}
+	}
+
+	// Fallback: convert to interface{} for complex comparisons
 	switch expr.Operator {
 	case TOKEN_EQ: // ==
 		return e.compareValues(left, right, func(a, b float64) bool { return a == b })

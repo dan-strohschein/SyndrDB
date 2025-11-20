@@ -255,7 +255,7 @@ func NewHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 	// TODO: Sprint 4 - Initialize CompactionManager
 	// idx.compactor = compactor.NewCompactionManager(compactorConfig)
 
-	config.Logger.Infow("Created new LSM-style hash index",
+	config.Logger.Debugw("Created new LSM-style hash index",
 		"indexName", config.IndexName,
 		"bundleName", config.BundleName,
 		"dataDir", config.DataDir)

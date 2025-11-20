@@ -155,7 +155,7 @@ func GetSettings() *Arguments {
 			AuthEnabled:         false,
 			CreateDefaultDB:     true,
 			Version:             "0.1.0",
-			BundleStorageFormat: "json", // Default to JSON for development
+			BundleStorageFormat: "binary", // Binary (BSON) format is the only supported format
 
 			// PHASE 1 PERFORMANCE DEFAULTS
 			WALEnabled:           true, // WAL enabled by default

@@ -207,7 +207,7 @@ func (nh *NullHandler) GetFieldValue(doc *models.Document, fieldName string) int
 	}
 
 	// Check if the value needs unescaping
-	if strValue, ok := field.Value.(string); ok {
+	if strValue, ok := field.Value.AsString(); ok { // ✅ Use AsString()
 		if strings.HasPrefix(strValue, SYNDR_ESCAPED) {
 			// Remove the escape prefix to get original user value
 			return strings.TrimPrefix(strValue, SYNDR_ESCAPED)
@@ -233,7 +233,7 @@ func (nh *NullHandler) SetFieldValue(doc *models.Document, fieldName string, val
 	if value == nil {
 		doc.Fields[fieldName] = models.Field{
 			Name:  fieldName,
-			Value: SYNDR_NULL,
+			Value: models.NewStringValue(SYNDR_NULL), // ✅ Use NewStringValue
 		}
 		return
 	}
@@ -243,7 +243,7 @@ func (nh *NullHandler) SetFieldValue(doc *models.Document, fieldName string, val
 
 	doc.Fields[fieldName] = models.Field{
 		Name:  fieldName,
-		Value: escapedValue,
+		Value: models.NewInterfaceValue(escapedValue), // ✅ Use NewInterfaceValue
 	}
 }
 
@@ -292,7 +292,7 @@ func (nh *NullHandler) SetMissingField(doc *models.Document, fieldName string) {
 
 	doc.Fields[fieldName] = models.Field{
 		Name:  fieldName,
-		Value: SYNDR_MISSING,
+		Value: models.NewStringValue(SYNDR_MISSING), // ✅ Use NewStringValue
 	}
 }
 
@@ -304,11 +304,9 @@ func (nh *NullHandler) SetDeletedField(doc *models.Document, fieldName string) {
 
 	doc.Fields[fieldName] = models.Field{
 		Name:  fieldName,
-		Value: SYNDR_DELETED,
+		Value: models.NewStringValue(SYNDR_DELETED), // ✅ Use NewStringValue
 	}
-}
-
-// SetDefaultField marks a field as using its default value.
+} // SetDefaultField marks a field as using its default value.
 func (nh *NullHandler) SetDefaultField(doc *models.Document, fieldName string) {
 	if doc.Fields == nil {
 		doc.Fields = make(map[string]models.Field)
@@ -316,11 +314,9 @@ func (nh *NullHandler) SetDefaultField(doc *models.Document, fieldName string) {
 
 	doc.Fields[fieldName] = models.Field{
 		Name:  fieldName,
-		Value: SYNDR_DEFAULT,
+		Value: models.NewStringValue(SYNDR_DEFAULT), // ✅ Use NewStringValue
 	}
-}
-
-// InitializeDocumentFields initializes document fields based on bundle schema.
+} // InitializeDocumentFields initializes document fields based on bundle schema.
 // For each field definition:
 // - If field is required and not provided: return error
 // - If field has default value and not provided: set to SYNDR_DEFAULT
@@ -349,7 +345,7 @@ func (nh *NullHandler) InitializeDocumentFields(doc *models.Document, bundle *mo
 		if providedFields[fieldName] {
 			// Escape the value if it looks like a magic value
 			if field, exists := doc.Fields[fieldName]; exists {
-				field.Value = nh.EscapeUserValue(field.Value)
+				field.Value = models.NewInterfaceValue(nh.EscapeUserValue(field.Value.AsInterface())) // ✅ Use NewInterfaceValue
 				doc.Fields[fieldName] = field
 			}
 			continue
@@ -371,7 +367,7 @@ func (nh *NullHandler) InitializeDocumentFields(doc *models.Document, bundle *mo
 			// No default value - set to SYNDR_NULL
 			doc.Fields[fieldName] = models.Field{
 				Name:  fieldName,
-				Value: SYNDR_NULL,
+				Value: models.NewStringValue(SYNDR_NULL), // ✅ Use NewStringValue
 			}
 			nh.logger.Debugf("[NULL_HANDLER] Field '%s' set to SYNDR_NULL (optional, no default)", fieldName)
 		}

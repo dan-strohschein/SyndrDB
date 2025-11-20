@@ -366,7 +366,7 @@ func validatePermissionsHydration() error {
 	// Check each document in the permissions bundle
 	for _, doc := range *permissionsBundle.Documents {
 		if nameField, exists := doc.Fields["Name"]; exists {
-			if nameValue, ok := nameField.Value.(string); ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
 				foundPermissions[nameValue] = true
 			}
 		}
@@ -389,14 +389,14 @@ func validatePermissionsHydration() error {
 		// Check PermissionID field
 		if permIdField, exists := doc.Fields["PermissionID"]; !exists {
 			return fmt.Errorf("permission document missing PermissionID field")
-		} else if permIdValue, ok := permIdField.Value.(string); !ok || permIdValue == "" {
+		} else if permIdValue, ok := permIdField.Value.AsString(); !ok || permIdValue == "" {
 			return fmt.Errorf("permission document has invalid PermissionID value")
 		}
 
 		// Check Name field
 		if nameField, exists := doc.Fields["Name"]; !exists {
 			return fmt.Errorf("permission document missing Name field")
-		} else if nameValue, ok := nameField.Value.(string); !ok || nameValue == "" {
+		} else if nameValue, ok := nameField.Value.AsString(); !ok || nameValue == "" {
 			return fmt.Errorf("permission document has invalid Name value")
 		}
 
@@ -461,7 +461,7 @@ func validateRolesHydration() error {
 	// Check each document in the roles bundle
 	for _, doc := range *rolesBundle.Documents {
 		if nameField, exists := doc.Fields["Name"]; exists {
-			if nameValue, ok := nameField.Value.(string); ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
 				foundRoles[nameValue] = true
 			}
 		}
@@ -484,14 +484,14 @@ func validateRolesHydration() error {
 		// Check RoleID field
 		if roleIdField, exists := doc.Fields["RoleID"]; !exists {
 			return fmt.Errorf("role document missing RoleID field")
-		} else if roleIdValue, ok := roleIdField.Value.(string); !ok || roleIdValue == "" {
+		} else if roleIdValue, ok := roleIdField.Value.AsString(); !ok || roleIdValue == "" {
 			return fmt.Errorf("role document has invalid RoleID value")
 		}
 
 		// Check Name field
 		if nameField, exists := doc.Fields["Name"]; !exists {
 			return fmt.Errorf("role document missing Name field")
-		} else if nameValue, ok := nameField.Value.(string); !ok || nameValue == "" {
+		} else if nameValue, ok := nameField.Value.AsString(); !ok || nameValue == "" {
 			return fmt.Errorf("role document has invalid Name value")
 		}
 
@@ -545,7 +545,7 @@ func validateUsersHydration() error {
 	foundUsers := make(map[string]bool)
 	for _, doc := range *usersBundle.Documents {
 		if nameField, exists := doc.Fields["Name"]; exists {
-			if userName, ok := nameField.Value.(string); ok {
+			if userName, ok := nameField.Value.AsString(); ok {
 				foundUsers[userName] = true
 			}
 		}
@@ -562,14 +562,14 @@ func validateUsersHydration() error {
 		// Check UserID field
 		if userIdField, exists := doc.Fields["UserID"]; !exists {
 			return fmt.Errorf("user document missing UserID field")
-		} else if userIdValue, ok := userIdField.Value.(string); !ok || userIdValue == "" {
+		} else if userIdValue, ok := userIdField.Value.AsString(); !ok || userIdValue == "" {
 			return fmt.Errorf("user document has invalid UserID value")
 		}
 
 		// Check Name field
 		if nameField, exists := doc.Fields["Name"]; !exists {
 			return fmt.Errorf("user document missing Name field")
-		} else if nameValue, ok := nameField.Value.(string); !ok || nameValue == "" {
+		} else if nameValue, ok := nameField.Value.AsString(); !ok || nameValue == "" {
 			return fmt.Errorf("user document has invalid Name value")
 		}
 
@@ -649,15 +649,15 @@ func validateUserPermissionsHydration() error {
 	// Create maps for lookup
 	usersByID := make(map[string]string)
 	for _, userDoc := range *usersBundle.Documents {
-		userID := userDoc.Fields["UserID"].Value.(string)
-		userName := userDoc.Fields["Name"].Value.(string)
+		userID, _ := userDoc.Fields["UserID"].Value.AsString()
+		userName, _ := userDoc.Fields["Name"].Value.AsString()
 		usersByID[userID] = userName
 	}
 
 	permissionsByID := make(map[string]string)
 	for _, permDoc := range *permissionsBundle.Documents {
-		permID := permDoc.Fields["PermissionID"].Value.(string)
-		permName := permDoc.Fields["Name"].Value.(string)
+		permID, _ := permDoc.Fields["PermissionID"].Value.AsString()
+		permName, _ := permDoc.Fields["Name"].Value.AsString()
 		permissionsByID[permID] = permName
 	}
 
@@ -670,14 +670,14 @@ func validateUserPermissionsHydration() error {
 		// Check UserPermissionID field
 		if userPermIdField, exists := doc.Fields["UserPermissionID"]; !exists {
 			return fmt.Errorf("user permission document missing UserPermissionID field")
-		} else if userPermIdValue, ok := userPermIdField.Value.(string); !ok || userPermIdValue == "" {
+		} else if userPermIdValue, ok := userPermIdField.Value.AsString(); !ok || userPermIdValue == "" {
 			return fmt.Errorf("user permission document has invalid UserPermissionID value")
 		}
 
 		// Check UserID field
 		if userIdField, exists := doc.Fields["UserID"]; !exists {
 			return fmt.Errorf("user permission document missing UserID field")
-		} else if userIdValue, ok := userIdField.Value.(string); !ok || userIdValue == "" {
+		} else if userIdValue, ok := userIdField.Value.AsString(); !ok || userIdValue == "" {
 			return fmt.Errorf("user permission document has invalid UserID value")
 		} else {
 			userName := usersByID[userIdValue]
@@ -686,7 +686,7 @@ func validateUserPermissionsHydration() error {
 			// Check PermissionID field
 			if permIdField, exists := doc.Fields["PermissionID"]; !exists {
 				return fmt.Errorf("user permission document missing PermissionID field")
-			} else if permIdValue, ok := permIdField.Value.(string); !ok || permIdValue == "" {
+			} else if permIdValue, ok := permIdField.Value.AsString(); !ok || permIdValue == "" {
 				return fmt.Errorf("user permission document has invalid PermissionID value")
 			} else {
 				permissionName := permissionsByID[permIdValue]
@@ -791,8 +791,8 @@ func validateDatabaseUsersHydration() error {
 	// Create map for user lookup
 	usersByID := make(map[string]string)
 	for _, userDoc := range *usersBundle.Documents {
-		userID := userDoc.Fields["UserID"].Value.(string)
-		userName := userDoc.Fields["Name"].Value.(string)
+		userID, _ := userDoc.Fields["UserID"].Value.AsString()
+		userName, _ := userDoc.Fields["Name"].Value.AsString()
 		usersByID[userID] = userName
 	}
 
@@ -809,14 +809,14 @@ func validateDatabaseUsersHydration() error {
 		// Looking at the code, it should be "DatabaseUserID"
 		if dbUserIdField, exists := doc.Fields["DatabaseUserID"]; !exists {
 			return fmt.Errorf("database user document missing DatabaseUserID field")
-		} else if dbUserIdValue, ok := dbUserIdField.Value.(string); !ok || dbUserIdValue == "" {
+		} else if dbUserIdValue, ok := dbUserIdField.Value.AsString(); !ok || dbUserIdValue == "" {
 			return fmt.Errorf("database user document has invalid DatabaseUserID value")
 		}
 
 		// Check UserID field
 		if userIdField, exists := doc.Fields["UserID"]; !exists {
 			return fmt.Errorf("database user document missing UserID field")
-		} else if userIdValue, ok := userIdField.Value.(string); !ok || userIdValue == "" {
+		} else if userIdValue, ok := userIdField.Value.AsString(); !ok || userIdValue == "" {
 			return fmt.Errorf("database user document has invalid UserID value")
 		} else {
 			userName := usersByID[userIdValue]
@@ -827,7 +827,7 @@ func validateDatabaseUsersHydration() error {
 		// Check DatabaseID field
 		if dbIdField, exists := doc.Fields["DatabaseID"]; !exists {
 			return fmt.Errorf("database user document missing DatabaseID field")
-		} else if dbIdValue, ok := dbIdField.Value.(string); !ok || dbIdValue == "" {
+		} else if dbIdValue, ok := dbIdField.Value.AsString(); !ok || dbIdValue == "" {
 			return fmt.Errorf("database user document has invalid DatabaseID value")
 		} else if dbIdValue != primaryDBID {
 			return fmt.Errorf("database user document has incorrect DatabaseID, expected %s, got %s", primaryDBID, dbIdValue)

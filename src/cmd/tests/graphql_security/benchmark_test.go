@@ -22,7 +22,7 @@ func BenchmarkTokenBucket_Allow_SingleUser(b *testing.B) {
 	defer sugar.Sync()
 
 	config := &settings.GraphQLSecurityConfig{
-		EnableGraphQLRateLimit:     true,
+		EnableGraphQLRateLimit:      true,
 		AuthenticatedQueryRateLimit: 100,
 		QueryCost:                   1,
 		InactivityTimeout:           5 * time.Minute,
@@ -49,7 +49,7 @@ func BenchmarkTokenBucket_Allow_NewUser(b *testing.B) {
 	defer sugar.Sync()
 
 	config := &settings.GraphQLSecurityConfig{
-		EnableGraphQLRateLimit:     true,
+		EnableGraphQLRateLimit:      true,
 		AuthenticatedQueryRateLimit: 100,
 		QueryCost:                   1,
 		InactivityTimeout:           5 * time.Minute,
@@ -77,7 +77,7 @@ func BenchmarkTokenBucket_Allow_Concurrent(b *testing.B) {
 	defer sugar.Sync()
 
 	config := &settings.GraphQLSecurityConfig{
-		EnableGraphQLRateLimit:     true,
+		EnableGraphQLRateLimit:      true,
 		AuthenticatedQueryRateLimit: 1000,
 		QueryCost:                   1,
 		InactivityTimeout:           5 * time.Minute,
@@ -106,7 +106,7 @@ func BenchmarkTokenBucket_Refill(b *testing.B) {
 	defer sugar.Sync()
 
 	config := &settings.GraphQLSecurityConfig{
-		EnableGraphQLRateLimit:     true,
+		EnableGraphQLRateLimit:      true,
 		AuthenticatedQueryRateLimit: 100,
 		QueryCost:                   1,
 		InactivityTimeout:           5 * time.Minute,
@@ -226,11 +226,11 @@ func BenchmarkComplexityAnalyzer_AdminBypass(b *testing.B) {
 func BenchmarkRoleCache_Hit(b *testing.B) {
 	// Create mock session with cached role
 	session := &MockSession{
-		cachedRole:     "user",
-		isAdmin:        false,
-		roleCacheTime:  time.Now(),
-		roleCacheTTL:   5 * time.Minute,
-		hasValidCache:  true,
+		cachedRole:    "user",
+		isAdmin:       false,
+		roleCacheTime: time.Now(),
+		roleCacheTTL:  5 * time.Minute,
+		hasValidCache: true,
 	}
 
 	b.ResetTimer()
@@ -248,12 +248,12 @@ func BenchmarkRoleCache_Hit(b *testing.B) {
 func BenchmarkRoleCache_Miss(b *testing.B) {
 	// Create mock session without cached role
 	session := &MockSession{
-		cachedRole:     "",
-		isAdmin:        false,
-		roleCacheTime:  time.Time{},
-		roleCacheTTL:   5 * time.Minute,
-		hasValidCache:  false,
-		lookupRole:     "user",
+		cachedRole:    "",
+		isAdmin:       false,
+		roleCacheTime: time.Time{},
+		roleCacheTTL:  5 * time.Minute,
+		hasValidCache: false,
+		lookupRole:    "user",
 	}
 
 	b.ResetTimer()
@@ -270,12 +270,12 @@ func BenchmarkRoleCache_Miss(b *testing.B) {
 // BenchmarkRoleCache_Invalidation benchmarks cache invalidation and re-fetch
 func BenchmarkRoleCache_Invalidation(b *testing.B) {
 	session := &MockSession{
-		cachedRole:     "user",
-		isAdmin:        false,
-		roleCacheTime:  time.Now(),
-		roleCacheTTL:   5 * time.Minute,
-		hasValidCache:  true,
-		lookupRole:     "admin",
+		cachedRole:    "user",
+		isAdmin:       false,
+		roleCacheTime: time.Now(),
+		roleCacheTTL:  5 * time.Minute,
+		hasValidCache: true,
+		lookupRole:    "admin",
 	}
 
 	b.ResetTimer()
@@ -301,17 +301,17 @@ func BenchmarkGraphQL_SecurityOverhead_Enabled(b *testing.B) {
 
 	// Simulate all security layers enabled
 	config := &settings.GraphQLSecurityConfig{
-		EnableComplexityLimit:          true,
-		EnableGraphQLRateLimit:         true,
-		EnableQueryTimeout:             true,
-		EnableQueryMonitoring:          true,
-		AuthenticatedComplexityLimit:   200,
-		AuthenticatedQueryRateLimit:    100,
-		AuthenticatedQueryTimeout:      30 * time.Second,
-		QueryCost:                       1,
-		InactivityTimeout:              5 * time.Minute,
-		MetricsPurgeInterval:           5 * time.Minute,
-		RateAlgorithm:                  "token-bucket",
+		EnableComplexityLimit:        true,
+		EnableGraphQLRateLimit:       true,
+		EnableQueryTimeout:           true,
+		EnableQueryMonitoring:        true,
+		AuthenticatedComplexityLimit: 200,
+		AuthenticatedQueryRateLimit:  100,
+		AuthenticatedQueryTimeout:    30 * time.Second,
+		QueryCost:                    1,
+		InactivityTimeout:            5 * time.Minute,
+		MetricsPurgeInterval:         5 * time.Minute,
+		RateAlgorithm:                "token-bucket",
 	}
 
 	complexityConfig := &optimization.ComplexityConfig{
@@ -383,16 +383,16 @@ func BenchmarkGraphQL_SecurityOverhead_AdminBypass(b *testing.B) {
 	defer sugar.Sync()
 
 	config := &settings.GraphQLSecurityConfig{
-		EnableComplexityLimit:          true,
-		EnableGraphQLRateLimit:         true,
-		EnableQueryTimeout:             true,
-		EnableQueryMonitoring:          true,
-		AdminComplexityLimit:           0, // Unlimited
-		AdminQueryRateLimit:            0, // Unlimited
-		AdminTimeout:                   10 * time.Minute,
-		InactivityTimeout:              5 * time.Minute,
-		MetricsPurgeInterval:           5 * time.Minute,
-		RateAlgorithm:                  "token-bucket",
+		EnableComplexityLimit:  true,
+		EnableGraphQLRateLimit: true,
+		EnableQueryTimeout:     true,
+		EnableQueryMonitoring:  true,
+		AdminComplexityLimit:   0, // Unlimited
+		AdminQueryRateLimit:    0, // Unlimited
+		AdminTimeout:           10 * time.Minute,
+		InactivityTimeout:      5 * time.Minute,
+		MetricsPurgeInterval:   5 * time.Minute,
+		RateAlgorithm:          "token-bucket",
 	}
 
 	limiter := graphql.NewRateLimiter(config, sugar)
@@ -441,7 +441,7 @@ func BenchmarkTokenBucket_ConcurrentStress(b *testing.B) {
 	defer sugar.Sync()
 
 	config := &settings.GraphQLSecurityConfig{
-		EnableGraphQLRateLimit:     true,
+		EnableGraphQLRateLimit:      true,
 		AuthenticatedQueryRateLimit: 10000, // High limit to avoid blocking
 		QueryCost:                   1,
 		InactivityTimeout:           5 * time.Minute,

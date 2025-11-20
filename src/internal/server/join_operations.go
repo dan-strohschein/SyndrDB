@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	joinexecutor "syndrdb/src/internal/query/join_executor"
@@ -253,16 +254,17 @@ func mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, logger *zap.Sug
 	// Add join metadata
 	mergedFields["join_key"] = models.Field{
 		Name:  "join_key",
-		Value: joinedDoc.JoinKey,
+		Value: models.NewStringValue(joinedDoc.JoinKey),
 	}
 
+	// STEP 1: Use document pool to reduce allocations
+	// TODO: Option C - Implement reference counting for automatic pool return
 	// Create merged document
-	mergedDoc := &models.Document{
-		DocumentID: fmt.Sprintf("join_%s", joinedDoc.JoinKey),
-		Fields:     mergedFields,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
-	}
+	mergedDoc := document.GetPooledDocument()
+	mergedDoc.DocumentID = fmt.Sprintf("join_%s", joinedDoc.JoinKey)
+	mergedDoc.Fields = mergedFields
+	mergedDoc.CreatedAt = time.Now()
+	mergedDoc.UpdatedAt = time.Now()
 
 	return mergedDoc
 }
@@ -447,10 +449,10 @@ func analyzeWhereClauseForJoin(whereGroup *queryparser.WhereGroup, leftBundle, r
 	}
 
 	analysis := &WhereAnalysis{
-		LeftBundleConditions:  make([]queryparser.WhereClause, 0),
-		RightBundleConditions: make([]queryparser.WhereClause, 0),
-		CrossBundleConditions: make([]queryparser.WhereClause, 0),
-		RemainingConditions:   make([]queryparser.WhereClause, 0),
+		LeftBundleConditions:  make([]queryparser.WhereClause, 0, 10),
+		RightBundleConditions: make([]queryparser.WhereClause, 0, 10),
+		CrossBundleConditions: make([]queryparser.WhereClause, 0, 5),
+		RemainingConditions:   make([]queryparser.WhereClause, 0, 5),
 	}
 
 	// Analyze each clause in the WHERE group

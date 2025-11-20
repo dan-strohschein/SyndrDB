@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	gqlcontext "syndrdb/src/internal/graphQL/context"
 	"syndrdb/src/internal/graphQL/mutations"
@@ -1301,9 +1302,9 @@ func (h *GraphQLHandler) resolveArgumentValue(value *ast.Value, variables map[st
 //   - []map[string]interface{}: Query results as document maps
 //   - error: Execution errors
 func (h *GraphQLHandler) executeUnifiedQuery(query *queryparser.UnifiedSelectQuery, bundle *models.Bundle) ([]map[string]interface{}, error) {
-	// Step 1: Create unified query planner
+	// Step 1: Use unified query planner from ServiceManager (with plan caching)
 	// This is the SAME planner used by SyndrQL queries
-	queryPlanner := planner.NewUnifiedQueryPlanner(h.logger, h.serviceManager.BundleService)
+	queryPlanner := h.serviceManager.UnifiedPlanner
 
 	// Step 2: Create execution plan
 	// The planner analyzes the query, estimates costs, selects indexes,
@@ -1413,12 +1414,13 @@ func (h *GraphQLHandler) formatGraphQLResults(ctx context.Context, results []map
 				// PHASE 8: Resolve relationship field
 				h.logger.Debugf("[GraphQL Relationship] Resolving relationship '%s' for document", fieldName)
 
+				// STEP 1: Use document pool to reduce allocations
+				// TODO: Option C - Implement reference counting for automatic pool return
 				// Convert map[string]interface{} to *models.Document
 				// Use the Data field for raw document data
-				parentDoc := &models.Document{
-					Fields: make(map[string]models.Field),
-					Data:   make(map[string]interface{}),
-				}
+				parentDoc := document.GetPooledDocument()
+				parentDoc.Fields = make(map[string]models.Field)
+				parentDoc.Data = make(map[string]interface{})
 
 				// Copy DocumentID
 				if docID, ok := doc["DocumentID"].(string); ok {

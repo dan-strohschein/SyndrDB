@@ -132,8 +132,7 @@ func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLog
 	hasRelationships := len(bundleMetadata.Relationships) > 0
 
 	if (hasDocuments || hasRelationships) && !bundleCmd.HasForceSwitch {
-		errorMsg := fmt.Sprintf("cannot drop bundle '%s' because it contains documents or has relationships. Use FORCE to override.", bundleCmd.BundleName)
-		return nil, fmt.Errorf(errorMsg)
+		return nil, fmt.Errorf("cannot drop bundle '%s' because it contains documents or has relationships. Use FORCE to override", bundleCmd.BundleName)
 	}
 
 	if serviceManager.WALManager != nil {

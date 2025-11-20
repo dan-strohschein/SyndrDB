@@ -30,8 +30,8 @@ package queryparser
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+	"syndrdb/src/pkg/common/helpers"
 
 	"go.uber.org/zap"
 )
@@ -61,7 +61,7 @@ func ParseBasicSelectQuery(query string, logger *zap.SugaredLogger) (*BasicSelec
 
 	// Initialize the select query structure
 	selectQuery := &BasicSelectQuery{
-		SelectFields: make([]string, 0),
+		SelectFields: make([]string, 0, 20),
 	}
 
 	// Normalize the query (remove extra whitespace)
@@ -103,7 +103,7 @@ func parseBasicSelectClause(query string, selectQuery *BasicSelectQuery, logger 
 
 		// Handle TOP N syntax: SELECT TOP 10 "field1", "field2"
 		// Skip over "TOP N " if present
-		topPattern := regexp.MustCompile(`(?i)^TOP\s+(\d+)\s+`)
+		topPattern := helpers.MustCompileCached(`(?i)^TOP\s+(\d+)\s+`)
 		if matches := topPattern.FindStringSubmatch(selectPart); len(matches) > 0 {
 			// Skip past "TOP N " to get to the field list
 			selectPart = selectPart[len(matches[0]):]
@@ -174,7 +174,7 @@ func parseBasicFieldList(fieldsPart string, logger *zap.SugaredLogger) ([]string
 // parseBasicFromClause parses the FROM portion of the query
 func parseBasicFromClause(query string, selectQuery *BasicSelectQuery, logger *zap.SugaredLogger) error {
 	// Regular expression to match FROM clause
-	fromRegex := regexp.MustCompile(`FROM\s+"([^"]+)"`)
+	fromRegex := helpers.MustCompileCached(`FROM\s+"([^"]+)"`)
 	matches := fromRegex.FindStringSubmatch(query)
 
 	if len(matches) < 2 {

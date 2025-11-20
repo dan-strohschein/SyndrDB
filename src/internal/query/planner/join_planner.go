@@ -34,6 +34,7 @@ package planner
 import (
 	"fmt"
 	"strings"
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: For JOIN executor integration
@@ -576,16 +577,18 @@ func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.Joined
 	// Add JOIN metadata
 	mergedFields["join_key"] = models.Field{
 		Name:  "join_key",
-		Value: joinedDoc.JoinKey,
+		Value: models.NewStringValue(joinedDoc.JoinKey),
 	}
 
-	return &models.Document{
-		//DocumentID: fmt.Sprintf("join_%d_%s", index, joinedDoc.JoinKey),
-		DocumentID: joinedDoc.JoinKey,
-		Fields:     mergedFields,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
-	}
+	// STEP 1: Use document pool to reduce allocations
+	// TODO: Option C - Implement reference counting for automatic pool return
+	doc := document.GetPooledDocument()
+	//doc.DocumentID = fmt.Sprintf("join_%d_%s", index, joinedDoc.JoinKey)
+	doc.DocumentID = joinedDoc.JoinKey
+	doc.Fields = mergedFields
+	doc.CreatedAt = time.Now()
+	doc.UpdatedAt = time.Now()
+	return doc
 }
 
 // PlannerBundleAdapter adapts a Bundle to implement BundleInterface for the JOIN executor

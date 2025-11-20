@@ -113,7 +113,7 @@ func (s *FastDocumentSerializer) writeField(fieldName string, field models.Field
 	s.buffer = append(s.buffer, nameBytes...)
 
 	// Write field value based on type
-	switch value := field.Value.(type) {
+	switch value := field.Value.AsInterface().(type) { // ✅ Convert FieldValue to interface{} for type switch
 	case string:
 		s.buffer = append(s.buffer, 1) // Type: string
 		valueBytes := []byte(value)
