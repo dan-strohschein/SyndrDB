@@ -2,13 +2,13 @@ package defaultdb
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
 	"time"
-
-	"strings"
 
 	"go.uber.org/zap"
 )
@@ -268,6 +268,100 @@ func (cs *CatalogService) UpdateBundleNameInCatalog(bundleID, databaseName, oldN
 	cs.bundleService.FlushAllBuffers()
 
 	cs.logger.Infof("Successfully updated catalog entry for bundle '%s' -> '%s'", oldName, newName)
+	return nil
+}
+
+// UpdateDatabaseNameInCatalog updates the Name and FilePath fields in the primary.Databases
+// catalog when a database is renamed. This ensures the system catalog remains consistent
+// with the actual database state on disk.
+//
+// This method is called by DatabaseService.RenameDatabase() after the database directory
+// and files have been successfully renamed on disk.
+//
+// Parameters:
+//   - databaseID: The unique identifier of the database (doesn't change during rename)
+//   - oldName: The previous database name (for logging/validation)
+//   - newName: The new database name to update in the catalog
+//
+// Returns an error if the catalog cannot be loaded or updated.
+func (cs *CatalogService) UpdateDatabaseNameInCatalog(databaseID, oldName, newName string) error {
+	cs.logger.Infof("Updating catalog entry for database rename: '%s' -> '%s' (ID: %s)", oldName, newName, databaseID)
+
+	// Get the primary database
+	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return fmt.Errorf("failed to get primary database: %w", err)
+	}
+
+	// Get the Databases bundle from primary database
+	databasesBundle, err := cs.bundleService.GetBundleByName(primaryDB, "Databases")
+	if err != nil {
+		return fmt.Errorf("failed to get primary.Databases bundle: %w", err)
+	}
+
+	// Load all documents from the catalog using page-based loading
+	docs, err := cs.bundleService.LoadCatalogBundleDocuments(databasesBundle.Name)
+	if err != nil {
+		return fmt.Errorf("failed to load catalog documents: %w", err)
+	}
+
+	// Find the document for this database by DatabaseID
+	var targetDoc *models.Document
+	for _, doc := range docs {
+		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
+			if dbID, ok := dbIDField.Value.AsString(); ok && dbID == databaseID {
+				targetDoc = doc
+				break
+			}
+		}
+	}
+
+	if targetDoc == nil {
+		return fmt.Errorf("database with ID '%s' not found in catalog", databaseID)
+	}
+
+	// Verify the old name matches (validation check)
+	if nameField, exists := targetDoc.Fields["Name"]; exists {
+		if currentName, ok := nameField.Value.AsString(); ok && !strings.EqualFold(currentName, oldName) {
+			cs.logger.Warnf("Catalog name mismatch: expected '%s' but found '%s' (proceeding with update)", oldName, currentName)
+		}
+	}
+
+	// Update the Name field
+	targetDoc.Fields["Name"] = models.Field{
+		Name:  "Name",
+		Value: models.NewStringValue(newName),
+	}
+
+	// Update the FilePath field (now points to new database directory)
+	newFilePath := filepath.Join(cs.databaseService.Settings.DataDir, newName)
+	targetDoc.Fields["FilePath"] = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(newFilePath),
+	}
+
+	// Update the timestamp
+	targetDoc.UpdatedAt = time.Now()
+
+	// Persist the updated document back to the catalog
+	updateCommand := &models.DocumentUpdateCommand{
+		BundleName:  databasesBundle.Name,
+		WhereClause: fmt.Sprintf("\"DocumentID\" == \"%s\"", targetDoc.DocumentID),
+		Fields: []models.KeyValue{
+			{Key: "Name", Value: newName},
+			{Key: "FilePath", Value: newFilePath},
+		},
+	}
+
+	// Use UpdateDocumentInBundle to persist changes
+	if err := cs.bundleService.UpdateDocumentInBundle(databasesBundle, updateCommand); err != nil {
+		return fmt.Errorf("failed to update database in catalog: %w", err)
+	}
+
+	// Flush buffers to ensure data is written immediately
+	cs.bundleService.FlushAllBuffers()
+
+	cs.logger.Infof("Successfully updated catalog entry for database '%s' -> '%s'", oldName, newName)
 	return nil
 }
 

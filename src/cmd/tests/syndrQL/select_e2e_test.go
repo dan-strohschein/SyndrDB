@@ -15,6 +15,9 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/journal"
+	"syndrdb/src/internal/lock"
+	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/server"
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
@@ -221,9 +224,38 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 	}
 
 	// Initialize service manager (no GraphQL for tests)
-	serviceManager := server.InitServiceManager(databaseService, bundleService, catalogService, nil, nil, sugar, false)
-	if serviceManager == nil {
-		tb.Fatal("Failed to initialize service manager")
+	// NOTE: Don't use InitServiceManager in tests because it uses sync.Once which creates
+	// a singleton shared across all tests. Instead, create a fresh ServiceManager for each test.
+	sessionManager := server.NewSessionManager(sugar, 30*time.Minute, 1000)
+
+	// Initialize WAL Manager
+	walManager, err := journal.NewWALManager(sugar)
+	if err != nil {
+		sugar.Warnf("Warning: Failed to initialize WAL Manager: %v", err)
+		walManager = nil
+	}
+
+	// Initialize RBAC services (needed for permission checks)
+	userService := server.NewUserService(bundleService, databaseService, nil, sugar, false)
+	permissionService := server.NewPermissionService(bundleService, databaseService, nil, sugar, false)
+	lockService := lock.NewLockService(sugar.Desugar())
+
+	// Initialize unified query planner
+	unifiedPlanner := planner.NewUnifiedQueryPlanner(sugar, bundleService)
+
+	serviceManager := &server.ServiceManager{
+		DatabaseService:        databaseService,
+		BundleService:          bundleService,
+		InternalCatalogService: catalogService,
+		WALManager:             walManager,
+		LockService:            lockService,
+		GraphQLProcessor:       nil,
+		UserService:            userService,
+		PermissionService:      permissionService,
+		MigrationService:       nil,
+		SessionManager:         sessionManager,
+		ActiveConnections:      make(map[string]*server.Connection),
+		UnifiedPlanner:         unifiedPlanner,
 	}
 
 	// Create unique test database (use test name + timestamp to avoid conflicts)

@@ -35,6 +35,7 @@ package database
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
@@ -106,6 +107,54 @@ func ParseDeleteDatabaseCommand(command string) (*models.DatabaseCommand, error)
 	return &models.DatabaseCommand{
 		DatabaseName: databaseName,
 		CommandType:  "DELETE",
+	}, nil
+}
+
+// ParseRenameDatabaseCommand parses a RENAME DATABASE command
+// Expected formats:
+//   - RENAME DATABASE "old_name" TO "new_name"
+//   - RENAME DATABASE "old_name" TO "new_name" FORCE
+//
+// Returns a DatabaseCommand with:
+//   - CommandType: "RENAME"
+//   - DatabaseName: old database name
+//   - NewDatabaseName: new database name
+//   - Force: true if FORCE keyword is present
+func ParseRenameDatabaseCommand(command string) (*models.DatabaseCommand, error) {
+	// Regular expression to extract old name, new name, and optional FORCE keyword
+	// Pattern: RENAME DATABASE "old_name" TO "new_name" [FORCE]
+	renameRegex := regexp.MustCompile(`RENAME\s+DATABASE\s+"([^"]+)"\s+TO\s+"([^"]+)"`)
+	matches := renameRegex.FindStringSubmatch(command)
+
+	if len(matches) < 3 {
+		return nil, fmt.Errorf("invalid RENAME DATABASE command syntax. Expected: RENAME DATABASE \"old_name\" TO \"new_name\" [FORCE]")
+	}
+
+	oldName := matches[1]
+	newName := matches[2]
+
+	// Check if FORCE keyword is present (case-insensitive)
+	force := strings.Contains(strings.ToUpper(command), "FORCE")
+
+	// Validate database names
+	if !IsValidDatabaseName(oldName) {
+		return nil, fmt.Errorf("invalid old database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", oldName)
+	}
+
+	if !IsValidDatabaseName(newName) {
+		return nil, fmt.Errorf("invalid new database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", newName)
+	}
+
+	if oldName == newName {
+		return nil, fmt.Errorf("new database name cannot be the same as the current name")
+	}
+
+	return &models.DatabaseCommand{
+		ID:              helpers.GenerateUUID(),
+		CommandType:     "RENAME",
+		DatabaseName:    oldName,
+		NewDatabaseName: newName,
+		Force:           force,
 	}, nil
 }
 

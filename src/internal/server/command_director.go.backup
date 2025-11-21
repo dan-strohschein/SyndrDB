@@ -499,15 +499,6 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		return UseDatabase(command, logger, serviceManager)
 	}
 
-	// Parse RENAME command
-	if strings.HasPrefix(commandLower, "rename") {
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "database" {
-			// RENAME DATABASE "old_name" TO "new_name" [FORCE]
-			return RenameDatabase(command, logger, serviceManager, session)
-		}
-		return nil, fmt.Errorf("unknown RENAME command: %s", command)
-	}
-
 	return &result, nil
 }
 

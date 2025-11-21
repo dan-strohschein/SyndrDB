@@ -9,9 +9,12 @@ This document covers user management and Role-Based Access Control (RBAC) comman
 1. [Security System Overview](#security-system-overview)
 2. [User Commands](#user-commands)
    - [CREATE USER](#create-user)
+   - [UPDATE USER](#update-user)
+   - [DELETE USER](#delete-user)
 3. [Grant Commands](#grant-commands)
    - [GRANT Permission](#grant-permission)
    - [GRANT ROLE](#grant-role)
+   - [REVOKE Commands](#revoke-commands)
 4. [Pre-defined Roles & Permissions](#pre-defined-roles--permissions)
 5. [Not Yet Implemented](#not-yet-implemented)
 
@@ -774,48 +777,230 @@ GRANT ROLE "Admin" TO USER "test_admin";
 
 ---
 
+---
+
+## UPDATE USER
+
+Modify an existing user's password. Other user attributes (IsActive, IsLockedOut) are currently managed by the system.
+
+### ✅ Syntax
+
+```sql
+UPDATE USER "username" SET PASSWORD = "new_password";
+UPDATE USER "username" SET PASSWORD = "new_password" FORCE;
+```
+
+### 📝 Parameters
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| `username` | The username to update | ✅ Required |
+| `new_password` | The new password (8+ chars) | ✅ Required |
+| `FORCE` | Terminate active sessions after update | ❌ Optional |
+
+### 🔒 Permissions Required
+
+- **Admin** role required to update any user
+- Users cannot update their own passwords (must be done by Admin)
+
+### 💡 Examples
+
+#### Update User Password
+
+```sql
+UPDATE USER "dev1" SET PASSWORD = "NewSecureP@ss123!";
+```
+
+#### Update Password with Session Termination
+
+```sql
+UPDATE USER "app_user" SET PASSWORD = "NewP@ssword456!" FORCE;
+```
+
+The `FORCE` option will:
+1. Update the password
+2. Terminate all active sessions for that user
+3. Require the user to log in again with the new password
+
+### ⚠️ Error Cases
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| User not found | Username doesn't exist | Check username spelling |
+| Weak password | Password < 8 characters | Use stronger password |
+| Permission denied | Not an Admin | Log in as Admin |
+| Invalid syntax | Missing SET PASSWORD | Follow syntax exactly |
+
+### ✅ Best Practices
+
+- ✅ Use `FORCE` when you suspect a password has been compromised
+- ✅ Ensure new passwords meet complexity requirements
+- ✅ Notify users when their password is changed
+- ❌ Don't update passwords unnecessarily
+- ❌ Don't share new passwords over insecure channels
+
+---
+
+## REVOKE Commands
+
+Remove permissions or roles from a user.
+
+### ✅ REVOKE Permission Syntax
+
+```sql
+REVOKE "permission_name" FROM USER "username";
+REVOKE "permission_name" FROM USER "username" FORCE;
+```
+
+### ✅ REVOKE Role Syntax
+
+```sql
+REVOKE ROLE "role_name" FROM USER "username";
+REVOKE ROLE "role_name" FROM USER "username" FORCE;
+```
+
+### 📝 Parameters
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| `permission_name` | Permission to revoke | ✅ Required (for permission) |
+| `role_name` | Role to revoke | ✅ Required (for role) |
+| `username` | Target user | ✅ Required |
+| `FORCE` | Terminate active sessions | ❌ Optional |
+
+### 🔒 Permissions Required
+
+- **Admin** role required to revoke any permission or role
+
+### 💡 Examples
+
+#### Revoke Individual Permission
+
+```sql
+REVOKE "Write" FROM USER "readonly_user";
+```
+
+#### Revoke Role
+
+```sql
+REVOKE ROLE "Data-Writer" FROM USER "contractor1";
+```
+
+#### Revoke with Session Termination
+
+```sql
+REVOKE "Admin" FROM USER "former_admin" FORCE;
+REVOKE ROLE "Dbo" FROM USER "temp_dba" FORCE;
+```
+
+The `FORCE` option will:
+1. Remove the permission/role
+2. Terminate all active sessions for that user
+3. Prevent them from performing actions they no longer have permission for
+
+### ⚠️ Error Cases
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| User not found | Username doesn't exist | Check username spelling |
+| Permission not granted | User doesn't have that permission | Check GRANT PERMISSION first |
+| Role not granted | User doesn't have that role | Check GRANT ROLE first |
+| Permission denied | Not an Admin | Log in as Admin |
+
+### ✅ Best Practices
+
+- ✅ Use `FORCE` when revoking critical permissions (Admin, Write, Delete)
+- ✅ Verify what permissions a user has before revoking
+- ✅ Revoke roles instead of individual permissions when possible
+- ✅ Document why permissions were revoked
+- ❌ Don't revoke permissions without notifying the affected user
+- ❌ Don't revoke Data-Reader (it's auto-granted to all users)
+
+---
+
+## DELETE USER
+
+Remove a user from the system. This operation cascades to remove all associated permissions and role assignments.
+
+### ✅ Syntax
+
+```sql
+DELETE USER "username";
+DELETE USER "username" FORCE;
+DROP USER "username";
+DROP USER "username" FORCE;
+```
+
+**Note:** `DELETE USER` and `DROP USER` are aliases - they perform the same operation.
+
+### 📝 Parameters
+
+| Parameter | Description | Required |
+|-----------|-------------|----------|
+| `username` | The username to delete | ✅ Required |
+| `FORCE` | Terminate active sessions before deletion | ❌ Optional |
+
+### 🔒 Permissions Required
+
+- **Admin** role required to delete any user
+- Cannot delete your own user account
+
+### 💡 Examples
+
+#### Delete User
+
+```sql
+DELETE USER "contractor1";
+```
+
+#### Delete User with Active Sessions
+
+```sql
+DELETE USER "terminated_employee" FORCE;
+```
+
+#### Drop User (Alias)
+
+```sql
+DROP USER "old_account" FORCE;
+```
+
+### 🔄 Cascade Behavior
+
+Deleting a user automatically removes:
+- All UserPermissions entries for that user
+- All UserRoles entries for that user
+- All active sessions for that user (when using FORCE)
+
+### ⚠️ Error Cases
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| User not found | Username doesn't exist | Check username spelling |
+| Cannot delete self | Trying to delete own account | Use different Admin account |
+| Active sessions | User has active sessions | Use FORCE option |
+| Permission denied | Not an Admin | Log in as Admin |
+
+### ✅ Best Practices
+
+- ✅ Always use `FORCE` when deleting users to ensure clean removal
+- ✅ Verify the username before deletion (it's permanent)
+- ✅ Archive user data before deletion if needed
+- ✅ Document why users were deleted
+- ❌ Don't delete users without proper authorization
+- ❌ Don't delete service accounts without coordinating with application teams
+
+---
+
 ## Not Yet Implemented
 
 The following commands are **not yet implemented** in SyndrDB. They are planned for future releases.
 
-### ⚠️ UPDATE USER (Not Implemented)
-
-```sql
--- PLANNED SYNTAX (not yet available):
-UPDATE USER "username" SET PASSWORD 'newpassword';
-UPDATE USER "username" SET IsActive = false;
-UPDATE USER "username" SET IsLockedOut = false;
-```
-
-**Workaround:** Currently, user updates must be done by directly modifying the Users bundle documents.
-
 ---
 
-### ⚠️ DELETE USER (Not Implemented)
 
-```sql
--- PLANNED SYNTAX (not yet available):
-DELETE USER "username";
-DROP USER "username";
-```
 
-**Workaround:** Currently, users must be removed by deleting their documents from the Users bundle and cleaning up related UserPermissions and UserRoles documents.
 
----
-
-### ⚠️ REVOKE Commands (Not Implemented)
-
-```sql
--- PLANNED SYNTAX (not yet available):
-REVOKE "permission" FROM USER "username";
-REVOKE ROLE "role" FROM USER "username";
-```
-
-**Status:** The underlying functions `RevokePermissionFromUser` and `RevokeRoleFromUser` exist in the codebase, but there is **no command parser** to expose them as SQL commands.
-
-**Workaround:** Currently, revocation must be done by directly removing documents from UserPermissions or UserRoles bundles.
-
----
 
 ### ⚠️ CREATE/UPDATE/DELETE ROLE (Not Implemented)
 
@@ -837,24 +1022,7 @@ DROP ROLE "role_name";
 
 The following features are planned for future implementation:
 
-1. **REVOKE Commands**
-   - Priority: **High**
-   - REVOKE PERMISSION syntax with parser
-   - REVOKE ROLE syntax with parser
-   - Cascade revoke options
-
-2. **UPDATE USER**
-   - Priority: **High**
-   - Password reset
-   - Account enable/disable
-   - Unlock account
-
-3. **DELETE USER**
-   - Priority: **Medium**
-   - Cascade delete (remove permissions/roles)
-   - Archive user option
-
-4. **ROLE Management**
+1. **ROLE Management**
    - Priority: **Medium**
    - CREATE ROLE command
    - ALTER ROLE (add/remove permissions)
@@ -877,8 +1045,8 @@ The following features are planned for future implementation:
 | Command | Syntax | Status |
 |---------|--------|--------|
 | Create User | `CREATE USER "name" WITH PASSWORD 'pass';` | ✅ Implemented |
-| Update User | `UPDATE USER "name" SET ...` | ❌ Not Implemented |
-| Delete User | `DELETE USER "name";` | ❌ Not Implemented |
+| Update User | `UPDATE USER "name" SET PASSWORD = "pass";` | ✅ Implemented |
+| Delete User | `DELETE USER "name";` or `DROP USER "name";` | ✅ Implemented |
 
 ### Grant Commands
 
@@ -886,8 +1054,8 @@ The following features are planned for future implementation:
 |---------|--------|--------|
 | Grant Permission | `GRANT "permission" TO USER "name";` | ✅ Implemented |
 | Grant Role | `GRANT ROLE "role" TO USER "name";` | ✅ Implemented |
-| Revoke Permission | `REVOKE "permission" FROM USER "name";` | ❌ Not Implemented |
-| Revoke Role | `REVOKE ROLE "role" FROM USER "name";` | ❌ Not Implemented |
+| Revoke Permission | `REVOKE "permission" FROM USER "name";` | ✅ Implemented |
+| Revoke Role | `REVOKE ROLE "role" FROM USER "name";` | ✅ Implemented |
 
 ### Role Commands
 

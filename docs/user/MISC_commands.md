@@ -7,17 +7,18 @@ This document covers database management and administrative commands in SyndrDB.
 ## 📑 Table of Contents
 
 1. [CREATE DATABASE](#create-database)
-2. [USE DATABASE](#use-database)
-3. [BACKUP DATABASE](#backup-database)
-4. [RESTORE DATABASE](#restore-database)
-5. [MIGRATION Commands](#migration-commands)
+2. [RENAME DATABASE](#rename-database)
+3. [USE DATABASE](#use-database)
+4. [BACKUP DATABASE](#backup-database)
+5. [RESTORE DATABASE](#restore-database)
+6. [MIGRATION Commands](#migration-commands)
    - [START MIGRATION](#start-migration)
    - [SHOW MIGRATIONS](#show-migrations)
    - [APPLY MIGRATION](#apply-migration)
    - [APPLY ROLLBACK](#apply-rollback)
    - [VALIDATE MIGRATION](#validate-migration)
    - [VALIDATE ROLLBACK](#validate-rollback)
-6. [EXPLAIN (Coming Soon)](#explain-coming-soon)
+7. [EXPLAIN (Coming Soon)](#explain-coming-soon)
 
 ---
 
@@ -126,6 +127,237 @@ CREATE DATABASE "user_management_system"
 CREATE DATABASE "analytics-dev"
 CREATE DATABASE "analytics-staging"
 CREATE DATABASE "analytics-prod"
+```
+
+---
+
+## RENAME DATABASE
+
+Renames an existing database, updating all references, file paths, and active sessions.
+
+### Syntax
+
+```sql
+-- Basic rename (fails if active sessions exist)
+RENAME DATABASE "old_name" TO "new_name";
+
+-- Force rename (terminates active sessions)
+RENAME DATABASE "old_name" TO "new_name" FORCE;
+```
+
+### Components
+
+| Component | Description | Required |
+|-----------|-------------|----------|
+| **old_name** | Current name of the database | ✅ Yes |
+| **new_name** | New name for the database | ✅ Yes |
+| **FORCE** | Force flag to terminate active sessions | ❌ No |
+
+### Naming Rules
+
+New database names must follow the same rules as CREATE DATABASE:
+- ✅ Start with a letter (a-z, A-Z)
+- ✅ Can contain alphanumeric characters (a-z, A-Z, 0-9)
+- ✅ Can contain underscores (`_`) and hyphens (`-`)
+- ❌ Cannot start with numbers or special characters
+- ❌ Cannot contain spaces
+- ❌ Cannot be the same as the old name
+
+### Examples
+
+#### Basic Rename
+
+```sql
+-- Rename a database (no active sessions)
+RENAME DATABASE "old_app" TO "new_app";
+-- Response: Database 'old_app' renamed to 'new_app' successfully.
+```
+
+#### Force Rename with Active Sessions
+
+```sql
+-- Attempt rename with active sessions (will fail)
+RENAME DATABASE "production_db" TO "prod_v2";
+-- Error: Cannot rename database 'production_db': 5 active session(s) detected. 
+-- Use FORCE to terminate sessions and proceed.
+
+-- Force rename (terminates sessions)
+RENAME DATABASE "production_db" TO "prod_v2" FORCE;
+-- Response: Database 'production_db' renamed to 'prod_v2' successfully. 
+-- 5 session(s) were terminated.
+```
+
+#### Rename with Environment Migration
+
+```sql
+-- Rename for environment promotion
+RENAME DATABASE "app-staging" TO "app-staging-old";
+RENAME DATABASE "app-dev" TO "app-staging";
+
+-- Rename for version upgrade
+RENAME DATABASE "analytics_v1" TO "analytics_v1_archive";
+RENAME DATABASE "analytics_v2_beta" TO "analytics_v2";
+```
+
+### Permissions
+
+- **Required Permission:** `Admin`
+- Only users with Admin permissions can rename databases
+- This is strictly enforced to prevent unauthorized database modifications
+
+### Behavior
+
+The RENAME DATABASE operation performs the following steps atomically:
+
+1. **Permission Check:** Verifies user has Admin permission
+2. **Validation:** 
+   - Confirms old database exists
+   - Validates new database name
+   - Ensures new name isn't already in use
+   - Verifies old and new names are different
+3. **Session Detection:** Checks for active sessions using the database
+4. **Session Handling:**
+   - **Without FORCE:** Fails if active sessions exist
+   - **With FORCE:** Terminates all active sessions on the database
+5. **Buffer Flush:** Flushes all buffers to disk to ensure data consistency
+6. **Directory Rename:** Atomically renames the database directory using `os.Rename`
+7. **In-Memory Update:** Updates database service's internal mappings
+8. **Catalog Update:** Updates `primary.Databases` bundle with new name and file path
+9. **WAL Logging:** Logs the operation to Write-Ahead Log with:
+   - Transaction ID
+   - Old database name
+   - New database name
+   - Database ID
+   - FORCE flag status
+   - Number of sessions terminated
+   - Timestamp
+10. **Session Update:** Updates remaining sessions to reference new database name
+
+### Error Cases
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `permission denied` | User lacks Admin permission | Use an account with Admin privileges |
+| `database not found` | Old database doesn't exist | Verify database name with `SHOW DATABASES` |
+| `database already exists` | New name is already in use | Choose a different name |
+| `invalid database name` | New name violates naming rules | Follow naming rules (start with letter, alphanumeric + _ -) |
+| `active sessions detected` | Sessions exist without FORCE | Add FORCE flag or wait for sessions to close |
+| `same database name` | Old and new names are identical | Choose a different new name |
+| `rename failed` | Filesystem error during rename | Check permissions and disk space |
+| `catalog update failed` | Rename succeeded but catalog update failed | Database is renamed; catalog may need manual repair |
+
+### FORCE Flag Details
+
+The `FORCE` flag provides powerful session management:
+
+**Behavior:**
+- ✅ Terminates ALL active sessions using the database
+- ✅ Returns count of terminated sessions in response
+- ✅ Allows rename to proceed immediately
+- ⚠️ Active queries are interrupted
+- ⚠️ Users lose unsaved work in terminated sessions
+
+**Use Cases for FORCE:**
+- Emergency database renaming
+- Automated deployment scripts
+- Maintenance windows with known active sessions
+- Development/testing environments
+
+**When NOT to use FORCE:**
+- Production databases with user traffic (unless planned maintenance)
+- When data integrity of in-flight transactions matters
+- Without notifying affected users
+
+### Safety Features
+
+The rename operation includes several safety mechanisms:
+
+1. **Atomic Rename:** Uses OS-level atomic rename operation
+2. **WAL Logging:** Full operation logged before execution
+3. **Rollback on Failure:** Partial failures don't leave database in inconsistent state
+4. **Catalog Consistency:** Both database and catalog are updated
+5. **Session Validation:** All active sessions are properly tracked
+6. **Buffer Flushing:** Ensures all data is persisted before rename
+
+### Best Practices
+
+✅ **DO:**
+- Use FORCE during planned maintenance windows
+- Notify users before forcing session termination
+- Verify no critical operations are running before FORCE
+- Test rename operations in development first
+- Use consistent naming conventions (e.g., `app-v2`, not `app_v2`)
+- Document reason for rename in change logs
+
+❌ **DON'T:**
+- Don't use FORCE on production without warning users
+- Don't rename databases during peak usage
+- Don't forget to update application configuration
+- Don't rename system databases (like `primary`)
+- Don't use special characters beyond `_` and `-`
+
+### Complete Example
+
+```sql
+-- Step 1: Check current databases
+SHOW DATABASES;
+-- Response: ["primary", "old_analytics", "user_service"]
+
+-- Step 2: Attempt basic rename
+RENAME DATABASE "old_analytics" TO "analytics_v2";
+-- Error: Cannot rename database 'old_analytics': 3 active session(s) detected.
+
+-- Step 3: Use FORCE to proceed
+RENAME DATABASE "old_analytics" TO "analytics_v2" FORCE;
+-- Response: Database 'old_analytics' renamed to 'analytics_v2' successfully. 
+-- 3 session(s) were terminated.
+
+-- Step 4: Verify rename
+SHOW DATABASES;
+-- Response: ["primary", "analytics_v2", "user_service"]
+
+-- Step 5: Switch to renamed database
+USE "analytics_v2";
+-- Response: Switched to database 'analytics_v2'
+
+-- Step 6: Verify data integrity
+SELECT * FROM BUNDLE "Events" LIMIT 10;
+-- Data should be intact after rename
+```
+
+### Monitoring and Verification
+
+After a rename operation, verify:
+
+```sql
+-- 1. Database exists with new name
+SHOW DATABASES;
+
+-- 2. Can switch to new database
+USE "new_database_name";
+
+-- 3. Bundles are accessible
+SHOW BUNDLES;
+
+-- 4. Data is intact
+SELECT COUNT(*) FROM BUNDLE "YourBundle";
+```
+
+### WAL Entry Example
+
+When a rename occurs, the WAL contains:
+
+```json
+{
+  "transaction_id": "a1b2c3d4e5f6g7h8",
+  "operation": "RENAME_DATABASE",
+  "timestamp": "2025-11-21T18:30:00Z",
+  "old_name": "old_analytics",
+  "new_name": "analytics_v2",
+  "database_id": "db-uuid-12345",
+  "force": true,
+  "sessions_terminated": 3
+}
 ```
 
 ---

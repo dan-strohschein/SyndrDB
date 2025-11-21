@@ -3,6 +3,8 @@ package database
 import (
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/bundlestore"
@@ -236,6 +238,86 @@ func (s *DatabaseService) DeleteDatabase(databaseName string) error {
 	// Could add actual file deletion here if needed
 	log.Printf("Deleted database %s (ID: %s)", db.Name, db.DatabaseID)
 	return nil
+}
+
+// RenameDatabase renames a database by updating its name in the system catalog,
+// renaming the database directory on disk, and updating all in-memory references.
+//
+// This operation:
+// 1. Validates the new database name
+// 2. Checks that the new name isn't already in use
+// 3. Renames the database directory on disk (atomic operation)
+// 4. Updates the in-memory database map
+// 5. Updates the database data file with the new name
+//
+// Parameters:
+//   - oldName: Current database name
+//   - newName: Desired new database name
+//
+// Returns the renamed database and an error if validation fails or if the rename
+// operation cannot be completed. If the directory rename succeeds but data file
+// update fails, a warning is logged but the operation is considered successful
+// (the data file update is just metadata and can be manually corrected).
+func (s *DatabaseService) RenameDatabase(oldName, newName string) (*models.Database, error) {
+	s.Logger.Infof("Renaming database '%s' to '%s'", oldName, newName)
+
+	// Validate new database name
+	if !IsValidDatabaseName(newName) {
+		return nil, fmt.Errorf("invalid new database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", newName)
+	}
+
+	if oldName == newName {
+		return nil, fmt.Errorf("new database name is the same as the current name")
+	}
+
+	// Get the existing database
+	database, err := s.GetDatabaseByName(oldName)
+	if err != nil {
+		return nil, fmt.Errorf("database '%s' not found: %w", oldName, err)
+	}
+
+	// Check that new name doesn't already exist (case-insensitive)
+	_, err = s.GetDatabaseByName(newName)
+	if err == nil {
+		return nil, fmt.Errorf("database with name '%s' already exists", newName)
+	}
+
+	// Get old and new directory paths
+	oldDirPath := filepath.Join(s.Settings.DataDir, oldName)
+	newDirPath := filepath.Join(s.Settings.DataDir, newName)
+
+	// Verify old directory exists
+	if _, err := os.Stat(oldDirPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("database directory does not exist: %s", oldDirPath)
+	}
+
+	// Verify new directory doesn't exist
+	if _, err := os.Stat(newDirPath); err == nil {
+		return nil, fmt.Errorf("directory for new database name already exists: %s", newDirPath)
+	}
+
+	// Rename the database directory (atomic operation on most filesystems)
+	// This renames all database files and bundles in one operation
+	if err := os.Rename(oldDirPath, newDirPath); err != nil {
+		return nil, fmt.Errorf("failed to rename database directory: %w", err)
+	}
+
+	// Update database metadata in memory
+	database.Name = newName
+	database.DataDirectory = newDirPath
+
+	// Update in-memory database map (remove old key, add new key)
+	delete(s.Databases, oldName)
+	s.Databases[newName] = database
+
+	// Update the database data file with new name
+	if err := s.Store.UpdateDatabaseDataFile(database); err != nil {
+		s.Logger.Warnf("Failed to update database data file after rename: %v", err)
+		// Don't fail - directory is already renamed, this is just metadata
+	}
+
+	s.Logger.Infof("Successfully renamed database '%s' to '%s'", oldName, newName)
+	return database, nil
 }
 
 // GetDatabaseByID retrieves a database by its ID

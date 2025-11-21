@@ -246,8 +246,10 @@ type KeyValue struct {
 
 type DatabaseCommand struct {
 	ID                 string
-	CommandType        string // CREATE, UPDATE, DELETE
+	CommandType        string // CREATE, UPDATE, DELETE, RENAME
 	DatabaseName       string
+	NewDatabaseName    string // For RENAME operations
+	Force              bool   // For FORCE operations
 	DBMetadataFilePath string
 }
 
