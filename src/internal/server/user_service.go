@@ -70,6 +70,47 @@ func NewUserService(
 	}
 }
 
+// isSystemUser checks if a user is a system user that cannot be modified or deleted
+// System users are created during database initialization with IsSystem=true
+// Returns error if user is a system user, nil otherwise
+// TODO: I can add support for super-admin override to modify system users
+func (us *UserService) isSystemUser(username string) error {
+	// Get primary database
+	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Get Users bundle
+	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		return fmt.Errorf("Users bundle not found: %w", err)
+	}
+
+	// Find user document by username (case-insensitive)
+	usernameLower := strings.ToLower(username)
+	docs := *usersBundle.Documents
+	for _, doc := range docs {
+		if nameField, ok := doc.Fields["Username"]; ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
+				if strings.ToLower(nameValue) == usernameLower {
+					// Check IsSystem field
+					if isSystemField, ok := doc.Fields["IsSystem"]; ok {
+						if isSystem, ok := isSystemField.Value.AsBool(); ok && isSystem {
+							return fmt.Errorf("Cannot modify system user '%s'", username)
+						}
+					}
+					// User found but not a system user
+					return nil
+				}
+			}
+		}
+	}
+
+	// User not found - that's ok, they might not exist yet
+	return nil
+}
+
 // CreateUser creates a new user in the primary database Users bundle
 // Parameters:
 //   - username: User's username (alphanumeric, dash, underscore only, case-insensitive unique)
@@ -184,6 +225,10 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 			"LockoutExpiresOn": {
 				Name:  "LockoutExpiresOn",
 				Value: models.NewStringValue(time.Now().Format(time.RFC3339)),
+			},
+			"IsSystem": {
+				Name:  "IsSystem",
+				Value: models.NewBoolValue(false), // User-created users are not system users
 			},
 		},
 	}
@@ -322,7 +367,276 @@ func (us *UserService) ValidateUserCredentials(username, password string) (bool,
 	return isValid, nil
 }
 
-// TODO: I will implement UpdateUser for password changes and profile updates
-// TODO: I will implement DeleteUser for user removal (with cascade options)
+// UpdateUser updates user fields (currently supports PASSWORD only)
+// Parameters:
+//   - username: The username to update
+//   - updates: Map of field names to new values (e.g., "PASSWORD" -> "new_password")
+//   - force: Whether to forcefully terminate active sessions
+//
+// Returns:
+//   - error: Any error that occurred during update
+//
+// TODO: I will add support for updating additional user fields (email, phone, metadata)
+// TODO: I will add field-level audit logging for compliance
+// TODO: I will add support for conditional updates (optimistic locking)
+// TODO: I will add password history checking to prevent reuse
+func (us *UserService) UpdateUser(username string, updates map[string]string, force bool) error {
+	us.logger.Infof("Updating user: %s (force=%v)", username, force)
+
+	// Check if user is a system user
+	if err := us.isSystemUser(username); err != nil {
+		return err
+	}
+
+	// Get primary database
+	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		if us.debugMode {
+			return fmt.Errorf("primary database not found: %w", err)
+		}
+		return fmt.Errorf("internal error: database access failed")
+	}
+
+	// Get Users bundle
+	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		if us.debugMode {
+			return fmt.Errorf("Users bundle not found: %w", err)
+		}
+		return fmt.Errorf("internal error: user storage not available")
+	}
+
+	// Find user document (case-insensitive)
+	usernameLower := strings.ToLower(username)
+	var targetDocID string
+	docs := *usersBundle.Documents
+
+	for docID, doc := range docs {
+		if nameField, ok := doc.Fields["Username"]; ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
+				if strings.ToLower(nameValue) == usernameLower {
+					targetDocID = docID
+					break
+				}
+			}
+		}
+	}
+
+	if targetDocID == "" {
+		if us.debugMode {
+			return fmt.Errorf("user '%s' not found", username)
+		}
+		return fmt.Errorf("user not found")
+	}
+
+	// Check for active sessions if not forcing
+	serviceManager := GetServiceManager()
+	if !force && serviceManager.SessionManager != nil {
+		sessions := serviceManager.SessionManager.GetUserSessions(username)
+		if len(sessions) > 0 {
+			return fmt.Errorf("user '%s' has %d active session(s). Use FORCE to terminate sessions and proceed",
+				username, len(sessions))
+		}
+	}
+
+	// If forcing and sessions exist, terminate them
+	if force && serviceManager.SessionManager != nil && serviceManager.ActiveConnections != nil {
+		sessions := serviceManager.SessionManager.GetUserSessions(username)
+		if len(sessions) > 0 {
+			terminated, _ := serviceManager.SessionManager.TerminateUserSessions(username, serviceManager.ActiveConnections)
+			us.logger.Warnw("FORCED UPDATE USER - TERMINATED USER SESSIONS",
+				"username", username,
+				"sessionsTerminated", terminated,
+				"operator", "SYSTEM", // TODO: Replace with actual operator username
+			)
+		}
+	}
+
+	// Get target document for modification
+	targetDoc := docs[targetDocID]
+
+	// Apply updates
+	for field, value := range updates {
+		switch strings.ToUpper(field) {
+		case "PASSWORD":
+			// Hash the new password using UserStore
+			if userIDField, ok := targetDoc.Fields["UserID"]; ok {
+				if userID, ok := userIDField.Value.AsString(); ok {
+					newUser := auth.NewUser{
+						UserID:   userID,
+						Username: username,
+						Password: value,
+					}
+					storedUser, err := us.userStore.AddUser(newUser) // This updates if exists
+					if err != nil {
+						if us.debugMode {
+							return fmt.Errorf("failed to hash new password: %w", err)
+						}
+						return fmt.Errorf("internal error: password update failed")
+					}
+
+					// Update PasswordHash field in document
+					targetDoc.Fields["PasswordHash"] = models.Field{
+						Name:  "PasswordHash",
+						Value: models.NewStringValue(string(storedUser.PasswordHash.Hash)),
+					}
+				}
+			}
+		default:
+			if us.debugMode {
+				us.logger.Warnf("Ignoring unsupported update field: %s", field)
+			}
+		}
+	}
+
+	// Save updated document back to bundle
+	(*usersBundle.Documents)[targetDocID] = targetDoc
+
+	us.logger.Infof("User '%s' updated successfully", username)
+	return nil
+}
+
+// DeleteUser removes a user from the system and cleans up related data
+// Parameters:
+//   - username: The username to delete
+//   - force: Whether to forcefully terminate active sessions
+//
+// Returns:
+//   - error: Any error that occurred during deletion
+//
+// TODO: I will add CASCADE option to delete user-created databases and objects
+// TODO: I will add soft delete with recovery period (retention policy)
+// TODO: I will add archival of user data before deletion (compliance)
+// TODO: I will add support for transferring ownership before deletion
+func (us *UserService) DeleteUser(username string, force bool) error {
+	us.logger.Infof("Deleting user: %s (force=%v)", username, force)
+
+	// Check if user is a system user
+	if err := us.isSystemUser(username); err != nil {
+		return err
+	}
+
+	// Get primary database
+	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		if us.debugMode {
+			return fmt.Errorf("primary database not found: %w", err)
+		}
+		return fmt.Errorf("internal error: database access failed")
+	}
+
+	// Get Users bundle
+	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		if us.debugMode {
+			return fmt.Errorf("Users bundle not found: %w", err)
+		}
+		return fmt.Errorf("internal error: user storage not available")
+	}
+
+	// Find user document (case-insensitive)
+	usernameLower := strings.ToLower(username)
+	var userID string
+	var targetDocID string
+	docs := *usersBundle.Documents
+
+	for docID, doc := range docs {
+		if nameField, ok := doc.Fields["Username"]; ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
+				if strings.ToLower(nameValue) == usernameLower {
+					// Get UserID for junction table cleanup
+					if idField, ok := doc.Fields["UserID"]; ok {
+						if id, ok := idField.Value.AsString(); ok {
+							userID = id
+						}
+					}
+					targetDocID = docID
+					break
+				}
+			}
+		}
+	}
+
+	if targetDocID == "" {
+		if us.debugMode {
+			return fmt.Errorf("user '%s' not found", username)
+		}
+		return fmt.Errorf("user not found")
+	}
+
+	// Check for active sessions if not forcing
+	serviceManager := GetServiceManager()
+	if !force && serviceManager.SessionManager != nil {
+		sessions := serviceManager.SessionManager.GetUserSessions(username)
+		if len(sessions) > 0 {
+			return fmt.Errorf("user '%s' has %d active session(s). Use FORCE to terminate sessions and proceed",
+				username, len(sessions))
+		}
+	}
+
+	// If forcing and sessions exist, terminate them
+	if force && serviceManager.SessionManager != nil && serviceManager.ActiveConnections != nil {
+		sessions := serviceManager.SessionManager.GetUserSessions(username)
+		if len(sessions) > 0 {
+			terminated, _ := serviceManager.SessionManager.TerminateUserSessions(username, serviceManager.ActiveConnections)
+			us.logger.Warnw("FORCED DELETE USER - TERMINATED USER SESSIONS",
+				"username", username,
+				"sessionsTerminated", terminated,
+				"operator", "SYSTEM", // TODO: Replace with actual operator username
+			)
+		}
+	}
+
+	// Auto-cleanup: Remove user from junction tables (UserRoles, UserPermissions)
+	if userID != "" {
+		// Clean up UserRoles
+		if userRolesBundle, err := us.bundleService.GetBundleByName(primaryDB, "UserRoles"); err == nil {
+			us.cleanupJunctionTable(userRolesBundle, "UserID", userID, "UserRoles")
+		}
+
+		// Clean up UserPermissions
+		if userPermsBundle, err := us.bundleService.GetBundleByName(primaryDB, "UserPermissions"); err == nil {
+			us.cleanupJunctionTable(userPermsBundle, "UserID", userID, "UserPermissions")
+		}
+	}
+
+	// Remove user document from Users bundle (delete from map)
+	delete(*usersBundle.Documents, targetDocID)
+
+	us.logger.Infof("User '%s' deleted successfully", username)
+	return nil
+}
+
+// cleanupJunctionTable removes all records matching a specific field value
+// This is used for cascade deletion of junction table records
+func (us *UserService) cleanupJunctionTable(junctionBundle *models.Bundle, fieldName, fieldValue, tableName string) {
+	if junctionBundle.Documents == nil {
+		return
+	}
+
+	docs := *junctionBundle.Documents
+	removedCount := 0
+
+	// Collect docIDs to delete
+	toDelete := make([]string, 0)
+	for docID, doc := range docs {
+		if field, ok := doc.Fields[fieldName]; ok {
+			if value, ok := field.Value.AsString(); ok && value == fieldValue {
+				toDelete = append(toDelete, docID)
+			}
+		}
+	}
+
+	// Delete collected documents
+	for _, docID := range toDelete {
+		delete(*junctionBundle.Documents, docID)
+		removedCount++
+	}
+
+	if removedCount > 0 {
+		us.logger.Infof("Removed %d records from %s for %s=%s", removedCount, tableName, fieldName, fieldValue)
+	}
+}
+
 // TODO: I will implement ListUsers with pagination and filtering
 // TODO: I will implement LockoutUser and UnlockUser for security management

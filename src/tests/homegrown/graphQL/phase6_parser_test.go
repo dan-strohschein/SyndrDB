@@ -235,8 +235,8 @@ func TestPhase6ParserWithWhere(t *testing.T) {
 	}
 
 	// Verify WHERE was parsed
-	if unifiedQuery.WhereClause == nil {
-		t.Error("Expected WhereClause to be set")
+	if unifiedQuery.WhereExpression == nil {
+		t.Error("Expected WhereExpression to be set")
 	}
 
 	t.Logf("✓ WHERE clause parsed successfully")

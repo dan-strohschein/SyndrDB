@@ -70,6 +70,47 @@ func NewPermissionService(
 	}
 }
 
+// isSystemRole checks if a role is a system role that cannot be modified or deleted
+// System roles are created during database initialization with IsSystem=true
+// Returns error if role is a system role, nil otherwise
+// TODO: I can add support for super-admin override to modify system roles
+func (ps *PermissionService) isSystemRole(roleName string) error {
+	// Get primary database
+	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Get Roles bundle
+	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
+	if err != nil {
+		return fmt.Errorf("Roles bundle not found: %w", err)
+	}
+
+	// Find role document by name (case-insensitive)
+	roleNameLower := strings.ToLower(roleName)
+	docs := *rolesBundle.Documents
+	for _, doc := range docs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
+				if strings.ToLower(nameValue) == roleNameLower {
+					// Check IsSystem field
+					if isSystemField, ok := doc.Fields["IsSystem"]; ok {
+						if isSystem, ok := isSystemField.Value.AsBool(); ok && isSystem {
+							return fmt.Errorf("Cannot modify system role '%s'", roleName)
+						}
+					}
+					// Role found but not a system role
+					return nil
+				}
+			}
+		}
+	}
+
+	// Role not found - that's ok, they might not exist yet
+	return nil
+}
+
 // GrantPermissionToUser grants a permission to a user
 // Creates the permission if it doesn't exist
 // Parameters:
@@ -147,8 +188,8 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
 					str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := permIDField.Value.AsString()
-				if ok1 && ok2 && str1 == userID && str2 == permissionID {
+					str2, ok2 := permIDField.Value.AsString()
+					if ok1 && ok2 && str1 == userID && str2 == permissionID {
 						if ps.debugMode {
 							return fmt.Errorf("user '%s' already has permission '%s'", username, permissionName)
 						}
@@ -289,8 +330,8 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if roleIDField, ok := doc.Fields["RoleID"]; ok {
 					str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := roleIDField.Value.AsString()
-				if ok1 && ok2 && str1 == userID && str2 == roleID {
+					str2, ok2 := roleIDField.Value.AsString()
+					if ok1 && ok2 && str1 == userID && str2 == roleID {
 						if ps.debugMode {
 							return fmt.Errorf("user '%s' already has role '%s'", username, roleName)
 						}
@@ -399,8 +440,8 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
 					str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := permIDField.Value.AsString()
-				if ok1 && ok2 && str1 == userID && str2 == permissionID {
+					str2, ok2 := permIDField.Value.AsString()
+					if ok1 && ok2 && str1 == userID && str2 == permissionID {
 						delete(*userPermissionsBundle.Documents, docID)
 						found = true
 						break
@@ -483,8 +524,8 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if roleIDField, ok := doc.Fields["RoleID"]; ok {
 					str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := roleIDField.Value.AsString()
-				if ok1 && ok2 && str1 == userID && str2 == roleID {
+					str2, ok2 := roleIDField.Value.AsString()
+					if ok1 && ok2 && str1 == userID && str2 == roleID {
 						delete(*userRolesBundle.Documents, docID)
 						found = true
 						break
@@ -554,7 +595,7 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 				if str, ok := nameField.Value.AsString(); ok && str == permissionName {
 					if idField, ok := doc.Fields["PermissionID"]; ok {
 						str, _ := idField.Value.AsString()
-				return str, nil
+						return str, nil
 					}
 				}
 			}
@@ -637,8 +678,8 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
 					str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := permIDField.Value.AsString()
-				if ok1 && ok2 && str1 == userID && str2 == permissionID {
+					str2, ok2 := permIDField.Value.AsString()
+					if ok1 && ok2 && str1 == userID && str2 == permissionID {
 						return true, nil // Direct permission found
 					}
 				}
@@ -729,7 +770,7 @@ func (ps *PermissionService) getUserID(username string) (string, error) {
 				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
 					if idField, ok := doc.Fields["UserID"]; ok {
 						str, _ := idField.Value.AsString()
-				return str, nil
+						return str, nil
 					}
 				}
 			}
@@ -766,7 +807,7 @@ func (ps *PermissionService) getRoleID(roleName string) (string, error) {
 				if str, ok := nameField.Value.AsString(); ok && str == roleName {
 					if idField, ok := doc.Fields["RoleID"]; ok {
 						str, _ := idField.Value.AsString()
-				return str, nil
+						return str, nil
 					}
 				}
 			}
@@ -800,7 +841,7 @@ func (ps *PermissionService) getPermissionID(permissionName string) (string, err
 				if str, ok := nameField.Value.AsString(); ok && str == permissionName {
 					if idField, ok := doc.Fields["PermissionID"]; ok {
 						str, _ := idField.Value.AsString()
-				return str, nil
+						return str, nil
 					}
 				}
 			}
@@ -808,6 +849,442 @@ func (ps *PermissionService) getPermissionID(permissionName string) (string, err
 	}
 
 	return "", fmt.Errorf("permission not found")
+}
+
+// CreateRole creates a new role in the primary database Roles bundle
+// Parameters:
+//   - roleName: The name of the role to create
+//   - description: Optional description of the role
+//
+// Returns:
+//   - roleID: The generated UUID for the new role
+//   - error: Any error that occurred during creation
+//
+// TODO: I will add support for role hierarchies (parent roles)
+// TODO: I will add support for role templates
+// TODO: I will add support for role metadata
+func (ps *PermissionService) CreateRole(roleName, description string) (string, error) {
+	ps.logger.Infof("Creating new role: %s", roleName)
+
+	// Get primary database
+	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		if ps.debugMode {
+			return "", fmt.Errorf("primary database not found: %w", err)
+		}
+		return "", fmt.Errorf("internal error: database access failed")
+	}
+
+	// Get Roles bundle
+	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
+	if err != nil {
+		if ps.debugMode {
+			return "", fmt.Errorf("Roles bundle not found: %w", err)
+		}
+		return "", fmt.Errorf("internal error: role storage not available")
+	}
+
+	// Check if role already exists (case-insensitive)
+	if rolesBundle.Documents != nil {
+		for _, doc := range *rolesBundle.Documents {
+			if nameField, ok := doc.Fields["Name"]; ok {
+				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, roleName) {
+					if ps.debugMode {
+						return "", fmt.Errorf("role '%s' already exists", roleName)
+					}
+					return "", fmt.Errorf("role already exists")
+				}
+			}
+		}
+	}
+
+	// Generate RoleID
+	roleID := helpers.GenerateUUID()
+
+	// Create role document
+	roleDoc := &models.Document{
+		DocumentID: helpers.GenerateFastUUID(),
+		Fields: map[string]models.Field{
+			"DocumentID": {
+				Name:  "DocumentID",
+				Value: models.NewStringValue(helpers.GenerateFastUUID()),
+			},
+			"RoleID": {
+				Name:  "RoleID",
+				Value: models.NewStringValue(roleID),
+			},
+			"Name": {
+				Name:  "Name",
+				Value: models.NewStringValue(roleName),
+			},
+			"Description": {
+				Name:  "Description",
+				Value: models.NewStringValue(description),
+			},
+			"IsSystem": {
+				Name:  "IsSystem",
+				Value: models.NewBoolValue(false), // User-created roles are not system roles
+			},
+		},
+	}
+
+	// Add role document to Roles bundle
+	if rolesBundle.Documents == nil {
+		documentsMap := make(map[string]models.Document)
+		rolesBundle.Documents = &documentsMap
+	}
+	(*rolesBundle.Documents)[roleDoc.DocumentID] = *roleDoc
+
+	ps.logger.Infof("Role '%s' created successfully with ID: %s", roleName, roleID)
+	return roleID, nil
+}
+
+// UpdateRole updates role fields (currently supports DESCRIPTION only)
+// Parameters:
+//   - roleName: The role name to update
+//   - updates: Map of field names to new values (e.g., "DESCRIPTION" -> "new_description")
+//   - force: Whether to forcefully terminate active sessions of users with this role
+//
+// Returns:
+//   - error: Any error that occurred during update
+//
+// TODO: I will add support for updating role hierarchies
+// TODO: I will add support for role metadata updates
+// TODO: I will add batch update support for multiple roles
+func (ps *PermissionService) UpdateRole(roleName string, updates map[string]string, force bool) error {
+	ps.logger.Infof("Updating role: %s (force=%v)", roleName, force)
+
+	// Check if role is a system role
+	if err := ps.isSystemRole(roleName); err != nil {
+		return err
+	}
+
+	// Get primary database
+	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		if ps.debugMode {
+			return fmt.Errorf("primary database not found: %w", err)
+		}
+		return fmt.Errorf("internal error: database access failed")
+	}
+
+	// Get Roles bundle
+	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
+	if err != nil {
+		if ps.debugMode {
+			return fmt.Errorf("Roles bundle not found: %w", err)
+		}
+		return fmt.Errorf("internal error: role storage not available")
+	}
+
+	// Find role document (case-insensitive)
+	roleNameLower := strings.ToLower(roleName)
+	var targetDocID string
+	docs := *rolesBundle.Documents
+
+	for docID, doc := range docs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
+				if strings.ToLower(nameValue) == roleNameLower {
+					targetDocID = docID
+					break
+				}
+			}
+		}
+	}
+
+	if targetDocID == "" {
+		if ps.debugMode {
+			return fmt.Errorf("role '%s' not found", roleName)
+		}
+		return fmt.Errorf("role not found")
+	}
+
+	// Check for active sessions of users with this role if not forcing
+	serviceManager := GetServiceManager()
+	if !force && serviceManager.SessionManager != nil {
+		// Get all users with this role
+		usersWithRole, err := ps.getUsersWithRole(roleName)
+		if err == nil && len(usersWithRole) > 0 {
+			// Check if any of these users have active sessions
+			totalSessions := 0
+			for _, username := range usersWithRole {
+				sessions := serviceManager.SessionManager.GetUserSessions(username)
+				totalSessions += len(sessions)
+			}
+			if totalSessions > 0 {
+				return fmt.Errorf("role '%s' is assigned to users with %d active session(s). Use FORCE to terminate sessions and proceed",
+					roleName, totalSessions)
+			}
+		}
+	}
+
+	// If forcing and sessions exist, terminate them
+	if force && serviceManager.SessionManager != nil && serviceManager.ActiveConnections != nil {
+		usersWithRole, err := ps.getUsersWithRole(roleName)
+		if err == nil && len(usersWithRole) > 0 {
+			totalTerminated := 0
+			for _, username := range usersWithRole {
+				sessions := serviceManager.SessionManager.GetUserSessions(username)
+				if len(sessions) > 0 {
+					terminated, _ := serviceManager.SessionManager.TerminateUserSessions(username, serviceManager.ActiveConnections)
+					totalTerminated += terminated
+				}
+			}
+			if totalTerminated > 0 {
+				ps.logger.Warnw("FORCED UPDATE ROLE - TERMINATED USER SESSIONS",
+					"role", roleName,
+					"sessionsTerminated", totalTerminated,
+					"operator", "SYSTEM", // TODO: Replace with actual operator username
+				)
+			}
+		}
+	}
+
+	// Get target document for modification
+	targetDoc := docs[targetDocID]
+
+	// Apply updates
+	for field, value := range updates {
+		switch strings.ToUpper(field) {
+		case "DESCRIPTION":
+			targetDoc.Fields["Description"] = models.Field{
+				Name:  "Description",
+				Value: models.NewStringValue(value),
+			}
+		default:
+			if ps.debugMode {
+				ps.logger.Warnf("Ignoring unsupported update field: %s", field)
+			}
+		}
+	}
+
+	// Save updated document back to bundle
+	(*rolesBundle.Documents)[targetDocID] = targetDoc
+
+	ps.logger.Infof("Role '%s' updated successfully", roleName)
+	return nil
+}
+
+// DeleteRole removes a role from the system and cleans up related data
+// Parameters:
+//   - roleName: The role name to delete
+//   - force: Whether to forcefully terminate active sessions of users with this role
+//
+// Returns:
+//   - error: Any error that occurred during deletion
+//
+// TODO: I will add support for role transfer (assign permissions to another role)
+// TODO: I will add soft delete with recovery period
+// TODO: I will add archival of role data before deletion
+func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
+	ps.logger.Infof("Deleting role: %s (force=%v)", roleName, force)
+
+	// Check if role is a system role
+	if err := ps.isSystemRole(roleName); err != nil {
+		return err
+	}
+
+	// Get primary database
+	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		if ps.debugMode {
+			return fmt.Errorf("primary database not found: %w", err)
+		}
+		return fmt.Errorf("internal error: database access failed")
+	}
+
+	// Get Roles bundle
+	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
+	if err != nil {
+		if ps.debugMode {
+			return fmt.Errorf("Roles bundle not found: %w", err)
+		}
+		return fmt.Errorf("internal error: role storage not available")
+	}
+
+	// Find role document (case-insensitive)
+	roleNameLower := strings.ToLower(roleName)
+	var roleID string
+	var targetDocID string
+	docs := *rolesBundle.Documents
+
+	for docID, doc := range docs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if nameValue, ok := nameField.Value.AsString(); ok {
+				if strings.ToLower(nameValue) == roleNameLower {
+					// Get RoleID for junction table cleanup
+					if idField, ok := doc.Fields["RoleID"]; ok {
+						if id, ok := idField.Value.AsString(); ok {
+							roleID = id
+						}
+					}
+					targetDocID = docID
+					break
+				}
+			}
+		}
+	}
+
+	if targetDocID == "" {
+		if ps.debugMode {
+			return fmt.Errorf("role '%s' not found", roleName)
+		}
+		return fmt.Errorf("role not found")
+	}
+
+	// Check for active sessions of users with this role if not forcing
+	serviceManager := GetServiceManager()
+	if !force && serviceManager.SessionManager != nil {
+		usersWithRole, err := ps.getUsersWithRole(roleName)
+		if err == nil && len(usersWithRole) > 0 {
+			totalSessions := 0
+			for _, username := range usersWithRole {
+				sessions := serviceManager.SessionManager.GetUserSessions(username)
+				totalSessions += len(sessions)
+			}
+			if totalSessions > 0 {
+				return fmt.Errorf("role '%s' is assigned to users with %d active session(s). Use FORCE to terminate sessions and proceed",
+					roleName, totalSessions)
+			}
+		}
+	}
+
+	// If forcing and sessions exist, terminate them
+	if force && serviceManager.SessionManager != nil && serviceManager.ActiveConnections != nil {
+		usersWithRole, err := ps.getUsersWithRole(roleName)
+		if err == nil && len(usersWithRole) > 0 {
+			totalTerminated := 0
+			for _, username := range usersWithRole {
+				sessions := serviceManager.SessionManager.GetUserSessions(username)
+				if len(sessions) > 0 {
+					terminated, _ := serviceManager.SessionManager.TerminateUserSessions(username, serviceManager.ActiveConnections)
+					totalTerminated += terminated
+				}
+			}
+			if totalTerminated > 0 {
+				ps.logger.Warnw("FORCED DELETE ROLE - TERMINATED USER SESSIONS",
+					"role", roleName,
+					"sessionsTerminated", totalTerminated,
+					"operator", "SYSTEM", // TODO: Replace with actual operator username
+				)
+			}
+		}
+	}
+
+	// Auto-cleanup: Remove role from junction tables (UserRoles, RolesPermissions)
+	if roleID != "" {
+		// Clean up UserRoles
+		if userRolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "UserRoles"); err == nil {
+			ps.cleanupRoleJunctionTable(userRolesBundle, "RoleID", roleID, "UserRoles")
+		}
+
+		// Clean up RolesPermissions
+		if rolesPermsBundle, err := ps.bundleService.GetBundleByName(primaryDB, "RolesPermissions"); err == nil {
+			ps.cleanupRoleJunctionTable(rolesPermsBundle, "RoleID", roleID, "RolesPermissions")
+		}
+	}
+
+	// Remove role document from Roles bundle (delete from map)
+	delete(*rolesBundle.Documents, targetDocID)
+
+	ps.logger.Infof("Role '%s' deleted successfully", roleName)
+	return nil
+}
+
+// getUsersWithRole returns a list of usernames that have the specified role
+func (ps *PermissionService) getUsersWithRole(roleName string) ([]string, error) {
+	// Get primary database
+	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, err
+	}
+
+	// Get role ID
+	roleID, err := ps.getRoleID(roleName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get UserRoles bundle
+	userRolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "UserRoles")
+	if err != nil {
+		return nil, err
+	}
+
+	// Get Users bundle to map UserID to Username
+	usersBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		return nil, err
+	}
+
+	// Collect all UserIDs with this role
+	userIDs := make([]string, 0)
+	if userRolesBundle.Documents != nil {
+		for _, doc := range *userRolesBundle.Documents {
+			if roleIDField, ok := doc.Fields["RoleID"]; ok {
+				if rid, ok := roleIDField.Value.AsString(); ok && rid == roleID {
+					if userIDField, ok := doc.Fields["UserID"]; ok {
+						if uid, ok := userIDField.Value.AsString(); ok {
+							userIDs = append(userIDs, uid)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Map UserIDs to usernames
+	usernames := make([]string, 0, len(userIDs))
+	if usersBundle.Documents != nil {
+		for _, userID := range userIDs {
+			for _, doc := range *usersBundle.Documents {
+				if idField, ok := doc.Fields["UserID"]; ok {
+					if uid, ok := idField.Value.AsString(); ok && uid == userID {
+						if nameField, ok := doc.Fields["Name"]; ok {
+							if username, ok := nameField.Value.AsString(); ok {
+								usernames = append(usernames, username)
+							}
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return usernames, nil
+}
+
+// cleanupRoleJunctionTable removes all records matching a specific field value
+// This is used for cascade deletion of role junction table records
+func (ps *PermissionService) cleanupRoleJunctionTable(junctionBundle *models.Bundle, fieldName, fieldValue, tableName string) {
+	if junctionBundle.Documents == nil {
+		return
+	}
+
+	docs := *junctionBundle.Documents
+	removedCount := 0
+
+	// Collect docIDs to delete
+	toDelete := make([]string, 0)
+	for docID, doc := range docs {
+		if field, ok := doc.Fields[fieldName]; ok {
+			if value, ok := field.Value.AsString(); ok && value == fieldValue {
+				toDelete = append(toDelete, docID)
+			}
+		}
+	}
+
+	// Delete collected documents
+	for _, docID := range toDelete {
+		delete(*junctionBundle.Documents, docID)
+		removedCount++
+	}
+
+	if removedCount > 0 {
+		ps.logger.Infof("Removed %d records from %s for %s=%s", removedCount, tableName, fieldName, fieldValue)
+	}
 }
 
 // TODO: I will implement GetUserPermissions to list all permissions for a user

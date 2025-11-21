@@ -111,6 +111,28 @@ func GrantPermission(command string, logger *zap.SugaredLogger, serviceManager S
 	return GrantPermissionOrRoleCommand(command, logger, serviceManager, primaryDB, false)
 }
 
+// RevokePermission processes a REVOKE command using the new parser-based implementation with optional FORCE
+// Syntax:
+//
+//	REVOKE "permission" FROM USER "username";
+//	REVOKE "permission" FROM USER "username" FORCE;
+//	REVOKE ROLE "role" FROM USER "username";
+//	REVOKE ROLE "role" FROM USER "username" FORCE;
+//
+// TODO: I can add support for revoking permissions on specific databases/bundles
+func RevokePermission(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing REVOKE command: %s", command)
+
+	// Get the Primary database for context
+	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Use the new parser-based handler with debug mode disabled (secure errors)
+	return RevokePermissionOrRoleCommand(command, logger, serviceManager, primaryDB, serviceManager.SessionManager, serviceManager.ActiveConnections, false)
+}
+
 // AttachUserToDatabase processes an ATTACH command
 // Syntax: ATTACH USER username TO DATABASE database_name
 func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
@@ -324,6 +346,87 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 	}
 
 	return false, nil
+}
+
+// UpdateUser processes UPDATE USER commands using the parser-based implementation
+// Syntax: UPDATE USER "username" SET PASSWORD = "new_password" [FORCE];
+func UpdateUser(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing UPDATE USER command")
+
+	// Get the primary database for RBAC operations
+	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Delegate to UpdateUserCommand with debugMode=false for production
+	return UpdateUserCommand(command, logger, serviceManager, primaryDB, false)
+}
+
+// DeleteUser processes DELETE USER and DROP USER commands using the parser-based implementation
+// Syntax:
+//   - DELETE USER "username" [FORCE];
+//   - DROP USER "username" [FORCE];
+func DeleteUser(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing DELETE/DROP USER command")
+
+	// Get the primary database for RBAC operations
+	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Delegate to DeleteUserCommand with debugMode=false for production
+	return DeleteUserCommand(command, logger, serviceManager, primaryDB, false)
+}
+
+// CreateRole processes CREATE ROLE commands using the parser-based implementation
+// Syntax: CREATE ROLE "role_name" [WITH DESCRIPTION "description"];
+func CreateRole(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing CREATE ROLE command")
+
+	// Get the primary database for RBAC operations
+	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Delegate to CreateRoleCommand with debugMode=false for production
+	return CreateRoleCommand(command, logger, serviceManager, primaryDB, false)
+}
+
+// UpdateRole processes UPDATE ROLE and ALTER ROLE commands using the parser-based implementation
+// Syntax:
+//   - UPDATE ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE];
+//   - ALTER ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE];
+func UpdateRole(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing UPDATE/ALTER ROLE command")
+
+	// Get the primary database for RBAC operations
+	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Delegate to UpdateRoleCommand with debugMode=false for production
+	return UpdateRoleCommand(command, logger, serviceManager, primaryDB, false)
+}
+
+// DeleteRole processes DELETE ROLE and DROP ROLE commands using the parser-based implementation
+// Syntax:
+//   - DELETE ROLE "role_name" [FORCE];
+//   - DROP ROLE "role_name" [FORCE];
+func DeleteRole(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+	logger.Infof("Processing DELETE/DROP ROLE command")
+
+	// Get the primary database for RBAC operations
+	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
+	if err != nil {
+		return nil, fmt.Errorf("primary database not found: %w", err)
+	}
+
+	// Delegate to DeleteRoleCommand with debugMode=false for production
+	return DeleteRoleCommand(command, logger, serviceManager, primaryDB, false)
 }
 
 // To be populated during refactoring

@@ -243,6 +243,9 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 	server.SessionManager = NewSessionManager(sugar, server.SessionTimeout, server.MaxSessions)
 
+	// Set session context in ServiceManager for RBAC FORCE operations
+	SetSessionContext(server.SessionManager, server.ActiveConnections)
+
 	// Initialize UserStore with authentication rate limiting if auth is enabled
 	if config.AuthEnabled {
 		userStorePath := filepath.Join(config.DataDir, "users.dat")

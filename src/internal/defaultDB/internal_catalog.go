@@ -774,9 +774,14 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 			Name:  "Name",
 			Value: models.NewStringValue(permission),
 		}
+		field3 := models.Field{
+			Name:  "IsSystem",
+			Value: models.NewBoolValue(true),
+		}
 		fields := map[string]models.Field{}
 		fields["PermissionID"] = field1
 		fields["Name"] = field2
+		fields["IsSystem"] = field3
 		doc := &models.Document{
 			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
@@ -827,9 +832,14 @@ func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
 			Name:  "Name",
 			Value: models.NewStringValue(role),
 		}
+		field3 := models.Field{
+			Name:  "IsSystem",
+			Value: models.NewBoolValue(true),
+		}
 		fields := map[string]models.Field{}
 		fields["RoleID"] = field1
 		fields["Name"] = field2
+		fields["IsSystem"] = field3
 		doc := &models.Document{
 			DocumentID: helpers.GenerateFastUUID(),
 			Fields:     fields,
@@ -1037,6 +1047,10 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 			"FailedLoginAttempts": {
 				Name:  "FailedLoginAttempts",
 				Value: models.NewIntValue(0),
+			},
+			"IsSystem": {
+				Name:  "IsSystem",
+				Value: models.NewBoolValue(true),
 			},
 		}
 

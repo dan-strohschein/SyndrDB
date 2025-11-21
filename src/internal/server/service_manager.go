@@ -43,6 +43,10 @@ type ServiceManager struct {
 	PermissionService      *PermissionService        // RBAC: Manages permissions and roles
 	MigrationService       MigrationServiceInterface // Migration: Database versioning and schema migration
 
+	// RBAC session management for FORCE operations
+	SessionManager    *SessionManager        // Session manager for terminating active sessions
+	ActiveConnections map[string]*Connection // Active connections for session termination
+
 	// STEP 2: Query plan caching - shared planner with cache invalidation
 	UnifiedPlanner *planner.UnifiedQueryPlanner
 
@@ -184,6 +188,21 @@ func SetGraphQLProcessor(processor GraphQLProcessor) {
 		instance.GraphQLProcessor = processor
 		if instance.logger != nil {
 			instance.logger.Info("GraphQL processor has been set on ServiceManager")
+		}
+	}
+}
+
+// SetSessionContext sets the SessionManager and ActiveConnections for RBAC operations with FORCE support
+// This must be called after server initialization to enable forced session termination in REVOKE commands
+// TODO: I can add thread-safe session context updates for hot-reload scenarios
+func SetSessionContext(sessionManager *SessionManager, activeConnections map[string]*Connection) {
+	mu.Lock()
+	defer mu.Unlock()
+	if instance != nil {
+		instance.SessionManager = sessionManager
+		instance.ActiveConnections = activeConnections
+		if instance.logger != nil {
+			instance.logger.Info("Session context has been set on ServiceManager for RBAC FORCE operations")
 		}
 	}
 }

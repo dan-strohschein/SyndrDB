@@ -388,6 +388,77 @@ func (sm *SessionManager) InvalidateUserSessions(username string) error {
 	return lastError
 }
 
+// TerminateUserSessions forcefully terminates all active sessions for a user
+// Sends a graceful disconnect message to each client before closing the connection
+// This method is used when FORCE option is specified in RBAC commands
+// Parameters:
+//   - username: The username whose sessions should be terminated
+//   - connectionMap: Map of connectionID to Connection objects (from Server.ActiveConnections)
+//
+// Returns:
+//   - count: Number of sessions terminated
+//   - error: Any error that occurred during termination
+//
+// TODO: I can add session termination event broadcast for monitoring systems
+// TODO: I can add configurable termination grace period before forced disconnect
+func (sm *SessionManager) TerminateUserSessions(username string, connectionMap map[string]*Connection) (int, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sessions := sm.userSessions[username]
+	if sessions == nil {
+		return 0, nil
+	}
+
+	terminatedCount := 0
+	var lastError error
+
+	for _, session := range sessions {
+		// Get the connection for this session
+		if conn, exists := connectionMap[session.ConnectionID]; exists && conn != nil {
+			// Send graceful disconnect message to client before closing
+			if conn.Writer != nil {
+				sm.logger.Infow("Sending termination message to client",
+					"username", username,
+					"sessionID", session.SessionID,
+					"connectionID", session.ConnectionID)
+
+				// Send error message using the same format as sendError
+				response := map[string]interface{}{
+					"status":  "error",
+					"message": "The administrator forcefully removed your session from the server",
+				}
+				if jsonResponse, err := json.Marshal(response); err == nil {
+					conn.Writer.WriteString(string(jsonResponse) + "\n")
+					conn.Writer.Flush()
+				}
+			}
+
+			// Close the connection
+			if conn.Conn != nil {
+				conn.Conn.Close()
+			}
+		}
+
+		// Cleanup the session
+		if err := sm.cleanupSession(session); err != nil {
+			sm.logger.Warnw("Error cleaning up terminated session",
+				"username", username,
+				"sessionID", session.SessionID,
+				"error", err)
+			lastError = err
+		} else {
+			terminatedCount++
+		}
+	}
+
+	sm.logger.Infow("Terminated user sessions",
+		"username", username,
+		"count", terminatedCount)
+
+	return terminatedCount, lastError
+}
+
 // UpdateActivity updates the last activity time for a session with security validation
 func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) error {
 	sm.mu.RLock()

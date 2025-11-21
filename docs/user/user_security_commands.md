@@ -833,21 +833,6 @@ DROP ROLE "role_name";
 
 ---
 
-### ⚠️ CREATE/UPDATE/DELETE PERMISSION (Not Implemented)
-
-```sql
--- PLANNED SYNTAX (not yet available):
-CREATE PERMISSION "permission_name";
-UPDATE PERMISSION "old_name" SET NAME = "new_name";
-DROP PERMISSION "permission_name";
-```
-
-**Status:** Permissions are **auto-created** when granted. There is no explicit command to manage permissions.
-
-**Current Behavior:** When you grant a permission that doesn't exist, it's automatically created. This is by design.
-
----
-
 ### 📅 Future Roadmap
 
 The following features are planned for future implementation:
@@ -876,13 +861,7 @@ The following features are planned for future implementation:
    - DROP ROLE command
    - Role hierarchies/inheritance
 
-5. **PERMISSION Management**
-   - Priority: **Low**
-   - CREATE PERMISSION (explicit)
-   - ALTER PERMISSION (rename)
-   - DROP PERMISSION (with cascade options)
-
-6. **Advanced Features**
+5. **Advanced Features**
    - Time-based permission grants (expiration)
    - Permission templates
    - Bulk user operations
@@ -918,14 +897,6 @@ The following features are planned for future implementation:
 | Update Role | `UPDATE ROLE "name" ...` | ❌ Not Implemented |
 | Delete Role | `DROP ROLE "name";` | ❌ Not Implemented |
 
-### Permission Commands
-
-| Command | Syntax | Status |
-|---------|--------|--------|
-| Create Permission | Auto-created on grant | ✅ Auto-created |
-| Update Permission | N/A | ❌ Not Implemented |
-| Delete Permission | N/A | ❌ Not Implemented |
-
 ---
 
 ## 🎯 Best Practices Summary
@@ -941,9 +912,7 @@ The following features are planned for future implementation:
 
 ### Permission Management
 - ✅ Prefer roles over individual permissions
-- ✅ Use custom permissions for special cases
 - ✅ Follow principle of least privilege
-- ✅ Document custom permissions
 - ❌ Don't create overlapping permissions
 - ❌ Don't grant more access than needed
 

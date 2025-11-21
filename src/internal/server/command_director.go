@@ -128,6 +128,9 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			// TODO: Determine debug mode from server configuration
 			debugMode := false
 			return CreateUserCommand(command, logger, serviceManager, database, debugMode)
+		case "role":
+			// CREATE ROLE "role_name" [WITH DESCRIPTION "description"];
+			return CreateRole(command, logger, serviceManager)
 		default:
 
 			return &result, fmt.Errorf("unknown command format: %s", command)
@@ -247,16 +250,33 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			return result1, err
 
 		case "user":
-			// ParseCreateRelationshipCommand(command)
+			// UPDATE USER "username" SET PASSWORD = "new_password" [FORCE];
+			return UpdateUser(command, logger, serviceManager)
+		case "role":
+			// UPDATE ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE];
+			return UpdateRole(command, logger, serviceManager)
 		default:
 			return &result, fmt.Errorf("unknown command format: %s", command)
 		}
 		return &result, nil
 	}
 
+	// Handle ALTER as an alias for UPDATE
+	if strings.HasPrefix(commandLower, "alter") {
+		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "role" {
+			// ALTER ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE];
+			return UpdateRole(command, logger, serviceManager)
+		}
+	}
+
 	// Parse GRANT command
 	if strings.HasPrefix(commandLower, "grant") {
 		return GrantPermission(command, logger, serviceManager)
+	}
+
+	// Parse REVOKE command
+	if strings.HasPrefix(commandLower, "revoke") {
+		return RevokePermission(command, logger, serviceManager)
 	}
 
 	// Parse ATTACH command
@@ -335,6 +355,12 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			}
 
 			return DeleteBundleCommand(bundleCmd, logger, serviceManager, database)
+		case "user":
+			// DROP USER "username" [FORCE]; (same as DELETE USER)
+			return DeleteUser(command, logger, serviceManager)
+		case "role":
+			// DROP ROLE "role_name" [FORCE]; (same as DELETE ROLE)
+			return DeleteRole(command, logger, serviceManager)
 		}
 	}
 
@@ -433,7 +459,11 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 					deletedCount, bundleName, idsJSON)
 			}
 		case "user":
-			// ParseCreateRelationshipCommand(command)
+			// DELETE USER "username" [FORCE];
+			return DeleteUser(command, logger, serviceManager)
+		case "role":
+			// DELETE ROLE "role_name" [FORCE];
+			return DeleteRole(command, logger, serviceManager)
 		default:
 			return &result, fmt.Errorf("unknown command format: %s", command)
 		}

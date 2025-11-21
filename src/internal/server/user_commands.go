@@ -171,3 +171,413 @@ func grantRole(stmt *syndrQL.GrantStatement, logger *zap.SugaredLogger, serviceM
 
 	return cmdResponse, nil
 }
+
+// RevokePermissionOrRoleCommand handles both REVOKE PERMISSION and REVOKE ROLE commands with optional FORCE
+// Supports syntaxes:
+//   - REVOKE "permission" FROM USER "username";
+//   - REVOKE "permission" FROM USER "username" FORCE;
+//   - REVOKE ROLE "role" FROM USER "username";
+//   - REVOKE ROLE "role" FROM USER "username" FORCE;
+//
+// # When FORCE is specified, active sessions for the user will be terminated
+//
+// TODO: I can add support for bulk revoke operations
+// TODO: I can add cascading revoke for dependent grants
+func RevokePermissionOrRoleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, sessionManager *SessionManager, activeConnections map[string]*Connection, debugMode bool) (*CommandResponse, error) {
+	// Parse the REVOKE statement
+	parser := syndrQL.NewRevokeParser(command)
+	stmt, err := parser.Parse()
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to parse REVOKE command: %v", err)
+		}
+		return nil, fmt.Errorf("syntax error in REVOKE command")
+	}
+
+	// Validate the statement
+	if err := stmt.Validate(); err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("invalid REVOKE statement: %v", err)
+		}
+		return nil, fmt.Errorf("invalid REVOKE syntax")
+	}
+
+	// Check for active sessions if not using FORCE
+	if !stmt.Force {
+		sessions := sessionManager.GetUserSessions(stmt.Username)
+		if len(sessions) > 0 {
+			err := fmt.Errorf("Cannot revoke from user '%s': user has %d active session(s). Use FORCE to terminate sessions", stmt.Username, len(sessions))
+			// TODO: Integrate with SecurityAuditor to log revoke attempt blocked by active sessions
+			logger.Warnw("REVOKE command blocked by active sessions",
+				"username", stmt.Username,
+				"sessionCount", len(sessions),
+				"force", false)
+			return nil, err
+		}
+	}
+
+	// If FORCE is specified, terminate user sessions
+	if stmt.Force {
+		terminatedCount, err := sessionManager.TerminateUserSessions(stmt.Username, activeConnections)
+		if err != nil {
+			logger.Warnw("Error terminating user sessions during forced revoke",
+				"username", stmt.Username,
+				"error", err)
+		}
+		if terminatedCount > 0 {
+			// TODO: Integrate with SecurityAuditor to log forced session termination
+			logger.Warnw("FORCED REVOKE - TERMINATED USER SESSIONS",
+				"username", stmt.Username,
+				"sessionCount", terminatedCount,
+				"type", stmt.Type.String())
+		}
+	}
+
+	// Handle based on revoke type
+	switch stmt.Type {
+	case syndrQL.RevokeTypePermission:
+		return revokePermission(stmt, logger, serviceManager, database, debugMode)
+	case syndrQL.RevokeTypeRole:
+		return revokeRole(stmt, logger, serviceManager, database, debugMode)
+	default:
+		if debugMode {
+			return nil, fmt.Errorf("unknown revoke type: %v", stmt.Type)
+		}
+		return nil, fmt.Errorf("invalid revoke type")
+	}
+}
+
+// revokePermission handles REVOKE "permission" FROM USER "username"
+func revokePermission(stmt *syndrQL.RevokeStatement, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, debugMode bool) (*CommandResponse, error) {
+	logger.Infof("Revoking permission '%s' from user '%s' in database '%s'", stmt.PermissionName, stmt.Username, database.Name)
+
+	// Revoke the permission using PermissionService
+	err := serviceManager.PermissionService.RevokePermissionFromUser(stmt.Username, stmt.PermissionName)
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to revoke permission '%s' from user '%s': %v", stmt.PermissionName, stmt.Username, err)
+		}
+		return nil, fmt.Errorf("failed to revoke permission")
+	}
+
+	// TODO: Integrate with SecurityAuditor to log permission revocation
+	if stmt.Force {
+		logger.Warnw("FORCED PERMISSION REVOKE COMPLETED",
+			"permission", stmt.PermissionName,
+			"username", stmt.Username)
+	} else {
+		logger.Infow("Permission revoked successfully",
+			"permission", stmt.PermissionName,
+			"username", stmt.Username)
+	}
+
+	result := fmt.Sprintf("Permission '%s' revoked from user '%s' successfully.", stmt.PermissionName, stmt.Username)
+	if stmt.Force {
+		result = fmt.Sprintf("Permission '%s' forcefully revoked from user '%s' and sessions terminated.", stmt.PermissionName, stmt.Username)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      result,
+	}
+
+	return cmdResponse, nil
+}
+
+// revokeRole handles REVOKE ROLE "role" FROM USER "username"
+func revokeRole(stmt *syndrQL.RevokeStatement, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, debugMode bool) (*CommandResponse, error) {
+	logger.Infof("Revoking role '%s' from user '%s' in database '%s'", stmt.RoleName, stmt.Username, database.Name)
+
+	// Revoke the role using PermissionService
+	err := serviceManager.PermissionService.RevokeRoleFromUser(stmt.Username, stmt.RoleName)
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to revoke role '%s' from user '%s': %v", stmt.RoleName, stmt.Username, err)
+		}
+		return nil, fmt.Errorf("failed to revoke role")
+	}
+
+	// TODO: Integrate with SecurityAuditor to log role revocation
+	if stmt.Force {
+		logger.Warnw("FORCED ROLE REVOKE COMPLETED",
+			"role", stmt.RoleName,
+			"username", stmt.Username)
+	} else {
+		logger.Infow("Role revoked successfully",
+			"role", stmt.RoleName,
+			"username", stmt.Username)
+	}
+
+	result := fmt.Sprintf("Role '%s' revoked from user '%s' successfully.", stmt.RoleName, stmt.Username)
+	if stmt.Force {
+		result = fmt.Sprintf("Role '%s' forcefully revoked from user '%s' and sessions terminated.", stmt.RoleName, stmt.Username)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      result,
+	}
+
+	return cmdResponse, nil
+}
+
+// UpdateUserCommand handles UPDATE USER "username" SET field = value [FORCE] command
+// Currently supports PASSWORD field updates only
+func UpdateUserCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, debugMode bool) (*CommandResponse, error) {
+	// Parse the UPDATE USER statement
+	parser := syndrQL.NewUpdateUserParser(command)
+	stmt, err := parser.Parse()
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to parse UPDATE USER command: %v", err)
+		}
+		return nil, fmt.Errorf("syntax error in UPDATE USER command")
+	}
+
+	// Validate the statement
+	if err := stmt.Validate(); err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("invalid UPDATE USER statement: %v", err)
+		}
+		return nil, fmt.Errorf("invalid UPDATE USER syntax")
+	}
+
+	logger.Infof("Updating user '%s' (force=%v)", stmt.Username, stmt.Force)
+
+	// Update the user using UserService
+	err = serviceManager.UserService.UpdateUser(stmt.Username, stmt.Updates, stmt.Force)
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to update user '%s': %v", stmt.Username, err)
+		}
+		return nil, err // Pass through system user protection errors
+	}
+
+	// TODO: Integrate with SecurityAuditor to log user updates
+	if stmt.Force {
+		logger.Warnw("FORCED UPDATE USER COMPLETED",
+			"username", stmt.Username,
+			"updatedFields", len(stmt.Updates))
+	} else {
+		logger.Infow("User updated successfully",
+			"username", stmt.Username,
+			"updatedFields", len(stmt.Updates))
+	}
+
+	result := fmt.Sprintf("User '%s' updated successfully.", stmt.Username)
+	if stmt.Force {
+		result = fmt.Sprintf("User '%s' forcefully updated and active sessions terminated.", stmt.Username)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      result,
+	}
+
+	return cmdResponse, nil
+}
+
+// DeleteUserCommand handles DELETE USER "username" [FORCE] and DROP USER "username" [FORCE] commands
+// Removes user and automatically cleans up UserRoles and UserPermissions junction tables
+func DeleteUserCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, debugMode bool) (*CommandResponse, error) {
+	// Parse the DELETE USER statement
+	parser := syndrQL.NewDeleteUserParser(command)
+	stmt, err := parser.Parse()
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to parse DELETE USER command: %v", err)
+		}
+		return nil, fmt.Errorf("syntax error in DELETE USER command")
+	}
+
+	// Validate the statement
+	if err := stmt.Validate(); err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("invalid DELETE USER statement: %v", err)
+		}
+		return nil, fmt.Errorf("invalid DELETE USER syntax")
+	}
+
+	logger.Infof("Deleting user '%s' (force=%v)", stmt.Username, stmt.Force)
+
+	// Delete the user using UserService
+	err = serviceManager.UserService.DeleteUser(stmt.Username, stmt.Force)
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to delete user '%s': %v", stmt.Username, err)
+		}
+		return nil, err // Pass through system user protection errors
+	}
+
+	// TODO: Integrate with SecurityAuditor to log user deletion
+	if stmt.Force {
+		logger.Warnw("FORCED DELETE USER COMPLETED",
+			"username", stmt.Username)
+	} else {
+		logger.Infow("User deleted successfully",
+			"username", stmt.Username)
+	}
+
+	result := fmt.Sprintf("User '%s' deleted successfully.", stmt.Username)
+	if stmt.Force {
+		result = fmt.Sprintf("User '%s' forcefully deleted and active sessions terminated.", stmt.Username)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      result,
+	}
+
+	return cmdResponse, nil
+}
+
+// CreateRoleCommand handles CREATE ROLE "role_name" [WITH DESCRIPTION "description"] command
+func CreateRoleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, debugMode bool) (*CommandResponse, error) {
+	// Parse the CREATE ROLE statement
+	parser := syndrQL.NewCreateRoleParser(command)
+	stmt, err := parser.Parse()
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to parse CREATE ROLE command: %v", err)
+		}
+		return nil, fmt.Errorf("syntax error in CREATE ROLE command")
+	}
+
+	// Validate the statement
+	if err := stmt.Validate(); err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("invalid CREATE ROLE statement: %v", err)
+		}
+		return nil, fmt.Errorf("invalid CREATE ROLE syntax")
+	}
+
+	logger.Infof("Creating role '%s'", stmt.RoleName)
+
+	// Create the role using PermissionService
+	roleID, err := serviceManager.PermissionService.CreateRole(stmt.RoleName, stmt.Description)
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to create role '%s': %v", stmt.RoleName, err)
+		}
+		return nil, err
+	}
+
+	logger.Infof("Role '%s' created successfully with ID: %s", stmt.RoleName, roleID)
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      fmt.Sprintf("Role '%s' created successfully.", stmt.RoleName),
+	}
+
+	return cmdResponse, nil
+}
+
+// UpdateRoleCommand handles UPDATE ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE] command
+// Also handles ALTER ROLE syntax
+func UpdateRoleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, debugMode bool) (*CommandResponse, error) {
+	// Parse the UPDATE/ALTER ROLE statement
+	parser := syndrQL.NewUpdateRoleParser(command)
+	stmt, err := parser.Parse()
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to parse UPDATE/ALTER ROLE command: %v", err)
+		}
+		return nil, fmt.Errorf("syntax error in UPDATE/ALTER ROLE command")
+	}
+
+	// Validate the statement
+	if err := stmt.Validate(); err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("invalid UPDATE/ALTER ROLE statement: %v", err)
+		}
+		return nil, fmt.Errorf("invalid UPDATE/ALTER ROLE syntax")
+	}
+
+	logger.Infof("Updating role '%s' (force=%v)", stmt.RoleName, stmt.Force)
+
+	// Update the role using PermissionService
+	err = serviceManager.PermissionService.UpdateRole(stmt.RoleName, stmt.Updates, stmt.Force)
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to update role '%s': %v", stmt.RoleName, err)
+		}
+		return nil, err
+	}
+
+	// TODO: Integrate with SecurityAuditor to log role updates
+	if stmt.Force {
+		logger.Warnw("FORCED UPDATE ROLE COMPLETED",
+			"role", stmt.RoleName,
+			"updatedFields", len(stmt.Updates))
+	} else {
+		logger.Infow("Role updated successfully",
+			"role", stmt.RoleName,
+			"updatedFields", len(stmt.Updates))
+	}
+
+	result := fmt.Sprintf("Role '%s' updated successfully.", stmt.RoleName)
+	if stmt.Force {
+		result = fmt.Sprintf("Role '%s' forcefully updated and affected user sessions terminated.", stmt.RoleName)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      result,
+	}
+
+	return cmdResponse, nil
+}
+
+// DeleteRoleCommand handles DELETE ROLE "role_name" [FORCE] and DROP ROLE "role_name" [FORCE] commands
+// Removes role and automatically cleans up UserRoles and RolesPermissions junction tables
+func DeleteRoleCommand(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, debugMode bool) (*CommandResponse, error) {
+	// Parse the DELETE/DROP ROLE statement
+	parser := syndrQL.NewDeleteRoleParser(command)
+	stmt, err := parser.Parse()
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to parse DELETE/DROP ROLE command: %v", err)
+		}
+		return nil, fmt.Errorf("syntax error in DELETE/DROP ROLE command")
+	}
+
+	// Validate the statement
+	if err := stmt.Validate(); err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("invalid DELETE/DROP ROLE statement: %v", err)
+		}
+		return nil, fmt.Errorf("invalid DELETE/DROP ROLE syntax")
+	}
+
+	logger.Infof("Deleting role '%s' (force=%v)", stmt.RoleName, stmt.Force)
+
+	// Delete the role using PermissionService
+	err = serviceManager.PermissionService.DeleteRole(stmt.RoleName, stmt.Force)
+	if err != nil {
+		if debugMode {
+			return nil, fmt.Errorf("failed to delete role '%s': %v", stmt.RoleName, err)
+		}
+		return nil, err
+	}
+
+	// TODO: Integrate with SecurityAuditor to log role deletion
+	if stmt.Force {
+		logger.Warnw("FORCED DELETE ROLE COMPLETED",
+			"role", stmt.RoleName)
+	} else {
+		logger.Infow("Role deleted successfully",
+			"role", stmt.RoleName)
+	}
+
+	result := fmt.Sprintf("Role '%s' deleted successfully.", stmt.RoleName)
+	if stmt.Force {
+		result = fmt.Sprintf("Role '%s' forcefully deleted and affected user sessions terminated.", stmt.RoleName)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      result,
+	}
+
+	return cmdResponse, nil
+}

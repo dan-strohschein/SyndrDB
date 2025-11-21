@@ -110,11 +110,12 @@ const (
 	TOKEN_BUNDLES  // BUNDLES
 
 	// Keywords - RBAC
-	TOKEN_USER     // USER
-	TOKEN_PASSWORD // PASSWORD
-	TOKEN_GRANT    // GRANT
-	TOKEN_REVOKE   // REVOKE
-	TOKEN_ROLE     // ROLE
+	TOKEN_USER        // USER
+	TOKEN_PASSWORD    // PASSWORD
+	TOKEN_GRANT       // GRANT
+	TOKEN_REVOKE      // REVOKE
+	TOKEN_ROLE        // ROLE
+	TOKEN_DESCRIPTION // DESCRIPTION
 
 	// Keywords - Types
 	TOKEN_STRING_TYPE // STRING
@@ -297,6 +298,8 @@ func (tt TokenType) String() string {
 		return "REVOKE"
 	case TOKEN_ROLE:
 		return "ROLE"
+	case TOKEN_DESCRIPTION:
+		return "DESCRIPTION"
 	case TOKEN_STRING_TYPE:
 		return "STRING_TYPE"
 	case TOKEN_INT_TYPE:
@@ -398,6 +401,7 @@ var keywords = map[string]TokenType{
 	"ON":           TOKEN_ON,
 	"AS":           TOKEN_AS,
 	"RELATIONSHIP": TOKEN_RELATIONSHIP,
+	"DESCRIPTION":  TOKEN_DESCRIPTION,
 	"FORCE":        TOKEN_FORCE,
 
 	// Utility Keywords (Cold Path)
