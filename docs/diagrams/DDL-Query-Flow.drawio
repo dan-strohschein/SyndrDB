@@ -1,0 +1,333 @@
+<mxfile host="app.diagrams.net" modified="2025-11-20T12:00:00.000Z" agent="draw.io" version="22.1.0">
+  <diagram name="DDL Command Flow" id="ddl-command-flow">
+    <mxGraphModel dx="1434" dy="844" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        
+        <!-- Actors (Lifelines) -->
+        <mxCell id="client" value="Client" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="command-director" value="CommandDirector" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="200" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="parser" value="SyndrQL Parser" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="360" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="bundle-service" value="Bundle Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="520" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="validation" value="Validation Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="680" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="index-service" value="Index Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="840" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="schema-mgr" value="Schema Manager" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1000" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="wal" value="Write-Ahead Log" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1160" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="storage" value="Storage" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1320" y="40" width="100" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <!-- Messages -->
+        <mxCell id="msg1" value="CREATE BUNDLE Authors WITH FIELDS (name STRING, age INT)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="client" target="command-director">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="90" y="140" as="sourcePoint"/>
+            <mxPoint x="260" y="140" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg2" value="ParseCreateBundle()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="parser">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="180" as="sourcePoint"/>
+            <mxPoint x="420" y="180" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="415" y="200" width="10" height="160" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self1" value="Tokenize" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="425" y="220" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="480" y="220"/>
+              <mxPoint x="480" y="250"/>
+            </Array>
+            <mxPoint x="425" y="250" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self2" value="Parse Fields/Constraints" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="425" y="270" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="500" y="270"/>
+              <mxPoint x="500" y="320"/>
+            </Array>
+            <mxPoint x="425" y="320" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg3" value="return CreateBundleCommand" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="parser" target="command-director">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="420" y="380" as="sourcePoint"/>
+            <mxPoint x="260" y="380" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg4" value="ValidateBundle()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="validation">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="420" as="sourcePoint"/>
+            <mxPoint x="740" y="420" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="735" y="440" width="10" height="180" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self3" value="Check Name Collision" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="745" y="460" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="810" y="460"/>
+              <mxPoint x="810" y="490"/>
+            </Array>
+            <mxPoint x="745" y="490" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self4" value="Validate Field Types" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="745" y="510" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="810" y="510"/>
+              <mxPoint x="810" y="540"/>
+            </Array>
+            <mxPoint x="745" y="540" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self5" value="Validate Constraints" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="745" y="560" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="810" y="560"/>
+              <mxPoint x="810" y="590"/>
+            </Array>
+            <mxPoint x="745" y="590" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg5" value="return ValidationResult" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="validation" target="command-director">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="640" as="sourcePoint"/>
+            <mxPoint x="260" y="640" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Alternative Fragment for Validation -->
+        <mxCell id="alt1" value="alt" style="shape=umlFrame;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="180" y="680" width="1240" height="960" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="alt-label1" value="[Validation Passed]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="190" y="685" width="120" height="20" as="geometry"/>
+        </mxCell>
+        
+        <!-- Success Path -->
+        <mxCell id="msg6" value="BeginTransaction()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="wal">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="720" as="sourcePoint"/>
+            <mxPoint x="1220" y="720" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg7" value="Write BEGIN marker" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1220" y="760" as="sourcePoint"/>
+            <mxPoint x="1370" y="760" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg8" value="CreateBundle()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="bundle-service">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="800" as="sourcePoint"/>
+            <mxPoint x="580" y="800" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="575" y="820" width="10" height="240" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self6" value="Initialize Bundle Struct" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="585" y="840" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="650" y="840"/>
+              <mxPoint x="650" y="870"/>
+            </Array>
+            <mxPoint x="585" y="870" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self7" value="Create DocumentStructure" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="585" y="890" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="650" y="890"/>
+              <mxPoint x="650" y="920"/>
+            </Array>
+            <mxPoint x="585" y="920" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg9" value="CreateHashIndex(DocumentID)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="index-service">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="940" as="sourcePoint"/>
+            <mxPoint x="900" y="940" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg10" value="Write Index Metadata" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="index-service" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="900" y="980" as="sourcePoint"/>
+            <mxPoint x="1370" y="980" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg11" value="return Index Created" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="index-service" target="bundle-service">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="900" y="1020" as="sourcePoint"/>
+            <mxPoint x="580" y="1020" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg12" value="RegisterSchema()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="schema-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="1060" as="sourcePoint"/>
+            <mxPoint x="1060" y="1060" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="1055" y="1080" width="10" height="140" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self8" value="Generate GraphQL Types" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1065" y="1100" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="1140" y="1100"/>
+              <mxPoint x="1140" y="1130"/>
+            </Array>
+            <mxPoint x="1065" y="1130" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self9" value="Create Input Types" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1065" y="1150" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="1140" y="1150"/>
+              <mxPoint x="1140" y="1180"/>
+            </Array>
+            <mxPoint x="1065" y="1180" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg13" value="Persist Schema" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="schema-mgr" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1060" y="1200" as="sourcePoint"/>
+            <mxPoint x="1370" y="1200" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg14" value="return Schema Registered" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="schema-mgr" target="bundle-service">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1060" y="1240" as="sourcePoint"/>
+            <mxPoint x="580" y="1240" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg15" value="Write Bundle Metadata" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="1280" as="sourcePoint"/>
+            <mxPoint x="1370" y="1280" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg16" value="return Bundle Created" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="bundle-service" target="command-director">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="1320" as="sourcePoint"/>
+            <mxPoint x="260" y="1320" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg17" value="CommitTransaction()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="wal">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="1360" as="sourcePoint"/>
+            <mxPoint x="1220" y="1360" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation5" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1215" y="1380" width="10" height="100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg18" value="Write COMMIT marker" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1220" y="1400" as="sourcePoint"/>
+            <mxPoint x="1370" y="1400" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg19" value="Flush Journal" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1220" y="1440" as="sourcePoint"/>
+            <mxPoint x="1370" y="1440" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg20" value="Success" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="command-director" target="client">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="260" y="1500" as="sourcePoint"/>
+            <mxPoint x="90" y="1500" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Divider for alternative path -->
+        <mxCell id="divider" value="" style="line;strokeWidth=1;fillColor=none;align=left;verticalAlign=middle;spacingTop=-1;spacingLeft=3;spacingRight=3;rotatable=0;labelPosition=right;points=[];portConstraint=eastwest;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="180" y="1540" width="1240" height="8" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="alt-label2" value="[Validation Failed]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="190" y="1555" width="120" height="20" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg21" value="Error: Validation Failed" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;strokeColor=#b85450;" edge="1" parent="1" source="command-director" target="client">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="260" y="1600" as="sourcePoint"/>
+            <mxPoint x="90" y="1600" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

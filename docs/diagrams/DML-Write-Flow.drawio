@@ -1,0 +1,301 @@
+<mxfile host="app.diagrams.net" modified="2025-11-20T12:00:00.000Z" agent="draw.io" version="22.1.0">
+  <diagram name="DML Write Flow" id="dml-write-flow">
+    <mxGraphModel dx="1434" dy="844" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        
+        <!-- Actors (Lifelines) -->
+        <mxCell id="client" value="Client" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="command-director" value="CommandDirector" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="200" y="40" width="120" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="parser" value="SyndrQL Parser" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="360" y="40" width="120" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="bundle-service" value="Bundle Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="520" y="40" width="120" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="index-service" value="Index Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="680" y="40" width="120" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="wal" value="Write-Ahead Log" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="840" y="40" width="120" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="storage" value="Storage" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1000" y="40" width="100" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="rel-mgr" value="Relationship Manager" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1140" y="40" width="140" height="1500" as="geometry"/>
+        </mxCell>
+        
+        <!-- Messages -->
+        <mxCell id="msg1" value='INSERT DOCUMENT INTO Authors {"name": "Dan", "age": 30}' style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="client" target="command-director">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="90" y="140" as="sourcePoint"/>
+            <mxPoint x="260" y="140" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg2" value="ParseInsert()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="parser">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="180" as="sourcePoint"/>
+            <mxPoint x="420" y="180" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="415" y="200" width="10" height="120" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self1" value="Tokenize" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="425" y="220" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="480" y="220"/>
+              <mxPoint x="480" y="250"/>
+            </Array>
+            <mxPoint x="425" y="250" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self2" value="Parse JSON Data" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="425" y="270" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="480" y="270"/>
+              <mxPoint x="480" y="300"/>
+            </Array>
+            <mxPoint x="425" y="300" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg3" value="return InsertCommand" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="parser" target="command-director">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="420" y="340" as="sourcePoint"/>
+            <mxPoint x="260" y="340" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg4" value="BeginTransaction()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="wal">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="380" as="sourcePoint"/>
+            <mxPoint x="900" y="380" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg5" value="Write BEGIN + Timestamp" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="900" y="420" as="sourcePoint"/>
+            <mxPoint x="1050" y="420" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg6" value="AddDocument()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="bundle-service">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="460" as="sourcePoint"/>
+            <mxPoint x="580" y="460" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="575" y="480" width="10" height="440" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self3" value="Generate DocumentID (UUID)" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="585" y="500" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="660" y="500"/>
+              <mxPoint x="660" y="530"/>
+            </Array>
+            <mxPoint x="585" y="530" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self4" value="Validate Against Schema" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="585" y="550" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="660" y="550"/>
+              <mxPoint x="660" y="580"/>
+            </Array>
+            <mxPoint x="585" y="580" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self5" value="Check Constraints" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="585" y="600" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="660" y="600"/>
+              <mxPoint x="660" y="630"/>
+            </Array>
+            <mxPoint x="585" y="630" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Alternative Fragment for Relationships -->
+        <mxCell id="alt1" value="alt" style="shape=umlFrame;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="540" y="650" width="740" height="120" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="alt-label1" value="[Has Relationships]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="550" y="655" width="120" height="20" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg7" value="ValidateRelationships()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="rel-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="690" as="sourcePoint"/>
+            <mxPoint x="1210" y="690" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self6" value="Check Foreign Keys" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1215" y="710" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="1260" y="710"/>
+              <mxPoint x="1260" y="730"/>
+            </Array>
+            <mxPoint x="1215" y="730" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg8" value="return Valid" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="rel-mgr" target="bundle-service">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1210" y="750" as="sourcePoint"/>
+            <mxPoint x="580" y="750" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg9" value="UpdateHashIndex()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="index-service">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="790" as="sourcePoint"/>
+            <mxPoint x="740" y="790" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg10" value="Write Index Entry" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="index-service" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="740" y="830" as="sourcePoint"/>
+            <mxPoint x="1050" y="830" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg11" value="return Index Updated" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="index-service" target="bundle-service">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="870" as="sourcePoint"/>
+            <mxPoint x="580" y="870" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Alternative Fragment for Secondary Indexes -->
+        <mxCell id="alt2" value="alt" style="shape=umlFrame;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="540" y="890" width="560" height="100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="alt-label2" value="[Has Secondary Indexes]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="550" y="895" width="150" height="20" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg12" value="UpdateBTreeIndexes()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="index-service">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="930" as="sourcePoint"/>
+            <mxPoint x="740" y="930" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg13" value="Update BTree Nodes" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="index-service" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="740" y="950" as="sourcePoint"/>
+            <mxPoint x="1050" y="950" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg14" value="return Indexes Updated" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="index-service" target="bundle-service">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="740" y="970" as="sourcePoint"/>
+            <mxPoint x="580" y="970" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg15" value="WritePage(Document)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="1010" as="sourcePoint"/>
+            <mxPoint x="1050" y="1010" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg16" value="return Page Written" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="storage" target="bundle-service">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1050" y="1050" as="sourcePoint"/>
+            <mxPoint x="580" y="1050" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg17" value="LogInsert()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-service" target="wal">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="580" y="1090" as="sourcePoint"/>
+            <mxPoint x="900" y="1090" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg18" value="Write INSERT Record" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="900" y="1130" as="sourcePoint"/>
+            <mxPoint x="1050" y="1130" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg19" value="return Document Added" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="bundle-service" target="command-director">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="580" y="1170" as="sourcePoint"/>
+            <mxPoint x="260" y="1170" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg20" value="CommitTransaction()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="wal">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="1210" as="sourcePoint"/>
+            <mxPoint x="900" y="1210" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="895" y="1230" width="10" height="100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg21" value="Write COMMIT marker" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="900" y="1250" as="sourcePoint"/>
+            <mxPoint x="1050" y="1250" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg22" value="Fsync Journal" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="900" y="1290" as="sourcePoint"/>
+            <mxPoint x="1050" y="1290" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg23" value="Success + DocumentID" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="command-director" target="client">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="260" y="1350" as="sourcePoint"/>
+            <mxPoint x="90" y="1350" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

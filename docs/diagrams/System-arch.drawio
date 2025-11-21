@@ -1,0 +1,223 @@
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" version="29.1.0">
+  <diagram name="System Architecture" id="system-architecture">
+    <mxGraphModel dx="2834" dy="739" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="client" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1" value="TCP Client" vertex="1">
+          <mxGeometry height="60" width="160" x="-30" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="entry-layer" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1" value="Entry Layer" vertex="1">
+          <mxGeometry height="120" width="960" x="-110" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="server" parent="entry-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" value="Server TCP Handler" vertex="1">
+          <mxGeometry height="60" width="240" x="40" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="session" parent="entry-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" value="Session Manager" vertex="1">
+          <mxGeometry height="60" width="240" x="360" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="auth" parent="entry-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" value="Authentication" vertex="1">
+          <mxGeometry height="60" width="240" x="680" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="query-layer" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1" value="Query Processing Layer" vertex="1">
+          <mxGeometry height="120" width="960" x="370" y="320" as="geometry" />
+        </mxCell>
+        <mxCell id="command-director" parent="query-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00" value="CommandDirector" vertex="1">
+          <mxGeometry height="60" width="240" x="290" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="graphql" parent="query-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00" value="GraphQL Handler" vertex="1">
+          <mxGeometry height="60" width="240" x="30" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="syndrql" parent="query-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00" value="SyndrQL Parser" vertex="1">
+          <mxGeometry height="60" width="240" x="680" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="security-layer" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1" value="Security Layer (GraphQL Only)" vertex="1">
+          <mxGeometry height="330" width="560" x="310" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="complexity" parent="security-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" value="Complexity Analyzer" vertex="1">
+          <mxGeometry height="60" width="200" x="60" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="ratelimit" parent="security-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" value="Rate Limiter" vertex="1">
+          <mxGeometry height="60" width="200" x="60" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="timeout" parent="security-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" value="Query Timeout" vertex="1">
+          <mxGeometry height="60" width="200" x="60" y="250" as="geometry" />
+        </mxCell>
+        <mxCell id="monitor" parent="security-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" value="Query Monitor" vertex="1">
+          <mxGeometry height="60" width="200" x="350" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="planning-layer" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1" value="Query Planning Layer" vertex="1">
+          <mxGeometry height="240" width="820" x="1140" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="unified-planner" parent="planning-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e" value="Unified Query Planner" vertex="1">
+          <mxGeometry height="60" width="200" x="40" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="query-router" parent="planning-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e" value="Query Router" vertex="1">
+          <mxGeometry height="60" width="200" x="320" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="join-planner" parent="planning-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e" value="JOIN Planner" vertex="1">
+          <mxGeometry height="60" width="160" x="600" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="groupby-planner" parent="planning-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e" value="GROUP BY Planner" vertex="1">
+          <mxGeometry height="60" width="200" x="590" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="plan-builder" parent="planning-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e" value="Plan Builder" vertex="1">
+          <mxGeometry height="60" width="200" x="190" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="execution-layer" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1" value="Execution Layer" vertex="1">
+          <mxGeometry height="160" width="1600" x="370" y="860" as="geometry" />
+        </mxCell>
+        <mxCell id="scan-node" parent="execution-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cfe2f3;strokeColor=#6c8ebf" value="Scan Nodes" vertex="1">
+          <mxGeometry height="80" width="200" x="40" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="join-node" parent="execution-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cfe2f3;strokeColor=#6c8ebf" value="JOIN Nodes" vertex="1">
+          <mxGeometry height="80" width="200" x="300" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="filter-node" parent="execution-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cfe2f3;strokeColor=#6c8ebf" value="Filter Nodes" vertex="1">
+          <mxGeometry height="80" width="200" x="560" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="sort-node" parent="execution-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cfe2f3;strokeColor=#6c8ebf" value="Sort Nodes" vertex="1">
+          <mxGeometry height="80" width="200" x="820" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="agg-node" parent="execution-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cfe2f3;strokeColor=#6c8ebf" value="Aggregation Nodes" vertex="1">
+          <mxGeometry height="80" width="200" x="1080" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="limit-node" parent="execution-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cfe2f3;strokeColor=#6c8ebf" value="Limit Nodes" vertex="1">
+          <mxGeometry height="80" width="200" x="1340" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="storage-layer" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1" value="Storage Layer" vertex="1">
+          <mxGeometry height="610" width="1130" x="110" y="1080" as="geometry" />
+        </mxCell>
+        <mxCell id="bundle-service" parent="storage-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd966;strokeColor=#d6b656" value="Bundle Service" vertex="1">
+          <mxGeometry height="80" width="280" x="380" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="wal" parent="storage-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd966;strokeColor=#d6b656" value="Write-Ahead Log" vertex="1">
+          <mxGeometry height="80" width="200" x="850" y="270" as="geometry" />
+        </mxCell>
+        <mxCell id="doc-scanner" parent="storage-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd966;strokeColor=#d6b656" value="Document Scanner" vertex="1">
+          <mxGeometry height="80" width="280" x="50" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="edge26" edge="1" parent="storage-layer" source="bundle-service" target="doc-scanner">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="index-service" parent="storage-layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd966;strokeColor=#d6b656" value="Index Service" vertex="1">
+          <mxGeometry height="80" width="280" x="460" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="edge27" edge="1" parent="storage-layer" source="bundle-service" target="index-service">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="data-layer" parent="1" style="swimlane;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1" value="Data Layer" vertex="1">
+          <mxGeometry height="120" width="800" x="300" y="1830" as="geometry" />
+        </mxCell>
+        <mxCell id="bundles" parent="data-layer" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366" value="Bundles" vertex="1">
+          <mxGeometry height="60" width="160" x="80" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="indexes" parent="data-layer" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366" value="Indexes" vertex="1">
+          <mxGeometry height="60" width="160" x="320" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="journal" parent="data-layer" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#d5e8d4;strokeColor=#82b366" value="WAL Journal" vertex="1">
+          <mxGeometry height="60" width="160" x="560" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="edge1" edge="1" parent="1" source="client" target="server">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge2" edge="1" parent="1" source="server" target="session">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge3" edge="1" parent="1" source="session" target="auth">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge4" edge="1" parent="1" source="auth" target="command-director">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge5" edge="1" parent="1" source="auth" target="graphql">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge6" edge="1" parent="1" source="graphql" target="complexity">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge7" edge="1" parent="1" source="complexity" target="ratelimit">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge8" edge="1" parent="1" source="ratelimit" target="timeout">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge9" edge="1" parent="1" source="timeout" target="monitor">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge10" edge="1" parent="1" source="monitor" target="command-director">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge11" edge="1" parent="1" source="command-director" target="syndrql">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge12" edge="1" parent="1" source="syndrql" target="unified-planner">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge13" edge="1" parent="1" source="unified-planner" target="query-router">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge14" edge="1" parent="1" source="query-router" target="join-planner">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge15" edge="1" parent="1" source="query-router" target="groupby-planner">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge16" edge="1" parent="1" source="query-router" target="plan-builder">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge17" edge="1" parent="1" source="plan-builder" target="scan-node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge18" edge="1" parent="1" source="plan-builder" target="join-node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge19" edge="1" parent="1" source="plan-builder" target="filter-node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge20" edge="1" parent="1" source="plan-builder" target="sort-node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge21" edge="1" parent="1" source="plan-builder" target="agg-node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge22" edge="1" parent="1" source="plan-builder" target="limit-node">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge23" edge="1" parent="1" source="scan-node" target="bundle-service">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge24" edge="1" parent="1" source="join-node" target="bundle-service">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge25" edge="1" parent="1" source="filter-node" target="bundle-service">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge28" edge="1" parent="1" source="bundle-service" target="wal">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge31" edge="1" parent="1" source="wal" target="file-manager">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge32" edge="1" parent="1" source="file-manager" target="bundles">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge33" edge="1" parent="1" source="file-manager" target="indexes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge34" edge="1" parent="1" source="file-manager" target="journal">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="file-manager" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd966;strokeColor=#d6b656" value="File Manager" vertex="1">
+          <mxGeometry height="80" width="240" x="590" y="1600" as="geometry" />
+        </mxCell>
+        <mxCell id="edge29" edge="1" parent="1" source="doc-scanner" target="file-manager">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge30" edge="1" parent="1" source="index-service" target="file-manager">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

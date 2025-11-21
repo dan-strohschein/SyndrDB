@@ -1,0 +1,252 @@
+<mxfile host="app.diagrams.net" modified="2025-11-20T12:00:00.000Z" agent="draw.io" version="22.1.0">
+  <diagram name="Query Planning Decision Tree" id="query-planning-tree">
+    <mxGraphModel dx="1434" dy="844" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        
+        <!-- Start Node -->
+        <mxCell id="start" value="Unified Query Received" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="580" y="40" width="200" height="60" as="geometry"/>
+        </mxCell>
+        
+        <!-- Parse Type Decision -->
+        <mxCell id="parse-type" value="Query Type?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="600" y="140" width="160" height="80" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge1" edge="1" parent="1" source="start" target="parse-type">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Route Options -->
+        <mxCell id="simple-route" value="Route to Base Planner" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" vertex="1" parent="1">
+          <mxGeometry x="80" y="280" width="160" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="join-route" value="Route to JOIN Planner" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6" vertex="1" parent="1">
+          <mxGeometry x="320" y="280" width="160" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="group-route" value="Route to GROUP BY Planner" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450" vertex="1" parent="1">
+          <mxGeometry x="560" y="280" width="180" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="complex-route" value="Multiple Planners" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00" vertex="1" parent="1">
+          <mxGeometry x="820" y="280" width="160" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge2" value="Simple SELECT" edge="1" parent="1" source="parse-type" target="simple-route">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge3" value="Has JOIN" edge="1" parent="1" source="parse-type" target="join-route">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge4" value="Has GROUP BY" edge="1" parent="1" source="parse-type" target="group-route">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge5" value="Complex" edge="1" parent="1" source="parse-type" target="complex-route">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Has WHERE Decision -->
+        <mxCell id="has-where" value="Has WHERE?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="90" y="400" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge6" edge="1" parent="1" source="simple-route" target="has-where">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="full-scan" value="Full Scan Node" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" vertex="1" parent="1">
+          <mxGeometry x="20" y="540" width="120" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="check-indexes" value="Indexes Available?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="180" y="525" width="140" height="80" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge7" value="No" edge="1" parent="1" source="has-where" target="full-scan">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge8" value="Yes" edge="1" parent="1" source="has-where" target="check-indexes">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Index Options -->
+        <mxCell id="hash-lookup" value="Hash Index Scan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="80" y="680" width="130" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="btree-scan" value="BTree Index Scan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="240" y="680" width="130" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="expr-filter" value="Expression Filter Node" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" vertex="1" parent="1">
+          <mxGeometry x="400" y="680" width="150" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge9" value="Hash Index" edge="1" parent="1" source="check-indexes" target="hash-lookup">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge10" value="BTree Index" edge="1" parent="1" source="check-indexes" target="btree-scan">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge11" value="No Index" edge="1" parent="1" source="check-indexes" target="expr-filter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- JOIN Algorithm Decision -->
+        <mxCell id="choose-algo" value="Choose Algorithm" style="rhombus;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="315" y="390" width="150" height="80" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge12" edge="1" parent="1" source="join-route" target="choose-algo">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="nested-loop" value="Nested Loop Join" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6" vertex="1" parent="1">
+          <mxGeometry x="220" y="540" width="130" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="hash-join" value="Hash Join" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6" vertex="1" parent="1">
+          <mxGeometry x="380" y="540" width="130" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="merge-join" value="Merge Join" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6" vertex="1" parent="1">
+          <mxGeometry x="540" y="540" width="130" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge13" value="Small Left" edge="1" parent="1" source="choose-algo" target="nested-loop">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge14" value="Large Equal" edge="1" parent="1" source="choose-algo" target="hash-join">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge15" value="Both Sorted" edge="1" parent="1" source="choose-algo" target="merge-join">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- GROUP BY Decision -->
+        <mxCell id="choose-agg" value="Aggregation Strategy" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="575" y="390" width="150" height="80" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge16" edge="1" parent="1" source="group-route" target="choose-agg">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="hash-agg" value="Hash Aggregate" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450" vertex="1" parent="1">
+          <mxGeometry x="510" y="540" width="130" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="sort-agg" value="Sort + Group Aggregate" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450" vertex="1" parent="1">
+          <mxGeometry x="670" y="540" width="170" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge17" value="Unsorted Data" edge="1" parent="1" source="choose-agg" target="hash-agg">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge18" value="Sorted Data" edge="1" parent="1" source="choose-agg" target="sort-agg">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Add Modifiers Decision -->
+        <mxCell id="add-modifiers" value="Add Modifiers?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="600" y="820" width="150" height="80" as="geometry"/>
+        </mxCell>
+        
+        <!-- Connect all paths to modifiers -->
+        <mxCell id="edge19" edge="1" parent="1" source="full-scan" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge20" edge="1" parent="1" source="hash-lookup" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge21" edge="1" parent="1" source="btree-scan" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge22" edge="1" parent="1" source="expr-filter" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge23" edge="1" parent="1" source="nested-loop" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge24" edge="1" parent="1" source="hash-join" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge25" edge="1" parent="1" source="merge-join" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge26" edge="1" parent="1" source="hash-agg" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge27" edge="1" parent="1" source="sort-agg" target="add-modifiers">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Modifier Options -->
+        <mxCell id="add-sort" value="Wrap in SortNode" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" vertex="1" parent="1">
+          <mxGeometry x="420" y="980" width="140" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="add-limit" value="Wrap in LimitNode" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" vertex="1" parent="1">
+          <mxGeometry x="600" y="980" width="140" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="add-group" value="Wrap in AggNode" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" vertex="1" parent="1">
+          <mxGeometry x="780" y="980" width="140" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="execute" value="Execute Plan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="960" y="980" width="140" height="50" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge28" value="Has ORDER BY" edge="1" parent="1" source="add-modifiers" target="add-sort">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge29" value="Has LIMIT" edge="1" parent="1" source="add-modifiers" target="add-limit">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge30" value="Has GROUP BY" edge="1" parent="1" source="add-modifiers" target="add-group">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge31" value="None" edge="1" parent="1" source="add-modifiers" target="execute">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge32" edge="1" parent="1" source="add-sort" target="execute">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge33" edge="1" parent="1" source="add-limit" target="execute">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge34" edge="1" parent="1" source="add-group" target="execute">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

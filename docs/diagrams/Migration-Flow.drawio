@@ -1,0 +1,322 @@
+<mxfile host="app.diagrams.net" modified="2025-11-20T12:00:00.000Z" agent="draw.io" version="22.1.0">
+  <diagram name="Migration Flow" id="migration-flow">
+    <mxGraphModel dx="1434" dy="844" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="1800" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        
+        <!-- Actors (Lifelines) -->
+        <mxCell id="admin" value="Admin/CLI" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="migration-mgr" value="Migration Manager" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="200" y="40" width="140" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="version-tracker" value="Version Tracker" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="380" y="40" width="130" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="schema-mgr" value="Schema Manager" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="550" y="40" width="130" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="bundle-svc" value="Bundle Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="720" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="index-svc" value="Index Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="880" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="wal" value="Write-Ahead Log" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1040" y="40" width="120" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="storage" value="Storage" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1200" y="40" width="100" height="1700" as="geometry"/>
+        </mxCell>
+        
+        <!-- Messages -->
+        <mxCell id="msg1" value="ALTER BUNDLE Authors ADD FIELD email STRING" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="admin" target="migration-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="90" y="140" as="sourcePoint"/>
+            <mxPoint x="270" y="140" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="265" y="160" width="10" height="1540" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg2" value="GetCurrentVersion()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="version-tracker">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="200" as="sourcePoint"/>
+            <mxPoint x="445" y="200" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="440" y="220" width="10" height="80" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self1" value="Query migration_history" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="450" y="240" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="520" y="240"/>
+              <mxPoint x="520" y="270"/>
+            </Array>
+            <mxPoint x="450" y="270" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg3" value="return Version: 3" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="version-tracker" target="migration-mgr">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="445" y="320" as="sourcePoint"/>
+            <mxPoint x="270" y="320" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self2" value="Generate Migration Plan" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="275" y="360" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="360" y="360"/>
+              <mxPoint x="360" y="410"/>
+            </Array>
+            <mxPoint x="275" y="410" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg4" value="BeginTransaction()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="wal">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="450" as="sourcePoint"/>
+            <mxPoint x="1100" y="450" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg5" value="Write MIGRATION_START" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1100" y="490" as="sourcePoint"/>
+            <mxPoint x="1250" y="490" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg6" value="LockBundle(Authors)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="bundle-svc">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="530" as="sourcePoint"/>
+            <mxPoint x="780" y="530" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="775" y="550" width="10" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self3" value="Set READ_ONLY mode" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="785" y="570" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="850" y="570"/>
+            </Array>
+            <mxPoint x="785" y="590" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg7" value="return Locked" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="bundle-svc" target="migration-mgr">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="780" y="630" as="sourcePoint"/>
+            <mxPoint x="270" y="630" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg8" value="GetCurrentSchema()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="schema-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="670" as="sourcePoint"/>
+            <mxPoint x="615" y="670" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg9" value="return Schema v3" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="schema-mgr" target="migration-mgr">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="615" y="710" as="sourcePoint"/>
+            <mxPoint x="270" y="710" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self4" value="Create v4 Schema" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="275" y="750" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="360" y="750"/>
+              <mxPoint x="360" y="800"/>
+            </Array>
+            <mxPoint x="275" y="800" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg10" value="ValidateSchemaChange(v3, v4)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="schema-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="840" as="sourcePoint"/>
+            <mxPoint x="615" y="840" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="610" y="860" width="10" height="140" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self5" value="Check Breaking Changes" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="620" y="880" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="700" y="880"/>
+              <mxPoint x="700" y="910"/>
+            </Array>
+            <mxPoint x="620" y="910" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self6" value="Validate Field Compatibility" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="620" y="930" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="710" y="930"/>
+              <mxPoint x="710" y="970"/>
+            </Array>
+            <mxPoint x="620" y="970" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg11" value="return ValidationResult (OK)" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="schema-mgr" target="migration-mgr">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="615" y="1020" as="sourcePoint"/>
+            <mxPoint x="270" y="1020" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Alternative for Index Migration -->
+        <mxCell id="alt1" value="alt" style="shape=umlFrame;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="180" y="1060" width="760" height="200" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="alt-label1" value="[New Field Requires Index]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="190" y="1065" width="160" height="20" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg12" value="CreateIndex(email, BTree)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="index-svc">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="1100" as="sourcePoint"/>
+            <mxPoint x="940" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self7" value="Allocate BTree Structure" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="945" y="1120" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="1010" y="1120"/>
+            </Array>
+            <mxPoint x="945" y="1150" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg13" value="Write Index Metadata" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="index-svc" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="940" y="1180" as="sourcePoint"/>
+            <mxPoint x="1250" y="1180" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg14" value="return Index Created" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="index-svc" target="migration-mgr">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="940" y="1220" as="sourcePoint"/>
+            <mxPoint x="270" y="1220" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg15" value="UpdateBundleMetadata(v4)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="bundle-svc">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="1280" as="sourcePoint"/>
+            <mxPoint x="780" y="1280" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg16" value="Write Updated Metadata" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="bundle-svc" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="780" y="1320" as="sourcePoint"/>
+            <mxPoint x="1250" y="1320" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg17" value="SaveSchema(v4)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="schema-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="1360" as="sourcePoint"/>
+            <mxPoint x="615" y="1360" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg18" value="Persist to schema_versions" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="schema-mgr" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="615" y="1400" as="sourcePoint"/>
+            <mxPoint x="1250" y="1400" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg19" value="RecordMigration(v3→v4)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="version-tracker">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="1440" as="sourcePoint"/>
+            <mxPoint x="445" y="1440" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg20" value="Insert into migration_history" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="version-tracker" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="445" y="1480" as="sourcePoint"/>
+            <mxPoint x="1250" y="1480" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg21" value="UnlockBundle()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="bundle-svc">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="1520" as="sourcePoint"/>
+            <mxPoint x="780" y="1520" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self8" value="Set READ_WRITE mode" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="785" y="1540" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="850" y="1540"/>
+            </Array>
+            <mxPoint x="785" y="1560" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg22" value="CommitTransaction()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="migration-mgr" target="wal">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="270" y="1600" as="sourcePoint"/>
+            <mxPoint x="1100" y="1600" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg23" value="Write MIGRATION_COMMIT" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="wal" target="storage">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1100" y="1640" as="sourcePoint"/>
+            <mxPoint x="1250" y="1640" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg24" value="Success: Migration Complete" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="migration-mgr" target="admin">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="270" y="1680" as="sourcePoint"/>
+            <mxPoint x="90" y="1680" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

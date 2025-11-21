@@ -1,0 +1,359 @@
+<mxfile host="app.diagrams.net" modified="2025-11-20T12:00:00.000Z" agent="draw.io" version="22.1.0">
+  <diagram name="GraphQL Query Flow" id="graphql-query-flow">
+    <mxGraphModel dx="1434" dy="844" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="2200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        
+        <!-- Actors (Lifelines) -->
+        <mxCell id="client" value="Client" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="100" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="graphql-handler" value="GraphQL Handler" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="200" y="40" width="120" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="complexity" value="Complexity Analyzer" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="360" y="40" width="130" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="rate-limiter" value="Rate Limiter" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="530" y="40" width="120" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="timeout-mgr" value="Timeout Manager" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="690" y="40" width="130" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="query-monitor" value="Query Monitor" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="860" y="40" width="120" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="command-director" value="Command Director" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1020" y="40" width="130" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="dataloader" value="DataLoader" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1190" y="40" width="120" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="bundle-svc" value="Bundle Service" style="shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;html=1;container=1;collapsible=0;recursiveResize=0;outlineConnect=0;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1350" y="40" width="120" height="2100" as="geometry"/>
+        </mxCell>
+        
+        <!-- Messages -->
+        <mxCell id="msg1" value='query { authors(where: {age: {gt: 18}}) { id name books { title } } }' style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="client" target="graphql-handler">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="90" y="140" as="sourcePoint"/>
+            <mxPoint x="260" y="140" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation1" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="255" y="160" width="10" height="220" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self1" value="ParseQuery (gqlparser)" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="180" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="330" y="180"/>
+              <mxPoint x="330" y="210"/>
+            </Array>
+            <mxPoint x="265" y="210" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self2" value="Validate Schema" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="230" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="330" y="230"/>
+              <mxPoint x="330" y="260"/>
+            </Array>
+            <mxPoint x="265" y="260" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg2" value="AnalyzeQuery()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="complexity">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="300" as="sourcePoint"/>
+            <mxPoint x="425" y="300" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation2" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="420" y="320" width="10" height="140" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self3" value="Calculate Depth (2 levels)" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="430" y="340" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="510" y="340"/>
+              <mxPoint x="510" y="370"/>
+            </Array>
+            <mxPoint x="430" y="370" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self4" value="Calculate Breadth (3 fields)" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="430" y="390" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="520" y="390"/>
+              <mxPoint x="520" y="420"/>
+            </Array>
+            <mxPoint x="430" y="420" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self5" value="Calculate Complexity Score" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="430" y="440" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="520" y="440"/>
+            </Array>
+            <mxPoint x="430" y="450" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg3" value="return ComplexityResult{depth:2, breadth:3, score:15}" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="complexity" target="graphql-handler">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="425" y="480" as="sourcePoint"/>
+            <mxPoint x="260" y="480" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Alternative for Complexity Check -->
+        <mxCell id="alt1" value="alt" style="shape=umlFrame;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="180" y="500" width="300" height="100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="alt-label1" value="[Complexity > Role Limit]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="190" y="505" width="150" height="20" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg4" value="Error: Query too complex" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;strokeColor=#b85450;" edge="1" parent="1" source="graphql-handler" target="client">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="260" y="550" as="sourcePoint"/>
+            <mxPoint x="90" y="550" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg5" value="CheckRateLimit(user, cost)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="rate-limiter">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="620" as="sourcePoint"/>
+            <mxPoint x="590" y="620" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation3" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="585" y="640" width="10" height="100" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self6" value="Get Token Bucket" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="595" y="660" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="660" y="660"/>
+              <mxPoint x="660" y="690"/>
+            </Array>
+            <mxPoint x="595" y="690" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self7" value="Consume Tokens" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="595" y="710" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="660" y="710"/>
+            </Array>
+            <mxPoint x="595" y="730" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Alternative for Rate Limit -->
+        <mxCell id="alt2" value="alt" style="shape=umlFrame;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="180" y="760" width="430" height="120" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="alt-label2" value="[Rate Limit Exceeded]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="190" y="765" width="150" height="20" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg6" value="Error: Rate limited" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;strokeColor=#b85450;" edge="1" parent="1" source="rate-limiter" target="graphql-handler">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="590" y="800" as="sourcePoint"/>
+            <mxPoint x="260" y="800" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg7" value="Error: Too many requests" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;strokeColor=#b85450;" edge="1" parent="1" source="graphql-handler" target="client">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="260" y="840" as="sourcePoint"/>
+            <mxPoint x="90" y="840" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="divider1" value="" style="line;strokeWidth=1;fillColor=none;align=left;verticalAlign=middle;spacingTop=-1;spacingLeft=3;spacingRight=3;rotatable=0;labelPosition=right;points=[];portConstraint=eastwest;strokeColor=#666666;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="180" y="860" width="430" height="8" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg8" value="return OK" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="rate-limiter" target="graphql-handler">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="590" y="900" as="sourcePoint"/>
+            <mxPoint x="260" y="900" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg9" value="StartTimeout(roleLimit)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="timeout-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="940" as="sourcePoint"/>
+            <mxPoint x="755" y="940" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self8" value="Create Context with Deadline" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="760" y="960" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="840" y="960"/>
+            </Array>
+            <mxPoint x="760" y="980" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg10" value="RecordQueryStart()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="query-monitor">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="1020" as="sourcePoint"/>
+            <mxPoint x="920" y="1020" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="activation4" value="" style="html=1;points=[];perimeter=orthogonalPerimeter;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="255" y="1060" width="10" height="220" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="self9" value="Create DataLoader Context" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="1080" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="350" y="1080"/>
+              <mxPoint x="350" y="1110"/>
+            </Array>
+            <mxPoint x="265" y="1110" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self10" value="Translate WHERE to WhereGroup" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="265" y="1130" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="370" y="1130"/>
+              <mxPoint x="370" y="1160"/>
+            </Array>
+            <mxPoint x="265" y="1160" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg11" value="ExecuteQuery(SyndrQL)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="command-director">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="1200" as="sourcePoint"/>
+            <mxPoint x="1085" y="1200" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg12" value="Execute with Plan" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="command-director" target="bundle-svc">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1085" y="1240" as="sourcePoint"/>
+            <mxPoint x="1410" y="1240" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg13" value="return Authors Results" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="bundle-svc" target="command-director">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1410" y="1280" as="sourcePoint"/>
+            <mxPoint x="1085" y="1280" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg14" value="return Results" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="command-director" target="graphql-handler">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1085" y="1320" as="sourcePoint"/>
+            <mxPoint x="260" y="1320" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- Loop for DataLoader -->
+        <mxCell id="loop1" value="loop" style="shape=umlFrame;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="180" y="1360" width="350" height="160" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="loop-label" value="[For Each Author]" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="190" y="1365" width="120" height="20" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="msg15" value='Load("books", author.id)' style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="dataloader">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="1400" as="sourcePoint"/>
+            <mxPoint x="1250" y="1400" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="self11" value="Batch Request" style="html=1;align=left;spacingLeft=2;endArrow=block;rounded=0;edgeStyle=orthogonalEdgeStyle;curved=0;rounded=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1255" y="1440" as="sourcePoint"/>
+            <Array as="points">
+              <mxPoint x="1310" y="1440"/>
+            </Array>
+            <mxPoint x="1255" y="1480" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg16" value="GetRelatedDocuments(batchIDs)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="dataloader" target="bundle-svc">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="1250" y="1540" as="sourcePoint"/>
+            <mxPoint x="1410" y="1540" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg17" value="return Books for All Authors" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="bundle-svc" target="dataloader">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1410" y="1580" as="sourcePoint"/>
+            <mxPoint x="1250" y="1580" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg18" value="return Resolved Books" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="dataloader" target="graphql-handler">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1250" y="1620" as="sourcePoint"/>
+            <mxPoint x="260" y="1620" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg19" value="RecordQueryComplete(success, duration)" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="query-monitor">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="1680" as="sourcePoint"/>
+            <mxPoint x="920" y="1680" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg20" value="CancelTimeout()" style="html=1;verticalAlign=bottom;endArrow=block;rounded=0;" edge="1" parent="1" source="graphql-handler" target="timeout-mgr">
+          <mxGeometry width="80" relative="1" as="geometry">
+            <mxPoint x="260" y="1720" as="sourcePoint"/>
+            <mxPoint x="755" y="1720" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        
+        <mxCell id="msg21" value="JSON Response" style="html=1;verticalAlign=bottom;endArrow=open;dashed=1;endSize=8;rounded=0;" edge="1" parent="1" source="graphql-handler" target="client">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="260" y="1780" as="sourcePoint"/>
+            <mxPoint x="90" y="1780" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

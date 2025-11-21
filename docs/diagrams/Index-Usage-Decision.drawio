@@ -1,0 +1,343 @@
+<mxfile host="app.diagrams.net" modified="2025-11-20T12:00:00.000Z" agent="draw.io" version="22.1.0">
+  <diagram name="Index Usage Decision Flow" id="index-decision-flow">
+    <mxGraphModel dx="1434" dy="844" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        
+        <!-- Start -->
+        <mxCell id="start" value="WHERE Clause Received" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="450" y="40" width="200" height="60" as="geometry"/>
+        </mxCell>
+        
+        <!-- Analyze Condition -->
+        <mxCell id="analyze" value="Analyze Condition Type" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="470" y="140" width="160" height="80" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge1" edge="1" parent="1" source="start" target="analyze">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Equality Check -->
+        <mxCell id="equality" value="Equality (=)?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" vertex="1" parent="1">
+          <mxGeometry x="80" y="280" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <!-- Range Check -->
+        <mxCell id="range" value="Range (&gt;, &lt;, BETWEEN)?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6" vertex="1" parent="1">
+          <mxGeometry x="280" y="280" width="160" height="70" as="geometry"/>
+        </mxCell>
+        
+        <!-- IN Check -->
+        <mxCell id="in-clause" value="IN (list)?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450" vertex="1" parent="1">
+          <mxGeometry x="500" y="280" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <!-- Expression Check -->
+        <mxCell id="expression" value="Complex Expression?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00" vertex="1" parent="1">
+          <mxGeometry x="700" y="280" width="160" height="70" as="geometry"/>
+        </mxCell>
+        
+        <!-- Pattern Match -->
+        <mxCell id="pattern" value="LIKE Pattern?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="920" y="280" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge2" value="Equality" edge="1" parent="1" source="analyze" target="equality">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge3" value="Range" edge="1" parent="1" source="analyze" target="range">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge4" value="IN" edge="1" parent="1" source="analyze" target="in-clause">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge5" value="Expression" edge="1" parent="1" source="analyze" target="expression">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge6" value="Pattern" edge="1" parent="1" source="analyze" target="pattern">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Equality Path -->
+        <mxCell id="check-hash" value="Hash Index on Field?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" vertex="1" parent="1">
+          <mxGeometry x="70" y="420" width="160" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge7" edge="1" parent="1" source="equality" target="check-hash">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="use-hash" value="Use Hash Index\n(O(1) lookup)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="20" y="560" width="130" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="check-btree-eq" value="BTree Index?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf" vertex="1" parent="1">
+          <mxGeometry x="180" y="560" width="120" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge8" value="Yes" edge="1" parent="1" source="check-hash" target="use-hash">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge9" value="No" edge="1" parent="1" source="check-hash" target="check-btree-eq">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="use-btree-eq" value="Use BTree Lookup\n(O(log n))" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="170" y="680" width="140" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="full-scan-eq" value="Full Scan + Filter" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" vertex="1" parent="1">
+          <mxGeometry x="330" y="680" width="130" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge10" value="Yes" edge="1" parent="1" source="check-btree-eq" target="use-btree-eq">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge11" value="No" edge="1" parent="1" source="check-btree-eq" target="full-scan-eq">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Range Path -->
+        <mxCell id="check-btree-range" value="BTree Index?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6" vertex="1" parent="1">
+          <mxGeometry x="290" y="420" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge12" edge="1" parent="1" source="range" target="check-btree-range">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="use-btree-range" value="BTree Range Scan\n(O(log n + k))" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="230" y="560" width="140" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="estimate-card" value="Estimate Cardinality" style="rhombus;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6" vertex="1" parent="1">
+          <mxGeometry x="400" y="560" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge13" value="Yes" edge="1" parent="1" source="check-btree-range" target="use-btree-range">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge14" value="No" edge="1" parent="1" source="check-btree-range" target="estimate-card">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="scan-with-filter" value="Full Scan + Range Filter" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" vertex="1" parent="1">
+          <mxGeometry x="400" y="680" width="140" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge15" value="High %" edge="1" parent="1" source="estimate-card" target="scan-with-filter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge16" edge="1" parent="1" source="use-btree-range" target="scan-with-filter">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="300" y="660"/>
+              <mxPoint x="470" y="660"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        
+        <!-- IN Path -->
+        <mxCell id="check-list-size" value="List Size?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450" vertex="1" parent="1">
+          <mxGeometry x="505" y="420" width="130" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge17" edge="1" parent="1" source="in-clause" target="check-list-size">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="multi-hash" value="Multiple Hash Lookups" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="460" y="560" width="140" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="btree-batch" value="BTree Batch Lookup" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="620" y="560" width="140" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge18" value="Small (&lt;10)" edge="1" parent="1" source="check-list-size" target="multi-hash">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge19" value="Large" edge="1" parent="1" source="check-list-size" target="btree-batch">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Expression Path -->
+        <mxCell id="check-indexed-expr" value="Indexed Expression?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00" vertex="1" parent="1">
+          <mxGeometry x="710" y="420" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge20" edge="1" parent="1" source="expression" target="check-indexed-expr">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="use-expr-index" value="Expression Index Scan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="660" y="560" width="140" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="eval-expr" value="Full Scan +\nExpression Eval" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" vertex="1" parent="1">
+          <mxGeometry x="820" y="560" width="140" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge21" value="Yes" edge="1" parent="1" source="check-indexed-expr" target="use-expr-index">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge22" value="No" edge="1" parent="1" source="check-indexed-expr" target="eval-expr">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Pattern Path -->
+        <mxCell id="check-prefix" value="Prefix Match?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="925" y="420" width="130" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge23" edge="1" parent="1" source="pattern" target="check-prefix">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="btree-prefix" value="BTree Prefix Scan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="860" y="560" width="130" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="full-text-search" value="Full Text Index?\n(if available)" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656" vertex="1" parent="1">
+          <mxGeometry x="1010" y="555" width="140" height="70" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge24" value="Yes (abc%)" edge="1" parent="1" source="check-prefix" target="btree-prefix">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge25" value="No (%abc%)" edge="1" parent="1" source="check-prefix" target="full-text-search">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="use-fts" value="Full Text Scan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366" vertex="1" parent="1">
+          <mxGeometry x="980" y="680" width="120" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="pattern-scan" value="Full Scan + LIKE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666" vertex="1" parent="1">
+          <mxGeometry x="1120" y="680" width="120" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge26" value="Yes" edge="1" parent="1" source="full-text-search" target="use-fts">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge27" value="No" edge="1" parent="1" source="full-text-search" target="pattern-scan">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Cost Estimation -->
+        <mxCell id="cost-estimate" value="Compare Cost Estimates" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="470" y="820" width="180" height="60" as="geometry"/>
+        </mxCell>
+        
+        <!-- Connect all terminal nodes to cost estimation -->
+        <mxCell id="edge28" edge="1" parent="1" source="use-hash" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge29" edge="1" parent="1" source="use-btree-eq" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge30" edge="1" parent="1" source="full-scan-eq" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge31" edge="1" parent="1" source="scan-with-filter" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge32" edge="1" parent="1" source="multi-hash" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge33" edge="1" parent="1" source="btree-batch" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge34" edge="1" parent="1" source="use-expr-index" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge35" edge="1" parent="1" source="eval-expr" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge36" edge="1" parent="1" source="btree-prefix" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge37" edge="1" parent="1" source="use-fts" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge38" edge="1" parent="1" source="pattern-scan" target="cost-estimate">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Final Decision -->
+        <mxCell id="select-best" value="Select Lowest Cost Plan" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="450" y="940" width="200" height="60" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="edge39" edge="1" parent="1" source="cost-estimate" target="select-best">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        
+        <!-- Add Legend -->
+        <mxCell id="legend" value="Legend" style="swimlane;fontStyle=1;align=center;verticalAlign=top;childLayout=stackLayout;horizontal=1;startSize=26;horizontalStack=0;resizeParent=1;resizeParentMax=0;resizeLast=0;collapsible=1;marginBottom=0;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1040" width="200" height="240" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend1" value="Hash Index: O(1)" style="text;strokeColor=#82b366;fillColor=#d5e8d4;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="legend">
+          <mxGeometry y="26" width="200" height="26" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend2" value="BTree Index: O(log n)" style="text;strokeColor=#82b366;fillColor=#d5e8d4;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="legend">
+          <mxGeometry y="52" width="200" height="26" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend3" value="Range Scan: O(log n + k)" style="text;strokeColor=#82b366;fillColor=#d5e8d4;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="legend">
+          <mxGeometry y="78" width="200" height="26" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend4" value="Full Scan: O(n)" style="text;strokeColor=#666666;fillColor=#f5f5f5;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;" vertex="1" parent="legend">
+          <mxGeometry y="104" width="200" height="26" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend5" value="" style="line;strokeWidth=1;fillColor=none;align=left;verticalAlign=middle;spacingTop=-1;spacingLeft=3;spacingRight=3;rotatable=0;labelPosition=right;points=[];portConstraint=eastwest;strokeColor=#666666;" vertex="1" parent="legend">
+          <mxGeometry y="130" width="200" height="8" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend6" value="k = result set size" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontStyle=2" vertex="1" parent="legend">
+          <mxGeometry y="138" width="200" height="26" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend7" value="n = total documents" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontStyle=2" vertex="1" parent="legend">
+          <mxGeometry y="164" width="200" height="26" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend8" value="" style="line;strokeWidth=1;fillColor=none;align=left;verticalAlign=middle;spacingTop=-1;spacingLeft=3;spacingRight=3;rotatable=0;labelPosition=right;points=[];portConstraint=eastwest;strokeColor=#666666;" vertex="1" parent="legend">
+          <mxGeometry y="190" width="200" height="8" as="geometry"/>
+        </mxCell>
+        
+        <mxCell id="legend9" value="Cost = IO + CPU + Memory" style="text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;spacingLeft=4;spacingRight=4;overflow=hidden;rotatable=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontStyle=3" vertex="1" parent="legend">
+          <mxGeometry y="198" width="200" height="42" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
