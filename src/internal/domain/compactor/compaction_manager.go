@@ -858,3 +858,293 @@ func (cm *CompactionManager) writeBundleDocument(file *os.File, doc *models.Docu
 
 	return n1 + n2, nil
 }
+
+// ----- BUCKET-AWARE COMPACTION (Phase 4: xxHash Optimization) -----
+
+// CompactBucketFiles compacts all files for a specific bucket
+// This enables parallel compaction across buckets for better performance
+//
+// Parameters:
+//   - fieldName: Name of the indexed field
+//   - isForeignKey: Whether this is a foreign key index
+//   - bucketNum: Bucket number to compact
+//   - bucketFiles: List of bucket files to compact (absolute paths)
+//
+// Returns the path to the compacted file and any error
+func (cm *CompactionManager) CompactBucketFiles(fieldName string, isForeignKey bool, bucketNum uint32, bucketFiles []string) (string, error) {
+	if len(bucketFiles) == 0 {
+		return "", fmt.Errorf("no files to compact for bucket %d", bucketNum)
+	}
+
+	// Check if already compacting (single-threaded safety check)
+	// Note: For parallel compaction, each bucket gets its own goroutine
+	cm.mutex.Lock()
+	if cm.compacting {
+		cm.mutex.Unlock()
+		return "", fmt.Errorf("compaction already in progress for bucket %d", bucketNum)
+	}
+	cm.compacting = true
+	cm.mutex.Unlock()
+
+	defer func() {
+		cm.mutex.Lock()
+		cm.compacting = false
+		cm.mutex.Unlock()
+	}()
+
+	startTime := time.Now()
+
+	cm.logger.Infow("Starting bucket compaction",
+		"fieldName", fieldName,
+		"isForeignKey", isForeignKey,
+		"bucketNum", bucketNum,
+		"fileCount", len(bucketFiles))
+
+	// Perform compaction
+	compactedFile, stats, err := cm.compactBucketFilesInternal(fieldName, isForeignKey, bucketNum, bucketFiles)
+
+	duration := time.Since(startTime)
+
+	// Update statistics
+	cm.updateStats(stats, duration, err)
+
+	if err != nil {
+		cm.logger.Errorw("Bucket compaction failed",
+			"fieldName", fieldName,
+			"bucketNum", bucketNum,
+			"duration", duration,
+			"error", err)
+		return "", err
+	}
+
+	cm.logger.Infow("Bucket compaction completed",
+		"fieldName", fieldName,
+		"bucketNum", bucketNum,
+		"duration", duration,
+		"inputFiles", len(bucketFiles),
+		"outputFile", compactedFile,
+		"entriesKept", stats.TotalEntriesKept,
+		"entriesRemoved", stats.TotalEntriesRemoved)
+
+	return compactedFile, nil
+}
+
+// compactBucketFilesInternal performs the actual bucket compaction logic
+// Separated from main function for cleaner error handling
+func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isForeignKey bool, bucketNum uint32, bucketFiles []string) (string, CompactionStats, error) {
+	stats := CompactionStats{}
+
+	// Sort files by entry number (ensures temporal ordering within bucket)
+	sortedFiles := make([]string, len(bucketFiles))
+	copy(sortedFiles, bucketFiles)
+	sort.Strings(sortedFiles)
+
+	// Create temporary output file
+	fkSuffix := ""
+	if isForeignKey {
+		fkSuffix = "_fk"
+	}
+	outputFileName := fmt.Sprintf("%s%s_bucket_%06d_compacted_%d.hidx.tmp", fieldName, fkSuffix, bucketNum, time.Now().UnixNano())
+	outputFilePath := filepath.Join(cm.dataDir, outputFileName)
+
+	outputFile, err := os.Create(outputFilePath)
+	if err != nil {
+		return "", stats, fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	// Track unique keys and their latest entries
+	// Map: key -> latest entry
+	latestEntries := make(map[string]*hashIndexEntryWrapper)
+
+	// Read all entries from all files
+	// Latest file wins for duplicate keys
+	for _, filePath := range sortedFiles {
+		entries, err := cm.readEntriesFromFile(filePath)
+		if err != nil {
+			return "", stats, fmt.Errorf("failed to read entries from %s: %w", filePath, err)
+		}
+
+		stats.TotalFilesCompacted++
+
+		// Process entries - latest wins
+		for _, entry := range entries {
+			// Verify entry belongs to this bucket (sanity check)
+			if entry.BucketNum != bucketNum {
+				cm.logger.Warnw("Entry has wrong bucket number, skipping",
+					"expectedBucket", bucketNum,
+					"actualBucket", entry.BucketNum,
+					"key", entry.KeyValue,
+					"file", filePath)
+				continue
+			}
+
+			wrapper := &hashIndexEntryWrapper{
+				entry:    entry,
+				filePath: filePath,
+			}
+
+			existing, exists := latestEntries[entry.KeyValue]
+			if !exists {
+				// First time seeing this key
+				latestEntries[entry.KeyValue] = wrapper
+			} else {
+				// Compare timestamps/sequences to determine latest
+				if cm.isNewer(entry, existing.entry) {
+					latestEntries[entry.KeyValue] = wrapper
+					stats.TotalEntriesRemoved++ // Old version removed
+				} else {
+					stats.TotalEntriesRemoved++ // Current entry is old, discard
+				}
+			}
+		}
+	}
+
+	// Write non-tombstone entries to output file
+	var entriesToWrite []*hashindexV3.HashIndexEntry
+	for _, wrapper := range latestEntries {
+		if wrapper.entry.Deleted {
+			// Skip tombstones - they can be removed during compaction
+			stats.TotalEntriesRemoved++
+		} else {
+			entriesToWrite = append(entriesToWrite, wrapper.entry)
+			stats.TotalEntriesKept++
+		}
+	}
+
+	// Sort entries by key for better locality
+	sort.Slice(entriesToWrite, func(i, j int) bool {
+		return entriesToWrite[i].KeyValue < entriesToWrite[j].KeyValue
+	})
+
+	// Write entries to output file
+	for _, entry := range entriesToWrite {
+		data, err := cm.serializeEntry(entry)
+		if err != nil {
+			return "", stats, fmt.Errorf("failed to serialize entry: %w", err)
+		}
+
+		n, err := outputFile.Write(data)
+		if err != nil {
+			return "", stats, fmt.Errorf("failed to write entry: %w", err)
+		}
+
+		stats.TotalBytesWritten += uint64(n)
+	}
+
+	// Sync to disk
+	if err := outputFile.Sync(); err != nil {
+		return "", stats, fmt.Errorf("failed to sync output file: %w", err)
+	}
+
+	// Close output file before rename
+	outputFile.Close()
+
+	// Generate final file name with bucket-aware format
+	// Format: FieldName(_fk)?_bucket_NNNNNN_entry_000000.hidx
+	finalFileName := fmt.Sprintf("%s%s_bucket_%06d_entry_000000.hidx", fieldName, fkSuffix, bucketNum)
+	finalFilePath := filepath.Join(cm.dataDir, finalFileName)
+
+	// Rename temp file to final name (atomic on most systems)
+	if err := os.Rename(outputFilePath, finalFilePath); err != nil {
+		// Clean up temp file
+		os.Remove(outputFilePath)
+		return "", stats, fmt.Errorf("failed to rename output file: %w", err)
+	}
+
+	cm.logger.Infow("Compacted bucket file created",
+		"outputFile", finalFilePath,
+		"bucketNum", bucketNum,
+		"entriesKept", stats.TotalEntriesKept,
+		"entriesRemoved", stats.TotalEntriesRemoved,
+		"bytesWritten", stats.TotalBytesWritten)
+
+	return finalFilePath, stats, nil
+}
+
+// CompactAllBucketsParallel compacts all buckets in parallel
+// This provides significant performance improvement for large indexes
+//
+// Parameters:
+//   - fieldName: Name of the indexed field
+//   - isForeignKey: Whether this is a foreign key index
+//   - bucketFileMap: Map of bucketNum -> list of files for that bucket
+//   - maxConcurrency: Maximum number of parallel compactions (e.g., 256 for all buckets)
+//
+// Returns:
+//   - compactedFiles: Map of bucketNum -> compacted file path
+//   - errors: Map of bucketNum -> error (if any)
+func (cm *CompactionManager) CompactAllBucketsParallel(fieldName string, isForeignKey bool, bucketFileMap map[uint32][]string, maxConcurrency int) (map[uint32]string, map[uint32]error) {
+	if maxConcurrency <= 0 {
+		maxConcurrency = 4 // Default concurrency
+	}
+
+	compactedFiles := make(map[uint32]string)
+	errors := make(map[uint32]error)
+
+	// Use channel to limit concurrency
+	semaphore := make(chan struct{}, maxConcurrency)
+
+	// Use wait group to wait for all compactions
+	var wg sync.WaitGroup
+	var resultMutex sync.Mutex
+
+	cm.logger.Infow("Starting parallel bucket compaction",
+		"fieldName", fieldName,
+		"totalBuckets", len(bucketFileMap),
+		"maxConcurrency", maxConcurrency)
+
+	startTime := time.Now()
+
+	for bucketNum, files := range bucketFileMap {
+		if len(files) == 0 {
+			continue // Skip empty buckets
+		}
+
+		wg.Add(1)
+		go func(bNum uint32, bFiles []string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			// Compact this bucket
+			// Note: We temporarily disable the compacting flag check for parallel compaction
+			cm.mutex.Lock()
+			wasCompacting := cm.compacting
+			cm.compacting = false // Allow parallel operations
+			cm.mutex.Unlock()
+
+			compactedFile, err := cm.CompactBucketFiles(fieldName, isForeignKey, bNum, bFiles)
+
+			// Restore compacting state
+			cm.mutex.Lock()
+			cm.compacting = wasCompacting
+			cm.mutex.Unlock()
+
+			// Store results
+			resultMutex.Lock()
+			if err != nil {
+				errors[bNum] = err
+			} else {
+				compactedFiles[bNum] = compactedFile
+			}
+			resultMutex.Unlock()
+		}(bucketNum, files)
+	}
+
+	// Wait for all compactions to complete
+	wg.Wait()
+
+	duration := time.Since(startTime)
+
+	cm.logger.Infow("Parallel bucket compaction completed",
+		"fieldName", fieldName,
+		"totalBuckets", len(bucketFileMap),
+		"successfulBuckets", len(compactedFiles),
+		"failedBuckets", len(errors),
+		"duration", duration)
+
+	return compactedFiles, errors
+}

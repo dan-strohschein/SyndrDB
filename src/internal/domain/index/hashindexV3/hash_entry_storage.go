@@ -69,6 +69,198 @@ const (
 	EntryFileSuffix = "_%s_%06d" + EntryFileExtension
 )
 
+// ----- BUCKET-AWARE STORAGE (Phase 2: xxHash Optimization) -----
+
+// BucketFileHandle manages a single bucket's file and write buffer
+type BucketFileHandle struct {
+	BucketNum      uint32        // Bucket number (0 to NumBuckets-1)
+	CurrentFile    *os.File      // Currently active file for writes
+	CurrentFileNum int           // Current file number within bucket
+	CurrentSize    int64         // Current size of active file
+	WriteBuffer    *bufio.Writer // Buffered writer for performance
+	AllFiles       []string      // List of all files for this bucket (oldest to newest)
+	Mutex          sync.RWMutex  // Protects file operations for this bucket
+}
+
+// BucketFileManager manages per-bucket file handles for optimized writes
+// Enables O(1) bucket lookup and parallel compaction
+type BucketFileManager struct {
+	buckets         map[uint32]*BucketFileHandle // Map of bucket number to file handle
+	numBuckets      uint32                       // Total number of buckets
+	bucketMaxSize   int64                        // Max file size per bucket file
+	writeBufferSize int                          // Write buffer size
+	fieldName       string                       // Field name for file naming
+	isForeignKey    bool                         // Whether this is a foreign key index
+	namingHelper    *FileNamingHelper            // File naming utilities
+	globalMutex     sync.RWMutex                 // Protects buckets map
+	logger          *zap.SugaredLogger           // Logger
+}
+
+// NewBucketFileManager creates a new bucket file manager
+func NewBucketFileManager(numBuckets uint32, bucketMaxSize int64, writeBufferSize int,
+	fieldName string, isForeignKey bool, namingHelper *FileNamingHelper,
+	logger *zap.SugaredLogger) *BucketFileManager {
+
+	return &BucketFileManager{
+		buckets:         make(map[uint32]*BucketFileHandle),
+		numBuckets:      numBuckets,
+		bucketMaxSize:   bucketMaxSize,
+		writeBufferSize: writeBufferSize,
+		fieldName:       fieldName,
+		isForeignKey:    isForeignKey,
+		namingHelper:    namingHelper,
+		logger:          logger,
+	}
+}
+
+// GetOrCreateBucketHandle gets or creates a file handle for a bucket
+// Thread-safe lazy initialization
+func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*BucketFileHandle, error) {
+	// Fast path: read lock first
+	bfm.globalMutex.RLock()
+	handle, exists := bfm.buckets[bucketNum]
+	bfm.globalMutex.RUnlock()
+
+	if exists {
+		return handle, nil
+	}
+
+	// Slow path: write lock and create
+	bfm.globalMutex.Lock()
+	defer bfm.globalMutex.Unlock()
+
+	// Double-check after acquiring write lock
+	if handle, exists := bfm.buckets[bucketNum]; exists {
+		return handle, nil
+	}
+
+	// Create new bucket handle
+	handle = &BucketFileHandle{
+		BucketNum:      bucketNum,
+		CurrentFileNum: 0,
+		CurrentSize:    0,
+		AllFiles:       make([]string, 0),
+	}
+
+	// Discover existing files for this bucket
+	existingFiles, err := bfm.namingHelper.GetBucketFiles(bfm.fieldName, bfm.isForeignKey, bucketNum)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover bucket files: %w", err)
+	}
+
+	if len(existingFiles) > 0 {
+		// Sort files by file number
+		sort.Strings(existingFiles)
+		handle.AllFiles = existingFiles
+
+		// Parse latest file number
+		parsed := bfm.namingHelper.ParseBucketIndexFileName(existingFiles[len(existingFiles)-1])
+		if parsed.IsValid {
+			handle.CurrentFileNum = parsed.FileNumber + 1 // Next file number
+		}
+	}
+
+	// Open current file for writing
+	if err := bfm.openBucketFile(handle); err != nil {
+		return nil, fmt.Errorf("failed to open bucket file: %w", err)
+	}
+
+	bfm.buckets[bucketNum] = handle
+	return handle, nil
+}
+
+// openBucketFile opens a new file for a bucket
+func (bfm *BucketFileManager) openBucketFile(handle *BucketFileHandle) error {
+	filePath := bfm.namingHelper.GenerateBucketIndexFilePath(
+		bfm.fieldName,
+		bfm.isForeignKey,
+		handle.BucketNum,
+		handle.CurrentFileNum,
+	)
+
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open file %s: %w", filePath, err)
+	}
+
+	// Get current file size
+	stat, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	handle.CurrentFile = file
+	handle.CurrentSize = stat.Size()
+	handle.WriteBuffer = bufio.NewWriterSize(file, bfm.writeBufferSize)
+	handle.AllFiles = append(handle.AllFiles, filePath)
+
+	return nil
+}
+
+// rotateBucketFile rotates to a new file for a bucket
+func (bfm *BucketFileManager) rotateBucketFile(handle *BucketFileHandle) error {
+	// Flush and close current file
+	if handle.WriteBuffer != nil {
+		if err := handle.WriteBuffer.Flush(); err != nil {
+			return fmt.Errorf("failed to flush before rotation: %w", err)
+		}
+	}
+
+	if handle.CurrentFile != nil {
+		if err := handle.CurrentFile.Close(); err != nil {
+			return fmt.Errorf("failed to close file before rotation: %w", err)
+		}
+	}
+
+	// Increment file number and open new file
+	handle.CurrentFileNum++
+	handle.CurrentSize = 0
+
+	if err := bfm.openBucketFile(handle); err != nil {
+		return fmt.Errorf("failed to open new bucket file: %w", err)
+	}
+
+	if bfm.logger != nil {
+		bfm.logger.Debugw("Rotated bucket file",
+			"fieldName", bfm.fieldName,
+			"bucketNum", handle.BucketNum,
+			"newFileNum", handle.CurrentFileNum)
+	}
+
+	return nil
+}
+
+// CloseAll closes all bucket file handles
+func (bfm *BucketFileManager) CloseAll() error {
+	bfm.globalMutex.Lock()
+	defer bfm.globalMutex.Unlock()
+
+	var firstErr error
+	for bucketNum, handle := range bfm.buckets {
+		handle.Mutex.Lock()
+
+		// Flush and close
+		if handle.WriteBuffer != nil {
+			if err := handle.WriteBuffer.Flush(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("failed to flush bucket %d: %w", bucketNum, err)
+			}
+		}
+
+		if handle.CurrentFile != nil {
+			if err := handle.CurrentFile.Close(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("failed to close bucket %d: %w", bucketNum, err)
+			}
+		}
+
+		handle.Mutex.Unlock()
+	}
+
+	return firstErr
+}
+
+// ----- END BUCKET-AWARE STORAGE -----
+
 // EntryStorage manages append-only entry files for hash indexes
 // Follows Single Responsibility Principle: Only handles entry persistence
 type EntryStorage struct {
@@ -104,6 +296,12 @@ type EntryStorage struct {
 	headerManager *HeaderManager
 	namingHelper  *FileNamingHelper
 
+	// Bucket-aware storage (Phase 2: xxHash Optimization)
+	useBuckets        bool               // Enable bucket-based file organization
+	bucketFileManager *BucketFileManager // Manages per-bucket file handles
+	numBuckets        uint32             // Number of buckets
+	bucketFileMaxSize int64              // Max file size per bucket
+
 	// Statistics
 	totalEntries uint64    // Total entries written
 	totalBytes   uint64    // Total bytes written
@@ -134,6 +332,11 @@ type EntryStorageConfig struct {
 	// Foreign key relationship (only if IsForeignKey == true)
 	ReferencedBundle string // Target bundle name
 	ReferencedField  string // Target field name
+
+	// Bucket configuration (Phase 2: xxHash Optimization)
+	UseBuckets        bool   // Enable bucket-based file organization
+	NumBuckets        uint32 // Number of buckets (default: 256)
+	BucketFileMaxSize int64  // Max file size per bucket (default: 64MB)
 
 	Logger *zap.SugaredLogger
 }
@@ -175,6 +378,14 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 	if config.WriteBufferSize <= 0 {
 		config.WriteBufferSize = DefaultWriteBufferSize
 	}
+	if config.UseBuckets {
+		if config.NumBuckets == 0 {
+			config.NumBuckets = 256 // Default 256 buckets
+		}
+		if config.BucketFileMaxSize == 0 {
+			config.BucketFileMaxSize = 64 * 1024 * 1024 // 64MB default
+		}
+	}
 
 	// Create data directory if it doesn't exist
 	// config.DataDir already contains: data_files/<Database>/<Bundle>/indexes
@@ -201,6 +412,22 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 		namingHelper:             NewFileNamingHelper(config.DataDir, config.BundleName),
 		entriesSinceHeaderUpdate: 0,
 		headerUpdateInterval:     100, // Update header every 100 entries
+		useBuckets:               config.UseBuckets,
+		numBuckets:               config.NumBuckets,
+		bucketFileMaxSize:        config.BucketFileMaxSize,
+	}
+
+	// Initialize bucket file manager if buckets are enabled
+	if storage.useBuckets {
+		storage.bucketFileManager = NewBucketFileManager(
+			storage.numBuckets,
+			storage.bucketFileMaxSize,
+			storage.writeBufferSize,
+			storage.fieldName,
+			storage.isForeignKey,
+			storage.namingHelper,
+			storage.logger,
+		)
 	}
 
 	// Discover existing files
@@ -228,6 +455,7 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 
 // AppendEntry appends a new entry to the current file
 // This is the main write path for LSM index entries
+// Routes to bucket-aware writes if buckets are enabled
 //
 // Parameters:
 //   - entry: The entry to append
@@ -238,6 +466,12 @@ func (es *EntryStorage) AppendEntry(entry *HashIndexEntry) error {
 		return fmt.Errorf("cannot append nil entry")
 	}
 
+	// Route to bucket-aware write if buckets enabled
+	if es.useBuckets {
+		return es.appendEntryToBucket(entry)
+	}
+
+	// Legacy non-bucketed write path
 	es.fileMutex.Lock()
 	defer es.fileMutex.Unlock()
 
@@ -275,6 +509,62 @@ func (es *EntryStorage) AppendEntry(entry *HashIndexEntry) error {
 	es.currentFileSize += int64(n)
 	es.totalEntries++
 	es.totalBytes += uint64(n)
+
+	return nil
+}
+
+// appendEntryToBucket appends entry to bucket-specific file
+// Uses BucketNum field from entry to route to correct bucket
+//
+// Parameters:
+//   - entry: The entry to append (must have BucketNum set)
+//
+// Returns error if append fails
+func (es *EntryStorage) appendEntryToBucket(entry *HashIndexEntry) error {
+	// Get or create bucket file handle
+	handle, err := es.bucketFileManager.GetOrCreateBucketHandle(entry.BucketNum)
+	if err != nil {
+		return fmt.Errorf("failed to get bucket handle: %w", err)
+	}
+
+	// Lock this bucket for writing
+	handle.Mutex.Lock()
+	defer handle.Mutex.Unlock()
+
+	// Serialize entry
+	data, err := entry.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to serialize entry: %w", err)
+	}
+
+	// Check if we need to rotate bucket file
+	if handle.CurrentSize+int64(len(data)) > es.bucketFileMaxSize {
+		if err := es.bucketFileManager.rotateBucketFile(handle); err != nil {
+			return fmt.Errorf("failed to rotate bucket file: %w", err)
+		}
+	}
+
+	// Write to bucket's buffer
+	n, err := handle.WriteBuffer.Write(data)
+	if err != nil {
+		return fmt.Errorf("failed to write to bucket: %w", err)
+	}
+
+	if n != len(data) {
+		return fmt.Errorf("partial write: wrote %d bytes, expected %d bytes", n, len(data))
+	}
+
+	// Flush immediately for durability
+	if err := handle.WriteBuffer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush bucket write: %w", err)
+	}
+
+	// Update bucket statistics
+	handle.CurrentSize += int64(n)
+
+	// Update global statistics (atomic for thread safety)
+	atomic.AddUint64(&es.totalEntries, 1)
+	atomic.AddUint64(&es.totalBytes, uint64(n))
 
 	return nil
 }
@@ -488,19 +778,95 @@ func (es *EntryStorage) GetLatestEntry(key string) (*HashIndexEntry, error) {
 	return foundEntry, nil
 }
 
+// ScanBucket scans only files for a specific bucket (Phase 3: Bucket-optimized reads)
+// This is the key optimization: O(1) bucket selection instead of O(n) full scan
+//
+// Parameters:
+//   - bucketNum: The bucket number to scan (computed from hash value)
+//   - visitor: Function called for each entry (return false to stop)
+//
+// Returns error if scan fails
+func (es *EntryStorage) ScanBucket(bucketNum uint32, visitor func(*HashIndexEntry) bool) error {
+	if !es.useBuckets {
+		return fmt.Errorf("bucket scanning not enabled (useBuckets=false)")
+	}
+
+	// Get bucket file handle
+	handle, err := es.bucketFileManager.GetOrCreateBucketHandle(bucketNum)
+	if err != nil {
+		return fmt.Errorf("failed to get bucket handle: %w", err)
+	}
+
+	// Lock bucket for reading
+	handle.Mutex.RLock()
+	defer handle.Mutex.RUnlock()
+
+	// Flush bucket's write buffer to ensure we read latest data
+	if handle.WriteBuffer != nil {
+		if err := handle.WriteBuffer.Flush(); err != nil {
+			return fmt.Errorf("failed to flush bucket before scan: %w", err)
+		}
+	}
+
+	// Scan bucket files from newest to oldest
+	// This ensures we find the most recent version of any key first
+	for i := len(handle.AllFiles) - 1; i >= 0; i-- {
+		filePath := handle.AllFiles[i]
+		if err := es.scanFileBackward(filePath, visitor); err != nil {
+			return fmt.Errorf("failed to scan bucket file %s: %w", filePath, err)
+		}
+	}
+
+	return nil
+}
+
+// GetLatestEntryFromBucket finds latest entry for a key in a specific bucket
+// Optimized version of GetLatestEntry that only scans one bucket
+//
+// Parameters:
+//   - key: The key to search for
+//   - bucketNum: The bucket number (computed from key hash)
+//
+// Returns the latest entry or nil if not found
+func (es *EntryStorage) GetLatestEntryFromBucket(key string, bucketNum uint32) (*HashIndexEntry, error) {
+	var foundEntry *HashIndexEntry
+
+	err := es.ScanBucket(bucketNum, func(entry *HashIndexEntry) bool {
+		// Important: Verify hash matches to detect collisions
+		if entry.KeyValue == key && entry.BucketNum == bucketNum {
+			foundEntry = entry
+			return false // Stop scanning - we found the latest
+		}
+		return true // Continue scanning
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan bucket %d for key %s: %w", bucketNum, key, err)
+	}
+
+	return foundEntry, nil
+}
+
 // Close closes the storage and flushes all data
 func (es *EntryStorage) Close() error {
 	es.fileMutex.Lock()
 	defer es.fileMutex.Unlock()
 
-	// Flush buffer
+	// Close bucket files if using buckets
+	if es.useBuckets && es.bucketFileManager != nil {
+		if err := es.bucketFileManager.CloseAll(); err != nil {
+			return fmt.Errorf("failed to close bucket files: %w", err)
+		}
+	}
+
+	// Flush buffer (legacy non-bucketed mode)
 	if es.writeBuffer != nil {
 		if err := es.writeBuffer.Flush(); err != nil {
 			return fmt.Errorf("failed to flush on close: %w", err)
 		}
 	}
 
-	// Close current file
+	// Close current file (legacy non-bucketed mode)
 	if es.currentFile != nil {
 		if err := es.currentFile.Close(); err != nil {
 			return fmt.Errorf("failed to close file: %w", err)
@@ -512,6 +878,7 @@ func (es *EntryStorage) Close() error {
 		es.logger.Infow("Entry storage closed",
 			"indexName", es.indexName,
 			"bundleName", es.bundleName,
+			"useBuckets", es.useBuckets,
 			"totalEntries", es.totalEntries,
 			"totalBytes", es.totalBytes)
 	}
@@ -873,6 +1240,11 @@ func (es *EntryStorage) scanFileBackward(filePath string, visitor func(*HashInde
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Handle empty files (newly created bucket files with no entries yet)
+	if len(data) == 0 {
+		return nil // No entries to scan
 	}
 
 	// Determine starting offset based on file format

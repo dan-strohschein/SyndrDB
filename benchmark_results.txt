@@ -1,0 +1,15 @@
+goos: darwin
+goarch: arm64
+pkg: syndrdb/src/internal/domain/index/hashindexV3
+cpu: Apple M3 Pro
+BenchmarkDiskLookup_Bucketed-12       	  348606	      9120 ns/op	    109645 ops/sec	    1020 B/op	       7 allocs/op
+BenchmarkDiskLookup_NonBucketed-12    	    4342	    815585 ns/op	      1226 ops/sec	 2134239 B/op	   30014 allocs/op
+BenchmarkBucketLookup_Optimized-12    	  398061	      9085 ns/op	    110075 ops/sec	    4537 B/op	       5 allocs/op
+BenchmarkMixedWorkload_80_20-12       	  394526	      9080 ns/op	    110127 ops/sec	    1020 B/op	       7 allocs/op
+BenchmarkBucketDistribution-12        	1000000000	         2.633 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAppendEntry_Bucketed-12      	 2474794	      1433 ns/op	     224 B/op	       6 allocs/op
+BenchmarkScanBucket-12                	  315832	     11070 ns/op	   29396 B/op	      10 allocs/op
+BenchmarkComparison/Bucketed-12       	  391076	      9157 ns/op	    109211 ops/sec	    1020 B/op	       7 allocs/op
+BenchmarkComparison/NonBucketed-12    	    4338	    813768 ns/op	      1229 ops/sec	 2134236 B/op	   30014 allocs/op
+PASS
+ok  	syndrdb/src/internal/domain/index/hashindexV3	36.541s

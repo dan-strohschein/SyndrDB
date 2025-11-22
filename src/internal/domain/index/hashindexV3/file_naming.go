@@ -283,3 +283,122 @@ func (fnh *FileNamingHelper) ValidateFileName(fileName string) error {
 
 	return nil
 }
+
+// ----- BUCKET-AWARE FILE NAMING (Phase 2: xxHash Optimization) -----
+
+// GenerateBucketIndexFileName generates a bucket-aware file name for hash index
+// Format: {fieldName}_bucket_{bucketNum:06d}_entry_{fileNum:06d}.hidx
+//
+// Examples:
+//   - UserID_bucket_000000_entry_000000.hidx
+//   - Email_fk_bucket_000042_entry_000003.hidx
+//
+// Parameters:
+//   - fieldName: Name of the field being indexed
+//   - isForeignKey: True if this is a foreign key index
+//   - bucketNum: Bucket number (0 to NumBuckets-1)
+//   - fileNumber: File sequence within bucket
+//
+// Returns: filename with bucket organization
+func (fnh *FileNamingHelper) GenerateBucketIndexFileName(fieldName string, isForeignKey bool, bucketNum uint32, fileNumber int) string {
+	var base string
+	if isForeignKey {
+		base = fmt.Sprintf("%s%s", fieldName, ForeignKeySuffix)
+	} else {
+		base = fieldName
+	}
+
+	// Format: base_bucket_NNNNNN_entry_NNNNNN.hidx
+	return fmt.Sprintf("%s_bucket_%06d_entry_%06d%s", base, bucketNum, fileNumber, IndexFileExtension)
+}
+
+// GenerateBucketIndexFilePath generates full path for bucket-aware index file
+func (fnh *FileNamingHelper) GenerateBucketIndexFilePath(fieldName string, isForeignKey bool, bucketNum uint32, fileNumber int) string {
+	fileName := fnh.GenerateBucketIndexFileName(fieldName, isForeignKey, bucketNum, fileNumber)
+	return filepath.Join(fnh.dataDir, fileName)
+}
+
+// ParsedBucketIndexFileName contains metadata from bucket-aware file names
+type ParsedBucketIndexFileName struct {
+	FieldName    string // Name of the indexed field
+	IsForeignKey bool   // Whether this is a foreign key index
+	BucketNum    uint32 // Bucket number
+	FileNumber   int    // File sequence within bucket
+	FullPath     string // Full file path
+	FileName     string // Just the file name
+	IsValid      bool   // Whether parsing succeeded
+}
+
+// ParseBucketIndexFileName extracts metadata from bucket-aware file name
+// Handles format: FieldName(_fk)?_bucket_NNNNNN_entry_NNNNNN.hidx
+//
+// Returns: ParsedBucketIndexFileName with extracted metadata
+func (fnh *FileNamingHelper) ParseBucketIndexFileName(fileName string) ParsedBucketIndexFileName {
+	result := ParsedBucketIndexFileName{
+		FullPath: fileName,
+		FileName: filepath.Base(fileName),
+		IsValid:  false,
+	}
+
+	// Check extension
+	if !strings.HasSuffix(result.FileName, IndexFileExtension) {
+		return result
+	}
+
+	// Remove extension
+	nameWithoutExt := strings.TrimSuffix(result.FileName, IndexFileExtension)
+
+	// Pattern: FieldName(_fk)?_bucket_NNNNNN_entry_NNNNNN
+	// Use regex to parse
+	pattern := regexp.MustCompile(`^(.+?)(_fk)?_bucket_(\d{6})_entry_(\d{6})$`)
+	matches := pattern.FindStringSubmatch(nameWithoutExt)
+
+	if matches == nil || len(matches) != 5 {
+		return result
+	}
+
+	// Extract components
+	result.FieldName = matches[1]
+	result.IsForeignKey = matches[2] == ForeignKeySuffix
+
+	// Parse bucket number
+	bucketNum, err := strconv.ParseUint(matches[3], 10, 32)
+	if err != nil {
+		return result
+	}
+	result.BucketNum = uint32(bucketNum)
+
+	// Parse file number
+	fileNum, err := strconv.Atoi(matches[4])
+	if err != nil {
+		return result
+	}
+	result.FileNumber = fileNum
+
+	result.IsValid = true
+	return result
+}
+
+// GetBucketFiles returns all files for a specific bucket
+// Parameters:
+//   - fieldName: Name of the field
+//   - isForeignKey: Whether this is a foreign key index
+//   - bucketNum: Bucket number to query
+//
+// Returns: Sorted list of file paths for the bucket
+func (fnh *FileNamingHelper) GetBucketFiles(fieldName string, isForeignKey bool, bucketNum uint32) ([]string, error) {
+	// Pattern: FieldName(_fk)?_bucket_{bucketNum:06d}_entry_*.hidx
+	var pattern string
+	if isForeignKey {
+		pattern = fmt.Sprintf("%s%s_bucket_%06d_entry_*%s", fieldName, ForeignKeySuffix, bucketNum, IndexFileExtension)
+	} else {
+		pattern = fmt.Sprintf("%s_bucket_%06d_entry_*%s", fieldName, bucketNum, IndexFileExtension)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(fnh.dataDir, pattern))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find bucket files: %w", err)
+	}
+
+	return matches, nil
+}

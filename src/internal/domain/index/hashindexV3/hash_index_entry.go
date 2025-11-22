@@ -34,9 +34,10 @@ TODO: Future extensions
 import (
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 // Magic numbers for entry identification (follows bundle storage pattern)
@@ -437,7 +438,7 @@ func DeserializeEntryFromReader(reader io.Reader) (*HashIndexEntry, int, error) 
 // IMPORTANT: Uses same encoding as Serialize() to ensure checksums match
 // Must use PutUint* methods with temp buffer, not binary.Write (which uses reflection)
 func (e *HashIndexEntry) computeChecksum() uint32 {
-	h := fnv.New32a()
+	h := xxhash.New()
 	buf := make([]byte, 8) // Reusable buffer for encoding
 
 	// Hash only the logical entry data (not storage/temporal metadata)
@@ -473,7 +474,8 @@ func (e *HashIndexEntry) computeChecksum() uint32 {
 	h.Write([]byte(e.KeyValue))
 	h.Write([]byte(e.DocumentID))
 
-	return h.Sum32()
+	// xxHash returns uint64, truncate to uint32 for compatibility
+	return uint32(h.Sum64())
 }
 
 // IsNewer returns true if this entry is newer than the other entry
@@ -496,13 +498,50 @@ func (e *HashIndexEntry) String() string {
 		e.HashValue, e.BucketNum, e.Timestamp.Format(time.RFC3339))
 }
 
-// ComputeHash computes a hash value for a given key
-// Uses FNV-1a hash algorithm for good distribution
-// This is consistent across all entries for the same key
+// ComputeHash computes a 32-bit hash value for the given key using xxHash.
+// xxHash is chosen for its exceptional speed (<10ns per hash) while maintaining
+// excellent distribution properties for hash table applications.
+//
+// The function uses xxHash64 and truncates to uint32 for compatibility with
+// the HashIndexEntry.HashValue field. This provides good distribution across
+// 2^32 buckets while keeping the hash value compact.
+//
+// This function is inline-able and has zero allocations.
 func ComputeHash(key string) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(key))
-	return h.Sum32()
+	// Use xxHash64 for speed, truncate to uint32
+	// Lower 32 bits maintain excellent distribution properties
+	return uint32(xxhash.Sum64String(key))
+}
+
+// ComputeBucketNum determines which bucket a hash value belongs to.
+// Uses simple modulo operation to map hash values to bucket range [0, numBuckets).
+//
+// This function is inline-able and has zero allocations.
+//
+// Parameters:
+//   - hashValue: The 32-bit hash of the key (from ComputeHash)
+//   - numBuckets: Total number of buckets (typically 256)
+//
+// Returns:
+//   - Bucket number in range [0, numBuckets)
+func ComputeBucketNum(hashValue uint32, numBuckets uint32) uint32 {
+	return hashValue % numBuckets
+}
+
+// ComputeHashAndBucket is a convenience function that computes both hash and bucket
+// in a single call. Useful for operations that need both values.
+//
+// Parameters:
+//   - key: The key to hash
+//   - numBuckets: Total number of buckets
+//
+// Returns:
+//   - hashValue: 32-bit hash of the key
+//   - bucketNum: Bucket number in range [0, numBuckets)
+func ComputeHashAndBucket(key string, numBuckets uint32) (hashValue uint32, bucketNum uint32) {
+	hashValue = ComputeHash(key)
+	bucketNum = ComputeBucketNum(hashValue, numBuckets)
+	return
 }
 
 // TODO: Future extensions
