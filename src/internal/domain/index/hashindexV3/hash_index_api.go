@@ -521,6 +521,88 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 	return []string{latestEntry.DocumentID}, []uint32{latestEntry.PageID}, nil
 }
 
+// BatchGet retrieves document IDs for multiple key values in parallel
+// This is optimized for JOIN operations where we need to look up many keys at once
+// Uses goroutines to parallelize lookups across buckets
+// Parameters:
+//   - keyValues: Slice of key values to look up
+//
+// Returns:
+//   - results: Map from key value -> document IDs
+//   - error: Any error that occurred during batch lookup
+//
+// TODO: Add batching configuration (currently uses 256 keys per goroutine batch)
+// TODO: Consider adding context for cancellation
+func (idx *HashIndexV3) BatchGet(keyValues []string) (map[string][]string, error) {
+	if idx.closed {
+		return nil, fmt.Errorf("index is closed")
+	}
+
+	if len(keyValues) == 0 {
+		return make(map[string][]string), nil
+	}
+
+	// Use a map to collect results from parallel goroutines
+	results := make(map[string][]string, len(keyValues))
+	var resultsMutex sync.Mutex
+	var wg sync.WaitGroup
+	var firstError error
+	var errorOnce sync.Once
+
+	// Process keys in batches of 256 for optimal parallelism
+	const batchSize = 256
+	numBatches := (len(keyValues) + batchSize - 1) / batchSize
+
+	for batchIdx := 0; batchIdx < numBatches; batchIdx++ {
+		wg.Add(1)
+
+		// Capture batch range for this goroutine
+		start := batchIdx * batchSize
+		end := start + batchSize
+		if end > len(keyValues) {
+			end = len(keyValues)
+		}
+		batchKeys := keyValues[start:end]
+
+		go func(keys []string) {
+			defer wg.Done()
+
+			// Process each key in this batch
+			for _, keyValue := range keys {
+				if keyValue == "" {
+					continue // Skip empty keys
+				}
+
+				// Use the existing Get() method which has MemTable caching and bucket optimization
+				docIDs, _, err := idx.Get(keyValue)
+				if err != nil {
+					// Record first error and continue (fail-fast on first error)
+					errorOnce.Do(func() {
+						firstError = fmt.Errorf("failed to get key %s: %w", keyValue, err)
+					})
+					return
+				}
+
+				// Store results
+				if len(docIDs) > 0 {
+					resultsMutex.Lock()
+					results[keyValue] = docIDs
+					resultsMutex.Unlock()
+				}
+			}
+		}(batchKeys)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+
+	if firstError != nil {
+		return nil, firstError
+	}
+
+	return results, nil
+}
+
 // Delete marks a key as deleted by appending a tombstone
 // The actual entry is not removed until compaction runs
 // Parameters:

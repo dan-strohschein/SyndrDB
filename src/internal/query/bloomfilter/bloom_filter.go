@@ -33,8 +33,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
 	"math"
+
+	syndrdbsimd "github.com/dan-strohschein/syndrdb-simd"
 )
 
 // BloomFilter represents a space-efficient probabilistic set membership filter
@@ -200,18 +201,18 @@ type BloomFilterStats struct {
 }
 
 // getHashValues computes two hash values for double hashing
-// Uses FNV-1a hash algorithm for speed
+// Uses XXHash algorithm for speed (2-3x faster than FNV-1a)
 func (bf *BloomFilter) getHashValues(item string) (uint64, uint64) {
-	// First hash: FNV-1a
-	h1 := fnv.New64a()
-	h1.Write([]byte(item))
-	hash1 := h1.Sum64()
+	data := []byte(item)
 
-	// Second hash: FNV-1a with modified seed
-	// We XOR with a prime to get a different hash function
-	h2 := fnv.New64a()
-	h2.Write([]byte(item + "\x00")) // Add null byte as salt
-	hash2 := h2.Sum64()
+	// First hash: XXHash64
+	hash1 := syndrdbsimd.XXHash64Bytes(data)
+
+	// Second hash: XXHash64 with modified seed (append null byte as salt)
+	saltedData := make([]byte, len(data)+1)
+	copy(saltedData, data)
+	saltedData[len(data)] = 0x00
+	hash2 := syndrdbsimd.XXHash64Bytes(saltedData)
 
 	return hash1, hash2
 }
@@ -220,7 +221,7 @@ func (bf *BloomFilter) getHashValues(item string) (uint64, uint64) {
 func (bf *BloomFilter) setBit(pos uint64) {
 	arrayIndex := pos / 64
 	bitIndex := pos % 64
-	bf.bitArray[arrayIndex] |= (1 << bitIndex)
+	bf.bitArray[arrayIndex] |= 1 << bitIndex
 }
 
 // getBit checks if the bit at the given position is set
@@ -322,18 +323,16 @@ func (bf *BloomFilter) MayContainUint64(hash uint64) bool {
 }
 
 // getHashValuesFromBytes computes two hash values from a byte array for double hashing
+// Uses XXHash algorithm for speed (2-3x faster than FNV-1a)
 func (bf *BloomFilter) getHashValuesFromBytes(data []byte) (uint64, uint64) {
-	// First hash: FNV-1a
-	h1 := fnv.New64a()
-	h1.Write(data)
-	hash1 := h1.Sum64()
+	// First hash: XXHash64
+	hash1 := syndrdbsimd.XXHash64Bytes(data)
 
-	// Second hash: FNV-1a with modified seed
-	// Append a null byte as salt for different hash function
-	h2 := fnv.New64a()
-	h2.Write(data)
-	h2.Write([]byte{0x00})
-	hash2 := h2.Sum64()
+	// Second hash: XXHash64 with modified seed (append null byte as salt)
+	saltedData := make([]byte, len(data)+1)
+	copy(saltedData, data)
+	saltedData[len(data)] = 0x00
+	hash2 := syndrdbsimd.XXHash64Bytes(saltedData)
 
 	return hash1, hash2
 }

@@ -159,6 +159,11 @@ type HashTable interface {
 	// Clear removes all entries from the hash table
 	Clear()
 
+	// GetAllKeys returns all unique keys in the hash table
+	// This is used for index-assisted probing where we need to query the index
+	// with all keys from the hash table
+	GetAllKeys() []interface{}
+
 	// PHASE 2: Add disk spillover support
 	// SpillToDisk() error
 	// LoadFromDisk() error

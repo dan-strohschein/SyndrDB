@@ -264,6 +264,29 @@ func (ht *InMemoryHashTable) estimateDocumentSize(doc *models.Document) int64 {
 	return baseSize
 }
 
+// GetAllKeys returns all unique keys in the hash table
+// This is used for index-assisted probing where we need to query the index with all keys
+// Returns a slice of keys (caller must type-assert to appropriate type)
+// TODO: Consider returning a more specific type or using generics if performance becomes an issue
+func (ht *InMemoryHashTable) GetAllKeys() []interface{} {
+	ht.mutex.RLock()
+	defer ht.mutex.RUnlock()
+
+	// Pre-allocate slice with exact capacity to avoid reallocation
+	keys := make([]interface{}, 0, ht.size)
+
+	// Iterate through all buckets and collect keys
+	for i := range ht.buckets {
+		bucket := &ht.buckets[i]
+		for j := range bucket.entries {
+			entry := &bucket.entries[j]
+			keys = append(keys, entry.key)
+		}
+	}
+
+	return keys
+}
+
 // PHASE 2: Disk spillover methods (to be implemented)
 /*
 func (ht *InMemoryHashTable) SpillToDisk() error {

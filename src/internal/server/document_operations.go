@@ -75,7 +75,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 // AddDocument handles ADD DOCUMENT commands
 // Syntax: ADD DOCUMENT TO "<BUNDLE_NAME>" (<FIELD_NAME>: <VALUE>, ...);
 func AddDocument(commandParts []string, command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error) {
-	logger.Infof("Trying to add document to %s.%s", database.Name, commandParts[3])
+	logger.Debugf("Trying to add document to %s.%s", database.Name, commandParts[3])
 
 	if len(commandParts) < 4 {
 		return nil, fmt.Errorf("ADD DOCUMENT requires the spec 'TO <bundle_name>'")

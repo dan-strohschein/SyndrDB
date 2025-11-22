@@ -80,6 +80,31 @@ type Bundle struct {
 	IsDirty bool // Indicates metadata needs persistence (not serialized)
 }
 
+// GetHashIndexForField searches for a hash index on the specified field
+// Returns the hash index instance if found, nil otherwise
+// This is used by JOIN optimizations to check if an index exists before using index-assisted strategies
+// TODO: Consider caching index lookups if this becomes a bottleneck
+func (b *Bundle) GetHashIndexForField(fieldName string) interface{} {
+	if b.Indexes == nil {
+		return nil
+	}
+
+	// Iterate through all indexes to find a hash index on this field
+	for _, indexRef := range b.Indexes {
+		// Check if this is a hash index
+		if indexRef.IndexType == "hash" {
+			// Check if the field matches
+			if indexRef.HashIndexField.FieldName == fieldName {
+				// Return the index instance
+				// The caller needs to type-assert this to *hashindexV3.HashIndexV3
+				return indexRef.IndexInstance
+			}
+		}
+	}
+
+	return nil
+}
+
 // DocumentPage represents a page of documents for scalable loading
 type DocumentPage struct {
 	PageID         uint32              // Unique page identifier within bundle
