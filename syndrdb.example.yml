@@ -1,0 +1,315 @@
+# SyndrDB Configuration File Example
+# This file documents all available configuration options with their defaults
+# Copy this file to syndrdb.yml and customize as needed
+
+# ==============================================================================
+# STORAGE CONFIGURATION
+# ==============================================================================
+
+# Directory for database files (default: "./data")
+data_dir: "./data_files"
+
+# Directory for log files (default: "")
+log_dir: "./log_files"
+
+# Directory for temporary files (default: "")
+temp_dir: "./temp_files"
+
+# ==============================================================================
+# SERVER CONFIGURATION
+# ==============================================================================
+
+# Host address to bind to (default: "0.0.0.0")
+host: "127.0.0.1"
+
+# Port number to listen on (default: 27017)
+port: 1776
+
+# Operation mode: "standalone" or "cluster" (default: "standalone")
+mode: "standalone"
+
+# ==============================================================================
+# LOGGING CONFIGURATION
+# ==============================================================================
+
+# Enable verbose logging (default: false)
+verbose: true
+
+# Enable debug mode (default: false)
+debug: false
+
+# Enable user debug mode (default: false)
+user_debug: false
+
+# Log level: "debug", "info", "warn", "error" (default: "info")
+log_level: "info"
+
+# Print logs to screen (default: false)
+print_to_screen: true
+
+# ==============================================================================
+# AUTHENTICATION & SECURITY
+# ==============================================================================
+
+# Enable authentication (default: false)
+auth_enabled: false
+
+# Session timeout in minutes (default: 30)
+session_timeout_minutes: 30
+
+# Maximum concurrent sessions (default: 1000)
+max_sessions: 1000
+
+# ==============================================================================
+# BUNDLE CONFIGURATION
+# ==============================================================================
+
+# Bundle storage format: "json" or "binary" (default: "binary")
+bundle_storage_format: "binary"
+
+# Bundle buffer size for reads (default: 0)
+bundle_buffer_size: 0
+
+# ==============================================================================
+# JOURNAL CONFIGURATION
+# ==============================================================================
+
+# Maximum journal file size in bytes (default: 0)
+max_journal_file_size: 1000000
+
+# ==============================================================================
+# WAL (Write-Ahead Logging) CONFIGURATION
+# ==============================================================================
+
+# WAL mode: "sync" or "async" (default: "sync")
+wal_mode: "sync"
+
+# Number of async WAL workers (default: 2)
+async_wal_workers: 2
+
+# Async WAL queue size (default: 1000)
+async_wal_queue_size: 1000
+
+# Enable WAL globally (default: true)
+wal_enabled: true
+
+# Operations per second threshold for bulk mode (default: 50)
+wal_bulk_mode_threshold: 50
+
+# Disable WAL during bulk operations (default: true)
+wal_disable_for_bulk: true
+
+# ==============================================================================
+# METADATA CONFIGURATION
+# ==============================================================================
+
+# Documents before metadata flush (default: 500)
+metadata_batch_size: 500
+
+# Documents before disk persistence (default: 1000)
+metadata_persist_interval: 1000
+
+# Time in seconds between forced flushes (default: 0)
+metadata_flush_interval: 10
+
+# Auto-detect bulk operations for optimization (default: true)
+bulk_operation_detection: true
+
+# ==============================================================================
+# INDEX CONFIGURATION
+# ==============================================================================
+
+# Safety margin for sequence recovery (default: 100)
+index_sequence_safety_margin: 100
+
+# ==============================================================================
+# PARSER CONFIGURATION
+# ==============================================================================
+
+# Use new SyndrQL parser instead of legacy parser (default: true)
+use_new_parser: true
+
+# ==============================================================================
+# SORTING OPTIMIZATION CONFIGURATION
+# ==============================================================================
+
+# Top-N Heapsort Configuration
+# Ratio of LIMIT/total_rows for Top-N activation (default: 0.1)
+sort_topn_threshold: 0.1
+
+# Minimum dataset size for Top-N optimization (default: 100)
+sort_topn_min_size: 100
+
+# Initial heap capacity for Top-N queries (default: 1000)
+sort_heap_initial_capacity: 1000
+
+# Radix Sort Configuration
+# Minimum dataset size for radix sort (default: 1000)
+sort_radix_min_size: 1000
+
+# Minimum LIMIT/total_rows ratio for radix (default: 0.5)
+sort_radix_limit_ratio: 0.5
+
+# Maximum radix sort passes for wide integers (default: 8)
+sort_radix_max_passes: 8
+
+# SIMD String Sort Configuration
+# Enable SIMD string sorting optimization (default: true)
+sort_simd_enabled: true
+
+# Bytes used for abbreviated string keys (default: 8)
+sort_simd_abbrev_bytes: 8
+
+# Minimum dataset size for SIMD activation (default: 100)
+sort_simd_min_size: 100
+
+# Parallel Sort Configuration
+# Enable parallel sorting for large datasets (default: true)
+sort_parallel_enabled: false
+
+# Minimum dataset size for parallel sort (default: 10000)
+sort_parallel_min_size: 10000
+
+# Maximum memory in MB for sorting operations (default: 512)
+sort_max_memory_mb: 512
+
+# ==============================================================================
+# JOIN SIMD CONFIGURATION
+# ==============================================================================
+
+# Enable SIMD acceleration for JOIN operations (default: true)
+join_simd_enabled: true
+
+# Auto-detect CPU SIMD support (default: true)
+join_simd_auto_detect: true
+
+# ==============================================================================
+# WHERE CLAUSE OPTIMIZATION CONFIGURATION
+# ==============================================================================
+
+# SIMD Configuration
+# Enable SIMD acceleration for WHERE clause comparisons (default: true)
+where_simd_enabled: true
+
+# Auto-detect CPU SIMD support for WHERE clauses (default: true)
+where_simd_auto_detect: true
+
+# Bloom Filter Configuration
+# Enable Bloom filter pre-filtering for multi-condition WHERE clauses (default: true)
+where_bloom_enabled: true
+
+# Minimum document count to activate Bloom filtering (default: 500)
+where_bloom_min_documents: 500
+
+# Batch/Columnar SIMD Configuration
+# Enable batch/columnar SIMD processing for WHERE clauses (default: true)
+where_batch_simd_enabled: true
+
+# Minimum document count for batch SIMD processing (default: 100)
+where_batch_min_size: 100
+
+# Expression Caching Configuration
+# Enable expression caching and predicate reordering (default: true)
+where_expression_cache_enabled: true
+
+# LRU cache size for compiled expressions (default: 1000)
+where_expression_cache_size: 1000
+
+# ==============================================================================
+# BACKUP & RESTORE CONFIGURATION
+# ==============================================================================
+
+# Directory for backup files (default: "./backups")
+backup_dir: "./backups"
+
+# Compression format: "gzip", "zstd", "none" (default: "gzip")
+backup_compression: "gzip"
+
+# Include index files in backups (default: true)
+backup_include_indexes: true
+
+# ==============================================================================
+# MIGRATION SYSTEM CONFIGURATION
+# ==============================================================================
+
+# Maximum commands per migration (default: 1000)
+max_migration_commands: 1000
+
+# Performance warning threshold in seconds (default: 1.0)
+migration_performance_threshold: 1.0
+
+# Maximum validation report size in bytes (default: 10485760 = 10MB)
+max_validation_report_size: 10485760
+
+# Days to retain validation reports (default: 30)
+validation_report_retention_days: 30
+
+# Enable automatic reverse command generation (default: true)
+enable_auto_reverse: true
+
+# Require explicit DOWN commands in migrations (default: false)
+require_explicit_down_commands: false
+
+# Timeout for migration operations in seconds (default: 300)
+migration_timeout_seconds: 300
+
+# ==============================================================================
+# GRAPHQL CONFIGURATION
+# ==============================================================================
+
+# Enable GraphQL API (default: false)
+enable_graphql: false
+
+# GraphQL Security Configuration (Layers 1-5)
+# Enable query complexity analysis - Layer 1 (default: true)
+enable_complexity_limit: true
+
+# Enable query depth limiting - Layer 2 (default: true)
+enable_depth_limit: true
+
+# Enable per-user rate limiting - Layer 3 (default: true)
+enable_graphql_rate_limit: true
+
+# Enable query execution timeout - Layer 4 (default: true)
+enable_query_timeout: true
+
+# Enable query metrics monitoring - Layer 5 (default: true)
+enable_query_monitoring: true
+
+# Rate limiting algorithm: "token-bucket" or "time-bucket" (default: "token-bucket")
+graphql_rate_algorithm: "token-bucket"
+
+# ==============================================================================
+# TLS/SSL CONFIGURATION (Not yet implemented)
+# ==============================================================================
+
+# Enable TLS/SSL (default: false)
+# tls_enabled: false
+
+# Path to TLS certificate file
+# tls_cert_file: ""
+
+# Path to TLS private key file
+# tls_key_file: ""
+
+# Generate self-signed certificate if none exists (default: false)
+# tls_generate_self_signed: false
+
+# Require client certificates (default: false)
+# tls_require_client_cert: false
+
+# Path to CA file for client certificate validation
+# tls_ca_file: ""
+
+# ==============================================================================
+# NOTES
+# ==============================================================================
+# 
+# - Command-line flags take precedence over this configuration file
+# - Unspecified options will use default values
+# - Boolean values must be lowercase: true or false
+# - Numeric values must not be quoted
+# - String values can be quoted or unquoted
+# - Unknown fields are silently ignored
+# 
+# For more information, see the SyndrDB documentation

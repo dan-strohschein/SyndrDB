@@ -1,0 +1,12 @@
+# Unknown Fields Configuration
+# This file contains fields that don't exist in the Arguments struct
+# These should be silently ignored
+
+host: "127.0.0.1"
+port: 7777
+unknown_field_1: "should be ignored"
+another_unknown: 12345
+nested_unknown:
+  field: "value"
+data_dir: "./test_data"
+fake_setting: true

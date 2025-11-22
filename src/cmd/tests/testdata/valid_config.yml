@@ -1,0 +1,63 @@
+# Valid SyndrDB Configuration File
+# This file demonstrates all available configuration options
+
+# Storage Configuration
+data_dir: "./test_data"
+log_dir: "./test_logs"
+temp_dir: "./test_temp"
+
+# Server Configuration
+host: "127.0.0.1"
+port: 9999
+mode: "standalone"
+verbose: true
+debug: false
+log_level: "info"
+
+# Authentication
+auth_enabled: true
+session_timeout_minutes: 60
+max_sessions: 500
+
+# Bundle Configuration
+bundle_storage_format: "binary"
+
+# WAL Configuration
+wal_mode: "async"
+async_wal_workers: 4
+async_wal_queue_size: 2000
+
+# Parser Configuration
+use_new_parser: true
+
+# Sorting Configuration
+sort_topn_threshold: 0.2
+sort_topn_min_size: 200
+sort_heap_initial_capacity: 2000
+sort_radix_min_size: 2000
+sort_radix_limit_ratio: 0.6
+sort_simd_enabled: true
+sort_parallel_enabled: true
+sort_parallel_min_size: 20000
+
+# JOIN SIMD Configuration
+join_simd_enabled: true
+join_simd_auto_detect: true
+
+# WHERE Configuration
+where_simd_enabled: true
+where_bloom_enabled: true
+where_bloom_min_documents: 1000
+where_batch_simd_enabled: true
+
+# Migration Configuration
+max_migration_commands: 2000
+migration_performance_threshold: 2.0
+enable_auto_reverse: true
+
+# GraphQL Configuration
+enable_graphql: true
+enable_complexity_limit: true
+enable_depth_limit: true
+enable_graphql_rate_limit: true
+graphql_rate_algorithm: "token-bucket"

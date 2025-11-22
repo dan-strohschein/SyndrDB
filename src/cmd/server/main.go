@@ -47,7 +47,7 @@ func main() {
 	flag.StringVar(&args.Host, "host", "127.0.0.1", "Host name or IP address to listen on")
 	flag.IntVar(&args.Port, "port", 1776, "Port for the HTTP server")
 	flag.BoolVar(&args.Verbose, "verbose", true, "Enable verbose logging")
-	flag.StringVar(&args.ConfigFile, "config", "", "Path to config file")
+	flag.StringVar(&args.ConfigFile, "config", "", "Path to YAML config file (default: ./syndrdb.yml if exists)")
 	flag.StringVar(&args.Mode, "mode", "standalone", "Operation mode (standalone, cluster)")
 	flag.BoolVar(&args.AuthEnabled, "auth", false, "Enable authentication")
 	flag.IntVar(&args.SessionTimeoutMinutes, "session-timeout", 30, "Session timeout in minutes")
@@ -125,8 +125,105 @@ func main() {
 	flag.BoolVar(&args.EnableQueryMonitoring, "enable-query-monitoring", true, "Enable GraphQL query metrics monitoring (Layer 5)")
 	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", "token-bucket", "GraphQL rate limiting algorithm: token-bucket or time-bucket")
 
-	// Parse command line arguments
+	// STEP 1: Do an initial parse to check for --config flag
 	flag.Parse()
+
+	// STEP 2: Load YAML configuration if specified or if default exists
+	configPath := args.ConfigFile
+	configSource := "defaults and CLI flags only"
+
+	// If no --config flag, check for default syndrdb.yml in current directory
+	if configPath == "" {
+		defaultConfigPath := "./syndrdb.yml"
+		if _, err := os.Stat(defaultConfigPath); err == nil {
+			configPath = defaultConfigPath
+		}
+	}
+
+	// Load YAML config if a path was found
+	if configPath != "" {
+		yamlConfig, err := settings.LoadConfigFromYAML(configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading configuration file: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Merge YAML values into current args (which has defaults)
+		mergedArgs := settings.MergeYAMLIntoDefaults(args, yamlConfig)
+
+		// Update args with merged values
+		*args = *mergedArgs
+		configSource = fmt.Sprintf("configuration file: %s", configPath)
+	}
+
+	// STEP 3: Re-parse command line flags to override YAML values
+	// We need to reset and re-register flags with the merged values as defaults
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+
+	// Re-register all flags with merged defaults
+	flag.StringVar(&args.DataDir, "datadir", args.DataDir, "Directory to store data files")
+	flag.StringVar(&args.LogDir, "logdir", args.LogDir, "Directory to store log files")
+	flag.StringVar(&args.TempDir, "tempdir", args.TempDir, "Temporary directory for intermediate files")
+	flag.StringVar(&args.ConfigFile, "config", configPath, "Path to YAML config file")
+	flag.StringVar(&args.Host, "host", args.Host, "Host address to bind to")
+	flag.IntVar(&args.Port, "port", args.Port, "Port number to listen on")
+	flag.BoolVar(&args.Verbose, "verbose", args.Verbose, "Enable verbose logging")
+	flag.BoolVar(&args.Debug, "debug", args.Debug, "Enable debug mode")
+	flag.BoolVar(&args.UserDebug, "userdebug", args.UserDebug, "Enable user debug mode")
+	flag.StringVar(&args.LogLevel, "loglevel", args.LogLevel, "Log level: debug, info, warn, error")
+	flag.BoolVar(&args.PrintToScreen, "print", args.PrintToScreen, "Print logs to screen")
+	flag.StringVar(&args.Mode, "mode", args.Mode, "Operation mode: standalone, cluster")
+	flag.BoolVar(&args.AuthEnabled, "auth", args.AuthEnabled, "Enable authentication")
+	flag.IntVar(&args.SessionTimeoutMinutes, "session-timeout", args.SessionTimeoutMinutes, "Session timeout in minutes")
+	flag.IntVar(&args.MaxSessions, "max-sessions", args.MaxSessions, "Maximum concurrent sessions")
+	flag.StringVar(&args.Version, "version", args.Version, "Version information")
+	flag.BoolVar(&args.EnableGraphQL, "graphql", args.EnableGraphQL, "Enable GraphQL API")
+	flag.StringVar(&args.BundleStorageFormat, "bundle-format", args.BundleStorageFormat, "Bundle storage format")
+	flag.Int64Var(&args.MaxJournalFileSize, "maxjournalfilesize", args.MaxJournalFileSize, "Maximum journal file size")
+	flag.StringVar(&args.WALMode, "wal-mode", args.WALMode, "WAL mode: sync or async")
+	flag.IntVar(&args.AsyncWALWorkers, "async-wal-workers", args.AsyncWALWorkers, "Number of async WAL workers")
+	flag.IntVar(&args.AsyncWALQueueSize, "async-wal-queue", args.AsyncWALQueueSize, "Async WAL queue size")
+	flag.IntVar(&args.IndexSequenceSafetyMargin, "index-seq-margin", args.IndexSequenceSafetyMargin, "Index sequence safety margin")
+	flag.BoolVar(&args.UseNewParser, "use-new-parser", args.UseNewParser, "Use new SyndrQL parser")
+	flag.Float64Var(&args.SortTopNThreshold, "sort-topn-threshold", args.SortTopNThreshold, "Top-N LIMIT/total ratio threshold")
+	flag.IntVar(&args.SortTopNMinSize, "sort-topn-minsize", args.SortTopNMinSize, "Minimum dataset size for Top-N")
+	flag.IntVar(&args.SortHeapInitialCapacity, "sort-heap-capacity", args.SortHeapInitialCapacity, "Initial heap capacity")
+	flag.IntVar(&args.SortRadixMinSize, "sort-radix-minsize", args.SortRadixMinSize, "Minimum dataset size for radix sort")
+	flag.Float64Var(&args.SortRadixLimitRatio, "sort-radix-limitratio", args.SortRadixLimitRatio, "Minimum LIMIT/total ratio for radix")
+	flag.IntVar(&args.SortRadixMaxPasses, "sort-radix-maxpasses", args.SortRadixMaxPasses, "Maximum radix sort passes")
+	flag.BoolVar(&args.SortSIMDEnabled, "sort-simd-enabled", args.SortSIMDEnabled, "Enable SIMD string sorting")
+	flag.IntVar(&args.SortSIMDAbbrevBytes, "sort-simd-abbrevbytes", args.SortSIMDAbbrevBytes, "Abbreviated key bytes for SIMD")
+	flag.IntVar(&args.SortSIMDMinSize, "sort-simd-minsize", args.SortSIMDMinSize, "Minimum size for SIMD sort")
+	flag.BoolVar(&args.SortParallelEnabled, "sort-parallel-enabled", args.SortParallelEnabled, "Enable parallel sorting")
+	flag.IntVar(&args.SortParallelMinSize, "sort-parallel-threshold", args.SortParallelMinSize, "Minimum size for parallel sort")
+	flag.IntVar(&args.SortMaxMemoryMB, "sort-max-memory", args.SortMaxMemoryMB, "Maximum sort memory in MB")
+	flag.BoolVar(&args.JoinSIMDEnabled, "join-simd-enabled", args.JoinSIMDEnabled, "Enable SIMD for JOINs")
+	flag.BoolVar(&args.JoinSIMDAutoDetect, "join-simd-autodetect", args.JoinSIMDAutoDetect, "Auto-detect CPU SIMD for JOINs")
+	flag.BoolVar(&args.WhereSIMDEnabled, "where-simd-enabled", args.WhereSIMDEnabled, "Enable SIMD for WHERE")
+	flag.BoolVar(&args.WhereSIMDAutoDetect, "where-simd-autodetect", args.WhereSIMDAutoDetect, "Auto-detect CPU SIMD for WHERE")
+	flag.BoolVar(&args.WhereBloomEnabled, "where-bloom-enabled", args.WhereBloomEnabled, "Enable Bloom filtering")
+	flag.IntVar(&args.WhereBloomMinDocuments, "where-bloom-min-docs", args.WhereBloomMinDocuments, "Min docs for Bloom filter")
+	flag.BoolVar(&args.WhereBatchSIMDEnabled, "where-batch-simd", args.WhereBatchSIMDEnabled, "Enable batch SIMD for WHERE")
+	flag.IntVar(&args.WhereBatchMinSize, "where-batch-min-size", args.WhereBatchMinSize, "Min size for batch SIMD")
+	flag.IntVar(&args.MaxMigrationCommands, "max-migration-commands", args.MaxMigrationCommands, "Max commands per migration")
+	flag.Float64Var(&args.MigrationPerformanceThreshold, "migration-perf-threshold", args.MigrationPerformanceThreshold, "Performance warning threshold (seconds)")
+	flag.Int64Var(&args.MaxValidationReportSize, "max-validation-report-size", args.MaxValidationReportSize, "Max validation report size")
+	flag.IntVar(&args.ValidationReportRetentionDays, "validation-report-retention", args.ValidationReportRetentionDays, "Validation report retention (days)")
+	flag.BoolVar(&args.EnableAutoReverse, "enable-auto-reverse", args.EnableAutoReverse, "Enable auto-reverse generation")
+	flag.BoolVar(&args.RequireExplicitDownCommands, "require-explicit-down", args.RequireExplicitDownCommands, "Require explicit DOWN commands")
+	flag.IntVar(&args.MigrationTimeoutSeconds, "migration-timeout", args.MigrationTimeoutSeconds, "Migration timeout (seconds)")
+	flag.BoolVar(&args.EnableComplexityLimit, "enable-complexity-limit", args.EnableComplexityLimit, "Enable GraphQL query complexity analysis (Layer 1)")
+	flag.BoolVar(&args.EnableDepthLimit, "enable-depth-limit", args.EnableDepthLimit, "Enable GraphQL query depth limiting (Layer 2)")
+	flag.BoolVar(&args.EnableGraphQLRateLimit, "enable-graphql-rate-limit", args.EnableGraphQLRateLimit, "Enable per-user GraphQL rate limiting (Layer 3)")
+	flag.BoolVar(&args.EnableQueryTimeout, "enable-query-timeout", args.EnableQueryTimeout, "Enable GraphQL query execution timeout (Layer 4)")
+	flag.BoolVar(&args.EnableQueryMonitoring, "enable-query-monitoring", args.EnableQueryMonitoring, "Enable GraphQL query metrics monitoring (Layer 5)")
+	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", args.GraphQLRateAlgorithm, "GraphQL rate limiting algorithm")
+
+	// Final parse with CLI taking precedence
+	flag.Parse()
+
+	// Log which configuration source was used
+	log.Printf("Configuration loaded from: %s", configSource)
 
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	logFilename := fmt.Sprintf("%s_%s_ServerLog.txt", timestamp, args.Host)

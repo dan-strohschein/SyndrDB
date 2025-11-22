@@ -244,6 +244,7 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 	// These are standard GraphQL scalars that all schemas need
 	schemaString := `
 		scalar DateTime
+		scalar Date
 		
 		# Query type with fields for each bundle
 		# Each bundle becomes a queryable field returning a list of documents
@@ -1741,6 +1742,7 @@ func (h *GraphQLHandler) buildIntrospectionTypes() []interface{} {
 		map[string]interface{}{"name": "Boolean", "kind": "SCALAR"},
 		map[string]interface{}{"name": "ID", "kind": "SCALAR"},
 		map[string]interface{}{"name": "DateTime", "kind": "SCALAR"},
+		map[string]interface{}{"name": "Date", "kind": "SCALAR"},
 
 		// Query type
 		h.buildQueryTypeIntrospection(),
@@ -1868,7 +1870,7 @@ func (h *GraphQLHandler) parseTypeForIntrospection(typeStr string) map[string]in
 
 // isScalarType checks if a type name is a GraphQL scalar
 func (h *GraphQLHandler) isScalarType(typeName string) bool {
-	scalars := []string{"String", "Int", "Float", "Boolean", "ID", "DateTime"}
+	scalars := []string{"String", "Int", "Float", "Boolean", "ID", "DateTime", "Date"}
 	for _, scalar := range scalars {
 		if typeName == scalar {
 			return true

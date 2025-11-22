@@ -3,6 +3,7 @@ package conversion
 import (
 	"fmt"
 	"strconv"
+	"time"
 	"unsafe"
 )
 
@@ -72,6 +73,11 @@ func ValueToString(v interface{}) string {
 			return "true"
 		}
 		return "false"
+
+	case time.Time:
+		// Format DateTime as RFC3339 for consistent hashing
+		// This ensures datetime fields hash consistently
+		return val.Format(time.RFC3339)
 
 	case []byte:
 		// Zero-copy conversion for byte slices

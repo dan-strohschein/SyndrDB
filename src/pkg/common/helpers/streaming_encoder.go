@@ -155,6 +155,35 @@ func writeFieldValue(stream *jsoniter.Stream, value interface{}) {
 		return
 	}
 
+	// Handle models.FieldValue type (typed union)
+	if fv, ok := value.(models.FieldValue); ok {
+		// Use the FieldValue's custom JSON marshaling
+		// This handles DateTime as RFC3339 and Date as "YYYY-MM-DD"
+		switch fv.Type {
+		case models.FieldTypeString:
+			stream.WriteString(fv.StringVal)
+		case models.FieldTypeInt:
+			stream.WriteInt64(fv.IntVal)
+		case models.FieldTypeFloat:
+			stream.WriteFloat64(fv.FloatVal)
+		case models.FieldTypeBool:
+			stream.WriteBool(fv.BoolVal)
+		case models.FieldTypeDateTime:
+			// DateTime: RFC3339 format
+			stream.WriteString(fv.DateTimeVal.Format(time.RFC3339))
+		case models.FieldTypeDate:
+			// Date: YYYY-MM-DD format
+			stream.WriteString(fv.DateVal.Format("2006-01-02"))
+		case models.FieldTypeInterface:
+			writeFieldValue(stream, fv.InterfaceVal)
+		case models.FieldTypeNil:
+			stream.WriteNil()
+		default:
+			stream.WriteNil()
+		}
+		return
+	}
+
 	switch v := value.(type) {
 	case string:
 		stream.WriteString(v)

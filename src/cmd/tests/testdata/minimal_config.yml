@@ -1,0 +1,6 @@
+# Minimal SyndrDB Configuration
+# Only specifies a few essential options
+
+host: "0.0.0.0"
+port: 8888
+data_dir: "./minimal_data"

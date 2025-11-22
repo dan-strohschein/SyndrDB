@@ -1262,6 +1262,17 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 		//logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
 	}
 
+	// Handle time.Time comparison (DateTime and Date)
+	aTime, aIsTime := a.(time.Time)
+	bTime, bIsTime := b.(time.Time)
+	if aIsTime && bIsTime {
+		// Truncate to millisecond precision for DateTime comparison
+		aTrunc := aTime.Truncate(time.Millisecond)
+		bTrunc := bTime.Truncate(time.Millisecond)
+		// Use numeric comparison function with Unix milliseconds
+		return numericComparison(float64(aTrunc.UnixMilli()), float64(bTrunc.UnixMilli()))
+	}
+
 	// Handle string comparison
 	aStr, aIsString := a.(string)
 	bStr, bIsString := b.(string)

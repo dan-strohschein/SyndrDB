@@ -1,0 +1,7 @@
+# Invalid Types Configuration
+# This file contains type mismatches to test error handling
+
+host: "127.0.0.1"
+port: "not_a_number"  # Should be int
+verbose: "yes"         # Should be bool
+sort_topn_threshold: "invalid"  # Should be float64

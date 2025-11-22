@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
@@ -18,6 +19,8 @@ const (
 	FieldTypeInt
 	FieldTypeFloat
 	FieldTypeBool
+	FieldTypeDateTime  // Full timestamp with time zone, stored as UTC
+	FieldTypeDate      // Date only (time component zeroed at midnight UTC)
 	FieldTypeInterface // Fallback for complex types (arrays, objects, etc.)
 )
 
@@ -28,10 +31,12 @@ type FieldValue struct {
 	Type FieldValueType
 
 	// Union storage (only one is used at a time)
-	StringVal string
-	IntVal    int64
-	FloatVal  float64
-	BoolVal   bool
+	StringVal   string
+	IntVal      int64
+	FloatVal    float64
+	BoolVal     bool
+	DateTimeVal time.Time // DateTime: full timestamp in UTC
+	DateVal     time.Time // Date: date only (time at midnight UTC)
 
 	// Fallback for complex types that still need interface{}
 	// (e.g., arrays, nested objects, null values)
@@ -68,6 +73,23 @@ func NewBoolValue(b bool) FieldValue {
 	}
 }
 
+func NewDateTimeValue(t time.Time) FieldValue {
+	// Ensure DateTime is stored in UTC
+	return FieldValue{
+		Type:        FieldTypeDateTime,
+		DateTimeVal: t.UTC(),
+	}
+}
+
+func NewDateValue(t time.Time) FieldValue {
+	// Date stores only date component - zero out time to midnight UTC
+	utc := t.UTC()
+	return FieldValue{
+		Type:    FieldTypeDate,
+		DateVal: time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC),
+	}
+}
+
 func NewInterfaceValue(v interface{}) FieldValue {
 	// Try to avoid interface{} if possible
 	switch val := v.(type) {
@@ -85,6 +107,9 @@ func NewInterfaceValue(v interface{}) FieldValue {
 		return NewFloatValue(float64(val))
 	case bool:
 		return NewBoolValue(val)
+	case time.Time:
+		// Default to DateTime for time.Time values from interface{}
+		return NewDateTimeValue(val)
 	case nil:
 		return FieldValue{Type: FieldTypeNil}
 	default:
@@ -108,6 +133,10 @@ func (fv FieldValue) AsInterface() interface{} {
 		return fv.FloatVal
 	case FieldTypeBool:
 		return fv.BoolVal
+	case FieldTypeDateTime:
+		return fv.DateTimeVal
+	case FieldTypeDate:
+		return fv.DateVal
 	case FieldTypeInterface:
 		return fv.InterfaceVal
 	case FieldTypeNil:
@@ -145,6 +174,20 @@ func (fv FieldValue) AsBool() (bool, bool) {
 	return false, false
 }
 
+func (fv FieldValue) AsDateTime() (time.Time, bool) {
+	if fv.Type == FieldTypeDateTime {
+		return fv.DateTimeVal, true
+	}
+	return time.Time{}, false
+}
+
+func (fv FieldValue) AsDate() (time.Time, bool) {
+	if fv.Type == FieldTypeDate {
+		return fv.DateVal, true
+	}
+	return time.Time{}, false
+}
+
 func (fv FieldValue) IsNil() bool {
 	return fv.Type == FieldTypeNil
 }
@@ -160,6 +203,10 @@ func (fv FieldValue) String() string {
 		return fmt.Sprintf("%f", fv.FloatVal)
 	case FieldTypeBool:
 		return fmt.Sprintf("%t", fv.BoolVal)
+	case FieldTypeDateTime:
+		return fv.DateTimeVal.Format(time.RFC3339)
+	case FieldTypeDate:
+		return fv.DateVal.Format("2006-01-02")
 	case FieldTypeInterface:
 		return fmt.Sprintf("%v", fv.InterfaceVal)
 	case FieldTypeNil:
@@ -219,6 +266,21 @@ func (fv *FieldValue) UnmarshalBSON(data []byte) error {
 		}
 		*fv = NewBoolValue(b)
 
+	case bsontype.DateTime:
+		// BSON DateTime is milliseconds since epoch
+		ms, ok := raw.DateTimeOK()
+		if !ok {
+			return fmt.Errorf("failed to decode datetime")
+		}
+		t := time.Unix(0, ms*int64(time.Millisecond)).UTC()
+
+		// Distinguish between DateTime and Date by checking if time is exactly midnight UTC
+		if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
+			*fv = NewDateValue(t)
+		} else {
+			*fv = NewDateTimeValue(t)
+		}
+
 	case bsontype.Null:
 		*fv = FieldValue{Type: FieldTypeNil}
 
@@ -253,6 +315,12 @@ func (fv FieldValue) Equals(other FieldValue) bool {
 		return fv.FloatVal == other.FloatVal
 	case FieldTypeBool:
 		return fv.BoolVal == other.BoolVal
+	case FieldTypeDateTime:
+		// DateTime comparison with millisecond precision
+		return fv.DateTimeVal.Truncate(time.Millisecond).Equal(other.DateTimeVal.Truncate(time.Millisecond))
+	case FieldTypeDate:
+		// Date comparison (time already zeroed)
+		return fv.DateVal.Equal(other.DateVal)
 	case FieldTypeNil:
 		return true
 	case FieldTypeInterface:
@@ -290,6 +358,12 @@ func (fv FieldValue) MarshalJSON() ([]byte, error) {
 		return json.Marshal(fv.FloatVal)
 	case FieldTypeBool:
 		return json.Marshal(fv.BoolVal)
+	case FieldTypeDateTime:
+		// Format DateTime as RFC3339 string for JSON
+		return json.Marshal(fv.DateTimeVal.Format(time.RFC3339))
+	case FieldTypeDate:
+		// Format Date as "YYYY-MM-DD" string for JSON
+		return json.Marshal(fv.DateVal.Format("2006-01-02"))
 	case FieldTypeInterface:
 		return json.Marshal(fv.InterfaceVal)
 	case FieldTypeNil:

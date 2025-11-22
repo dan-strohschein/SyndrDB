@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
+
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
@@ -13,9 +15,9 @@ import (
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/storage/bundlestore"
 	syndrQL "syndrdb/src/internal/syndrQL"
+	"syndrdb/src/internal/utils"
 	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/settings"
-	"time"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 
@@ -65,6 +67,8 @@ var typeConverters = map[string]TypeConverter{
 	"float":        convertToFloat,
 	"number":       convertToFloat, // alias for float
 	"bool":         convertToBool,
+	"datetime":     convertToDateTime,
+	"date":         convertToDate,
 	"relationship": convertToString,
 }
 
@@ -189,6 +193,59 @@ func convertToBool(value interface{}) (interface{}, error) {
 	default:
 		return nil, fmt.Errorf("expected boolean but got %T", value)
 	}
+}
+
+func convertToDateTime(value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+	// Fast path: already a time.Time
+	if timeVal, ok := value.(time.Time); ok {
+		// Ensure UTC conversion
+		return timeVal.UTC(), nil
+	}
+	// Handle string values
+	if strVal, ok := value.(string); ok {
+		// Allow NULL magic values to pass through
+		if strings.HasPrefix(strVal, "::SYNDR_") {
+			return strVal, nil
+		}
+		// Parse datetime string - this was already done in parseValue, but handle legacy cases
+		if parsedTime, _, err := utils.ParseDateTime(strVal); err == nil {
+			return parsedTime.UTC(), nil
+		} else {
+			return nil, fmt.Errorf("cannot convert string '%s' to datetime: %v", strVal, err)
+		}
+	}
+	return nil, fmt.Errorf("expected datetime but got %T", value)
+}
+
+func convertToDate(value interface{}) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+	// Fast path: already a time.Time
+	if timeVal, ok := value.(time.Time); ok {
+		// Date: zero out time component to midnight UTC
+		utc := timeVal.UTC()
+		return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC), nil
+	}
+	// Handle string values
+	if strVal, ok := value.(string); ok {
+		// Allow NULL magic values to pass through
+		if strings.HasPrefix(strVal, "::SYNDR_") {
+			return strVal, nil
+		}
+		// Parse date string
+		if parsedTime, _, err := utils.ParseDateTime(strVal); err == nil {
+			// Zero out time to midnight UTC for Date type
+			utc := parsedTime.UTC()
+			return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC), nil
+		} else {
+			return nil, fmt.Errorf("cannot convert string '%s' to date: %v", strVal, err)
+		}
+	}
+	return nil, fmt.Errorf("expected date but got %T", value)
 }
 
 type BundleService struct {

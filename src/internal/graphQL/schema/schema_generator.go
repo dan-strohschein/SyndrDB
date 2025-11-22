@@ -48,9 +48,9 @@ func getDefaultTypeMap() map[string]string {
 
 		// Special types
 		"id":        "ID",
-		"datetime":  "String", // ISO 8601 string
-		"timestamp": "String", // ISO 8601 string
-		"date":      "String", // ISO 8601 date
+		"datetime":  "DateTime", // Custom DateTime scalar (RFC3339)
+		"timestamp": "DateTime", // Alias for DateTime
+		"date":      "Date",     // Custom Date scalar (YYYY-MM-DD)
 
 		// Relationship type (resolved to target bundle type)
 		"relationship": "String", // Default, overridden by actual relationship

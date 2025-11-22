@@ -5,7 +5,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/utils"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 
@@ -602,8 +604,17 @@ func splitByCommaRespectingQuotes(text string) []string {
 func parseValue(valueStr string) interface{} {
 	// Input is already normalized, no need for TrimSpace
 
-	// Handle quoted strings
+	// Handle quoted strings - check if it's a datetime first
 	if strings.HasPrefix(valueStr, "\"") && strings.HasSuffix(valueStr, "\"") {
+		// Try to parse as datetime if it looks like one
+		if utils.IsLikelyDateTime(valueStr) {
+			if parsedTime, _, err := utils.ParseDateTime(valueStr); err == nil {
+				// Successfully parsed as datetime, return time.Time
+				// The NewDateTimeValue or NewDateValue constructor will be called during field validation
+				return parsedTime
+			}
+			// If parsing failed, treat as regular string
+		}
 		return valueStr[1 : len(valueStr)-1] // Return string without quotes
 	}
 

@@ -2,6 +2,8 @@ package syndrQL
 
 import (
 	"fmt"
+
+	"syndrdb/src/internal/utils"
 )
 
 /*
@@ -212,6 +214,15 @@ func (p *InsertParser) parseValue() (interface{}, error) {
 
 	switch tok.Type {
 	case TOKEN_STRING:
+		// Check if the string looks like a datetime
+		if utils.IsLikelyDateTime(tok.Value) {
+			if parsedTime, _, err := utils.ParseDateTime(tok.Value); err == nil {
+				// Successfully parsed as datetime
+				// The field type validator will determine if this should be DateTime or Date
+				return parsedTime, nil
+			}
+			// If parsing failed, treat as regular string
+		}
 		return tok.Value, nil
 	case TOKEN_NUMBER:
 		return tok.Literal, nil

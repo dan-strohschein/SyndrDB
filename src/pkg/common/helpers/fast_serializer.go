@@ -144,6 +144,21 @@ func (s *FastDocumentSerializer) writeField(fieldName string, field models.Field
 			s.buffer = append(s.buffer, 0)
 		}
 
+	case time.Time:
+		// Determine if this is a Date (midnight UTC) or DateTime
+		// Check if time component is exactly midnight
+		if value.Hour() == 0 && value.Minute() == 0 && value.Second() == 0 && value.Nanosecond() == 0 {
+			// Date type: store as Unix nanoseconds (type code 7)
+			s.buffer = append(s.buffer, 7) // Type: date
+			s.writeUint32(8)               // Size: 8 bytes
+			s.writeInt64(value.UnixNano())
+		} else {
+			// DateTime type: store as Unix nanoseconds (type code 6)
+			s.buffer = append(s.buffer, 6) // Type: datetime
+			s.writeUint32(8)               // Size: 8 bytes
+			s.writeInt64(value.UnixNano())
+		}
+
 	default:
 		// Fallback to string representation
 		s.buffer = append(s.buffer, 1) // Type: string

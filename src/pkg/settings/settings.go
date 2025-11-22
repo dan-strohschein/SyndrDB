@@ -5,152 +5,133 @@ import (
 	"time"
 )
 
+// TODO: I will add support for environment variable overrides with ENV > CLI > YAML > defaults precedence
+// TODO: I will implement hot-reload functionality via SIGHUP signal to reload configuration without server restart
+
 type Arguments struct {
-	DataDir    string
-	LogDir     string
-	LogFile    string
-	TempDir    string // Temporary directory for intermediate files/indexes/sorts
-	ConfigFile string
+	// Storage Configuration
+	DataDir    string `yaml:"data_dir"`
+	LogDir     string `yaml:"log_dir"`
+	LogFile    string `yaml:"log_file"`
+	TempDir    string `yaml:"temp_dir"` // Temporary directory for intermediate files/indexes/sorts
+	ConfigFile string `yaml:"config_file"`
 
-	CreateDefaultDB bool // Create default database if it doesn't exist
-	PrintToScreen   bool // Print to screen
+	// Server Configuration
+	CreateDefaultDB bool `yaml:"create_default_db"` // Create default database if it doesn't exist
+	PrintToScreen   bool `yaml:"print_to_screen"`   // Print to screen
 
-	Debug     bool // Debug mode
-	UserDebug bool // User debug mode
+	// Logging Configuration
+	Debug     bool   `yaml:"debug"`      // Debug mode
+	UserDebug bool   `yaml:"user_debug"` // User debug mode
+	LogLevel  string `yaml:"log_level"`  // Log level: debug, info, warn, error
+	Verbose   bool   `yaml:"verbose"`    // Strongly verbose logging
 
-	LogLevel string // Log level: debug, info, warn, error
+	// Server Mode Configuration
+	Mode string `yaml:"mode"` // The mode of operation: standalone, cluster
+	Host string `yaml:"host"` // the host name or IP address to listen on
+	Port int    `yaml:"port"` // the port number to listen on
 
-	// The mode of operation
-	// standalone, cluster
-	Mode string
+	// Journal Configuration
+	MaxJournalFileSize int64 `yaml:"max_journal_file_size"`
 
-	// the host name or IP address to listen on
-	Host string
+	// Bundle Configuration
+	BundleBufferSize    int    `yaml:"bundle_buffer_size"`    // Size of the buffer for bundle reads
+	BundleStorageFormat string `yaml:"bundle_storage_format"` // Storage format: "json" or "binary" (default: "binary")
 
-	// Add to Journal struct
-	MaxJournalFileSize int64
+	// Authentication Configuration
+	AuthEnabled bool `yaml:"auth_enabled"` // Enable authentication
 
-	BundleBufferSize int // Size of the buffer for bundle reads
+	// Session Management Configuration
+	SessionTimeoutMinutes int `yaml:"session_timeout_minutes"` // Session timeout in minutes
+	MaxSessions           int `yaml:"max_sessions"`            // Maximum number of concurrent sessions
 
-	// the port number to listen on
-	Port int
+	// TLS/SSL Configuration
+	TLSEnabled            bool   `yaml:"tls_enabled"`              // Enable TLS/SSL
+	TLSCertFile           string `yaml:"tls_cert_file"`            // Path to TLS certificate file
+	TLSKeyFile            string `yaml:"tls_key_file"`             // Path to TLS private key file
+	TLSGenerateSelfSigned bool   `yaml:"tls_generate_self_signed"` // Generate self-signed certificate if none exists
+	TLSRequireClientCert  bool   `yaml:"tls_require_client_cert"`  // Require client certificates
+	TLSCAFile             string `yaml:"tls_ca_file"`              // Path to CA file for client certificate validation
 
-	// Strongly verbose logging
-	Verbose bool
+	Version string `yaml:"version"` // Show version information
 
-	AuthEnabled bool // Enable authentication
+	// GraphQL Configuration
+	EnableGraphQL bool `yaml:"enable_graphql"` // Enable GraphQL API
 
-	// Session management configuration
-	SessionTimeoutMinutes int // Session timeout in minutes
-	MaxSessions           int // Maximum number of concurrent sessions
-
-	// TLS/SSL configuration
-	TLSEnabled            bool   // Enable TLS/SSL
-	TLSCertFile           string // Path to TLS certificate file
-	TLSKeyFile            string // Path to TLS private key file
-	TLSGenerateSelfSigned bool   // Generate self-signed certificate if none exists
-	TLSRequireClientCert  bool   // Require client certificates
-	TLSCAFile             string // Path to CA file for client certificate validation
-
-	Version string // Show version information
-
-	EnableGraphQL bool // Enable GraphQL API
-
-	// Bundle storage format configuration
-	BundleStorageFormat string // Storage format: "json" or "binary" (default: "json")
-
-	// PHASE 1 PERFORMANCE OPTIMIZATIONS
-	// WAL Configuration for bulk operations
-	WALEnabled           bool // Enable/disable WAL globally
-	WALBulkModeThreshold int  // Operations per second threshold for bulk mode
-	WALDisableForBulkOps bool // Disable WAL during bulk operations
-
-	// PHASE 2 ASYNC WAL CONFIGURATION
-	WALMode           string // WAL mode: "sync" or "async" (default: "sync")
-	AsyncWALWorkers   int    // Number of async WAL workers (default: 2)
-	AsyncWALQueueSize int    // Async WAL queue size (default: 1000)
+	// WAL Configuration (Phase 1 Performance Optimizations)
+	WALEnabled           bool   `yaml:"wal_enabled"`             // Enable/disable WAL globally
+	WALBulkModeThreshold int    `yaml:"wal_bulk_mode_threshold"` // Operations per second threshold for bulk mode
+	WALDisableForBulkOps bool   `yaml:"wal_disable_for_bulk"`    // Disable WAL during bulk operations
+	WALMode              string `yaml:"wal_mode"`                // WAL mode: "sync" or "async" (default: "sync")
+	AsyncWALWorkers      int    `yaml:"async_wal_workers"`       // Number of async WAL workers (default: 2)
+	AsyncWALQueueSize    int    `yaml:"async_wal_queue_size"`    // Async WAL queue size (default: 1000)
 
 	// Metadata Update Performance Settings
-	MetadataBatchSize       int // Documents before metadata flush (default: 50 → 500)
-	MetadataPersistInterval int // Documents before disk persistence (default: 1000)
-	MetadataFlushInterval   int // Time in seconds between forced flushes
-
-	// Performance Mode Detection
-	BulkOperationDetection bool // Auto-detect bulk operations for optimization
+	MetadataBatchSize       int  `yaml:"metadata_batch_size"`       // Documents before metadata flush (default: 500)
+	MetadataPersistInterval int  `yaml:"metadata_persist_interval"` // Documents before disk persistence (default: 1000)
+	MetadataFlushInterval   int  `yaml:"metadata_flush_interval"`   // Time in seconds between forced flushes
+	BulkOperationDetection  bool `yaml:"bulk_operation_detection"`  // Auto-detect bulk operations for optimization
 
 	// Hash Index Configuration
-	IndexSequenceSafetyMargin int // Safety margin for sequence recovery (default: 100)
+	IndexSequenceSafetyMargin int `yaml:"index_sequence_safety_margin"` // Safety margin for sequence recovery (default: 100)
 
 	// Parser Configuration
-	UseNewParser bool // Use new SyndrQL parser instead of legacy parser (default: false)
+	UseNewParser bool `yaml:"use_new_parser"` // Use new SyndrQL parser instead of legacy parser (default: true)
 
-	// PHASE 4 SORTING OPTIMIZATION CONFIGURATION
-	// Top-N Heapsort Configuration
-	SortTopNThreshold       float64 // Ratio of LIMIT/total_rows for Top-N activation (default: 0.1)
-	SortTopNMinSize         int     // Minimum dataset size for Top-N optimization (default: 100)
-	SortHeapInitialCapacity int     // Initial heap capacity for Top-N queries (default: 1000)
-
-	// Radix Sort Configuration
-	SortRadixMinSize    int     // Minimum dataset size for radix sort (default: 1000)
-	SortRadixLimitRatio float64 // Minimum LIMIT/total_rows ratio for radix (default: 0.5)
-	SortRadixMaxPasses  int     // Maximum radix sort passes for wide integers (default: 8)
-
-	// SIMD String Sort Configuration
-	SortSIMDEnabled     bool // Enable SIMD string sorting optimization (default: true)
-	SortSIMDAbbrevBytes int  // Bytes used for abbreviated string keys (default: 8)
-	SortSIMDMinSize     int  // Minimum dataset size for SIMD activation (default: 100)
+	// Sorting Optimization Configuration (Phase 4)
+	SortTopNThreshold       float64 `yaml:"sort_topn_threshold"`        // Ratio of LIMIT/total_rows for Top-N activation (default: 0.1)
+	SortTopNMinSize         int     `yaml:"sort_topn_min_size"`         // Minimum dataset size for Top-N optimization (default: 100)
+	SortHeapInitialCapacity int     `yaml:"sort_heap_initial_capacity"` // Initial heap capacity for Top-N queries (default: 1000)
+	SortRadixMinSize        int     `yaml:"sort_radix_min_size"`        // Minimum dataset size for radix sort (default: 1000)
+	SortRadixLimitRatio     float64 `yaml:"sort_radix_limit_ratio"`     // Minimum LIMIT/total_rows ratio for radix (default: 0.5)
+	SortRadixMaxPasses      int     `yaml:"sort_radix_max_passes"`      // Maximum radix sort passes for wide integers (default: 8)
+	SortSIMDEnabled         bool    `yaml:"sort_simd_enabled"`          // Enable SIMD string sorting optimization (default: true)
+	SortSIMDAbbrevBytes     int     `yaml:"sort_simd_abbrev_bytes"`     // Bytes used for abbreviated string keys (default: 8)
+	SortSIMDMinSize         int     `yaml:"sort_simd_min_size"`         // Minimum dataset size for SIMD activation (default: 100)
+	SortEnableParallel      bool    `yaml:"sort_enable_parallel"`       // DEPRECATED: Use SortParallelEnabled instead
+	SortParallelThreshold   int     `yaml:"sort_parallel_threshold"`    // DEPRECATED: Use SortParallelMinSize instead
+	SortParallelEnabled     bool    `yaml:"sort_parallel_enabled"`      // Enable parallel sorting for large datasets (default: true)
+	SortParallelMinSize     int     `yaml:"sort_parallel_min_size"`     // Minimum dataset size for parallel sort (default: 10000)
+	SortMaxMemoryMB         int     `yaml:"sort_max_memory_mb"`         // Maximum memory in MB for sorting operations (default: 512)
 
 	// JOIN SIMD Configuration
-	JoinSIMDEnabled    bool // Enable SIMD acceleration for JOIN operations (default: auto-detect)
-	JoinSIMDAutoDetect bool // Auto-detect CPU SIMD support (default: true)
+	JoinSIMDEnabled    bool `yaml:"join_simd_enabled"`     // Enable SIMD acceleration for JOIN operations (default: true)
+	JoinSIMDAutoDetect bool `yaml:"join_simd_auto_detect"` // Auto-detect CPU SIMD support (default: true)
 
 	// WHERE SIMD Configuration
-	WhereSIMDEnabled    bool // Enable SIMD acceleration for WHERE clause comparisons (default: true)
-	WhereSIMDAutoDetect bool // Auto-detect CPU SIMD support for WHERE clauses (default: true)
-
-	// WHERE Bloom Filter Configuration
-	WhereBloomEnabled      bool // Enable Bloom filter pre-filtering for multi-condition WHERE clauses (default: true)
-	WhereBloomMinDocuments int  // Minimum document count to activate Bloom filtering (default: 500)
-
-	// WHERE Batch/Columnar SIMD Configuration (Priority 3)
-	WhereBatchSIMDEnabled bool // Enable batch/columnar SIMD processing for WHERE clauses (default: true)
-	WhereBatchMinSize     int  // Minimum document count for batch SIMD processing (default: 100)
-
-	// WHERE Expression Caching Configuration (Priority 4)
-	WhereExpressionCacheEnabled bool // Enable expression caching and predicate reordering (default: true)
-	WhereExpressionCacheSize    int  // LRU cache size for compiled expressions (default: 1000)
-
-	// Parallel Sort Configuration (Phase 5)
-	SortEnableParallel    bool // DEPRECATED: Use SortParallelEnabled instead
-	SortParallelThreshold int  // DEPRECATED: Use SortParallelMinSize instead
-	SortParallelEnabled   bool // Enable parallel sorting for large datasets (default: true)
-	SortParallelMinSize   int  // Minimum dataset size for parallel sort (default: 10000)
-	SortMaxMemoryMB       int  // Maximum memory in MB for sorting operations (default: 512)
+	WhereSIMDEnabled            bool `yaml:"where_simd_enabled"`             // Enable SIMD acceleration for WHERE clause comparisons (default: true)
+	WhereSIMDAutoDetect         bool `yaml:"where_simd_auto_detect"`         // Auto-detect CPU SIMD support for WHERE clauses (default: true)
+	WhereBloomEnabled           bool `yaml:"where_bloom_enabled"`            // Enable Bloom filter pre-filtering for multi-condition WHERE clauses (default: true)
+	WhereBloomMinDocuments      int  `yaml:"where_bloom_min_documents"`      // Minimum document count to activate Bloom filtering (default: 500)
+	WhereBatchSIMDEnabled       bool `yaml:"where_batch_simd_enabled"`       // Enable batch/columnar SIMD processing for WHERE clauses (default: true)
+	WhereBatchMinSize           int  `yaml:"where_batch_min_size"`           // Minimum document count for batch SIMD processing (default: 100)
+	WhereExpressionCacheEnabled bool `yaml:"where_expression_cache_enabled"` // Enable expression caching and predicate reordering (default: true)
+	WhereExpressionCacheSize    int  `yaml:"where_expression_cache_size"`    // LRU cache size for compiled expressions (default: 1000)
 
 	// Backup & Restore Configuration
-	BackupDir            string // Directory for backup files (default: "./backups")
-	BackupCompression    string // Compression format: "gzip", "zstd", "none" (default: "gzip")
-	BackupIncludeIndexes bool   // Include index files in backups (default: true)
+	BackupDir            string `yaml:"backup_dir"`             // Directory for backup files (default: "./backups")
+	BackupCompression    string `yaml:"backup_compression"`     // Compression format: "gzip", "zstd", "none" (default: "gzip")
+	BackupIncludeIndexes bool   `yaml:"backup_include_indexes"` // Include index files in backups (default: true)
 	// TODO: I will add BackupRetentionDays for automatic backup cleanup
 	// TODO: I will add BackupEncryption settings for encrypted backups
 	// TODO: I will add BackupCloudProvider for S3/GCS/Azure integration
 
 	// Migration System Configuration
-	MaxMigrationCommands          int     // Maximum commands per migration (default: 1000)
-	MigrationPerformanceThreshold float64 // Performance warning threshold in seconds (default: 1.0)
-	MaxValidationReportSize       int64   // Maximum validation report size in bytes (default: 10MB)
-	ValidationReportRetentionDays int     // Days to retain validation reports (default: 30)
-	EnableAutoReverse             bool    // Enable automatic reverse command generation (default: true)
-	RequireExplicitDownCommands   bool    // Require explicit DOWN commands in migrations (default: false)
-	MigrationTimeoutSeconds       int     // Timeout for migration operations in seconds (default: 300)
+	MaxMigrationCommands          int     `yaml:"max_migration_commands"`           // Maximum commands per migration (default: 1000)
+	MigrationPerformanceThreshold float64 `yaml:"migration_performance_threshold"`  // Performance warning threshold in seconds (default: 1.0)
+	MaxValidationReportSize       int64   `yaml:"max_validation_report_size"`       // Maximum validation report size in bytes (default: 10MB)
+	ValidationReportRetentionDays int     `yaml:"validation_report_retention_days"` // Days to retain validation reports (default: 30)
+	EnableAutoReverse             bool    `yaml:"enable_auto_reverse"`              // Enable automatic reverse command generation (default: true)
+	RequireExplicitDownCommands   bool    `yaml:"require_explicit_down_commands"`   // Require explicit DOWN commands in migrations (default: false)
+	MigrationTimeoutSeconds       int     `yaml:"migration_timeout_seconds"`        // Timeout for migration operations in seconds (default: 300)
 
 	// GraphQL Security Configuration (Layers 1-5)
-	EnableComplexityLimit  bool   // Enable query complexity analysis (Layer 1, default: true)
-	EnableDepthLimit       bool   // Enable query depth limiting (Layer 2, default: true)
-	EnableGraphQLRateLimit bool   // Enable per-user rate limiting (Layer 3, default: true)
-	EnableQueryTimeout     bool   // Enable query execution timeout (Layer 4, default: true)
-	EnableQueryMonitoring  bool   // Enable query metrics monitoring (Layer 5, default: true)
-	GraphQLRateAlgorithm   string // Rate limiting algorithm: "token-bucket" or "time-bucket" (default: "token-bucket")
+	EnableComplexityLimit  bool   `yaml:"enable_complexity_limit"`   // Enable query complexity analysis (Layer 1, default: true)
+	EnableDepthLimit       bool   `yaml:"enable_depth_limit"`        // Enable query depth limiting (Layer 2, default: true)
+	EnableGraphQLRateLimit bool   `yaml:"enable_graphql_rate_limit"` // Enable per-user rate limiting (Layer 3, default: true)
+	EnableQueryTimeout     bool   `yaml:"enable_query_timeout"`      // Enable query execution timeout (Layer 4, default: true)
+	EnableQueryMonitoring  bool   `yaml:"enable_query_monitoring"`   // Enable query metrics monitoring (Layer 5, default: true)
+	GraphQLRateAlgorithm   string `yaml:"graphql_rate_algorithm"`    // Rate limiting algorithm: "token-bucket" or "time-bucket" (default: "token-bucket")
 }
 
 var (
