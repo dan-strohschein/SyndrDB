@@ -684,24 +684,24 @@ func TestGroupByAggregationNodeExecution(t *testing.T) {
 				DocumentID: "doc1",
 				Fields: map[string]models.Field{
 					"city":   {Name: "city", Value: models.NewStringValue("Seattle")},
-					"age":    {Name: "age", Value: 25},
-					"salary": {Name: "salary", Value: 75000},
+					"age":    {Name: "age", Value: models.NewIntValue(25)},
+					"salary": {Name: "salary", Value: models.NewIntValue(75000)},
 				},
 			},
 			"doc2": {
 				DocumentID: "doc2",
 				Fields: map[string]models.Field{
 					"city":   {Name: "city", Value: models.NewStringValue("Seattle")},
-					"age":    {Name: "age", Value: 30},
-					"salary": {Name: "salary", Value: 85000},
+					"age":    {Name: "age", Value: models.NewIntValue(30)},
+					"salary": {Name: "salary", Value: models.NewIntValue(85000)},
 				},
 			},
 			"doc3": {
 				DocumentID: "doc3",
 				Fields: map[string]models.Field{
 					"city":   {Name: "city", Value: models.NewStringValue("Portland")},
-					"age":    {Name: "age", Value: 28},
-					"salary": {Name: "salary", Value: 70000},
+					"age":    {Name: "age", Value: models.NewIntValue(28)},
+					"salary": {Name: "salary", Value: models.NewIntValue(70000)},
 				},
 			},
 		}

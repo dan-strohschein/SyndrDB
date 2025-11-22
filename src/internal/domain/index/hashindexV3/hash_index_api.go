@@ -176,12 +176,21 @@ type IndexStats struct {
 	LastModified time.Time
 }
 
-// CompactionManager interface for future integration
-// TODO: Sprint 4 - Integrate with actual compactor package
-// This will be replaced with real compaction manager from /src/internal/domain/compactor
+// CompactionManager interface for LSM-style file compaction
+// Implemented by the compactor package's CompactionManager
+// Using interface to avoid circular dependencies
 type CompactionManager interface {
+	// ShouldCompact determines if compaction is needed based on file list
+	// The implementation examines file count, sizes, etc.
 	ShouldCompact(files []string) bool
-	CompactFiles(files []string) (string, error)
+
+	// CompactHashIndexFiles merges multiple entry files into one
+	// Parameters:
+	//   - bundleName: Name of the bundle
+	//   - indexName: Name of the index
+	//   - entryFiles: List of entry files to compact (absolute paths)
+	// Returns the path to the compacted file and any error
+	CompactHashIndexFiles(bundleName, indexName string, entryFiles []string) (string, error)
 }
 
 // NewHashIndexV3 creates a new LSM-style hash index
@@ -388,14 +397,12 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 	// Update statistics
 	idx.updatePutStats()
 
-	// Check if compaction is needed
-	// TODO: Sprint 4 - Integrate with CompactionManager
-	// if idx.config.CompactionEnabled && idx.compactor != nil {
-	//     files := idx.storage.GetAllFiles()
-	//     if idx.compactor.ShouldCompact(files) {
-	//         go idx.triggerCompaction() // Background compaction
-	//     }
-	// }
+	// Periodically check if compaction is needed
+	// Check every 1000 writes to avoid overhead
+	if atomic.LoadUint64(&idx.GlobalSequence)%1000 == 0 {
+		// Run in background to avoid blocking writes
+		go idx.triggerCompaction()
+	}
 
 	return nil
 }
@@ -757,34 +764,81 @@ func (config *IndexConfig) GetIndexFilePath() string {
 }
 
 // TODO: Sprint 4 - Background Compaction
-// triggerCompaction runs compaction in background
-// func (idx *HashIndexV3) triggerCompaction() {
-//     idx.logger.Infow("Starting background compaction",
-//         "indexName", idx.config.IndexName)
-//
-//     files := idx.storage.GetAllFiles()
-//     compactedFile, err := idx.compactor.CompactFiles(files)
-//     if err != nil {
-//         idx.logger.Errorw("Compaction failed",
-//             "indexName", idx.config.IndexName,
-//             "error", err)
-//         return
-//     }
-//
-//     // Atomically replace old files with compacted file
-//     err = idx.storage.ReplaceFiles(files, compactedFile)
-//     if err != nil {
-//         idx.logger.Errorw("Failed to replace files after compaction",
-//             "error", err)
-//         return
-//     }
-//
-//     idx.stats.mutex.Lock()
-//     idx.stats.CompactionCount++
-//     idx.stats.LastCompactionTime = time.Now()
-//     idx.stats.mutex.Unlock()
-//
-//     idx.logger.Infow("Compaction completed successfully",
-//         "indexName", idx.config.IndexName,
-//         "compactedFile", compactedFile)
-// }
+// triggerCompaction checks if compaction is needed and runs it
+// Called periodically from Put() to maintain LSM efficiency
+func (idx *HashIndexV3) triggerCompaction() {
+	// Skip if compaction disabled or compactor not set
+	if idx.compactor == nil {
+		return
+	}
+
+	// Get all entry files
+	files, err := idx.storage.GetEntryFiles()
+	if err != nil {
+		idx.logger.Errorw("Failed to get entry files for compaction check",
+			"error", err)
+		return
+	}
+
+	// Check if compaction needed (compactor examines file count/sizes)
+	if !idx.compactor.ShouldCompact(files) {
+		return
+	}
+
+	idx.logger.Infow("Triggering compaction",
+		"indexName", idx.config.IndexName,
+		"bundleName", idx.config.BundleName,
+		"fileCount", len(files))
+
+	// Call the compactor's CompactHashIndexFiles method
+	compactedFile, err := idx.compactor.CompactHashIndexFiles(
+		idx.config.BundleName,
+		idx.config.IndexName,
+		files,
+	)
+	if err != nil {
+		idx.logger.Errorw("Compaction failed",
+			"indexName", idx.config.IndexName,
+			"bundleName", idx.config.BundleName,
+			"error", err)
+		return
+	}
+
+	// Replace old files with compacted file
+	err = idx.storage.ReplaceFiles(files, compactedFile)
+	if err != nil {
+		idx.logger.Errorw("Failed to replace files after compaction",
+			"indexName", idx.config.IndexName,
+			"error", err,
+			"compactedFile", compactedFile)
+		return
+	}
+
+	// Update statistics
+	idx.statsMutex.Lock()
+	idx.stats.CompactionCount++
+	idx.stats.LastCompactionTime = time.Now()
+	idx.statsMutex.Unlock()
+
+	idx.logger.Infow("Compaction completed successfully",
+		"indexName", idx.config.IndexName,
+		"compactedFile", compactedFile,
+		"oldFileCount", len(files))
+}
+
+// SetCompactor injects a CompactionManager implementation
+// This allows external configuration without creating import cycles
+// Must be called after NewHashIndexV3() and before compaction is triggered
+func (idx *HashIndexV3) SetCompactor(cm CompactionManager) {
+	idx.mutex.Lock()
+	defer idx.mutex.Unlock()
+	idx.compactor = cm
+	idx.logger.Infow("Compactor configured",
+		"indexName", idx.config.IndexName)
+}
+
+// GetStorage returns the underlying EntryStorage for testing purposes
+// This allows tests to inspect file state and trigger operations
+func (idx *HashIndexV3) GetStorage() *EntryStorage {
+	return idx.storage
+}

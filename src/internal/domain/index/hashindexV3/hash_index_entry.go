@@ -35,6 +35,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"time"
 )
 
@@ -355,6 +356,73 @@ func DeserializeEntry(data []byte) (*HashIndexEntry, int, error) {
 	}
 
 	return entry, offset, nil
+}
+
+// DeserializeEntryFromReader reads and deserializes an entry from an io.Reader
+// This is useful for streaming reads during compaction
+//
+// Returns:
+//   - entry: The deserialized entry
+//   - bytesRead: Number of bytes consumed
+//   - error: Any error encountered (including io.EOF)
+func DeserializeEntryFromReader(reader io.Reader) (*HashIndexEntry, int, error) {
+	// Read header first to determine total size
+	headerBuf := make([]byte, EntryHeaderSize)
+	n, err := io.ReadFull(reader, headerBuf)
+	if err != nil {
+		return nil, n, err
+	}
+
+	// Read key length
+	keyLenBuf := make([]byte, 4)
+	n2, err := io.ReadFull(reader, keyLenBuf)
+	if err != nil {
+		return nil, n + n2, err
+	}
+	keyLen := binary.LittleEndian.Uint32(keyLenBuf)
+
+	if keyLen > MaxKeySize {
+		return nil, n + n2, fmt.Errorf("key length %d exceeds maximum %d", keyLen, MaxKeySize)
+	}
+
+	// Read key data
+	keyBuf := make([]byte, keyLen)
+	n3, err := io.ReadFull(reader, keyBuf)
+	if err != nil {
+		return nil, n + n2 + n3, err
+	}
+
+	// Read document ID length
+	docLenBuf := make([]byte, 4)
+	n4, err := io.ReadFull(reader, docLenBuf)
+	if err != nil {
+		return nil, n + n2 + n3 + n4, err
+	}
+	docLen := binary.LittleEndian.Uint32(docLenBuf)
+
+	if docLen > MaxDocumentIDSize {
+		return nil, n + n2 + n3 + n4, fmt.Errorf("document ID length %d exceeds maximum %d", docLen, MaxDocumentIDSize)
+	}
+
+	// Read document ID data
+	docBuf := make([]byte, docLen)
+	n5, err := io.ReadFull(reader, docBuf)
+	if err != nil {
+		return nil, n + n2 + n3 + n4 + n5, err
+	}
+
+	// Reconstruct full buffer and use existing DeserializeEntry
+	totalSize := n + n2 + int(keyLen) + n3 + n4 + int(docLen) + n5
+	fullBuf := make([]byte, totalSize)
+
+	copy(fullBuf[0:], headerBuf)
+	copy(fullBuf[n:], keyLenBuf)
+	copy(fullBuf[n+n2:], keyBuf)
+	copy(fullBuf[n+n2+n3:], docLenBuf)
+	copy(fullBuf[n+n2+n3+n4:], docBuf)
+
+	entry, _, err := DeserializeEntry(fullBuf)
+	return entry, totalSize, err
 }
 
 // computeChecksum calculates a CRC32 checksum of entry data

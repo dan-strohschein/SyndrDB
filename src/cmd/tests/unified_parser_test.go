@@ -9,6 +9,7 @@ package main
 
 import (
 	"strings"
+	"syndrdb/src/internal/query/queryparser"
 	"testing"
 
 	"go.uber.org/zap"
@@ -29,7 +30,7 @@ func TestSimpleQueries(t *testing.T) {
 		name           string
 		query          string
 		expectError    bool
-		expectedType   QueryType
+		expectedType   queryparser.QueryType
 		expectedFrom   string
 		expectedFields int
 	}{
@@ -37,7 +38,7 @@ func TestSimpleQueries(t *testing.T) {
 			name:           "Simple SELECT DOCUMENTS",
 			query:          `SELECT DOCUMENTS FROM "Users"`,
 			expectError:    false,
-			expectedType:   SimpleQuery,
+			expectedType:   queryparser.SimpleQuery,
 			expectedFrom:   "Users",
 			expectedFields: 0, // Empty means all fields
 		},
@@ -45,7 +46,7 @@ func TestSimpleQueries(t *testing.T) {
 			name:           "Simple SELECT with fields",
 			query:          `SELECT name, email, age FROM "Users"`,
 			expectError:    false,
-			expectedType:   SimpleQuery,
+			expectedType:   queryparser.SimpleQuery,
 			expectedFrom:   "Users",
 			expectedFields: 3,
 		},
@@ -53,7 +54,7 @@ func TestSimpleQueries(t *testing.T) {
 			name:           "Simple SELECT with WHERE",
 			query:          `SELECT name, email FROM "Users" WHERE age > 18`,
 			expectError:    false,
-			expectedType:   SimpleQuery,
+			expectedType:   queryparser.SimpleQuery,
 			expectedFrom:   "Users",
 			expectedFields: 2,
 		},
@@ -61,7 +62,7 @@ func TestSimpleQueries(t *testing.T) {
 			name:           "SELECT with quoted fields",
 			query:          `SELECT "firstName", 'lastName', email FROM "Users"`,
 			expectError:    false,
-			expectedType:   SimpleQuery,
+			expectedType:   queryparser.SimpleQuery,
 			expectedFrom:   "Users",
 			expectedFields: 3,
 		},
@@ -69,7 +70,7 @@ func TestSimpleQueries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUnifiedSelectQuery(tt.query, logger)
+			result, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
@@ -110,7 +111,7 @@ func TestJoinQueries(t *testing.T) {
 		name          string
 		query         string
 		expectError   bool
-		expectedType  QueryType
+		expectedType  queryparser.QueryType
 		expectedJoins int
 	}{
 		{
@@ -118,7 +119,7 @@ func TestJoinQueries(t *testing.T) {
 			query: `SELECT DOCUMENTS FROM "Users" 
 					JOIN "Orders" ON "Users"."id" == "Orders"."userId"`,
 			expectError:   false,
-			expectedType:  JoinQuery,
+			expectedType:  queryparser.JoinQuery,
 			expectedJoins: 1,
 		},
 		{
@@ -127,7 +128,7 @@ func TestJoinQueries(t *testing.T) {
 					JOIN "Orders" ON "Users"."id" == "Orders"."userId"
 					WHERE "Users"."age" > 18`,
 			expectError:   false,
-			expectedType:  JoinQuery,
+			expectedType:  queryparser.JoinQuery,
 			expectedJoins: 1,
 		},
 		{
@@ -136,14 +137,14 @@ func TestJoinQueries(t *testing.T) {
 					JOIN "Orders" ON "Users"."id" == "Orders"."userId"
 					JOIN "Products" ON "Orders"."productId" == "Products"."id"`,
 			expectError:   false,
-			expectedType:  JoinQuery,
+			expectedType:  queryparser.JoinQuery,
 			expectedJoins: 1, // Note: Current JOIN parser treats multiple JOINs as conditions on one JOIN
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUnifiedSelectQuery(tt.query, logger)
+			result, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
@@ -179,7 +180,7 @@ func TestGroupByQueries(t *testing.T) {
 		name                  string
 		query                 string
 		expectError           bool
-		expectedType          QueryType
+		expectedType          queryparser.QueryType
 		expectedAggregates    int
 		expectedGroupByFields int
 	}{
@@ -187,7 +188,7 @@ func TestGroupByQueries(t *testing.T) {
 			name:                  "Simple GROUP BY with COUNT",
 			query:                 `SELECT country, COUNT(*) FROM "Users" GROUP BY country`,
 			expectError:           false,
-			expectedType:          GroupByQuery,
+			expectedType:          queryparser.GroupByQuery,
 			expectedAggregates:    1,
 			expectedGroupByFields: 1,
 		},
@@ -195,7 +196,7 @@ func TestGroupByQueries(t *testing.T) {
 			name:                  "GROUP BY with multiple aggregates",
 			query:                 `SELECT department, COUNT(*), AVG(salary), SUM(salary) FROM "Employees" GROUP BY department`,
 			expectError:           false,
-			expectedType:          GroupByQuery,
+			expectedType:          queryparser.GroupByQuery,
 			expectedAggregates:    3,
 			expectedGroupByFields: 1,
 		},
@@ -203,7 +204,7 @@ func TestGroupByQueries(t *testing.T) {
 			name:                  "GROUP BY with HAVING",
 			query:                 `SELECT country, COUNT(*) FROM "Users" GROUP BY country HAVING COUNT(*) > 10`,
 			expectError:           false,
-			expectedType:          GroupByQuery,
+			expectedType:          queryparser.GroupByQuery,
 			expectedAggregates:    1,
 			expectedGroupByFields: 1,
 		},
@@ -211,7 +212,7 @@ func TestGroupByQueries(t *testing.T) {
 			name:                  "GROUP BY with WHERE and HAVING",
 			query:                 `SELECT department, AVG(salary) FROM "Employees" WHERE salary > 30000 GROUP BY department HAVING AVG(salary) > 50000`,
 			expectError:           false,
-			expectedType:          GroupByQuery,
+			expectedType:          queryparser.GroupByQuery,
 			expectedAggregates:    1,
 			expectedGroupByFields: 1,
 		},
@@ -219,7 +220,7 @@ func TestGroupByQueries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUnifiedSelectQuery(tt.query, logger)
+			result, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
@@ -286,7 +287,7 @@ func TestComplexQueries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUnifiedSelectQuery(tt.query, logger)
+			result, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
@@ -299,7 +300,7 @@ func TestComplexQueries(t *testing.T) {
 			}
 
 			if !tt.expectError {
-				if result.QueryType != ComplexQuery {
+				if result.QueryType != queryparser.ComplexQuery {
 					t.Logf("Note: QueryType is %s (complex queries may be detected as JOIN or GroupBy)", result.QueryType)
 				}
 			}
@@ -348,7 +349,7 @@ func TestTopAndLimitClauses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUnifiedSelectQuery(tt.query, logger)
+			result, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
@@ -412,7 +413,7 @@ func TestDistinctAndCountOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUnifiedSelectQuery(tt.query, logger)
+			result, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if err != nil {
 				t.Errorf("Unexpected error: %v", err)
@@ -463,7 +464,7 @@ func TestOrderByParsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := ParseUnifiedSelectQuery(tt.query, logger)
+			result, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
@@ -524,7 +525,7 @@ func TestValidationErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ParseUnifiedSelectQuery(tt.query, logger)
+			_, err := queryparser.ParseUnifiedSelectQuery(tt.query, logger)
 
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
@@ -557,7 +558,7 @@ func TestHelperFunctions(t *testing.T) {
 			  ORDER BY country ASC 
 			  LIMIT 10`
 
-	result, err := ParseUnifiedSelectQuery(query, logger)
+	result, err := queryparser.ParseUnifiedSelectQuery(query, logger)
 	if err != nil {
 		t.Fatalf("Failed to parse test query: %v", err)
 	}
@@ -607,33 +608,33 @@ func TestQueryTypeDetection(t *testing.T) {
 	tests := []struct {
 		name         string
 		query        string
-		expectedType QueryType
+		expectedType queryparser.QueryType
 	}{
 		{
 			name:         "Simple query",
 			query:        `SELECT DOCUMENTS FROM "Users"`,
-			expectedType: SimpleQuery,
+			expectedType: queryparser.SimpleQuery,
 		},
 		{
 			name:         "JOIN query",
 			query:        `SELECT DOCUMENTS FROM "Users" JOIN "Orders" ON "Users"."id" == "Orders"."userId"`,
-			expectedType: JoinQuery,
+			expectedType: queryparser.JoinQuery,
 		},
 		{
 			name:         "GROUP BY query",
 			query:        `SELECT country, COUNT(*) FROM "Users" GROUP BY country`,
-			expectedType: GroupByQuery,
+			expectedType: queryparser.GroupByQuery,
 		},
 		{
 			name:         "Complex query (JOIN + GROUP BY)",
 			query:        `SELECT country, COUNT(*) FROM "Users" JOIN "Orders" ON "Users"."id" == "Orders"."userId" GROUP BY country`,
-			expectedType: ComplexQuery,
+			expectedType: queryparser.ComplexQuery,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			detectedType := detectQueryType(tt.query, logger)
+			detectedType := queryparser.DetectQueryType(tt.query, logger)
 
 			if detectedType != tt.expectedType {
 				t.Errorf("Expected QueryType %s, got %s", tt.expectedType, detectedType)
@@ -651,7 +652,7 @@ func BenchmarkSimpleQueryParsing(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = ParseUnifiedSelectQuery(query, logger)
+		_, _ = queryparser.ParseUnifiedSelectQuery(query, logger)
 	}
 }
 
@@ -671,6 +672,6 @@ func BenchmarkComplexQueryParsing(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = ParseUnifiedSelectQuery(query, logger)
+		_, _ = queryparser.ParseUnifiedSelectQuery(query, logger)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"syndrdb/src/internal/journal"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ func TestBinaryWALSerialization(t *testing.T) {
 	tmpDir := os.TempDir()
 	walPath := filepath.Join(tmpDir, "test_binary_wal")
 
-	config := WALConfig{
+	config := journal.WALConfig{
 		LogDir:             tmpDir,
 		MaxFileSize:        1024 * 1024, // 1MB
 		FlushInterval:      time.Second,
@@ -30,7 +31,7 @@ func TestBinaryWALSerialization(t *testing.T) {
 		AutoFlush:          true,
 	}
 
-	wal, err := NewWriteAheadLog(config, sugar)
+	wal, err := journal.NewWriteAheadLog(config, sugar)
 	if err != nil {
 		t.Fatalf("Failed to create WAL: %v", err)
 	}
@@ -38,11 +39,11 @@ func TestBinaryWALSerialization(t *testing.T) {
 	defer os.Remove(walPath)
 
 	// Create test WAL entry
-	testEntry := WALEntry{
+	testEntry := journal.WALEntry{
 		LSN:        1,
 		Timestamp:  time.Now(),
 		TxID:       "test-tx-123",
-		Operation:  OpInsert,
+		Operation:  journal.OpInsert,
 		BundleName: "test-bundle",
 		DocumentID: "doc-12345",
 		BeforeData: "",
@@ -51,7 +52,7 @@ func TestBinaryWALSerialization(t *testing.T) {
 	}
 
 	// Calculate checksum
-	testEntry.Checksum = wal.calculateChecksum(testEntry)
+	testEntry.Checksum = wal.CalculateChecksum(testEntry)
 
 	// Test binary serialization
 	binaryData, err := wal.SerializeWALEntryBinary(testEntry)
@@ -117,11 +118,11 @@ func TestBinaryWALPerformance(t *testing.T) {
 	sugar := logger.Sugar()
 
 	// Test entry
-	testEntry := WALEntry{
+	testEntry := journal.WALEntry{
 		LSN:        1,
 		Timestamp:  time.Now(),
 		TxID:       "performance-test-tx-123456789",
-		Operation:  OpInsert,
+		Operation:  journal.OpInsert,
 		BundleName: "performance-test-bundle-with-long-name",
 		DocumentID: "performance-test-document-id-123456789",
 		BeforeData: "",
@@ -133,7 +134,7 @@ func TestBinaryWALPerformance(t *testing.T) {
 	tmpDir := os.TempDir()
 	walPath := filepath.Join(tmpDir, "test_perf_wal")
 
-	config := WALConfig{
+	config := journal.WALConfig{
 		LogDir:             tmpDir,
 		MaxFileSize:        1024 * 1024 * 10, // 10MB
 		FlushInterval:      time.Second,
@@ -144,14 +145,14 @@ func TestBinaryWALPerformance(t *testing.T) {
 		AutoFlush:          false, // Disable auto flush for controlled testing
 	}
 
-	wal, err := NewWriteAheadLog(config, sugar)
+	wal, err := journal.NewWriteAheadLog(config, sugar)
 	if err != nil {
 		t.Fatalf("Failed to create WAL: %v", err)
 	}
 	defer wal.Close()
 	defer os.Remove(walPath)
 
-	testEntry.Checksum = wal.calculateChecksum(testEntry)
+	testEntry.Checksum = wal.CalculateChecksum(testEntry)
 
 	// Test binary serialization performance
 	iterations := 10000
@@ -205,7 +206,7 @@ func BenchmarkBinaryWALSerialization(b *testing.B) {
 	tmpDir := os.TempDir()
 	walPath := filepath.Join(tmpDir, "bench_wal")
 
-	config := WALConfig{
+	config := journal.WALConfig{
 		LogDir:             tmpDir,
 		MaxFileSize:        1024 * 1024,
 		FlushInterval:      time.Second,
@@ -216,25 +217,25 @@ func BenchmarkBinaryWALSerialization(b *testing.B) {
 		AutoFlush:          false,
 	}
 
-	wal, err := NewWriteAheadLog(config, sugar)
+	wal, err := journal.NewWriteAheadLog(config, sugar)
 	if err != nil {
 		b.Fatalf("Failed to create WAL: %v", err)
 	}
 	defer wal.Close()
 	defer os.Remove(walPath)
 
-	testEntry := WALEntry{
+	testEntry := journal.WALEntry{
 		LSN:        1,
 		Timestamp:  time.Now(),
 		TxID:       "bench-tx-123",
-		Operation:  OpInsert,
+		Operation:  journal.OpInsert,
 		BundleName: "bench-bundle",
 		DocumentID: "bench-doc-123",
 		BeforeData: "",
 		AfterData:  `{"name": "benchmark", "value": 42}`,
 		Metadata:   `{"index": "name"}`,
 	}
-	testEntry.Checksum = wal.calculateChecksum(testEntry)
+	testEntry.Checksum = wal.CalculateChecksum(testEntry)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -255,7 +256,7 @@ func BenchmarkBinaryWALDeserialization(b *testing.B) {
 	tmpDir := os.TempDir()
 	walPath := filepath.Join(tmpDir, "bench_wal_deser")
 
-	config := WALConfig{
+	config := journal.WALConfig{
 		LogDir:             tmpDir,
 		MaxFileSize:        1024 * 1024,
 		FlushInterval:      time.Second,
@@ -266,25 +267,25 @@ func BenchmarkBinaryWALDeserialization(b *testing.B) {
 		AutoFlush:          false,
 	}
 
-	wal, err := NewWriteAheadLog(config, sugar)
+	wal, err := journal.NewWriteAheadLog(config, sugar)
 	if err != nil {
 		b.Fatalf("Failed to create WAL: %v", err)
 	}
 	defer wal.Close()
 	defer os.Remove(walPath)
 
-	testEntry := WALEntry{
+	testEntry := journal.WALEntry{
 		LSN:        1,
 		Timestamp:  time.Now(),
 		TxID:       "bench-tx-123",
-		Operation:  OpInsert,
+		Operation:  journal.OpInsert,
 		BundleName: "bench-bundle",
 		DocumentID: "bench-doc-123",
 		BeforeData: "",
 		AfterData:  `{"name": "benchmark", "value": 42}`,
 		Metadata:   `{"index": "name"}`,
 	}
-	testEntry.Checksum = wal.calculateChecksum(testEntry)
+	testEntry.Checksum = wal.CalculateChecksum(testEntry)
 
 	// Pre-serialize the test data
 	binaryData, err := wal.SerializeWALEntryBinary(testEntry)

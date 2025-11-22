@@ -18,7 +18,6 @@ import (
 // Function aliases for sorting functions
 var (
 	ParallelTopNHeapSort  = sorting.ParallelTopNHeapSort
-	TopNHeapSort          = sorting.TopNHeapSort
 	ShouldUseParallelTopN = sorting.ShouldUseParallelTopN
 )
 
@@ -32,7 +31,7 @@ func createTestDocuments1(count int, fieldName string) map[string]*models.Docume
 			Fields: map[string]models.Field{
 				fieldName: {
 					Name:  fieldName,
-					Value: int64(i),
+					Value: models.NewIntValue(int64(i)),
 				},
 			},
 		}
@@ -86,8 +85,8 @@ func TestParallelTopNHeapSort_BasicCorrectness(t *testing.T) {
 
 			// Verify correct ordering
 			for i := 0; i < len(result)-1; i++ {
-				score1 := result[i].Fields["score"].Value.(int64)
-				score2 := result[i+1].Fields["score"].Value.(int64)
+				score1, _ := result[i].Fields["score"].Value.AsInt()
+				score2, _ := result[i+1].Fields["score"].Value.AsInt()
 
 				if tt.direction == queryparser.SortAsc {
 					if score1 > score2 {
@@ -104,7 +103,7 @@ func TestParallelTopNHeapSort_BasicCorrectness(t *testing.T) {
 			if tt.direction == queryparser.SortAsc {
 				// For ASC, should have smallest values
 				for i := 0; i < len(result); i++ {
-					score := result[i].Fields["score"].Value.(int64)
+					score, _ := result[i].Fields["score"].Value.AsInt()
 					if score >= int64(tt.limit) {
 						t.Errorf("ASC top-N incorrect: got score %d at index %d, expected < %d",
 							score, i, tt.limit)
@@ -114,7 +113,7 @@ func TestParallelTopNHeapSort_BasicCorrectness(t *testing.T) {
 			} else {
 				// For DESC, should have largest values
 				for i := 0; i < len(result); i++ {
-					score := result[i].Fields["score"].Value.(int64)
+					score, _ := result[i].Fields["score"].Value.AsInt()
 					expectedMin := int64(tt.numDocs - tt.limit)
 					if score < expectedMin {
 						t.Errorf("DESC top-N incorrect: got score %d at index %d, expected >= %d",
@@ -151,7 +150,7 @@ func TestParallelTopNHeapSort_CompareWithSequential(t *testing.T) {
 			}
 
 			// Run sequential Top-N
-			seqResult, err := TopNHeapSort(docs, tt.limit, orderBy, logger)
+			seqResult, err := sorting.TopNHeapSort(docs, tt.limit, orderBy, logger)
 			if err != nil {
 				t.Fatalf("Sequential TopNHeapSort failed: %v", err)
 			}
@@ -169,8 +168,8 @@ func TestParallelTopNHeapSort_CompareWithSequential(t *testing.T) {
 			}
 
 			for i := 0; i < len(seqResult); i++ {
-				seqVal := seqResult[i].Fields["value"].Value.(int64)
-				parVal := parResult[i].Fields["value"].Value.(int64)
+				seqVal, _ := seqResult[i].Fields["value"].Value.AsInt()
+				parVal, _ := parResult[i].Fields["value"].Value.AsInt()
 
 				if seqVal != parVal {
 					t.Errorf("Value mismatch at index %d: sequential=%d, parallel=%d",
@@ -191,8 +190,8 @@ func TestParallelTopNHeapSort_MultipleFields(t *testing.T) {
 		doc := &models.Document{
 			DocumentID: uuid.New().String(),
 			Fields: map[string]models.Field{
-				"category": {Value: int64(i % 10)}, // 10 categories
-				"score":    {Value: int64(i)},
+				"category": {Value: models.NewIntValue(int64(i % 10))}, // 10 categories
+				"score":    {Value: models.NewIntValue(int64(i))},
 			},
 		}
 		docs[doc.DocumentID] = doc
@@ -212,10 +211,10 @@ func TestParallelTopNHeapSort_MultipleFields(t *testing.T) {
 
 	// Verify multi-field ordering
 	for i := 0; i < len(result)-1; i++ {
-		cat1 := result[i].Fields["category"].Value.(int64)
-		cat2 := result[i+1].Fields["category"].Value.(int64)
-		score1 := result[i].Fields["score"].Value.(int64)
-		score2 := result[i+1].Fields["score"].Value.(int64)
+		cat1, _ := result[i].Fields["category"].Value.AsInt()
+		cat2, _ := result[i+1].Fields["category"].Value.AsInt()
+		score1, _ := result[i].Fields["score"].Value.AsInt()
+		score2, _ := result[i+1].Fields["score"].Value.AsInt()
 
 		if cat1 > cat2 {
 			t.Errorf("Primary field ordering violated at index %d: category %d > %d",
@@ -494,7 +493,7 @@ func BenchmarkParallelVsSequential(b *testing.B) {
 		b.Run(fmt.Sprintf("Sequential_%d", size), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = TopNHeapSort(docs, 100, orderBy, logger)
+				_, _ = sorting.TopNHeapSort(docs, 100, orderBy, logger)
 			}
 		})
 

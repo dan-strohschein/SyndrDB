@@ -78,11 +78,11 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Fields: map[string]models.Field{
 				"age": {
 					Name:  "age",
-					Value: age,
+					Value: models.NewIntValue(int64(age)),
 				},
 				"name": {
 					Name:  "name",
-					Value: fmt.Sprintf("Person_%s", docID),
+					Value: models.NewStringValue(fmt.Sprintf("Person_%s", docID)),
 				},
 			},
 		}
@@ -111,14 +111,14 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Logger:    sugaredLogger,
 		}
 
-		results, err := node.executeBTreeRangeScan()
+		results, err := node.ExecuteBTreeRangeScan()
 		require.NoError(t, err)
 
 		// Should return ages: 28, 30, 35, 40, 45
 		assert.GreaterOrEqual(t, len(results), 5, "Should find at least 5 documents with age > 25")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.(int)
+			age := doc.Fields["age"].Value.IntVal
 			assert.Greater(t, age, 25, "Document %s has age %d, expected > 25", docID, age)
 		}
 	})
@@ -134,14 +134,14 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Logger:    sugaredLogger,
 		}
 
-		results, err := node.executeBTreeRangeScan()
+		results, err := node.ExecuteBTreeRangeScan()
 		require.NoError(t, err)
 
 		// Should return ages: 30, 35, 40, 45
 		assert.GreaterOrEqual(t, len(results), 4, "Should find at least 4 documents with age >= 30")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.(int)
+			age := doc.Fields["age"].Value.IntVal
 			assert.GreaterOrEqual(t, age, 30, "Document %s has age %d, expected >= 30", docID, age)
 		}
 	})
@@ -157,14 +157,14 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Logger:    sugaredLogger,
 		}
 
-		results, err := node.executeBTreeRangeScan()
+		results, err := node.ExecuteBTreeRangeScan()
 		require.NoError(t, err)
 
 		// Should return ages: 15, 18, 20
 		assert.GreaterOrEqual(t, len(results), 3, "Should find at least 3 documents with age <= 20")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.(int)
+			age := doc.Fields["age"].Value.IntVal
 			assert.LessOrEqual(t, age, 20, "Document %s has age %d, expected <= 20", docID, age)
 		}
 	})
@@ -181,14 +181,14 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Logger:     sugaredLogger,
 		}
 
-		results, err := node.executeBTreeRangeScan()
+		results, err := node.ExecuteBTreeRangeScan()
 		require.NoError(t, err)
 
 		// Should return ages: 20, 22, 25, 28, 30
 		assert.GreaterOrEqual(t, len(results), 5, "Should find at least 5 documents with age BETWEEN 20 AND 30")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.(int)
+			age := doc.Fields["age"].Value.IntVal
 			assert.GreaterOrEqual(t, age, 20, "Document %s has age %d, expected >= 20", docID, age)
 			assert.LessOrEqual(t, age, 30, "Document %s has age %d, expected <= 30", docID, age)
 		}
@@ -205,7 +205,7 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Logger:    sugaredLogger,
 		}
 
-		results, err := node.executeBTreeRangeScan()
+		results, err := node.ExecuteBTreeRangeScan()
 		require.NoError(t, err)
 		assert.Empty(t, results, "Should find no documents with age > 100")
 	})
@@ -221,7 +221,7 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Logger: sugaredLogger,
 		}
 
-		_, err := node.executeBTreeRangeScan()
+		_, err := node.ExecuteBTreeRangeScan()
 		assert.Error(t, err, "Should return error when BETWEEN is missing range values")
 		assert.Contains(t, err.Error(), "requires both rangeStart and rangeEnd")
 	})
@@ -237,7 +237,7 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 			Logger:    sugaredLogger,
 		}
 
-		_, err := node.executeBTreeRangeScan()
+		_, err := node.ExecuteBTreeRangeScan()
 		assert.Error(t, err, "Should return error for unsupported operator")
 		assert.Contains(t, err.Error(), "unsupported range operator")
 	})
@@ -328,7 +328,7 @@ func TestOperatorToKeyRange(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			startKey, endKey, excludeStart, excludeEnd, err := node.operatorToKeyRange(tt.operator, tt.searchKey, tt.rangeStart, tt.rangeEnd)
+			startKey, endKey, excludeStart, excludeEnd, err := node.OperatorToKeyRange(tt.operator, tt.searchKey, tt.rangeStart, tt.rangeEnd)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -383,7 +383,7 @@ func TestConvertToBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := node.convertToBytes(tt.input)
+			result := node.ConvertToBytes(tt.input)
 			assert.Equal(t, tt.expected, string(result))
 		})
 	}

@@ -394,6 +394,10 @@ func (wal *WriteAheadLog) checkFileRotation() error {
 	return nil
 }
 
+func (wal *WriteAheadLog) CalculateChecksum(entry WALEntry) uint32 {
+	return wal.calculateChecksum(entry)
+}
+
 // calculateChecksum calculates a simple checksum for the WAL entry
 func (wal *WriteAheadLog) calculateChecksum(entry WALEntry) uint32 {
 	data := fmt.Sprintf("%d%s%d%s%s%s%s%s",

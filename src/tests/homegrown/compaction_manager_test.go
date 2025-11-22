@@ -1,7 +1,45 @@
 package homegrown
 
+/*
+COMPACTION MANAGER UNIT TESTS
+
+This file contains unit tests for the standalone CompactionManager implementation.
+These tests verify the compaction logic in isolation, independent of the hashIndexV3 integration.
+
+TEST COVERAGE:
+- CompactionManager creation and configuration
+- File merging logic (multiple files → single compacted file)
+- Tombstone removal during compaction
+- Temporal ordering (latest entry wins)
+- Compaction strategy evaluation (file count, size, tombstone ratio)
+- Statistics tracking and error handling
+- Thread-safety and concurrent operations
+
+INTEGRATION TESTS:
+For end-to-end integration tests with hashIndexV3, see:
+- /src/cmd/tests/hashindex_compaction_e2e_test.go
+
+These tests verify the compaction integration mechanism works correctly
+with the LSM-style hash index, including:
+- External compactor injection via SetCompactor()
+- Automatic compaction triggering (every 1000 writes)
+- File replacement coordination with EntryStorage
+- Data integrity across compaction cycles
+
+DESIGN PRINCIPLES:
+- Isolation: Tests use temporary directories and clean up after themselves
+- Single Responsibility: Each test focuses on one aspect of compaction
+- Observability: Tests verify statistics and logging output
+- Thread-safety: Tests verify concurrent operations are safe
+
+NOTE: This file tests the STANDALONE compaction manager.
+The actual integration with hashIndexV3 is tested in the E2E test suite.
+*/
+
 import (
 	"path/filepath"
+	"syndrdb/src/internal/domain/compactor"
+	"syndrdb/src/internal/domain/index/hashindexV3"
 	"testing"
 	"time"
 
@@ -14,14 +52,14 @@ func TestNewCompactionManager(t *testing.T) {
 
 	logger, _ := zap.NewDevelopment()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   logger.Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
@@ -30,15 +68,15 @@ func TestNewCompactionManager(t *testing.T) {
 		t.Fatal("Compaction manager is nil")
 	}
 
-	if cm.dataDir != tempDir {
-		t.Errorf("Expected dataDir=%s, got %s", tempDir, cm.dataDir)
+	if config.DataDir != tempDir {
+		t.Errorf("Expected dataDir=%s, got %s", tempDir, config.DataDir)
 	}
 
-	if !cm.enabled {
+	if !config.Enabled {
 		t.Error("Expected compaction to be enabled")
 	}
 
-	if cm.compacting {
+	if cm.IsCompacting() {
 		t.Error("Expected compacting to be false initially")
 	}
 }
@@ -47,34 +85,34 @@ func TestNewCompactionManager(t *testing.T) {
 func TestNewCompactionManagerWithDefaults(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir: tempDir,
 		Enabled: true,
 		// Strategy and Logger will be defaulted
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
 
-	if cm.strategy == nil {
+	if cm.GetStrategy() == nil {
 		t.Error("Expected default strategy to be set")
 	}
 
-	if cm.logger == nil {
+	if cm.GetLogger() == nil {
 		t.Error("Expected default logger to be set")
 	}
 }
 
 // TestNewCompactionManagerEmptyDataDir tests validation
 func TestNewCompactionManagerEmptyDataDir(t *testing.T) {
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir: "",
 		Enabled: true,
 	}
 
-	_, err := NewCompactionManager(config)
+	_, err := compactor.NewCompactionManager(config)
 	if err == nil {
 		t.Error("Expected error for empty data directory")
 	}
@@ -84,32 +122,32 @@ func TestNewCompactionManagerEmptyDataDir(t *testing.T) {
 func TestEnableDisable(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  false,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
 
 	// Should be disabled initially
-	if cm.enabled {
+	if config.Enabled {
 		t.Error("Expected compaction to be disabled")
 	}
 
 	// Enable
 	cm.Enable()
-	if !cm.enabled {
+	if !config.Enabled {
 		t.Error("Expected compaction to be enabled after Enable()")
 	}
 
 	// Disable
 	cm.Disable()
-	if cm.enabled {
+	if config.Enabled {
 		t.Error("Expected compaction to be disabled after Disable()")
 	}
 }
@@ -118,14 +156,14 @@ func TestEnableDisable(t *testing.T) {
 func TestIsCompacting(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
@@ -135,18 +173,16 @@ func TestIsCompacting(t *testing.T) {
 	}
 
 	// Simulate compaction in progress
-	cm.mutex.Lock()
-	cm.compacting = true
-	cm.mutex.Unlock()
+
+	cm.SetCompacting(true)
 
 	if !cm.IsCompacting() {
 		t.Error("Expected compacting to be true")
 	}
 
 	// Reset
-	cm.mutex.Lock()
-	cm.compacting = false
-	cm.mutex.Unlock()
+
+	cm.SetCompacting(false)
 
 	if cm.IsCompacting() {
 		t.Error("Expected compacting to be false after reset")
@@ -157,14 +193,14 @@ func TestIsCompacting(t *testing.T) {
 func TestGetStats(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
@@ -180,12 +216,13 @@ func TestGetStats(t *testing.T) {
 	}
 
 	// Update stats manually
-	cm.stats.mutex.Lock()
-	cm.stats.TotalCompactions = 5
-	cm.stats.TotalEntriesKept = 100
-	cm.stats.TotalEntriesRemoved = 50
-	cm.stats.mutex.Unlock()
+	sts := compactor.CompactionStats{
+		TotalCompactions:    5,
+		TotalEntriesKept:    100,
+		TotalEntriesRemoved: 50,
+	}
 
+	cm.UpdateStats(sts, 200*time.Millisecond, nil)
 	stats = cm.GetStats()
 
 	if stats.TotalCompactions != 5 {
@@ -205,27 +242,27 @@ func TestGetStats(t *testing.T) {
 func TestUpdateStats(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
 
 	// First compaction
-	stats1 := CompactionStats{
+	stats1 := compactor.CompactionStats{
 		TotalFilesCompacted: 3,
 		TotalBytesWritten:   1024,
 		TotalEntriesKept:    50,
 		TotalEntriesRemoved: 10,
 	}
 
-	cm.updateStats(stats1, 100*time.Millisecond, nil)
+	cm.UpdateStats(stats1, 100*time.Millisecond, nil)
 
 	globalStats := cm.GetStats()
 
@@ -242,14 +279,14 @@ func TestUpdateStats(t *testing.T) {
 	}
 
 	// Second compaction
-	stats2 := CompactionStats{
+	stats2 := compactor.CompactionStats{
 		TotalFilesCompacted: 2,
 		TotalBytesWritten:   512,
 		TotalEntriesKept:    30,
 		TotalEntriesRemoved: 5,
 	}
 
-	cm.updateStats(stats2, 200*time.Millisecond, nil)
+	cm.UpdateStats(stats2, 200*time.Millisecond, nil)
 
 	globalStats = cm.GetStats()
 
@@ -276,14 +313,14 @@ func TestUpdateStats(t *testing.T) {
 func TestIsNewer(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
@@ -293,17 +330,17 @@ func TestIsNewer(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		entry1   *hashIndexEntry
-		entry2   *hashIndexEntry
+		entry1   *hashindexV3.HashIndexEntry
+		entry2   *hashindexV3.HashIndexEntry
 		expected bool
 	}{
 		{
 			name: "Newer by sequence",
-			entry1: &hashIndexEntry{
+			entry1: &hashindexV3.HashIndexEntry{
 				Sequence:  2,
 				Timestamp: now,
 			},
-			entry2: &hashIndexEntry{
+			entry2: &hashindexV3.HashIndexEntry{
 				Sequence:  1,
 				Timestamp: now,
 			},
@@ -311,11 +348,11 @@ func TestIsNewer(t *testing.T) {
 		},
 		{
 			name: "Older by sequence",
-			entry1: &hashIndexEntry{
+			entry1: &hashindexV3.HashIndexEntry{
 				Sequence:  1,
 				Timestamp: now,
 			},
-			entry2: &hashIndexEntry{
+			entry2: &hashindexV3.HashIndexEntry{
 				Sequence:  2,
 				Timestamp: now,
 			},
@@ -323,11 +360,11 @@ func TestIsNewer(t *testing.T) {
 		},
 		{
 			name: "Newer by timestamp (same sequence)",
-			entry1: &hashIndexEntry{
+			entry1: &hashindexV3.HashIndexEntry{
 				Sequence:  1,
 				Timestamp: later,
 			},
-			entry2: &hashIndexEntry{
+			entry2: &hashindexV3.HashIndexEntry{
 				Sequence:  1,
 				Timestamp: now,
 			},
@@ -335,11 +372,11 @@ func TestIsNewer(t *testing.T) {
 		},
 		{
 			name: "Older by timestamp (same sequence)",
-			entry1: &hashIndexEntry{
+			entry1: &hashindexV3.HashIndexEntry{
 				Sequence:  1,
 				Timestamp: now,
 			},
-			entry2: &hashIndexEntry{
+			entry2: &hashindexV3.HashIndexEntry{
 				Sequence:  1,
 				Timestamp: later,
 			},
@@ -349,7 +386,7 @@ func TestIsNewer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := cm.isNewer(tt.entry1, tt.entry2)
+			result := cm.IsNewer(tt.entry1, tt.entry2)
 			if result != tt.expected {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
 			}
@@ -362,16 +399,16 @@ func TestShouldCompact(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Test with file count strategy (max 5 files)
-	strategy := NewFileCountStrategy(5)
+	strategy := compactor.NewFileCountStrategy(5)
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
 		Strategy: strategy,
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
@@ -402,9 +439,8 @@ func TestShouldCompact(t *testing.T) {
 
 	// Test with compaction in progress
 	cm.Enable()
-	cm.mutex.Lock()
-	cm.compacting = true
-	cm.mutex.Unlock()
+
+	cm.SetCompacting(true)
 
 	if cm.ShouldCompact(files) {
 		t.Error("Expected ShouldCompact=false when compaction in progress")
@@ -415,14 +451,14 @@ func TestShouldCompact(t *testing.T) {
 func TestCompactHashIndexFilesValidation(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
@@ -446,9 +482,8 @@ func TestCompactHashIndexFilesValidation(t *testing.T) {
 	}
 
 	// Test compaction already in progress
-	cm.mutex.Lock()
-	cm.compacting = true
-	cm.mutex.Unlock()
+
+	cm.SetCompacting(true)
 
 	_, err = cm.CompactHashIndexFiles("bundle1", "idx1", []string{"file1.idx"})
 	if err == nil {
@@ -460,14 +495,14 @@ func TestCompactHashIndexFilesValidation(t *testing.T) {
 func TestCompactBundleFileNotImplemented(t *testing.T) {
 	tempDir := t.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, err := NewCompactionManager(config)
+	cm, err := compactor.NewCompactionManager(config)
 	if err != nil {
 		t.Fatalf("Failed to create compaction manager: %v", err)
 	}
@@ -487,16 +522,16 @@ func TestCompactBundleFileNotImplemented(t *testing.T) {
 func BenchmarkUpdateStats(b *testing.B) {
 	tempDir := b.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, _ := NewCompactionManager(config)
+	cm, _ := compactor.NewCompactionManager(config)
 
-	stats := CompactionStats{
+	stats := compactor.CompactionStats{
 		TotalFilesCompacted: 3,
 		TotalBytesWritten:   1024,
 		TotalEntriesKept:    50,
@@ -506,7 +541,7 @@ func BenchmarkUpdateStats(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		cm.updateStats(stats, 100*time.Millisecond, nil)
+		cm.UpdateStats(stats, 100*time.Millisecond, nil)
 	}
 }
 
@@ -514,14 +549,14 @@ func BenchmarkUpdateStats(b *testing.B) {
 func BenchmarkIsNewer(b *testing.B) {
 	tempDir := b.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewDefaultCompactionStrategy(),
+		Strategy: compactor.NewDefaultCompactionStrategy(),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, _ := NewCompactionManager(config)
+	cm, _ := compactor.NewCompactionManager(config)
 
 	entry1 := &hashIndexEntry{
 		Sequence:  2,
@@ -544,14 +579,14 @@ func BenchmarkIsNewer(b *testing.B) {
 func BenchmarkShouldCompact(b *testing.B) {
 	tempDir := b.TempDir()
 
-	config := CompactionConfig{
+	config := compactor.CompactionConfig{
 		DataDir:  tempDir,
-		Strategy: NewFileCountStrategy(10),
+		Strategy: compactor.NewFileCountStrategy(10),
 		Enabled:  true,
 		Logger:   zap.NewNop().Sugar(),
 	}
 
-	cm, _ := NewCompactionManager(config)
+	cm, _ := compactor.NewCompactionManager(config)
 
 	files := make([]string, 8)
 	for i := 0; i < 8; i++ {

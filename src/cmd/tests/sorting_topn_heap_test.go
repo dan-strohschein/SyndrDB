@@ -15,6 +15,7 @@ import (
 // Function aliases for sorting functions
 var (
 	ShouldUseTopNHeap = sorting.ShouldUseTopNHeap
+	TopNHeapSort      = sorting.TopNHeapSort
 )
 
 // TestTopNHeapSort_ASC tests ascending sort with Top-N heap
@@ -29,35 +30,35 @@ func TestTopNHeapSort_ASC(t *testing.T) {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Alice")},
-				"age":  {Name: "age", Value: 28},
+				"age":  {Name: "age", Value: models.NewIntValue(28)},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Bob")},
-				"age":  {Name: "age", Value: 35},
+				"age":  {Name: "age", Value: models.NewIntValue(35)},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
-				"age":  {Name: "age", Value: 25},
+				"age":  {Name: "age", Value: models.NewIntValue(25)},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Diana")},
-				"age":  {Name: "age", Value: 42},
+				"age":  {Name: "age", Value: models.NewIntValue(42)},
 			},
 		},
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Eve")},
-				"age":  {Name: "age", Value: 18},
+				"age":  {Name: "age", Value: models.NewIntValue(18)},
 			},
 		},
 	}
@@ -77,14 +78,20 @@ func TestTopNHeapSort_ASC(t *testing.T) {
 	require.Len(t, result, 3)
 
 	// Verify correct order
-	assert.Equal(t, "Eve", result[0].Fields["name"].Value)
-	assert.Equal(t, 18, result[0].Fields["age"].Value)
+	nameVal, _ := result[0].Fields["name"].Value.AsString()
+	assert.Equal(t, "Eve", nameVal)
+	ageVal, _ := result[0].Fields["age"].Value.AsInt()
+	assert.Equal(t, int64(18), ageVal)
 
-	assert.Equal(t, "Charlie", result[1].Fields["name"].Value)
-	assert.Equal(t, 25, result[1].Fields["age"].Value)
+	nameVal, _ = result[1].Fields["name"].Value.AsString()
+	assert.Equal(t, "Charlie", nameVal)
+	ageVal, _ = result[1].Fields["age"].Value.AsInt()
+	assert.Equal(t, int64(25), ageVal)
 
-	assert.Equal(t, "Alice", result[2].Fields["name"].Value)
-	assert.Equal(t, 28, result[2].Fields["age"].Value)
+	nameVal, _ = result[2].Fields["name"].Value.AsString()
+	assert.Equal(t, "Alice", nameVal)
+	ageVal, _ = result[2].Fields["age"].Value.AsInt()
+	assert.Equal(t, int64(28), ageVal)
 }
 
 // TestTopNHeapSort_DESC tests descending sort with Top-N heap
@@ -99,35 +106,35 @@ func TestTopNHeapSort_DESC(t *testing.T) {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Alice")},
-				"age":  {Name: "age", Value: 28},
+				"age":  {Name: "age", Value: models.NewIntValue(28)},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Bob")},
-				"age":  {Name: "age", Value: 35},
+				"age":  {Name: "age", Value: models.NewIntValue(35)},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
-				"age":  {Name: "age", Value: 25},
+				"age":  {Name: "age", Value: models.NewIntValue(25)},
 			},
 		},
 		"doc4": {
 			DocumentID: "doc4",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Diana")},
-				"age":  {Name: "age", Value: 42},
+				"age":  {Name: "age", Value: models.NewIntValue(42)},
 			},
 		},
 		"doc5": {
 			DocumentID: "doc5",
 			Fields: map[string]models.Field{
 				"name": {Name: "name", Value: models.NewStringValue("Eve")},
-				"age":  {Name: "age", Value: 18},
+				"age":  {Name: "age", Value: models.NewIntValue(18)},
 			},
 		},
 	}
@@ -147,14 +154,20 @@ func TestTopNHeapSort_DESC(t *testing.T) {
 	require.Len(t, result, 3)
 
 	// Verify correct order
-	assert.Equal(t, "Diana", result[0].Fields["name"].Value)
-	assert.Equal(t, 42, result[0].Fields["age"].Value)
+	nameVal, _ := result[0].Fields["name"].Value.AsString()
+	assert.Equal(t, "Diana", nameVal)
+	ageVal, _ := result[0].Fields["age"].Value.AsInt()
+	assert.Equal(t, int64(42), ageVal)
 
-	assert.Equal(t, "Bob", result[1].Fields["name"].Value)
-	assert.Equal(t, 35, result[1].Fields["age"].Value)
+	nameVal, _ = result[1].Fields["name"].Value.AsString()
+	assert.Equal(t, "Bob", nameVal)
+	ageVal, _ = result[1].Fields["age"].Value.AsInt()
+	assert.Equal(t, int64(35), ageVal)
 
-	assert.Equal(t, "Alice", result[2].Fields["name"].Value)
-	assert.Equal(t, 28, result[2].Fields["age"].Value)
+	nameVal, _ = result[2].Fields["name"].Value.AsString()
+	assert.Equal(t, "Alice", nameVal)
+	ageVal, _ = result[2].Fields["age"].Value.AsInt()
+	assert.Equal(t, int64(28), ageVal)
 }
 
 // TestShouldUseTopNHeap tests the threshold logic

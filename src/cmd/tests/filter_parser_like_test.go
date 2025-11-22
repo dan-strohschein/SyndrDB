@@ -105,7 +105,7 @@ func createTestDocument(fields map[string]interface{}) *models.Document {
 
 	for name, value := range fields {
 		doc.Fields[name] = models.Field{
-			Value: value,
+			Value: value.(models.FieldValue),
 		}
 	}
 

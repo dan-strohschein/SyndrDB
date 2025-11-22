@@ -71,18 +71,18 @@ func TestRadixSort_ASC(t *testing.T) {
 	// Check order: 18, 25, 28, 35, 42
 	expectedAges := []int64{18, 25, 28, 35, 42}
 	for i, doc := range result {
-		age := doc.Fields["age"].Value.(int64)
+		age, _ := doc.Fields["age"].Value.AsInt()
 		if age != expectedAges[i] {
 			t.Errorf("Result[%d]: expected age %d, got %d", i, expectedAges[i], age)
 		}
 	}
 
-	t.Logf("ASC radix sort correct: %d, %d, %d, %d, %d",
-		result[0].Fields["age"].Value.(int64),
-		result[1].Fields["age"].Value.(int64),
-		result[2].Fields["age"].Value.(int64),
-		result[3].Fields["age"].Value.(int64),
-		result[4].Fields["age"].Value.(int64))
+	age0, _ := result[0].Fields["age"].Value.AsInt()
+	age1, _ := result[1].Fields["age"].Value.AsInt()
+	age2, _ := result[2].Fields["age"].Value.AsInt()
+	age3, _ := result[3].Fields["age"].Value.AsInt()
+	age4, _ := result[4].Fields["age"].Value.AsInt()
+	t.Logf("ASC radix sort correct: %d, %d, %d, %d, %d", age0, age1, age2, age3, age4)
 }
 
 // TestRadixSort_DESC tests radix sort in descending order
@@ -131,17 +131,17 @@ func TestRadixSort_DESC(t *testing.T) {
 	// Check order: 250, 175, 100, 50
 	expectedScores := []int64{250, 175, 100, 50}
 	for i, doc := range result {
-		score := doc.Fields["score"].Value.(int64)
+		score, _ := doc.Fields["score"].Value.AsInt()
 		if score != expectedScores[i] {
 			t.Errorf("Result[%d]: expected score %d, got %d", i, expectedScores[i], score)
 		}
 	}
 
-	t.Logf("DESC radix sort correct: %d, %d, %d, %d",
-		result[0].Fields["score"].Value.(int64),
-		result[1].Fields["score"].Value.(int64),
-		result[2].Fields["score"].Value.(int64),
-		result[3].Fields["score"].Value.(int64))
+	score0, _ := result[0].Fields["score"].Value.AsInt()
+	score1, _ := result[1].Fields["score"].Value.AsInt()
+	score2, _ := result[2].Fields["score"].Value.AsInt()
+	score3, _ := result[3].Fields["score"].Value.AsInt()
+	t.Logf("DESC radix sort correct: %d, %d, %d, %d", score0, score1, score2, score3)
 }
 
 // TestRadixSort_NegativeNumbers tests handling of negative integers
@@ -153,7 +153,7 @@ func TestRadixSort_NegativeNumbers(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: int64(-15)},
+				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(-15))},
 			},
 		},
 		"doc2": {
@@ -169,9 +169,9 @@ func TestRadixSort_NegativeNumbers(t *testing.T) {
 			},
 		},
 		"doc4": {
-			DocumentID: "doc4",
+			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: int64(-5)},
+				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(-5))},
 			},
 		},
 		"doc5": {
@@ -191,18 +191,18 @@ func TestRadixSort_NegativeNumbers(t *testing.T) {
 	// Verify results: -15, -5, 0, 10, 25
 	expectedTemps := []int64{-15, -5, 0, 10, 25}
 	for i, doc := range result {
-		temp := doc.Fields["temperature"].Value.(int64)
+		temp, _ := doc.Fields["temperature"].Value.AsInt()
 		if temp != expectedTemps[i] {
 			t.Errorf("Result[%d]: expected temp %d, got %d", i, expectedTemps[i], temp)
 		}
 	}
 
-	t.Logf("Negative numbers handled correctly: %d, %d, %d, %d, %d",
-		result[0].Fields["temperature"].Value.(int64),
-		result[1].Fields["temperature"].Value.(int64),
-		result[2].Fields["temperature"].Value.(int64),
-		result[3].Fields["temperature"].Value.(int64),
-		result[4].Fields["temperature"].Value.(int64))
+	temp0, _ := result[0].Fields["temperature"].Value.AsInt()
+	temp1, _ := result[1].Fields["temperature"].Value.AsInt()
+	temp2, _ := result[2].Fields["temperature"].Value.AsInt()
+	temp3, _ := result[3].Fields["temperature"].Value.AsInt()
+	temp4, _ := result[4].Fields["temperature"].Value.AsInt()
+	t.Logf("Negative number sort correct: %d, %d, %d, %d, %d", temp0, temp1, temp2, temp3, temp4)
 }
 
 // TestRadixSort_LargeNumbers tests with large int64 values
@@ -223,9 +223,9 @@ func TestRadixSort_LargeNumbers(t *testing.T) {
 			},
 		},
 		"doc3": {
-			DocumentID: "doc3",
+			DocumentID: "min",
 			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: int64(-9223372036854775808)}, // Min int64
+				"value": {Name: "value", Value: models.NewIntValue(int64(-9223372036854775808))}, // Min int64
 			},
 		},
 		"doc4": {
@@ -255,7 +255,7 @@ func TestRadixSort_LargeNumbers(t *testing.T) {
 	}
 
 	for i, doc := range result {
-		value := doc.Fields["value"].Value.(int64)
+		value, _ := doc.Fields["value"].Value.AsInt()
 		if value != expectedValues[i] {
 			t.Errorf("Result[%d]: expected %d, got %d", i, expectedValues[i], value)
 		}
@@ -272,19 +272,19 @@ func TestRadixSort_Int32(t *testing.T) {
 		"doc1": {
 			DocumentID: "doc1",
 			Fields: map[string]models.Field{
-				"count": {Name: "count", Value: int32(500)},
+				"count": {Name: "count", Value: models.NewIntValue(int64(500))},
 			},
 		},
 		"doc2": {
 			DocumentID: "doc2",
 			Fields: map[string]models.Field{
-				"count": {Name: "count", Value: int32(100)},
+				"count": {Name: "count", Value: models.NewIntValue(int64(100))},
 			},
 		},
 		"doc3": {
 			DocumentID: "doc3",
 			Fields: map[string]models.Field{
-				"count": {Name: "count", Value: int32(300)},
+				"count": {Name: "count", Value: models.NewIntValue(int64(300))},
 			},
 		},
 	}
@@ -299,8 +299,8 @@ func TestRadixSort_Int32(t *testing.T) {
 	expectedCounts := []int64{100, 300, 500} // Converted to int64
 	for i, doc := range result {
 		// int32 is converted to int64 internally
-		count := doc.Fields["count"].Value.(int32)
-		if int64(count) != expectedCounts[i] {
+		count, _ := doc.Fields["count"].Value.AsInt()
+		if count != expectedCounts[i] {
 			t.Errorf("Result[%d]: expected %d, got %d", i, expectedCounts[i], count)
 		}
 	}
@@ -455,14 +455,14 @@ func TestRadixSort_DuplicateValues(t *testing.T) {
 
 	// Verify all 100s come before all 200s
 	for i := 0; i < 2; i++ {
-		score := result[i].Fields["score"].Value.(int64)
+		score, _ := result[i].Fields["score"].Value.AsInt()
 		if score != 100 {
 			t.Errorf("Result[%d]: expected score 100, got %d", i, score)
 		}
 	}
 
 	for i := 2; i < 4; i++ {
-		score := result[i].Fields["score"].Value.(int64)
+		score, _ := result[i].Fields["score"].Value.AsInt()
 		if score != 200 {
 			t.Errorf("Result[%d]: expected score 200, got %d", i, score)
 		}
@@ -560,7 +560,7 @@ func BenchmarkRadixSort_1000(b *testing.B) {
 		docs[fmt.Sprintf("doc%d", i)] = &models.Document{
 			DocumentID: fmt.Sprintf("doc%d", i),
 			Fields: map[string]models.Field{
-				"age": {Name: "age", Value: int64(i % 100)},
+				"age": {Name: "age", Value: models.NewIntValue(int64(i % 100))},
 			},
 		}
 	}
@@ -581,7 +581,7 @@ func BenchmarkRadixSort_10000(b *testing.B) {
 		docs[fmt.Sprintf("doc%d", i)] = &models.Document{
 			DocumentID: fmt.Sprintf("doc%d", i),
 			Fields: map[string]models.Field{
-				"age": {Name: "age", Value: int64(i % 1000)},
+				"age": {Name: "age", Value: models.NewIntValue(int64(i % 1000))},
 			},
 		}
 	}

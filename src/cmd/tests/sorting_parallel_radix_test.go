@@ -11,8 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Type aliases for sorting configuration types
-//type SortingConfig = sorting.SortingConfig
+// Type aliases for sorting configuration types are in sorting_config_test.go
 
 // Function aliases for sorting functions
 var (
@@ -61,8 +60,8 @@ func TestParallelRadixSort_BasicCorrectness(t *testing.T) {
 
 			// Verify correct ordering
 			for i := 0; i < len(result)-1; i++ {
-				val1 := result[i].Fields["value"].Value.(int64)
-				val2 := result[i+1].Fields["value"].Value.(int64)
+				val1, _ := result[i].Fields["value"].Value.AsInt()
+				val2, _ := result[i+1].Fields["value"].Value.AsInt()
 
 				if tt.ascending {
 					if val1 > val2 {
@@ -115,8 +114,8 @@ func TestParallelRadixSort_CompareWithSequential(t *testing.T) {
 			}
 
 			for i := 0; i < len(seqResult); i++ {
-				seqVal := seqResult[i].Fields["num"].Value.(int64)
-				parVal := parResult[i].Fields["num"].Value.(int64)
+				seqVal, _ := seqResult[i].Fields["num"].Value.AsInt()
+				parVal, _ := parResult[i].Fields["num"].Value.AsInt()
 
 				if seqVal != parVal {
 					t.Errorf("Value mismatch at index %d: sequential=%d, parallel=%d",
@@ -137,7 +136,7 @@ func TestParallelRadixSort_MixedTypes(t *testing.T) {
 	doc1 := &models.Document{
 		DocumentID: uuid.New().String(),
 		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: int(42)},
+			"value": {Name: "value", Value: models.NewIntValue(int64(42))},
 		},
 	}
 	docs[doc1.DocumentID] = doc1
@@ -146,7 +145,7 @@ func TestParallelRadixSort_MixedTypes(t *testing.T) {
 	doc2 := &models.Document{
 		DocumentID: uuid.New().String(),
 		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: int32(15)},
+			"value": {Name: "value", Value: models.NewIntValue(int64(15))},
 		},
 	}
 	docs[doc2.DocumentID] = doc2
@@ -164,7 +163,7 @@ func TestParallelRadixSort_MixedTypes(t *testing.T) {
 	doc4 := &models.Document{
 		DocumentID: uuid.New().String(),
 		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: float64(7.9)}, // Converts to 7
+			"value": {Name: "value", Value: models.NewFloatValue(7.9)}, // Converts to 7
 		},
 	}
 	docs[doc4.DocumentID] = doc4
@@ -181,17 +180,12 @@ func TestParallelRadixSort_MixedTypes(t *testing.T) {
 	// Expected order: 7, 15, 42, 99
 	expectedValues := []int64{7, 15, 42, 99}
 	for i, expected := range expectedValues {
-		actual := result[i].Fields["value"].Value
+		fv := result[i].Fields["value"].Value
 		var actualInt64 int64
-		switch v := actual.(type) {
-		case int:
-			actualInt64 = int64(v)
-		case int32:
-			actualInt64 = int64(v)
-		case int64:
-			actualInt64 = v
-		case float64:
-			actualInt64 = int64(v)
+		if intVal, ok := fv.AsInt(); ok {
+			actualInt64 = intVal
+		} else if floatVal, ok := fv.AsFloat(); ok {
+			actualInt64 = int64(floatVal)
 		}
 
 		if actualInt64 != expected {
@@ -411,7 +405,7 @@ func createDocsFromValues(values []int64, fieldName string) map[string]*models.D
 			Fields: map[string]models.Field{
 				fieldName: {
 					Name:  fieldName,
-					Value: val,
+					Value: models.NewIntValue(val),
 				},
 			},
 		}

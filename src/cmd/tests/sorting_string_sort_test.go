@@ -200,7 +200,7 @@ func TestStringHeapSort_ASC(t *testing.T) {
 			t.Fatalf("Document %d missing 'name' field", i)
 		}
 
-		name := nameField.Value.(string)
+		name, _ := nameField.Value.AsString()
 		if name != expectedNames[i] {
 			t.Errorf("Result[%d] = %q, want %q", i, name, expectedNames[i])
 		}
@@ -279,7 +279,7 @@ func TestStringHeapSort_DESC(t *testing.T) {
 			t.Fatalf("Document %d missing 'city' field", i)
 		}
 
-		city := cityField.Value.(string)
+		city, _ := cityField.Value.AsString()
 		if city != expectedCities[i] {
 			t.Errorf("Result[%d] = %q, want %q", i, city, expectedCities[i])
 		}
@@ -336,8 +336,8 @@ func TestStringHeapSort_SIMD_vs_NonSIMD(t *testing.T) {
 	}
 
 	for i := range resultsSIMD {
-		simdDesc := resultsSIMD[i].Fields["description"].Value.(string)
-		noSimdDesc := resultsNoSIMD[i].Fields["description"].Value.(string)
+		simdDesc, _ := resultsSIMD[i].Fields["description"].Value.AsString()
+		noSimdDesc, _ := resultsNoSIMD[i].Fields["description"].Value.AsString()
 
 		if simdDesc != noSimdDesc {
 			t.Errorf("Result[%d] mismatch: SIMD=%q, NoSIMD=%q", i, simdDesc, noSimdDesc)

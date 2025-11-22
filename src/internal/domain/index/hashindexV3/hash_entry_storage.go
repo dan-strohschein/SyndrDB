@@ -46,6 +46,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -514,6 +515,128 @@ func (es *EntryStorage) Close() error {
 			"totalEntries", es.totalEntries,
 			"totalBytes", es.totalBytes)
 	}
+
+	return nil
+}
+
+// DeleteFile removes a file from tracking and deletes it from disk
+// This is used during compaction to remove old files
+//
+// Parameters:
+//   - filePath: Absolute path to file to delete
+//
+// Returns error if file cannot be deleted
+func (es *EntryStorage) DeleteFile(filePath string) error {
+	es.fileMutex.Lock()
+	defer es.fileMutex.Unlock()
+
+	// Remove from allFiles slice
+	for i, f := range es.allFiles {
+		if f == filePath {
+			es.allFiles = append(es.allFiles[:i], es.allFiles[i+1:]...)
+			break
+		}
+	}
+
+	// Delete physical file
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete file %s: %w", filePath, err)
+	}
+
+	es.logger.Debugw("Deleted index file",
+		"file", filePath,
+		"remainingFiles", len(es.allFiles))
+
+	return nil
+}
+
+// DeleteFiles removes multiple files atomically
+// If any deletion fails, previous deletions are NOT rolled back
+//
+// Parameters:
+//   - filePaths: List of absolute file paths to delete
+//
+// Returns error if any file cannot be deleted
+func (es *EntryStorage) DeleteFiles(filePaths []string) error {
+	var errors []error
+
+	for _, filePath := range filePaths {
+		if err := es.DeleteFile(filePath); err != nil {
+			errors = append(errors, err)
+			// Continue deleting other files even if one fails
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to delete %d files: %v", len(errors), errors)
+	}
+
+	return nil
+}
+
+// RegisterFile adds an externally-created file to the storage's file list
+// This is used after compaction creates a new merged file
+//
+// Parameters:
+//   - filePath: Absolute path to file to register
+//
+// Returns error if file doesn't exist
+func (es *EntryStorage) RegisterFile(filePath string) error {
+	es.fileMutex.Lock()
+	defer es.fileMutex.Unlock()
+
+	// Verify file exists
+	if _, err := os.Stat(filePath); err != nil {
+		return fmt.Errorf("cannot register non-existent file %s: %w", filePath, err)
+	}
+
+	// Add to allFiles and maintain sorted order
+	es.allFiles = append(es.allFiles, filePath)
+	sort.Strings(es.allFiles)
+
+	es.logger.Debugw("Registered new index file",
+		"file", filePath,
+		"totalFiles", len(es.allFiles))
+
+	return nil
+}
+
+// ReplaceFiles atomically replaces old files with a new compacted file
+// This is the critical method for compaction integration
+//
+// Steps:
+//  1. Verify new file exists
+//  2. Register new file (adds to tracking)
+//  3. Delete old files (removes from tracking and disk)
+//
+// Parameters:
+//   - oldFiles: List of old file paths to remove
+//   - newFile: Path to new compacted file
+//
+// Returns error if replacement fails
+func (es *EntryStorage) ReplaceFiles(oldFiles []string, newFile string) error {
+	es.logger.Infow("Replacing files with compacted version",
+		"oldFileCount", len(oldFiles),
+		"newFile", newFile)
+
+	// Step 1: Register new file first (makes it available for reads)
+	if err := es.RegisterFile(newFile); err != nil {
+		return fmt.Errorf("failed to register new file: %w", err)
+	}
+
+	// Step 2: Delete old files
+	// Note: If deletion fails, new file is still registered
+	// This is safe because reads will use latest data
+	if err := es.DeleteFiles(oldFiles); err != nil {
+		es.logger.Warnw("Failed to delete some old files after compaction",
+			"error", err,
+			"oldFiles", oldFiles)
+		// Don't return error - compaction was successful, cleanup can be retried
+	}
+
+	es.logger.Infow("File replacement completed",
+		"newFile", newFile,
+		"deletedCount", len(oldFiles))
 
 	return nil
 }

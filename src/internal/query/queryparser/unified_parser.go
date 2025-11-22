@@ -212,6 +212,10 @@ func ParseUnifiedSelectQuery(query string, logger *zap.SugaredLogger) (*UnifiedS
 	return unifiedQuery, nil
 }
 
+func DetectQueryType(query string, logger *zap.SugaredLogger) QueryType {
+	return detectQueryType(query, logger)
+}
+
 // detectQueryType analyzes the query string to determine its complexity level
 func detectQueryType(query string, logger *zap.SugaredLogger) QueryType {
 	// Normalize query for detection (remove extra whitespace, newlines)

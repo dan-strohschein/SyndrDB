@@ -189,6 +189,10 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 	return results, nil
 }
 
+func (node *IndexScanNode) ExecuteBTreeRangeScan() (map[string]*models.Document, error) {
+	return node.executeBTreeRangeScan()
+}
+
 func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document, error) {
 	node.Logger.Debugf("Executing B-tree range scan on %s for operator %s with value %v",
 		node.IndexName, node.Operator, node.SearchKey)
@@ -270,6 +274,10 @@ func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document,
 	return results, nil
 }
 
+func (node *IndexScanNode) OperatorToKeyRange(operator string, searchKey, rangeStart, rangeEnd interface{}) ([]byte, []byte, bool, bool, error) {
+	return node.operatorToKeyRange(operator, searchKey, rangeStart, rangeEnd)
+}
+
 // operatorToKeyRange converts query operators (>, <, >=, <=, BETWEEN) to B-tree key ranges
 // This function implements the critical operator → key range conversion for range queries
 //
@@ -327,6 +335,10 @@ func (node *IndexScanNode) operatorToKeyRange(operator string, searchKey, rangeS
 	default:
 		return nil, nil, false, false, fmt.Errorf("unsupported range operator: %s (supported: >, >=, <, <=, BETWEEN)", operator)
 	}
+}
+
+func (node *IndexScanNode) ConvertToBytes(value interface{}) []byte {
+	return node.convertToBytes(value)
 }
 
 // convertToBytes converts various types to byte slices for B-tree index operations

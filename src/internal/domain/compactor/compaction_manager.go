@@ -48,7 +48,9 @@ TODO: Future extensions
 */
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,6 +58,10 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"syndrdb/src/internal/domain/index/hashindexV3"
+	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/helpers"
 )
 
 // CompactionManager manages compaction operations for LSM-style storage
@@ -76,18 +82,26 @@ type CompactionManager struct {
 
 	// Logging
 	logger *zap.SugaredLogger
+
+	Compacting bool
 }
 
 // CompactionStats tracks compaction performance metrics
 type CompactionStats struct {
-	TotalCompactions    uint64        // Total number of compactions performed
-	TotalFilesCompacted uint64        // Total files compacted
-	TotalBytesWritten   uint64        // Total bytes written during compaction
-	TotalEntriesKept    uint64        // Total entries kept after compaction
-	TotalEntriesRemoved uint64        // Total entries removed (tombstones + old versions)
-	LastDuration        time.Duration // Duration of last compaction
-	AverageDuration     time.Duration // Average compaction duration
-	LastError           error         // Last compaction error
+	TotalCompactions    uint64 // Total number of compactions performed
+	TotalFilesCompacted uint64 // Total files compacted
+	TotalBytesWritten   uint64 // Total bytes written during compaction
+	TotalEntriesKept    uint64 // Total entries kept after compaction
+	TotalEntriesRemoved uint64 // Total entries removed (tombstones + old versions)
+
+	// Bundle-specific statistics
+	TotalBundlesCompacted uint64 // Total bundle files compacted
+	TotalDocumentsKept    uint64 // Total documents kept in bundle compaction
+	TotalDocumentsRemoved uint64 // Total documents removed in bundle compaction
+
+	LastDuration    time.Duration // Duration of last compaction
+	AverageDuration time.Duration // Average compaction duration
+	LastError       error         // Last compaction error
 
 	mutex sync.RWMutex // Protects statistics
 }
@@ -132,6 +146,18 @@ func NewCompactionManager(config CompactionConfig) (*CompactionManager, error) {
 	}
 
 	return cm, nil
+}
+
+func (cm *CompactionManager) GetCompacting() bool {
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
+	return cm.compacting
+}
+
+func (cm *CompactionManager) SetCompacting(value bool) {
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
+	cm.compacting = true
 }
 
 // CompactHashIndexFiles compacts hash index entry files
@@ -262,7 +288,7 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 	}
 
 	// Write non-tombstone entries to output file
-	var entriesToWrite []*hashIndexEntry
+	var entriesToWrite []*hashindexV3.HashIndexEntry
 	for _, wrapper := range latestEntries {
 		if wrapper.entry.Deleted {
 			// Skip tombstones - they can be removed during compaction
@@ -342,31 +368,142 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 //
 // Returns the path to the compacted file and any error
 func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleFilePath string) (string, error) {
-	// TODO: Sprint X - Bundle File Compaction
-	//
-	// Implementation steps:
-	// 1. Parse bundle file using parseAppendedDocuments pattern
-	// 2. Identify documents with tombstones (0xDEADDEAD markers)
-	// 3. Create new bundle file with only active documents
-	// 4. Use same magic numbers: 0xDEADBEEF for documents
-	// 5. Maintain temporal ordering
-	// 6. Update bundle metadata (document count, file size)
-	// 7. Atomically replace old file
-	// 8. Update indexes to point to new file
-	//
-	// Integration points:
-	// - Use bundlestore.parseAppendedDocuments() for reading
-	// - Use bundlestore.AppendDocumentToBundleFile() pattern for writing
-	// - Coordinate with BundleStorageEngine for file locking
-	// - Update all indexes after compaction
-	//
-	// Performance considerations:
-	// - Use buffered I/O (64KB buffer like current implementation)
-	// - Process in batches to avoid memory pressure
-	// - Pause compaction if system is under load
-	// - Track compaction statistics (documents kept/removed, bytes saved)
+	cm.logger.Infow("Starting bundle file compaction",
+		"bundle", bundleName,
+		"database", databaseName,
+		"filePath", bundleFilePath)
 
-	return "", fmt.Errorf("bundle file compaction not yet implemented - coming in later sprint")
+	startTime := time.Now()
+
+	// Step 1: Parse bundle file and collect all documents
+	cm.logger.Infow("Parsing bundle file", "filePath", bundleFilePath)
+	documentWrappers, err := cm.parseBundleDocuments(bundleFilePath)
+	if err != nil {
+		cm.logger.Errorw("Failed to parse bundle documents",
+			"filePath", bundleFilePath,
+			"error", err)
+		return "", fmt.Errorf("failed to parse bundle file: %w", err)
+	}
+
+	// Step 2: Separate active documents from tombstones
+	activeDocuments := make([]*models.Document, 0)
+	tombstoneCount := 0
+
+	for _, wrapper := range documentWrappers {
+		if cm.isTombstoneDocument(wrapper) {
+			tombstoneCount++
+			cm.logger.Debugw("Skipping tombstone document",
+				"documentID", wrapper.document.DocumentID)
+		} else {
+			activeDocuments = append(activeDocuments, &wrapper.document)
+		}
+	}
+
+	cm.logger.Infow("Document analysis complete",
+		"totalDocuments", len(documentWrappers),
+		"activeDocuments", len(activeDocuments),
+		"tombstones", tombstoneCount)
+
+	// If no tombstones, no compaction needed
+	if tombstoneCount == 0 {
+		cm.logger.Infow("No tombstones found, skipping compaction",
+			"filePath", bundleFilePath)
+		return bundleFilePath, nil
+	}
+
+	// Step 3: Create temporary compacted file
+	tempFilePath := bundleFilePath + ".compact.tmp"
+	tempFile, err := os.Create(tempFilePath)
+	if err != nil {
+		cm.logger.Errorw("Failed to create temporary file",
+			"tempFilePath", tempFilePath,
+			"error", err)
+		return "", fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	defer func() {
+		tempFile.Close()
+		// Clean up temp file if we return with error
+		if err != nil {
+			os.Remove(tempFilePath)
+		}
+	}()
+
+	// Step 4: Write active documents to new file
+	// TODO: Batch writes for large bundles (>10K documents)
+	bytesWritten := int64(0)
+	documentsWritten := 0
+
+	for _, doc := range activeDocuments {
+		n, writeErr := cm.writeBundleDocument(tempFile, doc)
+		if writeErr != nil {
+			err = fmt.Errorf("failed to write document %s: %w", doc.DocumentID, writeErr)
+			cm.logger.Errorw("Failed to write document",
+				"documentID", doc.DocumentID,
+				"error", writeErr)
+			return "", err
+		}
+		bytesWritten += int64(n)
+		documentsWritten++
+	}
+
+	// Ensure all data is written to disk before replacing
+	if syncErr := tempFile.Sync(); syncErr != nil {
+		err = fmt.Errorf("failed to sync temporary file: %w", syncErr)
+		cm.logger.Errorw("Failed to sync temporary file", "error", syncErr)
+		return "", err
+	}
+
+	tempFile.Close() // Close before rename
+
+	// Step 5: Get original file info for stats
+	originalInfo, err := os.Stat(bundleFilePath)
+	if err != nil {
+		cm.logger.Errorw("Failed to stat original file",
+			"filePath", bundleFilePath,
+			"error", err)
+		return "", fmt.Errorf("failed to stat original file: %w", err)
+	}
+	originalSize := originalInfo.Size()
+
+	// Step 6: Atomically replace original file with compacted version
+	if err := os.Rename(tempFilePath, bundleFilePath); err != nil {
+		cm.logger.Errorw("Failed to replace original file",
+			"originalPath", bundleFilePath,
+			"tempPath", tempFilePath,
+			"error", err)
+		return "", fmt.Errorf("failed to replace original file: %w", err)
+	}
+
+	// Step 7: Update compaction statistics
+	duration := time.Since(startTime)
+	spaceSaved := originalSize - bytesWritten
+
+	// Create stats struct (without mutex - that's managed by updateStats)
+	stats := CompactionStats{
+		TotalBundlesCompacted: 1,
+		TotalDocumentsKept:    uint64(documentsWritten),
+		TotalDocumentsRemoved: uint64(tombstoneCount),
+		TotalBytesWritten:     uint64(bytesWritten),
+		TotalFilesCompacted:   1,
+		// Note: mutex field is zero-valued and not used in transfer
+	}
+
+	cm.updateStats(stats, duration, nil)
+
+	cm.logger.Infow("Bundle file compaction complete",
+		"bundle", bundleName,
+		"database", databaseName,
+		"originalSize", originalSize,
+		"compactedSize", bytesWritten,
+		"spaceSaved", spaceSaved,
+		"documentsKept", documentsWritten,
+		"documentsRemoved", tombstoneCount,
+		"duration", duration)
+
+	// TODO: Step 8 - Notify indexes to update references to compacted file
+	// This will be implemented when index update coordination is added
+
+	return bundleFilePath, nil
 }
 
 // ShouldCompact checks if compaction should be triggered based on strategy
@@ -391,11 +528,11 @@ func (cm *CompactionManager) ShouldCompact(files []string) bool {
 }
 
 // GetStats returns current compaction statistics
-func (cm *CompactionManager) GetStats() CompactionStats {
+func (cm *CompactionManager) GetStats() *CompactionStats {
 	cm.stats.mutex.RLock()
 	defer cm.stats.mutex.RUnlock()
 
-	return cm.stats
+	return &cm.stats
 }
 
 // Enable enables compaction
@@ -419,6 +556,18 @@ func (cm *CompactionManager) IsCompacting() bool {
 	return cm.compacting
 }
 
+func (cm *CompactionManager) GetStrategy() CompactionStrategy {
+	return cm.strategy
+}
+
+func (cm *CompactionManager) GetLogger() *zap.SugaredLogger {
+	return cm.logger
+}
+
+func (cm *CompactionManager) UpdateStats(stats CompactionStats, duration time.Duration, err error) {
+	cm.UpdateStats(stats, duration, err)
+}
+
 // updateStats updates compaction statistics
 func (cm *CompactionManager) updateStats(stats CompactionStats, duration time.Duration, err error) {
 	cm.stats.mutex.Lock()
@@ -429,6 +578,12 @@ func (cm *CompactionManager) updateStats(stats CompactionStats, duration time.Du
 	cm.stats.TotalBytesWritten += stats.TotalBytesWritten
 	cm.stats.TotalEntriesKept += stats.TotalEntriesKept
 	cm.stats.TotalEntriesRemoved += stats.TotalEntriesRemoved
+
+	// Update bundle-specific statistics
+	cm.stats.TotalBundlesCompacted += stats.TotalBundlesCompacted
+	cm.stats.TotalDocumentsKept += stats.TotalDocumentsKept
+	cm.stats.TotalDocumentsRemoved += stats.TotalDocumentsRemoved
+
 	cm.stats.LastDuration = duration
 	cm.stats.LastError = err
 
@@ -442,38 +597,63 @@ func (cm *CompactionManager) updateStats(stats CompactionStats, duration time.Du
 }
 
 // readEntriesFromFile reads all entries from a file
-// This is a placeholder - will be replaced with actual storage integration
-func (cm *CompactionManager) readEntriesFromFile(filePath string) ([]*hashIndexEntry, error) {
-	// TODO: Sprint 3 - Integration with EntryStorage
-	// Replace this with actual EntryStorage.ScanForward() call
-	//
-	// Example integration:
-	// storage := hashindexV3.NewEntryStorage(...)
-	// var entries []*hashIndexEntry
-	// err := storage.ScanForward(func(entry *HashIndexEntry) bool {
-	//     entries = append(entries, convertToInternalEntry(entry))
-	//     return true
-	// })
+// Uses hashindexV3's deserialization to read entries
+func (cm *CompactionManager) readEntriesFromFile(filePath string) ([]*hashindexV3.HashIndexEntry, error) {
+	var entries []*hashindexV3.HashIndexEntry
 
-	return nil, fmt.Errorf("readEntriesFromFile not yet implemented - needs EntryStorage integration")
+	// Open file for reading
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	// Read all entries from file
+	for {
+		entry, bytesRead, err := hashindexV3.DeserializeEntryFromReader(file)
+		if err != nil {
+			if err == io.EOF {
+				break // End of file reached
+			}
+			// Log error but continue - partial corruption shouldn't stop compaction
+			cm.logger.Warnw("Failed to deserialize entry, skipping",
+				"file", filePath,
+				"error", err)
+			continue
+		}
+
+		if bytesRead == 0 {
+			break // No more entries
+		}
+
+		entries = append(entries, entry)
+	}
+
+	cm.logger.Debugw("Read entries from file",
+		"file", filePath,
+		"entryCount", len(entries))
+
+	return entries, nil
 }
 
 // serializeEntry serializes an entry to bytes
-// This is a placeholder - will be replaced with actual entry serialization
-func (cm *CompactionManager) serializeEntry(entry *hashIndexEntry) ([]byte, error) {
-	// TODO: Sprint 3 - Integration with HashIndexEntry
-	// Replace this with actual HashIndexEntry.Serialize() call
-	//
-	// Example integration:
-	// realEntry := convertToHashIndexEntry(entry)
-	// return realEntry.Serialize()
+// Uses hashindexV3's built-in serialization
+func (cm *CompactionManager) serializeEntry(entry *hashindexV3.HashIndexEntry) ([]byte, error) {
+	// Use hashindexV3's built-in serialization
+	data, err := entry.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize entry: %w", err)
+	}
+	return data, nil
+}
 
-	return nil, fmt.Errorf("serializeEntry not yet implemented - needs HashIndexEntry integration")
+func (cm *CompactionManager) IsNewer(entry1, entry2 *hashindexV3.HashIndexEntry) bool {
+	return cm.isNewer(entry1, entry2)
 }
 
 // isNewer determines if entry1 is newer than entry2
 // Uses sequence number and timestamp for comparison
-func (cm *CompactionManager) isNewer(entry1, entry2 *hashIndexEntry) bool {
+func (cm *CompactionManager) isNewer(entry1, entry2 *hashindexV3.HashIndexEntry) bool {
 	// First compare sequence numbers (if available)
 	if entry1.Sequence != entry2.Sequence {
 		return entry1.Sequence > entry2.Sequence
@@ -483,19 +663,198 @@ func (cm *CompactionManager) isNewer(entry1, entry2 *hashIndexEntry) bool {
 	return entry1.Timestamp.After(entry2.Timestamp)
 }
 
-// hashIndexEntry is an internal representation for compaction
-// This will be replaced with actual HashIndexEntry from hashindexV3
-type hashIndexEntry struct {
-	KeyValue   string
-	DocumentID string
-	Timestamp  time.Time
-	Sequence   uint64
-	Deleted    bool
-	HashValue  uint32
-}
-
 // hashIndexEntryWrapper wraps an entry with metadata
 type hashIndexEntryWrapper struct {
-	entry    *hashIndexEntry
+	entry    *hashindexV3.HashIndexEntry
 	filePath string // Source file for debugging
+}
+
+// bundleDocumentWrapper wraps a document with compaction metadata
+// Used during bundle file compaction to track document state
+type bundleDocumentWrapper struct {
+	document    models.Document
+	isTombstone bool      // True if this is a deletion marker (0xDEADDEAD)
+	offset      int64     // File offset where document was found
+	timestamp   time.Time // When document was written/deleted
+}
+
+// parseBundleDocuments reads and parses all documents from a bundle file
+// This function follows the parseAppendedDocuments pattern from BundleStorageEngine
+// Returns a map of documentID -> document wrapper
+//
+// TODO: Add support for compressed bundle formats in future
+func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string]*bundleDocumentWrapper, error) {
+	documents := make(map[string]*bundleDocumentWrapper)
+
+	// Read entire file into memory
+	// TODO: Implement streaming for very large files (>1GB)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bundle file: %w", err)
+	}
+
+	offset := int64(0)
+
+	for offset < int64(len(data)) {
+		// Need at least 8 bytes for header (magic + size)
+		if offset+8 > int64(len(data)) {
+			break
+		}
+
+		// Read magic number and size
+		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
+		size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+
+		// Validate size to prevent out-of-bounds access
+		if offset+8+int64(size) > int64(len(data)) {
+			cm.logger.Warnw("Invalid document size at offset, stopping parse",
+				"offset", offset,
+				"size", size,
+				"fileSize", len(data))
+			break
+		}
+
+		// Extract document/tombstone data
+		docData := data[offset+8 : offset+8+int64(size)]
+
+		if magic == 0xDEADBEEF {
+			// Active document
+			docMap, err := helpers.DecodeFastBinary(docData)
+			if err != nil {
+				cm.logger.Warnw("Failed to decode document, skipping",
+					"offset", offset,
+					"error", err)
+				offset += 8 + int64(size)
+				continue
+			}
+
+			// Convert to Document struct
+			doc := models.Document{}
+			if docID, ok := docMap["DocumentID"].(string); ok {
+				doc.DocumentID = docID
+			}
+			if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
+				doc.Fields = fields
+			}
+			if createdAt, ok := docMap["CreatedAt"].(time.Time); ok {
+				doc.CreatedAt = createdAt
+			}
+			if updatedAt, ok := docMap["UpdatedAt"].(time.Time); ok {
+				doc.UpdatedAt = updatedAt
+			}
+
+			// Store or update document (latest wins)
+			wrapper := &bundleDocumentWrapper{
+				document:    doc,
+				isTombstone: false,
+				offset:      offset,
+				timestamp:   doc.UpdatedAt,
+			}
+
+			// If document already exists, keep the newer one
+			if existing, exists := documents[doc.DocumentID]; exists {
+				if wrapper.timestamp.After(existing.timestamp) {
+					documents[doc.DocumentID] = wrapper
+				}
+			} else {
+				documents[doc.DocumentID] = wrapper
+			}
+
+		} else if magic == 0xDEADDEAD {
+			// Deletion marker (tombstone)
+			deletionMap, err := helpers.DecodeFastBinary(docData)
+			if err != nil {
+				cm.logger.Warnw("Failed to decode deletion marker, skipping",
+					"offset", offset,
+					"error", err)
+				offset += 8 + int64(size)
+				continue
+			}
+
+			if documentID, ok := deletionMap["DocumentID"].(string); ok && documentID != "" {
+				// Mark document as deleted
+				wrapper := &bundleDocumentWrapper{
+					document: models.Document{
+						DocumentID: documentID,
+					},
+					isTombstone: true,
+					offset:      offset,
+					timestamp:   time.Now(), // TODO: Extract actual deletion timestamp if available
+				}
+
+				// Tombstone always wins (marks document for deletion)
+				if existing, exists := documents[documentID]; exists {
+					if wrapper.timestamp.After(existing.timestamp) {
+						documents[documentID] = wrapper
+					}
+				} else {
+					documents[documentID] = wrapper
+				}
+
+				cm.logger.Debugw("Found deletion marker",
+					"documentID", documentID,
+					"offset", offset)
+			}
+		} else {
+			// Unknown magic number - corrupted data
+			cm.logger.Warnw("Unknown magic number, stopping parse",
+				"offset", offset,
+				"magic", fmt.Sprintf("0x%X", magic))
+			break
+		}
+
+		offset += 8 + int64(size)
+	}
+
+	cm.logger.Infow("Parsed bundle documents",
+		"filePath", filePath,
+		"totalDocuments", len(documents))
+
+	return documents, nil
+}
+
+// isTombstoneDocument checks if a document wrapper represents a deletion marker
+// Simple helper to improve code readability
+func (cm *CompactionManager) isTombstoneDocument(wrapper *bundleDocumentWrapper) bool {
+	return wrapper.isTombstone
+}
+
+// writeBundleDocument writes a single document to the output file with proper formatting
+// Follows the AppendDocumentToBundleFile pattern from BundleStorageEngine
+// Returns bytes written and any error
+//
+// TODO: Add document compression option for large payloads
+func (cm *CompactionManager) writeBundleDocument(file *os.File, doc *models.Document) (int, error) {
+	// Serialize document using fast binary format
+	docMap := map[string]interface{}{
+		"DocumentID": doc.DocumentID,
+		"Fields":     doc.Fields,
+		"CreatedAt":  doc.CreatedAt,
+		"UpdatedAt":  doc.UpdatedAt,
+	}
+
+	documentBytes, err := helpers.EncodeFastBinary(docMap)
+	if err != nil {
+		return 0, fmt.Errorf("failed to encode document %s: %w", doc.DocumentID, err)
+	}
+
+	// Create header with magic number and size
+	headerSize := uint32(len(documentBytes))
+	headerBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF) // Magic number for active documents
+	binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
+
+	// Write header
+	n1, err := file.Write(headerBytes)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write header: %w", err)
+	}
+
+	// Write document data
+	n2, err := file.Write(documentBytes)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write document data: %w", err)
+	}
+
+	return n1 + n2, nil
 }

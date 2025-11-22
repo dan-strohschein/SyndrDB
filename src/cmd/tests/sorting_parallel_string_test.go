@@ -30,7 +30,7 @@ func createTestDocumentsWithStrings(count int, fieldName string, prefix string) 
 			Fields: map[string]models.Field{
 				fieldName: {
 					Name:  fieldName,
-					Value: fmt.Sprintf("%s%03d", prefix, i),
+					Value: models.NewStringValue(fmt.Sprintf("%s%03d", prefix, i)),
 				},
 			},
 		}
@@ -77,8 +77,8 @@ func TestParallelStringSort_BasicCorrectness(t *testing.T) {
 
 			// Verify correct ordering
 			for i := 0; i < len(result)-1; i++ {
-				name1 := result[i].Fields["name"].Value.(string)
-				name2 := result[i+1].Fields["name"].Value.(string)
+				name1, _ := result[i].Fields["name"].Value.AsString()
+				name2, _ := result[i+1].Fields["name"].Value.AsString()
 
 				if tt.ascending {
 					if name1 > name2 {
@@ -119,7 +119,7 @@ func TestParallelStringSort_VariedStrings(t *testing.T) {
 			Fields: map[string]models.Field{
 				"text": {
 					Name:  "text",
-					Value: fmt.Sprintf("%s_%03d", pattern, i),
+					Value: models.NewStringValue(fmt.Sprintf("%s_%03d", pattern, i)),
 				},
 			},
 		}
@@ -133,8 +133,8 @@ func TestParallelStringSort_VariedStrings(t *testing.T) {
 
 	// Verify ordering
 	for i := 0; i < len(result)-1; i++ {
-		text1 := result[i].Fields["text"].Value.(string)
-		text2 := result[i+1].Fields["text"].Value.(string)
+		text1, _ := result[i].Fields["text"].Value.AsString()
+		text2, _ := result[i+1].Fields["text"].Value.AsString()
 
 		if text1 > text2 {
 			t.Errorf("Ordering violated at index %d: %s > %s", i, text1, text2)
@@ -167,8 +167,8 @@ func TestParallelStringSort_WithSIMD(t *testing.T) {
 	}
 
 	for i := 0; i < len(resultWithSIMD); i++ {
-		val1 := resultWithSIMD[i].Fields["description"].Value.(string)
-		val2 := resultWithoutSIMD[i].Fields["description"].Value.(string)
+		val1, _ := resultWithSIMD[i].Fields["description"].Value.AsString()
+		val2, _ := resultWithoutSIMD[i].Fields["description"].Value.AsString()
 
 		if val1 != val2 {
 			t.Errorf("SIMD vs non-SIMD mismatch at index %d: %s != %s", i, val1, val2)
@@ -228,7 +228,7 @@ func TestParallelStringSort_ByteArrayValues(t *testing.T) {
 			Fields: map[string]models.Field{
 				"data": {
 					Name:  "data",
-					Value: []byte(fmt.Sprintf("bytes_%03d", i)),
+					Value: models.NewInterfaceValue([]byte(fmt.Sprintf("bytes_%03d", i))),
 				},
 			},
 		}
@@ -246,8 +246,8 @@ func TestParallelStringSort_ByteArrayValues(t *testing.T) {
 
 	// Verify ordering
 	for i := 0; i < len(result)-1; i++ {
-		bytes1 := result[i].Fields["data"].Value.([]byte)
-		bytes2 := result[i+1].Fields["data"].Value.([]byte)
+		bytes1 := result[i].Fields["data"].Value.AsInterface().([]byte)
+		bytes2 := result[i+1].Fields["data"].Value.AsInterface().([]byte)
 		str1 := string(bytes1)
 		str2 := string(bytes2)
 

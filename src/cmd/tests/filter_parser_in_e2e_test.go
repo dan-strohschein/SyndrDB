@@ -33,6 +33,7 @@ func createE2ETestBundle(t *testing.T, bundleName string, docCount int) *models.
 
 	for i := 0; i < docCount; i++ {
 		docID := fmt.Sprintf("doc_%d", i)
+		bob := statuses[i%len(statuses)]
 		doc := models.Document{
 			DocumentID: docID,
 			Data: map[string]interface{}{
@@ -41,9 +42,9 @@ func createE2ETestBundle(t *testing.T, bundleName string, docCount int) *models.
 				"Priority":   i % 10,
 			},
 			Fields: map[string]models.Field{
-				"Status":     {Name: "Status", Value: statuses[i%len(statuses)]},
-				"CategoryID": {Name: "CategoryID", Value: categories[i%len(categories)]},
-				"Priority":   {Name: "Priority", Value: i % 10},
+				"Status":     {Name: "Status", Value: models.FieldValue{StringVal: bob}},
+				"CategoryID": {Name: "CategoryID", Value: models.FieldValue{IntVal: int64(categories[i%len(categories)])}},
+				"Priority":   {Name: "Priority", Value: models.FieldValue{IntVal: int64(i % 10)}},
 			},
 		}
 		documents[docID] = doc
