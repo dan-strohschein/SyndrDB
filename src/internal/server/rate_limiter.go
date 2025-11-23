@@ -207,6 +207,14 @@ func (rl *RateLimiter) UnbanIP(ip string) {
 	}
 }
 
+// SetMaxGlobalConnections updates the maximum global connection limit
+// TODO: I could add validation to ensure new limit >= current active connections
+func (rl *RateLimiter) SetMaxGlobalConnections(max int) {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
+	rl.config.MaxGlobalConnections = max
+}
+
 // isWhitelisted checks if an IP is in the whitelist
 func (rl *RateLimiter) isWhitelisted(ip string) bool {
 	for _, whitelistedIP := range rl.config.WhitelistedIPs {

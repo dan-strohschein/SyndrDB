@@ -52,6 +52,8 @@ func main() {
 	flag.BoolVar(&args.AuthEnabled, "auth", false, "Enable authentication")
 	flag.IntVar(&args.SessionTimeoutMinutes, "session-timeout", 30, "Session timeout in minutes")
 	flag.IntVar(&args.MaxSessions, "max-sessions", 1000, "Maximum number of concurrent sessions")
+	flag.IntVar(&args.MaxConnections, "max-connections", 100, "Maximum connection pool size")
+	flag.IntVar(&args.ConnectionIdleTimeoutMinutes, "connection-idle-timeout", 30, "Connection idle timeout in minutes")
 	flag.StringVar(&args.Version, "version", "0.0.1alpha", "Shows version")
 	flag.BoolVar(&args.PrintToScreen, "print", true, "Print Log Messages to screen")
 	flag.BoolVar(&args.Debug, "debug", true, "Enable debug mode")

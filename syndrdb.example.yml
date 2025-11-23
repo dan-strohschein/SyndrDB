@@ -60,6 +60,12 @@ session_timeout_minutes: 30
 # Maximum concurrent sessions (default: 1000)
 max_sessions: 1000
 
+# Maximum connection pool size (default: 100)
+max_connections: 100
+
+# Connection idle timeout in minutes (default: 30)
+connection_idle_timeout: 30
+
 # ==============================================================================
 # BUNDLE CONFIGURATION
 # ==============================================================================

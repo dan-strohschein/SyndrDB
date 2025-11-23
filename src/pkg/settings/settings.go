@@ -45,6 +45,10 @@ type Arguments struct {
 	SessionTimeoutMinutes int `yaml:"session_timeout_minutes"` // Session timeout in minutes
 	MaxSessions           int `yaml:"max_sessions"`            // Maximum number of concurrent sessions
 
+	// Connection Pool Management
+	MaxConnections               int `yaml:"max_connections"`         // Maximum connection pool size (default: 100)
+	ConnectionIdleTimeoutMinutes int `yaml:"connection_idle_timeout"` // Connection idle timeout in minutes (default: 30)
+
 	// TLS/SSL Configuration
 	TLSEnabled            bool   `yaml:"tls_enabled"`              // Enable TLS/SSL
 	TLSCertFile           string `yaml:"tls_cert_file"`            // Path to TLS certificate file

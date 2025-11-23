@@ -44,27 +44,29 @@ var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 // Server represents the main TCP server for SyndrDB
 type Server struct {
-	Host              string
-	Port              int
-	Databases         map[string]*models.Database
-	Listener          net.Listener
-	AuthEnabled       bool
-	GraphQLEnabled    bool
-	Users             map[string]string // username -> hashed password (legacy, use UserStore instead)
-	UserStore         *auth.UserStore   // Modern user authentication with rate limiting
-	ActiveConnections map[string]*Connection
-	SessionManager    *SessionManager
-	ServiceManager    *ServiceManager
-	RateLimiter       *RateLimiter
-	TLSConfig         *tls.Config
-	SessionTimeout    time.Duration
-	MaxSessions       int
-	mu                sync.Mutex
-	Running           bool
-	databaseService   *database.DatabaseService
-	logger            *zap.SugaredLogger
-	bufferPool        *buffer.BufferPool
-	wg                sync.WaitGroup // WaitGroup for tracking active connections
+	Host                  string
+	Port                  int
+	Databases             map[string]*models.Database
+	Listener              net.Listener
+	AuthEnabled           bool
+	GraphQLEnabled        bool
+	Users                 map[string]string // username -> hashed password (legacy, use UserStore instead)
+	UserStore             *auth.UserStore   // Modern user authentication with rate limiting
+	ActiveConnections     map[string]*Connection
+	SessionManager        *SessionManager
+	ServiceManager        *ServiceManager
+	RateLimiter           *RateLimiter
+	TLSConfig             *tls.Config
+	SessionTimeout        time.Duration
+	MaxSessions           int
+	MaxConnections        int           // Maximum connection pool size
+	ConnectionIdleTimeout time.Duration // Connection idle timeout duration
+	mu                    sync.Mutex
+	Running               bool
+	databaseService       *database.DatabaseService
+	logger                *zap.SugaredLogger
+	bufferPool            *buffer.BufferPool
+	wg                    sync.WaitGroup // WaitGroup for tracking active connections
 }
 
 // Connection represents an active client connection
@@ -186,23 +188,35 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 	// Create a new server
 	server := &Server{
-		Host:              config.Host,
-		Port:              config.Port,
-		Databases:         make(map[string]*models.Database),
-		AuthEnabled:       config.AuthEnabled,
-		GraphQLEnabled:    config.EnableGraphQL,
-		Users:             make(map[string]string),
-		ActiveConnections: make(map[string]*Connection),
-		SessionTimeout:    time.Duration(config.SessionTimeoutMinutes) * time.Minute,
-		MaxSessions:       config.MaxSessions,
-		databaseService:   databaseService,
-		logger:            sugar,
-		bufferPool:        bufferPool,
-		ServiceManager:    serviceManager,
+		Host:                  config.Host,
+		Port:                  config.Port,
+		Databases:             make(map[string]*models.Database),
+		AuthEnabled:           config.AuthEnabled,
+		GraphQLEnabled:        config.EnableGraphQL,
+		Users:                 make(map[string]string),
+		ActiveConnections:     make(map[string]*Connection),
+		SessionTimeout:        time.Duration(config.SessionTimeoutMinutes) * time.Minute,
+		MaxSessions:           config.MaxSessions,
+		MaxConnections:        config.MaxConnections,
+		ConnectionIdleTimeout: time.Duration(config.ConnectionIdleTimeoutMinutes) * time.Minute,
+		databaseService:       databaseService,
+		logger:                sugar,
+		bufferPool:            bufferPool,
+		ServiceManager:        serviceManager,
 	}
 
-	// Initialize rate limiter
-	server.RateLimiter = NewRateLimiter(DefaultRateLimitConfig())
+	// Set defaults if not configured
+	if server.MaxConnections <= 0 {
+		server.MaxConnections = 100 // Default 100 connections
+	}
+	if server.ConnectionIdleTimeout <= 0 {
+		server.ConnectionIdleTimeout = 30 * time.Minute // Default 30 minutes
+	}
+
+	// Initialize rate limiter with same max connections
+	rateLimitConfig := DefaultRateLimitConfig()
+	rateLimitConfig.MaxGlobalConnections = server.MaxConnections
+	server.RateLimiter = NewRateLimiter(rateLimitConfig)
 
 	// Initialize TLS configuration
 	tlsConfig := &TLSConfig{
@@ -455,9 +469,15 @@ func (s *Server) Stop() error {
 		s.UserStore.Close()
 	}
 
-	// Close all active connections
+	// Send shutdown warning to all active connections and close them
+	// TODO: I could add a configurable grace period to allow clients to finish in-flight operations
 	s.mu.Lock()
 	for id, conn := range s.ActiveConnections {
+		// Best effort: send shutdown message to client
+		if conn.Writer != nil {
+			fmt.Fprintf(conn.Writer, "Server shutting down, your connection is being closed\n")
+			conn.Writer.Flush()
+		}
 		conn.Conn.Close()
 		delete(s.ActiveConnections, id)
 	}
@@ -495,6 +515,36 @@ func (s *Server) Stop() error {
 	s.logger.Sync()
 
 	return nil
+}
+
+// GetConnectionPoolStats returns detailed statistics about the connection pool
+// TODO: I could add average idle time, peak connection count, and connection churn rate metrics
+func (s *Server) GetConnectionPoolStats() map[string]interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	connections := make([]map[string]interface{}, 0, len(s.ActiveConnections))
+
+	for _, conn := range s.ActiveConnections {
+		idleSeconds := now.Sub(conn.LastActive).Seconds()
+		connInfo := map[string]interface{}{
+			"id":               conn.ID,
+			"last_active_unix": conn.LastActive.Unix(),
+			"idle_seconds":     int64(idleSeconds),
+			"database":         conn.DatabaseName,
+			"user":             conn.User,
+			"authorized":       conn.Authorized,
+		}
+		connections = append(connections, connInfo)
+	}
+
+	return map[string]interface{}{
+		"active_count":         len(s.ActiveConnections),
+		"max_connections":      s.MaxConnections,
+		"idle_timeout_seconds": int64(s.ConnectionIdleTimeout.Seconds()),
+		"connections":          connections,
+	}
 }
 
 // GetLogger returns the server's logger
@@ -577,6 +627,25 @@ func (s *Server) acceptConnections() {
 			continue
 		}
 
+		// Check connection pool limit
+		s.mu.Lock()
+		activeCount := len(s.ActiveConnections)
+		s.mu.Unlock()
+
+		if activeCount >= s.MaxConnections {
+			// TODO: I could add metrics tracking for rejected connections to monitor pool pressure
+			s.logger.Warnw("Connection rejected - pool limit reached",
+				"active", activeCount,
+				"max", s.MaxConnections,
+				"remoteAddr", conn.RemoteAddr().String())
+			// Best effort: send error message to client before closing
+			writer := bufio.NewWriter(conn)
+			fmt.Fprintf(writer, "ERROR: Server has reached maximum connection limit (%d)\n", s.MaxConnections)
+			writer.Flush()
+			conn.Close()
+			continue
+		}
+
 		// Rate limiting check
 		clientIP := ExtractIPFromConn(conn)
 		if err := s.RateLimiter.CheckConnection(clientIP); err != nil {
@@ -635,7 +704,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	// Ensure connection is removed when this function exits
 	defer func() {
+		// TODO: I could add connection lifetime metrics here for monitoring
+		clientIP := ExtractIPFromConn(conn)
 
+		// Release from rate limiter FIRST (before removing from ActiveConnections)
+		s.RateLimiter.ReleaseConnection(clientIP)
+
+		// Then remove from active connections
 		conn.Close()
 		s.mu.Lock()
 		delete(s.ActiveConnections, connID)
@@ -893,8 +968,22 @@ func (s *Server) handleConnection(conn net.Conn) {
 			return
 
 		case <-time.After(300 * time.Second):
-			// Idle timeout - send ping or check connection health
-			connLogger.Info("Connection idle for 5 minutes")
+			// Check for idle timeout (5-minute checks, but enforce configured timeout)
+			idleTime := time.Since(connection.LastActive)
+			if idleTime >= s.ConnectionIdleTimeout {
+				// TODO: I could add configurable warning threshold before timeout (e.g., send warning at 80% of timeout)
+				connLogger.Infow("Connection closed due to inactivity",
+					"idle_duration", idleTime.String(),
+					"timeout", s.ConnectionIdleTimeout.String())
+				// Best effort: send warning message to client
+				fmt.Fprintf(writer, "Connection closed due to inactivity\n")
+				writer.Flush()
+				return // Triggers defer cleanup which handles RateLimiter.ReleaseConnection
+			}
+			// Still within timeout - log activity check
+			connLogger.Debugw("Connection idle check",
+				"idle_duration", idleTime.String(),
+				"timeout", s.ConnectionIdleTimeout.String())
 		}
 	}
 
