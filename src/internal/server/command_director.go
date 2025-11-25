@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,14 +9,16 @@ import (
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-func CommandDirector(database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	if database == nil {
 		// Get the database from the session.
 	}
@@ -62,7 +65,7 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 		//               SELECT COUNT(*) FROM bundle
 		//               SELECT * FROM bundle JOIN...
 		//               SELECT field1, COUNT(*) FROM bundle GROUP BY field1
-		return SelectDocuments(commandParts, serviceManager, database, logger, startTime)
+		return SelectDocuments(ctx, commandParts, serviceManager, database, logger, startTime, session)
 	}
 
 	if strings.HasPrefix(commandLower, "show") {
@@ -412,6 +415,10 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 
 			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs)) // Execute with WAL logging if available
 			if serviceManager.WALManager != nil {
+				// METRICS: Track transaction begin
+				globalMetrics := GetGlobalServerMetrics()
+				globalMetrics.TransactionsBegun.Add(1)
+
 				err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
 					// Log the document deletion before execution
 					// Note: We'll log the where clause as metadata for the deletion
@@ -423,6 +430,13 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 					// Delete the document from the bundle
 					return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs)
 				})
+
+				// METRICS: Track transaction outcome
+				if err != nil {
+					globalMetrics.TransactionsRolledBack.Add(1)
+				} else {
+					globalMetrics.TransactionsCommitted.Add(1)
+				}
 			} else {
 				// Fallback to direct execution if WAL is not available
 				logger.Warn("WAL Manager not available, executing without transaction logging")
@@ -432,6 +446,15 @@ func CommandDirector(database *models.Database, serviceManager ServiceManager, c
 			if err != nil {
 				return nil, fmt.Errorf("error deleting document from bundle '%s': %v", bundleName, err)
 			}
+
+			// METRICS: Track document deletes
+			globalMetrics := GetGlobalServerMetrics()
+			globalMetrics.DocumentDeletesTotal.Add(uint64(len(docIDs)))
+			dbMetrics := GetDatabaseMetrics(database.Name)
+			dbMetrics.DBDocumentDeletesTotal.Add(uint64(len(docIDs)))
+			bundleMetrics := GetBundleMetrics(database.Name, bundleName)
+			bundleMetrics.BundleDocumentsDeleted.Add(uint64(len(docIDs)))
+			bundleMetrics.BundleCurrentDocCount.Add(^uint64(len(docIDs) - 1)) // Atomic subtract
 
 			// STEP 2: Invalidate query plan cache after data mutation
 			if serviceManager.UnifiedPlanner != nil {
@@ -554,11 +577,15 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 	return filteredDocuments
 }
 
-func SelectDocuments(commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time) (interface{}, error) {
+func SelectDocuments(ctx context.Context, commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time, session *Session) (interface{}, error) {
 
 	fullCommand := strings.Join(commandParts, " ")
 
 	logger.Debugf("Processing SELECT query: %s", fullCommand)
+
+	// METRICS: Track query execution
+	metrics := GetGlobalServerMetrics()
+	metrics.QueryExecutionsTotal.Add(1)
 
 	// STEP 1: Parse the query using parseQuery (respects feature flag, has fallback)
 	query, err := ParseQuery(fullCommand, logger)
@@ -578,13 +605,105 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 		return nil, fmt.Errorf("failed to create execution plan: %w", err)
 	}
 
+	// METRICS: Track query plan cache performance (cache hit/miss tracking happens in planner)
+	// Track query features
+	if query.HasJoin() {
+		metrics.QueryJoinsTotal.Add(1)
+	}
+	if query.HasGroupBy() {
+		metrics.QueryGroupBysTotal.Add(1)
+	}
+	if query.HasOrderBy() {
+		metrics.QueryOrderBysTotal.Add(1)
+	}
+
 	logger.Debugf("Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 
-	// STEP 4: Execute the plan
-	documents, err := plan.RootNode.Execute()
+	// STEP 4: Create timeout context and execute the plan
+	args := settings.GetSettings()
+	isAdmin := false
+	if session != nil {
+		isAdmin = session.GetIsAdmin()
+	}
+
+	timeout := args.GetQueryTimeout(isAdmin)
+	var cancel context.CancelFunc
+	var timeoutOccurred bool
+	var timeoutError error
+
+	// STEP 4.5: Create memory tracker for per-query memory limit (DoS protection)
+	memoryLimit := args.GetQueryMemoryLimit(isAdmin)
+	memoryTracker := NewMemoryTracker(memoryLimit)
+	ctx = WithMemoryTracker(ctx, memoryTracker)
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		// Launch warning goroutine at 80% threshold
+		// TODO: Make warning threshold configurable for different deployment scenarios
+		go func() {
+			warningTime := time.Duration(float64(timeout) * 0.8)
+			select {
+			case <-time.After(warningTime):
+				username := "anonymous"
+				if session != nil {
+					username = session.Username
+				}
+				logger.Warnw("Query approaching timeout",
+					"query", query.FromBundle,
+					"timeout", timeout,
+					"elapsed", warningTime,
+					"username", username,
+				)
+			case <-ctx.Done():
+				return
+			}
+		}()
+	}
+
+	// Execute the plan with context
+	documents, err := plan.RootNode.Execute(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute query plan: %w", err)
+		// Check if error is due to timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			// METRICS: Track query timeout
+			metrics.QueryTimeoutsTotal.Add(1)
+			timeoutOccurred = true
+			timeoutError = fmt.Errorf("query execution timeout exceeded (%v)", timeout)
+			logger.Warnw("Query timed out, returning partial results",
+				"timeout", timeout,
+				"partial_results", len(documents),
+				"query", query.FromBundle,
+			)
+			// Continue with partial results
+		} else if err == planner.ErrMemoryLimitExceeded {
+			// METRICS: Track memory limit exceeded
+			metrics.QueryMemoryLimitExceeded.Add(1)
+			// Memory limit exceeded - record metrics and return error immediately
+			// CLEANUP VERIFICATION: When this error occurs, the execution nodes return nil documents
+			// and all allocated maps go out of scope for GC cleanup. Document pointers reference
+			// bundle cache (not pooled allocations), so no explicit cleanup needed. The empty
+			// CommandResponse below has no PooledMaps or PooledDocuments, ensuring sendResult's
+			// defer cleanup is safe.
+			memoryTracker.RecordMetrics(plan.EstimatedRows)
+			errorMsg := memoryTracker.FormatErrorMessage(plan.EstimatedRows)
+			logger.Warnw("Query memory limit exceeded",
+				"error", errorMsg,
+				"query", query.FromBundle,
+				"estimated_rows", plan.EstimatedRows,
+			)
+
+			// TODO: I could implement graceful degradation with partial results instead of hard error
+			return &CommandResponse{
+				ResultCount:     0,
+				Result:          nil,
+				ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+				Error:           &errorMsg,
+			}, nil
+		} else {
+			return nil, fmt.Errorf("failed to execute query plan: %w", err)
+		}
 	}
 
 	logger.Debugf("Query executed successfully: Retrieved %d documents", len(documents))
@@ -678,11 +797,32 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 	// Calculate execution time
 	executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6
 
+	// METRICS: Record query latency histogram
+	latencyMs := executionTime
+	if latencyMs < 1 {
+		metrics.QueryLatencyLt1ms.Add(1)
+	} else if latencyMs < 10 {
+		metrics.QueryLatencyLt10ms.Add(1)
+	} else if latencyMs < 100 {
+		metrics.QueryLatencyLt100ms.Add(1)
+	} else if latencyMs < 1000 {
+		metrics.QueryLatencyLt1s.Add(1)
+	} else {
+		metrics.QueryLatencyGte1s.Add(1)
+	}
+
 	// Create response
 	cmdResponse := &CommandResponse{
 		ResultCount:     resultCount,
 		Result:          results,
 		ExecutionTimeMS: executionTime,
+	}
+
+	// Add timeout information if timeout occurred
+	if timeoutOccurred {
+		cmdResponse.TimeoutOccurred = true
+		errorMsg := timeoutError.Error()
+		cmdResponse.Error = &errorMsg
 	}
 
 	// PHASE H: For streaming path, store documents for direct encoding
@@ -699,6 +839,9 @@ func SelectDocuments(commandParts []string, serviceManager ServiceManager, datab
 
 	logger.Debugf("Returning %d documents (execution time: %.2fms)",
 		cmdResponse.ResultCount, cmdResponse.ExecutionTimeMS)
+
+	// Record memory tracking metrics for successful queries
+	memoryTracker.RecordMetrics(cmdResponse.ResultCount)
 
 	return cmdResponse, nil
 

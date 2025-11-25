@@ -286,6 +286,32 @@ enable_query_monitoring: true
 graphql_rate_algorithm: "token-bucket"
 
 # ==============================================================================
+# SYNDRQL QUERY TIMEOUT CONFIGURATION
+# ==============================================================================
+
+# Default query execution timeout in seconds (default: 300)
+# Applied to all regular user queries when enable_query_timeout is true
+query_timeout_seconds: 300
+
+# Admin query execution timeout in seconds (default: 600)
+# Admin users get extended timeouts for complex maintenance queries
+admin_query_timeout_seconds: 600
+
+# ==============================================================================
+# PER-QUERY MEMORY LIMITS (DoS Protection)
+# ==============================================================================
+
+# Maximum memory per query in MB (default: 25)
+# Server-wide limit applied to all SELECT queries across all databases
+# Protects against memory exhaustion attacks via sampling-based projection
+# Note: JOIN operations have separate MemoryLimit in JoinRequest
+query_max_memory_mb: 25
+
+# Maximum memory per admin query in MB (default: 25)
+# Same limits apply to admin users for now
+admin_query_max_memory_mb: 25
+
+# ==============================================================================
 # TLS/SSL CONFIGURATION (Not yet implemented)
 # ==============================================================================
 

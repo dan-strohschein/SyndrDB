@@ -56,6 +56,7 @@ join algorithm in its own specialized execution node.
 package planner
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -202,16 +203,16 @@ func NewMergeJoinNode(leftChild, rightChild ExecutionNode,
 }
 
 // Execute implements ExecutionNode interface for NestedLoopJoinNode
-func (n *NestedLoopJoinNode) Execute() (map[string]*models.Document, error) {
+func (n *NestedLoopJoinNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	if !n.processed {
 		// Execute child nodes to get input documents
-		leftDocs, err := n.LeftChild.Execute()
+		leftDocs, err := n.LeftChild.Execute(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute left child in nested loop join: %w", err)
 		}
 		n.leftDocs = leftDocs
 
-		rightDocs, err := n.RightChild.Execute()
+		rightDocs, err := n.RightChild.Execute(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute right child in nested loop join: %w", err)
 		}
@@ -273,10 +274,10 @@ func (n *NestedLoopJoinNode) Execute() (map[string]*models.Document, error) {
 }
 
 // Execute implements ExecutionNode interface for HashJoinNode
-func (h *HashJoinNode) Execute() (map[string]*models.Document, error) {
+func (h *HashJoinNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	if !h.processed {
 		// Build phase: create hash table from left child (build side)
-		leftDocs, err := h.LeftChild.Execute()
+		leftDocs, err := h.LeftChild.Execute(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute left child in hash join: %w", err)
 		}
@@ -292,7 +293,7 @@ func (h *HashJoinNode) Execute() (map[string]*models.Document, error) {
 		}
 
 		// Probe phase: get right child documents
-		rightDocs, err := h.RightChild.Execute()
+		rightDocs, err := h.RightChild.Execute(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute right child in hash join: %w", err)
 		}
@@ -337,15 +338,15 @@ func (h *HashJoinNode) Execute() (map[string]*models.Document, error) {
 }
 
 // Execute implements ExecutionNode interface for MergeJoinNode
-func (m *MergeJoinNode) Execute() (map[string]*models.Document, error) {
+func (m *MergeJoinNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	if !m.processed {
 		// Get documents from both children
-		leftDocs, err := m.LeftChild.Execute()
+		leftDocs, err := m.LeftChild.Execute(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute left child in merge join: %w", err)
 		}
 
-		rightDocs, err := m.RightChild.Execute()
+		rightDocs, err := m.RightChild.Execute(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to execute right child in merge join: %w", err)
 		}

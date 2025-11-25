@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"syndrdb/src/internal/server"
 	"testing"
 	"time"
@@ -11,27 +12,31 @@ func BenchmarkSelectQuery_100Authors(b *testing.B) {
 	// Do setup outside benchmark using testing wrapper
 	// We'll create a mini test to do setup, then extract the fixture
 	var fixture *TestFixture
-	
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	testSetup := func(t *testing.T) {
 		fixture = setupRealServer(t)
 		seedSimpleAuthorsBundle(t, fixture, 100)
 	}
-	
+
 	// Run setup as a test (hacky but works)
 	testing.RunTests(func(_, _ string) (bool, error) { return true, nil },
 		[]testing.InternalTest{{Name: "Setup", F: testSetup}})
-	
+
 	if fixture == nil {
 		b.Fatal("Setup failed")
 	}
-	
+
 	query := `SELECT * FROM "Authors"`
-	
+
 	b.ResetTimer()
 	b.ReportAllocs()
-	
+
 	for i := 0; i < b.N; i++ {
 		_, err := server.CommandDirector(
+			ctx,
 			fixture.Database,
 			*fixture.ServiceManager,
 			query,
@@ -44,7 +49,7 @@ func BenchmarkSelectQuery_100Authors(b *testing.B) {
 			b.Fatalf("Query failed: %v", err)
 		}
 	}
-	
+
 	// Cleanup
 	if fixture.ServiceManager != nil && fixture.ServiceManager.BundleService != nil {
 		fixture.ServiceManager.BundleService.Shutdown()

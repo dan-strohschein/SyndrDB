@@ -179,11 +179,11 @@ func NewAggregationNode(
 //   - error: Any error during execution
 func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.Logger.Infof("Executing AggregationNode with %d GROUP BY fields, %d aggregates, strategy=%s",
+		len(n.GroupBy.Fields), len(n.AggregateFields), n.executionStrategy.String()),
 		len(n.GroupBy.Fields), len(n.AggregateFields), n.executionStrategy.String())
-
 	// Execute child node to get input documents (WHERE already applied by FilterNode)
 	documents, err := n.Child.Execute(ctx)
-	if err != nil {
+	if err {
 		return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
 	}
 
@@ -199,9 +199,9 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 	var groupResults map[groupKey]*groupResult
 	switch n.executionStrategy {
 	case queryparser.HashAggregate:
-		groupResults, err = n.executeHashAggregate(ctx, documents)
+		groupResults, err = n.executeHashAggregate(documents)
 	case queryparser.SortGroupAggregate:
-		groupResults, err = n.executeSortGroupAggregate(ctx, documents)
+		groupResults, err = n.executeSortGroupAggregate(documents)
 	default:
 		return nil, fmt.Errorf("unsupported execution strategy: %s", n.executionStrategy.String())
 	}
@@ -258,28 +258,12 @@ type groupResult struct {
 // TODO: Phase 2 - I should implement memory management with spill-to-disk for large datasets
 // TODO: Phase 2 - Add work_mem limit checking and automatic fallback to sort-aggregate
 // TODO: Phase 2 - Consider using sync.Map for concurrent aggregation in parallel execution
-func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
+func (n *AggregationNode) executeHashAggregate(documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
 	n.Logger.Debugf("Executing Hash Aggregate strategy")
 
 	groupMap := make(map[groupKey]*groupResult)
 
-	// Memory tracking: Get tracker from context
-	memoryTracker := GetMemoryTrackerFromContext(ctx)
-	docCount := 0
-
 	for _, doc := range documents {
-		docCount++
-
-		// Memory tracking: Sample every 100th document
-		if memoryTracker != nil && docCount%100 == 0 {
-			docSize := models.EstimateDocumentSize(doc)
-			memoryTracker.Sample(docSize, docCount)
-
-			if memoryTracker.WillExceedLimit(len(documents)) {
-				return nil, ErrMemoryLimitExceeded
-			}
-		}
-
 		// Create group key from GROUP BY fields
 		gKey, groupFields, err := n.createGroupKey(doc)
 		if err != nil {
@@ -327,12 +311,8 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 // TODO: Phase 2 - I should implement external merge sort for datasets larger than memory
 // TODO: Phase 2 - Add streaming aggregation to reduce memory footprint
 // TODO: Phase 2 - Consider index scans when GROUP BY fields match an index for pre-sorted data
-func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
+func (n *AggregationNode) executeSortGroupAggregate(documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
 	n.Logger.Debugf("Executing Sort + GroupAggregate strategy")
-
-	// Memory tracking: Get tracker from context
-	memoryTracker := GetMemoryTrackerFromContext(ctx)
-	docCount := 0
 
 	// Convert documents to sortable slice
 	docSlice := make([]*models.Document, 0, len(documents))
@@ -352,18 +332,6 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 	var currentGroupKey groupKey
 
 	for _, doc := range docSlice {
-		docCount++
-
-		// Memory tracking: Sample every 100th document
-		if memoryTracker != nil && docCount%100 == 0 {
-			docSize := models.EstimateDocumentSize(doc)
-			memoryTracker.Sample(docSize, docCount)
-
-			if memoryTracker.WillExceedLimit(len(documents)) {
-				return nil, ErrMemoryLimitExceeded
-			}
-		}
-
 		// Create group key
 		gKey, groupFields, err := n.createGroupKey(doc)
 		if err != nil {

@@ -1321,7 +1321,7 @@ func (h *GraphQLHandler) executeUnifiedQuery(query *queryparser.UnifiedSelectQue
 	// Step 3: Execute the plan
 	// This executes the root node of the execution tree, which recursively
 	// executes all child nodes (scans, filters, joins, sorts, limits, etc.)
-	documents, err := plan.RootNode.Execute()
+	documents, err := plan.RootNode.Execute(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}

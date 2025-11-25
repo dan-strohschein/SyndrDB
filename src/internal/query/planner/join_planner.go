@@ -32,6 +32,7 @@ on join planning while delegating execution to specialized join nodes.
 package planner
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/document"
@@ -403,7 +404,7 @@ type JoinExecutionNode struct {
 }
 
 // Execute implements ExecutionNode interface using the new JOIN executor
-func (jen *JoinExecutionNode) Execute() (map[string]*models.Document, error) {
+func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	jen.Logger.Infof("Executing JOIN using Phase 1 JOIN executor")
 
 	// Convert query to JOIN request format

@@ -32,6 +32,7 @@ Open/Closed: New test cases can be added without modifying existing tests.
 */
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"syndrdb/src/internal/domain/models"
@@ -49,6 +50,9 @@ import (
 func seedRandomizedAuthors(t testing.TB, fixture *TestFixture, count int) {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	countries := []string{"USA", "UK", "Canada", "France"}
 	rand.Seed(time.Now().UnixNano())
 
@@ -61,7 +65,7 @@ func seedRandomizedAuthors(t testing.TB, fixture *TestFixture, count int) {
 			i, name, country, birthYear)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed author %d: %v", i, err)
 		}
@@ -71,6 +75,9 @@ func seedRandomizedAuthors(t testing.TB, fixture *TestFixture, count int) {
 // seedRandomizedBooks creates count Book documents with randomized Genre and Price
 func seedRandomizedBooks(t testing.TB, fixture *TestFixture, count int) {
 	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	genres := []string{"Fiction", "Non-Fiction", "Mystery", "Sci-Fi"}
 	rand.Seed(time.Now().UnixNano())
@@ -86,7 +93,7 @@ func seedRandomizedBooks(t testing.TB, fixture *TestFixture, count int) {
 			i, title, authorID, genre, price)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed book %d: %v", i, err)
 		}
@@ -97,8 +104,11 @@ func seedRandomizedBooks(t testing.TB, fixture *TestFixture, count int) {
 func executeSelectQuery(t testing.TB, fixture *TestFixture, query string) []*models.Document {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	startTime := time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Query execution failed: %v\nQuery: %s", err, query)
 	}

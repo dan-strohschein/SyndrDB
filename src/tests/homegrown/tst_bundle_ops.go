@@ -8,6 +8,7 @@ Each function tests specific bundle operations through the complete command proc
 package homegrown
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -370,7 +371,7 @@ func executeClientCommand(commandText string) (interface{}, error) {
 
 	// Process command through the actual command director
 	startTime := time.Now()
-	result, err := server.CommandDirector(testDatabase, *testServiceManager, commandText, ColorLogger, startTime, nil, "127.0.0.1")
+	result, err := server.CommandDirector(context.Background(), testDatabase, *testServiceManager, commandText, ColorLogger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		return nil, fmt.Errorf("command failed: %w", err)
 	}

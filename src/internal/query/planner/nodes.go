@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"context"
 	"fmt"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
@@ -17,20 +18,20 @@ import (
 
 // Execute methods for different node types
 
-func (node *IndexScanNode) Execute() (map[string]*models.Document, error) {
+func (node *IndexScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	switch node.ScanType {
 	case HashIndexScan:
-		return node.executeHashIndexScan()
+		return node.executeHashIndexScan(ctx)
 	case BTreeIndexScan:
-		return node.executeBTreeIndexScan()
+		return node.executeBTreeIndexScan(ctx)
 	case BTreeRangeScan:
-		return node.executeBTreeRangeScan()
+		return node.executeBTreeRangeScan(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported scan type: %v", node.ScanType)
 	}
 }
 
-func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, error) {
+func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string]*models.Document, error) {
 	node.Logger.Debugf("Executing hash index scan on %s for key %v", node.IndexName, node.SearchKey)
 
 	// Find the hash index in the bundle
@@ -82,7 +83,19 @@ func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, 
 		return results, nil
 	}
 
+	docCount := 0
 	for _, docID := range documentIDs {
+		// Check context every 1000 documents
+		// TODO: I can make this check frequency adaptive based on document processing rate
+		if docCount%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				// Return partial results on timeout
+				return results, ctx.Err()
+			default:
+				// Continue processing
+			}
+		}
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
 			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			results[docID] = &doc
@@ -91,6 +104,7 @@ func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, 
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
 			node.Logger.Warnf("Document ID %s found in hash index but not in bundle documents", docID)
 		}
+		docCount++
 	}
 
 	node.Logger.Debugf("Hash index scan returned %d documents for key %v", len(results), node.SearchKey)
@@ -104,7 +118,7 @@ func (node *IndexScanNode) executeHashIndexScan() (map[string]*models.Document, 
 // 	return nil
 // }
 
-func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document, error) {
+func (node *IndexScanNode) executeBTreeIndexScan(ctx context.Context) (map[string]*models.Document, error) {
 	node.Logger.Infof("Executing B-tree index scan on %s for key %v", node.IndexName, node.SearchKey)
 
 	// Find the B-tree index in the bundle
@@ -174,7 +188,19 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 
 	// Retrieve the actual documents from the bundle
 	results := make(map[string]*models.Document)
+	docCount := 0
 	for _, docID := range documentIDs {
+		// Check context every 1000 documents
+		// TODO: I can make this check frequency adaptive based on document processing rate
+		if docCount%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				// Return partial results on timeout
+				return results, ctx.Err()
+			default:
+				// Continue processing
+			}
+		}
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
 			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			results[docID] = &doc
@@ -183,6 +209,7 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
 			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle documents", docID)
 		}
+		docCount++
 	}
 
 	node.Logger.Debugf("B-tree index scan returned %d documents for key %v", len(results), node.SearchKey)
@@ -190,10 +217,10 @@ func (node *IndexScanNode) executeBTreeIndexScan() (map[string]*models.Document,
 }
 
 func (node *IndexScanNode) ExecuteBTreeRangeScan() (map[string]*models.Document, error) {
-	return node.executeBTreeRangeScan()
+	return node.executeBTreeRangeScan(context.Background())
 }
 
-func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document, error) {
+func (node *IndexScanNode) executeBTreeRangeScan(ctx context.Context) (map[string]*models.Document, error) {
 	node.Logger.Debugf("Executing B-tree range scan on %s for operator %s with value %v",
 		node.IndexName, node.Operator, node.SearchKey)
 
@@ -259,7 +286,19 @@ func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document,
 
 	// Retrieve the actual documents from the bundle
 	results := make(map[string]*models.Document)
+	docCount := 0
 	for _, docID := range documentIDs {
+		// Check context every 1000 documents
+		// TODO: I can make this check frequency adaptive based on document processing rate
+		if docCount%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				// Return partial results on timeout
+				return results, ctx.Err()
+			default:
+				// Continue processing
+			}
+		}
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
 			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			results[docID] = &doc
@@ -268,6 +307,7 @@ func (node *IndexScanNode) executeBTreeRangeScan() (map[string]*models.Document,
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
 			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle documents", docID)
 		}
+		docCount++
 	}
 
 	node.Logger.Infof("B-tree range scan returned %d documents for operator %s", len(results), node.Operator)
@@ -354,19 +394,53 @@ func (node *IndexScanNode) convertToBytes(value interface{}) []byte {
 	return encoded
 }
 
-func (node *FullScanNode) Execute() (map[string]*models.Document, error) {
+func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	node.Logger.Infof("Executing optimized full bundle scan on %s using document scanner", node.Bundle.Name)
 
 	results := make(map[string]*models.Document)
+
+	// Get memory tracker from context for per-query memory limit
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
 
 	// CRITICAL: Check if documents are complete before using fast path
 	// If DocumentsComplete is false, Documents is a memtable (recent writes only), not a complete cache
 	// MUST use scanner to merge memtable with disk data
 	if node.Bundle.Documents != nil && node.Bundle.DocumentsComplete {
 		node.Logger.Debugf("Using complete in-memory documents for bundle %s", node.Bundle.Name)
+		docCount := 0
 		for docID, doc := range *node.Bundle.Documents {
+			// Check context every 1000 documents
+			// TODO: I can make this check frequency adaptive based on document processing rate
+			if docCount%1000 == 0 {
+				select {
+				case <-ctx.Done():
+					// Return partial results on timeout
+					return results, ctx.Err()
+				default:
+					// Continue processing
+				}
+			}
+
+			// Memory tracking: Sample every 100th document
+			if memoryTracker != nil && docCount%100 == 0 {
+				docSize := models.EstimateDocumentSize(&doc)
+				if err := memoryTracker.Sample(docSize, docCount); err != nil {
+					return nil, err
+				}
+
+				// Check if projected memory exceeds limit
+				totalDocs := len(*node.Bundle.Documents)
+				if memoryTracker.WillExceedLimit(totalDocs) {
+					errorMsg := memoryTracker.FormatErrorMessage(totalDocs)
+					node.Logger.Warnf("Memory limit exceeded during full scan: %s", errorMsg)
+					// TODO: I could implement graceful degradation by returning partial results with a warning flag
+					return nil, ErrMemoryLimitExceeded
+				}
+			}
+
 			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			results[docID] = &doc
+			docCount++
 		}
 		return results, nil
 	}
@@ -393,9 +467,40 @@ func (node *FullScanNode) Execute() (map[string]*models.Document, error) {
 	}
 
 	// Convert scanner result to the expected map format
+	docCount := 0
+
 	for i, doc := range scanResult.Documents {
+		// Check context every 1000 documents
+		// TODO: I can make this check frequency adaptive based on document processing rate
+		if docCount%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				// Return partial results on timeout
+				return results, ctx.Err()
+			default:
+				// Continue processing
+			}
+		}
+
+		// Memory tracking: Sample every 100th document
+		if memoryTracker != nil && i%100 == 0 {
+			docSize := models.EstimateDocumentSize(doc)
+			if err := memoryTracker.Sample(docSize, i); err != nil {
+				return nil, err
+			}
+
+			// Check if projected memory exceeds limit
+			totalDocs := len(scanResult.Documents)
+			if memoryTracker.WillExceedLimit(totalDocs) {
+				errorMsg := memoryTracker.FormatErrorMessage(totalDocs)
+				node.Logger.Warnf("Memory limit exceeded during scanner full scan: %s", errorMsg)
+				return nil, ErrMemoryLimitExceeded
+			}
+		}
+
 		docID := scanResult.DocumentIDs[i]
 		results[docID] = doc
+		docCount++
 	}
 
 	node.Logger.Debugf("Document scanner completed full scan: %d documents in %v (batches: %d, cache hits: %d)",
@@ -440,9 +545,9 @@ func (node *FullScanNode) ExecuteStreaming(callback func(map[string]*models.Docu
 	return nil
 }
 
-func (node *FilterNode) Execute() (map[string]*models.Document, error) {
+func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	// Execute child node first
-	documents, err := node.Child.Execute()
+	documents, err := node.Child.Execute(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -504,10 +609,41 @@ func (node *FilterNode) Execute() (map[string]*models.Document, error) {
 
 	// Apply full WHERE expression to remaining documents (post-optimization or all if skipped)
 	filtered := make(map[string]*models.Document)
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+	docCount := 0
 	for docID, doc := range documents {
+		// Check context every 1000 documents
+		// TODO: I can make this check frequency adaptive based on document processing rate
+		if docCount%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				// Return partial results on timeout
+				return filtered, ctx.Err()
+			default:
+				// Continue processing
+			}
+		}
+
+		// Memory tracking: Sample every 100th document
+		if memoryTracker != nil && docCount%100 == 0 {
+			docSize := models.EstimateDocumentSize(doc)
+			if err := memoryTracker.Sample(docSize, docCount); err != nil {
+				return nil, err
+			}
+
+			// Check if projected memory exceeds limit
+			if memoryTracker.WillExceedLimit(len(documents)) {
+				errorMsg := memoryTracker.FormatErrorMessage(len(documents))
+				node.Logger.Warnf("Memory limit exceeded during filter: %s", errorMsg)
+				// TODO: I could implement graceful degradation by returning partial results with a warning flag
+				return nil, ErrMemoryLimitExceeded
+			}
+		}
+
 		if node.matchesConditions(doc) {
 			filtered[docID] = doc
 		}
+		docCount++
 	}
 
 	node.Logger.Debugf("Filter node reduced %d documents to %d", len(documents), len(filtered))
@@ -549,11 +685,11 @@ func (node *FilterNode) matchesConditions(doc *models.Document) bool {
 	return result
 }
 
-func (node *UnionNode) Execute() (map[string]*models.Document, error) {
+func (node *UnionNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	allResults := make(map[string]*models.Document)
 
 	for _, child := range node.Children {
-		results, err := child.Execute()
+		results, err := child.Execute(ctx)
 		if err != nil {
 			return nil, err
 		}

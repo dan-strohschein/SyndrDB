@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -86,6 +87,9 @@ func setupFullServer(t *testing.T) *TestFixture {
 // setupFullServerTB is the testing.TB version for benchmarks
 func setupFullServerTB(tb testing.TB) *TestFixture {
 	tb.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// Create temporary directory - DON'T use tb.TempDir() so we can inspect it
 	//tempDir, err := os.MkdirTemp("", "TestSelect_*")
@@ -262,7 +266,7 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 	dbName := fmt.Sprintf("testdb_%s_%d", tb.Name(), time.Now().UnixNano())
 	createDBCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
 	startTime := time.Now()
-	_, err = server.CommandDirector(nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
 	if err != nil {
 		tb.Fatalf("Failed to create %s database: %v", dbName, err)
 	}
@@ -280,7 +284,7 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 	// This ensures subsequent commands operate on the correct database
 	useDBCmd := fmt.Sprintf(`USE "%s"`, dbName)
 	startTime = time.Now()
-	_, err = server.CommandDirector(nil, *serviceManager, useDBCmd, sugar, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *serviceManager, useDBCmd, sugar, startTime, nil, "127.0.0.1")
 	if err != nil {
 		tb.Fatalf("Failed to switch to %s database: %v", dbName, err)
 	}
@@ -322,6 +326,9 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 func resetDatabase(t *testing.T, fixture *TestFixture) {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	bundles := []string{"Authors", "Books", "Publishers"}
 
 	// Drop existing bundles (ignore errors if they don't exist)
@@ -329,7 +336,7 @@ func resetDatabase(t *testing.T, fixture *TestFixture) {
 		dropCmd := fmt.Sprintf(`DROP BUNDLE "%s"`, bundleName)
 		startTime := time.Now()
 		// Pass fixture.Database to ensure commands operate on correct database
-		_, _ = server.CommandDirector(fixture.Database, *fixture.ServiceManager, dropCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, _ = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, dropCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	}
 
 	// Create Authors bundle - must pass database context
@@ -341,7 +348,7 @@ func resetDatabase(t *testing.T, fixture *TestFixture) {
 		{"BirthYear", "INT", false, false, 0}
 	);`
 	startTime := time.Now()
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Authors bundle: %v", err)
 	}
@@ -365,7 +372,7 @@ func resetDatabase(t *testing.T, fixture *TestFixture) {
 		{"Price", "FLOAT", false, false, null}
 	)`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Books bundle: %v", err)
 	}
@@ -377,14 +384,14 @@ func resetDatabase(t *testing.T, fixture *TestFixture) {
 		{"Country", "STRING", false, false, null}
 	)`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Publishers bundle: %v", err)
 	}
 
 	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorID");`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create relationship: %v", err)
 	}
@@ -399,6 +406,9 @@ func resetDatabase(t *testing.T, fixture *TestFixture) {
 // seedAuthorsBundle creates predictable author documents
 func seedAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	countries := []string{"USA", "UK", "Canada", "France"}
 
@@ -429,7 +439,7 @@ func seedAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 		}
 
 		startTime := time.Now()
-		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed author %d: %v", i, err)
 		}
@@ -456,7 +466,7 @@ func seedAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 	// Verify seed count via COUNT(*)
 	countCmd := `SELECT COUNT(*) FROM "Authors"`
 	startTime := time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to verify author count: %v", err)
 	}
@@ -530,7 +540,7 @@ func seedAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 	if count <= 10 {
 		selectCmd := `SELECT ID, Name FROM "Authors"`
 		startTime = time.Now()
-		docsResponse, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		docsResponse, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err == nil {
 			docs := extractDocuments(t, docsResponse)
 			fixture.Logger.Infof("✓ Seeded %d authors: %v", count, getDocumentIDs(docs))
@@ -543,6 +553,9 @@ func seedAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 // seedBooksBundle creates predictable book documents
 func seedBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	genres := []string{"Fiction", "NonFiction", "Mystery", "SciFi", "Fantasy"}
 
@@ -559,7 +572,7 @@ func seedBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 			i, title, authorID, authDocID, genre, price)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed book %d: %v", i, err)
 		}
@@ -568,7 +581,7 @@ func seedBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 	// Verify seed count via COUNT(*)
 	countCmd := `SELECT COUNT(*) FROM "Books"`
 	startTime := time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to verify book count: %v", err)
 	}
@@ -602,7 +615,7 @@ func seedBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 	if count <= 10 {
 		selectCmd := `SELECT ID, Title FROM "Books"`
 		startTime = time.Now()
-		docsResponse, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		docsResponse, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err == nil {
 			docs := extractDocuments(t, docsResponse)
 			fixture.Logger.Infof("✓ Seeded %d books: %v", count, getDocumentIDs(docs))
@@ -616,6 +629,9 @@ func seedBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 func seedPublishersBundle(t *testing.T, fixture *TestFixture, count int) {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	countries := []string{"USA", "UK", "Canada", "Germany"}
 
 	for i := 1; i <= count; i++ {
@@ -626,7 +642,7 @@ func seedPublishersBundle(t *testing.T, fixture *TestFixture, count int) {
 			i, name, country)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed publisher %d: %v", i, err)
 		}
@@ -635,7 +651,7 @@ func seedPublishersBundle(t *testing.T, fixture *TestFixture, count int) {
 	// Verify seed count via COUNT(*)
 	countCmd := `SELECT COUNT(*) FROM "Publishers"`
 	startTime := time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to verify publisher count: %v", err)
 	}
@@ -669,7 +685,7 @@ func seedPublishersBundle(t *testing.T, fixture *TestFixture, count int) {
 	if count <= 10 {
 		selectCmd := `SELECT ID, Name FROM "Publishers"`
 		startTime = time.Now()
-		docsResponse, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		docsResponse, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err == nil {
 			docs := extractDocuments(t, docsResponse)
 			fixture.Logger.Infof("✓ Seeded %d publishers: %v", count, getDocumentIDs(docs))
@@ -687,8 +703,11 @@ func seedPublishersBundle(t *testing.T, fixture *TestFixture, count int) {
 func executeRealQuery(t *testing.T, fixture *TestFixture, query string) interface{} {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	startTime := time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Query execution failed: %v\nQuery: %s", err, query)
 	}
@@ -1562,6 +1581,10 @@ func isOrdered(prev, curr interface{}, ascending bool) bool {
 // =============================================================================
 
 func BenchmarkSimpleSelect(b *testing.B) {
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Setup (outside timing)
 	fixture := setupRealServerForBenchmark(b)
 	resetDatabaseForBenchmark(b, fixture)
@@ -1572,7 +1595,7 @@ func BenchmarkSimpleSelect(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Query failed: %v", err)
 		}
@@ -1585,6 +1608,9 @@ func BenchmarkSimpleSelect(b *testing.B) {
 }
 
 func BenchmarkComplexWhere(b *testing.B) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Setup (outside timing)
 	fixture := setupRealServerForBenchmark(b)
 	resetDatabaseForBenchmark(b, fixture)
@@ -1595,7 +1621,7 @@ func BenchmarkComplexWhere(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Query failed: %v", err)
 		}
@@ -1608,6 +1634,9 @@ func BenchmarkComplexWhere(b *testing.B) {
 }
 
 func BenchmarkGroupByAggregates(b *testing.B) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Setup (outside timing)
 	fixture := setupRealServerForBenchmark(b)
 	resetDatabaseForBenchmark(b, fixture)
@@ -1618,7 +1647,7 @@ func BenchmarkGroupByAggregates(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Query failed: %v", err)
 		}
@@ -1717,10 +1746,13 @@ func setupRealServerForBenchmark(b *testing.B) *TestFixture {
 		b.Fatal("Failed to initialize service manager")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	dbName := fmt.Sprintf("testdb_%s", b.Name())
 	createDBCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
 	startTime := time.Now()
-	_, err = server.CommandDirector(nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create %s database: %v", dbName, err)
 	}
@@ -1742,10 +1774,13 @@ func setupRealServerForBenchmark(b *testing.B) *TestFixture {
 func resetDatabaseForBenchmark(b *testing.B, fixture *TestFixture) {
 	bundles := []string{"Authors", "Books", "Publishers"}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	for _, bundleName := range bundles {
 		dropCmd := fmt.Sprintf(`DROP BUNDLE "%s"`, bundleName)
 		startTime := time.Now()
-		_, _ = server.CommandDirector(fixture.Database, *fixture.ServiceManager, dropCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, _ = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, dropCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	}
 
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
@@ -1755,7 +1790,7 @@ func resetDatabaseForBenchmark(b *testing.B, fixture *TestFixture) {
 		{"BirthYear", "INT", false, false, NULL}
 	)`
 	startTime := time.Now()
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Authors bundle: %v", err)
 	}
@@ -1768,7 +1803,7 @@ func resetDatabaseForBenchmark(b *testing.B, fixture *TestFixture) {
 		{"Price", "FLOAT", false, false, null}
 	)`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Books bundle: %v", err)
 	}
@@ -1779,7 +1814,7 @@ func resetDatabaseForBenchmark(b *testing.B, fixture *TestFixture) {
 		{"Country", "STRING", false, false, null}
 	)`
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Publishers bundle: %v", err)
 	}
@@ -1787,6 +1822,9 @@ func resetDatabaseForBenchmark(b *testing.B, fixture *TestFixture) {
 
 func seedAuthorsBundleForBenchmark(b *testing.B, fixture *TestFixture, count int) {
 	countries := []string{"USA", "UK", "Canada", "France"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	for i := 1; i <= count; i++ {
 		name := fmt.Sprintf("Author_%03d", i)
@@ -1797,7 +1835,7 @@ func seedAuthorsBundleForBenchmark(b *testing.B, fixture *TestFixture, count int
 			i, name, country, birthYear)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Failed to seed author %d: %v", i, err)
 		}
@@ -1806,6 +1844,9 @@ func seedAuthorsBundleForBenchmark(b *testing.B, fixture *TestFixture, count int
 
 func seedBooksBundleForBenchmark(b *testing.B, fixture *TestFixture, count int) {
 	genres := []string{"Fiction", "NonFiction", "Mystery", "SciFi", "Fantasy"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	for i := 1; i <= count; i++ {
 		title := fmt.Sprintf("Book_%03d", i)
@@ -1817,7 +1858,7 @@ func seedBooksBundleForBenchmark(b *testing.B, fixture *TestFixture, count int) 
 			i, title, authorID, genre, price)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Failed to seed book %d: %v", i, err)
 		}

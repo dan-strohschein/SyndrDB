@@ -14,6 +14,7 @@ The resolvers provide:
 */
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -249,7 +250,7 @@ func (h *GraphQLHandler) resolveDocuments(field *ast.Field, variables map[string
 
 	// Execute the query using the command director
 	startTime := time.Now()
-	response, err := server.CommandDirector(h.database, h.serviceManager, query, h.logger, startTime, h.currentSession, h.currentClientIP)
+	response, err := server.CommandDirector(context.Background(), h.database, h.serviceManager, query, h.logger, startTime, h.currentSession, h.currentClientIP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute documents query: %w", err)
 	}
@@ -309,7 +310,7 @@ func (h *GraphQLHandler) resolveDocument(field *ast.Field, variables map[string]
 
 	// Execute the query using the command director
 	startTime := time.Now()
-	response, err := server.CommandDirector(h.database, h.serviceManager, query, h.logger, startTime, h.currentSession, h.currentClientIP)
+	response, err := server.CommandDirector(context.Background(), h.database, h.serviceManager, query, h.logger, startTime, h.currentSession, h.currentClientIP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute document query: %w", err)
 	}
@@ -356,7 +357,7 @@ func (h *GraphQLHandler) mutateCreateDatabase(field *ast.Field, variables map[st
 
 	// Execute the command using the command director
 	startTime := time.Now()
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
+	response, err := server.CommandDirector(context.Background(), h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
@@ -417,7 +418,7 @@ func (h *GraphQLHandler) mutateCreateBundle(field *ast.Field, variables map[stri
 
 	// Execute the command using the command director
 	startTime := time.Now()
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
+	response, err := server.CommandDirector(context.Background(), h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bundle: %w", err)
 	}
@@ -485,7 +486,7 @@ func (h *GraphQLHandler) mutateCreateDocument(field *ast.Field, variables map[st
 
 	// Execute the command using the command director
 	startTime := time.Now()
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
+	response, err := server.CommandDirector(context.Background(), h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create document: %w", err)
 	}
@@ -568,7 +569,7 @@ func (h *GraphQLHandler) mutateUpdateDocument(field *ast.Field, variables map[st
 
 	// Execute the command using the command director
 	startTime := time.Now()
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
+	response, err := server.CommandDirector(context.Background(), h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update document: %w", err)
 	}
@@ -631,7 +632,7 @@ func (h *GraphQLHandler) mutateDeleteDocument(field *ast.Field, variables map[st
 
 	// Execute the command using the command director
 	startTime := time.Now()
-	response, err := server.CommandDirector(h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
+	response, err := server.CommandDirector(context.Background(), h.database, h.serviceManager, command, h.logger, startTime, h.currentSession, h.currentClientIP)
 	if err != nil {
 		return nil, fmt.Errorf("failed to delete document: %w", err)
 	}

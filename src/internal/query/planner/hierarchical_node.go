@@ -48,6 +48,7 @@ This node is part of Phase 2 of the unified query system implementation.
 package planner
 
 import (
+	"context"
 	"fmt"
 	"syndrdb/src/internal/domain/models"
 	joinexecutor "syndrdb/src/internal/query/join_executor"
@@ -156,11 +157,11 @@ func NewHierarchicalTransformNode(
 // Returns:
 //   - map[string]*models.Document: Hierarchically structured documents (or flat results if not yet integrated with JOIN)
 //   - error: Any error during execution
-func (n *HierarchicalTransformNode) Execute() (map[string]*models.Document, error) {
+func (n *HierarchicalTransformNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.Logger.Infof("Executing HierarchicalTransformNode with relationship '%s'", n.RelationshipName)
 
 	// Execute child node to get documents
-	documents, err := n.Child.Execute()
+	documents, err := n.Child.Execute(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("HierarchicalTransformNode: child execution failed: %w", err)
 	}

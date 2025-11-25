@@ -34,9 +34,10 @@ type QueryMetric struct {
 	TokensAvailable float64
 
 	// Result metrics
-	Success      bool
-	ErrorCode    string
-	ErrorMessage string
+	Success         bool
+	TimeoutOccurred bool // Whether query timed out
+	ErrorCode       string
+	ErrorMessage    string
 
 	// Metadata
 	Timestamp time.Time
@@ -117,6 +118,16 @@ func (qm *QueryMonitor) RecordQuery(metric *QueryMetric) {
 			"duration", metric.Duration,
 			"complexity", metric.Complexity,
 			"operationType", metric.OperationType,
+		)
+	}
+
+	// Log timeout events
+	if metric.TimeoutOccurred {
+		qm.logger.Warnw("Query timeout occurred",
+			"queryID", metric.QueryID,
+			"username", metric.Username,
+			"duration", metric.Duration,
+			"query", metric.Query,
 		)
 	}
 
@@ -277,9 +288,10 @@ func (qm *QueryMonitor) GetStats() map[string]interface{} {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	// Count success/failure rates
+	// Count success/failure/timeout rates
 	successCount := 0
 	failureCount := 0
+	timeoutCount := 0
 	totalDuration := time.Duration(0)
 
 	for _, metric := range qm.metrics {
@@ -287,6 +299,9 @@ func (qm *QueryMonitor) GetStats() map[string]interface{} {
 			successCount++
 		} else {
 			failureCount++
+		}
+		if metric.TimeoutOccurred {
+			timeoutCount++
 		}
 		totalDuration += metric.Duration
 	}
@@ -305,7 +320,9 @@ func (qm *QueryMonitor) GetStats() map[string]interface{} {
 		"memoryLimitMB":        qm.config.MaxMemoryMB,
 		"successCount":         successCount,
 		"failureCount":         failureCount,
+		"timeoutCount":         timeoutCount,
 		"successRate":          float64(successCount) / float64(len(qm.metrics)),
+		"timeoutRate":          float64(timeoutCount) / float64(len(qm.metrics)),
 		"avgDuration":          avgDuration.String(),
 	}
 }

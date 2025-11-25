@@ -298,6 +298,11 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 	sm.sessions[sessionID] = session
 	sm.connectionSessions[connectionID] = session
 
+	// METRICS: Track session creation
+	metrics := GetGlobalServerMetrics()
+	metrics.SessionsCreated.Add(1)
+	metrics.SessionsActive.Add(1)
+
 	// Add to user sessions
 	if sm.userSessions[username] == nil {
 		sm.userSessions[username] = make([]*Session, 0, 5)
@@ -364,6 +369,11 @@ func (sm *SessionManager) InvalidateSession(sessionID string) error {
 	if !exists {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
+
+	// METRICS: Track session termination
+	metrics := GetGlobalServerMetrics()
+	metrics.SessionsTerminated.Add(1)
+	metrics.SessionsActive.Add(^uint64(0)) // Atomic decrement
 
 	return sm.cleanupSession(session)
 }

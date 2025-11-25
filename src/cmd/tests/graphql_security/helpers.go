@@ -1,6 +1,7 @@
 package graphql_security
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -180,6 +181,9 @@ func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *Te
 		sugar.Warnf("Warning: Failed to hydrate roles catalog: %v", err)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Initialize service manager
 	serviceManager := server.InitServiceManager(databaseService, bundleService, catalogService, nil, nil, sugar, false)
 	if serviceManager == nil {
@@ -190,7 +194,7 @@ func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *Te
 	dbName := "graphql_security_testdb_" + strings.ReplaceAll(t.Name(), "/", "_")
 	createDBCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
 	startTime := time.Now()
-	_, err = server.CommandDirector(nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
@@ -198,7 +202,7 @@ func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *Te
 	// Switch to the test database
 	useDBCmd := fmt.Sprintf(`USE "%s"`, dbName)
 	startTime = time.Now()
-	_, err = server.CommandDirector(nil, *serviceManager, useDBCmd, sugar, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *serviceManager, useDBCmd, sugar, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to switch to test database: %v", err)
 	}
@@ -417,6 +421,9 @@ func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConf
 		sugar.Warnf("Warning: Failed to hydrate roles catalog: %v", err)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Initialize service manager
 	serviceManager := server.InitServiceManager(databaseService, bundleService, catalogService, nil, nil, sugar, false)
 	if serviceManager == nil {
@@ -427,7 +434,7 @@ func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConf
 	dbName := "graphql_security_testdb_" + strings.ReplaceAll(t.Name(), "/", "_")
 	createDBCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
 	startTime := time.Now()
-	_, err = server.CommandDirector(nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create test database: %v", err)
 	}
@@ -435,7 +442,7 @@ func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConf
 	// Switch to the test database
 	useDBCmd := fmt.Sprintf(`USE "%s"`, dbName)
 	startTime = time.Now()
-	_, err = server.CommandDirector(nil, *serviceManager, useDBCmd, sugar, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *serviceManager, useDBCmd, sugar, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to switch to test database: %v", err)
 	}

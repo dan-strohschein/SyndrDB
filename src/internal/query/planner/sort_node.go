@@ -34,6 +34,7 @@ This node is part of Phase 2 of the unified query system implementation.
 package planner
 
 import (
+	"context"
 	"fmt"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/planner/sorting"
@@ -152,11 +153,11 @@ func NewSortNode(child ExecutionNode, orderBy *queryparser.OrderByClause, logger
 // Returns:
 //   - map[string]*models.Document: Sorted documents
 //   - error: Any error during execution
-func (n *SortNode) Execute() (map[string]*models.Document, error) {
+func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.Logger.Infof("Executing SortNode with %d ORDER BY fields", len(n.OrderBy.Fields))
 
 	// Execute child node to get input documents
-	documents, err := n.Child.Execute()
+	documents, err := n.Child.Execute(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
 	}
@@ -173,6 +174,26 @@ func (n *SortNode) Execute() (map[string]*models.Document, error) {
 	if n.OrderBy == nil || len(n.OrderBy.Fields) == 0 {
 		n.Logger.Debug("SortNode: no ORDER BY fields specified, returning unsorted documents")
 		return documents, nil
+	}
+
+	// Memory tracking: Sample documents before sorting (sorting can be memory-intensive)
+	// We sample here to catch large result sets before allocating sort buffers
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+	if memoryTracker != nil {
+		docCount := 0
+		for _, doc := range documents {
+			docCount++
+
+			// Sample every 100th document
+			if docCount%100 == 0 {
+				docSize := models.EstimateDocumentSize(doc)
+				memoryTracker.Sample(docSize, docCount)
+
+				if memoryTracker.WillExceedLimit(len(documents)) {
+					return nil, ErrMemoryLimitExceeded
+				}
+			}
+		}
 	}
 
 	// Execute the sort
@@ -201,16 +222,17 @@ func (n *SortNode) Execute() (map[string]*models.Document, error) {
 // This is called by LimitNode to enable the Top-N optimization
 //
 // Parameters:
+//   - ctx: Context for cancellation support
 //   - limit: The LIMIT value from downstream LimitNode
 //
 // Returns:
 //   - []*models.Document: Top N documents in sorted order
 //   - error: Any error during execution
-func (n *SortNode) ExecuteWithLimit(limit int) ([]*models.Document, error) {
+func (n *SortNode) ExecuteWithLimit(ctx context.Context, limit int) ([]*models.Document, error) {
 	n.Logger.Infof("Executing SortNode with LIMIT %d optimization", limit)
 
 	// Execute child node to get input documents
-	documents, err := n.Child.Execute()
+	documents, err := n.Child.Execute(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
 	}

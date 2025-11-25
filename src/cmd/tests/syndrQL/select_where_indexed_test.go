@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -24,6 +25,9 @@ func Benchmark_WhereBloom_Enabled_HashIndexed(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
@@ -32,20 +36,20 @@ func Benchmark_WhereBloom_Enabled_HashIndexed(b *testing.B) {
 		{"Age", "INT", true, false, 0},
 		{"Status", "STRING", true, false, ""}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create bundle: %v", err)
 	}
 
 	// Create Hash indexes on Country and Status
 	countryIndexCmd := `CREATE H-INDEX "idx_country" ON BUNDLE "Users" WITH FIELDS ({"Country", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, countryIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, countryIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Country index: %v", err)
 	}
 
 	statusIndexCmd := `CREATE H-INDEX "idx_status" ON BUNDLE "Users" WITH FIELDS ({"Status", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, statusIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, statusIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Status index: %v", err)
 	}
@@ -61,7 +65,7 @@ func Benchmark_WhereBloom_Enabled_HashIndexed(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Users" WITH ({"ID"=%d}, {"Name"="User%d"}, {"Country"="%s"}, {"Age"=%d}, {"Status"="%s"});`,
 			i, i, country, age, status,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	// Wait for indexes to fully build (200ms should be sufficient for 2500 docs)
@@ -72,7 +76,7 @@ func Benchmark_WhereBloom_Enabled_HashIndexed(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 }
 
@@ -84,6 +88,9 @@ func Benchmark_WhereBloom_Disabled_BTreeIndexed(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
@@ -92,14 +99,14 @@ func Benchmark_WhereBloom_Disabled_BTreeIndexed(b *testing.B) {
 		{"Age", "INT", true, false, 0},
 		{"Status", "STRING", true, false, ""}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create bundle: %v", err)
 	}
 
 	// Create B-Tree index on Age
 	ageIndexCmd := `CREATE B-INDEX "idx_age" ON BUNDLE "Users" WITH FIELDS ({"Age", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, ageIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, ageIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Age index: %v", err)
 	}
@@ -115,7 +122,7 @@ func Benchmark_WhereBloom_Disabled_BTreeIndexed(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Users" WITH ({"ID"=%d}, {"Name"="User%d"}, {"Country"="%s"}, {"Age"=%d}, {"Status"="%s"});`,
 			i, i, country, age, status,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	// Wait for indexes to fully build
@@ -126,7 +133,7 @@ func Benchmark_WhereBloom_Disabled_BTreeIndexed(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 	b.StopTimer()
 	settings.GetSettings().WhereBloomEnabled = true
@@ -140,6 +147,9 @@ func Benchmark_RangedWhere_FullyIndexed(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle with Price field
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
@@ -149,32 +159,32 @@ func Benchmark_RangedWhere_FullyIndexed(b *testing.B) {
 		{"Status", "STRING", true, false, ""},
 		{"Price", "INT", true, false, 0}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create bundle: %v", err)
 	}
 
 	// Create ALL indexes
 	countryIndexCmd := `CREATE H-INDEX "idx_country" ON BUNDLE "Users" WITH FIELDS ({"Country", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, countryIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, countryIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Country index: %v", err)
 	}
 
 	statusIndexCmd := `CREATE H-INDEX "idx_status" ON BUNDLE "Users" WITH FIELDS ({"Status", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, statusIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, statusIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Status index: %v", err)
 	}
 
 	ageIndexCmd := `CREATE B-INDEX "idx_age" ON BUNDLE "Users" WITH FIELDS ({"Age", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, ageIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, ageIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Age index: %v", err)
 	}
 
 	priceIndexCmd := `CREATE B-INDEX "idx_price" ON BUNDLE "Users" WITH FIELDS ({"Price", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, priceIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, priceIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Price index: %v", err)
 	}
@@ -191,7 +201,7 @@ func Benchmark_RangedWhere_FullyIndexed(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Users" WITH ({"ID"=%d}, {"Name"="User%d"}, {"Country"="%s"}, {"Age"=%d}, {"Status"="%s"}, {"Price"=%d});`,
 			i, i, country, age, status, price,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	// Wait for ALL indexes to fully build (extra time for 4 indexes)
@@ -201,6 +211,6 @@ func Benchmark_RangedWhere_FullyIndexed(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 }

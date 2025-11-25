@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"context"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
@@ -20,7 +21,7 @@ type BundleServiceInterface interface {
 
 // ExecutionNode represents a node in the execution plan tree
 type ExecutionNode interface {
-	Execute() (map[string]*models.Document, error)
+	Execute(ctx context.Context) (map[string]*models.Document, error)
 	GetCost() float64
 	GetEstimatedRows() int
 }

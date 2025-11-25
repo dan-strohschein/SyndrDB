@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,10 +34,13 @@ Test Coverage:
 func TestRenameDatabaseCommand_Success_NoActiveSessions(t *testing.T) {
 	fixture := setupFullServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create a test database to rename
 	dbName := "original_db"
 	createCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
-	_, err := server.CommandDirector(nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -50,7 +54,7 @@ func TestRenameDatabaseCommand_Success_NoActiveSessions(t *testing.T) {
 	// Execute RENAME DATABASE command
 	newName := "renamed_db"
 	renameCmd := fmt.Sprintf(`RENAME DATABASE "%s" TO "%s";`, dbName, newName)
-	result, err := server.CommandDirector(nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	result, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("RENAME DATABASE failed: %v", err)
 	}
@@ -97,10 +101,13 @@ func TestRenameDatabaseCommand_Success_NoActiveSessions(t *testing.T) {
 func TestRenameDatabaseCommand_PermissionDenied_NonAdminUser(t *testing.T) {
 	fixture := setupFullServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create a test database
 	dbName := "perm_test_db"
 	createCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
-	_, err := server.CommandDirector(nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -115,7 +122,7 @@ func TestRenameDatabaseCommand_PermissionDenied_NonAdminUser(t *testing.T) {
 	renameCmd := fmt.Sprintf(`RENAME DATABASE "%s" TO "%s";`, dbName, newName)
 
 	// Without session, this should succeed (admin context)
-	result, err := server.CommandDirector(nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	result, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 
 	if err != nil {
 		t.Errorf("Expected success for nil session (admin context), got error: %v", err)
@@ -133,10 +140,13 @@ func TestRenameDatabaseCommand_PermissionDenied_NonAdminUser(t *testing.T) {
 func TestRenameDatabaseCommand_ActiveSessionsBlock_WithoutForce(t *testing.T) {
 	fixture := setupFullServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create and USE a database
 	dbName := "session_test_db"
 	createCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
-	_, err := server.CommandDirector(nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -156,7 +166,7 @@ func TestRenameDatabaseCommand_ActiveSessionsBlock_WithoutForce(t *testing.T) {
 	// Attempt RENAME without FORCE - should fail
 	newName := "should_fail_rename"
 	renameCmd := fmt.Sprintf(`RENAME DATABASE "%s" TO "%s";`, dbName, newName)
-	result, err := server.CommandDirector(nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	result, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 
 	// Should fail due to active session
 	if err == nil {
@@ -181,10 +191,13 @@ func TestRenameDatabaseCommand_ActiveSessionsBlock_WithoutForce(t *testing.T) {
 func TestRenameDatabaseCommand_ForceTerminatesSessions(t *testing.T) {
 	fixture := setupFullServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create a database
 	dbName := "force_test_db"
 	createCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
-	_, err := server.CommandDirector(nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -207,7 +220,7 @@ func TestRenameDatabaseCommand_ForceTerminatesSessions(t *testing.T) {
 	// Execute RENAME with FORCE
 	newName := "force_renamed_db"
 	renameCmd := fmt.Sprintf(`RENAME DATABASE "%s" TO "%s" FORCE;`, dbName, newName)
-	result, err := server.CommandDirector(nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	result, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("RENAME DATABASE with FORCE failed: %v", err)
 	}
@@ -252,18 +265,21 @@ func TestRenameDatabaseCommand_ForceTerminatesSessions(t *testing.T) {
 func TestRenameDatabaseCommand_SessionNamesAutoUpdate(t *testing.T) {
 	fixture := setupFullServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create two databases
 	db1Name := "db_one"
 	db2Name := "db_two"
 
 	createCmd1 := fmt.Sprintf(`CREATE DATABASE "%s"`, db1Name)
-	_, err := server.CommandDirector(nil, *fixture.ServiceManager, createCmd1, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, createCmd1, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create database 1: %v", err)
 	}
 
 	createCmd2 := fmt.Sprintf(`CREATE DATABASE "%s"`, db2Name)
-	_, err = server.CommandDirector(nil, *fixture.ServiceManager, createCmd2, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *fixture.ServiceManager, createCmd2, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create database 2: %v", err)
 	}
@@ -301,7 +317,7 @@ func TestRenameDatabaseCommand_SessionNamesAutoUpdate(t *testing.T) {
 	// So we need to use FORCE, but verify sessions on OTHER databases are NOT terminated
 	newName := "db_one_renamed"
 	renameCmd := fmt.Sprintf(`RENAME DATABASE "%s" TO "%s" FORCE;`, db1Name, newName)
-	result, err := server.CommandDirector(nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	result, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("RENAME DATABASE failed: %v", err)
 	}
@@ -336,10 +352,13 @@ func TestRenameDatabaseCommand_SessionNamesAutoUpdate(t *testing.T) {
 func TestRenameDatabaseCommand_CatalogConsistency(t *testing.T) {
 	fixture := setupFullServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create a database
 	dbName := "catalog_test_db"
 	createCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
-	_, err := server.CommandDirector(nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create database: %v", err)
 	}
@@ -354,7 +373,7 @@ func TestRenameDatabaseCommand_CatalogConsistency(t *testing.T) {
 	// Rename the database
 	newName := "catalog_renamed_db"
 	renameCmd := fmt.Sprintf(`RENAME DATABASE "%s" TO "%s";`, dbName, newName)
-	_, err = server.CommandDirector(nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, nil, *fixture.ServiceManager, renameCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("RENAME DATABASE failed: %v", err)
 	}
@@ -362,7 +381,7 @@ func TestRenameDatabaseCommand_CatalogConsistency(t *testing.T) {
 	// Verify catalog was updated by querying primary.Databases bundle
 	// Use SELECT to query the catalog
 	selectCmd := fmt.Sprintf(`USE "primary"; SELECT * FROM Databases WHERE DatabaseID = "%s";`, dbID)
-	result, err := server.CommandDirector(nil, *fixture.ServiceManager, selectCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	result, err := server.CommandDirector(ctx, nil, *fixture.ServiceManager, selectCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to query Databases catalog: %v", err)
 	}

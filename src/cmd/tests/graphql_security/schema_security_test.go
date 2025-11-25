@@ -1,6 +1,7 @@
 package graphql_security
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -12,6 +13,9 @@ import (
 
 // TestWithSimpleSchema tests GraphQL security with an actual schema
 func TestWithSimpleSchema(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Phase 1: Setup environment WITHOUT GraphQL handler
 	partialEnv := setupPartialTestEnvironment(t, true)
 	defer partialEnv.cleanup()
@@ -25,7 +29,7 @@ func TestWithSimpleSchema(t *testing.T) {
 	);`
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(partialEnv.database, *partialEnv.serviceManager, createBundleCmd, partialEnv.logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, partialEnv.database, *partialEnv.serviceManager, createBundleCmd, partialEnv.logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create TestUsers bundle: %v", err)
 	}
@@ -43,7 +47,7 @@ func TestWithSimpleSchema(t *testing.T) {
 			i, i, i, 20+i)
 
 		startTime = time.Now()
-		_, err = server.CommandDirector(partialEnv.database, *partialEnv.serviceManager, addDocCmd, partialEnv.logger, startTime, nil, "127.0.0.1")
+		_, err = server.CommandDirector(ctx, partialEnv.database, *partialEnv.serviceManager, addDocCmd, partialEnv.logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to add document %d: %v", i, err)
 		}
@@ -129,6 +133,9 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 	env := setupTestEnvironment(t, true)
 	defer env.cleanup()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create two related bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
 		{"Name"="AuthorID", "Type"="INT", "PrimaryKey"=true},
@@ -137,7 +144,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 	)`
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(env.database, *env.serviceManager, createAuthorsCmd, env.logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createAuthorsCmd, env.logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Authors bundle: %v", err)
 	}
@@ -150,7 +157,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 	)`
 
 	startTime = time.Now()
-	_, err = server.CommandDirector(env.database, *env.serviceManager, createBooksCmd, env.logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, createBooksCmd, env.logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Books bundle: %v", err)
 	}
@@ -158,7 +165,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 	// Add relationship
 	addRelCmd := `ADD RELATIONSHIP FROM "Authors"."AuthorID" TO "Books"."AuthorID" AS "Books" TYPE "1toMany"`
 	startTime = time.Now()
-	_, err = server.CommandDirector(env.database, *env.serviceManager, addRelCmd, env.logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, addRelCmd, env.logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Logf("Note: Failed to add relationship (may not be critical): %v", err)
 	}
@@ -167,7 +174,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		addAuthorCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Authors" WITH ({"AuthorID"=%d}, {"Name"="Author%d"}, {"Country"="USA"})`, i, i)
 		startTime = time.Now()
-		_, err = server.CommandDirector(env.database, *env.serviceManager, addAuthorCmd, env.logger, startTime, nil, "127.0.0.1")
+		_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, addAuthorCmd, env.logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to add author %d: %v", i, err)
 		}
@@ -178,7 +185,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 			addBookCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"BookID"=%d}, {"Title"="Book%d"}, {"AuthorID"=%d}, {"Genre"="Fiction"})`,
 				bookID, bookID, i)
 			startTime = time.Now()
-			_, err = server.CommandDirector(env.database, *env.serviceManager, addBookCmd, env.logger, startTime, nil, "127.0.0.1")
+			_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, addBookCmd, env.logger, startTime, nil, "127.0.0.1")
 			if err != nil {
 				t.Fatalf("Failed to add book %d: %v", bookID, err)
 			}
@@ -227,6 +234,9 @@ func TestSecurityLayersWithMutation(t *testing.T) {
 	env := setupTestEnvironment(t, true)
 	defer env.cleanup()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle first
 	createBundleCmd := `CREATE BUNDLE "Products" WITH FIELDS (
 		{"Name"="ProductID", "Type"="INT", "PrimaryKey"=true},
@@ -235,7 +245,7 @@ func TestSecurityLayersWithMutation(t *testing.T) {
 	)`
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Products bundle: %v", err)
 	}
@@ -275,6 +285,9 @@ func TestTimeoutEnforcement(t *testing.T) {
 	env := setupTestEnvironment(t, true)
 	defer env.cleanup()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create a bundle
 	createBundleCmd := `CREATE BUNDLE "LargeData" WITH FIELDS (
 		{"Name"="ID", "Type"="INT", "PrimaryKey"=true},
@@ -282,7 +295,7 @@ func TestTimeoutEnforcement(t *testing.T) {
 	)`
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create LargeData bundle: %v", err)
 	}
@@ -291,7 +304,7 @@ func TestTimeoutEnforcement(t *testing.T) {
 	for i := 1; i <= 10; i++ {
 		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "LargeData" WITH ({"ID"=%d}, {"Data"="Row%d"})`, i, i)
 		startTime = time.Now()
-		_, err = server.CommandDirector(env.database, *env.serviceManager, addDocCmd, env.logger, startTime, nil, "127.0.0.1")
+		_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, addDocCmd, env.logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to add document %d: %v", i, err)
 		}
@@ -319,6 +332,9 @@ func TestMonitoringMetrics(t *testing.T) {
 	env := setupTestEnvironment(t, true)
 	defer env.cleanup()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create a simple bundle
 	createBundleCmd := `CREATE BUNDLE "Metrics" WITH FIELDS (
 		{"Name"="ID", "Type"="INT", "PrimaryKey"=true},
@@ -326,7 +342,7 @@ func TestMonitoringMetrics(t *testing.T) {
 	)`
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create Metrics bundle: %v", err)
 	}

@@ -62,6 +62,8 @@ func main() {
 	flag.StringVar(&args.LogLevel, "loglevel", "info", "Log level: debug, info, warn, error")
 	flag.StringVar(&args.BundleStorageFormat, "bundle-format", "binary", "Bundle storage format (only 'binary' is supported)")
 
+	flag.BoolVar(&args.ExportRealtimeMetrics, "export-RT-metrics", true, "Export Real Time Metrics for Monitoring")
+
 	// PHASE 2 ASYNC WAL FLAGS
 	flag.StringVar(&args.WALMode, "wal-mode", "sync", "WAL mode: sync or async")
 	flag.IntVar(&args.AsyncWALWorkers, "async-wal-workers", 2, "Number of async WAL worker threads")
@@ -126,6 +128,14 @@ func main() {
 	flag.BoolVar(&args.EnableQueryTimeout, "enable-query-timeout", true, "Enable GraphQL query execution timeout (Layer 4)")
 	flag.BoolVar(&args.EnableQueryMonitoring, "enable-query-monitoring", true, "Enable GraphQL query metrics monitoring (Layer 5)")
 	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", "token-bucket", "GraphQL rate limiting algorithm: token-bucket or time-bucket")
+
+	// SyndrQL Query Timeout Flags
+	flag.IntVar(&args.QueryTimeoutSeconds, "query-timeout", 300, "Default query execution timeout in seconds (1-3600)")
+	flag.IntVar(&args.AdminQueryTimeoutSeconds, "admin-query-timeout", 600, "Admin query execution timeout in seconds (60-3600)")
+
+	// Per-Query Memory Limit Flags (DoS Protection)
+	flag.IntVar(&args.QueryMaxMemoryMB, "query-max-memory", 25, "Maximum memory per query in MB (any positive integer)")
+	flag.IntVar(&args.AdminQueryMaxMemoryMB, "admin-query-max-memory", 25, "Maximum memory per admin query in MB (any positive integer)")
 
 	// STEP 1: Do an initial parse to check for --config flag
 	flag.Parse()
@@ -258,7 +268,7 @@ func main() {
 		log.Printf("  Session Timeout: %d minutes\n", args.SessionTimeoutMinutes)
 		log.Printf("  Max Sessions: %d\n", args.MaxSessions)
 		log.Printf("  GraphQL Enabled: %v\n", args.EnableGraphQL)
-
+		log.Printf("  Export Real-Time Metrics: %v\n", args.ExportRealtimeMetrics)
 	}
 
 	// Set up logging
@@ -450,6 +460,14 @@ func validateArguments(args *settings.Arguments) error {
 	validModes := map[string]bool{"standalone": true, "cluster": true}
 	if _, valid := validModes[args.Mode]; !valid {
 		return fmt.Errorf("invalid mode: %s (must be 'standalone' or 'cluster')", args.Mode)
+	}
+
+	// Validate query timeout configuration
+	if args.QueryTimeoutSeconds < 1 || args.QueryTimeoutSeconds > 3600 {
+		return fmt.Errorf("invalid query timeout: %d seconds (must be between 1 and 3600)", args.QueryTimeoutSeconds)
+	}
+	if args.AdminQueryTimeoutSeconds < 60 || args.AdminQueryTimeoutSeconds > 3600 {
+		return fmt.Errorf("invalid admin query timeout: %d seconds (must be between 60 and 3600)", args.AdminQueryTimeoutSeconds)
 	}
 
 	return nil

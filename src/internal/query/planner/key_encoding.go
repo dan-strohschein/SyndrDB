@@ -95,9 +95,10 @@ func (e *KeyEncoder) EncodeKey(value interface{}) ([]byte, error) {
 //  3. This ensures: -100 < -10 < 0 < 10 < 100 in byte order
 //
 // Example:
-//   -100 → offset → 9223372036854775708 → [0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x9C]
-//   0    → offset → 9223372036854775808 → [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-//   100  → offset → 9223372036854775908 → [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]
+//
+//	-100 → offset → 9223372036854775708 → [0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x9C]
+//	0    → offset → 9223372036854775808 → [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+//	100  → offset → 9223372036854775908 → [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]
 func (e *KeyEncoder) encodeInt64(value int64) []byte {
 	// Offset by MaxInt64 to make all values positive
 	// This maps the range [-MaxInt64, MaxInt64] to [0, 2*MaxInt64]
@@ -134,9 +135,10 @@ func (e *KeyEncoder) encodeUint64(value uint64) []byte {
 //   - Mantissa (52 bits): fractional part
 //
 // Example:
-//   -100.5 → bits: 0xC059200000000000 → flip all → 0x3FA6DFFFFFFFFFFF
-//   0.0    → bits: 0x0000000000000000 → flip sign → 0x8000000000000000
-//   100.5  → bits: 0x4059200000000000 → flip sign → 0xC059200000000000
+//
+//	-100.5 → bits: 0xC059200000000000 → flip all → 0x3FA6DFFFFFFFFFFF
+//	0.0    → bits: 0x0000000000000000 → flip sign → 0x8000000000000000
+//	100.5  → bits: 0x4059200000000000 → flip sign → 0xC059200000000000
 func (e *KeyEncoder) encodeFloat64(value float64) []byte {
 	// Get IEEE 754 bit representation
 	bits := math.Float64bits(value)

@@ -40,6 +40,7 @@ This node is part of Phase 2 of the unified query system implementation.
 package planner
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"syndrdb/src/internal/domain/models"
@@ -147,11 +148,11 @@ func NewLimitNode(child ExecutionNode, limit, offset int, logger *zap.SugaredLog
 // Returns:
 //   - map[string]*models.Document: Limited documents
 //   - error: Any error during execution
-func (n *LimitNode) Execute() (map[string]*models.Document, error) {
+func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.Logger.Infof("Executing LimitNode: Limit=%d, Offset=%d", n.Limit, n.Offset)
 
 	// Execute child node to get input documents
-	documents, err := n.Child.Execute()
+	documents, err := n.Child.Execute(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("LimitNode: child execution failed: %w", err)
 	}
@@ -182,7 +183,7 @@ func (n *LimitNode) Execute() (map[string]*models.Document, error) {
 
 		// Call ExecuteWithLimit to enable Top-N heapsort
 		var err error
-		docSlice, err = sortNode.ExecuteWithLimit(effectiveLimit)
+		docSlice, err = sortNode.ExecuteWithLimit(ctx, effectiveLimit)
 		if err != nil {
 			return nil, fmt.Errorf("LimitNode: SortNode.ExecuteWithLimit failed: %w", err)
 		}

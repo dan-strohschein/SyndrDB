@@ -8,6 +8,11 @@ type CommandResponse struct {
 	ResultCount     int
 	Result          interface{}
 	ExecutionTimeMS float64
+
+	// Timeout information
+	Error           *string `json:"error,omitempty"`            // Error message (e.g., timeout)
+	TimeoutOccurred bool    `json:"timeout_occurred,omitempty"` // Whether query timed out
+
 	// PooledMaps holds document maps that need to be returned to pool after JSON marshaling
 	// Stored directly to avoid closure allocation
 	PooledMaps []map[string]interface{} `json:"-"`

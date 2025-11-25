@@ -39,6 +39,10 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 
 	// Execute with WAL logging if available
 	if serviceManager.WALManager != nil {
+		// METRICS: Track transaction begin
+		globalMetrics := GetGlobalServerMetrics()
+		globalMetrics.TransactionsBegun.Add(1)
+
 		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
 			// Log the document update before execution
 			// Note: We'll log the fields being updated, actual before/after data is captured by bundle service
@@ -50,6 +54,13 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			// Update the document in the bundle
 			return serviceManager.BundleService.UpdateDocumentInBundle(bundle, docCommand)
 		})
+
+		// METRICS: Track transaction outcome
+		if err != nil {
+			globalMetrics.TransactionsRolledBack.Add(1)
+		} else {
+			globalMetrics.TransactionsCommitted.Add(1)
+		}
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
@@ -59,6 +70,14 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	if err != nil {
 		return nil, fmt.Errorf("error updating document in bundle '%s': %v", bundleName, err)
 	}
+
+	// METRICS: Track document update
+	globalMetrics := GetGlobalServerMetrics()
+	globalMetrics.DocumentUpdatesTotal.Add(1)
+	dbMetrics := GetDatabaseMetrics(database.Name)
+	dbMetrics.DBDocumentUpdatesTotal.Add(1)
+	bundleMetrics := GetBundleMetrics(database.Name, bundleName)
+	bundleMetrics.BundleDocumentsUpdated.Add(1)
 
 	// STEP 2: Invalidate query plan cache after data mutation
 	if serviceManager.UnifiedPlanner != nil {
@@ -98,6 +117,10 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	docID := ""
 	// Execute with WAL logging if available
 	if serviceManager.WALManager != nil {
+		// METRICS: Track transaction begin
+		globalMetrics := GetGlobalServerMetrics()
+		globalMetrics.TransactionsBegun.Add(1)
+
 		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
 			// Log the document insertion before execution
 			// Note: Document ID will be generated during bundle service execution
@@ -110,6 +133,13 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 			docID, err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
 			return err
 		})
+
+		// METRICS: Track transaction outcome
+		if err != nil {
+			globalMetrics.TransactionsRolledBack.Add(1)
+		} else {
+			globalMetrics.TransactionsCommitted.Add(1)
+		}
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
@@ -119,6 +149,15 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	if err != nil {
 		return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
 	}
+
+	// METRICS: Track document insert
+	globalMetrics := GetGlobalServerMetrics()
+	globalMetrics.DocumentInsertsTotal.Add(1)
+	dbMetrics := GetDatabaseMetrics(database.Name)
+	dbMetrics.DBDocumentInsertsTotal.Add(1)
+	bundleMetrics := GetBundleMetrics(database.Name, bundleName)
+	bundleMetrics.BundleDocumentsInserted.Add(1)
+	bundleMetrics.BundleCurrentDocCount.Add(1)
 
 	// STEP 2: Invalidate query plan cache after data mutation
 	if serviceManager.UnifiedPlanner != nil {

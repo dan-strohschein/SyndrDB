@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/common/helpers"
 	"testing"
@@ -13,6 +14,9 @@ func BenchmarkSelect_AllFields_Small(b *testing.B) {
 	fixture := setupRealServerTB(b)
 	seedSimpleAuthorsBundleTB(b, fixture, 100)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	query := `SELECT * FROM "Authors"`
 
 	// Reset timer to exclude setup time from measurements
@@ -22,6 +26,7 @@ func BenchmarkSelect_AllFields_Small(b *testing.B) {
 	// The actual benchmark loop - only the query execution is timed
 	for i := 0; i < b.N; i++ {
 		result, err := server.CommandDirector(
+			ctx,
 			fixture.Database,
 			*fixture.ServiceManager,
 			query,
@@ -48,6 +53,9 @@ func BenchmarkSelect_DocumentPooling(b *testing.B) {
 	fixture := setupRealServerTB(b)
 	seedSimpleAuthorsBundleTB(b, fixture, 100)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	query := `SELECT * FROM "Authors"`
 
 	// Reset timer to exclude setup time from measurements
@@ -57,6 +65,7 @@ func BenchmarkSelect_DocumentPooling(b *testing.B) {
 	// The actual benchmark loop - only the query execution is timed
 	for i := 0; i < b.N; i++ {
 		result, err := server.CommandDirector(
+			ctx,
 			fixture.Database,
 			*fixture.ServiceManager,
 			query,
@@ -87,6 +96,9 @@ func BenchmarkSelect_PlanCaching(b *testing.B) {
 	fixture := setupRealServerTB(b)
 	seedSimpleAuthorsBundleTB(b, fixture, 100)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	query := `SELECT Name, Country FROM "Authors" WHERE ID > 10 ORDER BY Name LIMIT 50`
 
 	// Reset timer to exclude setup time from measurements
@@ -98,6 +110,7 @@ func BenchmarkSelect_PlanCaching(b *testing.B) {
 	// Subsequent iterations: Cache HIT (plan reused from cache)
 	for i := 0; i < b.N; i++ {
 		result, err := server.CommandDirector(
+			ctx,
 			fixture.Database,
 			*fixture.ServiceManager,
 			query,
@@ -126,6 +139,9 @@ func BenchmarkSelect_PlanCaching_NoCacheControl(b *testing.B) {
 	fixture := setupRealServerTB(b)
 	seedSimpleAuthorsBundleTB(b, fixture, 100)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	query := `SELECT Name, Country FROM "Authors" WHERE ID > 10 ORDER BY Name LIMIT 50`
 
 	// Reset timer to exclude setup time from measurements
@@ -141,6 +157,7 @@ func BenchmarkSelect_PlanCaching_NoCacheControl(b *testing.B) {
 		}
 
 		result, err := server.CommandDirector(
+			ctx,
 			fixture.Database,
 			*fixture.ServiceManager,
 			query,
@@ -171,6 +188,9 @@ func BenchmarkSelect_Join_HashJoin(b *testing.B) {
 	// Setup once outside the measured loop
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Seed Authors (100 records)
 	seedSimpleAuthorsBundleTB(b, fixture, 100)
 
@@ -188,6 +208,7 @@ func BenchmarkSelect_Join_HashJoin(b *testing.B) {
 	// The actual benchmark loop
 	for i := 0; i < b.N; i++ {
 		result, err := server.CommandDirector(
+			ctx,
 			fixture.Database,
 			*fixture.ServiceManager,
 			query,

@@ -24,6 +24,7 @@ setup, teardown, and comprehensive validation of results.
 package homegrown
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -386,7 +387,7 @@ func TestJoinPerformance(logger *zap.SugaredLogger) error {
 	logger.Infof("✓ Estimated rows: %d", plan.EstimatedRows)
 
 	// Execute the plan
-	documents, err := plan.RootNode.Execute()
+	documents, err := plan.RootNode.Execute(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to execute performance test: %w", err)
 	}

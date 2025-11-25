@@ -31,6 +31,8 @@ type Arguments struct {
 	Host string `yaml:"host"` // the host name or IP address to listen on
 	Port int    `yaml:"port"` // the port number to listen on
 
+	ExportRealtimeMetrics bool `yaml:"export_realtime_metrics"` // Export real-time metrics for monitoring
+
 	// Journal Configuration
 	MaxJournalFileSize int64 `yaml:"max_journal_file_size"`
 
@@ -136,6 +138,15 @@ type Arguments struct {
 	EnableQueryTimeout     bool   `yaml:"enable_query_timeout"`      // Enable query execution timeout (Layer 4, default: true)
 	EnableQueryMonitoring  bool   `yaml:"enable_query_monitoring"`   // Enable query metrics monitoring (Layer 5, default: true)
 	GraphQLRateAlgorithm   string `yaml:"graphql_rate_algorithm"`    // Rate limiting algorithm: "token-bucket" or "time-bucket" (default: "token-bucket")
+
+	// SyndrQL Query Timeout Configuration
+	QueryTimeoutSeconds      int `yaml:"query_timeout_seconds"`       // Default query execution timeout in seconds (default: 300)
+	AdminQueryTimeoutSeconds int `yaml:"admin_query_timeout_seconds"` // Admin query execution timeout in seconds (default: 600)
+
+	// Per-Query Memory Limit Configuration (DoS Protection)
+	QueryMaxMemoryMB      int `yaml:"query_max_memory_mb"`       // Maximum memory per query in MB (default: 25)
+	AdminQueryMaxMemoryMB int `yaml:"admin_query_max_memory_mb"` // Maximum memory per admin query in MB (default: 25)
+	// Note: JOIN operations have a separate MemoryLimit in JoinRequest which remains unchanged
 }
 
 var (
@@ -161,6 +172,8 @@ func GetSettings() *Arguments {
 			CreateDefaultDB:     true,
 			Version:             "0.1.0",
 			BundleStorageFormat: "binary", // Binary (BSON) format is the only supported format
+
+			ExportRealtimeMetrics: false, // Export real-time metrics for monitoring
 
 			// PHASE 1 PERFORMANCE DEFAULTS
 			WALEnabled:           true, // WAL enabled by default
@@ -237,6 +250,14 @@ func GetSettings() *Arguments {
 			EnableQueryTimeout:     true,           // Layer 4: Query execution timeout ON
 			EnableQueryMonitoring:  true,           // Layer 5: Query metrics monitoring ON
 			GraphQLRateAlgorithm:   "token-bucket", // Default to token bucket algorithm
+
+			// SyndrQL Query Timeout Defaults
+			QueryTimeoutSeconds:      300, // 5 minute default timeout for regular queries
+			AdminQueryTimeoutSeconds: 600, // 10 minute default timeout for admin queries
+
+			// Per-Query Memory Limit Defaults (DoS Protection)
+			QueryMaxMemoryMB:      25, // 25MB default per-query memory limit
+			AdminQueryMaxMemoryMB: 25, // 25MB default per-query memory limit for admins
 		}
 	})
 	return instance
@@ -424,4 +445,32 @@ func BuildGraphQLSecurityConfig(args *Arguments) *GraphQLSecurityConfig {
 	config.RateAlgorithm = args.GraphQLRateAlgorithm
 
 	return config
+}
+
+// GetQueryTimeout returns the appropriate query timeout based on admin status
+// Returns 0 if query timeout is disabled
+// TODO: I can extend this to support role-based timeouts for different user tiers beyond just admin/non-admin
+func (a *Arguments) GetQueryTimeout(isAdmin bool) time.Duration {
+	if !a.EnableQueryTimeout {
+		return 0 // No timeout
+	}
+
+	if isAdmin {
+		return time.Duration(a.AdminQueryTimeoutSeconds) * time.Second
+	}
+
+	return time.Duration(a.QueryTimeoutSeconds) * time.Second
+}
+
+// GetQueryMemoryLimit returns the appropriate per-query memory limit in bytes based on admin status
+// This is a server-wide limit applied to all SELECT queries across all databases
+// Returns memory limit in bytes (converted from MB configuration)
+// TODO: I could add support for admin users to override this limit via a query-level flag (e.g., ALLOW_UNLIMITED_MEMORY)
+// TODO: I could implement dynamic limit adjustment based on available system memory (e.g., query limit = 10% of free RAM)
+func (a *Arguments) GetQueryMemoryLimit(isAdmin bool) int64 {
+	limitMB := a.QueryMaxMemoryMB
+	if isAdmin {
+		limitMB = a.AdminQueryMaxMemoryMB
+	}
+	return int64(limitMB) * 1024 * 1024 // Convert MB to bytes
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -1079,8 +1080,11 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 		clientIP = ExtractIPFromConn(conn.Conn)
 	}
 
-	// TODO pull this from the original architecture
-	result, err := CommandDirector(conn.Database, *serviceManager, command, s.logger, startTime, conn.Session, clientIP)
+	// Create base context for query execution
+	ctx := context.Background()
+
+	// Execute command with context support
+	result, err := CommandDirector(ctx, conn.Database, *serviceManager, command, s.logger, startTime, conn.Session, clientIP)
 
 	stats = s.bufferPool.GetStats()
 	s.logger.Debugf("Buffer stats after command: hits=%d, misses=%d, ratio=%.2f, used=%d/%d",

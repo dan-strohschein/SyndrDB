@@ -70,6 +70,7 @@ Tests hash-aggregate strategy with sample documents
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -660,7 +661,7 @@ type MockScanNode struct {
 	Rows      int
 }
 
-func (m *MockScanNode) Execute() (map[string]*models.Document, error) {
+func (m *MockScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	return m.Documents, nil
 }
 
@@ -735,7 +736,7 @@ func TestGroupByAggregationNodeExecution(t *testing.T) {
 		)
 
 		// Execute aggregation
-		results, err := aggNode.Execute()
+		results, err := aggNode.Execute(context.Background())
 		if err != nil {
 			t.Fatalf("AggregationNode execution failed: %v", err)
 		}

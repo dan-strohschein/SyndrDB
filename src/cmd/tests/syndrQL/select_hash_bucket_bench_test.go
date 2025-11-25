@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -22,6 +23,9 @@ func Benchmark_SelectWithHashIndex_SmallDataset(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle with hash-indexed SKU field
 	createCmd := `CREATE BUNDLE "Products" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
@@ -30,14 +34,14 @@ func Benchmark_SelectWithHashIndex_SmallDataset(b *testing.B) {
 		{"Price", "FLOAT", true, false, 0.0},
 		{"Category", "STRING", true, false, ""}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create bundle: %v", err)
 	}
 
 	// Create hash index on SKU (primary lookup field)
 	skuIndexCmd := `CREATE H-INDEX "idx_sku" ON BUNDLE "Products" WITH FIELDS ({"SKU", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, skuIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, skuIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create SKU index: %v", err)
 	}
@@ -51,7 +55,7 @@ func Benchmark_SelectWithHashIndex_SmallDataset(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Products" WITH ({"ID"=%d}, {"SKU"="PROD-%d"}, {"Name"="Product %d"}, {"Price"=%.2f}, {"Category"="%s"});`,
 			i, i, i, price, category,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	// Wait for index build
@@ -62,7 +66,7 @@ func Benchmark_SelectWithHashIndex_SmallDataset(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Query failed: %v", err)
 		}
@@ -76,6 +80,9 @@ func Benchmark_SelectWithHashIndex_MediumDataset(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Orders" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
@@ -84,14 +91,14 @@ func Benchmark_SelectWithHashIndex_MediumDataset(b *testing.B) {
 		{"Total", "FLOAT", true, false, 0.0},
 		{"Status", "STRING", true, false, ""}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create bundle: %v", err)
 	}
 
 	// Create hash index on OrderID
 	orderIndexCmd := `CREATE H-INDEX "idx_orderid" ON BUNDLE "Orders" WITH FIELDS ({"OrderID", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, orderIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, orderIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create OrderID index: %v", err)
 	}
@@ -106,7 +113,7 @@ func Benchmark_SelectWithHashIndex_MediumDataset(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Orders" WITH ({"ID"=%d}, {"OrderID"="ORD-%d"}, {"CustomerID"=%d}, {"Total"=%.2f}, {"Status"="%s"});`,
 			i, i, customerID, total, status,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	// Wait for index build
@@ -116,7 +123,7 @@ func Benchmark_SelectWithHashIndex_MediumDataset(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Query failed: %v", err)
 		}
@@ -130,6 +137,9 @@ func Benchmark_SelectWithHashIndex_HotKey(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Cache" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
@@ -138,14 +148,14 @@ func Benchmark_SelectWithHashIndex_HotKey(b *testing.B) {
 		{"TTL", "INT", true, false, 0},
 		{"AccessCount", "INT", true, false, 0}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create bundle: %v", err)
 	}
 
 	// Create hash index on Key
 	keyIndexCmd := `CREATE H-INDEX "idx_key" ON BUNDLE "Cache" WITH FIELDS ({"Key", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, keyIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, keyIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Key index: %v", err)
 	}
@@ -164,7 +174,7 @@ func Benchmark_SelectWithHashIndex_HotKey(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Cache" WITH ({"ID"=%d}, {"Key"="%s"}, {"Value"="%s"}, {"TTL"=%d}, {"AccessCount"=0});`,
 			i, key, value, ttl,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	// Wait for index build
@@ -175,7 +185,7 @@ func Benchmark_SelectWithHashIndex_HotKey(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Query failed: %v", err)
 		}
@@ -189,6 +199,9 @@ func Benchmark_SelectWithMultipleHashIndexes(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
@@ -197,20 +210,20 @@ func Benchmark_SelectWithMultipleHashIndexes(b *testing.B) {
 		{"Status", "STRING", true, false, ""},
 		{"RegisteredDate", "STRING", true, false, ""}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create bundle: %v", err)
 	}
 
 	// Create hash indexes on Email and Status
 	emailIndexCmd := `CREATE H-INDEX "idx_email" ON BUNDLE "Users" WITH FIELDS ({"Email", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, emailIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, emailIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Email index: %v", err)
 	}
 
 	statusIndexCmd := `CREATE H-INDEX "idx_status" ON BUNDLE "Users" WITH FIELDS ({"Status", false, false});`
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, statusIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, statusIndexCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		b.Fatalf("Failed to create Status index: %v", err)
 	}
@@ -223,7 +236,7 @@ func Benchmark_SelectWithMultipleHashIndexes(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Users" WITH ({"ID"=%d}, {"Email"="user%d@example.com"}, {"Name"="User %d"}, {"Status"="%s"}, {"RegisteredDate"="2025-11-22"});`,
 			i, i, i, status,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 
 		if i%5000 == 0 {
 			b.Logf("Seeded %d users...", i)
@@ -238,7 +251,7 @@ func Benchmark_SelectWithMultipleHashIndexes(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 		if err != nil {
 			b.Fatalf("Query failed: %v", err)
 		}

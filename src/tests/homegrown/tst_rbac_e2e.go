@@ -27,6 +27,7 @@ MAIN TEST FUNCTIONS:
 package homegrown
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -144,7 +145,7 @@ func executeCommand(command string) (string, error) {
 
 	// Execute the command using the CommandDirector function
 	startTime := time.Now()
-	result, err := server.CommandDirector(testRBACE2EDatabase, *testRBACE2EServiceManager, command, ColorLogger, startTime, nil, "127.0.0.1")
+	result, err := server.CommandDirector(context.Background(), testRBACE2EDatabase, *testRBACE2EServiceManager, command, ColorLogger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		return "", err
 	}

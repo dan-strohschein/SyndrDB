@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"fmt"
 	"syndrdb/src/internal/server"
 	"testing"
@@ -13,6 +14,9 @@ func BenchmarkInsert_Single(b *testing.B) {
 	// Setup once outside the measured loop
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Reset timer to exclude setup time from measurements
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -23,6 +27,7 @@ func BenchmarkInsert_Single(b *testing.B) {
 			i, fmt.Sprintf("Author_%d", i))
 
 		_, err := server.CommandDirector(
+			ctx,
 			fixture.Database,
 			*fixture.ServiceManager,
 			query,
@@ -45,6 +50,9 @@ func BenchmarkInsert_Batch(b *testing.B) {
 
 	batchSize := 100
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Reset timer to exclude setup time from measurements
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -57,6 +65,7 @@ func BenchmarkInsert_Batch(b *testing.B) {
 				docID, fmt.Sprintf("Author_%d", docID))
 
 			_, err := server.CommandDirector(
+				ctx,
 				fixture.Database,
 				*fixture.ServiceManager,
 				query,

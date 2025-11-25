@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -15,6 +16,9 @@ func TestDateTime_E2E_BundleCreation(t *testing.T) {
 
 	bundleName := "TestEventsBundle"
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle with DateTime and Date fields
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
 		{"eventId", "STRING", true, false, ""},
@@ -25,7 +29,7 @@ func TestDateTime_E2E_BundleCreation(t *testing.T) {
 	);`, bundleName)
 
 	startTime := time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create bundle: %v", err)
 	}
@@ -46,6 +50,9 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 
 	bundleName := "TestEventsBundle"
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle first
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
 		{"eventId", "STRING", true, false, ""},
@@ -56,7 +63,7 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 	);`, bundleName)
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create bundle: %v", err)
 	}
@@ -71,7 +78,7 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 	);`, bundleName)
 
 	startTime = time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, insertCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, insertCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to insert document: %v", err)
 	}
@@ -95,7 +102,7 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 	// Test COUNT(*) first to verify document persisted
 	countCmd := fmt.Sprintf(`SELECT COUNT(*) FROM "%s";`, bundleName)
 	startTime = time.Now()
-	countResp, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	countResp, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, countCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to execute COUNT: %v", err)
 	}
@@ -125,7 +132,7 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 	// Now try SELECT if count succeeded
 	selectCmd := fmt.Sprintf(`SELECT * FROM "%s";`, bundleName)
 	startTime = time.Now()
-	response, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to select document: %v", err)
 	}
@@ -179,6 +186,9 @@ func TestDateTime_E2E_MultipleFormats(t *testing.T) {
 
 	bundleName := "TestEventsBundle"
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
 		{"eventId", "STRING", true, false, ""},
@@ -189,7 +199,7 @@ func TestDateTime_E2E_MultipleFormats(t *testing.T) {
 	);`, bundleName)
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create bundle: %v", err)
 	}
@@ -242,7 +252,7 @@ func TestDateTime_E2E_MultipleFormats(t *testing.T) {
 			);`, bundleName, tc.eventId, tc.name, tc.eventTime, tc.eventDate, tc.description)
 
 			startTime := time.Now()
-			_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, insertCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+			_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, insertCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 			if err != nil {
 				t.Fatalf("Failed to insert document: %v", err)
 			}
@@ -257,7 +267,7 @@ func TestDateTime_E2E_MultipleFormats(t *testing.T) {
 			// Verify document was stored
 			selectCmd := fmt.Sprintf(`SELECT * FROM "%s" WHERE "eventId" == "%s";`, bundleName, tc.eventId)
 			startTime = time.Now()
-			response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+			response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 			if err != nil {
 				t.Fatalf("Failed to select document: %v", err)
 			}
@@ -292,6 +302,9 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 
 	bundleName := "TestEventsBundle"
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
 		{"eventId", "STRING", true, false, ""},
@@ -302,7 +315,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 	);`, bundleName)
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create bundle: %v", err)
 	}
@@ -330,7 +343,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 		);`, bundleName, doc.eventId, doc.eventTime, doc.eventDate)
 
 		startTime := time.Now()
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, insertCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, insertCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to insert document %s: %v", doc.eventId, err)
 		}
@@ -346,7 +359,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 	t.Run("Equality filter on DateTime", func(t *testing.T) {
 		selectCmd := fmt.Sprintf(`SELECT * FROM "%s" WHERE "eventTime" == "2024-11-22T10:00:00Z";`, bundleName)
 		startTime := time.Now()
-		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
@@ -378,7 +391,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 	t.Run("Greater than filter on DateTime", func(t *testing.T) {
 		selectCmd := fmt.Sprintf(`SELECT * FROM "%s" WHERE "eventTime" > "2024-11-22T10:00:00Z";`, bundleName)
 		startTime := time.Now()
-		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
@@ -407,7 +420,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 	t.Run("Less than or equal filter on Date", func(t *testing.T) {
 		selectCmd := fmt.Sprintf(`SELECT * FROM "%s" WHERE "eventDate" <= "2024-11-21";`, bundleName)
 		startTime := time.Now()
-		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
@@ -436,7 +449,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 	t.Run("Range filter on DateTime", func(t *testing.T) {
 		selectCmd := fmt.Sprintf(`SELECT * FROM "%s" WHERE "eventTime" >= "2024-11-21T00:00:00Z" AND "eventTime" <= "2024-11-23T23:59:59Z";`, bundleName)
 		startTime := time.Now()
-		response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+		response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
@@ -469,6 +482,9 @@ func TestDateTime_E2E_MillisecondPrecision(t *testing.T) {
 
 	bundleName := "TestEventsBundle"
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
 		{"eventId", "STRING", true, false, ""},
@@ -479,7 +495,7 @@ func TestDateTime_E2E_MillisecondPrecision(t *testing.T) {
 	);`, bundleName)
 
 	startTime := time.Now()
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create bundle: %v", err)
 	}
@@ -502,13 +518,13 @@ func TestDateTime_E2E_MillisecondPrecision(t *testing.T) {
 	);`, bundleName)
 
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, insertCmd1, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, insertCmd1, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to insert document 1: %v", err)
 	}
 
 	startTime = time.Now()
-	_, err = server.CommandDirector(fixture.Database, *fixture.ServiceManager, insertCmd2, fixture.Logger, startTime, nil, "127.0.0.1")
+	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, insertCmd2, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to insert document 2: %v", err)
 	}
@@ -523,7 +539,7 @@ func TestDateTime_E2E_MillisecondPrecision(t *testing.T) {
 	// Query for exact millisecond match
 	selectCmd := fmt.Sprintf(`SELECT * FROM "%s" WHERE "eventTime" == "2024-11-22T12:00:00.123Z";`, bundleName)
 	startTime = time.Now()
-	response, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
+	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to execute query: %v", err)
 	}

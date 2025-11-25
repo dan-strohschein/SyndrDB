@@ -83,6 +83,7 @@ TODO ENHANCEMENTS:
 */
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"syndrdb/src/internal/domain/models"
@@ -157,11 +158,11 @@ func NewDistinctNode(
 
 // Execute performs DISTINCT deduplication using adaptive strategy selection
 // Returns deduplicated documents as map[string]*models.Document
-func (n *DistinctNode) Execute() (map[string]*models.Document, error) {
+func (n *DistinctNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.Logger.Debugf("DistinctNode.Execute: Starting DISTINCT deduplication (fields: %v)", n.DistinctFields)
 
 	// Get documents from child node
-	documents, err := n.Child.Execute()
+	documents, err := n.Child.Execute(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("distinct node: failed to execute child: %w", err)
 	}
@@ -186,11 +187,11 @@ func (n *DistinctNode) Execute() (map[string]*models.Document, error) {
 		if err != nil || result == nil {
 			// Index-based failed, fallback to hash
 			n.Logger.Debugf("DistinctNode: Index-based failed, falling back to hash-based")
-			result, err = n.executeHashBased(documents)
+			result, err = n.executeHashBased(ctx, documents)
 		}
 
 	case "hash":
-		result, err = n.executeHashBased(documents)
+		result, err = n.executeHashBased(ctx, documents)
 
 	case "sort":
 		result, err = n.executeSortBased(documents)
@@ -293,7 +294,7 @@ func (n *DistinctNode) estimateCost() float64 {
 
 // executeHashBased performs hash-based deduplication with bloom filter optimization
 // Returns deduplicated documents or error
-func (n *DistinctNode) executeHashBased(documents map[string]*models.Document) (map[string]*models.Document, error) {
+func (n *DistinctNode) executeHashBased(ctx context.Context, documents map[string]*models.Document) (map[string]*models.Document, error) {
 	n.Logger.Debugf("DistinctNode: Executing hash-based deduplication")
 
 	estimatedDocs := len(documents)
@@ -318,8 +319,24 @@ func (n *DistinctNode) executeHashBased(documents map[string]*models.Document) (
 	var memoryUsed int64
 	var collisionCount int64
 
+	// Query-level memory tracking
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+	docCount := 0
+
 	// Process each document
 	for docID, doc := range documents {
+		docCount++
+
+		// Query-level memory tracking: Sample every 100th document
+		if memoryTracker != nil && docCount%100 == 0 {
+			docSize := models.EstimateDocumentSize(doc)
+			memoryTracker.Sample(docSize, docCount)
+
+			if memoryTracker.WillExceedLimit(len(documents)) {
+				return nil, ErrMemoryLimitExceeded
+			}
+		}
+
 		// Extract DISTINCT field values
 		values, err := extractDistinctFields(doc, n.DistinctFields)
 		if err != nil {

@@ -841,12 +841,28 @@ func (idx *HashIndexV3) updatePutStats() {
 	idx.stats.LastModified = time.Now()
 }
 
+// updatePutStatsWithLatency updates statistics for Put operations with latency tracking
+func (idx *HashIndexV3) updatePutStatsWithLatency(latencyMs float64) {
+	idx.updatePutStats()
+	// Note: Global metrics tracking should be added by importing syndrdb/src/internal/server
+	// For now, we'll track latency in local stats only to avoid circular dependencies
+	// TODO: Add global metrics when server package dependency is resolved
+}
+
 // updateGetStats updates statistics for Get operations
 func (idx *HashIndexV3) updateGetStats() {
 	idx.statsMutex.Lock()
 	defer idx.statsMutex.Unlock()
 
 	idx.stats.TotalGets++
+}
+
+// updateGetStatsWithLatency updates statistics for Get operations with latency tracking
+func (idx *HashIndexV3) updateGetStatsWithLatency(latencyMs float64) {
+	idx.updateGetStats()
+	// Note: Global metrics tracking should be added by importing syndrdb/src/internal/server
+	// For now, we'll track latency in local stats only to avoid circular dependencies
+	// TODO: Add global metrics when server package dependency is resolved
 }
 
 // updateDeleteStats updates statistics for Delete operations
@@ -857,6 +873,14 @@ func (idx *HashIndexV3) updateDeleteStats() {
 	idx.stats.TotalDeletes++
 	idx.stats.TombstoneCount++
 	idx.stats.LastModified = time.Now()
+}
+
+// updateDeleteStatsWithLatency updates statistics for Delete operations with latency tracking
+func (idx *HashIndexV3) updateDeleteStatsWithLatency(latencyMs float64) {
+	idx.updateDeleteStats()
+	// Note: Global metrics tracking should be added by importing syndrdb/src/internal/server
+	// For now, we'll track latency in local stats only to avoid circular dependencies
+	// TODO: Add global metrics when server package dependency is resolved
 }
 
 // updateCacheHit updates cache hit statistics

@@ -1,6 +1,7 @@
 package syndrQL
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -22,6 +23,9 @@ func seedUsers(t testing.TB, fixture *TestFixture, count int) {
 	t.Helper()
 	rand.Seed(time.Now().UnixNano())
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	countries := []string{"USA", "UK", "Canada", "France"}
 	statuses := []string{"active", "inactive"}
 
@@ -35,7 +39,7 @@ func seedUsers(t testing.TB, fixture *TestFixture, count int) {
 			i, i, country, age, status,
 		)
 
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to add document: %v", err)
 		}
@@ -46,6 +50,9 @@ func seedUsers(t testing.TB, fixture *TestFixture, count int) {
 func seedUsersWithPrices(t testing.TB, fixture *TestFixture, count int) {
 	t.Helper()
 	rand.Seed(time.Now().UnixNano())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	countries := []string{"USA", "UK", "Canada", "France"}
 	statuses := []string{"active", "inactive"}
@@ -61,7 +68,7 @@ func seedUsersWithPrices(t testing.TB, fixture *TestFixture, count int) {
 			i, i, country, age, status, price,
 		)
 
-		_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to add document: %v", err)
 		}
@@ -72,7 +79,10 @@ func seedUsersWithPrices(t testing.TB, fixture *TestFixture, count int) {
 func executeQuery(t testing.TB, fixture *TestFixture, query string) []*models.Document {
 	t.Helper()
 
-	resp, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Query failed: %v", err)
 	}
@@ -97,6 +107,9 @@ func executeQuery(t testing.TB, fixture *TestFixture, query string) []*models.Do
 func TestWhereBloom_MultiCondition(t *testing.T) {
 	fixture := setupRealServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
 		{"Name", "STRING", true, false, ""},
@@ -104,7 +117,7 @@ func TestWhereBloom_MultiCondition(t *testing.T) {
 		{"Age", "INT", true, false, 0},
 		{"Status", "STRING", true, false, ""}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create bundle: %v", err)
 	}
@@ -131,6 +144,9 @@ func TestWhereBloom_MultiCondition(t *testing.T) {
 func TestWhereBloom_vs_NoBloom(t *testing.T) {
 	fixture := setupRealServer(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
 		{"Name", "STRING", true, false, ""},
@@ -138,7 +154,7 @@ func TestWhereBloom_vs_NoBloom(t *testing.T) {
 		{"Age", "INT", true, false, 0},
 		{"Status", "STRING", true, false, ""}
 	);`
-	_, err := server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Failed to create bundle: %v", err)
 	}
@@ -166,6 +182,9 @@ func Benchmark_WhereBloom_Enabled(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
 		{"Name", "STRING", true, false, ""},
@@ -173,7 +192,7 @@ func Benchmark_WhereBloom_Enabled(b *testing.B) {
 		{"Age", "INT", true, false, 0},
 		{"Status", "STRING", true, false, ""}
 	);`
-	server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 
 	// Seed documents
 	countries := []string{"USA", "UK", "Canada", "France"}
@@ -186,7 +205,7 @@ func Benchmark_WhereBloom_Enabled(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Users" WITH ({"ID"=%d}, {"Name"="User%d"}, {"Country"="%s"}, {"Age"=%d}, {"Status"="%s"});`,
 			i, i, country, age, status,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	settings.GetSettings().WhereBloomEnabled = true
@@ -194,7 +213,7 @@ func Benchmark_WhereBloom_Enabled(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 }
 
@@ -203,6 +222,9 @@ func Benchmark_WhereBloom_Disabled(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
 		{"Name", "STRING", true, false, ""},
@@ -210,7 +232,7 @@ func Benchmark_WhereBloom_Disabled(b *testing.B) {
 		{"Age", "INT", true, false, 0},
 		{"Status", "STRING", true, false, ""}
 	);`
-	server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 
 	// Seed documents
 	countries := []string{"USA", "UK", "Canada", "France"}
@@ -223,7 +245,7 @@ func Benchmark_WhereBloom_Disabled(b *testing.B) {
 			`ADD DOCUMENT TO BUNDLE "Users" WITH ({"ID"=%d}, {"Name"="User%d"}, {"Country"="%s"}, {"Age"=%d}, {"Status"="%s"});`,
 			i, i, country, age, status,
 		)
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 
 	settings.GetSettings().WhereBloomEnabled = false
@@ -231,7 +253,7 @@ func Benchmark_WhereBloom_Disabled(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 	b.StopTimer()
 	settings.GetSettings().WhereBloomEnabled = true
@@ -242,6 +264,9 @@ func Benchmark_RangedWhere(b *testing.B) {
 	b.StopTimer()
 	fixture := setupRealServerTB(b)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
 		{"ID", "INT", true, false, 0},
 		{"Name", "STRING", true, false, ""},
@@ -250,7 +275,7 @@ func Benchmark_RangedWhere(b *testing.B) {
 		{"Status", "STRING", true, false, ""},
 		{"Price", "INT", true, false, 0}
 	);`
-	server.CommandDirector(fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 
 	// Seed 1000 users with Price field
 	seedUsersWithPrices(b, fixture, 1000)
@@ -259,6 +284,6 @@ func Benchmark_RangedWhere(b *testing.B) {
 
 	b.StartTimer()
 	for i := 0; i < b.N; i++ {
-		server.CommandDirector(fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, query, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	}
 }
