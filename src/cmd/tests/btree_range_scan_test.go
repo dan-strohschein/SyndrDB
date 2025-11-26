@@ -16,7 +16,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/models"
@@ -29,8 +31,9 @@ import (
 
 // TestBTreeRangeScanIntegration tests the integration between query planner and B-tree range scans
 func TestBTreeRangeScanIntegration(t *testing.T) {
-	// Setup test environment
-	testDir := "data/testdb/planner_range_test"
+	// Setup test environment with unique database name
+	dbName := fmt.Sprintf("testdb_range_scan_%d", time.Now().UnixNano())
+	testDir := filepath.Join("data", dbName)
 	os.RemoveAll(testDir)
 	defer os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
@@ -42,7 +45,7 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 	sugaredLogger := logger.Sugar()
 
 	// Create a B-tree index using proper configuration
-	config := btreeindexV2.DefaultIndexConfig("test_bundle", "age", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("test_bundle", "age", testDir, dbName)
 	config.PageSize = 8192
 	config.CacheSize = 20
 

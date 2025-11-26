@@ -135,7 +135,51 @@ func executeSelectQuery(t testing.TB, fixture *TestFixture, query string) []*mod
 		if cmdResp.Result == nil {
 			return []*models.Document{}
 		}
-		t.Fatalf("Expected []*models.Document, got %T", cmdResp.Result)
+
+		// Handle flattened format ([]map[string]interface{})
+		flatDocs, ok := cmdResp.Result.([]map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected []*models.Document or []map[string]interface{}, got %T", cmdResp.Result)
+		}
+
+		// Reconstruct Document objects from flattened format
+		docs := make([]*models.Document, 0, len(flatDocs))
+		for _, flatDoc := range flatDocs {
+			doc := &models.Document{
+				Fields: make(map[string]models.Field),
+			}
+
+			// Extract DocumentID if present
+			if docID, exists := flatDoc["DocumentID"]; exists {
+				if docIDStr, ok := docID.(string); ok {
+					doc.DocumentID = docIDStr
+				}
+			}
+
+			// Copy all other fields
+			for key, value := range flatDoc {
+				if key == "DocumentID" {
+					continue // Already handled
+				}
+
+				// Convert to FieldValue and create Field
+				var fieldValue models.FieldValue
+				if fv, ok := value.(models.FieldValue); ok {
+					fieldValue = fv
+				} else {
+					// Wrap in interface FieldValue if not already a FieldValue
+					fieldValue = models.NewInterfaceValue(value)
+				}
+
+				doc.Fields[key] = models.Field{
+					Name:  key,
+					Value: fieldValue,
+				}
+			}
+
+			docs = append(docs, doc)
+		}
+		return docs
 	}
 
 	return docs

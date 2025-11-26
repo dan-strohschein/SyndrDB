@@ -3,6 +3,7 @@ package syndrQL
 import (
 	"fmt"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/utils"
 
 	"go.uber.org/zap"
 )
@@ -266,6 +267,17 @@ func (a *ExpressionAdapter) extractFieldAndValue(expr *BinaryExpression) (string
 func (a *ExpressionAdapter) extractLiteralValue(expr Expression) (interface{}, error) {
 	switch expr := expr.(type) {
 	case *LiteralExpression:
+		// Check if the literal is a DateTime/Date string and parse it to time.Time
+		// This is necessary for WHERE clause comparisons to work correctly
+		if strVal, ok := expr.Value.(string); ok {
+			// Check if it looks like a DateTime/Date (ISO 8601 format)
+			if len(strVal) >= 10 && strVal[4] == '-' && strVal[7] == '-' {
+				// Try to parse as DateTime
+				if parsedTime, _, err := utils.ParseDateTime(strVal); err == nil {
+					return parsedTime, nil
+				}
+			}
+		}
 		return expr.Value, nil
 	case *IdentifierExpression:
 		// In some cases, an identifier might be used as a value (field-to-field comparison)

@@ -204,7 +204,11 @@ func (d *FastDocumentDeserializer) readField() (string, models.Field, error) {
 		if err != nil {
 			return "", models.Field{}, fmt.Errorf("failed to read datetime value: %w", err)
 		}
-		value = time.Unix(0, unixNanos).UTC()
+		// ✅ Create FieldTypeDateTime directly (don't use NewInterfaceValue which loses type info)
+		return fieldName, models.Field{
+			Name:  fieldName,
+			Value: models.NewDateTimeValue(time.Unix(0, unixNanos).UTC()),
+		}, nil
 
 	case 7: // date
 		_, err := d.readUint32() // Read size (should be 8)
@@ -215,9 +219,14 @@ func (d *FastDocumentDeserializer) readField() (string, models.Field, error) {
 		if err != nil {
 			return "", models.Field{}, fmt.Errorf("failed to read date value: %w", err)
 		}
+		// ✅ Create FieldTypeDate directly (don't use NewInterfaceValue which loses type info)
 		// Date: reconstruct time and ensure it's at midnight UTC
 		t := time.Unix(0, unixNanos).UTC()
-		value = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		dateTime := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		return fieldName, models.Field{
+			Name:  fieldName,
+			Value: models.NewDateValue(dateTime),
+		}, nil
 
 	default:
 		return "", models.Field{}, fmt.Errorf("unknown field type: %d", fieldType)

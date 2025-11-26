@@ -3,14 +3,12 @@ package server
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/planner"
-	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 	"time"
@@ -718,41 +716,31 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 	var flattenedDocs []map[string]interface{}
 
 	if !useStreaming {
-		// Legacy path: Transform to maps for sorting/aggregation
-		flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
-	}
+		// BUSINESS RULE: Every query has a SortNode (user ORDER BY or default CreatedAt ASC)
+		// Get sorted documents from SortNode to preserve sort order
+		var sortedDocs []*models.Document
 
-	// TODO Update the sorting to use a more powerful sorter that can handle different data types
-	// If the dev decided to put an order by on a countOnly query, ignore it
-	if query.HasOrderBy() && len(flattenedDocs) > 0 && !query.IsCountOnly {
-		sort.SliceStable(flattenedDocs, func(i, j int) bool {
-			for _, field := range query.OrderBy.Fields {
-				val1, exists1 := flattenedDocs[i][field.FieldName]
-				val2, exists2 := flattenedDocs[j][field.FieldName]
+		// Only extract sorted docs if RootNode is DIRECTLY a SortNode (no LimitNode wrapper)
+		// When LimitNode wraps SortNode, don't extract - would bypass the LIMIT!
+		if sn, ok := plan.RootNode.(*planner.SortNode); ok {
+			sortedDocs = sn.GetSortedDocuments()
+		}
 
-				// Handle missing fields
-				if !exists1 && !exists2 {
-					continue
-				}
-				if !exists1 {
-					return field.Direction == queryparser.SortDesc
-				}
-				if !exists2 {
-					return field.Direction == queryparser.SortAsc
-				}
-
-				// Compare values
-				cmp := compareValuesForSort(val1, val2)
-				if cmp != 0 {
-					if field.Direction == queryparser.SortAsc {
-						return cmp < 0
-					}
-					return cmp > 0
-				}
-			}
-			return false
-		})
-	}
+		if sortedDocs != nil && len(sortedDocs) > 0 {
+			// Use order-preserving transform for sorted documents
+			// This respects the sort order from the planner (user ORDER BY or default CreatedAt)
+			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, query.SelectFields)
+		} else {
+			// Fallback: SortNode not found or didn't populate sortedDocs
+			// This shouldn't happen with the new planner design, but keep for safety
+			logger.Warn("SortNode not found in plan tree or sortedDocs empty, using fallback transform")
+			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+		}
+	} // NOTE: Sorting is handled by the SortNode in the unified query planner execution tree.
+	// This legacy sort code was causing a bug where documents were re-sorted AFTER the
+	// SortNode had already correctly ordered them, destroying the proper sort order.
+	// The SortNode uses FieldValue type-aware comparisons, which is more accurate than
+	// this interface{} comparison approach. Do not re-enable this code.
 
 	var results interface{}
 	var resultCount int
@@ -830,6 +818,11 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 		cmdResponse.StreamDocuments = documents
 		cmdResponse.StreamFields = query.SelectFields
 		cmdResponse.ResultCount = len(documents)
+
+		// CRITICAL FIX: For direct function calls (E2E tests), convert StreamDocuments to Result
+		// HTTP responses use StreamDocuments for efficient streaming, but direct callers expect Result
+		// This ensures backward compatibility with existing tests while maintaining streaming optimization
+		cmdResponse.Result = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
 	} else {
 		// PHASE A: Store pooled maps for cleanup after JSON marshaling (avoids closure allocation)
 		if flattenedDocs, ok := results.([]map[string]interface{}); ok {

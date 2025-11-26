@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 
@@ -19,8 +22,15 @@ func TestCompaction_BasicFunctionality(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(tempDir)
 
+	// Use unique database name to avoid test interference
+	dbName := fmt.Sprintf("testdb_compaction_%d", time.Now().UnixNano())
+	dbPath := filepath.Join("data", dbName)
+	os.RemoveAll(dbPath)
+	os.MkdirAll(dbPath, 0755)
+	defer os.RemoveAll(dbPath)
+
 	// Create test index using DefaultIndexConfig
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, dbName)
 	config.PageSize = 4096
 	config.CacheSize = 100 // Keep cache small for testing
 	config.FillFactor = 0.7
@@ -51,8 +61,15 @@ func TestCompactionOptions_BasicFunctionality(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(tempDir)
 
+	// Use unique database name to avoid test interference
+	dbName := fmt.Sprintf("testdb_compaction_opts_%d", time.Now().UnixNano())
+	dbPath := filepath.Join("data", dbName)
+	os.RemoveAll(dbPath)
+	os.MkdirAll(dbPath, 0755)
+	defer os.RemoveAll(dbPath)
+
 	// Create test index
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, dbName)
 	config.PageSize = 4096
 	config.CacheSize = 100
 	config.FillFactor = 0.7

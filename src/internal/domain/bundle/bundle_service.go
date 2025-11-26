@@ -201,8 +201,8 @@ func convertToDateTime(value interface{}) (interface{}, error) {
 	}
 	// Fast path: already a time.Time
 	if timeVal, ok := value.(time.Time); ok {
-		// Ensure UTC conversion
-		return timeVal.UTC(), nil
+		// ✅ Return FieldValue directly so type info preserved (DateTime)
+		return models.NewDateTimeValue(timeVal.UTC()), nil
 	}
 	// Handle string values
 	if strVal, ok := value.(string); ok {
@@ -212,7 +212,8 @@ func convertToDateTime(value interface{}) (interface{}, error) {
 		}
 		// Parse datetime string - this was already done in parseValue, but handle legacy cases
 		if parsedTime, _, err := utils.ParseDateTime(strVal); err == nil {
-			return parsedTime.UTC(), nil
+			// ✅ Return FieldValue directly so type info preserved (DateTime)
+			return models.NewDateTimeValue(parsedTime.UTC()), nil
 		} else {
 			return nil, fmt.Errorf("cannot convert string '%s' to datetime: %v", strVal, err)
 		}
@@ -228,7 +229,9 @@ func convertToDate(value interface{}) (interface{}, error) {
 	if timeVal, ok := value.(time.Time); ok {
 		// Date: zero out time component to midnight UTC
 		utc := timeVal.UTC()
-		return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC), nil
+		dateTime := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+		// ✅ Return FieldValue directly so type info preserved (Date)
+		return models.NewDateValue(dateTime), nil
 	}
 	// Handle string values
 	if strVal, ok := value.(string); ok {
@@ -240,7 +243,9 @@ func convertToDate(value interface{}) (interface{}, error) {
 		if parsedTime, _, err := utils.ParseDateTime(strVal); err == nil {
 			// Zero out time to midnight UTC for Date type
 			utc := parsedTime.UTC()
-			return time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC), nil
+			dateTime := time.Date(utc.Year(), utc.Month(), utc.Day(), 0, 0, 0, 0, time.UTC)
+			// ✅ Return FieldValue directly so type info preserved (Date)
+			return models.NewDateValue(dateTime), nil
 		} else {
 			return nil, fmt.Errorf("cannot convert string '%s' to date: %v", strVal, err)
 		}

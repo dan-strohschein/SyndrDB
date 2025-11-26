@@ -64,6 +64,10 @@ import (
 	"syndrdb/src/pkg/common/helpers"
 )
 
+// MetricsReporter is a callback function for reporting metrics without import cycles
+// This allows CompactionManager to report metrics to the server package without importing it
+type MetricsReporter func(metricName string, value uint64)
+
 // CompactionManager manages compaction operations for LSM-style storage
 // Follows Single Responsibility Principle: Only handles compaction
 type CompactionManager struct {
@@ -77,8 +81,16 @@ type CompactionManager struct {
 	lastCompaction time.Time    // Time of last compaction
 	mutex          sync.RWMutex // Protects compaction state
 
+	// Per-bundle/index locking for concurrent compaction
+	// Key format: "bundle:{bundleName}" or "index:{bundleName}_{indexName}"
+	// Value: *sync.Mutex for that resource
+	bundleLocks sync.Map // Fine-grained locks to prevent concurrent compaction of same bundle/index
+
 	// Statistics
 	stats CompactionStats // Compaction statistics
+
+	// Metrics reporting (optional callback to avoid import cycles)
+	metricsReporter MetricsReporter
 
 	// Logging
 	logger *zap.SugaredLogger
@@ -108,10 +120,11 @@ type CompactionStats struct {
 
 // CompactionConfig holds configuration for CompactionManager
 type CompactionConfig struct {
-	DataDir  string             // Directory containing files
-	Strategy CompactionStrategy // Compaction strategy
-	Enabled  bool               // Enable/disable compaction
-	Logger   *zap.SugaredLogger // Logger instance
+	DataDir         string             // Directory containing files
+	Strategy        CompactionStrategy // Compaction strategy
+	Enabled         bool               // Enable/disable compaction
+	Logger          *zap.SugaredLogger // Logger instance
+	MetricsReporter MetricsReporter    // Optional callback for reporting metrics
 }
 
 // NewCompactionManager creates a new compaction manager
@@ -137,12 +150,13 @@ func NewCompactionManager(config CompactionConfig) (*CompactionManager, error) {
 	}
 
 	cm := &CompactionManager{
-		dataDir:    config.DataDir,
-		strategy:   config.Strategy,
-		enabled:    config.Enabled,
-		compacting: false,
-		stats:      CompactionStats{},
-		logger:     config.Logger,
+		dataDir:     config.DataDir,
+		strategy:    config.Strategy,
+		enabled:     config.Enabled,
+		compacting:  false,
+		bundleLocks: sync.Map{}, // Initialize per-bundle lock map
+		stats:       CompactionStats{},
+		logger:      config.Logger,
 	}
 
 	return cm, nil
@@ -179,10 +193,18 @@ func (cm *CompactionManager) CompactHashIndexFiles(bundleName, indexName string,
 		return "", fmt.Errorf("no files to compact")
 	}
 
-	// Check if already compacting
+	// Acquire per-index lock to prevent concurrent compaction
+	// This ensures only one compaction happens per index at a time
+	indexLock := cm.acquireIndexLock(bundleName, indexName)
+	defer indexLock.Unlock()
+
+	// Check if already compacting globally
 	cm.mutex.Lock()
 	if cm.compacting {
 		cm.mutex.Unlock()
+		if cm.metricsReporter != nil {
+			cm.metricsReporter("CompactionBlockedByLock", 1)
+		}
 		return "", fmt.Errorf("compaction already in progress")
 	}
 	cm.compacting = true
@@ -305,6 +327,9 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 	})
 
 	// Write entries to output file
+	// TODO FIXME: the stats is returning the lock. We should change this to return a pointer
+	// to the stats struct instead of a copy so the state is correctly updated. Passing by value
+	// will create an independent copy of the stats struct and the mutex will not be shared.
 	for _, entry := range entriesToWrite {
 		data, err := cm.serializeEntry(entry)
 		if err != nil {
@@ -368,6 +393,11 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 //
 // Returns the path to the compacted file and any error
 func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleFilePath string) (string, error) {
+	// Acquire per-bundle lock to prevent concurrent compaction
+	// This ensures ghost cleanup worker and manual triggers don't conflict
+	bundleLock := cm.acquireBundleLock(bundleName)
+	defer bundleLock.Unlock()
+
 	cm.logger.Infow("Starting bundle file compaction",
 		"bundle", bundleName,
 		"database", databaseName,
@@ -562,6 +592,86 @@ func (cm *CompactionManager) GetStrategy() CompactionStrategy {
 
 func (cm *CompactionManager) GetLogger() *zap.SugaredLogger {
 	return cm.logger
+}
+
+// acquireBundleLock acquires an exclusive lock for a bundle file
+// Returns the lock that must be released after compaction completes
+//
+// This prevents concurrent compaction of the same bundle from ghost cleanup
+// worker and manual triggers, which would corrupt the file.
+//
+// Parameters:
+//   - bundleName: Name of bundle to lock
+//
+// Returns the mutex that was acquired (caller must defer Unlock())
+//
+// TODO: MVCC Evolution Path - Replace per-bundle locks with MVCC copy-on-write
+// When transaction support (BEGIN/COMMIT/ROLLBACK) is implemented:
+// 1. Remove this lock acquisition entirely
+// 2. Ghost cleanup creates new bundle version with suffix .v{TransactionID}.bnd
+// 3. Write all non-tombstone documents to new version file
+// 4. Update bundle metadata to point to new version (atomic pointer swap)
+// 5. Old version file remains readable by in-progress queries (check their TransactionID)
+// 6. Version cleanup thread removes old versions when no active transaction references them
+// 7. This enables true lock-free reads during compaction (queries never block)
+//
+// MVCC Implementation Notes:
+// - Bundle metadata needs LatestVersionID atomic.Uint64 field
+// - Each bundle version file: {database}_{bundle}.v{versionID}.bnd
+// - Reader queries snapshot bundle versions at query start (bundleVersionMap map[string]uint64)
+// - Compaction increments version ID, writes new file, atomically updates metadata
+// - Version cleanup scans all active queries' snapshots, deletes unreferenced versions
+// - This matches SQL Server's snapshot isolation (queries see consistent point-in-time data)
+func (cm *CompactionManager) acquireBundleLock(bundleName string) *sync.Mutex {
+	lockKey := fmt.Sprintf("bundle:%s", bundleName)
+
+	// Get or create mutex for this bundle
+	lockInterface, _ := cm.bundleLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	lock := lockInterface.(*sync.Mutex)
+
+	// Acquire the lock (blocks if another compaction is in progress)
+	lock.Lock()
+
+	return lock
+}
+
+// acquireIndexLock acquires an exclusive lock for a hash index
+// Returns the lock that must be released after compaction completes
+//
+// This prevents concurrent compaction of the same index from periodic triggers
+// and manual compaction calls.
+//
+// Parameters:
+//   - bundleName: Name of bundle containing the index
+//   - indexName: Name of index to lock
+//
+// Returns the mutex that was acquired (caller must defer Unlock())
+//
+// TODO: MVCC Evolution Path - Replace per-index locks with versioned index files
+// When MVCC transactions are implemented:
+// 1. Hash index files use versioning: {bundle}_{index}_{NNNNNN}.v{TransactionID}.idx
+// 2. Compaction creates new version file with merged entries
+// 3. Index metadata tracks latest version ID (atomic swap on completion)
+// 4. Queries snapshot index version IDs at query start
+// 5. Old index versions cleaned up when no queries reference them
+// 6. Lock-free compaction: readers use old version while compaction builds new version
+//
+// This requires coordination between:
+// - HashIndex.triggerCompaction() - snapshot current version before compaction
+// - CompactionManager.CompactHashIndexFiles() - write to .v{newVersionID}.idx file
+// - HashIndex metadata update - atomic version pointer swap after compaction
+// - Version cleanup - remove unreferenced .idx files based on active query snapshots
+func (cm *CompactionManager) acquireIndexLock(bundleName, indexName string) *sync.Mutex {
+	lockKey := fmt.Sprintf("index:%s_%s", bundleName, indexName)
+
+	// Get or create mutex for this index
+	lockInterface, _ := cm.bundleLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	lock := lockInterface.(*sync.Mutex)
+
+	// Acquire the lock (blocks if another compaction is in progress)
+	lock.Lock()
+
+	return lock
 }
 
 func (cm *CompactionManager) UpdateStats(stats CompactionStats, duration time.Duration, err error) {

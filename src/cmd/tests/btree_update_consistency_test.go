@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +22,9 @@ import (
 //
 // This test simulates the critical path: Document Update → Index Update
 func TestBTreeIndex_DocumentUpdateMaintainsIndexConsistency(t *testing.T) {
-	testDir := "data/testdb/btree_update_consistency"
+	// Use unique database name to avoid test interference
+	dbName := fmt.Sprintf("testdb_update_consistency_%d", time.Now().UnixNano())
+	testDir := filepath.Join("data", dbName)
 
 	// Ensure clean state - forcefully remove any leftover files
 	err := os.RemoveAll(testDir)
@@ -45,7 +49,7 @@ func TestBTreeIndex_DocumentUpdateMaintainsIndexConsistency(t *testing.T) {
 	sugaredLogger := logger.Sugar()
 
 	// Create B-tree index on 'category' field (string-based)
-	config := btreeindexV2.DefaultIndexConfig("products", "category", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("products", "category", testDir, dbName)
 	config.PageSize = 8192
 	config.CacheSize = 50
 
@@ -256,7 +260,9 @@ func TestBTreeIndex_DocumentUpdateMaintainsIndexConsistency(t *testing.T) {
 // TestBTreeIndex_UpdateWithMultipleDocumentsPerKey verifies that updates work
 // correctly when multiple documents share the same indexed value (non-unique index)
 func TestBTreeIndex_UpdateWithMultipleDocumentsPerKey(t *testing.T) {
-	testDir := "data/testdb/btree_update_multi_docs"
+	// Use unique database name to avoid test interference
+	dbName := fmt.Sprintf("testdb_update_multi_%d", time.Now().UnixNano())
+	testDir := filepath.Join("data", dbName)
 	os.RemoveAll(testDir)
 	defer os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
@@ -267,7 +273,7 @@ func TestBTreeIndex_UpdateWithMultipleDocumentsPerKey(t *testing.T) {
 	sugaredLogger := logger.Sugar()
 
 	// Create B-tree index on 'category' (non-unique)
-	config := btreeindexV2.DefaultIndexConfig("products", "category", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("products", "category", testDir, dbName)
 	config.PageSize = 8192
 	config.CacheSize = 50
 
@@ -359,7 +365,9 @@ func TestBTreeIndex_UpdateWithMultipleDocumentsPerKey(t *testing.T) {
 // TestBTreeIndex_UpdateDuringConcurrentReads verifies that updates don't
 // corrupt the index when concurrent reads are happening
 func TestBTreeIndex_UpdateDuringConcurrentReads(t *testing.T) {
-	testDir := "data/testdb/btree_update_concurrent"
+	// Use unique database name to avoid test interference
+	dbName := fmt.Sprintf("testdb_update_concurrent_%d", time.Now().UnixNano())
+	testDir := filepath.Join("data", dbName)
 	os.RemoveAll(testDir)
 	defer os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
@@ -369,7 +377,7 @@ func TestBTreeIndex_UpdateDuringConcurrentReads(t *testing.T) {
 	defer logger.Sync()
 	sugaredLogger := logger.Sugar()
 
-	config := btreeindexV2.DefaultIndexConfig("products", "price", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("products", "price", testDir, dbName)
 	config.PageSize = 8192
 	config.CacheSize = 100
 

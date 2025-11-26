@@ -246,6 +246,40 @@ type GlobalServerMetrics struct {
 	WALLastFlushTimestamp atomic.Uint64 // Timestamp of last WAL flush (Unix epoch seconds)
 	WALLastSyncTimestamp  atomic.Uint64 // Timestamp of last WAL sync (Unix epoch seconds)
 	WALReplicationLagMs   atomic.Uint64 // Replication lag in milliseconds (current time - last sync)
+
+	// ============================================================================
+	// Ghost Cleanup Metrics (SQL Server-style background compaction)
+	// ============================================================================
+	GhostCleanupCyclesTotal      atomic.Uint64 // Total number of ghost cleanup cycles executed
+	GhostRecordsScanned          atomic.Uint64 // Total ghost records scanned
+	GhostRecordsRemoved          atomic.Uint64 // Total ghost records (tombstones) removed
+	GhostCleanupDurationMs       atomic.Uint64 // Duration of last cleanup cycle (milliseconds)
+	GhostCleanupPausedForLoad    atomic.Uint64 // Number of times cleanup paused due to high query load
+	GhostCleanupBatchesProcessed atomic.Uint64 // Number of batches processed
+
+	// Tombstone Cache Metrics
+	TombstoneCacheHits      atomic.Uint64 // Cache hits when checking tombstone ratios
+	TombstoneCacheMisses    atomic.Uint64 // Cache misses requiring file scans
+	TombstoneScansPerformed atomic.Uint64 // Number of file scans performed
+	TombstoneCacheEvictions atomic.Uint64 // Number of cache entries evicted (age or size based)
+
+	// Compaction Trigger Breakdown
+	CompactionTriggeredGhost atomic.Uint64 // Compactions triggered by ghost cleanup worker
+	CompactionBlockedByLock  atomic.Uint64 // Compactions blocked due to lock contention
+
+	// Orphaned File Cleanup
+	OrphanedTempFilesRemoved atomic.Uint64 // Number of orphaned .compact.tmp files cleaned up
+
+	// TODO: MVCC Future - Add version store metrics when transaction support (BEGIN/COMMIT/ROLLBACK) is implemented:
+	// VersionStoreSize atomic.Uint64              // Total bytes consumed by old row versions in version store
+	// VersionStorePurgedBytes atomic.Uint64       // Total bytes reclaimed by version cleanup
+	// OldestActiveTransactionID atomic.Uint64     // Lowest transaction ID still active (blocks version cleanup)
+	// VersionsCleanedPerCycle atomic.Uint64       // Row versions removed per cleanup cycle
+	// VersionChainLengthAvg atomic.Uint64         // Average number of versions per document
+	// VersionChainLengthMax atomic.Uint64         // Longest version chain observed (alert if >100)
+	// These track version store health similar to SQL Server's sys.dm_tran_version_store metrics.
+	// Version cleanup runs every 60 seconds (separate from ghost cleanup's 10 seconds) to balance
+	// cleanup overhead vs space reclamation for long-running analytical queries.
 }
 
 // globalServerMetrics is the singleton instance
@@ -394,6 +428,21 @@ func (gsm *GlobalServerMetrics) GetMetrics() map[string]uint64 {
 		"wal_last_flush_timestamp": gsm.WALLastFlushTimestamp.Load(),
 		"wal_last_sync_timestamp":  gsm.WALLastSyncTimestamp.Load(),
 		"wal_replication_lag_ms":   gsm.WALReplicationLagMs.Load(),
+
+		// Ghost Cleanup Metrics (SQL Server-style background compaction)
+		"ghost_cleanup_cycles_total":      gsm.GhostCleanupCyclesTotal.Load(),
+		"ghost_records_scanned":           gsm.GhostRecordsScanned.Load(),
+		"ghost_records_removed":           gsm.GhostRecordsRemoved.Load(),
+		"ghost_cleanup_duration_ms":       gsm.GhostCleanupDurationMs.Load(),
+		"ghost_cleanup_paused_for_load":   gsm.GhostCleanupPausedForLoad.Load(),
+		"ghost_cleanup_batches_processed": gsm.GhostCleanupBatchesProcessed.Load(),
+		"tombstone_cache_hits":            gsm.TombstoneCacheHits.Load(),
+		"tombstone_cache_misses":          gsm.TombstoneCacheMisses.Load(),
+		"tombstone_scans_performed":       gsm.TombstoneScansPerformed.Load(),
+		"tombstone_cache_evictions":       gsm.TombstoneCacheEvictions.Load(),
+		"compaction_triggered_ghost":      gsm.CompactionTriggeredGhost.Load(),
+		"compaction_blocked_by_lock":      gsm.CompactionBlockedByLock.Load(),
+		"orphaned_temp_files_removed":     gsm.OrphanedTempFilesRemoved.Load(),
 	}
 }
 

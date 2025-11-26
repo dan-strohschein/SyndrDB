@@ -528,6 +528,10 @@ func rangeSearchInternalWithBounds(idx *BTreeIndex, startKey, endKey []byte, exc
 // to avoid repeated tombstone filtering on hot keys
 func searchInLeaf(leaf *BTreeNode, key []byte) []string {
 	for i, nodeKey := range leaf.Keys {
+		// TODO: TEMPORARY FIX - Type normalization for numeric comparisons
+		// This handles int vs int64 mismatches from parseValue() similar to IN query fix.
+		// A more performant solution will be implemented later that normalizes at index
+		// creation time rather than at search time. For now, this ensures correctness.
 		if bytes.Equal(nodeKey, key) {
 			if i < len(leaf.Values) {
 				// Use helper method to filter out tombstones

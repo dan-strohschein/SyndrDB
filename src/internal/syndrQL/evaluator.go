@@ -599,10 +599,19 @@ func (e *ExpressionEvaluator) evaluateIn(left interface{}, right interface{}, ne
 		return negate, nil // false for IN, true for NOT IN
 	}
 
+	if fv, ok := left.(models.FieldValue); ok {
+		left = fv.AsInterface()
+	}
+
 	// Check if left value is in the array
 	matched := false
 	for _, item := range rightArr {
 		// Use compareValues for consistent comparison logic
+		//check to see if the right is a fieldValue type
+		if fv, ok := item.(models.FieldValue); ok {
+			item = fv.AsInterface()
+		}
+
 		result, err := e.compareValues(left, item, func(a, b float64) bool { return a == b })
 		if err != nil {
 			// If comparison fails, try direct equality

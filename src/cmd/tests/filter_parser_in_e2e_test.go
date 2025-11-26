@@ -42,9 +42,9 @@ func createE2ETestBundle(t *testing.T, bundleName string, docCount int) *models.
 				"Priority":   i % 10,
 			},
 			Fields: map[string]models.Field{
-				"Status":     {Name: "Status", Value: models.FieldValue{StringVal: bob}},
-				"CategoryID": {Name: "CategoryID", Value: models.FieldValue{IntVal: int64(categories[i%len(categories)])}},
-				"Priority":   {Name: "Priority", Value: models.FieldValue{IntVal: int64(i % 10)}},
+				"Status":     {Name: "Status", Value: models.NewStringValue(bob)},
+				"CategoryID": {Name: "CategoryID", Value: models.NewIntValue(int64(categories[i%len(categories)]))},
+				"Priority":   {Name: "Priority", Value: models.NewIntValue(int64(i % 10))},
 			},
 		}
 		documents[docID] = doc
@@ -69,9 +69,12 @@ func TestE2E_SimpleInQuery(t *testing.T) {
 		t.Fatalf("Failed to parse WHERE clause: %v", err)
 	}
 
+	t.Logf("WhereGroup: %+v", whereGroup)
+
 	matchCount := 0
-	for _, doc := range *bundle.Documents {
+	for docID, doc := range *bundle.Documents {
 		docPtr := &doc
+		t.Logf("Doc %s Status field: %+v", docID, doc.Fields["Status"])
 		if EvaluateWhereClause(docPtr, whereGroup, logger) {
 			matchCount++
 		}
@@ -119,9 +122,17 @@ func TestE2E_NumericInQuery(t *testing.T) {
 		t.Fatalf("Failed to parse WHERE clause: %v", err)
 	}
 
+	t.Logf("WhereGroup: %+v", whereGroup)
+	if len(whereGroup.Clauses) > 0 {
+		t.Logf("Clause Value type: %T, value: %v", whereGroup.Clauses[0].Value, whereGroup.Clauses[0].Value)
+	}
+
 	matchCount := 0
-	for _, doc := range *bundle.Documents {
+	for docID, doc := range *bundle.Documents {
 		docPtr := &doc
+		catField := doc.Fields["CategoryID"]
+		t.Logf("Doc %s CategoryID: Type=%d, IntVal=%d, AsInterface=%v",
+			docID, catField.Value.Type, catField.Value.IntVal, catField.Value.AsInterface())
 		if EvaluateWhereClause(docPtr, whereGroup, logger) {
 			matchCount++
 		}

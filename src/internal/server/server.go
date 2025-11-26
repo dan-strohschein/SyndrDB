@@ -16,11 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syndrdb/src/data"
 	"syndrdb/src/internal/audit"
 	"syndrdb/src/internal/auth"
 	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
+	"syndrdb/src/internal/domain/compactor"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
@@ -67,7 +69,9 @@ type Server struct {
 	databaseService       *database.DatabaseService
 	logger                *zap.SugaredLogger
 	bufferPool            *buffer.BufferPool
-	wg                    sync.WaitGroup // WaitGroup for tracking active connections
+	wg                    sync.WaitGroup                // WaitGroup for tracking active connections
+	activeQueryCount      atomic.Uint64                 // Number of currently executing queries (for ghost cleanup pausing)
+	GhostCleanupWorker    *compactor.GhostCleanupWorker // Background worker for automatic compaction
 }
 
 // Connection represents an active client connection
@@ -414,6 +418,85 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		}
 	}
 
+	// Initialize ghost cleanup worker for automatic background compaction
+	// Create metrics reporter callback to avoid import cycles
+	metricsReporter := func(metricName string, value uint64) {
+		metrics := GetGlobalServerMetrics()
+		switch metricName {
+		case "GhostCleanupCyclesTotal":
+			metrics.GhostCleanupCyclesTotal.Add(value)
+		case "GhostRecordsScanned":
+			metrics.GhostRecordsScanned.Add(value)
+		case "GhostRecordsRemoved":
+			metrics.GhostRecordsRemoved.Add(value)
+		case "GhostCleanupDurationMs":
+			metrics.GhostCleanupDurationMs.Store(value)
+		case "GhostCleanupPausedForLoad":
+			metrics.GhostCleanupPausedForLoad.Add(value)
+		case "GhostCleanupBatchesProcessed":
+			metrics.GhostCleanupBatchesProcessed.Add(value)
+		case "TombstoneCacheHits":
+			metrics.TombstoneCacheHits.Add(value)
+		case "TombstoneCacheMisses":
+			metrics.TombstoneCacheMisses.Add(value)
+		case "TombstoneScansPerformed":
+			metrics.TombstoneScansPerformed.Add(value)
+		case "TombstoneCacheEvictions":
+			metrics.TombstoneCacheEvictions.Add(value)
+		case "CompactionTriggeredGhost":
+			metrics.CompactionTriggeredGhost.Add(value)
+		case "CompactionBlockedByLock":
+			metrics.CompactionBlockedByLock.Add(value)
+		case "OrphanedTempFilesRemoved":
+			metrics.OrphanedTempFilesRemoved.Add(value)
+		}
+	}
+
+	// Set metrics reporter for tombstone cache
+	compactor.SetTombstoneCacheMetricsReporter(metricsReporter)
+
+	// Create compaction manager with tombstone ratio from config
+	compactionStrategy := compactor.NewDefaultCompactionStrategy()
+	// TODO: I will expose SetTombstoneRatioThreshold when tombstone ratio becomes configurable at runtime
+	compactionManager, err := compactor.NewCompactionManager(compactor.CompactionConfig{
+		DataDir:         config.DataDir,
+		Strategy:        compactionStrategy,
+		Enabled:         config.GhostCleanupEnabled,
+		Logger:          sugar,
+		MetricsReporter: metricsReporter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create compaction manager: %w", err)
+	}
+
+	// Initialize ghost cleanup worker if enabled in configuration
+	if config.GhostCleanupEnabled {
+		ghostCleanupWorker := compactor.NewGhostCleanupWorker(compactor.GhostCleanupConfig{
+			Interval:             time.Duration(config.GhostCleanupIntervalSeconds) * time.Second,
+			BatchSize:            config.GhostCleanupBatchSize,
+			PauseThreshold:       config.GhostCleanupPauseThreshold,
+			DataDir:              config.DataDir,
+			ServiceManagerGetter: func() interface{} { return GetServiceManager() },
+			ActiveQueryCount:     &server.activeQueryCount,
+			Compactor:            compactionManager,
+			MetricsReporter:      metricsReporter,
+			Logger:               sugar,
+		})
+
+		server.GhostCleanupWorker = ghostCleanupWorker
+
+		// Start the ghost cleanup worker
+		ghostCleanupWorker.Start()
+		sugar.Infow("Ghost cleanup worker started for automatic background compaction",
+			"interval", config.GhostCleanupIntervalSeconds,
+			"batchSize", config.GhostCleanupBatchSize,
+			"pauseThreshold", config.GhostCleanupPauseThreshold,
+			"tombstoneRatio", config.GhostCleanupTombstoneRatio,
+		)
+	} else {
+		sugar.Info("Ghost cleanup worker disabled in configuration")
+	}
+
 	return server, nil
 }
 
@@ -459,6 +542,12 @@ func (s *Server) Start() error {
 // Stop gracefully shuts down the server
 func (s *Server) Stop() error {
 	s.Running = false
+
+	// Stop ghost cleanup worker to prevent background compaction during shutdown
+	if s.GhostCleanupWorker != nil {
+		s.GhostCleanupWorker.Stop()
+		s.logger.Info("Ghost cleanup worker stopped")
+	}
 
 	// Stop session manager first to cleanup all sessions
 	if s.SessionManager != nil {

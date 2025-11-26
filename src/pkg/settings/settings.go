@@ -147,6 +147,13 @@ type Arguments struct {
 	QueryMaxMemoryMB      int `yaml:"query_max_memory_mb"`       // Maximum memory per query in MB (default: 25)
 	AdminQueryMaxMemoryMB int `yaml:"admin_query_max_memory_mb"` // Maximum memory per admin query in MB (default: 25)
 	// Note: JOIN operations have a separate MemoryLimit in JoinRequest which remains unchanged
+
+	// Ghost Cleanup (Automatic Compaction) Configuration
+	GhostCleanupEnabled         bool    `yaml:"ghost_cleanup_enabled"`          // Enable automatic ghost record cleanup (default: true)
+	GhostCleanupIntervalSeconds int     `yaml:"ghost_cleanup_interval_seconds"` // Cleanup cycle interval in seconds (default: 10)
+	GhostCleanupBatchSize       int     `yaml:"ghost_cleanup_batch_size"`       // Batch size for processing (default: 10000)
+	GhostCleanupPauseThreshold  int     `yaml:"ghost_cleanup_pause_threshold"`  // Active query pause threshold (default: 500)
+	GhostCleanupTombstoneRatio  float64 `yaml:"ghost_cleanup_tombstone_ratio"`  // Tombstone ratio threshold for compaction (default: 0.3)
 }
 
 var (
@@ -258,6 +265,13 @@ func GetSettings() *Arguments {
 			// Per-Query Memory Limit Defaults (DoS Protection)
 			QueryMaxMemoryMB:      25, // 25MB default per-query memory limit
 			AdminQueryMaxMemoryMB: 25, // 25MB default per-query memory limit for admins
+
+			// Ghost Cleanup (Automatic Compaction) Defaults
+			GhostCleanupEnabled:         true,  // Enable ghost cleanup by default
+			GhostCleanupIntervalSeconds: 10,    // Run every 10 seconds (SQL Server pattern)
+			GhostCleanupBatchSize:       10000, // Process up to 10,000 records per cycle
+			GhostCleanupPauseThreshold:  500,   // Pause when 500+ queries active
+			GhostCleanupTombstoneRatio:  0.3,   // Compact when 30% tombstones
 		}
 	})
 	return instance

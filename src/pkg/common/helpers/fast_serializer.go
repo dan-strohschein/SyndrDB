@@ -112,6 +112,22 @@ func (s *FastDocumentSerializer) writeField(fieldName string, field models.Field
 	s.writeUint32(uint32(len(nameBytes)))
 	s.buffer = append(s.buffer, nameBytes...)
 
+	// ✅ Check FieldValue type FIRST for DateTime/Date (before AsInterface loses type info)
+	if field.Value.Type == models.FieldTypeDateTime {
+		// DateTime type: store as Unix nanoseconds (type code 6)
+		s.buffer = append(s.buffer, 6) // Type: datetime
+		s.writeUint32(8)               // Size: 8 bytes
+		s.writeInt64(field.Value.DateTimeVal.UnixNano())
+		return nil
+	}
+	if field.Value.Type == models.FieldTypeDate {
+		// Date type: store as Unix nanoseconds (type code 7)
+		s.buffer = append(s.buffer, 7) // Type: date
+		s.writeUint32(8)               // Size: 8 bytes
+		s.writeInt64(field.Value.DateVal.UnixNano())
+		return nil
+	}
+
 	// Write field value based on type
 	switch value := field.Value.AsInterface().(type) { // ✅ Convert FieldValue to interface{} for type switch
 	case string:
@@ -145,19 +161,12 @@ func (s *FastDocumentSerializer) writeField(fieldName string, field models.Field
 		}
 
 	case time.Time:
-		// Determine if this is a Date (midnight UTC) or DateTime
-		// Check if time component is exactly midnight
-		if value.Hour() == 0 && value.Minute() == 0 && value.Second() == 0 && value.Nanosecond() == 0 {
-			// Date type: store as Unix nanoseconds (type code 7)
-			s.buffer = append(s.buffer, 7) // Type: date
-			s.writeUint32(8)               // Size: 8 bytes
-			s.writeInt64(value.UnixNano())
-		} else {
-			// DateTime type: store as Unix nanoseconds (type code 6)
-			s.buffer = append(s.buffer, 6) // Type: datetime
-			s.writeUint32(8)               // Size: 8 bytes
-			s.writeInt64(value.UnixNano())
-		}
+		// This case handles any time.Time values that weren't caught by FieldType check above
+		// (e.g., from map data structures without FieldValue wrapper)
+		// Default to DateTime type (type code 6)
+		s.buffer = append(s.buffer, 6) // Type: datetime
+		s.writeUint32(8)               // Size: 8 bytes
+		s.writeInt64(value.UnixNano())
 
 	default:
 		// Fallback to string representation

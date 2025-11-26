@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 
@@ -13,14 +14,16 @@ import (
 
 // TestSimpleDelete tests basic delete functionality with minimal data
 func TestSimpleDelete(t *testing.T) {
-	testDir := "data/testdb_simple"
+	// Use unique database name to avoid test interference
+	dbName := fmt.Sprintf("testdb_simple_%d", time.Now().UnixNano())
+	testDir := fmt.Sprintf("data/%s", dbName)
 	os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
 	defer os.RemoveAll(testDir)
 
 	logger, _ := zap.NewDevelopment()
 
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, dbName)
 	config.PageSize = 1024
 	config.MaxKeyLength = 256
 	config.CacheSize = 10

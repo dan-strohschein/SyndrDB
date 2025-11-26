@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syndrdb/src/internal/domain/index"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
+	"syndrdb/src/internal/utils"
 	"time"
 
 	// "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
@@ -16,7 +17,6 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/common/helpers"
-	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 	//"syndrdb/src/engine"
@@ -596,10 +596,22 @@ func isISO8601Date(s string) bool {
 
 // Helper function to parse a value token into the right type
 func parseValue(valueToken string) (interface{}, error) {
-	// Handle quoted string
+	// Handle quoted string - check for DateTime/Date first before treating as plain string
 	if strings.HasPrefix(valueToken, "\"") && strings.HasSuffix(valueToken, "\"") {
-		// Remove quotes and return string
-		return valueToken[1 : len(valueToken)-1], nil
+		// Remove quotes
+		unquoted := valueToken[1 : len(valueToken)-1]
+
+		// Check if the string looks like a DateTime/Date (ISO 8601 format)
+		if isISO8601Date(unquoted) {
+			// Try to parse as DateTime
+			parsedTime, _, err := utils.ParseDateTime(unquoted)
+			if err == nil {
+				return parsedTime, nil
+			}
+			// If parsing fails, treat as regular string
+		}
+
+		return unquoted, nil
 	}
 
 	// Handle NULL keyword (converts to magic value for indexing)
@@ -640,14 +652,12 @@ func parseValue(valueToken string) (interface{}, error) {
 func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logger *zap.SugaredLogger) bool {
 	// If there are no clauses or subgroups, default to true
 	if len(whereGroup.Clauses) == 0 && len(whereGroup.SubGroups) == 0 {
-		logger.Infof("DEBUG DEBUG:: No clauses or subgroups in WHERE group, returning true")
 		return true
 	}
 
 	// Evaluate all clauses in this group
 	clauseResults := make([]bool, 0, len(whereGroup.Clauses))
 	for _, clause := range whereGroup.Clauses {
-		//logger.Infof("DEBUG DEBUG:: Evaluating clause: %+v", clause)
 		clauseResults = append(clauseResults, evaluateClause(document, clause, logger))
 	}
 
@@ -702,6 +712,12 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 		return true
 	}
 
+	// CRITICAL FIX: Extract actual value from FieldValue typed union before comparison
+	// FieldValue is a struct with different value types (String, Int, Float, etc.)
+	// We need to unwrap it to get the actual comparable value (similar to IN operator fix)
+	// NOTE: This fix is for the deprecated filter_parser.go - SyndrQL evaluator handles this correctly
+	actualFieldValue := field.Value.AsInterface()
+
 	// Handle NULL comparisons using magic value
 	// WHERE "Email" == NULL -> checks if Email field contains ::SYNDR_NULL::
 	if clause.Value != nil {
@@ -722,17 +738,17 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 	// Compare based on operator and types
 	switch clause.Operator {
 	case "==":
-		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a == b })
+		return compareValues(actualFieldValue, clause.Value, logger, func(a, b float64) bool { return a == b })
 	case "!=":
-		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a != b })
+		return compareValues(actualFieldValue, clause.Value, logger, func(a, b float64) bool { return a != b })
 	case ">=":
-		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a >= b })
+		return compareValues(actualFieldValue, clause.Value, logger, func(a, b float64) bool { return a >= b })
 	case ">":
-		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a > b })
+		return compareValues(actualFieldValue, clause.Value, logger, func(a, b float64) bool { return a > b })
 	case "<=":
-		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a <= b })
+		return compareValues(actualFieldValue, clause.Value, logger, func(a, b float64) bool { return a <= b })
 	case "<":
-		return compareValues(field.Value, clause.Value, logger, func(a, b float64) bool { return a < b })
+		return compareValues(actualFieldValue, clause.Value, logger, func(a, b float64) bool { return a < b })
 	case "IN":
 		return EvaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
 			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
@@ -1168,6 +1184,12 @@ func EvaluateInOperator(fieldValue interface{}, clauseValue interface{}, caseIns
 
 	startTime := time.Now()
 
+	// Extract actual value from FieldValue struct if needed
+	// The caller passes field.Value which is a FieldValue struct, not the raw value
+	if fv, ok := fieldValue.(models.FieldValue); ok {
+		fieldValue = fv.AsInterface()
+	}
+
 	// Convert clause value to slice
 	valueList, ok := clauseValue.([]interface{})
 	if !ok {
@@ -1241,7 +1263,68 @@ func EvaluateInOperator(fieldValue interface{}, clauseValue interface{}, caseIns
 		}
 	} else {
 		// Case-sensitive or non-string comparison
+		// First try direct lookup
 		matched = valueSet[fieldValue]
+
+		// If not matched and field is numeric, try type-normalized comparison
+		// This handles int vs int64, float32 vs float64 mismatches from parseValue
+		if !matched {
+			switch fv := fieldValue.(type) {
+			case int, int32, int64:
+				// Convert to int64 and check all numeric values in set
+				var fieldInt64 int64
+				switch v := fv.(type) {
+				case int:
+					fieldInt64 = int64(v)
+				case int32:
+					fieldInt64 = int64(v)
+				case int64:
+					fieldInt64 = v
+				}
+				for value := range valueSet {
+					switch sv := value.(type) {
+					case int:
+						if int64(sv) == fieldInt64 {
+							matched = true
+							break
+						}
+					case int32:
+						if int64(sv) == fieldInt64 {
+							matched = true
+							break
+						}
+					case int64:
+						if sv == fieldInt64 {
+							matched = true
+							break
+						}
+					}
+				}
+			case float32, float64:
+				// Convert to float64 and check all numeric values in set
+				var fieldFloat64 float64
+				switch v := fv.(type) {
+				case float32:
+					fieldFloat64 = float64(v)
+				case float64:
+					fieldFloat64 = v
+				}
+				for value := range valueSet {
+					switch sv := value.(type) {
+					case float32:
+						if float64(sv) == fieldFloat64 {
+							matched = true
+							break
+						}
+					case float64:
+						if sv == fieldFloat64 {
+							matched = true
+							break
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Record statistics
@@ -1257,11 +1340,6 @@ func EvaluateInOperator(fieldValue interface{}, clauseValue interface{}, caseIns
 
 // compareValues handles type conversion and comparison
 func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericComparison func(float64, float64) bool) bool {
-	settings := settings.GetSettings()
-	if settings.Debug && settings.Verbose {
-		//logger.Infof("DEBUG DEBUG:: Comparing values: a=%v (%T), b=%v (%T)", a, a, b, b)
-	}
-
 	// Handle time.Time comparison (DateTime and Date)
 	aTime, aIsTime := a.(time.Time)
 	bTime, bIsTime := b.(time.Time)
@@ -1276,9 +1354,6 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 	// Handle string comparison
 	aStr, aIsString := a.(string)
 	bStr, bIsString := b.(string)
-	if settings.Debug && settings.Verbose {
-		//logger.Infof("DEBUG DEBUG:: String check: aIsString=%v, bIsString=%v", aIsString, bIsString)
-	}
 	if aIsString && bIsString {
 		// Check if either value is a magic value - if so, use direct string comparison
 		// This prevents magic values like "::SYNDR_NULL::" from being parsed as numbers

@@ -28,6 +28,7 @@ import (
 	"os"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,10 +51,19 @@ func setupCacheTestIndex(t *testing.T, testName string, cacheSize int) (string, 
 	tempDir, err := os.MkdirTemp("", fmt.Sprintf("btree-cache-test-%s-*", testName))
 	require.NoError(t, err, "Failed to create temp directory")
 
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, "testdb")
+	// Use unique database name based on test name to avoid collisions
+	dbName := fmt.Sprintf("testdb_%s_%d", testName, time.Now().UnixNano())
+
+	// Clean up any existing test database files for this specific test
+	dbPath := fmt.Sprintf("data/%s", dbName)
+	os.RemoveAll(dbPath)
+	os.MkdirAll(dbPath, 0755)
+
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, dbName)
 	config.PageSize = 4096
 	config.CacheSize = cacheSize // Small cache to trigger eviction
 	config.FillFactor = 0.7
+	config.IsUnique = false // Allow duplicate document IDs for testing
 
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err, "Failed to create logger")

@@ -108,14 +108,17 @@ func (pb *PlanBuilder) BuildPlan(
 		pb.logger.Debug("Added DistinctNode to tree")
 	}
 
-	// Add sorting if ORDER BY present
+	// ALWAYS add sorting for deterministic ordering
+	// If user specified ORDER BY, use it; otherwise default to CreatedAt ASC
+	sortNode, err := pb.addSortNode(currentTree, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add sort: %w", err)
+	}
+	currentTree = sortNode
 	if query.HasOrderBy() {
-		sortNode, err := pb.addSortNode(currentTree, query)
-		if err != nil {
-			return nil, fmt.Errorf("failed to add sort: %w", err)
-		}
-		currentTree = sortNode
-		pb.logger.Debug("Added SortNode to tree")
+		pb.logger.Debug("Added SortNode with user ORDER BY clause")
+	} else {
+		pb.logger.Debug("Added SortNode with default CreatedAt ASC ordering")
 	}
 
 	// Add limiting if TOP/LIMIT/OFFSET present
@@ -202,15 +205,36 @@ func (pb *PlanBuilder) addDistinctNode(
 
 // addSortNode wraps tree with sorting
 // PHASE 3: Sorting composition
+// BUSINESS RULE: Always adds sorting for deterministic ordering
+// - If query has ORDER BY: use user's specified sort fields
+// - If no ORDER BY: default to CreatedAt ASC for insertion-order results
 func (pb *PlanBuilder) addSortNode(
 	child ExecutionNode,
 	query *queryparser.UnifiedSelectQuery,
 ) (ExecutionNode, error) {
 
+	var orderBy *queryparser.OrderByClause
+
+	if query.HasOrderBy() {
+		// Use user-specified ORDER BY
+		orderBy = query.OrderBy
+	} else {
+		// Default to CreatedAt ASC for deterministic insertion-order results
+		orderBy = &queryparser.OrderByClause{
+			Fields: []queryparser.OrderByField{
+				{
+					FieldName:     "CreatedAt",
+					Direction:     queryparser.SortAsc,
+					NullsPosition: queryparser.NullsLast,
+				},
+			},
+		}
+	}
+
 	// Create sort node with ORDER BY clause
 	sortNode := NewSortNode(
 		child,
-		query.OrderBy,
+		orderBy,
 		pb.logger,
 	)
 

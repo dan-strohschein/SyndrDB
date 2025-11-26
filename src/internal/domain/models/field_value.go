@@ -91,6 +91,13 @@ func NewDateValue(t time.Time) FieldValue {
 }
 
 func NewInterfaceValue(v interface{}) FieldValue {
+	// CRITICAL FIX: If already a FieldValue, return it directly (don't double-wrap)
+	// This happens when validateAndConvertFieldTypeFast returns a FieldValue (e.g., NewDateValue)
+	// and MakeDocumentFieldsPooled calls NewInterfaceValue on it
+	if fv, ok := v.(FieldValue); ok {
+		return fv
+	}
+
 	// Try to avoid interface{} if possible
 	switch val := v.(type) {
 	case string:
@@ -134,9 +141,11 @@ func (fv FieldValue) AsInterface() interface{} {
 	case FieldTypeBool:
 		return fv.BoolVal
 	case FieldTypeDateTime:
-		return fv.DateTimeVal
+		// Return RFC3339 formatted string for JSON compatibility
+		return fv.DateTimeVal.Format(time.RFC3339)
 	case FieldTypeDate:
-		return fv.DateVal
+		// Return YYYY-MM-DD formatted string for JSON compatibility
+		return fv.DateVal.Format("2006-01-02")
 	case FieldTypeInterface:
 		return fv.InterfaceVal
 	case FieldTypeNil:
@@ -403,8 +412,42 @@ func (fv FieldValue) CompareEqual(other FieldValue) bool {
 			return fv.FloatVal == other.FloatVal
 		case FieldTypeBool:
 			return fv.BoolVal == other.BoolVal
+		case FieldTypeDateTime:
+			return fv.DateTimeVal.Equal(other.DateTimeVal)
+		case FieldTypeDate:
+			return fv.DateVal.Equal(other.DateVal)
 		case FieldTypeNil:
 			return true
+		}
+	}
+
+	// Cross-type: DateTime vs Date (compare time components)
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeDate {
+		return fv.DateTimeVal.Equal(other.DateVal)
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeDateTime {
+		return fv.DateVal.Equal(other.DateTimeVal)
+	}
+
+	// Cross-type: DateTime/Date vs String (parse string as time)
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeString {
+		if otherTime, err := parseDateTime(other.StringVal); err == nil {
+			return fv.DateTimeVal.Equal(otherTime)
+		}
+	}
+	if fv.Type == FieldTypeString && other.Type == FieldTypeDateTime {
+		if fvTime, err := parseDateTime(fv.StringVal); err == nil {
+			return fvTime.Equal(other.DateTimeVal)
+		}
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeString {
+		if otherTime, err := parseDate(other.StringVal); err == nil {
+			return fv.DateVal.Equal(otherTime)
+		}
+	}
+	if fv.Type == FieldTypeString && other.Type == FieldTypeDate {
+		if fvTime, err := parseDate(fv.StringVal); err == nil {
+			return fvTime.Equal(other.DateVal)
 		}
 	}
 
@@ -442,6 +485,44 @@ func (fv FieldValue) CompareLessThan(other FieldValue) bool {
 	}
 	if other.Type == FieldTypeString && other.StringVal == "::SYNDR_NULL::" {
 		return false
+	}
+
+	// DateTime/Date comparison (same type)
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeDateTime {
+		return fv.DateTimeVal.Before(other.DateTimeVal)
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeDate {
+		return fv.DateVal.Before(other.DateVal)
+	}
+
+	// Cross-type: DateTime vs Date
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeDate {
+		return fv.DateTimeVal.Before(other.DateVal)
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeDateTime {
+		return fv.DateVal.Before(other.DateTimeVal)
+	}
+
+	// Cross-type: DateTime/Date vs String
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeString {
+		if otherTime, err := parseDateTime(other.StringVal); err == nil {
+			return fv.DateTimeVal.Before(otherTime)
+		}
+	}
+	if fv.Type == FieldTypeString && other.Type == FieldTypeDateTime {
+		if fvTime, err := parseDateTime(fv.StringVal); err == nil {
+			return fvTime.Before(other.DateTimeVal)
+		}
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeString {
+		if otherTime, err := parseDate(other.StringVal); err == nil {
+			return fv.DateVal.Before(otherTime)
+		}
+	}
+	if fv.Type == FieldTypeString && other.Type == FieldTypeDate {
+		if fvTime, err := parseDate(fv.StringVal); err == nil {
+			return fvTime.Before(other.DateVal)
+		}
 	}
 
 	// String comparison (including numeric strings like "1970")
@@ -490,6 +571,44 @@ func (fv FieldValue) CompareGreaterThan(other FieldValue) bool {
 		return false
 	}
 
+	// DateTime/Date comparison (same type)
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeDateTime {
+		return fv.DateTimeVal.After(other.DateTimeVal)
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeDate {
+		return fv.DateVal.After(other.DateVal)
+	}
+
+	// Cross-type: DateTime vs Date
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeDate {
+		return fv.DateTimeVal.After(other.DateVal)
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeDateTime {
+		return fv.DateVal.After(other.DateTimeVal)
+	}
+
+	// Cross-type: DateTime/Date vs String
+	if fv.Type == FieldTypeDateTime && other.Type == FieldTypeString {
+		if otherTime, err := parseDateTime(other.StringVal); err == nil {
+			return fv.DateTimeVal.After(otherTime)
+		}
+	}
+	if fv.Type == FieldTypeString && other.Type == FieldTypeDateTime {
+		if fvTime, err := parseDateTime(fv.StringVal); err == nil {
+			return fvTime.After(other.DateTimeVal)
+		}
+	}
+	if fv.Type == FieldTypeDate && other.Type == FieldTypeString {
+		if otherTime, err := parseDate(other.StringVal); err == nil {
+			return fv.DateVal.After(otherTime)
+		}
+	}
+	if fv.Type == FieldTypeString && other.Type == FieldTypeDate {
+		if fvTime, err := parseDate(fv.StringVal); err == nil {
+			return fvTime.After(other.DateVal)
+		}
+	}
+
 	// String comparison
 	if fv.Type == FieldTypeString && other.Type == FieldTypeString {
 		return fv.StringVal > other.StringVal
@@ -535,4 +654,41 @@ func (fv FieldValue) CompareNotEqual(other FieldValue) bool {
 // Returns the numeric value and nil error if successful
 func parseNumeric(s string) (float64, error) {
 	return strconv.ParseFloat(s, 64)
+}
+
+// parseDateTime attempts to parse a string as a DateTime value
+// Supports multiple common formats: RFC3339, ISO8601, etc.
+func parseDateTime(s string) (time.Time, error) {
+	// Try common formats in order
+	formats := []string{
+		time.RFC3339,           // "2006-01-02T15:04:05Z07:00"
+		time.RFC3339Nano,       // "2006-01-02T15:04:05.999999999Z07:00"
+		"2006-01-02T15:04:05Z", // ISO8601 with Z
+		"2006-01-02T15:04:05",  // ISO8601 without timezone
+		"2006-01-02 15:04:05",  // SQL format
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, s); err == nil {
+			return t.UTC(), nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("unable to parse '%s' as datetime", s)
+}
+
+// parseDate attempts to parse a string as a Date value (time at midnight UTC)
+// Supports formats like: "2024-11-22", "2024-11-22T00:00:00Z", etc.
+func parseDate(s string) (time.Time, error) {
+	// Try date-only format first
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
+	}
+
+	// Try datetime formats and extract date component
+	if t, err := parseDateTime(s); err == nil {
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
+	}
+
+	return time.Time{}, fmt.Errorf("unable to parse '%s' as date", s)
 }

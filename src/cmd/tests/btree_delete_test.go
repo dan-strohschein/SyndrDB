@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 
@@ -387,11 +388,20 @@ func setupTestIndex(t *testing.T, testName string) (string, *btreeindexV2.BTreeI
 	tempDir, err := os.MkdirTemp("", fmt.Sprintf("btree-delete-test-%s-*", testName))
 	require.NoError(t, err)
 
+	// Use unique database name based on test name to avoid collisions
+	dbName := fmt.Sprintf("testdb_%s_%d", testName, time.Now().UnixNano())
+
+	// Clean up any existing test database files for this specific test
+	dbPath := fmt.Sprintf("data/%s", dbName)
+	os.RemoveAll(dbPath)
+	os.MkdirAll(dbPath, 0755)
+
 	// Create index configuration
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", tempDir, dbName)
 	config.PageSize = 4096
 	config.CacheSize = 100
 	config.FillFactor = 0.7
+	config.IsUnique = false // Allow non-unique for testing
 
 	// Create logger
 	logger, _ := zap.NewDevelopment()

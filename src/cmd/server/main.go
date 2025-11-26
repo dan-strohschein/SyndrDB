@@ -15,6 +15,7 @@ import (
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/settings"
 
+	"syndrdb/src/internal/monitoring"
 	"syscall"
 	"time"
 )
@@ -382,6 +383,13 @@ func main() {
 	// Create a context with timeout for graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Deal with the real time metrics exporter if enabled
+	if args.ExportRealtimeMetrics {
+		exporter, _ := monitoring.NewMemoryMappedExporter("/tmp/syndrdb_metrics.mmap", time.Second, srv.GetLogger())
+		exporter.Start()
+		defer exporter.Stop()
+	}
 
 	// Create a channel to signal shutdown completion
 	done := make(chan error, 1)

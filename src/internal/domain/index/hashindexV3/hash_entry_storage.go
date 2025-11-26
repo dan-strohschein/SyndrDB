@@ -89,26 +89,32 @@ type BucketFileManager struct {
 	numBuckets      uint32                       // Total number of buckets
 	bucketMaxSize   int64                        // Max file size per bucket file
 	writeBufferSize int                          // Write buffer size
+	indexName       string                       // Index name for header creation
 	fieldName       string                       // Field name for file naming
+	bundleName      string                       // Bundle name for header creation
 	isForeignKey    bool                         // Whether this is a foreign key index
 	namingHelper    *FileNamingHelper            // File naming utilities
+	headerManager   *HeaderManager               // Header manager for writing headers
 	globalMutex     sync.RWMutex                 // Protects buckets map
 	logger          *zap.SugaredLogger           // Logger
 }
 
 // NewBucketFileManager creates a new bucket file manager
 func NewBucketFileManager(numBuckets uint32, bucketMaxSize int64, writeBufferSize int,
-	fieldName string, isForeignKey bool, namingHelper *FileNamingHelper,
-	logger *zap.SugaredLogger) *BucketFileManager {
+	indexName, fieldName, bundleName string, isForeignKey bool, namingHelper *FileNamingHelper,
+	headerManager *HeaderManager, logger *zap.SugaredLogger) *BucketFileManager {
 
 	return &BucketFileManager{
 		buckets:         make(map[uint32]*BucketFileHandle),
 		numBuckets:      numBuckets,
 		bucketMaxSize:   bucketMaxSize,
 		writeBufferSize: writeBufferSize,
+		indexName:       indexName,
 		fieldName:       fieldName,
+		bundleName:      bundleName,
 		isForeignKey:    isForeignKey,
 		namingHelper:    namingHelper,
+		headerManager:   headerManager,
 		logger:          logger,
 	}
 }
@@ -188,6 +194,45 @@ func (bfm *BucketFileManager) openBucketFile(handle *BucketFileHandle) error {
 	if err != nil {
 		file.Close()
 		return fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	// COMPACTION FIX: Write header for new bucket files (zero-size files)
+	// This prevents "invalid header size: 0" errors when scanning bucket files after compaction.
+	// The header is essential for scanFileBackward() to know where entry data begins.
+	if stat.Size() == 0 {
+		// Create minimal header for bucket file
+		header := bfm.headerManager.CreateHeader(
+			bfm.indexName,
+			bfm.fieldName,
+			bfm.bundleName,
+			handle.CurrentFileNum,
+			bfm.isForeignKey,
+			false, // isUnique - bucket files don't enforce uniqueness
+			false, // isPrimaryKey - bucket files don't enforce PK
+		)
+
+		// Write header to file
+		serializer := NewHeaderSerializer()
+		bytesWritten, err := serializer.WriteHeaderToFile(file, header)
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("failed to write header to bucket file %s: %w", filePath, err)
+		}
+
+		// Update current size to account for header
+		stat, err = file.Stat()
+		if err != nil {
+			file.Close()
+			return fmt.Errorf("failed to stat file after header write: %w", err)
+		}
+
+		if bfm.logger != nil {
+			bfm.logger.Debugw("Wrote header to new bucket file",
+				"fieldName", bfm.fieldName,
+				"bucketNum", handle.BucketNum,
+				"fileNum", handle.CurrentFileNum,
+				"headerBytes", bytesWritten)
+		}
 	}
 
 	handle.CurrentFile = file
@@ -423,9 +468,12 @@ func NewEntryStorage(config EntryStorageConfig) (*EntryStorage, error) {
 			storage.numBuckets,
 			storage.bucketFileMaxSize,
 			storage.writeBufferSize,
+			storage.indexName,
 			storage.fieldName,
+			storage.bundleName,
 			storage.isForeignKey,
 			storage.namingHelper,
+			storage.headerManager,
 			storage.logger,
 		)
 	}

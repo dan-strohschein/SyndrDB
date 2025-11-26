@@ -114,15 +114,15 @@ func formatBytes(bytes uint64) string {
 func createMemoryTestIndex(t *testing.T, testName string) *btreeindexV2.BTreeIndex {
 	t.Helper()
 
-	testDir := filepath.Join("data", "memory_leak_tests")
+	// Use unique database name to avoid test interference
+	dbName := fmt.Sprintf("testdb_mem_%s_%d", testName, time.Now().UnixNano())
+	testDir := filepath.Join("data", dbName)
+	os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
-
-	indexPath := filepath.Join(testDir, fmt.Sprintf("%s_btree.btidx", testName))
-	os.Remove(indexPath)
 
 	logger, _ := zap.NewDevelopment()
 
-	config := btreeindexV2.DefaultIndexConfig("leak_test_bundle", "test_field", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("leak_test_bundle", "test_field", testDir, dbName)
 	config.PageSize = 4096
 	config.CacheSize = 200 // Increased from 100 to reduce cache thrashing
 	config.MaxKeyLength = 256

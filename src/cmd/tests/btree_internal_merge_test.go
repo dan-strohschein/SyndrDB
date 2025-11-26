@@ -5,6 +5,7 @@ import (
 	"os"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,15 +14,17 @@ import (
 
 // TestInternalNodeMerging tests the complete internal node merge workflow
 func TestInternalNodeMerging(t *testing.T) {
-	// Setup test environment
-	testDir := "data/testdb"
+	// Setup test environment with unique database
+	dbName := fmt.Sprintf("testdb_merge_%d", time.Now().UnixNano())
+	testDir := fmt.Sprintf("data/%s", dbName)
+	os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
 	defer os.RemoveAll(testDir)
 
 	logger, _ := zap.NewDevelopment()
 
 	// Create index with small page size to force splits
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, dbName)
 	config.PageSize = 1024    // Minimum allowed page size
 	config.MaxKeyLength = 256 // 1/4 of page size
 	config.CacheSize = 10
@@ -96,13 +99,15 @@ func TestInternalNodeMerging(t *testing.T) {
 
 // TestInternalNodeBorrowing tests borrowing keys from siblings
 func TestInternalNodeBorrowing(t *testing.T) {
-	testDir := "data/testdb"
+	dbName := fmt.Sprintf("testdb_borrow_%d", time.Now().UnixNano())
+	testDir := fmt.Sprintf("data/%s", dbName)
+	os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
 	defer os.RemoveAll(testDir)
 
 	logger, _ := zap.NewDevelopment()
 
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, dbName)
 	config.PageSize = 1024
 	config.MaxKeyLength = 256
 	config.CacheSize = 10
@@ -151,13 +156,15 @@ func TestInternalNodeBorrowing(t *testing.T) {
 
 // TestRootDemotion tests the case where root becomes empty and child is promoted
 func TestRootDemotion(t *testing.T) {
-	testDir := "data/testdb"
+	dbName := fmt.Sprintf("testdb_root_%d", time.Now().UnixNano())
+	testDir := fmt.Sprintf("data/%s", dbName)
+	os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
 	defer os.RemoveAll(testDir)
 
 	logger, _ := zap.NewDevelopment()
 
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, dbName)
 	config.PageSize = 1024
 	config.MaxKeyLength = 256
 	config.CacheSize = 10
@@ -211,13 +218,15 @@ func TestInternalMergeStressTest(t *testing.T) {
 		t.Skip("Skipping stress test in short mode")
 	}
 
-	testDir := "data/testdb"
+	dbName := fmt.Sprintf("testdb_stress_%d", time.Now().UnixNano())
+	testDir := fmt.Sprintf("data/%s", dbName)
+	os.RemoveAll(testDir)
 	os.MkdirAll(testDir, 0755)
 	defer os.RemoveAll(testDir)
 
 	logger, _ := zap.NewDevelopment()
 
-	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, "testdb")
+	config := btreeindexV2.DefaultIndexConfig("testbundle", "testfield", testDir, dbName)
 	config.PageSize = 1024
 	config.MaxKeyLength = 256
 	config.CacheSize = 20

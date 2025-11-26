@@ -1080,7 +1080,21 @@ func TestWhere_INClause(t *testing.T) {
 
 	// Verify all results have Genre in allowed list
 	for i, doc := range docs {
-		if genre, ok := doc["Genre"].(string); ok {
+		var genre string
+		var ok bool
+		if genreVal, exists := doc["Genre"]; exists {
+			if str, isStr := genreVal.(string); isStr {
+				genre = str
+				ok = true
+			} else if fv, isFV := genreVal.(models.FieldValue); isFV {
+				if str, isStr := fv.AsString(); isStr {
+					genre = str
+					ok = true
+				}
+			}
+		}
+
+		if ok {
 			if genre != "Mystery" && genre != "SciFi" {
 				t.Errorf("Document %d has Genre=%s, expected Mystery or SciFi", i, genre)
 			}
@@ -1106,7 +1120,21 @@ func TestWhere_NOTINClause(t *testing.T) {
 
 	// Verify no results have USA or UK
 	for i, doc := range docs {
-		if country, ok := doc["Country"].(string); ok {
+		var country string
+		var ok bool
+		if countryVal, exists := doc["Country"]; exists {
+			if str, isStr := countryVal.(string); isStr {
+				country = str
+				ok = true
+			} else if fv, isFV := countryVal.(models.FieldValue); isFV {
+				if str, isStr := fv.AsString(); isStr {
+					country = str
+					ok = true
+				}
+			}
+		}
+
+		if ok {
 			if country == "USA" || country == "UK" {
 				t.Errorf("Document %d has Country=%s, should be excluded", i, country)
 			}
@@ -1161,6 +1189,16 @@ func TestOrderBy_WithWhereAndLimit(t *testing.T) {
 
 	query := `SELECT TOP 10 * FROM "Books" WHERE Genre == "Fiction" ORDER BY Price ASC`
 	response := executeRealQuery(t, fixture, query)
+
+	// DEBUG: Check what the response actually contains
+	if cmdResp, ok := response.(*server.CommandResponse); ok {
+		t.Logf("DEBUG: ResultCount=%d, StreamDocuments=%d, Result type=%T",
+			cmdResp.ResultCount, len(cmdResp.StreamDocuments), cmdResp.Result)
+		if docs, ok := cmdResp.Result.([]map[string]interface{}); ok {
+			t.Logf("DEBUG: Result slice has %d documents", len(docs))
+		}
+	}
+
 	docs := extractDocuments(t, response)
 
 	if len(docs) != 10 {
@@ -1350,17 +1388,37 @@ func TestWhere_MultipleFields(t *testing.T) {
 
 	// Verify all results match both conditions
 	for i, doc := range docs {
-		country, okCountry := doc["Country"].(string)
+		// Extract Country - handle both string and FieldValue types
+		var country string
+		var okCountry bool
+		if countryVal, exists := doc["Country"]; exists {
+			if str, ok := countryVal.(string); ok {
+				country = str
+				okCountry = true
+			} else if fv, ok := countryVal.(models.FieldValue); ok {
+				if str, ok := fv.AsString(); ok {
+					country = str
+					okCountry = true
+				}
+			}
+		}
 
-		// Handle both int and int64 types for BirthYear
+		// Extract BirthYear - handle int, int64, and FieldValue types
 		var year int64
 		var okYear bool
-		if y, ok := doc["BirthYear"].(int64); ok {
-			year = y
-			okYear = true
-		} else if y, ok := doc["BirthYear"].(int); ok {
-			year = int64(y)
-			okYear = true
+		if birthYearVal, exists := doc["BirthYear"]; exists {
+			if y, ok := birthYearVal.(int64); ok {
+				year = y
+				okYear = true
+			} else if y, ok := birthYearVal.(int); ok {
+				year = int64(y)
+				okYear = true
+			} else if fv, ok := birthYearVal.(models.FieldValue); ok {
+				if y, ok := fv.AsInt(); ok {
+					year = y
+					okYear = true
+				}
+			}
 		}
 
 		if !okCountry || !okYear {
@@ -1529,6 +1587,19 @@ func validateSampledOrdering(t *testing.T, docs []map[string]interface{}, field 
 
 // isOrdered checks if two values are in correct order
 func isOrdered(prev, curr interface{}, ascending bool) bool {
+	// Handle FieldValue type (E2E tests get FieldValue directly, not through JSON marshaling)
+	if fvPrev, ok := prev.(models.FieldValue); ok {
+		if fvCurr, ok := curr.(models.FieldValue); ok {
+			// Use FieldValue's built-in comparison methods
+			if ascending {
+				return fvPrev.CompareLessThanOrEqual(fvCurr)
+			} else {
+				return fvPrev.CompareGreaterThanOrEqual(fvCurr)
+			}
+		}
+		return false
+	}
+
 	// Handle different types
 	switch p := prev.(type) {
 	case int:

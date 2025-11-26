@@ -714,8 +714,6 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 		}
 	}
 
-	cs.logger.Infof("DEBUG DEBUG DEBUG Found %d documents with DatabaseName of '%s' in catalog", len(results), databaseName)
-
 	return &results, nil
 }
 

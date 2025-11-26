@@ -400,7 +400,7 @@ func TestValidateSelectionSet(t *testing.T) {
 
 		err := validator.ValidateSelectionSet(selectionSet)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "must specify fields to return")
+		assert.Contains(t, err.Error(), "selection set cannot be empty")
 	})
 
 	t.Run("Nil selection set", func(t *testing.T) {
@@ -408,7 +408,7 @@ func TestValidateSelectionSet(t *testing.T) {
 
 		err := validator.ValidateSelectionSet(selectionSet)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "must specify fields to return")
+		assert.Contains(t, err.Error(), "selection set cannot be empty")
 	})
 }
 
@@ -441,7 +441,7 @@ func TestValidateInputObject(t *testing.T) {
 
 		err := validator.ValidateInputObject(value)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "must be an object")
+		assert.Contains(t, err.Error(), "expected object")
 	})
 
 	t.Run("Empty object", func(t *testing.T) {
@@ -452,12 +452,12 @@ func TestValidateInputObject(t *testing.T) {
 
 		err := validator.ValidateInputObject(value)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot be empty")
+		assert.Contains(t, err.Error(), "input object is empty")
 	})
 
 	t.Run("Nil value", func(t *testing.T) {
 		err := validator.ValidateInputObject(nil)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "input value is nil")
+		assert.Contains(t, err.Error(), "input object is nil")
 	})
 }

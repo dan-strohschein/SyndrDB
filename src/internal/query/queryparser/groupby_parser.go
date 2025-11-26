@@ -421,9 +421,9 @@ func parseGroupByClause(query string, selectQuery *SelectQueryWithGroupBy, logge
 	afterGroupBy := query[groupByIndex+10:] // +10 for " GROUP BY "
 	upperAfterGroupBy := strings.ToUpper(afterGroupBy)
 
-	// Find end of GROUP BY clause
+	// Find end of GROUP BY clause - stop at HAVING, ORDER BY, LIMIT, or OFFSET
 	endIndex := len(afterGroupBy)
-	for _, keyword := range []string{" HAVING ", " ORDER BY "} {
+	for _, keyword := range []string{" HAVING ", " ORDER BY ", " LIMIT ", " OFFSET "} {
 		if idx := strings.Index(upperAfterGroupBy, keyword); idx != -1 && idx < endIndex {
 			endIndex = idx
 		}
@@ -472,10 +472,12 @@ func parseHavingClause(query string, selectQuery *SelectQueryWithGroupBy, logger
 	afterHaving := query[havingIndex+8:] // +8 for " HAVING "
 	upperAfterHaving := strings.ToUpper(afterHaving)
 
-	// Find end of HAVING clause (before ORDER BY)
+	// Find end of HAVING clause (before ORDER BY, LIMIT, or OFFSET)
 	endIndex := len(afterHaving)
-	if orderByIdx := strings.Index(upperAfterHaving, " ORDER BY "); orderByIdx != -1 {
-		endIndex = orderByIdx
+	for _, keyword := range []string{" ORDER BY ", " LIMIT ", " OFFSET "} {
+		if idx := strings.Index(upperAfterHaving, keyword); idx != -1 && idx < endIndex {
+			endIndex = idx
+		}
 	}
 
 	havingCondition := strings.TrimSpace(afterHaving[:endIndex])
@@ -498,8 +500,19 @@ func parseOrderByClauseForGroupBy(query string, selectQuery *SelectQueryWithGrou
 		return nil
 	}
 
-	// Extract ORDER BY portion
-	orderByPart := strings.TrimSpace(query[orderByIndex+10:]) // +10 for " ORDER BY "
+	// Extract ORDER BY portion (stop at LIMIT or OFFSET)
+	afterOrderBy := query[orderByIndex+10:] // +10 for " ORDER BY "
+	upperAfterOrderBy := strings.ToUpper(afterOrderBy)
+
+	// Find end of ORDER BY clause
+	endIndex := len(afterOrderBy)
+	for _, keyword := range []string{" LIMIT ", " OFFSET "} {
+		if idx := strings.Index(upperAfterOrderBy, keyword); idx != -1 && idx < endIndex {
+			endIndex = idx
+		}
+	}
+
+	orderByPart := strings.TrimSpace(afterOrderBy[:endIndex])
 	if orderByPart == "" {
 		return fmt.Errorf("ORDER BY clause cannot be empty")
 	}

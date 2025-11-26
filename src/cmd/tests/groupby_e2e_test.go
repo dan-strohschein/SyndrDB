@@ -504,8 +504,7 @@ func TestGroupByEdgeCases(t *testing.T) {
 		{
 			name:        "HAVING without GROUP BY",
 			query:       `SELECT COUNT(*) FROM "Users" HAVING COUNT(*) > 5`,
-			expectError: true,
-			errorMsg:    "HAVING requires GROUP BY",
+			expectError: false, // Valid SQL: HAVING on aggregate-only query (treats all rows as one group)
 		},
 		{
 			name:        "GROUP BY with empty result set simulation",

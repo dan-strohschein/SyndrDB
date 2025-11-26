@@ -312,6 +312,30 @@ query_max_memory_mb: 25
 admin_query_max_memory_mb: 25
 
 # ==============================================================================
+# GHOST CLEANUP (AUTOMATIC COMPACTION) CONFIGURATION
+# ==============================================================================
+
+# Enable automatic ghost record cleanup worker (default: true)
+# SQL Server-style background compaction that runs periodically
+ghost_cleanup_enabled: true
+
+# Cleanup cycle interval in seconds (default: 10)
+# How often the ghost cleanup worker scans for records to compact
+ghost_cleanup_interval_seconds: 10
+
+# Batch size for ghost record processing (default: 10000)
+# Maximum number of records to process in a single cleanup cycle
+ghost_cleanup_batch_size: 10000
+
+# Active query pause threshold (default: 500)
+# Cleanup worker pauses when this many queries are active to avoid contention
+ghost_cleanup_pause_threshold: 500
+
+# Tombstone ratio threshold for compaction (default: 0.3)
+# Trigger compaction when tombstones exceed this percentage (30%)
+ghost_cleanup_tombstone_ratio: 0.3
+
+# ==============================================================================
 # TLS/SSL CONFIGURATION (Not yet implemented)
 # ==============================================================================
 

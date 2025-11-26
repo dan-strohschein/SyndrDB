@@ -545,7 +545,6 @@ func (hi *HashIndex) Search(key string) ([]string, error) {
 	//hashValue := calculateHash(keyBytes, hi.metadata.HashSeed)
 	hashValue := jenkinsHash(key, hi.metadata.HashSeed)
 	bucketNum := hi.computeBucket(hashValue)
-	hi.logger.Debugf("DEBUG DEBUG DEBUG Searching key: %s, Hash value: %d, Bucket: %d", key, hashValue, bucketNum)
 	// Determine target bucket
 	//bucketNum := hi.calculateBucket(hashValue)
 

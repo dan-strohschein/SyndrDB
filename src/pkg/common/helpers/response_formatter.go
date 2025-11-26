@@ -151,6 +151,63 @@ func TransformDocumentsToFlatFormatWithProjection(documents map[string]*models.D
 	return flattenedDocs
 }
 
+// TransformSortedDocumentsToFlatFormatWithProjection converts an already-sorted slice of documents
+// to flattened format while PRESERVING the sort order.
+//
+// This function is specifically for ORDER BY queries where the sort order has already been
+// established by the SortNode execution. Unlike TransformDocumentsToFlatFormatWithProjection,
+// this does NOT re-sort by DocumentID, which would destroy the ORDER BY sort.
+//
+// Parameters:
+//   - documents: Slice of documents in pre-sorted order
+//   - selectedFields: List of fields to include (nil/empty = all fields)
+//
+// Returns:
+//   - Array of flattened document objects in the same order as input
+func TransformSortedDocumentsToFlatFormatWithProjection(documents []*models.Document, selectedFields []string) []map[string]interface{} {
+	// ✅ PRE-ALLOCATE TO EXACT SIZE - eliminates slice growth allocations!
+	flattenedDocs := make([]map[string]interface{}, 0, len(documents))
+
+	// Build field filter map for O(1) lookup
+	var fieldFilter map[string]bool
+	hasProjection := len(selectedFields) > 0
+	if hasProjection {
+		fieldFilter = make(map[string]bool, len(selectedFields)) // ✅ Pre-size
+		for _, field := range selectedFields {
+			fieldFilter[field] = true
+		}
+	}
+
+	// Process documents in their current order (already sorted)
+	for _, doc := range documents {
+		// Get a map from the pool (PHASE A OPTIMIZATION)
+		// This eliminates 100+ allocations per query by reusing maps
+		flatDoc := GetDocMap()
+
+		// PHASE G: Always include document metadata using interned string constants
+		flatDoc[FieldDocumentID] = doc.DocumentID
+		flatDoc[FieldCreatedAt] = doc.CreatedAt
+		flatDoc[FieldUpdatedAt] = doc.UpdatedAt
+
+		// Add fields based on projection
+		for fieldName, field := range doc.Fields {
+			// Check if this field should be included
+			// ✅ ZERO-ALLOCATION: Check FieldValue type directly (no boxing)!
+			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(field.Value)
+
+			if shouldInclude {
+				// ✅ ZERO-ALLOCATION: Store FieldValue directly (no boxing)!
+				// JSON marshaling calls FieldValue.MarshalJSON() automatically
+				flatDoc[fieldName] = field.Value
+			}
+		}
+
+		flattenedDocs = append(flattenedDocs, flatDoc)
+	}
+
+	return flattenedDocs
+}
+
 // isNestedRelationshipFieldValue checks if a FieldValue contains a nested relationship
 // Avoids boxing by checking FieldValue type first
 func isNestedRelationshipFieldValue(fv models.FieldValue) bool {

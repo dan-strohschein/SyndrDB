@@ -162,10 +162,11 @@ func (ds *DocumentSorter) compareDocuments(doc1, doc2 *models.Document) bool {
 }
 
 // getFieldValue extracts a field value from a document
-func (ds *DocumentSorter) getFieldValue(doc *models.Document, fieldName string) (interface{}, bool) {
+func (ds *DocumentSorter) getFieldValue(doc *models.Document, fieldName string) (models.FieldValue, bool) {
 	// Handle special DocumentID field
 	if strings.EqualFold(fieldName, "documentid") {
-		return doc.DocumentID, true
+		// Return DocumentID as a String FieldValue
+		return models.NewStringValue(doc.DocumentID), true
 	}
 
 	// Check document fields
@@ -180,7 +181,7 @@ func (ds *DocumentSorter) getFieldValue(doc *models.Document, fieldName string) 
 		}
 	}
 
-	return nil, false
+	return models.FieldValue{}, false
 }
 
 // compareValues compares two values and returns:
@@ -198,6 +199,20 @@ func (ds *DocumentSorter) compareValues(value1, value2 interface{}) int {
 	}
 	if value2 == nil {
 		return 1
+	}
+
+	// Check if both values are FieldValue - use zero-allocation type-aware comparison
+	fv1, ok1 := value1.(models.FieldValue)
+	fv2, ok2 := value2.(models.FieldValue)
+	if ok1 && ok2 {
+		// Use FieldValue's built-in comparison methods for type-aware, zero-allocation comparison
+		if fv1.CompareEqual(fv2) {
+			return 0
+		} else if fv1.CompareLessThan(fv2) {
+			return -1
+		} else {
+			return 1
+		}
 	}
 
 	// Try to compare as same types first
