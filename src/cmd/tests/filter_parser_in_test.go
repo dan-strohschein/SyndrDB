@@ -87,7 +87,7 @@ var (
 // ================================================================================
 
 func TestParseValueList_BasicStringList(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", "\"value1\"", ",", "\"value2\"", ",", "\"value3\"", ")"}
 
 	values, caseInsensitive, originalCount, newPos, err := parseValueList(tokens, 0, logger)
@@ -114,7 +114,7 @@ func TestParseValueList_BasicStringList(t *testing.T) {
 }
 
 func TestParseValueList_CaseInsensitiveWithNPrefix(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"N", "(", "\"ABC\"", ",", "\"def\"", ")"}
 
 	values, caseInsensitive, _, _, err := parseValueList(tokens, 0, logger)
@@ -133,7 +133,7 @@ func TestParseValueList_CaseInsensitiveWithNPrefix(t *testing.T) {
 }
 
 func TestParseValueList_NumericList(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", "1", ",", "2", ",", "3", ",", "10", ")"}
 
 	values, _, originalCount, _, err := parseValueList(tokens, 0, logger)
@@ -161,7 +161,7 @@ func TestParseValueList_NumericList(t *testing.T) {
 }
 
 func TestParseValueList_Deduplication(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", "\"a\"", ",", "\"b\"", ",", "\"a\"", ",", "\"c\"", ",", "\"b\"", ")"}
 
 	values, _, originalCount, _, err := parseValueList(tokens, 0, logger)
@@ -180,7 +180,7 @@ func TestParseValueList_Deduplication(t *testing.T) {
 }
 
 func TestParseValueList_TypeMismatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", "\"string\"", ",", "123", ",", "\"another\"", ")"}
 
 	_, _, _, _, err := parseValueList(tokens, 0, logger)
@@ -195,7 +195,7 @@ func TestParseValueList_TypeMismatch(t *testing.T) {
 }
 
 func TestParseValueList_EmptyList(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", ")"}
 
 	_, _, _, _, err := parseValueList(tokens, 0, logger)
@@ -210,7 +210,7 @@ func TestParseValueList_EmptyList(t *testing.T) {
 }
 
 func TestParseValueList_ExceedsMaximumSize(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	// Create a list with 10,001 UNIQUE values
 	tokens := []string{"("}
@@ -235,7 +235,7 @@ func TestParseValueList_ExceedsMaximumSize(t *testing.T) {
 }
 
 func TestParseValueList_MissingOpenParen(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"\"value1\"", ",", "\"value2\"", ")"}
 
 	_, _, _, _, err := parseValueList(tokens, 0, logger)
@@ -246,7 +246,7 @@ func TestParseValueList_MissingOpenParen(t *testing.T) {
 }
 
 func TestParseValueList_NullValues(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", "\"::SYNDR_NULL::\"", ",", "\"value1\"", ",", "\"::SYNDR_NULL::\"", ")"}
 
 	values, _, originalCount, _, err := parseValueList(tokens, 0, logger)
@@ -270,7 +270,7 @@ func TestParseValueList_NullValues(t *testing.T) {
 // ================================================================================
 
 func TestEvaluateInOperator_BasicMatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "active"
 	clauseValue := []interface{}{"active", "pending", "verified"}
 
@@ -282,7 +282,7 @@ func TestEvaluateInOperator_BasicMatch(t *testing.T) {
 }
 
 func TestEvaluateInOperator_NoMatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "cancelled"
 	clauseValue := []interface{}{"active", "pending", "verified"}
 
@@ -294,7 +294,7 @@ func TestEvaluateInOperator_NoMatch(t *testing.T) {
 }
 
 func TestEvaluateInOperator_NotIn_Match(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "cancelled"
 	clauseValue := []interface{}{"active", "pending", "verified"}
 
@@ -306,7 +306,7 @@ func TestEvaluateInOperator_NotIn_Match(t *testing.T) {
 }
 
 func TestEvaluateInOperator_NotIn_NoMatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "active"
 	clauseValue := []interface{}{"active", "pending", "verified"}
 
@@ -318,7 +318,7 @@ func TestEvaluateInOperator_NotIn_NoMatch(t *testing.T) {
 }
 
 func TestEvaluateInOperator_CaseInsensitive_Match(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "ACTIVE"
 	clauseValue := []interface{}{"active", "pending", "verified"}
 
@@ -330,7 +330,7 @@ func TestEvaluateInOperator_CaseInsensitive_Match(t *testing.T) {
 }
 
 func TestEvaluateInOperator_CaseInsensitive_NoMatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "CANCELLED"
 	clauseValue := []interface{}{"active", "pending", "verified"}
 
@@ -342,7 +342,7 @@ func TestEvaluateInOperator_CaseInsensitive_NoMatch(t *testing.T) {
 }
 
 func TestEvaluateInOperator_NumericMatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := int64(5)
 	clauseValue := []interface{}{int64(1), int64(5), int64(10)}
 
@@ -354,7 +354,7 @@ func TestEvaluateInOperator_NumericMatch(t *testing.T) {
 }
 
 func TestEvaluateInOperator_NullMatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "::SYNDR_NULL::"
 	clauseValue := []interface{}{"value1", "::SYNDR_NULL::", "value2"}
 
@@ -366,7 +366,7 @@ func TestEvaluateInOperator_NullMatch(t *testing.T) {
 }
 
 func TestEvaluateInOperator_NullNoMatch(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "::SYNDR_NULL::"
 	clauseValue := []interface{}{"value1", "value2"}
 
@@ -378,7 +378,7 @@ func TestEvaluateInOperator_NullNoMatch(t *testing.T) {
 }
 
 func TestEvaluateInOperator_InvalidClauseValue(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := "active"
 	clauseValue := "not_a_list" // Invalid - should be []interface{}
 
@@ -395,7 +395,7 @@ func TestEvaluateInOperator_InvalidClauseValue(t *testing.T) {
 
 func TestParseWhereClause_SimpleIn(t *testing.T) {
 	whereClause := `"Status" IN ("active", "pending")`
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	result, err := ParseWhereClause(whereClause)
 
@@ -531,7 +531,7 @@ func TestParseWhereClause_InCombinedWithOtherConditions(t *testing.T) {
 // ================================================================================
 
 func TestInQueryStats_RecordAndRetrieve(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	InitStatsManager(logger)
 
 	// Reset stats to ensure clean state
@@ -568,7 +568,7 @@ func TestInQueryStats_RecordAndRetrieve(t *testing.T) {
 }
 
 func TestInQueryStats_ResetStats(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	InitStatsManager(logger)
 
 	// Record some queries
@@ -592,7 +592,7 @@ func TestInQueryStats_ResetStats(t *testing.T) {
 }
 
 func TestInQueryStats_GetJSON(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	InitStatsManager(logger)
 
 	// Record a query
@@ -618,7 +618,7 @@ func TestInQueryStats_GetJSON(t *testing.T) {
 // ================================================================================
 
 func TestParseValueList_MixedQuotes(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", "\"value1\"", ",", "'value2'", ",", "\"value3\"", ")"}
 
 	values, _, _, _, err := parseValueList(tokens, 0, logger)
@@ -633,7 +633,7 @@ func TestParseValueList_MixedQuotes(t *testing.T) {
 }
 
 func TestParseValueList_FloatValues(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	tokens := []string{"(", "1.5", ",", "2.7", ",", "3.14", ")"}
 
 	values, _, _, _, err := parseValueList(tokens, 0, logger)
@@ -654,7 +654,7 @@ func TestParseValueList_FloatValues(t *testing.T) {
 }
 
 func TestEvaluateInOperator_LargeList(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	// Create a large list (1000 values)
 	clauseValue := make([]interface{}, 1000)
@@ -671,7 +671,7 @@ func TestEvaluateInOperator_LargeList(t *testing.T) {
 }
 
 func TestEvaluateInOperator_CaseInsensitiveNonString(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	fieldValue := int64(5)
 	clauseValue := []interface{}{int64(5), int64(10)}
 

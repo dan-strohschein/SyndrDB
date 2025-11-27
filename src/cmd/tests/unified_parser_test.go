@@ -16,14 +16,14 @@ import (
 )
 
 // Helper function to create a test logger
-func createTestLogger() *zap.SugaredLogger {
+func CreateTestLogger() *zap.SugaredLogger {
 	logger, _ := zap.NewDevelopment()
 	return logger.Sugar()
 }
 
 // TestSimpleQueries tests basic SELECT queries without JOIN or GROUP BY
 func TestSimpleQueries(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -104,7 +104,7 @@ func TestSimpleQueries(t *testing.T) {
 
 // TestJoinQueries tests SELECT queries with JOIN clauses
 func TestJoinQueries(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -173,7 +173,7 @@ func TestJoinQueries(t *testing.T) {
 
 // TestGroupByQueries tests SELECT queries with GROUP BY clauses
 func TestGroupByQueries(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -258,7 +258,7 @@ func TestGroupByQueries(t *testing.T) {
 
 // TestComplexQueries tests queries with multiple advanced features
 func TestComplexQueries(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -310,7 +310,7 @@ func TestComplexQueries(t *testing.T) {
 
 // TestTopAndLimitClauses tests TOP, LIMIT, and OFFSET parsing
 func TestTopAndLimitClauses(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -382,7 +382,7 @@ func TestTopAndLimitClauses(t *testing.T) {
 
 // TestDistinctAndCountOnly tests DISTINCT and COUNT(*) only queries
 func TestDistinctAndCountOnly(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -433,7 +433,7 @@ func TestDistinctAndCountOnly(t *testing.T) {
 
 // TestOrderByParsing tests ORDER BY clause parsing
 func TestOrderByParsing(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -494,7 +494,7 @@ func TestOrderByParsing(t *testing.T) {
 
 // TestValidationErrors tests query validation error cases
 func TestValidationErrors(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -548,7 +548,7 @@ func TestValidationErrors(t *testing.T) {
 
 // TestHelperFunctions tests the helper methods on UnifiedSelectQuery
 func TestHelperFunctions(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	query := `SELECT country, COUNT(*) FROM "Users" 
@@ -602,7 +602,7 @@ func TestHelperFunctions(t *testing.T) {
 
 // TestQueryTypeDetection tests the query type detection logic
 func TestQueryTypeDetection(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -645,7 +645,7 @@ func TestQueryTypeDetection(t *testing.T) {
 
 // BenchmarkSimpleQueryParsing benchmarks simple query parsing performance
 func BenchmarkSimpleQueryParsing(b *testing.B) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	query := `SELECT name, email, age FROM "Users" WHERE age > 18 ORDER BY name ASC LIMIT 100`
@@ -658,7 +658,7 @@ func BenchmarkSimpleQueryParsing(b *testing.B) {
 
 // BenchmarkComplexQueryParsing benchmarks complex query parsing performance
 func BenchmarkComplexQueryParsing(b *testing.B) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	query := `SELECT "Orders"."country", COUNT(*), AVG("Orders"."total") 

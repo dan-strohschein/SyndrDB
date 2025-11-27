@@ -81,7 +81,7 @@ import (
 
 // TestGroupByBasicAggregates tests basic GROUP BY with different aggregate functions
 func TestGroupByBasicAggregates(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -224,7 +224,7 @@ func TestGroupByBasicAggregates(t *testing.T) {
 
 // TestGroupByWithWhere tests GROUP BY queries with WHERE clause
 func TestGroupByWithWhere(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -289,7 +289,7 @@ func TestGroupByWithWhere(t *testing.T) {
 
 // TestGroupByWithHaving tests GROUP BY queries with HAVING clause
 func TestGroupByWithHaving(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -358,7 +358,7 @@ func TestGroupByWithHaving(t *testing.T) {
 
 // TestGroupByWithOrderBy tests GROUP BY queries with ORDER BY clause
 func TestGroupByWithOrderBy(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -424,7 +424,7 @@ func TestGroupByWithOrderBy(t *testing.T) {
 
 // TestGroupByWithLimit tests GROUP BY queries with LIMIT/OFFSET clause
 func TestGroupByWithLimit(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -492,7 +492,7 @@ func TestGroupByWithLimit(t *testing.T) {
 
 // TestGroupByEdgeCases tests edge cases for GROUP BY queries
 func TestGroupByEdgeCases(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	tests := []struct {
@@ -558,7 +558,7 @@ func TestGroupByEdgeCases(t *testing.T) {
 
 // TestGroupByExecutionPipeline tests the complete execution pipeline
 func TestGroupByExecutionPipeline(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	t.Run("Complete pipeline: Parse → Plan → Validate", func(t *testing.T) {
@@ -611,7 +611,7 @@ func TestGroupByExecutionPipeline(t *testing.T) {
 
 // TestGroupByPlannerIntegration tests integration with UnifiedQueryPlanner
 func TestGroupByPlannerIntegration(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	t.Run("Planner creates correct execution tree", func(t *testing.T) {
@@ -674,7 +674,7 @@ func (m *MockScanNode) GetEstimatedRows() int {
 
 // TestGroupByAggregationNodeExecution tests AggregationNode execution with mock data
 func TestGroupByAggregationNodeExecution(t *testing.T) {
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 	defer logger.Sync()
 
 	t.Run("AggregationNode execution with sample data", func(t *testing.T) {

@@ -61,7 +61,7 @@ func createE2ETestBundle(t *testing.T, bundleName string, docCount int) *models.
 // TestE2E_SimpleInQuery tests basic IN query functionality
 func TestE2E_SimpleInQuery(t *testing.T) {
 	bundle := createE2ETestBundle(t, "test_simple_in", 100)
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active", "pending", "verified")`
 	whereGroup, err := ParseWhereClause(whereClause)
@@ -89,7 +89,7 @@ func TestE2E_SimpleInQuery(t *testing.T) {
 // TestE2E_NotInQuery tests NOT IN query functionality
 func TestE2E_NotInQuery(t *testing.T) {
 	bundle := createE2ETestBundle(t, "test_not_in", 50)
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	whereClause := `"Status" NOT IN ("cancelled", "refunded")`
 	whereGroup, err := ParseWhereClause(whereClause)
@@ -114,7 +114,7 @@ func TestE2E_NotInQuery(t *testing.T) {
 // TestE2E_NumericInQuery tests IN with numeric values
 func TestE2E_NumericInQuery(t *testing.T) {
 	bundle := createE2ETestBundle(t, "test_numeric", 100)
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	whereClause := `"CategoryID" IN (1, 2, 5, 10)`
 	whereGroup, err := ParseWhereClause(whereClause)
@@ -147,7 +147,7 @@ func TestE2E_NumericInQuery(t *testing.T) {
 // TestE2E_InWithAndCondition tests IN combined with AND
 func TestE2E_InWithAndCondition(t *testing.T) {
 	bundle := createE2ETestBundle(t, "test_in_and", 100)
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active", "pending") AND "Priority" == 5`
 	whereGroup, err := ParseWhereClause(whereClause)
@@ -169,7 +169,7 @@ func TestE2E_InWithAndCondition(t *testing.T) {
 // TestE2E_MultipleInQueries tests multiple IN clauses
 func TestE2E_MultipleInQueries(t *testing.T) {
 	bundle := createE2ETestBundle(t, "test_multiple_in", 100)
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active", "pending") AND "CategoryID" IN (1, 2, 3)`
 	whereGroup, err := ParseWhereClause(whereClause)
@@ -191,7 +191,7 @@ func TestE2E_MultipleInQueries(t *testing.T) {
 // TestE2E_SingleValueOptimization tests single-value IN optimization
 func TestE2E_SingleValueOptimization(t *testing.T) {
 	bundle := createE2ETestBundle(t, "test_single_opt", 100)
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active")`
 	whereGroup, err := ParseWhereClause(whereClause)
@@ -231,7 +231,7 @@ func TestE2E_LargeInList(t *testing.T) {
 	}
 
 	bundle := createE2ETestBundle(t, "test_large_in", 1000)
-	logger := createTestLogger()
+	logger := CreateTestLogger()
 
 	// Create IN list with 100 values
 	inList := "("
