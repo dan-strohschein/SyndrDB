@@ -36,6 +36,25 @@ import (
 	"go.uber.org/zap"
 )
 
+// QueryPlannerInterface defines the interface for plan cache invalidation
+// This avoids circular dependencies with the server package
+type QueryPlannerInterface interface {
+	InvalidateBundleCache(bundleName string)
+}
+
+// Global query planner reference for plan cache invalidation
+// Set by server during initialization to avoid circular dependencies
+var globalQueryPlanner QueryPlannerInterface
+var plannerMutex sync.RWMutex
+
+// SetQueryPlanner sets the global query planner reference
+// Called by server during initialization
+func SetQueryPlanner(planner QueryPlannerInterface) {
+	plannerMutex.Lock()
+	defer plannerMutex.Unlock()
+	globalQueryPlanner = planner
+}
+
 // IndexUpdate represents a deferred index update operation
 type IndexUpdate struct {
 	BundleName string
@@ -2240,6 +2259,10 @@ func (s *BundleService) ApplyFieldChanges(database *models.Database, bundle *mod
 		}
 	}
 
+	// Invalidate plan cache for schema changes (field additions/removals/modifications)
+	// This ensures queries use fresh plans reflecting the new schema
+	s.invalidatePlanCacheForBundle(bundle.Name)
+
 	// Rebuild affected indexes
 	if len(indexesToRebuild) > 0 {
 		//s.logger.Infof("Rebuilding %d indexes for bundle '%s'", len(indexesToRebuild), bundle.Name)
@@ -2835,6 +2858,23 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", len(keysToDelete), bundleName)
 }
 
+// invalidatePlanCacheForBundle invalidates all cached query plans for a bundle
+// Called on schema changes (index creation, field modifications) to ensure
+// queries use fresh plans reflecting the updated schema
+func (s *BundleService) invalidatePlanCacheForBundle(bundleName string) {
+	plannerMutex.RLock()
+	planner := globalQueryPlanner
+	plannerMutex.RUnlock()
+
+	if planner == nil {
+		return
+	}
+
+	// Invalidate all plans for this bundle
+	planner.InvalidateBundleCache(bundleName)
+	s.logger.Debugf("Invalidated query plan cache for bundle '%s' (schema change)", bundleName)
+}
+
 // min returns the minimum of two integers
 // I should probably redo this in assembly for speed
 func min(a, b int) int {
@@ -3122,6 +3162,10 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 	if err != nil {
 		return fmt.Errorf("bundle '%s' not found", indexCommand.BundleName)
 	}
+
+	// Invalidate plan cache before index creation (schema change)
+	// This ensures queries use fresh plans after index becomes available
+	s.invalidatePlanCacheForBundle(bundle.Name)
 
 	// Create the index based on the command type
 

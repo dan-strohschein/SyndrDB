@@ -114,6 +114,9 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		// STEP 2: Initialize unified query planner with plan caching
 		unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, bundleService)
 
+		// Register planner with bundle service for schema change invalidation
+		bundle.SetQueryPlanner(unifiedPlanner)
+
 		// TODO: Initialize Migration service here
 		// Example:
 		// migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())

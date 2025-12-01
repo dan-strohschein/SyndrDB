@@ -153,7 +153,7 @@ func BenchmarkSelect_PlanCaching_NoCacheControl(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// Invalidate cache before each query to simulate fresh planning
 		if fixture.ServiceManager.UnifiedPlanner != nil {
-			fixture.ServiceManager.UnifiedPlanner.InvalidatePlanCache()
+			fixture.ServiceManager.UnifiedPlanner.InvalidateBundleCache("Authors")
 		}
 
 		result, err := server.CommandDirector(

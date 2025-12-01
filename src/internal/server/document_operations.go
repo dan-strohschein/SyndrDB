@@ -79,9 +79,12 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	bundleMetrics := GetBundleMetrics(database.Name, bundleName)
 	bundleMetrics.BundleDocumentsUpdated.Add(1)
 
-	// STEP 2: Invalidate query plan cache after data mutation
+	// Track write for plan cache invalidation (MongoDB-style write-threshold)
 	if serviceManager.UnifiedPlanner != nil {
-		serviceManager.UnifiedPlanner.InvalidatePlanCache()
+		invalidationMgr := serviceManager.UnifiedPlanner.GetInvalidationManager()
+		if invalidationMgr != nil {
+			invalidationMgr.OnWrite(bundleName, 1)
+		}
 	}
 
 	cmdResponse := &CommandResponse{
@@ -159,9 +162,12 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	bundleMetrics.BundleDocumentsInserted.Add(1)
 	bundleMetrics.BundleCurrentDocCount.Add(1)
 
-	// STEP 2: Invalidate query plan cache after data mutation
+	// Track write for plan cache invalidation (MongoDB-style write-threshold)
 	if serviceManager.UnifiedPlanner != nil {
-		serviceManager.UnifiedPlanner.InvalidatePlanCache()
+		invalidationMgr := serviceManager.UnifiedPlanner.GetInvalidationManager()
+		if invalidationMgr != nil {
+			invalidationMgr.OnWrite(bundleName, 1)
+		}
 	}
 
 	result := fmt.Sprintf("{\"DocumentID\": \"%s\", \"message\": \"Document added successfully to bundle '%s'.\"}", docID, bundleName)

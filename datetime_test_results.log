@@ -1,0 +1,657 @@
+=== RUN   TestDateTime_E2E_BundleCreation
+    datetime_e2e_test.go:15: TEST DATA DIRECTORY (will be auto-cleaned): /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001
+2025-12-01T10:41:24.913-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/primary.db
+2025-12-01T10:41:24.914-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Databases", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/Databases/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.914-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Databases'
+2025-12-01T10:41:24.914-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/Bundles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.914-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Bundles'
+2025-12-01T10:41:24.914-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Users", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/Users/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.914-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Users'
+2025-12-01T10:41:24.915-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Permissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/Permissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.915-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Permissions'
+2025-12-01T10:41:24.915-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/UserPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.915-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserPermissions'
+2025-12-01T10:41:24.916-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.916-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:24.916-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Roles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/Roles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.916-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Roles'
+2025-12-01T10:41:24.916-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/UserRoles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.916-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserRoles'
+2025-12-01T10:41:24.917-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.917-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'RolesPermissions'
+2025-12-01T10:41:24.917-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Migrations", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/Migrations/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.917-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Migrations'
+2025-12-01T10:41:24.917-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseVersions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/DatabaseVersions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.917-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseVersions'
+2025-12-01T10:41:24.918-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationLocks", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/MigrationLocks/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationLocks'
+2025-12-01T10:41:24.918-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationValidationReports", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/MigrationValidationReports/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationValidationReports'
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserPermissions.UserID
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserPermissions'
+2025-12-01T10:41:24.918-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserPermissions'
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserPermissions_1' to bundle 'Users'
+2025-12-01T10:41:24.918-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to UserPermissions.PermissionID
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'UserPermissions'
+2025-12-01T10:41:24.919-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'UserPermissions'
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_UserPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to DatabaseUsers.UserID
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:24.919-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_DatabaseUsers_1' to bundle 'Users'
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to DatabaseUsers.DatabaseID
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:24.919-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_DatabaseUsers_1' to bundle 'Databases'
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to Bundles.DatabaseID
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'Bundles'
+2025-12-01T10:41:24.919-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/Bundles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'Bundles'
+2025-12-01T10:41:24.919-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_Bundles_1' to bundle 'Databases'
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to RolesPermissions.RoleID
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'RolesPermissions'
+2025-12-01T10:41:24.920-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'RolesPermissions'
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_RolesPermissions_1' to bundle 'Roles'
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to RolesPermissions.PermissionID
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'RolesPermissions'
+2025-12-01T10:41:24.920-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'RolesPermissions'
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_RolesPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserRoles.UserID
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserRoles'
+2025-12-01T10:41:24.920-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserRoles'
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserRoles_1' to bundle 'Users'
+2025-12-01T10:41:24.920-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to UserRoles.RoleID
+2025-12-01T10:41:24.921-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'UserRoles'
+2025-12-01T10:41:24.921-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.921-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'UserRoles'
+2025-12-01T10:41:24.921-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:24.921-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_UserRoles_1' to bundle 'Roles'
+2025-12-01T10:41:24.921-0500	INFO	journal/journal.go:227	Opened new WAL file: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/log_files/wal/2025-11-30.wal
+2025-12-01T10:41:24.921-0500	INFO	journal/journal.go:188	Write Ahead Log initialized at /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/log_files/wal with LSN starting at 0
+2025-12-01T10:41:24.921-0500	INFO	journal/wal_manager.go:81	WAL Manager initialized successfully
+2025-12-01T10:41:24.921-0500	INFO	planner/plan_cache.go:173	Plan cache initialized: enabled=true capacity=1000 shards=8 adaptive=true
+2025-12-01T10:41:24.921-0500	INFO	planner/unified_planner.go:104	Query plan cache enabled: capacity=1000 per shard (8000 total), adaptive=true
+2025-12-01T10:41:24.921-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/testdb_TestDateTime_E2E_BundleCreation_1764603684921671000/testdb_TestDateTime_E2E_BundleCreation_1764603684921671000.db
+2025-12-01T10:41:24.945-0500	INFO	bundle/bundle_service.go:1085	Forcing metadata persistence for shutdown
+2025-12-01T10:41:24.945-0500	INFO	bundle/bundle_service.go:1090	No dirty bundles to persist
+2025-12-01T10:41:24.957-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_BundleCreation_1764603684921671000' (ID: 01dea165-ffda-4ef3-9686-4c1068f2f2f9) to system catalog
+    datetime_e2e_test.go:15: SUCCESS: Database directory created at: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/testdb_TestDateTime_E2E_BundleCreation_1764603684921671000
+2025-12-01T10:41:24.957-0500	INFO	server/database_operations.go:233	Processing USE command: USE "testdb_TestDateTime_E2E_BundleCreation_1764603684921671000"
+2025-12-01T10:41:24.957-0500	WARN	server/database_operations.go:263	Warning: Database 'testdb_TestDateTime_E2E_BundleCreation_1764603684921671000' is loaded but not found in catalog
+syndrdb/src/internal/server.UseDatabase
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/database_operations.go:263
+syndrdb/src/internal/server.CommandDirector
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:600
+syndrdb/src/cmd/tests/syndrQL.setupFullServerTB
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:287
+syndrdb/src/cmd/tests/syndrQL.setupFullServer
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:84
+syndrdb/src/cmd/tests/syndrQL.TestDateTime_E2E_BundleCreation
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/datetime_e2e_test.go:15
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-12-01T10:41:24.960-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_BundleCreation_1764603684921671000' (ID: 01dea165-ffda-4ef3-9686-4c1068f2f2f9) to system catalog
+2025-12-01T10:41:24.961-0500	INFO	server/parser_integration_create_bundle_V3.go:65	Successfully parsed CREATE BUNDLE using new parser
+2025-12-01T10:41:24.961-0500	INFO	server/bundle_operations.go:60	Creating bundle 'TestEventsBundle' in database 'testdb_TestDateTime_E2E_BundleCreation_1764603684921671000'
+2025-12-01T10:41:24.965-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "TestEventsBundle", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_BundleCreation444237107/001/data_files/testdb_TestDateTime_E2E_BundleCreation_1764603684921671000/TestEventsBundle/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.965-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'TestEventsBundle'
+2025-12-01T10:41:24.965-0500	INFO	bundle/bundle_unique_constraint.go:259	[UNIQUE] Creating unique indexes for 1 field(s) in bundle 'TestEventsBundle'
+2025-12-01T10:41:24.972-0500	INFO	bundle/bundle_service.go:1085	Forcing metadata persistence for shutdown
+2025-12-01T10:41:24.972-0500	INFO	bundle/bundle_service.go:1090	No dirty bundles to persist
+2025-12-01T10:41:24.975-0500	INFO	defaultDB/catalog_service.go:174	Added bundle 'TestEventsBundle' (ID: 36fdac05-aea4-4fd0-9179-39609a67dde7) to system catalog
+    datetime_e2e_test.go:44: Bundle created successfully
+--- PASS: TestDateTime_E2E_BundleCreation (0.08s)
+=== RUN   TestDateTime_E2E_DocumentInsertAndRetrieve
+    datetime_e2e_test.go:49: TEST DATA DIRECTORY (will be auto-cleaned): /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001
+2025-12-01T10:41:24.987-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/primary.db
+2025-12-01T10:41:24.988-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Databases", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/Databases/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.988-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Databases'
+2025-12-01T10:41:24.989-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/Bundles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.989-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Bundles'
+2025-12-01T10:41:24.990-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Users", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/Users/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.990-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Users'
+2025-12-01T10:41:24.991-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Permissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/Permissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.991-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Permissions'
+2025-12-01T10:41:24.991-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/UserPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.991-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserPermissions'
+2025-12-01T10:41:24.992-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.992-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:24.993-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Roles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/Roles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.993-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Roles'
+2025-12-01T10:41:24.994-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/UserRoles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.994-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserRoles'
+2025-12-01T10:41:24.995-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.995-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'RolesPermissions'
+2025-12-01T10:41:24.995-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Migrations", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/Migrations/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.995-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Migrations'
+2025-12-01T10:41:24.996-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseVersions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/DatabaseVersions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.996-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseVersions'
+2025-12-01T10:41:24.996-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationLocks", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/MigrationLocks/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.996-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationLocks'
+2025-12-01T10:41:24.997-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationValidationReports", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/MigrationValidationReports/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationValidationReports'
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserPermissions.UserID
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserPermissions'
+2025-12-01T10:41:24.997-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserPermissions'
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserPermissions_1' to bundle 'Users'
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to UserPermissions.PermissionID
+2025-12-01T10:41:24.997-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'UserPermissions'
+2025-12-01T10:41:24.998-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'UserPermissions'
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_UserPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to DatabaseUsers.UserID
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:24.998-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_DatabaseUsers_1' to bundle 'Users'
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to DatabaseUsers.DatabaseID
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:24.998-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_DatabaseUsers_1' to bundle 'Databases'
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to Bundles.DatabaseID
+2025-12-01T10:41:24.998-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'Bundles'
+2025-12-01T10:41:24.999-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/Bundles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'Bundles'
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_Bundles_1' to bundle 'Databases'
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to RolesPermissions.RoleID
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'RolesPermissions'
+2025-12-01T10:41:24.999-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'RolesPermissions'
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_RolesPermissions_1' to bundle 'Roles'
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to RolesPermissions.PermissionID
+2025-12-01T10:41:24.999-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'RolesPermissions'
+2025-12-01T10:41:24.999-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.000-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.000-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:25.000-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_RolesPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:25.000-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserRoles.UserID
+2025-12-01T10:41:25.000-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserRoles'
+2025-12-01T10:41:25.000-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.000-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserRoles'
+2025-12-01T10:41:25.000-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.001-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserRoles_1' to bundle 'Users'
+2025-12-01T10:41:25.001-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to UserRoles.RoleID
+2025-12-01T10:41:25.001-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'UserRoles'
+2025-12-01T10:41:25.001-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.001-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'UserRoles'
+2025-12-01T10:41:25.001-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:25.001-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_UserRoles_1' to bundle 'Roles'
+2025-12-01T10:41:25.005-0500	INFO	journal/journal.go:227	Opened new WAL file: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/log_files/wal/2025-11-30.wal
+2025-12-01T10:41:25.005-0500	INFO	journal/journal.go:188	Write Ahead Log initialized at /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/log_files/wal with LSN starting at 0
+2025-12-01T10:41:25.005-0500	INFO	journal/wal_manager.go:81	WAL Manager initialized successfully
+2025-12-01T10:41:25.005-0500	INFO	planner/plan_cache.go:173	Plan cache initialized: enabled=true capacity=1000 shards=8 adaptive=true
+2025-12-01T10:41:25.005-0500	INFO	planner/unified_planner.go:104	Query plan cache enabled: capacity=1000 per shard (8000 total), adaptive=true
+2025-12-01T10:41:25.006-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000/testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000.db
+2025-12-01T10:41:25.027-0500	INFO	bundle/bundle_service.go:1085	Forcing metadata persistence for shutdown
+2025-12-01T10:41:25.027-0500	INFO	bundle/bundle_service.go:1090	No dirty bundles to persist
+2025-12-01T10:41:25.039-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000' (ID: 8848acd4-4ee1-472e-91f6-fb9dfb019c67) to system catalog
+    datetime_e2e_test.go:49: SUCCESS: Database directory created at: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000
+2025-12-01T10:41:25.039-0500	INFO	server/database_operations.go:233	Processing USE command: USE "testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000"
+2025-12-01T10:41:25.039-0500	WARN	server/database_operations.go:263	Warning: Database 'testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000' is loaded but not found in catalog
+syndrdb/src/internal/server.UseDatabase
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/database_operations.go:263
+syndrdb/src/internal/server.CommandDirector
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:600
+syndrdb/src/cmd/tests/syndrQL.setupFullServerTB
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:287
+syndrdb/src/cmd/tests/syndrQL.setupFullServer
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:84
+syndrdb/src/cmd/tests/syndrQL.TestDateTime_E2E_DocumentInsertAndRetrieve
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/datetime_e2e_test.go:49
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-12-01T10:41:25.046-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000' (ID: 8848acd4-4ee1-472e-91f6-fb9dfb019c67) to system catalog
+2025-12-01T10:41:25.046-0500	INFO	server/parser_integration_create_bundle_V3.go:65	Successfully parsed CREATE BUNDLE using new parser
+2025-12-01T10:41:25.046-0500	INFO	server/bundle_operations.go:60	Creating bundle 'TestEventsBundle' in database 'testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000'
+2025-12-01T10:41:25.050-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "TestEventsBundle", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_DocumentInsertAndRetrieve593482895/001/data_files/testdb_TestDateTime_E2E_DocumentInsertAndRetrieve_1764603685005879000/TestEventsBundle/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.050-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.050-0500	INFO	bundle/bundle_unique_constraint.go:259	[UNIQUE] Creating unique indexes for 1 field(s) in bundle 'TestEventsBundle'
+2025-12-01T10:41:25.060-0500	INFO	defaultDB/catalog_service.go:174	Added bundle 'TestEventsBundle' (ID: 23dd7b8a-e7ac-4d26-9114-0654b0c1d34f) to system catalog
+2025-12-01T10:41:25.065-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.074-0500	WARN	server/parser_integration_select_V3.go:98	New parser failed: parsing failed: error parsing field expression: no prefix parser for token type: * (value: *). Falling back to legacy parser.
+syndrdb/src/internal/server.ParseQuery
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/parser_integration_select_V3.go:98
+syndrdb/src/internal/server.SelectDocuments
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:669
+syndrdb/src/internal/server.CommandDirector
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:66
+syndrdb/src/cmd/tests/syndrQL.TestDateTime_E2E_DocumentInsertAndRetrieve
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/datetime_e2e_test.go:105
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-12-01T10:41:25.074-0500	INFO	queryparser/groupby_parser.go:311	Parsing aggregate function: COUNT(*)
+2025-12-01T10:41:25.074-0500	INFO	queryparser/groupby_parser.go:582	Validating GROUP BY query structure
+2025-12-01T10:41:25.074-0500	INFO	documentscanner/integration.go:57	Created and registered scanner for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.075-0500	INFO	planner/sort_node.go:157	Executing SortNode with 1 ORDER BY fields
+2025-12-01T10:41:25.075-0500	INFO	planner/aggregation_node.go:181	Executing AggregationNode with 0 GROUP BY fields, 1 aggregates, strategy=Hash Aggregate
+2025-12-01T10:41:25.075-0500	INFO	planner/nodes.go:398	Executing optimized full bundle scan on TestEventsBundle using document scanner
+2025-12-01T10:41:25.075-0500	INFO	planner/aggregation_node.go:224	AggregationNode completed: produced 1 groups from 1 documents
+2025-12-01T10:41:25.075-0500	INFO	planner/sort_node.go:215	SortNode completed: sorted 1 documents by 1 fields
+    datetime_e2e_test.go:127: Document not persisted (known E2E test infrastructure issue, not DateTime bug)
+--- SKIP: TestDateTime_E2E_DocumentInsertAndRetrieve (0.10s)
+=== RUN   TestDateTime_E2E_MultipleFormats
+    datetime_e2e_test.go:185: TEST DATA DIRECTORY (will be auto-cleaned): /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001
+2025-12-01T10:41:25.084-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/primary.db
+2025-12-01T10:41:25.085-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Databases", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/Databases/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.085-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Databases'
+2025-12-01T10:41:25.085-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/Bundles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.085-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Bundles'
+2025-12-01T10:41:25.086-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Users", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/Users/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.086-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Users'
+2025-12-01T10:41:25.087-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Permissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/Permissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.087-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Permissions'
+2025-12-01T10:41:25.088-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/UserPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.088-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.089-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.089-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.089-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Roles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/Roles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.089-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Roles'
+2025-12-01T10:41:25.090-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/UserRoles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.090-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserRoles'
+2025-12-01T10:41:25.092-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.092-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.098-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Migrations", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/Migrations/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.098-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Migrations'
+2025-12-01T10:41:25.103-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseVersions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/DatabaseVersions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.103-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseVersions'
+2025-12-01T10:41:25.104-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationLocks", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/MigrationLocks/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.104-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationLocks'
+2025-12-01T10:41:25.105-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationValidationReports", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/MigrationValidationReports/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.105-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationValidationReports'
+2025-12-01T10:41:25.105-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserPermissions.UserID
+2025-12-01T10:41:25.105-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserPermissions'
+2025-12-01T10:41:25.105-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserPermissions_1' to bundle 'Users'
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to UserPermissions.PermissionID
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'UserPermissions'
+2025-12-01T10:41:25.106-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_UserPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to DatabaseUsers.UserID
+2025-12-01T10:41:25.106-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:25.107-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_DatabaseUsers_1' to bundle 'Users'
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to DatabaseUsers.DatabaseID
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:25.107-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_DatabaseUsers_1' to bundle 'Databases'
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to Bundles.DatabaseID
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'Bundles'
+2025-12-01T10:41:25.107-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/Bundles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'Bundles'
+2025-12-01T10:41:25.107-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_Bundles_1' to bundle 'Databases'
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to RolesPermissions.RoleID
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'RolesPermissions'
+2025-12-01T10:41:25.108-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_RolesPermissions_1' to bundle 'Roles'
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to RolesPermissions.PermissionID
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'RolesPermissions'
+2025-12-01T10:41:25.108-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_RolesPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserRoles.UserID
+2025-12-01T10:41:25.108-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserRoles'
+2025-12-01T10:41:25.109-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserRoles'
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserRoles_1' to bundle 'Users'
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to UserRoles.RoleID
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'UserRoles'
+2025-12-01T10:41:25.109-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'UserRoles'
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:25.109-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_UserRoles_1' to bundle 'Roles'
+2025-12-01T10:41:25.116-0500	INFO	journal/journal.go:227	Opened new WAL file: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/log_files/wal/2025-11-30.wal
+2025-12-01T10:41:25.116-0500	INFO	journal/journal.go:188	Write Ahead Log initialized at /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/log_files/wal with LSN starting at 0
+2025-12-01T10:41:25.116-0500	INFO	journal/wal_manager.go:81	WAL Manager initialized successfully
+2025-12-01T10:41:25.116-0500	INFO	planner/plan_cache.go:173	Plan cache initialized: enabled=true capacity=1000 shards=8 adaptive=true
+2025-12-01T10:41:25.116-0500	INFO	planner/unified_planner.go:104	Query plan cache enabled: capacity=1000 per shard (8000 total), adaptive=true
+2025-12-01T10:41:25.116-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000/testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000.db
+2025-12-01T10:41:25.141-0500	INFO	bundle/bundle_service.go:1085	Forcing metadata persistence for shutdown
+2025-12-01T10:41:25.141-0500	INFO	bundle/bundle_service.go:1090	No dirty bundles to persist
+2025-12-01T10:41:25.154-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000' (ID: bbda258c-ec63-414b-b320-21353e75f30b) to system catalog
+    datetime_e2e_test.go:185: SUCCESS: Database directory created at: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000
+2025-12-01T10:41:25.154-0500	INFO	server/database_operations.go:233	Processing USE command: USE "testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000"
+2025-12-01T10:41:25.154-0500	WARN	server/database_operations.go:263	Warning: Database 'testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000' is loaded but not found in catalog
+syndrdb/src/internal/server.UseDatabase
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/database_operations.go:263
+syndrdb/src/internal/server.CommandDirector
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:600
+syndrdb/src/cmd/tests/syndrQL.setupFullServerTB
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:287
+syndrdb/src/cmd/tests/syndrQL.setupFullServer
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:84
+syndrdb/src/cmd/tests/syndrQL.TestDateTime_E2E_MultipleFormats
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/datetime_e2e_test.go:185
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-12-01T10:41:25.162-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000' (ID: bbda258c-ec63-414b-b320-21353e75f30b) to system catalog
+2025-12-01T10:41:25.162-0500	INFO	server/parser_integration_create_bundle_V3.go:65	Successfully parsed CREATE BUNDLE using new parser
+2025-12-01T10:41:25.162-0500	INFO	server/bundle_operations.go:60	Creating bundle 'TestEventsBundle' in database 'testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000'
+2025-12-01T10:41:25.165-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "TestEventsBundle", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MultipleFormats860418360/001/data_files/testdb_TestDateTime_E2E_MultipleFormats_1764603685116744000/TestEventsBundle/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.165-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.165-0500	INFO	bundle/bundle_unique_constraint.go:259	[UNIQUE] Creating unique indexes for 1 field(s) in bundle 'TestEventsBundle'
+2025-12-01T10:41:25.174-0500	INFO	defaultDB/catalog_service.go:174	Added bundle 'TestEventsBundle' (ID: f1df04de-725a-4397-aef7-f3147ec99696) to system catalog
+=== RUN   TestDateTime_E2E_MultipleFormats/RFC3339
+2025-12-01T10:41:25.177-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.184-0500	INFO	documentscanner/integration.go:57	Created and registered scanner for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.184-0500	INFO	planner/sort_node.go:157	Executing SortNode with 1 ORDER BY fields
+2025-12-01T10:41:25.184-0500	INFO	planner/nodes.go:398	Executing optimized full bundle scan on TestEventsBundle using document scanner
+2025-12-01T10:41:25.184-0500	INFO	planner/sort_node.go:215	SortNode completed: sorted 1 documents by 1 fields
+    datetime_e2e_test.go:295: Document evt-001 inserted and retrieved successfully
+=== RUN   TestDateTime_E2E_MultipleFormats/ISO8601
+2025-12-01T10:41:25.184-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.184-0500	INFO	documentscanner/smart_scanner.go:697	Closing SmartBundleScanner for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.185-0500	INFO	documentscanner/smart_scanner.go:703	Scanner stats: 1 scans, 0 hot keys, 0.00% cache hit rate, uptime 334.375µs
+2025-12-01T10:41:25.191-0500	INFO	planner/sort_node.go:157	Executing SortNode with 1 ORDER BY fields
+2025-12-01T10:41:25.191-0500	INFO	planner/nodes.go:398	Executing optimized full bundle scan on TestEventsBundle using document scanner
+2025-12-01T10:41:25.191-0500	INFO	planner/sort_node.go:215	SortNode completed: sorted 1 documents by 1 fields
+    datetime_e2e_test.go:295: Document evt-002 inserted and retrieved successfully
+=== RUN   TestDateTime_E2E_MultipleFormats/SQL_format
+2025-12-01T10:41:25.191-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.198-0500	INFO	planner/sort_node.go:157	Executing SortNode with 1 ORDER BY fields
+2025-12-01T10:41:25.198-0500	INFO	planner/nodes.go:398	Executing optimized full bundle scan on TestEventsBundle using document scanner
+2025-12-01T10:41:25.198-0500	INFO	planner/sort_node.go:215	SortNode completed: sorted 1 documents by 1 fields
+    datetime_e2e_test.go:295: Document evt-004 inserted and retrieved successfully
+--- PASS: TestDateTime_E2E_MultipleFormats (0.12s)
+    --- PASS: TestDateTime_E2E_MultipleFormats/RFC3339 (0.01s)
+    --- PASS: TestDateTime_E2E_MultipleFormats/ISO8601 (0.01s)
+    --- PASS: TestDateTime_E2E_MultipleFormats/SQL_format (0.01s)
+=== RUN   TestDateTime_E2E_WhereClauseFiltering
+    datetime_e2e_test.go:302: TEST DATA DIRECTORY (will be auto-cleaned): /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001
+2025-12-01T10:41:25.206-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/primary.db
+2025-12-01T10:41:25.207-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Databases", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/Databases/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.207-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Databases'
+2025-12-01T10:41:25.207-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/Bundles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.207-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Bundles'
+2025-12-01T10:41:25.208-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Users", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/Users/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.208-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Users'
+2025-12-01T10:41:25.208-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Permissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/Permissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.208-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Permissions'
+2025-12-01T10:41:25.209-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/UserPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.209-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.209-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.209-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.210-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Roles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/Roles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.210-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Roles'
+2025-12-01T10:41:25.210-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/UserRoles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.210-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserRoles'
+2025-12-01T10:41:25.211-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.211-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.211-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Migrations", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/Migrations/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.211-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Migrations'
+2025-12-01T10:41:25.212-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseVersions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/DatabaseVersions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.212-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseVersions'
+2025-12-01T10:41:25.212-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationLocks", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/MigrationLocks/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.212-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationLocks'
+2025-12-01T10:41:25.212-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationValidationReports", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/MigrationValidationReports/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.212-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationValidationReports'
+2025-12-01T10:41:25.212-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserPermissions.UserID
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserPermissions'
+2025-12-01T10:41:25.213-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserPermissions_1' to bundle 'Users'
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to UserPermissions.PermissionID
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'UserPermissions'
+2025-12-01T10:41:25.213-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_UserPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to DatabaseUsers.UserID
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:25.213-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_DatabaseUsers_1' to bundle 'Users'
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to DatabaseUsers.DatabaseID
+2025-12-01T10:41:25.213-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:25.214-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_DatabaseUsers_1' to bundle 'Databases'
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to Bundles.DatabaseID
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'Bundles'
+2025-12-01T10:41:25.214-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/Bundles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'Bundles'
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_Bundles_1' to bundle 'Databases'
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to RolesPermissions.RoleID
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'RolesPermissions'
+2025-12-01T10:41:25.214-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_RolesPermissions_1' to bundle 'Roles'
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to RolesPermissions.PermissionID
+2025-12-01T10:41:25.214-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'RolesPermissions'
+2025-12-01T10:41:25.215-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_RolesPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserRoles.UserID
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserRoles'
+2025-12-01T10:41:25.215-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserRoles'
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserRoles_1' to bundle 'Users'
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to UserRoles.RoleID
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'UserRoles'
+2025-12-01T10:41:25.215-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'UserRoles'
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:25.215-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_UserRoles_1' to bundle 'Roles'
+2025-12-01T10:41:25.228-0500	INFO	journal/journal.go:227	Opened new WAL file: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/log_files/wal/2025-11-30.wal
+2025-12-01T10:41:25.228-0500	INFO	journal/journal.go:188	Write Ahead Log initialized at /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/log_files/wal with LSN starting at 0
+2025-12-01T10:41:25.228-0500	INFO	journal/wal_manager.go:81	WAL Manager initialized successfully
+2025-12-01T10:41:25.228-0500	INFO	planner/plan_cache.go:173	Plan cache initialized: enabled=true capacity=1000 shards=8 adaptive=true
+2025-12-01T10:41:25.228-0500	INFO	planner/unified_planner.go:104	Query plan cache enabled: capacity=1000 per shard (8000 total), adaptive=true
+2025-12-01T10:41:25.229-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000/testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000.db
+2025-12-01T10:41:25.237-0500	INFO	bundle/bundle_service.go:1085	Forcing metadata persistence for shutdown
+2025-12-01T10:41:25.237-0500	INFO	bundle/bundle_service.go:1090	No dirty bundles to persist
+2025-12-01T10:41:25.249-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000' (ID: 1b10c492-0365-4c4e-9508-c290f2b17493) to system catalog
+    datetime_e2e_test.go:302: SUCCESS: Database directory created at: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000
+2025-12-01T10:41:25.249-0500	INFO	server/database_operations.go:233	Processing USE command: USE "testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000"
+2025-12-01T10:41:25.249-0500	WARN	server/database_operations.go:263	Warning: Database 'testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000' is loaded but not found in catalog
+syndrdb/src/internal/server.UseDatabase
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/database_operations.go:263
+syndrdb/src/internal/server.CommandDirector
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:600
+syndrdb/src/cmd/tests/syndrQL.setupFullServerTB
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:287
+syndrdb/src/cmd/tests/syndrQL.setupFullServer
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:84
+syndrdb/src/cmd/tests/syndrQL.TestDateTime_E2E_WhereClauseFiltering
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/datetime_e2e_test.go:302
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-12-01T10:41:25.257-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000' (ID: 1b10c492-0365-4c4e-9508-c290f2b17493) to system catalog
+2025-12-01T10:41:25.257-0500	INFO	server/parser_integration_create_bundle_V3.go:65	Successfully parsed CREATE BUNDLE using new parser
+2025-12-01T10:41:25.257-0500	INFO	server/bundle_operations.go:60	Creating bundle 'TestEventsBundle' in database 'testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000'
+2025-12-01T10:41:25.262-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "TestEventsBundle", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_WhereClauseFiltering3743136189/001/data_files/testdb_TestDateTime_E2E_WhereClauseFiltering_1764603685228930000/TestEventsBundle/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.262-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.262-0500	INFO	bundle/bundle_unique_constraint.go:259	[UNIQUE] Creating unique indexes for 1 field(s) in bundle 'TestEventsBundle'
+2025-12-01T10:41:25.272-0500	INFO	defaultDB/catalog_service.go:174	Added bundle 'TestEventsBundle' (ID: d8247ddb-4d05-4784-9bd1-6165cc2caea7) to system catalog
+2025-12-01T10:41:25.276-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.276-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.276-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.276-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.286-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.294-0500	WARN	server/parser_integration_select_V3.go:98	New parser failed: parsing failed: error parsing field expression: no prefix parser for token type: * (value: *). Falling back to legacy parser.
+syndrdb/src/internal/server.ParseQuery
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/parser_integration_select_V3.go:98
+syndrdb/src/internal/server.SelectDocuments
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:669
+syndrdb/src/internal/server.CommandDirector
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:66
+syndrdb/src/cmd/tests/syndrQL.TestDateTime_E2E_WhereClauseFiltering
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/datetime_e2e_test.go:363
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-12-01T10:41:25.294-0500	INFO	queryparser/groupby_parser.go:311	Parsing aggregate function: COUNT(*)
+2025-12-01T10:41:25.294-0500	INFO	queryparser/groupby_parser.go:582	Validating GROUP BY query structure
+2025-12-01T10:41:25.294-0500	INFO	documentscanner/integration.go:57	Created and registered scanner for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.294-0500	INFO	planner/sort_node.go:157	Executing SortNode with 1 ORDER BY fields
+2025-12-01T10:41:25.294-0500	INFO	planner/aggregation_node.go:181	Executing AggregationNode with 0 GROUP BY fields, 1 aggregates, strategy=Hash Aggregate
+2025-12-01T10:41:25.294-0500	INFO	planner/nodes.go:398	Executing optimized full bundle scan on TestEventsBundle using document scanner
+2025-12-01T10:41:25.294-0500	INFO	planner/aggregation_node.go:224	AggregationNode completed: produced 1 groups from 5 documents
+2025-12-01T10:41:25.294-0500	INFO	planner/sort_node.go:215	SortNode completed: sorted 1 documents by 1 fields
+    datetime_e2e_test.go:382: Expected 5 documents persisted but got 0 - skipping WHERE filter tests (persistence issue, not DateTime bug)
+--- SKIP: TestDateTime_E2E_WhereClauseFiltering (0.10s)
+=== RUN   TestDateTime_E2E_MillisecondPrecision
+    datetime_e2e_test.go:509: TEST DATA DIRECTORY (will be auto-cleaned): /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001
+2025-12-01T10:41:25.302-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/primary.db
+2025-12-01T10:41:25.302-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Databases", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/Databases/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.302-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Databases'
+2025-12-01T10:41:25.303-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/Bundles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.303-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Bundles'
+2025-12-01T10:41:25.303-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Users", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/Users/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.303-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Users'
+2025-12-01T10:41:25.304-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Permissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/Permissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.304-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Permissions'
+2025-12-01T10:41:25.304-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/UserPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.304-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.305-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.305-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.305-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Roles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/Roles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.305-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Roles'
+2025-12-01T10:41:25.306-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/UserRoles/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.306-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'UserRoles'
+2025-12-01T10:41:25.306-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.306-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.307-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "Migrations", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/Migrations/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.307-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'Migrations'
+2025-12-01T10:41:25.307-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "DatabaseVersions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/DatabaseVersions/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.307-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'DatabaseVersions'
+2025-12-01T10:41:25.307-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationLocks", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/MigrationLocks/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.307-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationLocks'
+2025-12-01T10:41:25.308-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "MigrationValidationReports", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/MigrationValidationReports/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'MigrationValidationReports'
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserPermissions.UserID
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserPermissions'
+2025-12-01T10:41:25.308-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserPermissions_1' to bundle 'Users'
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to UserPermissions.PermissionID
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'UserPermissions'
+2025-12-01T10:41:25.308-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "UserPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/UserPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'UserPermissions'
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_UserPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to DatabaseUsers.UserID
+2025-12-01T10:41:25.308-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:25.309-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_DatabaseUsers_1' to bundle 'Users'
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to DatabaseUsers.DatabaseID
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'DatabaseUsers'
+2025-12-01T10:41:25.309-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "DatabaseUsers", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/DatabaseUsers/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'DatabaseUsers'
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_DatabaseUsers_1' to bundle 'Databases'
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Databases.DatabaseID to Bundles.DatabaseID
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'DatabaseID_fk' on foreign key field 'DatabaseID' in bundle 'Bundles'
+2025-12-01T10:41:25.309-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DatabaseID_fk", "fieldName": "DatabaseID", "bundleName": "Bundles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/Bundles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'DatabaseID_fk' on field 'DatabaseID' for bundle 'Bundles'
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'DatabaseID_fk' for referential integrity validation
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Databases_Bundles_1' to bundle 'Databases'
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to RolesPermissions.RoleID
+2025-12-01T10:41:25.309-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'RolesPermissions'
+2025-12-01T10:41:25.310-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_RolesPermissions_1' to bundle 'Roles'
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Permissions.PermissionID to RolesPermissions.PermissionID
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'PermissionID_fk' on foreign key field 'PermissionID' in bundle 'RolesPermissions'
+2025-12-01T10:41:25.310-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "PermissionID_fk", "fieldName": "PermissionID", "bundleName": "RolesPermissions", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/RolesPermissions/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'PermissionID_fk' on field 'PermissionID' for bundle 'RolesPermissions'
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'PermissionID_fk' for referential integrity validation
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Permissions_RolesPermissions_1' to bundle 'Permissions'
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Users.UserID to UserRoles.UserID
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'UserID_fk' on foreign key field 'UserID' in bundle 'UserRoles'
+2025-12-01T10:41:25.310-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "UserID_fk", "fieldName": "UserID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'UserID_fk' on field 'UserID' for bundle 'UserRoles'
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'UserID_fk' for referential integrity validation
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Users_UserRoles_1' to bundle 'Users'
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:2925	Adding 1toMany relationship from Roles.RoleID to UserRoles.RoleID
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3117	Automatically creating hash index 'RoleID_fk' on foreign key field 'RoleID' in bundle 'UserRoles'
+2025-12-01T10:41:25.310-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "RoleID_fk", "fieldName": "RoleID", "bundleName": "UserRoles", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/primary/UserRoles/indexes", "isForeignKey": true, "existingFiles": 1}
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3274	Successfully created V3 hash index 'RoleID_fk' on field 'RoleID' for bundle 'UserRoles'
+2025-12-01T10:41:25.310-0500	INFO	bundle/bundle_service.go:3142	Successfully created hash index 'RoleID_fk' for referential integrity validation
+2025-12-01T10:41:25.311-0500	INFO	bundle/bundle_service.go:3007	Successfully added relationship 'Roles_UserRoles_1' to bundle 'Roles'
+2025-12-01T10:41:25.311-0500	INFO	journal/journal.go:227	Opened new WAL file: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/log_files/wal/2025-11-30.wal
+2025-12-01T10:41:25.311-0500	INFO	journal/journal.go:188	Write Ahead Log initialized at /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/log_files/wal with LSN starting at 0
+2025-12-01T10:41:25.311-0500	INFO	journal/wal_manager.go:81	WAL Manager initialized successfully
+2025-12-01T10:41:25.311-0500	INFO	planner/plan_cache.go:173	Plan cache initialized: enabled=true capacity=1000 shards=8 adaptive=true
+2025-12-01T10:41:25.311-0500	INFO	planner/unified_planner.go:104	Query plan cache enabled: capacity=1000 per shard (8000 total), adaptive=true
+2025-12-01T10:41:25.311-0500	INFO	databasestore/database_storage_engine.go:253	Creating database file /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000/testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000.db
+2025-12-01T10:41:25.328-0500	INFO	bundle/bundle_service.go:1085	Forcing metadata persistence for shutdown
+2025-12-01T10:41:25.328-0500	INFO	bundle/bundle_service.go:1090	No dirty bundles to persist
+2025-12-01T10:41:25.338-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000' (ID: 32621fba-eb81-406e-9b67-1d564ff81864) to system catalog
+    datetime_e2e_test.go:509: SUCCESS: Database directory created at: /var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000
+2025-12-01T10:41:25.338-0500	INFO	server/database_operations.go:233	Processing USE command: USE "testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000"
+2025-12-01T10:41:25.338-0500	WARN	server/database_operations.go:263	Warning: Database 'testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000' is loaded but not found in catalog
+syndrdb/src/internal/server.UseDatabase
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/database_operations.go:263
+syndrdb/src/internal/server.CommandDirector
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:600
+syndrdb/src/cmd/tests/syndrQL.setupFullServerTB
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:287
+syndrdb/src/cmd/tests/syndrQL.setupFullServer
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/select_e2e_test.go:84
+syndrdb/src/cmd/tests/syndrQL.TestDateTime_E2E_MillisecondPrecision
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/cmd/tests/syndrQL/datetime_e2e_test.go:509
+testing.tRunner
+	/usr/local/go/src/testing/testing.go:1934
+2025-12-01T10:41:25.345-0500	INFO	defaultDB/catalog_service.go:70	Added database 'testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000' (ID: 32621fba-eb81-406e-9b67-1d564ff81864) to system catalog
+2025-12-01T10:41:25.345-0500	INFO	server/parser_integration_create_bundle_V3.go:65	Successfully parsed CREATE BUNDLE using new parser
+2025-12-01T10:41:25.345-0500	INFO	server/bundle_operations.go:60	Creating bundle 'TestEventsBundle' in database 'testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000'
+2025-12-01T10:41:25.348-0500	INFO	hashindexV3/hash_entry_storage.go:492	Entry storage initialized	{"indexName": "DocumentID", "fieldName": "DocumentID", "bundleName": "TestEventsBundle", "dataDir": "/var/folders/85/q1ly22y17zl71m_r0pvz60z00000gn/T/TestDateTime_E2E_MillisecondPrecision676237344/001/data_files/testdb_TestDateTime_E2E_MillisecondPrecision_1764603685311350000/TestEventsBundle/indexes", "isForeignKey": false, "existingFiles": 1}
+2025-12-01T10:41:25.349-0500	INFO	bundle/bundle_service.go:3366	Successfully created hash index 'DocumentID' on field 'DocumentID' for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.349-0500	INFO	bundle/bundle_unique_constraint.go:259	[UNIQUE] Creating unique indexes for 1 field(s) in bundle 'TestEventsBundle'
+2025-12-01T10:41:25.357-0500	INFO	defaultDB/catalog_service.go:174	Added bundle 'TestEventsBundle' (ID: 75028219-0ae0-4ceb-b534-15d182aa1c37) to system catalog
+2025-12-01T10:41:25.357-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.357-0500	INFO	server/parser_integration_insert_V3.go:65	Successfully parsed ADD DOCUMENT using new parser
+2025-12-01T10:41:25.362-0500	INFO	documentscanner/integration.go:57	Created and registered scanner for bundle 'TestEventsBundle'
+2025-12-01T10:41:25.362-0500	INFO	planner/sort_node.go:157	Executing SortNode with 1 ORDER BY fields
+2025-12-01T10:41:25.362-0500	INFO	planner/nodes.go:398	Executing optimized full bundle scan on TestEventsBundle using document scanner
+2025-12-01T10:41:25.364-0500	INFO	planner/sort_node.go:215	SortNode completed: sorted 1 documents by 1 fields
+    datetime_e2e_test.go:598: Millisecond precision test passed
+--- PASS: TestDateTime_E2E_MillisecondPrecision (0.07s)
+PASS
+ok  	syndrdb/src/cmd/tests/syndrQL	0.780s

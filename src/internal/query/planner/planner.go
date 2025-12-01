@@ -19,11 +19,12 @@ type BundleServiceInterface interface {
 	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
 }
 
-// ExecutionNode represents a node in the execution plan tree
+// ExecutionNode represents a node in the execution tree
 type ExecutionNode interface {
 	Execute(ctx context.Context) (map[string]*models.Document, error)
 	GetCost() float64
 	GetEstimatedRows() int
+	EstimateMemoryUsage() int64 // Memory estimation for cache sizing
 }
 
 // ExecutionPlan represents the complete execution plan
@@ -33,6 +34,10 @@ type ExecutionPlan struct {
 	EstimatedRows int
 	IndexesUsed   []string
 	Logger        *zap.SugaredLogger
+
+	// Cached memory estimation (computed once at plan creation)
+	// NOTE: ExecutionPlan is immutable after creation - if plan mutation support added, must recompute
+	estimatedMemoryBytes int64
 }
 
 // ScanType represents different types of scans

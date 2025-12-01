@@ -217,10 +217,13 @@ type GlobalServerMetrics struct {
 	// ============================================================================
 	// PLAN B: Query Plan Cache Enhanced Metrics
 	// ============================================================================
-	QueryPlanCacheEvictions  atomic.Uint64 // Number of cache evictions due to capacity limits
-	QueryPlanCacheSize       atomic.Uint64 // Current number of entries in plan cache
-	QueryPlanCacheMaxSize    atomic.Uint64 // Maximum capacity of plan cache
-	QueryPlanCacheMemoryUsed atomic.Uint64 // Approximate memory used by plan cache (bytes)
+	QueryPlanCacheEvictions     atomic.Uint64 // Number of cache evictions due to capacity limits
+	QueryPlanCacheInvalidations atomic.Uint64 // Number of cache invalidations due to writes/schema changes
+	QueryPlanCacheStaleServes   atomic.Uint64 // Number of stale plans served during rebuild window
+	QueryPlanCacheMemoryBytes   atomic.Uint64 // Estimated memory used by plan cache (bytes)
+	QueryPlanCacheSize          atomic.Uint64 // DEPRECATED: Use QueryPlanCacheHits + QueryPlanCacheMisses
+	QueryPlanCacheMaxSize       atomic.Uint64 // DEPRECATED: Use settings.PlanCacheCapacity
+	QueryPlanCacheMemoryUsed    atomic.Uint64 // DEPRECATED: Use QueryPlanCacheMemoryBytes
 
 	// ============================================================================
 	// PLAN C: Compaction Duration Histograms & Trigger Tracking
@@ -401,10 +404,10 @@ func (gsm *GlobalServerMetrics) GetMetrics() map[string]uint64 {
 		"btree_index_delete_errors": gsm.BTreeIndexDeleteErrors.Load(),
 
 		// Plan B: Query Plan Cache Enhanced Metrics
-		"query_plan_cache_evictions":   gsm.QueryPlanCacheEvictions.Load(),
-		"query_plan_cache_size":        gsm.QueryPlanCacheSize.Load(),
-		"query_plan_cache_max_size":    gsm.QueryPlanCacheMaxSize.Load(),
-		"query_plan_cache_memory_used": gsm.QueryPlanCacheMemoryUsed.Load(),
+		"query_plan_cache_evictions":     gsm.QueryPlanCacheEvictions.Load(),
+		"query_plan_cache_invalidations": gsm.QueryPlanCacheInvalidations.Load(),
+		"query_plan_cache_stale_serves":  gsm.QueryPlanCacheStaleServes.Load(),
+		"query_plan_cache_memory_bytes":  gsm.QueryPlanCacheMemoryBytes.Load(),
 
 		// Plan C: Compaction Duration Histograms
 		"compaction_duration_lt_100ms": gsm.CompactionDurationLt100ms.Load(),

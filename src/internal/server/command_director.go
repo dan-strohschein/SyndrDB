@@ -531,9 +531,12 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 			bundleMetrics.BundleDocumentsDeleted.Add(uint64(len(docIDs)))
 			bundleMetrics.BundleCurrentDocCount.Add(^uint64(len(docIDs) - 1)) // Atomic subtract
 
-			// STEP 2: Invalidate query plan cache after data mutation
+			// Track write for plan cache invalidation (MongoDB-style write-threshold)
 			if serviceManager.UnifiedPlanner != nil {
-				serviceManager.UnifiedPlanner.InvalidatePlanCache()
+				invalidationMgr := serviceManager.UnifiedPlanner.GetInvalidationManager()
+				if invalidationMgr != nil {
+					invalidationMgr.OnWrite(bundleName, len(docIDs))
+				}
 			}
 
 			// STEP 6: Format success response with deleted document IDs

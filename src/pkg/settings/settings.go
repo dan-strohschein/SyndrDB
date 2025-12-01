@@ -154,6 +154,16 @@ type Arguments struct {
 	GhostCleanupBatchSize       int     `yaml:"ghost_cleanup_batch_size"`       // Batch size for processing (default: 10000)
 	GhostCleanupPauseThreshold  int     `yaml:"ghost_cleanup_pause_threshold"`  // Active query pause threshold (default: 500)
 	GhostCleanupTombstoneRatio  float64 `yaml:"ghost_cleanup_tombstone_ratio"`  // Tombstone ratio threshold for compaction (default: 0.3)
+
+	// Query Plan Cache Configuration
+	PlanCacheEnabled           bool `yaml:"plan_cache_enabled"`             // Enable query plan caching (default: true)
+	PlanCacheCapacity          int  `yaml:"plan_cache_capacity"`            // Maximum cached plans per shard (default: 1000, 8 shards = 8000 total)
+	PlanCacheAdaptivePlanning  bool `yaml:"plan_cache_adaptive_planning"`   // Enable PostgreSQL-style adaptive planning (default: true)
+	PlanCacheCustomThreshold   int  `yaml:"plan_cache_custom_threshold"`    // Number of custom executions before generic plan evaluation (default: 5)
+	PlanCacheWriteThreshold    int  `yaml:"plan_cache_write_threshold"`     // Write count threshold for invalidation (default: 1000)
+	PlanCacheStaleServeSeconds int  `yaml:"plan_cache_stale_serve_seconds"` // Stale plan serving window in seconds (default: 60)
+	// TODO: I will add PlanCacheMemoryLimitMB for memory-aware eviction when memory profiling reveals actual cache memory usage
+	// TODO: I will add PlanCacheCompressionEnabled for large plan compression when we have plans exceeding 10KB
 }
 
 var (
@@ -272,6 +282,14 @@ func GetSettings() *Arguments {
 			GhostCleanupBatchSize:       10000, // Process up to 10,000 records per cycle
 			GhostCleanupPauseThreshold:  500,   // Pause when 500+ queries active
 			GhostCleanupTombstoneRatio:  0.3,   // Compact when 30% tombstones
+
+			// Query Plan Cache Defaults
+			PlanCacheEnabled:           true, // Enable plan caching by default
+			PlanCacheCapacity:          1000, // 1000 plans per shard (8000 total)
+			PlanCacheAdaptivePlanning:  true, // Enable adaptive planning
+			PlanCacheCustomThreshold:   5,    // 5 custom executions before generic plan
+			PlanCacheWriteThreshold:    1000, // Invalidate after 1000 writes
+			PlanCacheStaleServeSeconds: 60,   // 60 second stale serving window
 		}
 	})
 	return instance
