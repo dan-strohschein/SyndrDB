@@ -52,7 +52,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			}
 
 			// Update the document in the bundle
-			return serviceManager.BundleService.UpdateDocumentInBundle(bundle, docCommand)
+			return serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand)
 		})
 
 		// METRICS: Track transaction outcome
@@ -64,7 +64,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
-		err = serviceManager.BundleService.UpdateDocumentInBundle(bundle, docCommand)
+		err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand)
 	}
 
 	if err != nil {

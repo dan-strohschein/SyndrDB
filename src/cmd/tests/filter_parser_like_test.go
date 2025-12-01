@@ -69,7 +69,6 @@ import (
 	"strings"
 	"testing"
 
-	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 
 	"go.uber.org/zap"
@@ -97,20 +96,20 @@ func createLikeTestLogger() *zap.SugaredLogger {
 }
 
 // createTestDocument creates a test document with the given field values
-func createTestDocument(fields map[string]interface{}) *models.Document {
-	doc := &models.Document{
-		DocumentID: "test-doc-123",
-		Fields:     make(map[string]models.Field),
-	}
+// func createTestDocument(fields map[string]interface{}) *models.Document {
+// 	doc := &models.Document{
+// 		DocumentID: "test-doc-123",
+// 		Fields:     make(map[string]models.Field),
+// 	}
 
-	for name, value := range fields {
-		doc.Fields[name] = models.Field{
-			Value: value.(models.FieldValue),
-		}
-	}
+// 	for name, value := range fields {
+// 		doc.Fields[name] = models.Field{
+// 			Value: value.(models.FieldValue),
+// 		}
+// 	}
 
-	return doc
-}
+// 	return doc
+// }
 
 // ================================================================================
 // PARSE LIKE PATTERN TESTS

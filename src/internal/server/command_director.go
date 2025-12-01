@@ -202,7 +202,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 			// Apply field changes if present
 			if len(bndleCommand.Changes) > 0 {
 				logger.Infof("Applying %d field changes to bundle '%s'", len(bndleCommand.Changes), bundle.Name)
-				err := serviceManager.BundleService.ApplyFieldChanges(bundle, bndleCommand.Changes)
+				err := serviceManager.BundleService.ApplyFieldChanges(database, bundle, bndleCommand.Changes)
 				if err != nil {
 					return &result, fmt.Errorf("failed to apply field changes: %w", err)
 				}
@@ -380,8 +380,33 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 			// DROP BUNDLE "<BUNDLE_NAME>"
 			// Use new parser if feature flag is enabled, fallback to legacy on error
 
-			// PLACEHOLDER: This is where the actual deletion will happen
-			// serviceManager.BundleService.RemoveBundle(database, bundleName)
+			// TODO This is repeated code, but I want both delete and drop to work
+			// the same. This should get wrapped up in a common function
+			bundleCmd, err := parseDropBundle(command, logger)
+			if err != nil {
+				return &result, fmt.Errorf("error parsing DROP BUNDLE command: %v", err)
+			}
+
+			// Validate bundle name
+			bundleName := bundleCmd.BundleName
+			if bundleName == "" {
+				return &result, fmt.Errorf("bundle name cannot be empty in DROP BUNDLE command")
+			}
+
+			// Validate that the bundle exists
+			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+			if err != nil {
+				return &result, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+			}
+
+			// Validate that there are no documents in the bundle
+			// We will eventually need to add a force option to make this work even with documents
+			// but that will also require a more granular permission setup and careful handling
+			if bundle.Documents != nil && len(*bundle.Documents) > 0 {
+				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
+			}
+
+			return DeleteBundleCommand(bundleCmd, logger, serviceManager, database)
 		case "documents":
 			// DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>
 			// Parse the document command first to get bundle name and WHERE clause

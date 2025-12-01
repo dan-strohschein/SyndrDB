@@ -158,12 +158,12 @@ func (e *MutationExecutor) ExecuteUpdate(updateCommand *models.DocumentUpdateCom
 			// - Filtering documents by WHERE clause
 			// - Validating update fields
 			// - Updating indexes (BTree/Hash) for modified fields
-			return e.serviceManager.BundleService.UpdateDocumentInBundle(bundle, updateCommand)
+			return e.serviceManager.BundleService.UpdateDocumentInBundle(e.database, bundle, updateCommand)
 		})
 	} else {
 		// Fallback to direct execution if WAL is not available
 		e.logger.Warn("WAL Manager not available, executing without transaction logging")
-		err = e.serviceManager.BundleService.UpdateDocumentInBundle(bundle, updateCommand)
+		err = e.serviceManager.BundleService.UpdateDocumentInBundle(e.database, bundle, updateCommand)
 	}
 
 	if err != nil {

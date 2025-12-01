@@ -161,6 +161,9 @@ func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLog
 
 			return err
 		})
+		if err != nil {
+			return nil, err
+		}
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")

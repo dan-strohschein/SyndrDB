@@ -2185,7 +2185,7 @@ func (s *BundleService) updateBundleInSystemCatalog(database *models.Database, o
 // ApplyFieldChanges applies ADD/REMOVE/MODIFY field operations to a bundle.
 // It validates constraints, performs type conversions, and rebuilds indexes as needed.
 // This method handles the actual schema modification for UPDATE BUNDLE commands.
-func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []models.FieldChange) error {
+func (s *BundleService) ApplyFieldChanges(database *models.Database, bundle *models.Bundle, changes []models.FieldChange) error {
 	if bundle == nil {
 		return fmt.Errorf("bundle is nil")
 	}
@@ -2209,7 +2209,7 @@ func (s *BundleService) ApplyFieldChanges(bundle *models.Bundle, changes []model
 			if fieldName == "" {
 				fieldName = change.NewField.Name
 			}
-			if err := s.applyRemoveField(bundle, fieldName); err != nil {
+			if err := s.applyRemoveField(database, bundle, fieldName); err != nil {
 				return fmt.Errorf("failed to remove field '%s': %w", fieldName, err)
 			}
 			// Track if this field was indexed
@@ -2309,7 +2309,7 @@ func (s *BundleService) applyAddField(bundle *models.Bundle, change *models.Fiel
 }
 
 // applyRemoveField removes a field from the bundle schema and all documents
-func (s *BundleService) applyRemoveField(bundle *models.Bundle, fieldName string) error {
+func (s *BundleService) applyRemoveField(database *models.Database, bundle *models.Bundle, fieldName string) error {
 	// Validate field exists
 	if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]; !exists {
 		return fmt.Errorf("field '%s' does not exist in bundle '%s'", fieldName, bundle.Name)
@@ -2318,6 +2318,16 @@ func (s *BundleService) applyRemoveField(bundle *models.Bundle, fieldName string
 	// Cannot remove DocumentID field
 	if fieldName == "DocumentID" {
 		return fmt.Errorf("cannot remove system field 'DocumentID'")
+	}
+
+	// === VALIDATE REFERENTIAL INTEGRITY ===
+	// Check if this field is used in any relationships (both directions)
+	bundleCache := make(map[string]*models.Bundle)
+	validator := NewReferentialIntegrityValidator(s, s.logger)
+	violation := validator.ValidateFieldRemoval(database, bundle, fieldName, bundleCache)
+	if violation != nil {
+		s.logger.Warnf("[REFINT] %s | Suggested: %s", violation.Error(), violation.SuggestedAction)
+		return fmt.Errorf("%s", violation.Error())
 	}
 
 	// Remove from schema
@@ -2354,6 +2364,17 @@ func (s *BundleService) applyModifyField(bundle *models.Bundle, change *models.F
 		if _, exists := bundle.DocumentStructure.FieldDefinitions[newFieldName]; exists {
 			return fmt.Errorf("cannot rename field '%s' to '%s': target field name already exists", oldFieldName, newFieldName)
 		}
+
+		// === VALIDATE REFERENTIAL INTEGRITY ===
+		// Check if this field rename would break any relationships
+		bundleCache := make(map[string]*models.Bundle)
+		validator := NewReferentialIntegrityValidator(s, s.logger)
+		violation := validator.ValidateFieldRename(nil, bundle, oldFieldName, newFieldName, bundleCache)
+		if violation != nil {
+			s.logger.Warnf("[REFINT] %s | Suggested: %s", violation.Error(), violation.SuggestedAction)
+			return fmt.Errorf("%s", violation.Error())
+		}
+
 		s.logger.Debugf("Renaming field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
 	}
 
@@ -3822,7 +3843,7 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 
 	return nil
 }
-func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) error {
+func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) error {
 	args := settings.GetSettings()
 	// Check if the bundle exists
 	if bundle == nil {
@@ -3842,6 +3863,8 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 		return fmt.Errorf("failed to filter documents: %w", err)
 	}
 
+	s.logger.Infof("[REFINT-DEBUG] After GetDocumentsByFilter: found %d documents matching WHERE '%s'", len(filteredDocs), docCommand.WhereClause)
+
 	if args.Debug {
 		s.logger.Infof("Updating %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
 	}
@@ -3850,6 +3873,54 @@ func (s *BundleService) UpdateDocumentInBundle(bundle *models.Bundle, docCommand
 	err = s.validateUpdateFields(bundle, docCommand)
 	if err != nil {
 		return fmt.Errorf("document field validation failed: %w", err)
+	}
+
+	// ==========  VALIDATE REFERENTIAL INTEGRITY FOR FOREIGN KEY UPDATES ==========
+	// Check if any fields being updated are foreign keys and validate the new values
+	// Note: Must check BOTH outgoing relationships (stored in bundle.Relationships)
+	//       AND incoming relationships (stored in other bundles pointing to this one)
+	s.logger.Infof("[REFINT-UPDATE] Starting FK validation for bundle '%s', database=%v, bundle.Relationships=%d",
+		bundle.Name, database != nil, len(bundle.Relationships))
+	if len(bundle.Relationships) > 0 || database != nil {
+		// Create operation-scoped validation cache to avoid redundant hash lookups
+		validationCache := make(map[string]*ForeignKeyViolation)
+		bundleCache := make(map[string]*models.Bundle)
+
+		// Create validator
+		validator := NewReferentialIntegrityValidator(s, s.logger)
+
+		// Build map of field updates for easier lookup
+		updateFields := make(map[string]string)
+		for _, kv := range docCommand.Fields {
+			if strValue, ok := kv.Value.(string); ok {
+				updateFields[kv.Key] = strValue
+			}
+		}
+		s.logger.Infof("[REFINT-UPDATE] Update fields: %v", updateFields)
+
+		// Identify which fields are foreign keys (checks BOTH directions)
+		foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, updateFields, bundleCache)
+		s.logger.Infof("[REFINT-UPDATE] Identified %d FK fields being updated", len(foreignKeyUpdates))
+
+		if len(foreignKeyUpdates) > 0 {
+			// Extract document IDs being updated
+			docIDs := make([]string, len(filteredDocs))
+			for i, doc := range filteredDocs {
+				docIDs[i] = doc.DocumentID
+			}
+			s.logger.Infof("[REFINT-UPDATE] Validating %d document(s): %v", len(docIDs), docIDs)
+
+			// Perform batch validation with caching
+			violation := validator.batchValidateForeignKeys(bundle, docIDs, foreignKeyUpdates, validationCache)
+			if violation != nil {
+				// Log the violation at WARN level with suggested action
+				s.logger.Warnf("[REFINT] %s | Suggested: %s", violation.Error(), violation.SuggestedAction)
+				return fmt.Errorf("%s", violation.Error())
+			}
+
+			s.logger.Debugf("[REFINT] Foreign key validation passed for %d document(s) updating %d FK field(s)",
+				len(docIDs), len(foreignKeyUpdates))
+		}
 	}
 
 	for _, doc := range filteredDocs {
@@ -4773,6 +4844,11 @@ func (s *BundleService) validateUpdateFields(bundle *models.Bundle, docCommand *
 		fieldName := docCommand.Fields[i].Key
 		fieldValue := docCommand.Fields[i].Value
 
+		// REFERENTIAL INTEGRITY: DocumentID is read-only and cannot be updated
+		if fieldName == "DocumentID" {
+			return fmt.Errorf("cannot update DocumentID: this is a read-only system field")
+		}
+
 		// Check if the field exists in bundle field definitions
 		fieldDef, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]
 		if !exists {
@@ -5144,6 +5220,23 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 	if err != nil {
 		return fmt.Errorf("failed to find bundle '%s' for deletion: %w", bundleCommand.BundleName, err)
 	}
+
+	// === VALIDATE REFERENTIAL INTEGRITY ===
+	// Check if any other bundles have relationships pointing to this bundle
+	validator := NewReferentialIntegrityValidator(s, s.logger)
+
+	// Create operation-scoped cache
+	bundleCache := make(map[string]*models.Bundle)
+
+	violations := validator.ValidateIncomingRelationships(database, bundle.Name, bundleCache)
+	if len(violations) > 0 {
+		// Log first violation and return error
+		firstViolation := violations[0]
+		s.logger.Warnf("[REFINT] Found %d incoming relationship(s) that would be orphaned by deleting bundle '%s'",
+			len(violations), bundle.Name)
+		return fmt.Errorf("%s", firstViolation.Error())
+	}
+
 	// Close all indexes for this bundle
 	if bundle.Indexes != nil {
 		for indexName, indexRef := range bundle.Indexes {

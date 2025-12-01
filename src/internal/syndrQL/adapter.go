@@ -519,11 +519,11 @@ func (a *UpdateStatementAdapter) serializeWhereGroup(whereGroup *queryparser.Whe
 	for _, clause := range whereGroup.Clauses {
 		// Format: Field Operator Value
 		valueStr := fmt.Sprintf("%v", clause.Value)
-		// Quote string values
+		// Quote string values with DOUBLE quotes (parser expects double quotes, not single)
 		if _, ok := clause.Value.(string); ok {
-			valueStr = fmt.Sprintf("'%s'", clause.Value)
+			valueStr = fmt.Sprintf("\"%s\"", clause.Value)
 		}
-		conditionStr := fmt.Sprintf("%s %s %s", clause.Field, clause.Operator, valueStr)
+		conditionStr := fmt.Sprintf("\"%s\" %s %s", clause.Field, clause.Operator, valueStr)
 		parts = append(parts, conditionStr)
 	}
 
@@ -616,7 +616,7 @@ func (a *DeleteStatementAdapter) serializeWhereGroup(whereGroup *queryparser.Whe
 		valueStr := fmt.Sprintf("%v", clause.Value)
 		// Quote string values
 		if _, ok := clause.Value.(string); ok {
-			valueStr = fmt.Sprintf("'%s'", clause.Value)
+			valueStr = fmt.Sprintf("\"%s\"", clause.Value)
 		}
 		conditionStr := fmt.Sprintf("%s %s %s", clause.Field, clause.Operator, valueStr)
 		parts = append(parts, conditionStr)

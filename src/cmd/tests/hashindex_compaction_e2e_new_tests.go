@@ -22,7 +22,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
+
+func CreateLocalTestLogger() *zap.SugaredLogger {
+	logger, _ := zap.NewDevelopment()
+	return logger.Sugar()
+}
 
 // TestCompaction_ConcurrentReadWriteDuringCompaction verifies that the system can handle
 // work correctly while compaction is running in the background
@@ -30,7 +36,7 @@ func TestCompaction_ConcurrentReadWriteDuringCompaction(t *testing.T) {
 	testDir := filepath.Join("./temp_files", "compaction_concurrent_operations")
 	defer os.RemoveAll(testDir)
 
-	logger := CreateTestLogger()
+	logger := CreateLocalTestLogger()
 
 	config := hashindexV3.IndexConfig{
 		IndexName:         "TestIndex",
@@ -139,7 +145,7 @@ func TestCompaction_LargeScale(t *testing.T) {
 	testDir := filepath.Join("./temp_files", "compaction_large_scale")
 	defer os.RemoveAll(testDir)
 
-	logger := CreateTestLogger()
+	logger := CreateLocalTestLogger()
 
 	config := hashindexV3.IndexConfig{
 		IndexName:         "TestIndex",
@@ -222,7 +228,7 @@ func TestCompaction_MetricsTracking(t *testing.T) {
 	testDir := filepath.Join("./temp_files", "compaction_metrics")
 	defer os.RemoveAll(testDir)
 
-	logger := CreateTestLogger()
+	logger := CreateLocalTestLogger()
 
 	config := hashindexV3.IndexConfig{
 		IndexName:         "TestIndex",
@@ -291,7 +297,7 @@ func TestCompaction_ErrorRecovery(t *testing.T) {
 	testDir := filepath.Join("./temp_files", "compaction_error_recovery")
 	defer os.RemoveAll(testDir)
 
-	logger := CreateTestLogger()
+	logger := CreateLocalTestLogger()
 
 	config := hashindexV3.IndexConfig{
 		IndexName:         "TestIndex",
@@ -368,7 +374,7 @@ func TestCompaction_BundleIntegration(t *testing.T) {
 	testDir := filepath.Join("./temp_files", "compaction_bundle_integration")
 	defer os.RemoveAll(testDir)
 
-	logger := CreateTestLogger()
+	logger := CreateLocalTestLogger()
 
 	// Create test directory
 	err := os.MkdirAll(testDir, 0755)

@@ -400,7 +400,7 @@ func TestSchemaVersioning(t *testing.T) {
 	}
 
 	// Apply change 1
-	bundleService.ApplyFieldChanges(bundle, []models.FieldChange{
+	bundleService.ApplyFieldChanges(db, bundle, []models.FieldChange{
 		{ChangeType: "ADD", NewField: models.FieldDefinition{Name: "email", Type: "string"}},
 	})
 
@@ -411,7 +411,7 @@ func TestSchemaVersioning(t *testing.T) {
 	}
 
 	// Apply change 2
-	bundleService.ApplyFieldChanges(bundle, []models.FieldChange{
+	bundleService.ApplyFieldChanges(db, bundle, []models.FieldChange{
 		{ChangeType: "ADD", NewField: models.FieldDefinition{Name: "age", Type: "int"}},
 	})
 

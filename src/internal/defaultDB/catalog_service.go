@@ -260,7 +260,7 @@ func (cs *CatalogService) UpdateBundleNameInCatalog(bundleID, databaseName, oldN
 	}
 
 	// Use UpdateDocumentInBundle to persist changes
-	if err := cs.bundleService.UpdateDocumentInBundle(bundlesBundle, updateCommand); err != nil {
+	if err := cs.bundleService.UpdateDocumentInBundle(primaryDB, bundlesBundle, updateCommand); err != nil {
 		return fmt.Errorf("failed to update bundle in catalog: %w", err)
 	}
 
@@ -354,7 +354,7 @@ func (cs *CatalogService) UpdateDatabaseNameInCatalog(databaseID, oldName, newNa
 	}
 
 	// Use UpdateDocumentInBundle to persist changes
-	if err := cs.bundleService.UpdateDocumentInBundle(databasesBundle, updateCommand); err != nil {
+	if err := cs.bundleService.UpdateDocumentInBundle(primaryDB, databasesBundle, updateCommand); err != nil {
 		return fmt.Errorf("failed to update database in catalog: %w", err)
 	}
 
