@@ -287,6 +287,30 @@ func (wm *WALManager) LogIndexDrop(txID, bundleName, indexName string, indexData
 	return nil
 }
 
+// LogRelationshipDrop logs a relationship drop operation to the WAL.
+// This records the removal of a relationship metadata from a bundle, preserving the transaction
+// history for future crash recovery and audit purposes.
+// Parameters:
+//   - txID: The transaction ID this operation belongs to
+//   - bundleName: The name of the source bundle containing the relationship
+//   - relationshipName: The name of the relationship being dropped (e.g., "Authors_Books_1")
+//
+// Returns: error if marshaling fails or WAL logging fails
+// TODO: Implement replay logic for DROP_RELATIONSHIP operations in WAL recovery process to restore database state after crash
+func (wm *WALManager) LogRelationshipDrop(txID, bundleName, relationshipName string) error {
+	metadata := fmt.Sprintf(`{"bundle_name":"%s","relationship_name":"%s","operation":"DROP_RELATIONSHIP"}`, bundleName, relationshipName)
+
+	// Log the relationship drop operation
+	// We use empty beforeData and afterData as this is a metadata-only operation
+	err := wm.wal.LogOperation(txID, OpDropRelationship, bundleName, relationshipName, "", "", metadata)
+	if err != nil {
+		return fmt.Errorf("failed to log relationship drop: %w", err)
+	}
+
+	wm.logger.Debugf("Logged relationship drop: bundle=%s, relationship=%s, tx=%s", bundleName, relationshipName, txID)
+	return nil
+}
+
 // ExecuteWithLogging executes a function within a transaction with automatic logging
 func (wm *WALManager) ExecuteWithLogging(operation func(txID string) error) error {
 	txID, err := wm.BeginTransaction()

@@ -163,6 +163,61 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 		case "bundle":
 			normalizedCommand := helpers.NormalizeCommand(command) // Normalize once
 			//logger.Infof("DEBUG COMMAND IS :: %s", normalizedCommand)
+
+			// Check if this is a DROP RELATIONSHIP command - handle it separately without going through new parser
+			if strings.Contains(strings.ToUpper(normalizedCommand), "DROP RELATIONSHIP") {
+				// Parse DROP RELATIONSHIP command using old parser
+				RelationshipCommand, err := bndle.ParseDropRelationshipCommand(normalizedCommand)
+				if err != nil {
+					return &result, err
+				}
+
+				// Get the bundle
+				bundle, err := serviceManager.BundleService.GetBundleByName(database, RelationshipCommand.BundleName)
+				if err != nil {
+					return &result, fmt.Errorf("bundle '%s' not found: %w", RelationshipCommand.BundleName, err)
+				}
+
+				// Execute DROP RELATIONSHIP with WAL logging if available
+				if serviceManager.WALManager != nil {
+					// METRICS: Track transaction begin
+					globalMetrics := GetGlobalServerMetrics()
+					globalMetrics.TransactionsBegun.Add(1)
+
+					err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+						// Log the relationship drop before execution
+						// TODO: Implement WAL replay logic for relationship drops in LogRelationshipDrop method for crash recovery
+						err := serviceManager.WALManager.LogRelationshipDrop(txID, RelationshipCommand.BundleName, RelationshipCommand.Name)
+						if err != nil {
+							return fmt.Errorf("failed to log relationship drop: %w", err)
+						}
+
+						// Remove the relationship from the bundle
+						return serviceManager.BundleService.RemoveRelationshipFromBundle(bundle, RelationshipCommand.Name)
+					})
+
+					// METRICS: Track transaction outcome
+					if err != nil {
+						globalMetrics.TransactionsRolledBack.Add(1)
+						return &result, fmt.Errorf("failed to drop relationship: %w", err)
+					} else {
+						globalMetrics.TransactionsCommitted.Add(1)
+					}
+				} else {
+					// Fallback to direct execution if WAL is not available
+					logger.Warn("WAL Manager not available, executing without transaction logging")
+					err = serviceManager.BundleService.RemoveRelationshipFromBundle(bundle, RelationshipCommand.Name)
+					if err != nil {
+						return &result, fmt.Errorf("failed to drop relationship: %w", err)
+					}
+				}
+
+				// Build success message
+				result = fmt.Sprintf("Relationship '%s' removed from bundle '%s'.", RelationshipCommand.Name, bundle.Name)
+				return &result, nil
+			}
+
+			// Parse UPDATE BUNDLE using new parser (for field changes, renames, etc.)
 			// bndleCommand, err := bndle.ParseUpdateBundleCommand(normalizedCommand, logger)
 			// if err != nil {
 			// 	return &result, err
@@ -215,29 +270,26 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 				}
 			}
 
-			// Handle relationship changes if present
+			// Handle relationship changes if present (ADD RELATIONSHIP or CREATE RELATIONSHIP)
 			if bndleCommand.HasRelationshipCommands {
-				//TODO : Don't assume its always a create, it could be to update a relationship
 				var RelationshipCommand *models.RelationshipCommand
 				var err error
 
-				// Check if it's the new ADD RELATIONSHIP syntax
 				if strings.Contains(strings.ToUpper(normalizedCommand), "ADD RELATIONSHIP") {
+					// Check if it's the new ADD RELATIONSHIP syntax
 					RelationshipCommand, err = bndle.ParseAddRelationshipCommand(normalizedCommand)
+					if err != nil {
+						return &result, err
+					}
+					AddRelationshipToBundle(serviceManager, database, bndleCommand.BundleName, RelationshipCommand)
 				} else {
 					// Use the old CREATE RELATIONSHIP syntax
 					RelationshipCommand, err = bndle.ParseCreateRelationshipCommand(normalizedCommand)
+					if err != nil {
+						return &result, err
+					}
+					AddRelationshipToBundle(serviceManager, database, bndleCommand.BundleName, RelationshipCommand)
 				}
-
-				if err != nil {
-					return &result, err
-				}
-				// CREATE RELATIONSHIP "RELATIONSHIP_NAME"
-				// FROM BUNDLE "BUNDLE_NAME"
-				// WITH FIELD "<FIELDNAME>"
-				// TO BUNDLE "BUNDLE_NAME"
-				// WITH FIELD "<FIELDNAME>"
-				AddRelationshipToBundle(serviceManager, database, bndleCommand.BundleName, RelationshipCommand)
 			}
 
 		case "documents":

@@ -55,6 +55,7 @@ const (
 	OpDeleteBundle
 	OpCreateIndex
 	OpDropIndex
+	OpDropRelationship
 	OpBeginTx
 	OpCommitTx
 	OpRollbackTx

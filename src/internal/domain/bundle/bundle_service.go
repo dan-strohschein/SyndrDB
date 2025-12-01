@@ -2968,6 +2968,56 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 	return nil
 }
 
+// RemoveRelationshipFromBundle removes a relationship from a bundle by name.
+// This is a metadata-only operation that removes the relationship definition while preserving
+// all fields, indexes, and document data. The foreign key fields remain in place on both
+// the source and destination bundles, and any auto-created indexes are also preserved.
+// Parameters:
+//   - bundle: The source bundle containing the relationship to remove
+//   - relationshipName: The name of the relationship to remove (e.g., "Authors_Books_1")
+//
+// Returns: error if bundle is nil, relationship name is empty, relationship not found, or persistence fails
+func (s *BundleService) RemoveRelationshipFromBundle(bundle *models.Bundle, relationshipName string) error {
+	// Validate inputs following SyndrDB defensive programming practices
+	if bundle == nil {
+		return fmt.Errorf("bundle is nil")
+	}
+	if relationshipName == "" {
+		return fmt.Errorf("relationship name cannot be empty")
+	}
+
+	// Check if relationship exists in bundle
+	relationship, exists := bundle.Relationships[relationshipName]
+	if !exists {
+		return fmt.Errorf("relationship '%s' not found on bundle '%s'", relationshipName, bundle.Name)
+	}
+
+	s.logger.Infof("Removing relationship '%s' (type: %s) from bundle '%s' to bundle '%s'",
+		relationshipName, relationship.RelationshipType, bundle.Name, relationship.DestinationBundle)
+
+	// Remove relationship from bundle metadata (metadata-only operation)
+	delete(bundle.Relationships, relationshipName)
+
+	// TODO: Add CASCADE option to remove auto-created foreign key fields and hash indexes when dropping relationship
+	// TODO: Add RESTRICT validation to block drop if documents contain non-null foreign key values
+
+	// Persist bundle metadata changes to disk
+	err := s.store.UpdateBundleFile(bundle.Database, bundle)
+	if err != nil {
+		return fmt.Errorf("failed to update bundle file: %w", err)
+	}
+
+	// Regenerate GraphQL schema for source bundle only (follows AddRelationshipToBundle pattern)
+	// This reuses the regenerateGraphQLSchema method for consistency.
+	if err := s.regenerateGraphQLSchema(bundle); err != nil {
+		s.logger.Warnf("[GraphQL] Failed to regenerate schema for bundle '%s' after relationship drop: %v", bundle.Name, err)
+		// Continue despite GraphQL error - schema regeneration is non-critical
+	}
+
+	s.logger.Infof("Successfully removed relationship '%s' from bundle '%s'", relationshipName, bundle.Name)
+	return nil
+}
+
 // generateRelationshipName generates a unique relationship name with counter
 // TODO This should go into a seperate bundle utilities file
 func (s *BundleService) generateRelationshipName(bundle *models.Bundle, sourceBundle, destinationBundle string) string {

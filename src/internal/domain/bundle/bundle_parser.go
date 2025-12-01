@@ -895,3 +895,35 @@ func ParseAddRelationshipCommand(command string) (*models.RelationshipCommand, e
 		TargetBundleName: destinationBundle,
 	}, nil
 }
+
+// ParseDropRelationshipCommand parses a DROP RELATIONSHIP command and returns a RelationshipCommand.
+// This function handles the syntax: UPDATE BUNDLE "<BUNDLE_NAME>" DROP RELATIONSHIP "<RELATIONSHIP_NAME>";
+// The operation removes only the relationship metadata from the bundle, preserving all fields and indexes.
+// Syntax: UPDATE BUNDLE "BundleName" DROP RELATIONSHIP "RelationshipName";
+// Returns: RelationshipCommand with CommandType="DROP", BundleName, and Name populated
+func ParseDropRelationshipCommand(command string) (*models.RelationshipCommand, error) {
+	command = strings.TrimSuffix(command, ";")
+
+	// Regular expression to parse the DROP RELATIONSHIP command
+	// UPDATE BUNDLE "<BundleName>" DROP RELATIONSHIP "<RelationshipName>"
+	dropRelationshipRegex := regexp.MustCompile(`UPDATE\s+BUNDLE\s+"([^"]+)"\s+DROP\s+RELATIONSHIP\s+"([^"]+)"`)
+
+	matches := dropRelationshipRegex.FindStringSubmatch(command)
+	if len(matches) < 3 {
+		return nil, fmt.Errorf("invalid DROP RELATIONSHIP command syntax. Expected: UPDATE BUNDLE \"<BundleName>\" DROP RELATIONSHIP \"<RelationshipName>\"")
+	}
+
+	bundleName := matches[1]
+	relationshipName := matches[2]
+
+	// Validate relationship name is not empty
+	if relationshipName == "" {
+		return nil, fmt.Errorf("relationship name cannot be empty in DROP RELATIONSHIP command")
+	}
+
+	return &models.RelationshipCommand{
+		CommandType: "DROP",
+		BundleName:  bundleName,
+		Name:        relationshipName,
+	}, nil
+}
