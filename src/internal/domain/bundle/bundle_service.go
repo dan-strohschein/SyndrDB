@@ -1209,6 +1209,65 @@ func (s *BundleService) GetBulkModeStatus() (bool, int, float64) {
 	return s.bulkModeEnabled, s.operationCount, opsPerSecond
 }
 
+// FlushAllIndexesToDisk forces all loaded hash and BTree indexes to flush their memtables to disk
+// This ensures durability even for indexes that don't have pending updates in the buffer
+// CRITICAL for test reliability and data consistency after bulk operations
+func (s *BundleService) FlushAllIndexesToDisk() error {
+	var errors []error
+	flushedCount := 0
+
+	// Iterate through all bundles and flush their loaded indexes
+	for bundleName, bundle := range s.bundleMetadata {
+		if bundle.Indexes == nil {
+			continue
+		}
+
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexInstance == nil {
+				continue // Index not loaded in memory, skip
+			}
+
+			switch indexRef.IndexType {
+			case "hash":
+				// Flush hash index V3 (LSM-style)
+				if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndexV3); ok {
+					if err := hashIndex.Flush(); err != nil {
+						errorMsg := fmt.Sprintf("failed to flush hash index '%s' in bundle '%s': %v", indexName, bundleName, err)
+						s.logger.Warnf(errorMsg)
+						errors = append(errors, fmt.Errorf(errorMsg))
+					} else {
+						flushedCount++
+						s.logger.Debugf("Flushed hash index '%s' in bundle '%s' to disk", indexName, bundleName)
+					}
+				}
+
+			case "btree":
+				// Flush BTree index if it has a Flush method
+				if btreeIndex, ok := indexRef.IndexInstance.(interface{ Flush() error }); ok {
+					if err := btreeIndex.Flush(); err != nil {
+						errorMsg := fmt.Sprintf("failed to flush BTree index '%s' in bundle '%s': %v", indexName, bundleName, err)
+						s.logger.Warnf(errorMsg)
+						errors = append(errors, fmt.Errorf(errorMsg))
+					} else {
+						flushedCount++
+						s.logger.Debugf("Flushed BTree index '%s' in bundle '%s' to disk", indexName, bundleName)
+					}
+				}
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to flush %d of %d indexes: %v", len(errors), flushedCount+len(errors), errors)
+	}
+
+	if flushedCount > 0 {
+		s.logger.Infof("Successfully flushed %d indexes to disk", flushedCount)
+	}
+
+	return nil
+}
+
 // FlushAllBuffers forces immediate flush of all pending operations to disk
 // This should be called at the end of bulk operations to ensure data persistence
 func (s *BundleService) FlushAllBuffers() error {
@@ -1221,17 +1280,26 @@ func (s *BundleService) FlushAllBuffers() error {
 		s.flushIndexUpdates()
 	}
 
-	// 2. Force metadata persistence regardless of thresholds
+	// 2. CRITICAL: Flush all loaded indexes to ensure memtables are persisted
+	// This is essential for test reliability and durability after document operations
+	if err := s.FlushAllIndexesToDisk(); err != nil {
+		s.logger.Warnf("Failed to flush all indexes to disk: %v", err)
+		errors = append(errors, err)
+	}
+
+	// 3. Force metadata persistence regardless of thresholds
 	if len(s.metadataUpdateBuffer) > 0 {
 
 		s.ForceMetadataPersistence()
 	}
 
-	// 3. Sync any file system buffers
+	// 4. Sync any file system buffers
 	// Note: Individual stores should handle their own sync operations
-	s.store.FlushAllWriteBuffers()
+	if err := s.store.FlushAllWriteBuffers(); err != nil {
+		errors = append(errors, err)
+	}
 
-	// 4. Log completion
+	// 5. Log completion
 	if len(errors) > 0 {
 		s.logger.Errorf("FLUSH: Completed with %d errors", len(errors))
 		return fmt.Errorf("flush completed with %d errors", len(errors))

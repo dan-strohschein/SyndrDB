@@ -273,6 +273,13 @@ type GlobalServerMetrics struct {
 	// Orphaned File Cleanup
 	OrphanedTempFilesRemoved atomic.Uint64 // Number of orphaned .compact.tmp files cleaned up
 
+	// ============================================================================
+	// DateTime Parsing Metrics
+	// ============================================================================
+	DateTimeParseAttemptsTotal atomic.Uint64 // Total datetime parse attempts
+	DateTimeParseSuccessTotal  atomic.Uint64 // Successful datetime parses
+	DateTimeParseErrorsTotal   atomic.Uint64 // Failed datetime parse attempts
+
 	// TODO: MVCC Future - Add version store metrics when transaction support (BEGIN/COMMIT/ROLLBACK) is implemented:
 	// VersionStoreSize atomic.Uint64              // Total bytes consumed by old row versions in version store
 	// VersionStorePurgedBytes atomic.Uint64       // Total bytes reclaimed by version cleanup
@@ -446,6 +453,11 @@ func (gsm *GlobalServerMetrics) GetMetrics() map[string]uint64 {
 		"compaction_triggered_ghost":      gsm.CompactionTriggeredGhost.Load(),
 		"compaction_blocked_by_lock":      gsm.CompactionBlockedByLock.Load(),
 		"orphaned_temp_files_removed":     gsm.OrphanedTempFilesRemoved.Load(),
+
+		// DateTime Parsing Metrics
+		"datetime_parse_attempts_total": gsm.DateTimeParseAttemptsTotal.Load(),
+		"datetime_parse_success_total":  gsm.DateTimeParseSuccessTotal.Load(),
+		"datetime_parse_errors_total":   gsm.DateTimeParseErrorsTotal.Load(),
 	}
 }
 

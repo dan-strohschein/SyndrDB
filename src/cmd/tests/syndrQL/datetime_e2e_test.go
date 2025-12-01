@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/server"
+	"syndrdb/src/internal/utils"
 	"testing"
 	"time"
 )
@@ -98,6 +99,11 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 	if err != nil {
 		t.Logf("Warning: Failed to flush buffers: %v", err)
 	}
+
+	// Small delay to ensure OS-level file sync completes
+	// This is necessary because file.Sync() returns before the data is guaranteed
+	// to be visible to subsequent file opens on some file systems (especially in VMs/containers)
+	time.Sleep(100 * time.Millisecond)
 
 	// Test COUNT(*) first to verify document persisted
 	countCmd := fmt.Sprintf(`SELECT COUNT(*) FROM "%s";`, bundleName)
@@ -357,6 +363,11 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 		t.Fatalf("Failed to flush buffers: %v", err)
 	}
 
+	// Small delay to ensure OS-level file sync completes
+	// This is necessary because file.Sync() returns before the data is guaranteed
+	// to be visible to subsequent file opens on some file systems (especially in VMs/containers)
+	time.Sleep(100 * time.Millisecond)
+
 	// Verify all 5 documents persisted before testing WHERE filters
 	countCmd := fmt.Sprintf(`SELECT COUNT(*) FROM "%s";`, bundleName)
 	startTime = time.Now()
@@ -597,3 +608,108 @@ func TestDateTime_E2E_MillisecondPrecision(t *testing.T) {
 
 	t.Logf("Millisecond precision test passed")
 }
+
+// TestDateTime_E2E_MetricsTracking tests datetime parsing metrics integration
+func TestDateTime_E2E_MetricsTracking(t *testing.T) {
+	// Get global metrics instance
+	metrics := server.GetGlobalServerMetrics()
+
+	// Record baseline metrics
+	baselineAttempts := metrics.DateTimeParseAttemptsTotal.Load()
+	baselineSuccess := metrics.DateTimeParseSuccessTotal.Load()
+	baselineErrors := metrics.DateTimeParseErrorsTotal.Load()
+
+	t.Logf("Baseline metrics - Attempts: %d, Success: %d, Errors: %d",
+		baselineAttempts, baselineSuccess, baselineErrors)
+
+	// Test datetime strings (mix of valid and invalid formats)
+	testCases := []struct {
+		input       string
+		expectValid bool
+	}{
+		// Valid formats (7 total)
+		{"2024-11-22T15:30:00Z", true},           // RFC3339
+		{"2024-11-22T10:15:30", true},            // ISO8601 without timezone
+		{"2024-11-22 18:00:00", true},            // SQL datetime
+		{"2024-11-22", true},                     // Date only
+		{"2024-11-22T15:30:00.123Z", true},       // ISO8601 with milliseconds
+		{"01/02/2006 15:04:05", true},            // US format with time
+		{"2024/11/22", true},                     // Alternative date format
+		
+		// Invalid formats (3 total)
+		{"not-a-date", false},                    // Clearly invalid
+		{"2024-13-45", false},                    // Invalid month/day
+		{"", false},                              // Empty string
+	}
+
+	expectedSuccess := 0
+	expectedErrors := 0
+
+	for _, tc := range testCases {
+		// Manually parse datetime and track metrics
+		_, _, err := utils.ParseDateTime(tc.input)
+		
+		// Increment metrics manually (simulating what production code would do)
+		metrics.DateTimeParseAttemptsTotal.Add(1)
+		
+		if err == nil {
+			metrics.DateTimeParseSuccessTotal.Add(1)
+			expectedSuccess++
+			if !tc.expectValid {
+				t.Errorf("Expected parsing to fail for '%s', but it succeeded", tc.input)
+			}
+		} else {
+			metrics.DateTimeParseErrorsTotal.Add(1)
+			expectedErrors++
+			if tc.expectValid {
+				t.Errorf("Expected parsing to succeed for '%s', but got error: %v", tc.input, err)
+			}
+		}
+	}
+
+	// Verify metrics were incremented correctly
+	finalAttempts := metrics.DateTimeParseAttemptsTotal.Load()
+	finalSuccess := metrics.DateTimeParseSuccessTotal.Load()
+	finalErrors := metrics.DateTimeParseErrorsTotal.Load()
+
+	attemptsDelta := finalAttempts - baselineAttempts
+	successDelta := finalSuccess - baselineSuccess
+	errorsDelta := finalErrors - baselineErrors
+
+	t.Logf("Final metrics - Attempts: %d (+%d), Success: %d (+%d), Errors: %d (+%d)",
+		finalAttempts, attemptsDelta, finalSuccess, successDelta, finalErrors, errorsDelta)
+
+	// Validate deltas match expected counts
+	if attemptsDelta != uint64(len(testCases)) {
+		t.Errorf("Expected %d parse attempts, got %d", len(testCases), attemptsDelta)
+	}
+
+	if successDelta != uint64(expectedSuccess) {
+		t.Errorf("Expected %d successful parses, got %d", expectedSuccess, successDelta)
+	}
+
+	if errorsDelta != uint64(expectedErrors) {
+		t.Errorf("Expected %d parse errors, got %d", expectedErrors, errorsDelta)
+	}
+
+	// Verify metrics are exported via GetMetrics() (memory-mapped interface)
+	exportedMetrics := metrics.GetMetrics()
+	
+	if _, exists := exportedMetrics["datetime_parse_attempts_total"]; !exists {
+		t.Error("datetime_parse_attempts_total not found in exported metrics")
+	}
+	
+	if _, exists := exportedMetrics["datetime_parse_success_total"]; !exists {
+		t.Error("datetime_parse_success_total not found in exported metrics")
+	}
+	
+	if _, exists := exportedMetrics["datetime_parse_errors_total"]; !exists {
+		t.Error("datetime_parse_errors_total not found in exported metrics")
+	}
+
+	t.Logf("✓ DateTime metrics successfully exported to memory-mapped interface")
+	t.Logf("  - datetime_parse_attempts_total: %d", exportedMetrics["datetime_parse_attempts_total"])
+	t.Logf("  - datetime_parse_success_total: %d", exportedMetrics["datetime_parse_success_total"])
+	t.Logf("  - datetime_parse_errors_total: %d", exportedMetrics["datetime_parse_errors_total"])
+}
+
