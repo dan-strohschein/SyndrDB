@@ -2,6 +2,7 @@ package syndrQL
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"syndrdb/src/internal/domain/models"
@@ -85,10 +86,15 @@ func NewExpressionEvaluatorWithSIMD(logger *zap.SugaredLogger, useSIMD bool) *Ex
 	}
 }
 
+// SubqueryExecutionContext holds materialized subquery results keyed by SubqueryExpression pointer
+// This allows the evaluator to look up cached subquery results during WHERE clause evaluation
+type SubqueryExecutionContext map[*SubqueryExpression]interface{}
+
 // Evaluate evaluates an expression against a document and returns the result
 // This is the main entry point for expression evaluation
 // bundleContext is optional - when nil, single-bundle behavior is maintained for backward compatibility
-func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+// subqueryContext is optional - when nil, subquery evaluation will fail (prevents runtime errors for non-subquery queries)
+func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
 	if expr == nil {
 		return nil, fmt.Errorf("cannot evaluate nil expression")
 	}
@@ -105,15 +111,17 @@ func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bu
 	case *QualifiedIdentifierExpression:
 		return e.evaluateQualifiedIdentifier(expr, doc, bundleContext)
 	case *BinaryExpression:
-		return e.evaluateBinary(expr, doc, bundleContext)
+		return e.evaluateBinary(expr, doc, bundleContext, subqueryContext)
 	case *UnaryExpression:
-		return e.evaluateUnary(expr, doc, bundleContext)
+		return e.evaluateUnary(expr, doc, bundleContext, subqueryContext)
 	case *GroupedExpression:
-		return e.evaluateGrouped(expr, doc, bundleContext)
+		return e.evaluateGrouped(expr, doc, bundleContext, subqueryContext)
 	case *CallExpression:
-		return e.evaluateCall(expr, doc, bundleContext)
+		return e.evaluateCall(expr, doc, bundleContext, subqueryContext)
 	case *ArrayExpression:
-		return e.evaluateArray(expr, doc, bundleContext)
+		return e.evaluateArray(expr, doc, bundleContext, subqueryContext)
+	case *SubqueryExpression:
+		return e.evaluateSubquery(expr, subqueryContext)
 	default:
 		return nil, fmt.Errorf("unsupported expression type: %T", expr)
 	}
@@ -200,12 +208,20 @@ func (e *ExpressionEvaluator) evaluateQualifiedIdentifier(expr *QualifiedIdentif
 	return models.FieldValue{Type: models.FieldTypeNil}, nil // ✅ Return nil FieldValue
 }
 
-// evaluateCall evaluates a function call expression (e.g., COUNT(*), SUM(Price))
-func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+// evaluateBinary evaluates a binary expression (e.g., a == b, a AND b)
+func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+	if e.logger != nil && (expr.Operator == TOKEN_IN || expr.Operator == TOKEN_NOTIN) {
+		e.logger.Infof("evaluateBinary: operator=%s, leftType=%T, processing IN/NOT IN", expr.Operator, expr.Left)
+	}
+
 	// Evaluate left side first
-	left, err := e.Evaluate(expr.Left, doc, bundleContext)
+	left, err := e.Evaluate(expr.Left, doc, bundleContext, subqueryContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating left side of binary expression: %w", err)
+	}
+
+	if e.logger != nil && (expr.Operator == TOKEN_IN || expr.Operator == TOKEN_NOTIN) {
+		e.logger.Infof("evaluateBinary: left evaluated to %T, now evaluating right", left)
 	}
 
 	// For logical operators, implement short-circuit evaluation
@@ -220,7 +236,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 		}
 
 		// Left is true, evaluate right
-		right, err := e.Evaluate(expr.Right, doc, bundleContext)
+		right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating right side of AND: %w", err)
 		}
@@ -244,7 +260,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 		}
 
 		// Left is false, evaluate right
-		right, err := e.Evaluate(expr.Right, doc, bundleContext)
+		right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating right side of OR: %w", err)
 		}
@@ -258,7 +274,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 	}
 
 	// For all other operators, evaluate right side
-	right, err := e.Evaluate(expr.Right, doc, bundleContext)
+	right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating right side of binary expression: %w", err)
 	}
@@ -336,9 +352,9 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 }
 
 // evaluateUnary evaluates a unary expression (e.g., NOT, -, +)
-func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
 	// Evaluate operand (Right field in UnaryExpression)
-	operand, err := e.Evaluate(expr.Right, doc, bundleContext)
+	operand, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating unary operand: %w", err)
 	}
@@ -371,13 +387,13 @@ func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.D
 }
 
 // evaluateGrouped evaluates a grouped expression (parenthesized)
-func (e *ExpressionEvaluator) evaluateGrouped(expr *GroupedExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
-	return e.Evaluate(expr.Expression, doc, bundleContext)
+func (e *ExpressionEvaluator) evaluateGrouped(expr *GroupedExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+	return e.Evaluate(expr.Expression, doc, bundleContext, subqueryContext)
 }
 
 // evaluateCall evaluates a function call expression
 // TODO: I need to implement function evaluation when we add support for functions like UPPER(), LOWER(), etc.
-func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
 	// TODO: I will implement built-in functions here (UPPER, LOWER, CONCAT, etc.)
 	// TODO: I might want to support user-defined functions in the future
 	return nil, fmt.Errorf("function calls not yet implemented: %s", expr.Function)
@@ -385,11 +401,11 @@ func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Doc
 
 // evaluateArray evaluates an array expression
 // TODO: I need to implement array evaluation for IN clauses and array operations
-func (e *ExpressionEvaluator) evaluateArray(expr *ArrayExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateArray(expr *ArrayExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
 	// Evaluate each element in the array
 	result := make([]interface{}, len(expr.Elements))
 	for i, elem := range expr.Elements {
-		val, err := e.Evaluate(elem, doc, bundleContext)
+		val, err := e.Evaluate(elem, doc, bundleContext, subqueryContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating array element %d: %w", i, err)
 		}
@@ -585,10 +601,104 @@ func (e *ExpressionEvaluator) evaluateLike(left interface{}, right interface{}, 
 // evaluateIn evaluates IN and NOT IN operators
 // Checks if left value is a member of right array
 func (e *ExpressionEvaluator) evaluateIn(left interface{}, right interface{}, negate bool) (interface{}, error) {
-	// Right side should be an array
+	// Handle SubqueryResult (from IN subquery execution)
+	// Use reflection to avoid circular dependency with subquery package
+	rightType := reflect.TypeOf(right)
+	rightTypeStr := ""
+	if rightType != nil {
+		rightTypeStr = rightType.String()
+	}
+
+	if e.logger != nil {
+		e.logger.Debugf("evaluateIn: left=%T, right=%T, rightTypeString='%s'", left, right, rightTypeStr)
+	}
+
+	// Check if right is a SubqueryResult using type string (contains "SubqueryResult")
+	if rightType != nil && strings.Contains(rightTypeStr, "SubqueryResult") {
+		rightValue := reflect.ValueOf(right).Elem()
+
+		// Get Values field ([]models.FieldValue)
+		valuesField := rightValue.FieldByName("Values")
+		if !valuesField.IsValid() {
+			return nil, fmt.Errorf("SubqueryResult missing Values field")
+		}
+
+		// Get ContainsNull field (bool)
+		containsNullField := rightValue.FieldByName("ContainsNull")
+		if !containsNullField.IsValid() {
+			return nil, fmt.Errorf("SubqueryResult missing ContainsNull field")
+		}
+		containsNull := containsNullField.Bool()
+
+		if e.logger != nil {
+			e.logger.Debugf("evaluateIn: Processing SubqueryResult with %d values, containsNull=%v", valuesField.Len(), containsNull)
+		}
+
+		// Handle NULL values on left side
+		if left == nil || left == "::SYNDR_NULL::" {
+			if e.logger != nil {
+				e.logger.Debugf("IN operator: NULL value on left side, returning false")
+			}
+			return negate, nil // false for IN, true for NOT IN
+		}
+
+		// Convert left to comparable value
+		if fv, ok := left.(models.FieldValue); ok {
+			left = fv.AsInterface()
+		}
+
+		// Check if left value is in the subquery result values
+		matched := false
+		valuesLen := valuesField.Len()
+		for i := 0; i < valuesLen; i++ {
+			value := valuesField.Index(i).Interface().(models.FieldValue)
+			item := value.AsInterface()
+
+			// Use compareValues for consistent comparison logic
+			result, err := e.compareValues(left, item, func(a, b float64) bool { return a == b })
+			if err != nil {
+				// If comparison fails, try direct equality
+				if left == item {
+					matched = true
+					break
+				}
+				continue
+			}
+
+			// If result is true, we found a match
+			if result {
+				matched = true
+				if e.logger != nil {
+					e.logger.Debugf("evaluateIn: Found match! left=%v, item=%v", left, item)
+				}
+				break
+			}
+		}
+
+		// Handle NOT IN with NULL values in subquery (SQL standard: NULL in list makes NOT IN false)
+		if negate && containsNull && !matched {
+			// If we didn't match and the subquery contains NULL, NOT IN returns NULL (false)
+			if e.logger != nil {
+				e.logger.Debugf("NOT IN operator: subquery contains NULL and no match found, returning false")
+			}
+			return false, nil
+		}
+
+		// Apply negation for NOT IN
+		if negate {
+			matched = !matched
+		}
+
+		if e.logger != nil {
+			e.logger.Debugf("evaluateIn: Final result=%v (negate=%v)", matched, negate)
+		}
+		return matched, nil
+	}
+
+	// Right side should be an array (for non-subquery IN clauses)
 	rightArr, ok := right.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("IN operator requires array on right side, got %T", right)
+		return nil, fmt.Errorf("IN operator requires array or subquery on right side, got %T", right)
 	}
 
 	// Handle NULL values on left side - return false (SQL standard)
@@ -700,11 +810,52 @@ func (e *ExpressionEvaluator) toFloat64(v interface{}) (float64, error) {
 
 // EvaluateAsBool evaluates an expression and returns the result as a boolean
 // This is a convenience method for WHERE clause evaluation
-func (e *ExpressionEvaluator) EvaluateAsBool(expr Expression, doc *models.Document, bundleContext *BundleContext) (bool, error) {
-	result, err := e.Evaluate(expr, doc, bundleContext)
+// subqueryContext is optional - when nil, subquery evaluation will fail (safe for non-subquery queries)
+func (e *ExpressionEvaluator) EvaluateAsBool(expr Expression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (bool, error) {
+	result, err := e.Evaluate(expr, doc, bundleContext, subqueryContext)
 	if err != nil {
 		return false, err
 	}
 
 	return e.toBool(result)
+}
+
+// evaluateSubquery evaluates a subquery expression by looking up its cached result
+// This method expects the subquery to have been executed beforehand via DetectAndExecuteSubqueries()
+// For EXISTS: Returns boolean based on whether subquery has rows (NOT EXISTS is handled by evaluateUnary)
+// For IN/NOT IN: Returns SubqueryResult for membership testing
+func (e *ExpressionEvaluator) evaluateSubquery(expr *SubqueryExpression, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+	if subqueryContext == nil {
+		return nil, fmt.Errorf("subquery evaluation requires subquery context (subquery must be executed first)")
+	}
+
+	result, found := subqueryContext[expr]
+	if !found {
+		return nil, fmt.Errorf("subquery result not found in execution context (subquery may not have been executed)")
+	}
+
+	// For EXISTS subqueries, convert SubqueryResult to boolean
+	// Use reflection to avoid circular dependency with subquery package
+	if expr.SubqueryType == SUBQUERY_EXISTS {
+		resultType := reflect.TypeOf(result)
+		if resultType != nil && resultType.String() == "*subquery.SubqueryResult" {
+			resultValue := reflect.ValueOf(result).Elem()
+
+			// Get RowCount field (int)
+			rowCountField := resultValue.FieldByName("RowCount")
+			if !rowCountField.IsValid() {
+				return nil, fmt.Errorf("SubqueryResult missing RowCount field")
+			}
+			rowCount := int(rowCountField.Int())
+
+			// EXISTS returns true if subquery has any rows
+			exists := rowCount > 0
+			return exists, nil
+		}
+		return nil, fmt.Errorf("EXISTS subquery result is not a SubqueryResult: %T", result)
+	}
+
+	// For IN/NOT IN subqueries, return SubqueryResult directly
+	// The evaluateIn method will handle the membership testing
+	return result, nil
 }

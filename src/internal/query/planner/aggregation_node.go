@@ -679,7 +679,7 @@ func (n *AggregationNode) applyHavingClause(documents map[string]*models.Documen
 
 	for docID, doc := range documents {
 		// Evaluate HAVING expression against the aggregated document
-		matches, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx)
+		matches, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, nil)
 		if err != nil {
 			return nil, fmt.Errorf("HAVING expression evaluation failed for group %s: %w", docID, err)
 		}

@@ -220,11 +220,11 @@ func (p *UpdateParser) parseWhereClause() (Expression, error) {
 	whereTokens := p.collectWhereTokens()
 
 	if len(whereTokens) == 0 {
-		return nil, fmt.Errorf("expected WHERE condition after WHERE keyword")
+		return nil, fmt.Errorf("expected WHERE condition")
 	}
 
 	// Use ExpressionParser to parse WHERE condition
-	exprParser := NewExpressionParser(whereTokens)
+	exprParser := NewExpressionParser(whereTokens, nil)
 	expr, err := exprParser.Parse()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse WHERE expression: %w", err)

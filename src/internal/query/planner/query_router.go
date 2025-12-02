@@ -50,6 +50,9 @@ type QueryRouter struct {
 	// queryCache for expression caching and predicate reordering (Priority 4)
 	queryCache *QueryCache
 
+	// TIER 1 SUBQUERY SUPPORT: Subquery executor for IN/EXISTS evaluation
+	subqueryExecutor interface{} // Passed from UnifiedQueryPlanner
+
 	// logger for debugging
 	logger *zap.SugaredLogger
 }
@@ -82,6 +85,12 @@ func NewQueryRouter(
 		queryCache:    queryCache,
 		logger:        logger,
 	}
+}
+
+// SetSubqueryExecutor sets the subquery executor after router construction
+// This avoids circular dependency issues during initialization
+func (qr *QueryRouter) SetSubqueryExecutor(executor interface{}) {
+	qr.subqueryExecutor = executor
 }
 
 // RouteQuery routes a unified query to the appropriate planner
@@ -182,7 +191,7 @@ func (qr *QueryRouter) routeSimpleQuery(
 
 	// NEW: Use Expression-based planning if WhereExpression is available
 	if query.WhereExpression != nil {
-		return qr.createExpressionBasedPlan(query, bundle, docScanner)
+		return qr.createExpressionBasedPlan(query, bundle, database, docScanner)
 	}
 
 	// No WHERE clause - create simple full scan
@@ -246,13 +255,15 @@ func (qr *QueryRouter) routeGroupByQuery(
 		bundleCtx := syndrQL.NewBundleContextForSingleBundle(bundle)
 
 		filterNode := &FilterNode{
-			Child:           scanNode,
-			WhereExpression: query.WhereExpression,
-			BundleContext:   bundleCtx,
-			Cost:            scanNode.GetCost(),
-			EstimatedRows:   scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
-			Logger:          qr.logger,
-			QueryCache:      qr.queryCache, // Priority 4: Enable expression caching
+			Child:            scanNode,
+			WhereExpression:  query.WhereExpression,
+			BundleContext:    bundleCtx,
+			Cost:             scanNode.GetCost(),
+			EstimatedRows:    scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
+			Logger:           qr.logger,
+			QueryCache:       qr.queryCache,       // Priority 4: Enable expression caching
+			SubqueryExecutor: qr.subqueryExecutor, // TIER 1: Enable subquery support
+			Database:         database,            // TIER 1: Database for subquery execution
 		}
 
 		rootNode = filterNode
@@ -306,6 +317,7 @@ func (qr *QueryRouter) convertToJoinQuery(query *queryparser.UnifiedSelectQuery)
 func (qr *QueryRouter) createExpressionBasedPlan(
 	query *queryparser.UnifiedSelectQuery,
 	bundle *models.Bundle,
+	database *models.Database, // TIER 1: Added for subquery support
 	docScanner documentscanner.DocumentScannerInterface,
 ) (ExecutionNode, []string, error) {
 
@@ -342,14 +354,16 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 
 	// Create FilterNode with Expression
 	filterNode := &FilterNode{
-		Child:           fullScan,
-		WhereExpression: expr,
-		BundleContext:   bundleCtx,
-		Cost:            fullScan.Cost + (float64(bundle.TotalDocuments) * 0.01), // Small cost for filtering
-		EstimatedRows:   int(bundle.TotalDocuments) / 2,                          // Assume 50% selectivity
-		Logger:          qr.logger,
-		DocumentScanner: docScanner,
-		QueryCache:      qr.queryCache, // Priority 4: Enable expression caching
+		Child:            fullScan,
+		WhereExpression:  expr,
+		BundleContext:    bundleCtx,
+		Cost:             fullScan.Cost + (float64(bundle.TotalDocuments) * 0.01), // Small cost for filtering
+		EstimatedRows:    int(bundle.TotalDocuments) / 2,                          // Assume 50% selectivity
+		Logger:           qr.logger,
+		DocumentScanner:  docScanner,
+		QueryCache:       qr.queryCache,       // Priority 4: Enable expression caching
+		SubqueryExecutor: qr.subqueryExecutor, // TIER 1: Enable subquery support
+		Database:         database,            // TIER 1: Database for subquery execution
 	}
 
 	return filterNode, []string{}, nil

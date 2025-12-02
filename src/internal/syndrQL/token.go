@@ -46,6 +46,7 @@ const (
 	TOKEN_LIKE     // LIKE
 	TOKEN_IN       // IN
 	TOKEN_NOTIN    // NOT IN
+	TOKEN_EXISTS   // EXISTS (for subquery support - Tier 1)
 	TOKEN_CONTAINS // CONTAINS
 
 	// Operators - Logical
@@ -192,6 +193,8 @@ func (tt TokenType) String() string {
 		return "IN"
 	case TOKEN_NOTIN:
 		return "NOT IN"
+	case TOKEN_EXISTS:
+		return "EXISTS"
 	case TOKEN_CONTAINS:
 		return "CONTAINS"
 	case TOKEN_AND:
@@ -426,6 +429,7 @@ var keywords = map[string]TokenType{
 	"NOT":      TOKEN_NOT,
 	"LIKE":     TOKEN_LIKE,
 	"IN":       TOKEN_IN,
+	"EXISTS":   TOKEN_EXISTS,
 	"CONTAINS": TOKEN_CONTAINS,
 
 	// Literals as keywords

@@ -37,6 +37,7 @@ import (
 	"context"
 	"fmt"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/planner/subquery"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/settings"
 
@@ -57,6 +58,9 @@ type UnifiedQueryPlanner struct {
 	// Query plan cache - PostgreSQL-inspired sharded LRU with MongoDB-style invalidation
 	planCache       *ShardedPlanCache    // 8-shard cache with adaptive planning and stale serving
 	invalidationMgr *InvalidationManager // Write-threshold invalidation manager
+
+	// TIER 1 SUBQUERY SUPPORT: Subquery executor for IN/EXISTS subquery evaluation
+	subqueryExecutor interface{} // *subquery.StandardSubqueryExecutor - use interface{} to avoid import cycle
 
 	// logger for debugging
 	logger *zap.SugaredLogger
@@ -107,7 +111,8 @@ func NewUnifiedQueryPlanner(
 		logger.Infof("Query plan cache disabled")
 	}
 
-	return &UnifiedQueryPlanner{
+	// Create the unified planner first (needed for circular dependency resolution)
+	planner := &UnifiedQueryPlanner{
 		basePlanner:     basePlanner,
 		joinPlanner:     joinPlanner,
 		router:          router,
@@ -116,6 +121,51 @@ func NewUnifiedQueryPlanner(
 		planCache:       planCache,
 		invalidationMgr: invalidationMgr,
 	}
+
+	// TIER 1 SUBQUERY SUPPORT: Initialize subquery executor with config and metrics
+	// Note: We pass a planner adapter instead of the planner directly to satisfy the interface
+	// This creates a controlled circular dependency that's safe because the executor only uses
+	// the planner's CreatePlan method, not the executor field.
+	if args.SubqueryEnabled {
+		subqueryConfig := subquery.NewSubqueryConfigFromSettings(args)
+		// Create adapter that implements subquery.QueryPlannerInterface
+		plannerAdapter := &queryPlannerAdapter{planner: planner}
+		// TODO: Wire in metrics recorder when available (pass nil for now)
+		executor := subquery.NewStandardSubqueryExecutor(
+			subqueryConfig,
+			plannerAdapter, // Adapter implements the correct interface
+			nil,            // No metrics recorder yet
+			logger,
+		)
+		planner.subqueryExecutor = executor
+
+		// Inject subquery executor into router so it can pass to FilterNode
+		router.SetSubqueryExecutor(executor)
+
+		logger.Infof("Subquery support enabled: small_threshold=%d, hash_threshold=%d, max_depth=%d",
+			args.SubquerySmallThreshold, args.SubqueryHashThreshold, args.SubqueryMaxDepth)
+	} else {
+		logger.Infof("Subquery support disabled")
+	}
+
+	return planner
+}
+
+// queryPlannerAdapter adapts UnifiedQueryPlanner to subquery.QueryPlannerInterface
+type queryPlannerAdapter struct {
+	planner *UnifiedQueryPlanner
+}
+
+// CreatePlan implements subquery.QueryPlannerInterface
+func (adapter *queryPlannerAdapter) CreatePlan(
+	query *queryparser.UnifiedSelectQuery,
+	database *models.Database,
+) (subquery.ExecutionPlanInterface, error) {
+	plan, err := adapter.planner.CreatePlan(query, database)
+	if err != nil {
+		return nil, err
+	}
+	return plan, nil // *ExecutionPlan implements subquery.ExecutionPlanInterface
 }
 
 // CreatePlan creates a complete execution plan for a unified SELECT query

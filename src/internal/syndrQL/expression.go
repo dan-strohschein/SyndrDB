@@ -3,6 +3,8 @@ package syndrQL
 import (
 	"fmt"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 // Expression represents a parsed expression node in the AST
@@ -22,6 +24,7 @@ const (
 	EXPR_CALL
 	EXPR_ARRAY
 	EXPR_GROUPED
+	EXPR_SUBQUERY // Added for Tier 1 subquery support
 )
 
 // LiteralExpression represents a literal value (string, number, bool, null)
@@ -121,6 +124,56 @@ func (qie *QualifiedIdentifierExpression) String() string {
 	return fmt.Sprintf("\"%s\".\"%s\"", qie.Bundle, qie.Field)
 }
 
+// SubqueryExpression represents a subquery in IN or EXISTS clauses
+// Supports uncorrelated subqueries for Tier 1 implementation.
+// TODO: Add correlated subquery support in Tier 3 with parameter binding
+// TODO: Add support for scalar subqueries (SELECT field FROM ... LIMIT 1)
+// TODO: Add support for derived table subqueries (FROM (SELECT ...) AS alias)
+type SubqueryExpression struct {
+	SubqueryType     SubqueryType     // IN, EXISTS, NOT IN (Tier 1), or scalar/derived (future)
+	InnerQuery       *SelectStatement // The SELECT statement inside the subquery
+	NestingDepth     int              // Current nesting level (enforced max from config)
+	IsCorrelated     bool             // Whether subquery references outer query (false for Tier 1)
+	CorrelatedFields []string         // Fields that reference outer query (empty for Tier 1)
+
+	// TODO: In Tier 2, add CanFlatten bool to indicate if optimizer can rewrite to JOIN
+	// TODO: In Tier 3, add ParameterBindings map[string]interface{} for correlated execution
+}
+
+// SubqueryType categorizes the type of subquery
+type SubqueryType int
+
+const (
+	SUBQUERY_IN         SubqueryType = iota // field IN (SELECT ...)
+	SUBQUERY_EXISTS                         // EXISTS (SELECT ...)
+	SUBQUERY_NOT_IN                         // field NOT IN (SELECT ...) - requires special NULL handling
+	SUBQUERY_NOT_EXISTS                     // NOT EXISTS (SELECT ...)
+	// TODO: Add in future tiers:
+	// SUBQUERY_SCALAR                // (SELECT single_value FROM ...)
+	// SUBQUERY_DERIVED_TABLE         // FROM (SELECT ...) AS alias
+)
+
+// String returns the string representation of a SubqueryType
+func (st SubqueryType) String() string {
+	switch st {
+	case SUBQUERY_IN:
+		return "IN"
+	case SUBQUERY_EXISTS:
+		return "EXISTS"
+	case SUBQUERY_NOT_IN:
+		return "NOT IN"
+	case SUBQUERY_NOT_EXISTS:
+		return "NOT EXISTS"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func (se *SubqueryExpression) expressionNode() {}
+func (se *SubqueryExpression) String() string {
+	return fmt.Sprintf("%s (SELECT ... FROM %s)", se.SubqueryType.String(), se.InnerQuery.BundleName)
+}
+
 // Precedence levels for operator precedence parsing (Pratt parser)
 type Precedence int
 
@@ -178,6 +231,9 @@ type ExpressionParser struct {
 
 	// Error tracking
 	errors []string
+
+	// Logger for error reporting
+	logger *zap.SugaredLogger
 }
 
 // Function types for Pratt parser
@@ -185,13 +241,14 @@ type prefixParseFunc func() (Expression, error)
 type infixParseFunc func(Expression) (Expression, error)
 
 // NewExpressionParser creates a new expression parser
-func NewExpressionParser(tokens []Token) *ExpressionParser {
+func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionParser {
 	p := &ExpressionParser{
 		tokens:        tokens,
 		pos:           0,
 		prefixParsers: make(map[TokenType]prefixParseFunc),
 		infixParsers:  make(map[TokenType]infixParseFunc),
 		errors:        make([]string, 0),
+		logger:        logger,
 	}
 
 	if len(tokens) > 0 {
@@ -209,6 +266,7 @@ func NewExpressionParser(tokens []Token) *ExpressionParser {
 	p.registerPrefix(TOKEN_MINUS, p.parseUnaryExpression)
 	p.registerPrefix(TOKEN_LPAREN, p.parseGroupedExpression)
 	p.registerPrefix(TOKEN_LBRACKET, p.parseArrayExpression)
+	p.registerPrefix(TOKEN_EXISTS, p.parseExistsExpression)
 
 	// Register infix parsers (tokens that can appear between expressions)
 	p.registerInfix(TOKEN_PLUS, p.parseBinaryExpression)
@@ -418,7 +476,7 @@ func (p *ExpressionParser) parseBinaryExpression(left Expression) (Expression, e
 }
 
 // parseInExpression parses IN and NOT IN expressions
-// Syntax: field IN (value1, value2, ...) or field NOT IN (value1, value2, ...)
+// Syntax: field IN (value1, value2, ...) or field IN (SELECT ...) or field NOT IN (...)
 func (p *ExpressionParser) parseInExpression(left Expression) (Expression, error) {
 	operator := p.current.Type // Either TOKEN_IN or TOKEN_NOTIN
 	p.advance()                // consume 'IN' or 'NOT IN'
@@ -429,7 +487,58 @@ func (p *ExpressionParser) parseInExpression(left Expression) (Expression, error
 	}
 	p.advance() // consume '('
 
-	// Parse list of values
+	// Check for subquery: field IN (SELECT ...)
+	if p.current.Type == TOKEN_SELECT {
+		// Collect tokens for the subquery SELECT statement
+		// We need to find the matching ')' for the IN clause
+		// The SELECT parser will handle nested parentheses in its own expressions
+		subqueryTokens := p.collectSubqueryTokens()
+		if len(subqueryTokens) == 0 {
+			return nil, fmt.Errorf("failed to collect subquery tokens")
+		}
+
+		// Parse SELECT statement using SelectParser
+		selectParser := NewSelectParser(subqueryTokens)
+
+		innerQuery, err := selectParser.Parse(p.logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse subquery: %w", err)
+		}
+
+		// Expect closing parenthesis (we should be positioned right after subquery)
+		if p.current.Type != TOKEN_RPAREN {
+			return nil, fmt.Errorf("expected ')' after subquery, got %s", p.current.Type.String())
+		}
+		p.advance() // consume ')'
+
+		// Determine subquery type based on operator
+		var subqueryType SubqueryType
+		if operator == TOKEN_NOTIN {
+			subqueryType = SUBQUERY_NOT_IN
+		} else {
+			subqueryType = SUBQUERY_IN
+		}
+
+		// Create SubqueryExpression
+		subqueryExpr := &SubqueryExpression{
+			SubqueryType:     subqueryType,
+			InnerQuery:       innerQuery,
+			NestingDepth:     1,     // Will be updated during validation
+			IsCorrelated:     false, // Tier 1: only uncorrelated
+			CorrelatedFields: nil,
+		}
+
+		// Wrap SubqueryExpression in BinaryExpression with left side and operator
+		// This is critical: the WHERE clause needs "field IN (subquery)" structure
+		// not just the subquery itself
+		return &BinaryExpression{
+			Left:     left,
+			Operator: operator,
+			Right:    subqueryExpr,
+		}, nil
+	}
+
+	// Parse list of values (original behavior)
 	values := make([]Expression, 0)
 
 	// Empty list
@@ -469,6 +578,53 @@ func (p *ExpressionParser) parseInExpression(left Expression) (Expression, error
 		Left:     left,
 		Operator: operator,
 		Right:    &ArrayExpression{Elements: values},
+	}, nil
+}
+
+// parseExistsExpression parses EXISTS subquery expressions
+// Syntax: EXISTS (SELECT ...)
+func (p *ExpressionParser) parseExistsExpression() (Expression, error) {
+	p.advance() // consume 'EXISTS'
+
+	// Expect opening parenthesis
+	if p.current.Type != TOKEN_LPAREN {
+		return nil, fmt.Errorf("expected '(' after EXISTS, got %s", p.current.Type.String())
+	}
+	p.advance() // consume '('
+
+	// Expect SELECT statement
+	if p.current.Type != TOKEN_SELECT {
+		return nil, fmt.Errorf("expected SELECT after EXISTS (, got %s", p.current.Type.String())
+	}
+
+	// Collect tokens for the subquery SELECT statement
+	subqueryTokens := p.collectSubqueryTokens()
+	if len(subqueryTokens) == 0 {
+		return nil, fmt.Errorf("failed to collect EXISTS subquery tokens")
+	}
+
+	// Parse SELECT statement using SelectParser
+	selectParser := NewSelectParser(subqueryTokens)
+
+	innerQuery, err := selectParser.Parse(p.logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse EXISTS subquery: %w", err)
+	}
+
+	// Expect closing parenthesis (we should be positioned right after subquery)
+	if p.current.Type != TOKEN_RPAREN {
+		return nil, fmt.Errorf("expected ')' after EXISTS subquery, got %s", p.current.Type.String())
+	}
+	p.advance() // consume ')'
+
+	// Create SubqueryExpression with EXISTS type
+	// Note: NestingDepth will be calculated by validator during query planning
+	return &SubqueryExpression{
+		SubqueryType:     SUBQUERY_EXISTS,
+		InnerQuery:       innerQuery,
+		NestingDepth:     1,     // Will be updated during validation
+		IsCorrelated:     false, // Tier 1: only uncorrelated
+		CorrelatedFields: nil,
 	}, nil
 }
 
@@ -594,6 +750,41 @@ func (p *ExpressionParser) isStatementTerminator() bool {
 		p.current.Type == TOKEN_RBRACE
 }
 
+// collectSubqueryTokens collects tokens for a subquery SELECT statement
+// Starts at the current position (should be SELECT token) and collects tokens
+// until the matching ')' is found. Handles nested parentheses correctly.
+// Returns the collected tokens and advances the parser position to the ')'.
+func (p *ExpressionParser) collectSubqueryTokens() []Token {
+	tokens := make([]Token, 0)
+	parenDepth := 0 // Track parenthesis depth for nested expressions
+
+	// Collect tokens until we find the matching ')' for the IN/EXISTS clause
+	for p.current.Type != TOKEN_EOF {
+		// Track parenthesis depth
+		if p.current.Type == TOKEN_LPAREN {
+			parenDepth++
+		} else if p.current.Type == TOKEN_RPAREN {
+			// If we're at depth 0, this is the closing ')' for the IN/EXISTS clause
+			if parenDepth == 0 {
+				// Don't include the ')' in subquery tokens
+				// Add EOF token for the SELECT parser
+				tokens = append(tokens, Token{Type: TOKEN_EOF})
+				return tokens
+			}
+			parenDepth--
+		}
+
+		// Collect token
+		tokens = append(tokens, p.current)
+		p.advance()
+	}
+
+	// If we reach here, we hit EOF before finding the matching ')'
+	// Add EOF token anyway
+	tokens = append(tokens, Token{Type: TOKEN_EOF})
+	return tokens
+}
+
 // ParseExpression is a convenience function for parsing an expression from a string
 func ParseExpression(input string) (Expression, error) {
 	tokenizer := NewTokenizer(input)
@@ -602,7 +793,7 @@ func ParseExpression(input string) (Expression, error) {
 		return nil, fmt.Errorf("tokenization error: %w", err)
 	}
 
-	parser := NewExpressionParser(tokens)
+	parser := NewExpressionParser(tokens, nil) // nil logger for standalone parsing
 	return parser.Parse()
 }
 

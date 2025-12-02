@@ -4536,7 +4536,7 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 		return nil, false, fmt.Errorf("failed to tokenize WHERE clause: %w", err)
 	}
 
-	parser := syndrQL.NewExpressionParser(tokens)
+	parser := syndrQL.NewExpressionParser(tokens, s.logger)
 	expr, err := parser.Parse()
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)
@@ -4615,7 +4615,7 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 		return nil, false, fmt.Errorf("failed to tokenize WHERE clause: %w", err)
 	}
 
-	parser := syndrQL.NewExpressionParser(tokens)
+	parser := syndrQL.NewExpressionParser(tokens, s.logger)
 	expr, err := parser.Parse()
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)

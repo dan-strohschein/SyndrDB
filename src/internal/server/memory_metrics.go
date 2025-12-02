@@ -165,6 +165,15 @@ type GlobalServerMetrics struct {
 	QueryGroupBysTotal       atomic.Uint64 // Total number of GROUP BY operations
 	QueryOrderBysTotal       atomic.Uint64 // Total number of ORDER BY operations
 
+	// Subquery Execution Metrics (Tier 1 Implementation)
+	SubqueryExecutionsTotal       atomic.Uint64 // Total number of subqueries executed
+	SubqueryInListStrategy        atomic.Uint64 // Subqueries using IN-list materialization
+	SubqueryHashJoinStrategy      atomic.Uint64 // Subqueries using HashJoin strategy
+	SubqueryIndexedLookupStrategy atomic.Uint64 // Subqueries using indexed lookup (Tier 3)
+	SubqueryDepthExceeded         atomic.Uint64 // Subqueries rejected due to max depth exceeded
+	SubqueryMemoryLimitExceeded   atomic.Uint64 // Subqueries forced to HashJoin due to memory limit
+	SubqueryContainsNull          atomic.Uint64 // Subqueries with NULL values in results
+
 	// Query Latency Histograms
 	QueryLatencyLt1ms   atomic.Uint64 // Queries < 1ms
 	QueryLatencyLt10ms  atomic.Uint64 // Queries < 10ms
@@ -363,6 +372,15 @@ func (gsm *GlobalServerMetrics) GetMetrics() map[string]uint64 {
 		"query_joins_total":           gsm.QueryJoinsTotal.Load(),
 		"query_group_bys_total":       gsm.QueryGroupBysTotal.Load(),
 		"query_order_bys_total":       gsm.QueryOrderBysTotal.Load(),
+
+		// Subquery Execution Metrics
+		"subquery_executions_total":        gsm.SubqueryExecutionsTotal.Load(),
+		"subquery_inlist_strategy":         gsm.SubqueryInListStrategy.Load(),
+		"subquery_hashjoin_strategy":       gsm.SubqueryHashJoinStrategy.Load(),
+		"subquery_indexed_lookup_strategy": gsm.SubqueryIndexedLookupStrategy.Load(),
+		"subquery_depth_exceeded":          gsm.SubqueryDepthExceeded.Load(),
+		"subquery_memory_limit_exceeded":   gsm.SubqueryMemoryLimitExceeded.Load(),
+		"subquery_contains_null":           gsm.SubqueryContainsNull.Load(),
 
 		// Query Latency Histograms
 		"query_latency_lt_1ms":   gsm.QueryLatencyLt1ms.Load(),

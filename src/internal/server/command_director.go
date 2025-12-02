@@ -46,6 +46,11 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	// OPTIMIZATION: Compute lowercase version once to avoid 40+ allocations
 	commandLower := strings.ToLower(command)
 
+	// EXPLAIN command - must be checked before SELECT to intercept EXPLAIN SELECT
+	if strings.HasPrefix(commandLower, "explain") {
+		return HandleExplainCommand(ctx, command, database, serviceManager, logger, startTime)
+	}
+
 	if strings.HasPrefix(commandLower, "select") {
 		// Parse SELECT command
 		// Check for SELECT DATABASES (special case for system catalog)

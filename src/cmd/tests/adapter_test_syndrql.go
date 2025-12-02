@@ -30,7 +30,7 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(42))},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(30))},
 	}
 
-	result2, err := evaluator.EvaluateAsBool(expr2, doc, nil)
+	result2, err := evaluator.EvaluateAsBool(expr2, doc, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestEvaluatorLogicalOperators(t *testing.T) {
 		},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestEvaluatorNullHandling(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewStringValue("::SYNDR_NULL::")},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestEvaluatorTypeCoercion(t *testing.T) {
 
 	doc := &models.Document{
 		Fields: map[string]models.Field{
-			"count":  {Value: models.NewStringValue("42")},     // String that can be parsed as number
+			"count":  {Value: models.NewStringValue("42")},  // String that can be parsed as number
 			"active": {Value: models.NewIntValue(int64(1))}, // Number that can be treated as boolean
 		},
 	}
@@ -333,7 +333,7 @@ func TestEvaluatorTypeCoercion(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(42))},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -361,7 +361,7 @@ func BenchmarkEvaluatorSimpleComparison(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = evaluator.EvaluateAsBool(expr, doc, nil)
+		_, _ = evaluator.EvaluateAsBool(expr, doc, nil, nil)
 	}
 }
 
@@ -411,6 +411,6 @@ func BenchmarkEvaluatorComplexExpression(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = evaluator.EvaluateAsBool(expr, doc, nil)
+		_, _ = evaluator.EvaluateAsBool(expr, doc, nil, nil)
 	}
 }

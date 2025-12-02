@@ -164,6 +164,13 @@ type Arguments struct {
 	PlanCacheStaleServeSeconds int  `yaml:"plan_cache_stale_serve_seconds"` // Stale plan serving window in seconds (default: 60)
 	// TODO: I will add PlanCacheMemoryLimitMB for memory-aware eviction when memory profiling reveals actual cache memory usage
 	// TODO: I will add PlanCacheCompressionEnabled for large plan compression when we have plans exceeding 10KB
+
+	// TIER 1 SUBQUERY SUPPORT: Subquery execution configuration
+	SubqueryEnabled           bool `yaml:"subquery_enabled"`              // Enable subquery support (default: true)
+	SubquerySmallThreshold    int  `yaml:"subquery_small_threshold"`      // IN-list strategy threshold (default: 100)
+	SubqueryHashThreshold     int  `yaml:"subquery_medium_threshold"`     // HashJoin strategy threshold (default: 10000)
+	SubqueryMaxDepth          int  `yaml:"subquery_max_depth"`            // Maximum nesting depth (default: 3)
+	SubqueryMaxInListMemoryMB int  `yaml:"subquery_max_inlist_memory_mb"` // Max IN-list memory in MB (default: 10)
 }
 
 var (
@@ -290,6 +297,13 @@ func GetSettings() *Arguments {
 			PlanCacheCustomThreshold:   5,    // 5 custom executions before generic plan
 			PlanCacheWriteThreshold:    1000, // Invalidate after 1000 writes
 			PlanCacheStaleServeSeconds: 60,   // 60 second stale serving window
+
+			// TIER 1 SUBQUERY SUPPORT: Subquery Execution Defaults
+			SubqueryEnabled:           true,  // Enable subquery support by default
+			SubquerySmallThreshold:    100,   // Use IN-list for <100 rows
+			SubqueryHashThreshold:     10000, // Use HashJoin for <10k rows
+			SubqueryMaxDepth:          3,     // Maximum 3 levels of nesting
+			SubqueryMaxInListMemoryMB: 10,    // 10MB max for IN-list materialization
 		}
 	})
 	return instance

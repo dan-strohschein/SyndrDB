@@ -124,7 +124,7 @@ func (p *DeleteParser) parseWhereClause() (Expression, error) {
 	}
 
 	// Use ExpressionParser to parse WHERE condition
-	exprParser := NewExpressionParser(whereTokens)
+	exprParser := NewExpressionParser(whereTokens, nil)
 	expr, err := exprParser.Parse()
 	if err != nil {
 		return nil, fmt.Errorf("invalid WHERE clause expression: %w", err)

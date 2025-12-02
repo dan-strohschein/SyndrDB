@@ -18,7 +18,7 @@ This document covers database management and administrative commands in SyndrDB.
    - [APPLY ROLLBACK](#apply-rollback)
    - [VALIDATE MIGRATION](#validate-migration)
    - [VALIDATE ROLLBACK](#validate-rollback)
-7. [EXPLAIN (Coming Soon)](#explain-coming-soon)
+7. [EXPLAIN](#explain)
 
 ---
 
@@ -1913,50 +1913,394 @@ VALIDATE ROLLBACK TO VERSION 2;
 
 ---
 
-## EXPLAIN (Coming Soon)
+## EXPLAIN
 
-⚠️ **This feature is not yet implemented.**
+Shows the query execution plan for a SELECT statement, including cost estimates, index usage, and execution strategy. Use this to understand and optimize query performance.
 
-The `EXPLAIN` command will provide query execution plans and performance analysis for `SELECT` queries.
-
-### Planned Syntax
+### Syntax
 
 ```sql
-EXPLAIN SELECT * FROM BUNDLE "Users" WHERE age > 25
+-- Basic query plan analysis
+EXPLAIN <SELECT_statement>;
+
+-- Execute query and include actual runtime metrics
+EXPLAIN ANALYZE <SELECT_statement>;
 ```
 
-### Planned Features
+### Components
 
-- 📊 **Execution Plan:** Show how the query will be executed
-- 🔍 **Index Usage:** Identify which indexes are used
-- ⚡ **Performance Metrics:** Estimate execution time and resource usage
-- 💡 **Optimization Suggestions:** Recommend indexes or query improvements
+| Component | Description | Required |
+|-----------|-------------|----------|
+| **SELECT_statement** | Any valid SELECT query | ✅ Yes |
+| **ANALYZE** | Execute query and include actual metrics | ❌ No |
 
-### Example Output (Planned)
+### Output Format
 
+Returns a JSON structure containing:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **QueryType** | string | Type of query (SELECT) |
+| **Query** | string | Original query string |
+| **PlanType** | string | Human-readable plan description |
+| **Cost** | float64 | Estimated query cost |
+| **EstimatedRows** | int | Estimated number of rows returned |
+| **IndexesUsed** | []string | List of indexes utilized |
+| **ExecutionTree** | object | Hierarchical execution plan |
+| **CostFormulas** | object | Cost calculation formulas (if available) |
+
+### Examples
+
+#### Basic EXPLAIN
+
+```sql
+-- Analyze a simple query
+EXPLAIN SELECT * FROM "Authors" WHERE "Name" == "Strohschein";
 ```
-Query Plan:
-  1. Index Scan: hash_index_Users_age
-     Filter: age > 25
-     Estimated Rows: 1,250
-  
-  2. Document Fetch: Users bundle
-     Estimated I/O: 1,250 reads
-  
-  3. Result Set: 1,250 documents
-  
-Performance:
-  Estimated Time: 15ms
-  Index Used: YES (hash_index_Users_age)
-  
-Recommendations:
-  - Consider B-Tree index on 'age' for range queries
-  - Current hash index optimal for equality checks only
+
+**Response:**
+```json
+{
+  "QueryPlan": {
+    "QueryType": "SELECT",
+    "Query": "SELECT * FROM \"Authors\" WHERE \"Name\" == \"Strohschein\"",
+    "PlanType": "IndexScan(Name) -> Filter",
+    "Cost": 7.0722,
+    "EstimatedRows": 3,
+    "IndexesUsed": ["authors_name_hash_idx"],
+    "ExecutionTree": {
+      "NodeType": "FilterNode",
+      "Predicate": "Name == Strohschein",
+      "Cost": 7.0722,
+      "Child": {
+        "NodeType": "IndexScanNode",
+        "IndexName": "authors_name_hash_idx",
+        "ScanType": "hash_lookup",
+        "Cost": 5.2
+      }
+    }
+  }
+}
 ```
 
-### Stay Tuned!
+#### EXPLAIN ANALYZE
 
-This feature is planned for a future release. Follow SyndrDB development for updates.
+```sql
+-- Execute query and get actual runtime metrics
+EXPLAIN ANALYZE SELECT * FROM "Authors" WHERE "Country" == "USA";
+```
+
+**Response:**
+```json
+{
+  "QueryPlan": {
+    "QueryType": "SELECT",
+    "Query": "SELECT * FROM \"Authors\" WHERE \"Country\" == \"USA\"",
+    "PlanType": "FullScan -> Filter",
+    "Cost": 125.4,
+    "EstimatedRows": 15,
+    "IndexesUsed": [],
+    "ExecutionTree": {
+      "NodeType": "FilterNode",
+      "Predicate": "Country == USA",
+      "Cost": 125.4,
+      "Child": {
+        "NodeType": "FullScanNode",
+        "BundleName": "Authors",
+        "Cost": 100.0
+      }
+    },
+    "Executed": true,
+    "ExecutionTimeMs": 12.3
+  }
+}
+```
+
+#### Complex Query Analysis
+
+```sql
+-- Analyze complex query with multiple operations
+EXPLAIN SELECT * FROM "Authors" 
+WHERE "BirthYear" >= 1970 
+ORDER BY "Name" ASC 
+LIMIT 10;
+```
+
+**Response:**
+```json
+{
+  "QueryPlan": {
+    "QueryType": "SELECT",
+    "Query": "SELECT * FROM \"Authors\" WHERE \"BirthYear\" >= 1970 ORDER BY \"Name\" ASC LIMIT 10",
+    "PlanType": "FullScan -> Filter -> Sort -> Limit",
+    "Cost": 284.5,
+    "EstimatedRows": 10,
+    "IndexesUsed": [],
+    "ExecutionTree": {
+      "NodeType": "LimitNode",
+      "Limit": 10,
+      "Cost": 284.5,
+      "Child": {
+        "NodeType": "SortNode",
+        "OrderBy": [{"Field": "Name", "Direction": "ASC"}],
+        "Cost": 280.0,
+        "Child": {
+          "NodeType": "FilterNode",
+          "Predicate": "BirthYear >= 1970",
+          "Cost": 150.0,
+          "Child": {
+            "NodeType": "FullScanNode",
+            "BundleName": "Authors",
+            "Cost": 100.0
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+#### JOIN Query Analysis
+
+```sql
+-- Analyze JOIN query
+EXPLAIN SELECT * FROM "Authors" 
+JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID";
+```
+
+**Response:**
+```json
+{
+  "QueryPlan": {
+    "QueryType": "SELECT",
+    "Query": "SELECT * FROM \"Authors\" JOIN \"Books\" ON \"Authors\".\"ID\" == \"Books\".\"AuthorID\"",
+    "PlanType": "HashJoin",
+    "Cost": 450.0,
+    "EstimatedRows": 250,
+    "IndexesUsed": ["authors_id_idx", "books_authorid_idx"],
+    "ExecutionTree": {
+      "NodeType": "HashJoinNode",
+      "JoinType": "INNER",
+      "LeftChild": {
+        "NodeType": "IndexScanNode",
+        "BundleName": "Authors",
+        "IndexName": "authors_id_idx"
+      },
+      "RightChild": {
+        "NodeType": "IndexScanNode",
+        "BundleName": "Books",
+        "IndexName": "books_authorid_idx"
+      }
+    }
+  }
+}
+```
+
+#### GROUP BY Analysis
+
+```sql
+-- Analyze aggregation query
+EXPLAIN SELECT "Country", COUNT(*) FROM "Authors" GROUP BY "Country";
+```
+
+**Response:**
+```json
+{
+  "QueryPlan": {
+    "QueryType": "SELECT",
+    "Query": "SELECT \"Country\", COUNT(*) FROM \"Authors\" GROUP BY \"Country\"",
+    "PlanType": "Aggregation",
+    "Cost": 180.0,
+    "EstimatedRows": 25,
+    "IndexesUsed": [],
+    "ExecutionTree": {
+      "NodeType": "AggregationNode",
+      "GroupBy": ["Country"],
+      "Aggregates": [
+        {
+          "Function": "COUNT",
+          "Field": "*",
+          "Alias": "COUNT(*)"
+        }
+      ],
+      "Cost": 180.0,
+      "Child": {
+        "NodeType": "FullScanNode",
+        "BundleName": "Authors",
+        "Cost": 100.0
+      }
+    }
+  }
+}
+```
+
+### Execution Node Types
+
+The `ExecutionTree` contains one or more of these node types:
+
+| Node Type | Description | Key Fields |
+|-----------|-------------|------------|
+| **IndexScanNode** | Uses an index to scan documents | `IndexName`, `ScanType` |
+| **FullScanNode** | Scans entire bundle | `BundleName` |
+| **FilterNode** | Applies WHERE clause filter | `Predicate`, `Child` |
+| **SortNode** | Sorts results | `OrderBy`, `Child` |
+| **LimitNode** | Limits number of results | `Limit`, `Offset`, `Child` |
+| **AggregationNode** | GROUP BY aggregation | `GroupBy`, `Aggregates`, `Child` |
+| **DistinctNode** | Removes duplicates | `Child` |
+| **UnionNode** | Combines multiple queries | `Children` |
+| **JoinExecutionNode** | Executes JOIN operation | `JoinType`, `FromBundle` |
+| **NestedLoopJoinNode** | Nested loop JOIN algorithm | `LeftChild`, `RightChild` |
+| **HashJoinNode** | Hash JOIN algorithm | `LeftChild`, `RightChild` |
+| **MergeJoinNode** | Merge JOIN algorithm | `LeftChild`, `RightChild` |
+
+### Cost Model
+
+Query costs are estimated based on:
+
+| Operation | Cost Factor | Formula |
+|-----------|-------------|---------|
+| **Full Scan** | Document count | `documents × 1.0` |
+| **Index Scan** | Selectivity | `documents × 0.1` |
+| **Hash Lookup** | Near constant | `5.0 + results × 0.1` |
+| **Filter** | Input rows | `input_rows × 0.5` |
+| **Sort** | N log N | `rows × log(rows) × 0.01` |
+| **Hash Join** | Build + probe | `left_rows + right_rows` |
+| **Nested Loop** | Cartesian | `left_rows × right_rows × 0.1` |
+| **Aggregation** | Grouping overhead | `rows × 0.8` |
+
+### Performance Analysis Tips
+
+#### 1. Check Index Usage
+
+```sql
+EXPLAIN SELECT * FROM "Users" WHERE "email" == "user@example.com";
+-- Look for: "IndexesUsed": ["users_email_idx"]
+-- If empty [], consider creating an index
+```
+
+#### 2. Compare Costs
+
+```sql
+-- Without index (high cost)
+EXPLAIN SELECT * FROM "Users" WHERE "age" > 30;
+-- Cost: 5000 (FullScan)
+
+-- Create index
+CREATE INDEX "users_age_btree" ON "Users" ("age") USING BTREE;
+
+-- With index (lower cost)
+EXPLAIN SELECT * FROM "Users" WHERE "age" > 30;
+-- Cost: 250 (IndexScan)
+```
+
+#### 3. Analyze JOIN Performance
+
+```sql
+-- Check JOIN algorithm selection
+EXPLAIN SELECT * FROM "Orders" JOIN "Customers" ON "Orders"."CustomerID" == "Customers"."ID";
+
+-- Look for:
+-- - HashJoinNode (good for large datasets)
+-- - NestedLoopJoinNode (warning: may be slow)
+-- - IndexesUsed (should list indexes on join columns)
+```
+
+#### 4. Verify LIMIT Optimization
+
+```sql
+-- Good: LIMIT applied early
+EXPLAIN SELECT * FROM "Products" ORDER BY "price" DESC LIMIT 10;
+-- PlanType should end with "-> Limit"
+-- Cost should be reasonable
+
+-- Bad: Large sort before LIMIT
+-- If cost is very high, consider adding index on sort field
+```
+
+#### 5. Validate Execution with ANALYZE
+
+```sql
+-- Get actual vs estimated comparison
+EXPLAIN ANALYZE SELECT * FROM "Logs" WHERE "timestamp" > '2024-01-01';
+
+-- Compare:
+-- - EstimatedRows vs actual row count
+-- - Estimated cost vs ExecutionTimeMs
+-- - Verify index usage in practice
+```
+
+### Use Cases
+
+| Scenario | Use EXPLAIN To |
+|----------|----------------|
+| **Slow Queries** | Identify missing indexes or inefficient plans |
+| **Index Design** | Verify indexes are being used |
+| **Query Optimization** | Compare different query formulations |
+| **Capacity Planning** | Estimate query costs for scaling |
+| **Debugging** | Understand unexpected query behavior |
+| **Performance Tuning** | Find bottlenecks in complex queries |
+
+### Limitations
+
+| Limitation | Description | Workaround |
+|------------|-------------|------------|
+| **SELECT Only** | Currently only supports SELECT statements | UPDATE/DELETE support planned |
+| **Cost Estimates** | Estimates may not match actual performance | Use EXPLAIN ANALYZE for real metrics |
+| **Node Timing** | ANALYZE doesn't track per-node timing yet | Monitor overall execution time |
+| **Cache Effects** | Doesn't account for caching | Run multiple times to see cache impact |
+
+### Best Practices
+
+✅ **DO:**
+- Use EXPLAIN during development to validate queries
+- Run EXPLAIN ANALYZE on production-like data volumes
+- Check index usage before deploying new queries
+- Compare costs when choosing between query approaches
+- Monitor slow queries with EXPLAIN in production
+- Document expected costs for critical queries
+
+❌ **DON'T:**
+- Don't rely solely on cost estimates - use ANALYZE
+- Don't run EXPLAIN ANALYZE on huge datasets in production
+- Don't ignore index recommendations
+- Don't optimize prematurely - measure first
+
+### Complete Example Workflow
+
+```sql
+-- 1. Initial query (slow)
+SELECT * FROM "Orders" WHERE "status" == "pending" AND "amount" > 1000;
+
+-- 2. Analyze current performance
+EXPLAIN ANALYZE SELECT * FROM "Orders" WHERE "status" == "pending" AND "amount" > 1000;
+-- Response shows:
+--   PlanType: "FullScan -> Filter"
+--   Cost: 25000
+--   ExecutionTimeMs: 450
+--   IndexesUsed: []
+
+-- 3. Create index on status field
+CREATE INDEX "orders_status_idx" ON "Orders" ("status") USING HASH;
+
+-- 4. Verify improvement
+EXPLAIN ANALYZE SELECT * FROM "Orders" WHERE "status" == "pending" AND "amount" > 1000;
+-- Response now shows:
+--   PlanType: "IndexScan(status) -> Filter"
+--   Cost: 1200
+--   ExecutionTimeMs: 45
+--   IndexesUsed: ["orders_status_idx"]
+
+-- 5. Further optimization - add compound index
+CREATE INDEX "orders_status_amount_idx" ON "Orders" ("status", "amount") USING BTREE;
+
+-- 6. Final verification
+EXPLAIN ANALYZE SELECT * FROM "Orders" WHERE "status" == "pending" AND "amount" > 1000;
+-- Response:
+--   PlanType: "IndexScan(status,amount)"
+--   Cost: 150
+--   ExecutionTimeMs: 8
+--   IndexesUsed: ["orders_status_amount_idx"]
+```
 
 ---
 
@@ -1986,6 +2330,13 @@ This feature is planned for a future release. Follow SyndrDB development for upd
 | `APPLY ROLLBACK TO VERSION n` | Revert migration | APPLIED → ROLLED_BACK |
 | `VALIDATE MIGRATION WITH VERSION n` | Validate before apply | PENDING |
 | `VALIDATE ROLLBACK TO VERSION n` | Validate before rollback | Any |
+
+### Query Analysis
+
+| Command | Purpose | Permission |
+|---------|---------|------------|
+| `EXPLAIN <SELECT>` | Show query execution plan | Any |
+| `EXPLAIN ANALYZE <SELECT>` | Execute and analyze query | Any |
 
 ---
 
@@ -2025,6 +2376,13 @@ This feature is planned for a future release. Follow SyndrDB development for upd
 - Create backups before applying migrations or rollbacks
 - Apply migrations during low-traffic periods
 - Keep migrations atomic and focused
+
+### Query Performance
+- Use `EXPLAIN` during development to validate query performance
+- Run `EXPLAIN ANALYZE` to compare estimates vs actual execution
+- Create indexes when EXPLAIN shows full scans on large bundles
+- Monitor query costs in production for optimization opportunities
+- Document expected query costs for critical operations
 
 ---
 

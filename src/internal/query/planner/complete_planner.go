@@ -320,9 +320,10 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 		remainingClauses := qp.getRemainingClauses(clauses, *usedClause)
 		if len(remainingClauses) > 0 {
 			filterNode := &FilterNode{
-				Child:   bestNode,
-				Clauses: remainingClauses,
-				Logger:  qp.Logger,
+				Child:            bestNode,
+				Clauses:          remainingClauses,
+				Logger:           qp.Logger,
+				SubqueryExecutor: nil, // TIER 1: Not used in legacy clause-based filtering
 			}
 			filterNode.Cost = bestNode.GetCost() + float64(bestNode.GetEstimatedRows())*0.1
 			filterNode.EstimatedRows = int(float64(bestNode.GetEstimatedRows()) * 0.3) // Assume filters reduce by 70%
@@ -351,9 +352,10 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 
 	if len(clauses) > 0 {
 		filterNode := &FilterNode{
-			Child:   fullScan,
-			Clauses: clauses,
-			Logger:  qp.Logger,
+			Child:            fullScan,
+			Clauses:          clauses,
+			Logger:           qp.Logger,
+			SubqueryExecutor: nil, // TIER 1: Not used in legacy clause-based filtering
 		}
 		filterNode.Cost = fullScan.GetCost() + float64(fullScan.GetEstimatedRows())*0.1
 		filterNode.EstimatedRows = int(float64(fullScan.GetEstimatedRows()) * 0.3)
@@ -454,9 +456,10 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 		// If there are non-index clauses, add them as filters
 		if len(nonIndexClauses) > 0 {
 			filterNode := &FilterNode{
-				Child:   unionNode,
-				Clauses: nonIndexClauses,
-				Logger:  qp.Logger,
+				Child:            unionNode,
+				Clauses:          nonIndexClauses,
+				Logger:           qp.Logger,
+				SubqueryExecutor: nil, // TIER 1: Not used in legacy clause-based filtering
 			}
 			filterNode.Cost = unionNode.GetCost() + float64(unionNode.GetEstimatedRows())*0.1
 			filterNode.EstimatedRows = unionNode.GetEstimatedRows() // OR filters don't reduce as much
@@ -476,9 +479,10 @@ func (qp *QueryPlanner) optimizeORConditions(bundle *models.Bundle, clauses []qu
 	}
 
 	filterNode := &FilterNode{
-		Child:   fullScan,
-		Clauses: clauses,
-		Logger:  qp.Logger,
+		Child:            fullScan,
+		Clauses:          clauses,
+		Logger:           qp.Logger,
+		SubqueryExecutor: nil, // TIER 1: Not used in legacy clause-based filtering
 	}
 	filterNode.Cost = fullScan.GetCost() + float64(fullScan.GetEstimatedRows())*0.1
 	filterNode.EstimatedRows = int(float64(fullScan.GetEstimatedRows()) * 0.5) // OR conditions typically match more rows

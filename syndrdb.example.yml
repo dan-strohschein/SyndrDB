@@ -312,6 +312,29 @@ query_max_memory_mb: 25
 admin_query_max_memory_mb: 25
 
 # ==============================================================================
+# QUERY OPTIMIZATION CONFIGURATION
+# ==============================================================================
+
+# Tier 1 Subquery Execution Settings
+# Enable IN/EXISTS subquery support with configurable strategy selection
+subquery_enabled: true  # Enable subquery support (default: true)
+
+# Strategy threshold: use IN-list materialization below this row count (default: 100)
+subquery_small_threshold: 100
+
+# Strategy threshold: use HashJoin below this row count (default: 10000)
+# Above this threshold, IndexedLookup is used if index available
+subquery_medium_threshold: 10000
+
+# Maximum subquery nesting depth (default: 3)
+# Prevents stack overflow and ensures reasonable query complexity
+subquery_max_depth: 3
+
+# Maximum memory for IN-list materialization in MB (default: 10)
+# Forces HashJoin strategy if estimated memory exceeds this limit
+subquery_max_inlist_memory_mb: 10
+
+# ==============================================================================
 # GHOST CLEANUP (AUTOMATIC COMPACTION) CONFIGURATION
 # ==============================================================================
 

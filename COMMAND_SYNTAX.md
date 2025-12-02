@@ -127,7 +127,189 @@ DELETE DOCUMENTS FROM BUNDLE "<BUNDLE_NAME>"
 WHERE <CONDITIONS>;
 ```
 
-## Index Management Commands
+## Query Analysis Commands
+
+### EXPLAIN
+Shows the query execution plan without executing the query. This command helps optimize query performance by revealing:
+- Estimated execution cost
+- Expected number of rows
+- Indexes that will be used
+- Execution node tree structure
+- Cost calculation formulas
+
+**Current Limitation**: EXPLAIN currently only supports SELECT statements. Support for UPDATE and DELETE statements will be added when they migrate to the query planning system.
+
+```
+EXPLAIN <SELECT_STATEMENT>;
+```
+
+**Example:**
+```
+EXPLAIN SELECT * FROM "Authors" WHERE "Name" == "Strohschein";
+```
+
+**Output Format:**
+```json
+{
+  "QueryPlan": {
+    "QueryType": "SimpleSelect",
+    "PlanType": "HashIndexScan -> Filter",
+    "Cost": 15.42,
+    "EstimatedRows": 3,
+    "IndexesUsed": ["authors_name_hash_idx"],
+    "MemoryEstimate": 4096,
+    "CostFormulas": {
+      "HashIndexCost": "1.0 (base) + 0.1 (lookup)",
+      "FilterCost": "N * 0.1 (per-row evaluation)"
+    },
+    "ExecutionTree": {
+      "NodeType": "FilterNode",
+      "Cost": 15.42,
+      "EstimatedRows": 3,
+      "MemoryUsage": 2048,
+      "Child": {
+        "NodeType": "HashIndexScanNode",
+        "IndexName": "authors_name_hash_idx",
+        "ScanType": "HashIndexScan",
+        "SearchKey": "Strohschein",
+        "Cost": 1.1,
+        "EstimatedRows": 100
+      }
+    }
+  }
+}
+```
+
+### EXPLAIN ANALYZE
+Executes the query AND shows both estimated and actual execution metrics. This provides comprehensive performance analysis including:
+- All information from EXPLAIN
+- Actual execution time per node
+- Actual number of rows returned
+- Comparison of estimated vs actual metrics
+
+**Current Limitation**: EXPLAIN ANALYZE currently only supports SELECT statements. Support for UPDATE and DELETE statements will be added when they migrate to the query planning system.
+
+```
+EXPLAIN ANALYZE <SELECT_STATEMENT>;
+```
+
+**Example:**
+```
+EXPLAIN ANALYZE SELECT * FROM "Authors" WHERE "Country" == "USA" ORDER BY "Name" LIMIT 10;
+```
+
+**Output Format (includes all EXPLAIN fields plus execution metrics):**
+```json
+{
+  "QueryPlan": {
+    "QueryType": "SimpleSelect",
+    "PlanType": "FullScan -> Filter -> Sort -> Limit",
+    "Cost": 245.67,
+    "EstimatedRows": 10,
+    "IndexesUsed": [],
+    "MemoryEstimate": 16384,
+    "CostFormulas": {
+      "FullScanCost": "N * 1.0 (linear scan)",
+      "FilterCost": "N * 0.1 (per-row evaluation)",
+      "SortCost": "N * log2(N) * 0.1 (quicksort)",
+      "LimitCost": "min(N, LIMIT) * 1.0"
+    },
+    "ExecutionTree": {
+      "NodeType": "LimitNode",
+      "Limit": 10,
+      "Cost": 245.67,
+      "EstimatedRows": 10,
+      "ActualExecutionTime": 2.34,
+      "ActualRowsReturned": 10,
+      "Child": {
+        "NodeType": "SortNode",
+        "SortFields": [{"Field": "Name", "Direction": "ASC"}],
+        "Cost": 240.50,
+        "EstimatedRows": 50,
+        "ActualExecutionTime": 1.89,
+        "ActualRowsReturned": 50,
+        "Child": {
+          "NodeType": "FilterNode",
+          "Cost": 120.00,
+          "EstimatedRows": 50,
+          "ActualExecutionTime": 0.45,
+          "ActualRowsReturned": 50,
+          "Child": {
+            "NodeType": "FullScanNode",
+            "BundleName": "Authors",
+            "Cost": 100.00,
+            "EstimatedRows": 100,
+            "ActualExecutionTime": 0.12,
+            "ActualRowsReturned": 100
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+**Use Cases:**
+
+1. **Query Optimization**: Identify slow operations and missing indexes
+   ```
+   EXPLAIN SELECT * FROM "Products" WHERE "Price" > 100;
+   ```
+
+2. **Index Verification**: Confirm that indexes are being used
+   ```
+   EXPLAIN SELECT * FROM "Users" WHERE "Email" == "user@example.com";
+   ```
+
+3. **JOIN Analysis**: Understand JOIN algorithm selection (NestedLoop, Hash, Merge)
+   ```
+   EXPLAIN SELECT * FROM "Orders" JOIN "Customers" ON "Orders"."CustomerID" == "Customers"."ID";
+   ```
+
+4. **Performance Debugging**: Find bottlenecks with ANALYZE
+   ```
+   EXPLAIN ANALYZE SELECT * FROM "Logs" WHERE "Timestamp" >= "2024-01-01" ORDER BY "Timestamp" LIMIT 1000;
+   ```
+
+5. **Aggregation Analysis**: Review GROUP BY execution strategies
+   ```
+   EXPLAIN SELECT "Category", COUNT(*) FROM "Products" GROUP BY "Category";
+   ```
+
+**Cost Model:**
+
+SyndrDB's query planner estimates costs using the following formulas:
+
+| Operation | Formula | Description |
+|-----------|---------|-------------|
+| Hash Index Scan | `1.0 + 0.1` | Base cost + lookup cost (O(1)) |
+| B-Tree Index Scan | `log2(N) + 0.5` | Tree traversal cost (O(log N)) |
+| B-Tree Range Scan | `log2(N) + M` | Tree traversal + range size |
+| Full Scan | `N * 1.0` | Linear scan of all documents |
+| Filter | `N * 0.1` | Per-row predicate evaluation |
+| Sort | `N * log2(N) * 0.1` | Comparison-based sorting |
+| Limit | `min(N, LIMIT) * 1.0` | Early termination |
+| Hash Aggregation | `N * 0.2` | Hash-based GROUP BY |
+| Distinct | `N * 0.15` | Hash-based deduplication |
+| Nested Loop JOIN | `M * N` | Cartesian product iteration |
+| Hash JOIN | `M + N` | Hash build + probe |
+| Merge JOIN | `M*log(M) + N*log(N) + M + N` | Sort both sides + merge |
+
+Where:
+- `N` = number of rows
+- `M` = number of rows from other table/side
+- `LIMIT` = limit value
+
+**Performance Tips:**
+
+1. **Add indexes on WHERE clause fields** to reduce scan costs
+2. **Use LIMIT** with ORDER BY to enable Top-N optimization
+3. **Filter before JOIN** to reduce join input size
+4. **Choose selective predicates** to reduce estimated rows early
+5. **Review cost formulas** to understand optimizer decisions
+6. **Compare estimated vs actual** (ANALYZE) to identify estimation errors
+
+
 
 ### CREATE BTREE INDEX
 Creates a B-Tree index on bundle fields.

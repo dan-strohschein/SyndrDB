@@ -555,6 +555,24 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	// Get settings for optimization configuration
 	args := settings.GetSettings()
 
+	// TIER 1 SUBQUERY SUPPORT: Detect and execute subqueries before applying WHERE optimizations
+	var subqueryContext syndrQL.SubqueryExecutionContext
+	if node.WhereExpression != nil && node.SubqueryExecutor != nil && node.Database != nil {
+		if expr, ok := node.WhereExpression.(syndrQL.Expression); ok {
+			// Detect and execute all subqueries in the WHERE expression
+			subqueryContext, err = DetectAndExecuteSubqueries(ctx, expr, node.Database, node.SubqueryExecutor, node.Logger)
+			if err != nil {
+				// Subquery execution failed - return error
+				node.Logger.Errorf("Subquery execution failed: %v", err)
+				return nil, fmt.Errorf("subquery execution failed: %w", err)
+			}
+			// Log subquery execution if any subqueries were found
+			if len(subqueryContext) > 0 {
+				node.Logger.Debugf("Executed %d subqueries before WHERE evaluation", len(subqueryContext))
+			}
+		}
+	}
+
 	// PRIORITY 4: Expression caching and predicate reordering (applied before evaluation)
 	var optimizedExpr syndrQL.Expression
 	if args.WhereExpressionCacheEnabled && node.QueryCache != nil && node.WhereExpression != nil {
@@ -640,7 +658,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 			}
 		}
 
-		if node.matchesConditions(doc) {
+		if node.matchesConditions(doc, subqueryContext) {
 			filtered[docID] = doc
 		}
 		docCount++
@@ -650,7 +668,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	return filtered, nil
 }
 
-func (node *FilterNode) matchesConditions(doc *models.Document) bool {
+func (node *FilterNode) matchesConditions(doc *models.Document, subqueryContext syndrQL.SubqueryExecutionContext) bool {
 	// Require Expression-based evaluation
 	if node.WhereExpression == nil {
 		// No filter conditions - match all documents
@@ -676,7 +694,7 @@ func (node *FilterNode) matchesConditions(doc *models.Document) bool {
 	// NEW: Create evaluator with SIMD configuration from settings (Phase 1 WHERE optimization)
 	args := settings.GetSettings()
 	evaluator := syndrQL.NewExpressionEvaluatorWithSIMD(node.Logger, args.WhereSIMDEnabled)
-	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx)
+	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, subqueryContext)
 	if err != nil {
 		node.Logger.Errorf("Expression evaluation failed: %v", err)
 		return false

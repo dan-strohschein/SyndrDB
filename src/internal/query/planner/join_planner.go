@@ -164,11 +164,12 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 	if hasWhereExpression {
 		// Create FilterNode to apply WHERE expression after JOIN
 		filterNode := &FilterNode{
-			Child:           joinNode,
-			WhereExpression: query.WhereExpression,
-			Cost:            estimatedCost + float64(estimatedRows)*0.1, // Add filter cost
-			EstimatedRows:   estimatedRows / 10,                         // Assume 10% selectivity
-			Logger:          jp.Logger,
+			Child:            joinNode,
+			WhereExpression:  query.WhereExpression,
+			Cost:             estimatedCost + float64(estimatedRows)*0.1, // Add filter cost
+			EstimatedRows:    estimatedRows / 10,                         // Assume 10% selectivity
+			Logger:           jp.Logger,
+			SubqueryExecutor: nil, // TIER 1: TODO - wire in subquery executor from router
 		}
 		rootNode = filterNode
 		finalCost = filterNode.Cost

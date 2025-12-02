@@ -628,18 +628,18 @@ func TestDateTime_E2E_MetricsTracking(t *testing.T) {
 		expectValid bool
 	}{
 		// Valid formats (7 total)
-		{"2024-11-22T15:30:00Z", true},           // RFC3339
-		{"2024-11-22T10:15:30", true},            // ISO8601 without timezone
-		{"2024-11-22 18:00:00", true},            // SQL datetime
-		{"2024-11-22", true},                     // Date only
-		{"2024-11-22T15:30:00.123Z", true},       // ISO8601 with milliseconds
-		{"01/02/2006 15:04:05", true},            // US format with time
-		{"2024/11/22", true},                     // Alternative date format
-		
+		{"2024-11-22T15:30:00Z", true},     // RFC3339
+		{"2024-11-22T10:15:30", true},      // ISO8601 without timezone
+		{"2024-11-22 18:00:00", true},      // SQL datetime
+		{"2024-11-22", true},               // Date only
+		{"2024-11-22T15:30:00.123Z", true}, // ISO8601 with milliseconds
+		{"01/02/2006 15:04:05", true},      // US format with time
+		{"2024/11/22", true},               // Alternative date format
+
 		// Invalid formats (3 total)
-		{"not-a-date", false},                    // Clearly invalid
-		{"2024-13-45", false},                    // Invalid month/day
-		{"", false},                              // Empty string
+		{"not-a-date", false}, // Clearly invalid
+		{"2024-13-45", false}, // Invalid month/day
+		{"", false},           // Empty string
 	}
 
 	expectedSuccess := 0
@@ -648,10 +648,10 @@ func TestDateTime_E2E_MetricsTracking(t *testing.T) {
 	for _, tc := range testCases {
 		// Manually parse datetime and track metrics
 		_, _, err := utils.ParseDateTime(tc.input)
-		
+
 		// Increment metrics manually (simulating what production code would do)
 		metrics.DateTimeParseAttemptsTotal.Add(1)
-		
+
 		if err == nil {
 			metrics.DateTimeParseSuccessTotal.Add(1)
 			expectedSuccess++
@@ -694,15 +694,15 @@ func TestDateTime_E2E_MetricsTracking(t *testing.T) {
 
 	// Verify metrics are exported via GetMetrics() (memory-mapped interface)
 	exportedMetrics := metrics.GetMetrics()
-	
+
 	if _, exists := exportedMetrics["datetime_parse_attempts_total"]; !exists {
 		t.Error("datetime_parse_attempts_total not found in exported metrics")
 	}
-	
+
 	if _, exists := exportedMetrics["datetime_parse_success_total"]; !exists {
 		t.Error("datetime_parse_success_total not found in exported metrics")
 	}
-	
+
 	if _, exists := exportedMetrics["datetime_parse_errors_total"]; !exists {
 		t.Error("datetime_parse_errors_total not found in exported metrics")
 	}
@@ -712,4 +712,3 @@ func TestDateTime_E2E_MetricsTracking(t *testing.T) {
 	t.Logf("  - datetime_parse_success_total: %d", exportedMetrics["datetime_parse_success_total"])
 	t.Logf("  - datetime_parse_errors_total: %d", exportedMetrics["datetime_parse_errors_total"])
 }
-

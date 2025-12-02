@@ -132,6 +132,9 @@ type SelectParser struct {
 
 	// Pattern detector for hot path optimization
 	patternDetector *SelectPatternDetector
+
+	// Logger for error reporting and debugging
+	logger *zap.SugaredLogger
 }
 
 // NewSelectParser creates a new SELECT parser
@@ -151,6 +154,9 @@ func NewSelectParser(tokens []Token) *SelectParser {
 
 // Parse parses a SELECT statement
 func (p *SelectParser) Parse(logger *zap.SugaredLogger) (*SelectStatement, error) {
+	// Store logger for use by child parsers (ExpressionParser, nested SelectParsers)
+	p.logger = logger
+
 	stmt := &SelectStatement{
 		Fields:  make([]SelectField, 0),
 		OrderBy: make([]OrderByField, 0),
@@ -387,7 +393,7 @@ func (p *SelectParser) parseFieldExpression() (Expression, error) {
 	}
 
 	// Use ExpressionParser to parse the collected tokens
-	exprParser := NewExpressionParser(exprTokens)
+	exprParser := NewExpressionParser(exprTokens, p.logger)
 	expr, err := exprParser.Parse()
 	if err != nil {
 		return nil, fmt.Errorf("error parsing field expression: %w", err)
@@ -431,10 +437,14 @@ func (p *SelectParser) parseWhereClause() (Expression, error) {
 	}
 
 	// Use ExpressionParser to parse WHERE condition
-	exprParser := NewExpressionParser(whereTokens)
+	exprParser := NewExpressionParser(whereTokens, p.logger)
 	expr, err := exprParser.Parse()
 	if err != nil {
 		return nil, fmt.Errorf("error parsing WHERE clause: %w", err)
+	}
+
+	if p.logger != nil {
+		p.logger.Debugf("parseWhereClause: parsed expression type=%T", expr)
 	}
 
 	return expr, nil
@@ -679,7 +689,7 @@ func (p *SelectParser) parseHavingClause(stmt *SelectStatement) error {
 	}
 
 	// Use ExpressionParser
-	exprParser := NewExpressionParser(havingTokens)
+	exprParser := NewExpressionParser(havingTokens, p.logger)
 	expr, err := exprParser.Parse()
 	if err != nil {
 		return fmt.Errorf("error parsing HAVING clause: %w", err)

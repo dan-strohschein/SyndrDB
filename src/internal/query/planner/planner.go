@@ -91,6 +91,10 @@ type FilterNode struct {
 	DocumentScanner documentscanner.DocumentScannerInterface
 	// PRIORITY 4: Query cache for expression caching and predicate reordering
 	QueryCache *QueryCache
+	// TIER 1 SUBQUERY SUPPORT: Subquery executor for detecting and executing subqueries in WHERE expressions
+	SubqueryExecutor interface{} // *subquery.SubqueryExecutor - use type assertion to avoid circular dependencies
+	// TIER 1 SUBQUERY SUPPORT: Database reference needed for executing inner queries
+	Database *models.Database // Database containing bundles for subquery execution
 }
 
 // FilterCondition represents a single filter condition
@@ -108,4 +112,10 @@ type UnionNode struct {
 	Logger        *zap.SugaredLogger
 	// DOCUMENT SCANNER INTEGRATION: Add document scanner for paginated operations
 	DocumentScanner documentscanner.DocumentScannerInterface
+}
+
+// Execute executes the execution plan by running the root node
+// This method implements the ExecutionPlanInterface for subquery execution
+func (ep *ExecutionPlan) Execute(ctx context.Context) (interface{}, error) {
+	return ep.RootNode.Execute(ctx)
 }
