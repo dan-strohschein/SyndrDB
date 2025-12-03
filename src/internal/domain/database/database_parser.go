@@ -110,6 +110,35 @@ func ParseDeleteDatabaseCommand(command string) (*models.DatabaseCommand, error)
 	}, nil
 }
 
+// ParseDropDatabaseCommand parses a DROP DATABASE command
+// Expected format: DROP "<database_name>"
+// Returns a DatabaseCommand with:
+//   - CommandType: "DROP"
+//   - DatabaseName: database name to drop
+func ParseDropDatabaseCommand(command string) (*models.DatabaseCommand, error) {
+	// Regular expression to extract database name
+	// Pattern: DROP "database_name" or DROP DATABASE "database_name"
+	dropRegex := regexp.MustCompile(`DROP\s+(?:DATABASE\s+)?"([^"]+)"`)
+	matches := dropRegex.FindStringSubmatch(command)
+
+	if len(matches) < 2 {
+		return nil, fmt.Errorf("invalid DROP DATABASE command syntax. Expected: DROP \"database_name\"")
+	}
+
+	databaseName := matches[1]
+
+	// Validate database name
+	if !IsValidDatabaseName(databaseName) {
+		return nil, fmt.Errorf("invalid database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", databaseName)
+	}
+
+	return &models.DatabaseCommand{
+		ID:           helpers.GenerateUUID(),
+		CommandType:  "DROP",
+		DatabaseName: databaseName,
+	}, nil
+}
+
 // ParseRenameDatabaseCommand parses a RENAME DATABASE command
 // Expected formats:
 //   - RENAME DATABASE "old_name" TO "new_name"

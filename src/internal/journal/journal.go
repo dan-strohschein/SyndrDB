@@ -56,6 +56,7 @@ const (
 	OpCreateIndex
 	OpDropIndex
 	OpDropRelationship
+	OpDropDatabase
 	OpBeginTx
 	OpCommitTx
 	OpRollbackTx

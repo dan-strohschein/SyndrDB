@@ -394,8 +394,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	if strings.HasPrefix(commandLower, "drop") {
 		switch strings.ToLower(commandParts[1]) {
 		case "database":
-			break
-			//return DropDatabase(command, logger, serviceManager)
+			return DropDatabase(command, logger, serviceManager, session)
 		case "bundle":
 			bundleCmd, err := parseDropBundle(command, logger)
 			if err != nil {
