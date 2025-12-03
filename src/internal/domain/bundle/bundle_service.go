@@ -2537,13 +2537,19 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 			}
 
 			if _, hasField := doc.Fields[fieldName]; !hasField {
+				// Evaluate default value (supports Expression or literal)
+				evaluatedValue, err := s.evaluateDefaultValue(defaultValue, &doc)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate default value for field '%s': %w", fieldName, err)
+				}
+
 				doc.Fields[fieldName] = models.Field{
 					Name:  fieldName,
-					Value: models.NewInterfaceValue(defaultValue), // ✅ Use NewInterfaceValue
+					Value: models.NewInterfaceValue(evaluatedValue),
 				}
 
 				// Update the document in the bundle file
-				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
+				err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to update document %s: %w", docID, err)
 				}
@@ -2838,13 +2844,19 @@ func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldN
 
 			field, hasField := doc.Fields[fieldName]
 			if !hasField || field.Value.IsNil() { // ✅ Use IsNil()
+				// Evaluate default value (supports Expression or literal)
+				evaluatedValue, err := s.evaluateDefaultValue(defaultValue, &doc)
+				if err != nil {
+					return fmt.Errorf("failed to evaluate default value for field '%s': %w", fieldName, err)
+				}
+
 				doc.Fields[fieldName] = models.Field{
 					Name:  fieldName,
-					Value: models.NewInterfaceValue(defaultValue), // ✅ Use NewInterfaceValue
+					Value: models.NewInterfaceValue(evaluatedValue),
 				}
 
 				// Persist the change
-				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
+				err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
 				}
@@ -2856,6 +2868,29 @@ func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldN
 	s.invalidateBundlePageCache(bundle.Name)
 
 	return nil
+}
+
+// evaluateDefaultValue evaluates a default value (supports Expression or literal)
+func (s *BundleService) evaluateDefaultValue(defaultValue interface{}, doc *models.Document) (interface{}, error) {
+	// Check if default value is an Expression (function call)
+	if expr, isExpr := defaultValue.(syndrQL.Expression); isExpr {
+		// Create evaluator for expression evaluation
+		evaluator := syndrQL.NewExpressionEvaluator(s.logger)
+
+		// Use the provided document for evaluation context
+		// Field references will work if the field already exists in doc
+		// Function calls like F:NOW() don't need document fields
+		result, err := evaluator.Evaluate(expr, doc, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("expression evaluation failed: %w", err)
+		}
+
+		// Result is already interface{}, return as-is
+		return result, nil
+	}
+
+	// Literal value - return as-is
+	return defaultValue, nil
 }
 
 // isFieldIndexed checks if a field has an index
@@ -4890,9 +4925,19 @@ func (s *BundleService) processNullValues(bundle *models.Bundle, docCommand *mod
 		// Handle nil or SYNDR_NULL -> check for default value substitution
 		if fieldValue == nil || fieldValue == SYNDR_NULL {
 			if fieldDef.DefaultValue != nil {
-				// Substitute the actual default value
-				docCommand.Fields[i].Value = fieldDef.DefaultValue
-				s.logger.Debugf("Substituted default value for field '%s': %v", fieldName, fieldDef.DefaultValue)
+				// Evaluate default value (supports Expression or literal)
+				// Create a temporary document for evaluation context
+				tempDoc := &models.Document{
+					Data: make(map[string]interface{}),
+				}
+				evaluatedValue, err := s.evaluateDefaultValue(fieldDef.DefaultValue, tempDoc)
+				if err != nil {
+					s.logger.Errorf("Failed to evaluate default value for field '%s': %v", fieldName, err)
+					return fmt.Errorf("failed to evaluate default value for field '%s': %w", fieldName, err)
+				}
+				// Substitute the evaluated default value
+				docCommand.Fields[i].Value = evaluatedValue
+				s.logger.Debugf("Substituted evaluated default value for field '%s': %v", fieldName, evaluatedValue)
 			} else {
 				// No default - use SYNDR_NULL
 				docCommand.Fields[i].Value = SYNDR_NULL
@@ -4952,8 +4997,18 @@ func (s *BundleService) processNullValues(bundle *models.Bundle, docCommand *mod
 			// Determine value: use default if available, otherwise SYNDR_NULL
 			var fieldValue interface{}
 			if fieldDef.DefaultValue != nil {
-				fieldValue = fieldDef.DefaultValue
-				s.logger.Debugf("Using default value for missing field '%s': %v", fieldName, fieldDef.DefaultValue)
+				// Evaluate default value (supports Expression or literal)
+				// Create a temporary document for evaluation context
+				tempDoc := &models.Document{
+					Data: make(map[string]interface{}),
+				}
+				evaluatedValue, err := s.evaluateDefaultValue(fieldDef.DefaultValue, tempDoc)
+				if err != nil {
+					s.logger.Errorf("Failed to evaluate default value for field '%s': %v", fieldName, err)
+					return fmt.Errorf("failed to evaluate default value for field '%s': %w", fieldName, err)
+				}
+				fieldValue = evaluatedValue
+				s.logger.Debugf("Using evaluated default value for missing field '%s': %v", fieldName, evaluatedValue)
 			} else {
 				fieldValue = SYNDR_NULL
 			}

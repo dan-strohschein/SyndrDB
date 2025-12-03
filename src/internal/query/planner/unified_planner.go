@@ -216,6 +216,11 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 	database *models.Database,
 ) (*ExecutionPlan, error) {
 
+	// Check for expression-only query (no FROM clause)
+	if query.FromBundle == "" {
+		return uqp.createExpressionOnlyPlan(query, database)
+	}
+
 	// Step 1: Route to appropriate planner and get base execution tree
 
 	// Step 1: Route to appropriate planner and get base execution tree
@@ -252,6 +257,40 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 	uqp.logger.Debugf("Unified execution plan created successfully: "+
 		"Type=%s, Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v, MemoryEstimate=%d bytes",
 		query.QueryType, plan.Cost, plan.EstimatedRows, plan.IndexesUsed, memoryEstimate)
+
+	return plan, nil
+}
+
+// createExpressionOnlyPlan creates an execution plan for expression-only SELECT queries (no FROM clause)
+func (uqp *UnifiedQueryPlanner) createExpressionOnlyPlan(
+	query *queryparser.UnifiedSelectQuery,
+	database *models.Database,
+) (*ExecutionPlan, error) {
+
+	// Validate that query doesn't have DISTINCT
+	if query.IsDistinct {
+		return nil, fmt.Errorf("DISTINCT modifier cannot be used in expression-only SELECT queries")
+		// TODO: Consider allowing DISTINCT in future for consistency with SQL standard,
+		// though result is always identical for single-row expression evaluation.
+	}
+
+	// Create expression evaluation node
+	evalNode := &ExpressionEvaluationNode{
+		SelectFields: query.SelectFields,
+		Logger:       uqp.logger,
+	}
+
+	plan := &ExecutionPlan{
+		RootNode:             evalNode,
+		Cost:                 evalNode.GetCost(),
+		EstimatedRows:        evalNode.GetEstimatedRows(),
+		IndexesUsed:          []string{}, // No indexes used for expression-only
+		Logger:               uqp.logger,
+		estimatedMemoryBytes: evalNode.EstimateMemoryUsage(),
+	}
+
+	uqp.logger.Debugf("Expression-only execution plan created: Fields=%d, Cost=%.2f, Rows=%d",
+		len(query.SelectFields), plan.Cost, plan.EstimatedRows)
 
 	return plan, nil
 }

@@ -11,6 +11,7 @@ import (
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/query/resolver"
 	"syndrdb/src/internal/utils"
+	"syndrdb/src/pkg/data"
 	pkgSettings "syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -68,10 +69,10 @@ func NewBundleContext(bundles map[string]*models.Bundle, primaryBundle string, j
 
 // ExpressionEvaluator evaluates Expression AST nodes against document data
 type ExpressionEvaluator struct {
-	logger   *zap.SugaredLogger
-	useSIMD  bool                 // Enable SIMD acceleration for string comparisons
-	nowCache time.Time            // Cached NOW() value (query-scoped for consistency)
-	tzCache  *utils.TimezoneCache // Timezone cache for AT TIME ZONE operations
+	logger       *zap.SugaredLogger
+	useSIMD      bool      // Enable SIMD acceleration for string comparisons
+	nowCache     time.Time // Cached NOW() value (query-scoped for consistency)
+	tzCache      *utils.TimezoneCache // Timezone cache for AT TIME ZONE operations
 }
 
 // NewExpressionEvaluator creates a new expression evaluator with SIMD disabled
@@ -412,7 +413,7 @@ func (e *ExpressionEvaluator) evaluateGrouped(expr *GroupedExpression, doc *mode
 // TODO: I will add support for user-defined functions when implementing UDF system
 func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
 	// Evaluate all arguments first
-	args := make([]models.FieldValue, len(expr.Arguments))
+	args := make([]data.FieldValue, len(expr.Arguments))
 	for i, argExpr := range expr.Arguments {
 		argVal, err := e.Evaluate(argExpr, doc, bundleContext, subqueryContext)
 		if err != nil {
@@ -435,7 +436,7 @@ func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Doc
 		TimezoneCache: e.tzCache,
 		Document:      doc.Data,
 		BundleName:    "", // TODO: Extract from bundleContext when needed
-		FieldValues:   make(map[string]models.FieldValue),
+		FieldValues:   make(map[string]data.FieldValue),
 	}
 
 	// Call function via registry
@@ -489,15 +490,6 @@ func (e *ExpressionEvaluator) evaluateAtTimeZone(expr *AtTimeZoneExpression, doc
 	switch v := val.(type) {
 	case time.Time:
 		dt = v
-	case models.FieldValue:
-		// Handle FieldValue (from auto-parsing)
-		if v.Type == models.FieldTypeDateTime {
-			dt = v.DateTimeVal
-		} else if v.Type == models.FieldTypeDate {
-			dt = v.DateVal
-		} else {
-			return nil, fmt.Errorf("AT TIME ZONE: FieldValue must be DateTime or Date type, got %s", v.Type)
-		}
 	case string:
 		// Try parsing as ISO 8601 DateTime
 		dt, err = time.Parse(time.RFC3339, v)
@@ -980,53 +972,50 @@ func (e *ExpressionEvaluator) evaluateSubquery(expr *SubqueryExpression, subquer
 	return result, nil
 }
 
-// interfaceToFieldValue converts interface{} to models.FieldValue
+// interfaceToFieldValue converts interface{} to data.FieldValue
 // TODO: I will optimize this with type switch table when profiling shows >1% CPU time
-func interfaceToFieldValue(val interface{}) models.FieldValue {
+func interfaceToFieldValue(val interface{}) data.FieldValue {
 	if val == nil {
-		return models.FieldValue{Type: models.FieldTypeNil}
+		return data.FieldValue{Type: data.TYPE_NULL}
 	}
 
 	switch v := val.(type) {
-	case models.FieldValue:
-		// Already a FieldValue - return directly (happens when evaluating expressions)
-		return v
 	case string:
-		return models.NewStringValue(v)
+		return data.NewStringValue(v)
 	case int:
-		return models.NewIntValue(int64(v))
+		return data.NewIntValue(int64(v))
 	case int64:
-		return models.NewIntValue(v)
+		return data.NewIntValue(v)
 	case float64:
-		return models.NewFloatValue(v)
+		return data.NewFloatValue(v)
 	case bool:
-		return models.NewBoolValue(v)
+		return data.NewBoolValue(v)
 	case time.Time:
-		return models.NewDateTimeValue(v)
+		return data.NewDateTimeValue(v)
 	case []interface{}:
-		// TODO: add proper array support when implementing array field types
-		return models.FieldValue{Type: models.FieldTypeNil}
+		// TODO: I will add proper array support when implementing array field types
+		return data.FieldValue{Type: data.TYPE_NULL}
 	default:
 		// Unknown type - return NULL
-		return models.FieldValue{Type: models.FieldTypeNil}
+		return data.FieldValue{Type: data.TYPE_NULL}
 	}
 }
 
-// fieldValueToInterface converts models.FieldValue to interface{}
-// TODO: optimize this with jump table when profiling shows >1% CPU time
-func fieldValueToInterface(fv models.FieldValue) interface{} {
+// fieldValueToInterface converts data.FieldValue to interface{}
+// TODO: I will optimize this with jump table when profiling shows >1% CPU time
+func fieldValueToInterface(fv data.FieldValue) interface{} {
 	switch fv.Type {
-	case models.FieldTypeString:
-		return fv.StringVal
-	case models.FieldTypeInt:
-		return fv.IntVal
-	case models.FieldTypeFloat:
-		return fv.FloatVal
-	case models.FieldTypeBool:
-		return fv.BoolVal
-	case models.FieldTypeDateTime:
-		return fv.DateTimeVal
-	case models.FieldTypeNil:
+	case data.TYPE_STRING:
+		return fv.StringValue
+	case data.TYPE_INT:
+		return fv.IntValue
+	case data.TYPE_FLOAT:
+		return fv.FloatValue
+	case data.TYPE_BOOL:
+		return fv.BoolValue
+	case data.TYPE_DATETIME:
+		return fv.DateTimeValue
+	case data.TYPE_NULL:
 		return nil
 	default:
 		return nil

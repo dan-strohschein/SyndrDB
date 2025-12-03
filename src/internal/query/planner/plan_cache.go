@@ -412,9 +412,19 @@ func (spc *ShardedPlanCache) computeKey(query *queryparser.UnifiedSelectQuery, u
 	}
 
 	// Write WHERE expression structure (not values) - recursive serialization
-	// I'll serialize the expression tree structure here
-	// TODO: Implement proper WHERE expression structure serialization that walks AST
-	// and writes operator types and field names (skipping literal values)
+	// For now, we serialize the string representation of the Expression
+	// This ensures queries with different WHERE clauses get different cache keys
+	if query.WhereExpression != nil {
+		h.Write([]byte("WHERE:"))
+		// Use string representation of expression for now
+		// This is not ideal but ensures different WHERE clauses produce different keys
+		whereStr := fmt.Sprintf("%v", query.WhereExpression)
+		h.Write([]byte(whereStr))
+		h.Write([]byte{0})
+	} else {
+		h.Write([]byte("NO_WHERE"))
+		h.Write([]byte{0})
+	}
 
 	// Write GROUP BY fields (sorted)
 	if query.GroupBy != nil {

@@ -24,7 +24,9 @@ const (
 	EXPR_CALL
 	EXPR_ARRAY
 	EXPR_GROUPED
-	EXPR_SUBQUERY // Added for Tier 1 subquery support
+	EXPR_SUBQUERY     // Added for Tier 1 subquery support
+	EXPR_INTERVAL     // Added for DateTime INTERVAL literals
+	EXPR_AT_TIME_ZONE // Added for AT TIME ZONE operator
 )
 
 // LiteralExpression represents a literal value (string, number, bool, null)
@@ -37,6 +39,10 @@ func (le *LiteralExpression) expressionNode() {}
 func (le *LiteralExpression) String() string {
 	if le.Value == nil {
 		return "NULL"
+	}
+	// Add quotes for string literals so they can be re-parsed correctly
+	if str, ok := le.Value.(string); ok {
+		return fmt.Sprintf("\"%s\"", str)
 	}
 	return fmt.Sprintf("%v", le.Value)
 }
@@ -86,7 +92,8 @@ func (ce *CallExpression) String() string {
 	for i, arg := range ce.Arguments {
 		args[i] = arg.String()
 	}
-	return fmt.Sprintf("%s(%s)", ce.Function, strings.Join(args, ", "))
+	// Keep F: prefix for function calls to ensure correct re-parsing
+	return fmt.Sprintf("F:%s(%s)", ce.Function, strings.Join(args, ", "))
 }
 
 // ArrayExpression represents an array literal [value1, value2, ...]
@@ -174,21 +181,56 @@ func (se *SubqueryExpression) String() string {
 	return fmt.Sprintf("%s (SELECT ... FROM %s)", se.SubqueryType.String(), se.InnerQuery.BundleName)
 }
 
+// IntervalExpression represents an INTERVAL literal for date/time arithmetic
+// Supports both numeric format: INTERVAL '7' DAY
+// And string format: INTERVAL '7 days', INTERVAL '1 month 2 days'
+// TODO: I will add support for ISO 8601 duration format (P1Y2M3DT4H5M6S) when implementing advanced date parsing
+// TODO: I will add interval multiplication/division (e.g., INTERVAL '1 day' * 3) when arithmetic extensions are needed
+type IntervalExpression struct {
+	Value           string    // Raw interval value: '7', '7 days', '1 month 2 days'
+	Unit            TokenType // Unit token: TOKEN_YEAR, TOKEN_MONTH, TOKEN_DAY, TOKEN_HOUR, TOKEN_MINUTE, TOKEN_SECOND
+	IsNumericFormat bool      // true for INTERVAL '7' DAY, false for INTERVAL '7 days'
+}
+
+func (ie *IntervalExpression) expressionNode() {}
+func (ie *IntervalExpression) String() string {
+	if ie.IsNumericFormat {
+		return fmt.Sprintf("INTERVAL '%s' %s", ie.Value, ie.Unit.String())
+	}
+	return fmt.Sprintf("INTERVAL '%s'", ie.Value)
+}
+
+// AtTimeZoneExpression represents the AT TIME ZONE operator
+// Converts DateTime values between timezones at query time
+// Storage remains UTC-only for consistency
+// TODO: I will add compile-time timezone validation when implementing static analysis optimization
+// TODO: I will add support for expression-based timezone (e.g., field reference) when dynamic timezone conversion is needed
+type AtTimeZoneExpression struct {
+	Expression Expression // The DateTime expression to convert
+	Timezone   string     // Target timezone name (IANA format: 'America/New_York', 'UTC', etc.)
+}
+
+func (atze *AtTimeZoneExpression) expressionNode() {}
+func (atze *AtTimeZoneExpression) String() string {
+	return fmt.Sprintf("(%s AT TIME ZONE '%s')", atze.Expression.String(), atze.Timezone)
+}
+
 // Precedence levels for operator precedence parsing (Pratt parser)
 type Precedence int
 
 const (
-	PRECEDENCE_LOWEST      Precedence = iota
-	PRECEDENCE_LOGICAL_OR             // OR
-	PRECEDENCE_LOGICAL_AND            // AND
-	PRECEDENCE_EQUALITY               // == !=
-	PRECEDENCE_COMPARISON             // > < >= <= LIKE IN CONTAINS
-	PRECEDENCE_SUM                    // + -
-	PRECEDENCE_PRODUCT                // * / %
-	PRECEDENCE_UNARY                  // NOT -expr
-	PRECEDENCE_CALL                   // function()
-	PRECEDENCE_INDEX                  // array[index]
-	PRECEDENCE_MEMBER                 // Bundle.Field (member access - highest precedence)
+	PRECEDENCE_LOWEST       Precedence = iota
+	PRECEDENCE_LOGICAL_OR              // OR
+	PRECEDENCE_LOGICAL_AND             // AND
+	PRECEDENCE_EQUALITY                // == !=
+	PRECEDENCE_COMPARISON              // > < >= <= LIKE IN CONTAINS
+	PRECEDENCE_SUM                     // + -
+	PRECEDENCE_PRODUCT                 // * / %
+	PRECEDENCE_UNARY                   // NOT -expr
+	PRECEDENCE_CALL                    // function()
+	PRECEDENCE_AT_TIME_ZONE            // AT TIME ZONE
+	PRECEDENCE_INDEX                   // array[index]
+	PRECEDENCE_MEMBER                  // Bundle.Field (member access - highest precedence)
 )
 
 // precedences maps token types to their precedence levels
@@ -212,6 +254,7 @@ var precedences = map[TokenType]Precedence{
 	TOKEN_DIVIDE:   PRECEDENCE_PRODUCT,
 	TOKEN_MODULO:   PRECEDENCE_PRODUCT,
 	TOKEN_LPAREN:   PRECEDENCE_CALL,
+	TOKEN_AT:       PRECEDENCE_AT_TIME_ZONE, // AT TIME ZONE operator
 	TOKEN_LBRACKET: PRECEDENCE_INDEX,
 	TOKEN_DOT:      PRECEDENCE_MEMBER, // Member access (Bundle.Field)
 }
@@ -267,6 +310,18 @@ func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionP
 	p.registerPrefix(TOKEN_LPAREN, p.parseGroupedExpression)
 	p.registerPrefix(TOKEN_LBRACKET, p.parseArrayExpression)
 	p.registerPrefix(TOKEN_EXISTS, p.parseExistsExpression)
+	p.registerPrefix(TOKEN_MULTIPLY, p.parseMultiplyOrWildcard) // Handle * as wildcard in COUNT(*) or multiplication
+
+	// Register DateTime function prefix parsers
+	// TODO: I will add support for custom function prefixes when implementing UDF system
+	p.registerPrefix(TOKEN_NOW, p.parseFunctionCall)
+	p.registerPrefix(TOKEN_EXTRACT, p.parseFunctionCall)
+	p.registerPrefix(TOKEN_DATE_TRUNC, p.parseFunctionCall)
+	p.registerPrefix(TOKEN_DATE_ADD, p.parseFunctionCall)
+	p.registerPrefix(TOKEN_DATE_SUB, p.parseFunctionCall)
+	p.registerPrefix(TOKEN_AGE, p.parseFunctionCall)
+	p.registerPrefix(TOKEN_FUNCTION, p.parseFunctionCall) // Fallback for unknown F:FUNCTION_NAME
+	p.registerPrefix(TOKEN_INTERVAL, p.parseInterval)
 
 	// Register infix parsers (tokens that can appear between expressions)
 	p.registerInfix(TOKEN_PLUS, p.parseBinaryExpression)
@@ -289,6 +344,7 @@ func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionP
 	p.registerInfix(TOKEN_CONTAINS, p.parseBinaryExpression)
 	p.registerInfix(TOKEN_LPAREN, p.parseCallExpression)
 	p.registerInfix(TOKEN_DOT, p.parseQualifiedIdentifier)
+	p.registerInfix(TOKEN_AT, p.parseAtTimeZone) // AT TIME ZONE operator
 
 	// TODO: I should add support for array indexing (field[0])
 
@@ -383,6 +439,16 @@ func (p *ExpressionParser) parseLiteral() (Expression, error) {
 	expr := &LiteralExpression{
 		Token: p.current.Type,
 		Value: p.current.Literal,
+	}
+	p.advance()
+	return expr, nil
+}
+
+func (p *ExpressionParser) parseMultiplyOrWildcard() (Expression, error) {
+	// When * appears as a prefix (not as infix multiplication),
+	// treat it as a wildcard identifier (for COUNT(*))
+	expr := &IdentifierExpression{
+		Name: "*",
 	}
 	p.advance()
 	return expr, nil
@@ -712,6 +778,136 @@ func (p *ExpressionParser) parseQualifiedIdentifier(left Expression) (Expression
 	return &QualifiedIdentifierExpression{
 		Bundle: bundleName,
 		Field:  fieldName,
+	}, nil
+}
+
+// parseFunctionCall parses F:FUNCTION_NAME(...) style function calls
+// All functions use uniform comma-separated argument syntax:
+// F:NOW(), F:EXTRACT("YEAR", datetime), F:DATE_ADD(datetime, amount, "DAY"), etc.
+// TODO: I will add support for named parameters when implementing advanced function features
+func (p *ExpressionParser) parseFunctionCall() (Expression, error) {
+	// Extract function name from token value (e.g., "F:NOW" -> "NOW")
+	funcName := p.current.Value
+	if strings.HasPrefix(funcName, "F:") {
+		funcName = funcName[2:] // Remove "F:" prefix
+	} else {
+		// For TOKEN_NOW, TOKEN_EXTRACT, etc., use the token's string representation
+		funcName = strings.TrimPrefix(p.current.Type.String(), "TOKEN_")
+	}
+
+	p.advance() // consume function name token
+
+	// Expect opening parenthesis
+	if p.current.Type != TOKEN_LPAREN {
+		return nil, fmt.Errorf("expected '(' after function name '%s', got %s", funcName, p.current.Type.String())
+	}
+	p.advance() // consume '('
+
+	args := make([]Expression, 0)
+
+	// Empty argument list
+	if p.current.Type == TOKEN_RPAREN {
+		p.advance()
+		return &CallExpression{
+			Function:  funcName,
+			Arguments: args,
+		}, nil
+	}
+
+	// Parse first argument
+	arg, err := p.parseExpression(PRECEDENCE_LOWEST)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing first argument: %w", err)
+	}
+	args = append(args, arg)
+
+	// Parse remaining comma-separated arguments
+	for p.current.Type == TOKEN_COMMA {
+		p.advance() // consume ','
+
+		arg, err := p.parseExpression(PRECEDENCE_LOWEST)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing argument: %w", err)
+		}
+		args = append(args, arg)
+	}
+
+	if p.current.Type != TOKEN_RPAREN {
+		return nil, fmt.Errorf("expected ')' after function arguments, got %s", p.current.Type.String())
+	}
+	p.advance() // consume ')'
+
+	return &CallExpression{
+		Function:  funcName,
+		Arguments: args,
+	}, nil
+}
+
+// parseInterval parses INTERVAL literals
+// Supports: INTERVAL '7' DAY and INTERVAL '7 days' / INTERVAL '1 month 2 days'
+// TODO: I will add support for INTERVAL arithmetic (INTERVAL + INTERVAL) when implementing complex date operations
+func (p *ExpressionParser) parseInterval() (Expression, error) {
+	p.advance() // consume INTERVAL keyword
+
+	// Expect string literal with interval value
+	if p.current.Type != TOKEN_STRING {
+		return nil, fmt.Errorf("expected string literal after INTERVAL, got %s", p.current.Type.String())
+	}
+
+	intervalValue := p.current.Value
+	p.advance() // consume interval value
+
+	// Check for numeric format: INTERVAL '7' DAY
+	if p.current.Type == TOKEN_YEAR || p.current.Type == TOKEN_MONTH ||
+		p.current.Type == TOKEN_DAY || p.current.Type == TOKEN_HOUR ||
+		p.current.Type == TOKEN_MINUTE || p.current.Type == TOKEN_SECOND {
+
+		unit := p.current.Type
+		p.advance() // consume unit
+
+		return &IntervalExpression{
+			Value:           intervalValue,
+			Unit:            unit,
+			IsNumericFormat: true,
+		}, nil
+	}
+
+	// String format: INTERVAL '7 days', INTERVAL '1 month 2 days'
+	return &IntervalExpression{
+		Value:           intervalValue,
+		Unit:            TOKEN_ILLEGAL, // No explicit unit for string format
+		IsNumericFormat: false,
+	}, nil
+}
+
+// parseAtTimeZone parses the AT TIME ZONE operator
+// Syntax: datetime_expression AT TIME ZONE 'timezone_name'
+// TODO: I will add support for expression-based timezone (field reference) when implementing dynamic timezone conversion
+func (p *ExpressionParser) parseAtTimeZone(left Expression) (Expression, error) {
+	p.advance() // consume AT
+
+	// Expect TIME ZONE keywords
+	if p.current.Type != TOKEN_TIME {
+		return nil, fmt.Errorf("expected TIME after AT, got %s", p.current.Type.String())
+	}
+	p.advance() // consume TIME
+
+	if p.current.Type != TOKEN_ZONE {
+		return nil, fmt.Errorf("expected ZONE after AT TIME, got %s", p.current.Type.String())
+	}
+	p.advance() // consume ZONE
+
+	// Expect timezone string literal
+	if p.current.Type != TOKEN_STRING {
+		return nil, fmt.Errorf("expected timezone string after AT TIME ZONE, got %s", p.current.Type.String())
+	}
+
+	timezone := p.current.Value
+	p.advance() // consume timezone
+
+	return &AtTimeZoneExpression{
+		Expression: left,
+		Timezone:   timezone,
 	}, nil
 }
 

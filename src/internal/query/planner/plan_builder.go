@@ -85,16 +85,34 @@ func (pb *PlanBuilder) BuildPlan(
 
 	pb.logger.Debug("Building execution plan from base tree")
 
+	// DEBUG: Log query analysis
+	pb.logger.Infof("PlanBuilder.BuildPlan ANALYSIS:")
+	pb.logger.Infof("  - HasGroupBy(): %v", query.HasGroupBy())
+	pb.logger.Infof("  - IsAggregateQuery(): %v", query.IsAggregateQuery())
+	pb.logger.Infof("  - IsAggregateOnly: %v", query.IsAggregateOnly)
+	pb.logger.Infof("  - AggregateFields count: %d", len(query.AggregateFields))
+	if len(query.AggregateFields) > 0 {
+		for i, aggField := range query.AggregateFields {
+			pb.logger.Infof("    [%d] Function=%s, Field=%s, Alias=%s",
+				i, aggField.Function, aggField.Field, aggField.Alias)
+		}
+	}
+	pb.logger.Infof("  - GroupBy clause: %v", query.GroupBy)
+
 	currentTree := baseTree
 
-	// Add aggregation if GROUP BY present
-	if query.HasGroupBy() {
+	// Add aggregation if GROUP BY present OR if aggregate-only query (SELECT COUNT(*))
+	if query.HasGroupBy() || query.IsAggregateOnly {
 		aggNode, err := pb.addAggregationNode(currentTree, query, database)
 		if err != nil {
 			return nil, fmt.Errorf("failed to add aggregation: %w", err)
 		}
 		currentTree = aggNode
-		pb.logger.Debug("Added AggregationNode to tree")
+		if query.HasGroupBy() {
+			pb.logger.Debug("Added AggregationNode for GROUP BY query")
+		} else {
+			pb.logger.Debug("Added AggregationNode for aggregate-only query")
+		}
 	}
 
 	// Add DISTINCT deduplication if SELECT DISTINCT present
@@ -152,6 +170,20 @@ func (pb *PlanBuilder) addAggregationNode(
 	query *queryparser.UnifiedSelectQuery,
 	database *models.Database,
 ) (ExecutionNode, error) {
+
+	// DEBUG: Log aggregate fields being passed
+	pb.logger.Infof("addAggregationNode: Creating aggregation with %d aggregate fields", len(query.AggregateFields))
+	for i, aggField := range query.AggregateFields {
+		pb.logger.Infof("  Aggregate[%d]: Function=%s, Field=%s, Alias=%s",
+			i, aggField.Function, aggField.Field, aggField.Alias)
+	}
+
+	// DEBUG: Log HAVING expression presence and type
+	if query.HavingExpression == nil {
+		pb.logger.Infof("addAggregationNode: No HAVING expression")
+	} else {
+		pb.logger.Infof("addAggregationNode: HAVING expression present (type: %T)", query.HavingExpression)
+	}
 
 	// Create aggregation node with GROUP BY clause
 	// Note: ORDER BY is handled separately by SortNode (added after aggregation)

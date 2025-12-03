@@ -58,9 +58,10 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 		QueryType: a.mapSelectPatternToQueryType(stmt.Pattern),
 
 		// Map SELECT clause
-		SelectFields: a.extractSelectFields(stmt),
-		IsDistinct:   stmt.Distinct,
-		// TODO: I need to detect IsCountOnly from SelectFields (SELECT COUNT(*) optimization)
+		SelectFields:    a.extractSelectFields(stmt),
+		IsDistinct:      stmt.Distinct,
+		IsAggregateOnly: stmt.IsAggregateOnly(),            // Detect aggregate-only queries (SELECT COUNT(*))
+		AggregateFields: []queryparser.AggregateFunction{}, // Populated below
 
 		// Map FROM clause
 		FromBundle: stmt.BundleName,
@@ -102,7 +103,25 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 		query.RelationshipName = stmt.RelationshipName
 	}
 
-	// TODO: I need to implement aggregate field extraction from SelectFields
+	// Extract aggregate functions from SelectFields whenever they exist
+	// This handles both GROUP BY queries and aggregate-only queries (SELECT COUNT(*))
+	if stmt.HasAggregates() {
+		a.logger.Infof("Extracting %d aggregate functions from SELECT clause", stmt.CountAggregates())
+		query.AggregateFields = a.extractAggregateFields(stmt)
+
+		// For GROUP BY queries, separate aggregate and non-aggregate fields
+		if len(stmt.GroupBy) > 0 {
+			query.SelectFields = a.extractNonAggregateFields(stmt)
+			a.logger.Infof("GROUP BY query: %d aggregates, %d non-aggregate fields",
+				len(query.AggregateFields), len(query.SelectFields))
+		} else if stmt.IsAggregateOnly() {
+			// Aggregate-only query (e.g., SELECT COUNT(*) FROM table)
+			// Clear SelectFields since all fields are aggregates
+			query.SelectFields = []string{}
+			a.logger.Infof("Aggregate-only query: %d aggregates, 0 regular fields",
+				len(query.AggregateFields))
+		}
+	}
 
 	return query, nil
 }
@@ -174,13 +193,9 @@ func (a *SelectStatementAdapter) extractFieldName(expr Expression) string {
 		return fmt.Sprintf("%v", expr.Value)
 
 	case *CallExpression:
-		// Function call (e.g., COUNT(*), SUM(field))
-		// TODO: I need to extract this to AggregateFields array
-		args := make([]string, len(expr.Arguments))
-		for i, arg := range expr.Arguments {
-			args[i] = a.extractFieldName(arg)
-		}
-		return fmt.Sprintf("%s(%s)", expr.Function, strings.Join(args, ", "))
+		// Function call (e.g., COUNT(*), SUM(field), F:EXTRACT("YEAR", date))
+		// Use the expression's String() method which handles F: prefix and quoted arguments
+		return expr.String()
 
 	case *BinaryExpression:
 		// Computed expression (e.g., SELECT price * quantity)
@@ -195,6 +210,85 @@ func (a *SelectStatementAdapter) extractFieldName(expr Expression) string {
 		// Fallback
 		return expr.String()
 	}
+}
+
+// extractAggregateFields extracts aggregate function calls from SELECT fields
+// Returns them as AggregateFunction structures for query planning
+func (a *SelectStatementAdapter) extractAggregateFields(stmt *SelectStatement) []queryparser.AggregateFunction {
+	aggregates := make([]queryparser.AggregateFunction, 0)
+
+	if len(stmt.Fields) == 0 {
+		return aggregates
+	}
+
+	for _, field := range stmt.Fields {
+		if call, isCall := field.Expression.(*CallExpression); isCall {
+			// Check if it's an aggregate function
+			funcName := strings.ToUpper(call.Function)
+			if funcName == "COUNT" || funcName == "SUM" || funcName == "AVG" || funcName == "MIN" || funcName == "MAX" {
+				// Extract field name from arguments
+				var fieldArg string
+				if len(call.Arguments) == 0 {
+					fieldArg = "*" // COUNT()
+				} else if len(call.Arguments) == 1 {
+					if ident, ok := call.Arguments[0].(*IdentifierExpression); ok {
+						if ident.Name == "*" {
+							fieldArg = "*" // COUNT(*)
+						} else {
+							fieldArg = ident.Name
+						}
+					} else {
+						// Complex expression (e.g., SUM(price * quantity))
+						fieldArg = call.Arguments[0].String()
+					}
+				} else {
+					// Multiple arguments - use String() representation
+					fieldArg = call.Arguments[0].String()
+				}
+
+				aggregate := queryparser.AggregateFunction{
+					Function: funcName,
+					Field:    fieldArg,
+					Alias:    field.Alias, // Use alias if provided
+				}
+				aggregates = append(aggregates, aggregate)
+			}
+		}
+	}
+
+	return aggregates
+}
+
+// extractNonAggregateFields extracts non-aggregate fields from SELECT clause
+// This returns the regular fields that should be in GROUP BY
+func (a *SelectStatementAdapter) extractNonAggregateFields(stmt *SelectStatement) []string {
+	fields := make([]string, 0)
+
+	if len(stmt.Fields) == 0 {
+		return fields
+	}
+
+	for _, field := range stmt.Fields {
+		// Skip aggregate functions
+		if call, isCall := field.Expression.(*CallExpression); isCall {
+			funcName := strings.ToUpper(call.Function)
+			if funcName == "COUNT" || funcName == "SUM" || funcName == "AVG" || funcName == "MIN" || funcName == "MAX" {
+				continue // Skip aggregates
+			}
+		}
+
+		// Add non-aggregate field
+		fieldName := a.extractFieldName(field.Expression)
+		if field.Alias != "" {
+			// If there's an alias, we might want to use it
+			// But for GROUP BY compatibility, use the original field name
+			fields = append(fields, fieldName)
+		} else {
+			fields = append(fields, fieldName)
+		}
+	}
+
+	return fields
 }
 
 // convertOrderBy converts OrderByField array to OrderByClause
@@ -744,6 +838,12 @@ func (a *CreateBundleStatementAdapter) validateFieldType(fieldType string) error
 func (a *CreateBundleStatementAdapter) validateDefaultValue(fieldType string, defaultValue interface{}) error {
 	if defaultValue == nil {
 		return nil // NULL is always valid
+	}
+
+	// Check if default value is an Expression (e.g., F:NOW())
+	// Expressions are evaluated at runtime, so we can't validate the type here
+	if _, isExpr := defaultValue.(Expression); isExpr {
+		return nil // Expression is valid for any type
 	}
 
 	normalizedType := strings.ToLower(fieldType)

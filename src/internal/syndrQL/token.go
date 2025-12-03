@@ -140,6 +140,30 @@ const (
 	TOKEN_VALIDATE   // VALIDATE
 	TOKEN_ROLLBACK   // ROLLBACK
 	TOKEN_MIGRATIONS // MIGRATIONS (for SHOW MIGRATIONS)
+
+	// Keywords - DateTime Functions
+	// TODO: I will add TOKEN_DATE_DIFF when implementing interval-based date arithmetic extensions
+	// TODO: I will add TOKEN_FORMAT when implementing custom DateTime format output (Phase 2)
+	TOKEN_FUNCTION   // F: prefix for function calls (case-insensitive)
+	TOKEN_NOW        // NOW
+	TOKEN_EXTRACT    // EXTRACT
+	TOKEN_DATE_TRUNC // DATE_TRUNC
+	TOKEN_DATE_ADD   // DATE_ADD
+	TOKEN_DATE_SUB   // DATE_SUB
+	TOKEN_AGE        // AGE
+	TOKEN_INTERVAL   // INTERVAL
+	TOKEN_AT         // AT (for AT TIME ZONE)
+	TOKEN_TIME       // TIME (for AT TIME ZONE)
+	TOKEN_ZONE       // ZONE (for AT TIME ZONE)
+
+	// Keywords - DateTime Units (for EXTRACT and DATE_TRUNC)
+	// TODO: I will add TOKEN_WEEK, TOKEN_QUARTER when implementing extended date part extraction
+	TOKEN_YEAR   // YEAR
+	TOKEN_MONTH  // MONTH
+	TOKEN_DAY    // DAY
+	TOKEN_HOUR   // HOUR
+	TOKEN_MINUTE // MINUTE
+	TOKEN_SECOND // SECOND
 )
 
 // String returns the string representation of a token type
@@ -341,6 +365,40 @@ func (tt TokenType) String() string {
 		return "ROLLBACK"
 	case TOKEN_MIGRATIONS:
 		return "MIGRATIONS"
+	case TOKEN_FUNCTION:
+		return "F:"
+	case TOKEN_NOW:
+		return "NOW"
+	case TOKEN_EXTRACT:
+		return "EXTRACT"
+	case TOKEN_DATE_TRUNC:
+		return "DATE_TRUNC"
+	case TOKEN_DATE_ADD:
+		return "DATE_ADD"
+	case TOKEN_DATE_SUB:
+		return "DATE_SUB"
+	case TOKEN_AGE:
+		return "AGE"
+	case TOKEN_INTERVAL:
+		return "INTERVAL"
+	case TOKEN_AT:
+		return "AT"
+	case TOKEN_TIME:
+		return "TIME"
+	case TOKEN_ZONE:
+		return "ZONE"
+	case TOKEN_YEAR:
+		return "YEAR"
+	case TOKEN_MONTH:
+		return "MONTH"
+	case TOKEN_DAY:
+		return "DAY"
+	case TOKEN_HOUR:
+		return "HOUR"
+	case TOKEN_MINUTE:
+		return "MINUTE"
+	case TOKEN_SECOND:
+		return "SECOND"
 	default:
 		return "UNKNOWN"
 	}
@@ -458,6 +516,29 @@ var keywords = map[string]TokenType{
 	"VALIDATE":   TOKEN_VALIDATE,
 	"ROLLBACK":   TOKEN_ROLLBACK,
 	"MIGRATIONS": TOKEN_MIGRATIONS,
+
+	// DateTime Function Keywords - REMOVED from keywords map
+	// These are ONLY recognized when prefixed with F: (handled by readFunctionToken)
+	// "NOW":        TOKEN_NOW,        // Only as F:NOW()
+	// "EXTRACT":    TOKEN_EXTRACT,    // Only as F:EXTRACT()
+	// "DATE_TRUNC": TOKEN_DATE_TRUNC, // Only as F:DATE_TRUNC()
+	// "DATE_ADD":   TOKEN_DATE_ADD,   // Only as F:DATE_ADD()
+	// "DATE_SUB":   TOKEN_DATE_SUB,   // Only as F:DATE_SUB()
+	// "AGE":        TOKEN_AGE,        // Only as F:AGE()
+
+	// DateTime Operators and Keywords (NOT functions)
+	"INTERVAL": TOKEN_INTERVAL,
+	"AT":       TOKEN_AT,
+	"TIME":     TOKEN_TIME,
+	"ZONE":     TOKEN_ZONE,
+
+	// DateTime Unit Keywords (for INTERVAL and EXTRACT)
+	"YEAR":   TOKEN_YEAR,
+	"MONTH":  TOKEN_MONTH,
+	"DAY":    TOKEN_DAY,
+	"HOUR":   TOKEN_HOUR,
+	"MINUTE": TOKEN_MINUTE,
+	"SECOND": TOKEN_SECOND,
 }
 
 // LookupKeyword checks if an identifier is a keyword and returns its token type

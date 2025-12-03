@@ -16,6 +16,15 @@ import (
 	"go.uber.org/zap"
 )
 
+// Helper function for debugging
+func getKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	if database == nil {
 		// Get the database from the session.
@@ -789,7 +798,28 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 		}
 	}
 
-	logger.Debugf("Query executed successfully: Retrieved %d documents", len(documents))
+	logger.Infof("Query executed successfully: Retrieved %d documents", len(documents))
+
+	// EXPRESSION-ONLY SELECT: Handle queries without FROM clause
+	// These return a single synthetic document with expression results in Data map
+	// Skip document metadata (DocumentID, CreatedAt, UpdatedAt) and return only expression values
+	if query.FromBundle == "" && len(documents) == 1 {
+		logger.Infof("EXPRESSION-ONLY SELECT detected: FromBundle='%s', document count=%d", query.FromBundle, len(documents))
+		for docID, doc := range documents {
+			// Expression results are in doc.Data map - return directly
+			logger.Infof("Expression result document ID: %s, Data keys: %v, Data values: %+v", docID, getKeys(doc.Data), doc.Data)
+			results := make([]map[string]interface{}, 1)
+			results[0] = doc.Data
+
+			executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6
+
+			return &CommandResponse{
+				ResultCount:     1,
+				Result:          results,
+				ExecutionTimeMS: executionTime,
+			}, nil
+		}
+	}
 
 	// PHASE H: For simple SELECT queries, stream documents directly without intermediate transform
 	// Only use streaming when:
@@ -797,6 +827,35 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 	// 2. No ORDER BY (would need sorting which requires materialized slice)
 	// Streaming eliminates ~300 allocations by skipping the map[string]interface{} intermediate layer
 	useStreaming := !query.IsCountOnly && !query.HasOrderBy()
+
+	// CRITICAL FIX: For GROUP BY queries, merge SelectFields with aggregate field names
+	// Aggregate fields (MIN, MAX, COUNT, SUM, AVG) are not in SelectFields but need to be included in results
+	selectedFields := query.SelectFields
+	if query.HasGroupBy() && len(query.AggregateFields) > 0 {
+		// Build list of all fields to include: GROUP BY fields + aggregate result fields
+		fieldsToInclude := make([]string, 0, len(query.SelectFields)+len(query.AggregateFields))
+		fieldsToInclude = append(fieldsToInclude, query.SelectFields...)
+
+		// Add aggregate field names (use Alias if present, otherwise generate from Function_Field)
+		// CRITICAL: Use same logic as aggregation_node.go:getAggregateKey()
+		for _, aggField := range query.AggregateFields {
+			aggFieldName := aggField.Alias
+			if aggFieldName == "" {
+				// Generate field name matching aggregation_node.go logic
+				if aggField.Field == "*" {
+					// COUNT(*) -> count_all
+					aggFieldName = strings.ToLower(aggField.Function) + "_all"
+				} else {
+					// MIN(field) -> min_field, MAX(field) -> max_field, etc.
+					aggFieldName = strings.ToLower(aggField.Function) + "_" + aggField.Field
+				}
+			}
+			fieldsToInclude = append(fieldsToInclude, aggFieldName)
+		}
+
+		selectedFields = fieldsToInclude
+		logger.Debugf("GROUP BY: Including %d fields in projection: %v", len(selectedFields), selectedFields)
+	}
 
 	var flattenedDocs []map[string]interface{}
 
@@ -814,12 +873,12 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 		if sortedDocs != nil && len(sortedDocs) > 0 {
 			// Use order-preserving transform for sorted documents
 			// This respects the sort order from the planner (user ORDER BY or default CreatedAt)
-			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, query.SelectFields)
+			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields)
 		} else {
 			// Fallback: SortNode not found or didn't populate sortedDocs
 			// This shouldn't happen with the new planner design, but keep for safety
 			logger.Warn("SortNode not found in plan tree or sortedDocs empty, using fallback transform")
-			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
 		}
 	} // NOTE: Sorting is handled by the SortNode in the unified query planner execution tree.
 	// This legacy sort code was causing a bug where documents were re-sorted AFTER the
@@ -901,13 +960,13 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 	// PHASE H: For streaming path, store documents for direct encoding
 	if useStreaming {
 		cmdResponse.StreamDocuments = documents
-		cmdResponse.StreamFields = query.SelectFields
+		cmdResponse.StreamFields = selectedFields // Use merged fields (includes aggregates)
 		cmdResponse.ResultCount = len(documents)
 
 		// CRITICAL FIX: For direct function calls (E2E tests), convert StreamDocuments to Result
 		// HTTP responses use StreamDocuments for efficient streaming, but direct callers expect Result
 		// This ensures backward compatibility with existing tests while maintaining streaming optimization
-		cmdResponse.Result = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+		cmdResponse.Result = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
 	} else {
 		// PHASE A: Store pooled maps for cleanup after JSON marshaling (avoids closure allocation)
 		if flattenedDocs, ok := results.([]map[string]interface{}); ok {

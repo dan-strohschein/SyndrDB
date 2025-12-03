@@ -91,14 +91,15 @@ type OrderByField struct {
 type SelectPattern int
 
 const (
-	PATTERN_SELECT_ALL           SelectPattern = iota // SELECT * FROM bundle
-	PATTERN_SELECT_FIELDS                             // SELECT field1, field2 FROM bundle
-	PATTERN_SELECT_WHERE_SIMPLE                       // SELECT * WHERE field = value
-	PATTERN_SELECT_WHERE_COMPLEX                      // SELECT * WHERE complex_condition
-	PATTERN_SELECT_AGGREGATE                          // SELECT COUNT(*), SUM(field)
-	PATTERN_SELECT_JOIN                               // SELECT with JOIN
-	PATTERN_SELECT_GROUPBY                            // SELECT with GROUP BY
-	PATTERN_SELECT_CUSTOM                             // Complex custom query
+	PATTERN_SELECT_ALL             SelectPattern = iota // SELECT * FROM bundle
+	PATTERN_SELECT_FIELDS                               // SELECT field1, field2 FROM bundle
+	PATTERN_SELECT_WHERE_SIMPLE                         // SELECT * WHERE field = value
+	PATTERN_SELECT_WHERE_COMPLEX                        // SELECT * WHERE complex_condition
+	PATTERN_SELECT_AGGREGATE                            // SELECT COUNT(*), SUM(field)
+	PATTERN_SELECT_JOIN                                 // SELECT with JOIN
+	PATTERN_SELECT_GROUPBY                              // SELECT with GROUP BY
+	PATTERN_SELECT_EXPRESSION_ONLY                      // SELECT without FROM (expression evaluator)
+	PATTERN_SELECT_CUSTOM                               // Complex custom query
 )
 
 // String returns the string representation of a SelectPattern
@@ -206,18 +207,18 @@ func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPatter
 		stmt.Fields = fields
 	}
 
-	// Expect FROM keyword
-	if p.current.Type != TOKEN_FROM {
-		return nil, fmt.Errorf("expected FROM, got %s", p.current.Type.String())
-	}
-	p.advance()
+	// Parse FROM clause (optional for expression-only queries)
+	if p.current.Type == TOKEN_FROM {
+		p.advance()
 
-	// Parse bundle name
-	if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
-		return nil, fmt.Errorf("expected bundle name, got %s", p.current.Type.String())
+		// Parse bundle name
+		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+			return nil, fmt.Errorf("expected bundle name after FROM, got %s", p.current.Type.String())
+		}
+		stmt.BundleName = p.current.Value
+		p.advance()
 	}
-	stmt.BundleName = p.current.Value
-	p.advance()
+	// else: BundleName remains empty - expression-only query
 
 	// Check for WHERE clause (optional)
 	//moved to the optional clauses parser
@@ -241,6 +242,14 @@ func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPatter
 	// Parse optional clauses
 	if err := p.parseOptionalClauses(stmt, logger); err != nil {
 		return nil, err
+	}
+
+	// Validate expression-only constraints
+	if stmt.BundleName == "" {
+		if err := validateExpressionOnly(stmt); err != nil {
+			return nil, err
+		}
+		stmt.Pattern = PATTERN_SELECT_EXPRESSION_ONLY
 	}
 
 	// Set complexity and index hints
@@ -284,22 +293,30 @@ func (p *SelectParser) parseFullPath(stmt *SelectStatement, logger *zap.SugaredL
 		stmt.Fields = fields
 	}
 
-	// Parse FROM clause
-	if p.current.Type != TOKEN_FROM {
-		return nil, fmt.Errorf("expected FROM, got %s", p.current.Type.String())
-	}
-	p.advance()
+	// Parse FROM clause (optional for expression-only queries)
+	if p.current.Type == TOKEN_FROM {
+		p.advance()
 
-	// Parse bundle name
-	if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
-		return nil, fmt.Errorf("expected bundle name, got %s", p.current.Type.String())
+		// Parse bundle name
+		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
+			return nil, fmt.Errorf("expected bundle name after FROM, got %s", p.current.Type.String())
+		}
+		stmt.BundleName = p.current.Value
+		p.advance()
 	}
-	stmt.BundleName = p.current.Value
-	p.advance()
+	// else: BundleName remains empty - expression-only query
 
 	// Parse optional clauses in order
 	if err := p.parseOptionalClauses(stmt, logger); err != nil {
 		return nil, err
+	}
+
+	// Validate expression-only constraints
+	if stmt.BundleName == "" {
+		if err := validateExpressionOnly(stmt); err != nil {
+			return nil, err
+		}
+		stmt.Pattern = PATTERN_SELECT_EXPRESSION_ONLY
 	}
 
 	// Analyze query for optimization hints
@@ -403,18 +420,32 @@ func (p *SelectParser) parseFieldExpression() (Expression, error) {
 }
 
 // collectExpressionTokens collects tokens until a SELECT-level delimiter
+// Handles nested parentheses to correctly capture function arguments
 func (p *SelectParser) collectExpressionTokens() []Token {
 	tokens := make([]Token, 0)
+	parenDepth := 0 // Track parenthesis nesting
 
-	for p.current.Type != TOKEN_EOF &&
-		p.current.Type != TOKEN_COMMA &&
-		p.current.Type != TOKEN_FROM &&
-		p.current.Type != TOKEN_WHERE &&
-		p.current.Type != TOKEN_ORDER &&
-		p.current.Type != TOKEN_GROUP &&
-		p.current.Type != TOKEN_LIMIT &&
-		p.current.Type != TOKEN_OFFSET &&
-		p.current.Type != TOKEN_AS {
+	for p.current.Type != TOKEN_EOF {
+		// Track parenthesis depth
+		if p.current.Type == TOKEN_LPAREN {
+			parenDepth++
+		} else if p.current.Type == TOKEN_RPAREN {
+			parenDepth--
+		}
+
+		// Only stop at delimiters when we're at depth 0 (not inside function calls)
+		if parenDepth == 0 {
+			if p.current.Type == TOKEN_COMMA ||
+				p.current.Type == TOKEN_FROM ||
+				p.current.Type == TOKEN_WHERE ||
+				p.current.Type == TOKEN_ORDER ||
+				p.current.Type == TOKEN_GROUP ||
+				p.current.Type == TOKEN_LIMIT ||
+				p.current.Type == TOKEN_OFFSET ||
+				p.current.Type == TOKEN_AS {
+				break
+			}
+		}
 
 		tokens = append(tokens, p.current)
 		p.advance()
@@ -860,6 +891,23 @@ func NewSelectPatternDetector() *SelectPatternDetector {
 
 // DetectPattern performs fast pattern detection on tokenized query
 func (spd *SelectPatternDetector) DetectPattern(tokens []Token) SelectPattern {
+	if len(tokens) < 2 {
+		return PATTERN_SELECT_CUSTOM
+	}
+
+	// Check for expression-only SELECT (no FROM clause)
+	hasFrom := false
+	for _, token := range tokens {
+		if token.Type == TOKEN_FROM {
+			hasFrom = true
+			break
+		}
+	}
+
+	if !hasFrom && tokens[0].Type == TOKEN_SELECT {
+		return PATTERN_SELECT_EXPRESSION_ONLY
+	}
+
 	if len(tokens) < 4 {
 		return PATTERN_SELECT_CUSTOM
 	}
@@ -1073,6 +1121,238 @@ func (p *SelectParser) parseQualifiedFieldName() (string, error) {
 // TODO: I should add support for subqueries in FROM clause
 // TODO: I should add support for UNION/INTERSECT/EXCEPT operations
 // TODO: I should add support for window functions (OVER, PARTITION BY)
+
+// validateExpressionOnly validates that an expression-only SELECT query (no FROM clause)
+// doesn't use clauses that require a bundle context
+func validateExpressionOnly(stmt *SelectStatement) error {
+	var errors []string
+
+	// Check for clauses that require FROM
+	if stmt.WhereClause != nil {
+		errors = append(errors, "WHERE clause requires FROM clause to specify bundle")
+	}
+
+	if len(stmt.JoinClauses) > 0 {
+		errors = append(errors, "JOIN requires FROM clause to specify bundle")
+	}
+
+	if len(stmt.GroupBy) > 0 {
+		errors = append(errors, "GROUP BY requires FROM clause to specify bundle")
+	}
+
+	if stmt.Having != nil {
+		errors = append(errors, "HAVING requires FROM clause to specify bundle")
+	}
+
+	if len(stmt.OrderBy) > 0 {
+		errors = append(errors, "ORDER BY requires FROM clause to specify bundle")
+	}
+
+	if stmt.Limit > 0 || stmt.Offset > 0 {
+		errors = append(errors, "LIMIT/OFFSET requires FROM clause to specify bundle")
+	}
+
+	if stmt.Distinct {
+		errors = append(errors, "DISTINCT modifier cannot be used in expression-only SELECT queries")
+	}
+
+	// Recursively check for aggregates and subqueries in expressions
+	var aggregateFuncs []string
+	for _, field := range stmt.Fields {
+		if field.Expression != nil {
+			aggs := findAggregatesInExpression(field.Expression)
+			aggregateFuncs = append(aggregateFuncs, aggs...)
+
+			if hasSubqueryInExpression(field.Expression) {
+				errors = append(errors, "Subquery found in expression - subqueries require FROM clause for evaluation")
+			}
+		}
+	}
+
+	if len(aggregateFuncs) > 0 {
+		// TODO: Future enhancement - Consider allowing aggregate-only expressions that compute results
+		// without documents. For example, mathematical aggregates like COUNT(1+1) could theoretically
+		// return computed values. This would require aggregate evaluation without document context.
+		funcList := strings.Join(uniqueStrings(aggregateFuncs), ", ")
+		errors = append(errors, fmt.Sprintf("Aggregate functions %s found in expression - aggregate functions require FROM clause to specify bundle", funcList))
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("%s", strings.Join(errors, "; "))
+	}
+
+	return nil
+}
+
+// findAggregatesInExpression recursively searches for aggregate function calls in an expression
+func findAggregatesInExpression(expr Expression) []string {
+	if expr == nil {
+		return nil
+	}
+
+	var aggregates []string
+
+	switch e := expr.(type) {
+	case *CallExpression:
+		// Check if this is an aggregate function
+		funcName := strings.ToUpper(e.Function)
+		if funcName == "COUNT" || funcName == "SUM" || funcName == "AVG" || funcName == "MIN" || funcName == "MAX" {
+			aggregates = append(aggregates, funcName)
+		}
+		// Recursively check arguments
+		for _, arg := range e.Arguments {
+			aggregates = append(aggregates, findAggregatesInExpression(arg)...)
+		}
+
+	case *BinaryExpression:
+		aggregates = append(aggregates, findAggregatesInExpression(e.Left)...)
+		aggregates = append(aggregates, findAggregatesInExpression(e.Right)...)
+
+	case *UnaryExpression:
+		aggregates = append(aggregates, findAggregatesInExpression(e.Right)...)
+
+	case *GroupedExpression:
+		aggregates = append(aggregates, findAggregatesInExpression(e.Expression)...)
+
+	case *IntervalExpression:
+		// INTERVAL expressions don't contain aggregates
+
+	case *AtTimeZoneExpression:
+		aggregates = append(aggregates, findAggregatesInExpression(e.Expression)...)
+	}
+
+	return aggregates
+}
+
+// hasSubqueryInExpression recursively checks if an expression contains a subquery
+func hasSubqueryInExpression(expr Expression) bool {
+	if expr == nil {
+		return false
+	}
+
+	switch e := expr.(type) {
+	case *SubqueryExpression:
+		return true
+
+	case *CallExpression:
+		for _, arg := range e.Arguments {
+			if hasSubqueryInExpression(arg) {
+				return true
+			}
+		}
+
+	case *BinaryExpression:
+		return hasSubqueryInExpression(e.Left) || hasSubqueryInExpression(e.Right)
+
+	case *UnaryExpression:
+		return hasSubqueryInExpression(e.Right)
+
+	case *GroupedExpression:
+		return hasSubqueryInExpression(e.Expression)
+
+	case *AtTimeZoneExpression:
+		return hasSubqueryInExpression(e.Expression)
+	}
+
+	return false
+}
+
+// uniqueStrings returns a deduplicated slice of strings
+func uniqueStrings(strs []string) []string {
+	seen := make(map[string]bool)
+	result := []string{}
+	for _, str := range strs {
+		if !seen[str] {
+			seen[str] = true
+			result = append(result, str)
+		}
+	}
+	return result
+}
+
+// HasAggregates returns true if the SELECT statement contains any aggregate functions
+func (stmt *SelectStatement) HasAggregates() bool {
+	if len(stmt.Fields) == 0 {
+		return false
+	}
+
+	for _, field := range stmt.Fields {
+		if call, isCall := field.Expression.(*CallExpression); isCall {
+			funcName := strings.ToUpper(call.Function)
+			if funcName == "COUNT" || funcName == "SUM" || funcName == "AVG" || funcName == "MIN" || funcName == "MAX" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsAggregateOnly returns true if ALL fields in the SELECT list are aggregate functions
+// Note: COUNT(*) where * is an argument inside the CallExpression is still an aggregate
+func (stmt *SelectStatement) IsAggregateOnly() bool {
+	if len(stmt.Fields) == 0 {
+		return false
+	}
+
+	for _, field := range stmt.Fields {
+		if call, isCall := field.Expression.(*CallExpression); isCall {
+			// Check if it's an aggregate function
+			funcName := strings.ToUpper(call.Function)
+			if funcName == "COUNT" || funcName == "SUM" || funcName == "AVG" || funcName == "MIN" || funcName == "MAX" {
+				// This is an aggregate - continue checking other fields
+				continue
+			}
+			// It's a non-aggregate function call
+			return false
+		} else if ident, isIdent := field.Expression.(*IdentifierExpression); isIdent {
+			// Wildcard selector (SELECT *) - not aggregate-only
+			if ident.Name == "*" {
+				return false
+			}
+			// Regular field identifier - not aggregate-only
+			return false
+		} else {
+			// Any other expression type (literal, binary expr, etc.) - not aggregate-only
+			return false
+		}
+	}
+
+	// All fields are aggregate functions
+	return true
+}
+
+// CountAggregates returns the number of aggregate functions in the SELECT list
+func (stmt *SelectStatement) CountAggregates() int {
+	count := 0
+	for _, field := range stmt.Fields {
+		if call, isCall := field.Expression.(*CallExpression); isCall {
+			funcName := strings.ToUpper(call.Function)
+			if funcName == "COUNT" || funcName == "SUM" || funcName == "AVG" || funcName == "MIN" || funcName == "MAX" {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// CountNonAggregates returns the number of non-aggregate fields in the SELECT list
+func (stmt *SelectStatement) CountNonAggregates() int {
+	count := 0
+	for _, field := range stmt.Fields {
+		isAggregate := false
+		if call, isCall := field.Expression.(*CallExpression); isCall {
+			funcName := strings.ToUpper(call.Function)
+			if funcName == "COUNT" || funcName == "SUM" || funcName == "AVG" || funcName == "MIN" || funcName == "MAX" {
+				isAggregate = true
+			}
+		}
+		if !isAggregate {
+			count++
+		}
+	}
+	return count
+}
+
 // TODO: I should integrate with statement cache for repeated query patterns
 // TODO: I should add support for SELECT INTO (create new bundle from results)
 // TODO: I should add parallel parsing for very large queries

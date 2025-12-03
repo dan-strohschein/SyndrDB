@@ -74,10 +74,12 @@ func NewBoolValue(b bool) FieldValue {
 }
 
 func NewDateTimeValue(t time.Time) FieldValue {
-	// Ensure DateTime is stored in UTC
+	// Store DateTime preserving timezone information
+	// Note: Previously this converted to UTC, but that breaks AT TIME ZONE functionality
+	// where we need to preserve the timezone for operations like EXTRACT
 	return FieldValue{
 		Type:        FieldTypeDateTime,
-		DateTimeVal: t.UTC(),
+		DateTimeVal: t,
 	}
 }
 
@@ -101,6 +103,12 @@ func NewInterfaceValue(v interface{}) FieldValue {
 	// Try to avoid interface{} if possible
 	switch val := v.(type) {
 	case string:
+		// Auto-parse DateTime strings (MVP: automatic type detection)
+		// Try parsing as DateTime first - if successful, return as DateTime
+		if parsedTime, err := tryParseDateTime(val); err == nil {
+			return NewDateTimeValue(parsedTime)
+		}
+		// Not a DateTime - return as string
 		return NewStringValue(val)
 	case int:
 		return NewIntValue(int64(val))
@@ -675,6 +683,13 @@ func parseDateTime(s string) (time.Time, error) {
 	}
 
 	return time.Time{}, fmt.Errorf("unable to parse '%s' as datetime", s)
+}
+
+// tryParseDateTime is a non-error version for auto-detection
+// Returns parsed time and nil error if string matches DateTime format
+// Returns zero time and error if string is not a DateTime
+func tryParseDateTime(s string) (time.Time, error) {
+	return parseDateTime(s)
 }
 
 // parseDate attempts to parse a string as a Date value (time at midnight UTC)

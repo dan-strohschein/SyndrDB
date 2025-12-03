@@ -471,6 +471,37 @@ func seedAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 		t.Fatalf("Failed to verify author count: %v", err)
 	}
 
+	// DEBUG: Inspect raw response from COUNT query
+	t.Logf("======= COUNT(*) RESPONSE DEBUG =======")
+	t.Logf("Response type: %T", response)
+	if cmdResp, ok := response.(*server.CommandResponse); ok {
+		t.Logf("CommandResponse.Result type: %T", cmdResp.Result)
+		t.Logf("CommandResponse.ResultCount: %d", cmdResp.ResultCount)
+		t.Logf("CommandResponse.Error: %v", cmdResp.Error)
+
+		// Deep inspect the Result
+		switch result := cmdResp.Result.(type) {
+		case []map[string]interface{}:
+			t.Logf("Result is []map[string]interface{} with length: %d", len(result))
+			// Show first 3 documents to see if they have Column1 or aggregate fields
+			for i := 0; i < len(result) && i < 3; i++ {
+				t.Logf("Document %d: %+v", i, result[i])
+				t.Logf("Document %d fields:", i)
+				for k, v := range result[i] {
+					t.Logf("  Key: '%s', Value: %v, ValueType: %T", k, v, v)
+				}
+			}
+		case map[string]interface{}:
+			t.Logf("Result is map[string]interface{}: %+v", result)
+			for k, v := range result {
+				t.Logf("  Key: '%s', Value: %v, ValueType: %T", k, v, v)
+			}
+		default:
+			t.Logf("Result is unexpected type: %+v", result)
+		}
+	}
+	t.Logf("======= END COUNT(*) DEBUG =======")
+
 	actualCount := extractCountFromResponse(t, response)
 	if actualCount != count {
 		t.Fatalf("Author seed verification failed: expected %d, got %d", count, actualCount)
@@ -798,8 +829,32 @@ func extractAggregates(t *testing.T, response interface{}) map[string]interface{
 		}
 		return converted
 	case []map[string]interface{}:
+		// Check if this is actually an aggregate result or a document result
+		// Aggregate results should have fields like Count, SUM, MIN, MAX, AVG
+		// Document results have fields like DocumentID, CreatedAt, UpdatedAt
 		if len(result) > 0 {
-			return result[0]
+			first := result[0]
+			// Check if this looks like an aggregate result
+			hasAggregateFields := false
+			for key := range first {
+				lowerKey := strings.ToLower(key)
+				if lowerKey == "count" || lowerKey == "sum" || lowerKey == "min" ||
+					lowerKey == "max" || lowerKey == "avg" || strings.HasPrefix(lowerKey, "count(") ||
+					strings.HasPrefix(lowerKey, "sum(") || strings.HasPrefix(lowerKey, "min(") ||
+					strings.HasPrefix(lowerKey, "max(") || strings.HasPrefix(lowerKey, "avg(") {
+					hasAggregateFields = true
+					break
+				}
+			}
+
+			if hasAggregateFields {
+				return first
+			}
+
+			// This is a document array, not an aggregate result
+			// Log warning and return empty map so the test will fail with a clear message
+			t.Logf("WARNING: extractAggregates called but result appears to be document array, not aggregates")
+			t.Logf("First element keys: %v", getKeys(first))
 		}
 		return map[string]interface{}{}
 	default:
@@ -820,20 +875,56 @@ func extractGroupedResults(t *testing.T, response interface{}) []map[string]inte
 func extractCountFromResponse(t *testing.T, response interface{}) int {
 	t.Helper()
 
-	agg := extractAggregates(t, response)
-
-	// DEBUG: Print what we actually got
-	for k, v := range agg {
-		t.Logf("agg[%s] = %v (type: %T)", k, v, v)
+	cmdResponse, ok := response.(*server.CommandResponse)
+	if !ok {
+		t.Fatalf("Expected *server.CommandResponse, got %T", response)
 	}
+
+	// NEW BEHAVIOR: Synthetic documents with Column1, Column2, etc.
+	if resultArray, ok := cmdResponse.Result.([]map[string]interface{}); ok {
+		if len(resultArray) > 0 {
+			first := resultArray[0]
+
+			// Check if this is a synthetic document (has Column1, Column2, etc.)
+			// Try Column1 first (for single aggregate like COUNT(*))
+			if val, ok := first["Column1"]; ok {
+				t.Logf("Found synthetic document with Column1 = %v", val)
+				// Try direct int
+				if count, ok := val.(int); ok {
+					return count
+				}
+				// Try int64
+				if count, ok := val.(int64); ok {
+					return int(count)
+				}
+				// Try float64 (JSON numbers)
+				if count, ok := val.(float64); ok {
+					return int(count)
+				}
+				// Try FieldValue
+				if fv, ok := val.(models.FieldValue); ok {
+					if intVal, ok := fv.AsInt(); ok {
+						return int(intVal)
+					}
+				}
+			}
+		}
+	}
+
+	// Try to extract from aggregates (old/legacy behavior for GROUP BY queries)
+	agg := extractAggregates(t, response)
 
 	// Try different possible keys for count
 	// Handle both direct int and FieldValue wrapper
-	for _, key := range []string{"Count", "count", "COUNT"} {
+	for _, key := range []string{"Column1", "Count", "count", "COUNT", "count(*)", "COUNT(*)", "count_all"} {
 		if val, ok := agg[key]; ok {
 			// Try direct int
 			if count, ok := val.(int); ok {
 				return count
+			}
+			// Try int64
+			if count, ok := val.(int64); ok {
+				return int(count)
 			}
 			// Try float64 (JSON numbers)
 			if count, ok := val.(float64); ok {
@@ -850,9 +941,7 @@ func extractCountFromResponse(t *testing.T, response interface{}) int {
 
 	t.Fatalf("Could not extract count from aggregates: %v (type: %T)", agg, agg)
 	return 0
-}
-
-// FieldValue unwrapping helpers (for response formatter using FieldValue)
+} // FieldValue unwrapping helpers (for response formatter using FieldValue)
 func asString(val interface{}) (string, bool) {
 	if s, ok := val.(string); ok {
 		return s, true

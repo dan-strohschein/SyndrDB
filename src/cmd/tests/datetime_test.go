@@ -71,9 +71,9 @@ func TestDate_BasicFieldValue(t *testing.T) {
 // TestDateTime_Comparison tests DateTime field comparison with millisecond precision
 func TestDateTime_Comparison(t *testing.T) {
 	// Create two DateTime values that differ by microseconds
-	base := time.Date(2024, 11, 22, 10, 30, 45, 500*1000*1000, time.UTC) // 500ms
+	base := time.Date(2024, 11, 22, 10, 30, 45, 500*1000*1000, time.UTC)             // 500ms
 	similar := time.Date(2024, 11, 22, 10, 30, 45, 500*1000*1000+123*1000, time.UTC) // 500.123ms
-	different := time.Date(2024, 11, 22, 10, 30, 45, 501*1000*1000, time.UTC) // 501ms
+	different := time.Date(2024, 11, 22, 10, 30, 45, 501*1000*1000, time.UTC)        // 501ms
 
 	fv1 := models.NewDateTimeValue(base)
 	fv2 := models.NewDateTimeValue(similar)
@@ -171,34 +171,58 @@ func TestDateTime_NullHandling(t *testing.T) {
 }
 
 // TestDateTime_AsInterface tests DateTime AsInterface conversion
+// NOTE: AsInterface returns RFC3339 string for JSON compatibility, not time.Time
 func TestDateTime_AsInterface(t *testing.T) {
 	testTime := time.Date(2024, 11, 22, 15, 30, 45, 0, time.UTC)
 	fv := models.NewDateTimeValue(testTime)
 
 	val := fv.AsInterface()
-	timeVal, ok := val.(time.Time)
+	strVal, ok := val.(string)
 	if !ok {
-		t.Fatalf("AsInterface should return time.Time, got %T", val)
+		t.Fatalf("AsInterface should return string (RFC3339), got %T", val)
 	}
 
-	if !timeVal.Equal(testTime.UTC()) {
-		t.Errorf("AsInterface time mismatch: expected %v, got %v", testTime.UTC(), timeVal)
+	// Should be RFC3339 formatted
+	expected := testTime.Format(time.RFC3339)
+	if strVal != expected {
+		t.Errorf("AsInterface string mismatch: expected %v, got %v", expected, strVal)
+	}
+
+	// Verify it can be parsed back to time.Time
+	parsed, err := time.Parse(time.RFC3339, strVal)
+	if err != nil {
+		t.Fatalf("Failed to parse RFC3339 string: %v", err)
+	}
+	if !parsed.Equal(testTime) {
+		t.Errorf("Parsed time mismatch: expected %v, got %v", testTime, parsed)
 	}
 }
 
 // TestDate_AsInterface tests Date AsInterface conversion
+// NOTE: AsInterface returns YYYY-MM-DD string for JSON compatibility, not time.Time
 func TestDate_AsInterface(t *testing.T) {
 	testTime := time.Date(2024, 11, 22, 0, 0, 0, 0, time.UTC)
 	fv := models.NewDateValue(testTime)
 
 	val := fv.AsInterface()
-	timeVal, ok := val.(time.Time)
+	strVal, ok := val.(string)
 	if !ok {
-		t.Fatalf("AsInterface should return time.Time, got %T", val)
+		t.Fatalf("AsInterface should return string (YYYY-MM-DD), got %T", val)
 	}
 
-	expected := time.Date(2024, 11, 22, 0, 0, 0, 0, time.UTC)
-	if !timeVal.Equal(expected) {
-		t.Errorf("AsInterface time mismatch: expected %v, got %v", expected, timeVal)
+	// Should be YYYY-MM-DD formatted
+	expected := "2024-11-22"
+	if strVal != expected {
+		t.Errorf("AsInterface string mismatch: expected %v, got %v", expected, strVal)
+	}
+
+	// Verify it can be parsed back to date
+	parsed, err := time.Parse("2006-01-02", strVal)
+	if err != nil {
+		t.Fatalf("Failed to parse date string: %v", err)
+	}
+	expectedTime := time.Date(2024, 11, 22, 0, 0, 0, 0, time.UTC)
+	if !parsed.Equal(expectedTime) {
+		t.Errorf("Parsed date mismatch: expected %v, got %v", expectedTime, parsed)
 	}
 }

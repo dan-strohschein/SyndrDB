@@ -54,6 +54,7 @@ import (
 	"syndrdb/src/internal/query/executor"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -178,8 +179,13 @@ func NewAggregationNode(
 //   - map[string]*models.Document: Aggregated group documents
 //   - error: Any error during execution
 func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
+	groupByFieldCount := 0
+	if n.GroupBy != nil {
+		groupByFieldCount = len(n.GroupBy.Fields)
+	}
+
 	n.Logger.Infof("Executing AggregationNode with %d GROUP BY fields, %d aggregates, strategy=%s",
-		len(n.GroupBy.Fields), len(n.AggregateFields), n.executionStrategy.String())
+		groupByFieldCount, len(n.AggregateFields), n.executionStrategy.String())
 
 	// Execute child node to get input documents (WHERE already applied by FilterNode)
 	documents, err := n.Child.Execute(ctx)
@@ -214,7 +220,14 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 	resultDocs := n.convertGroupResultsToDocuments(groupResults)
 
 	// Apply HAVING clause if present
-	if n.HavingClause != nil && n.HavingClause.Condition != "" {
+	// NEW: Check HavingExpression (syndrQL.Expression) first
+	// LEGACY: Fall back to HavingClause (queryparser.HavingClause) for backward compatibility
+	if n.HavingExpression != nil {
+		resultDocs, err = n.applyHavingClause(resultDocs)
+		if err != nil {
+			return nil, fmt.Errorf("AggregationNode: HAVING clause failed: %w", err)
+		}
+	} else if n.HavingClause != nil && n.HavingClause.Condition != "" {
 		resultDocs, err = n.applyHavingClause(resultDocs)
 		if err != nil {
 			return nil, fmt.Errorf("AggregationNode: HAVING clause failed: %w", err)
@@ -401,6 +414,12 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 // createGroupKey creates a unique key for the group based on GROUP BY fields
 // PHASE 3: Group key generation
 func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[string]interface{}, error) {
+	// Handle aggregate-only queries (no GROUP BY clause)
+	if n.GroupBy == nil || len(n.GroupBy.Fields) == 0 {
+		// All documents belong to the same group (empty key)
+		return groupKey(""), make(map[string]interface{}), nil
+	}
+
 	groupFields := make(map[string]interface{})
 	keyParts := make([]string, 0, len(n.GroupBy.Fields))
 
@@ -437,8 +456,17 @@ func (n *AggregationNode) extractFieldName(qualifiedName string) string {
 		return fieldName
 	}
 
-	// Simple field name, already trimmed
+	// Simple field name - return as is
 	return qualifiedName
+}
+
+// getFieldNames is a helper to extract field names from a map
+func getFieldNames(fields map[string]models.Field) []string {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	return names
 }
 
 // updateAggregates updates aggregate values for a group with data from a document
@@ -475,17 +503,53 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(aggFunc.Field)
 			if field, exists := doc.Fields[fieldName]; exists {
-				if aggVal.Min == nil || n.isLess(field.Value, aggVal.Min) {
-					aggVal.Min = field.Value
+				// Extract the actual value from FieldValue based on type
+				var compareValue interface{}
+				if field.Value.Type == models.FieldTypeDateTime {
+					compareValue = field.Value.DateTimeVal
+					n.Logger.Info("MIN DateTime field found",
+						zap.String("field", fieldName),
+						zap.Time("value", field.Value.DateTimeVal))
+				} else if field.Value.Type == models.FieldTypeDate {
+					compareValue = field.Value.DateVal
+				} else {
+					// For other types, use the FieldValue itself
+					compareValue = field.Value
+					n.Logger.Info("MIN non-DateTime field",
+						zap.String("field", fieldName),
+						zap.String("type", string(field.Value.Type)),
+						zap.Any("value", compareValue))
 				}
+
+				if aggVal.Min == nil || n.isLess(compareValue, aggVal.Min) {
+					aggVal.Min = compareValue
+					n.Logger.Info("Updated MIN value",
+						zap.String("field", fieldName),
+						zap.Any("newMin", compareValue))
+				}
+			} else {
+				n.Logger.Warn("MIN field not found in document",
+					zap.String("field", fieldName),
+					zap.Strings("availableFields", getFieldNames(doc.Fields)))
 			}
 
 		case "MAX":
 			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(aggFunc.Field)
 			if field, exists := doc.Fields[fieldName]; exists {
-				if aggVal.Max == nil || n.isGreater(field.Value, aggVal.Max) {
-					aggVal.Max = field.Value
+				// Extract the actual value from FieldValue based on type
+				var compareValue interface{}
+				if field.Value.Type == models.FieldTypeDateTime {
+					compareValue = field.Value.DateTimeVal
+				} else if field.Value.Type == models.FieldTypeDate {
+					compareValue = field.Value.DateVal
+				} else {
+					// For other types, use the FieldValue itself
+					compareValue = field.Value
+				}
+
+				if aggVal.Max == nil || n.isGreater(compareValue, aggVal.Max) {
+					aggVal.Max = compareValue
 				}
 			}
 		}
@@ -509,6 +573,19 @@ func (n *AggregationNode) getAggregateKey(aggFunc queryparser.AggregateFunction)
 // convertGroupResultsToDocuments converts group results to document format
 // PHASE 3: Result conversion
 func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupKey]*groupResult) map[string]*models.Document {
+	// Check if this is an aggregate-only query (no GROUP BY fields)
+	groupByFieldCount := 0
+	if n.GroupBy != nil {
+		groupByFieldCount = len(n.GroupBy.Fields)
+	}
+	isAggregateOnly := groupByFieldCount == 0 && len(n.AggregateFields) > 0
+
+	if isAggregateOnly {
+		n.Logger.Info("Converting aggregate-only query results to synthetic document")
+		return n.convertAggregateOnlyToSyntheticDocument(groupResults)
+	}
+
+	// Regular GROUP BY query - create one document per group
 	resultDocs := make(map[string]*models.Document)
 	groupIndex := 0
 
@@ -543,14 +620,27 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 				}
 			case "MIN":
 				finalValue = aggVal.Min
+				n.Logger.Info("MIN aggregate result",
+					zap.String("aggKey", aggKey),
+					zap.Any("finalValue", finalValue),
+					zap.String("function", aggFunc.Function),
+					zap.String("field", aggFunc.Field))
 			case "MAX":
 				finalValue = aggVal.Max
+				n.Logger.Info("MAX aggregate result",
+					zap.String("aggKey", aggKey),
+					zap.Any("finalValue", finalValue),
+					zap.String("function", aggFunc.Function),
+					zap.String("field", aggFunc.Field))
 			}
 
 			fields[aggKey] = models.Field{
 				Name:  aggKey,
 				Value: models.NewInterfaceValue(finalValue),
 			}
+			n.Logger.Info("Added aggregate field to result",
+				zap.String("aggKey", aggKey),
+				zap.Any("value", finalValue))
 		}
 
 		// STEP 1: Use document pool to reduce allocations
@@ -564,6 +654,78 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 	}
 
 	return resultDocs
+}
+
+// convertAggregateOnlyToSyntheticDocument creates a single synthetic document for aggregate-only queries
+// For queries like SELECT COUNT(*) FROM table, SELECT SUM(x), AVG(y) FROM table
+func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults map[groupKey]*groupResult) map[string]*models.Document {
+	// Aggregate-only queries should have exactly one group (the "" key representing all documents)
+	if len(groupResults) != 1 {
+		n.Logger.Warnf("Aggregate-only query has unexpected group count: %d", len(groupResults))
+	}
+
+	// Get the single group result
+	var gResult *groupResult
+	for _, gr := range groupResults {
+		gResult = gr
+		break
+	}
+
+	if gResult == nil {
+		n.Logger.Warn("No group results found for aggregate-only query")
+		return make(map[string]*models.Document)
+	}
+
+	// Create synthetic document with aggregate function names as field names
+	fields := make(map[string]models.Field)
+
+	columnIndex := 1
+	for _, aggFunc := range n.AggregateFields {
+		aggKey := n.getAggregateKey(aggFunc)
+		aggVal := gResult.AggregateValues[aggKey]
+
+		var finalValue interface{}
+		switch aggFunc.Function {
+		case "COUNT":
+			finalValue = aggVal.Count
+		case "SUM":
+			finalValue = aggVal.Sum
+		case "AVG":
+			if len(aggVal.Values) > 0 {
+				finalValue = aggVal.Sum / float64(len(aggVal.Values))
+			} else {
+				finalValue = nil
+			}
+		case "MIN":
+			finalValue = aggVal.Min
+		case "MAX":
+			finalValue = aggVal.Max
+		}
+
+		// Use Column1, Column2, etc. as field names for synthetic documents
+		columnName := fmt.Sprintf("Column%d", columnIndex)
+
+		fields[columnName] = models.Field{
+			Name:  columnName,
+			Value: models.NewInterfaceValue(finalValue),
+		}
+
+		n.Logger.Infof("Added synthetic field %s with value %v (from %s(%s))",
+			columnName, finalValue, aggFunc.Function, aggFunc.Field)
+
+		columnIndex++
+	}
+
+	// Create synthetic document
+	doc := document.GetPooledDocument()
+	doc.DocumentID = "synthetic_0"
+	doc.Fields = fields
+
+	n.Logger.Infof("Created synthetic document for aggregate-only query with %d fields", len(fields))
+
+	return map[string]*models.Document{
+		"synthetic_0": doc,
+	}
 }
 
 // sortDocumentsByGroupFields sorts documents by GROUP BY fields
@@ -603,6 +765,21 @@ func (n *AggregationNode) sortDocumentsByGroupFields(docs []*models.Document) er
 // convertToFloat converts various numeric types to float64
 // PHASE 3: Type conversion helper
 func (n *AggregationNode) convertToFloat(value interface{}) (float64, error) {
+	// Handle FieldValue type - extract actual value based on type
+	if fv, ok := value.(models.FieldValue); ok {
+		switch fv.Type {
+		case models.FieldTypeFloat:
+			return fv.FloatVal, nil
+		case models.FieldTypeInt:
+			return float64(fv.IntVal), nil
+		case models.FieldTypeString:
+			return strconv.ParseFloat(fv.StringVal, 64)
+		default:
+			return 0, fmt.Errorf("cannot convert FieldValue of type %s to float64", fv.Type)
+		}
+	}
+
+	// Handle direct value types (for backward compatibility)
 	switch v := value.(type) {
 	case float64:
 		return v, nil
@@ -624,14 +801,38 @@ func (n *AggregationNode) convertToFloat(value interface{}) (float64, error) {
 // isLess compares two values for MIN operation
 // PHASE 3: Comparison helper
 func (n *AggregationNode) isLess(a, b interface{}) bool {
-	// Simple comparison - handles string representation
+	// Handle time.Time comparison for DateTime MIN/MAX
+	if tA, okA := a.(time.Time); okA {
+		if tB, okB := b.(time.Time); okB {
+			return tA.Before(tB)
+		}
+	}
+	// Handle FieldValue with DateTime
+	if fvA, okA := a.(models.FieldValue); okA && fvA.Type == models.FieldTypeDateTime {
+		if fvB, okB := b.(models.FieldValue); okB && fvB.Type == models.FieldTypeDateTime {
+			return fvA.DateTimeVal.Before(fvB.DateTimeVal)
+		}
+	}
+	// Fallback to string comparison for other types
 	return fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b)
 }
 
 // isGreater compares two values for MAX operation
 // PHASE 3: Comparison helper
 func (n *AggregationNode) isGreater(a, b interface{}) bool {
-	// Simple comparison - handles string representation
+	// Handle time.Time comparison for DateTime MIN/MAX
+	if tA, okA := a.(time.Time); okA {
+		if tB, okB := b.(time.Time); okB {
+			return tA.After(tB)
+		}
+	}
+	// Handle FieldValue with DateTime
+	if fvA, okA := a.(models.FieldValue); okA && fvA.Type == models.FieldTypeDateTime {
+		if fvB, okB := b.(models.FieldValue); okB && fvB.Type == models.FieldTypeDateTime {
+			return fvA.DateTimeVal.After(fvB.DateTimeVal)
+		}
+	}
+	// Fallback to string comparison for other types
 	return fmt.Sprintf("%v", a) > fmt.Sprintf("%v", b)
 }
 
@@ -662,6 +863,10 @@ func (n *AggregationNode) applyHavingClause(documents map[string]*models.Documen
 		return nil, fmt.Errorf("HavingExpression is not a syndrQL.Expression: %T", n.HavingExpression)
 	}
 
+	// Transform aggregate function calls in HAVING to field lookups
+	// e.g., MIN(start_time) → min_start_time
+	expr = n.transformHavingExpression(expr)
+
 	n.Logger.Debugf("Applying HAVING expression")
 
 	// Get BundleContext if available (for qualified field resolution)
@@ -691,6 +896,54 @@ func (n *AggregationNode) applyHavingClause(documents map[string]*models.Documen
 
 	n.Logger.Debugf("HAVING expression filtered %d groups to %d groups", len(documents), len(filteredDocs))
 	return filteredDocs, nil
+}
+
+// transformHavingExpression recursively transforms aggregate function calls to field lookups
+// Example: MIN(start_time) → IdentifierExpression{Name: "min_start_time"}
+func (n *AggregationNode) transformHavingExpression(expr syndrQL.Expression) syndrQL.Expression {
+	switch e := expr.(type) {
+	case *syndrQL.CallExpression:
+		// Check if this is an aggregate function
+		function := strings.ToUpper(e.Function)
+		if function == "MIN" || function == "MAX" || function == "COUNT" || function == "SUM" || function == "AVG" {
+			// Transform to field name using same logic as getAggregateKey
+			var fieldName string
+			if len(e.Arguments) > 0 {
+				// Extract field name from first argument
+				if identExpr, ok := e.Arguments[0].(*syndrQL.IdentifierExpression); ok {
+					if identExpr.Name == "*" {
+						fieldName = strings.ToLower(function) + "_all" // COUNT(*) → count_all
+					} else {
+						fieldName = strings.ToLower(function) + "_" + identExpr.Name
+					}
+				}
+			}
+			if fieldName != "" {
+				return &syndrQL.IdentifierExpression{Name: fieldName}
+			}
+		}
+		return e
+
+	case *syndrQL.BinaryExpression:
+		// Recursively transform left and right sides
+		e.Left = n.transformHavingExpression(e.Left)
+		e.Right = n.transformHavingExpression(e.Right)
+		return e
+
+	case *syndrQL.UnaryExpression:
+		// Recursively transform the operand
+		e.Right = n.transformHavingExpression(e.Right)
+		return e
+
+	case *syndrQL.GroupedExpression:
+		// Recursively transform the inner expression
+		e.Expression = n.transformHavingExpression(e.Expression)
+		return e
+
+	default:
+		// For other expression types (literals, identifiers, etc.), return as-is
+		return expr
+	}
 }
 
 // GetCost returns the estimated execution cost

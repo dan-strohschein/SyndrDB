@@ -171,6 +171,10 @@ type Arguments struct {
 	SubqueryHashThreshold     int  `yaml:"subquery_medium_threshold"`     // HashJoin strategy threshold (default: 10000)
 	SubqueryMaxDepth          int  `yaml:"subquery_max_depth"`            // Maximum nesting depth (default: 3)
 	SubqueryMaxInListMemoryMB int  `yaml:"subquery_max_inlist_memory_mb"` // Max IN-list memory in MB (default: 10)
+
+	// DateTime Timezone Cache Configuration
+	// TODO: I will add support for runtime cache size adjustment if profiling shows cache misses exceed 5%
+	TimezoneCacheSize int `yaml:"timezone_cache_size"` // LRU cache size for rare timezones (default: 128, hot zones cached separately)
 }
 
 var (
@@ -304,6 +308,9 @@ func GetSettings() *Arguments {
 			SubqueryHashThreshold:     10000, // Use HashJoin for <10k rows
 			SubqueryMaxDepth:          3,     // Maximum 3 levels of nesting
 			SubqueryMaxInListMemoryMB: 10,    // 10MB max for IN-list materialization
+
+			// DateTime Timezone Cache Defaults
+			TimezoneCacheSize: 128, // Cache 128 rare timezones (20 hot zones cached separately in sync.Map)
 		}
 	})
 	return instance

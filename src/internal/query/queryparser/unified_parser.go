@@ -106,6 +106,7 @@ type UnifiedSelectQuery struct {
 	AggregateFields []AggregateFunction // Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 	IsDistinct      bool                // SELECT DISTINCT flag
 	IsCountOnly     bool                // SELECT COUNT(*) flag (no other fields)
+	IsAggregateOnly bool                // SELECT only aggregate functions (no non-aggregate fields)
 
 	// FROM clause
 	FromBundle string // Primary bundle name

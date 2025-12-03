@@ -672,6 +672,11 @@ func (m *MockScanNode) GetEstimatedRows() int {
 	return m.Rows
 }
 
+func (m *MockScanNode) EstimateMemoryUsage() int64 {
+	// Rough estimate: assume each document is 1KB
+	return int64(len(m.Documents) * 1024)
+}
+
 // TestGroupByAggregationNodeExecution tests AggregationNode execution with mock data
 func TestGroupByAggregationNodeExecution(t *testing.T) {
 	logger := CreateTestLogger()

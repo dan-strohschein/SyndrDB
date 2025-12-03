@@ -140,7 +140,10 @@ func (t *Tokenizer) nextToken() Token {
 	case '"', '\'':
 		tok = t.readString(t.ch)
 	default:
-		if isLetter(t.ch) {
+		// Check for F: prefix (case-insensitive function call)
+		if (t.ch == 'F' || t.ch == 'f') && t.peekChar() == ':' {
+			return t.readFunctionCall() // Return directly - readFunctionCall already positions at next char
+		} else if isLetter(t.ch) {
 			return t.readIdentifier()
 		} else if isDigit(t.ch) {
 			return t.readNumber()
@@ -256,6 +259,66 @@ func (t *Tokenizer) readIdentifier() Token {
 	}
 
 	return tok
+}
+
+// readFunctionCall reads F:FUNCTION_NAME() style function calls
+// TODO: I will optimize this method to avoid repeated uppercase conversions when profiling shows >1% CPU time
+func (t *Tokenizer) readFunctionCall() Token {
+	startLine := t.line
+	startColumn := t.column
+
+	// Consume 'F' or 'f'
+	t.readChar()
+	// Consume ':'
+	t.readChar()
+
+	// Now read the function name
+	funcNameStart := t.pos
+	for isLetter(t.ch) || isDigit(t.ch) || t.ch == '_' {
+		t.readChar()
+	}
+
+	funcName := t.input[funcNameStart:t.pos]
+	if funcName == "" {
+		return Token{
+			Type:   TOKEN_ILLEGAL,
+			Value:  "F: prefix with no function name",
+			Line:   startLine,
+			Column: startColumn,
+		}
+	}
+
+	// Uppercase the function name for case-insensitive matching
+	upperFuncName := strings.ToUpper(funcName)
+
+	// Map function names to specific tokens for better parsing
+	// TODO: I will add validation for unknown function names when function registry is implemented
+	var tokenType TokenType
+	switch upperFuncName {
+	case "NOW":
+		tokenType = TOKEN_NOW
+	case "EXTRACT":
+		tokenType = TOKEN_EXTRACT
+	case "DATE_TRUNC":
+		tokenType = TOKEN_DATE_TRUNC
+	case "DATE_ADD":
+		tokenType = TOKEN_DATE_ADD
+	case "DATE_SUB":
+		tokenType = TOKEN_DATE_SUB
+	case "AGE":
+		tokenType = TOKEN_AGE
+	default:
+		// Unknown function - still mark as FUNCTION token for registry dispatch
+		// TODO: I will add registry validation when function_registry.go is implemented
+		tokenType = TOKEN_FUNCTION
+	}
+
+	return Token{
+		Type:   tokenType,
+		Value:  "F:" + upperFuncName, // Store uppercased for consistency
+		Line:   startLine,
+		Column: startColumn,
+	}
 }
 
 // readNumber reads a numeric literal (integer or float)

@@ -52,7 +52,7 @@ type FieldDefinitionParsed struct {
 	Type         string      // Data type (string, int, float, bool, etc.)
 	IsRequired   bool        // Whether the field is required
 	IsUnique     bool        // Whether the field must be unique
-	DefaultValue interface{} // Default value for the field
+	DefaultValue interface{} // Default value: literal value OR Expression (for F:NOW(), etc.)
 	// TODO: I will add support for validation constraints
 	// TODO: I will add support for field-level indexes
 }
@@ -262,7 +262,9 @@ func (p *CreateBundleParser) parseFieldDefinition() (FieldDefinitionParsed, erro
 	}, nil
 }
 
-// parseFieldValue parses a field value (string, number, boolean, or null)
+// parseFieldValue parses a field value (string, number, boolean, null, or Expression)
+// Supports function calls like F:NOW() for dynamic default values
+// TODO: I will add support for INTERVAL expressions when implementing interval default values
 func (p *CreateBundleParser) parseFieldValue() (interface{}, error) {
 	if p.isAtEnd() {
 		return nil, fmt.Errorf("unexpected end of input while parsing field value")
@@ -273,7 +275,28 @@ func (p *CreateBundleParser) parseFieldValue() (interface{}, error) {
 	switch token.Type {
 	case TOKEN_STRING:
 		p.advance()
-		return token.Value, nil
+		value := token.Value
+
+		// Check if the string is a function expression (e.g., "F:NOW()")
+		if strings.HasPrefix(value, "F:") || strings.HasPrefix(value, "f:") {
+			// Tokenize and parse the function expression
+			tokenizer := NewTokenizer(value)
+			tokens, err := tokenizer.Tokenize()
+			if err != nil {
+				return nil, fmt.Errorf("failed to tokenize function expression '%s': %w", value, err)
+			}
+
+			// Parse as expression
+			exprParser := NewExpressionParser(tokens, nil)
+			expr, err := exprParser.Parse()
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse function expression '%s': %w", value, err)
+			}
+
+			return expr, nil
+		}
+
+		return value, nil
 
 	case TOKEN_NUMBER:
 		p.advance()
@@ -291,6 +314,19 @@ func (p *CreateBundleParser) parseFieldValue() (interface{}, error) {
 	case TOKEN_NULL:
 		p.advance()
 		return nil, nil
+
+	case TOKEN_NOW, TOKEN_EXTRACT, TOKEN_DATE_TRUNC, TOKEN_DATE_ADD, TOKEN_DATE_SUB, TOKEN_AGE, TOKEN_FUNCTION:
+		// Parse function call expression (e.g., F:NOW())
+		// Create an expression parser from current position
+		exprParser := NewExpressionParser(p.tokens[p.current:], nil)
+		expr, err := exprParser.Parse()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse function call: %w", err)
+		}
+		// Advance parser position to match expression parser consumption
+		// Expression parser consumed tokens, so we need to skip them
+		p.current += exprParser.pos
+		return expr, nil
 
 	case TOKEN_IDENT:
 		// Handle unquoted identifiers (could be true, false, null in lowercase)

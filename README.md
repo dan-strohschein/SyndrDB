@@ -88,7 +88,6 @@ Field Types:
 * INT
 * FLOAT
 * BOOL
-(Coming soon)
 * DATETIME
 
 + ISREQUIRED is a boolean value (TRUE/FALSE) indicating if the value MUST be supplied to be valid

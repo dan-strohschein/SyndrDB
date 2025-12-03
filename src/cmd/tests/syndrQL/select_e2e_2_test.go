@@ -3,6 +3,7 @@ package syndrQL
 import (
 	"context"
 	"fmt"
+	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/server"
 	"testing"
 	"time"
@@ -151,12 +152,29 @@ func validateCountResult(t *testing.T, response interface{}, expectedCount int, 
 				return
 			}
 
-			// Extract the count value
+			// Extract the count value from Column1 (synthetic document field)
 			countValue := 0
-			if count, ok := results[0]["COUNT(*)"].(float64); ok {
-				countValue = int(count)
-			} else if count, ok := results[0]["COUNT(*)"].(int); ok {
-				countValue = count
+			if val, ok := results[0]["Column1"]; ok {
+				// Handle different value types
+				if count, ok := val.(float64); ok {
+					countValue = int(count)
+				} else if count, ok := val.(int); ok {
+					countValue = count
+				} else if count, ok := val.(int64); ok {
+					countValue = int(count)
+				} else if field, ok := val.(models.Field); ok {
+					// It's a Field struct, extract the Value
+					if intVal, ok := field.Value.AsInt(); ok {
+						countValue = int(intVal)
+					}
+				} else if fv, ok := val.(models.FieldValue); ok {
+					// It's a FieldValue directly
+					if intVal, ok := fv.AsInt(); ok {
+						countValue = int(intVal)
+					}
+				} else {
+					t.Logf("[%s] Column1 has unexpected type: %T, value: %v", testName, val, val)
+				}
 			}
 
 			if countValue != expectedCount {
@@ -730,12 +748,27 @@ func TestSelect_Count(t *testing.T) {
 			if len(results) != 1 {
 				t.Errorf("Expected 1 result in array, got %d", len(results))
 			} else {
-				// Extract the count value
+				// Extract the count value from Column1
 				countValue := 0
-				if count, ok := results[0]["COUNT(*)"].(float64); ok {
-					countValue = int(count)
-				} else if count, ok := results[0]["COUNT(*)"].(int); ok {
-					countValue = count
+				if val, ok := results[0]["Column1"]; ok {
+					// Handle different value types
+					if count, ok := val.(float64); ok {
+						countValue = int(count)
+					} else if count, ok := val.(int); ok {
+						countValue = count
+					} else if count, ok := val.(int64); ok {
+						countValue = int(count)
+					} else if field, ok := val.(models.Field); ok {
+						// It's a Field struct, extract the Value
+						if intVal, ok := field.Value.AsInt(); ok {
+							countValue = int(intVal)
+						}
+					} else if fv, ok := val.(models.FieldValue); ok {
+						// It's a FieldValue directly
+						if intVal, ok := fv.AsInt(); ok {
+							countValue = int(intVal)
+						}
+					}
 				}
 
 				if countValue != 100 {
