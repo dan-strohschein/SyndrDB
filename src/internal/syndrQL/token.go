@@ -102,6 +102,7 @@ const (
 	TOKEN_AS           // AS
 	TOKEN_RELATIONSHIP // RELATIONSHIP (for WITH RELATIONSHIP clause)
 	TOKEN_FORCE        // FORCE (for FORCE switch)
+	TOKEN_CONFIRMED    // CONFIRMED (for bulk operation safety)
 
 	// Keywords - Utility (Cold Path)
 	TOKEN_SHOW     // SHOW
@@ -343,6 +344,8 @@ func (tt TokenType) String() string {
 		return "DATETIME_TYPE"
 	case TOKEN_FORCE:
 		return "FORCE"
+	case TOKEN_CONFIRMED:
+		return "CONFIRMED"
 	case TOKEN_REMOVE_FIELD:
 		return "REMOVE_FIELD"
 	case TOKEN_MODIFY_FIELD:
@@ -466,6 +469,7 @@ var keywords = map[string]TokenType{
 	"RELATIONSHIP": TOKEN_RELATIONSHIP,
 	"DESCRIPTION":  TOKEN_DESCRIPTION,
 	"FORCE":        TOKEN_FORCE,
+	"CONFIRMED":    TOKEN_CONFIRMED,
 
 	// Utility Keywords (Cold Path)
 	"SHOW":     TOKEN_SHOW,

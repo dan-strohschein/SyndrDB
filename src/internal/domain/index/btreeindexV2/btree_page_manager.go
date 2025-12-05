@@ -76,7 +76,19 @@ type BTreePageManager struct {
 
 	// Statistics (using atomic operations for thread safety)
 	stats cacheStatistics
+
+	// TODO: Add memory-pressure flush logic - track dirtyPageCount, auto-flush when >= BTreeMaxDirtyPages, prefer evicting clean pages to avoid write stalls during reads
+	// IMPORTANT NOTE: Memory pressure triggers proactive flush to prevent OOM - clean pages evicted first to minimize I/O blocking during read-heavy workloads
+	// dirtyPageCount int // Current number of dirty pages in cache
+	// maxDirtyPages int  // Threshold from settings.BTreeMaxDirtyPages (default: 1000)
 }
+
+// TODO: Add GetDirtyPageCount() method for monitoring and metrics integration
+// func (pm *BTreePageManager) GetDirtyPageCount() int {
+//     pm.mutex.RLock()
+//     defer pm.mutex.RUnlock()
+//     return pm.dirtyPageCount
+// }
 
 func (pm *BTreePageManager) ClearCache() {
 	pm.mutex.Lock()
@@ -309,6 +321,16 @@ func (pm *BTreePageManager) MarkPageDirty(pageNum uint32) error {
 		return fmt.Errorf("cannot mark page %d as dirty: not in cache", pageNum)
 	}
 
+	// TODO: Increment dirtyPageCount when marking page dirty, check memory pressure threshold
+	// IMPORTANT NOTE: Auto-flush when dirtyPageCount >= settings.BTreeMaxDirtyPages to prevent OOM
+	// if !entry.isDirty {
+	// 		pm.dirtyPageCount++
+	// 		if pm.dirtyPageCount >= pm.maxDirtyPages {
+	// 			// Trigger proactive flush to avoid memory pressure during reads
+	// 			go pm.Flush(pm.pageWriter)
+	// 		}
+	// }
+
 	entry.isDirty = true
 	entry.lastAccess = time.Now()
 	pm.logger.Debugf("Marked page %d as dirty", pageNum)
@@ -339,6 +361,12 @@ func (pm *BTreePageManager) Flush(writer func(uint32, interface{}) error) error 
 				flushErrors = append(flushErrors, fmt.Errorf("failed to flush page %d: %w", pageNum, err))
 				continue
 			}
+
+			// TODO: Decrement dirtyPageCount when flushing dirty page
+			// IMPORTANT NOTE: Keep dirtyPageCount accurate for memory pressure monitoring
+			// if entry.isDirty {
+			// 		pm.dirtyPageCount--
+			// }
 
 			// Mark as clean after successful write
 			entry.isDirty = false
@@ -575,6 +603,31 @@ func (pm *BTreePageManager) evictLRU() {
 	if pm.currentSize == 0 {
 		return
 	}
+
+	// TODO: Prefer evicting clean pages to avoid I/O blocking during read-heavy workloads
+	// IMPORTANT NOTE: Two-pass eviction: first pass for clean unpinned pages, second pass for dirty unpinned pages
+	// This minimizes write stalls during OLTP queries that need to evict pages
+	// First pass: look for clean unpinned pages
+	// var lru *cacheEntry
+	// current := pm.lruTail.prev
+	// for current != pm.lruHead {
+	// 		if current.pinCount == 0 && !current.isDirty {
+	// 			lru = current
+	// 			break
+	// 		}
+	// 		current = current.prev
+	// }
+	// Second pass: if no clean pages, evict dirty unpinned page
+	// if lru == nil {
+	// 		current = pm.lruTail.prev
+	// 		for current != pm.lruHead {
+	// 			if current.pinCount == 0 {
+	// 				lru = current
+	// 				break
+	// 			}
+	// 			current = current.prev
+	// 		}
+	// }
 
 	// Find the least recently used UNPINNED page
 	// Walk backwards through LRU list to find first unpinned page

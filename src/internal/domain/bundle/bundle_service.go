@@ -356,6 +356,10 @@ type BundleService struct {
 
 	// PERFORMANCE OPTIMIZATION: Runtime-toggleable diagnostic logging (Priority 1)
 	verboseLogging bool // Default: false - disable hot path diagnostic logs for performance
+
+	// TODO: Implement bundle-level shared WAL for B-Tree indexes - single WAL per bundle reduces file handles and enables coordinated checkpoints. Add btreeWAL field, initialize in NewBundleService, log format: BTREE:idx_name:INSERT|DELETE|UPDATE:pageNum:key
+	// IMPORTANT NOTE: B-Tree indexes share bundle-level WAL to minimize file handles and enable coordinated checkpoint/recovery
+	// btreeWAL *journal.WriteAheadLog // Shared WAL for all B-Tree indexes in this bundle (reduces file handles)
 }
 
 func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
@@ -511,6 +515,11 @@ func (s *BundleService) getOrCreateSchemaManager(db *models.Database) (*graphQLS
 	// Cache the manager for future use
 	s.schemaManagers[db.Name] = manager
 	s.logger.Infof("GraphQL schema manager initialized for database '%s' at: %s", db.Name, schemaFilePath)
+
+	// TODO: Initialize BTreeCheckpointManager in NewBundleService after creating BundleService instance
+	// IMPORTANT NOTE: Checkpoint manager coordinates periodic flush and WAL truncation across all B-Tree indexes
+	// checkpointManager := btreeindexV2.NewBTreeCheckpointManager(settings)
+	// s.checkpointManager = checkpointManager
 
 	return manager, nil
 }
@@ -4054,6 +4063,18 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	}
 	defer s.ReleaseBundleWriteLock(bundle.Name)
 
+	// SAFETY CHECK: Bulk update (empty WHERE clause) requires CONFIRMED keyword
+	if docCommand.WhereClause == "" || strings.TrimSpace(docCommand.WhereClause) == "" {
+		if !docCommand.Confirmed {
+			return fmt.Errorf("bulk update requires CONFIRMED keyword for safety. "+
+				"Syntax: UPDATE DOCUMENTS IN BUNDLE \"%s\" (field = value, ...) CONFIRMED\n"+
+				"This safety mechanism prevents accidental modification of all documents in a bundle. "+
+				"Use a WHERE clause to update specific documents without CONFIRMED keyword",
+				docCommand.BundleName)
+		}
+		s.logger.Infof("Bulk update CONFIRMED for bundle '%s' - proceeding to update all documents", bundle.Name)
+	}
+
 	// Get the existing document
 	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause)
 	if err != nil {
@@ -4238,6 +4259,8 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	return nil
 }
 
+// DeleteDocumentFromBundle is the public interface for deleting documents from a bundle.
+// It acquires necessary locks and delegates to the internal implementation.
 func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string) error {
 	args := settings.GetSettings()
 
@@ -4260,21 +4283,59 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 
 	// ========== FIND DOCUMENTS MATCHING WHERE CLAUSE ==========
 
-	// STEP 2 Notes: Check for empty WHERE clause (delete all)
+	// STEP 2 Notes: Check for empty WHERE clause (bulk delete all documents)
 	if docCommand.WhereClause == "" || strings.TrimSpace(docCommand.WhereClause) == "" {
-		// TODO: Implement bulk delete with referential integrity checks
-		// Before allowing DELETE ALL, I need to:
-		// 1. Check if any other bundles have relationships pointing to this bundle
-		// 2. Verify that no foreign key constraints would be violated
-		// 3. Check if cascade delete is configured for dependent relationships
-		// 4. Optionally require explicit confirmation (e.g., DELETE ALL CONFIRMED)
-		// 5. Maybe implement a switch for soft deletes always to ensure safety
-		// 6. Add transaction support to rollback if any constraint fails
-		// 7. Implement batch tombstone writing for performance
-		// For now, this operation is too dangerous without proper safeguards.
-		// TODO must implement this before full MVP launch
-		return fmt.Errorf("DELETE ALL DOCUMENTS from bundle '%s' is not yet supported - WHERE clause is required for safety. "+
-			"This feature requires referential integrity validation to prevent orphaned relationships", docCommand.BundleName)
+		// Bulk delete requires CONFIRMED keyword for safety
+		if !docCommand.Confirmed {
+			return fmt.Errorf("bulk delete requires CONFIRMED keyword for safety. "+
+				"Syntax: DELETE FROM \"%s\" CONFIRMED\n"+
+				"This safety mechanism prevents accidental data loss when deleting all documents in a bundle. "+
+				"The operation will validate referential integrity and cascade deletes as configured",
+				docCommand.BundleName)
+		}
+
+		// Get all document IDs from the bundle
+		allDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+		if err != nil {
+			return fmt.Errorf("failed to retrieve documents for bulk delete: %w", err)
+		}
+
+		if len(allDocs) == 0 {
+			s.logger.Infof("Bundle '%s' is already empty, nothing to delete", bundle.Name)
+			docCommand.DeletedDocumentIDs = []string{}
+			return nil
+		}
+
+		// Extract document IDs for validation and deletion
+		bulkDocIDs := make([]string, 0, len(allDocs))
+		for _, doc := range allDocs {
+			bulkDocIDs = append(bulkDocIDs, doc.DocumentID)
+		}
+
+		s.logger.Infof("Bulk delete will validate and delete %d documents from bundle '%s'", len(bulkDocIDs), bundle.Name)
+
+		// Perform batch referential integrity validation
+		validator := NewReferentialIntegrityValidator(s, s.logger)
+		if err := validator.ValidateBulkDeleteOptimized(bundle, bulkDocIDs); err != nil {
+			return fmt.Errorf("bulk delete failed referential integrity check: %w", err)
+		}
+
+		// All validations passed - proceed with deletion using internal method (lock already held)
+		// Skip individual metadata updates - we'll do a single bulk update after all deletions
+		if err := s.deleteDocumentsInternal(bundle, docCommand, bulkDocIDs, true); err != nil {
+			return fmt.Errorf("bulk delete execution failed: %w", err)
+		}
+
+		// Schedule single metadata update for all deleted documents
+		s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", int64(len(bulkDocIDs)))
+
+		// Flush all pending operations to ensure consistency
+		if err := s.FlushAllBuffers(); err != nil {
+			s.logger.Warnf("Failed to flush buffers after bulk delete: %v", err)
+		}
+
+		s.logger.Infof("Successfully deleted %d documents from bundle '%s'", len(bulkDocIDs), bundle.Name)
+		return nil
 	}
 
 	// ==========  VALIDATE REFERENTIAL INTEGRITY ==========
@@ -4292,25 +4353,113 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 	}
 	s.logger.Debugf("[REFINT] Referential integrity validated successfully for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
 
-	// Process each document
-	for _, documentID := range docIDs {
-		//documentID := doc.DocumentID
+	// Delegate to internal delete logic (lock already held)
+	// Use individual metadata updates for WHERE clause deletes (skipMetadataUpdate=false)
+	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, false)
+}
 
-		//  Remove from physical bundle file (append tombstone marker)
-		err := s.store.DeleteDocumentFromBundleFile(bundle, documentID)
+// deleteDocumentsInternal performs the actual document deletion logic without acquiring locks.
+// This method should only be called by public methods that have already acquired necessary locks.
+// Following the Single Responsibility Principle: handles physical deletion, cache invalidation, and index updates.
+//
+// Parameters:
+//   - skipMetadataUpdate: if true, caller is responsible for scheduling metadata updates (used for bulk operations)
+func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, skipMetadataUpdate bool) error {
+	// CRITICAL OPTIMIZATION: For bulk deletes, use batched file operations
+	isBulkDelete := len(docIDs) > 10 // Consider > 10 deletions as "bulk"
+
+	if isBulkDelete {
+		// CRITICAL: Flush write buffer FIRST to ensure all documents are on disk
+		// Otherwise tombstones might be written before some document inserts are flushed
+		err := s.store.FlushWriteBuffers(docCommand.BundleName)
 		if err != nil {
-			return fmt.Errorf("failed to remove document %s from bundle file: %w", documentID, err)
+			s.logger.Warnf("Failed to flush write buffers before bulk delete: %v", err)
 		}
 
-		//  Remove from in-memory caches
-		// Use smart cache invalidation: invalidate specific page if known, otherwise all pages
-		s.invalidateDocumentPage(docCommand.BundleName, documentID)
+		// CRITICAL: Write ALL deletion markers to disk FIRST (durability)
+		err = s.store.AppendDeletionMarkersBatch(bundle, docIDs)
+		if err != nil {
+			return fmt.Errorf("failed to append batch deletion markers: %w", err)
+		}
+		s.logger.Infof("BULK DELETE: Wrote %d deletion markers to disk", len(docIDs))
 
-		// CRITICAL: Invalidate the document scanner cache to force reload from disk on next call
-		// TODO This may be a bad idea for performance. Have to test
-		// Without this, queries will serve stale cached documents and won't see the deletion
+		// CRITICAL: Close the write buffer to ensure file handle is released and
+		// OS metadata cache is invalidated. This ensures subsequent opens get
+		// the correct file size (including tombstones).
+		err = s.store.CloseWriteBuffer(docCommand.BundleName)
+		if err != nil {
+			s.logger.Warnf("Failed to close write buffer after tombstones: %v", err)
+		}
+
+		// CRITICAL: Now remove documents from ALL memory structures to ensure consistency
+		// This must happen AFTER disk write to maintain durability
+
+		// 1. Remove from Bundle.Documents if loaded
+		if bundle.Documents != nil {
+			for _, docID := range docIDs {
+				delete(*bundle.Documents, docID)
+			}
+			s.logger.Infof("BULK DELETE: Removed %d documents from Bundle.Documents in-memory map", len(docIDs))
+		}
+
+		// 2. Remove from documentPageMap (page location cache)
+		s.pageCacheMutex.Lock()
+		if pageMap, exists := s.documentPageMap[docCommand.BundleName]; exists {
+			for _, docID := range docIDs {
+				delete(pageMap, docID)
+			}
+		}
+		s.pageCacheMutex.Unlock()
+
+		// 3. Clear documentPages cache (actual page data)
+		s.invalidateBundlePageCache(docCommand.BundleName)
+
+		// 3.5. Update the document scanner's cached pages to remove deleted documents
+		// This ensures queries don't return stale cached data
+		if scanner, exists := s.bundleScanners[docCommand.BundleName]; exists {
+			// Get the BundleAdapter from the scanner
+			if smartScanner, ok := scanner.(*documentscanner.SmartBundleScanner); ok {
+				smartScanner.RemoveDocumentsFromCache(docIDs)
+			}
+		}
+
+		// 4. Clear document scanner cache
 		s.RemoveDocumentScanner(docCommand.BundleName)
-		s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after deletion", docCommand.BundleName)
+
+		s.logger.Infof("BULK DELETE: Removed %d documents from all memory structures for bundle '%s'", len(docIDs), docCommand.BundleName)
+	} else {
+		// Non-bulk: process each document individually
+		for _, documentID := range docIDs {
+			// STEP 1: Remove from physical bundle file (append tombstone marker) - DURABILITY FIRST
+			err := s.store.DeleteDocumentFromBundleFile(bundle, documentID)
+			if err != nil {
+				return fmt.Errorf("failed to remove document %s from bundle file: %w", documentID, err)
+			}
+
+			// STEP 2: Remove from in-memory structures - CONSISTENCY AFTER DURABILITY
+
+			// Remove from Bundle.Documents if loaded
+			if bundle.Documents != nil {
+				delete(*bundle.Documents, documentID)
+			}
+
+			// Remove from documentPageMap (page location cache)
+			s.pageCacheMutex.Lock()
+			if pageMap, exists := s.documentPageMap[docCommand.BundleName]; exists {
+				delete(pageMap, documentID)
+			}
+			s.pageCacheMutex.Unlock()
+
+			// Invalidate specific page if known, otherwise all pages
+			s.invalidateDocumentPage(docCommand.BundleName, documentID)
+
+			// Invalidate the document scanner cache to force reload from disk on next call
+			s.RemoveDocumentScanner(docCommand.BundleName)
+		}
+	}
+
+	// Process each document for index/relationship cleanup (same for bulk and non-bulk)
+	for _, documentID := range docIDs {
 
 		//  Remove from hash indexes with disk persistence
 		if bundle.Indexes != nil {
@@ -4344,49 +4493,138 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 						// Continue - the in-memory deletion was successful
 					}
 				} else if indexRef.IndexType == "btree" {
-					// TODO - Add B-Tree index deletion with persistence
-					// TODO MVP feature, must be done by launch
+					// B-Tree index deletion with persistence (MVP feature - required for launch)
+					// Load the document first to extract the indexed field value
+					doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, documentID)
+					if err != nil {
+						s.logger.Warnf("Failed to load document '%s' for B-Tree index deletion: %v", documentID, err)
+						continue // Continue with other indexes
+					}
+
+					// Extract the field value for deletion
+					fieldValue, err := extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName)
+					if err != nil {
+						s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, err)
+						continue
+					}
+
+					// Convert field value to bytes for BTree storage
+					keyBytes, err := convertValueToBytes(fieldValue)
+					if err != nil {
+						s.logger.Warnf("Failed to convert field value to bytes for document '%s': %v", documentID, err)
+						continue
+					}
+
 					// Load BTree index on-demand
-					// btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
-					// if err != nil {
-					// 	s.logger.Errorf("Failed to load BTree index '%s': %v", indexName, err)
-					// 	continue // Continue with other indexes
-					// }
+					btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+					if err != nil {
+						s.logger.Errorf("Failed to load BTree index '%s': %v", indexName, err)
+						continue // Continue with other indexes
+					}
 
-					// // Extract the field value for deletion
-					// fieldValue, err := extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName)
-					// if err != nil {
-					// 	s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, err)
-					// 	continue
-					// }
+					// Delete from the BTree index
+					err = btreeIndex.Delete(keyBytes, documentID)
+					if err != nil {
+						s.logger.Warnf("Failed to delete document '%s' from BTree index '%s': %v", documentID, indexName, err)
+					} else {
+						s.logger.Debugf("Successfully deleted document '%s' from BTree index '%s'",
+							documentID, indexName)
+					}
 
-					// // Convert field value to bytes for BTree storage
-					// keyBytes, err := convertValueToBytes(fieldValue)
-					// if err != nil {
-					// 	s.logger.Warnf("Failed to convert field value to bytes for document '%s': %v", documentID, err)
-					// 	continue
-					// }
-
-					// // Delete from the BTree index
-					// err = btreeIndex.Delete(keyBytes, documentID)
-					// if err != nil {
-					// 	s.logger.Warnf("Failed to delete document '%s' from BTree index '%s': %v", documentID, indexName, err)
-					// } else {
-					// 	s.logger.Debugf("Successfully deleted document '%s' from BTree index '%s'",
-					// 		documentID, indexName)
-					// }
-					// TODO: Add B-Tree index persistence method call here
+					// TODO: Add explicit BTree index persistence (flush) to ensure durability
+					// Currently relies on BTreeIndex internal flush mechanisms
+					// Future enhancement: Add btreeIndex.Flush() call here or use batched persistence
 				}
 			}
 		}
 
-		// Schedule deferred metadata update
-		s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", 1)
+		// Schedule deferred metadata update (unless caller is handling bulk update)
+		if !skipMetadataUpdate {
+			s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", 1)
+		}
+	}
+
+	// CRITICAL: For bulk deletes, invalidate query planner cache
+	// The planner caches Bundle objects with full document sets
+	if isBulkDelete {
+		s.invalidatePlanCacheForBundle(docCommand.BundleName)
+		s.logger.Infof("BULK DELETE: Invalidated query planner cache for bundle '%s'", docCommand.BundleName)
 	}
 
 	// STEP 7: Update command with deleted document IDs for response
 	docCommand.DeletedDocumentIDs = docIDs //deletedDocumentIDs
 
+	return nil
+}
+
+// DeleteAllDocumentsFromBundle performs a bulk delete of all documents in a bundle with referential integrity checks
+// This method implements the CONFIRMED bulk delete operation: DELETE FROM "BundleName" CONFIRMED
+//
+// Performance: Uses batch validation with HashIndexV3.BatchGet() for O(1) parallel lookups
+// Safety: Requires CONFIRMED keyword (validated by caller) and performs full referential integrity validation
+// Transaction: Caller must wrap in WAL transaction at server layer for atomicity
+//
+// Error Format: Returns aggregated violation counts (e.g., "423 references in 'Books' via 'author_id'")
+// instead of individual document errors for better UX with large datasets.
+//
+// TODO: I will add configurable soft-delete flag for bulk operations to enable tombstone-only mode
+// with background compaction instead of immediate physical deletion
+func (s *BundleService) DeleteAllDocumentsFromBundle(
+	docCommand *models.DocumentDeleteCommand,
+	bundle *models.Bundle,
+) error {
+	args := settings.GetSettings()
+	if args.Debug {
+		s.logger.Infof("Starting bulk delete of all documents from bundle '%s'", docCommand.BundleName)
+	}
+
+	// Acquire write lock for the bundle
+	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
+		return fmt.Errorf("failed to acquire write lock for bundle '%s': %w", bundle.Name, err)
+	}
+	defer s.ReleaseBundleWriteLock(bundle.Name)
+
+	// Get all document IDs from the bundle
+	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve documents for bulk delete: %w", err)
+	}
+
+	if len(allDocs) == 0 {
+		s.logger.Infof("Bundle '%s' is already empty, nothing to delete", bundle.Name)
+		docCommand.DeletedDocumentIDs = []string{}
+		return nil
+	}
+
+	// Extract document IDs for validation and deletion
+	docIDs := make([]string, 0, len(allDocs))
+	for _, doc := range allDocs {
+		docIDs = append(docIDs, doc.DocumentID)
+	}
+
+	s.logger.Infof("Bulk delete will validate and delete %d documents from bundle '%s'", len(docIDs), bundle.Name)
+
+	// Perform batch referential integrity validation
+	validator := NewReferentialIntegrityValidator(s, s.logger)
+	if err := validator.ValidateBulkDeleteOptimized(bundle, docIDs); err != nil {
+		return fmt.Errorf("bulk delete failed referential integrity check: %w", err)
+	}
+
+	// All validations passed - proceed with deletion using internal method (lock already held)
+	// Skip individual metadata updates - we'll do a single bulk update after all deletions
+	if err := s.deleteDocumentsInternal(bundle, docCommand, docIDs, true); err != nil {
+		return fmt.Errorf("bulk delete execution failed: %w", err)
+	}
+
+	// Schedule single metadata update for all deleted documents
+	s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", int64(len(docIDs)))
+
+	// Flush all pending operations to ensure consistency
+	if err := s.FlushAllBuffers(); err != nil {
+		s.logger.Warnf("Failed to flush buffers after bulk delete: %v", err)
+	}
+
+	s.logger.Infof("Successfully deleted %d documents from bundle '%s'", len(docIDs), bundle.Name)
 	return nil
 }
 
@@ -5328,7 +5566,6 @@ func (s *BundleService) GetOrCreateDocumentScanner(bundle *models.Bundle) (docum
 
 	// Cache the scanner
 	s.bundleScanners[bundle.Name] = scanner
-	s.logger.Debugf("Created and cached document scanner for bundle '%s'", bundle.Name)
 
 	return scanner, nil
 }
@@ -5343,10 +5580,14 @@ func (s *BundleService) RemoveDocumentScanner(bundleName string) {
 	s.scannerMutex.Lock()
 	defer s.scannerMutex.Unlock()
 
+	s.logger.Infof("DEBUG: RemoveDocumentScanner called for bundle '%s'", bundleName)
 	if scanner, exists := s.bundleScanners[bundleName]; exists {
+		s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner EXISTS in map, closing it...")
 		scanner.Close()
 		delete(s.bundleScanners, bundleName)
-		s.logger.Debugf("Removed document scanner for bundle '%s'", bundleName)
+		s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner REMOVED from map for bundle '%s'", bundleName)
+	} else {
+		s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner NOT FOUND in map for bundle '%s'", bundleName)
 	}
 }
 

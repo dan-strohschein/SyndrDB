@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"syndrdb/src/internal/domain/models"
+
 	"syndrdb/src/pkg/common/conversion"
 
 	"go.uber.org/zap"
@@ -712,4 +713,24 @@ func (sbs *SmartBundleScanner) Close() error {
 	}
 
 	return nil
+}
+
+// RemoveDocumentsFromCache removes deleted documents from the scanner's cached pages
+// This is called after documents are deleted to keep the cache consistent with disk
+func (s *SmartBundleScanner) RemoveDocumentsFromCache(documentIDs []string) {
+
+	// Get the BundleAdapter (which holds the cachedPages map)
+	if bundleAdapter, ok := s.bundle.(*BundleAdapter); ok {
+		// Remove documents from each cached page
+		for _, cachedPage := range bundleAdapter.cachedPages {
+			for _, docID := range documentIDs {
+				delete(cachedPage.Documents, docID)
+			}
+		}
+
+		if s.logger != nil {
+			s.logger.Infof("Removed %d documents from scanner cache for bundle '%s'",
+				len(documentIDs), bundleAdapter.bundle.Name)
+		}
+	}
 }

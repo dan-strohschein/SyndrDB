@@ -31,7 +31,8 @@ Performance Targets:
 // DeleteStatement represents a parsed DELETE DOCUMENTS statement
 type DeleteStatement struct {
 	BundleName  string     // Name of the bundle to delete from
-	WhereClause Expression // WHERE clause expression for filtering documents to delete
+	WhereClause Expression // WHERE clause expression for filtering documents to delete (optional)
+	Confirmed   bool       // True if CONFIRMED keyword was provided (required for bulk deletes)
 	// TODO: I will add support for point delete vs. range delete optimization
 	// TODO: I will detect common WHERE patterns for query optimization
 }
@@ -58,7 +59,8 @@ func NewDeleteParser(input string) (*DeleteParser, error) {
 }
 
 // Parse parses a DELETE DOCUMENTS statement
-// Syntax: DELETE DOCUMENTS FROM BUNDLE "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>;
+// Syntax: DELETE DOCUMENTS FROM "<BUNDLE_NAME>" [CONFIRMED] [WHERE <WHERE_CLAUSE>];
+// The CONFIRMED keyword is required when WHERE clause is omitted (bulk delete safety)
 func (p *DeleteParser) Parse() (*DeleteStatement, error) {
 	// Expect: DELETE
 	if err := p.expectKeyword(TOKEN_DELETE, "DELETE"); err != nil {
@@ -75,26 +77,29 @@ func (p *DeleteParser) Parse() (*DeleteStatement, error) {
 		return nil, err
 	}
 
-	// Expect: BUNDLE
-	// if err := p.expectKeyword(TOKEN_BUNDLE, "BUNDLE"); err != nil {
-	// 	return nil, err
-	// }
-
 	// Expect: bundle name (string)
 	bundleName, err := p.expectString()
 	if err != nil {
 		return nil, fmt.Errorf("expected bundle name: %w", err)
 	}
 
-	// Expect: WHERE
-	if err := p.expectKeyword(TOKEN_WHERE, "WHERE"); err != nil {
-		return nil, err
+	// Check for optional CONFIRMED keyword
+	confirmed := false
+	if !p.isAtEnd() && p.peek().Type == TOKEN_CONFIRMED {
+		confirmed = true
+		p.advance()
 	}
 
-	// Parse WHERE clause expression
-	whereClause, err := p.parseWhereClause()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
+	// Check for optional WHERE keyword
+	var whereClause Expression
+	if !p.isAtEnd() && p.peek().Type == TOKEN_WHERE {
+		p.advance() // Consume WHERE
+
+		// Parse WHERE clause expression
+		whereClause, err = p.parseWhereClause()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
+		}
 	}
 
 	// Expect: semicolon (optional)
@@ -110,6 +115,7 @@ func (p *DeleteParser) Parse() (*DeleteStatement, error) {
 	return &DeleteStatement{
 		BundleName:  bundleName,
 		WhereClause: whereClause,
+		Confirmed:   confirmed,
 	}, nil
 }
 

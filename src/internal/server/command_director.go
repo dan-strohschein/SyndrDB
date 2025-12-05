@@ -893,33 +893,10 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 		results = nil
 		resultCount = len(documents)
 	} else if query.IsCountOnly {
-		// Extract the actual COUNT(*) value from the aggregate result
-		// The GROUP BY executor returns 1 document with the count_all field
-		countValue := 0
-		if len(flattenedDocs) > 0 {
-			// Get the first (and only) result document
-			firstDoc := flattenedDocs[0]
-			// Look for count_all field (created by GROUP BY executor for COUNT(*))
-			if count, exists := firstDoc["count_all"]; exists {
-				switch v := count.(type) {
-				case int64:
-					countValue = int(v)
-				case int:
-					countValue = v
-				case float64:
-					countValue = int(v)
-				case models.FieldValue:
-					// ✅ Handle FieldValue from response formatter
-					if intVal, ok := v.AsInt(); ok {
-						countValue = int(intVal)
-					} else if floatVal, ok := v.AsFloat(); ok {
-						countValue = int(floatVal)
-					}
-				}
-			}
-		}
-		results = map[string]int{"Count": countValue}
-		resultCount = 1
+		// COUNT(*) queries already have synthetic document from AggregationNode
+		// Just return flattenedDocs directly (contains Column1, Column2, etc. fields)
+		results = flattenedDocs
+		resultCount = len(flattenedDocs)
 	} else {
 		results = flattenedDocs
 		resultCount = len(flattenedDocs)

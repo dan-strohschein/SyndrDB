@@ -99,7 +99,7 @@ These features are **blockers** for production use. Without them, users cannot r
 
 ---
 
-### 1.4 B-Tree Index Persistence
+### 1.4 B-Tree Index Persistence (DONE!!!)
 
 **Status:** Incomplete  
 **Location:** `src/internal/domain/bundle/bundle_service.go` (multiple TODO markers)
@@ -125,10 +125,17 @@ These features are **blockers** for production use. Without them, users cannot r
 
 ### 1.5 Bulk Delete with Referential Integrity
 
-**Status:** Not Implemented  
-**Location:** `src/internal/domain/bundle/bundle_service.go`
+**Status:** ✅ Implemented (December 3, 2025)  
+**Location:** `src/internal/domain/bundle/bundle_service.go`, `src/internal/domain/bundle/bundle_validator.go`
 
-**Description:** TODO marker: `TODO: Implement bulk delete with referential integrity checks`
+**Implementation Details:**
+- **Syntax:** `DELETE DOCUMENTS FROM "BundleName" CONFIRMED` and `UPDATE DOCUMENTS IN BUNDLE "Name" (fields) CONFIRMED`
+- **Parser:** Extended DELETE and UPDATE parsers with optional `CONFIRMED` keyword and optional WHERE clause
+- **Safety:** CONFIRMED keyword required when WHERE clause is missing (prevents accidental bulk operations)
+- **Batch Validation:** `ValidateBulkDeleteOptimized()` uses `HashIndexV3.BatchGet()` for O(1) parallel lookups
+- **Error Reporting:** Aggregated count-based errors (e.g., "423 references in 'Books' via 'author_id'")
+- **Performance:** Batch operations process all document IDs at once, internal 256-key batching for optimal throughput
+- **E2E Tests:** Comprehensive test suite in `src/cmd/tests/syndrQL/bulk_operations_e2e_test.go`
 
 **What it's used for:**
 - Safe deletion of related data
@@ -140,7 +147,9 @@ These features are **blockers** for production use. Without them, users cannot r
 - Deleting a parent without handling children creates data corruption
 - Production systems require predictable referential behavior
 
-**Estimated Effort:** 1-2 weeks
+**Estimated Effort:** 1-2 weeks ✅ **COMPLETED**
+
+**Known Issue:** Document scanner counts tombstoned/deleted documents when aggregating COUNT(*). The `parseAppendedDocumentsRange` correctly removes deleted documents from results but returns the count before deletions are applied. This affects COUNT queries after bulk deletes. Fix in progress.
 
 ---
 

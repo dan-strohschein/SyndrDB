@@ -62,6 +62,7 @@ type BundleStore interface {
 	UpdateBundleFilename(database *models.Database, bundle *models.Bundle, oldBundleName string) error
 	UpdateDocumentInBundleFile(bundle *models.Bundle, document *models.Document) error
 	DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error
+	AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error // Batch deletion for performance
 
 	// Returns the physical page ID where the document was stored
 	AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error)
@@ -73,6 +74,7 @@ type BundleStore interface {
 
 	FlushWriteBuffers(bundleName string) error
 	FlushAllWriteBuffers() error
+	CloseWriteBuffer(bundleName string) error
 	CloseWriteBuffers() error
 }
 
@@ -932,10 +934,81 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 		return fmt.Errorf("failed to write deletion marker data: %w", err)
 	}
 
+	// CRITICAL: Force OS to flush to disk to ensure deletion marker is persisted
+	// Without this, subsequent reads might not see the tombstone marker
+	if err := file.Sync(); err != nil {
+		b.logger.Warnf("Failed to sync deletion marker to disk: %v (continuing anyway)", err)
+		// Don't fail - the data was written, sync is durability optimization
+	}
+
 	if b.logger != nil {
 		b.logger.Infow("Successfully appended deletion marker",
 			"bundle", bundleName,
 			"documentID", documentID)
+	}
+
+	return nil
+}
+
+// AppendDeletionMarkersBatch writes multiple deletion markers in a single file operation
+// This is CRITICAL for bulk delete performance - opens file once, writes all markers, syncs once
+func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error {
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+
+	// Open file once for all markers
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open bundle file for batch deletion markers: %w", err)
+	}
+	defer file.Close()
+
+	// Write all deletion markers
+	for _, documentID := range documentIDs {
+		// Create deletion marker entry
+		deletionEntry := map[string]interface{}{
+			"DocumentID": documentID,
+			"Operation":  "DELETE",
+			"Timestamp":  time.Now(),
+		}
+
+		// Serialize the deletion marker
+		deletionBytes, err := helpers.EncodeFastBinary(deletionEntry)
+		if err != nil {
+			return fmt.Errorf("failed to encode deletion marker for %s: %w", documentID, err)
+		}
+
+		// Create header with deletion magic number
+		headerSize := uint32(len(deletionBytes))
+		headerBytes := make([]byte, 8)
+		binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADDEAD)
+		binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
+
+		// Write header and data
+		if _, err := file.Write(headerBytes); err != nil {
+			return fmt.Errorf("failed to write deletion marker header for %s: %w", documentID, err)
+		}
+		if _, err := file.Write(deletionBytes); err != nil {
+			return fmt.Errorf("failed to write deletion marker data for %s: %w", documentID, err)
+		}
+	}
+
+	// CRITICAL: Single sync at the end for all markers
+	if err := file.Sync(); err != nil {
+		b.logger.Warnf("Failed to sync %d deletion markers to disk: %v (continuing anyway)", len(documentIDs), err)
+	}
+
+	// CRITICAL: Close file IMMEDIATELY after sync to ensure OS updates file metadata
+	// before any subsequent opens. Using defer can cause race conditions where
+	// the next os.Open() + file.Stat() returns stale file size (before tombstones).
+	if err := file.Close(); err != nil {
+		b.logger.Warnf("Failed to close file after deletion markers: %v", err)
+	}
+
+	if b.logger != nil {
+		b.logger.Infow("Successfully appended batch deletion markers",
+			"bundle", bundle.Name,
+			"count", len(documentIDs))
 	}
 
 	return nil
@@ -1152,7 +1225,31 @@ func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 	return nil
 }
 
-// CloseWriteBuffers closes and flushes all write buffers
+// CloseWriteBuffer closes and removes the write buffer for a specific bundle
+// This is CRITICAL after operations that change file size (like appending tombstones)
+// to ensure subsequent file opens get fresh metadata (correct file size).
+func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
+	b.bufferMutex.Lock()
+	defer b.bufferMutex.Unlock()
+	
+	// ALWAYS log this to debug the issue
+	b.logger.Infof("DEBUG: CloseWriteBuffer called for bundle '%s'", bundleName)
+	
+	if buffer, exists := b.writeBuffers[bundleName]; exists {
+		b.logger.Infof("DEBUG: Found write buffer for bundle '%s', closing it...", bundleName)
+		if err := buffer.Close(); err != nil {
+			b.logger.Warnf("Failed to close write buffer for bundle %s: %v", bundleName, err)
+			return err
+		}
+		// Remove from map so next write creates a fresh buffer
+		delete(b.writeBuffers, bundleName)
+		b.logger.Infof("DEBUG: Successfully closed and removed write buffer for bundle '%s'", bundleName)
+	} else {
+		b.logger.Infof("DEBUG: No write buffer found for bundle '%s' - nothing to close", bundleName)
+	}
+	
+	return nil
+}// CloseWriteBuffers closes and flushes all write buffers
 func (b *BundleStorageEngine) CloseWriteBuffers() error {
 	b.bufferMutex.Lock()
 	defer b.bufferMutex.Unlock()
@@ -1189,11 +1286,15 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 		return nil, 0, fmt.Errorf("failed to get file info: %w", err)
 	}
 
+	b.logger.Infof("DEBUG: readDocumentRange - file '%s' size: %d bytes", filePath, fileInfo.Size())
+
 	fileData := make([]byte, fileInfo.Size())
-	_, err = file.Read(fileData)
+	bytesRead, err := file.Read(fileData)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read file: %w", err)
 	}
+	
+	b.logger.Infof("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
 
 	// Parse documents with range limiting
 	pageDocuments, totalCount, err := b.parseAppendedDocumentsRange(fileData, startIndex, endIndex)
@@ -1249,15 +1350,49 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 	offset := 0
 	documentIndex := uint32(0)
 
+	// DEBUG: Log parsing start
+	if b.logger != nil {
+		b.logger.Infof("DEBUG: parseAppendedDocumentsRange called with data size %d bytes, range [%d, %d)", len(data), startIndex, endIndex)
+	}
+
+	// CRITICAL FIX: Skip bundle metadata header if present
+	// The file format is: [Bundle Metadata Header] [Document 1] [Document 2] ... [Tombstones]
+	// Bundle metadata header format: 0x42444D44 (magic) + size (4 bytes) + BSON data
+	if len(data) >= 8 {
+		magic := binary.LittleEndian.Uint32(data[0:4])
+		if magic == 0x42444D44 { // "BDMD" = Bundle Metadata
+			metadataSize := binary.LittleEndian.Uint32(data[4:8])
+			offset = int(8 + metadataSize) // Skip 8-byte header + BSON data
+			if b.logger != nil {
+				b.logger.Infof("DEBUG: Skipping bundle metadata header: magic=0x%X, size=%d, new offset=%d", magic, metadataSize, offset)
+			}
+		}
+	}
+
 	for offset < len(data) {
 		// Need at least 8 bytes for header
 		if offset+8 > len(data) {
+			if b.logger != nil {
+				b.logger.Infof("DEBUG: Stopping parse at offset %d (not enough bytes for header)", offset)
+			}
 			break
 		}
 
 		// Read magic number and size
 		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
 		size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+
+		// DEBUG: Log what we found
+		if b.logger != nil {
+			if magic == 0xDEADBEEF {
+				b.logger.Infof("DEBUG: Found DOCUMENT at offset %d, size %d", offset, size)
+			} else if magic == 0xDEADDEAD {
+				b.logger.Infof("DEBUG: Found TOMBSTONE at offset %d, size %d", offset, size)
+			} else {
+				// Log unknown magic numbers too
+				b.logger.Infof("DEBUG: Found UNKNOWN magic 0x%X at offset %d, size %d", magic, offset, size)
+			}
+		}
 
 		// Handle document records
 		if magic == 0xDEADBEEF {
@@ -1401,6 +1536,11 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 			// 	}
 			// }
 
+			// DEBUG: Always log deletion marker processing
+			if b.logger != nil {
+				b.logger.Infof("DEBUG: Found deletion marker at offset %d, size %d bytes", offset, size)
+			}
+
 			// Decode deletion marker using fast binary format
 			deletionMap, err := helpers.DecodeFastBinary(deletionData)
 			if err != nil {
@@ -1410,6 +1550,10 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 				continue
 			}
 
+			if b.logger != nil {
+				b.logger.Infof("DEBUG: Decoded deletion marker: %+v", deletionMap)
+			}
+
 			if documentID, ok := deletionMap["DocumentID"].(string); ok && documentID != "" {
 				// Mark document as deleted and remove from current sets
 				deletedDocuments[documentID] = true
@@ -1417,7 +1561,11 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 				delete(pageDocuments, documentID)
 
 				if b.logger != nil {
-					b.logger.Debugf("Found deletion marker for document %s", documentID)
+					b.logger.Infof("DEBUG: Marked document %s as deleted (total deleted: %d)", documentID, len(deletedDocuments))
+				}
+			} else {
+				if b.logger != nil {
+					b.logger.Warnf("DEBUG: Deletion marker missing DocumentID or wrong type: %+v", deletionMap)
 				}
 			}
 

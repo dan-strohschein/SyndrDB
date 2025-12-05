@@ -254,6 +254,7 @@ type DocumentDeleteCommand struct {
 	BundleName         string
 	Fields             []KeyValue // Fields to be added or updated in the document
 	WhereClause        string     // Optional where clause for filtering documents
+	Confirmed          bool       // Requires CONFIRMED keyword for bulk deletes without WHERE clause
 	DeletedDocumentIDs []string   // Track successfully deleted document IDs for response
 	RawCommand         string     // Store the raw command for logging/debugging
 }
@@ -262,6 +263,7 @@ type DocumentUpdateCommand struct {
 	BundleName  string
 	Fields      []KeyValue // Fields to be added or updated in the document
 	WhereClause string     // Optional where clause for filtering documents
+	Confirmed   bool       // Requires CONFIRMED keyword for bulk updates without WHERE clause
 }
 
 type KeyValue struct {

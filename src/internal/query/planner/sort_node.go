@@ -167,6 +167,9 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 	// Handle empty result set
 	if len(documents) == 0 {
 		n.Logger.Debug("SortNode: no documents to sort, returning empty result")
+		// CRITICAL FIX: Clear cache to prevent stale data from previous queries
+		// Without this, subsequent queries would read old cached documents
+		n.sortedDocuments = nil
 		return documents, nil
 	}
 

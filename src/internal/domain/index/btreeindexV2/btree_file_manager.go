@@ -313,6 +313,15 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 		}
 	}
 
+	// TODO: Skip fsync when BTreeSyncMode="batched" - batched mode relies on WAL for durability, fsync happens at checkpoint
+	// IMPORTANT NOTE: Immediate mode (default) uses fsync for safety, batched mode trades latency for throughput
+	// syncMode := fm.settings.BTreeSyncMode // Inject settings into FileManager
+	// if syncMode != "batched" {
+	// 		if err := fm.File.Sync(); err != nil {
+	// 			return fmt.Errorf("failed to sync page %d to disk: %w", pageNum, err)
+	// 		}
+	// }
+
 	// Sync to disk to ensure durability
 	if err := fm.File.Sync(); err != nil {
 		return fmt.Errorf("failed to sync page %d to disk: %w", pageNum, err)

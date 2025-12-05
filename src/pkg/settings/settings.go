@@ -81,6 +81,17 @@ type Arguments struct {
 	// Hash Index Configuration
 	IndexSequenceSafetyMargin int `yaml:"index_sequence_safety_margin"` // Safety margin for sequence recovery (default: 100)
 
+	// B-Tree Index Persistence Configuration
+	// TODO: Add B-Tree index persistence configuration settings (BTreeSyncMode, BTreeBatchSize, BTreeFlushInterval, BTreeMaxDirtyPages, BTreeEnableWAL, BTreeCheckpointInterval, BTreeWALRetentionSeconds, BTreeGroupCommitDelay)
+	BTreeSyncMode            string `yaml:"btree_sync_mode"`             // Sync mode: "immediate", "batched", "scheduled" (default: "batched")
+	BTreeBatchSize           int    `yaml:"btree_batch_size"`            // Operations before flush (default: 100)
+	BTreeFlushInterval       int    `yaml:"btree_flush_interval"`        // Time in seconds between scheduled flushes (default: 5)
+	BTreeMaxDirtyPages       int    `yaml:"btree_max_dirty_pages"`       // Memory pressure threshold for auto-flush (default: 1000)
+	BTreeEnableWAL           bool   `yaml:"btree_enable_wal"`            // Enable WAL for batched durability (default: true)
+	BTreeCheckpointInterval  int    `yaml:"btree_checkpoint_interval"`   // Time in seconds between checkpoints (default: 300)
+	BTreeWALRetentionSeconds int    `yaml:"btree_wal_retention_seconds"` // WAL retention after checkpoint in seconds (default: 60)
+	BTreeGroupCommitDelay    int    `yaml:"btree_group_commit_delay"`    // Group commit window in milliseconds (default: 10)
+
 	// Parser Configuration
 	UseNewParser bool `yaml:"use_new_parser"` // Use new SyndrQL parser instead of legacy parser (default: true)
 
@@ -217,6 +228,16 @@ func GetSettings() *Arguments {
 			MetadataPersistInterval: 1000, // Persist every 1000 documents
 			MetadataFlushInterval:   10,   // Flush every 10 seconds
 			BulkOperationDetection:  true, // Auto-detect bulk operations
+
+			// B-Tree Index Persistence Defaults
+			BTreeSyncMode:            "batched", // Batched mode for performance with WAL durability
+			BTreeBatchSize:           100,       // Batch 100 operations before flush
+			BTreeFlushInterval:       5,         // Flush every 5 seconds
+			BTreeMaxDirtyPages:       1000,      // Auto-flush at 1000 dirty pages
+			BTreeEnableWAL:           true,      // Enable WAL for crash recovery
+			BTreeCheckpointInterval:  300,       // Checkpoint every 5 minutes
+			BTreeWALRetentionSeconds: 60,        // Retain WAL for 60 seconds post-checkpoint
+			BTreeGroupCommitDelay:    10,        // 10ms group commit window
 
 			// Parser Configuration (default to false for safety)
 			UseNewParser: true, // Use new parser by default

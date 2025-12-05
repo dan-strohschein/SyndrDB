@@ -120,6 +120,16 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 			query.SelectFields = []string{}
 			a.logger.Infof("Aggregate-only query: %d aggregates, 0 regular fields",
 				len(query.AggregateFields))
+			
+			// CRITICAL FIX: Set IsCountOnly flag for COUNT(*) queries without GROUP BY
+			// This enables special handling in command_director.go to return a single count value
+			// instead of the full synthetic document with metadata fields
+			if len(query.AggregateFields) == 1 &&
+				query.AggregateFields[0].Function == "COUNT" &&
+				query.AggregateFields[0].Field == "*" {
+				query.IsCountOnly = true
+				a.logger.Infof("Detected COUNT(*) only query - setting IsCountOnly=true")
+			}
 		}
 	}
 
@@ -670,24 +680,24 @@ func (a *DeleteStatementAdapter) ToDocumentDeleteCommand(stmt *DeleteStatement) 
 		return nil, fmt.Errorf("bundle name cannot be empty in DELETE statement")
 	}
 
-	if stmt.WhereClause == nil {
-		return nil, fmt.Errorf("DELETE statement requires a WHERE clause")
-	}
+	var whereClauseStr string
+	if stmt.WhereClause != nil {
+		// Convert WHERE clause expression to WhereGroup for compatibility
+		whereGroup, err := a.expressionAdapter.ToWhereGroup(stmt.WhereClause)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert WHERE clause: %w", err)
+		}
 
-	// Convert WHERE clause expression to WhereGroup for compatibility
-	whereGroup, err := a.expressionAdapter.ToWhereGroup(stmt.WhereClause)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert WHERE clause: %w", err)
+		// Serialize WHERE clause back to string format
+		// TODO: I should consider keeping the structured WhereGroup in DocumentDeleteCommand
+		// for better performance instead of round-tripping through string serialization
+		whereClauseStr = a.serializeWhereGroup(whereGroup)
 	}
-
-	// Serialize WHERE clause back to string format
-	// TODO: I should consider keeping the structured WhereGroup in DocumentDeleteCommand
-	// for better performance instead of round-tripping through string serialization
-	whereClauseStr := a.serializeWhereGroup(whereGroup)
 
 	return &models.DocumentDeleteCommand{
 		BundleName:         stmt.BundleName,
 		WhereClause:        whereClauseStr,
+		Confirmed:          stmt.Confirmed,
 		Fields:             nil, // Deprecated - WHERE clause is used instead
 		DeletedDocumentIDs: nil, // Will be populated by the bundle service
 		RawCommand:         "",  // TODO: I could store the original command for debugging

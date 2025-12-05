@@ -50,7 +50,11 @@ func (si *ScannerIntegration) CreateScannerForBundle(bundle *models.Bundle, bund
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scanner: %w", err)
 	}
-
+	
+	// Clear any cached pages that may have been loaded during scanner creation
+	// This ensures subsequent queries reload from disk and see tombstones
+	bundleAdapter.cachedPages = make(map[uint32]*models.DocumentPage)
+	
 	// Register with metrics manager
 	si.metricsManager.RegisterScanner(bundle.Name, scanner)
 

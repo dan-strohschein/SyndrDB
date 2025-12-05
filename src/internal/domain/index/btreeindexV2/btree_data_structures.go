@@ -63,6 +63,13 @@ type BTreeIndex struct {
 	walManager *BTreeWALManager // WAL manager for logging index operations
 	walEnabled bool             // Whether WAL is enabled (mandatory for production)
 	nextLSN    uint64           // Next Log Sequence Number to assign
+
+	// TODO: Integrate shared WAL into BTreeIndex - add sharedWAL field, log operations before applying in batched mode, delay WritePage fsync when batched
+	// URGENT TODO: On index Open(), check for uncommitted WAL entries and replay them to recover from crash. This requires integration with database-level WAL recovery system (implement in subsequent project)
+	// IMPORTANT NOTE: Batched mode delays fsync but relies on WAL for crash recovery - durability guaranteed by WAL replay on restart
+	// sharedWAL *journal.WriteAheadLog // Shared bundle-level WAL (injected from BundleService)
+	// indexName string                 // Index name for WAL logging prefix
+	// syncMode string                  // "immediate", "batched", or "scheduled" from settings.BTreeSyncMode
 }
 
 func (idx *BTreeIndex) GetRootPageNum() uint32 {

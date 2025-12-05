@@ -197,8 +197,19 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 
 	// Handle empty result set
 	if len(documents) == 0 {
-		n.Logger.Debug("AggregationNode: no documents to aggregate, returning empty result")
-		return documents, nil
+		// Check if this is an aggregate-only query (no GROUP BY clause)
+		isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+		
+		if !isAggregateOnly {
+			// Regular GROUP BY queries with no documents - return empty result
+			n.Logger.Debug("AggregationNode: no documents to aggregate (GROUP BY query), returning empty result")
+			return documents, nil
+		}
+		
+		// For aggregate-only queries (e.g., COUNT(*)), we MUST create synthetic document
+		// even with 0 input documents because COUNT(*)=0, SUM(x)=0, etc. are valid results
+		n.Logger.Debug("AggregationNode: no documents but aggregate-only query - creating synthetic document with zero values")
+		// Fall through to execute aggregation with empty input
 	}
 
 	// Execute aggregation based on chosen strategy
@@ -275,6 +286,24 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 	n.Logger.Debugf("Executing Hash Aggregate strategy")
 
 	groupMap := make(map[groupKey]*groupResult)
+
+	// For aggregate-only queries with 0 documents, create initial group with zero values
+	// This ensures COUNT(*)=0, SUM(x)=0, etc. for empty result sets
+	isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+	if len(documents) == 0 && isAggregateOnly {
+		// Create empty group with key ""
+		gResult := &groupResult{
+			GroupFields:     make(map[string]interface{}),
+			AggregateValues: make(map[string]*aggregateValue),
+		}
+		// Initialize aggregate values to zero
+		for _, aggFunc := range n.AggregateFields {
+			gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+		}
+		groupMap[groupKey("")] = gResult
+		n.Logger.Debug("Created initial group with zero values for aggregate-only query")
+		return groupMap, nil
+	}
 
 	// Memory tracking: Get tracker from context
 	memoryTracker := GetMemoryTrackerFromContext(ctx)

@@ -33,7 +33,8 @@ Performance Targets:
 type UpdateStatement struct {
 	BundleName  string                 // Name of the bundle to update
 	Fields      map[string]interface{} // Field name to new value mapping
-	WhereClause Expression             // WHERE clause expression for filtering
+	WhereClause Expression             // WHERE clause expression for filtering (optional)
+	Confirmed   bool                   // True if CONFIRMED keyword was provided (required for bulk updates)
 	// TODO: I will add support for batch updates with optimization
 	// TODO: I will detect point updates vs. range updates for query optimization
 }
@@ -60,7 +61,8 @@ func NewUpdateParser(input string) (*UpdateParser, error) {
 }
 
 // Parse parses an UPDATE DOCUMENTS statement
-// Syntax: UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>" (<FIELD_NAME> = <VALUE>) WHERE <WHERE_CLAUSE>;
+// Syntax: UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>" (<FIELD_NAME> = <VALUE>) [CONFIRMED] [WHERE <WHERE_CLAUSE>];
+// The CONFIRMED keyword is required when WHERE clause is omitted (bulk update safety)
 func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 	// Expect: UPDATE
 	if err := p.expectKeyword(TOKEN_UPDATE, "UPDATE"); err != nil {
@@ -108,15 +110,24 @@ func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 		return nil, err
 	}
 
-	// Expect: WHERE
-	if err := p.expectKeyword(TOKEN_WHERE, "WHERE"); err != nil {
-		return nil, err
+	// Check for optional CONFIRMED keyword
+	confirmed := false
+	if p.peek().Type == TOKEN_CONFIRMED {
+		confirmed = true
+		p.advance()
 	}
 
-	// Parse WHERE clause expression
-	whereClause, err := p.parseWhereClause()
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
+	// Check for optional WHERE keyword
+	var whereClause Expression
+	if p.peek().Type == TOKEN_WHERE {
+		p.advance() // Consume WHERE
+
+		// Parse WHERE clause expression
+		var err error
+		whereClause, err = p.parseWhereClause()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
+		}
 	}
 
 	// Optional: consume semicolon if present
@@ -133,6 +144,7 @@ func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 		BundleName:  bundleName,
 		Fields:      fields,
 		WhereClause: whereClause,
+		Confirmed:   confirmed,
 	}, nil
 }
 

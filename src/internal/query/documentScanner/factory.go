@@ -51,8 +51,8 @@ func (sf *ScannerFactory) CreateScanner(bundle BundleInterface, config *ScannerC
 	// Create and return scanner
 	scanner := NewSmartBundleScanner(bundle, config, cache, sf.logger)
 
-	sf.logger.Debugf("Created smart scanner for bundle '%s' with %d documents",
-		bundle.GetName(), bundle.GetTotalDocuments())
+	sf.logger.Debugf("Created smart scanner for bundle '%s' ",
+		bundle.GetName())
 
 	return scanner, nil
 }
@@ -179,6 +179,7 @@ type BundleAdapter struct {
 func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterface, logger *zap.SugaredLogger) *BundleAdapter {
 	// SAFETY: Log bundle metadata immediately to diagnose potential infinite loop causes
 	if bundle != nil {
+		logger.Infof("DEBUG: Creating NEW BundleAdapter for bundle '%s' (instance %p)", bundle.Name, bundle)
 		// logger.Infof("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
 		// logger.Infof("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
 		// logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
@@ -199,12 +200,16 @@ func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterfac
 		logger.Errorf("SAFETY CHECK: Bundle is nil!")
 	}
 
-	return &BundleAdapter{
+	adapter := &BundleAdapter{
 		bundle:        bundle,
 		bundleService: bundleService,
 		cachedPages:   make(map[uint32]*models.DocumentPage),
 		logger:        logger,
 	}
+
+	logger.Infof("DEBUG: Created BundleAdapter instance %p with fresh cachedPages map %p", adapter, adapter.cachedPages)
+
+	return adapter
 }
 
 // ===== STREAMING IMPLEMENTATION - NO MORE INFINITE LOOPS =====
@@ -235,20 +240,16 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 	return page, nil
 }
 
-// getTotalDocumentsCount gets cached total or calculates it efficiently
+// getTotalDocumentsCount gets the accurate count by iterating filtered pages
+// CRITICAL: This count CANNOT be cached because document deletions create tombstones
+// which reduce the count dynamically. The parseAppendedDocumentsRange() function
+// filters tombstones, so each page load returns only non-deleted documents.
+// Caching would return stale counts after bulk deletes.
 func (ba *BundleAdapter) getTotalDocumentsCount() int {
-	if ba.totalDocuments != nil {
-		return *ba.totalDocuments
-	}
+	// CRITICAL FIX: Do NOT use cached value or ba.bundle.TotalDocuments metadata
+	// The append-only storage format means tombstones reduce the actual count
+	// Always count by iterating pages to get accurate count after deletions
 
-	// Use bundle metadata if available
-	if ba.bundle.TotalDocuments > 0 {
-		count := int(ba.bundle.TotalDocuments)
-		ba.totalDocuments = &count
-		return count
-	}
-
-	// Fallback: count by iterating pages (but don't load all documents)
 	count := 0
 	// SAFETY: Prevent infinite loops by limiting page count
 	maxSafePages := uint32(100)
@@ -266,7 +267,6 @@ func (ba *BundleAdapter) getTotalDocumentsCount() int {
 		count += len(page.Documents)
 	}
 
-	ba.totalDocuments = &count
 	return count
 }
 
