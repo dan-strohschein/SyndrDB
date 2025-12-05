@@ -149,7 +149,6 @@ These features are **blockers** for production use. Without them, users cannot r
 
 **Estimated Effort:** 1-2 weeks ✅ **COMPLETED**
 
-**Known Issue:** Document scanner counts tombstoned/deleted documents when aggregating COUNT(*). The `parseAppendedDocumentsRange` correctly removes deleted documents from results but returns the count before deletions are applied. This affects COUNT queries after bulk deletes. Fix in progress.
 
 ---
 

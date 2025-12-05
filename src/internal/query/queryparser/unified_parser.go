@@ -468,8 +468,18 @@ func enhanceWithAdditionalClauses(query string, unified *UnifiedSelectQuery, log
 
 	logger.Infof("TRACE IsCountOnly check: len(AggregateFields)=%d, AggregateFields[0].Function=%s, AggregateFields[0].Field=%s, len(SelectFields)=%d, hasGroupByFields=%v",
 		len(unified.AggregateFields),
-		func() string { if len(unified.AggregateFields) > 0 { return unified.AggregateFields[0].Function }; return "" }(),
-		func() string { if len(unified.AggregateFields) > 0 { return unified.AggregateFields[0].Field }; return "" }(),
+		func() string {
+			if len(unified.AggregateFields) > 0 {
+				return unified.AggregateFields[0].Function
+			}
+			return ""
+		}(),
+		func() string {
+			if len(unified.AggregateFields) > 0 {
+				return unified.AggregateFields[0].Field
+			}
+			return ""
+		}(),
 		len(unified.SelectFields),
 		hasGroupByFields)
 

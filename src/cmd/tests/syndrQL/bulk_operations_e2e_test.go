@@ -49,7 +49,7 @@ func TestBulkUpdate_MissingConfirmed_ShouldFail(t *testing.T) {
 	defer cancel()
 
 	// Attempt UPDATE without WHERE clause and without CONFIRMED
-	updateCmd := `UPDATE DOCUMENTS IN BUNDLE "Authors" ({"Country" = "Unknown"})`
+	updateCmd := `UPDATE DOCUMENTS IN BUNDLE "Authors" ("Country" = "Unknown")`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, updateCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 
@@ -123,7 +123,7 @@ func TestBulkUpdate_WithConfirmed_ShouldSucceed(t *testing.T) {
 	validateCountResult(t, response, 0, "Before bulk update")
 
 	// Perform bulk update with CONFIRMED
-	updateCmd := `UPDATE DOCUMENTS IN BUNDLE "Authors" ({"Country" = "Updated"}) CONFIRMED`
+	updateCmd := `UPDATE DOCUMENTS IN BUNDLE "Authors" ("Country" = "Updated") CONFIRMED`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, updateCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
@@ -154,6 +154,7 @@ func TestBulkDelete_ReferentialIntegrity_ShouldBlockWithCountError(t *testing.T)
 	defer cancel()
 
 	// Create relationship from Books to Authors
+	// This is NOT the right syntax for SyndrQL
 	relCmd := `CREATE RELATIONSHIP "Authors_Books" FROM "Authors" TO "Books" ON "DocumentID" -> "AuthorsID" WITH DELETE RESTRICT`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, relCmd, fixture.Logger, startTime, nil, "127.0.0.1")

@@ -199,13 +199,13 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 	if len(documents) == 0 {
 		// Check if this is an aggregate-only query (no GROUP BY clause)
 		isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-		
+
 		if !isAggregateOnly {
 			// Regular GROUP BY queries with no documents - return empty result
 			n.Logger.Debug("AggregationNode: no documents to aggregate (GROUP BY query), returning empty result")
 			return documents, nil
 		}
-		
+
 		// For aggregate-only queries (e.g., COUNT(*)), we MUST create synthetic document
 		// even with 0 input documents because COUNT(*)=0, SUM(x)=0, etc. are valid results
 		n.Logger.Debug("AggregationNode: no documents but aggregate-only query - creating synthetic document with zero values")

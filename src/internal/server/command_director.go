@@ -486,6 +486,11 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 				return nil, fmt.Errorf("bundle name cannot be empty in DELETE DOCUMENTS command")
 			}
 
+			// SAFETY: Validate CONFIRMED keyword requirement for bulk deletes without WHERE clause
+			if docCommand.WhereClause == "" && !docCommand.Confirmed {
+				return nil, fmt.Errorf("bulk DELETE without WHERE clause requires CONFIRMED keyword. Use: DELETE DOCUMENTS FROM \"%s\" CONFIRMED", docCommand.BundleName)
+			}
+
 			bundleName := docCommand.BundleName
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {

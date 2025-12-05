@@ -120,7 +120,7 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 			query.SelectFields = []string{}
 			a.logger.Infof("Aggregate-only query: %d aggregates, 0 regular fields",
 				len(query.AggregateFields))
-			
+
 			// CRITICAL FIX: Set IsCountOnly flag for COUNT(*) queries without GROUP BY
 			// This enables special handling in command_director.go to return a single count value
 			// instead of the full synthetic document with metadata fields
@@ -578,10 +578,6 @@ func (a *UpdateStatementAdapter) ToDocumentUpdateCommand(stmt *UpdateStatement) 
 		return nil, fmt.Errorf("UPDATE statement must specify at least one field to update")
 	}
 
-	if stmt.WhereClause == nil {
-		return nil, fmt.Errorf("UPDATE statement requires a WHERE clause")
-	}
-
 	// Convert map[string]interface{} to []KeyValue
 	// TODO: I should optimize this conversion to avoid allocations for hot path
 	keyValues := make([]models.KeyValue, 0, len(stmt.Fields))
@@ -592,21 +588,25 @@ func (a *UpdateStatementAdapter) ToDocumentUpdateCommand(stmt *UpdateStatement) 
 		})
 	}
 
-	// Convert WHERE clause expression to WhereGroup for compatibility
-	whereGroup, err := a.expressionAdapter.ToWhereGroup(stmt.WhereClause)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert WHERE clause: %w", err)
-	}
+	// Convert WHERE clause expression to WhereGroup for compatibility (if present)
+	var whereClauseStr string
+	if stmt.WhereClause != nil {
+		whereGroup, err := a.expressionAdapter.ToWhereGroup(stmt.WhereClause)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert WHERE clause: %w", err)
+		}
 
-	// Serialize WHERE clause back to string format
-	// TODO: I should consider keeping the structured WhereGroup in DocumentUpdateCommand
-	// for better performance instead of round-tripping through string serialization
-	whereClauseStr := a.serializeWhereGroup(whereGroup)
+		// Serialize WHERE clause back to string format
+		// TODO: I should consider keeping the structured WhereGroup in DocumentUpdateCommand
+		// for better performance instead of round-tripping through string serialization
+		whereClauseStr = a.serializeWhereGroup(whereGroup)
+	}
 
 	return &models.DocumentUpdateCommand{
 		BundleName:  stmt.BundleName,
 		Fields:      keyValues,
 		WhereClause: whereClauseStr,
+		Confirmed:   stmt.Confirmed,
 	}, nil
 }
 

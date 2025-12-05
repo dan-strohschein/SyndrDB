@@ -98,7 +98,7 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 	// DEBUG: Log the bundle file path for manual inspection
 	bundleFilePath := filepath.Join(fixture.TempDir, "data_files", fixture.Database.Name, fmt.Sprintf("%s_%s.bnd", fixture.Database.Name, bundleName))
 	t.Logf("DEBUG: Bundle file path: %s", bundleFilePath)
-	
+
 	// Check file size to see if tombstones were written
 	if fileInfo, err := os.Stat(bundleFilePath); err == nil {
 		t.Logf("DEBUG: Bundle file size: %d bytes", fileInfo.Size())
@@ -112,9 +112,9 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 	// READ AND DUMP BUNDLE FILE TO FIND TOMBSTONES
 	fileData, err := os.ReadFile(bundleFilePath)
 	require.NoError(t, err, "Failed to read bundle file")
-	
+
 	t.Logf("DEBUG: Read bundle file, %d bytes", len(fileData))
-	
+
 	// Search for all 0xDEADDEAD (tombstone) markers (little-endian: AD DE AD DE)
 	tombstoneCount := 0
 	for i := 0; i < len(fileData)-4; i++ {
@@ -132,7 +132,7 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 		}
 	}
 	t.Logf("DEBUG: Total tombstone markers found in file: %d (expected 100)", tombstoneCount)
-	
+
 	// Search for all 0xDEADBEEF (document) markers (little-endian: EF BE AD DE)
 	documentCount := 0
 	firstDocOffset := -1
@@ -146,7 +146,7 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 		}
 	}
 	t.Logf("DEBUG: Total document markers found in file: %d (expected 100)", documentCount)
-	
+
 	// If no tombstones found, dump metadata header area
 	if tombstoneCount == 0 {
 		t.Logf("DEBUG: NO TOMBSTONES FOUND! Dumping first 64 bytes of file:")
@@ -155,7 +155,7 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 			dumpEnd = len(fileData)
 		}
 		t.Logf("DEBUG: First 64 bytes: %X", fileData[0:dumpEnd])
-		
+
 		if firstDocOffset > 0 {
 			t.Logf("DEBUG: Dumping 32 bytes before first document at offset %d:", firstDocOffset)
 			dumpStart := firstDocOffset - 32
@@ -176,7 +176,7 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 	// CRITICAL: Verify COUNT returns 0, not the stale metadata value of 100
 	docs := cmdResp.Result.([]map[string]interface{})
 	require.Len(t, docs, 1, "Should have one result row")
-	
+
 	// Handle both int64 and models.FieldValue types
 	var countAfterDelete int
 	switch v := docs[0]["Column1"].(type) {
@@ -191,14 +191,14 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 	default:
 		t.Fatalf("Unexpected type for Column1: %T", v)
 	}
-	
+
 	// DEBUG: If test is about to fail, keep the temp directory for inspection
 	if countAfterDelete != 0 {
 		t.Logf("DEBUG: Test will fail - keeping temp directory: %s", fixture.TempDir)
 		t.Logf("DEBUG: To inspect bundle file: hexdump -C '%s' | less", bundleFilePath)
 		// Don't cleanup on failure - just let it fail
 	}
-	
+
 	require.Equal(t, 0, countAfterDelete, "COUNT(*) should return 0 after deleting all 100 documents")
 	t.Logf("✓ COUNT query correctly returns actual document count (not stale metadata)")
 }

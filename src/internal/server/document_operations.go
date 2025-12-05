@@ -24,17 +24,22 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, fmt.Errorf("bundle name cannot be empty in UPDATE DOCUMENTS command")
 	}
 
-	// Get the bundle by name
-	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
-	if err != nil {
-		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
-	}
-
 	// Parse the document command using new parser with feature flag support
 	// This will attempt new parser if enabled, fallback to legacy parser on failure
 	docCommand, err := parseUpdateDocument(command, logger)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing update document command: %v", err)
+	}
+
+	// SAFETY: Validate CONFIRMED keyword requirement for bulk updates without WHERE clause
+	if docCommand.WhereClause == "" && !docCommand.Confirmed {
+		return nil, fmt.Errorf("bulk UPDATE without WHERE clause requires CONFIRMED keyword. Use: UPDATE DOCUMENTS IN BUNDLE \"%s\" (...) CONFIRMED", bundleName)
+	}
+
+	// Get the bundle by name
+	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 	}
 
 	// Execute with WAL logging if available

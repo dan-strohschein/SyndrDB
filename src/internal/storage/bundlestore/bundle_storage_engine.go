@@ -1231,10 +1231,10 @@ func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 	b.bufferMutex.Lock()
 	defer b.bufferMutex.Unlock()
-	
+
 	// ALWAYS log this to debug the issue
 	b.logger.Infof("DEBUG: CloseWriteBuffer called for bundle '%s'", bundleName)
-	
+
 	if buffer, exists := b.writeBuffers[bundleName]; exists {
 		b.logger.Infof("DEBUG: Found write buffer for bundle '%s', closing it...", bundleName)
 		if err := buffer.Close(); err != nil {
@@ -1247,9 +1247,9 @@ func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 	} else {
 		b.logger.Infof("DEBUG: No write buffer found for bundle '%s' - nothing to close", bundleName)
 	}
-	
+
 	return nil
-}// CloseWriteBuffers closes and flushes all write buffers
+} // CloseWriteBuffers closes and flushes all write buffers
 func (b *BundleStorageEngine) CloseWriteBuffers() error {
 	b.bufferMutex.Lock()
 	defer b.bufferMutex.Unlock()
@@ -1293,7 +1293,7 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read file: %w", err)
 	}
-	
+
 	b.logger.Infof("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
 
 	// Parse documents with range limiting
