@@ -9,7 +9,7 @@
 *MongoDB's flexibility.  PostgreSQL's power. GraphQL's elegance. One server.*
 
 [![Status](https://img.shields.io/badge/status-MVP%20Ready-success)](https://www.syndrdb.com)
-[![License](https://img. shields.io/badge/license-TBD-blue)]()
+[![License](https://img.shields.io/badge/license-BSL%201.1-blue)](./LICENSE)
 [![Go](https://img.shields.io/badge/Go-99.9%25-00ADD8?logo=go)](https://golang.org)
 [![Version](https://img.shields.io/badge/version-0.0.1alpha-orange)]()
 
