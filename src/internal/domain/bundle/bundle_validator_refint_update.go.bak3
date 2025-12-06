@@ -1017,34 +1017,27 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 
 				// Use BatchGet to find which documents in the referencing bundle have FK values
 				// that match our target DocumentIDs. Returns map[fkValue][]documentIDs
-				hashIndex, ok := hashIdx.(*hashindexV3.HashIndexV3)
-				if !ok {
-					v.logger.Warnf("[DROP-RESTRICT] Type assertion failed")
-					hashIdx = nil
+				results, err := hashIdx.BatchGet(docIDsToCheck)
+				if err != nil {
+					v.logger.Warnf("[DROP-RESTRICT] BatchGet failed on hash index for FK field '%s' in bundle '%s': %v, falling back to full scan",
+						fkField, bundleName, err)
+					hashIdx = nil // Trigger fallback path below
 				} else {
-					results, err := hashIndex.BatchGet(docIDsToCheck)
-					if err != nil {
-						v.logger.Warnf("[DROP-RESTRICT] BatchGet failed on hash index for FK field '%s' in bundle '%s': %v, falling back to full scan",
-							fkField, bundleName, err)
-						hashIdx = nil // Trigger fallback path below
-					} else {
-						// Count total violations (documents in referencing bundle with FK references)
-						for fkValue, referencingDocIDs := range results {
-							violations += len(referencingDocIDs)
-							v.logger.Debugf("[DROP-RESTRICT] FK value '%s' in bundle '%s' has %d references to target bundle '%s'",
-								fkValue, bundleName, len(referencingDocIDs), targetBundle.Name)
-						}
-
-						if useSampling && violations >= 100 {
-							// Early termination at 100 violations in sampling mode
-							return fmt.Errorf("Cannot drop bundle '%s' - at least 100 documents in '%s' reference this bundle via field '%s' (sampling mode detected violations, actual count may be higher). Remove references first or use DROP BUNDLE \"%s\" WITH FORCE", targetBundle.Name, bundleName, fkField, targetBundle.Name)
-						}
-
-						v.logger.Debugf("[DROP-RESTRICT] Hash index scan complete: found %d violations in bundle '%s' via field '%s'",
-							violations, bundleName, fkField)
+					// Count total violations (documents in referencing bundle with FK references)
+					for fkValue, referencingDocIDs := range results {
+						violations += len(referencingDocIDs)
+						v.logger.Debugf("[DROP-RESTRICT] FK value '%s' in bundle '%s' has %d references to target bundle '%s'",
+							fkValue, bundleName, len(referencingDocIDs), targetBundle.Name)
 					}
-				}
 
+					if useSampling && violations >= 100 {
+						// Early termination at 100 violations in sampling mode
+						return fmt.Errorf("Cannot drop bundle '%s' - at least 100 documents in '%s' reference this bundle via field '%s' (sampling mode detected violations, actual count may be higher). Remove references first or use DROP BUNDLE \"%s\" WITH FORCE", targetBundle.Name, bundleName, fkField, targetBundle.Name)
+					}
+
+					v.logger.Debugf("[DROP-RESTRICT] Hash index scan complete: found %d violations in bundle '%s' via field '%s'",
+						violations, bundleName, fkField)
+				}
 			}
 
 			if hashIdx == nil {
@@ -1071,8 +1064,8 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 
 					// Check if this document has a FK value matching target bundle
 					for _, field := range doc.Fields {
-						if field.Name == fkField && field.Value.Type == models.FieldTypeString {
-							fkValue := field.Value.StringVal
+						if field.Name == fkField && field.Value.Type == "string" {
+							fkValue := field.Value.StringValue
 							// Check if this FK value exists in target bundle
 							for _, targetDocID := range targetDocumentIDs {
 								if fkValue == targetDocID {

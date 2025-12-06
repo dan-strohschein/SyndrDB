@@ -152,22 +152,54 @@ These features are **blockers** for production use. Without them, users cannot r
 
 ---
 
-### 1.6 RESTRICT Validation for DROP
+### 1.6 RESTRICT Validation for DROP (DONE!!!)
 
-**Status:** Not Implemented  
-**Location:** `src/internal/domain/bundle/bundle_service.go`
+**Status:** Implemented  
+**Location:** `src/internal/domain/bundle/bundle_validator_refint_update.go`, `src/internal/domain/bundle/bundle_service.go`, `src/pkg/settings/settings.go`
 
-**Description:** TODO marker: `TODO: Add RESTRICT validation to block drop if documents contain non-null foreign key values`
+**Description:** DROP BUNDLE now validates referential integrity constraints to prevent accidental data loss when other bundles contain foreign key references to the target bundle. The validation uses intelligent algorithms with configurable thoroughness.
+
+**Implementation Details:**
+
+**Syntax:**
+```sql
+DROP BUNDLE "BundleName"              -- Fails if FK violations exist
+DROP BUNDLE "BundleName" WITH FORCE   -- Bypasses validation
+```
+
+**Configuration Options** (via `syndrdb.yml`):
+- `RestrictValidationThorough` (bool): When true, performs exhaustive checking of all documents. When false, uses probabilistic sampling for bundles with >10,000 documents.
+- `RestrictValidationSampleSize` (int, 1-100,000): Number of documents to sample in non-thorough mode. Default: 1000
+- `RestrictValidationLogProgress` (bool): Enable detailed progress logging during validation
+
+**Performance Characteristics:**
+- **O(1) Hash Index Path**: Uses `HashIndexV3.BatchGet()` for constant-time lookups when hash indexes exist on foreign key fields
+- **O(n*m) Fallback**: Full document scan when no hash index available (n = source documents, m = target documents)
+- **Sampling Mode**: For bundles >10,000 docs in non-thorough mode, samples documents probabilistically to reduce validation time
+- **Alphabetically-Sorted Locking**: Prevents deadlocks by acquiring bundle locks in consistent order
+
+**Error Messages:**
+```
+Cannot drop bundle 'Authors' - 2 bundles have documents with foreign key violations (13 total violations):
+  - Books: 10 documents reference 'Authors' via field 'author_id'
+  - Articles: 3 documents reference 'Authors' via field 'author_id'
+
+To force deletion anyway, use: DROP BUNDLE "Authors" WITH FORCE
+```
+
+For 6+ bundles with violations, displays top 5 plus "... and X more bundles"
 
 **What it's used for:**
-- Preventing accidental deletion of data that has dependencies
+- Preventing accidental deletion of referenced data
 - Safe schema modifications in production
+- Data integrity enforcement
 
-**Why it's necessary for MVP:**
-- Without this, users can accidentally break data integrity
-- Standard database behavior users expect
+**Why it was necessary for MVP:**
+- Without this, users could accidentally break data integrity and corrupt their database
+- Standard database behavior users expect from referential integrity systems
+- Critical safety feature for production environments
 
-**Estimated Effort:** 3-5 days
+**Estimated Effort:** 3-5 days (COMPLETED)
 
 ---
 
@@ -220,7 +252,7 @@ These features significantly impact usability but could be added shortly after i
 
 ---
 
-### 2.2 Full-Text Search
+### 2.2 Full-Text Search (Enterprise Edition Only!)
 
 **Status:** Documented, Not Implemented  
 **Location:** `docs/full_text_Index_impl.md`
@@ -241,7 +273,7 @@ These features significantly impact usability but could be added shortly after i
 
 ---
 
-### 2.3 Pub/Sub (Real-time Subscriptions)
+### 2.3 Pub/Sub (Real-time Subscriptions) (Enterprise Edition only!)
 
 **Status:** Documented, Not Implemented  
 **Location:** `docs/pub-sub_impl.md`
@@ -357,7 +389,7 @@ These features significantly impact usability but could be added shortly after i
 
 ---
 
-### 2.8 Cluster Mode
+### 2.8 Cluster Mode (Enterprise edition ONLY)
 
 **Status:** Flag Exists, Not Implemented  
 **Location:** README shows `-mode string` with "standalone, cluster"

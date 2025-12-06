@@ -1,6 +1,8 @@
 package settings
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -195,6 +197,11 @@ type Arguments struct {
 	// DateTime Timezone Cache Configuration
 	// TODO: I will add support for runtime cache size adjustment if profiling shows cache misses exceed 5%
 	TimezoneCacheSize int `yaml:"timezone_cache_size"` // LRU cache size for rare timezones (default: 128, hot zones cached separately)
+
+	// DROP BUNDLE RESTRICT Validation Configuration
+	RestrictValidationThorough    bool `yaml:"restrict_validation_thorough"`     // Enable thorough validation (all documents) vs sampling mode (default: true)
+	RestrictValidationSampleSize  int  `yaml:"restrict_validation_sample_size"`  // Sample size for probabilistic sampling mode (default: 1000, stops at 100 violations)
+	RestrictValidationLogProgress bool `yaml:"restrict_validation_log_progress"` // Enable progress logging for DROP validation scans - useful for debugging large bundles but generates significant log output in production. Recommended: false for production, true for development/troubleshooting (default: false)
 }
 
 var (
@@ -350,6 +357,11 @@ func GetSettings() *Arguments {
 
 			// DateTime Timezone Cache Defaults
 			TimezoneCacheSize: 128, // Cache 128 rare timezones (20 hot zones cached separately in sync.Map)
+
+			// DROP BUNDLE RESTRICT Validation Defaults
+			RestrictValidationThorough:    true,  // Thorough validation by default for safety
+			RestrictValidationSampleSize:  1000,  // Sample 1000 DocumentIDs in sampling mode
+			RestrictValidationLogProgress: false, // Disable progress logging by default (production)
 		}
 	})
 	return instance
@@ -565,6 +577,141 @@ func (a *Arguments) GetQueryMemoryLimit(isAdmin bool) int64 {
 		limitMB = a.AdminQueryMaxMemoryMB
 	}
 	return int64(limitMB) * 1024 * 1024 // Convert MB to bytes
+}
+
+// ValidateSettings performs comprehensive validation of all configuration settings
+// This function is called at server startup to ensure all settings are valid before
+// the server starts accepting connections. It validates numeric ranges, string formats,
+// and logical consistency across all configuration parameters.
+//
+// Returns a detailed error message listing all invalid settings if validation fails,
+// or nil if all settings are valid.
+//
+// Design: Fail-hard on invalid configuration to prevent silent misconfigurations in production
+func (a *Arguments) ValidateSettings() error {
+	var errors []string
+
+	// Validate DROP BUNDLE RESTRICT settings
+	if a.RestrictValidationSampleSize < 1 || a.RestrictValidationSampleSize > 100000 {
+		errors = append(errors, fmt.Sprintf(
+			"RestrictValidationSampleSize must be between 1 and 100,000 (got: %d). "+
+				"This setting controls sampling size for DROP BUNDLE validation. Recommended value: 1000 for balanced performance.",
+			a.RestrictValidationSampleSize))
+	}
+
+	// Validate port numbers
+	if a.Port < 1 || a.Port > 65535 {
+		errors = append(errors, fmt.Sprintf(
+			"Port must be between 1 and 65535 (got: %d)", a.Port))
+	}
+
+	// Validate session timeout
+	if a.SessionTimeoutMinutes < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"SessionTimeoutMinutes must be positive (got: %d)", a.SessionTimeoutMinutes))
+	}
+
+	// Validate connection pool settings
+	if a.MaxConnections < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"MaxConnections must be positive (got: %d)", a.MaxConnections))
+	}
+
+	if a.ConnectionIdleTimeoutMinutes < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"ConnectionIdleTimeoutMinutes must be positive (got: %d)", a.ConnectionIdleTimeoutMinutes))
+	}
+
+	// Validate WAL settings
+	if a.WALMode != "sync" && a.WALMode != "async" {
+		errors = append(errors, fmt.Sprintf(
+			"WALMode must be 'sync' or 'async' (got: '%s')", a.WALMode))
+	}
+
+	if a.AsyncWALWorkers < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"AsyncWALWorkers must be positive (got: %d)", a.AsyncWALWorkers))
+	}
+
+	if a.AsyncWALQueueSize < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"AsyncWALQueueSize must be positive (got: %d)", a.AsyncWALQueueSize))
+	}
+
+	// Validate metadata settings
+	if a.MetadataBatchSize < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"MetadataBatchSize must be positive (got: %d)", a.MetadataBatchSize))
+	}
+
+	if a.MetadataPersistInterval < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"MetadataPersistInterval must be positive (got: %d)", a.MetadataPersistInterval))
+	}
+
+	// Validate B-Tree settings
+	if a.BTreeSyncMode != "immediate" && a.BTreeSyncMode != "batched" && a.BTreeSyncMode != "scheduled" {
+		errors = append(errors, fmt.Sprintf(
+			"BTreeSyncMode must be 'immediate', 'batched', or 'scheduled' (got: '%s')", a.BTreeSyncMode))
+	}
+
+	if a.BTreeBatchSize < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"BTreeBatchSize must be positive (got: %d)", a.BTreeBatchSize))
+	}
+
+	// Validate sorting settings
+	if a.SortTopNThreshold < 0 || a.SortTopNThreshold > 1.0 {
+		errors = append(errors, fmt.Sprintf(
+			"SortTopNThreshold must be between 0.0 and 1.0 (got: %.2f)", a.SortTopNThreshold))
+	}
+
+	if a.SortRadixLimitRatio < 0 || a.SortRadixLimitRatio > 1.0 {
+		errors = append(errors, fmt.Sprintf(
+			"SortRadixLimitRatio must be between 0.0 and 1.0 (got: %.2f)", a.SortRadixLimitRatio))
+	}
+
+	// Validate query timeout settings
+	if a.QueryTimeoutSeconds < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"QueryTimeoutSeconds must be positive (got: %d)", a.QueryTimeoutSeconds))
+	}
+
+	if a.AdminQueryTimeoutSeconds < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"AdminQueryTimeoutSeconds must be positive (got: %d)", a.AdminQueryTimeoutSeconds))
+	}
+
+	// Validate memory limits
+	if a.QueryMaxMemoryMB < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"QueryMaxMemoryMB must be positive (got: %d)", a.QueryMaxMemoryMB))
+	}
+
+	if a.AdminQueryMaxMemoryMB < 1 {
+		errors = append(errors, fmt.Sprintf(
+			"AdminQueryMaxMemoryMB must be positive (got: %d)", a.AdminQueryMaxMemoryMB))
+	}
+
+	// Validate subquery settings
+	if a.SubqueryMaxDepth < 1 || a.SubqueryMaxDepth > 10 {
+		errors = append(errors, fmt.Sprintf(
+			"SubqueryMaxDepth must be between 1 and 10 (got: %d)", a.SubqueryMaxDepth))
+	}
+
+	// Validate statistics settings
+	if a.StatsAutoAnalyzeRatio < 0 || a.StatsAutoAnalyzeRatio > 1.0 {
+		errors = append(errors, fmt.Sprintf(
+			"StatsAutoAnalyzeRatio must be between 0.0 and 1.0 (got: %.2f)", a.StatsAutoAnalyzeRatio))
+	}
+
+	// If any errors were found, return them all as a single formatted error
+	if len(errors) > 0 {
+		return fmt.Errorf("FATAL: Invalid configuration detected - Server cannot start with invalid settings:\n\n%s",
+			strings.Join(errors, "\n"))
+	}
+
+	return nil
 }
 
 // ResetSettingsForTesting resets the global settings singleton for testing purposes

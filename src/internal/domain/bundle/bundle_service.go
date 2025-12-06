@@ -5687,19 +5687,41 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 	}
 
 	// === VALIDATE REFERENTIAL INTEGRITY ===
-	// Check if any other bundles have relationships pointing to this bundle
-	validator := NewReferentialIntegrityValidator(s, s.logger)
+	// Only perform validation if FORCE flag was not specified
+	if !bundleCommand.HasForceSwitch {
+		// Check if any other bundles have relationships pointing to this bundle
+		validator := NewReferentialIntegrityValidator(s, s.logger)
 
-	// Create operation-scoped cache
-	bundleCache := make(map[string]*models.Bundle)
+		// Create operation-scoped cache
+		bundleCache := make(map[string]*models.Bundle)
 
-	violations := validator.ValidateIncomingRelationships(database, bundle.Name, bundleCache)
-	if len(violations) > 0 {
-		// Log first violation and return error
-		firstViolation := violations[0]
-		s.logger.Warnf("[REFINT] Found %d incoming relationship(s) that would be orphaned by deleting bundle '%s'",
-			len(violations), bundle.Name)
-		return fmt.Errorf("%s", firstViolation.Error())
+		// STEP 1: Validate relationship metadata (schema-level validation)
+		violations := validator.ValidateIncomingRelationships(database, bundle.Name, bundleCache)
+		if len(violations) > 0 {
+			// Log first violation and return error
+			firstViolation := violations[0]
+			s.logger.Warnf("[REFINT] Found %d incoming relationship(s) that would be orphaned by deleting bundle '%s'",
+				len(violations), bundle.Name)
+			return fmt.Errorf("%s", firstViolation.Error())
+		}
+
+		// STEP 2: Validate document-level foreign key references (data-level validation)
+		// This checks if any documents in other bundles actually reference documents in this bundle
+		thorough := settings.GetSettings().RestrictValidationThorough
+		sampleSize := settings.GetSettings().RestrictValidationSampleSize
+		logProgress := settings.GetSettings().RestrictValidationLogProgress
+
+		s.logger.Infof("[DROP-RESTRICT] Starting document-level validation for bundle '%s' (thorough=%v, sampleSize=%d, logProgress=%v)",
+			bundle.Name, thorough, sampleSize, logProgress)
+
+		if err := validator.ValidateDropBundleDocumentReferences(database, bundle, bundleCache, thorough, sampleSize, logProgress); err != nil {
+			s.logger.Warnf("[DROP-RESTRICT] Document-level validation failed for bundle '%s': %v", bundle.Name, err)
+			return err
+		}
+
+		s.logger.Infof("[DROP-RESTRICT] All validations passed for bundle '%s' - no violations found", bundle.Name)
+	} else {
+		s.logger.Warnf("[DROP-RESTRICT] FORCE flag specified - skipping referential integrity validation for bundle '%s'", bundle.Name)
 	}
 
 	// Close all indexes for this bundle
