@@ -245,7 +245,7 @@ SyndrDB borrows battle-tested concepts from the best databases:
 
 ---
 
-## 🗺️ Roadmap to v1.0
+## 🗺️ Roadmap to Community Edition v1.0
 
 - [x] Core SyndrQL query language
 - [x] GraphQL interface
@@ -255,10 +255,18 @@ SyndrDB borrows battle-tested concepts from the best databases:
 - [x] RBAC security system
 - [x] Migration system
 - [x] Backup & restore
+
+## Expected Enterprise Features (Coming Soon!!)
+
 - [ ] Full-text search (enterprise edition)
 - [ ] Cluster mode (distributed) (enterprise edtion)
 - [ ] Real-time subscriptions (enterprise edition)
 - [ ] Performance benchmarks vs existing databases
+- [ ] Multi-region Replication
+- [ ] Federated GraphQL instancing
+- [ ] Hot Backups
+- [ ] Embedded Code Execution/Webhooks
+- [ ] Advanced observability tooling
 
 ---
 
