@@ -54,6 +54,8 @@ const (
 	LeftJoin
 	RightJoin
 	FullOuterJoin
+	SemiJoin // EXISTS, IN subqueries converted to semi-joins
+	AntiJoin // NOT EXISTS, NOT IN subqueries converted to anti-joins
 )
 
 // String returns the string representation of JoinType
@@ -67,6 +69,10 @@ func (jt JoinType) String() string {
 		return "RIGHT JOIN"
 	case FullOuterJoin:
 		return "FULL OUTER JOIN"
+	case SemiJoin:
+		return "SEMI JOIN"
+	case AntiJoin:
+		return "ANTI JOIN"
 	default:
 		return "UNKNOWN JOIN"
 	}

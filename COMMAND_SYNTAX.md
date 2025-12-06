@@ -309,6 +309,81 @@ Where:
 5. **Review cost formulas** to understand optimizer decisions
 6. **Compare estimated vs actual** (ANALYZE) to identify estimation errors
 
+### ANALYZE
+Collects statistics about data distribution in bundles to improve query planning and optimization. Statistics include:
+- Row count estimates
+- Most common values and their frequencies
+- Value distribution histograms (20 buckets)
+- NULL value ratios
+- Cardinality estimates per field
+
+These statistics enable the query optimizer to:
+- Make better cost estimates for query plans
+- Choose optimal JOIN algorithms
+- Rewrite correlated subqueries into semi-joins
+- Improve selectivity estimates for filters
+
+```
+ANALYZE BUNDLE "<BUNDLE_NAME>";
+```
+
+**Example:**
+```
+ANALYZE BUNDLE "Orders";
+```
+
+**Auto-Analyze:**
+
+SyndrDB can automatically analyze bundles when data changes significantly. This is controlled by configuration settings:
+- `StatsAutoAnalyzeEnabled`: Enable/disable auto-analyze (default: true)
+- `StatsAutoAnalyzeThreshold`: Minimum document changes before auto-analyze (default: 1000)
+- `StatsAutoAnalyzeRatio`: Percentage of bundle size that triggers auto-analyze (default: 0.10)
+
+Auto-analyze triggers when: `changes >= max(threshold, bundle_size * ratio)`
+
+**Scheduled Analysis:**
+
+For large bundles, you can configure scheduled analysis to run during off-peak hours:
+- `StatsScheduledAnalyzeEnabled`: Enable/disable scheduled analysis (default: false)
+- `StatsScheduledAnalyzeTime`: Time to run analysis in HH:MM format (default: "02:00")
+- `StatsScheduledAnalyzeMinDocs`: Minimum bundle size for scheduled analysis (default: 100000)
+
+**Statistics Storage:**
+
+Statistics are:
+- Versioned (STATS_VERSION=1) with automatic re-analysis on version mismatch
+- Compressed using gzip (<5MB) or zstd (≥5MB) when over threshold (default: 1MB)
+- Stored in `data_files/statistics/<bundle_name>.stats`
+- Automatically refreshed when stale or bundle schema changes
+
+**Sampling Strategy:**
+
+To maintain performance on large bundles, ANALYZE uses adaptive sampling:
+- Full scan for bundles with <1,000 documents
+- 10% sample for bundles with 1,000-100,000 documents  
+- 1,000 document sample for bundles with >100,000 documents
+
+**When to Use ANALYZE:**
+
+1. **After bulk data loads** to refresh statistics
+   ```
+   ANALYZE BUNDLE "Products";
+   ```
+
+2. **Before complex queries** on new or significantly changed data
+   ```
+   ANALYZE BUNDLE "Orders";
+   EXPLAIN SELECT * FROM "Orders" WHERE "Status" == "Pending";
+   ```
+
+3. **When query plans seem suboptimal** to provide fresh data distribution info
+   ```
+   ANALYZE BUNDLE "Customers";
+   EXPLAIN ANALYZE SELECT * FROM "Customers" JOIN "Orders" ON "Customers"."ID" == "Orders"."CustomerID";
+   ```
+
+4. **Periodically for stable bundles** using scheduled analysis configuration
+
 
 
 ### CREATE BTREE INDEX

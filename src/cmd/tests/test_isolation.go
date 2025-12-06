@@ -27,8 +27,9 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
 	"syndrdb/src/pkg/settings"
+
+	"go.uber.org/zap"
 )
 
 // TestIsolation manages isolated test environments
@@ -184,12 +185,12 @@ func (ti *TestIsolation) Cleanup() {
 				break
 			}
 			if i < retries-1 {
-				ti.t.Logf("Warning: failed to remove temp directory %s (attempt %d/%d): %v, retrying...", 
+				ti.t.Logf("Warning: failed to remove temp directory %s (attempt %d/%d): %v, retrying...",
 					ti.tempDir, i+1, retries, err)
 				time.Sleep(100 * time.Millisecond)
 				runtime.GC()
 			} else {
-				ti.t.Logf("Warning: failed to remove temp directory %s after %d attempts: %v", 
+				ti.t.Logf("Warning: failed to remove temp directory %s after %d attempts: %v",
 					ti.tempDir, retries, err)
 			}
 		}
@@ -211,13 +212,12 @@ func ForceCleanupAll() error {
 // It's a lightweight alternative to full NewTestIsolation when you only need settings isolation
 func EnsureTestIsolation(t *testing.T) {
 	t.Helper()
-	
+
 	// Reset settings for this test
 	settings.ResetSettingsForTesting()
-	
+
 	// Register cleanup to reset again after test
 	t.Cleanup(func() {
 		settings.ResetSettingsForTesting()
 	})
 }
-

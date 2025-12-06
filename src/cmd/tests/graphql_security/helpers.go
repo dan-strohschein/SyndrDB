@@ -24,7 +24,6 @@ import (
 	"syndrdb/src/internal/storage/databasestore"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
-)	"syndrdb/src/pkg/settings"
 )
 
 // TestEnvironment holds all components needed for GraphQL security testing

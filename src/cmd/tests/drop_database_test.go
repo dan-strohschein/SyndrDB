@@ -205,7 +205,7 @@ func setupDropDatabaseTest(t *testing.T) (*server.ServiceManager, *models.Databa
 		}
 		// Sync logger
 		sugar.Sync()
-		
+
 		t.Logf("Cleanup completed for test: %s", t.Name())
 	}
 	isolation.AddCleanup(cleanup)

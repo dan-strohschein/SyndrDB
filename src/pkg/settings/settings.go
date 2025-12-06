@@ -183,6 +183,15 @@ type Arguments struct {
 	SubqueryMaxDepth          int  `yaml:"subquery_max_depth"`            // Maximum nesting depth (default: 3)
 	SubqueryMaxInListMemoryMB int  `yaml:"subquery_max_inlist_memory_mb"` // Max IN-list memory in MB (default: 10)
 
+	// Bundle Statistics Configuration (for correlated subquery optimization)
+	StatsCompressionThresholdMB  int     `yaml:"stats_compression_threshold_mb"`   // Compression threshold in MB (default: 1)
+	StatsAutoAnalyzeEnabled      bool    `yaml:"stats_auto_analyze_enabled"`       // Enable automatic statistics analysis (default: true)
+	StatsAutoAnalyzeThreshold    int     `yaml:"stats_auto_analyze_threshold"`     // Document changes before auto-analyze (default: 1000)
+	StatsAutoAnalyzeRatio        float64 `yaml:"stats_auto_analyze_ratio"`         // Ratio of changes to bundle size for auto-analyze (default: 0.10)
+	StatsScheduledAnalyzeEnabled bool    `yaml:"stats_scheduled_analyze_enabled"`  // Enable scheduled background analysis (default: true)
+	StatsScheduledAnalyzeTime    string  `yaml:"stats_scheduled_analyze_time"`     // Time for scheduled analysis in HH:MM format (default: "02:00")
+	StatsScheduledAnalyzeMinDocs int     `yaml:"stats_scheduled_analyze_min_docs"` // Minimum documents for scheduled analysis (default: 100000)
+
 	// DateTime Timezone Cache Configuration
 	// TODO: I will add support for runtime cache size adjustment if profiling shows cache misses exceed 5%
 	TimezoneCacheSize int `yaml:"timezone_cache_size"` // LRU cache size for rare timezones (default: 128, hot zones cached separately)
@@ -329,6 +338,15 @@ func GetSettings() *Arguments {
 			SubqueryHashThreshold:     10000, // Use HashJoin for <10k rows
 			SubqueryMaxDepth:          3,     // Maximum 3 levels of nesting
 			SubqueryMaxInListMemoryMB: 10,    // 10MB max for IN-list materialization
+
+			// Bundle Statistics Defaults
+			StatsCompressionThresholdMB:  1,       // Compress statistics >1MB
+			StatsAutoAnalyzeEnabled:      true,    // Enable auto-analyze by default
+			StatsAutoAnalyzeThreshold:    1000,    // Auto-analyze after 1000 changes
+			StatsAutoAnalyzeRatio:        0.10,    // Or 10% of bundle size
+			StatsScheduledAnalyzeEnabled: true,    // Enable scheduled analysis
+			StatsScheduledAnalyzeTime:    "02:00", // Run at 2 AM server local time
+			StatsScheduledAnalyzeMinDocs: 100000,  // Only for bundles >100k docs
 
 			// DateTime Timezone Cache Defaults
 			TimezoneCacheSize: 128, // Cache 128 rare timezones (20 hot zones cached separately in sync.Map)
@@ -558,4 +576,3 @@ func ResetSettingsForTesting() {
 	instance = nil
 	once = sync.Once{}
 }
-

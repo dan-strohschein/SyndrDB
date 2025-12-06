@@ -335,6 +335,39 @@ subquery_max_depth: 3
 subquery_max_inlist_memory_mb: 10
 
 # ==============================================================================
+# STATISTICS COLLECTION & QUERY OPTIMIZATION CONFIGURATION
+# ==============================================================================
+
+# Statistics Storage Configuration
+# Compression threshold in MB for statistics files (default: 1)
+# Statistics larger than this will be compressed (gzip <5MB, zstd >=5MB)
+stats_compression_threshold_mb: 1
+
+# Auto-Analyze Configuration
+# Automatically collect statistics when data changes significantly
+# Enable automatic statistics collection (default: true)
+stats_auto_analyze_enabled: true
+
+# Minimum document changes before auto-analyze triggers (default: 1000)
+stats_auto_analyze_threshold: 1000
+
+# Percentage of bundle size that triggers auto-analyze (default: 0.10 = 10%)
+# Auto-analyze triggers when: changes >= max(threshold, bundle_size * ratio)
+stats_auto_analyze_ratio: 0.10
+
+# Scheduled Analysis Configuration
+# Run statistics collection during off-peak hours for large bundles
+# Enable scheduled statistics collection (default: false)
+stats_scheduled_analyze_enabled: false
+
+# Time to run scheduled analysis in HH:MM format, server local time (default: "02:00")
+stats_scheduled_analyze_time: "02:00"
+
+# Minimum bundle size for scheduled analysis (default: 100000)
+# Only bundles with at least this many documents are analyzed on schedule
+stats_scheduled_analyze_min_docs: 100000
+
+# ==============================================================================
 # GHOST CLEANUP (AUTOMATIC COMPACTION) CONFIGURATION
 # ==============================================================================
 

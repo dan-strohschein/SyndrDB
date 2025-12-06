@@ -262,28 +262,38 @@ These features significantly impact usability but could be added shortly after i
 
 ---
 
-### 2.4 Subqueries/Sub-Selects (Partially DONE - Corelated not yet)
+### 2.4 Subqueries/Sub-Selects (COMPLETE!!!)
 
-**Status:** Partially Implemented  
-**Location:** `docs/subselect_impl.md`, `src/internal/query/planner/subquery/`
+**Status:** ✅ Implemented (December 2025)  
+**Location:** `src/internal/query/planner/subquery_rewriter.go`, `src/internal/query/planner/correlation_analyzer.go`, `src/internal/query/planner/semi_join_nodes.go`, `src/internal/domain/statistics/`
 
-**Description:** Subquery infrastructure exists with TODO marker: `Tier 1: NOT IMPLEMENTED (requires correlation field detection)`
+**Implementation Details:**
+- **Tier 1: Correlated Subquery Detection** - Analyzes WHERE clause subqueries to detect correlation with outer query
+- **Statistics Collection** - Adaptive sampling strategy for bundle statistics (full scan <1k docs, 10% sample 1k-100k, 1000-sample >100k)
+- **Auto-Analyze** - Automatic statistics collection when changes >= max(1000, 10% of bundle size)
+- **Scheduled Analysis** - Time-based scheduled analysis (default 02:00) for large bundles (>100k docs)
+- **Subquery Rewriting** - Recursive innermost-first rewriting with MAX_REWRITE_DEPTH=3
+- **Semi-Join Execution** - Hash-based O(N+M) semi-joins and NULL-aware anti-joins
+- **Cost-Based Optimization** - Uses statistics for selectivity estimation and strategy selection
+- **ANALYZE Command** - `ANALYZE BUNDLE "<name>"` to manually collect statistics
+- **Configuration** - 7 new settings for compression, auto-analyze, and scheduled analysis
 
 **What it's used for:**
 - Complex queries with nested conditions
 - Correlated queries (e.g., EXISTS, IN with subquery)
 - Advanced data analysis
+- Query optimization through statistics-driven planning
 
 **Why it's necessary for MVP:**
 - Standard SQL feature
 - Required for complex business logic queries
-- Framework exists, needs completion
+- Enables PostgreSQL-style query optimization
 
-**Estimated Effort:** 2-4 weeks
+**Estimated Effort:** 3-4 weeks ✅ **COMPLETED**
 
 ---
 
-### 2.5 HAVING Clause for GROUP BY
+### 2.5 HAVING Clause for GROUP BY (COMPLETE !!!!)
 
 **Status:** Partially Implemented  
 **Location:** `src/internal/query/executor/groupby_executor.go`
@@ -304,7 +314,7 @@ These features significantly impact usability but could be added shortly after i
 
 ---
 
-### 2.6 ORDER BY for GROUP BY Results
+### 2.6 ORDER BY for GROUP BY Results (COMPLETE!!!)
 
 **Status:** Not Implemented  
 **Location:** `src/internal/query/executor/groupby_executor.go`
@@ -324,7 +334,7 @@ These features significantly impact usability but could be added shortly after i
 
 ---
 
-### 2.7 Config File Support
+### 2.7 Config File Support (COMPLETE!!!!)
 
 **Status:** Not Implemented  
 **Location:** `src/pkg/settings/settings.go`

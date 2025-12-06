@@ -369,12 +369,12 @@ func BenchmarkDatabaseCreation(b *testing.B) {
 func TestMain(m *testing.M) {
 	// Setup: Force cleanup of any leftover test isolation directories
 	ForceCleanupAll()
-	
+
 	// Run all tests
 	code := m.Run()
-	
+
 	// Cleanup: Remove all test isolation directories
 	ForceCleanupAll()
-	
+
 	os.Exit(code)
 }
