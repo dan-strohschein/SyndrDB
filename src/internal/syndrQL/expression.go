@@ -66,6 +66,10 @@ type BinaryExpression struct {
 
 func (be *BinaryExpression) expressionNode() {}
 func (be *BinaryExpression) String() string {
+	// Handle IS NULL and IS NOT NULL which don't have a right operand
+	if be.Right == nil {
+		return fmt.Sprintf("(%s %s)", be.Left.String(), be.Operator.String())
+	}
 	return fmt.Sprintf("(%s %s %s)", be.Left.String(), be.Operator.String(), be.Right.String())
 }
 
@@ -235,28 +239,30 @@ const (
 
 // precedences maps token types to their precedence levels
 var precedences = map[TokenType]Precedence{
-	TOKEN_OR:       PRECEDENCE_LOGICAL_OR,
-	TOKEN_AND:      PRECEDENCE_LOGICAL_AND,
-	TOKEN_ASSIGN:   PRECEDENCE_EQUALITY, // Single = for equality in WHERE clauses (SyndrDB syntax)
-	TOKEN_EQ:       PRECEDENCE_EQUALITY, // Double == for equality (standard SQL syntax)
-	TOKEN_NEQ:      PRECEDENCE_EQUALITY,
-	TOKEN_LT:       PRECEDENCE_COMPARISON,
-	TOKEN_LTE:      PRECEDENCE_COMPARISON,
-	TOKEN_GT:       PRECEDENCE_COMPARISON,
-	TOKEN_GTE:      PRECEDENCE_COMPARISON,
-	TOKEN_LIKE:     PRECEDENCE_COMPARISON,
-	TOKEN_IN:       PRECEDENCE_COMPARISON,
-	TOKEN_NOTIN:    PRECEDENCE_COMPARISON,
-	TOKEN_CONTAINS: PRECEDENCE_COMPARISON,
-	TOKEN_PLUS:     PRECEDENCE_SUM,
-	TOKEN_MINUS:    PRECEDENCE_SUM,
-	TOKEN_MULTIPLY: PRECEDENCE_PRODUCT,
-	TOKEN_DIVIDE:   PRECEDENCE_PRODUCT,
-	TOKEN_MODULO:   PRECEDENCE_PRODUCT,
-	TOKEN_LPAREN:   PRECEDENCE_CALL,
-	TOKEN_AT:       PRECEDENCE_AT_TIME_ZONE, // AT TIME ZONE operator
-	TOKEN_LBRACKET: PRECEDENCE_INDEX,
-	TOKEN_DOT:      PRECEDENCE_MEMBER, // Member access (Bundle.Field)
+	TOKEN_OR:          PRECEDENCE_LOGICAL_OR,
+	TOKEN_AND:         PRECEDENCE_LOGICAL_AND,
+	TOKEN_ASSIGN:      PRECEDENCE_EQUALITY, // Single = for equality in WHERE clauses (SyndrDB syntax)
+	TOKEN_EQ:          PRECEDENCE_EQUALITY, // Double == for equality (standard SQL syntax)
+	TOKEN_NEQ:         PRECEDENCE_EQUALITY,
+	TOKEN_LT:          PRECEDENCE_COMPARISON,
+	TOKEN_LTE:         PRECEDENCE_COMPARISON,
+	TOKEN_GT:          PRECEDENCE_COMPARISON,
+	TOKEN_GTE:         PRECEDENCE_COMPARISON,
+	TOKEN_LIKE:        PRECEDENCE_COMPARISON,
+	TOKEN_IN:          PRECEDENCE_COMPARISON,
+	TOKEN_NOTIN:       PRECEDENCE_COMPARISON,
+	TOKEN_IS_NULL:     PRECEDENCE_COMPARISON,
+	TOKEN_IS_NOT_NULL: PRECEDENCE_COMPARISON,
+	TOKEN_CONTAINS:    PRECEDENCE_COMPARISON,
+	TOKEN_PLUS:        PRECEDENCE_SUM,
+	TOKEN_MINUS:       PRECEDENCE_SUM,
+	TOKEN_MULTIPLY:    PRECEDENCE_PRODUCT,
+	TOKEN_DIVIDE:      PRECEDENCE_PRODUCT,
+	TOKEN_MODULO:      PRECEDENCE_PRODUCT,
+	TOKEN_LPAREN:      PRECEDENCE_CALL,
+	TOKEN_AT:          PRECEDENCE_AT_TIME_ZONE, // AT TIME ZONE operator
+	TOKEN_LBRACKET:    PRECEDENCE_INDEX,
+	TOKEN_DOT:         PRECEDENCE_MEMBER, // Member access (Bundle.Field)
 }
 
 // ExpressionParser parses expressions using Pratt parsing algorithm
@@ -341,6 +347,8 @@ func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionP
 	p.registerInfix(TOKEN_LIKE, p.parseBinaryExpression)
 	p.registerInfix(TOKEN_IN, p.parseInExpression)
 	p.registerInfix(TOKEN_NOTIN, p.parseInExpression)
+	p.registerInfix(TOKEN_IS_NULL, p.parseIsNullExpression)
+	p.registerInfix(TOKEN_IS_NOT_NULL, p.parseIsNullExpression)
 	p.registerInfix(TOKEN_CONTAINS, p.parseBinaryExpression)
 	p.registerInfix(TOKEN_LPAREN, p.parseCallExpression)
 	p.registerInfix(TOKEN_DOT, p.parseQualifiedIdentifier)
@@ -415,10 +423,11 @@ func (p *ExpressionParser) parseQuotedIdentifierOrLiteral() (Expression, error) 
 	p.advance()
 
 	// If followed by an operator that takes a field on the left side, treat as identifier
-	// Examples: "Genre" IN (...), "Name" = "value", "Price" > 10
+	// Examples: "Genre" IN (...), "Name" = "value", "Price" > 10, "Email" IS NULL
 	switch p.current.Type {
 	case TOKEN_IN, TOKEN_NOTIN, TOKEN_EQ, TOKEN_NEQ,
-		TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE, TOKEN_LIKE:
+		TOKEN_LT, TOKEN_LTE, TOKEN_GT, TOKEN_GTE, TOKEN_LIKE,
+		TOKEN_IS_NULL, TOKEN_IS_NOT_NULL:
 		// This is a field identifier
 		return &IdentifierExpression{Name: value}, nil
 
@@ -534,6 +543,20 @@ func (p *ExpressionParser) parseBinaryExpression(left Expression) (Expression, e
 		return nil, err
 	}
 
+	// Validate: Check if user is trying to compare with NULL using == or !=
+	// This is a common mistake - they should use IS NULL or IS NOT NULL instead
+	if litExpr, ok := right.(*LiteralExpression); ok {
+		if litExpr.Token == TOKEN_NULL {
+			if operator == TOKEN_EQ || operator == TOKEN_NEQ {
+				suggestedOp := "IS NULL"
+				if operator == TOKEN_NEQ {
+					suggestedOp = "IS NOT NULL"
+				}
+				return nil, fmt.Errorf("cannot use '%s' with NULL value; use '%s' instead (e.g., WHERE field %s)", operator.String(), suggestedOp, suggestedOp)
+			}
+		}
+	}
+
 	return &BinaryExpression{
 		Left:     left,
 		Operator: operator,
@@ -644,6 +667,24 @@ func (p *ExpressionParser) parseInExpression(left Expression) (Expression, error
 		Left:     left,
 		Operator: operator,
 		Right:    &ArrayExpression{Elements: values},
+	}, nil
+}
+
+// parseIsNullExpression handles IS NULL and IS NOT NULL expressions
+// Converts them to BinaryExpression with the IS NULL/IS NOT NULL operator
+// The evaluator will handle these specially to check the ::SYNDR_NULL:: magic value
+func (p *ExpressionParser) parseIsNullExpression(left Expression) (Expression, error) {
+	isNullOperator := p.current.Type // Either TOKEN_IS_NULL or TOKEN_IS_NOT_NULL
+	p.advance()                      // consume 'IS NULL' or 'IS NOT NULL'
+
+	// I will keep the IS NULL/IS NOT NULL operator intact
+	// The evaluator (like the legacy filter parser) will recognize these operators
+	// and check if the field value == "::SYNDR_NULL::" magic value
+	// This allows uniform handling across both parsers
+	return &BinaryExpression{
+		Left:     left,
+		Operator: isNullOperator,
+		Right:    nil, // IS NULL/IS NOT NULL don't have a right operand
 	}, nil
 }
 

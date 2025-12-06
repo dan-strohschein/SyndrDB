@@ -161,7 +161,7 @@ func setupRootUserTestEnvironment() error {
 	}
 
 	bufferPool := buffer.NewBufferPool(args.BundleBufferSize, buffer.DefaultPageSize, fileRegistry, ColorLogger)
-	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, ColorLogger, "json")
+	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, ColorLogger, "binary")
 	if err != nil {
 		os.RemoveAll(testDataDir)
 		return fmt.Errorf("failed to create bundle store: %v", err)

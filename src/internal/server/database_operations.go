@@ -541,7 +541,7 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 
 	// Step 7: Remove database from in-memory map
 	if serviceManager.DatabaseService != nil {
-		delete(serviceManager.DatabaseService.Databases, database.DatabaseID)
+		delete(serviceManager.DatabaseService.Databases, dbName)
 		logger.Infof("Removed database '%s' from in-memory service", dbName)
 	}
 

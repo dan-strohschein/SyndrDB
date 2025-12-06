@@ -177,52 +177,37 @@ func TestDateTime_AsInterface(t *testing.T) {
 	fv := models.NewDateTimeValue(testTime)
 
 	val := fv.AsInterface()
-	strVal, ok := val.(string)
+	timeVal, ok := val.(time.Time)
 	if !ok {
-		t.Fatalf("AsInterface should return string (RFC3339), got %T", val)
+		t.Fatalf("AsInterface should return time.Time, got %T", val)
 	}
 
-	// Should be RFC3339 formatted
-	expected := testTime.Format(time.RFC3339)
-	if strVal != expected {
-		t.Errorf("AsInterface string mismatch: expected %v, got %v", expected, strVal)
-	}
-
-	// Verify it can be parsed back to time.Time
-	parsed, err := time.Parse(time.RFC3339, strVal)
-	if err != nil {
-		t.Fatalf("Failed to parse RFC3339 string: %v", err)
-	}
-	if !parsed.Equal(testTime) {
-		t.Errorf("Parsed time mismatch: expected %v, got %v", testTime, parsed)
+	// Should match the original time value
+	if !timeVal.Equal(testTime) {
+		t.Errorf("AsInterface time mismatch: expected %v, got %v", testTime, timeVal)
 	}
 }
 
 // TestDate_AsInterface tests Date AsInterface conversion
-// NOTE: AsInterface returns YYYY-MM-DD string for JSON compatibility, not time.Time
+// NOTE: AsInterface returns time.Time for consistency with DateTime
 func TestDate_AsInterface(t *testing.T) {
 	testTime := time.Date(2024, 11, 22, 0, 0, 0, 0, time.UTC)
 	fv := models.NewDateValue(testTime)
 
 	val := fv.AsInterface()
-	strVal, ok := val.(string)
+	timeVal, ok := val.(time.Time)
 	if !ok {
-		t.Fatalf("AsInterface should return string (YYYY-MM-DD), got %T", val)
+		t.Fatalf("AsInterface should return time.Time, got %T", val)
 	}
 
-	// Should be YYYY-MM-DD formatted
-	expected := "2024-11-22"
-	if strVal != expected {
-		t.Errorf("AsInterface string mismatch: expected %v, got %v", expected, strVal)
-	}
-
-	// Verify it can be parsed back to date
-	parsed, err := time.Parse("2006-01-02", strVal)
-	if err != nil {
-		t.Fatalf("Failed to parse date string: %v", err)
-	}
+	// Should match the date (midnight UTC)
 	expectedTime := time.Date(2024, 11, 22, 0, 0, 0, 0, time.UTC)
-	if !parsed.Equal(expectedTime) {
-		t.Errorf("Parsed date mismatch: expected %v, got %v", expectedTime, parsed)
+	if !timeVal.Equal(expectedTime) {
+		t.Errorf("AsInterface time mismatch: expected %v, got %v", expectedTime, timeVal)
+	}
+
+	// Verify it's at midnight UTC
+	if timeVal.Hour() != 0 || timeVal.Minute() != 0 || timeVal.Second() != 0 {
+		t.Errorf("Date should be at midnight, got %v", timeVal)
 	}
 }

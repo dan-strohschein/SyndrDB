@@ -5160,6 +5160,13 @@ func (s *BundleService) processNullValues(bundle *models.Bundle, docCommand *mod
 		// Mark as provided (even if NULL - we'll check for defaults)
 		providedFields[fieldName] = true
 
+		// CRITICAL: Check if user explicitly set a required field to NULL
+		// This must happen BEFORE default value substitution
+		// Required fields cannot be NULL, even if they have a default value
+		if fieldDef.IsRequired && (fieldValue == nil || fieldValue == SYNDR_NULL) {
+			return fmt.Errorf("required field '%s' cannot be set to NULL", fieldName)
+		}
+
 		// Handle nil or SYNDR_NULL -> check for default value substitution
 		if fieldValue == nil || fieldValue == SYNDR_NULL {
 			if fieldDef.DefaultValue != nil {

@@ -31,8 +31,9 @@ type ConnectionPoolTestFixture struct {
 // setupConnectionPoolTest creates a test server with connection pool configured
 func setupConnectionPoolTest(t *testing.T) *ConnectionPoolTestFixture {
 	t.Helper()
+	EnsureTestIsolation(t)
 
-	// Create temporary directory
+	// Create temp directory
 	tempDir := t.TempDir()
 
 	// Setup logger

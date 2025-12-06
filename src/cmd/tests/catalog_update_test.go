@@ -56,6 +56,8 @@ import (
 
 // setupTestEnvironment creates a test database environment with services
 func setupCatalogTestEnvironment(t *testing.T) (*database.DatabaseService, *bundle.BundleService, *defaultdb.CatalogService, *zap.SugaredLogger, func()) {
+	EnsureTestIsolation(t)
+	
 	// Create test directory
 	testDir := filepath.Join(os.TempDir(), fmt.Sprintf("syndrdb_test_%d", os.Getpid()))
 	if err := os.MkdirAll(testDir, 0755); err != nil {

@@ -299,7 +299,7 @@ func TestMigration_CreateAutoDescription(t *testing.T) {
 	cmd := migration.MigrationCommand{
 		DatabaseName: "testdb",
 		Description:  "", // Empty - should auto-generate
-		Commands:     []string{"CREATE BUNDLE Products", "CREATE BUNDLE Orders"},
+		Commands:     []string{"CREATE BUNDLE \"Products\"", "CREATE BUNDLE \"Orders\""},
 		CreatedBy:    "admin",
 	}
 
@@ -312,7 +312,8 @@ func TestMigration_CreateAutoDescription(t *testing.T) {
 	if mig.Description == "" {
 		t.Error("Expected auto-generated description, got empty string")
 	}
-	if !strings.Contains(mig.Description, "CREATE BUNDLE Products") {
+	// Description should reference first command (auto-generated descriptions are uppercased)
+	if !strings.Contains(mig.Description, "CREATE BUNDLE PRODUCTS") {
 		t.Errorf("Expected description to reference first command, got: %s", mig.Description)
 	}
 }

@@ -52,6 +52,7 @@ type TestContext struct {
 
 // setupTestEnvironment initializes a clean test environment for database testing
 func setupTestEnvironment(t *testing.T) TestContext {
+	EnsureTestIsolation(t)
 	logger := zaptest.NewLogger(t).Sugar()
 
 	tempDir, err := os.MkdirTemp("", "syndrdb_test_*")
@@ -366,8 +367,14 @@ func BenchmarkDatabaseCreation(b *testing.B) {
 
 // TestMain sets up and tears down the test environment
 func TestMain(m *testing.M) {
-	// Setup global test environment if needed
+	// Setup: Force cleanup of any leftover test isolation directories
+	ForceCleanupAll()
+	
+	// Run all tests
 	code := m.Run()
-	// Cleanup global test environment if needed
+	
+	// Cleanup: Remove all test isolation directories
+	ForceCleanupAll()
+	
 	os.Exit(code)
 }

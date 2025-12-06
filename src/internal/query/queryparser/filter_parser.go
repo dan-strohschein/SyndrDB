@@ -279,8 +279,63 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 				field = field[1 : len(field)-1]
 			}
 
-			// Handle IN and NOT IN operators
 			upperOp := strings.ToUpper(operator)
+
+			// Handle IS NULL and IS NOT NULL operators
+			// These are unary suffix operators that check for NULL values
+			// IS NULL translates to: field == "::SYNDR_NULL::"
+			// IS NOT NULL translates to: field != "::SYNDR_NULL::"
+			if upperOp == "IS" && pos+2 < len(tokens) {
+				nextToken := strings.ToUpper(tokens[pos+2])
+
+				// Check for IS NULL
+				if nextToken == "NULL" {
+					operator = "=="
+					value := SYNDR_NULL // Use magic NULL value
+
+					clause := WhereClause{
+						Field:    field,
+						Operator: operator,
+						Value:    value,
+					}
+
+					pos += 3 // Skip field, "IS", "NULL"
+
+					// Check for logical joiner
+					if pos < len(tokens) && (strings.ToUpper(tokens[pos]) == "AND" || strings.ToUpper(tokens[pos]) == "OR") {
+						clause.Logic = strings.ToUpper(tokens[pos])
+						pos++
+					}
+
+					group.Clauses = append(group.Clauses, clause)
+					continue
+				}
+
+				// Check for IS NOT NULL
+				if nextToken == "NOT" && pos+3 < len(tokens) && strings.ToUpper(tokens[pos+3]) == "NULL" {
+					operator = "!="
+					value := SYNDR_NULL // Use magic NULL value
+
+					clause := WhereClause{
+						Field:    field,
+						Operator: operator,
+						Value:    value,
+					}
+
+					pos += 4 // Skip field, "IS", "NOT", "NULL"
+
+					// Check for logical joiner
+					if pos < len(tokens) && (strings.ToUpper(tokens[pos]) == "AND" || strings.ToUpper(tokens[pos]) == "OR") {
+						clause.Logic = strings.ToUpper(tokens[pos])
+						pos++
+					}
+
+					group.Clauses = append(group.Clauses, clause)
+					continue
+				}
+			}
+
+			// Handle IN and NOT IN operators
 			if upperOp == "IN" || (upperOp == "NOT" && pos+2 < len(tokens) && strings.ToUpper(tokens[pos+2]) == "IN") {
 				// Handle NOT IN
 				isNotIn := false
@@ -417,6 +472,11 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 				return nil, pos, fmt.Errorf("invalid operator: %s", operator)
 			}
 
+			// Normalize = to == for internal consistency
+			if operator == "=" {
+				operator = "=="
+			}
+
 			// Parse regular value (non-IN)
 			if pos+2 >= len(tokens) {
 				return nil, pos, fmt.Errorf("incomplete WHERE condition at position %d", pos)
@@ -459,8 +519,9 @@ func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
 // Helper function to check if operator is valid
 func isValidOperator(op string) bool {
 	upperOp := strings.ToUpper(op)
-	return op == "==" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<=" ||
-		upperOp == "IN" || upperOp == "NOT IN" || upperOp == "LIKE" || upperOp == "NOT LIKE"
+	return op == "==" || op == "=" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<=" ||
+		upperOp == "IN" || upperOp == "NOT IN" || upperOp == "LIKE" || upperOp == "NOT LIKE" ||
+		upperOp == "IS NULL" || upperOp == "IS NOT NULL"
 }
 
 // isNullValue checks if a value is a magic NULL value
@@ -614,10 +675,17 @@ func parseValue(valueToken string) (interface{}, error) {
 		return unquoted, nil
 	}
 
-	// Handle NULL keyword (converts to magic value for indexing)
-	// Supports: NULL, null, SYNDR_NULL, ::SYNDR_NULL::
+	// Handle NULL keyword - provide helpful error message
+	// Users should use IS NULL/IS NOT NULL syntax instead of field == NULL
+	// Note: This only applies when NULL appears as a bare keyword in comparisons
 	upperToken := strings.ToUpper(valueToken)
-	if upperToken == "NULL" || upperToken == "SYNDR_NULL" || upperToken == "::SYNDR_NULL::" {
+	if upperToken == "NULL" {
+		return nil, fmt.Errorf("cannot use NULL as a comparison value; use 'IS NULL' or 'IS NOT NULL' syntax instead (e.g., WHERE field IS NULL)")
+	}
+
+	// Handle magic NULL values (for internal use)
+	// These are allowed because they come from the system, not user queries
+	if upperToken == "SYNDR_NULL" || upperToken == "::SYNDR_NULL::" {
 		return "::SYNDR_NULL::", nil
 	}
 
@@ -688,6 +756,10 @@ func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logg
 // evaluateClause evaluates a single clause against a document
 func evaluateClause(document *models.Document, clause WhereClause, logger *zap.SugaredLogger) bool {
 	// Get field value from document
+	// TODO: I will extend IS NULL/IS NOT NULL support to SELECT field expressions
+	// This will allow queries like: SELECT name, email IS NULL as missing_email FROM Users
+	// Currently IS NULL/IS NOT NULL only works in WHERE clauses
+	// Implementation requires: expression evaluator updates, result field aliasing, type handling
 
 	if strings.Contains(clause.Field, "\"") {
 		clause.Field = strings.ReplaceAll(clause.Field, "\"", "")
@@ -761,6 +833,22 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 	case "NOT LIKE":
 		return EvaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
 			clause.Field, clause.PatternType, logger)
+	case "IS NULL":
+		// Handle IS NULL operator from GraphQL or direct WhereClause usage
+		// Check if field value equals the magic NULL value
+		fieldValueStr, fieldIsStr := field.Value.AsString()
+		if fieldIsStr && fieldValueStr == "::SYNDR_NULL::" {
+			return true
+		}
+		return false
+	case "IS NOT NULL":
+		// Handle IS NOT NULL operator from GraphQL or direct WhereClause usage
+		// Check if field value does NOT equal the magic NULL value
+		fieldValueStr, fieldIsStr := field.Value.AsString()
+		if fieldIsStr && fieldValueStr == "::SYNDR_NULL::" {
+			return false
+		}
+		return true
 	default:
 		return false
 	}

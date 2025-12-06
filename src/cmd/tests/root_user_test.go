@@ -1,16 +1,28 @@
 package main
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap"
 
+	"syndrdb/src/internal/auth"
+	defaultdb "syndrdb/src/internal/defaultDB"
+	"syndrdb/src/internal/domain/bundle"
+	"syndrdb/src/internal/domain/database"
+	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/server"
-	"syndrdb/src/tests/homegrown"
+	"syndrdb/src/internal/storage/buffer"
+	"syndrdb/src/internal/storage/bundlestore"
+	"syndrdb/src/internal/storage/databasestore"
+	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 )
 
 /*
@@ -39,77 +51,220 @@ TODO: I will add performance benchmarks for Root user authentication
 */
 
 // setupRootUserTest initializes a clean test environment for Root user testing
-func setupRootUserTest(t *testing.T) (*server.UserService, *server.PermissionService, *models.Database, func()) {
-	_ = zaptest.NewLogger(t).Sugar()
+func setupRootUserTest(t *testing.T) (*server.ServiceManager, *models.Database, func()) {
+	t.Helper()
+	EnsureTestIsolation(t)
 
-	// Create temporary directory for test database
-	tempDir, err := os.MkdirTemp("", "syndrdb_rootuser_test_*")
-	require.NoError(t, err, "Failed to create temp directory")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = ctx // Will use if needed
 
-	// Use the standard test database service which initializes with default users
-	databaseService, _, err := homegrown.StandupTestDatabaseService()
-	require.NoError(t, err, "Failed to setup database service")
+	// Create temporary directory
+	tempDir := t.TempDir()
+	t.Logf("Test data directory: %s", tempDir)
 
-	// Get primary database
-	primaryDB, err := databaseService.GetDatabaseByName("primary")
-	require.NoError(t, err, "Failed to get primary database")
-	require.NotNil(t, primaryDB, "Primary database should exist")
+	// Setup logger
+	loggerConfig := zap.NewDevelopmentConfig()
+	loggerConfig.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
+	logger, err := loggerConfig.Build()
+	require.NoError(t, err, "Failed to create logger")
+	sugar := logger.Sugar()
 
-	// Get service manager
-	serviceManager := server.GetServiceManager()
-	require.NotNil(t, serviceManager, "ServiceManager should exist")
-	require.NotNil(t, serviceManager.UserService, "UserService should exist")
-	require.NotNil(t, serviceManager.PermissionService, "PermissionService should exist")
+	// Create settings
+	args := &settings.Arguments{
+		DataDir:         filepath.Join(tempDir, "data_files"),
+		TempDir:         filepath.Join(tempDir, "temp_files"),
+		LogDir:          filepath.Join(tempDir, "log_files"),
+		LogLevel:        "warn",
+		CreateDefaultDB: true,
+		UseNewParser:    true,
+	}
 
-	userService := serviceManager.UserService
-	permissionService := serviceManager.PermissionService
+	// Set global settings
+	globalSettings := settings.GetSettings()
+	globalSettings.LogDir = args.LogDir
+	globalSettings.DataDir = args.DataDir
+	globalSettings.TempDir = args.TempDir
+
+	// Create directory structure
+	require.NoError(t, os.MkdirAll(args.DataDir, 0755), "Failed to create data directory")
+	require.NoError(t, os.MkdirAll(args.TempDir, 0755), "Failed to create temp directory")
+	require.NoError(t, os.MkdirAll(args.LogDir, 0755), "Failed to create log directory")
+
+	// Create database storage engine
+	databaseStore, err := databasestore.NewDatabaseStore(args.DataDir, sugar)
+	require.NoError(t, err, "Failed to create database store")
+
+	// Create database service
+	databaseFactory := database.NewDatabaseFactory()
+	databaseService := database.NewDatabaseService(databaseStore, databaseFactory, args, sugar)
+
+	// Create buffer pool and file registry for bundle store
+	fileRegistry, err := buffer.NewFileRegistry(args.DataDir, buffer.SyncInterval, sugar)
+	require.NoError(t, err, "Failed to create file registry")
+	bufferPool := buffer.NewBufferPool(1000, buffer.DefaultPageSize, fileRegistry, sugar)
+
+	// Create bundle store and service with BINARY format
+	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, sugar, "binary")
+	require.NoError(t, err, "Failed to create bundle store")
+	bundleFactory := bundle.NewBundleFactory()
+	documentFactory := document.NewDocumentFactory()
+	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, args)
+
+	// Create catalog service
+	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
+
+	// Inject catalog service into bundle service (resolves circular dependency)
+	bundleService.SetCatalogService(catalogService)
+
+	// Create and initialize the "primary" database
+	primaryDB := &models.Database{
+		DatabaseID:    helpers.GenerateUUID(),
+		Name:          "primary",
+		Description:   "Primary database for Root user tests",
+		DataDirectory: args.DataDir,
+		Bundles:       make(map[string]models.Bundle),
+		BundleFiles:   []string{},
+	}
+
+	// Save the primary database to disk
+	err = databaseStore.CreateDatabaseDataFile(primaryDB)
+	require.NoError(t, err, "Failed to create primary database file")
+
+	// Add primary database to service
+	databaseService.Databases[primaryDB.Name] = primaryDB
+
+	// Initialize primary database catalogs (creates RBAC bundles)
+	err = defaultdb.InitPrimaryBundleCatalogs(databaseService, databaseStore, primaryDB, sugar, bundleService)
+	require.NoError(t, err, "Failed to initialize primary catalogs")
+
+	// Initialize UserStore for authentication
+	userStorePath := filepath.Join(args.DataDir, "users.db")
+	encryptionKey := "SyndrDB-Test-RootUser-Key"
+	authConfig := auth.DefaultAuthRateLimitConfig()
+
+	userStore, err := auth.NewUserStoreWithAuditor(
+		userStorePath,
+		encryptionKey,
+		sugar,
+		authConfig,
+		nil, // No auditor for tests
+	)
+	require.NoError(t, err, "Failed to create user store")
+
+	// Hydrate all catalog bundles (creates catalog documents - must be called in order)
+	err = defaultdb.HydrateBundlesPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+	if err != nil {
+		sugar.Warnf("Warning: Failed to hydrate bundles catalog: %v", err)
+	}
+
+	err = defaultdb.HydratePermissionPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+	if err != nil {
+		sugar.Warnf("Warning: Failed to hydrate permissions catalog: %v", err)
+	}
+
+	err = defaultdb.HydrateRolesPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+	if err != nil {
+		sugar.Warnf("Warning: Failed to hydrate roles catalog: %v", err)
+	}
+
+	err = defaultdb.HydrateRolesPermissionsPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
+	if err != nil {
+		sugar.Warnf("Warning: Failed to hydrate roles-permissions catalog: %v", err)
+	}
+
+	err = defaultdb.HydrateUserPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService, userStore)
+	if err != nil {
+		sugar.Warnf("Warning: Failed to hydrate users catalog: %v", err)
+	}
+
+	// Initialize ServiceManager with all services
+	serviceManager := server.InitServiceManager(databaseService, bundleService, catalogService, nil, userStore, sugar, false)
+	require.NotNil(t, serviceManager, "ServiceManager should not be nil")
+
+	// Initialize UserService and PermissionService
+	serviceManager.UserService = server.NewUserService(
+		bundleService,
+		databaseService,
+		userStore,
+		sugar,
+		false, // debug mode off
+	)
+
+	serviceManager.PermissionService = server.NewPermissionService(
+		bundleService,
+		databaseService,
+		nil, // SessionManager not needed in tests
+		sugar,
+		false, // debug mode off
+	)
 
 	// Cleanup function
 	cleanup := func() {
-		os.RemoveAll(tempDir)
+		if bundleService != nil {
+			bundleService.Shutdown()
+		}
 	}
 
-	return userService, permissionService, primaryDB, cleanup
+	return serviceManager, primaryDB, cleanup
 }
 
 // TestRootUser_CreatedProperly tests that the Root user is created during initialization
 func TestRootUser_CreatedProperly(t *testing.T) {
-	_, _, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
-	// Verify Root user exists in Users bundle
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	require.True(t, exists, "Users bundle should exist")
+	// Verify Root user exists in Users bundle (use BundleService, not direct map access)
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	require.NoError(t, err, "Failed to get Users bundle")
+	require.NotNil(t, usersBundle, "Users bundle should exist")
 	require.NotNil(t, usersBundle.Documents, "Users bundle should have documents")
 
 	userDocs := *usersBundle.Documents
+
 	var rootUser *models.Document
 	for _, doc := range userDocs {
-		if username, ok := doc.Data["Username"].(string); ok && username == "Root" {
-			rootUser = &doc
-			break
+		if usernameField, exists := doc.Fields["Username"]; exists {
+			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
+				rootUser = &doc
+				break
+			}
 		}
 	}
 
 	require.NotNil(t, rootUser, "Root user should exist in Users bundle")
 
 	// Verify Root user has required fields
-	assert.NotEmpty(t, rootUser.Data["UserID"], "Root user should have UserID")
-	assert.Equal(t, "Root", rootUser.Data["Username"], "Username should be 'Root'")
-	assert.Equal(t, true, rootUser.Data["IsActive"], "Root user should be active")
-	assert.Equal(t, false, rootUser.Data["IsLockedOut"], "Root user should not be locked out")
-	assert.Equal(t, 0, rootUser.Data["FailedLoginAttempts"], "Root user should have 0 failed login attempts")
+	userID, ok := rootUser.Fields["UserID"].Value.AsString()
+	require.True(t, ok, "UserID should be a string")
+	assert.NotEmpty(t, userID, "Root user should have UserID")
+
+	username, ok := rootUser.Fields["Username"].Value.AsString()
+	require.True(t, ok, "Username should be a string")
+	assert.Equal(t, "Root", username, "Username should be 'Root'")
+
+	isActive, ok := rootUser.Fields["IsActive"].Value.AsBool()
+	require.True(t, ok, "IsActive should be a bool")
+	assert.True(t, isActive, "Root user should be active")
+
+	isLockedOut, ok := rootUser.Fields["IsLockedOut"].Value.AsBool()
+	require.True(t, ok, "IsLockedOut should be a bool")
+	assert.False(t, isLockedOut, "Root user should not be locked out")
+
+	failedAttempts, ok := rootUser.Fields["FailedLoginAttempts"].Value.AsInt()
+	require.True(t, ok, "FailedLoginAttempts should be an int")
+	assert.Equal(t, int64(0), failedAttempts, "Root user should have 0 failed login attempts")
 
 	t.Log("✓ Root user created properly with all required fields")
 }
 
 // TestRootUser_CanLogin tests that Root user can authenticate with default password
 func TestRootUser_CanLogin(t *testing.T) {
-	userService, _, _, cleanup := setupRootUserTest(t)
+	serviceManager, _, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Test authentication with correct password
-	authenticated, err := userService.ValidateUserCredentials("Root", "root")
+	authenticated, err := serviceManager.UserService.ValidateUserCredentials("Root", "root")
 
 	assert.NoError(t, err, "Authentication should not return an error")
 	assert.True(t, authenticated, "Root user should authenticate with password 'root'")
@@ -119,32 +274,32 @@ func TestRootUser_CanLogin(t *testing.T) {
 
 // TestRootUser_PasswordHashed tests that Root user password is hashed, not plaintext
 func TestRootUser_PasswordHashed(t *testing.T) {
-	userService, _, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Get Root user from Users bundle
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	require.True(t, exists, "Users bundle should exist")
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	require.NoError(t, err, "Failed to get Users bundle")
+	require.NotNil(t, usersBundle, "Users bundle should exist")
 
 	userDocs := *usersBundle.Documents
 	var rootUser *models.Document
 	for _, doc := range userDocs {
-		if username, ok := doc.Data["Username"].(string); ok && username == "Root" {
-			rootUser = &doc
-			break
+		if usernameField, exists := doc.Fields["Username"]; exists {
+			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
+				rootUser = &doc
+				break
+			}
 		}
 	}
 
 	require.NotNil(t, rootUser, "Root user should exist")
 
 	// Check if password field exists
-	password, hasPassword := rootUser.Data["Password"]
-
-	if hasPassword {
-		passwordStr, isString := password.(string)
-		if isString {
+	if passwordField, hasPassword := rootUser.Fields["Password"]; hasPassword {
+		if password, ok := passwordField.Value.AsString(); ok {
 			// Password should NOT be plaintext "root"
-			assert.NotEqual(t, "root", passwordStr, "Password should not be stored as plaintext")
+			assert.NotEqual(t, "root", password, "Password should not be stored as plaintext")
 
 			// If it's not plaintext, it should be an Argon2id hash
 			// Argon2id hashes start with "$argon2" prefix
@@ -154,12 +309,12 @@ func TestRootUser_PasswordHashed(t *testing.T) {
 	}
 
 	// Verify password is hashed in UserStore by checking authentication works
-	authenticated, err := userService.ValidateUserCredentials("Root", "root")
+	authenticated, err := serviceManager.UserService.ValidateUserCredentials("Root", "root")
 	require.NoError(t, err, "Authentication check should not error")
 	require.True(t, authenticated, "Password should be properly hashed in UserStore")
 
 	// Verify wrong password fails
-	authenticated, err = userService.ValidateUserCredentials("Root", "wrongpassword")
+	authenticated, err = serviceManager.UserService.ValidateUserCredentials("Root", "wrongpassword")
 	assert.False(t, authenticated, "Wrong password should not authenticate")
 
 	t.Log("✓ Root user password is properly hashed (not plaintext)")
@@ -167,36 +322,68 @@ func TestRootUser_PasswordHashed(t *testing.T) {
 
 // TestRootUser_HasDboRole tests that Root user has the Dbo role assigned
 func TestRootUser_HasDboRole(t *testing.T) {
-	_, _, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Get Root user's UserID
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	require.True(t, exists, "Users bundle should exist")
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	require.NoError(t, err, "Failed to get Users bundle")
+	require.NotNil(t, usersBundle, "Users bundle should exist")
 
 	userDocs := *usersBundle.Documents
 	var rootUserID string
 	for _, doc := range userDocs {
-		if username, ok := doc.Data["Username"].(string); ok && username == "Root" {
-			rootUserID = doc.Data["UserID"].(string)
-			break
+		if usernameField, exists := doc.Fields["Username"]; exists {
+			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
+				if userIDField, exists := doc.Fields["UserID"]; exists {
+					rootUserID, _ = userIDField.Value.AsString()
+				}
+				break
+			}
 		}
 	}
 
 	require.NotEmpty(t, rootUserID, "Root user ID should be found")
 
 	// Check UserRoles bundle for Dbo role assignment
-	userRolesBundle, exists := primaryDB.Bundles["UserRoles"]
-	require.True(t, exists, "UserRoles bundle should exist")
+	userRolesBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "UserRoles")
+	require.NoError(t, err, "Failed to get UserRoles bundle")
+	require.NotNil(t, userRolesBundle, "UserRoles bundle should exist")
 	require.NotNil(t, userRolesBundle.Documents, "UserRoles bundle should have documents")
 
+	// Find the RoleID for the Root user
 	roleAssignments := *userRolesBundle.Documents
-	var hasDboRole bool
+	var rootRoleID string
 	for _, doc := range roleAssignments {
-		if userID, ok := doc.Data["UserID"].(string); ok && userID == rootUserID {
-			if role, ok := doc.Data["Role"].(string); ok && role == "Dbo" {
-				hasDboRole = true
-				break
+		if userIDField, exists := doc.Fields["UserID"]; exists {
+			if userID, ok := userIDField.Value.AsString(); ok && userID == rootUserID {
+				if roleIDField, exists := doc.Fields["RoleID"]; exists {
+					rootRoleID, _ = roleIDField.Value.AsString()
+					break
+				}
+			}
+		}
+	}
+
+	require.NotEmpty(t, rootRoleID, "Root user should have a role assigned")
+
+	// Now check the Roles bundle to see if this RoleID corresponds to "Dbo"
+	rolesBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Roles")
+	require.NoError(t, err, "Failed to get Roles bundle")
+	require.NotNil(t, rolesBundle, "Roles bundle should exist")
+	require.NotNil(t, rolesBundle.Documents, "Roles bundle should have documents")
+
+	roles := *rolesBundle.Documents
+	var hasDboRole bool
+	for _, doc := range roles {
+		if roleIDField, exists := doc.Fields["RoleID"]; exists {
+			if roleID, ok := roleIDField.Value.AsString(); ok && roleID == rootRoleID {
+				if nameField, exists := doc.Fields["Name"]; exists {
+					if roleName, ok := nameField.Value.AsString(); ok && roleName == "Dbo" {
+						hasDboRole = true
+						break
+					}
+				}
 			}
 		}
 	}
@@ -208,14 +395,14 @@ func TestRootUser_HasDboRole(t *testing.T) {
 
 // TestRootUser_HasAllPermissions tests that Root user has all core permissions via Dbo role
 func TestRootUser_HasAllPermissions(t *testing.T) {
-	_, permissionService, _, cleanup := setupRootUserTest(t)
+	serviceManager, _, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Core permissions that Dbo role should grant
 	corePermissions := []string{"Read", "Write", "Admin", "Read-Write"}
 
 	for _, permission := range corePermissions {
-		hasPermission, err := permissionService.UserHasPermission("Root", permission)
+		hasPermission, err := serviceManager.PermissionService.UserHasPermission("Root", permission)
 
 		assert.NoError(t, err, "Permission check should not error for %s", permission)
 		assert.True(t, hasPermission, "Root user should have %s permission via Dbo role", permission)
@@ -228,11 +415,11 @@ func TestRootUser_HasAllPermissions(t *testing.T) {
 
 // TestRootUser_CanAccessDatabases tests that Root user can access database entities
 func TestRootUser_CanAccessDatabases(t *testing.T) {
-	_, permissionService, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Verify Root has Admin permission (required for database-level operations)
-	hasAdmin, err := permissionService.UserHasPermission("Root", "Admin")
+	hasAdmin, err := serviceManager.PermissionService.UserHasPermission("Root", "Admin")
 	require.NoError(t, err, "Admin permission check should not error")
 	require.True(t, hasAdmin, "Root user should have Admin permission")
 
@@ -246,16 +433,16 @@ func TestRootUser_CanAccessDatabases(t *testing.T) {
 
 // TestRootUser_CanAccessBundles tests that Root user can access bundle entities
 func TestRootUser_CanAccessBundles(t *testing.T) {
-	_, permissionService, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Verify Root has Read permission (required for bundle read operations)
-	hasRead, err := permissionService.UserHasPermission("Root", "Read")
+	hasRead, err := serviceManager.PermissionService.UserHasPermission("Root", "Read")
 	require.NoError(t, err, "Read permission check should not error")
 	require.True(t, hasRead, "Root user should have Read permission")
 
 	// Verify Root has Write permission (required for bundle write operations)
-	hasWrite, err := permissionService.UserHasPermission("Root", "Write")
+	hasWrite, err := serviceManager.PermissionService.UserHasPermission("Root", "Write")
 	require.NoError(t, err, "Write permission check should not error")
 	require.True(t, hasWrite, "Root user should have Write permission")
 
@@ -275,17 +462,18 @@ func TestRootUser_CanAccessBundles(t *testing.T) {
 
 // TestRootUser_CanAccessDocuments tests that Root user can access document entities
 func TestRootUser_CanAccessDocuments(t *testing.T) {
-	_, permissionService, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Verify Root has Read-Write permission (required for document operations)
-	hasReadWrite, err := permissionService.UserHasPermission("Root", "Read-Write")
+	hasReadWrite, err := serviceManager.PermissionService.UserHasPermission("Root", "Read-Write")
 	require.NoError(t, err, "Read-Write permission check should not error")
 	require.True(t, hasReadWrite, "Root user should have Read-Write permission")
 
 	// Test access to documents in Users bundle
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	require.True(t, exists, "Users bundle should exist")
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	require.NoError(t, err, "Failed to get Users bundle")
+	require.NotNil(t, usersBundle, "Users bundle should exist")
 	require.NotNil(t, usersBundle.Documents, "Users bundle should have documents")
 
 	userDocs := *usersBundle.Documents
@@ -294,11 +482,13 @@ func TestRootUser_CanAccessDocuments(t *testing.T) {
 	// Verify we can read Root user document
 	var rootUserFound bool
 	for _, doc := range userDocs {
-		if username, ok := doc.Data["Username"].(string); ok && username == "Root" {
-			rootUserFound = true
-			assert.NotEmpty(t, doc.DocumentID, "Root user document should have DocumentID")
-			assert.NotNil(t, doc.Data, "Root user document should have Data map")
-			break
+		if usernameField, exists := doc.Fields["Username"]; exists {
+			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
+				rootUserFound = true
+				assert.NotEmpty(t, doc.DocumentID, "Root user document should have DocumentID")
+				assert.NotNil(t, doc.Data, "Root user document should have Data map")
+				break
+			}
 		}
 	}
 
@@ -309,11 +499,11 @@ func TestRootUser_CanAccessDocuments(t *testing.T) {
 
 // TestRootUser_CanAccessIndexes tests that Root user can access index entities
 func TestRootUser_CanAccessIndexes(t *testing.T) {
-	_, permissionService, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Verify Root has Admin permission (required for index operations)
-	hasAdmin, err := permissionService.UserHasPermission("Root", "Admin")
+	hasAdmin, err := serviceManager.PermissionService.UserHasPermission("Root", "Admin")
 	require.NoError(t, err, "Admin permission check should not error")
 	require.True(t, hasAdmin, "Root user should have Admin permission")
 
@@ -331,14 +521,14 @@ func TestRootUser_CanAccessIndexes(t *testing.T) {
 
 // TestRootUser_FullAccessWorkflow tests complete workflow of Root user accessing all entities
 func TestRootUser_FullAccessWorkflow(t *testing.T) {
-	userService, permissionService, primaryDB, cleanup := setupRootUserTest(t)
+	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	t.Log("Starting Root user full access workflow test...")
 
 	// Step 1: Authenticate as Root
 	t.Log("Step 1: Authenticating as Root user...")
-	authenticated, err := userService.ValidateUserCredentials("Root", "root")
+	authenticated, err := serviceManager.UserService.ValidateUserCredentials("Root", "root")
 	require.NoError(t, err, "Authentication should not error")
 	require.True(t, authenticated, "Root user should authenticate successfully")
 	t.Log("  ✓ Root user authenticated")
@@ -347,7 +537,7 @@ func TestRootUser_FullAccessWorkflow(t *testing.T) {
 	t.Log("Step 2: Verifying all permissions...")
 	allPermissions := []string{"Read", "Write", "Admin", "Read-Write"}
 	for _, perm := range allPermissions {
-		hasPermission, err := permissionService.UserHasPermission("Root", perm)
+		hasPermission, err := serviceManager.PermissionService.UserHasPermission("Root", perm)
 		require.NoError(t, err, "Permission check for %s should not error", perm)
 		require.True(t, hasPermission, "Root should have %s permission", perm)
 		t.Logf("  ✓ Has %s permission", perm)
@@ -390,7 +580,7 @@ func TestRootUser_FullAccessWorkflow(t *testing.T) {
 
 // TestRootUser_AuthenticationFailsWithWrongPassword tests that wrong password is rejected
 func TestRootUser_AuthenticationFailsWithWrongPassword(t *testing.T) {
-	userService, _, _, cleanup := setupRootUserTest(t)
+	serviceManager, _, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Test authentication with incorrect passwords
@@ -405,7 +595,7 @@ func TestRootUser_AuthenticationFailsWithWrongPassword(t *testing.T) {
 	}
 
 	for _, wrongPassword := range wrongPasswords {
-		authenticated, _ := userService.ValidateUserCredentials("Root", wrongPassword)
+		authenticated, _ := serviceManager.UserService.ValidateUserCredentials("Root", wrongPassword)
 
 		// Authentication should either return false or an error (both are acceptable)
 		assert.False(t, authenticated, "Wrong password '%s' should not authenticate", wrongPassword)
@@ -417,7 +607,7 @@ func TestRootUser_AuthenticationFailsWithWrongPassword(t *testing.T) {
 
 // TestRootUser_CaseInsensitiveUsername tests that Root username is case-insensitive
 func TestRootUser_CaseInsensitiveUsername(t *testing.T) {
-	userService, _, _, cleanup := setupRootUserTest(t)
+	serviceManager, _, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
 	// Test various case variations of "Root"
@@ -430,7 +620,7 @@ func TestRootUser_CaseInsensitiveUsername(t *testing.T) {
 	}
 
 	for _, username := range usernameVariations {
-		authenticated, err := userService.ValidateUserCredentials(username, "root")
+		authenticated, err := serviceManager.UserService.ValidateUserCredentials(username, "root")
 
 		assert.NoError(t, err, "Authentication should not error for username '%s'", username)
 		assert.True(t, authenticated, "Username '%s' should authenticate (case-insensitive)", username)

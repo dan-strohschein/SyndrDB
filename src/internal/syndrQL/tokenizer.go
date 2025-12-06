@@ -199,6 +199,89 @@ func (t *Tokenizer) readIdentifier() Token {
 	upperLiteral := strings.ToUpper(literal)
 	tokenType := LookupKeyword(upperLiteral)
 
+	// Special handling for IS NULL and IS NOT NULL
+	if upperLiteral == "IS" {
+		// Save current position
+		savedPos := t.pos
+		savedCh := t.ch
+		savedLine := t.line
+		savedColumn := t.column
+
+		// Skip whitespace and check if next token is NOT or NULL
+		t.skipWhitespace()
+
+		if isLetter(t.ch) {
+			nextStartPos := t.pos
+			for isLetter(t.ch) || isDigit(t.ch) || t.ch == '_' {
+				t.readChar()
+			}
+			nextLiteral := t.input[nextStartPos:t.pos]
+			nextUpperLiteral := strings.ToUpper(nextLiteral)
+
+			if nextUpperLiteral == "NOT" {
+				// Check for IS NOT NULL
+				secondSavedPos := t.pos
+				secondSavedCh := t.ch
+				secondSavedLine := t.line
+				secondSavedColumn := t.column
+
+				t.skipWhitespace()
+
+				if isLetter(t.ch) {
+					thirdStartPos := t.pos
+					for isLetter(t.ch) || isDigit(t.ch) || t.ch == '_' {
+						t.readChar()
+					}
+					thirdLiteral := t.input[thirdStartPos:t.pos]
+					thirdUpperLiteral := strings.ToUpper(thirdLiteral)
+
+					if thirdUpperLiteral == "NULL" {
+						// Merge IS NOT NULL into single token
+						return Token{
+							Type:   TOKEN_IS_NOT_NULL,
+							Value:  literal + " " + nextLiteral + " " + thirdLiteral,
+							Line:   startLine,
+							Column: startColumn,
+						}
+					}
+
+					// Not followed by NULL, restore to after NOT
+					t.pos = secondSavedPos
+					t.ch = secondSavedCh
+					t.line = secondSavedLine
+					t.column = secondSavedColumn
+				}
+
+				// IS NOT without NULL - restore position to before IS
+				t.pos = savedPos
+				t.ch = savedCh
+				t.line = savedLine
+				t.column = savedColumn
+
+			} else if nextUpperLiteral == "NULL" {
+				// Merge IS NULL into single token
+				return Token{
+					Type:   TOKEN_IS_NULL,
+					Value:  literal + " " + nextLiteral,
+					Line:   startLine,
+					Column: startColumn,
+				}
+			} else {
+				// IS followed by something else - restore position
+				t.pos = savedPos
+				t.ch = savedCh
+				t.line = savedLine
+				t.column = savedColumn
+			}
+		} else {
+			// Not a letter, restore position
+			t.pos = savedPos
+			t.ch = savedCh
+			t.line = savedLine
+			t.column = savedColumn
+		}
+	}
+
 	// Special handling for NOT IN - check if NOT is followed by IN
 	if tokenType == TOKEN_NOT {
 		// Save current position

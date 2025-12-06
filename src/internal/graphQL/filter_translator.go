@@ -279,12 +279,13 @@ func (ft *FilterTranslator) translateFieldFilter(fieldName string, filter *Field
 	}
 
 	// isNull operator
+	// Translates to comparison against magic NULL value
 	if filter.IsNull != nil {
 		if *filter.IsNull {
 			clauses = append(clauses, models.WhereClause{
 				Field:    fieldName,
 				Operator: "IS NULL",
-				Value:    nil,
+				Value:    nil, // GraphQL uses nil, but evaluateClause checks magic value
 				Logic:    "AND",
 			})
 		} else {
@@ -292,19 +293,20 @@ func (ft *FilterTranslator) translateFieldFilter(fieldName string, filter *Field
 			clauses = append(clauses, models.WhereClause{
 				Field:    fieldName,
 				Operator: "IS NOT NULL",
-				Value:    nil,
+				Value:    nil, // GraphQL uses nil, but evaluateClause checks magic value
 				Logic:    "AND",
 			})
 		}
 	}
 
 	// isNotNull operator
+	// Translates to comparison against magic NULL value (inverted)
 	if filter.IsNotNull != nil {
 		if *filter.IsNotNull {
 			clauses = append(clauses, models.WhereClause{
 				Field:    fieldName,
 				Operator: "IS NOT NULL",
-				Value:    nil,
+				Value:    nil, // GraphQL uses nil, but evaluateClause checks magic value
 				Logic:    "AND",
 			})
 		} else {
@@ -312,7 +314,7 @@ func (ft *FilterTranslator) translateFieldFilter(fieldName string, filter *Field
 			clauses = append(clauses, models.WhereClause{
 				Field:    fieldName,
 				Operator: "IS NULL",
-				Value:    nil,
+				Value:    nil, // GraphQL uses nil, but evaluateClause checks magic value
 				Logic:    "AND",
 			})
 		}

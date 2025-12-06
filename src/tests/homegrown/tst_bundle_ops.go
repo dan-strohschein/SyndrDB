@@ -221,7 +221,7 @@ func initializeTestServiceManager() error {
 	databaseService := sharedDatabaseService
 
 	// Create bundle service
-	bundleStore, err := bundlestore.NewBundleStore(dataDir, bufferPool, sugar, "json")
+	bundleStore, err := bundlestore.NewBundleStore(dataDir, bufferPool, sugar, "binary")
 	if err != nil {
 		return fmt.Errorf("failed to create bundle store: %w", err)
 	}
@@ -332,7 +332,7 @@ func setupBundleTestEnvironment() error {
 	databaseService := sharedDatabaseService
 
 	// Create bundle service
-	bundleStore, err := bundlestore.NewBundleStore(dataDir, bufferPool, sugar, "json")
+	bundleStore, err := bundlestore.NewBundleStore(dataDir, bufferPool, sugar, "binary")
 	if err != nil {
 		return fmt.Errorf("failed to create bundle store: %w", err)
 	}

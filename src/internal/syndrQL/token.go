@@ -37,17 +37,19 @@ const (
 	TOKEN_ASSIGN // = (single equals for assignment)
 
 	// Operators - Comparison
-	TOKEN_EQ       // ==
-	TOKEN_NEQ      // !=
-	TOKEN_LT       // <
-	TOKEN_LTE      // <=
-	TOKEN_GT       // >
-	TOKEN_GTE      // >=
-	TOKEN_LIKE     // LIKE
-	TOKEN_IN       // IN
-	TOKEN_NOTIN    // NOT IN
-	TOKEN_EXISTS   // EXISTS (for subquery support - Tier 1)
-	TOKEN_CONTAINS // CONTAINS
+	TOKEN_EQ          // ==
+	TOKEN_NEQ         // !=
+	TOKEN_LT          // <
+	TOKEN_LTE         // <=
+	TOKEN_GT          // >
+	TOKEN_GTE         // >=
+	TOKEN_LIKE        // LIKE
+	TOKEN_IN          // IN
+	TOKEN_NOTIN       // NOT IN
+	TOKEN_IS_NULL     // IS NULL
+	TOKEN_IS_NOT_NULL // IS NOT NULL
+	TOKEN_EXISTS      // EXISTS (for subquery support - Tier 1)
+	TOKEN_CONTAINS    // CONTAINS
 
 	// Operators - Logical
 	TOKEN_AND // AND
@@ -218,6 +220,10 @@ func (tt TokenType) String() string {
 		return "IN"
 	case TOKEN_NOTIN:
 		return "NOT IN"
+	case TOKEN_IS_NULL:
+		return "IS NULL"
+	case TOKEN_IS_NOT_NULL:
+		return "IS NOT NULL"
 	case TOKEN_EXISTS:
 		return "EXISTS"
 	case TOKEN_CONTAINS:

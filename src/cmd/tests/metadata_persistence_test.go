@@ -427,6 +427,8 @@ func TestMetadataPersistence_HighThroughputScenario(t *testing.T) {
 // =============================================================================
 
 func setupTestService(t *testing.T) (*bundle.BundleService, func()) {
+	EnsureTestIsolation(t)
+	
 	// Create temporary directory for test
 	tmpDir, err := os.MkdirTemp("", "metadata_persistence_test_*")
 	require.NoError(t, err)

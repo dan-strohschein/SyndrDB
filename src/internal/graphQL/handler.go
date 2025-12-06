@@ -283,6 +283,15 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 		}
 	}
 
+	// If no bundles exist, add a placeholder query field to prevent empty Query type
+	// GraphQL spec requires Query type to have at least one field
+	if len(bundleTypes) == 0 && schemaManager == nil {
+		schemaString += "\t\t_schema: String\n"
+	} else if len(bundleTypes) == 0 {
+		// SchemaManager exists but no bundles yet - add placeholder
+		schemaString += "\t\t_schema: String\n"
+	}
+
 	// Close Query type and add introspection support
 	schemaString += "\t}\n\n"
 

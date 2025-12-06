@@ -59,9 +59,14 @@ func NormalizeQueryForNewParser(query string) string {
 	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";")
 
+	// Convert "SELECT TOP N DOCUMENTS FROM" to "SELECT TOP N * FROM"
+	// Must be done before other DOCUMENTS conversions to preserve TOP clause
+	re := regexp.MustCompile(`(?i)\bSELECT\s+TOP\s+(\d+)\s+DOCUMENTS\s+FROM\b`)
+	query = re.ReplaceAllString(query, "SELECT TOP $1 * FROM")
+
 	// Convert "SELECT DOCUMENTS FROM" to "SELECT * FROM"
 	// Case-insensitive replacement
-	re := regexp.MustCompile(`(?i)\bSELECT\s+DOCUMENTS\s+FROM\b`)
+	re = regexp.MustCompile(`(?i)\bSELECT\s+DOCUMENTS\s+FROM\b`)
 	query = re.ReplaceAllString(query, "SELECT * FROM")
 
 	// Convert "SELECT DOCUMENT FROM" to "SELECT * FROM" (singular form)
@@ -76,34 +81,23 @@ func NormalizeQueryForNewParser(query string) string {
 	return query
 }
 
-// ParseQuery attempts new parser first (if enabled), falls back to legacy on error
+// ParseQuery uses the new SyndrQL V3 parser exclusively
 func ParseQuery(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSelectQuery, error) {
-	// Check feature flag
-	if !shouldUseNewParser() {
-		logger.Debugf("Using legacy parser (flag disabled)")
-		return queryparser.ParseUnifiedSelectQuery(query, logger)
-	}
-
-	// Try new parser
-	logger.Debugf("Attempting new SyndrQL parser (flag enabled)")
+	// Use new SyndrQL parser exclusively
+	logger.Debugf("Using new SyndrQL V3 parser for query: %s", query)
 	globalParserMetrics.NewParserAttempts.Add(1)
 
 	unifiedQuery, err := parseQueryWithNewParser(query, logger)
 
 	if err != nil {
-		// Record failure and fallback
+		// Record failure
 		globalParserMetrics.NewParserFailures.Add(1)
-		globalParserMetrics.FallbacksTriggered.Add(1)
-
-		logger.Warnf("New parser failed: %v. Falling back to legacy parser.", err)
-
-		// Fallback to legacy parser
-		return queryparser.ParseUnifiedSelectQuery(query, logger)
+		logger.Errorf("New parser failed: %v", err)
+		return nil, err
 	}
 
 	// Record success
 	globalParserMetrics.NewParserSuccesses.Add(1)
-	//logger.Infof("Successfully parsed query using new parser")
 
 	return unifiedQuery, nil
 }

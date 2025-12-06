@@ -54,6 +54,7 @@ func (g *MutationGenerator) GenerateMutationSchema(database *models.Database, sc
 
 	mutationSchema.WriteString("\ttype Mutation {\n")
 
+	mutationCount := 0
 	// Generate CRUD mutations for each bundle
 	for bundleName := range database.Bundles {
 		// Get bundle schema for type information
@@ -77,12 +78,20 @@ func (g *MutationGenerator) GenerateMutationSchema(database *models.Database, sc
 		mutationSchema.WriteString(fmt.Sprintf("\t\t# Delete a %s\n", bundleName))
 		mutationSchema.WriteString(fmt.Sprintf("\t\tdelete%s(id: ID!): Delete%sPayload!\n\n", bundleName, bundleName))
 
+		mutationCount++
+
 		// TODO: I will add batch mutation generation when SyndrDB supports batch operations.
 		// Batch mutations would be generated like:
 		// createUsers(inputs: [CreateUserInput!]!): CreateUsersPayload!
 		// updateUsers(inputs: [UpdateUserInput!]!): UpdateUsersPayload!
 		// deleteUsers(ids: [ID!]!): DeleteUsersPayload!
 		// The payload types would include success/failure counts and error details.
+	}
+
+	// If no mutations were generated, add a placeholder to prevent empty Mutation type
+	// GraphQL spec requires Mutation type to have at least one field if it exists
+	if mutationCount == 0 {
+		mutationSchema.WriteString("\t\t_placeholder: String\n")
 	}
 
 	mutationSchema.WriteString("\t}\n\n")

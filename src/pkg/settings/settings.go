@@ -548,3 +548,14 @@ func (a *Arguments) GetQueryMemoryLimit(isAdmin bool) int64 {
 	}
 	return int64(limitMB) * 1024 * 1024 // Convert MB to bytes
 }
+
+// ResetSettingsForTesting resets the global settings singleton for testing purposes
+// This should ONLY be called from test code to ensure test isolation
+// WARNING: Not safe for concurrent use - tests must not run in parallel when using this
+func ResetSettingsForTesting() {
+	mu.Lock()
+	defer mu.Unlock()
+	instance = nil
+	once = sync.Once{}
+}
+

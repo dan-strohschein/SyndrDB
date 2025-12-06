@@ -138,10 +138,10 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 
 	// Create two related bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"Name"="AuthorID", "Type"="INT", "PrimaryKey"=true},
-		{"Name"="Name", "Type"="STRING"},
-		{"Name"="Country", "Type"="STRING"}
-	)`
+		{"AuthorID", "INT", true, true, 0},
+		{"Name", "STRING", true, false, ""},
+		{"Country", "STRING", false, false, ""}
+	);`
 
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createAuthorsCmd, env.logger, startTime, nil, "127.0.0.1")
@@ -150,11 +150,11 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 	}
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"Name"="BookID", "Type"="INT", "PrimaryKey"=true},
-		{"Name"="Title", "Type"="STRING"},
-		{"Name"="AuthorID", "Type"="INT"},
-		{"Name"="Genre", "Type"="STRING"}
-	)`
+		{"BookID", "INT", true, true, 0},
+		{"Title", "STRING", true, false, ""},
+		{"AuthorID", "INT", false, false, 0},
+		{"Genre", "STRING", false, false, ""}
+	);`
 
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, createBooksCmd, env.logger, startTime, nil, "127.0.0.1")
@@ -239,10 +239,10 @@ func TestSecurityLayersWithMutation(t *testing.T) {
 
 	// Create bundle first
 	createBundleCmd := `CREATE BUNDLE "Products" WITH FIELDS (
-		{"Name"="ProductID", "Type"="INT", "PrimaryKey"=true},
-		{"Name"="Name", "Type"="STRING"},
-		{"Name"="Price", "Type"="FLOAT"}
-	)`
+		{"ProductID", "INT", true, true, 0},
+		{"Name", "STRING", true, false, ""},
+		{"Price", "FLOAT", false, false, 0.0}
+	);`
 
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
@@ -290,9 +290,9 @@ func TestTimeoutEnforcement(t *testing.T) {
 
 	// Create a bundle
 	createBundleCmd := `CREATE BUNDLE "LargeData" WITH FIELDS (
-		{"Name"="ID", "Type"="INT", "PrimaryKey"=true},
-		{"Name"="Data", "Type"="STRING"}
-	)`
+		{"ID", "INT", true, true, 0},
+		{"Data", "STRING", true, false, ""}
+	);`
 
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")
@@ -337,9 +337,9 @@ func TestMonitoringMetrics(t *testing.T) {
 
 	// Create a simple bundle
 	createBundleCmd := `CREATE BUNDLE "Metrics" WITH FIELDS (
-		{"Name"="ID", "Type"="INT", "PrimaryKey"=true},
-		{"Name"="Value", "Type"="STRING"}
-	)`
+		{"ID", "INT", true, true, 0},
+		{"Value", "STRING", true, false, ""}
+	);`
 
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, env.database, *env.serviceManager, createBundleCmd, env.logger, startTime, nil, "127.0.0.1")

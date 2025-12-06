@@ -24,6 +24,7 @@ import (
 	"syndrdb/src/internal/storage/databasestore"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
+)	"syndrdb/src/pkg/settings"
 )
 
 // TestEnvironment holds all components needed for GraphQL security testing
@@ -45,6 +46,15 @@ type PartialTestEnvironment struct {
 	logger         *zap.SugaredLogger
 	config         SecurityTestConfig
 	cleanup        func()
+}
+
+// EnsureTestIsolation ensures the current test has isolated settings
+func EnsureTestIsolation(t *testing.T) {
+	t.Helper()
+	settings.ResetSettingsForTesting()
+	t.Cleanup(func() {
+		settings.ResetSettingsForTesting()
+	})
 }
 
 // SecurityTestConfig configures which security layers to enable for testing
@@ -69,6 +79,7 @@ func setupTestEnvironment(t *testing.T, enableSecurity bool) *TestEnvironment {
 // setupTestEnvironmentWithConfig creates test environment with custom security configuration
 func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *TestEnvironment {
 	t.Helper()
+	EnsureTestIsolation(t)
 
 	// Create temporary directory
 	tempDir := t.TempDir()
@@ -128,7 +139,7 @@ func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *Te
 	bufferPool := buffer.NewBufferPool(1000, buffer.DefaultPageSize, fileRegistry, sugar)
 
 	// Create bundle store and service
-	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, sugar, "json")
+	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, sugar, "binary")
 	if err != nil {
 		t.Fatalf("Failed to create bundle store: %v", err)
 	}
@@ -367,7 +378,7 @@ func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConf
 	bufferPool := buffer.NewBufferPool(1000, buffer.DefaultPageSize, fileRegistry, sugar)
 
 	// Create bundle store and service
-	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, sugar, "json")
+	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, sugar, "binary")
 	if err != nil {
 		t.Fatalf("Failed to create bundle store: %v", err)
 	}

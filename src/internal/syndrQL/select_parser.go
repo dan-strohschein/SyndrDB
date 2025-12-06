@@ -671,21 +671,27 @@ func (p *SelectParser) parseGroupByClause(stmt *SelectStatement) error {
 		var fieldName string
 
 		if p.current.Type == TOKEN_STRING {
-			// Qualified identifier: "Bundle"."Field"
-			bundleName := p.current.Value
-			p.advance() // consume bundle name
+			// Could be either:
+			// 1. Qualified identifier: "Bundle"."Field"
+			// 2. Just a quoted field name: "Field"
 
-			if p.current.Type != TOKEN_DOT {
-				return fmt.Errorf("expected '.' after bundle name in GROUP BY, got %s", p.current.Type.String())
+			firstPart := p.current.Value
+			p.advance() // consume first string
+
+			if p.current.Type == TOKEN_DOT {
+				// This is a qualified identifier "Bundle"."Field"
+				p.advance() // consume dot
+
+				if p.current.Type != TOKEN_STRING && p.current.Type != TOKEN_IDENT {
+					return fmt.Errorf("expected field name after '.' in GROUP BY, got %s", p.current.Type.String())
+				}
+
+				fieldName = fmt.Sprintf(`"%s"."%s"`, firstPart, p.current.Value)
+				p.advance()
+			} else {
+				// This is just a quoted field name "Field"
+				fieldName = fmt.Sprintf(`"%s"`, firstPart)
 			}
-			p.advance() // consume dot
-
-			if p.current.Type != TOKEN_STRING && p.current.Type != TOKEN_IDENT {
-				return fmt.Errorf("expected field name after '.' in GROUP BY, got %s", p.current.Type.String())
-			}
-
-			fieldName = fmt.Sprintf(`"%s"."%s"`, bundleName, p.current.Value)
-			p.advance()
 		} else if p.current.Type == TOKEN_IDENT {
 			// Unqualified identifier
 			fieldName = p.current.Value

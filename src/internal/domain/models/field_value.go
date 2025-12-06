@@ -74,12 +74,12 @@ func NewBoolValue(b bool) FieldValue {
 }
 
 func NewDateTimeValue(t time.Time) FieldValue {
-	// Store DateTime preserving timezone information
-	// Note: Previously this converted to UTC, but that breaks AT TIME ZONE functionality
-	// where we need to preserve the timezone for operations like EXTRACT
+	// Convert to UTC for storage consistency
+	// This ensures all DateTime values are stored in a canonical format
+	utc := t.UTC()
 	return FieldValue{
 		Type:        FieldTypeDateTime,
-		DateTimeVal: t,
+		DateTimeVal: utc,
 	}
 }
 
@@ -149,11 +149,11 @@ func (fv FieldValue) AsInterface() interface{} {
 	case FieldTypeBool:
 		return fv.BoolVal
 	case FieldTypeDateTime:
-		// Return RFC3339 formatted string for JSON compatibility
-		return fv.DateTimeVal.Format(time.RFC3339)
+		// Return time.Time directly (string formatting handled by JSON marshaler)
+		return fv.DateTimeVal
 	case FieldTypeDate:
-		// Return YYYY-MM-DD formatted string for JSON compatibility
-		return fv.DateVal.Format("2006-01-02")
+		// Return time.Time directly (string formatting handled by JSON marshaler)
+		return fv.DateVal
 	case FieldTypeInterface:
 		return fv.InterfaceVal
 	case FieldTypeNil:

@@ -165,7 +165,7 @@ func setupPrimaryDatabaseTest() error {
 	bufferPool := buffer.NewBufferPool(1024, 100, fileRegistry, testPrimaryLogger)
 
 	// Create bundle service
-	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, testPrimaryLogger, "json")
+	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, testPrimaryLogger, "binary")
 	if err != nil {
 		return fmt.Errorf("failed to create bundle store: %w", err)
 	}

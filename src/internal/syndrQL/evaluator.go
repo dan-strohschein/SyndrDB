@@ -240,6 +240,26 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 		e.logger.Infof("evaluateBinary: left evaluated to %T, now evaluating right", left)
 	}
 
+	// Handle IS NULL and IS NOT NULL - these don't have a right operand
+	// Check if the left side evaluates to the ::SYNDR_NULL:: magic value
+	if expr.Operator == TOKEN_IS_NULL || expr.Operator == TOKEN_IS_NOT_NULL {
+		// Check if left value is the NULL magic value
+		isNull := false
+		if leftFV, ok := left.(models.FieldValue); ok {
+			// Check if the field value is the magic NULL value
+			strVal, _ := leftFV.AsString()
+			isNull = strVal == "::SYNDR_NULL::"
+		} else if leftStr, ok := left.(string); ok {
+			isNull = leftStr == "::SYNDR_NULL::"
+		}
+
+		if expr.Operator == TOKEN_IS_NULL {
+			return isNull, nil
+		} else {
+			return !isNull, nil
+		}
+	}
+
 	// For logical operators, implement short-circuit evaluation
 	if expr.Operator == TOKEN_AND {
 		// Short-circuit: if left is false, return false without evaluating right
@@ -1002,7 +1022,12 @@ func interfaceToFieldValue(val interface{}) models.FieldValue {
 	case bool:
 		return models.NewBoolValue(v)
 	case time.Time:
-		return models.NewDateTimeValue(v)
+		// Preserve timezone information for AT TIME ZONE operations
+		// Don't convert to UTC if the time has non-UTC timezone
+		return models.FieldValue{
+			Type:        models.FieldTypeDateTime,
+			DateTimeVal: v,
+		}
 	case []interface{}:
 		// TODO: add proper array support when implementing array field types
 		return models.FieldValue{Type: models.FieldTypeNil}

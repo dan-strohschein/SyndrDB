@@ -123,7 +123,7 @@ These features are **blockers** for production use. Without them, users cannot r
 
 ---
 
-### 1.5 Bulk Delete with Referential Integrity
+### 1.5 Bulk Delete with Referential Integrity (DONE!!!)
 
 **Status:** ✅ Implemented (December 3, 2025)  
 **Location:** `src/internal/domain/bundle/bundle_service.go`, `src/internal/domain/bundle/bundle_validator.go`
@@ -171,7 +171,7 @@ These features are **blockers** for production use. Without them, users cannot r
 
 ---
 
-### 1.7 NULL Handling Integration
+### 1.7 NULL Handling Integration (DONE !!!!!)
 
 **Status:** Partially Implemented  
 **Location:** `src/internal/domain/bundle/bundle_null_handler.go`
@@ -262,7 +262,7 @@ These features significantly impact usability but could be added shortly after i
 
 ---
 
-### 2.4 Subqueries/Sub-Selects
+### 2.4 Subqueries/Sub-Selects (Partially DONE - Corelated not yet)
 
 **Status:** Partially Implemented  
 **Location:** `docs/subselect_impl.md`, `src/internal/query/planner/subquery/`

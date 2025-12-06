@@ -39,6 +39,9 @@
 ```
 
 ---
+## Current Version: Pre-alpha MVP of Community Edition
+
+---
 
 ## 🎬 Quick Start
 

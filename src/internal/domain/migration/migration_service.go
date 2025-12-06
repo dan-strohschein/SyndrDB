@@ -137,11 +137,12 @@ func (s *MigrationService) CreateMigration(cmd MigrationCommand) (*Migration, er
 	}
 
 	// Get next version number for this database
-	currentVersion, err := s.GetCurrentVersion(cmd.DatabaseName)
+	// Use max version from all migrations (not just applied ones)
+	maxVersion, err := s.getMaxMigrationVersion(cmd.DatabaseName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current version: %w", err)
+		return nil, fmt.Errorf("failed to get max migration version: %w", err)
 	}
-	nextVersion := currentVersion + 1
+	nextVersion := maxVersion + 1
 
 	// Auto-generate description if not provided
 	description := cmd.Description
@@ -696,6 +697,47 @@ func (s *MigrationService) GetCurrentVersion(databaseName string) (int, error) {
 	return currentVersion, nil
 }
 
+// getMaxMigrationVersion retrieves the highest version number from all migrations for a database
+// Returns 0 if no migrations exist yet
+func (s *MigrationService) getMaxMigrationVersion(databaseName string) (int, error) {
+	filter := map[string]interface{}{
+		"DatabaseName": databaseName,
+	}
+
+	docs, err := s.bundleService.QueryDocuments("primary", "Migrations", filter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to query migrations: %w", err)
+	}
+
+	if len(docs) == 0 {
+		return 0, nil // No migrations exist yet
+	}
+
+	// Find maximum version
+	maxVersion := 0
+	for _, doc := range docs {
+		// Handle various numeric types
+		var version int
+		switch v := doc["Version"].(type) {
+		case float64:
+			version = int(v)
+		case int:
+			version = v
+		case int64:
+			version = int(v)
+		default:
+			s.logger.Warn("Unexpected Version type", zap.Any("type", v))
+			continue
+		}
+
+		if version > maxVersion {
+			maxVersion = version
+		}
+	}
+
+	return maxVersion, nil
+}
+
 // Helper functions
 
 // acquireLock attempts to acquire a migration lock for the database
@@ -859,6 +901,7 @@ func (s *MigrationService) executeCommand(databaseName, command, txID string) er
 
 func (s *MigrationService) migrationToDocument(m *Migration) map[string]interface{} {
 	doc := map[string]interface{}{
+		"DocumentID":          m.MigrationID, // Use MigrationID as DocumentID for easy updates
 		"MigrationID":         m.MigrationID,
 		"Version":             m.Version,
 		"DatabaseName":        m.DatabaseName,
@@ -886,29 +929,14 @@ func (s *MigrationService) migrationToDocument(m *Migration) map[string]interfac
 }
 
 func (s *MigrationService) documentToMigration(doc map[string]interface{}) *Migration {
-	// Convert command arrays from interface{} to []string
-	upCommandsInterface := doc["UpCommands"].([]interface{})
-	upCommands := make([]string, len(upCommandsInterface))
-	for i, v := range upCommandsInterface {
-		upCommands[i] = v.(string)
-	}
-
-	downCommandsInterface := doc["DownCommands"].([]interface{})
-	downCommands := make([]string, len(downCommandsInterface))
-	for i, v := range downCommandsInterface {
-		downCommands[i] = v.(string)
-	}
-
-	// Convert performance warnings from interface{} to []string
-	perfWarningsInterface := doc["PerformanceWarnings"].([]interface{})
-	perfWarnings := make([]string, len(perfWarningsInterface))
-	for i, v := range perfWarningsInterface {
-		perfWarnings[i] = v.(string)
-	}
+	// Convert command arrays - handle both []interface{} and []string
+	upCommands := convertToStringSlice(doc["UpCommands"])
+	downCommands := convertToStringSlice(doc["DownCommands"])
+	perfWarnings := convertToStringSlice(doc["PerformanceWarnings"])
 
 	m := &Migration{
 		MigrationID:         doc["MigrationID"].(string),
-		Version:             int(doc["Version"].(float64)),
+		Version:             convertToInt(doc["Version"]),
 		DatabaseName:        doc["DatabaseName"].(string),
 		Description:         doc["Description"].(string),
 		UpCommands:          upCommands,
@@ -917,7 +945,7 @@ func (s *MigrationService) documentToMigration(doc map[string]interface{}) *Migr
 		Checksum:            doc["Checksum"].(string),
 		AppliedBy:           doc["AppliedBy"].(string),
 		CreatedAt:           doc["CreatedAt"].(time.Time),
-		ExecutionTimeMs:     int64(doc["ExecutionTimeMs"].(float64)),
+		ExecutionTimeMs:     convertToInt64(doc["ExecutionTimeMs"]),
 		ErrorMessage:        doc["ErrorMessage"].(string),
 		PerformanceWarnings: perfWarnings,
 	}
@@ -953,6 +981,64 @@ func (s *MigrationService) validationReportToDocument(r *ValidationReport) map[s
 	}
 
 	return doc
+}
+
+// convertToStringSlice converts various slice types to []string
+// Handles both []interface{} and []string from document deserialization
+func convertToStringSlice(val interface{}) []string {
+	if val == nil {
+		return []string{}
+	}
+
+	// Handle []string directly
+	if strSlice, ok := val.([]string); ok {
+		return strSlice
+	}
+
+	// Handle []interface{}
+	if ifaceSlice, ok := val.([]interface{}); ok {
+		result := make([]string, len(ifaceSlice))
+		for i, v := range ifaceSlice {
+			if str, ok := v.(string); ok {
+				result[i] = str
+			}
+		}
+		return result
+	}
+
+	return []string{}
+}
+
+// convertToInt safely converts various numeric types to int
+func convertToInt(val interface{}) int {
+	switch v := val.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case float32:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+// convertToInt64 safely converts various numeric types to int64
+func convertToInt64(val interface{}) int64 {
+	switch v := val.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case float32:
+		return int64(v)
+	default:
+		return 0
+	}
 }
 
 // Placeholder utility functions

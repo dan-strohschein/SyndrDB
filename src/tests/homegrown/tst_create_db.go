@@ -146,7 +146,7 @@ func StandupTestDatabaseService() (*database.DatabaseService, *databasestore.Dat
 	}
 
 	bufferPool := buffer.NewBufferPool(args.BundleBufferSize, buffer.DefaultPageSize, fileRegistry, ColorLogger.Sugar())
-	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, ColorLogger.Sugar(), "json")
+	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, ColorLogger.Sugar(), "binary")
 	if err != nil {
 		ColorLogger.Info(HighlightRed(fmt.Sprintf("Failed to create bundle store: %v", err)))
 		return nil, nil, err

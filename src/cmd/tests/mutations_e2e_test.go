@@ -97,6 +97,8 @@ func (m *mockDatabaseStore) GetAllDatabases() ([]*models.Database, error) {
 
 // setupGraphQLTestEnvironment creates a complete test environment for GraphQL mutations
 func setupGraphQLTestEnvironment(t *testing.T) *TestEnvironment {
+	EnsureTestIsolation(t)
+	
 	// Create temporary directory
 	tmpDir, err := os.MkdirTemp("", "graphql_mutations_test_")
 	require.NoError(t, err, "Failed to create temp directory")

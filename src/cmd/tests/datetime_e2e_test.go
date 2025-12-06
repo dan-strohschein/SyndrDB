@@ -31,6 +31,7 @@ import (
 
 func setupTestFixture(t *testing.T) *TestFixture {
 	t.Helper()
+	EnsureTestIsolation(t)
 
 	fixture := setupFullServerTB(t)
 
