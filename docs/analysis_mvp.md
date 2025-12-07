@@ -231,7 +231,7 @@ For 6+ bundles with violations, displays top 5 plus "... and X more bundles"
 
 These features significantly impact usability but could be added shortly after initial launch.
 
-### 2.1 Views (Regular and Materialized)
+### 2.1 Views (Regular and Materialized) (DONE !!!)
 
 **Status:** Documented, Not Implemented  
 **Location:** `docs/views_impl.md`

@@ -44,8 +44,37 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	if !db.IsValidDatabaseName(dbCommand.DatabaseName) {
 		return nil, fmt.Errorf("invalid database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", dbCommand.DatabaseName)
 	}
-	// Execute the database command
-	newDb, err := serviceManager.DatabaseService.AddDatabase(*dbCommand)
+
+	// Execute the database creation with WAL logging
+	var newDb *models.Database
+	if serviceManager.WALManager != nil {
+		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+			// Create the database
+			var createErr error
+			newDb, createErr = serviceManager.DatabaseService.AddDatabase(*dbCommand)
+			if createErr != nil {
+				return createErr
+			}
+
+			// Log to WAL with database metadata
+			walData := map[string]interface{}{
+				"database_name": dbCommand.DatabaseName,
+				"database_id":   newDb.DatabaseID,
+				"created_at":    time.Now(),
+			}
+
+			logErr := serviceManager.WALManager.LogDatabaseCreate(txID, dbCommand.DatabaseName, walData)
+			if logErr != nil {
+				return fmt.Errorf("failed to log database creation to WAL: %w", logErr)
+			}
+
+			return nil
+		})
+	} else {
+		// No WAL manager, execute without logging
+		newDb, err = serviceManager.DatabaseService.AddDatabase(*dbCommand)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("error creating database: %v", err)
 	}

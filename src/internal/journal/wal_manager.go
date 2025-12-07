@@ -287,6 +287,32 @@ func (wm *WALManager) LogIndexDrop(txID, bundleName, indexName string, indexData
 	return nil
 }
 
+// LogDatabaseCreate logs a database creation operation to the WAL.
+// This records the creation of a new database, preserving the transaction
+// history for future crash recovery and audit purposes.
+// Parameters:
+//   - txID: The transaction ID this operation belongs to
+//   - databaseName: The name of the database being created
+//   - databaseData: The database metadata and configuration
+//
+// Returns: error if marshaling fails or WAL logging fails
+func (wm *WALManager) LogDatabaseCreate(txID, databaseName string, databaseData interface{}) error {
+	afterData, err := json.Marshal(databaseData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal database data: %w", err)
+	}
+
+	metadata := fmt.Sprintf(`{"database_name":"%s","operation":"CREATE_DATABASE"}`, databaseName)
+
+	err = wm.wal.LogOperation(txID, OpCreateDatabase, databaseName, "", "", string(afterData), metadata)
+	if err != nil {
+		return fmt.Errorf("failed to log database create: %w", err)
+	}
+
+	wm.logger.Debugf("Logged database create: database=%s, tx=%s", databaseName, txID)
+	return nil
+}
+
 // LogRelationshipDrop logs a relationship drop operation to the WAL.
 // This records the removal of a relationship metadata from a bundle, preserving the transaction
 // history for future crash recovery and audit purposes.
