@@ -141,7 +141,7 @@ type FileHeader struct {
 //   - *BTreeFileManager: The created file manager instance
 //   - error: Any error that occurred during creation
 func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logger *zap.SugaredLogger) (*BTreeFileManager, error) {
-	logger.Infof("DEBUG: NewBTreeFileManager called with filePath=%s, pageSize=%d, debugMode=%t", filePath, pageSize, debugMode)
+	//logger.Infof("DEBUG: NewBTreeFileManager called with filePath=%s, pageSize=%d, debugMode=%t", filePath, pageSize, debugMode)
 
 	if filePath == "" {
 		return nil, fmt.Errorf("file path cannot be empty")
@@ -163,10 +163,10 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 	}
 
 	// Check if file exists
-	logger.Infof("DEBUG: Checking if file exists: %s", filePath)
+	//logger.Infof("DEBUG: Checking if file exists: %s", filePath)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		// Create new file
-		logger.Infof("DEBUG: File does not exist, creating new file")
+		//logger.Infof("DEBUG: File does not exist, creating new file")
 		if pageSize == 0 {
 			return nil, fmt.Errorf("page size must be specified for new files")
 		}
@@ -174,10 +174,10 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 		if err := fm.createNewFile(); err != nil {
 			return nil, fmt.Errorf("failed to create new file: %w", err)
 		}
-		logger.Infof("DEBUG: New file created successfully")
+		//logger.Infof("DEBUG: New file created successfully")
 	} else {
 		// Open existing file
-		logger.Infof("DEBUG: File exists, opening existing file")
+		//logger.Infof("DEBUG: File exists, opening existing file")
 		if err := fm.openExistingFile(); err != nil {
 			return nil, fmt.Errorf("failed to open existing file: %w", err)
 		}
@@ -186,7 +186,7 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 		if pageSize == 0 {
 			fm.pageSize = fm.fileHeader.PageSize
 		}
-		logger.Infof("DEBUG: Existing file opened successfully")
+		//logger.Infof("DEBUG: Existing file opened successfully")
 	}
 
 	logger.Infof("Successfully created BTree file manager for: %s (pageSize: %d, debugMode: %t)",

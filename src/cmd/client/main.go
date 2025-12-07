@@ -218,7 +218,7 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 				command := inputBuffer.String()
 
 				// For debugging
-				fmt.Printf("Debug: Sending command: %q\n", command)
+				//fmt.Printf("Debug: Sending command: %q\n", command)
 
 				// Reset the buffer for next command
 				inputBuffer.Reset()

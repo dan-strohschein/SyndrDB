@@ -213,7 +213,7 @@ func (d *DatabaseStorageEngine) LoadDatabaseIntoMemory(database *models.Database
 	// Memory map the file
 	data, err := unix.Mmap(int(dbFile.Fd()), 0, fileSize, syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
-		fmt.Printf("Failed to memory map file: %v\n", err)
+		//fmt.Printf("Failed to memory map file: %v\n", err)
 		return nil, nil, err
 	}
 	defer unix.Munmap(data)

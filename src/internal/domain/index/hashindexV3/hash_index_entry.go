@@ -341,16 +341,16 @@ func DeserializeEntry(data []byte) (*HashIndexEntry, int, error) {
 	expectedChecksum := entry.computeChecksum()
 	if entry.Checksum != expectedChecksum {
 		// DEBUG: Log all fields used in checksum computation
-		fmt.Printf("CHECKSUM MISMATCH DEBUG:\n")
-		fmt.Printf("  Stored checksum: 0x%X\n", entry.Checksum)
-		fmt.Printf("  Computed checksum: 0x%X\n", expectedChecksum)
-		fmt.Printf("  Sequence: %d\n", entry.Sequence)
-		fmt.Printf("  HashValue: 0x%X\n", entry.HashValue)
-		fmt.Printf("  BucketNum: %d\n", entry.BucketNum)
-		fmt.Printf("  PageID: %d\n", entry.PageID)
-		fmt.Printf("  Deleted: %v\n", entry.Deleted)
-		fmt.Printf("  KeyValue: %q (len=%d)\n", entry.KeyValue, len(entry.KeyValue))
-		fmt.Printf("  DocumentID: %q (len=%d)\n", entry.DocumentID, len(entry.DocumentID))
+		//fmt.Printf("CHECKSUM MISMATCH DEBUG:\n")
+		//fmt.Printf("  Stored checksum: 0x%X\n", entry.Checksum)
+		//fmt.Printf("  Computed checksum: 0x%X\n", expectedChecksum)
+		//fmt.Printf("  Sequence: %d\n", entry.Sequence)
+		//fmt.Printf("  HashValue: 0x%X\n", entry.HashValue)
+		//fmt.Printf("  BucketNum: %d\n", entry.BucketNum)
+		//fmt.Printf("  PageID: %d\n", entry.PageID)
+		//fmt.Printf("  Deleted: %v\n", entry.Deleted)
+		//fmt.Printf("  KeyValue: %q (len=%d)\n", entry.KeyValue, len(entry.KeyValue))
+		//fmt.Printf("  DocumentID: %q (len=%d)\n", entry.DocumentID, len(entry.DocumentID))
 
 		return nil, 0, fmt.Errorf("checksum mismatch: stored=0x%X, computed=0x%X",
 			entry.Checksum, expectedChecksum)

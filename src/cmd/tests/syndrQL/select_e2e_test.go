@@ -15,6 +15,7 @@ import (
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
+	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
@@ -247,6 +248,12 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 	// Initialize unified query planner
 	unifiedPlanner := planner.NewUnifiedQueryPlanner(sugar, bundleService)
 
+	// Initialize Migration service (same as production)
+	migrationConfig := migration.LoadConfigFromSettings(globalSettings)
+	bundleServiceAdapter := server.NewBundleServiceAdapter(bundleService, databaseService, walManager, sugar)
+	migrationServiceCore := migration.NewMigrationService(bundleServiceAdapter, migrationConfig, sugar.Desugar())
+	migrationService := server.NewMigrationServiceAdapter(migrationServiceCore, sugar)
+
 	serviceManager := &server.ServiceManager{
 		DatabaseService:        databaseService,
 		BundleService:          bundleService,
@@ -256,7 +263,7 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 		GraphQLProcessor:       nil,
 		UserService:            userService,
 		PermissionService:      permissionService,
-		MigrationService:       nil,
+		MigrationService:       migrationService,
 		SessionManager:         sessionManager,
 		ActiveConnections:      make(map[string]*server.Connection),
 		UnifiedPlanner:         unifiedPlanner,

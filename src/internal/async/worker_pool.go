@@ -60,8 +60,8 @@ func NewWorkerPool(config WorkerPoolConfig) *WorkerPool {
 	if errorHandler == nil {
 		errorHandler = func(err error, op AsyncOperation) {
 			// TODO: I need to add proper logging here once I integrate with the main logger
-			fmt.Printf("Worker pool error: %v (operation: %s, sequence: %d)\n",
-				err, op.GetType(), op.GetSequence())
+			//fmt.Printf("Worker pool error: %v (operation: %s, sequence: %d)\n",
+			//	err, op.GetType(), op.GetSequence())
 		}
 	}
 

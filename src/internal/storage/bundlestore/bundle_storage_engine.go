@@ -235,7 +235,7 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 
 func testRawBundleData(data []byte) {
 	// convert the []bytes to ascii and print it to the screen
-	fmt.Println(string(data))
+	//fmt.Println(string(data))
 }
 
 // Helper functions for parsing bundle metadata
@@ -321,7 +321,7 @@ func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bu
 	// Memory map the file
 	data, err := unix.Mmap(int(bundleFile.Fd()), 0, fileSize, syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
-		fmt.Printf("Failed to memory map file: %v\n", err)
+		//fmt.Printf("Failed to memory map file: %v\n", err)
 		return nil, nil, err
 	}
 	defer unix.Munmap(data)
@@ -1233,19 +1233,19 @@ func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 	defer b.bufferMutex.Unlock()
 
 	// ALWAYS log this to debug the issue
-	b.logger.Infof("DEBUG: CloseWriteBuffer called for bundle '%s'", bundleName)
+	//b.logger.Infof("DEBUG: CloseWriteBuffer called for bundle '%s'", bundleName)
 
 	if buffer, exists := b.writeBuffers[bundleName]; exists {
-		b.logger.Infof("DEBUG: Found write buffer for bundle '%s', closing it...", bundleName)
+		//b.logger.Infof("DEBUG: Found write buffer for bundle '%s', closing it...", bundleName)
 		if err := buffer.Close(); err != nil {
 			b.logger.Warnf("Failed to close write buffer for bundle %s: %v", bundleName, err)
 			return err
 		}
 		// Remove from map so next write creates a fresh buffer
 		delete(b.writeBuffers, bundleName)
-		b.logger.Infof("DEBUG: Successfully closed and removed write buffer for bundle '%s'", bundleName)
+		//b.logger.Infof("DEBUG: Successfully closed and removed write buffer for bundle '%s'", bundleName)
 	} else {
-		b.logger.Infof("DEBUG: No write buffer found for bundle '%s' - nothing to close", bundleName)
+		//b.logger.Infof("DEBUG: No write buffer found for bundle '%s' - nothing to close", bundleName)
 	}
 
 	return nil
@@ -1286,15 +1286,15 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 		return nil, 0, fmt.Errorf("failed to get file info: %w", err)
 	}
 
-	b.logger.Infof("DEBUG: readDocumentRange - file '%s' size: %d bytes", filePath, fileInfo.Size())
+	//b.logger.Infof("DEBUG: readDocumentRange - file '%s' size: %d bytes", filePath, fileInfo.Size())
 
 	fileData := make([]byte, fileInfo.Size())
-	bytesRead, err := file.Read(fileData)
+	_, err = file.Read(fileData)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	b.logger.Infof("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
+	//b.logger.Infof("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
 
 	// Parse documents with range limiting
 	pageDocuments, totalCount, err := b.parseAppendedDocumentsRange(fileData, startIndex, endIndex)
@@ -1352,7 +1352,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 
 	// DEBUG: Log parsing start
 	if b.logger != nil {
-		b.logger.Infof("DEBUG: parseAppendedDocumentsRange called with data size %d bytes, range [%d, %d)", len(data), startIndex, endIndex)
+		//b.logger.Infof("DEBUG: parseAppendedDocumentsRange called with data size %d bytes, range [%d, %d)", len(data), startIndex, endIndex)
 	}
 
 	// CRITICAL FIX: Skip bundle metadata header if present
@@ -1364,7 +1364,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 			metadataSize := binary.LittleEndian.Uint32(data[4:8])
 			offset = int(8 + metadataSize) // Skip 8-byte header + BSON data
 			if b.logger != nil {
-				b.logger.Infof("DEBUG: Skipping bundle metadata header: magic=0x%X, size=%d, new offset=%d", magic, metadataSize, offset)
+				//b.logger.Infof("DEBUG: Skipping bundle metadata header: magic=0x%X, size=%d, new offset=%d", magic, metadataSize, offset)
 			}
 		}
 	}
@@ -1373,7 +1373,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 		// Need at least 8 bytes for header
 		if offset+8 > len(data) {
 			if b.logger != nil {
-				b.logger.Infof("DEBUG: Stopping parse at offset %d (not enough bytes for header)", offset)
+				//b.logger.Infof("DEBUG: Stopping parse at offset %d (not enough bytes for header)", offset)
 			}
 			break
 		}
@@ -1384,14 +1384,14 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 
 		// DEBUG: Log what we found
 		if b.logger != nil {
-			if magic == 0xDEADBEEF {
-				b.logger.Infof("DEBUG: Found DOCUMENT at offset %d, size %d", offset, size)
-			} else if magic == 0xDEADDEAD {
-				b.logger.Infof("DEBUG: Found TOMBSTONE at offset %d, size %d", offset, size)
-			} else {
-				// Log unknown magic numbers too
-				b.logger.Infof("DEBUG: Found UNKNOWN magic 0x%X at offset %d, size %d", magic, offset, size)
-			}
+			//if magic == 0xDEADBEEF {
+			//	b.logger.Infof("DEBUG: Found DOCUMENT at offset %d, size %d", offset, size)
+			//} else if magic == 0xDEADDEAD {
+			//	b.logger.Infof("DEBUG: Found TOMBSTONE at offset %d, size %d", offset, size)
+			//} else {
+			//	// Log unknown magic numbers too
+			//	b.logger.Infof("DEBUG: Found UNKNOWN magic 0x%X at offset %d, size %d", magic, offset, size)
+			//}
 		}
 
 		// Handle document records
@@ -1538,7 +1538,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 
 			// DEBUG: Always log deletion marker processing
 			if b.logger != nil {
-				b.logger.Infof("DEBUG: Found deletion marker at offset %d, size %d bytes", offset, size)
+				//b.logger.Infof("DEBUG: Found deletion marker at offset %d, size %d bytes", offset, size)
 			}
 
 			// Decode deletion marker using fast binary format
@@ -1551,7 +1551,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 			}
 
 			if b.logger != nil {
-				b.logger.Infof("DEBUG: Decoded deletion marker: %+v", deletionMap)
+				//b.logger.Infof("DEBUG: Decoded deletion marker: %+v", deletionMap)
 			}
 
 			if documentID, ok := deletionMap["DocumentID"].(string); ok && documentID != "" {
@@ -1561,11 +1561,11 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 				delete(pageDocuments, documentID)
 
 				if b.logger != nil {
-					b.logger.Infof("DEBUG: Marked document %s as deleted (total deleted: %d)", documentID, len(deletedDocuments))
+					//b.logger.Infof("DEBUG: Marked document %s as deleted (total deleted: %d)", documentID, len(deletedDocuments))
 				}
 			} else {
 				if b.logger != nil {
-					b.logger.Warnf("DEBUG: Deletion marker missing DocumentID or wrong type: %+v", deletionMap)
+					//b.logger.Warnf("DEBUG: Deletion marker missing DocumentID or wrong type: %+v", deletionMap)
 				}
 			}
 

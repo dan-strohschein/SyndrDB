@@ -7,10 +7,12 @@ import (
 	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
+	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/registry"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -117,10 +119,11 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		// Register planner with bundle service for schema change invalidation
 		bundle.SetQueryPlanner(unifiedPlanner)
 
-		// TODO: Initialize Migration service here
-		// Example:
-		// migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())
-		// migrationService := migration.NewMigrationService(bundleService, migrationConfig, logger.Desugar())
+		// Initialize Migration service with adapters
+		migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())
+		bundleServiceAdapter := NewBundleServiceAdapter(bundleService, dbService, walManager, logger)
+		migrationServiceCore := migration.NewMigrationService(bundleServiceAdapter, migrationConfig, logger.Desugar())
+		migrationService := NewMigrationServiceAdapter(migrationServiceCore, logger)
 
 		instance = &ServiceManager{
 			DatabaseService:        dbService,
@@ -131,7 +134,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			GraphQLProcessor:       graphqlProcessor,
 			UserService:            userService,
 			PermissionService:      permissionService,
-			MigrationService:       nil, // TODO: Set to migrationService once initialized
+			MigrationService:       migrationService,
 			UnifiedPlanner:         unifiedPlanner,
 			logger:                 logger,
 		}
@@ -146,6 +149,9 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 				logger.Info("ServiceManager initialized with GraphQL support")
 			} else {
 				logger.Info("ServiceManager initialized without GraphQL support")
+			}
+			if migrationService != nil {
+				logger.Info("ServiceManager initialized with Migration service")
 			}
 		}
 	})

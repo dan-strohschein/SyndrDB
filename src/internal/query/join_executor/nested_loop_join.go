@@ -110,12 +110,12 @@ func (nljs *NestedLoopJoinStrategy) Execute(request *JoinRequest) (*JoinResult, 
 	outerKey, innerKey := nljs.getJoinKeys(request.Conditions, swapped)
 
 	// DEBUG: Log join configuration
-	nljs.logger.Infof("JOIN DEBUG: Outer bundle: %s, Inner bundle: %s, Swapped: %t",
-		outerBundle.GetName(), innerBundle.GetName(), swapped)
-	nljs.logger.Infof("JOIN DEBUG: Outer key: '%s', Inner key: '%s'", outerKey, innerKey)
-	nljs.logger.Infof("JOIN DEBUG: Original join condition: %s %s %s",
-		request.Conditions[0].LeftKey, request.Conditions[0].Operator,
-		request.Conditions[0].RightKey)
+	//nljs.logger.Infof("JOIN DEBUG: Outer bundle: %s, Inner bundle: %s, Swapped: %t",
+	//	outerBundle.GetName(), innerBundle.GetName(), swapped)
+	//nljs.logger.Infof("JOIN DEBUG: Outer key: '%s', Inner key: '%s'", outerKey, innerKey)
+	//nljs.logger.Infof("JOIN DEBUG: Original join condition: %s %s %s",
+	//	request.Conditions[0].LeftKey, request.Conditions[0].Operator,
+	//	request.Conditions[0].RightKey)
 
 	// Pre-load inner loop documents for repeated access
 	innerDocs := innerBundle.GetAllDocuments()

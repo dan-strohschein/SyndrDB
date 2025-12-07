@@ -425,7 +425,7 @@ func (bt *BTreeFile) evictPage() {
 				if err := bt.writePageToDisk(pageNum, page); err != nil {
 					// Log the error but continue with eviction
 					// In production, you might want different error handling
-					fmt.Printf("Error writing page %d to disk: %v\n", pageNum, err)
+					//fmt.Printf("Error writing page %d to disk: %v\n", pageNum, err)
 				}
 			}
 

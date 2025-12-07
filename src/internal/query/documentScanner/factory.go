@@ -179,7 +179,7 @@ type BundleAdapter struct {
 func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterface, logger *zap.SugaredLogger) *BundleAdapter {
 	// SAFETY: Log bundle metadata immediately to diagnose potential infinite loop causes
 	if bundle != nil {
-		logger.Infof("DEBUG: Creating NEW BundleAdapter for bundle '%s' (instance %p)", bundle.Name, bundle)
+		//logger.Infof("DEBUG: Creating NEW BundleAdapter for bundle '%s' (instance %p)", bundle.Name, bundle)
 		// logger.Infof("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
 		// logger.Infof("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
 		// logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
@@ -207,7 +207,7 @@ func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterfac
 		logger:        logger,
 	}
 
-	logger.Infof("DEBUG: Created BundleAdapter instance %p with fresh cachedPages map %p", adapter, adapter.cachedPages)
+	//logger.Infof("DEBUG: Created BundleAdapter instance %p with fresh cachedPages map %p", adapter, adapter.cachedPages)
 
 	return adapter
 }

@@ -298,7 +298,7 @@ func (sa *SecurityAuditor) flushBuffer() {
 	defer sa.bufferMutex.Unlock()
 
 	if len(sa.eventBuffer) == 0 {
-		fmt.Println(" The event buffer is empty, nothing to flush")
+		//fmt.Println(" The event buffer is empty, nothing to flush")
 		return
 	}
 

@@ -30,7 +30,7 @@ func (hi *HashIndexFile) ReadPage(pageNum uint32) (*HashIndexPage, error) {
 				return nil, fmt.Errorf("INSERT.ReadPage2:: failed to open hash index file: %w", file_err)
 			}
 		} else {
-			fmt.Println("File is open and valid.")
+			//fmt.Println("File is open and valid.")
 		}
 	}
 
@@ -76,7 +76,7 @@ func (hi *HashIndexFile) WritePage(pageNum uint32, page *HashIndexPage) error {
 	}
 
 	// Log all page writes for debugging
-	fmt.Printf("WRITE PAGE: pageNum=%d, pageType=%d\n", pageNum, page.PageType)
+	//fmt.Printf("WRITE PAGE: pageNum=%d, pageType=%d\n", pageNum, page.PageType)
 
 	// Serialize the page
 	page.PageNum = pageNum
@@ -175,7 +175,7 @@ func (hi *HashIndexFile) TempReadMetaPage() (*HashIndexMetadata, error) {
 	}
 
 	// Print raw bytes for debugging
-	fmt.Printf("RAW DATA: % x\n", pageData)
+	//fmt.Printf("RAW DATA: % x\n", pageData)
 
 	// Parse the metadata from the page
 	return nil, nil
@@ -204,7 +204,7 @@ func (hi *HashIndexFile) ReadMetaPage() (*HashIndexMetadata, error) {
 	binary.Read(reader, binary.LittleEndian, &nextPage)
 	binary.Read(reader, binary.LittleEndian, &itemCount)
 	binary.Read(reader, binary.LittleEndian, &freeSpace)
-	fmt.Printf("Read meta page: type=%d, num=%d, next=%d, items=%d, free=%d\n", pageType, pageNum, nextPage, itemCount, freeSpace)
+	//fmt.Printf("Read meta page: type=%d, num=%d, next=%d, items=%d, free=%d\n", pageType, pageNum, nextPage, itemCount, freeSpace)
 	// Read current time
 	var timeLen uint32
 	binary.Read(reader, binary.LittleEndian, &timeLen)
@@ -217,7 +217,7 @@ func (hi *HashIndexFile) ReadMetaPage() (*HashIndexMetadata, error) {
 
 	marker := make([]byte, markerLen)
 	reader.Read(marker)
-	fmt.Println("Marker:", string(marker))
+	//fmt.Println("Marker:", string(marker))
 	if string(marker) != "METADATA" {
 		return nil, fmt.Errorf("invalid metadata marker: %s", string(marker))
 	}

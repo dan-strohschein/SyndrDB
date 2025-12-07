@@ -4092,7 +4092,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		return fmt.Errorf("failed to filter documents: %w", err)
 	}
 
-	s.logger.Infof("[REFINT-DEBUG] After GetDocumentsByFilter: found %d documents matching WHERE '%s'", len(filteredDocs), docCommand.WhereClause)
+	//s.logger.Infof("[REFINT-DEBUG] After GetDocumentsByFilter: found %d documents matching WHERE '%s'", len(filteredDocs), docCommand.WhereClause)
 
 	if args.Debug {
 		s.logger.Infof("Updating %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
@@ -5598,14 +5598,14 @@ func (s *BundleService) RemoveDocumentScanner(bundleName string) {
 	s.scannerMutex.Lock()
 	defer s.scannerMutex.Unlock()
 
-	s.logger.Infof("DEBUG: RemoveDocumentScanner called for bundle '%s'", bundleName)
+	//s.logger.Infof("DEBUG: RemoveDocumentScanner called for bundle '%s'", bundleName)
 	if scanner, exists := s.bundleScanners[bundleName]; exists {
-		s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner EXISTS in map, closing it...")
+		//s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner EXISTS in map, closing it...")
 		scanner.Close()
 		delete(s.bundleScanners, bundleName)
-		s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner REMOVED from map for bundle '%s'", bundleName)
+		//s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner REMOVED from map for bundle '%s'", bundleName)
 	} else {
-		s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner NOT FOUND in map for bundle '%s'", bundleName)
+		//s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner NOT FOUND in map for bundle '%s'", bundleName)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/domain/models"
 
 	"go.uber.org/zap"
@@ -99,17 +100,16 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 	}
 
 	// Create MigrationCommand struct
-	// Note: Using map[string]interface{} to avoid circular dependency with migration package
-	migrationCmd := map[string]interface{}{
-		"DatabaseName": database.Name,
-		"Description":  description,
-		"Commands":     cleanCommands,
-		"DownCommands": []string{}, // Will be auto-generated if possible
-		"CreatedBy":    "system",   // TODO: Get from session/auth context
+	migrationCmd := migration.MigrationCommand{
+		DatabaseName: database.Name,
+		Description:  description,
+		Commands:     cleanCommands,
+		DownCommands: []string{}, // Will be auto-generated if possible
+		CreatedBy:    "system",   // TODO: Get from session/auth context
 	}
 
 	// Delegate to migration service
-	migration, err := serviceManager.MigrationService.CreateMigration(migrationCmd)
+	migrationResult, err := serviceManager.MigrationService.CreateMigration(migrationCmd)
 	if err != nil {
 		logger.Errorf("Failed to create migration: %v", err)
 		return nil, fmt.Errorf("failed to create migration: %w", err)
@@ -119,7 +119,7 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 	return map[string]interface{}{
 		"status":    "success",
 		"message":   "Migration created successfully",
-		"migration": migration,
+		"migration": migrationResult,
 	}, nil
 }
 
