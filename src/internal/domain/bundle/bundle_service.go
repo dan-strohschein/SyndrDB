@@ -1481,6 +1481,12 @@ func (s *BundleService) forceFlushIndexUpdates() {
 
 func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db *models.Database, bundleCommand *models.BundleCommand) (*models.Bundle, error) {
 	args := settings.GetSettings()
+
+	// Validate bundle name (includes _mv_ prefix check)
+	if err := s.validateBundleName(bundleCommand.BundleName); err != nil {
+		return nil, fmt.Errorf("invalid bundle name '%s': %w", bundleCommand.BundleName, err)
+	}
+
 	// Check if the bundle already exists
 	if _, err := s.GetBundleByName(db, bundleCommand.BundleName); err == nil {
 		return nil, fmt.Errorf("bundle '%s' already exists", bundleCommand.BundleName)
@@ -2212,6 +2218,11 @@ func (s *BundleService) RenameBundle(database *models.Database, bundle *models.B
 func (s *BundleService) validateBundleName(name string) error {
 	if name == "" {
 		return fmt.Errorf("bundle name cannot be empty")
+	}
+
+	// Check for reserved _mv_ prefix (reserved for materialized views)
+	if strings.HasPrefix(name, "_mv_") {
+		return fmt.Errorf("bundle names cannot contain '_mv_' prefix (reserved for materialized views). Please choose a different bundle name")
 	}
 
 	// Bundle names should start with a letter and contain only alphanumeric characters and underscores

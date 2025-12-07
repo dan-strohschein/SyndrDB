@@ -348,6 +348,44 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END MIGRATION SYSTEM BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// VIEW SYSTEM BUNDLE
+	// ==============================================================
+
+	// create views bundle - system catalog for database views
+	// This is the authoritative source of truth for all views (regular and materialized)
+	views_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":        {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"ViewName":          {Name: "ViewName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"DatabaseName":      {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Definition":        {Name: "Definition", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Type":              {Name: "Type", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"CreatedAt":         {Name: "CreatedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"CreatedBy":         {Name: "CreatedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"LastRefreshed":     {Name: "LastRefreshed", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"ColumnCount":       {Name: "ColumnCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"ReferencedBundles": {Name: "ReferencedBundles", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "[]"},
+			"DataBundleName":    {Name: "DataBundleName", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+		},
+	}
+	views_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "Views",
+		DocumentStructure: views_docStructure,
+		Documents:         &map[string]models.Document{},
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, views_Bundle)
+
+	// ==============================================================
+	// END VIEW SYSTEM BUNDLE
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 
@@ -478,6 +516,7 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	userPermissionsBundle := databaseService.Databases["primary"].Bundles["UserPermissions"]
 	databaseUsersBundle := databaseService.Databases["primary"].Bundles["DatabaseUsers"]
 	userRolesBundle := databaseService.Databases["primary"].Bundles["UserRoles"]
+	viewsBundle := databaseService.Databases["primary"].Bundles["Views"]
 
 	// Database Bundle Document
 	field1 := models.Field{
@@ -745,6 +784,37 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, userRoles_Bundle_doc)
 	if err != nil {
 		logger.Warnf("Warning: Failed to add User Roles document to Bundles bundle: %v", err)
+		return err
+	}
+
+	// Views Bundle Document
+	dbBundleIdField = models.Field{
+		Name:  "BundleID",
+		Value: models.NewStringValue(viewsBundle.BundleID),
+	}
+	field2 = models.Field{
+		Name:  "Name",
+		Value: models.NewStringValue(viewsBundle.Name),
+	}
+	fields = map[string]models.Field{}
+	fields["DatabaseID"] = field1
+	fields["BundleID"] = dbBundleIdField
+	fields["Name"] = field2
+
+	views_Bundle_doc := &models.Document{
+		DocumentID: helpers.GenerateFastUUID(),
+		Fields:     fields,
+	}
+
+	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
+	views_Bundle_doc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: models.NewStringValue(views_Bundle_doc.DocumentID),
+	}
+
+	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, views_Bundle_doc)
+	if err != nil {
+		logger.Warnf("Warning: Failed to add Views document to Bundles bundle: %v", err)
 		return err
 	}
 

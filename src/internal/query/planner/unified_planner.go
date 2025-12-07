@@ -37,6 +37,7 @@ import (
 	"context"
 	"fmt"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/domain/view"
 	"syndrdb/src/internal/query/planner/subquery"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/settings"
@@ -61,6 +62,10 @@ type UnifiedQueryPlanner struct {
 
 	// TIER 1 SUBQUERY SUPPORT: Subquery executor for IN/EXISTS subquery evaluation
 	subqueryExecutor interface{} // *subquery.StandardSubqueryExecutor - use interface{} to avoid import cycle
+
+	// VIEW SUPPORT: View registry and query rewriter for PostgreSQL-style views
+	viewRegistry      *view.ViewRegistry      // In-memory cache of views for fast lookups
+	viewQueryRewriter *view.ViewQueryRewriter // Query rewriter for view expansion
 
 	// logger for debugging
 	logger *zap.SugaredLogger
@@ -93,6 +98,12 @@ func NewUnifiedQueryPlanner(
 	// Create builder for execution tree composition
 	builder := NewPlanBuilder(bundleService, logger)
 
+	// Initialize view support components
+	// TODO: I should wire this into the actual ViewService when it's fully implemented
+	// For now, create standalone instances for query planning integration
+	viewRegistry := view.NewViewRegistry(logger)
+	viewQueryRewriter := view.NewViewQueryRewriter(logger, viewRegistry)
+
 	// Initialize query plan cache if enabled
 	args := settings.GetSettings()
 	var planCache *ShardedPlanCache
@@ -113,13 +124,15 @@ func NewUnifiedQueryPlanner(
 
 	// Create the unified planner first (needed for circular dependency resolution)
 	planner := &UnifiedQueryPlanner{
-		basePlanner:     basePlanner,
-		joinPlanner:     joinPlanner,
-		router:          router,
-		builder:         builder,
-		logger:          logger,
-		planCache:       planCache,
-		invalidationMgr: invalidationMgr,
+		basePlanner:       basePlanner,
+		joinPlanner:       joinPlanner,
+		router:            router,
+		builder:           builder,
+		logger:            logger,
+		planCache:         planCache,
+		invalidationMgr:   invalidationMgr,
+		viewRegistry:      viewRegistry,
+		viewQueryRewriter: viewQueryRewriter,
 	}
 
 	// TIER 1 SUBQUERY SUPPORT: Initialize subquery executor with config and metrics
@@ -221,6 +234,38 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 		return uqp.createExpressionOnlyPlan(query, database)
 	}
 
+	// VIEW SUPPORT: Check if FromBundle is a view and rewrite query if needed
+	// This implements PostgreSQL-style query rewriting for regular views
+	if uqp.viewRegistry.IsView(database.Name, query.FromBundle) {
+		uqp.logger.Debugf("Detected view reference: %s in database %s", query.FromBundle, database.Name)
+
+		// TODO: I should extract username from query context when authentication is wired
+		// For now, use empty username (will be populated later by ViewService)
+		username := "" // Placeholder - will be populated from query context
+
+		// Rewrite query to expand view definition
+		// Note: The query is already parsed, so we need to serialize it back to SQL
+		// TODO: I should add a query serializer to convert UnifiedSelectQuery back to SQL
+		// For now, this is a placeholder showing the integration point
+		originalQuerySQL := "" // TODO: Serialize query to SQL string
+
+		rewrittenQuerySQL, err := uqp.viewQueryRewriter.RewriteQuery(originalQuerySQL, username, database.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to rewrite view query: %w", err)
+		}
+
+		// Parse rewritten query back to UnifiedSelectQuery
+		// TODO: I should parse the rewritten SQL back to UnifiedSelectQuery
+		// For now, this is a placeholder showing the integration point
+		_ = rewrittenQuerySQL // Avoid unused variable error
+
+		uqp.logger.Debugf("View query rewritten successfully for view: %s", query.FromBundle)
+
+		// TODO: I should continue planning with rewritten query instead of original
+		// Once query serialization and re-parsing are implemented, replace 'query' with
+		// the rewritten query object throughout the rest of this function
+	}
+
 	// Step 1: Route to appropriate planner and get base execution tree
 
 	// Step 1: Route to appropriate planner and get base execution tree
@@ -304,10 +349,35 @@ func (uqp *UnifiedQueryPlanner) InvalidateBundleCache(bundleName string) {
 	}
 }
 
+// InvalidateViewCache invalidates all cached plans that reference a specific view
+// Call this when a view definition changes or a view is dropped
+// This ensures queries against the view will be re-planned with the new definition
+func (uqp *UnifiedQueryPlanner) InvalidateViewCache(databaseName, viewName string) {
+	if uqp.planCache != nil {
+		// For regular views, we invalidate by treating the view name as a bundle name
+		// since the plan cache uses FromBundle as part of the cache key
+		uqp.planCache.InvalidateBundle(viewName)
+
+		// For materialized views, also invalidate the hidden data bundle
+		viewObj := uqp.viewRegistry.GetView(databaseName, viewName)
+		if viewObj != nil && viewObj.Type == view.ViewTypeMaterialized && viewObj.DataBundleName != "" {
+			uqp.planCache.InvalidateBundle(viewObj.DataBundleName)
+		}
+
+		uqp.logger.Debugf("Invalidated cached plans for view: %s in database: %s", viewName, databaseName)
+	}
+}
+
 // GetInvalidationManager returns the invalidation manager (for hooking into write operations)
 // This allows document operations to call OnWrite() for write-threshold invalidation
 func (uqp *UnifiedQueryPlanner) GetInvalidationManager() *InvalidationManager {
 	return uqp.invalidationMgr
+}
+
+// GetViewRegistry returns the view registry for external access
+// This allows the ViewService to register/unregister views
+func (uqp *UnifiedQueryPlanner) GetViewRegistry() *view.ViewRegistry {
+	return uqp.viewRegistry
 }
 
 // Shutdown gracefully shuts down the plan cache

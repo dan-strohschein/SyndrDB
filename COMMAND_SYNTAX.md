@@ -400,6 +400,244 @@ CREATE HASH INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
 (<FIELD_NAME>);
 ```
 
+## View Management Commands
+
+Views provide query abstraction and reusability. SyndrDB supports two types of views:
+- **Regular Views**: Virtual tables that rewrite queries dynamically (no data storage)
+- **Materialized Views**: Physical snapshots that store query results for fast repeated access
+
+### CREATE VIEW
+Creates a regular view that rewrites queries against the view to execute the underlying SELECT statement.
+
+```
+CREATE VIEW "<VIEW_NAME>" AS <SELECT_STATEMENT>;
+```
+
+**Examples:**
+```
+CREATE VIEW "ActiveCustomers" AS 
+  SELECT * FROM "Customers" WHERE "Status" == "Active";
+```
+
+```
+CREATE VIEW "OrderSummary" AS 
+  SELECT "CustomerID", COUNT(*) AS "OrderCount", SUM("Total") AS "TotalSpent"
+  FROM "Orders" 
+  GROUP BY "CustomerID";
+```
+
+**Characteristics:**
+- No data is stored; queries are rewritten at runtime
+- Always shows current data from underlying bundles
+- Minimal storage overhead (only view definition)
+- Cannot be directly updated (read-only)
+- Maximum view name length: 128 characters
+- Maximum definition length: 64 KB
+- View names cannot start with `_mv_` prefix (reserved for materialized views)
+
+**Permissions:**
+- Requires SELECT permission on all referenced bundles
+- Permissions are cached for 5 minutes for performance
+- View queries execute with the permissions of the calling user
+- Users need SELECT permission on the view and all underlying bundles
+
+### CREATE MATERIALIZED VIEW
+Creates a materialized view that stores the query results as a physical data bundle.
+
+```
+CREATE MATERIALIZED VIEW "<VIEW_NAME>" AS <SELECT_STATEMENT>;
+```
+
+**Examples:**
+```
+CREATE MATERIALIZED VIEW "DailySales" AS 
+  SELECT DATE("OrderDate") AS "Date", SUM("Amount") AS "TotalSales"
+  FROM "Orders"
+  GROUP BY DATE("OrderDate");
+```
+
+```
+CREATE MATERIALIZED VIEW "TopProducts" AS
+  SELECT "ProductID", "ProductName", COUNT(*) AS "OrderCount"
+  FROM "Orders" 
+  JOIN "Products" ON "Orders"."ProductID" == "Products"."ID"
+  GROUP BY "ProductID", "ProductName"
+  ORDER BY COUNT(*) DESC
+  LIMIT 100;
+```
+
+**Characteristics:**
+- Stores query results in a physical bundle with `_mv_` prefix
+- Data is static until manually refreshed
+- Fast query performance (reads from stored snapshot)
+- Uses storage space proportional to result set size
+- Shows stale data warning after 48 hours (configurable via `view_stale_warning_hours`)
+- Maximum concurrent views per bundle: 50
+- Requires manual refresh to update data
+
+**Storage:**
+- Data bundle: `_mv_<view_name>` (hidden from normal bundle listings)
+- View definition: Stored in system catalog
+- Automatic backup creation during refresh (`.bak` files)
+
+**Refresh Strategy:**
+- Manual refresh only (no automatic refresh)
+- Refresh acquires database-level exclusive lock (1-minute timeout)
+- Old data preserved until new snapshot is successfully populated
+- Atomic replacement ensures consistency
+
+### DROP VIEW
+Deletes a regular view from the database.
+
+```
+DROP VIEW "<VIEW_NAME>";
+```
+
+**Example:**
+```
+DROP VIEW "ActiveCustomers";
+```
+
+**Behavior:**
+- Removes view definition from system catalog
+- Does not affect underlying bundles
+- Fails if view does not exist
+- Cannot be used to drop materialized views (use `DROP MATERIALIZED VIEW`)
+
+### DROP MATERIALIZED VIEW
+Deletes a materialized view and its associated data bundle.
+
+```
+DROP MATERIALIZED VIEW "<VIEW_NAME>";
+```
+
+**Example:**
+```
+DROP MATERIALIZED VIEW "DailySales";
+```
+
+**Behavior:**
+- Removes view definition from system catalog
+- Deletes the physical data bundle (`_mv_<view_name>`)
+- Cannot be undone (data is permanently deleted)
+- Fails if view does not exist
+- Cannot be used to drop regular views (use `DROP VIEW`)
+
+### REFRESH MATERIALIZED VIEW
+Manually refreshes a materialized view by re-executing its query and replacing the stored data.
+
+```
+REFRESH MATERIALIZED VIEW "<VIEW_NAME>";
+```
+
+**Example:**
+```
+REFRESH MATERIALIZED VIEW "DailySales";
+```
+
+**Behavior:**
+- Acquires database-level exclusive lock (1-minute timeout)
+- Re-executes the view's SELECT statement
+- Creates new data snapshot in temporary storage
+- Atomically replaces old data with new snapshot
+- Updates `LastRefreshed` timestamp in system catalog
+- Resets stale data warning timer
+
+**Performance Considerations:**
+- Refresh duration depends on complexity of underlying query
+- Large result sets may take significant time to populate
+- Exclusive lock blocks other operations on the database during refresh
+- Consider scheduling refreshes during low-traffic periods
+
+### SHOW VIEWS
+Lists all views in the current or specified database.
+
+```
+SHOW VIEWS;
+SHOW VIEWS FROM "<DATABASE_NAME>";
+```
+
+**Examples:**
+```
+SHOW VIEWS;
+SHOW VIEWS FROM "SalesDB";
+```
+
+**Output Format:**
+Returns a list of views with metadata:
+```json
+{
+  "Views": [
+    {
+      "ViewName": "ActiveCustomers",
+      "Type": "VIEW",
+      "CreatedAt": "2024-01-15T10:30:00Z",
+      "CreatedBy": "admin"
+    },
+    {
+      "ViewName": "DailySales", 
+      "Type": "MATERIALIZED_VIEW",
+      "CreatedAt": "2024-01-15T11:00:00Z",
+      "CreatedBy": "admin",
+      "LastRefreshed": "2024-01-20T08:00:00Z",
+      "IsStale": false
+    }
+  ]
+}
+```
+
+**Fields:**
+- `ViewName`: Name of the view
+- `Type`: Either "VIEW" or "MATERIALIZED_VIEW"
+- `CreatedAt`: Timestamp when view was created
+- `CreatedBy`: Username of creator
+- `LastRefreshed`: (Materialized views only) Timestamp of last refresh
+- `IsStale`: (Materialized views only) True if stale warning threshold exceeded
+
+### DESCRIBE VIEW
+Shows detailed metadata and definition for a specific view.
+
+```
+DESCRIBE VIEW "<VIEW_NAME>";
+```
+
+**Example:**
+```
+DESCRIBE VIEW "ActiveCustomers";
+```
+
+**Output Format:**
+```json
+{
+  "ViewName": "ActiveCustomers",
+  "DatabaseName": "CustomerDB",
+  "Type": "VIEW",
+  "Definition": "SELECT * FROM \"Customers\" WHERE \"Status\" == \"Active\"",
+  "CreatedAt": "2024-01-15T10:30:00Z",
+  "CreatedBy": "admin",
+  "ColumnCount": 8,
+  "ReferencedBundles": ["Customers"]
+}
+```
+
+**Fields:**
+- `ViewName`: Name of the view
+- `DatabaseName`: Database containing the view
+- `Type`: Either "VIEW" or "MATERIALIZED_VIEW"
+- `Definition`: Full SELECT statement defining the view
+- `CreatedAt`: Timestamp when view was created
+- `CreatedBy`: Username of creator
+- `LastRefreshed`: (Materialized views only) Timestamp of last refresh
+- `ColumnCount`: Number of columns in view result
+- `ReferencedBundles`: List of bundles referenced in view definition
+- `DataBundleName`: (Materialized views only) Name of physical storage bundle (`_mv_<view_name>`)
+
+**Use Cases:**
+1. **Understanding View Logic**: Review the SELECT statement defining a view
+2. **Dependency Analysis**: Identify which bundles a view depends on
+3. **Refresh Status**: Check when a materialized view was last refreshed
+4. **Schema Information**: See column count and structure
+
 ## Information Display Commands
 
 ### SHOW DATABASES

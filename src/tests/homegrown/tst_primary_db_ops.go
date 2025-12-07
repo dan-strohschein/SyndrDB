@@ -224,7 +224,7 @@ func testInitPrimaryBundleCatalogs() error {
 func validateSystemBundlesCreated() error {
 	expectedBundles := []string{
 		"Databases", "Users", "Permissions", "UserPermissions",
-		"DatabaseUsers", "Roles", "UserRoles",
+		"DatabaseUsers", "Roles", "UserRoles", "Views",
 	}
 
 	for _, bundleName := range expectedBundles {

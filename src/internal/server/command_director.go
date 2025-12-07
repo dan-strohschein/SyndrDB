@@ -55,6 +55,13 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	// OPTIMIZATION: Compute lowercase version once to avoid 40+ allocations
 	commandLower := strings.ToLower(command)
 
+	// VIEW COMMANDS: Check for view-related commands early
+	// This includes: CREATE VIEW, CREATE MATERIALIZED VIEW, DROP VIEW, DROP MATERIALIZED VIEW,
+	//                REFRESH MATERIALIZED VIEW, SHOW VIEWS, DESCRIBE VIEW
+	if isViewCommand(commandParts) {
+		return RouteViewCommand(command, commandParts, logger, serviceManager, database, session)
+	}
+
 	// EXPLAIN command - must be checked before SELECT to intercept EXPLAIN SELECT
 	if strings.HasPrefix(commandLower, "explain") {
 		return HandleExplainCommand(ctx, command, database, serviceManager, logger, startTime)
@@ -90,6 +97,9 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 			return ShowBundles(command, database, logger, serviceManager)
 		case "bundle":
 			return ShowBundle(command, database, logger, serviceManager)
+		case "views":
+			// SHOW VIEWS [IN DATABASE "database_name"]
+			return HandleShowViews(command, logger, serviceManager, database)
 		case "sessions":
 			return ShowSessions(command, logger, serviceManager)
 		case "session":

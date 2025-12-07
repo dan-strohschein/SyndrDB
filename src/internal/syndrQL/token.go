@@ -113,6 +113,12 @@ const (
 	TOKEN_DATABASE // DATABASE
 	TOKEN_BUNDLES  // BUNDLES
 
+	// Keywords - Views
+	TOKEN_VIEW         // VIEW
+	TOKEN_VIEWS        // VIEWS
+	TOKEN_MATERIALIZED // MATERIALIZED
+	TOKEN_REFRESH      // REFRESH
+
 	// Keywords - RBAC
 	TOKEN_USER        // USER
 	TOKEN_PASSWORD    // PASSWORD
@@ -322,6 +328,14 @@ func (tt TokenType) String() string {
 		return "DATABASE"
 	case TOKEN_BUNDLES:
 		return "BUNDLES"
+	case TOKEN_VIEW:
+		return "VIEW"
+	case TOKEN_VIEWS:
+		return "VIEWS"
+	case TOKEN_MATERIALIZED:
+		return "MATERIALIZED"
+	case TOKEN_REFRESH:
+		return "REFRESH"
 	case TOKEN_USER:
 		return "USER"
 	case TOKEN_PASSWORD:
@@ -483,6 +497,12 @@ var keywords = map[string]TokenType{
 	"USE":      TOKEN_USE,
 	"DATABASE": TOKEN_DATABASE,
 	"BUNDLES":  TOKEN_BUNDLES,
+
+	// View Keywords
+	"VIEW":         TOKEN_VIEW,
+	"VIEWS":        TOKEN_VIEWS,
+	"MATERIALIZED": TOKEN_MATERIALIZED,
+	"REFRESH":      TOKEN_REFRESH,
 
 	// RBAC Keywords
 	"USER":     TOKEN_USER,

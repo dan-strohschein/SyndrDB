@@ -392,6 +392,15 @@ ghost_cleanup_pause_threshold: 500
 ghost_cleanup_tombstone_ratio: 0.3
 
 # ==============================================================================
+# VIEWS CONFIGURATION
+# ==============================================================================
+
+# Materialized View Stale Warning Threshold
+# Number of hours after last refresh before showing stale data warning (default: 48)
+# Set to 0 to disable stale warnings
+view_stale_warning_hours: 48
+
+# ==============================================================================
 # TLS/SSL CONFIGURATION (Not yet implemented)
 # ==============================================================================
 
