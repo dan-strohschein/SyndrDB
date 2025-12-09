@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"syndrdb/src/internal/domain/bundle"
+	"syndrdb/src/internal/domain/models"
+
 	"go.uber.org/zap"
 )
 
@@ -66,6 +69,9 @@ type BundleServiceInterface interface {
 	// UpdateDocument modifies an existing document by ID
 	UpdateDocument(dbName, bundleName, docID string, updates map[string]interface{}) error
 
+	// UpdateDocumentByField updates documents using a WHERE clause on any field (not just DocumentID)
+	UpdateDocumentByField(dbName, bundleName, fieldName, fieldValue string, updates map[string]interface{}) error
+
 	// DeleteDocument removes a document by ID
 	DeleteDocument(dbName, bundleName, docID string) error
 
@@ -83,6 +89,12 @@ type BundleServiceInterface interface {
 
 	// RollbackTransaction aborts changes
 	RollbackTransaction(txID string) error
+
+	// CreateHashIndex creates a hash index on a bundle
+	CreateHashIndex(dbName, command string) error
+
+	// CreateBTreeIndex creates a B-Tree index on a bundle
+	CreateBTreeIndex(dbName, command string) error
 }
 
 // MigrationService handles all migration operations
@@ -150,6 +162,16 @@ func (s *MigrationService) CreateMigration(cmd MigrationCommand) (*Migration, er
 	if description == "" {
 		description = GenerateDescription(cmd.Commands)
 	}
+
+	// Preprocess commands to extract and defer relationship definitions
+	// CREATE BUNDLE commands with relationships need to be split:
+	// 1. CREATE BUNDLE without relationships (executed first)
+	// 2. UPDATE BUNDLE ADD RELATIONSHIP (executed after both bundles exist)
+	processedCommands, err := s.preprocessRelationshipCommands(cmd.Commands)
+	if err != nil {
+		return nil, fmt.Errorf("failed to preprocess relationship commands: %w", err)
+	}
+	cmd.Commands = processedCommands
 
 	// Auto-generate down commands if not provided and auto-reverse is enabled
 	downCommands := cmd.DownCommands
@@ -264,12 +286,21 @@ func (s *MigrationService) ApplyMigration(databaseName string, version int, forc
 			continue
 		}
 
-		s.logger.Debug("Executing migration command",
+		s.logger.Info("Executing migration command",
 			zap.String("database", databaseName),
 			zap.Int("version", version),
 			zap.Int("commandIndex", i),
-			zap.String("command", cmd),
+			zap.Int("commandLength", len(cmd)),
+			zap.String("commandPreview", truncateString(cmd, 100)),
 		)
+
+		// Log full command for debugging if it contains CREATE BUNDLE
+		if strings.Contains(strings.ToUpper(cmd), "CREATE BUNDLE") {
+			s.logger.Info("[MIGRATION DEBUG] Full CREATE BUNDLE command",
+				zap.Int("commandLength", len(cmd)),
+				zap.String("fullCommand", cmd),
+			)
+		}
 
 		// TODO: Execute command through command director
 		// For now, this is a placeholder - actual command execution
@@ -694,7 +725,7 @@ func (s *MigrationService) GetCurrentVersion(databaseName string) (int, error) {
 		return 0, nil // No migrations applied yet
 	}
 
-	currentVersion := int(docs[0]["CurrentVersion"].(float64))
+	currentVersion := convertToInt(docs[0]["CurrentVersion"])
 	return currentVersion, nil
 }
 
@@ -830,29 +861,62 @@ func (s *MigrationService) updateMigrationStatus(migrationID string, status Migr
 		"ErrorMessage": errorMsg,
 	}
 
-	return s.bundleService.UpdateDocument("primary", "Migrations", migrationID, updates)
+	// Use UpdateDocumentByField to update via MigrationID instead of DocumentID
+	return s.bundleService.UpdateDocumentByField("primary", "Migrations", "MigrationID", migrationID, updates)
 }
 
 // updateMigrationComplete updates migration to APPLIED status with timing info
 func (s *MigrationService) updateMigrationComplete(migrationID string, status MigrationStatus, appliedAt *time.Time, executionTimeMs int) error {
 	updates := map[string]interface{}{
 		"Status":          string(status),
-		"AppliedAt":       appliedAt,
 		"ExecutionTimeMs": executionTimeMs,
 	}
 
-	return s.bundleService.UpdateDocument("primary", "Migrations", migrationID, updates)
+	// Dereference pointer field
+	if appliedAt != nil {
+		updates["AppliedAt"] = *appliedAt
+	}
+
+	s.logger.Info("Updating migration status",
+		zap.String("migrationID", migrationID),
+		zap.String("status", string(status)),
+		zap.Int("executionTimeMs", executionTimeMs),
+	)
+
+	// Use UpdateDocumentByField to update via MigrationID instead of DocumentID
+	// This is necessary because InsertDocument skips the DocumentID field,
+	// so DocumentID != MigrationID in the stored document
+	err := s.bundleService.UpdateDocumentByField("primary", "Migrations", "MigrationID", migrationID, updates)
+	if err != nil {
+		s.logger.Error("Failed to update migration status",
+			zap.String("migrationID", migrationID),
+			zap.Error(err),
+		)
+		return err
+	}
+
+	s.logger.Info("Successfully updated migration status",
+		zap.String("migrationID", migrationID),
+		zap.String("status", string(status)),
+	)
+
+	return nil
 }
 
 // updateMigrationRollback updates migration to ROLLED_BACK status
 func (s *MigrationService) updateMigrationRollback(migrationID string, rolledBackAt *time.Time, executionTimeMs int) error {
 	updates := map[string]interface{}{
 		"Status":          string(ROLLED_BACK),
-		"RolledBackAt":    rolledBackAt,
 		"ExecutionTimeMs": executionTimeMs,
 	}
 
-	return s.bundleService.UpdateDocument("primary", "Migrations", migrationID, updates)
+	// Dereference pointer field
+	if rolledBackAt != nil {
+		updates["RolledBackAt"] = *rolledBackAt
+	}
+
+	// Use UpdateDocumentByField to update via MigrationID instead of DocumentID
+	return s.bundleService.UpdateDocumentByField("primary", "Migrations", "MigrationID", migrationID, updates)
 }
 
 // updateDatabaseVersion updates the current version for a database
@@ -923,7 +987,7 @@ func (s *MigrationService) executeCommand(databaseName, command, txID string) er
 	}
 }
 
-// executeCreateCommand handles CREATE BUNDLE commands
+// executeCreateCommand handles CREATE BUNDLE and CREATE INDEX commands
 func (s *MigrationService) executeCreateCommand(databaseName, command string, parts []string) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("invalid CREATE command: %s", command)
@@ -932,6 +996,15 @@ func (s *MigrationService) executeCreateCommand(databaseName, command string, pa
 	switch strings.ToLower(parts[1]) {
 	case "bundle":
 		return s.executeCreateBundle(databaseName, command)
+	case "hash":
+		// CREATE HASH INDEX ...
+		if len(parts) >= 3 && strings.ToLower(parts[2]) == "index" {
+			return s.executeCreateHashIndex(databaseName, command)
+		}
+		return fmt.Errorf("unsupported CREATE HASH command: %s", command)
+	case "b-index":
+		// CREATE B-INDEX ...
+		return s.executeCreateBTreeIndex(databaseName, command)
 	default:
 		return fmt.Errorf("unsupported CREATE command: %s", command)
 	}
@@ -1077,48 +1150,52 @@ func (s *MigrationService) executeDeleteCommand(databaseName, command string, pa
 // executeCreateBundle creates a new bundle using the bundleService adapter
 // Parses field definitions and delegates to bundleService for actual creation
 func (s *MigrationService) executeCreateBundle(databaseName, command string) error {
-	command = normalizeWhitespace(command)
-
-	// Extract bundle name: CREATE BUNDLE "BundleName"
-	bundleRegex := regexp.MustCompile(`(?i)CREATE\s+BUNDLE\s+"([^"]+)"`)
-	matches := bundleRegex.FindStringSubmatch(command)
-	if len(matches) < 2 {
-		return fmt.Errorf("bundle name not found in CREATE BUNDLE command")
-	}
-	bundleName := matches[1]
-
-	// Extract field definitions if present: WITH FIELDS (...)
-	// If no fields specified, create bundle with empty schema
-	var fields []FieldDefinition
-	if strings.Contains(strings.ToUpper(command), "WITH FIELDS") {
-		fieldsRegex := regexp.MustCompile(`(?i)WITH\s+FIELDS\s*\((.+)\)`)
-		fieldsMatches := fieldsRegex.FindStringSubmatch(command)
-		if len(fieldsMatches) < 2 {
-			return fmt.Errorf("malformed WITH FIELDS section in CREATE BUNDLE command")
-		}
-
-		var err error
-		fields, err = s.parseBundleFieldDefinition(fieldsMatches[1])
-		if err != nil {
-			return fmt.Errorf("failed to parse field definitions: %w", err)
-		}
+	// Use the standard bundle parser to parse the CREATE BUNDLE command
+	// This parser correctly handles positional field format: {"name", "type", required, unique, default}
+	bundleCmd, err := bundle.ParseCreateBundleCommand(command, s.logger.Sugar())
+	if err != nil {
+		return fmt.Errorf("failed to parse CREATE BUNDLE command: %w", err)
 	}
 
 	s.logger.Info("Creating bundle via migration",
 		zap.String("database", databaseName),
-		zap.String("bundle", bundleName),
-		zap.Int("fieldCount", len(fields)),
+		zap.String("bundle", bundleCmd.BundleName),
+		zap.Int("fieldCount", len(bundleCmd.Fields)),
 	)
 
-	// Convert migration FieldDefinition to models.FieldDefinition
-	modelFields := make([]interface{}, len(fields))
-	for i, f := range fields {
-		modelFields[i] = convertToModelField(f)
+	// Call adapter to create bundle
+	adapter, ok := s.bundleService.(interface {
+		CreateBundle(dbName, bundleName string, fields []models.FieldDefinition) error
+	})
+	if !ok {
+		return fmt.Errorf("bundleService does not support CreateBundle operation")
 	}
 
-	// Call adapter to create bundle
-	// Note: Type assertion will be handled by the adapter
-	return fmt.Errorf("CREATE BUNDLE requires type conversion infrastructure (field definition compatibility)")
+	return adapter.CreateBundle(databaseName, bundleCmd.BundleName, bundleCmd.Fields)
+}
+
+// executeCreateHashIndex creates a hash index via migration
+// Format: CREATE HASH INDEX "IndexName" ON BUNDLE "BundleName" WITH FIELDS ({"field", required, unique})
+func (s *MigrationService) executeCreateHashIndex(databaseName, command string) error {
+	s.logger.Info("Creating hash index via migration",
+		zap.String("database", databaseName),
+		zap.String("command", command),
+	)
+
+	// Delegate to bundle service adapter which handles parsing and execution
+	return s.bundleService.CreateHashIndex(databaseName, command)
+}
+
+// executeCreateBTreeIndex creates a B-Tree index via migration
+// Format: CREATE B-INDEX "IndexName" ON BUNDLE "BundleName" WITH FIELDS ({"field", required, unique})
+func (s *MigrationService) executeCreateBTreeIndex(databaseName, command string) error {
+	s.logger.Info("Creating B-Tree index via migration",
+		zap.String("database", databaseName),
+		zap.String("command", command),
+	)
+
+	// Delegate to bundle service adapter which handles parsing and execution
+	return s.bundleService.CreateBTreeIndex(databaseName, command)
 }
 
 // executeDropBundle drops an existing bundle
@@ -1278,21 +1355,27 @@ func convertToModelField(f FieldDefinition) interface{} {
 // Conversion functions
 
 func (s *MigrationService) migrationToDocument(m *Migration) map[string]interface{} {
+	// Serialize command slices to JSON strings for storage
+	// The Migrations bundle schema defines these as STRING type, not arrays
+	upCommandsJSON, _ := json.Marshal(m.UpCommands)
+	downCommandsJSON, _ := json.Marshal(m.DownCommands)
+	perfWarningsJSON, _ := json.Marshal(m.PerformanceWarnings)
+
 	doc := map[string]interface{}{
 		"DocumentID":          m.MigrationID, // Use MigrationID as DocumentID for easy updates
 		"MigrationID":         m.MigrationID,
 		"Version":             m.Version,
 		"DatabaseName":        m.DatabaseName,
 		"Description":         m.Description,
-		"UpCommands":          m.UpCommands,
-		"DownCommands":        m.DownCommands,
+		"UpCommands":          string(upCommandsJSON),
+		"DownCommands":        string(downCommandsJSON),
 		"Status":              string(m.Status),
 		"Checksum":            m.Checksum,
 		"AppliedBy":           m.AppliedBy,
 		"CreatedAt":           m.CreatedAt,
 		"ExecutionTimeMs":     m.ExecutionTimeMs,
 		"ErrorMessage":        m.ErrorMessage,
-		"PerformanceWarnings": m.PerformanceWarnings,
+		"PerformanceWarnings": string(perfWarningsJSON),
 	}
 
 	if m.AppliedAt != nil {
@@ -1308,9 +1391,27 @@ func (s *MigrationService) migrationToDocument(m *Migration) map[string]interfac
 
 func (s *MigrationService) documentToMigration(doc map[string]interface{}) *Migration {
 	// Convert command arrays - handle both []interface{} and []string
+	// DEBUG: Log what type UpCommands actually is
+	if upCmdsRaw, ok := doc["UpCommands"]; ok {
+		s.logger.Info("[MIGRATION DEBUG] UpCommands type from database",
+			zap.String("type", fmt.Sprintf("%T", upCmdsRaw)),
+		)
+	}
+
 	upCommands := convertToStringSlice(doc["UpCommands"])
 	downCommands := convertToStringSlice(doc["DownCommands"])
 	perfWarnings := convertToStringSlice(doc["PerformanceWarnings"])
+
+	s.logger.Info("[MIGRATION DEBUG] Converted commands",
+		zap.Int("upCommandsCount", len(upCommands)),
+	)
+	for i, cmd := range upCommands {
+		s.logger.Info("[MIGRATION DEBUG] UpCommand",
+			zap.Int("index", i),
+			zap.Int("length", len(cmd)),
+			zap.String("preview", truncateString(cmd, 100)),
+		)
+	}
 
 	m := &Migration{
 		MigrationID:         doc["MigrationID"].(string),
@@ -1349,9 +1450,13 @@ func (s *MigrationService) validationReportToDocument(r *ValidationReport) map[s
 		"ValidationResults": r.ValidationResults,
 		"ReportSizeBytes":   r.ReportSizeBytes,
 		"Status":            string(r.Status),
-		"ExpiresAt":         r.ExpiresAt,
 		"MigrationVersion":  r.MigrationVersion,
 		"TargetVersion":     r.TargetVersion,
+	}
+
+	// Dereference pointer fields
+	if r.ExpiresAt != nil {
+		doc["ExpiresAt"] = *r.ExpiresAt
 	}
 
 	if r.ArchivedAt != nil {
@@ -1362,7 +1467,7 @@ func (s *MigrationService) validationReportToDocument(r *ValidationReport) map[s
 }
 
 // convertToStringSlice converts various slice types to []string
-// Handles both []interface{} and []string from document deserialization
+// Handles both []interface{}, []string, and JSON-encoded string arrays from document deserialization
 func convertToStringSlice(val interface{}) []string {
 	if val == nil {
 		return []string{}
@@ -1384,6 +1489,25 @@ func convertToStringSlice(val interface{}) []string {
 		return result
 	}
 
+	// Handle plain string (likely JSON-encoded array or storage serialization)
+	// The storage layer may have converted []string to a single string
+	if str, ok := val.(string); ok {
+		if str == "" {
+			return []string{}
+		}
+
+		// Try to unmarshal as JSON array first
+		var jsonArray []string
+		err := json.Unmarshal([]byte(str), &jsonArray)
+		if err == nil {
+			return jsonArray
+		}
+
+		// If not valid JSON, return single-element array with the string
+		// This handles edge cases where the string is not JSON-encoded
+		return []string{str}
+	}
+
 	return []string{}
 }
 
@@ -1403,6 +1527,83 @@ func convertToInt(val interface{}) int {
 	}
 }
 
+// preprocessRelationshipCommands extracts relationship definitions from CREATE BUNDLE commands
+// and converts them into separate UPDATE BUNDLE ADD RELATIONSHIP commands that execute after
+// all bundles are created. This is necessary because both bundles must exist before a
+// relationship can be established.
+//
+// Input:  ["CREATE BUNDLE Books WITH RELATIONSHIP (Books.AuthorID -> Authors.AuthorID)"]
+// Output: ["CREATE BUNDLE Books", "UPDATE BUNDLE Books ADD RELATIONSHIP (Books.AuthorID -> Authors.AuthorID)"]
+func (s *MigrationService) preprocessRelationshipCommands(commands []string) ([]string, error) {
+	var processedCommands []string
+	var deferredRelationships []string
+
+	for _, cmd := range commands {
+		cmdUpper := strings.ToUpper(strings.TrimSpace(cmd))
+
+		// Check if this is a CREATE BUNDLE command with WITH RELATIONSHIP
+		if strings.HasPrefix(cmdUpper, "CREATE BUNDLE") && strings.Contains(cmdUpper, "WITH RELATIONSHIP") {
+			// Extract bundle name and relationship definition
+			// Pattern: CREATE BUNDLE <name> ... WITH RELATIONSHIP (...)
+
+			// Find the bundle name (word after CREATE BUNDLE)
+			parts := strings.Fields(cmd)
+			if len(parts) < 3 {
+				return nil, fmt.Errorf("invalid CREATE BUNDLE syntax: %s", cmd)
+			}
+			bundleName := strings.Trim(parts[2], "\"'")
+
+			// Find WHERE the WITH RELATIONSHIP clause starts
+			relationshipIdx := strings.Index(cmdUpper, "WITH RELATIONSHIP")
+			if relationshipIdx == -1 {
+				// Should not happen since we checked for it, but be safe
+				processedCommands = append(processedCommands, cmd)
+				continue
+			}
+
+			// Split command into CREATE part (before WITH RELATIONSHIP) and relationship part
+			createPart := strings.TrimSpace(cmd[:relationshipIdx])
+			relationshipPart := strings.TrimSpace(cmd[relationshipIdx:])
+
+			// Add the CREATE BUNDLE command without the relationship
+			processedCommands = append(processedCommands, createPart)
+
+			// Convert to UPDATE BUNDLE ADD RELATIONSHIP command
+			// FROM: WITH RELATIONSHIP (...)
+			// TO:   UPDATE BUNDLE "BundleName" ADD RELATIONSHIP (...)
+			relationshipDef := strings.TrimPrefix(relationshipPart, "WITH RELATIONSHIP")
+			relationshipDef = strings.TrimSpace(relationshipDef)
+
+			updateCmd := fmt.Sprintf("UPDATE BUNDLE \"%s\" ADD RELATIONSHIP %s", bundleName, relationshipDef)
+			deferredRelationships = append(deferredRelationships, updateCmd)
+
+			s.logger.Debug("Extracted relationship from CREATE BUNDLE",
+				zap.String("bundle", bundleName),
+				zap.String("original", cmd),
+				zap.String("create", createPart),
+				zap.String("relationship", updateCmd),
+			)
+		} else {
+			// Not a CREATE BUNDLE with relationship, keep as-is
+			processedCommands = append(processedCommands, cmd)
+		}
+	}
+
+	// Append all deferred relationship commands at the end
+	// This ensures all bundles are created before relationships are established
+	processedCommands = append(processedCommands, deferredRelationships...)
+
+	if len(deferredRelationships) > 0 {
+		s.logger.Info("Preprocessed relationship commands",
+			zap.Int("originalCommands", len(commands)),
+			zap.Int("processedCommands", len(processedCommands)),
+			zap.Int("deferredRelationships", len(deferredRelationships)),
+		)
+	}
+
+	return processedCommands, nil
+}
+
 // convertToInt64 safely converts various numeric types to int64
 func convertToInt64(val interface{}) int64 {
 	switch v := val.(type) {
@@ -1420,6 +1621,14 @@ func convertToInt64(val interface{}) int64 {
 }
 
 // Placeholder utility functions
+
+// truncateString returns the first maxLen characters of s with "..." if truncated
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
 
 func generateUUID() string {
 	// TODO: Implement proper UUID generation using github.com/google/uuid

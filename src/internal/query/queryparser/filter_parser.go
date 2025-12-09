@@ -765,9 +765,16 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 		clause.Field = strings.ReplaceAll(clause.Field, "\"", "")
 	}
 
+	// DEBUG: Log all available fields in document
+	// logger.Infof("[FILTER DEBUG] Evaluating clause: Field='%s', Operator='%s', Value='%v'", clause.Field, clause.Operator, clause.Value)
+	// logger.Infof("[FILTER DEBUG] Document ID: %s, Available fields in document:", document.DocumentID)
+	// for fieldName, fieldVal := range document.Fields {
+	// 	logger.Infof("[FILTER DEBUG]   - '%s' = %v (type: %T)", fieldName, fieldVal.Value.AsInterface(), fieldVal.Value.AsInterface())
+	// }
+
 	field, exists := document.Fields[clause.Field]
 	if !exists && !strings.EqualFold(clause.Field, "documentid") {
-		logger.Infof("Field '%s' does not exist in document, returning false", clause.Field)
+		logger.Infof("[FILTER DEBUG] Field '%s' does not exist in document, returning false", clause.Field)
 		return false // Field doesn't exist
 	}
 

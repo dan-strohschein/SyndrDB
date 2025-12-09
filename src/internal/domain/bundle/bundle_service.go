@@ -1925,12 +1925,11 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	// CRITICAL: Force flush pending metadata updates to ensure PageCount is current
 	// This is necessary because document additions schedule deferred metadata updates
 	// and SELECT TOP needs accurate PageCount to work correctly
+
 	if len(s.metadataUpdateBuffer) > 0 {
 		s.logger.Debugf("Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
 		s.FlushMetadataUpdates()
 	}
-
-	//s.logger.Infof("Bundle %s has PageCount: %d, TotalDocuments: %d", bundleName, bundle.PageCount, bundle.TotalDocuments)
 	//s.logger.Infof("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",
 	//	bundleName, bundle.Documents != nil, bundle.DocumentsComplete)
 	// if bundle.Documents != nil {
@@ -1995,6 +1994,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 
 		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
 		if err != nil {
+			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 			continue
 		}
 
@@ -2008,9 +2008,6 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	// Merge with memtable (recent writes not yet on disk or flushed)
 	// This ensures queries see both persisted data AND recent writes
 	if bundle.Documents != nil && !bundle.DocumentsComplete {
-		s.logger.Debugf("Merging %d documents from memtable with %d from disk for bundle '%s'",
-			len(*bundle.Documents), len(allDocuments), bundle.Name)
-
 		// Create document ID set for deduplication (disk wins for conflicts)
 		diskDocIDs := make(map[string]bool, len(allDocuments))
 		for _, doc := range allDocuments {

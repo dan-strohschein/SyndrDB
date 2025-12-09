@@ -329,6 +329,21 @@ func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionP
 	p.registerPrefix(TOKEN_FUNCTION, p.parseFunctionCall) // Fallback for unknown F:FUNCTION_NAME
 	p.registerPrefix(TOKEN_INTERVAL, p.parseInterval)
 
+	// Register keyword-as-identifier parsers for keywords that might be used as field names
+	// This allows reserved words to be used as field names in WHERE clauses and expressions
+	// Common examples: Version, Name, Database, User, Migration, Bundle, View, Role, etc.
+	p.registerPrefix(TOKEN_VERSION, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_NAME, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_DATABASE, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_USER, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_ROLE, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_MIGRATION, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_MIGRATIONS, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_BUNDLE, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_BUNDLES, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_VIEW, p.parseKeywordAsIdentifier)
+	p.registerPrefix(TOKEN_VIEWS, p.parseKeywordAsIdentifier)
+
 	// Register infix parsers (tokens that can appear between expressions)
 	p.registerInfix(TOKEN_PLUS, p.parseBinaryExpression)
 	p.registerInfix(TOKEN_MINUS, p.parseBinaryExpression)
@@ -408,6 +423,22 @@ func (p *ExpressionParser) parseExpression(precedence Precedence) (Expression, e
 
 func (p *ExpressionParser) parseIdentifier() (Expression, error) {
 	expr := &IdentifierExpression{Name: p.current.Value}
+	p.advance()
+	return expr, nil
+}
+
+// parseKeywordAsIdentifier handles reserved keywords when they appear in identifier positions
+// This allows field names like "Version", "Status", "Type", etc. to be used even though
+// they are reserved keywords in SyndrQL
+func (p *ExpressionParser) parseKeywordAsIdentifier() (Expression, error) {
+	// Use the token's string representation as the field name
+	// This maintains the original casing (e.g., "Version" not "VERSION")
+	fieldName := p.current.Value
+	if fieldName == "" {
+		// Fallback to token type string if value is empty
+		fieldName = p.current.Type.String()
+	}
+	expr := &IdentifierExpression{Name: fieldName}
 	p.advance()
 	return expr, nil
 }

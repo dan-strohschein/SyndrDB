@@ -30,6 +30,11 @@ func NewClient(host string, port int, database, username, password string) *Clie
 	}
 }
 
+// CommandTerminator is a non-printable character signaling end of complete command batch.
+// Using ASCII EOT (End of Transmission) for semantic clarity and protocol framing.
+// This allows multi-statement commands (migrations, transactions) to be processed as a unit.
+const CommandTerminator = "\x04"
+
 // / This would be in your client package
 func (c *Client) Connect() error {
 	address := fmt.Sprintf("%s:%d", c.host, c.port)
@@ -64,9 +69,7 @@ func (c *Client) SendCommand(command string) error {
 	}
 
 	// Make sure command ends with newline
-	if !strings.HasSuffix(command, "\n") {
-		command = command + "\n"
-	}
+	command = command + CommandTerminator
 
 	// Debug output
 	//fmt.Printf("Debug: Raw bytes being sent: %v\n", []byte(command))

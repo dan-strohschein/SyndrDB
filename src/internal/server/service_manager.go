@@ -121,7 +121,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 
 		// Initialize Migration service with adapters
 		migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())
-		bundleServiceAdapter := NewBundleServiceAdapter(bundleService, dbService, walManager, logger)
+		bundleServiceAdapter := NewBundleServiceAdapter(bundleService, dbService, catalogService, walManager, logger)
 		migrationServiceCore := migration.NewMigrationService(bundleServiceAdapter, migrationConfig, logger.Desugar())
 		migrationService := NewMigrationServiceAdapter(migrationServiceCore, logger)
 

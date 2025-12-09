@@ -329,7 +329,8 @@ func (p *CreateBundleParser) parseFieldValue() (interface{}, error) {
 		return expr, nil
 
 	case TOKEN_IDENT:
-		// Handle unquoted identifiers (could be true, false, null in lowercase)
+		// Handle unquoted identifiers
+		// Can be boolean literals (true, false), null, or field type names (TEXT, etc.)
 		p.advance()
 		lowerValue := strings.ToLower(token.Value)
 		switch lowerValue {
@@ -340,8 +341,22 @@ func (p *CreateBundleParser) parseFieldValue() (interface{}, error) {
 		case "null":
 			return nil, nil
 		default:
-			return nil, fmt.Errorf("unexpected identifier as field value: %s", token.Value)
+			// Treat other identifiers as string values (e.g., field type names like TEXT)
+			// Validation of whether it's a valid type happens later in bundle service
+			return token.Value, nil
 		}
+
+	case TOKEN_STRING_TYPE, TOKEN_INT_TYPE, TOKEN_FLOAT_TYPE, TOKEN_BOOL_TYPE,
+		TOKEN_ARRAY_TYPE, TOKEN_DATE_TYPE, TOKEN_DATETIME_TYPE:
+		// Handle field type keywords (STRING, INT, FLOAT, BOOL, ARRAY, DATE, DATETIME)
+		// These appear as type specifications in CREATE BUNDLE commands
+		p.advance()
+		return token.Value, nil
+
+	case TOKEN_RELATIONSHIP:
+		// Handle RELATIONSHIP keyword which can appear in bundle definitions
+		p.advance()
+		return token.Value, nil
 
 	default:
 		return nil, fmt.Errorf("unexpected token type for field value: %s (%s)", token.Type, token.Value)

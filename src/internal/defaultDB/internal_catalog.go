@@ -84,7 +84,7 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 			"IsActive":            {Name: "IsActive", Type: "BOOLEAN", IsRequired: false, IsUnique: false, DefaultValue: "true"},
 			"IsLockedOut":         {Name: "IsLockedOut", Type: "BOOLEAN", IsRequired: false, IsUnique: false, DefaultValue: "false"},
 			"FailedLoginAttempts": {Name: "FailedLoginAttempts", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
-			"LockoutExpiresOn":    {Name: "LockoutExpiresOn", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"LockoutExpiresOn":    {Name: "LockoutExpiresOn", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
 		},
 	}
 	users_Bundle := &models.Bundle{
@@ -244,9 +244,9 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 			"Status":              {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "PENDING"},
 			"Checksum":            {Name: "Checksum", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"AppliedBy":           {Name: "AppliedBy", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
-			"CreatedAt":           {Name: "CreatedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
-			"AppliedAt":           {Name: "AppliedAt", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
-			"RolledBackAt":        {Name: "RolledBackAt", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"CreatedAt":           {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"AppliedAt":           {Name: "AppliedAt", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"RolledBackAt":        {Name: "RolledBackAt", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: nil},
 			"ExecutionTimeMs":     {Name: "ExecutionTimeMs", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
 			"ErrorMessage":        {Name: "ErrorMessage", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
 			"PerformanceWarnings": {Name: "PerformanceWarnings", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: "[]"},
@@ -265,13 +265,24 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, migrations_Bundle)
 
+	// Create unique index for MigrationID field
+	migrationIDIndexCmd := &models.CreateIndexCommand{
+		IndexType:  "hash",
+		IndexName:  "MigrationID_unique",
+		BundleName: "Migrations",
+		Fields: []models.FieldDefinition{
+			{Name: "MigrationID", Type: "STRING", IsRequired: true, IsUnique: true},
+		},
+	}
+	bundleService.AddIndexToBundle(db, migrations_Bundle, migrationIDIndexCmd)
+
 	// create databaseversions bundle
 	databaseVersions_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
 			"DocumentID":      {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"DatabaseName":    {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"CurrentVersion":  {Name: "CurrentVersion", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
-			"LastUpdated":     {Name: "LastUpdated", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"LastUpdated":     {Name: "LastUpdated", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
 			"LastMigrationID": {Name: "LastMigrationID", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
 		},
 	}
@@ -288,12 +299,23 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, databaseVersions_Bundle)
 
+	// Create unique index for DatabaseName field in DatabaseVersions
+	databaseVersionsIndexCmd := &models.CreateIndexCommand{
+		IndexType:  "hash",
+		IndexName:  "DatabaseName_unique",
+		BundleName: "DatabaseVersions",
+		Fields: []models.FieldDefinition{
+			{Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true},
+		},
+	}
+	bundleService.AddIndexToBundle(db, databaseVersions_Bundle, databaseVersionsIndexCmd)
+
 	// create migrationlocks bundle
 	migrationLocks_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
 			"DocumentID":       {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"DatabaseName":     {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"LockedAt":         {Name: "LockedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"LockedAt":         {Name: "LockedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
 			"LockedBy":         {Name: "LockedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"MigrationVersion": {Name: "MigrationVersion", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
 			"MigrationID":      {Name: "MigrationID", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
@@ -313,6 +335,17 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, migrationLocks_Bundle)
 
+	// Create unique index for DatabaseName field in MigrationLocks
+	databaseNameIndexCmd := &models.CreateIndexCommand{
+		IndexType:  "hash",
+		IndexName:  "DatabaseName_unique",
+		BundleName: "MigrationLocks",
+		Fields: []models.FieldDefinition{
+			{Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true},
+		},
+	}
+	bundleService.AddIndexToBundle(db, migrationLocks_Bundle, databaseNameIndexCmd)
+
 	// create migrationvalidationreports bundle
 	migrationReports_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
@@ -322,13 +355,13 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 			"TargetVersion":     {Name: "TargetVersion", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: nil},
 			"DatabaseName":      {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"ReportType":        {Name: "ReportType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "MIGRATION_VALIDATION"},
-			"GeneratedAt":       {Name: "GeneratedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"GeneratedAt":       {Name: "GeneratedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
 			"GeneratedBy":       {Name: "GeneratedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"ValidationResults": {Name: "ValidationResults", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "{}"},
 			"ReportSizeBytes":   {Name: "ReportSizeBytes", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
 			"Status":            {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "ACTIVE"},
-			"ArchivedAt":        {Name: "ArchivedAt", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
-			"ExpiresAt":         {Name: "ExpiresAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"ArchivedAt":        {Name: "ArchivedAt", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"ExpiresAt":         {Name: "ExpiresAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
 		},
 	}
 	migrationReports_Bundle := &models.Bundle{
@@ -343,6 +376,17 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		Database:          db,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, migrationReports_Bundle)
+
+	// Create unique index for ReportID field in MigrationValidationReports
+	reportIDIndexCmd := &models.CreateIndexCommand{
+		IndexType:  "hash",
+		IndexName:  "ReportID_unique",
+		BundleName: "MigrationValidationReports",
+		Fields: []models.FieldDefinition{
+			{Name: "ReportID", Type: "STRING", IsRequired: true, IsUnique: true},
+		},
+	}
+	bundleService.AddIndexToBundle(db, migrationReports_Bundle, reportIDIndexCmd)
 
 	// ==============================================================
 	// END MIGRATION SYSTEM BUNDLES
@@ -361,9 +405,9 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 			"DatabaseName":      {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"Definition":        {Name: "Definition", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
 			"Type":              {Name: "Type", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
-			"CreatedAt":         {Name: "CreatedAt", Type: "TIMESTAMP", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"CreatedAt":         {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
 			"CreatedBy":         {Name: "CreatedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
-			"LastRefreshed":     {Name: "LastRefreshed", Type: "TIMESTAMP", IsRequired: false, IsUnique: false, DefaultValue: nil},
+			"LastRefreshed":     {Name: "LastRefreshed", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: nil},
 			"ColumnCount":       {Name: "ColumnCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
 			"ReferencedBundles": {Name: "ReferencedBundles", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "[]"},
 			"DataBundleName":    {Name: "DataBundleName", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},

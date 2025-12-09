@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"strings"
+	"syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
@@ -31,6 +32,7 @@ TODO: I will add metrics tracking for migration operations to monitor system hea
 type BundleServiceAdapter struct {
 	bundleService   *bundle.BundleService
 	databaseService *database.DatabaseService
+	catalogService  *defaultdb.CatalogService
 	walManager      *journal.WALManager
 	logger          *zap.SugaredLogger
 }
@@ -39,12 +41,14 @@ type BundleServiceAdapter struct {
 func NewBundleServiceAdapter(
 	bundleService *bundle.BundleService,
 	databaseService *database.DatabaseService,
+	catalogService *defaultdb.CatalogService,
 	walManager *journal.WALManager,
 	logger *zap.SugaredLogger,
 ) *BundleServiceAdapter {
 	return &BundleServiceAdapter{
 		bundleService:   bundleService,
 		databaseService: databaseService,
+		catalogService:  catalogService,
 		walManager:      walManager,
 		logger:          logger,
 	}
@@ -83,6 +87,18 @@ func (a *BundleServiceAdapter) InsertDocument(dbName, bundleName string, doc map
 		if key == "DocumentID" {
 			continue
 		}
+
+		// DEBUG: Log array fields before storage
+		// if key == "UpCommands" || key == "DownCommands" {
+		// 	//a.logger.Infof("[STORAGE DEBUG] Storing %s: type=%T, value=%v", key, value, value)
+		// 	if arr, ok := value.([]string); ok {
+		// 	//	a.logger.Infof("[STORAGE DEBUG] %s is []string with %d elements", key, len(arr))
+		// 		for i, cmd := range arr {
+		// 			a.logger.Infof("[STORAGE DEBUG] %s[%d]: length=%d, preview=%s", key, i, len(cmd), truncate(cmd, 100))
+		// 		}
+		// 	}
+		// }
+
 		keyValues = append(keyValues, models.KeyValue{
 			Key:   key,
 			Value: value,
@@ -140,6 +156,45 @@ func (a *BundleServiceAdapter) UpdateDocument(dbName, bundleName, docID string, 
 	return nil
 }
 
+// UpdateDocumentByField updates documents using a WHERE clause on any field (not just DocumentID)
+// This is useful for updating by unique fields like MigrationID when DocumentID is auto-generated
+func (a *BundleServiceAdapter) UpdateDocumentByField(dbName, bundleName, fieldName, fieldValue string, updates map[string]interface{}) error {
+	db, bndl, err := a.resolveDatabaseAndBundle(dbName, bundleName)
+	if err != nil {
+		return err
+	}
+
+	// Convert to DocumentUpdateCommand
+	keyValues := make([]models.KeyValue, 0, len(updates))
+	for key, value := range updates {
+		keyValues = append(keyValues, models.KeyValue{
+			Key:   key,
+			Value: value,
+		})
+	}
+
+	// Use WHERE clause with the specified field
+	// CRITICAL: Use double quotes for string values (parseValue expects double quotes)
+	whereClause := fmt.Sprintf("%s == \"%s\"", fieldName, fieldValue)
+
+	updateCommand := &models.DocumentUpdateCommand{
+		BundleName:  bundleName,
+		Fields:      keyValues,
+		WhereClause: whereClause,
+		Confirmed:   true,
+	}
+
+	a.logger.Debugf("UpdateDocumentByField: bundle=%s, field=%s, value=%s, updates=%+v", bundleName, fieldName, fieldValue, updates)
+
+	// Call BundleService.UpdateDocumentInBundle
+	err = a.bundleService.UpdateDocumentInBundle(db, bndl, updateCommand)
+	if err != nil {
+		return fmt.Errorf("failed to update document in bundle '%s' where %s='%s': %w", bundleName, fieldName, fieldValue, err)
+	}
+
+	return nil
+}
+
 // DeleteDocument adapts the simple interface to BundleService's delete mechanism
 func (a *BundleServiceAdapter) DeleteDocument(dbName, bundleName, docID string) error {
 	_, bndl, err := a.resolveDatabaseAndBundle(dbName, bundleName)
@@ -180,6 +235,8 @@ func (a *BundleServiceAdapter) QueryDocuments(dbName, bundleName string, filter 
 		return nil, fmt.Errorf("failed to query documents from bundle '%s': %w", bundleName, err)
 	}
 
+	a.logger.Debugf("QueryDocuments: bundle=%s, filter=%+v, found %d documents", bundleName, filter, len(documents))
+
 	// Convert []*models.Document to []map[string]interface{}
 	result := make([]map[string]interface{}, 0, len(documents))
 	for _, doc := range documents {
@@ -187,8 +244,9 @@ func (a *BundleServiceAdapter) QueryDocuments(dbName, bundleName string, filter 
 		docMap["DocumentID"] = doc.DocumentID
 
 		// Copy all fields from the Fields map
+		// CRITICAL: Extract actual value from FieldValue union using AsInterface()
 		for fieldName, field := range doc.Fields {
-			docMap[fieldName] = field.Value
+			docMap[fieldName] = field.Value.AsInterface()
 		}
 
 		result = append(result, docMap)
@@ -212,9 +270,11 @@ func (a *BundleServiceAdapter) buildWhereClause(filter map[string]interface{}) s
 		}
 
 		// Build condition based on value type
+		// CRITICAL: Use double quotes for strings, not single quotes
+		// The WHERE clause parser (parseValue) only strips double quotes
 		switch v := value.(type) {
 		case string:
-			conditions = append(conditions, fmt.Sprintf("%s == '%s'", key, v))
+			conditions = append(conditions, fmt.Sprintf("%s == \"%s\"", key, v))
 		case int, int64:
 			conditions = append(conditions, fmt.Sprintf("%s == %v", key, v))
 		case float64:
@@ -223,7 +283,7 @@ func (a *BundleServiceAdapter) buildWhereClause(filter map[string]interface{}) s
 			conditions = append(conditions, fmt.Sprintf("%s == %v", key, v))
 		default:
 			// For complex types, convert to string
-			conditions = append(conditions, fmt.Sprintf("%s == '%v'", key, v))
+			conditions = append(conditions, fmt.Sprintf("%s == \"%v\"", key, v))
 		}
 	}
 
@@ -312,9 +372,20 @@ func (a *BundleServiceAdapter) CreateBundle(dbName, bundleName string, fields []
 	}
 
 	// Use AddBundle to create the new bundle
-	_, err = a.bundleService.AddBundle(a.databaseService, db, bundleCmd)
+	newBundle, err := a.bundleService.AddBundle(a.databaseService, db, bundleCmd)
 	if err != nil {
 		return fmt.Errorf("failed to create bundle '%s': %w", bundleName, err)
+	}
+
+	// Register the bundle in the system catalog (critical for SHOW BUNDLES to work)
+	if a.catalogService != nil {
+		err = a.catalogService.RegisterBundleInCatalog(newBundle)
+		if err != nil {
+			a.logger.Warnf("Warning: Failed to register bundle '%s' in catalog: %v", bundleName, err)
+			// Don't fail the migration if catalog registration fails - log and continue
+		}
+	} else {
+		a.logger.Warnf("Warning: CatalogService is nil, bundle '%s' not registered in catalog", bundleName)
 	}
 
 	a.logger.Infof("Created bundle '%s' in database '%s'", bundleName, dbName)
@@ -477,4 +548,58 @@ func (a *BundleServiceAdapter) RenameField(dbName, bundleName, oldFieldName, new
 
 	a.logger.Infof("Renamed field from '%s' to '%s' in bundle '%s' (database '%s')", oldFieldName, newFieldName, bundleName, dbName)
 	return nil
+}
+
+// CreateHashIndex creates a hash index on a bundle using the command string
+func (a *BundleServiceAdapter) CreateHashIndex(dbName, command string) error {
+	// Get database
+	db, err := a.databaseService.GetDatabaseByName(dbName)
+	if err != nil {
+		return fmt.Errorf("database '%s' not found: %w", dbName, err)
+	}
+
+	// Use the existing CreateHashIndex function from index_operations.go
+	// Create a ServiceManager to pass to the function
+	sm := ServiceManager{
+		BundleService:   a.bundleService,
+		DatabaseService: a.databaseService,
+	}
+
+	_, err, _ = CreateHashIndex(command, a.logger, sm, db)
+	if err != nil {
+		return fmt.Errorf("failed to create hash index: %w", err)
+	}
+
+	return nil
+}
+
+// CreateBTreeIndex creates a B-Tree index on a bundle using the command string
+func (a *BundleServiceAdapter) CreateBTreeIndex(dbName, command string) error {
+	// Get database
+	db, err := a.databaseService.GetDatabaseByName(dbName)
+	if err != nil {
+		return fmt.Errorf("database '%s' not found: %w", dbName, err)
+	}
+
+	// Use the existing CreateBTreeIndex function from index_operations.go
+	// Create a ServiceManager to pass to the function
+	sm := ServiceManager{
+		BundleService:   a.bundleService,
+		DatabaseService: a.databaseService,
+	}
+
+	_, err = CreateBTreeIndex(command, a.logger, sm, db)
+	if err != nil {
+		return fmt.Errorf("failed to create B-Tree index: %w", err)
+	}
+
+	return nil
+}
+
+// truncate returns first n chars of s with "..." if truncated
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

@@ -117,6 +117,11 @@ type ConnectionString struct {
 // 	}
 // }
 
+// CommandTerminator is a non-printable character signaling end of complete command batch.
+// Using ASCII EOT (End of Transmission) for semantic clarity and protocol framing.
+// This allows multi-statement commands (migrations, transactions) to be processed as a unit.
+const CommandTerminator = "\x04"
+
 // InitServer initializes the SyndrDB server
 func InitServer(config *settings.Arguments) (*Server, error) {
 
@@ -822,7 +827,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		defer close(dataCh)
 		defer close(errCh)
 
-		buffer := make([]byte, 1024)
+		buffer := make([]byte, 4096)
 		var partialData string // For storing incomplete data between reads
 
 		for {
@@ -852,57 +857,47 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 				if n > 0 {
 					data := string(buffer[:n])
-					//connLogger.Infof("Read %d bytes", n)
-					connLogger.Sync()
-					// Append to any previous partial data
-					data = partialData + data
 
-					if strings.Contains(data, "\n") {
-						lines := strings.Split(data, "\n")
-						for i := 0; i < len(lines); i++ {
-							line := strings.TrimSpace(lines[i])
-							if line != "" {
-								partialData += line + "\n" // accumulate lines, preserve newlines if needed
-								if strings.HasSuffix(line, ";") {
-									// Command is complete
-									cmd := strings.TrimSpace(partialData)
-									dataCh <- cmd
-									partialData = "" // reset for next command
-								}
-							}
+					connLogger.Sync()
+
+					// Append to any previous partial data
+					partialData += data
+
+					// Check for command terminator
+					if strings.Contains(partialData, CommandTerminator) {
+						// Remove terminator and send complete command batch
+						cmd := strings.TrimSuffix(partialData, CommandTerminator)
+						cmd = strings.TrimSpace(cmd)
+
+						if cmd != "" {
+							// Send complete command batch for processing
+							// CommandDirector handles multi-statement batches (migrations, transactions)
+							dataCh <- cmd
 						}
-					} else {
-						// No newline, accumulate as partial
-						partialData += data
+
+						// Reset for next command batch
+						partialData = ""
 					}
-					// Look for complete lines
+
 					// if strings.Contains(data, "\n") {
 					// 	lines := strings.Split(data, "\n")
-
-					// 	// The last element might be incomplete
-					// 	partialData = lines[len(lines)-1]
-
-					// 	// Process complete lines
-					// 	for i := 0; i < len(lines)-1; i++ {
+					// 	for i := 0; i < len(lines); i++ {
 					// 		line := strings.TrimSpace(lines[i])
 					// 		if line != "" {
-					// 			connLogger.Infof("Received line: %s", line)
-					// 			connLogger.Sync()
-					// 			// Only send to dataCh if line ends with ';'
+					// 			partialData += line + "\n" // accumulate lines, preserve newlines if needed
 					// 			if strings.HasSuffix(line, ";") {
-					// 				dataCh <- line
-					// 			} else {
-					// 				// Accumulate incomplete command
-					// 				partialData += line
+					// 				// Command is complete
+					// 				cmd := strings.TrimSpace(partialData)
+					// 				dataCh <- cmd
+					// 				partialData = "" // reset for next command
 					// 			}
 					// 		}
 					// 	}
 					// } else {
-					// 	// No newline, store entire chunk as partial
-					// 	partialData = data
-					// 	connLogger.Infof("Received data: %s", data)
-					// 	connLogger.Sync()
+					// 	// No newline, accumulate as partial
+					// 	partialData += data
 					// }
+
 				} else {
 					connLogger.Info("No Data Seen")
 					connLogger.Sync()
@@ -925,7 +920,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				goto cleanup
 			}
 			// Process the line
-			//connLogger.Debugf("Received: %s", line)
+			//connLogger.Infof("DEBUG DEBUG DEBUG \n\n\n Received: %s", line)
 
 			// Your existing logic for handling commands
 			//When the client connects, it should send the connection string
@@ -1095,8 +1090,8 @@ func (s *Server) processCommand(conn *Connection, command string) (interface{}, 
 		return nil, fmt.Errorf("rate limit exceeded: %v", err)
 	}
 
-	parts := strings.Fields(command)
-	if len(parts) == 0 {
+	// Check if command is empty (don't use strings.Fields as it breaks multi-line commands)
+	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("empty command")
 	}
 	// Use the new function to process and print the client data
@@ -1114,9 +1109,8 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 	// If not JSON, treat as plain text command
 	//fmt.Printf("\n--- Client Data (Plain Text) ---\n%s\n------------------------------\n", data)
 
-	// Split the data into command parts
-	parts := strings.Fields(data)
-	if len(parts) == 0 {
+	// Check if command is empty (don't use strings.Fields as it breaks multi-line commands)
+	if strings.TrimSpace(data) == "" {
 		return map[string]interface{}{
 			"status":    "received",
 			"message":   "Empty command",
@@ -1132,6 +1126,9 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 // handleTextCommand processes commands received in plain text format
 func (s *Server) handleTextCommand(conn *Connection, command string) (interface{}, error) {
 	serviceManager := GetServiceManager()
+
+	// DEBUG: Log exact command received from client with boundaries
+	//s.logger.Infof("[CLIENT INPUT] Received command (length=%d): |%s|", len(command), command)
 
 	// Update session activity with security validation
 	if conn.Session != nil {

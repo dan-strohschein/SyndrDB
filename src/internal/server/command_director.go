@@ -49,7 +49,14 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	command = SanitizeInput(command)
 	command = strings.TrimSpace(command)
 	command = strings.TrimSuffix(command, ";") // Remove trailing semicolon if present
-	commandParts := strings.Split(command, " ")
+
+	// CRITICAL: Extract first few words for command routing WITHOUT destroying multi-line commands
+	// Use Fields only for extracting command keywords, NOT for splitting the entire command
+	firstWords := strings.Fields(command)
+	if len(firstWords) == 0 {
+		return nil, fmt.Errorf("empty command")
+	}
+
 	result := ""
 
 	// OPTIMIZATION: Compute lowercase version once to avoid 40+ allocations
@@ -58,8 +65,8 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	// VIEW COMMANDS: Check for view-related commands early
 	// This includes: CREATE VIEW, CREATE MATERIALIZED VIEW, DROP VIEW, DROP MATERIALIZED VIEW,
 	//                REFRESH MATERIALIZED VIEW, SHOW VIEWS, DESCRIBE VIEW
-	if isViewCommand(commandParts) {
-		return RouteViewCommand(command, commandParts, logger, serviceManager, database, session)
+	if isViewCommand(firstWords) {
+		return RouteViewCommand(command, firstWords, logger, serviceManager, database, session)
 	}
 
 	// EXPLAIN command - must be checked before SELECT to intercept EXPLAIN SELECT
@@ -70,8 +77,8 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	if strings.HasPrefix(commandLower, "select") {
 		// Parse SELECT command
 		// Check for SELECT DATABASES (special case for system catalog)
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "databases" {
-			result1, err, shouldReturn := SelectDatabases(commandParts, serviceManager)
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "databases" {
+			result1, err, shouldReturn := SelectDatabases(firstWords, serviceManager)
 			if shouldReturn {
 				return result1, err
 			}
@@ -84,12 +91,15 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 		//               SELECT COUNT(*) FROM bundle
 		//               SELECT * FROM bundle JOIN...
 		//               SELECT field1, COUNT(*) FROM bundle GROUP BY field1
-		return SelectDocuments(ctx, commandParts, serviceManager, database, logger, startTime, session)
+		return SelectDocuments(ctx, command, serviceManager, database, logger, startTime, session)
 	}
 
 	if strings.HasPrefix(commandLower, "show") {
 		// Parse SHOW command
-		switch strings.ToLower(commandParts[1]) {
+		if len(firstWords) < 2 {
+			return nil, fmt.Errorf("incomplete SHOW command")
+		}
+		switch strings.ToLower(firstWords[1]) {
 		case "databases":
 			return ShowDatabases(command, logger, serviceManager)
 		case "bundles":
@@ -110,7 +120,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 			// SHOW MIGRATIONS FOR "database_name"
 			return ShowMigrationsCommand(command, database, logger, serviceManager)
 		case "rate":
-			if len(commandParts) > 2 && strings.ToLower(commandParts[2]) == "limit" {
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "limit" {
 				return ShowRateLimit(command, logger, serviceManager)
 			}
 			return nil, fmt.Errorf("unknown SHOW RATE command: %s", command)
@@ -120,7 +130,10 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	if strings.HasPrefix(commandLower, "invalidate") {
 		// Parse INVALIDATE command
-		switch strings.ToLower(commandParts[1]) {
+		if len(firstWords) < 2 {
+			return nil, fmt.Errorf("incomplete INVALIDATE command")
+		}
+		switch strings.ToLower(firstWords[1]) {
 		case "session":
 			return InvalidateSession(command, logger, serviceManager)
 		}
@@ -128,8 +141,10 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	}
 
 	if strings.HasPrefix(commandLower, "create") {
-
-		switch strings.ToLower(commandParts[1]) {
+		if len(firstWords) < 2 {
+			return nil, fmt.Errorf("incomplete CREATE command")
+		}
+		switch strings.ToLower(firstWords[1]) {
 		case "database":
 			return CreateDatabase(command, logger, serviceManager, result)
 		case "bundle":
@@ -142,6 +157,16 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 				return result1, err
 			} else {
 				return result1, nil
+			}
+		case "hash":
+			// CREATE HASH INDEX
+			if len(firstWords) >= 3 && strings.ToLower(firstWords[2]) == "index" {
+				result1, err, shouldReturn := CreateHashIndex(command, logger, serviceManager, database)
+				if shouldReturn {
+					return result1, err
+				}
+			} else {
+				return &result, fmt.Errorf("unknown command format: %s", command)
 			}
 		case "h-index":
 			result1, err, shouldReturn := CreateHashIndex(command, logger, serviceManager, database)
@@ -165,10 +190,13 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Parse Add Document command
 	if strings.HasPrefix(commandLower, "add") {
-		switch strings.ToLower(commandParts[1]) {
+		if len(firstWords) < 2 {
+			return nil, fmt.Errorf("incomplete ADD command")
+		}
+		switch strings.ToLower(firstWords[1]) {
 		case "document":
 
-			return AddDocument(commandParts, command, logger, serviceManager, database)
+			return AddDocument(firstWords, command, logger, serviceManager, database)
 		case "user":
 			return AddUser(command, logger, serviceManager)
 		}
@@ -176,7 +204,10 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Parse UPDATE  command
 	if strings.HasPrefix(commandLower, "update") {
-		switch strings.ToLower(commandParts[1]) {
+		if len(firstWords) < 2 {
+			return nil, fmt.Errorf("incomplete UPDATE command")
+		}
+		switch strings.ToLower(firstWords[1]) {
 		case "database":
 			dbCommand, err := db.ParseUpdateDatabaseCommand(command)
 			if err != nil {
@@ -322,7 +353,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 				(<FIELDNAME> = <VALUE>, <FIELDNAME> = <VALUE>, ... )
 			*/
 
-			result1, err := UpdateDocument(commandParts, serviceManager, database, command, logger)
+			result1, err := UpdateDocument(firstWords, serviceManager, database, command, logger)
 
 			return result1, err
 
@@ -340,7 +371,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Handle ALTER as an alias for UPDATE
 	if strings.HasPrefix(commandLower, "alter") {
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "role" {
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "role" {
 			// ALTER ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE];
 			return UpdateRole(command, logger, serviceManager)
 		}
@@ -368,7 +399,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Parse START MIGRATION command
 	if strings.HasPrefix(commandLower, "start") {
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "migration" {
 			// START MIGRATION [WITH DESCRIPTION "..."] <commands> COMMIT
 			return StartMigrationCommand(command, database, logger, serviceManager)
 		}
@@ -377,11 +408,11 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Parse APPLY command
 	if strings.HasPrefix(commandLower, "apply") {
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "migration" {
 			// APPLY MIGRATION WITH VERSION <number> [FORCE]
 			return ApplyMigrationCommand(command, database, logger, serviceManager)
 		}
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "rollback" {
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "rollback" {
 			// APPLY ROLLBACK TO VERSION <number>
 			return ApplyRollbackCommand(command, database, logger, serviceManager)
 		}
@@ -390,11 +421,11 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Parse VALIDATE command
 	if strings.HasPrefix(commandLower, "validate") {
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "migration" {
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "migration" {
 			// VALIDATE MIGRATION WITH VERSION <number>
 			return ValidateMigrationCommand(command, database, logger, serviceManager)
 		}
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "rollback" {
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "rollback" {
 			// VALIDATE ROLLBACK TO VERSION <number>
 			return ValidateRollbackCommand(command, database, logger, serviceManager)
 		}
@@ -402,7 +433,10 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	}
 
 	if strings.HasPrefix(commandLower, "drop") {
-		switch strings.ToLower(commandParts[1]) {
+		if len(firstWords) < 2 {
+			return nil, fmt.Errorf("incomplete DROP command")
+		}
+		switch strings.ToLower(firstWords[1]) {
 		case "database":
 			return DropDatabase(command, logger, serviceManager, session)
 		case "bundle":
@@ -442,8 +476,10 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Parse DELETE  command
 	if strings.HasPrefix(commandLower, "delete") {
-
-		switch strings.ToLower(commandParts[1]) {
+		if len(firstWords) < 2 {
+			return nil, fmt.Errorf("incomplete DELETE command")
+		}
+		switch strings.ToLower(firstWords[1]) {
 		case "database":
 			dbCommand, err := db.ParseDeleteDatabaseCommand(command)
 			if err != nil {
@@ -630,7 +666,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 
 	// Parse RENAME command
 	if strings.HasPrefix(commandLower, "rename") {
-		if len(commandParts) >= 2 && strings.ToLower(commandParts[1]) == "database" {
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "database" {
 			// RENAME DATABASE "old_name" TO "new_name" [FORCE]
 			return RenameDatabase(command, logger, serviceManager, session)
 		}
@@ -683,9 +719,7 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 	return filteredDocuments
 }
 
-func SelectDocuments(ctx context.Context, commandParts []string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time, session *Session) (interface{}, error) {
-
-	fullCommand := strings.Join(commandParts, " ")
+func SelectDocuments(ctx context.Context, fullCommand string, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger, startTime time.Time, session *Session) (interface{}, error) {
 
 	logger.Debugf("Processing SELECT query: %s", fullCommand)
 
@@ -975,11 +1009,11 @@ func SelectDocuments(ctx context.Context, commandParts []string, serviceManager 
 
 }
 
-func SelectDatabases(commandParts []string, serviceManager ServiceManager) (*CommandResponse, error, bool) {
-	if len(commandParts) < 3 {
+func SelectDatabases(firstWords []string, serviceManager ServiceManager) (*CommandResponse, error, bool) {
+	if len(firstWords) < 4 {
 		return nil, fmt.Errorf("SELECT DATABASES requires the spec 'FROM Default'"), false
 	}
-	if strings.EqualFold(commandParts[3], "DEFAULT") {
+	if strings.EqualFold(firstWords[3], "DEFAULT") {
 		databases := serviceManager.DatabaseService.ListDatabases()
 
 		if len(databases) == 0 {

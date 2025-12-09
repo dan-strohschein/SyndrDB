@@ -164,7 +164,7 @@ func (v *MigrationValidator) ValidateMigration(databaseName string, commands []s
 	)
 
 	// Phase 1: Syntax Validation (FAIL-FAST)
-	v.logger.Debug("Phase 1: Syntax validation")
+	v.logger.Debug("step 1: Syntax validation")
 	for i, command := range commands {
 		err := v.validateSyntax(command)
 		if err != nil {
@@ -182,7 +182,7 @@ func (v *MigrationValidator) ValidateMigration(databaseName string, commands []s
 	}
 
 	// Phase 2: Dependency Validation (FAIL-FAST)
-	v.logger.Debug("Phase 2: Dependency validation")
+	v.logger.Debug("step 2: Dependency validation")
 	depErrors := v.validateDependencies(commands, result)
 	if len(depErrors) > 0 {
 		result.DependencyValid = false
@@ -197,7 +197,7 @@ func (v *MigrationValidator) ValidateMigration(databaseName string, commands []s
 	}
 
 	// Phase 3: Command Count Validation (FAIL-FAST)
-	v.logger.Debug("Phase 3: Command count validation")
+	v.logger.Debug("step 3: Command count validation")
 	if len(commands) > v.config.MaxCommandsPerMigration {
 		result.CommandCountValid = false
 
@@ -212,7 +212,7 @@ func (v *MigrationValidator) ValidateMigration(databaseName string, commands []s
 	}
 
 	// Phase 4: Data Loss Detection (CONTINUE)
-	v.logger.Debug("Phase 4: Data loss detection")
+	v.logger.Debug("step 4: Data loss detection")
 	dataLossWarnings, err := v.detectDataLoss(databaseName, commands)
 	if err != nil {
 		v.logger.Warn("Data loss detection failed",
@@ -223,7 +223,7 @@ func (v *MigrationValidator) ValidateMigration(databaseName string, commands []s
 	}
 
 	// Phase 5: Performance Impact Analysis (CONTINUE)
-	v.logger.Debug("Phase 5: Performance impact analysis")
+	v.logger.Debug("step 5: Performance impact analysis")
 	perfWarnings, err := v.performanceAnalyzer.AnalyzePerformance(databaseName, commands)
 	if err != nil {
 		v.logger.Warn("Performance analysis failed",

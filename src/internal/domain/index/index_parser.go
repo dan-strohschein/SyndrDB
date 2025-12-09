@@ -155,32 +155,29 @@ func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*mo
 			)
 	*/
 	updateDocRegex := regexp.MustCompile(`(?i)^CREATE\s+HASH\s+INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+FIELDS\s*\(([^)]+)\)`)
-	if !updateDocRegex.MatchString(command) {
+	matches := updateDocRegex.FindStringSubmatch(command)
+	if matches == nil || len(matches) < 3 {
 		return nil, fmt.Errorf("invalid CREATE HASH INDEX command: %s", command)
 	}
 
-	parts := strings.Fields(command)
-	if len(parts) < 4 || parts[0] != "CREATE" || parts[1] != "HASH" || parts[2] != "INDEX" {
-		return nil, fmt.Errorf("invalid CREATE HASH INDEX command: %s", command)
-	}
-
-	indexName := parts[3]
-	bundleName := parts[5] // Assuming the bundle name is the next part after the index name
+	// Extract from regex capture groups
+	indexName := matches[1]
+	bundleName := matches[2]
+	fieldsPart := strings.TrimSpace(matches[3])
 
 	Fields := []models.FieldDefinition{}
-	fieldsPart := strings.TrimSpace(command[strings.Index(command, "WITH FIELDS (")+len("WITH FIELDS (") : strings.LastIndex(command, ")")])
 	if fieldsPart == "" {
 		return nil, fmt.Errorf("no fields specified for index: %s", command)
 	}
 
 	fieldRegex := regexp.MustCompile(`\{\s*"([^"]+)"\s*,\s*(true|false)\s*,\s*(true|false)\s*\}`)
 
-	matches := fieldRegex.FindAllStringSubmatch(fieldsPart, -1)
-	if matches == nil {
+	fieldMatches := fieldRegex.FindAllStringSubmatch(fieldsPart, -1)
+	if fieldMatches == nil {
 		return nil, fmt.Errorf("invalid field definitions in CREATE HASH INDEX command: %s", command)
 	}
 
-	for _, match := range matches {
+	for _, match := range fieldMatches {
 		if len(match) != 4 { // Changed from 5 to 4 since we removed one capture group
 			return nil, fmt.Errorf("invalid field definition in CREATE HASH INDEX command: %s", command)
 		}

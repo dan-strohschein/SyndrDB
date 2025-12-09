@@ -87,6 +87,7 @@ const (
 	TOKEN_DROP   // DROP
 	TOKEN_BUNDLE // BUNDLE
 	TOKEN_WITH   // WITH
+	TOKEN_FOR    // FOR
 	TOKEN_FIELDS // FIELDS
 	TOKEN_ADD    // ADD
 	TOKEN_TO     // TO
@@ -316,6 +317,8 @@ func (tt TokenType) String() string {
 		return "ON"
 	case TOKEN_AS:
 		return "AS"
+	case TOKEN_FOR:
+		return "FOR"
 	case TOKEN_RELATIONSHIP:
 		return "RELATIONSHIP"
 	case TOKEN_SHOW:
@@ -486,6 +489,7 @@ var keywords = map[string]TokenType{
 	"JOIN":         TOKEN_JOIN,
 	"ON":           TOKEN_ON,
 	"AS":           TOKEN_AS,
+	"FOR":          TOKEN_FOR,
 	"RELATIONSHIP": TOKEN_RELATIONSHIP,
 	"DESCRIPTION":  TOKEN_DESCRIPTION,
 	"FORCE":        TOKEN_FORCE,

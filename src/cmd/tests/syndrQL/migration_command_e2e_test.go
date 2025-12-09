@@ -72,7 +72,7 @@ func createMigrationWithCommands(t *testing.T, fixture *TestFixture, dbName, des
 	// Build START MIGRATION command
 	// Format: START MIGRATION WITH DESCRIPTION "desc" <cmd1>; <cmd2>; COMMIT
 	cmdBody := strings.Join(commands, "; ")
-	
+
 	createCmd := fmt.Sprintf(
 		`START MIGRATION WITH DESCRIPTION "%s" %s COMMIT`,
 		description,
@@ -201,7 +201,7 @@ func TestMigrationCommand_CreateBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get primary database: %v", err)
 	}
-	
+
 	// Temporarily use primary database for migration operations
 	originalDB := fixture.Database
 	fixture.Database = primaryDB

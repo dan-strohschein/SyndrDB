@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/syndrQL"
 
 	"go.uber.org/zap"
 )
@@ -85,8 +86,8 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 		return nil, fmt.Errorf("migration must contain at least one command")
 	}
 
-	// Split commands by semicolon
-	commands := strings.Split(commandBody, ";")
+	// Split commands by semicolon, respecting quoted strings
+	commands := splitBySemicolon(commandBody)
 	cleanCommands := []string{}
 	for _, cmd := range commands {
 		cmd = strings.TrimSpace(cmd)
@@ -115,11 +116,20 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 		return nil, fmt.Errorf("failed to create migration: %w", err)
 	}
 
+	// Type assert to get the migration details
+	mig, ok := migrationResult.(*migration.Migration)
+	if !ok {
+		logger.Errorf("Unexpected migration result type: %T", migrationResult)
+		return nil, fmt.Errorf("unexpected migration result type")
+	}
+
 	logger.Infof("Migration created successfully for database '%s'", database.Name)
 	return map[string]interface{}{
-		"status":    "success",
-		"message":   "Migration created successfully",
-		"migration": migrationResult,
+		"migration_id":     mig.MigrationID,
+		"version":          mig.Version,
+		"migration_status": string(mig.Status),
+		"status":           "success",
+		"message":          fmt.Sprintf("Migration created successfully for database '%s'", database.Name),
 	}, nil
 }
 
@@ -306,13 +316,28 @@ func ShowMigrationsCommand(command string, database *models.Database, logger *za
 		return nil, fmt.Errorf("no active database selected. Use 'USE DATABASE \"name\"' first")
 	}
 
-	logger.Infof("Executing SHOW MIGRATIONS command for database '%s'", database.Name)
+	parser, err := syndrQL.NewShowMigrationsParser(command)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to create SHOW MIGRATIONS parser: %w", err)
+	}
+	stmt, err := parser.Parse()
+	if err != nil {
+		return nil, fmt.Errorf("Failed to parse SHOW MIGRATIONS command: %w", err)
+	}
+
+	dbName := stmt.DatabaseName
+	if dbName == "" {
+		dbName = database.Name
+	}
+
+	logger.Infof("Executing SHOW MIGRATIONS command for database '%s'", dbName)
 
 	// Parse optional filters
 	// Format: SHOW MIGRATIONS FOR "database" [WHERE Status = "PENDING"] [ORDER BY Version DESC]
 	filters := make(map[string]interface{})
 
-	// Check for WHERE clause
+	// Check for WHERE clause <- This isn't really legal. The right way would be for the developer
+	// to execute a  SELECT query against a migrations view/table. But for now, this is a quick way to add filtering.
 	wherePattern := regexp.MustCompile(`(?i)WHERE\s+(\w+)\s*=\s*"([^"]+)"`)
 	if matches := wherePattern.FindStringSubmatch(command); len(matches) > 2 {
 		fieldName := matches[1]
@@ -322,24 +347,76 @@ func ShowMigrationsCommand(command string, database *models.Database, logger *za
 	}
 
 	// Delegate to migration service
-	migrations, err := serviceManager.MigrationService.ListMigrations(database.Name, filters)
+	migrations, err := serviceManager.MigrationService.ListMigrations(dbName, filters)
 	if err != nil {
 		logger.Errorf("Failed to list migrations: %v", err)
 		return nil, fmt.Errorf("failed to list migrations: %w", err)
 	}
 
 	// Get current version for context
-	currentVersion, err := serviceManager.MigrationService.GetCurrentVersion(database.Name)
+	currentVersion, err := serviceManager.MigrationService.GetCurrentVersion(dbName)
 	if err != nil {
 		logger.Warnf("Could not get current version: %v", err)
 		currentVersion = 0
 	}
 
-	logger.Infof("Retrieved migrations for database '%s'", database.Name)
+	logger.Infof("Retrieved migrations for database '%s'", dbName)
 	return map[string]interface{}{
 		"status":         "success",
-		"database":       database.Name,
+		"database":       dbName,
 		"currentVersion": currentVersion,
 		"migrations":     migrations,
 	}, nil
+}
+
+// splitBySemicolon splits a command string by semicolons while respecting quoted strings
+// This prevents breaking commands that contain semicolons inside string literals
+func splitBySemicolon(input string) []string {
+	var commands []string
+	var currentCommand strings.Builder
+	inString := false
+	var stringChar byte // Track whether we're in " or '
+
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+
+		switch {
+		case ch == '"' || ch == '\'':
+			// Check if this is an escaped quote
+			if i > 0 && input[i-1] == '\\' {
+				currentCommand.WriteByte(ch)
+			} else if inString && ch == stringChar {
+				// Closing quote
+				inString = false
+				currentCommand.WriteByte(ch)
+			} else if !inString {
+				// Opening quote
+				inString = true
+				stringChar = ch
+				currentCommand.WriteByte(ch)
+			} else {
+				// Different quote type inside string
+				currentCommand.WriteByte(ch)
+			}
+
+		case ch == ';' && !inString:
+			// End of command - save it and start new one
+			cmd := strings.TrimSpace(currentCommand.String())
+			if cmd != "" {
+				commands = append(commands, cmd)
+			}
+			currentCommand.Reset()
+
+		default:
+			currentCommand.WriteByte(ch)
+		}
+	}
+
+	// Add final command if any
+	cmd := strings.TrimSpace(currentCommand.String())
+	if cmd != "" {
+		commands = append(commands, cmd)
+	}
+
+	return commands
 }

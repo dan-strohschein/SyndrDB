@@ -789,6 +789,12 @@ func (a *CreateBundleStatementAdapter) ToBundleCommand(stmt *CreateBundleStateme
 			return nil, fmt.Errorf("field %d (%s): field type cannot be empty", i+1, parsedField.Name)
 		}
 
+		// Skip fields with type "relationship" - these should be defined via WITH RELATIONSHIP
+		// or UPDATE BUNDLE ADD RELATIONSHIP, not as field types
+		if strings.ToLower(parsedField.Type) == "relationship" {
+			continue
+		}
+
 		// Validate field type
 		if err := a.validateFieldType(parsedField.Type); err != nil {
 			return nil, fmt.Errorf("field %d (%s): %w", i+1, parsedField.Name, err)
