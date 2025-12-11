@@ -848,20 +848,21 @@ func ParseAddRelationshipCommand(command string) (*models.RelationshipCommand, e
 	*/
 
 	// Regular expression to parse the ADD RELATIONSHIP command
-	// UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipType>", "<SourceBundle>", "<SourceFieldName>", "<DestinationBundleName>", "<DestinationFieldName>")
-	relationshipRegex := regexp.MustCompile(`UPDATE\s+BUNDLE\s+"([^"]+)"\s+ADD\s+RELATIONSHIP\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*\)`)
+	// UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipName>" {"<RelationshipType>", "<SourceBundle>", "<SourceFieldName>", "<DestinationBundleName>", "<DestinationFieldName>"})
+	relationshipRegex := regexp.MustCompile(`UPDATE\s+BUNDLE\s+"([^"]+)"\s+ADD\s+RELATIONSHIP\s*\(\s*"([^"]+)"\s*\{\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*\}\s*\)`)
 
 	matches := relationshipRegex.FindStringSubmatch(command)
-	if len(matches) < 7 {
-		return nil, fmt.Errorf("invalid ADD RELATIONSHIP command syntax. Expected: UPDATE BUNDLE \"<BundleName>\" ADD RELATIONSHIP (\"<RelationshipType>\", \"<SourceBundle>\", \"<SourceField>\", \"<DestinationBundle>\", \"<DestinationField>\")")
+	if len(matches) < 8 {
+		return nil, fmt.Errorf("invalid ADD RELATIONSHIP command syntax. Expected: UPDATE BUNDLE \"<BundleName>\" ADD RELATIONSHIP (\"<RelationshipName>\" {\"<RelationshipType>\", \"<SourceBundle>\", \"<SourceField>\", \"<DestinationBundle>\", \"<DestinationField>\"})")
 	}
 
 	sourceBundleName := matches[1]
-	relationshipType := matches[2]
-	sourceBundle := matches[3]
-	sourceField := matches[4]
-	destinationBundle := matches[5]
-	destinationField := matches[6]
+	relationshipName := matches[2] // Capture the user-provided relationship name
+	relationshipType := matches[3]
+	sourceBundle := matches[4]
+	sourceField := matches[5]
+	destinationBundle := matches[6]
+	destinationField := matches[7]
 
 	// Validate relationship type
 	if relationshipType != "0toMany" && relationshipType != "1toMany" && relationshipType != "ManyToMany" {
@@ -876,9 +877,8 @@ func ParseAddRelationshipCommand(command string) (*models.RelationshipCommand, e
 		destinationField = sourceBundle + "ID"
 	}
 
-	// Generate relationship name: <SourceBundle>_<DestinationBundle>_<Counter>
-	// For now, we'll use a simple counter of 1. In the service layer, we can implement proper counter logic
-	relationshipName := fmt.Sprintf("%s_%s_1", sourceBundle, destinationBundle)
+	// Use the relationship name provided by the user
+	// (No longer auto-generating since the new syntax requires explicit naming)
 
 	return &models.RelationshipCommand{
 		CommandType:       "ADD",

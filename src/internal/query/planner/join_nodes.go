@@ -548,10 +548,45 @@ func evaluateJoinConditions(leftDoc, rightDoc *models.Document, conditions []que
 	return true
 }
 
-// evaluateComparison evaluates a comparison operation
+// evaluateComparison evaluates a comparison operation with type-aware logic
 func evaluateComparison(leftValue interface{}, operator string, rightValue interface{}, logger *zap.SugaredLogger) bool {
+	// Type-aware comparison for numeric types
+	leftNum, leftIsNum := toFloat64(leftValue)
+	rightNum, rightIsNum := toFloat64(rightValue)
+
+	if leftIsNum && rightIsNum {
+		// Both are numeric - use numeric comparison
+		logger.Debugf("JOIN: comparing numeric %v (%T) %s %v (%T)", leftValue, leftValue, operator, rightValue, rightValue)
+		switch operator {
+		case "==":
+			return leftNum == rightNum
+		case "!=":
+			return leftNum != rightNum
+		case ">":
+			return leftNum > rightNum
+		case "<":
+			return leftNum < rightNum
+		case ">=":
+			return leftNum >= rightNum
+		case "<=":
+			return leftNum <= rightNum
+		default:
+			logger.Warnf("Unknown join operator: %s", operator)
+			return false
+		}
+	}
+
+	// Check for type mismatch (one numeric, one not)
+	if leftIsNum != rightIsNum {
+		logger.Errorf("JOIN comparison failed: incompatible types %T and %T for operator %s", leftValue, rightValue, operator)
+		return false
+	}
+
+	// Fall back to string comparison for non-numeric types
 	leftStr := fmt.Sprintf("%v", leftValue)
 	rightStr := fmt.Sprintf("%v", rightValue)
+
+	logger.Debugf("JOIN: comparing string %v (%T) %s %v (%T)", leftValue, leftValue, operator, rightValue, rightValue)
 
 	switch operator {
 	case "==":
@@ -569,6 +604,24 @@ func evaluateComparison(leftValue interface{}, operator string, rightValue inter
 	default:
 		logger.Warnf("Unknown join operator: %s", operator)
 		return false
+	}
+}
+
+// toFloat64 attempts to convert a value to float64 for numeric comparison
+func toFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case int:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case float32:
+		return float64(v), true
+	case float64:
+		return v, true
+	default:
+		return 0, false
 	}
 }
 

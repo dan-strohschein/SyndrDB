@@ -71,6 +71,7 @@ type FieldModificationDefinitionParsed struct {
 }
 
 type RelationshipDefinitionParsed struct {
+	RelationshipName  string // Optional name of the relationship
 	RelationshipType  string // "1toMany", "0toMany", "1to1", "ManytoMany"
 	SourceBundle      string // Name of the source bundle
 	SourceField       string // Field in the source bundle
@@ -453,7 +454,17 @@ func (p *UpdateBundleParser) parseFieldValue() (interface{}, error) {
 }
 
 func (P *UpdateBundleParser) parseRelationshipAdditions(bundleName string) ([]RelationshipDefinitionParsed, error) {
+
 	var relationships []RelationshipDefinitionParsed
+
+	// There could be multiple ADD Relationship commands in a signle UPDATE BUNDLE statement
+	// The syntx for the whole statement looks like this:
+	/* Update Bundle "<BundleName>"
+	   ADD RELATIONSHIP (
+	   		"<relationshipName>" {"<RELATIONSHIP_TYPE>", "<SOURCE_BUNDLE>", "<SOURCE_FIELD>", "<DESTINATION_BUNDLE>", "<DESTINATION_FIELD>"},
+	    	"<relationshipName2" {"<RELATIONSHIP_TYPE_2>", "<SOURCE_BUNDLE_2>", "<SOURCE_FIELD_2>", "<DESTINATION_BUNDLE_2>", "<DESTINATION_FIELD_2>"}
+	);
+	*/
 
 	// Expect: ADD
 	if err := P.expectKeyword(TOKEN_ADD, "ADD"); err != nil {
@@ -465,28 +476,51 @@ func (P *UpdateBundleParser) parseRelationshipAdditions(bundleName string) ([]Re
 		return nil, err
 	}
 
-	// Expect: opening parenthesis
+	// Expect: opening parenthesis for multiple relationships
 	if err := P.expectToken(TOKEN_LPAREN, "("); err != nil {
 		return nil, err
 	}
 
 	// Parse relationship definitions
 	for {
-		relationship, err := P.parseRelationshipDefinition()
+		relationship := RelationshipDefinitionParsed{}
+		//  the developer must NAME the relationship being added
+		// e.g., ADD RELATIONSHIP ( "<RELATIONSHIP_NAME>"
+		if relName, err := P.expectString(); err != nil {
+			// Consume the relationship name
+			if err != nil {
+				return nil, fmt.Errorf("expected relationship name: %w", err)
+			}
+			relationship.RelationshipName = relName
+		}
+
+		// Expect: opening brace {
+		if err := P.expectToken(TOKEN_LBRACE, "{"); err != nil {
+			return nil, err
+		}
+		// Gets type, source bundle, source field, destination bundle, destination field
+		err := P.parseRelationshipDefinition(&relationship)
 		if err != nil {
 			return nil, err
 		}
 		relationships = append(relationships, relationship)
+
+		// Expect: closing brace }
+		if err := P.expectToken(TOKEN_RBRACE, "}"); err != nil {
+			return nil, err
+		}
 
 		// Check for comma (more relationships)
 		if !P.isAtEnd() && P.peek().Type == TOKEN_COMMA {
 			P.advance()
 			continue
 		}
+
 		break
+
 	}
 
-	// Expect: closing parenthesis
+	// Expect: opening parenthesis for multiple relationships
 	if err := P.expectToken(TOKEN_RPAREN, ")"); err != nil {
 		return nil, err
 	}
@@ -494,64 +528,64 @@ func (P *UpdateBundleParser) parseRelationshipAdditions(bundleName string) ([]Re
 	return relationships, nil
 }
 
-func (P *UpdateBundleParser) parseRelationshipDefinition() (RelationshipDefinitionParsed, error) {
+func (P *UpdateBundleParser) parseRelationshipDefinition(relationship *RelationshipDefinitionParsed) error {
 	// 1. Parse relationship type (string)
 	relationshipType, err := P.expectString()
 	if err != nil {
-		return RelationshipDefinitionParsed{}, fmt.Errorf("expected relationship type: %w", err)
+		return fmt.Errorf("expected relationship type: %w", err)
 	}
 
 	// Expect: comma
 	if err := P.expectToken(TOKEN_COMMA, ","); err != nil {
-		return RelationshipDefinitionParsed{}, err
+		return err
 	}
 
 	// 2. Parse source bundle (string)
 	sourceBundle, err := P.expectString()
 	if err != nil {
-		return RelationshipDefinitionParsed{}, fmt.Errorf("expected source bundle: %w", err)
+		return fmt.Errorf("expected source bundle: %w", err)
 	}
 
 	// Expect: comma
 	if err := P.expectToken(TOKEN_COMMA, ","); err != nil {
-		return RelationshipDefinitionParsed{}, err
+		return err
 	}
 
 	// 3. Parse source field (string)
 	sourceField, err := P.expectString()
 	if err != nil {
-		return RelationshipDefinitionParsed{}, fmt.Errorf("expected source field: %w", err)
+		return fmt.Errorf("expected source field: %w", err)
 	}
 
 	// Expect: comma
 	if err := P.expectToken(TOKEN_COMMA, ","); err != nil {
-		return RelationshipDefinitionParsed{}, err
+		return err
 	}
 
 	// 4. Parse destination bundle (string)
 	destinationBundle, err := P.expectString()
 	if err != nil {
-		return RelationshipDefinitionParsed{}, fmt.Errorf("expected destination bundle: %w", err)
+		return fmt.Errorf("expected destination bundle: %w", err)
 	}
 
 	// Expect: comma
 	if err := P.expectToken(TOKEN_COMMA, ","); err != nil {
-		return RelationshipDefinitionParsed{}, err
+		return err
 	}
 
 	// 5. Parse destination field (string)
 	destinationField, err := P.expectString()
 	if err != nil {
-		return RelationshipDefinitionParsed{}, fmt.Errorf("expected destination field: %w", err)
+		return fmt.Errorf("expected destination field: %w", err)
 	}
 
-	return RelationshipDefinitionParsed{
-		RelationshipType:  relationshipType,
-		SourceBundle:      sourceBundle,
-		SourceField:       sourceField,
-		DestinationBundle: destinationBundle,
-		DestinationField:  destinationField,
-	}, nil
+	relationship.RelationshipType = relationshipType
+	relationship.SourceBundle = sourceBundle
+	relationship.SourceField = sourceField
+	relationship.DestinationBundle = destinationBundle
+	relationship.DestinationField = destinationField
+
+	return nil
 }
 
 // Helper methods for token navigation and validation

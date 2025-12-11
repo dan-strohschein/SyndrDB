@@ -317,7 +317,7 @@ func setupBundles(t *testing.T, fixture *TestFixture) {
 		t.Fatalf("Failed to create Publishers bundle: %v", err)
 	}
 
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");`
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {
@@ -393,7 +393,7 @@ func setupBundlesTB(tb testing.TB, fixture *TestFixture) {
 		tb.Fatalf("Failed to create Publishers bundle: %v", err)
 	}
 
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");`
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {

@@ -68,7 +68,7 @@ func setupSubqueryBundles(tb testing.TB, fixture *TestFixture) {
 	}
 
 	// Create relationship
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");`
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {

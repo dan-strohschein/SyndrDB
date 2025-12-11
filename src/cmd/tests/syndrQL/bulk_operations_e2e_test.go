@@ -156,7 +156,7 @@ func TestBulkDelete_ReferentialIntegrity_ShouldBlockWithCountError(t *testing.T)
 	defer cancel()
 
 	// Create relationship from Authors to Books using correct UPDATE BUNDLE syntax
-	relCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");`
+	relCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("authorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, relCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {

@@ -262,17 +262,12 @@ func (sg *SchemaGenerator) generateRelationshipField(relationshipName string, re
 }
 
 // mapType maps a SyndrDB field type to a GraphQL type
+// FK fields use actual source field types (Int, String, DateTime), relationship traversal fields use [TargetType!]! arrays
 func (sg *SchemaGenerator) mapType(fieldDef models.FieldDefinition) (string, error) {
 	fieldType := strings.ToLower(fieldDef.Type)
 
-	// Handle relationship type specially
-	if fieldType == "relationship" {
-		// Relationships are handled separately via bundle.Relationships map
-		// For now, return String as default for relationship fields
-		return "String", nil
-	}
-
-	// Look up in type map
+	// Look up in type map - FK fields now preserve their source types (INT, STRING, etc.)
+	// instead of being hardcoded to "relationship"
 	graphqlType, exists := sg.typeMap[fieldType]
 	if !exists {
 		return "", fmt.Errorf("unsupported field type: %s", fieldDef.Type)

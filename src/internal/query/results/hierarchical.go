@@ -333,6 +333,12 @@ func (ht *HierarchicalTransformer) applyFieldSelection(doc *models.Document, sel
 
 	// Include selected fields if they exist
 	for _, fieldName := range selectedFields {
+		// For qualified field names (e.g., "Bundle.Field"), extract the field part
+		if strings.Contains(fieldName, ".") {
+			parts := strings.SplitN(fieldName, ".", 2)
+			fieldName = parts[1]
+		}
+
 		// Skip the relationship field as it's already included
 		if strings.EqualFold(fieldName, relationshipFieldName) {
 			continue

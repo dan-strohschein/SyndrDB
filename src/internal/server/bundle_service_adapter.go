@@ -3,7 +3,7 @@ package server
 import (
 	"fmt"
 	"strings"
-	"syndrdb/src/internal/defaultDB"
+	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
@@ -511,7 +511,6 @@ func (a *BundleServiceAdapter) DropField(dbName, bundleName, fieldName string) e
 }
 
 // RenameField changes a field's name in a bundle's schema
-// TODO: I will add index rebuilding after field rename to maintain query performance
 func (a *BundleServiceAdapter) RenameField(dbName, bundleName, oldFieldName, newFieldName string) error {
 	db, err := a.databaseService.GetDatabaseByName(dbName)
 	if err != nil {
@@ -541,12 +540,32 @@ func (a *BundleServiceAdapter) RenameField(dbName, bundleName, oldFieldName, new
 	}
 
 	// Apply the field change directly (no BundleCommand wrapper needed)
+	// This also rebuilds the indexes if the rename is successful
 	err = a.bundleService.ApplyFieldChanges(db, bndl, []models.FieldChange{change})
 	if err != nil {
 		return fmt.Errorf("failed to rename field from '%s' to '%s' in bundle '%s': %w", oldFieldName, newFieldName, bundleName, err)
 	}
 
 	a.logger.Infof("Renamed field from '%s' to '%s' in bundle '%s' (database '%s')", oldFieldName, newFieldName, bundleName, dbName)
+	return nil
+}
+
+// AddRelationship adds a relationship to a bundle
+// This adapter method resolves the database and bundle, then delegates to BundleService
+func (a *BundleServiceAdapter) AddRelationship(dbName, bundleName string, relationshipCommand *models.RelationshipCommand) error {
+	// Resolve database and bundle
+	_, bndl, err := a.resolveDatabaseAndBundle(dbName, bundleName)
+	if err != nil {
+		return err
+	}
+
+	// Add relationship using BundleService
+	err = a.bundleService.AddRelationshipToBundle(bndl, relationshipCommand)
+	if err != nil {
+		return fmt.Errorf("failed to add relationship to bundle '%s': %w", bundleName, err)
+	}
+
+	a.logger.Infof("Successfully added relationship to bundle '%s' in database '%s'", bundleName, dbName)
 	return nil
 }
 

@@ -29,7 +29,9 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	//     return nil, fmt.Errorf("access denied: only users with Admin permissions can create databases")
 	// }
 
-	dbCommand, err := db.ParseCreateDatabaseCommand(command, logger)
+	// Use new case-insensitive parser for CREATE DATABASE commands
+	// This routes through the SyndrQL parser for case-insensitive keyword matching
+	dbCommand, err := db.ParseDatabaseCommand(command, logger)
 	if err != nil {
 		return nil, err
 	}

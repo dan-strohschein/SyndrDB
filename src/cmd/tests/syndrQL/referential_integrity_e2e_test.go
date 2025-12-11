@@ -85,7 +85,7 @@ func TestE2E_ReferentialIntegrity_ForeignKeyValidation(t *testing.T) {
 	);`, "Create Books bundle")
 
 	// Setup: Create relationship
-	expectSuccess(t, fixture, `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "author_id");`, "Create relationship")
+	expectSuccess(t, fixture, `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "author_id"});`, "Create relationship")
 
 	// Setup: Insert valid author
 	expectSuccess(t, fixture, `ADD DOCUMENT TO BUNDLE "Authors" WITH ({"name"="J.K. Rowling"});`, "Insert author")
@@ -225,7 +225,7 @@ func TestE2E_ReferentialIntegrity_FieldRemovalProtection(t *testing.T) {
 		{"author_id", "STRING", true, false, ""}
 	);`, "Create Books")
 
-	expectSuccess(t, fixture, `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "author_id");`, "Create relationship")
+	expectSuccess(t, fixture, `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "author_id"});`, "Create relationship")
 
 	// TEST 1: Removing FK field should fail
 	t.Run("Cannot remove FK field", func(t *testing.T) {
@@ -264,7 +264,7 @@ func TestE2E_ReferentialIntegrity_BundleDeletion(t *testing.T) {
 
 	// Setup: Create relationship (Books -> Authors)
 	// Relationship is stored in SOURCE bundle (Books), pointing TO target bundle (Authors)
-	expectSuccess(t, fixture, `UPDATE BUNDLE "Books" ADD RELATIONSHIP ("1toMany", "Books", "author_id", "Authors", "DocumentID");`, "Create relationship")
+	expectSuccess(t, fixture, `UPDATE BUNDLE "Books" ADD RELATIONSHIP ("BooksAuthors" {"1toMany", "Books", "author_id", "Authors", "DocumentID"});`, "Create relationship")
 
 	// TEST: Cannot delete bundle with incoming relationships
 	// This verifies that referential integrity validation blocks bundle deletion

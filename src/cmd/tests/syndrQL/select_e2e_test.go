@@ -250,7 +250,7 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 
 	// Initialize Migration service (same as production)
 	migrationConfig := migration.LoadConfigFromSettings(globalSettings)
-	bundleServiceAdapter := server.NewBundleServiceAdapter(bundleService, databaseService, walManager, sugar)
+	bundleServiceAdapter := server.NewBundleServiceAdapter(bundleService, databaseService, catalogService, walManager, sugar)
 	migrationServiceCore := migration.NewMigrationService(bundleServiceAdapter, migrationConfig, sugar.Desugar())
 	migrationService := server.NewMigrationServiceAdapter(migrationServiceCore, sugar)
 
@@ -396,7 +396,7 @@ func resetDatabase(t *testing.T, fixture *TestFixture) {
 		t.Fatalf("Failed to create Publishers bundle: %v", err)
 	}
 
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorID");`
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ( "AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	if err != nil {

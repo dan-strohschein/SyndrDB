@@ -81,14 +81,14 @@ type TypeConverter func(interface{}) (interface{}, error)
 
 // Pre-compiled type converters for performance optimization
 var typeConverters = map[string]TypeConverter{
-	"string":       convertToString,
-	"int":          convertToInt,
-	"float":        convertToFloat,
-	"number":       convertToFloat, // alias for float
-	"bool":         convertToBool,
-	"datetime":     convertToDateTime,
-	"date":         convertToDate,
-	"relationship": convertToString,
+	"string":   convertToString,
+	"int":      convertToInt,
+	"float":    convertToFloat,
+	"number":   convertToFloat, // alias for float
+	"bool":     convertToBool,
+	"datetime": convertToDateTime,
+	"date":     convertToDate,
+	// "relationship" type removed - FK fields now preserve source field type
 }
 
 // Fast type converter functions - eliminate reflection overhead
@@ -3036,16 +3036,23 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 		TargetBundleName: relationshipCommand.DestinationBundle,
 	}
 
+	// Validate source field exists before creating relationship
+	sourceFieldDef, exists := bundle.DocumentStructure.FieldDefinitions[relationshipCommand.SourceField]
+	if !exists {
+		return fmt.Errorf("relationship validation failed: source field '%s.%s' does not exist", bundle.Name, relationshipCommand.SourceField)
+	}
+
 	// Add the relationship to the bundle
 	if bundle.Relationships == nil {
 		bundle.Relationships = make(map[string]models.Relationship)
 	}
 	bundle.Relationships[relationship.Name] = relationship
 
-	s.logger.Infof("Adding %s relationship from %s.%s to %s.%s",
-		relationship.RelationshipType,
+	s.logger.Infof("Validating relationship %s: %s.%s (%s) -> %s.%s",
+		relationship.Name,
 		relationship.SourceBundle,
 		relationship.SourceField,
+		sourceFieldDef.Type,
 		relationship.DestinationBundle,
 		relationship.DestinationField)
 
@@ -3072,18 +3079,30 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 			return fmt.Errorf("failed to add field to destination bundle for ManyToMany relationship: %w", err)
 		}
 
-		// Also add the reverse field to the source bundle
+		// Get destination bundle to lookup its source field type for reverse FK
+		destBundle, err := s.GetBundleByName(bundle.Database, relationship.DestinationBundle)
+		if err != nil {
+			return fmt.Errorf("failed to get destination bundle for ManyToMany reverse field: %w", err)
+		}
+
+		// Lookup destination bundle's source field for type preservation
+		destSourceFieldDef, exists := destBundle.DocumentStructure.FieldDefinitions[relationship.DestinationField]
+		if !exists {
+			return fmt.Errorf("relationship validation failed: destination field '%s.%s' does not exist for ManyToMany reverse", destBundle.Name, relationship.DestinationField)
+		}
+
+		// Also add the reverse field to the source bundle with preserved destination type
 		reverseFieldName := relationship.DestinationBundle + "ID"
 		bundle.DocumentStructure.FieldDefinitions[reverseFieldName] = models.FieldDefinition{
 			Name:         reverseFieldName,
-			Type:         "relationship",
+			Type:         destSourceFieldDef.Type, // Preserve destination field type
 			IsRequired:   false,
 			IsUnique:     false,
 			DefaultValue: nil,
 		}
 
-		s.logger.Infof("Added reverse field '%s' to source bundle '%s' for ManyToMany relationship",
-			reverseFieldName, bundle.Name)
+		s.logger.Infof("Added reverse field '%s' (type %s) to source bundle '%s' for ManyToMany relationship",
+			reverseFieldName, destSourceFieldDef.Type, bundle.Name)
 
 	default:
 		return fmt.Errorf("unsupported relationship type: %s", relationship.RelationshipType)
@@ -3203,20 +3222,29 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 		return fmt.Errorf("destination bundle '%s' not found: %w", relationship.DestinationBundle, err)
 	}
 
+	// Lookup source field to preserve its type
+	sourceFieldDef, exists := sourceBundle.DocumentStructure.FieldDefinitions[relationship.SourceField]
+	if !exists {
+		return fmt.Errorf("source field '%s' not found in bundle '%s'", relationship.SourceField, sourceBundle.Name)
+	}
+
 	// Check if field definitions map is initialized
 	if destinationBundle.DocumentStructure.FieldDefinitions == nil {
 		destinationBundle.DocumentStructure.FieldDefinitions = make(map[string]models.FieldDefinition)
 	}
 
-	// Add the relationship field to the destination bundle
+	// Add the relationship field to the destination bundle with preserved source type
 	fieldName := relationship.DestinationField
 	destinationBundle.DocumentStructure.FieldDefinitions[fieldName] = models.FieldDefinition{
 		Name:         fieldName,
-		Type:         "relationship",
+		Type:         sourceFieldDef.Type, // Preserve source field type instead of hardcoding "relationship"
 		IsRequired:   isRequired,
 		IsUnique:     isUnique,
 		DefaultValue: nil,
 	}
+
+	s.logger.Infof("Creating FK field '%s' with preserved type '%s' (from %s.%s)",
+		fieldName, sourceFieldDef.Type, sourceBundle.Name, relationship.SourceField)
 
 	// Update the destination bundle in the store
 	err = s.store.UpdateBundleFile(destinationBundle.Database, destinationBundle)
@@ -3245,8 +3273,8 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 			Fields: []models.FieldDefinition{
 				{
 					Name:     fieldName,
-					Type:     "relationship",
-					IsUnique: false, // Foreign keys are typically not unique (1-to-many)
+					Type:     sourceFieldDef.Type, // Use preserved source field type
+					IsUnique: false,               // Foreign keys are typically not unique (1-to-many)
 				},
 			},
 		}
@@ -5798,4 +5826,14 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 	}
 
 	return nil
+}
+
+// RegisterBundleForTesting registers a bundle in the in-memory cache for testing purposes
+// This allows E2E tests to set up bundle relationships without requiring full disk persistence
+func (s *BundleService) RegisterBundleForTesting(bundle *models.Bundle) {
+	if s.bundleMetadata == nil {
+		s.bundleMetadata = make(map[string]*models.Bundle)
+	}
+	s.bundleMetadata[bundle.Name] = bundle
+	s.logger.Debugf("[Testing] Registered bundle '%s' in memory cache", bundle.Name)
 }

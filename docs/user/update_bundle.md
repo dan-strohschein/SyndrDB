@@ -729,7 +729,7 @@ Examples:
 After adding relationships, verify with a JOIN query:
 
 ```sql
-UPDATE BUNDLE "authors" ADD RELATIONSHIP ("1toMany", "authors", "DocumentID", "books", "author_id");
+UPDATE BUNDLE "authors" ADD RELATIONSHIP ("authorsbooks" { "1toMany", "authors", "DocumentID", "books", "author_id"});
 
 -- Test it:
 SELECT * FROM "authors" JOIN "books" ON authors.DocumentID = books.author_id;

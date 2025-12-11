@@ -336,14 +336,20 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 					if err != nil {
 						return &result, err
 					}
-					AddRelationshipToBundle(serviceManager, database, bndleCommand.BundleName, RelationshipCommand)
+					_, err = AddRelationshipToBundle(serviceManager, database, bndleCommand.BundleName, RelationshipCommand)
+					if err != nil {
+						return &result, err
+					}
 				} else {
 					// Use the old CREATE RELATIONSHIP syntax
 					RelationshipCommand, err = bndle.ParseCreateRelationshipCommand(normalizedCommand)
 					if err != nil {
 						return &result, err
 					}
-					AddRelationshipToBundle(serviceManager, database, bndleCommand.BundleName, RelationshipCommand)
+					_, err = AddRelationshipToBundle(serviceManager, database, bndleCommand.BundleName, RelationshipCommand)
+					if err != nil {
+						return &result, err
+					}
 				}
 			}
 

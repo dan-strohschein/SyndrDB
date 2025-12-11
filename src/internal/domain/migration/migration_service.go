@@ -10,6 +10,7 @@ import (
 
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/syndrQL"
 
 	"go.uber.org/zap"
 )
@@ -279,6 +280,9 @@ func (s *MigrationService) ApplyMigration(databaseName string, version int, forc
 	}
 
 	// Execute each command sequentially
+	// Each command is wrapped in its own transaction and committed immediately
+	// This ensures that subsequent commands can see the effects of previous commands
+	// (e.g., CREATE BUNDLE followed by ADD RELATIONSHIP needs the bundle to exist on disk)
 	commands := migration.UpCommands
 	for i, cmd := range commands {
 		cmd = strings.TrimSpace(cmd)
@@ -311,14 +315,23 @@ func (s *MigrationService) ApplyMigration(databaseName string, version int, forc
 			s.updateMigrationStatus(migration.MigrationID, FAILED, fmt.Sprintf("command %d failed: %v", i, err))
 			return fmt.Errorf("command %d failed: %w", i, err)
 		}
-	}
 
-	// Commit transaction
-	err = s.bundleService.CommitTransaction(txID)
-	if err != nil {
-		s.bundleService.RollbackTransaction(txID)
-		s.updateMigrationStatus(migration.MigrationID, FAILED, fmt.Sprintf("failed to commit transaction: %v", err))
-		return fmt.Errorf("failed to commit transaction: %w", err)
+		// Commit transaction after each command to flush changes to disk
+		err = s.bundleService.CommitTransaction(txID)
+		if err != nil {
+			s.bundleService.RollbackTransaction(txID)
+			s.updateMigrationStatus(migration.MigrationID, FAILED, fmt.Sprintf("failed to commit command %d: %v", i, err))
+			return fmt.Errorf("failed to commit command %d: %w", i, err)
+		}
+
+		// Start new transaction for next command (if not last)
+		if i < len(commands)-1 {
+			txID, err = s.bundleService.BeginTransaction(databaseName)
+			if err != nil {
+				s.updateMigrationStatus(migration.MigrationID, FAILED, fmt.Sprintf("failed to begin transaction for command %d: %v", i+1, err))
+				return fmt.Errorf("failed to begin transaction for command %d: %w", i+1, err)
+			}
+		}
 	}
 
 	// Update migration status to APPLIED
@@ -1026,34 +1039,80 @@ func (s *MigrationService) executeAlterCommand(databaseName, command string, par
 
 // executeAlterBundle routes ALTER BUNDLE operations to appropriate handlers
 func (s *MigrationService) executeAlterBundle(databaseName, command string) error {
-	// Extract bundle name: ALTER BUNDLE "BundleName" ...
-	bundleRegex := regexp.MustCompile(`(?i)ALTER\s+BUNDLE\s+"([^"]+)"`)
-	matches := bundleRegex.FindStringSubmatch(command)
-	if len(matches) < 2 {
-		return fmt.Errorf("bundle name not found in ALTER BUNDLE command")
-	}
-	bundleName := matches[1]
+	// Extract bundle name: UPDATE BUNDLE "BundleName" ...
 
-	// Route based on operation type
-	commandUpper := strings.ToUpper(command)
-
-	if strings.Contains(commandUpper, "RENAME TO") {
-		return s.executeRenameBundleOperation(databaseName, bundleName, command)
+	updateBundleParser, err := syndrQL.NewUpdateBundleParser(command)
+	if err != nil {
+		return fmt.Errorf("failed to create CREATE BUNDLE parser: %w", err)
 	}
 
-	if strings.Contains(commandUpper, "ADD FIELD") {
-		return s.executeAddFieldOperation(databaseName, bundleName, command)
+	// Parse the UPDATE BUNDLE statement
+	updateBundleStmt, err := updateBundleParser.Parse()
+	if err != nil {
+		return fmt.Errorf("failed to parse UPDATE BUNDLE statement: %w", err)
 	}
 
-	if strings.Contains(commandUpper, "DROP FIELD") {
-		return s.executeDropFieldOperation(databaseName, bundleName, command)
+	bundleName := updateBundleStmt.BundleName
+
+	// bundleRegex := regexp.MustCompile(`(?i)UPDATE\s+BUNDLE\s+"([^"]+)"`)
+	// matches := bundleRegex.FindStringSubmatch(command)
+	// if len(matches) < 2 {
+	// 	return fmt.Errorf("bundle name not found in ALTER BUNDLE command")
+	// }
+	// bundleName := matches[1]
+
+	// // Route based on operation type
+	// commandUpper := strings.ToUpper(command)
+
+	if len(updateBundleStmt.NewBundleName) > 0 && !strings.EqualFold(updateBundleStmt.NewBundleName, bundleName) {
+		return s.executeRenameBundleOperation(databaseName, bundleName, updateBundleStmt)
 	}
 
-	if strings.Contains(commandUpper, "RENAME FIELD") {
-		return s.executeRenameFieldOperation(databaseName, bundleName, command)
+	// loop through the field mods and find the adds/deletes/modify, and send it to the right function
+	for _, fieldMod := range updateBundleStmt.Fields {
+		switch fieldMod.ModificationType {
+		case "ADD":
+			err := s.executeAddFieldOperation(databaseName, bundleName, &fieldMod)
+			if err != nil {
+				return err
+			}
+		case "REMOVE":
+			err := s.executeDropFieldOperation(databaseName, bundleName, &fieldMod)
+			if err != nil {
+				return err
+			}
+		case "MODIFY":
+			// TODO: currently this only renames fields. We really need to implement a way to change the data type, if possible.
+			// TODO: also handle other modifications like required, unique, default value changes. These are all very messy.
+			// - Changing data type may require data migration, this is excruciating. There is another idea product here for generating migrations to change field types.
+			// - Changing Is Required may require checking existing documents for compliance, and then figuring out how to handle non-compliant documents (default value? delete?)
+			// - Changing Is Unique requires checking existing documents for duplicates, which is also excruciating - this ALSO require
+			// For now, we will only handle renaming fields here.
+			err := s.executeRenameFieldOperation(databaseName, bundleName, &fieldMod)
+			if err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported ALTER BUNDLE operation: %s", fieldMod.ModificationType)
+		}
 	}
 
-	return fmt.Errorf("unsupported ALTER BUNDLE operation: %s", command)
+	// Handle relationship additions
+	for _, relationship := range updateBundleStmt.Relationships {
+		err := s.executeAddRelationshipOperation(databaseName, bundleName, &relationship)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Only return error if NO operations were performed
+	if len(updateBundleStmt.Fields) == 0 &&
+		len(updateBundleStmt.Relationships) == 0 &&
+		len(updateBundleStmt.NewBundleName) == 0 {
+		return fmt.Errorf("unsupported ALTER BUNDLE operation: %s", command)
+	}
+
+	return nil
 }
 
 // executeDropCommand handles DROP BUNDLE commands
@@ -1077,7 +1136,7 @@ func (s *MigrationService) executeInsertCommand(databaseName, command string, pa
 
 	// Support both forms: ADD DOCUMENT TO BUNDLE and INSERT INTO
 	if !strings.Contains(commandLower, "document") && !strings.Contains(commandLower, "into") {
-		return fmt.Errorf("invalid INSERT command format: %s", command)
+		return fmt.Errorf("invalid ADD Document command format: %s", command)
 	}
 
 	// Parse bundle name and document data from command
@@ -1232,14 +1291,20 @@ func (s *MigrationService) executeDropBundle(databaseName, command string) error
 }
 
 // executeRenameBundleOperation renames a bundle
-func (s *MigrationService) executeRenameBundleOperation(databaseName, oldName, command string) error {
+func (s *MigrationService) executeRenameBundleOperation(databaseName, oldName string, updateBundleStmt *syndrQL.UpdateBundleStatement) error {
 	// Extract new name: RENAME TO "NewName"
-	newNameRegex := regexp.MustCompile(`(?i)RENAME\s+TO\s+"([^"]+)"`)
-	matches := newNameRegex.FindStringSubmatch(command)
-	if len(matches) < 2 {
+
+	newName := updateBundleStmt.NewBundleName
+	if newName == "" {
 		return fmt.Errorf("new bundle name not found in RENAME TO clause")
 	}
-	newName := matches[1]
+
+	// newNameRegex := regexp.MustCompile(`(?i)RENAME\s+TO\s+"([^"]+)"`)
+	// matches := newNameRegex.FindStringSubmatch(command)
+	// if len(matches) < 2 {
+	// 	return fmt.Errorf("new bundle name not found in RENAME TO clause")
+	// }
+	// newName := matches[1]
 
 	s.logger.Info("Renaming bundle via migration",
 		zap.String("database", databaseName),
@@ -1259,18 +1324,27 @@ func (s *MigrationService) executeRenameBundleOperation(databaseName, oldName, c
 }
 
 // executeAddFieldOperation adds a new field to bundle schema
-func (s *MigrationService) executeAddFieldOperation(databaseName, bundleName, command string) error {
-	// Extract field definition: ADD FIELD {...}
-	fieldRegex := regexp.MustCompile(`(?i)ADD\s+FIELD\s+\{([^}]+)\}`)
-	matches := fieldRegex.FindStringSubmatch(command)
-	if len(matches) < 2 {
-		return fmt.Errorf("field definition not found in ADD FIELD clause")
-	}
+func (s *MigrationService) executeAddFieldOperation(databaseName, bundleName string, fieldMod *syndrQL.FieldModificationDefinitionParsed) error {
 
-	field, err := parseFieldDefinition("{" + matches[1] + "}")
-	if err != nil {
-		return fmt.Errorf("failed to parse field definition: %w", err)
+	newFieldDef := models.FieldDefinition{}
+	field := models.FieldDefinition{
+		Name:         fieldMod.Name,
+		Type:         fieldMod.Type,
+		IsRequired:   fieldMod.IsRequired,
+		IsUnique:     fieldMod.IsUnique,
+		DefaultValue: fieldMod.DefaultValue,
 	}
+	// Extract field definition: ADD FIELD {...}
+	// fieldRegex := regexp.MustCompile(`(?i)ADD\s+FIELD\s+\{([^}]+)\}`)
+	// matches := fieldRegex.FindStringSubmatch(command)
+	// if len(matches) < 2 {
+	// 	return fmt.Errorf("field definition not found in ADD FIELD clause")
+	// }
+
+	// field, err := parseFieldDefinition("{" + matches[1] + "}")
+	// if err != nil {
+	// 	return fmt.Errorf("failed to parse field definition: %w", err)
+	// }
 
 	s.logger.Info("Adding field to bundle via migration",
 		zap.String("database", databaseName),
@@ -1279,19 +1353,29 @@ func (s *MigrationService) executeAddFieldOperation(databaseName, bundleName, co
 		zap.String("type", field.Type),
 	)
 
-	// TODO: I will implement field addition via adapter once field type conversion is ready
-	return fmt.Errorf("ADD FIELD requires field definition type conversion infrastructure")
+	adapter, ok := s.bundleService.(interface {
+		AddField(dbName, bundleName string, field models.FieldDefinition) error
+	})
+
+	if !ok {
+		return fmt.Errorf("bundleService does not support RenameBundle operation")
+	}
+
+	return adapter.AddField(databaseName, bundleName, newFieldDef)
+
 }
 
 // executeDropFieldOperation removes a field from bundle schema
-func (s *MigrationService) executeDropFieldOperation(databaseName, bundleName, command string) error {
+func (s *MigrationService) executeDropFieldOperation(databaseName, bundleName string, fieldMod *syndrQL.FieldModificationDefinitionParsed) error {
 	// Extract field name: DROP FIELD "FieldName"
-	fieldRegex := regexp.MustCompile(`(?i)DROP\s+FIELD\s+"([^"]+)"`)
-	matches := fieldRegex.FindStringSubmatch(command)
-	if len(matches) < 2 {
-		return fmt.Errorf("field name not found in DROP FIELD clause")
-	}
-	fieldName := matches[1]
+	// fieldRegex := regexp.MustCompile(`(?i)DROP\s+FIELD\s+"([^"]+)"`)
+	// matches := fieldRegex.FindStringSubmatch(command)
+	// if len(matches) < 2 {
+	// 	return fmt.Errorf("field name not found in DROP FIELD clause")
+	// }
+	// fieldName := matches[1]
+
+	fieldName := fieldMod.Name
 
 	s.logger.Info("Dropping field from bundle via migration",
 		zap.String("database", databaseName),
@@ -1310,16 +1394,64 @@ func (s *MigrationService) executeDropFieldOperation(databaseName, bundleName, c
 	return adapter.DropField(databaseName, bundleName, fieldName)
 }
 
-// executeRenameFieldOperation renames a bundle field
-func (s *MigrationService) executeRenameFieldOperation(databaseName, bundleName, command string) error {
-	// Extract old and new field names: RENAME FIELD "OldName" TO "NewName"
-	renameRegex := regexp.MustCompile(`(?i)RENAME\s+FIELD\s+"([^"]+)"\s+TO\s+"([^"]+)"`)
-	matches := renameRegex.FindStringSubmatch(command)
-	if len(matches) < 3 {
-		return fmt.Errorf("field names not found in RENAME FIELD clause")
+// executeAddRelationshipOperation adds a relationship to a bundle via migration
+func (s *MigrationService) executeAddRelationshipOperation(databaseName, bundleName string, relationship *syndrQL.RelationshipDefinitionParsed) error {
+	// Convert the parsed relationship to a RelationshipCommand
+	relationshipCmd := &models.RelationshipCommand{
+		CommandType:       "ADD",
+		BundleName:        bundleName,
+		Name:              relationship.RelationshipName,
+		RelationshipType:  relationship.RelationshipType,
+		SourceBundle:      relationship.SourceBundle,
+		SourceField:       relationship.SourceField,
+		DestinationBundle: relationship.DestinationBundle,
+		DestinationField:  relationship.DestinationField,
 	}
-	oldFieldName := matches[1]
-	newFieldName := matches[2]
+
+	s.logger.Info("Adding relationship to bundle via migration",
+		zap.String("database", databaseName),
+		zap.String("bundle", bundleName),
+		zap.String("relationshipType", relationship.RelationshipType),
+		zap.String("sourceBundle", relationship.SourceBundle),
+		zap.String("destinationBundle", relationship.DestinationBundle),
+	)
+
+	// Use adapter that resolves database and bundle internally
+	adapter, ok := s.bundleService.(interface {
+		AddRelationship(dbName, bundleName string, relationshipCommand *models.RelationshipCommand) error
+	})
+	if !ok {
+		return fmt.Errorf("bundleService does not support AddRelationship operation")
+	}
+
+	// Add the relationship via adapter
+	err := adapter.AddRelationship(databaseName, bundleName, relationshipCmd)
+	if err != nil {
+		return fmt.Errorf("failed to add relationship to bundle '%s': %w", bundleName, err)
+	}
+
+	s.logger.Info("Successfully added relationship to bundle",
+		zap.String("database", databaseName),
+		zap.String("bundle", bundleName),
+		zap.String("relationship", relationship.RelationshipName),
+	)
+
+	return nil
+}
+
+// executeRenameFieldOperation renames a bundle field
+func (s *MigrationService) executeRenameFieldOperation(databaseName, bundleName string, fieldMod *syndrQL.FieldModificationDefinitionParsed) error {
+	// Extract old and new field names: RENAME FIELD "OldName" TO "NewName"
+	// renameRegex := regexp.MustCompile(`(?i)RENAME\s+FIELD\s+"([^"]+)"\s+TO\s+"([^"]+)"`)
+	// matches := renameRegex.FindStringSubmatch(command)
+	// if len(matches) < 3 {
+	// 	return fmt.Errorf("field names not found in RENAME FIELD clause")
+	// }
+	// oldFieldName := matches[1]
+	// newFieldName := matches[2]
+
+	oldFieldName := fieldMod.Name
+	newFieldName := fieldMod.NewName
 
 	s.logger.Info("Renaming field in bundle via migration",
 		zap.String("database", databaseName),
@@ -1340,7 +1472,7 @@ func (s *MigrationService) executeRenameFieldOperation(databaseName, bundleName,
 }
 
 // convertToModelField converts migration FieldDefinition to models.FieldDefinition
-// TODO: I will implement full type mapping between migration and models packages
+// TODO This should NOT EXIST. Refactor this later (AI Slop from making tests pass)
 func convertToModelField(f FieldDefinition) interface{} {
 	// Placeholder for type conversion
 	return map[string]interface{}{
