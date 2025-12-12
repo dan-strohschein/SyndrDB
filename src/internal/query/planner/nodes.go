@@ -694,7 +694,7 @@ func (node *FilterNode) matchesConditions(doc *models.Document, subqueryContext 
 	// NEW: Create evaluator with SIMD configuration from settings (Phase 1 WHERE optimization)
 	args := settings.GetSettings()
 	evaluator := syndrQL.NewExpressionEvaluatorWithSIMD(node.Logger, args.WhereSIMDEnabled)
-	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, subqueryContext)
+	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, subqueryContext, nil)
 	if err != nil {
 		node.Logger.Errorf("Expression evaluation failed: %v", err)
 		return false

@@ -9,7 +9,9 @@ import (
 	"sync"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/buffer"
+	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
@@ -145,6 +147,9 @@ type Session struct {
 	PendingOperations    []string          // Buffered commands within the transaction
 	CurrentSavepoint     *Savepoint        // Single-level savepoint (nil if no savepoint set)
 	TransactionStatus    TransactionStatus // Current status of the transaction
+
+	// Prepared statement cache (session-scoped)
+	PreparedStatements *syndrQL.ShardedPreparedStatementCache // Session-isolated prepared statement cache
 
 	// Session configuration
 	Timeout         time.Duration
@@ -302,6 +307,16 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 	// Generate IP validation hash for integrity checking
 	ipValidationHash := generateIPValidationHash(sessionID, clientIP, userAgent)
 
+	// Initialize prepared statement cache if enabled
+	var preparedStmtCache *syndrQL.ShardedPreparedStatementCache
+	settingsArgs := settings.GetSettings()
+	if settingsArgs.PreparedStatementCacheEnabled {
+		preparedStmtCache = syndrQL.NewShardedPreparedStatementCache(
+			settingsArgs.PreparedStatementCacheCapacity,
+			sm.logger.With("sessionID", sessionID, "component", "prepared_stmt_cache"),
+		)
+	}
+
 	session := &Session{
 		SessionID:          sessionID,
 		UserID:             userID,
@@ -325,6 +340,9 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		Timeout:            timeout,
 		MaxQueryHistory:    100, // Keep last 100 queries
 		Logger:             sm.logger.With("sessionID", sessionID, "username", username, "clientIP", clientIP),
+
+		// Initialize prepared statement cache
+		PreparedStatements: preparedStmtCache,
 
 		// Initialize role caching fields
 		RoleCacheTTL:      5 * time.Minute, // 5-minute TTL for role cache

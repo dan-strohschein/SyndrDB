@@ -156,6 +156,14 @@ const (
 	TOKEN_TRANSACTION // TRANSACTION
 	TOKEN_SAVEPOINT   // SAVEPOINT
 
+	// Keywords - Prepared Statements
+	TOKEN_PREPARE    // PREPARE
+	TOKEN_EXECUTE    // EXECUTE
+	TOKEN_DEALLOCATE // DEALLOCATE
+
+	// Parameterized Queries
+	TOKEN_PARAMETER // $1, $2, $3, ... (for prepared statements and parameter binding)
+
 	// Keywords - DateTime Functions
 	// TODO: I will add TOKEN_DATE_DIFF when implementing interval-based date arithmetic extensions
 	// TODO: I will add TOKEN_FORMAT when implementing custom DateTime format output (Phase 2)
@@ -402,6 +410,14 @@ func (tt TokenType) String() string {
 		return "TRANSACTION"
 	case TOKEN_SAVEPOINT:
 		return "SAVEPOINT"
+	case TOKEN_PREPARE:
+		return "PREPARE"
+	case TOKEN_EXECUTE:
+		return "EXECUTE"
+	case TOKEN_DEALLOCATE:
+		return "DEALLOCATE"
+	case TOKEN_PARAMETER:
+		return "PARAMETER"
 	case TOKEN_FUNCTION:
 		return "F:"
 	case TOKEN_NOW:
@@ -566,6 +582,11 @@ var keywords = map[string]TokenType{
 	"BEGIN":       TOKEN_BEGIN,
 	"TRANSACTION": TOKEN_TRANSACTION,
 	"SAVEPOINT":   TOKEN_SAVEPOINT,
+
+	// Prepared Statement Keywords
+	"PREPARE":    TOKEN_PREPARE,
+	"EXECUTE":    TOKEN_EXECUTE,
+	"DEALLOCATE": TOKEN_DEALLOCATE,
 
 	// DateTime Function Keywords - REMOVED from keywords map
 	// These are ONLY recognized when prefixed with F: (handled by readFunctionToken)

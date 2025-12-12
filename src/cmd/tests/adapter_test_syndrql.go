@@ -30,7 +30,7 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(42))},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(30))},
 	}
 
-	result2, err := evaluator.EvaluateAsBool(expr2, doc, nil, nil)
+	result2, err := evaluator.EvaluateAsBool(expr2, doc, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestEvaluatorLogicalOperators(t *testing.T) {
 		},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestEvaluatorNullHandling(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewStringValue("::SYNDR_NULL::")},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestEvaluatorTypeCoercion(t *testing.T) {
 		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(42))},
 	}
 
-	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil)
+	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to evaluate expression: %v", err)
 	}
@@ -361,7 +361,7 @@ func BenchmarkEvaluatorSimpleComparison(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = evaluator.EvaluateAsBool(expr, doc, nil, nil)
+		_, _ = evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
 	}
 }
 
@@ -411,6 +411,6 @@ func BenchmarkEvaluatorComplexExpression(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = evaluator.EvaluateAsBool(expr, doc, nil, nil)
+		_, _ = evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
 	}
 }

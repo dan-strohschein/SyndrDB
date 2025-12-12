@@ -185,6 +185,19 @@ func (se *SubqueryExpression) String() string {
 	return fmt.Sprintf("%s (SELECT ... FROM %s)", se.SubqueryType.String(), se.InnerQuery.BundleName)
 }
 
+// ParameterExpression represents a parameter placeholder ($1, $2, etc.) for parameterized queries
+// Parameters use 1-based indexing matching PostgreSQL convention.
+// Parameter reuse is allowed (e.g., WHERE x=$1 AND y=$1 binds same value twice).
+// TODO: Could add type hint validation here for PREPARE stmt (text, integer) FROM ... syntax in future enhancement
+type ParameterExpression struct {
+	Index int // 1-indexed parameter number ($1 = Index 1, $2 = Index 2, etc.)
+}
+
+func (pe *ParameterExpression) expressionNode() {}
+func (pe *ParameterExpression) String() string {
+	return fmt.Sprintf("$%d", pe.Index)
+}
+
 // IntervalExpression represents an INTERVAL literal for date/time arithmetic
 // Supports both numeric format: INTERVAL '7' DAY
 // And string format: INTERVAL '7 days', INTERVAL '1 month 2 days'
@@ -311,6 +324,7 @@ func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionP
 	p.registerPrefix(TOKEN_TRUE, p.parseLiteral)
 	p.registerPrefix(TOKEN_FALSE, p.parseLiteral)
 	p.registerPrefix(TOKEN_NULL, p.parseLiteral)
+	p.registerPrefix(TOKEN_PARAMETER, p.parseParameter)
 	p.registerPrefix(TOKEN_NOT, p.parseUnaryExpression)
 	p.registerPrefix(TOKEN_MINUS, p.parseUnaryExpression)
 	p.registerPrefix(TOKEN_LPAREN, p.parseGroupedExpression)
@@ -479,6 +493,19 @@ func (p *ExpressionParser) parseLiteral() (Expression, error) {
 	expr := &LiteralExpression{
 		Token: p.current.Type,
 		Value: p.current.Literal,
+	}
+	p.advance()
+	return expr, nil
+}
+
+func (p *ExpressionParser) parseParameter() (Expression, error) {
+	paramNum, ok := p.current.Literal.(int)
+	if !ok {
+		return nil, fmt.Errorf("invalid parameter index")
+	}
+
+	expr := &ParameterExpression{
+		Index: paramNum,
 	}
 	p.advance()
 	return expr, nil

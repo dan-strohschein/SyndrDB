@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/planner"
+	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 	"time"
@@ -37,10 +38,44 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	return result, err
 }
 
+// CommandDirectorWithParams is a convenience wrapper for executing parameterized commands
+// It constructs the delimiter-based protocol format and calls CommandDirector
+func CommandDirectorWithParams(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, params []string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+	// Build parameterized command using delimiter protocol
+	// Format: command\x05param1\x05param2\x05param3
+	if len(params) > 0 {
+		var sb strings.Builder
+		sb.WriteString(command)
+		for _, param := range params {
+			sb.WriteString("\x05") // ENQ delimiter
+			// Escape any ENQ or EOT characters in the parameter
+			escapedParam := strings.ReplaceAll(param, "\x04", "\x04\x04")
+			escapedParam = strings.ReplaceAll(escapedParam, "\x05", "\x05\x05")
+			sb.WriteString(escapedParam)
+		}
+		command = sb.String()
+	}
+
+	return CommandDirector(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
+}
+
 // executeCommand contains the main command execution logic
 func executeCommand(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	if database == nil {
 		// Get the database from the session.
+	}
+
+	// PARAMETER PARSING: Check if command has delimiter-separated parameters
+	rawCommand := command
+	command, params, hasParams := ParseParameterizedCommand(rawCommand)
+	if hasParams && len(params) > 0 {
+		// Create parameter context and add to context
+		paramContext, err := CreateParameterContext(params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create parameter context: %w", err)
+		}
+		// Add parameter context to the context for prepared statement operations
+		ctx = context.WithValue(ctx, "paramContext", paramContext)
 	}
 
 	// Check if this is a GraphQL command first
@@ -68,6 +103,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	firstWords := strings.Fields(command)
 	if len(firstWords) == 0 {
 		return nil, fmt.Errorf("empty command")
+	}
+
+	// PREPARED STATEMENTS: Check for PREPARE/EXECUTE/DEALLOCATE commands first
+	if IsPreparedStatementCommand(firstWords) {
+		return ParseAndExecutePreparedStatementCommand(ctx, command, session, database, serviceManager, logger)
 	}
 
 	// TRANSACTION MANAGEMENT: Check for transaction commands first (before any other processing)
@@ -1073,6 +1113,206 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 
 	return cmdResponse, nil
 
+}
+
+// IsPreparedStatementCommand checks if the command is a prepared statement operation
+func IsPreparedStatementCommand(firstWords []string) bool {
+	if len(firstWords) == 0 {
+		return false
+	}
+
+	firstWord := strings.ToUpper(firstWords[0])
+	return firstWord == "PREPARE" || firstWord == "EXECUTE" || firstWord == "DEALLOCATE"
+}
+
+// ParseAndExecutePreparedStatementCommand parses and executes PREPARE, EXECUTE, or DEALLOCATE commands
+func ParseAndExecutePreparedStatementCommand(
+	ctx context.Context,
+	command string,
+	session *Session,
+	database *models.Database,
+	serviceManager ServiceManager,
+	logger *zap.SugaredLogger,
+) (interface{}, error) {
+	if session == nil {
+		return nil, fmt.Errorf("prepared statements require an active session")
+	}
+
+	if session.PreparedStatements == nil {
+		return nil, fmt.Errorf("prepared statement cache is not initialized for this session")
+	}
+
+	// Tokenize the command using SyndrQL tokenizer
+	tokenizer := syndrQL.NewTokenizer(command)
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return nil, fmt.Errorf("failed to tokenize prepared statement command: %w", err)
+	}
+
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("empty prepared statement command")
+	}
+
+	// Create operations handler
+	pso := syndrQL.NewPreparedStatementOperations(logger)
+
+	// Route based on first token
+	switch tokens[0].Type {
+	case syndrQL.TOKEN_PREPARE:
+		// Parse PREPARE statement
+		prepareStmt, err := syndrQL.ParsePrepareStatement(tokens, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse PREPARE statement: %w", err)
+		}
+
+		// Handle PREPARE
+		message, err := pso.HandlePrepare(ctx, prepareStmt, session.PreparedStatements, database)
+		if err != nil {
+			return nil, err
+		}
+
+		return &CommandResponse{
+			Result: message,
+		}, nil
+
+	case syndrQL.TOKEN_EXECUTE:
+		// Parse EXECUTE statement
+		execStmt, err := syndrQL.ParseExecuteStatement(tokens, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse EXECUTE statement: %w", err)
+		}
+
+		// Check if parameters were provided via protocol (already parsed in parameterized_command.go)
+		// The parameter context should be passed through the session or context
+		// For now, we'll get it from the command context if available
+		var paramContext *syndrQL.ParameterContext
+		if ctxParams := ctx.Value("paramContext"); ctxParams != nil {
+			paramContext = ctxParams.(*syndrQL.ParameterContext)
+		}
+
+		// Handle EXECUTE
+		preparedStmt, paramCtx, err := pso.HandleExecute(ctx, execStmt, paramContext, session.PreparedStatements, database)
+		if err != nil {
+			return nil, err
+		}
+
+		// Now we need to actually execute the prepared query
+		// Reconstruct the query with the prepared statement's query text
+		// and pass the parameter context to the SELECT executor
+		return ExecutePreparedQuery(ctx, preparedStmt, paramCtx, database, session, serviceManager, logger)
+
+	case syndrQL.TOKEN_DEALLOCATE:
+		// Parse DEALLOCATE statement
+		deallocateStmt, err := syndrQL.ParseDeallocateStatement(tokens, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse DEALLOCATE statement: %w", err)
+		}
+
+		// Handle DEALLOCATE
+		message, err := pso.HandleDeallocate(ctx, deallocateStmt, session.PreparedStatements)
+		if err != nil {
+			return nil, err
+		}
+
+		// Record execution time
+		startTime := time.Now()
+		executionTime := time.Since(startTime)
+		session.PreparedStatements.RecordExecution(deallocateStmt.StatementName, executionTime)
+
+		return &CommandResponse{
+			Result: message,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("expected PREPARE, EXECUTE, or DEALLOCATE keyword")
+	}
+}
+
+// ExecutePreparedQuery executes a prepared statement query with the given parameters
+func ExecutePreparedQuery(
+	ctx context.Context,
+	preparedStmt *syndrQL.PreparedStatement,
+	paramContext *syndrQL.ParameterContext,
+	database *models.Database,
+	session *Session,
+	serviceManager ServiceManager,
+	logger *zap.SugaredLogger,
+) (interface{}, error) {
+	startTime := time.Now()
+
+	// Add parameter context to the context for evaluator access during WHERE clause evaluation
+	ctx = context.WithValue(ctx, "paramContext", paramContext)
+
+	// Initialize memory tracking for DoS protection
+	args := settings.GetSettings()
+	isAdmin := false // TODO: Determine admin status from session when auth is implemented
+	memoryLimit := args.GetQueryMemoryLimit(isAdmin)
+	memoryTracker := NewMemoryTracker(memoryLimit)
+	ctx = WithMemoryTracker(ctx, memoryTracker)
+
+	// Set up query timeout with 80% warning threshold
+	timeout := args.GetQueryTimeout(isAdmin)
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		// Start timeout warning goroutine
+		go func() {
+			warningTime := time.Duration(float64(timeout) * 0.8)
+			select {
+			case <-time.After(warningTime):
+				if ctx.Err() == nil {
+					logger.Warnf("Prepared query execution approaching timeout: %s (%.0f%% of %s)",
+						time.Since(startTime), 80.0, timeout)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}()
+	}
+
+	// Create execution plan through unified planner
+	plan, err := serviceManager.UnifiedPlanner.CreatePlan(preparedStmt.ParsedQuery, database)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create execution plan: %w", err)
+	}
+
+	// Execute the plan with parameter context
+	documents, err := plan.RootNode.Execute(ctx)
+	if err != nil {
+		// Check for timeout or memory limit errors
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("query execution timeout after %s", time.Since(startTime))
+		}
+		if err == planner.ErrMemoryLimitExceeded {
+			return nil, fmt.Errorf("query exceeded memory limit of %d bytes", memoryLimit)
+		}
+		return nil, fmt.Errorf("failed to execute prepared query: %w", err)
+	}
+
+	// Acquire read locks for documents in transaction (if applicable)
+	if session != nil && session.IsInTransaction() {
+		bundleName := preparedStmt.BundleName
+		for docID := range documents {
+			if err := serviceManager.LockManager.AcquireReadLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
+				return nil, fmt.Errorf("failed to acquire read lock for document %s: %w", docID, err)
+			}
+		}
+		logger.Debugf("Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
+	}
+
+	// Transform documents to flat format with projection
+	query := preparedStmt.ParsedQuery
+	selectedFields := query.SelectFields
+	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
+
+	// Record execution time and update statistics
+	executionTime := time.Since(startTime)
+	session.PreparedStatements.RecordExecution(preparedStmt.Name, executionTime)
+
+	// Return flattened documents as interface{}
+	return flattenedDocs, nil
 }
 
 func SelectDatabases(firstWords []string, serviceManager ServiceManager) (*CommandResponse, error, bool) {

@@ -31,6 +31,18 @@ Key responsibilities:
 
 The evaluator follows the Visitor pattern, with each Expression type implementing
 its own evaluation logic through the Evaluate method.
+
+PARAMETERIZED QUERY IMPLEMENTATION - Subtasks:
+[✓] Subtask 1: Add evaluateParameter() method (DONE)
+[✓] Subtask 2: Update Evaluate() main switch to include paramContext parameter (DONE)
+[✓] Subtask 3: Update evaluateBinary() - add paramContext to all recursive e.Evaluate() calls (DONE)
+[✓] Subtask 4: Update evaluateUnary() - add paramContext parameter and recursive calls (DONE)
+[✓] Subtask 5: Update evaluateGrouped() - add paramContext parameter and recursive calls (DONE)
+[✓] Subtask 6: Update evaluateCall() - add paramContext parameter and recursive calls (DONE)
+[✓] Subtask 7: Update evaluateArray() - add paramContext parameter and recursive calls (DONE)
+[✓] Subtask 8: Update evaluateAtTimeZone() - add paramContext parameter and recursive calls (DONE)
+[✓] Subtask 9: Update EvaluateAsBool() - add paramContext parameter (DONE)
+[✓] Subtask 10: Update all callers in select_executor.go, documentscanner package, etc. (DONE)
 */
 
 // BundleContext provides context about available bundles for field resolution
@@ -106,7 +118,9 @@ type SubqueryExecutionContext map[*SubqueryExpression]interface{}
 // This is the main entry point for expression evaluation
 // bundleContext is optional - when nil, single-bundle behavior is maintained for backward compatibility
 // subqueryContext is optional - when nil, subquery evaluation will fail (prevents runtime errors for non-subquery queries)
-func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+// paramContext is optional - when nil, parameter evaluation will fail (only used for parameterized queries)
+// TODO: Could optimize parameter resolution for complex types (arrays, objects) when type system expands
+func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
 	if expr == nil {
 		return nil, fmt.Errorf("cannot evaluate nil expression")
 	}
@@ -123,21 +137,23 @@ func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bu
 	case *QualifiedIdentifierExpression:
 		return e.evaluateQualifiedIdentifier(expr, doc, bundleContext)
 	case *BinaryExpression:
-		return e.evaluateBinary(expr, doc, bundleContext, subqueryContext)
+		return e.evaluateBinary(expr, doc, bundleContext, subqueryContext, paramContext)
 	case *UnaryExpression:
-		return e.evaluateUnary(expr, doc, bundleContext, subqueryContext)
+		return e.evaluateUnary(expr, doc, bundleContext, subqueryContext, paramContext)
 	case *GroupedExpression:
-		return e.evaluateGrouped(expr, doc, bundleContext, subqueryContext)
+		return e.evaluateGrouped(expr, doc, bundleContext, subqueryContext, paramContext)
 	case *CallExpression:
-		return e.evaluateCall(expr, doc, bundleContext, subqueryContext)
+		return e.evaluateCall(expr, doc, bundleContext, subqueryContext, paramContext)
 	case *ArrayExpression:
-		return e.evaluateArray(expr, doc, bundleContext, subqueryContext)
+		return e.evaluateArray(expr, doc, bundleContext, subqueryContext, paramContext)
 	case *SubqueryExpression:
 		return e.evaluateSubquery(expr, subqueryContext)
 	case *IntervalExpression:
 		return e.evaluateInterval(expr)
 	case *AtTimeZoneExpression:
-		return e.evaluateAtTimeZone(expr, doc, bundleContext, subqueryContext)
+		return e.evaluateAtTimeZone(expr, doc, bundleContext, subqueryContext, paramContext)
+	case *ParameterExpression:
+		return e.evaluateParameter(expr, paramContext)
 	default:
 		return nil, fmt.Errorf("unsupported expression type: %T", expr)
 	}
@@ -147,6 +163,23 @@ func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bu
 func (e *ExpressionEvaluator) evaluateLiteral(expr *LiteralExpression) (interface{}, error) {
 	// ✅ Convert literals to FieldValue for zero-allocation comparisons
 	return models.NewInterfaceValue(expr.Value), nil
+}
+
+// evaluateParameter evaluates a parameter placeholder by looking it up in the parameter context
+// Parameters use 1-based indexing ($1, $2, etc.)
+// Returns the bound parameter value with runtime type coercion support
+func (e *ExpressionEvaluator) evaluateParameter(expr *ParameterExpression, paramContext *ParameterContext) (interface{}, error) {
+	if paramContext == nil {
+		return nil, fmt.Errorf("parameter $%d used but no parameter context provided", expr.Index)
+	}
+
+	val, err := paramContext.Get(expr.Index)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to FieldValue for type coercion compatibility
+	return models.NewInterfaceValue(val), nil
 }
 
 // evaluateIdentifier evaluates an identifier (field name) by looking it up in the document
@@ -225,13 +258,13 @@ func (e *ExpressionEvaluator) evaluateQualifiedIdentifier(expr *QualifiedIdentif
 }
 
 // evaluateBinary evaluates a binary expression (e.g., a == b, a AND b)
-func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
 	if e.logger != nil && (expr.Operator == TOKEN_IN || expr.Operator == TOKEN_NOTIN) {
 		e.logger.Infof("evaluateBinary: operator=%s, leftType=%T, processing IN/NOT IN", expr.Operator, expr.Left)
 	}
 
 	// Evaluate left side first
-	left, err := e.Evaluate(expr.Left, doc, bundleContext, subqueryContext)
+	left, err := e.Evaluate(expr.Left, doc, bundleContext, subqueryContext, paramContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating left side of binary expression: %w", err)
 	}
@@ -272,7 +305,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 		}
 
 		// Left is true, evaluate right
-		right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
+		right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext, paramContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating right side of AND: %w", err)
 		}
@@ -296,7 +329,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 		}
 
 		// Left is false, evaluate right
-		right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
+		right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext, paramContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating right side of OR: %w", err)
 		}
@@ -310,7 +343,7 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 	}
 
 	// For all other operators, evaluate right side
-	right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
+	right, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext, paramContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating right side of binary expression: %w", err)
 	}
@@ -388,9 +421,9 @@ func (e *ExpressionEvaluator) evaluateBinary(expr *BinaryExpression, doc *models
 }
 
 // evaluateUnary evaluates a unary expression (e.g., NOT, -, +)
-func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
 	// Evaluate operand (Right field in UnaryExpression)
-	operand, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext)
+	operand, err := e.Evaluate(expr.Right, doc, bundleContext, subqueryContext, paramContext)
 	if err != nil {
 		return nil, fmt.Errorf("error evaluating unary operand: %w", err)
 	}
@@ -423,18 +456,18 @@ func (e *ExpressionEvaluator) evaluateUnary(expr *UnaryExpression, doc *models.D
 }
 
 // evaluateGrouped evaluates a grouped expression (parenthesized)
-func (e *ExpressionEvaluator) evaluateGrouped(expr *GroupedExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
-	return e.Evaluate(expr.Expression, doc, bundleContext, subqueryContext)
+func (e *ExpressionEvaluator) evaluateGrouped(expr *GroupedExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
+	return e.Evaluate(expr.Expression, doc, bundleContext, subqueryContext, paramContext)
 }
 
 // evaluateCall evaluates a function call expression using the function registry
 // Supports built-in DateTime functions: F:NOW(), F:EXTRACT(), F:DATE_TRUNC(), F:DATE_ADD(), F:DATE_SUB(), F:AGE()
 // TODO: I will add support for user-defined functions when implementing UDF system
-func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
 	// Evaluate all arguments first
 	args := make([]models.FieldValue, len(expr.Arguments))
 	for i, argExpr := range expr.Arguments {
-		argVal, err := e.Evaluate(argExpr, doc, bundleContext, subqueryContext)
+		argVal, err := e.Evaluate(argExpr, doc, bundleContext, subqueryContext, paramContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating function argument %d: %w", i+1, err)
 		}
@@ -497,9 +530,9 @@ func (e *ExpressionEvaluator) evaluateInterval(expr *IntervalExpression) (interf
 // evaluateAtTimeZone evaluates the AT TIME ZONE operator
 // Converts a DateTime from its current timezone to the target timezone
 // TODO: I will add compile-time timezone validation when implementing static analysis optimization
-func (e *ExpressionEvaluator) evaluateAtTimeZone(expr *AtTimeZoneExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateAtTimeZone(expr *AtTimeZoneExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
 	// Evaluate the left expression (should be a DateTime)
-	val, err := e.Evaluate(expr.Expression, doc, bundleContext, subqueryContext)
+	val, err := e.Evaluate(expr.Expression, doc, bundleContext, subqueryContext, paramContext)
 	if err != nil {
 		return nil, fmt.Errorf("AT TIME ZONE: error evaluating expression: %w", err)
 	}
@@ -541,11 +574,11 @@ func (e *ExpressionEvaluator) evaluateAtTimeZone(expr *AtTimeZoneExpression, doc
 
 // evaluateArray evaluates an array expression
 // TODO: I need to implement array evaluation for IN clauses and array operations
-func (e *ExpressionEvaluator) evaluateArray(expr *ArrayExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (interface{}, error) {
+func (e *ExpressionEvaluator) evaluateArray(expr *ArrayExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
 	// Evaluate each element in the array
 	result := make([]interface{}, len(expr.Elements))
 	for i, elem := range expr.Elements {
-		val, err := e.Evaluate(elem, doc, bundleContext, subqueryContext)
+		val, err := e.Evaluate(elem, doc, bundleContext, subqueryContext, paramContext)
 		if err != nil {
 			return nil, fmt.Errorf("error evaluating array element %d: %w", i, err)
 		}
@@ -951,8 +984,9 @@ func (e *ExpressionEvaluator) toFloat64(v interface{}) (float64, error) {
 // EvaluateAsBool evaluates an expression and returns the result as a boolean
 // This is a convenience method for WHERE clause evaluation
 // subqueryContext is optional - when nil, subquery evaluation will fail (safe for non-subquery queries)
-func (e *ExpressionEvaluator) EvaluateAsBool(expr Expression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext) (bool, error) {
-	result, err := e.Evaluate(expr, doc, bundleContext, subqueryContext)
+// paramContext is optional - when nil, parameter evaluation will fail (only used for parameterized queries)
+func (e *ExpressionEvaluator) EvaluateAsBool(expr Expression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (bool, error) {
+	result, err := e.Evaluate(expr, doc, bundleContext, subqueryContext, paramContext)
 	if err != nil {
 		return false, err
 	}

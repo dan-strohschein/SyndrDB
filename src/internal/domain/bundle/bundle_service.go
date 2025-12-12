@@ -2945,7 +2945,7 @@ func (s *BundleService) evaluateDefaultValue(defaultValue interface{}, doc *mode
 		// Use the provided document for evaluation context
 		// Field references will work if the field already exists in doc
 		// Function calls like F:NOW() don't need document fields
-		result, err := evaluator.Evaluate(expr, doc, nil, nil)
+		result, err := evaluator.Evaluate(expr, doc, nil, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("expression evaluation failed: %w", err)
 		}

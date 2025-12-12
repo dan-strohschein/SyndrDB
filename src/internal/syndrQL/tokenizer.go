@@ -139,6 +139,8 @@ func (t *Tokenizer) nextToken() Token {
 		tok = t.newToken(TOKEN_RBRACKET, string(t.ch))
 	case '"', '\'':
 		tok = t.readString(t.ch)
+	case '$':
+		return t.readParameter()
 	default:
 		// Check for F: prefix (case-insensitive function call)
 		if (t.ch == 'F' || t.ch == 'f') && t.peekChar() == ':' {
@@ -510,6 +512,54 @@ func (t *Tokenizer) readString(quote byte) Token {
 		Type:    TOKEN_STRING,
 		Value:   value,
 		Literal: value,
+		Line:    startLine,
+		Column:  startColumn,
+	}
+}
+
+// readParameter reads a parameter placeholder ($1, $2, etc.)
+// Parameters must be consecutive positive integers starting from $1
+func (t *Tokenizer) readParameter() Token {
+	startPos := t.pos
+	startLine := t.line
+	startColumn := t.column
+
+	t.readChar() // consume '$'
+
+	// Parameter must be followed by digits
+	if !isDigit(t.ch) {
+		return Token{
+			Type:   TOKEN_ILLEGAL,
+			Value:  "$",
+			Line:   startLine,
+			Column: startColumn,
+		}
+	}
+
+	// Read all digits
+	digitStart := t.pos
+	for isDigit(t.ch) {
+		t.readChar()
+	}
+
+	literal := t.input[startPos:t.pos]
+	paramNumStr := t.input[digitStart:t.pos]
+
+	// Parse parameter number
+	paramNum, err := strconv.Atoi(paramNumStr)
+	if err != nil || paramNum <= 0 {
+		return Token{
+			Type:   TOKEN_ILLEGAL,
+			Value:  literal,
+			Line:   startLine,
+			Column: startColumn,
+		}
+	}
+
+	return Token{
+		Type:    TOKEN_PARAMETER,
+		Value:   literal,
+		Literal: paramNum, // Store as int for easy access
 		Line:    startLine,
 		Column:  startColumn,
 	}

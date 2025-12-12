@@ -181,6 +181,13 @@ type Arguments struct {
 	// TODO: I will add PlanCacheMemoryLimitMB for memory-aware eviction when memory profiling reveals actual cache memory usage
 	// TODO: I will add PlanCacheCompressionEnabled for large plan compression when we have plans exceeding 10KB
 
+	// Prepared Statement Cache Configuration (for parameterized queries)
+	PreparedStatementCacheEnabled  bool `yaml:"prepared_statement_cache_enabled"`  // Enable prepared statement caching (default: true)
+	PreparedStatementCacheCapacity int  `yaml:"prepared_statement_cache_capacity"` // Maximum cached statements per shard (default: 1000, 8 shards = 8000 total)
+	MaxParametersPerQuery          int  `yaml:"max_parameters_per_query"`          // Maximum parameters per query (default: 1000)
+	// TODO: Could expose prepared statement metrics via SELECT * FROM 'system.prepared_statements' for observability in future metrics system expansion
+	// TODO: Could support preloading common statements on server startup from configuration file for cache warming
+
 	// TIER 1 SUBQUERY SUPPORT: Subquery execution configuration
 	SubqueryEnabled           bool `yaml:"subquery_enabled"`              // Enable subquery support (default: true)
 	SubquerySmallThreshold    int  `yaml:"subquery_small_threshold"`      // IN-list strategy threshold (default: 100)
@@ -341,6 +348,11 @@ func GetSettings() *Arguments {
 			PlanCacheCustomThreshold:   5,    // 5 custom executions before generic plan
 			PlanCacheWriteThreshold:    1000, // Invalidate after 1000 writes
 			PlanCacheStaleServeSeconds: 60,   // 60 second stale serving window
+
+			// Prepared Statement Cache Defaults
+			PreparedStatementCacheEnabled:  true, // Enable prepared statement caching by default
+			PreparedStatementCacheCapacity: 1000, // 1000 statements per shard (8000 total)
+			MaxParametersPerQuery:          1000, // Maximum 1000 parameters per query
 
 			// TIER 1 SUBQUERY SUPPORT: Subquery Execution Defaults
 			SubqueryEnabled:           true,  // Enable subquery support by default

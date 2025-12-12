@@ -35,6 +35,11 @@ func NewClient(host string, port int, database, username, password string) *Clie
 // This allows multi-statement commands (migrations, transactions) to be processed as a unit.
 const CommandTerminator = "\x04"
 
+// ParameterDelimiter is used to separate parameters in parameterized commands.
+// Using ASCII ENQ (Enquiry) for parameter separation in prepared statement protocol.
+// Format: EXECUTE stmt_name\x05param1\x05param2\x05...\x04
+const ParameterDelimiter = "\x05"
+
 // / This would be in your client package
 func (c *Client) Connect() error {
 	address := fmt.Sprintf("%s:%d", c.host, c.port)
@@ -81,6 +86,64 @@ func (c *Client) SendCommand(command string) error {
 	}
 
 	return nil
+}
+
+// SendCommandWithParams sends a parameterized command with parameters using delimiter-based protocol
+// Parameters are separated by ParameterDelimiter (\x05) with escape sequences for special characters:
+// - \x05 in parameter values is escaped as \x05\x05
+// - \x04 in parameter values is escaped as \x04\x04
+// This provides efficient serialization without JSON overhead while maintaining safety.
+func (c *Client) SendCommandWithParams(command string, params []string) error {
+	if c.conn == nil {
+		return fmt.Errorf("not connected to server")
+	}
+
+	// Build parameterized command: command\x05param1\x05param2\x05...\x04
+	var builder strings.Builder
+	builder.WriteString(command)
+
+	for _, param := range params {
+		builder.WriteString(ParameterDelimiter)
+		// Escape special characters in parameter value
+		escapedParam := escapeParameterValue(param)
+		builder.WriteString(escapedParam)
+	}
+
+	builder.WriteString(CommandTerminator)
+
+	// Write to connection
+	_, err := c.conn.Write([]byte(builder.String()))
+	if err != nil {
+		return fmt.Errorf("failed to send parameterized command: %w", err)
+	}
+
+	return nil
+}
+
+// escapeParameterValue escapes special characters in parameter values
+// - \x05 (ENQ/ParameterDelimiter) -> \x05\x05
+// - \x04 (EOT/CommandTerminator) -> \x04\x04
+func escapeParameterValue(value string) string {
+	// Fast path: no special characters to escape
+	if !strings.ContainsAny(value, "\x04\x05") {
+		return value
+	}
+
+	var result strings.Builder
+	result.Grow(len(value))
+
+	for _, ch := range value {
+		switch ch {
+		case '\x04':
+			result.WriteString("\x04\x04") // Escape EOT
+		case '\x05':
+			result.WriteString("\x05\x05") // Escape ENQ
+		default:
+			result.WriteRune(ch)
+		}
+	}
+
+	return result.String()
 }
 
 // ReceiveResponse reads the server's response as a string

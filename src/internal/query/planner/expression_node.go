@@ -95,7 +95,7 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 
 		// Evaluate expression with empty document context
 		evaluator := syndrQL.NewExpressionEvaluator(n.Logger)
-		result, err := evaluator.Evaluate(expr, emptyDoc, nil, nil)
+		result, err := evaluator.Evaluate(expr, emptyDoc, nil, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to evaluate expression '%s': %w", exprToEval, err)
 		}
