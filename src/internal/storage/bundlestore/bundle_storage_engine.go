@@ -67,6 +67,7 @@ type BundleStore interface {
 	// Returns the physical page ID where the document was stored
 	AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error)
 	AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error)
+	AppendDocumentToBundleFileWithTxID(bundle *models.Bundle, document *models.Document, txID string) (uint32, error)
 
 	RemoveDocumentFromBundleFile(database *models.Database, bundle *models.Bundle, documentID string, mmapData []byte) error
 	BundleFileExists(bundleName string, databaseName string) bool
@@ -76,6 +77,13 @@ type BundleStore interface {
 	FlushAllWriteBuffers() error
 	CloseWriteBuffer(bundleName string) error
 	CloseWriteBuffers() error
+
+	// Transaction-aware buffer methods
+	GetBufferedDocumentsForTransaction(bundleName string, txID string) ([]*models.Document, error)
+	MarkDocumentDiscarded(bundleName string, docID string) error
+	IsDocumentBuffered(bundleName string, docID string) bool
+	GetDiscardedDocuments(bundleName string) []string
+	ClearDiscardedDocuments(bundleName string, docIDs []string)
 }
 
 func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.SugaredLogger, storageFormat string) (*BundleStorageEngine, error) {
@@ -1046,6 +1054,14 @@ func (b *BundleStorageEngine) AddDocumentToBundleFile(bundle *models.Bundle, doc
 // This eliminates the need to rewrite the entire bundle file on every document insert
 // Returns the physical page ID where the document was stored (0-based)
 func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error) {
+	// Call AppendDocumentToBundleFileWithTxID with empty transaction ID for backward compatibility
+	return b.AppendDocumentToBundleFileWithTxID(bundle, document, "")
+}
+
+// AppendDocumentToBundleFileWithTxID adds a document with transaction tracking
+// This eliminates the need to rewrite the entire bundle file on every document insert
+// Returns the physical page ID where the document was stored (0-based)
+func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.Bundle, document *models.Document, txID string) (uint32, error) {
 	// PERFORMANCE FIX: Remove excessive logging in hot path
 	// Only log in debug mode to eliminate I/O overhead
 	if b.logger != nil && settings.GetSettings().Debug {
@@ -1127,7 +1143,8 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 	copy(combinedData[:8], headerBytes)
 	copy(combinedData[8:], documentBytes)
 
-	if err := writeBuffer.Write(combinedData[:len(headerBytes)+len(documentBytes)]); err != nil {
+	// Use WriteWithTxID to track transaction context
+	if err := writeBuffer.WriteWithTxID(combinedData[:len(headerBytes)+len(documentBytes)], document.DocumentID, txID); err != nil {
 		b.returnCombinedBuffer(combinedData) // Return buffer to pool
 		return 0, fmt.Errorf("failed to write document data: %w", err)
 	}
@@ -1249,7 +1266,92 @@ func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 	}
 
 	return nil
-} // CloseWriteBuffers closes and flushes all write buffers
+}
+
+// DiscardWriteBuffer discards the write buffer for a specific bundle WITHOUT flushing
+// This is used during transaction rollback to abandon buffered writes
+func (b *BundleStorageEngine) DiscardWriteBuffer(bundleName string) error {
+	b.bufferMutex.Lock()
+	defer b.bufferMutex.Unlock()
+
+	if buffer, exists := b.writeBuffers[bundleName]; exists {
+		if err := buffer.Discard(); err != nil {
+			b.logger.Warnf("Failed to discard write buffer for bundle %s: %v", bundleName, err)
+			return err
+		}
+		// Remove from map so next write creates a fresh buffer
+		delete(b.writeBuffers, bundleName)
+		b.logger.Debugf("Discarded write buffer for bundle '%s' without flushing", bundleName)
+	}
+
+	return nil
+}
+
+// GetBufferedDocumentsForTransaction returns all buffered documents for a specific transaction
+func (b *BundleStorageEngine) GetBufferedDocumentsForTransaction(bundleName string, txID string) ([]*models.Document, error) {
+	b.bufferMutex.RLock()
+	buffer, exists := b.writeBuffers[bundleName]
+	b.bufferMutex.RUnlock()
+
+	if !exists {
+		return nil, nil // No buffer = no buffered documents
+	}
+
+	return buffer.GetDocumentsForTransaction(txID)
+}
+
+// MarkDocumentDiscarded marks a document as discarded (for rollback)
+func (b *BundleStorageEngine) MarkDocumentDiscarded(bundleName string, docID string) error {
+	b.bufferMutex.RLock()
+	buffer, exists := b.writeBuffers[bundleName]
+	b.bufferMutex.RUnlock()
+
+	if !exists {
+		return nil // No buffer = document already flushed, nothing to mark
+	}
+
+	buffer.MarkDiscarded(docID)
+	return nil
+}
+
+// IsDocumentBuffered checks if a document is currently in the write buffer
+func (b *BundleStorageEngine) IsDocumentBuffered(bundleName string, docID string) bool {
+	b.bufferMutex.RLock()
+	buffer, exists := b.writeBuffers[bundleName]
+	b.bufferMutex.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	return buffer.IsDocumentAvailable(docID)
+}
+
+// GetDiscardedDocuments returns document IDs that were discarded in a bundle's buffer
+func (b *BundleStorageEngine) GetDiscardedDocuments(bundleName string) []string {
+	b.bufferMutex.RLock()
+	buffer, exists := b.writeBuffers[bundleName]
+	b.bufferMutex.RUnlock()
+
+	if !exists {
+		return nil
+	}
+
+	return buffer.GetDiscardedDocuments()
+}
+
+// ClearDiscardedDocuments removes the specified document IDs from the discarded set
+func (b *BundleStorageEngine) ClearDiscardedDocuments(bundleName string, docIDs []string) {
+	b.bufferMutex.RLock()
+	buffer, exists := b.writeBuffers[bundleName]
+	b.bufferMutex.RUnlock()
+
+	if exists {
+		buffer.ClearDiscardedDocuments(docIDs)
+	}
+}
+
+// CloseWriteBuffers closes and flushes all write buffers
 func (b *BundleStorageEngine) CloseWriteBuffers() error {
 	b.bufferMutex.Lock()
 	defer b.bufferMutex.Unlock()

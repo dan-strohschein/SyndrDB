@@ -402,3 +402,99 @@ func (wm *WALManager) CleanupOldFiles() error {
 func (wm *WALManager) ReplayOperations(fromLSN uint64, replayFunc func(WALEntry) error) error {
 	return wm.wal.ReplayOperations(fromLSN, replayFunc)
 }
+
+// UndoToLSN performs a rollback by applying before-images from current LSN to target LSN
+// This is used for transaction rollback and savepoint rollback
+// bundleManager is the interface to apply undo operations to actual data
+// lockManager is the lock manager to release locks after undo (can be nil if locks handled separately)
+func (wm *WALManager) UndoToLSN(targetLSN uint64, txID string, undoFunc func(WALEntry) error, lockManager interface{}) error {
+	if undoFunc == nil {
+		return fmt.Errorf("undoFunc cannot be nil")
+	}
+
+	currentLSN := wm.wal.GetCurrentLSN()
+	if targetLSN >= currentLSN {
+		wm.logger.Debugf("No undo needed: targetLSN=%d >= currentLSN=%d", targetLSN, currentLSN)
+		return nil
+	}
+
+	wm.logger.Infof("Starting undo from LSN %d to LSN %d for txID=%s", currentLSN, targetLSN, txID)
+
+	// Collect entries to undo (we need to read forward then apply backward)
+	entriesToUndo := make([]WALEntry, 0)
+
+	// Debug: track all entries seen during replay
+	totalEntriesSeen := 0
+	matchingTxID := 0
+	matchingLSN := 0
+
+	// Read entries from target LSN to current LSN
+	err := wm.wal.ReplayOperations(targetLSN, func(entry WALEntry) error {
+		totalEntriesSeen++
+		wm.logger.Infof("REPLAY: LSN=%d, TxID=%s, Op=%d, targetLSN=%d, checkTxID=%s",
+			entry.LSN, entry.TxID, entry.Operation, targetLSN, txID)
+
+		// Check if txID matches
+		if entry.TxID == txID {
+			matchingTxID++
+			wm.logger.Infof("REPLAY: TxID matches!")
+
+			// Check if LSN is after target
+			if entry.LSN > targetLSN {
+				matchingLSN++
+				entriesToUndo = append(entriesToUndo, entry)
+				wm.logger.Infof("REPLAY: Entry added to undo list! Total: %d", len(entriesToUndo))
+			} else {
+				wm.logger.Infof("REPLAY: LSN %d <= targetLSN %d, skipping", entry.LSN, targetLSN)
+			}
+		} else {
+			wm.logger.Infof("REPLAY: TxID mismatch (entry=%s, target=%s)", entry.TxID, txID)
+		}
+
+		return nil
+	})
+
+	wm.logger.Infof("REPLAY SUMMARY: totalSeen=%d, matchingTxID=%d, matchingLSN=%d, toUndo=%d",
+		totalEntriesSeen, matchingTxID, matchingLSN, len(entriesToUndo))
+
+	if err != nil {
+		return fmt.Errorf("failed to read WAL entries for undo: %w", err)
+	}
+
+	// Apply undo operations in reverse order (most recent first)
+	undoCount := 0
+	for i := len(entriesToUndo) - 1; i >= 0; i-- {
+		entry := entriesToUndo[i]
+
+		// Skip transaction control operations (they don't need undo)
+		if entry.Operation == OpBeginTx || entry.Operation == OpCommitTx || entry.Operation == OpRollbackTx {
+			continue
+		}
+
+		// Apply the undo operation using the before-image
+		if err := undoFunc(entry); err != nil {
+			return fmt.Errorf("failed to undo operation at LSN %d: %w", entry.LSN, err)
+		}
+
+		undoCount++
+		wm.logger.Debugf("Undid operation: LSN=%d, Op=%d, Bundle=%s, Doc=%s",
+			entry.LSN, entry.Operation, entry.BundleName, entry.DocumentID)
+	}
+
+	// Release locks if lock manager provided
+	if lockManager != nil {
+		// Type assert to get the ReleaseLocks method
+		// This allows us to pass the lock manager interface without importing it
+		type lockReleaser interface {
+			ReleaseLocks(txID string) int
+		}
+
+		if lr, ok := lockManager.(lockReleaser); ok {
+			releaseCount := lr.ReleaseLocks(txID)
+			wm.logger.Debugf("Released %d locks for txID=%s during undo", releaseCount, txID)
+		}
+	}
+
+	wm.logger.Infof("Undo complete: %d operations reversed for txID=%s", undoCount, txID)
+	return nil
+}

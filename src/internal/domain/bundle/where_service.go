@@ -64,7 +64,7 @@ func (w *WhereFilterService) GetDocumentIDsByFilter(bundle *models.Bundle, where
 	// - Empty WHERE clauses (returns all)
 	// - Index optimization via planner
 	// - Page-based loading
-	documents, err := w.bundleService.GetDocumentsByFilter(bundle, whereClause)
+	documents, err := w.bundleService.GetDocumentsByFilter(bundle, whereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter documents: %w", err)
 	}

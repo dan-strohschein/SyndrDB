@@ -245,7 +245,7 @@ func ShowUsers(command string, database *models.Database, logger *zap.SugaredLog
 	}
 
 	// Get all documents from the Users bundle (empty WHERE clause returns all)
-	userDocs, err := serviceManager.BundleService.GetDocumentsByFilter(usersBundle, "")
+	userDocs, err := serviceManager.BundleService.GetDocumentsByFilter(usersBundle, "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve user documents: %w", err)
 	}

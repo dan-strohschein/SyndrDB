@@ -67,6 +67,16 @@ max_connections: 100
 connection_idle_timeout: 30
 
 # ==============================================================================
+# TRANSACTION CONFIGURATION
+# ==============================================================================
+
+# Transaction idle timeout (default: "5m")
+# Valid time units: "s" (seconds), "m" (minutes), "h" (hours)
+# Examples: "30s", "5m", "1h"
+# If invalid or <= 0, falls back to 5 minutes with a warning
+transaction_idle_timeout: "5m"
+
+# ==============================================================================
 # BUNDLE CONFIGURATION
 # ==============================================================================
 

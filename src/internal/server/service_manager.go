@@ -12,6 +12,7 @@ import (
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/registry"
+	"syndrdb/src/internal/storage"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -44,6 +45,9 @@ type ServiceManager struct {
 	UserService            *UserService              // RBAC: Manages user creation and authentication
 	PermissionService      *PermissionService        // RBAC: Manages permissions and roles
 	MigrationService       MigrationServiceInterface // Migration: Database versioning and schema migration
+
+	// Transaction management
+	LockManager *storage.LockManager // Document-level locking for multi-statement transactions
 
 	// RBAC session management for FORCE operations
 	SessionManager    *SessionManager        // Session manager for terminating active sessions
@@ -113,6 +117,9 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		permissionService := NewPermissionService(bundleService, dbService, nil, logger, debugMode) // Initialize Lock service
 		lockService := lock.NewLockService(logger.Desugar())
 
+		// Initialize transaction lock manager
+		lockManager := storage.NewLockManager(logger)
+
 		// STEP 2: Initialize unified query planner with plan caching
 		unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, bundleService)
 
@@ -131,6 +138,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			InternalCatalogService: catalogService,
 			WALManager:             walManager,
 			LockService:            lockService,
+			LockManager:            lockManager,
 			GraphQLProcessor:       graphqlProcessor,
 			UserService:            userService,
 			PermissionService:      permissionService,

@@ -21,6 +21,7 @@ import (
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/server"
+	"syndrdb/src/internal/storage"
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/internal/storage/databasestore"
@@ -248,6 +249,9 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 	// Initialize unified query planner
 	unifiedPlanner := planner.NewUnifiedQueryPlanner(sugar, bundleService)
 
+	// Initialize transaction lock manager
+	lockManager := storage.NewLockManager(sugar)
+
 	// Initialize Migration service (same as production)
 	migrationConfig := migration.LoadConfigFromSettings(globalSettings)
 	bundleServiceAdapter := server.NewBundleServiceAdapter(bundleService, databaseService, catalogService, walManager, sugar)
@@ -260,6 +264,7 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 		InternalCatalogService: catalogService,
 		WALManager:             walManager,
 		LockService:            lockService,
+		LockManager:            lockManager,
 		GraphQLProcessor:       nil,
 		UserService:            userService,
 		PermissionService:      permissionService,

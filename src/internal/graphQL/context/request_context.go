@@ -205,7 +205,7 @@ func (rc *RequestContext) createLoaderForBundle(bundleName string, fieldName str
 		whereClause := buildWhereInClause(fieldName, ids)
 
 		// Execute batch query using existing BundleService
-		documents, err := rc.serviceManager.BundleService.GetDocumentsByFilter(&bundle, whereClause)
+		documents, err := rc.serviceManager.BundleService.GetDocumentsByFilter(&bundle, whereClause, nil)
 		if err != nil {
 			rc.logger.Errorf("[DataLoader] Batch load failed for bundle %s, field %s: %v", bundleName, fieldName, err)
 			return nil, fmt.Errorf("batch load failed: %w", err)

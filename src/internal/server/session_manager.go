@@ -15,6 +15,37 @@ import (
 	"go.uber.org/zap"
 )
 
+// TransactionStatus represents the status of a multi-statement transaction
+type TransactionStatus int
+
+const (
+	TransactionStatusInactive  TransactionStatus = iota // No active transaction
+	TransactionStatusActive                             // Transaction active, operations being buffered
+	TransactionStatusCommitted                          // Transaction successfully committed
+	TransactionStatusAborted                            // Transaction aborted/rolled back
+)
+
+func (ts TransactionStatus) String() string {
+	switch ts {
+	case TransactionStatusInactive:
+		return "INACTIVE"
+	case TransactionStatusActive:
+		return "ACTIVE"
+	case TransactionStatusCommitted:
+		return "COMMITTED"
+	case TransactionStatusAborted:
+		return "ABORTED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// Savepoint represents a savepoint within a transaction
+type Savepoint struct {
+	Name string // Alphanumeric name of the savepoint
+	LSN  uint64 // WAL LSN at savepoint creation
+}
+
 // SessionState represents the current state of a session
 type SessionState int
 
@@ -105,6 +136,15 @@ type Session struct {
 	BufferPool         *buffer.BufferPool
 	TempFiles          []string
 	ActiveTransactions map[string]context.CancelFunc // txID -> cancel function
+
+	// Transaction state (for multi-statement transactions)
+	TransactionActive    bool              // Whether a transaction is currently active
+	ActiveTransactionID  string            // WAL transaction ID for the active transaction
+	TransactionStartLSN  uint64            // LSN when transaction started (for rollback)
+	TransactionStartTime time.Time         // When the transaction started (for idle timeout)
+	PendingOperations    []string          // Buffered commands within the transaction
+	CurrentSavepoint     *Savepoint        // Single-level savepoint (nil if no savepoint set)
+	TransactionStatus    TransactionStatus // Current status of the transaction
 
 	// Session configuration
 	Timeout         time.Duration
@@ -358,6 +398,25 @@ func (sm *SessionManager) GetUserSessions(username string) []*Session {
 	result := make([]*Session, len(sessions))
 	copy(result, sessions)
 	return result
+}
+
+// GetActiveSessionsByTxID returns a map of active transaction IDs to session IDs
+// This is used by the lock manager's CleanupOrphanedLocks to determine which
+// transactions are still active and should not have their locks released
+func (sm *SessionManager) GetActiveSessionsByTxID() map[string]string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	activeTxMap := make(map[string]string)
+
+	// Iterate through all sessions and collect active transactions
+	for _, session := range sm.sessions {
+		if session.IsInTransaction() {
+			activeTxMap[session.ActiveTransactionID] = session.SessionID
+		}
+	}
+
+	return activeTxMap
 }
 
 // InvalidateSession invalidates a specific session
@@ -1085,4 +1144,134 @@ func (sm *SessionManager) GetSessionsByUser(username string) []*Session {
 	copy(result, sessions)
 
 	return result
+}
+
+// Transaction Management Methods for Session
+
+// IsInTransaction returns true if the session has an active transaction
+func (s *Session) IsInTransaction() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.TransactionActive && s.TransactionStatus == TransactionStatusActive
+}
+
+// GetActiveTransactionID returns the current transaction ID (empty string if not in transaction)
+func (s *Session) GetActiveTransactionID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ActiveTransactionID
+}
+
+// IsIdleExpired checks if the transaction has exceeded the idle timeout
+func (s *Session) IsIdleExpired(timeout time.Duration) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.TransactionActive {
+		return false
+	}
+
+	return time.Since(s.TransactionStartTime) > timeout
+}
+
+// BeginTransaction initializes transaction state for the session
+func (s *Session) BeginTransaction(txID string, startLSN uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.TransactionActive = true
+	s.ActiveTransactionID = txID
+	s.TransactionStartLSN = startLSN
+	s.TransactionStartTime = time.Now()
+	s.PendingOperations = make([]string, 0)
+	s.CurrentSavepoint = nil
+	s.TransactionStatus = TransactionStatusActive
+}
+
+// CommitTransaction marks the transaction as committed and clears state
+func (s *Session) CommitTransaction() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.TransactionStatus = TransactionStatusCommitted
+	s.clearTransactionState()
+}
+
+// AbortTransaction marks the transaction as aborted and clears state
+func (s *Session) AbortTransaction() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.TransactionStatus = TransactionStatusAborted
+	s.clearTransactionState()
+}
+
+// clearTransactionState resets all transaction-related fields (must hold mu.Lock)
+func (s *Session) clearTransactionState() {
+	s.TransactionActive = false
+	s.ActiveTransactionID = ""
+	s.TransactionStartLSN = 0
+	s.TransactionStartTime = time.Time{}
+	s.PendingOperations = nil
+	s.CurrentSavepoint = nil
+}
+
+// AddPendingOperation adds a command to the transaction's pending operations buffer
+func (s *Session) AddPendingOperation(command string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.PendingOperations == nil {
+		s.PendingOperations = make([]string, 0)
+	}
+	s.PendingOperations = append(s.PendingOperations, command)
+}
+
+// SetSavepoint sets a savepoint for the transaction (replaces any existing savepoint)
+func (s *Session) SetSavepoint(name string, lsn uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.CurrentSavepoint = &Savepoint{
+		Name: name,
+		LSN:  lsn,
+	}
+}
+
+// GetSavepoint returns the current savepoint, or nil if none exists
+func (s *Session) GetSavepoint() *Savepoint {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.CurrentSavepoint
+}
+
+// ClearSavepoint removes the current savepoint
+func (s *Session) ClearSavepoint() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.CurrentSavepoint = nil
+}
+
+// GetTransactionInfo returns current transaction information for debugging/monitoring
+func (s *Session) GetTransactionInfo() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	info := map[string]interface{}{
+		"active":            s.TransactionActive,
+		"status":            s.TransactionStatus.String(),
+		"transaction_id":    s.ActiveTransactionID,
+		"start_lsn":         s.TransactionStartLSN,
+		"start_time":        s.TransactionStartTime,
+		"pending_ops_count": len(s.PendingOperations),
+	}
+
+	if s.CurrentSavepoint != nil {
+		info["savepoint_name"] = s.CurrentSavepoint.Name
+		info["savepoint_lsn"] = s.CurrentSavepoint.LSN
+	}
+
+	return info
 }

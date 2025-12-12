@@ -126,7 +126,7 @@ func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser
 
 	// Use modern page-based document filtering with architectural fix
 	// The BundleService now properly handles page-based filtering without relying on legacy bundle.Documents
-	filteredDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, whereClause)
+	filteredDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, whereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to apply WHERE filter to %s bundle: %w", side, err)
 	}
@@ -135,7 +135,7 @@ func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser
 	originalCount := int(bundle.TotalDocuments)
 	if originalCount == 0 {
 		// Fallback: load all documents to get count (less efficient but accurate)
-		allDocs, countErr := serviceManager.BundleService.GetDocumentsByFilter(bundle, "")
+		allDocs, countErr := serviceManager.BundleService.GetDocumentsByFilter(bundle, "", nil)
 		if countErr == nil {
 			originalCount = len(allDocs)
 		}

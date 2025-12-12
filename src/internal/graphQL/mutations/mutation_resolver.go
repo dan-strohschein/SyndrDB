@@ -54,7 +54,7 @@ func (r *MutationResolver) ResolveCreateResponse(documentID string, bundleName s
 
 	// Fetch the created document
 	whereClause := fmt.Sprintf("DocumentID == \"%s\"", documentID)
-	documents, err := r.serviceManager.BundleService.GetDocumentsByFilter(bundle, whereClause)
+	documents, err := r.serviceManager.BundleService.GetDocumentsByFilter(bundle, whereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch created document: %w", err)
 	}
@@ -97,7 +97,7 @@ func (r *MutationResolver) ResolveUpdateResponse(updateCommand *models.DocumentU
 	}
 
 	// Fetch the updated document using the WHERE clause
-	documents, err := r.serviceManager.BundleService.GetDocumentsByFilter(bundle, updateCommand.WhereClause)
+	documents, err := r.serviceManager.BundleService.GetDocumentsByFilter(bundle, updateCommand.WhereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch updated document: %w", err)
 	}

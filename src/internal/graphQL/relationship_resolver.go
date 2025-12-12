@@ -258,7 +258,7 @@ func (rr *RelationshipResolver) resolveForwardRelationshipDirect(
 	whereClause := fmt.Sprintf("%s = '%v'", relationship.DestinationField, sourceValue)
 
 	// Execute query to get related documents
-	relatedDocs, err := rr.serviceManager.BundleService.GetDocumentsByFilter(destBundle, whereClause)
+	relatedDocs, err := rr.serviceManager.BundleService.GetDocumentsByFilter(destBundle, whereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query related documents: %w", err)
 	}
@@ -379,7 +379,7 @@ func (rr *RelationshipResolver) resolveReverseRelationshipDirect(
 	whereClause := fmt.Sprintf("%s = '%v'", reverseRel.SourceField, destValue)
 
 	// Execute query on SOURCE bundle (the bundle that defined the forward relationship)
-	relatedDocs, err := rr.serviceManager.BundleService.GetDocumentsByFilter(sourceBundle, whereClause)
+	relatedDocs, err := rr.serviceManager.BundleService.GetDocumentsByFilter(sourceBundle, whereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query reverse relationship documents: %w", err)
 	}

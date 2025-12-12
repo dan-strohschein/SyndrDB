@@ -42,6 +42,13 @@ type QueryPlannerInterface interface {
 	InvalidateBundleCache(bundleName string)
 }
 
+// SessionInterface defines the interface for transaction-aware queries
+// This avoids circular dependencies with the server package
+type SessionInterface interface {
+	IsInTransaction() bool
+	GetActiveTransactionID() string
+}
+
 // Global query planner reference for plan cache invalidation
 // Set by server during initialization to avoid circular dependencies
 var globalQueryPlanner QueryPlannerInterface
@@ -1315,6 +1322,47 @@ func (s *BundleService) FlushAllBuffers() error {
 	}
 
 	return nil
+}
+
+// IsDocumentBuffered checks if a document is currently in the write buffer
+func (s *BundleService) IsDocumentBuffered(bundleName string, docID string) bool {
+	return s.store.IsDocumentBuffered(bundleName, docID)
+}
+
+// MarkDocumentDiscarded marks a document as discarded (for rollback)
+func (s *BundleService) MarkDocumentDiscarded(bundleName string, docID string) error {
+	return s.store.MarkDocumentDiscarded(bundleName, docID)
+}
+
+// GetDiscardedDocuments returns list of document IDs marked as discarded in a bundle
+func (s *BundleService) GetDiscardedDocuments(bundleName string) []string {
+	return s.store.GetDiscardedDocuments(bundleName)
+}
+
+// ClearDiscardedDocuments removes document IDs from the discarded set after successful deletion
+func (s *BundleService) ClearDiscardedDocuments(bundleName string, docIDs []string) {
+	s.store.ClearDiscardedDocuments(bundleName, docIDs)
+}
+
+// DeleteDiscardedDocuments physically deletes documents that were marked as discarded
+// This is called after FlushAllBuffers during rollback cleanup
+func (s *BundleService) DeleteDiscardedDocuments(database *models.Database, bundleName string, docIDs []string) error {
+	if len(docIDs) == 0 {
+		return nil
+	}
+
+	bundle, err := s.GetBundleByName(database, bundleName)
+	if err != nil {
+		return fmt.Errorf("failed to get bundle %s: %w", bundleName, err)
+	}
+
+	// Create a minimal DocumentDeleteCommand for internal use
+	docCommand := &models.DocumentDeleteCommand{
+		BundleName: bundleName,
+	}
+
+	// Use internal deletion without metadata updates (we'll batch those)
+	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, true)
 }
 
 // processIndexUpdateBatch handles a batch of updates for a specific index
@@ -4012,7 +4060,98 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	return newDocument.DocumentID, nil
 }
 
+// AddDocumentToBundleWithTxID is a transaction-aware wrapper for AddDocumentToBundle
+// It accepts a txID parameter to track buffered documents during transactions
+func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentCommand, txID string) (string, error) {
+	// Check if the bundle exists
+	if bundle == nil {
+		s.logger.Errorf("Bundle is nil, cannot add document")
+		return "", fmt.Errorf("bundle '%s' is nil, cannot add document ", docCommand.BundleName)
+	}
+
+	// CRITICAL: Process NULL values and defaults FIRST, before validation
+	err := s.processNullValues(bundle, docCommand)
+	if err != nil {
+		return "", fmt.Errorf("failed to process NULL values: %w", err)
+	}
+
+	// Validate document fields against bundle field definitions
+	err = s.validateDocumentFields(bundle, docCommand)
+	if err != nil {
+		return "", fmt.Errorf("document field validation failed: %w", err)
+	}
+
+	// Validate unique constraints for all IsUnique fields
+	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
+	err = uniqueValidator.ValidateUniqueConstraints(bundle, docCommand)
+	if err != nil {
+		return "", fmt.Errorf("failed to process NULL values: %w", err)
+	}
+
+	// Create the document
+	newDocument := s.documentFactory.NewDocument(*docCommand)
+
+	// Schedule deferred metadata update
+	s.scheduleMetadataUpdate(docCommand.BundleName, "increment_docs", 1)
+
+	// Add document to bundle file WITH transaction ID for buffer tracking
+	pageID, err := s.store.AppendDocumentToBundleFileWithTxID(bundle, newDocument, txID)
+	if err != nil {
+		return "", fmt.Errorf("failed to add document to bundle: %w", err)
+	}
+
+	// Schedule index updates with the actual pageID from storage
+	if bundle.Indexes != nil {
+		for indexName, indexRef := range bundle.Indexes {
+			s.logger.Debugf("Scheduling deferred update for index '%s' of type '%s'", indexName, indexRef.IndexType)
+
+			if indexRef.IndexType == "hash" {
+				fieldName := indexRef.HashIndexField.FieldName
+				var fieldValue interface{}
+				if fieldName == "DocumentID" {
+					fieldValue = newDocument.DocumentID
+				} else {
+					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName)
+					if err != nil {
+						if s.verboseLogging {
+							s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, newDocument.DocumentID, err)
+						}
+						continue
+					}
+					fieldValue = extractedValue
+				}
+
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
+				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
+					indexName, newDocument.DocumentID, fieldName, pageID)
+
+			} else if indexRef.IndexType == "btree" {
+				fieldValue, err := extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName)
+				if err != nil {
+					s.logger.Warnf("Failed to extract field value for document '%s': %v", newDocument.DocumentID, err)
+					continue
+				}
+
+				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
+				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s' (page %d)",
+					newDocument.DocumentID, indexRef.BTreeIndexField.FieldName, pageID)
+			}
+		}
+	}
+
+	// Invalidate the document scanner cache
+	s.RemoveDocumentScanner(docCommand.BundleName)
+	s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after addition", docCommand.BundleName)
+
+	return newDocument.DocumentID, nil
+}
+
 func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, bundle *models.Bundle, document *models.Document) error {
+	return s.AddDocumentToBundleByStructWithTxID(database, bundle, document, "")
+}
+
+// AddDocumentToBundleByStructWithTxID adds a document with transaction tracking
+func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Database, bundle *models.Bundle, document *models.Document, txID string) error {
 	// Acquire write lock to prevent concurrent modifications during rename
 	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
 		return fmt.Errorf("failed to acquire write lock: %w", err)
@@ -4023,7 +4162,8 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 	s.scheduleMetadataUpdate(bundle.Name, "increment_docs", 1)
 
 	// Add document to bundle file (storage layer handles page allocation and returns pageID)
-	pageID, err := s.store.AddDocumentToBundleFile(bundle, document)
+	// Use transaction-aware method to track txID in buffer
+	pageID, err := s.store.AppendDocumentToBundleFileWithTxID(bundle, document, txID)
 	if err != nil {
 		return fmt.Errorf("failed to add document to bundle: %w", err)
 	}
@@ -4112,7 +4252,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	}
 
 	// Get the existing document
-	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause)
+	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
 	if err != nil {
 		return fmt.Errorf("failed to filter documents: %w", err)
 	}
@@ -4320,7 +4460,8 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 	// ========== FIND DOCUMENTS MATCHING WHERE CLAUSE ==========
 
 	// STEP 2 Notes: Check for empty WHERE clause (bulk delete all documents)
-	if docCommand.WhereClause == "" || strings.TrimSpace(docCommand.WhereClause) == "" {
+	// If docIDs are explicitly provided, skip this check - the caller knows what they're doing
+	if (docCommand.WhereClause == "" || strings.TrimSpace(docCommand.WhereClause) == "") && len(docIDs) == 0 {
 		// Bulk delete requires CONFIRMED keyword for safety
 		if !docCommand.Confirmed {
 			return fmt.Errorf("bulk delete requires CONFIRMED keyword for safety. "+
@@ -4721,7 +4862,7 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 // Returns:
 //   - []*models.Document: Array of documents matching the filter criteria
 //   - error: Any error that occurred during filtering
-func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts string) ([]*models.Document, error) {
+func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts string, session SessionInterface) ([]*models.Document, error) {
 	// Validate input parameters following SyndrDB defensive programming practices
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot filter documents")
@@ -4737,20 +4878,87 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 	// Force flush any pending metadata updates to ensure accurate PageCount
 	s.FlushMetadataUpdates()
 
-	// If no WHERE clause, return all documents
+	// Get buffered documents if in transaction
+	var bufferedDocs []*models.Document
+	if session != nil && session.IsInTransaction() {
+		var err error
+		bufferedDocs, err = s.store.GetBufferedDocumentsForTransaction(
+			bundle.Name,
+			session.GetActiveTransactionID(),
+		)
+		if err != nil {
+			s.logger.Warnf("Failed to get buffered documents for transaction %s: %v",
+				session.GetActiveTransactionID(), err)
+			// Continue with disk-only - don't fail query
+		} else if len(bufferedDocs) > 0 {
+			s.logger.Debugf("Found %d buffered documents for transaction %s in bundle %s",
+				len(bufferedDocs), session.GetActiveTransactionID(), bundle.Name)
+		}
+	}
+
+	// If no WHERE clause, return all documents (disk + buffered)
 	if whereParts == "" {
 		//s.logger.Infof("DEBUG: GetDocumentsByFilter - empty filter, calling getAllDocumentsForIndexing")
-		result, err := s.getAllDocumentsForIndexing(bundle.Name)
+		diskDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+		if err != nil {
+			return nil, err
+		}
 		//s.logger.Infof("DEBUG: GetDocumentsByFilter - getAllDocumentsForIndexing returned %d documents, error: %v", len(result), err)
-		return result, err
+		return s.mergeDocuments(diskDocs, bufferedDocs), nil
 	}
 
 	// CRITICAL: Use index-optimized filtering following SyndrDB performance optimization
 	// This replaces the direct queryparser.FilterDocuments call with index-aware filtering
 	//s.logger.Infof("DEBUG: GetDocumentsByFilter - non-empty filter, calling filterDocumentsWithIndexOptimization")
-	result, err := s.filterDocumentsWithIndexOptimization(bundle, nil, whereParts)
+	diskDocs, err := s.filterDocumentsWithIndexOptimization(bundle, nil, whereParts)
+	if err != nil {
+		return nil, err
+	}
+
+	// If we have buffered docs, filter them and merge with disk results
+	if len(bufferedDocs) > 0 {
+		filteredBuffered, err := s.filterBufferedDocuments(bufferedDocs, whereParts)
+		if err != nil {
+			s.logger.Warnf("Failed to filter buffered documents: %v", err)
+			// Fall back to just disk docs
+			return diskDocs, nil
+		}
+		return s.mergeDocuments(diskDocs, filteredBuffered), nil
+	}
+
 	//s.logger.Infof("DEBUG: GetDocumentsByFilter - filterDocumentsWithIndexOptimization returned %d documents, error: %v", len(result), err)
-	return result, err
+	return diskDocs, nil
+}
+
+// mergeDocuments combines disk and buffered documents, avoiding duplicates
+func (s *BundleService) mergeDocuments(diskDocs []*models.Document, bufferedDocs []*models.Document) []*models.Document {
+	if len(bufferedDocs) == 0 {
+		return diskDocs
+	}
+
+	// Build set of disk document IDs for duplicate checking
+	diskIDs := make(map[string]bool, len(diskDocs))
+	for _, doc := range diskDocs {
+		diskIDs[doc.DocumentID] = true
+	}
+
+	// Start with disk docs, add buffered docs that aren't duplicates
+	result := make([]*models.Document, len(diskDocs), len(diskDocs)+len(bufferedDocs))
+	copy(result, diskDocs)
+
+	for _, doc := range bufferedDocs {
+		if !diskIDs[doc.DocumentID] {
+			result = append(result, doc)
+		}
+	}
+
+	return result
+}
+
+// filterBufferedDocuments applies WHERE clause filtering to buffered documents
+func (s *BundleService) filterBufferedDocuments(docs []*models.Document, whereParts string) ([]*models.Document, error) {
+	// Use queryparser's FilterDocumentsRaw for in-memory filtering
+	return queryparser.FilterDocumentsRaw(docs, whereParts, s.logger)
 }
 
 // filterDocumentsWithIndexOptimization performs intelligent document filtering using available indexes

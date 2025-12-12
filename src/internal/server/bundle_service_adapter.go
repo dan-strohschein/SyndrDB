@@ -230,7 +230,7 @@ func (a *BundleServiceAdapter) QueryDocuments(dbName, bundleName string, filter 
 	whereClause := a.buildWhereClause(filter)
 
 	// Call BundleService.GetDocumentsByFilter
-	documents, err := a.bundleService.GetDocumentsByFilter(bndl, whereClause)
+	documents, err := a.bundleService.GetDocumentsByFilter(bndl, whereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query documents from bundle '%s': %w", bundleName, err)
 	}

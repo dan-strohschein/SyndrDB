@@ -53,6 +53,9 @@ type Arguments struct {
 	MaxConnections               int `yaml:"max_connections"`         // Maximum connection pool size (default: 100)
 	ConnectionIdleTimeoutMinutes int `yaml:"connection_idle_timeout"` // Connection idle timeout in minutes (default: 30)
 
+	// Transaction Configuration
+	TransactionIdleTimeout string `yaml:"transaction_idle_timeout"` // Transaction idle timeout (default: "5m")
+
 	// TLS/SSL Configuration
 	TLSEnabled            bool   `yaml:"tls_enabled"`              // Enable TLS/SSL
 	TLSCertFile           string `yaml:"tls_cert_file"`            // Path to TLS certificate file
@@ -579,6 +582,21 @@ func (a *Arguments) GetQueryMemoryLimit(isAdmin bool) int64 {
 	return int64(limitMB) * 1024 * 1024 // Convert MB to bytes
 }
 
+// GetTransactionIdleTimeout returns the parsed transaction idle timeout duration
+// Returns the configured timeout or 5 minutes as default if invalid
+func (a *Arguments) GetTransactionIdleTimeout() time.Duration {
+	if a.TransactionIdleTimeout == "" {
+		return 5 * time.Minute
+	}
+
+	duration, err := time.ParseDuration(a.TransactionIdleTimeout)
+	if err != nil || duration <= 0 {
+		return 5 * time.Minute // Fallback to default
+	}
+
+	return duration
+}
+
 // ValidateSettings performs comprehensive validation of all configuration settings
 // This function is called at server startup to ensure all settings are valid before
 // the server starts accepting connections. It validates numeric ranges, string formats,
@@ -620,6 +638,20 @@ func (a *Arguments) ValidateSettings() error {
 	if a.ConnectionIdleTimeoutMinutes < 1 {
 		errors = append(errors, fmt.Sprintf(
 			"ConnectionIdleTimeoutMinutes must be positive (got: %d)", a.ConnectionIdleTimeoutMinutes))
+	}
+
+	// Validate Transaction settings
+	if a.TransactionIdleTimeout != "" {
+		if duration, err := time.ParseDuration(a.TransactionIdleTimeout); err != nil || duration <= 0 {
+			// Invalid timeout - append warning and use default
+			errors = append(errors, fmt.Sprintf(
+				"WARNING: Invalid transaction_idle_timeout '%s' (must be positive duration like '5m', '30s'). Using default: 5m",
+				a.TransactionIdleTimeout))
+			a.TransactionIdleTimeout = "5m"
+		}
+	} else {
+		// Empty timeout - use default
+		a.TransactionIdleTimeout = "5m"
 	}
 
 	// Validate WAL settings

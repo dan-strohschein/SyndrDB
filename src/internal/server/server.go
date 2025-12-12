@@ -539,6 +539,39 @@ func (s *Server) Start() error {
 		s.logger.Info("GraphQL enabled for TCP connections - use GRAPHQL:: prefix in commands")
 	}
 
+	// TRANSACTION SUPPORT: Start background goroutine to cleanup orphaned locks
+	// This runs every 60 seconds to remove locks from transactions that failed without
+	// proper cleanup (server crashes, client disconnects, etc.)
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if !s.Running {
+					return
+				}
+				// Get active sessions for lock cleanup
+				// Convert transaction map to session ID set expected by CleanupOrphanedLocks
+				txMap := s.SessionManager.GetActiveSessionsByTxID()
+				activeSessionIDs := make(map[string]bool, len(txMap))
+				for _, sessionID := range txMap {
+					activeSessionIDs[sessionID] = true
+				}
+
+				// Call cleanup with active session IDs
+				if s.ServiceManager.LockManager != nil {
+					cleanedLocks, cleanedSessions := s.ServiceManager.LockManager.CleanupOrphanedLocks(activeSessionIDs)
+					if cleanedLocks > 0 {
+						s.logger.Infof("Cleaned up %d orphaned locks from %d inactive sessions", cleanedLocks, cleanedSessions)
+					}
+				}
+			}
+		}
+	}()
+	s.logger.Info("Transaction lock cleanup worker started (60s interval)")
+
 	go s.acceptConnections()
 
 	return nil

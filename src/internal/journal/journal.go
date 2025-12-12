@@ -470,23 +470,32 @@ func (wal *WriteAheadLog) Close() error {
 // The ASCII JSON format has been replaced with efficient binary serialization.
 // Use ReplayOperationsBinary directly for new code.
 func (wal *WriteAheadLog) ReplayOperations(fromLSN uint64, replayFunc func(WALEntry) error) error {
-	dir := filepath.Dir(wal.baseFilePath)
+	// The WAL files are in the baseFilePath directory itself, not its parent
+	dir := wal.baseFilePath
+	wal.logger.Infof("REPLAY: Looking for WAL files in directory: %s", dir)
+
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("failed to read WAL directory: %w", err)
 	}
 
-	walPattern := regexp.MustCompile(`wal_\d{4}-\d{2}-\d{2}.*\.wal$`)
+	wal.logger.Infof("REPLAY: Found %d files in directory", len(files))
+
+	// Match WAL files: YYYY-MM-DD.wal or YYYY-MM-DD_HH-MM-SS.wal (for rotated files)
+	walPattern := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(_\d{2}-\d{2}-\d{2})?\.wal$`)
 	var walFiles []string
 
 	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
+		wal.logger.Infof("REPLAY: Checking file: %s, matches=%v", file.Name(), walPattern.MatchString(file.Name()))
 		if walPattern.MatchString(file.Name()) {
 			walFiles = append(walFiles, filepath.Join(dir, file.Name()))
 		}
 	}
+
+	wal.logger.Infof("REPLAY: Found %d WAL files matching pattern", len(walFiles))
 
 	// Sort files by modification time
 	// TODO: Implement proper sorting

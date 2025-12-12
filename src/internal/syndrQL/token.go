@@ -151,6 +151,11 @@ const (
 	TOKEN_ROLLBACK   // ROLLBACK
 	TOKEN_MIGRATIONS // MIGRATIONS (for SHOW MIGRATIONS)
 
+	// Keywords - Transaction System
+	TOKEN_BEGIN       // BEGIN
+	TOKEN_TRANSACTION // TRANSACTION
+	TOKEN_SAVEPOINT   // SAVEPOINT
+
 	// Keywords - DateTime Functions
 	// TODO: I will add TOKEN_DATE_DIFF when implementing interval-based date arithmetic extensions
 	// TODO: I will add TOKEN_FORMAT when implementing custom DateTime format output (Phase 2)
@@ -391,6 +396,12 @@ func (tt TokenType) String() string {
 		return "ROLLBACK"
 	case TOKEN_MIGRATIONS:
 		return "MIGRATIONS"
+	case TOKEN_BEGIN:
+		return "BEGIN"
+	case TOKEN_TRANSACTION:
+		return "TRANSACTION"
+	case TOKEN_SAVEPOINT:
+		return "SAVEPOINT"
 	case TOKEN_FUNCTION:
 		return "F:"
 	case TOKEN_NOW:
@@ -550,6 +561,11 @@ var keywords = map[string]TokenType{
 	"VALIDATE":   TOKEN_VALIDATE,
 	"ROLLBACK":   TOKEN_ROLLBACK,
 	"MIGRATIONS": TOKEN_MIGRATIONS,
+
+	// Transaction Keywords
+	"BEGIN":       TOKEN_BEGIN,
+	"TRANSACTION": TOKEN_TRANSACTION,
+	"SAVEPOINT":   TOKEN_SAVEPOINT,
 
 	// DateTime Function Keywords - REMOVED from keywords map
 	// These are ONLY recognized when prefixed with F: (handled by readFunctionToken)

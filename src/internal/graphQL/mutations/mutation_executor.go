@@ -211,7 +211,7 @@ func (e *MutationExecutor) ExecuteDelete(deleteCommand *models.DocumentDeleteCom
 
 	// Get documents to delete by filtering
 	// This is the same path as SyndrQL: parse WHERE clause, filter documents
-	filteredDocs, err := e.serviceManager.BundleService.GetDocumentsByFilter(bundle, deleteCommand.WhereClause)
+	filteredDocs, err := e.serviceManager.BundleService.GetDocumentsByFilter(bundle, deleteCommand.WhereClause, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to filter documents: %w", err)
 	}

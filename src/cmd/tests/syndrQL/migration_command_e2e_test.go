@@ -178,7 +178,7 @@ func getDocumentCount(t *testing.T, fixture *TestFixture, bundleName string) int
 	}
 
 	// Get all documents using empty filter
-	docs, err := fixture.ServiceManager.BundleService.GetDocumentsByFilter(bundle, "")
+	docs, err := fixture.ServiceManager.BundleService.GetDocumentsByFilter(bundle, "", nil)
 	if err != nil {
 		t.Logf("Warning: Failed to get documents for bundle %s: %v", bundleName, err)
 		return 0

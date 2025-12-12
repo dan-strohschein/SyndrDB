@@ -26,6 +26,19 @@ func getKeys(m map[string]interface{}) []string {
 }
 
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
+	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
+
+	// Auto-rollback on any error if session has active transaction
+	if err != nil && session != nil && session.IsInTransaction() {
+		AutoRollbackOnError(session, serviceManager, database, err, logger)
+	}
+
+	return result, err
+}
+
+// executeCommand contains the main command execution logic
+func executeCommand(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	if database == nil {
 		// Get the database from the session.
 	}
@@ -55,6 +68,25 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	firstWords := strings.Fields(command)
 	if len(firstWords) == 0 {
 		return nil, fmt.Errorf("empty command")
+	}
+
+	// TRANSACTION MANAGEMENT: Check for transaction commands first (before any other processing)
+	if IsTransactionCommand(command) {
+		return ParseAndExecuteTransactionCommand(command, session, serviceManager, database, logger)
+	}
+
+	// TRANSACTION MANAGEMENT: Check idle timeout for active transactions
+	if session != nil {
+		if err := CheckTransactionIdleTimeout(session, logger); err != nil {
+			return nil, err
+		}
+	}
+
+	// TRANSACTION MANAGEMENT: Enforce DML-only within transactions
+	if session != nil && session.IsInTransaction() {
+		if IsDDLCommand(command) {
+			return nil, fmt.Errorf("DDL commands not allowed in transactions (txID: %s)", session.ActiveTransactionID)
+		}
 	}
 
 	result := ""
@@ -196,7 +228,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 		switch strings.ToLower(firstWords[1]) {
 		case "document":
 
-			return AddDocument(firstWords, command, logger, serviceManager, database)
+			return AddDocument(firstWords, command, logger, serviceManager, database, session)
 		case "user":
 			return AddUser(command, logger, serviceManager)
 		}
@@ -359,7 +391,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 				(<FIELDNAME> = <VALUE>, <FIELDNAME> = <VALUE>, ... )
 			*/
 
-			result1, err := UpdateDocument(firstWords, serviceManager, database, command, logger)
+			result1, err := UpdateDocument(firstWords, serviceManager, database, command, logger, session)
 
 			return result1, err
 
@@ -558,7 +590,21 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 				return nil, fmt.Errorf("failed to filter documents by WHERE clause: %w", err)
 			}
 
-			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs)) // Execute with WAL logging if available
+			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs))
+
+			// TRANSACTION SUPPORT: Acquire write locks for documents being deleted when in a transaction
+			// This ensures proper isolation and prevents concurrent modifications
+			if session != nil && session.IsInTransaction() {
+				// Acquire write locks for all matching documents
+				for _, docID := range docIDs {
+					if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
+						return nil, fmt.Errorf("failed to acquire write lock for document %s: %w", docID, err)
+					}
+				}
+				logger.Debugf("Acquired write locks for %d documents in transaction %s", len(docIDs), session.ActiveTransactionID)
+			}
+
+			// Execute with WAL logging if available
 			if serviceManager.WALManager != nil {
 				// METRICS: Track transaction begin
 				globalMetrics := GetGlobalServerMetrics()
@@ -853,6 +899,20 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	}
 
 	logger.Infof("Query executed successfully: Retrieved %d documents", len(documents))
+
+	// TRANSACTION SUPPORT: Acquire read locks for documents accessed in a transaction
+	// This ensures repeatable read isolation - prevents other transactions from modifying
+	// documents that this transaction has read
+	if session != nil && session.IsInTransaction() {
+		// Extract bundle name from query for lock acquisition
+		bundleName := query.FromBundle
+		for docID := range documents {
+			if err := serviceManager.LockManager.AcquireReadLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
+				return nil, fmt.Errorf("failed to acquire read lock for document %s: %w", docID, err)
+			}
+		}
+		logger.Debugf("Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
+	}
 
 	// EXPRESSION-ONLY SELECT: Handle queries without FROM clause
 	// These return a single synthetic document with expression results in Data map
