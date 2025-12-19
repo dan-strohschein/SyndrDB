@@ -689,8 +689,9 @@ func (p *SelectParser) parseGroupByClause(stmt *SelectStatement) error {
 				fieldName = fmt.Sprintf(`"%s"."%s"`, firstPart, p.current.Value)
 				p.advance()
 			} else {
-				// This is just a quoted field name "Field"
-				fieldName = fmt.Sprintf(`"%s"`, firstPart)
+				// This is just a quoted field name "Field" - use the value without re-adding quotes
+				// The quotes are just SQL syntax, the field name itself doesn't include them
+				fieldName = firstPart
 			}
 		} else if p.current.Type == TOKEN_IDENT {
 			// Unqualified identifier

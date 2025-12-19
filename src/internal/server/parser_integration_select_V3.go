@@ -92,7 +92,7 @@ func ParseQuery(query string, logger *zap.SugaredLogger) (*queryparser.UnifiedSe
 	if err != nil {
 		// Record failure
 		globalParserMetrics.NewParserFailures.Add(1)
-		logger.Errorf("New parser failed: %v", err)
+		logger.Errorf("New parser failed: %v trying to execute '%s'", err, query)
 		return nil, err
 	}
 

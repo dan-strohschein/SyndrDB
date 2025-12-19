@@ -411,3 +411,270 @@ func (mm *MetricsManager) sortBundleFrequencies(frequencies []BundleQueryFrequen
 		}
 	}
 }
+
+// JoinIndexMetrics tracks metrics for index-assisted join operations
+// These metrics provide insights into join optimization effectiveness
+type JoinIndexMetrics struct {
+	// Overall index usage statistics
+	TotalJoins         int64   `json:"total_joins"`          // Total join operations executed
+	IndexAssistedJoins int64   `json:"index_assisted_joins"` // Joins that used index optimization
+	IndexUsageRate     float64 `json:"index_usage_rate"`     // Percentage of joins using indexes
+	IndexFallbackCount int64   `json:"index_fallback_count"` // Times index probe failed and fell back
+
+	// Performance metrics
+	AverageIndexLookupTime time.Duration `json:"average_index_lookup_time"` // Average time for index lookups
+	TotalIndexLookupTime   time.Duration `json:"total_index_lookup_time"`   // Total time spent in index lookups
+	AverageScanReduction   float64       `json:"average_scan_reduction"`    // Average % of scans avoided (0-100)
+	AverageSpeedup         float64       `json:"average_speedup"`           // Average speedup multiplier (e.g., 500x)
+
+	// Index selectivity tracking
+	AverageSelectivity float64 `json:"average_selectivity"` // Average rows returned per index lookup
+	BestSelectivity    float64 `json:"best_selectivity"`    // Best (lowest) selectivity observed
+	WorstSelectivity   float64 `json:"worst_selectivity"`   // Worst (highest) selectivity observed
+
+	// Strategy selection tracking
+	StrategySelection map[string]int64 `json:"strategy_selection"` // Count by strategy name
+	ProbeIndexUsed    int64            `json:"probe_index_used"`   // Times probe-side index was used
+	BuildIndexUsed    int64            `json:"build_index_used"`   // Times build-side index was used
+
+	// Accuracy and estimation
+	EstimationAccuracy float64 `json:"estimation_accuracy"` // Average % accuracy of speedup estimates
+	Underperformances  int64   `json:"underperformances"`   // Times actual < 80% of estimated
+	Outperformances    int64   `json:"outperformances"`     // Times actual > 120% of estimated
+
+	// Bundle-specific tracking
+	IndexUsageByBundle map[string]int64 `json:"index_usage_by_bundle"` // Index usage count per bundle
+
+	// Time tracking
+	LastUpdated time.Time    `json:"last_updated"`
+	mu          sync.RWMutex `json:"-"` // Protects concurrent access
+}
+
+// JoinIndexMetricsSnapshot is a snapshot of JoinIndexMetrics without the mutex
+// This is safe to return by value and can be serialized
+type JoinIndexMetricsSnapshot struct {
+	TotalJoins             int64            `json:"total_joins"`
+	IndexAssistedJoins     int64            `json:"index_assisted_joins"`
+	IndexUsageRate         float64          `json:"index_usage_rate"`
+	IndexFallbackCount     int64            `json:"index_fallback_count"`
+	AverageIndexLookupTime time.Duration    `json:"average_index_lookup_time"`
+	TotalIndexLookupTime   time.Duration    `json:"total_index_lookup_time"`
+	AverageScanReduction   float64          `json:"average_scan_reduction"`
+	AverageSpeedup         float64          `json:"average_speedup"`
+	AverageSelectivity     float64          `json:"average_selectivity"`
+	BestSelectivity        float64          `json:"best_selectivity"`
+	WorstSelectivity       float64          `json:"worst_selectivity"`
+	StrategySelection      map[string]int64 `json:"strategy_selection"`
+	ProbeIndexUsed         int64            `json:"probe_index_used"`
+	BuildIndexUsed         int64            `json:"build_index_used"`
+	EstimationAccuracy     float64          `json:"estimation_accuracy"`
+	Underperformances      int64            `json:"underperformances"`
+	Outperformances        int64            `json:"outperformances"`
+	IndexUsageByBundle     map[string]int64 `json:"index_usage_by_bundle"`
+	LastUpdated            time.Time        `json:"last_updated"`
+}
+
+// NewJoinIndexMetrics creates a new join index metrics tracker
+func NewJoinIndexMetrics() *JoinIndexMetrics {
+	return &JoinIndexMetrics{
+		StrategySelection:  make(map[string]int64),
+		IndexUsageByBundle: make(map[string]int64),
+		LastUpdated:        time.Now(),
+	}
+}
+
+// RecordJoinExecution records metrics for a join operation
+// bundleName: Name of the probe bundle where index was used (if applicable)
+// usedIndex: Whether index was used for this join
+// strategy: Name of the index strategy used (e.g., "index_assisted_probe")
+func (m *JoinIndexMetrics) RecordJoinExecution(bundleName string, usedIndex bool, strategy string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.TotalJoins++
+
+	if usedIndex {
+		m.IndexAssistedJoins++
+		if bundleName != "" {
+			m.IndexUsageByBundle[bundleName]++
+		}
+
+		if strategy != "" {
+			m.StrategySelection[strategy]++
+
+			// Track specific strategy usage
+			if strategy == "index_assisted_probe" {
+				m.ProbeIndexUsed++
+			} else if strategy == "index_assisted_build" {
+				m.BuildIndexUsed++
+			}
+		}
+	}
+
+	// Update index usage rate
+	if m.TotalJoins > 0 {
+		m.IndexUsageRate = float64(m.IndexAssistedJoins) / float64(m.TotalJoins) * 100
+	}
+
+	m.LastUpdated = time.Now()
+}
+
+// RecordIndexLookup records metrics for an index lookup operation
+// lookupTime: Duration of the index lookup
+// selectivity: Number of rows returned per lookup
+func (m *JoinIndexMetrics) RecordIndexLookup(lookupTime time.Duration, selectivity float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.TotalIndexLookupTime += lookupTime
+
+	// Update average lookup time (running average)
+	if m.IndexAssistedJoins > 0 {
+		m.AverageIndexLookupTime = m.TotalIndexLookupTime / time.Duration(m.IndexAssistedJoins)
+	}
+
+	// Update selectivity tracking
+	// Use running average for average selectivity
+	if m.AverageSelectivity == 0 {
+		m.AverageSelectivity = selectivity
+		m.BestSelectivity = selectivity
+		m.WorstSelectivity = selectivity
+	} else {
+		// Weighted running average
+		weight := 0.1 // 10% weight for new value
+		m.AverageSelectivity = m.AverageSelectivity*(1-weight) + selectivity*weight
+
+		if selectivity < m.BestSelectivity {
+			m.BestSelectivity = selectivity
+		}
+		if selectivity > m.WorstSelectivity {
+			m.WorstSelectivity = selectivity
+		}
+	}
+
+	m.LastUpdated = time.Now()
+}
+
+// RecordPerformance records actual vs estimated performance
+// scanReduction: Percentage of scans avoided (0-100)
+// actualSpeedup: Actual speedup multiplier achieved
+// estimatedSpeedup: Estimated speedup multiplier
+func (m *JoinIndexMetrics) RecordPerformance(scanReduction float64, actualSpeedup float64, estimatedSpeedup float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Update average scan reduction (running average)
+	if m.AverageScanReduction == 0 {
+		m.AverageScanReduction = scanReduction
+	} else {
+		weight := 0.1 // 10% weight for new value
+		m.AverageScanReduction = m.AverageScanReduction*(1-weight) + scanReduction*weight
+	}
+
+	// Update average speedup (running average)
+	if m.AverageSpeedup == 0 {
+		m.AverageSpeedup = actualSpeedup
+	} else {
+		weight := 0.1
+		m.AverageSpeedup = m.AverageSpeedup*(1-weight) + actualSpeedup*weight
+	}
+
+	// Track estimation accuracy
+	if estimatedSpeedup > 0 {
+		accuracy := (1.0 - ((actualSpeedup - estimatedSpeedup) / estimatedSpeedup)) * 100
+		if accuracy < 0 {
+			accuracy = -accuracy // Make it absolute
+		}
+
+		// Update running average of accuracy
+		if m.EstimationAccuracy == 0 {
+			m.EstimationAccuracy = accuracy
+		} else {
+			weight := 0.1
+			m.EstimationAccuracy = m.EstimationAccuracy*(1-weight) + accuracy*weight
+		}
+
+		// Track underperformance and outperformance
+		if actualSpeedup < estimatedSpeedup*0.8 {
+			m.Underperformances++
+		} else if actualSpeedup > estimatedSpeedup*1.2 {
+			m.Outperformances++
+		}
+	}
+
+	m.LastUpdated = time.Now()
+}
+
+// RecordFallback records when index-assisted join falls back to full scan
+func (m *JoinIndexMetrics) RecordFallback() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.IndexFallbackCount++
+	m.LastUpdated = time.Now()
+}
+
+// GetSnapshot returns a snapshot of current metrics (thread-safe)
+func (m *JoinIndexMetrics) GetSnapshot() JoinIndexMetricsSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Create a snapshot without the mutex
+	snapshot := JoinIndexMetricsSnapshot{
+		TotalJoins:             m.TotalJoins,
+		IndexAssistedJoins:     m.IndexAssistedJoins,
+		IndexUsageRate:         m.IndexUsageRate,
+		IndexFallbackCount:     m.IndexFallbackCount,
+		AverageIndexLookupTime: m.AverageIndexLookupTime,
+		TotalIndexLookupTime:   m.TotalIndexLookupTime,
+		AverageScanReduction:   m.AverageScanReduction,
+		AverageSpeedup:         m.AverageSpeedup,
+		AverageSelectivity:     m.AverageSelectivity,
+		BestSelectivity:        m.BestSelectivity,
+		WorstSelectivity:       m.WorstSelectivity,
+		ProbeIndexUsed:         m.ProbeIndexUsed,
+		BuildIndexUsed:         m.BuildIndexUsed,
+		EstimationAccuracy:     m.EstimationAccuracy,
+		Underperformances:      m.Underperformances,
+		Outperformances:        m.Outperformances,
+		LastUpdated:            m.LastUpdated,
+		StrategySelection:      make(map[string]int64),
+		IndexUsageByBundle:     make(map[string]int64),
+	}
+
+	// Deep copy the maps
+	for k, v := range m.StrategySelection {
+		snapshot.StrategySelection[k] = v
+	}
+	for k, v := range m.IndexUsageByBundle {
+		snapshot.IndexUsageByBundle[k] = v
+	}
+
+	return snapshot
+}
+
+// Reset resets all metrics (useful for testing)
+func (m *JoinIndexMetrics) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.TotalJoins = 0
+	m.IndexAssistedJoins = 0
+	m.IndexUsageRate = 0
+	m.IndexFallbackCount = 0
+	m.AverageIndexLookupTime = 0
+	m.TotalIndexLookupTime = 0
+	m.AverageScanReduction = 0
+	m.AverageSpeedup = 0
+	m.AverageSelectivity = 0
+	m.BestSelectivity = 0
+	m.WorstSelectivity = 0
+	m.ProbeIndexUsed = 0
+	m.BuildIndexUsed = 0
+	m.EstimationAccuracy = 0
+	m.Underperformances = 0
+	m.Outperformances = 0
+	m.StrategySelection = make(map[string]int64)
+	m.IndexUsageByBundle = make(map[string]int64)
+	m.LastUpdated = time.Now()
+}

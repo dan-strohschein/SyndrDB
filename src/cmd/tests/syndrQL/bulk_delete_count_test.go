@@ -46,9 +46,9 @@ func TestBulkDelete_CountAccuracy(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Status", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Status", "STRING", true, false}
 	);`, bundleName)
 
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -215,8 +215,8 @@ func TestBulkDelete_MetadataUpdate(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Value", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Value", "STRING", true, false}
 	);`, bundleName)
 
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -267,8 +267,8 @@ func TestBulkDelete_WhereClause(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Status", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Status", "STRING", true, false}
 	);`, bundleName)
 
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -317,7 +317,7 @@ func TestBulkDelete_EmptyBundle(t *testing.T) {
 
 	// Create bundle with no documents
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"ID", "INT", true, false, 0}
+		{"ID", "INT", true, false}
 	);`, bundleName)
 
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")

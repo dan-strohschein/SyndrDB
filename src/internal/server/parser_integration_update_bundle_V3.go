@@ -54,15 +54,16 @@ func parseUpdateBundle(command string, logger *zap.SugaredLogger) (*models.Bundl
 		globalParserMetrics.NewParserFailures.Add(1)
 		globalParserMetrics.FallbacksTriggered.Add(1)
 
-		logger.Warnf("New CREATE BUNDLE parser failed: %v. Falling back to legacy parser.", err)
+		// logger.Warnf("New CREATE BUNDLE parser failed: %v. Falling back to legacy parser.", err)
 
-		// Fallback to legacy parser
-		return bndle.ParseCreateBundleCommand(command, logger)
+		// // Fallback to legacy parser
+		// return bndle.ParseCreateBundleCommand(command, logger)
+		return nil, fmt.Errorf(" UPDATE BUNDLE %s parser failed: %w", command, err)
 	}
 
 	// Record success
 	globalParserMetrics.NewParserSuccesses.Add(1)
-	logger.Infof("Successfully parsed CREATE BUNDLE using new parser")
+	logger.Infof("Successfully parsed UPDATE BUNDLE using new parser")
 
 	return bundleCommand, nil
 }

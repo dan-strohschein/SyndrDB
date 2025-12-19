@@ -41,10 +41,10 @@ func TestPlanCache_HitMiss(t *testing.T) {
 
 	// Create test bundle
 	createCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INTEGER", true, false, ""},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", true, false, ""},
-		{"BirthYear", "INTEGER", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", true, false},
+		{"BirthYear", "INT", true, false}
 	);`
 
 	startTime := time.Now()
@@ -96,9 +96,9 @@ func TestPlanCache_WriteThresholdInvalidation(t *testing.T) {
 
 	// Create test bundle
 	createCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INTEGER", true, false, ""},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", true, false}
 	);`
 
 	startTime := time.Now()
@@ -155,8 +155,8 @@ func TestPlanCache_SchemaChangeInvalidation(t *testing.T) {
 
 	// Create test bundle
 	createCmd := `CREATE BUNDLE "SchemaTest" WITH FIELDS (
-		{"ID", "INTEGER", true, false, ""},
-		{"Name", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false}
 	);`
 
 	startTime := time.Now()
@@ -213,9 +213,9 @@ func BenchmarkPlanCache_CacheHit(b *testing.B) {
 
 	// Create and seed bundle
 	createCmd := `CREATE BUNDLE "BenchAuthors" WITH FIELDS (
-		{"ID", "INTEGER", true, false, ""},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", true, false}
 	);`
 
 	startTime := time.Now()

@@ -55,10 +55,16 @@ UPDATE BUNDLE "<BUNDLE_NAME>" [update_operations];
 ## Document Management Commands
 
 ### ADD DOCUMENT
-Adds a new document to a bundle.
+Adds a new document to a bundle. Each field must be in its own braces, separated by commas.
 ```
 ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>" 
-WITH ({key=value, key=value});
+WITH ({"key"=value}, {"key"=value}, {"key"=value});
+```
+
+**Examples:**
+```
+ADD DOCUMENT TO BUNDLE "Users" WITH ({"name"="John"}, {"age"=30}, {"email"="john@example.com"});
+ADD DOCUMENT TO BUNDLE "Products" WITH ({"id"=1}, {"title"="Widget"}, {"price"=99.99});
 ```
 
 ### SELECT DOCUMENTS

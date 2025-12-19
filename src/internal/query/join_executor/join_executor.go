@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 
+	"syndrdb/src/internal/query/documentscanner"
+
 	"go.uber.org/zap"
 )
 
@@ -184,6 +186,57 @@ func (dje *DefaultJoinExecutor) selectBestStrategy(request *JoinRequest) (JoinSt
 		if preferredStrategy := dje.getPreferredStrategy(request); preferredStrategy != nil {
 			dje.logger.Debugf("Using learned preferred strategy: %s", preferredStrategy.GetName())
 			return preferredStrategy, nil
+		}
+	}
+
+	// PHASE 1: Check for index-assisted optimization opportunities
+	// This must happen before standard strategy evaluation
+	if len(request.Conditions) > 0 {
+		// Extract join keys from first condition (Phase 1 only supports single-column)
+		firstCondition := request.Conditions[0]
+		leftKey := firstCondition.LeftKey
+		rightKey := firstCondition.RightKey
+
+		// Determine build/probe bundles (hash join uses smaller as build side)
+		leftSize := request.LeftBundle.GetTotalDocuments()
+		rightSize := request.RightBundle.GetTotalDocuments()
+		var buildBundle, probeBundle documentscanner.BundleInterface
+		var buildKey, probeKey string
+
+		if leftSize <= rightSize {
+			buildBundle = request.LeftBundle
+			probeBundle = request.RightBundle
+			buildKey = leftKey
+			probeKey = rightKey
+		} else {
+			buildBundle = request.RightBundle
+			probeBundle = request.LeftBundle
+			buildKey = rightKey
+			probeKey = leftKey
+		}
+
+		// Estimate hash table size (used for cost calculation)
+		estimatedHashTableSize := buildBundle.GetTotalDocuments()
+
+		// Select index strategy if beneficial
+		indexStrategy := SelectIndexStrategy(
+			buildBundle, probeBundle,
+			buildKey, probeKey,
+			estimatedHashTableSize)
+
+		if indexStrategy != nil {
+			// Store selected strategy in request for use by join strategies
+			request.IndexStrategy = indexStrategy
+
+			// Log strategy explanation for debugging
+			explanation := FormatStrategyExplanation(
+				indexStrategy,
+				estimatedHashTableSize,
+				buildBundle.GetTotalDocuments(),
+				probeBundle.GetTotalDocuments())
+			dje.logger.Infof("Index optimization: %s", explanation)
+		} else {
+			dje.logger.Debugf("No beneficial index found for join keys %s/%s", buildKey, probeKey)
 		}
 	}
 

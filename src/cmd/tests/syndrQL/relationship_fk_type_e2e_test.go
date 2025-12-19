@@ -34,8 +34,8 @@ func TestFKTypePreservation_INT(t *testing.T) {
 
 	// Create Authors bundle with INT primary key
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"author_id", "INT", true, false, 0},
-		{"name", "STRING", false, false, ""}
+		{"author_id", "INT", true, false},
+		{"name", "STRING", false, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -43,9 +43,9 @@ func TestFKTypePreservation_INT(t *testing.T) {
 
 	// Create Books bundle with INT FK field
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"book_id", "INT", true, false, 0},
-		{"title", "STRING", false, false, ""},
-		{"author_fk", "INT", false, false, 0}
+		{"book_id", "INT", true, false},
+		{"title", "STRING", false, false},
+		{"author_fk", "INT", false, false}
 	);`
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -80,16 +80,16 @@ func TestFKTypePreservation_ManyToMany(t *testing.T) {
 
 	// Create bundles with STRING primary keys
 	createUsersCmd := `CREATE BUNDLE "Users" WITH FIELDS (
-		{"user_id", "STRING", true, false, ""},
-		{"username", "STRING", false, false, ""}
+		{"user_id", "STRING", true, false},
+		{"username", "STRING", false, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createUsersCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
 	require.NoError(t, err)
 
 	createGroupsCmd := `CREATE BUNDLE "Groups" WITH FIELDS (
-		{"group_id", "STRING", true, false, ""},
-		{"group_name", "STRING", false, false, ""}
+		{"group_id", "STRING", true, false},
+		{"group_name", "STRING", false, false}
 	);`
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createGroupsCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -134,17 +134,17 @@ func TestFKTypePreservation_JOIN(t *testing.T) {
 
 	// Create bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"author_id", "INT", true, false, 0},
-		{"AuthorName", "STRING", false, false, ""}
+		{"author_id", "INT", true, false},
+		{"AuthorName", "STRING", false, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
 	require.NoError(t, err)
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"book_id", "INT", true, false, 0},
-		{"title", "STRING", false, false, ""},
-		{"author_fk", "INT", false, false, 0}
+		{"book_id", "INT", true, false},
+		{"title", "STRING", false, false},
+		{"author_fk", "INT", false, false}
 	);`
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -208,17 +208,17 @@ func TestFKTypePreservation_ValidationFailure(t *testing.T) {
 	ctx := context.Background()
 
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"author_id", "INT", true, false, 0},
-		{"name", "STRING", false, false, ""}
+		{"author_id", "INT", true, false},
+		{"name", "STRING", false, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
 	require.NoError(t, err)
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"book_id", "INT", true, false, 0},
-		{"title", "STRING", false, false, ""},
-		{"author_fk", "INT", false, false, 0}
+		{"book_id", "INT", true, false},
+		{"title", "STRING", false, false},
+		{"author_fk", "INT", false, false}
 	);`
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd,
 		fixture.Logger, time.Now(), nil, "127.0.0.1")

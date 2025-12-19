@@ -121,7 +121,9 @@ type GroupByStrategy int
 const (
 	HashAggregate GroupByStrategy = iota
 	SortGroupAggregate
-	AutoStrategy // Let the system decide
+
+	NoGroupByAggregate // For Count(*) with ORDER BY without GROUP BY
+	AutoStrategy       // Let the system decide
 )
 
 // String returns the string representation of GroupByStrategy
@@ -630,6 +632,14 @@ func determineExecutionStrategy(selectQuery *SelectQueryWithGroupBy, logger *zap
 	if groupByFieldCount <= 3 && aggregateCount <= 5 {
 		logger.Debugf("Using Hash strategy: few GROUP BY fields (%d) and aggregates (%d)", groupByFieldCount, aggregateCount)
 		return HashAggregate
+	}
+
+	if groupByFieldCount == 0 && aggregateCount == 1 {
+		// Special case: COUNT(*) but no GROUP BY
+		if selectQuery.OrderBy != nil {
+			logger.Debugf("Using NoGroupByAggregate strategy: COUNT(*) with no GROUP BY")
+			return NoGroupByAggregate
+		}
 	}
 
 	// Default to Sort strategy for complex queries

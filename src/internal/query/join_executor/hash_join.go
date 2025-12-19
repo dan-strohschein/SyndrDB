@@ -127,10 +127,76 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 	}
 	defer hashTable.Clear() // Cleanup memory
 
-	// Probe phase: Stream through larger bundle and find matches (using Bloom filter)
-	joinedDocs, probeStats, err := hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
+	// Probe phase: Check for index-assisted optimization
+	var joinedDocs []*JoinedDocument
+	var probeStats *ScanStats
+	var indexUsed bool
+	var estimatedSpeedup float64
+
+	if request.IndexStrategy != nil {
+		// Check if this is a ProbeIndexStrategy
+		if probeStrategy, ok := request.IndexStrategy.(*ProbeIndexStrategy); ok && probeStrategy.IsApplicable() {
+			hjs.logger.Infof("Using index-assisted probe strategy on %s", probeBundle.GetName())
+
+			// Calculate estimated speedup for feedback loop
+			hashTableSize := hashTable.Size()
+			probeSize := probeBundle.GetTotalDocuments()
+			indexStats := probeStrategy.GetIndex().GetQueryOptimizationStats()
+			costEstimate := EvaluateIndexUsage(hashTableSize, probeSize, &indexStats)
+			estimatedSpeedup = costEstimate.EstimatedSpeedup
+
+			joinedDocs, probeStats, err = hjs.probeWithIndex(hashTable, probeStrategy, probeBundle, probeKey, request, swapped)
+			if err != nil {
+				hjs.logger.Warnf("Index-assisted probe failed, falling back to full scan: %v", err)
+				// Fall back to regular probe
+				joinedDocs, probeStats, err = hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
+				indexUsed = false
+			} else {
+				indexUsed = true
+			}
+		} else {
+			// Not a probe strategy or not applicable, use regular probe
+			joinedDocs, probeStats, err = hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
+		}
+	} else {
+		// No index strategy available, use regular probe with Bloom filter
+		joinedDocs, probeStats, err = hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("hash table probe failed: %w", err)
+	}
+
+	// PHASE 1: Statistics feedback loop - Compare estimated vs actual performance
+	if indexUsed && estimatedSpeedup > 0 {
+		probeSize := int64(probeBundle.GetTotalDocuments())
+		actualScanned := probeStats.DocumentsScanned
+
+		// Calculate actual speedup: how much work we saved
+		actualSpeedup := float64(probeSize) / float64(actualScanned)
+
+		// Calculate estimation accuracy
+		estimationError := ((actualSpeedup - estimatedSpeedup) / estimatedSpeedup) * 100
+
+		hjs.logger.Infof("Index optimization feedback: estimated %.2fx speedup, actual %.2fx speedup (%.1f%% estimation accuracy)",
+			estimatedSpeedup, actualSpeedup, 100-estimationError)
+
+		// Log detailed comparison for learning
+		if actualSpeedup < estimatedSpeedup*0.8 {
+			// Actual performance is worse than expected
+			hjs.logger.Warnf("Index underperformed: expected to scan %d docs (%.0f%% of %d), actually scanned %d (%.0f%%)",
+				int(float64(probeSize)/estimatedSpeedup), 100.0/estimatedSpeedup, probeSize,
+				actualScanned, float64(actualScanned*100)/float64(probeSize))
+		} else if actualSpeedup > estimatedSpeedup*1.2 {
+			// Actual performance is better than expected
+			hjs.logger.Infof("Index outperformed: scanned %d docs vs %d expected (%.1fx better than estimate)",
+				actualScanned, int(float64(probeSize)/estimatedSpeedup), actualSpeedup/estimatedSpeedup)
+		}
+
+		// Log scan reduction statistics
+		scanReduction := float64(probeSize-actualScanned) / float64(probeSize) * 100
+		hjs.logger.Infof("Scan reduction: %d → %d documents (%.1f%% reduction)",
+			probeSize, actualScanned, scanReduction)
 	}
 
 	// Create result
@@ -373,6 +439,132 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		hjs.logger.Debugf("Probe completed: %d documents scanned, %d comparisons, %d results",
 			stats.DocumentsScanned, stats.Comparisons, len(joinedDocs))
 	}
+
+	return joinedDocs, stats, nil
+}
+
+// probeWithIndex uses an index on the probe bundle to filter documents before probing
+// This is the PHASE 1 index-assisted join optimization
+//
+// Algorithm:
+//  1. Extract all unique keys from the hash table
+//  2. Use the probe bundle's index to BatchGet only matching document IDs
+//  3. Fetch those documents from the bundle
+//  4. Probe hash table with the filtered document set
+//
+// This eliminates the full table scan on the probe side, replacing O(probe_size) with O(hash_keys * index_lookup)
+func (hjs *HashJoinStrategy) probeWithIndex(
+	hashTable HashTable,
+	strategy *ProbeIndexStrategy,
+	probeBundle documentscanner.BundleInterface,
+	probeKey string,
+	request *JoinRequest,
+	swapped bool,
+) ([]*JoinedDocument, *ScanStats, error) {
+
+	hjs.logger.Infof("Index-assisted probe: extracting %d unique keys from hash table",
+		hashTable.Size())
+
+	// Step 1: Extract all unique keys from hash table
+	hashKeys := hashTable.GetAllKeys()
+	if len(hashKeys) == 0 {
+		hjs.logger.Debugf("Hash table is empty, no matches possible")
+		return []*JoinedDocument{}, &ScanStats{}, nil
+	}
+
+	// Convert keys to strings for BatchGet
+	keyStrings := make([]string, len(hashKeys))
+	for i, key := range hashKeys {
+		keyStrings[i] = conversion.ValueToString(key)
+	}
+
+	hjs.logger.Debugf("Performing index BatchGet for %d keys", len(keyStrings))
+
+	// Step 2: Use index to get matching document IDs
+	probeIndex := strategy.GetIndex()
+	if probeIndex == nil {
+		return nil, nil, fmt.Errorf("probe index is nil")
+	}
+
+	docIDsByKey, err := probeIndex.BatchGet(keyStrings)
+	if err != nil {
+		return nil, nil, fmt.Errorf("index BatchGet failed: %w", err)
+	}
+
+	// Count total matching documents
+	totalMatches := 0
+	for _, docIDs := range docIDsByKey {
+		totalMatches += len(docIDs)
+	}
+
+	hjs.logger.Infof("Index returned %d matching documents for %d keys (avg %.1f docs/key)",
+		totalMatches, len(docIDsByKey), float64(totalMatches)/float64(len(docIDsByKey)))
+
+	// Step 3: Fetch the matching documents from the bundle
+	// Pre-allocate result slice
+	estimatedResults := totalMatches
+	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
+	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
+
+	// Process each key and its matching documents
+	for keyStr, docIDs := range docIDsByKey {
+		// Check for cancellation
+		select {
+		case <-request.Context.Done():
+			return nil, nil, request.Context.Err()
+		default:
+		}
+
+		// Fetch each matching document
+		for _, docID := range docIDs {
+			// Get document from bundle
+			probeDoc := probeBundle.GetDocument(docID)
+			if probeDoc == nil {
+				// Document not found or deleted - silently skip
+				continue
+			}
+
+			stats.DocumentsScanned++
+
+			// Extract the actual key value from the document (for hash table lookup)
+			field, exists := probeDoc.Fields[probeKey]
+			if !exists {
+				hjs.logger.Warnf("Document %s missing join key %s", docID, probeKey)
+				continue
+			}
+
+			keyValue := field.Value
+
+			// Step 4: Look up matching documents in hash table
+			buildDocs, found := hashTable.Get(keyValue)
+			stats.Comparisons++
+
+			if found {
+				// Create joined documents for each match
+				for _, buildDoc := range buildDocs {
+					joinedDoc := hjs.createJoinedDocument(buildDoc, probeDoc, keyStr, swapped, request.JoinType)
+					if joinedDoc != nil {
+						joinedDocs = append(joinedDocs, joinedDoc)
+					}
+				}
+			} else if request.JoinType == LeftJoin && !swapped {
+				// Left outer join: include unmatched documents from left (probe) side
+				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, keyStr, swapped, request.JoinType)
+				if joinedDoc != nil {
+					joinedDocs = append(joinedDocs, joinedDoc)
+				}
+			} else if request.JoinType == RightJoin && swapped {
+				// Right outer join: include unmatched documents from right (probe) side
+				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, keyStr, swapped, request.JoinType)
+				if joinedDoc != nil {
+					joinedDocs = append(joinedDocs, joinedDoc)
+				}
+			}
+		}
+	}
+
+	hjs.logger.Infof("Index-assisted probe completed: %d documents scanned (vs %d full scan), %d results",
+		stats.DocumentsScanned, probeBundle.GetTotalDocuments(), len(joinedDocs))
 
 	return joinedDocs, stats, nil
 }

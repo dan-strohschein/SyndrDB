@@ -423,6 +423,42 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		}
 	}
 
+	// CRITICAL FIX: Synchronize all loaded databases with the catalog
+	// When databases are loaded from disk on startup, they need to be registered in the catalog
+	// This ensures SHOW DATABASES and USE DATABASE work correctly for pre-existing databases
+	if catalogService != nil && len(server.Databases) > 0 {
+		sugar.Infof("Synchronizing %d loaded databases with system catalog", len(server.Databases))
+		syncCount := 0
+		for dbName, db := range server.Databases {
+			// Skip primary database - it was already registered above
+			if strings.ToLower(dbName) == "primary" {
+				continue
+			}
+
+			// Check if database already exists in catalog
+			existingDB, err := catalogService.GetDatabaseFromCatalogByName(dbName)
+			if err != nil || existingDB == nil {
+				// Database not in catalog, add it
+				err = catalogService.AddDatabaseToCatalog(db)
+				if err != nil {
+					sugar.Warnf("Failed to register database '%s' in catalog: %v", dbName, err)
+				} else {
+					syncCount++
+					sugar.Debugf("Registered database '%s' in system catalog", dbName)
+				}
+			}
+		}
+		if syncCount > 0 {
+			sugar.Infof("Successfully synchronized %d databases with system catalog", syncCount)
+
+			// Flush catalog updates to ensure persistence
+			err := bundleService.FlushAllBuffers()
+			if err != nil {
+				sugar.Warnf("Failed to flush catalog updates: %v", err)
+			}
+		}
+	}
+
 	// Initialize ghost cleanup worker for automatic background compaction
 	// Create metrics reporter callback to avoid import cycles
 	metricsReporter := func(metricName string, value uint64) {

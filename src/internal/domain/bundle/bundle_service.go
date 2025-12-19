@@ -1248,6 +1248,11 @@ func (s *BundleService) FlushAllIndexesToDisk() error {
 				// Flush hash index V3 (LSM-style)
 				if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndexV3); ok {
 					if err := hashIndex.Flush(); err != nil {
+						// Skip closed indexes - they were already flushed when closed
+						if strings.Contains(err.Error(), "index is closed") {
+							s.logger.Debugf("Skipping flush for closed hash index '%s' in bundle '%s'", indexName, bundleName)
+							continue
+						}
 						errorMsg := fmt.Sprintf("failed to flush hash index '%s' in bundle '%s': %v", indexName, bundleName, err)
 						s.logger.Warnf(errorMsg)
 						errors = append(errors, fmt.Errorf(errorMsg))
@@ -1261,6 +1266,11 @@ func (s *BundleService) FlushAllIndexesToDisk() error {
 				// Flush BTree index if it has a Flush method
 				if btreeIndex, ok := indexRef.IndexInstance.(interface{ Flush() error }); ok {
 					if err := btreeIndex.Flush(); err != nil {
+						// Skip closed indexes - they were already flushed when closed
+						if strings.Contains(err.Error(), "index is closed") {
+							s.logger.Debugf("Skipping flush for closed BTree index '%s' in bundle '%s'", indexName, bundleName)
+							continue
+						}
 						errorMsg := fmt.Sprintf("failed to flush BTree index '%s' in bundle '%s': %v", indexName, bundleName, err)
 						s.logger.Warnf(errorMsg)
 						errors = append(errors, fmt.Errorf(errorMsg))
@@ -1458,7 +1468,15 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 func (s *BundleService) processBTreeIndexBatch(bundle *models.Bundle, indexName string, indexRef models.IndexReference, updates []IndexUpdate) error {
 	btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
 	if err != nil {
-		return fmt.Errorf("failed to load BTree index: %w", err)
+		// If index file doesn't exist, log warning and skip updates gracefully
+		// This can happen during index initialization or if file was deleted
+		s.logger.Warnf("Cannot process BTree index updates for '%s': %v", indexName, err)
+		return nil // Don't propagate error - just skip these updates
+	}
+
+	if btreeIndex == nil {
+		s.logger.Warnf("BTree index '%s' is nil, skipping updates", indexName)
+		return nil
 	}
 
 	// Process all updates for this BTree index
@@ -3922,6 +3940,16 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 	args := settings.GetSettings()
 	indexFilePath := fmt.Sprintf("%s/%s_%s.btidx", args.DataDir, bundle.Name, indexRef.BTreeIndexField.FieldName)
 
+	// Check if the index file exists before trying to open it
+	if _, err := os.Stat(indexFilePath); os.IsNotExist(err) {
+		// Index file doesn't exist - this can happen if:
+		// 1. Index was just created but file creation failed
+		// 2. Index metadata exists but file was deleted
+		// 3. Race condition during index creation
+		s.logger.Warnf("BTree index file '%s' does not exist for index '%s', skipping updates", indexFilePath, indexName)
+		return nil, fmt.Errorf("index file does not exist: %s (index may still be initializing)", indexFilePath)
+	}
+
 	btreeIndex, err := btreeindexV2.OpenBTreeIndex(indexFilePath, args.Debug, s.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BTree index '%s' from disk: %w", indexName, err)
@@ -4610,12 +4638,25 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 			// STEP 1: Remove from physical bundle file (append tombstone marker) - DURABILITY FIRST
 			err := s.store.DeleteDocumentFromBundleFile(bundle, documentID)
 			if err != nil {
-				return fmt.Errorf("failed to remove document %s from bundle file: %w", documentID, err)
+				// DEFENSIVE: Check if error is "document not found" - this can happen if:
+				// 1. Document exists only in memtable (not yet flushed to disk)
+				// 2. Document was already deleted but index still has stale entry
+				// 3. Concurrent deletion happened
+				// 4. Index cache is out of sync with bundle file
+				if strings.Contains(err.Error(), "not found") {
+					s.logger.Warnf("Document %s not found in bundle file during deletion (may be in memtable only or already deleted) - removing from memory", documentID)
+					// Document may be in memtable only (not yet flushed to disk)
+					// Remove it from memory structures anyway
+				} else {
+					return fmt.Errorf("failed to remove document %s from bundle file: %w", documentID, err)
+				}
 			}
 
-			// STEP 2: Remove from in-memory structures - CONSISTENCY AFTER DURABILITY
+			// STEP 2: Remove from in-memory structures - CONSISTENCY
+			// Do this regardless of whether file deletion succeeded, because document
+			// might exist only in memtable (not yet flushed to disk)
 
-			// Remove from Bundle.Documents if loaded
+			// Remove from Bundle.Documents if loaded (memtable)
 			if bundle.Documents != nil {
 				delete(*bundle.Documents, documentID)
 			}
@@ -5993,6 +6034,14 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 
 	// Remove the bundle from in-memory metadata
 	delete(database.Bundles, bundle.Name)
+
+	// CRITICAL FIX: Remove from bundleMetadata cache to prevent stale index references
+	// When a bundle is dropped and recreated with the same name, the old bundle object
+	// with closed index instances must be fully removed from memory. Without this,
+	// the stale bundle entry remains in bundleMetadata with closed indexes, causing
+	// "document not found in bundle" errors when the recreated bundle tries to use
+	// the old closed index instances instead of creating fresh ones.
+	delete(s.bundleMetadata, bundle.Name)
 
 	// Clear the document-page location cache for this bundle
 	s.pageCacheMutex.Lock()

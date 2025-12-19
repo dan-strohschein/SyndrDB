@@ -354,10 +354,10 @@ func resetDatabase(t *testing.T, fixture *TestFixture) {
 	// Create Authors bundle - must pass database context
 	// NOTE: Avoiding UNIQUE constraint for now due to indexing issues in test environment
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", false, false, ""},
-		{"BirthYear", "INT", false, false, 0}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false},
+		{"BirthYear", "INT", false, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")

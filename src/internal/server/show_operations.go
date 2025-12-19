@@ -46,8 +46,9 @@ func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager Ser
 		} else {
 			catalogNames := make([]string, 0, len(catalogDatabases))
 			for _, dbInfo := range catalogDatabases {
-				if dbName, ok := dbInfo["Name"].(string); ok {
-					catalogNames = append(catalogNames, dbName)
+				logger.Infof("Loaded DB from Service %s  ", dbInfo["Name"])
+				if _, ok := dbInfo["Name"].(models.FieldValue); ok {
+					catalogNames = append(catalogNames, dbInfo["Name"].(models.FieldValue).StringVal)
 				}
 			}
 
@@ -59,6 +60,7 @@ func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager Ser
 
 			catalogSet := make(map[string]bool)
 			for _, name := range catalogNames {
+
 				catalogSet[name] = true
 			}
 
@@ -71,6 +73,7 @@ func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager Ser
 
 			// Find databases loaded but not in catalog
 			for _, name := range databaseNames {
+				//logger.Infof("Comparing from Catalog %s to From Service ", name)
 				if !catalogSet[name] {
 					logger.Warnf("Database '%s' is loaded but not found in catalog", name)
 				}

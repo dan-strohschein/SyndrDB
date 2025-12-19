@@ -46,6 +46,9 @@ type JoinRequest struct {
 	MemoryLimit        int64 // Maximum memory to use (bytes)
 	AllowDiskSpillover bool  // Whether to use disk when memory is exhausted
 
+	// Index-assisted join optimization (PHASE 1)
+	IndexStrategy IndexExecutionStrategy // Selected index strategy for optimization (nil = no index)
+
 	// PHASE 2: Add parallel execution hints
 	// MaxWorkers     int    // Maximum number of parallel workers
 	// PartitionHint  string // Hint for partitioning strategy

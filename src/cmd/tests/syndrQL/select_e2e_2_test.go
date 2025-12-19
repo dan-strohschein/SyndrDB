@@ -270,10 +270,10 @@ func setupBundles(t *testing.T, fixture *TestFixture) {
 	// Create Authors bundle - must pass database context
 	// NOTE: Avoiding UNIQUE constraint for now due to indexing issues in test environment
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", false, false, ""},
-		{"BirthYear", "INT", false, false, 0}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false},
+		{"BirthYear", "INT", false, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -346,10 +346,10 @@ func setupBundlesTB(tb testing.TB, fixture *TestFixture) {
 	// Create Authors bundle - must pass database context
 	// NOTE: Avoiding UNIQUE constraint for now due to indexing issues in test environment
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", false, false, ""},
-		{"BirthYear", "INT", false, false, 0}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false},
+		{"BirthYear", "INT", false, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -369,11 +369,11 @@ func setupBundlesTB(tb testing.TB, fixture *TestFixture) {
 
 	// Create Books bundle - must pass database context
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"ID", "INT", true, true, null},
-		{"Title", "STRING", true, false, null},
-		{"AuthorID", "INT", false, false, null},
-		{"Genre", "STRING", false, false, null},
-		{"Price", "FLOAT", false, false, null}
+		{"ID", "INT", true, true},
+		{"Title", "STRING", true, false},
+		{"AuthorID", "INT", false, false},
+		{"Genre", "STRING", false, false},
+		{"Price", "FLOAT", false, false}
 	)`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -383,9 +383,9 @@ func setupBundlesTB(tb testing.TB, fixture *TestFixture) {
 
 	// Create Publishers bundle - must pass database context
 	createPublishersCmd := `CREATE BUNDLE "Publishers" WITH FIELDS (
-		{"ID", "INT", true, true, null},
-		{"Name", "STRING", true, false, null},
-		{"Country", "STRING", false, false, null}
+		{"ID", "INT", true, true},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false}
 	)`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")

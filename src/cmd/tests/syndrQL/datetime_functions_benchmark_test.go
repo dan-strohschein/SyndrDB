@@ -143,8 +143,8 @@ func BenchmarkDateTime_DefaultValue_NOW(b *testing.B) {
 
 	// Create bundle with F:NOW() as default
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"id", "STRING", true, false, ""},
-		{"created_at", "DATETIME", true, false, "F:NOW()"}
+		{"id", "STRING", true, false},
+		{"created_at", "DATETIME", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()

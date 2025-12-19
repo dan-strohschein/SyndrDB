@@ -96,8 +96,9 @@ type HashIndexV3 struct {
 	isDirty bool // Metadata needs persistence
 
 	// Statistics
-	stats      IndexStats
-	statsMutex sync.RWMutex // Separate mutex for stats
+	stats         IndexStats
+	statsMutex    sync.RWMutex       // Separate mutex for stats
+	queryOptStats *IndexStatsTracker // Query optimization statistics for join planning
 
 	// Logging
 	logger *zap.SugaredLogger
@@ -275,7 +276,8 @@ func NewHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 			CreatedAt:    time.Now(),
 			LastModified: time.Now(),
 		},
-		logger: config.Logger,
+		queryOptStats: NewIndexStatsTracker(),
+		logger:        config.Logger,
 	}
 
 	// TODO: Sprint 4 - Initialize CompactionManager
@@ -445,6 +447,9 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 		return nil, nil, fmt.Errorf("key value cannot be empty")
 	}
 
+	// Track lookup performance for query optimization
+	startTime := time.Now()
+
 	// READ PATH (LSM-style with bucket optimization):
 	// 1. Check MemTable first (O(1) if cached)
 	// 2. If not found, compute bucket and scan only that bucket's files (O(1) bucket + O(files_per_bucket))
@@ -461,9 +466,13 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 
 		// Check if this is a tombstone (deleted)
 		if entry.Deleted {
+			// Track lookup with zero results
+			idx.queryOptStats.RecordLookup(0, time.Since(startTime))
 			return []string{}, []uint32{}, nil
 		}
 
+		// Track lookup with one result
+		idx.queryOptStats.RecordLookup(1, time.Since(startTime))
 		return []string{entry.DocumentID}, []uint32{entry.PageID}, nil
 	}
 
@@ -499,6 +508,7 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 
 	if latestEntry == nil {
 		// Not found anywhere
+		idx.queryOptStats.RecordLookup(0, time.Since(startTime))
 		return []string{}, []uint32{}, nil
 	}
 
@@ -513,11 +523,14 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 
 	// Check if this is a tombstone
 	if latestEntry.Deleted {
+		idx.queryOptStats.RecordLookup(0, time.Since(startTime))
 		return []string{}, []uint32{}, nil
 	}
 
 	idx.updateGetStats()
 
+	// Track lookup with one result
+	idx.queryOptStats.RecordLookup(1, time.Since(startTime))
 	return []string{latestEntry.DocumentID}, []uint32{latestEntry.PageID}, nil
 }
 
@@ -764,6 +777,13 @@ func (idx *HashIndexV3) GetStats() IndexStats {
 // GetMemTableStats returns MemTable statistics
 func (idx *HashIndexV3) GetMemTableStats() MemTableStats {
 	return idx.MemTable.GetStats()
+}
+
+// GetQueryOptimizationStats returns statistics for query optimization and cost estimation
+// This is used by the join executor to decide between full scan vs index-assisted strategies
+// Returns a copy of the statistics to avoid race conditions
+func (idx *HashIndexV3) GetQueryOptimizationStats() QueryOptimizationStats {
+	return idx.queryOptStats.GetStats()
 }
 
 // TODO: Sprint 5 - Batch Operations

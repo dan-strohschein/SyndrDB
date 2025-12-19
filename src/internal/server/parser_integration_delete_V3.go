@@ -54,10 +54,11 @@ func parseDeleteDocument(command string, logger *zap.SugaredLogger) (*models.Doc
 		globalParserMetrics.NewParserFailures.Add(1)
 		globalParserMetrics.FallbacksTriggered.Add(1)
 
-		logger.Warnf("New DELETE DOCUMENTS parser failed: %v. Falling back to legacy parser.", err)
+		// logger.Warnf("New DELETE DOCUMENTS parser failed: %v. Falling back to legacy parser.", err)
 
-		// Fallback to legacy parser
-		return bndle.ParseDeleteDocumentCommand(command, logger)
+		// // Fallback to legacy parser
+		// return bndle.ParseDeleteDocumentCommand(command, logger)
+		return nil, fmt.Errorf(" DELETE DOCUMENTS %s parser failed: %w", command, err)
 	}
 
 	// Record success

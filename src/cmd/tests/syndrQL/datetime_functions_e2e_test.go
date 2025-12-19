@@ -310,9 +310,9 @@ func TestDateTime_DefaultValue_NOW(t *testing.T) {
 	defer cancel()
 
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"id", "STRING", true, false, ""},
-		{"name", "STRING", true, false, ""},
-		{"created_at", "DATETIME", true, false, "F:NOW()"}
+		{"id", "STRING", true, false},
+		{"name", "STRING", true, false},
+		{"created_at", "DATETIME", false, false, "F:NOW()"}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -766,9 +766,9 @@ func TestDateTime_GroupBy_MIN_MAX(t *testing.T) {
 
 	// Create bundle with event_type and event_time fields
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"id", "STRING", true, false, ""},
-		{"event_type", "STRING", true, false, ""},
-		{"event_time", "DATETIME", true, false, ""}
+		{"id", "STRING", true, false},
+		{"event_type", "STRING", true, false},
+		{"event_time", "DATETIME", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -907,9 +907,9 @@ func TestDateTime_GroupBy_COUNT_WithDateTrunc(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"id", "STRING", true, false, ""},
-		{"user_id", "STRING", true, false, ""},
-		{"access_time", "DATETIME", true, false, ""}
+		{"id", "STRING", true, false},
+		{"user_id", "STRING", true, false},
+		{"access_time", "DATETIME", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -1051,10 +1051,10 @@ func TestDateTime_GroupBy_HAVING_WithDateFunctions(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"session_id", "STRING", true, false, ""},
-		{"user_id", "STRING", true, false, ""},
-		{"start_time", "DATETIME", true, false, ""},
-		{"end_time", "DATETIME", true, false, ""}
+		{"session_id", "STRING", true, false},
+		{"user_id", "STRING", true, false},
+		{"start_time", "DATETIME", true, false},
+		{"end_time", "DATETIME", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -1195,10 +1195,10 @@ func TestDateTime_GroupBy_WithOtherAggregates(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"order_id", "STRING", true, false, ""},
-		{"status", "STRING", true, false, ""},
-		{"order_date", "DATETIME", true, false, ""},
-		{"amount", "FLOAT", true, false, ""}
+		{"order_id", "STRING", true, false},
+		{"status", "STRING", true, false},
+		{"order_date", "DATETIME", true, false},
+		{"amount", "FLOAT", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()

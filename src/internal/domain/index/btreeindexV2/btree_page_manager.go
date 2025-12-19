@@ -223,12 +223,12 @@ func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interfa
 		atomic.AddUint64(&pm.stats.hits, 1)
 
 		// INTENSIVE DEBUG: Log details for internal nodes
-		if node, ok := entry.pageData.(*BTreeNode); ok && !node.IsLeaf {
-			pm.logger.Infof("GetPage CACHE HIT: page %d is internal node with %d keys (ptr=%p)",
-				pageNum, node.KeyCount, entry.pageData)
-		} else {
-			pm.logger.Debugf("Cache hit for page %d", pageNum)
-		}
+		// if node, ok := entry.pageData.(*BTreeNode); ok && !node.IsLeaf {
+		// 	pm.logger.Infof("GetPage CACHE HIT: page %d is internal node with %d keys (ptr=%p)",
+		// 		pageNum, node.KeyCount, entry.pageData)
+		// } else {
+		// 	pm.logger.Debugf("Cache hit for page %d", pageNum)
+		// }
 
 		return entry.pageData, nil
 	}
@@ -264,12 +264,12 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 	defer pm.mutex.Unlock()
 
 	// INTENSIVE DEBUG: Log details for internal nodes
-	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-		pm.logger.Infof("PutPage CALLED: page %d is internal node with %d keys, dirty=%t (ptr=%p)",
-			pageNum, node.KeyCount, dirty, pageData)
-	} else {
-		pm.logger.Debugf("Putting page %d in cache (dirty: %t)", pageNum, dirty)
-	}
+	// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+	// 	pm.logger.Infof("PutPage CALLED: page %d is internal node with %d keys, dirty=%t (ptr=%p)",
+	// 		pageNum, node.KeyCount, dirty, pageData)
+	// } else {
+	// 	pm.logger.Debugf("Putting page %d in cache (dirty: %t)", pageNum, dirty)
+	// }
 
 	// Check if page is already in cache
 	if entry, exists := pm.cache[pageNum]; exists {
@@ -652,32 +652,38 @@ func (pm *BTreePageManager) evictLRU() {
 
 	pm.logger.Debugf("Evicting LRU page %d from cache", lru.pageNum)
 
+	// CRITICAL BUG FIX: Verify cache entry still matches LRU entry before flush
+	// Between finding LRU entry and evicting, another thread could have updated the page
+	// with different data. We MUST use the current cache data, not stale LRU pointer data.
+	cacheEntry, exists := pm.cache[lru.pageNum]
+	if !exists {
+		// Page was already removed from cache by another thread - safe to skip
+		pm.logger.Debugf("Page %d already removed from cache, skipping eviction", lru.pageNum)
+		pm.removeFromLRU(lru)
+		pm.currentSize--
+		pm.updateMemoryUsage()
+		return
+	}
+
+	// Keep reference to LRU list entry for list manipulation
+	lruListEntry := lru
+
+	// Track which data to flush - use current cache data to avoid stale writes
+	pageDataToFlush := cacheEntry.pageData
+	isDirtyFlag := cacheEntry.isDirty
+
+	// If page was updated in cache after we selected LRU entry,
+	// the cache map and LRU list are out of sync - log this for debugging
+	if cacheEntry.pageData != lru.pageData {
+		pm.logger.Warnf("RACE DETECTED: Page %d was updated during eviction (old ptr=%p, new ptr=%p) - using current cache data to prevent corruption",
+			lru.pageNum, lru.pageData, cacheEntry.pageData)
+	}
+
 	// CRITICAL: Flush dirty pages before eviction to prevent data loss
-	if lru.isDirty {
+	// Use current cache data, not stale LRU pointer data
+	if isDirtyFlag {
 		if pm.pageWriter != nil {
-			node, ok := lru.pageData.(*BTreeNode)
-			keyCount := -1
-			if ok {
-				keyCount = int(node.KeyCount)
-			}
-			pm.logger.Warnf("FLUSHING DIRTY PAGE %d BEFORE EVICTION (IsLeaf=%v, KeyCount=%d, cachePtr=%p)",
-				lru.pageNum, ok && node.IsLeaf, keyCount, lru.pageData)
-
-			// CRITICAL DEBUG: Check if cache entry pointer matches what we're about to flush
-			if cacheEntry, exists := pm.cache[lru.pageNum]; exists {
-				if cacheEntry.pageData != lru.pageData {
-					pm.logger.Errorf("BUG DETECTED: About to flush page %d with ptr=%p but cache has DIFFERENT ptr=%p!",
-						lru.pageNum, lru.pageData, cacheEntry.pageData)
-					if cachedNode, cOk := cacheEntry.pageData.(*BTreeNode); cOk && !cachedNode.IsLeaf {
-						pm.logger.Errorf("  Cache has %d keys at ptr=%p", cachedNode.KeyCount, cacheEntry.pageData)
-					}
-					if node != nil && !node.IsLeaf {
-						pm.logger.Errorf("  Flushing %d keys at ptr=%p", node.KeyCount, lru.pageData)
-					}
-				}
-			}
-
-			if err := pm.pageWriter(lru.pageNum, lru.pageData); err != nil {
+			if err := pm.pageWriter(lru.pageNum, pageDataToFlush); err != nil {
 				// Log error but continue with eviction
 				// TODO: I could implement retry logic with exponential backoff
 				// for transient I/O errors to improve reliability
@@ -685,7 +691,7 @@ func (pm *BTreePageManager) evictLRU() {
 			} else {
 				// Successfully flushed
 				atomic.AddUint64(&pm.stats.dirtyWrites, 1)
-				pm.logger.Warnf("SUCCESSFULLY FLUSHED PAGE %d BEFORE EVICTION", lru.pageNum)
+				// pm.logger.Warnf("SUCCESSFULLY FLUSHED PAGE %d BEFORE EVICTION", lru.pageNum)
 			}
 		} else {
 			// No writer configured - this should not happen in production
@@ -697,8 +703,8 @@ func (pm *BTreePageManager) evictLRU() {
 	delete(pm.cache, lru.pageNum)
 	pm.currentSize--
 
-	// Remove from LRU list
-	pm.removeFromLRU(lru)
+	// Remove from LRU list using the original LRU list entry pointer
+	pm.removeFromLRU(lruListEntry)
 
 	// Update statistics
 	atomic.AddUint64(&pm.stats.evictions, 1)

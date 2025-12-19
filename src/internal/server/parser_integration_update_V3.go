@@ -54,10 +54,11 @@ func parseUpdateDocument(command string, logger *zap.SugaredLogger) (*models.Doc
 		globalParserMetrics.NewParserFailures.Add(1)
 		globalParserMetrics.FallbacksTriggered.Add(1)
 
-		logger.Warnf("New UPDATE DOCUMENTS parser failed: %v. Falling back to legacy parser.", err)
+		//logger.Warnf("New UPDATE DOCUMENTS parser failed: %v. Falling back to legacy parser.", err)
 
 		// Fallback to legacy parser
-		return bndle.ParseUpdateDocumentCommand(command, logger)
+		//return bndle.ParseUpdateDocumentCommand(command, logger)
+		return nil, fmt.Errorf(" UPDATE DOCUMENTS %s parser failed: %w", command, err)
 	}
 
 	// Record success

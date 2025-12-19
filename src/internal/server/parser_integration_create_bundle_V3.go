@@ -2,7 +2,7 @@ package server
 
 import (
 	"fmt"
-	"strings"
+	//"strings"
 
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
@@ -56,19 +56,19 @@ func parseCreateBundle(command string, logger *zap.SugaredLogger) (*models.Bundl
 		globalParserMetrics.NewParserFailures.Add(1)
 		globalParserMetrics.FallbacksTriggered.Add(1)
 
-		logger.Warnf("New CREATE BUNDLE parser failed: %v. Falling back to legacy parser.", err)
-		// Log command length and hash instead of full text to avoid truncation
-		logger.Warnf("Failed command: length=%d, first 200 chars: %s", len(command), truncateForLog(command, 200))
-		logger.Warnf("Failed command: last 200 chars: %s", truncateLast(command, 200))
+		// logger.Warnf("New CREATE BUNDLE parser failed: %v. Falling back to legacy parser.", err)
+		// // Log command length and hash instead of full text to avoid truncation
+		// logger.Warnf("Failed command: length=%d, first 200 chars: %s", len(command), truncateForLog(command, 200))
+		// logger.Warnf("Failed command: last 200 chars: %s", truncateLast(command, 200))
 
-		// DEBUG: Show the exact bytes around "createdAt"
-		if idx := strings.Index(command, "crea"); idx != -1 && idx < len(command)-20 {
-			excerpt := command[idx : idx+20]
-			logger.Warnf("Bytes around 'crea': %q (hex: %x)", excerpt, []byte(excerpt))
-		}
+		// // DEBUG: Show the exact bytes around "createdAt"
+		// if idx := strings.Index(command, "crea"); idx != -1 && idx < len(command)-20 {
+		// 	excerpt := command[idx : idx+20]
+		// 	logger.Warnf("Bytes around 'crea': %q (hex: %x)", excerpt, []byte(excerpt))
+		// }
 
-		// Fallback to legacy parser
-		return bndle.ParseCreateBundleCommand(command, logger)
+		// // Fallback to legacy parser
+		return nil, fmt.Errorf(" CREATE BUNDLE %s parser failed: %w", command, err)
 	}
 
 	// Record success

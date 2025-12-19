@@ -30,11 +30,11 @@ func Benchmark_WhereBloom_Enabled_HashIndexed(b *testing.B) {
 
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", true, false, ""},
-		{"Age", "INT", true, false, 0},
-		{"Status", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", true, false},
+		{"Age", "INT", true, false},
+		{"Status", "STRING", true, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
@@ -93,11 +93,11 @@ func Benchmark_WhereBloom_Disabled_BTreeIndexed(b *testing.B) {
 
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", true, false, ""},
-		{"Age", "INT", true, false, 0},
-		{"Status", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", true, false},
+		{"Age", "INT", true, false},
+		{"Status", "STRING", true, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
@@ -152,12 +152,12 @@ func Benchmark_RangedWhere_FullyIndexed(b *testing.B) {
 
 	// Create bundle with Price field
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", true, false, ""},
-		{"Age", "INT", true, false, 0},
-		{"Status", "STRING", true, false, ""},
-		{"Price", "INT", true, false, 0}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", true, false},
+		{"Age", "INT", true, false},
+		{"Status", "STRING", true, false},
+		{"Price", "INT", true, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {

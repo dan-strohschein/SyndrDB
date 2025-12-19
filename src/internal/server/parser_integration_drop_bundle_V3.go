@@ -47,8 +47,9 @@ func parseDropBundle(command string, logger *zap.SugaredLogger) (*models.BundleC
 			// Track failure and fall back to legacy parser
 			globalParserMetrics.NewParserFailures.Add(1)
 			globalParserMetrics.FallbacksTriggered.Add(1)
-			logger.Warnf("New DROP BUNDLE parser failed, falling back to legacy: %v", err)
-			return bndle.ParseDeleteBundleCommand(command)
+			// logger.Warnf("New DROP BUNDLE parser failed, falling back to legacy: %v", err)
+			// return bndle.ParseDeleteBundleCommand(command)
+			return nil, fmt.Errorf(" DROP BUNDLE %s parser failed: %w", command, err)
 		}
 
 		// Track success

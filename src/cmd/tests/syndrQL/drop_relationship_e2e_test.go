@@ -25,23 +25,23 @@ func TestDropRelationship_BasicFlow(t *testing.T) {
 
 	// STEP 1: Create two bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Authors bundle")
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Title", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Title", "STRING", true, false}
 	);`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Books bundle")
 
 	// STEP 2: Add relationship between Authors and Books
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("Authors_Books_1" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create relationship")
@@ -92,8 +92,8 @@ func TestDropRelationship_NotFound(t *testing.T) {
 
 	// STEP 1: Create a bundle without relationships
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -125,36 +125,36 @@ func TestDropRelationship_MultipleRelationships(t *testing.T) {
 
 	// STEP 1: Create three bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Authors bundle")
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Title", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Title", "STRING", true, false}
 	);`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Books bundle")
 
 	createPublishersCmd := `CREATE BUNDLE "Publishers" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false}
 	);`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Publishers bundle")
 
 	// STEP 2: Add two relationships from Authors
-	createRelationship1Cmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
+	createRelationship1Cmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("Authors_Books_1" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationship1Cmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create first relationship")
 
-	createRelationship2Cmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsPublishers" {"1toMany", "Authors", "DocumentID", "Publishers", "AuthorsID"});`
+	createRelationship2Cmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("Authors_Publishers_1" {"1toMany", "Authors", "DocumentID", "Publishers", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationship2Cmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create second relationship")
@@ -165,7 +165,7 @@ func TestDropRelationship_MultipleRelationships(t *testing.T) {
 	assert.Equal(t, 2, len(authorsBundle.Relationships), "Authors bundle should have exactly 2 relationships")
 
 	// STEP 4: Drop the first relationship (Authors_Books_1)
-	dropRelationshipCmd := `UPDATE BUNDLE "Authors" DROP RELATIONSHIP "AuthorsBooks";`
+	dropRelationshipCmd := `UPDATE BUNDLE "Authors" DROP RELATIONSHIP "Authors_Books_1";`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, dropRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to drop first relationship")
@@ -198,23 +198,23 @@ func TestDropRelationship_FieldsPreserved(t *testing.T) {
 
 	// STEP 1: Create two bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Authors bundle")
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Title", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Title", "STRING", true, false}
 	);`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Books bundle")
 
 	// STEP 2: Add relationship
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ( "AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ( "Authors_Books_1" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create relationship")
@@ -241,7 +241,7 @@ func TestDropRelationship_FieldsPreserved(t *testing.T) {
 	require.NoError(t, err, "Failed to add book document")
 
 	// STEP 5: Drop the relationship
-	dropRelationshipCmd := `UPDATE BUNDLE "Authors" DROP RELATIONSHIP "AuthorsBooks";`
+	dropRelationshipCmd := `UPDATE BUNDLE "Authors" DROP RELATIONSHIP "Authors_Books_1";`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, dropRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to drop relationship")
@@ -282,23 +282,24 @@ func TestDropRelationship_IndexPreserved(t *testing.T) {
 
 	// STEP 1: Create two bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Authors bundle")
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Title", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Title", "STRING", true, false}
 	);`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create Books bundle")
 
 	// STEP 2: Add relationship (this creates a hash index on AuthorsID field)
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ( "AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
+	// Note: The system auto-generates relationship name as "Authors_Books_1"
+	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ( "Authors_Books_1" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to create relationship")
@@ -322,7 +323,7 @@ func TestDropRelationship_IndexPreserved(t *testing.T) {
 	t.Logf("Indexes before drop: %v", booksBundle.IndexNames)
 
 	// STEP 4: Drop the relationship
-	dropRelationshipCmd := `UPDATE BUNDLE "Authors" DROP RELATIONSHIP "AuthorsBooks";`
+	dropRelationshipCmd := `UPDATE BUNDLE "Authors" DROP RELATIONSHIP "Authors_Books_1";`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, dropRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to drop relationship")

@@ -72,10 +72,17 @@ func (wb *WriteBuffer) WriteWithTxID(data []byte, docID string, txID string) err
 
 	// Track this document with transaction context (if docID provided)
 	if docID != "" {
+		// CRITICAL FIX: Make a copy of data to prevent buffer pool race condition
+		// The caller may return the data buffer to a pool immediately after this call
+		// If we store a pointer to that buffer, another thread could reuse it and corrupt our data
+		// This copy ensures BufferedDocument has its own independent copy for transaction tracking
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+
 		wb.bufferedDocs[docID] = &BufferedDocument{
 			DocumentID: docID,
 			TxID:       txID,
-			Data:       data,
+			Data:       dataCopy, // Use the copy, not the original buffer
 			Offset:     offset,
 			Size:       len(data),
 		}
@@ -84,11 +91,8 @@ func (wb *WriteBuffer) WriteWithTxID(data []byte, docID string, txID string) err
 	// Add data to buffer
 	wb.buffer = append(wb.buffer, data...)
 
-	// Check flush conditions
-	shouldFlush := len(wb.buffer) >= wb.flushSize ||
-		time.Since(wb.lastFlush) >= wb.flushTimeout
-
-	if shouldFlush {
+	// Flush if buffer is getting full or timeout reached
+	if len(wb.buffer) >= wb.flushSize || time.Since(wb.lastFlush) >= wb.flushTimeout {
 		return wb.flushInternal()
 	}
 
@@ -102,19 +106,42 @@ func (wb *WriteBuffer) Flush() error {
 	return wb.flushInternal()
 }
 
+// Sync forces a sync to disk (fsync) to ensure durability
+// This can be called after Flush() to ensure OS has written data to physical disk
+func (wb *WriteBuffer) Sync() error {
+	wb.mutex.Lock()
+	defer wb.mutex.Unlock()
+
+	if wb.file == nil {
+		return fmt.Errorf("write buffer file is nil")
+	}
+	return wb.file.Sync()
+}
+
 // flushInternal performs the actual flush operation (must be called with mutex held)
 func (wb *WriteBuffer) flushInternal() error {
 	if len(wb.buffer) == 0 {
 		return nil
 	}
 
-	_, err := wb.file.Write(wb.buffer)
-	if err != nil {
-		return err
+	// CRITICAL: Handle short writes - file.Write() can return n < len(buffer) with err == nil
+	// We must loop until all bytes are written to prevent data corruption from partial writes
+	toWrite := wb.buffer
+	written := 0
+	for written < len(toWrite) {
+		n, err := wb.file.Write(toWrite[written:])
+		if err != nil {
+			return fmt.Errorf("write failed after %d of %d bytes: %w", written, len(toWrite), err)
+		}
+		if n == 0 {
+			// Write returned 0 with no error - this should never happen but signals a problem
+			return fmt.Errorf("write returned 0 bytes written with no error (stuck write)")
+		}
+		written += n
 	}
 
 	// Force OS to flush to disk - CRITICAL for durability
-	err = wb.file.Sync()
+	err := wb.file.Sync()
 	if err != nil {
 		return err
 	}

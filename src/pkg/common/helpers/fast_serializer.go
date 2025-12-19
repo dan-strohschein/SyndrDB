@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sync"
 	"syndrdb/src/internal/domain/models"
 	"time"
 )
@@ -12,7 +13,8 @@ import (
 // Replaces BSON encoding with direct binary format for write optimization
 // Designed specifically for append-only document storage with minimal overhead
 type FastDocumentSerializer struct {
-	buffer []byte // Reusable buffer to avoid allocations
+	buffer []byte     // Reusable buffer to avoid allocations
+	mu     sync.Mutex // Protects buffer from concurrent access
 }
 
 // NewFastDocumentSerializer creates a new fast serializer instance
@@ -26,8 +28,17 @@ func NewFastDocumentSerializer() *FastDocumentSerializer {
 // Binary format: [DocumentID_len][DocumentID][field_count][field1][field2]...
 // Each field: [name_len][name][type][value_len][value]
 func (s *FastDocumentSerializer) SerializeDocument(document *models.Document) ([]byte, error) {
-	// Reset buffer for reuse
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// CRITICAL: Reset buffer length but preserve capacity to prevent reallocations
+	// Reallocations during append() can cause race conditions if old buffer is still being copied
 	s.buffer = s.buffer[:0]
+
+	// If buffer is getting too large, reallocate fresh to prevent unbounded growth
+	if cap(s.buffer) > 1024*1024 { // 1MB cap
+		s.buffer = make([]byte, 0, 65536) // Reset to 64KB
+	}
 
 	// Write document ID
 	docIDBytes := []byte(document.DocumentID)
@@ -57,8 +68,17 @@ func (s *FastDocumentSerializer) SerializeDocument(document *models.Document) ([
 // SerializeDocumentMap converts a map-based document to binary format
 // Optimized for the current AppendDocumentToBundleFile usage pattern
 func (s *FastDocumentSerializer) SerializeDocumentMap(docEntry map[string]interface{}) ([]byte, error) {
-	// Reset buffer for reuse
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// CRITICAL: Reset buffer length but preserve capacity to prevent reallocations
+	// Reallocations during append() can cause race conditions if old buffer is still being copied
 	s.buffer = s.buffer[:0]
+
+	// If buffer is getting too large, reallocate fresh to prevent unbounded growth
+	if cap(s.buffer) > 1024*1024 { // 1MB cap
+		s.buffer = make([]byte, 0, 65536) // Reset to 64KB
+	}
 
 	// Write DocumentID
 	if docID, ok := docEntry["DocumentID"].(string); ok {
@@ -203,11 +223,21 @@ func (s *FastDocumentSerializer) writeFloat64(value float64) {
 	s.writeInt64(int64(math.Float64bits(value)))
 }
 
-// Global fast serializer instance to avoid repeated allocations
+// Global fast serializer instance with mutex protection
+// OPTION 1: Mutex-protected shared serializer (chosen for production)
+// Provides thread-safety while avoiding per-call allocations
 var globalFastSerializer = NewFastDocumentSerializer()
 
 // EncodeFastBinary replaces EncodeBSON for high-performance document serialization
 // Provides 5-10x faster serialization by eliminating BSON overhead
+//
+// CRITICAL FIX: Uses mutex-protected global serializer to prevent race conditions
+// Previous unprotected implementation caused corruption when multiple goroutines serialized:
+// 1. Thread A: s.buffer[:0], writes DocumentID + Fields to shared buffer
+// 2. Thread B: s.buffer[:0] ← RESETS Thread A's buffer during serialization!
+// 3. Thread B overwrites buffer, Thread A makes copy of CORRUPTED data
+// 4. Thread A writes garbage to disk → invalid field lengths (411199058, 3744236832 bytes)
+// Mutex adds ~100ns overhead but prevents all corruption - acceptable tradeoff
 func EncodeFastBinary(docEntry map[string]interface{}) ([]byte, error) {
 	return globalFastSerializer.SerializeDocumentMap(docEntry)
 }

@@ -65,10 +65,13 @@ func NewDropBundleParser(input string) (*DropBundleParser, error) {
 // Syntax: DROP BUNDLE "<BUNDLE_NAME>";
 func (p *DropBundleParser) Parse() (*DropBundleStatement, error) {
 	// Expect: DROP
-	if err := p.expectKeyword(TOKEN_DROP, "DROP"); err != nil {
-		return nil, err
-	}
+	DropExists := p.peek().Type == TOKEN_DROP
+	DeleteExists := p.peek().Type == TOKEN_DELETE
 
+	if !DropExists && !DeleteExists {
+		return nil, fmt.Errorf("expected DROP OR DELETE keyword, got %s", p.peek().Value)
+	}
+	p.advance() // consume DROP or DELETE
 	// Expect: BUNDLE
 	if err := p.expectKeyword(TOKEN_BUNDLE, "BUNDLE"); err != nil {
 		return nil, err

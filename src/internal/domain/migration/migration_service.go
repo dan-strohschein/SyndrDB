@@ -835,13 +835,11 @@ func (s *MigrationService) releaseLock(databaseName string) error {
 
 	for _, lock := range locks {
 		lockID := lock["DocumentID"].(string)
-		updates := map[string]interface{}{
-			"Status": "RELEASED",
-		}
 
-		err = s.bundleService.UpdateDocument("primary", "MigrationLocks", lockID, updates)
+		// Delete the lock document to allow subsequent migrations
+		err = s.bundleService.DeleteDocument("primary", "MigrationLocks", lockID)
 		if err != nil {
-			return fmt.Errorf("failed to release lock: %w", err)
+			return fmt.Errorf("failed to delete lock: %w", err)
 		}
 	}
 

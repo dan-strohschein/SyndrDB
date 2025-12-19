@@ -349,10 +349,10 @@ func createAuthorsBundle(t *testing.T, fixture *TestFixture) {
 
 	// Create Authors bundle with all fields needed by different seed functions
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", false, false, ""},
-		{"Biography", "STRING", false, false, ""},
-		{"Metadata", "INTERFACE", false, false, null}
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false},
+		{"Biography", "STRING", false, false},
+		{"Metadata", "JSON", false, false, null}
 	);`
 
 	startTime := time.Now()

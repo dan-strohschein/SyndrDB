@@ -151,6 +151,12 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 		return nil, fmt.Errorf("logger cannot be nil")
 	}
 
+	// CRITICAL SAFETY CHECK: Validate file extension to prevent writing to bundle files
+	// This prevents data corruption if file paths are constructed incorrectly
+	if !strings.HasSuffix(filePath, ".btidx") {
+		return nil, fmt.Errorf("SAFETY CHECK FAILED: BTree index file must have .btidx extension, got: %s", filePath)
+	}
+
 	logger.Debugf("Creating BTree file manager for: %s", filePath)
 
 	fm := &BTreeFileManager{
@@ -478,6 +484,11 @@ func (fm *BTreeFileManager) GetTotalPages() uint32 {
 
 // createNewFile creates a new index file with proper header
 func (fm *BTreeFileManager) createNewFile() error {
+	// CRITICAL SAFETY CHECK: Double-check file extension before creating file
+	if !strings.HasSuffix(fm.FilePath, ".btidx") {
+		return fmt.Errorf("CORRUPTION PREVENTION: refusing to create non-.btidx file: %s", fm.FilePath)
+	}
+
 	var err error
 	fm.File, err = os.Create(fm.FilePath)
 	if err != nil {
@@ -504,6 +515,11 @@ func (fm *BTreeFileManager) createNewFile() error {
 
 // openExistingFile opens an existing index file and reads header
 func (fm *BTreeFileManager) openExistingFile() error {
+	// CRITICAL SAFETY CHECK: Double-check file extension before opening file
+	if !strings.HasSuffix(fm.FilePath, ".btidx") {
+		return fmt.Errorf("CORRUPTION PREVENTION: refusing to open non-.btidx file: %s", fm.FilePath)
+	}
+
 	var err error
 	fm.File, err = os.OpenFile(fm.FilePath, os.O_RDWR, 0644)
 	if err != nil {

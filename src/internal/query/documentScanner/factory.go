@@ -9,6 +9,16 @@ import (
 	"go.uber.org/zap"
 )
 
+// Constants for safety limits to prevent DoS while allowing legitimate large datasets
+const (
+	// MaxReasonablePageCount prevents runaway queries from corrupt metadata
+	// This represents 100M documents at 1000 docs/page - a reasonable upper bound
+	MaxReasonablePageCount = uint32(100000)
+
+	// MinPageCount prevents zero-page bundles from being treated as empty
+	MinPageCount = uint32(1)
+)
+
 // ScannerFactory creates and configures document scanners
 // This factory pattern allows for easy testing and configuration management
 type ScannerFactory struct {
@@ -240,6 +250,38 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 	return page, nil
 }
 
+// getSafePageCount returns a validated page count with defensive bounds checking
+// This replaces hard-coded maxSafePages with metadata-driven limits
+// Returns: validated page count that is safe to iterate over
+func (ba *BundleAdapter) getSafePageCount() uint32 {
+	pageCount := uint32(ba.bundle.PageCount)
+
+	// CRITICAL FIX: If PageCount is 0 but TotalDocuments > 0, calculate from documents
+	// This handles cases where metadata persistence failed but documents exist
+	if pageCount == 0 && ba.bundle.TotalDocuments > 0 {
+		pageSize := uint32(1000) // Standard page size
+		pageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
+		ba.logger.Warnf("RECOVERY: PageCount was 0 but TotalDocuments=%d, calculated pageCount=%d",
+			ba.bundle.TotalDocuments, pageCount)
+	}
+
+	// DEFENSIVE: If both are 0, return minimum to allow at least one page check
+	if pageCount == 0 {
+		ba.logger.Warnf("SAFETY: Both PageCount and TotalDocuments are 0 for bundle '%s', using MinPageCount",
+			ba.bundle.Name)
+		return MinPageCount
+	}
+
+	// DEFENSIVE: Cap at reasonable maximum to prevent DoS from corrupt metadata
+	if pageCount > MaxReasonablePageCount {
+		ba.logger.Errorf("SAFETY: Bundle '%s' PageCount (%d) exceeds maximum reasonable limit (%d), capping",
+			ba.bundle.Name, pageCount, MaxReasonablePageCount)
+		return MaxReasonablePageCount
+	}
+
+	return pageCount
+}
+
 // getTotalDocumentsCount gets the accurate count by iterating filtered pages
 // CRITICAL: This count CANNOT be cached because document deletions create tombstones
 // which reduce the count dynamically. The parseAppendedDocumentsRange() function
@@ -251,13 +293,7 @@ func (ba *BundleAdapter) getTotalDocumentsCount() int {
 	// Always count by iterating pages to get accurate count after deletions
 
 	count := 0
-	// SAFETY: Prevent infinite loops by limiting page count
-	maxSafePages := uint32(100)
-	pageCount := uint32(ba.bundle.PageCount)
-	if pageCount > maxSafePages {
-		//ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in getTotalDocumentsCount", pageCount, maxSafePages)
-		pageCount = maxSafePages
-	}
+	pageCount := ba.getSafePageCount()
 
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := ba.loadDocumentPage(pageID)
@@ -288,56 +324,8 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 
 	var ids []string
 
-	// Stream through pages and collect only document IDs (not full documents)
-	// SAFETY: Prevent infinite loops by limiting page count
-	maxSafePages := uint32(100)
-	pageCount := uint32(ba.bundle.PageCount)
-
-	// CRITICAL FIX: If PageCount is 0 but TotalDocuments > 0, calculate pageCount from documents
-	// This handles cases where metadata persistence failed but documents exist
-	if pageCount == 0 && ba.bundle.TotalDocuments > 0 {
-		pageSize := uint32(1000) // Standard page size
-		pageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
-		ba.logger.Warnf("RECOVERY: PageCount was 0 but TotalDocuments=%d, calculated pageCount=%d",
-			ba.bundle.TotalDocuments, pageCount)
-	}
-
-	// CRITICAL FIX: If both PageCount and TotalDocuments are 0, still try to load page 0
-	// This handles cases where metadata is completely uninitialized but documents exist on disk
-	if pageCount == 0 {
-		ba.logger.Warnf("RECOVERY: Both PageCount and TotalDocuments are 0, attempting to load page 0 anyway")
-		page, err := ba.loadDocumentPage(0)
-		if err == nil && len(page.Documents) > 0 {
-			ba.logger.Warnf("RECOVERY: Found %d documents in page 0 despite metadata showing 0!", len(page.Documents))
-			for docID := range page.Documents {
-				ids = append(ids, docID)
-			}
-			// Still merge memtable even in recovery scenario
-			if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
-				ba.logger.Debugf("MEMTABLE MERGE: Adding %d documents from memtable", len(*ba.bundle.Documents))
-				for docID := range *ba.bundle.Documents {
-					ids = append(ids, docID)
-				}
-			}
-			return ids
-		} else {
-			ba.logger.Warnf("RECOVERY: No documents found in page 0, checking memtable")
-			// Even if page 0 is empty, check memtable
-			if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
-				ba.logger.Debugf("MEMTABLE MERGE: Found %d documents in memtable", len(*ba.bundle.Documents))
-				for docID := range *ba.bundle.Documents {
-					ids = append(ids, docID)
-				}
-				return ids
-			}
-			return ids // Return empty list
-		}
-	}
-
-	if pageCount > maxSafePages {
-		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in GetDocumentIDs", pageCount, maxSafePages)
-		pageCount = maxSafePages
-	}
+	// Get safe page count using validated metadata
+	pageCount := ba.getSafePageCount()
 
 	// Load document IDs from all pages on disk
 	diskIDSet := make(map[string]bool)
@@ -358,6 +346,8 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 
 	// CASSANDRA-STYLE MEMTABLE MERGE: Add memtable document IDs
 	// Only merge if Documents exists AND is marked as incomplete (memtable mode)
+	// CRITICAL: Must hold DocumentsMutex to prevent concurrent map iteration/write
+	ba.bundle.DocumentsMutex.RLock()
 	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
 		ba.logger.Debugf("MEMTABLE MERGE: Adding documents from memtable (has %d docs)", len(*ba.bundle.Documents))
 		memtableCount := 0
@@ -369,6 +359,7 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 		}
 		ba.logger.Debugf("MEMTABLE MERGE: Added %d new documents from memtable", memtableCount)
 	}
+	ba.bundle.DocumentsMutex.RUnlock()
 
 	//ba.logger.Debugf("Returning %d total document IDs (disk + memtable)", len(ids))
 	return ids
@@ -378,42 +369,22 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 	// CASSANDRA-STYLE MEMTABLE CHECK FIRST:
 	// Check memtable before going to disk (recent writes have priority)
+	// CRITICAL: Acquire read lock to prevent race condition with concurrent batch updates
+	ba.bundle.DocumentsMutex.RLock()
 	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
 		if doc, exists := (*ba.bundle.Documents)[docID]; exists {
+			ba.bundle.DocumentsMutex.RUnlock()
 			// ba.logger.Debugf("Document '%s' found in memtable", docID) // PERF: Disabled - causes 2.2M allocs/query
 			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			return &doc
 		}
 	}
+	ba.bundle.DocumentsMutex.RUnlock()
+
+	// Get safe page count using validated metadata
+	pageCount := ba.getSafePageCount()
 
 	// Stream through pages to find the specific document on disk
-	// SAFETY: Prevent infinite loops by limiting page count
-	maxSafePages := uint32(100)
-	pageCount := uint32(ba.bundle.PageCount)
-
-	// CRITICAL FIX: If PageCount is 0 but TotalDocuments > 0, calculate pageCount
-	if pageCount == 0 && ba.bundle.TotalDocuments > 0 {
-		pageSize := uint32(1000)
-		pageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
-	}
-
-	// CRITICAL FIX: If both are 0, still try page 0
-	if pageCount == 0 {
-		page, err := ba.loadDocumentPage(0)
-		if err == nil {
-			if doc, exists := page.Documents[docID]; exists {
-				// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-				return &doc
-			}
-		}
-		return nil // Document not found in page 0 or memtable
-	}
-
-	if pageCount > maxSafePages {
-		ba.logger.Errorf("SAFETY: Bundle PageCount (%d) exceeds safe limit (%d) in GetDocument", pageCount, maxSafePages)
-		pageCount = maxSafePages
-	}
-
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := ba.loadDocumentPage(pageID)
 		if err != nil {
@@ -442,15 +413,14 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 
 	allDocs := make(map[string]*models.Document)
 
-	// CASSANDRA-STYLE MEMTABLE MERGE:
-	// Always load from disk first (authoritative source), then merge memtable
+	// Get safe page count using validated metadata
+	pageCount := ba.getSafePageCount()
 
-	// PROTECTION: Limit maximum pages to prevent infinite loops
-	maxPages := uint32(10000) // Reasonable maximum
-	pageCount := uint32(ba.bundle.PageCount)
-	if pageCount > maxPages {
-		ba.logger.Errorf("INFINITE LOOP PROTECTION: PageCount %d exceeds maximum %d, limiting", pageCount, maxPages)
-		pageCount = maxPages
+	// WARN if loading a very large bundle completely into memory
+	estimatedDocs := int64(pageCount) * 1000 // Rough estimate
+	if estimatedDocs > 100000 {
+		ba.logger.Warnf("Loading all documents from large bundle '%s' (est. %d docs, %d pages) - consider using streaming",
+			ba.bundle.Name, estimatedDocs, pageCount)
 	}
 
 	// Load all pages from disk
@@ -478,6 +448,8 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 
 	// Merge with memtable (recent writes not yet flushed to new pages)
 	// Only merge if Documents exists AND is marked as incomplete (memtable mode)
+	// CRITICAL: Must hold DocumentsMutex to prevent concurrent map iteration/write
+	ba.bundle.DocumentsMutex.RLock()
 	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
 		ba.logger.Infof("Merging %d documents from memtable with %d from disk",
 			len(*ba.bundle.Documents), len(allDocs))
@@ -503,6 +475,7 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 	} else {
 		ba.logger.Infof("No memtable to merge (Documents=nil or DocumentsComplete=true)")
 	}
+	ba.bundle.DocumentsMutex.RUnlock()
 
 	ba.logger.Infof("Returning %d total documents (disk + memtable)", len(allDocs))
 	return allDocs
@@ -516,6 +489,93 @@ func (ba *BundleAdapter) GetName() string {
 // GetTotalDocuments returns the total number of documents efficiently
 func (ba *BundleAdapter) GetTotalDocuments() int {
 	return ba.getTotalDocumentsCount()
+}
+
+// GetHashIndexForField retrieves the hash index for a specific field
+// Returns nil if no index exists for the field
+// This is used by join executors for index-assisted operations
+// Supports both foreign key indexes and regular hash indexes
+func (ba *BundleAdapter) GetHashIndexForField(fieldName string) interface{} {
+	if ba.bundle == nil || ba.bundle.Indexes == nil {
+		return nil
+	}
+
+	// Iterate through all indexes to find one that has this field
+	for _, indexRef := range ba.bundle.Indexes {
+		// Only consider hash indexes (skip btree, etc.)
+		if indexRef.IndexType != "hash" {
+			continue
+		}
+
+		// Check if any field in this index matches the requested field name
+		for _, field := range indexRef.Fields {
+			if field.Name == fieldName {
+				// Return the actual index instance
+				return indexRef.IndexInstance
+			}
+		}
+	}
+
+	return nil
+}
+
+// HasIndexOnField checks if an index exists for the specified field
+// This is a quick check without loading the index
+// Supports both foreign key indexes and regular hash indexes
+func (ba *BundleAdapter) HasIndexOnField(fieldName string) bool {
+	if ba.bundle == nil || ba.bundle.Indexes == nil {
+		return false
+	}
+
+	// Iterate through all indexes to find one that has this field
+	for _, indexRef := range ba.bundle.Indexes {
+		// Only consider hash indexes (skip btree, etc.)
+		if indexRef.IndexType != "hash" {
+			continue
+		}
+
+		// Check if any field in this index matches the requested field name
+		for _, field := range indexRef.Fields {
+			if field.Name == fieldName {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// validatePageCount performs smart validation of PageCount to prevent infinite loops
+// while allowing legitimate large datasets. Returns validated pageCount.
+// DEPRECATED: Use getSafePageCount() instead for consistency
+func (ba *BundleAdapter) validatePageCount(caller string) uint32 {
+	const pageSize = uint32(1000)                // Standard page size
+	maxReasonablePages := MaxReasonablePageCount // Use global constant
+
+	pageCount := uint32(ba.bundle.PageCount)
+
+	// Calculate expected page count based on TotalDocuments
+	var expectedPages uint32
+	if ba.bundle.TotalDocuments > 0 {
+		expectedPages = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
+	}
+
+	// Detect obvious corruption: PageCount wildly exceeds what TotalDocuments suggests
+	if expectedPages > 0 && pageCount > expectedPages*10 {
+		ba.logger.Errorf("CORRUPTION DETECTED in %s: PageCount (%d) is 10x higher than expected (%d) based on TotalDocuments (%d). Using expected value.",
+			caller, pageCount, expectedPages, ba.bundle.TotalDocuments)
+		return expectedPages
+	}
+
+	// Hard limit: Prevent truly dangerous values (>10M documents)
+	if pageCount > maxReasonablePages {
+		ba.logger.Errorf("SAFETY LIMIT in %s: PageCount (%d) exceeds maximum safe limit (%d). Capping to limit.",
+			caller, pageCount, maxReasonablePages)
+		return maxReasonablePages
+	}
+
+	// Value seems reasonable - use it
+	return pageCount
 }
 
 // ===== STREAMING ITERATOR FOR SCANNER =====
@@ -547,12 +607,8 @@ type BundleDocumentIterator struct {
 }
 
 func (iter *BundleDocumentIterator) HasNext() bool {
-	// PROTECTION: Prevent infinite loops with reasonable page limits
-	maxPages := uint32(10000)
-	pageCount := uint32(iter.adapter.bundle.PageCount)
-	if pageCount > maxPages {
-		pageCount = maxPages
-	}
+	// Use the safe page count from adapter
+	pageCount := iter.adapter.getSafePageCount()
 
 	// Check if we have more pages to process
 	return iter.currentPage < pageCount

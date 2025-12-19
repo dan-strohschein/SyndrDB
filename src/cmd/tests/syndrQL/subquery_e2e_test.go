@@ -26,11 +26,11 @@ func setupSubqueryBundles(tb testing.TB, fixture *TestFixture) {
 
 	// Create Authors bundle
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", false, false, ""},
-		{"BirthYear", "INT", false, false, 0},
-		{"Active", "BOOL", false, false, true}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false},
+		{"BirthYear", "INT", false, false},
+		{"Active", "BOOL", false, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -40,13 +40,13 @@ func setupSubqueryBundles(tb testing.TB, fixture *TestFixture) {
 
 	// Create Books bundle
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"ID", "INT", true, true, null},
-		{"Title", "STRING", true, false, null},
-		{"AuthorID", "INT", false, false, null},
-		{"PublisherID", "INT", false, false, null},
-		{"Genre", "STRING", false, false, null},
-		{"Price", "FLOAT", false, false, null},
-		{"PublishedYear", "INT", false, false, null}
+		{"ID", "INT", true, true},
+		{"Title", "STRING", true, false},
+		{"AuthorID", "INT", false, false},
+		{"PublisherID", "INT", false, false},
+		{"Genre", "STRING", false, false},
+		{"Price", "FLOAT", false, false},
+		{"PublishedYear", "INT", false, false}
 	)`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -56,10 +56,10 @@ func setupSubqueryBundles(tb testing.TB, fixture *TestFixture) {
 
 	// Create Publishers bundle
 	createPublishersCmd := `CREATE BUNDLE "Publishers" WITH FIELDS (
-		{"ID", "INT", true, true, null},
-		{"Name", "STRING", true, false, null},
-		{"Country", "STRING", false, false, null},
-		{"EstablishedYear", "INT", false, false, null}
+		{"ID", "INT", true, true},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false},
+		{"EstablishedYear", "INT", false, false}
 	)`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createPublishersCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -217,7 +217,7 @@ func validateSubqueryResultCount(tb testing.TB, response interface{}, expectedCo
 
 // Test: IN subquery with small result set
 func TestSubquery_IN_SmallResultSet(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -238,7 +238,7 @@ func TestSubquery_IN_SmallResultSet(t *testing.T) {
 
 // Test: IN subquery with medium result set
 func TestSubquery_IN_MediumResultSet(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -260,7 +260,7 @@ func TestSubquery_IN_MediumResultSet(t *testing.T) {
 // Test: EXISTS subquery
 func TestSubquery_EXISTS_Basic(t *testing.T) {
 	t.Skip("Skipping: Correlated subqueries not yet implemented (Tier 3 feature)")
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -284,7 +284,7 @@ func TestSubquery_EXISTS_Basic(t *testing.T) {
 
 // Test: NOT IN subquery
 func TestSubquery_NOT_IN_Basic(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -309,7 +309,7 @@ func TestSubquery_NOT_IN_Basic(t *testing.T) {
 // Test: NOT EXISTS subquery
 func TestSubquery_NOT_EXISTS_Basic(t *testing.T) {
 	t.Skip("Skipping: Correlated subqueries not yet implemented (Tier 3 feature)")
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -330,7 +330,7 @@ func TestSubquery_NOT_EXISTS_Basic(t *testing.T) {
 
 // Test: Nested subqueries
 func TestSubquery_Nested_TwoLevels(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -351,7 +351,7 @@ func TestSubquery_Nested_TwoLevels(t *testing.T) {
 
 // Test: IN with outer WHERE clause
 func TestSubquery_IN_WithOuterWHERE(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -369,7 +369,7 @@ func TestSubquery_IN_WithOuterWHERE(t *testing.T) {
 
 // Test: EXISTS with complex subquery
 func TestSubquery_EXISTS_ComplexSubquery(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -388,7 +388,7 @@ func TestSubquery_EXISTS_ComplexSubquery(t *testing.T) {
 
 // Test: Multiple IN clauses
 func TestSubquery_Multiple_IN_Clauses(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -406,7 +406,7 @@ func TestSubquery_Multiple_IN_Clauses(t *testing.T) {
 
 // Test: IN with ORDER BY
 func TestSubquery_IN_WithORDERBY(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -427,7 +427,7 @@ func TestSubquery_IN_WithORDERBY(t *testing.T) {
 
 // Test: IN with LIMIT
 func TestSubquery_IN_WithLIMIT(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -441,7 +441,7 @@ func TestSubquery_IN_WithLIMIT(t *testing.T) {
 
 // Test: Empty subquery result
 func TestSubquery_IN_EmptyResult(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 150)
@@ -455,7 +455,7 @@ func TestSubquery_IN_EmptyResult(t *testing.T) {
 
 // Test: Large result set performance
 func TestSubquery_Performance_LargeResultSet(t *testing.T) {
-	fixture := setupRealServerTB(t)
+	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
 	seedBooksForSubquery(t, fixture, 500)

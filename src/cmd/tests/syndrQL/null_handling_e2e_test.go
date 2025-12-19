@@ -39,11 +39,11 @@ func TestNullInsertion(t *testing.T) {
 
 	// Create test bundle with optional fields that can be NULL
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
 		{"Email", "STRING", false, false, null},
 		{"PhoneNumber", "STRING", false, false, null},
-		{"Country", "STRING", false, false, "USA"}
+		{"Country", "STRING", false, false}
 	);`
 
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -92,8 +92,8 @@ func TestIsNullQuery(t *testing.T) {
 
 	// Create and seed test bundle
 	createCmd := `CREATE BUNDLE "Products" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
 		{"Description", "STRING", false, false, null},
 		{"Price", "FLOAT", false, false, null}
 	);`
@@ -195,8 +195,8 @@ func TestIsNotNullQuery(t *testing.T) {
 
 	// Create and seed test bundle
 	createCmd := `CREATE BUNDLE "Customers" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
 		{"Email", "STRING", false, false, null},
 		{"Phone", "STRING", false, false, null}
 	);`
@@ -283,8 +283,8 @@ func TestNullWithLogicalOperators(t *testing.T) {
 
 	// Create and seed test bundle
 	createCmd := `CREATE BUNDLE "Employees" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
 		{"Department", "STRING", false, false, null},
 		{"Manager", "STRING", false, false, null}
 	);`
@@ -386,7 +386,7 @@ func TestNullErrorHandling(t *testing.T) {
 
 	// Create test bundle
 	createCmd := `CREATE BUNDLE "TestTable" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
+		{"ID", "INT", true, false},
 		{"Value", "STRING", false, false, null}
 	);`
 
@@ -419,10 +419,10 @@ func TestNullWithDefaultValues(t *testing.T) {
 
 	// Create bundle with default values
 	createCmd := `CREATE BUNDLE "Settings" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Key", "STRING", true, false, ""},
-		{"Value", "STRING", false, false, "default_value"},
-		{"Priority", "INT", false, false, 100}
+		{"ID", "INT", true, false},
+		{"Key", "STRING", true, false},
+		{"Value", "STRING", false, false},
+		{"Priority", "INT", false, false}
 	);`
 
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")

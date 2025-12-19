@@ -183,9 +183,23 @@ func (v *UniqueConstraintValidator) checkHashIndexForDuplicates(
 		return "", fmt.Errorf("failed to search unique index '%s': %w", indexName, err)
 	}
 
-	// If any documents have this value, it's a uniqueness violation
-	if len(results) > 0 {
-		existingDocID := results[0] // First document with this value
+	// Filter out deleted documents from results
+	// Hash indexes may contain references to deleted documents until compaction
+	var existingDocID string
+	for _, docID := range results {
+		// Verify document still exists (not deleted)
+		_, err := v.bundleService.GetDocument(bundle.Name, bundle.Database.Name, docID)
+		if err == nil {
+			// Document exists and is not deleted
+			existingDocID = docID
+			break
+		}
+		// Document is deleted or doesn't exist, skip it
+		v.logger.Debugf("[UNIQUE] Skipping deleted/missing document '%s' in index '%s'", docID, indexName)
+	}
+
+	// If any non-deleted documents have this value, it's a uniqueness violation
+	if existingDocID != "" {
 		violation := fmt.Sprintf("Unique constraint violation: Field '%s' must be unique, but value '%s' already exists in document '%s'",
 			fieldName, valueStr, existingDocID)
 		v.logger.Warnf("[UNIQUE] %s", violation)

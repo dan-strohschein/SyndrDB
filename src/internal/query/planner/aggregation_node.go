@@ -310,6 +310,11 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 	docCount := 0
 
 	for _, doc := range documents {
+		// Skip nil documents as defensive measure during concurrent operations
+		if doc == nil {
+			continue
+		}
+
 		docCount++
 
 		// Memory tracking: Sample every 100th document
@@ -372,14 +377,33 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
 	n.Logger.Debugf("Executing Sort + GroupAggregate strategy")
 
+	// Check if this is an aggregate-only query (no GROUP BY clause)
+	isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+	if isAggregateOnly {
+		n.Logger.Debug("Aggregate-only query detected in Sort strategy - delegating to Hash strategy for efficiency")
+		// For aggregate-only queries, sorting is unnecessary since all documents go into one group
+		// Delegate to hash aggregate which handles this case efficiently
+		return n.executeHashAggregate(ctx, documents)
+	}
+
 	// Memory tracking: Get tracker from context
 	memoryTracker := GetMemoryTrackerFromContext(ctx)
 	docCount := 0
 
 	// Convert documents to sortable slice
+	// Filter out nil documents during concurrent operations
 	docSlice := make([]*models.Document, 0, len(documents))
+	nilCount := 0
 	for _, doc := range documents {
-		docSlice = append(docSlice, doc)
+		if doc != nil {
+			docSlice = append(docSlice, doc)
+		} else {
+			nilCount++
+		}
+	}
+
+	if nilCount > 0 {
+		n.Logger.Warnf("Filtered out %d nil documents during sort-aggregate (concurrent access issue)", nilCount)
 	}
 
 	// Sort by GROUP BY fields
@@ -394,6 +418,11 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 	var currentGroupKey groupKey
 
 	for _, doc := range docSlice {
+		// Skip nil documents as defensive measure during concurrent operations
+		if doc == nil {
+			continue
+		}
+
 		docCount++
 
 		// Memory tracking: Sample every 100th document
@@ -440,6 +469,40 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 	return groupMap, nil
 }
 
+// getCaseInsensitiveField performs a case-insensitive lookup for a field in a document
+// This ensures consistent behavior with SQL's standard case-insensitive identifier matching
+// Parameters:
+//   - doc: The document to search
+//   - fieldName: The field name to look for (case-insensitive)
+//
+// Returns:
+//   - models.Field: The field if found
+//   - bool: true if the field exists, false otherwise
+func (n *AggregationNode) getCaseInsensitiveField(doc *models.Document, fieldName string) (models.Field, bool) {
+	if doc.Fields == nil {
+		return models.Field{}, false
+	}
+
+	// Strip quotes from field name if present (SQL identifier normalization)
+	cleanFieldName := strings.Trim(fieldName, "\"'")
+
+	// Try exact match first (optimization for correctly cased fields)
+	if field, exists := doc.Fields[cleanFieldName]; exists {
+		return field, true
+	}
+
+	// Fall back to case-insensitive search
+	// TODO: Consider caching field name mappings for better performance in hot paths
+	lowerFieldName := strings.ToLower(cleanFieldName)
+	for key, field := range doc.Fields {
+		if strings.ToLower(key) == lowerFieldName {
+			return field, true
+		}
+	}
+
+	return models.Field{}, false
+}
+
 // createGroupKey creates a unique key for the group based on GROUP BY fields
 // PHASE 3: Group key generation
 func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[string]interface{}, error) {
@@ -449,6 +512,11 @@ func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[st
 		return groupKey(""), make(map[string]interface{}), nil
 	}
 
+	// Guard against nil Fields map during concurrent operations
+	if doc.Fields == nil {
+		return "", nil, fmt.Errorf("document has nil Fields map")
+	}
+
 	groupFields := make(map[string]interface{})
 	keyParts := make([]string, 0, len(n.GroupBy.Fields))
 
@@ -456,7 +524,8 @@ func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[st
 		// Extract the actual field name from qualified identifier (e.g., "Authors"."Name" -> Name)
 		fieldName := n.extractFieldName(qualifiedFieldName)
 
-		field, exists := doc.Fields[fieldName]
+		// Use case-insensitive field lookup to handle field name case mismatches
+		field, exists := n.getCaseInsensitiveField(doc, fieldName)
 		if !exists {
 			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", qualifiedFieldName)
 		}
@@ -501,6 +570,12 @@ func getFieldNames(fields map[string]models.Field) []string {
 // updateAggregates updates aggregate values for a group with data from a document
 // PHASE 3: Aggregate accumulation
 func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Document) error {
+	// Guard against nil Fields map during concurrent operations
+	if doc.Fields == nil {
+		n.Logger.Warn("Skipping document with nil Fields map in updateAggregates")
+		return nil
+	}
+
 	for _, aggFunc := range n.AggregateFields {
 		aggKey := n.getAggregateKey(aggFunc)
 		aggVal := gResult.AggregateValues[aggKey]
@@ -513,7 +588,8 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 				// COUNT(field) - count non-null values
 				// Extract actual field name from qualified identifier
 				fieldName := n.extractFieldName(aggFunc.Field)
-				if field, exists := doc.Fields[fieldName]; exists && !field.Value.IsNil() {
+				// Use case-insensitive field lookup
+				if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists && !field.Value.IsNil() {
 					aggVal.Count++
 				}
 			}
@@ -521,7 +597,8 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 		case "SUM", "AVG":
 			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(aggFunc.Field)
-			if field, exists := doc.Fields[fieldName]; exists {
+			// Use case-insensitive field lookup
+			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
 				if numValue, err := n.convertToFloat(field.Value); err == nil {
 					aggVal.Sum += numValue
 					aggVal.Values = append(aggVal.Values, numValue)
@@ -531,7 +608,8 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 		case "MIN":
 			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(aggFunc.Field)
-			if field, exists := doc.Fields[fieldName]; exists {
+			// Use case-insensitive field lookup
+			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
 				// Extract the actual value from FieldValue based on type
 				var compareValue interface{}
 				if field.Value.Type == models.FieldTypeDateTime {
@@ -565,7 +643,8 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 		case "MAX":
 			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(aggFunc.Field)
-			if field, exists := doc.Fields[fieldName]; exists {
+			// Use case-insensitive field lookup
+			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
 				// Extract the actual value from FieldValue based on type
 				var compareValue interface{}
 				if field.Value.Type == models.FieldTypeDateTime {
@@ -760,10 +839,39 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 // sortDocumentsByGroupFields sorts documents by GROUP BY fields
 // PHASE 3: Document sorting for sort-aggregate strategy
 func (n *AggregationNode) sortDocumentsByGroupFields(docs []*models.Document) error {
+	// Safety check: if no GROUP BY fields, no sorting needed
+	if n.GroupBy == nil || len(n.GroupBy.Fields) == 0 {
+		n.Logger.Warn("sortDocumentsByGroupFields called with no GROUP BY fields - skipping sort")
+		return nil
+	}
+
 	sort.Slice(docs, func(i, j int) bool {
+		// Guard against nil documents during concurrent operations
+		// TODO: Investigate if nil documents should be filtered before sorting rather than during comparison
+		if docs[i] == nil && docs[j] == nil {
+			return false
+		}
+		if docs[i] == nil {
+			return true // nil documents sort to beginning
+		}
+		if docs[j] == nil {
+			return false // non-nil documents sort after nil
+		}
+
 		for _, qualifiedFieldName := range n.GroupBy.Fields {
 			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(qualifiedFieldName)
+
+			// Guard against nil Fields map during concurrent operations
+			if docs[i].Fields == nil && docs[j].Fields == nil {
+				continue
+			}
+			if docs[i].Fields == nil {
+				return true
+			}
+			if docs[j].Fields == nil {
+				return false
+			}
 
 			fieldI, existsI := docs[i].Fields[fieldName]
 			fieldJ, existsJ := docs[j].Fields[fieldName]

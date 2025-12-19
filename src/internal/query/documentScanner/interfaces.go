@@ -45,6 +45,17 @@ type BundleInterface interface {
 
 	// GetTotalDocuments returns the total number of documents in the bundle
 	GetTotalDocuments() int
+
+	// GetHashIndexForField retrieves the hash index for a specific field
+	// Returns nil if no index exists for the field
+	// This is used by join executors for index-assisted operations
+	// TODO: Extend to support other index types (BTree, etc.) when implemented
+	GetHashIndexForField(fieldName string) interface{}
+
+	// HasIndexOnField checks if an index exists for the specified field
+	// This is a quick check without loading the index
+	// Returns true if any index type exists on this field
+	HasIndexOnField(fieldName string) bool
 }
 
 // ScanMetrics holds performance and usage metrics for the scanner

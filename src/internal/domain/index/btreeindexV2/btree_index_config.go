@@ -271,7 +271,17 @@ func (config *IndexConfig) GetIndexFilePath() string {
 	databaseName := helpers.GetDatabaseFolderPath(config.DatabaseName)
 
 	filename := fmt.Sprintf("%s.btidx", indexName)
-	return filepath.Join(databaseName, filename)
+	indexFilePath := filepath.Join(databaseName, filename)
+
+	// DIAGNOSTIC LOGGING: Log path construction for debugging file path issues
+	// This helps identify if paths are being constructed incorrectly
+	if strings.Contains(indexFilePath, ".bnd") || !strings.HasSuffix(indexFilePath, ".btidx") {
+		// CRITICAL: Path construction error detected!
+		panic(fmt.Sprintf("CRITICAL BUG: BTree index path has wrong extension! DatabaseName=%s, IndexName=%s, Path=%s",
+			config.DatabaseName, indexName, indexFilePath))
+	}
+
+	return indexFilePath
 }
 
 // GetTempFilePath returns the path for temporary files during operations

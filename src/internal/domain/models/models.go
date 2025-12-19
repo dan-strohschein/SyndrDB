@@ -4,6 +4,7 @@ import (
 	//btreeindex "syndrdb/src/btree_index"
 	//hashindex "syndrdb/src/hash_index"
 
+	"sync"
 	"time"
 )
 
@@ -55,6 +56,10 @@ type Bundle struct {
 	// DEPRECATED: Documents field kept for backward compatibility with legacy storage methods
 	// New code should use DocumentPages via BundleService.GetDocumentPage()
 	Documents *map[string]Document `json:"Documents,omitempty"`
+
+	// Mutex to protect concurrent access to Documents map (prevents race conditions during batch updates)
+	// CRITICAL: Must be held when reading or writing to Documents map
+	DocumentsMutex sync.RWMutex `json:"-"`
 
 	// Track indexes by name -> reference
 	Indexes    map[string]IndexReference

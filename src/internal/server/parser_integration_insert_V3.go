@@ -54,10 +54,11 @@ func parseAddDocument(command string, logger *zap.SugaredLogger) (*models.Docume
 		globalParserMetrics.NewParserFailures.Add(1)
 		globalParserMetrics.FallbacksTriggered.Add(1)
 
-		logger.Warnf("New ADD DOCUMENT parser failed: %v. Falling back to legacy parser.", err)
+		// logger.Warnf("New ADD DOCUMENT parser failed: %v. Falling back to legacy parser.", err)
 
-		// Fallback to legacy parser
-		return bndle.ParseAddDocumentCommand(command, logger)
+		// // Fallback to legacy parser
+		// return bndle.ParseAddDocumentCommand(command, logger)
+		return nil, fmt.Errorf(" ADD DOCUMENT %s parser failed: %w", command, err)
 	}
 
 	// Record success

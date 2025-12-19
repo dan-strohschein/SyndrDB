@@ -1,0 +1,496 @@
+==============================================
+CRITICAL: DATA CORRUPTION DETECTED
+==============================================
+Timestamp: 2025-12-18T08:42:12-05:00
+Bundle: unknown_bundle
+Offset: 13304ReaReason: Failed to decode document at offset 1330417: failed to read field 1: failed to read field name: failed to read string bytes: insufficient data for 7681 bytes at offset 81. Size: 247 bytes. Data preview (first 64 bytes): 15000000313838323532636464386162343465305f33333539070000000a000000446f63756d656e744944011500000031383832353263646438616234346530
+==============================================
+
+RECENT WRITE OPERATIONS (Last 10):
+==============================================
+
+Operation #1:
+  Bundle: products
+  Offset: 1289904
+  Expected Size: 258 bytes
+  Actual Size: 258 bytes
+  Start Time: 2025-12-18T08:41:09.97584-05:00
+  End Time: 2025-12-18T08:41:09.978434-05:00
+  Duration: 2.59425ms
+  Success: true
+  Stack Trace:
+goroutine 49 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44348, 0x8}, 0x13aeb0, 0x102)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089e000, 0x14004f494a0, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x14004ade980?, 0x8?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x14005006160?, 0x1400089e000, 0x140009d6300)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x14005006160, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x140008e8c48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x140009c41e0, 0x1d, 0x140008e8e88?}, {0x14000483e00, 0x1b0}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4000, {0x14005004000, 0x1b1})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4000, {0x14005004000, 0x1b1})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4000, {0x14005004000, 0x1b1})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a98000})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a98000?}, {0x14000a9a010?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #2:
+  Bundle: products
+  Offset: 1290162
+  Expected Size: 249 bytes
+  Actual Size: 249 bytes
+  Start Time: 2025-12-18T08:41:09.980125-05:00
+  End Time: 2025-12-18T08:41:09.982785-05:00
+  Duration: 2.659375ms
+  Success: true
+  Stack Trace:
+goroutine 49 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44348, 0x8}, 0x13afb2, 0xf9)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089e000, 0x140051a4050, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x1400510c040?, 0x8?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x14005102150?, 0x1400089e000, 0x14000a9c000)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x14005102150, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x1400506ac48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x140000836c0, 0x1c, 0x1400506ae78?}, {0x1400511c000, 0x1a8}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4000, {0x14005090000, 0x1a9})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4000, {0x14005090000, 0x1a9})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4000, {0x14005090000, 0x1a9})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a98000})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a98000?}, {0x14000a9a010?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #3:
+  Bundle: products
+  Offset: 1290411
+  Expected Size: 253 bytes
+  Actual Size: 253 bytes
+  Start Time: 2025-12-18T08:41:09.983225-05:00
+  End Time: 2025-12-18T08:41:09.984655-05:00
+  Duration: 1.430208ms
+  Success: true
+  Stack Trace:
+goroutine 49 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44348, 0x8}, 0x13b0ab, 0xfd)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089e000, 0x14004f48190, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x14004ade100?, 0x8?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x14005096210?, 0x1400089e000, 0x1400088e0c0)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x14005096210, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x1400506ac48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x14000083c00, 0x1c, 0x1400506ae78?}, {0x1400511c400, 0x1aa}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4000, {0x14005090380, 0x1ab})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4000, {0x14005090380, 0x1ab})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4000, {0x14005090380, 0x1ab})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a98000})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a98000?}, {0x14000a9a010?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #4:
+  Bundle: products
+  Offset: 1290664
+  Expected Size: 249 bytes
+  Actual Size: 249 bytes
+  Start Time: 2025-12-18T08:41:09.987783-05:00
+  End Time: 2025-12-18T08:41:09.990732-05:00
+  Duration: 2.949833ms
+  Success: true
+  Stack Trace:
+goroutine 49 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44348, 0x8}, 0x13b1a8, 0xf9)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089e000, 0x14004f48690, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x14004ade420?, 0x8?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x14005096510?, 0x1400089e000, 0x1400088e6c0)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x14005096510, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x1400506ac48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x14000083dc0, 0x1c, 0x1400506ae78?}, {0x1400511c600, 0x1a8}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4000, {0x14005090c40, 0x1a9})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4000, {0x14005090c40, 0x1a9})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4000, {0x14005090c40, 0x1a9})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a98000})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a98000?}, {0x14000a9a010?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #5:
+  Bundle: products
+  Offset: 1290913
+  Expected Size: 248 bytes
+  Actual Size: 248 bytes
+  Start Time: 2025-12-18T08:41:09.995307-05:00
+  End Time: 2025-12-18T08:41:09.996787-05:00
+  Duration: 1.479834ms
+  Success: true
+  Stack Trace:
+goroutine 49 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44348, 0x8}, 0x13b2a1, 0xf8)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089e000, 0x14004f48f50, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x14004adebc0?, 0x8?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x14005096e40?, 0x1400089e000, 0x1400088f1c0)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x14005096e40, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x1400506ac48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x14000502fc0, 0x1c, 0x1400506ae78?}, {0x1400511c800, 0x1a6}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4000, {0x14005091500, 0x1a7})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4000, {0x14005091500, 0x1a7})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4000, {0x14005091500, 0x1a7})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a98000})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a98000?}, {0x14000a9a010?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #6:
+  Bundle: products
+  Offset: 1291161
+  Expected Size: 250 bytes
+  Actual Size: 250 bytes
+  Start Time: 2025-12-18T08:41:09.997068-05:00
+  End Time: 2025-12-18T08:41:09.999772-05:00
+  Duration: 2.703583ms
+  Success: true
+  Stack Trace:
+goroutine 49 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44348, 0x8}, 0x13b399, 0xfa)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089e000, 0x14004f494f0, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x14004adf160?, 0x8?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x14005097120?, 0x1400089e000, 0x1400088f2c0)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x14005097120, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x1400506ac48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x14000503180, 0x1c, 0x1400506ae78?}, {0x1400511ca00, 0x1a5}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4000, {0x14005091dc0, 0x1a6})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4000, {0x14005091dc0, 0x1a6})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4000, {0x14005091dc0, 0x1a6})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a98000})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a98000?}, {0x14000a9a010?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #7:
+  Bundle: products
+  Offset: 1291411
+  Expected Size: 253 bytes
+  Actual Size: 253 bytes
+  Start Time: 2025-12-18T08:41:10.003132-05:00
+  End Time: 2025-12-18T08:41:10.005755-05:00
+  Duration: 2.623667ms
+  Success: true
+  Stack Trace:
+goroutine 49 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44348, 0x8}, 0x13b493, 0xfd)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089e000, 0x14004f49a40, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x14004adf480?, 0x8?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x140050973f0?, 0x1400089e000, 0x1400088f3c0)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x140050973f0, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x1400506ac48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x14000503340, 0x1c, 0x1400506ae78?}, {0x1400511cc00, 0x1ab}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4000, {0x14005004a80, 0x1ac})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4000, {0x14005004a80, 0x1ac})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4000, {0x14005004a80, 0x1ac})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a98000})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a98000?}, {0x14000a9a010?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #8:
+  Bundle: orders
+  Offset: 949132
+  Expected Size: 184 bytes
+  Actual Size: 184 bytes
+  Start Time: 2025-12-18T08:41:39.289099-05:00
+  End Time: 2025-12-18T08:41:39.292361-05:00
+  Duration: 3.262041ms
+  Success: true
+  Stack Trace:
+goroutine 54 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44ed0, 0x6}, 0xe7b8c, 0xb8)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089f770, 0x14008c07e00, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x1400303a080?, 0x6?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x14008bac190?, 0x1400089f770, 0x140009d6000)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x14008bac190, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x14000034c48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x140001be580, 0x15, 0x2000?}, {0x1400640e000, 0x125}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x140001b83f0, {0x14006400000, 0x126})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x140001b83f0, {0x14006400000, 0x126})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x140001b83f0, {0x14006400000, 0x126})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x14000a980d8})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x14000a980d8?}, {0x140054e6170?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #9:
+  Bundle: orders
+  Offset: 949316
+  Expected Size: 184 bytes
+  Actual Size: 184 bytes
+  Start Time: 2025-12-18T08:42:01.724149-05:00
+  End Time: 2025-12-18T08:42:01.726916-05:00
+  Duration: 2.766792ms
+  Success: true
+  Stack Trace:
+goroutine 36 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44ed0, 0x6}, 0xe7c44, 0xb8)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089f770, 0x14008c72d70, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x14008d94180?, 0x6?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x140029cbbe0?, 0x1400089f770, 0x14000a9c300)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x140029cbbe0, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x14000034c48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x140001be580, 0x15, 0x1038a8ac0?}, {0x14009b9a400, 0x125}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x140001b82d0, {0x14009bbc000, 0x126})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x140001b82d0, {0x14009bbc000, 0x126})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x140001b82d0, {0x14009bbc000, 0x126})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x140092b4038})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x140092b4038?}, {0x14004902010?, 0x1400642bf98?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+Operation #10:
+  Bundle: cart_items
+  Offset: 1106
+  Expected Size: 163 bytes
+  Actual Size: 163 bytes
+  Start Time: 2025-12-18T08:42:09.467152-05:00
+  End Time: 2025-12-18T08:42:09.469733-05:00
+  Duration: 2.581666ms
+  Success: true
+  Stack Trace:
+goroutine 38 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+syndrdb/src/internal/storage/bundlestore.(*BundleWriteLogger).LogWriteStart(0x140001d6a00, {0x14000b44530, 0xa}, 0x452, 0xa3)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/write_logger.go:89 +0x80
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFileWithTxID(0x14000138000, 0x1400089f590, 0x14002e278b0, {0x0, 0x0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1274 +0x418
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AppendDocumentToBundleFile(...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1189
+syndrdb/src/internal/storage/bundlestore.(*BundleStorageEngine).AddDocumentToBundleFile(0x140009c4000?, 0x1400756bbe0?, 0xa?)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/storage/bundlestore/bundle_storage_engine.go:1181 +0x24
+syndrdb/src/internal/domain/bundle.(*BundleService).AddDocumentToBundle(0x140009c4000, 0x1400a608200?, 0x1400089f590, 0x140001d76c0)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/domain/bundle/bundle_service.go:4028 +0x388
+syndrdb/src/internal/server.AddDocument.func1({0x1400a608200, 0x10})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:197 +0xe4
+syndrdb/src/internal/journal.(*WALManager).ExecuteWithLogging(0x1400000e138, 0x14000034c48)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/journal/wal_manager.go:348 +0x7c
+syndrdb/src/internal/server.AddDocument({0x140009f26c0, 0x11, 0x1038a8ac0?}, {0x1400014a300, 0xe4}, 0x140000681b0, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/document_operations.go:188 +0x33c
+syndrdb/src/internal/server.executeCommand({0x1034f3170, 0x1038d17e0}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:271 +0x1444
+syndrdb/src/internal/server.CommandDirector({0x1034f3170?, 0x1038d17e0?}, 0x1400003a660, {0x140001d69c0, 0x140009c4000, 0x1400000e0f0, 0x1400000e138, 0x140001c7380, {0x0, 0x0}, ...}, ...)
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/command_director.go:31 +0x60
+syndrdb/src/internal/server.(*Server).handleTextCommand(0x140009e8000, 0x14000ab4090, {0x1400a38a000, 0xe5})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1242 +0x464
+syndrdb/src/internal/server.(*Server).ProcessClientData(0x140009e8000, 0x14000ab4090, {0x1400a38a000, 0xe5})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1191 +0x178
+syndrdb/src/internal/server.(*Server).processCommand(0x140009e8000, 0x14000ab4090, {0x1400a38a000, 0xe5})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1167 +0x1e4
+syndrdb/src/internal/server.(*Server).handleConnection(0x140009e8000, {0x1034f75d8, 0x140000689c0})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:1108 +0x744
+syndrdb/src/internal/server.(*Server).acceptConnections.func1({0x1034f75d8?, 0x140000689c0?}, {0x14008940620?, 0x0?})
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:833 +0x94
+created by syndrdb/src/internal/server.(*Server).acceptConnections in goroutine 25
+	/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/src/internal/server/server.go:830 +0x6b0
+
+----------------------------------------------
+
+
+FAILED OPERATIONS SUMMARY:
+==============================================
+Total Failures: 0
+

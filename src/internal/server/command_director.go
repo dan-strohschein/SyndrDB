@@ -538,7 +538,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// Validate that there are no documents in the bundle
 			// We will eventually need to add a force option to make this work even with documents
 			// but that will also require a more granular permission setup and careful handling
-			if bundle.Documents != nil && len(*bundle.Documents) > 0 {
+			if bundle.Documents != nil && len(*bundle.Documents) > 0 && !bundleCmd.HasForceSwitch {
 				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
 			}
 
@@ -591,7 +591,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// Validate that there are no documents in the bundle
 			// We will eventually need to add a force option to make this work even with documents
 			// but that will also require a more granular permission setup and careful handling
-			if bundle.Documents != nil && len(*bundle.Documents) > 0 {
+			if bundle.Documents != nil && len(*bundle.Documents) > 0 && !bundleCmd.HasForceSwitch {
 				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
 			}
 
@@ -1017,21 +1017,30 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		// BUSINESS RULE: Every query has a SortNode (user ORDER BY or default CreatedAt ASC)
 		// Get sorted documents from SortNode to preserve sort order
 		var sortedDocs []*models.Document
+		foundSortNode := false
 
-		// Only extract sorted docs if RootNode is DIRECTLY a SortNode (no LimitNode wrapper)
-		// When LimitNode wraps SortNode, don't extract - would bypass the LIMIT!
+		// Check if RootNode is a SortNode or a LimitNode (which may wrap a SortNode)
+		// SortNode and LimitNode both have GetSortedDocuments() to preserve sort order
 		if sn, ok := plan.RootNode.(*planner.SortNode); ok {
+			// Direct SortNode - extract sorted documents
 			sortedDocs = sn.GetSortedDocuments()
+			foundSortNode = true
+		} else if ln, ok := plan.RootNode.(*planner.LimitNode); ok {
+			// LimitNode wrapping SortNode - extract limited AND sorted documents
+			// LimitNode.GetSortedDocuments() returns the limited subset in sorted order
+			sortedDocs = ln.GetSortedDocuments()
+			foundSortNode = true
 		}
 
-		if sortedDocs != nil && len(sortedDocs) > 0 {
+		if foundSortNode {
 			// Use order-preserving transform for sorted documents
 			// This respects the sort order from the planner (user ORDER BY or default CreatedAt)
+			// Note: sortedDocs may be empty if the query returned no results - this is valid
 			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields)
 		} else {
-			// Fallback: SortNode not found or didn't populate sortedDocs
+			// Fallback: SortNode/LimitNode not found in plan tree
 			// This shouldn't happen with the new planner design, but keep for safety
-			logger.Warn("SortNode not found in plan tree or sortedDocs empty, using fallback transform")
+			logger.Warn("SortNode/LimitNode not found in plan tree, using fallback transform")
 			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
 		}
 	} // NOTE: Sorting is handled by the SortNode in the unified query planner execution tree.

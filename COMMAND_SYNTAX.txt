@@ -12,7 +12,7 @@ DELETE BUNDLE "<BUNDLE_NAME>";
 
 UPDATE BUNDLE "<BUNDLE_NAME>" [update_operations];
 
-ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>" WITH ({key=value, key=value});
+ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>" WITH ({"key"=value}, {"key"=value}, {"key"=value});
 
 SELECT DOCUMENTS FROM "<BUNDLE_NAME>";
 

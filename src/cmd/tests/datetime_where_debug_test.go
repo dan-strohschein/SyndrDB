@@ -19,8 +19,8 @@ func TestDateTime_WHERE_Debug(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"eventId", "String", true, false, ""},
-		{"eventTime", "DateTime", true, false, ""}
+		{"eventId", "String", true, false},
+		{"eventTime", "DateTime", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()

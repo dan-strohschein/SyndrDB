@@ -75,13 +75,13 @@ func TestE2E_ReferentialIntegrity_ForeignKeyValidation(t *testing.T) {
 
 	// Setup: Create Authors bundle
 	expectSuccess(t, fixture, `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"name", "STRING", true, false, ""}
+		{"name", "STRING", true, false}
 	);`, "Create Authors bundle")
 
 	// Setup: Create Books bundle with relationship to Authors
 	expectSuccess(t, fixture, `CREATE BUNDLE "Books" WITH FIELDS (
-		{"title", "STRING", true, false, ""},
-		{"author_id", "STRING", true, false, ""}
+		{"title", "STRING", true, false},
+		{"author_id", "STRING", true, false}
 	);`, "Create Books bundle")
 
 	// Setup: Create relationship
@@ -200,7 +200,7 @@ func TestE2E_ReferentialIntegrity_DocumentIDProtection(t *testing.T) {
 
 	// Setup: Create test bundle and document
 	expectSuccess(t, fixture, `CREATE BUNDLE "TestBundle" WITH FIELDS (
-		{"name", "STRING", true, false, ""}
+		{"name", "STRING", true, false}
 	);`, "Create test bundle")
 
 	expectSuccess(t, fixture, `ADD DOCUMENT TO BUNDLE "TestBundle" WITH ({"name"="Test"});`, "Insert document")
@@ -217,12 +217,12 @@ func TestE2E_ReferentialIntegrity_FieldRemovalProtection(t *testing.T) {
 
 	// Setup: Create Authors and Books with relationship
 	expectSuccess(t, fixture, `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"name", "STRING", true, false, ""}
+		{"name", "STRING", true, false}
 	);`, "Create Authors")
 
 	expectSuccess(t, fixture, `CREATE BUNDLE "Books" WITH FIELDS (
-		{"title", "STRING", true, false, ""},
-		{"author_id", "STRING", true, false, ""}
+		{"title", "STRING", true, false},
+		{"author_id", "STRING", true, false}
 	);`, "Create Books")
 
 	expectSuccess(t, fixture, `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "author_id"});`, "Create relationship")
@@ -253,13 +253,13 @@ func TestE2E_ReferentialIntegrity_BundleDeletion(t *testing.T) {
 
 	// Setup: Create Authors bundle
 	expectSuccess(t, fixture, `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"name", "STRING", true, false, ""}
+		{"name", "STRING", true, false}
 	);`, "Create Authors bundle")
 
 	// Setup: Create Books bundle with relationship to Authors
 	expectSuccess(t, fixture, `CREATE BUNDLE "Books" WITH FIELDS (
-		{"title", "STRING", true, false, ""},
-		{"author_id", "STRING", true, false, ""}
+		{"title", "STRING", true, false},
+		{"author_id", "STRING", true, false}
 	);`, "Create Books bundle")
 
 	// Setup: Create relationship (Books -> Authors)

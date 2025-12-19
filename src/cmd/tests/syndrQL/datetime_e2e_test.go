@@ -22,11 +22,11 @@ func TestDateTime_E2E_BundleCreation(t *testing.T) {
 
 	// Create bundle with DateTime and Date fields
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"eventId", "STRING", true, false, ""},
-		{"eventName", "STRING", true, false, ""},
-		{"eventTime", "DATETIME", true, false, ""},
-		{"eventDate", "DATE", true, false, ""},
-		{"description", "STRING", true, false, ""}
+		{"eventId", "STRING", true, false},
+		{"eventName", "STRING", true, false},
+		{"eventTime", "DATETIME", true, false},
+		{"eventDate", "DATE", true, false},
+		{"description", "STRING", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -56,11 +56,11 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 
 	// Create bundle first
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"eventId", "STRING", true, false, ""},
-		{"eventName", "STRING", true, false, ""},
-		{"eventTime", "DATETIME", true, false, ""},
-		{"eventDate", "DATE", true, false, ""},
-		{"description", "STRING", true, false, ""}
+		{"eventId", "STRING", true, false},
+		{"eventName", "STRING", true, false},
+		{"eventTime", "DATETIME", true, false},
+		{"eventDate", "DATE", true, false},
+		{"description", "STRING", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -197,11 +197,11 @@ func TestDateTime_E2E_MultipleFormats(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"eventId", "STRING", true, false, ""},
-		{"eventName", "STRING", true, false, ""},
-		{"eventTime", "DATETIME", true, false, ""},
-		{"eventDate", "DATE", true, false, ""},
-		{"description", "STRING", true, false, ""}
+		{"eventId", "STRING", true, false},
+		{"eventName", "STRING", true, false},
+		{"eventTime", "DATETIME", true, false},
+		{"eventDate", "DATE", true, false},
+		{"description", "STRING", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -314,11 +314,11 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"eventId", "STRING", true, false, ""},
-		{"eventName", "STRING", true, false, ""},
-		{"eventTime", "DATETIME", true, false, ""},
-		{"eventDate", "DATE", true, false, ""},
-		{"description", "STRING", true, false, ""}
+		{"eventId", "STRING", true, false},
+		{"eventName", "STRING", true, false},
+		{"eventTime", "DATETIME", true, false},
+		{"eventDate", "DATE", true, false},
+		{"description", "STRING", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()
@@ -526,11 +526,11 @@ func TestDateTime_E2E_MillisecondPrecision(t *testing.T) {
 
 	// Create bundle
 	createCmd := fmt.Sprintf(`CREATE BUNDLE "%s" WITH FIELDS (
-		{"eventId", "STRING", true, false, ""},
-		{"eventName", "STRING", true, false, ""},
-		{"eventTime", "DATETIME", true, false, ""},
-		{"eventDate", "DATE", true, false, ""},
-		{"description", "STRING", true, false, ""}
+		{"eventId", "STRING", true, false},
+		{"eventName", "STRING", true, false},
+		{"eventTime", "DATETIME", true, false},
+		{"eventDate", "DATE", true, false},
+		{"description", "STRING", true, false}
 	);`, bundleName)
 
 	startTime := time.Now()

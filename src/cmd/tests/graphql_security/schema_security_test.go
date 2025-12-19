@@ -22,10 +22,10 @@ func TestWithSimpleSchema(t *testing.T) {
 
 	// Create a simple bundle with a few fields BEFORE handler initialization
 	createBundleCmd := `CREATE BUNDLE "TestUsers" WITH FIELDS (
-		{"UserID", "INT", true, true, 0},
-		{"Username", "STRING", true, false, ""},
-		{"Email", "STRING", true, false, ""},
-		{"Age", "INT", false, false, 0}
+		{"UserID", "INT", true, true},
+		{"Username", "STRING", true, false},
+		{"Email", "STRING", true, false},
+		{"Age", "INT", false, false}
 	);`
 
 	startTime := time.Now()
@@ -138,9 +138,9 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 
 	// Create two related bundles
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"AuthorID", "INT", true, true, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", false, false, ""}
+		{"AuthorID", "INT", true, true},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false}
 	);`
 
 	startTime := time.Now()
@@ -150,10 +150,10 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 	}
 
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"BookID", "INT", true, true, 0},
-		{"Title", "STRING", true, false, ""},
-		{"AuthorID", "INT", false, false, 0},
-		{"Genre", "STRING", false, false, ""}
+		{"BookID", "INT", true, true},
+		{"Title", "STRING", true, false},
+		{"AuthorID", "INT", false, false},
+		{"Genre", "STRING", false, false}
 	);`
 
 	startTime = time.Now()
@@ -239,9 +239,9 @@ func TestSecurityLayersWithMutation(t *testing.T) {
 
 	// Create bundle first
 	createBundleCmd := `CREATE BUNDLE "Products" WITH FIELDS (
-		{"ProductID", "INT", true, true, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Price", "FLOAT", false, false, 0.0}
+		{"ProductID", "INT", true, true},
+		{"Name", "STRING", true, false},
+		{"Price", "FLOAT", false, false}
 	);`
 
 	startTime := time.Now()
@@ -290,8 +290,8 @@ func TestTimeoutEnforcement(t *testing.T) {
 
 	// Create a bundle
 	createBundleCmd := `CREATE BUNDLE "LargeData" WITH FIELDS (
-		{"ID", "INT", true, true, 0},
-		{"Data", "STRING", true, false, ""}
+		{"ID", "INT", true, true},
+		{"Data", "STRING", true, false}
 	);`
 
 	startTime := time.Now()
@@ -337,8 +337,8 @@ func TestMonitoringMetrics(t *testing.T) {
 
 	// Create a simple bundle
 	createBundleCmd := `CREATE BUNDLE "Metrics" WITH FIELDS (
-		{"ID", "INT", true, true, 0},
-		{"Value", "STRING", true, false, ""}
+		{"ID", "INT", true, true},
+		{"Value", "STRING", true, false}
 	);`
 
 	startTime := time.Now()

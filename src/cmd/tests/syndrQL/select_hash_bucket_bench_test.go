@@ -28,11 +28,11 @@ func Benchmark_SelectWithHashIndex_SmallDataset(b *testing.B) {
 
 	// Create bundle with hash-indexed SKU field
 	createCmd := `CREATE BUNDLE "Products" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"SKU", "STRING", true, false, ""},
-		{"Name", "STRING", true, false, ""},
-		{"Price", "FLOAT", true, false, 0.0},
-		{"Category", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"SKU", "STRING", true, false},
+		{"Name", "STRING", true, false},
+		{"Price", "FLOAT", true, false},
+		{"Category", "STRING", true, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
@@ -85,11 +85,11 @@ func Benchmark_SelectWithHashIndex_MediumDataset(b *testing.B) {
 
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Orders" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"OrderID", "STRING", true, false, ""},
-		{"CustomerID", "INT", true, false, 0},
-		{"Total", "FLOAT", true, false, 0.0},
-		{"Status", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"OrderID", "STRING", true, false},
+		{"CustomerID", "INT", true, false},
+		{"Total", "FLOAT", true, false},
+		{"Status", "STRING", true, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
@@ -142,11 +142,11 @@ func Benchmark_SelectWithHashIndex_HotKey(b *testing.B) {
 
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Cache" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Key", "STRING", true, false, ""},
-		{"Value", "STRING", true, false, ""},
-		{"TTL", "INT", true, false, 0},
-		{"AccessCount", "INT", true, false, 0}
+		{"ID", "INT", true, false},
+		{"Key", "STRING", true, false},
+		{"Value", "STRING", true, false},
+		{"TTL", "INT", true, false},
+		{"AccessCount", "INT", true, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
@@ -204,11 +204,11 @@ func Benchmark_SelectWithMultipleHashIndexes(b *testing.B) {
 
 	// Create bundle
 	createCmd := `CREATE BUNDLE "Users" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Email", "STRING", true, false, ""},
-		{"Name", "STRING", true, false, ""},
-		{"Status", "STRING", true, false, ""},
-		{"RegisteredDate", "STRING", true, false, ""}
+		{"ID", "INT", true, false},
+		{"Email", "STRING", true, false},
+		{"Name", "STRING", true, false},
+		{"Status", "STRING", true, false},
+		{"RegisteredDate", "STRING", true, false}
 	);`
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {

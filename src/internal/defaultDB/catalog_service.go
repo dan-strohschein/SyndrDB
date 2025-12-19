@@ -694,15 +694,17 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 				if err1 != nil {
 					return nil, fmt.Errorf("failed to get bundle Metadata from Catalog by name '%s': %w", name, err1)
 				}
-				// Convert document to map for return
+				// Convert document to map for return - include only metadata fields, NOT documents
 				result := make(map[string]interface{})
-				result["BundleMetadata"] = actualBundle
-				result["CreatedAt"] = doc.CreatedAt
-				result["UpdatedAt"] = doc.UpdatedAt
-				result["DatabaseName"] = doc.Fields["DatabaseName"].Value
-				result["DatabaseID"] = doc.Fields["DatabaseID"].Value
-				result["FieldCount"] = doc.Fields["FieldCount"].Value
-				result["FilePath"] = doc.Fields["FilePath"].Value
+				result["BundleID"] = actualBundle.BundleID
+				result["Name"] = actualBundle.Name
+				result["Description"] = actualBundle.Description
+				result["TotalDocuments"] = actualBundle.TotalDocuments
+				result["PageCount"] = actualBundle.PageCount
+				result["PageSize"] = actualBundle.PageSize
+				result["CreatedAt"] = actualBundle.CreatedAt
+				result["UpdatedAt"] = actualBundle.UpdatedAt
+				result["CreatedBy"] = actualBundle.CreatedBy
 
 				// // Add all fields to the result
 				// for fieldName, field := range doc.Fields {

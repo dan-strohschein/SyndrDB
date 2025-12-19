@@ -734,6 +734,60 @@ func (pba *PlannerBundleAdapter) GetTotalDocuments() int {
 	return int(pba.bundle.TotalDocuments)
 }
 
+// GetHashIndexForField retrieves the hash index for a specific field
+// Returns nil if no index exists for the field
+// This is used by join executors for index-assisted operations
+// Supports both foreign key indexes and regular hash indexes
+func (pba *PlannerBundleAdapter) GetHashIndexForField(fieldName string) interface{} {
+	if pba.bundle == nil || pba.bundle.Indexes == nil {
+		return nil
+	}
+
+	// Iterate through all indexes to find one that has this field
+	for _, indexRef := range pba.bundle.Indexes {
+		// Only consider hash indexes (skip btree, etc.)
+		if indexRef.IndexType != "hash" {
+			continue
+		}
+
+		// Check if any field in this index matches the requested field name
+		for _, field := range indexRef.Fields {
+			if field.Name == fieldName {
+				// Return the actual index reference (contains IndexInstance)
+				return indexRef
+			}
+		}
+	}
+
+	return nil
+}
+
+// HasIndexOnField checks if an index exists for the specified field
+// This is a quick check without loading the index
+// Supports both foreign key indexes and regular hash indexes
+func (pba *PlannerBundleAdapter) HasIndexOnField(fieldName string) bool {
+	if pba.bundle == nil || pba.bundle.Indexes == nil {
+		return false
+	}
+
+	// Iterate through all indexes to find one that has this field
+	for _, indexRef := range pba.bundle.Indexes {
+		// Only consider hash indexes (skip btree, etc.)
+		if indexRef.IndexType != "hash" {
+			continue
+		}
+
+		// Check if any field in this index matches the requested field name
+		for _, field := range indexRef.Fields {
+			if field.Name == fieldName {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // PlannerServiceManager adapts bundle operations for the JOIN execution node
 // This provides the service interface needed by the JOIN executor without circular imports
 type PlannerServiceManager struct {

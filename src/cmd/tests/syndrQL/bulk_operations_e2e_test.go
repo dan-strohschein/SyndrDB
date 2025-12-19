@@ -335,10 +335,10 @@ func setupBundlesForBulkOps(t *testing.T, fixture *TestFixture) {
 
 	// Create Authors bundle
 	createAuthorsCmd := `CREATE BUNDLE "Authors" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Name", "STRING", true, false, ""},
-		{"Country", "STRING", false, false, ""},
-		{"BirthYear", "INT", false, false, 0}
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Country", "STRING", false, false},
+		{"BirthYear", "INT", false, false}
 	);`
 	startTime := time.Now()
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createAuthorsCmd, fixture.Logger, startTime, nil, "127.0.0.1")
@@ -348,11 +348,11 @@ func setupBundlesForBulkOps(t *testing.T, fixture *TestFixture) {
 
 	// Create Books bundle
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
-		{"ID", "INT", true, false, 0},
-		{"Title", "STRING", true, false, ""},
-		{"AuthorID", "INT", false, false, 0},
-		{"AuthorsID", "INT", false, false, 0},
-		{"Genre", "STRING", false, false, ""}
+		{"ID", "INT", true, false},
+		{"Title", "STRING", true, false},
+		{"AuthorID", "INT", false, false},
+		{"AuthorsID", "INT", false, false},
+		{"Genre", "STRING", false, false}
 	);`
 	startTime = time.Now()
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
