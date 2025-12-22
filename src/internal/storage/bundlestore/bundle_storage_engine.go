@@ -232,7 +232,7 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 	endIndex := startIndex + pageSize
 
 	// Load only the documents needed for this page using range-based loading
-	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex)
+	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load document range for bundle %s page %d: %w", bundleName, pageID, err)
 	}
@@ -1566,7 +1566,7 @@ func (b *BundleStorageEngine) CloseWriteBuffers() error {
 
 // readDocumentRange efficiently reads a specific range of documents for pagination
 // This implements true virtual pagination by streaming through the file and stopping at boundaries
-func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName string, startIndex, endIndex uint32) (map[string]models.Document, uint32, error) {
+func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName string, startIndex, endIndex uint32, fileData *[]byte) (map[string]models.Document, uint32, error) {
 	// CRITICAL FIX: Acquire read lock to prevent reading during concurrent writes
 	// RWMutex allows multiple concurrent readers but blocks during writes
 	// This prevents readers from seeing partially written or corrupted data
@@ -1576,29 +1576,29 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 
 	//args := settings.GetSettings()
 
-	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+	// databasePath := helpers.GetDatabaseFolderPath(databaseName)
 
-	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
+	// filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to open bundle file: %w", err)
-	}
-	defer file.Close()
+	// file, err := os.Open(filePath)
+	// if err != nil {
+	// 	return nil, 0, fmt.Errorf("failed to open bundle file: %w", err)
+	// }
+	// defer file.Close()
 
-	// Read the entire file for now - TODO: optimize with streaming
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get file info: %w", err)
-	}
+	// // Read the entire file for now - TODO: optimize with streaming
+	// fileInfo, err := file.Stat()
+	// if err != nil {
+	// 	return nil, 0, fmt.Errorf("failed to get file info: %w", err)
+	// }
 
-	//b.logger.Infof("DEBUG: readDocumentRange - file '%s' size: %d bytes", filePath, fileInfo.Size())
+	// //b.logger.Infof("DEBUG: readDocumentRange - file '%s' size: %d bytes", filePath, fileInfo.Size())
 
-	fileData := make([]byte, fileInfo.Size())
-	_, err = file.Read(fileData)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read file: %w", err)
-	}
+	// fileData := make([]byte, fileInfo.Size())
+	// _, err = file.Read(fileData)
+	// if err != nil {
+	// 	return nil, 0, fmt.Errorf("failed to read file: %w", err)
+	// }
 
 	//b.logger.Infof("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
 
@@ -1649,7 +1649,7 @@ func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName, databaseName str
 
 // parseAppendedDocumentsRange parses documents in the append-only format with range limiting
 // This implements efficient virtual pagination by stopping when the page is full
-func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startIndex, endIndex uint32) (map[string]models.Document, uint32, error) {
+func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startIndex, endIndex uint32) (map[string]models.Document, uint32, error) {
 	pageDocuments := make(map[string]models.Document)
 	deletedDocuments := make(map[string]bool)        // Track deleted documents
 	allDocuments := make(map[string]models.Document) // Track all valid documents for counting
@@ -1664,10 +1664,10 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 	// CRITICAL FIX: Skip bundle metadata header if present
 	// The file format is: [Bundle Metadata Header] [Document 1] [Document 2] ... [Tombstones]
 	// Bundle metadata header format: 0x42444D44 (magic) + size (4 bytes) + BSON data
-	if len(data) >= 8 {
-		magic := binary.LittleEndian.Uint32(data[0:4])
+	if len(*data) >= 8 {
+		magic := binary.LittleEndian.Uint32((*data)[0:4])
 		if magic == 0x42444D44 { // "BDMD" = Bundle Metadata
-			metadataSize := binary.LittleEndian.Uint32(data[4:8])
+			metadataSize := binary.LittleEndian.Uint32((*data)[4:8])
 			offset = int(8 + metadataSize) // Skip 8-byte header + BSON data
 			if b.logger != nil {
 				//b.logger.Infof("DEBUG: Skipping bundle metadata header: magic=0x%X, size=%d, new offset=%d", magic, metadataSize, offset)
@@ -1675,9 +1675,9 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 		}
 	}
 
-	for offset < len(data) {
+	for offset < len(*data) {
 		// Need at least 8 bytes for header
-		if offset+8 > len(data) {
+		if offset+8 > len(*data) {
 			if b.logger != nil {
 				//b.logger.Infof("DEBUG: Stopping parse at offset %d (not enough bytes for header)", offset)
 			}
@@ -1685,8 +1685,8 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 		}
 
 		// Read magic number and size
-		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
-		size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+		magic := binary.LittleEndian.Uint32((*data)[offset : offset+4])
+		size := binary.LittleEndian.Uint32((*data)[offset+4 : offset+8])
 
 		// DEBUG: Log what we found
 		if b.logger != nil {
@@ -1703,12 +1703,12 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 		// Handle document records
 		if magic == 0xDEADBEEF {
 			// Validate size
-			if offset+8+int(size) > len(data) {
+			if offset+8+int(size) > len(*data) {
 				break
 			}
 
 			// Extract document data
-			documentData := data[offset+8 : offset+8+int(size)]
+			documentData := (*data)[offset+8 : offset+8+int(size)]
 
 			// Decode document using fast binary format
 			docMap, err := helpers.DecodeFastBinary(documentData)
@@ -1834,12 +1834,12 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data []byte, startInde
 			offset += 8 + int(size)
 		} else if magic == 0xDEADDEAD {
 			// Handle deletion markers
-			if offset+8+int(size) > len(data) {
+			if offset+8+int(size) > len(*data) {
 				break
 			}
 
 			// Extract deletion marker data
-			deletionData := data[offset+8 : offset+8+int(size)]
+			deletionData := (*data)[offset+8 : offset+8+int(size)]
 
 			// Decode deletion marker
 			// deletionInterface, err := helpers.DecodeBSON(deletionData)

@@ -711,6 +711,29 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 				// 	result[fieldName] = field.Value
 				// }
 
+				// Always include document structure information (even if empty)
+				result["DocumentStructure"] = actualBundle.DocumentStructure
+
+				// Include indexes information if available
+				if len(actualBundle.Indexes) > 0 {
+					result["Indexes"] = actualBundle.Indexes
+				}
+
+				// Include index names if available
+				if len(actualBundle.IndexNames) > 0 {
+					result["IndexNames"] = actualBundle.IndexNames
+				}
+
+				// Include relationships information if available
+				if len(actualBundle.Relationships) > 0 {
+					result["Relationships"] = actualBundle.Relationships
+				}
+
+				// Include constraints information if available
+				if len(actualBundle.Constraints) > 0 {
+					result["Constraints"] = actualBundle.Constraints
+				}
+
 				results = append(results, result)
 			}
 		}

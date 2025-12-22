@@ -1993,7 +1993,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 	// and SELECT TOP needs accurate PageCount to work correctly
 
 	if len(s.metadataUpdateBuffer) > 0 {
-		s.logger.Debugf("Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
+		s.logger.Infof("DEBUG DEBUG DEBUG :: Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
 		s.FlushMetadataUpdates()
 	}
 	//s.logger.Infof("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",

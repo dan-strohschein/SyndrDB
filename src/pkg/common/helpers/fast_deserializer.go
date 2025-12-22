@@ -284,7 +284,7 @@ func (d *FastDocumentDeserializer) readByte() (byte, error) {
 
 func (d *FastDocumentDeserializer) readBytes(length int) ([]byte, error) {
 	if d.offset+length > len(d.data) {
-		return nil, fmt.Errorf("insufficient data for %d bytes at offset %d", length, d.offset)
+		return nil, fmt.Errorf("insufficient data for %d bytes at offset %d BUT len(d.data)=%d", length, d.offset, len(d.data))
 	}
 	value := d.data[d.offset : d.offset+length]
 	d.offset += length
@@ -303,14 +303,156 @@ func (d *FastDocumentDeserializer) readString() (string, error) {
 	return string(bytes), nil
 }
 
+// DeserializeDocumentMap converts binary format back to a map-based document
+// ✅ FIXED: Accept offset parameter instead of storing state
+func (d *FastDocumentDeserializer) DeserializeDocumentMap2(data []byte) (map[string]interface{}, error) {
+	// ✅ Make defensive copy to prevent aliasing
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	offset := 0
+	docEntry := make(map[string]interface{})
+
+	// Read DocumentID
+	documentID, newOffset, err := readStringAt(dataCopy, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read document ID: %w", err)
+	}
+	offset = newOffset
+	docEntry["DocumentID"] = documentID
+
+	// Read field count
+	fieldCount, newOffset, err := readUint32At(dataCopy, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read field count: %w", err)
+	}
+	offset = newOffset
+
+	// Read each field
+	fields := make(map[string]models.Field)
+	for i := uint32(0); i < fieldCount; i++ {
+		fieldName, field, newOffset, err := readFieldAt(dataCopy, offset)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read field %d: %w", i, err)
+		}
+		offset = newOffset
+		fields[fieldName] = field
+	}
+	docEntry["Fields"] = fields
+
+	// Read timestamps
+	createdAtNano, newOffset, err := readInt64At(dataCopy, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CreatedAt: %w", err)
+	}
+	offset = newOffset
+
+	updatedAtNano, newOffset, err := readInt64At(dataCopy, offset)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read UpdatedAt: %w", err)
+	}
+
+	// Convert timestamps back to time.Time
+	docEntry["CreatedAt"] = time.Unix(0, createdAtNano)
+	docEntry["UpdatedAt"] = time.Unix(0, updatedAtNano)
+
+	return docEntry, nil
+}
+
+func readStringAt(data []byte, offset int) (string, int, error) {
+	length, newOffset, err := readUint32At(data, offset)
+	if err != nil {
+		return "", offset, fmt.Errorf("failed to read string length: %w", err)
+	}
+
+	if newOffset+int(length) > len(data) {
+		return "", offset, fmt.Errorf("insufficient data for %d bytes at offset %d (len=%d)", length, newOffset, len(data))
+	}
+
+	// ✅ Force string copy to prevent aliasing
+	strBytes := make([]byte, length)
+	copy(strBytes, data[newOffset:newOffset+int(length)])
+
+	return string(strBytes), newOffset + int(length), nil
+}
+
+// Helper functions that don't use instance state
+func readUint32At(data []byte, offset int) (uint32, int, error) {
+	if offset+4 > len(data) {
+		return 0, offset, fmt.Errorf("insufficient data for uint32 at offset %d", offset)
+	}
+	value := binary.LittleEndian.Uint32(data[offset : offset+4])
+	return value, offset + 4, nil
+}
+
+func readInt64At(data []byte, offset int) (int64, int, error) {
+	if offset+8 > len(data) {
+		return 0, offset, fmt.Errorf("insufficient data for int64 at offset %d", offset)
+	}
+	value := binary.LittleEndian.Uint64(data[offset : offset+8])
+	return int64(value), offset + 8, nil
+}
+
+func readFieldAt(data []byte, offset int) (string, models.Field, int, error) {
+	// Read field name with forced copy
+	fieldName, newOffset, err := readStringAt(data, offset)
+	if err != nil {
+		return "", models.Field{}, offset, fmt.Errorf("failed to read field name: %w", err)
+	}
+	offset = newOffset
+
+	// Read field type
+	if offset+1 > len(data) {
+		return "", models.Field{}, offset, fmt.Errorf("insufficient data for field type at offset %d", offset)
+	}
+	fieldType := data[offset]
+	offset++
+
+	// Read field value based on type
+	var value interface{}
+	switch fieldType {
+	case 1: // string
+		valueLen, newOffset, err := readUint32At(data, offset)
+		if err != nil {
+			return "", models.Field{}, offset, fmt.Errorf("failed to read string length: %w", err)
+		}
+		offset = newOffset
+
+		if offset+int(valueLen) > len(data) {
+			return "", models.Field{}, offset, fmt.Errorf("insufficient data for string value")
+		}
+
+		// ✅ Force copy to prevent aliasing
+		valueBytes := make([]byte, valueLen)
+		copy(valueBytes, data[offset:offset+int(valueLen)])
+		value = string(valueBytes)
+		offset += int(valueLen)
+
+	// ... handle other types similarly ...
+
+	default:
+		return "", models.Field{}, offset, fmt.Errorf("unknown field type: %d", fieldType)
+	}
+
+	return fieldName, models.Field{
+		Name:  fieldName,
+		Value: models.NewInterfaceValue(value),
+	}, offset, nil
+}
+
 // Global fast deserializer instance to avoid repeated allocations
 var globalFastDeserializer = NewFastDocumentDeserializer()
 
 // DecodeFastBinary replaces DecodeBSON for high-performance document deserialization
 // Provides 5-10x faster deserialization by eliminating BSON overhead
 // Mirrors EncodeFastBinary function from fast_serializer.go
+// func DecodeFastBinary(data []byte) (map[string]interface{}, error) {
+// 	return globalFastDeserializer.DeserializeDocumentMap(data)
+//}
+
 func DecodeFastBinary(data []byte) (map[string]interface{}, error) {
-	return globalFastDeserializer.DeserializeDocumentMap(data)
+	deserializer := NewFastDocumentDeserializer()
+	return deserializer.DeserializeDocumentMap(data)
 }
 
 // DecodeFastBinaryToDocument deserializes binary data directly to a models.Document
