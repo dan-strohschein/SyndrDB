@@ -3938,7 +3938,7 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 
 	// Load the BTree index from disk using the index name and bundle information
 	args := settings.GetSettings()
-	indexFilePath := fmt.Sprintf("%s/%s_%s.btidx", args.DataDir, bundle.Name, indexRef.BTreeIndexField.FieldName)
+	indexFilePath := fmt.Sprintf("%s/%s_%s_btree.btidx", args.DataDir, bundle.Name, indexRef.BTreeIndexField.FieldName)
 
 	// Check if the index file exists before trying to open it
 	if _, err := os.Stat(indexFilePath); os.IsNotExist(err) {
