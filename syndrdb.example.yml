@@ -87,6 +87,15 @@ bundle_storage_format: "binary"
 bundle_buffer_size: 0
 
 # ==============================================================================
+# STORAGE ENGINE CONFIGURATION
+# ==============================================================================
+storage:
+  # Maximum bundle file size in MB before rotation (default: 32)
+  # Files will rotate when size exceeds max_size × 1.1 (±10% variance tolerance)
+  # This can be adjusted at runtime via: SET SYSTEM bundle_file_max_size_mb = 64;
+  bundle_file_max_size_mb: 32
+
+# ==============================================================================
 # JOURNAL CONFIGURATION
 # ==============================================================================
 
@@ -400,6 +409,43 @@ ghost_cleanup_pause_threshold: 500
 # Tombstone ratio threshold for compaction (default: 0.3)
 # Trigger compaction when tombstones exceed this percentage (30%)
 ghost_cleanup_tombstone_ratio: 0.3
+
+# ==============================================================================
+# BUNDLE FILE COMPACTION CONFIGURATION
+# ==============================================================================
+compaction:
+  # Maximum number of parallel compaction workers (default: 3)
+  # PostgreSQL uses autovacuum_max_workers = 3 by default
+  max_workers: 3
+  
+  # Maximum I/O throughput in MB/s for normal compaction (default: 50)
+  max_io_mbps: 50
+  
+  # Degraded mode I/O throughput in MB/s (default: 10)
+  # Used when compaction is forced after sustained high load
+  degraded_io_mbps: 10
+  
+  # Trigger A: Tombstone ratio threshold (default: 0.20)
+  # Compact when tombstones exceed 20% of total records
+  tombstone_ratio_threshold: 0.20
+  
+  # Trigger B: File count threshold (default: 10)
+  # Compact when bundle has more than 10 files
+  file_count_threshold: 10
+  
+  # Trigger C: Small file age threshold in hours (default: 1)
+  # Merge small files (< 32MB) older than this threshold
+  small_file_age_hours: 1
+  
+  # Trigger C: Small file size threshold in MB (default: 32)
+  small_file_size_mb: 32
+  
+  # Trigger D: Large bundle size threshold in GB (default: 1)
+  large_bundle_size_gb: 1
+  
+  # Trigger D: Fragmentation threshold (default: 0.30)
+  # Compact large bundles when fragmentation exceeds 30%
+  fragmentation_threshold: 0.30
 
 # ==============================================================================
 # VIEWS CONFIGURATION

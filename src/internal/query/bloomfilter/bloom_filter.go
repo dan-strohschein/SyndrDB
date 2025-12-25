@@ -418,3 +418,24 @@ func SerializeValues(values []interface{}) ([]byte, error) {
 
 	return buf.Bytes(), nil
 }
+
+// GetBitArray returns a copy of the internal bit array for serialization
+func (bf *BloomFilter) GetBitArray() []uint64 {
+	// Return a copy to prevent external modification
+	bitArrayCopy := make([]uint64, len(bf.bitArray))
+	copy(bitArrayCopy, bf.bitArray)
+	return bitArrayCopy
+}
+
+// SetBitArray replaces the internal bit array (used for deserialization)
+// WARNING: This bypasses normal Add() operations and should only be used for deserialization
+func (bf *BloomFilter) SetBitArray(bitArray []uint64) error {
+	expectedSize := (bf.size + 63) / 64
+	if uint64(len(bitArray)) != expectedSize {
+		return fmt.Errorf("bit array size mismatch: got %d, expected %d", len(bitArray), expectedSize)
+	}
+	
+	bf.bitArray = make([]uint64, len(bitArray))
+	copy(bf.bitArray, bitArray)
+	return nil
+}

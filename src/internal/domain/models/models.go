@@ -73,7 +73,7 @@ type Bundle struct {
 	// New fields for scalable document management
 	TotalDocuments int64 // Total number of documents in this bundle
 	PageCount      int64 // Total number of document pages
-	PageSize       int   // Number of documents per page (default: 1000)
+	PageSize       int   // Number of documents per page (default: 4096)
 
 	// Cassandra-style memtable approach for write buffering
 	// When false: Documents map is a write buffer (memtable) containing only recent writes

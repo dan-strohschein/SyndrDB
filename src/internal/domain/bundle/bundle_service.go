@@ -384,9 +384,7 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		logger:          logger,
 		bundleMetadata:  make(map[string]*models.Bundle),
 		documentPages:   make(map[string]*models.DocumentPage),
-		defaultPageSize: 1000, // Default: 1000 documents per page
-		maxLoadedPages:  100,  // Default: keep max 100 pages in memory
-
+	defaultPageSize: 4096, // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
 		// OPTIMIZATION: Use configurable performance settings
 		indexUpdateBuffer:    make([]IndexUpdate, 0, globalSettings.MetadataBatchSize),
 		indexUpdateBatchSize: globalSettings.MetadataBatchSize,                                       // INCREASED: 50 → 500
@@ -1014,7 +1012,7 @@ func (s *BundleService) FlushMetadataUpdates() {
 			// Ensure PageSize is never zero to prevent divide by zero
 			// Use consistent PageSize with BundleService and factory defaults
 			if bundle.PageSize == 0 {
-				bundle.PageSize = s.defaultPageSize // Use service default (1000)
+				bundle.PageSize = s.defaultPageSize // Use service default (4096)
 				s.logger.Debugf("Set default PageSize of %d for bundle '%s'", s.defaultPageSize, bundleName)
 			}
 
@@ -1677,7 +1675,7 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 
 	// Initialize bundle properties if not set
 	if bundle.PageSize == 0 {
-		bundle.PageSize = s.defaultPageSize // Use service default (1000)
+		bundle.PageSize = s.defaultPageSize // Use service default (4096)
 
 	}
 

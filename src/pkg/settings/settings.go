@@ -10,6 +10,11 @@ import (
 // TODO: I will add support for environment variable overrides with ENV > CLI > YAML > defaults precedence
 // TODO: I will implement hot-reload functionality via SIGHUP signal to reload configuration without server restart
 
+// StorageConfig holds storage engine configuration
+type StorageConfig struct {
+	BundleFileMaxSizeMB int `yaml:"bundle_file_max_size_mb"` // Maximum bundle file size in MB before rotation (default: 32)
+}
+
 type Arguments struct {
 	// Storage Configuration
 	DataDir    string `yaml:"data_dir"`
@@ -41,6 +46,9 @@ type Arguments struct {
 	// Bundle Configuration
 	BundleBufferSize    int    `yaml:"bundle_buffer_size"`    // Size of the buffer for bundle reads
 	BundleStorageFormat string `yaml:"bundle_storage_format"` // Storage format: "json" or "binary" (default: "binary")
+
+	// Storage Engine Configuration
+	Storage StorageConfig `yaml:"storage"` // Storage engine configuration
 
 	// Authentication Configuration
 	AuthEnabled bool `yaml:"auth_enabled"` // Enable authentication
@@ -237,6 +245,11 @@ func GetSettings() *Arguments {
 			CreateDefaultDB:     true,
 			Version:             "0.1.0",
 			BundleStorageFormat: "binary", // Binary (BSON) format is the only supported format
+
+			// Storage Engine Configuration
+			Storage: StorageConfig{
+				BundleFileMaxSizeMB: 32, // Default 32MB per file
+			},
 
 			ExportRealtimeMetrics: false, // Export real-time metrics for monitoring
 

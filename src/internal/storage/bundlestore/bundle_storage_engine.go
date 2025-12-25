@@ -1,6 +1,7 @@
 package bundlestore
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -32,8 +33,18 @@ type BundleStorageEngine struct {
 	DataDirectory string
 	logger        *zap.SugaredLogger
 	serializer    format.BundleSerializer // Configurable serialization format
-	writeBuffers  map[string]*WriteBuffer // Per-bundle write buffers for batched I/O
+	writeBuffers  map[string]*WriteBuffer // Per-file write buffers for batched I/O (keyed by file path)
 	bufferMutex   sync.RWMutex            // Protects writeBuffers map
+
+	// MULTI-FILE STORAGE: Manifest managers per bundle to track segment files
+	manifestManagers      map[string]*ManifestManager // Per-bundle manifest managers (keyed by bundle name)
+	manifestManagersMutex sync.Mutex                  // Protects manifestManagers map
+
+	// COMPACTION: Background compaction scheduler with parallel workers
+	compactor           *BundleCompactor
+	compactionScheduler *CompactionScheduler
+	compactionContext   context.Context    // Context for graceful compaction shutdown
+	compactionCancel    context.CancelFunc // Cancel function for compaction goroutines
 
 	// CONCURRENCY CONTROL: Per-bundle write locks to prevent dirty reads
 	// RWMutex allows concurrent reads while blocking during writes
@@ -112,15 +123,27 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 
 	// Create a new bundle store
 	store := &BundleStorageEngine{
-		DataDirectory: dataDir,
-		fileManager:   fileManager,
-		logger:        logger,
-		serializer:    serializer,
-		writeBuffers:  make(map[string]*WriteBuffer),
-		writeLocks:    make(map[string]*sync.RWMutex),     // Initialize write locks map
-		writeVerifier: NewDocumentWriteVerifier(logger),   // Initialize write verification
-		writeLogger:   NewBundleWriteLogger(logger, 1000), // Keep last 1000 write operations
+		DataDirectory:    dataDir,
+		fileManager:      fileManager,
+		logger:           logger,
+		serializer:       serializer,
+		writeBuffers:     make(map[string]*WriteBuffer),
+		manifestManagers: make(map[string]*ManifestManager),  // Initialize manifest managers map
+		writeLocks:       make(map[string]*sync.RWMutex),     // Initialize write locks map
+		writeVerifier:    NewDocumentWriteVerifier(logger),   // Initialize write verification
+		writeLogger:      NewBundleWriteLogger(logger, 1000), // Keep last 1000 write operations
 	}
+
+	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
+	store.compactor = NewBundleCompactor(dataDir, store, logger)
+	store.compactionScheduler = NewCompactionScheduler(store.compactor, 3, logger)
+	store.compactionScheduler.Start()
+
+	// Start periodic compaction evaluator (PostgreSQL autovacuum-style background checks)
+	ctx, cancel := context.WithCancel(context.Background())
+	store.compactionContext = ctx
+	store.compactionCancel = cancel
+	go store.periodicCompactionEvaluator(ctx)
 
 	// Ensure the data directory exists
 	if err := os.MkdirAll(store.DataDirectory, 0755); err != nil {
@@ -208,8 +231,129 @@ func (bse *BundleStorageEngine) loadBundleMetadataFromFile(dataDir, fileName str
 
 // LoadDocumentPage loads a specific page of documents for a bundle
 func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
-	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+	// MULTI-FILE STORAGE: Load manifest to get all segment files
+	manifestMgr := bse.getOrCreateManifestManager(databaseName, bundleName)
+	manifest, err := manifestMgr.LoadOrCreate(databaseName, bundleName)
+	if err != nil {
+		// Fall back to legacy single-file format if manifest doesn't exist
+		return bse.loadDocumentPageLegacy(bundleName, databaseName, pageID, dataRootDir)
+	}
 
+	// Check if we have any files in the manifest
+	if len(manifest.Files) == 0 {
+		// No files yet - fall back to legacy format
+		return bse.loadDocumentPageLegacy(bundleName, databaseName, pageID, dataRootDir)
+	}
+
+	// MULTI-FILE SCANNING: Load documents from all segment files and merge
+	pageSize := uint32(4096) // Use consistent page size with BundleService (power of 2)
+	startIndex := pageID * pageSize
+	endIndex := startIndex + pageSize
+
+	// Merged documents map with last-write-wins semantics
+	// Later files (higher fileID) overwrite earlier files
+	mergedDocuments := make(map[string]models.Document)
+	var totalDocsAcrossFiles uint32
+
+	// Scan all files in order (fileID ascending)
+	for _, fileInfo := range manifest.Files {
+		bundleDir := GetBundleDirectory(databaseName, bundleName)
+		filePath := filepath.Join(bundleDir, fileInfo.FileName)
+
+		// BLOOM FILTER OPTIMIZATION: Skip files that definitely don't contain any documents in this page
+		// This reduces disk I/O by ~99% for point queries
+		if fileInfo.BloomFilterData != "" {
+			bf, err := DeserializeBloomFilter(
+				fileInfo.BloomFilterData,
+				fileInfo.BloomFilterSize,
+				fileInfo.BloomFilterHashes,
+			)
+			if err == nil && bf != nil {
+				// For page queries, we can't use bloom filter effectively
+				// But we track this for future optimization (e.g., range queries)
+				// For now, bloom filters are primarily used during compaction
+				if bse.logger != nil && settings.GetSettings().Debug {
+					bse.logger.Debugf("Bloom filter available for file %s (size: %d bits)",
+						fileInfo.FileName, fileInfo.BloomFilterSize)
+				}
+			}
+		}
+
+		// Check if file exists (skip if not - may have been compacted)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			if bse.logger != nil && settings.GetSettings().Debug {
+				bse.logger.Debugf("Skipping non-existent file %s (likely compacted)", filePath)
+			}
+			continue
+		}
+
+		// Read the file
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
+			continue
+		}
+
+		// Parse documents from this file in the page range
+		fileDocuments, fileTotalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data)
+		if err != nil {
+			bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
+			continue
+		}
+
+		// Merge documents with last-write-wins
+		// Documents in later files overwrite documents from earlier files
+		for docID, doc := range fileDocuments {
+			mergedDocuments[docID] = doc
+		}
+
+		totalDocsAcrossFiles += fileTotalDocs
+	}
+
+	// GLOBAL TOMBSTONE FILTERING: Remove documents with empty DocumentID
+	// Tombstone markers (0xDEADDEAD) are already filtered by parseAppendedDocumentsRange
+	// but we also filter empty DocumentID as a safety measure
+	filteredDocuments := make(map[string]models.Document)
+	for docID, doc := range mergedDocuments {
+		// Skip documents with empty ID (defensive check)
+		if doc.DocumentID == "" {
+			continue
+		}
+		filteredDocuments[docID] = doc
+	}
+
+	page := &models.DocumentPage{
+		PageID:    pageID,
+		BundleID:  bundleName,
+		Documents: filteredDocuments,
+		LoadedAt:  time.Now(),
+		IsDirty:   false,
+	}
+
+	// Set pagination pointers based on actual document count
+	if pageID > 0 {
+		prevPageID := pageID - 1
+		page.PreviousPageID = &prevPageID
+	}
+
+	totalPages := (totalDocsAcrossFiles + pageSize - 1) / pageSize
+	if pageID < totalPages-1 {
+		nextPageID := pageID + 1
+		page.NextPageID = &nextPageID
+	}
+
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Loaded page %d for bundle %s: merged %d files, %d documents after filtering",
+			pageID, bundleName, len(manifest.Files), len(filteredDocuments))
+	}
+
+	return page, nil
+}
+
+// loadDocumentPageLegacy loads a page from the legacy single-file format
+// This provides backward compatibility during migration to multi-file storage
+func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
 	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 
 	// Read the bundle file header to get metadata
@@ -217,17 +361,15 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bundle file '%s': %w", filePath, err)
 	}
-	//	testRawBundleData(data)
+
 	// Use the configured serializer to load bundle metadata for format validation
-	// This ensures we understand the file format and can process it correctly
 	_, err = bse.serializer.DeserializeBundleMetadata(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse bundle metadata for document extraction: %w", err)
 	}
 
 	// PERFORMANCE FIX: Use efficient page-based loading instead of loading all documents
-	// This implements true virtual pagination over append-only storage
-	pageSize := uint32(1000) // Use consistent page size with BundleService
+	pageSize := uint32(4096) // Use consistent page size with BundleService (power of 2)
 	startIndex := pageID * pageSize
 	endIndex := startIndex + pageSize
 
@@ -256,9 +398,6 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 		nextPageID := pageID + 1
 		page.NextPageID = &nextPageID
 	}
-
-	// bse.logger.Infof("Efficiently loaded page %d for bundle %s with %d documents (total docs: %d, total pages: %d)",
-	// 	pageID, bundleName, len(pageDocuments), totalDocs, totalPages)
 
 	return page, nil
 }
@@ -785,7 +924,7 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	}
 
 	// Calculate page size once
-	pageSize := uint32(1000)
+	pageSize := uint32(4096)
 	if bundle.PageSize > 0 {
 		pageSize = uint32(bundle.PageSize)
 	}
@@ -949,7 +1088,7 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 
 	// Always calculate PageCount from TotalDocuments to ensure consistency
 	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
-	pageSize := uint32(1000)
+	pageSize := uint32(4096)
 	if bundle.PageSize > 0 {
 		pageSize = uint32(bundle.PageSize)
 	}
@@ -1132,7 +1271,7 @@ func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, 
 
 	// Always calculate PageCount from TotalDocuments to ensure consistency
 	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
-	pageSize := uint32(1000)
+	pageSize := uint32(4096)
 	if bundle.PageSize > 0 {
 		pageSize = uint32(bundle.PageSize)
 	}
@@ -1206,14 +1345,60 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	lock.Lock()
 	defer lock.Unlock()
 
-	// Track the file offset where this write will occur for corruption debugging
-	// Get current file size to know where write will happen
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
-	fileInfo, err := os.Stat(filePath)
-	var writeOffset int64 = 0
-	if err == nil {
-		writeOffset = fileInfo.Size()
+	// MULTI-FILE STORAGE: Determine current active file and check if rotation is needed
+	// Get or create manifest manager for this bundle
+	manifestMgr := b.getOrCreateManifestManager(bundle.Database.Name, bundle.Name)
+	manifest, err := manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load bundle manifest: %w", err)
+	}
+
+	// Get the current active (writable) file
+	var currentFileID uint32 = 1
+	if manifest.ActiveFileID > 0 {
+		currentFileID = uint32(manifest.ActiveFileID)
+	}
+
+	// Construct the current file path
+	bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
+	filePath := filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+
+	// CRITICAL FIX: Ensure the current file exists in manifest
+	// On first write, manifest is created but has no files yet
+	// Check if current file is tracked, if not, add it
+	fileExistsInManifest := false
+	for _, f := range manifest.Files {
+		if f.FileID == int(currentFileID) {
+			fileExistsInManifest = true
+			break
+		}
+	}
+	if !fileExistsInManifest {
+		// Add the current file to manifest (happens on first write to new bundle)
+		fileName := fmt.Sprintf("%06d.bnd", currentFileID)
+		if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+			return 0, fmt.Errorf("failed to add initial file to manifest: %w", err)
+		}
+		if b.logger != nil && settings.GetSettings().Debug {
+			b.logger.Infow("Added initial file to manifest",
+				"bundle", bundle.Name,
+				"fileID", currentFileID,
+				"fileName", fileName)
+		}
+	}
+
+	// Check if file rotation is needed (file size exceeds threshold)
+	// TODO: add configuration override per bundle when per-bundle tuning becomes necessary
+	maxSizeBytes := int64(settings.GetSettings().Storage.BundleFileMaxSizeMB) * 1024 * 1024
+	rotationThreshold := int64(float64(maxSizeBytes) * 1.1) // ±10% variance tolerance
+
+	fileInfo, statErr := os.Stat(filePath)
+	needsRotation := false
+	var currentFileSize int64 = 0
+
+	if statErr == nil {
+		currentFileSize = fileInfo.Size()
+		needsRotation = currentFileSize >= rotationThreshold
 	}
 
 	// PERFORMANCE FIX: Remove excessive logging in hot path
@@ -1222,7 +1407,57 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		b.logger.Infow("Appending document to bundle file",
 			"bundle", bundle.Name,
 			"for database", bundle.Database.Name,
-			"documentID", document.DocumentID)
+			"documentID", document.DocumentID,
+			"fileID", currentFileID,
+			"fileSize", currentFileSize,
+			"needsRotation", needsRotation)
+	}
+
+	// Handle file rotation if needed
+	if needsRotation {
+		// TODO:  add backpressure handling when write rate exceeds compaction rate
+		if b.logger != nil {
+			b.logger.Infow("Rotating bundle file - size threshold reached",
+				"bundle", bundle.Name,
+				"currentFileID", currentFileID,
+				"fileSize", currentFileSize,
+				"threshold", rotationThreshold)
+		}
+
+		// Close current write buffer and flush pending data
+		if err := b.CloseWriteBuffer(bundle.Name); err != nil {
+			return 0, fmt.Errorf("failed to close write buffer before rotation: %w", err)
+		}
+
+		// Update manifest: freeze current file and mark as immutable
+		if manifest.ActiveFileID > 0 {
+			if err := manifestMgr.FreezeFile(int(currentFileID)); err != nil {
+				return 0, fmt.Errorf("failed to freeze file in manifest: %w", err)
+			}
+		}
+
+		// Create new file with incremented ID
+		currentFileID++
+		filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+
+		// Add new active file to manifest
+		fileName := fmt.Sprintf("%06d.bnd", currentFileID)
+		if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+			return 0, fmt.Errorf("failed to add new file to manifest: %w", err)
+		}
+
+		if b.logger != nil {
+			b.logger.Infow("Created new bundle file segment",
+				"bundle", bundle.Name,
+				"newFileID", currentFileID,
+				"filePath", filePath)
+		}
+	}
+
+	// Track the file offset where this write will occur for corruption debugging
+	writeOffset := currentFileSize
+	if needsRotation {
+		writeOffset = 0 // New file starts at offset 0
 	}
 
 	// Validate inputs (keep critical validation)
@@ -1238,8 +1473,8 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 
 	// CRITICAL: Calculate page ID BEFORE incrementing document count
 	// Page ID is based on current position: pageID = currentDocCount / pageSize
-	// Use consistent page size with virtual pagination (1000 documents per page)
-	pageSize := uint32(1000)
+	// Use consistent page size with virtual pagination (4096 documents per page, power of 2)
+	pageSize := uint32(4096)
 	if bundle.PageSize > 0 {
 		pageSize = uint32(bundle.PageSize)
 	}
@@ -1311,6 +1546,19 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		return 0, fmt.Errorf("failed to flush write buffer: %w", err)
 	}
 
+	// Update manifest stats after successful write
+	// TODO: I will batch these updates when profiling shows manifest writes are a bottleneck
+	// TODO: I will track docCount and tombstones incrementally for accurate manifest stats
+	newFileSize := currentFileSize + int64(totalWriteSize)
+	// For now, update only file size; docCount tracking will be added in future iterations
+	if err := manifestMgr.UpdateFileStats(int(currentFileID), 0, 0, 0, 0, newFileSize); err != nil {
+		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, totalWriteSize, fmt.Errorf("failed to update manifest stats: %w", err))
+		// Non-fatal: continue even if manifest update fails
+		if b.logger != nil {
+			b.logger.Warnf("Failed to update manifest stats for bundle %s file %d: %v", bundle.Name, currentFileID, err)
+		}
+	}
+
 	// Log successful write operation
 	b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, totalWriteSize, nil)
 
@@ -1336,13 +1584,72 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 			"bundle", bundle.Name,
 			"documentID", document.DocumentID,
 			"pageID", pageID,
+			"fileID", currentFileID,
 			"documentSize", headerSize,
 			"newTotalDocuments", bundle.TotalDocuments,
 			"newPageCount", bundle.PageCount)
 	}
 
+	// COMPACTION INTEGRATION: Trigger compaction evaluation after write
+	// Don't block the write path - evaluate asynchronously
+	// PostgreSQL autovacuum-inspired: check triggers after mutations
+	go func() {
+		if b.compactionScheduler != nil {
+			b.compactionScheduler.EvaluateBundle(
+				bundle.Database.Name,
+				bundle.Name,
+			)
+		}
+	}()
+
 	// Return the page ID where this document was stored
 	return pageID, nil
+}
+
+// periodicCompactionEvaluator runs background compaction checks
+// PostgreSQL autovacuum-inspired: periodically check all bundles for compaction triggers
+// This ensures compaction runs even when writes stop
+func (b *BundleStorageEngine) periodicCompactionEvaluator(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second) // Check every 60 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			b.evaluateAllBundlesForCompaction()
+		}
+	}
+}
+
+// evaluateAllBundlesForCompaction evaluates all active bundles for compaction
+// This is called by the periodic evaluator to ensure compaction runs even without writes
+func (b *BundleStorageEngine) evaluateAllBundlesForCompaction() {
+	// Take snapshot of manifest managers to avoid holding lock during evaluation
+	b.manifestManagersMutex.Lock()
+	managerKeys := make([]string, 0, len(b.manifestManagers))
+	for key := range b.manifestManagers {
+		managerKeys = append(managerKeys, key)
+	}
+	b.manifestManagersMutex.Unlock()
+
+	// Evaluate each bundle asynchronously
+	for _, key := range managerKeys {
+		// Parse manager key: "<database>:<bundle>"
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		dbName, bundleName := parts[0], parts[1]
+
+		// Async evaluation - don't block ticker
+		go func(db, bundle string) {
+			if b.compactionScheduler != nil {
+				b.compactionScheduler.EvaluateBundle(db, bundle)
+			}
+		}(dbName, bundleName)
+	}
 }
 
 // getWriteLock gets or creates a write lock for a specific bundle
@@ -1361,10 +1668,34 @@ func (b *BundleStorageEngine) getWriteLock(bundleName string) *sync.RWMutex {
 	return lock
 }
 
-// getOrCreateWriteBuffer gets or creates a write buffer for the specified bundle
+// getOrCreateManifestManager gets or creates a manifest manager for a specific bundle
+// Manifest managers are cached per bundle for performance
+func (b *BundleStorageEngine) getOrCreateManifestManager(databaseName, bundleName string) *ManifestManager {
+	// Use bundleName as key (unique per database context)
+	managerKey := databaseName + ":" + bundleName
+
+	b.manifestManagersMutex.Lock()
+	defer b.manifestManagersMutex.Unlock()
+
+	if manager, exists := b.manifestManagers[managerKey]; exists {
+		return manager
+	}
+
+	// Create new manifest manager for this bundle
+	manager := NewManifestManager(b.DataDirectory, databaseName, bundleName, b.logger)
+	b.manifestManagers[managerKey] = manager
+	return manager
+}
+
+// getOrCreateWriteBuffer gets or creates a write buffer for the specified file
+// MULTI-FILE STORAGE: Write buffers are now keyed by filePath instead of bundleName
+// This allows multiple active write buffers per bundle (one per file segment)
 func (b *BundleStorageEngine) getOrCreateWriteBuffer(bundleName, filePath string) (*WriteBuffer, error) {
+	// Use file path as key to support multiple files per bundle
+	bufferKey := filePath
+
 	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bundleName]
+	buffer, exists := b.writeBuffers[bufferKey]
 	b.bufferMutex.RUnlock()
 
 	if exists {
@@ -1376,8 +1707,19 @@ func (b *BundleStorageEngine) getOrCreateWriteBuffer(bundleName, filePath string
 	defer b.bufferMutex.Unlock()
 
 	// Double-check after acquiring write lock
-	if buffer, exists := b.writeBuffers[bundleName]; exists {
+	if buffer, exists := b.writeBuffers[bufferKey]; exists {
 		return buffer, nil
+	}
+
+	// Ensure the bundle directory exists
+	// Extract database and bundle names from file path (format: data_files/<db>/<bundle>/<file>.bnd)
+	pathParts := strings.Split(filePath, string(filepath.Separator))
+	if len(pathParts) >= 3 {
+		databaseName := pathParts[len(pathParts)-3]
+		bundleName := pathParts[len(pathParts)-2]
+		if err := EnsureBundleDirectory(databaseName, bundleName); err != nil {
+			return nil, fmt.Errorf("failed to create bundle directory: %w", err)
+		}
 	}
 
 	// Open file in append mode with O_CREATE to handle first-time creation
@@ -1389,25 +1731,57 @@ func (b *BundleStorageEngine) getOrCreateWriteBuffer(bundleName, filePath string
 
 	// Create write buffer with 64KB buffer size for optimal performance
 	buffer = NewWriteBuffer(file, 65536)
-	b.writeBuffers[bundleName] = buffer
+	b.writeBuffers[bufferKey] = buffer
 
 	return buffer, nil
 }
 
-// FlushWriteBuffers flushes all write buffers for a bundle
+// FlushWriteBuffers flushes all write buffers for a specific bundle
+// MULTI-FILE STORAGE: Flushes all file buffers associated with the bundle
 func (b *BundleStorageEngine) FlushWriteBuffers(bundleName string) error {
 	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bundleName]
-	b.bufferMutex.RUnlock()
+	defer b.bufferMutex.RUnlock()
 
-	if exists {
-		return buffer.Flush()
+	var errors []error
+	bundlePattern := "/" + bundleName + "/"
+
+	for bufferKey, buffer := range b.writeBuffers {
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
+		if err := buffer.Flush(); err != nil {
+			b.logger.Warnf("Failed to flush buffer for %s: %v", bufferKey, err)
+			errors = append(errors, err)
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to flush %d write buffers for bundle %s", len(errors), bundleName)
+	}
+
+	// Evaluate compaction triggers after successful flush
+	// This is similar to PostgreSQL's autovacuum triggering after significant write activity
+	if b.compactionScheduler != nil {
+		// Extract database name from buffer keys
+		for bufferKey := range b.writeBuffers {
+			if strings.Contains(bufferKey, bundlePattern) {
+				// Parse database name from path (data_files/<database>/<bundle>)
+				parts := strings.Split(bufferKey, "/")
+				if len(parts) >= 3 {
+					databaseName := parts[len(parts)-3]
+					b.compactionScheduler.EvaluateBundle(databaseName, bundleName)
+					break // Only evaluate once per bundle
+				}
+			}
+		}
 	}
 
 	return nil
 }
 
 // FlushAllWriteBuffers flushes all write buffers for all bundles
+// MULTI-FILE STORAGE: Now flushes all file buffers (multiple files per bundle)
 func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 	b.bufferMutex.RLock()
 	defer b.bufferMutex.RUnlock()
@@ -1415,15 +1789,15 @@ func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 	var errors []string
 	flushedCount := 0
 
-	for bundleName, buffer := range b.writeBuffers {
+	for bufferKey, buffer := range b.writeBuffers {
 		if err := buffer.Flush(); err != nil {
-			errorMsg := fmt.Sprintf("failed to flush buffer for bundle '%s': %v", bundleName, err)
+			errorMsg := fmt.Sprintf("failed to flush buffer for file '%s': %v", bufferKey, err)
 			b.logger.Warnf(errorMsg)
 			errors = append(errors, errorMsg)
 		} else {
 			flushedCount++
 			if b.logger != nil && settings.GetSettings().Debug {
-				b.logger.Debugf("Successfully flushed write buffer for bundle '%s'", bundleName)
+				b.logger.Debugf("Successfully flushed write buffer for file '%s'", bufferKey)
 			}
 		}
 	}
@@ -1439,111 +1813,172 @@ func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 	return nil
 }
 
-// CloseWriteBuffer closes and removes the write buffer for a specific bundle
-// This is CRITICAL after operations that change file size (like appending tombstones)
+// CloseWriteBuffer closes and removes all write buffers for a specific bundle
+// MULTI-FILE STORAGE: Now closes all file buffers associated with the bundle
+// This is CRITICAL after operations that change file size (like appending tombstones or file rotation)
 // to ensure subsequent file opens get fresh metadata (correct file size).
 func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 	b.bufferMutex.Lock()
 	defer b.bufferMutex.Unlock()
 
-	// ALWAYS log this to debug the issue
-	//b.logger.Infof("DEBUG: CloseWriteBuffer called for bundle '%s'", bundleName)
+	// Find all buffers for this bundle (buffers are keyed by file path)
+	// Close all buffers that belong to this bundle
+	var errors []error
+	bundlePattern := "/" + bundleName + "/"
 
-	if buffer, exists := b.writeBuffers[bundleName]; exists {
-		//b.logger.Infof("DEBUG: Found write buffer for bundle '%s', closing it...", bundleName)
+	for bufferKey, buffer := range b.writeBuffers {
+		// Check if this buffer belongs to the specified bundle
+		// Buffer keys are file paths like: data_files/dbname/bundlename/000001.bnd
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
 		if err := buffer.Close(); err != nil {
-			b.logger.Warnf("Failed to close write buffer for bundle %s: %v", bundleName, err)
-			return err
+			b.logger.Warnf("Failed to close write buffer for %s: %v", bufferKey, err)
+			errors = append(errors, err)
 		}
 		// Remove from map so next write creates a fresh buffer
-		delete(b.writeBuffers, bundleName)
-		//b.logger.Infof("DEBUG: Successfully closed and removed write buffer for bundle '%s'", bundleName)
-	} else {
-		//b.logger.Infof("DEBUG: No write buffer found for bundle '%s' - nothing to close", bundleName)
+		delete(b.writeBuffers, bufferKey)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to close %d write buffers for bundle %s", len(errors), bundleName)
 	}
 
 	return nil
 }
 
-// DiscardWriteBuffer discards the write buffer for a specific bundle WITHOUT flushing
+// DiscardWriteBuffer discards all write buffers for a specific bundle WITHOUT flushing
+// MULTI-FILE STORAGE: Now discards all file buffers associated with the bundle
 // This is used during transaction rollback to abandon buffered writes
 func (b *BundleStorageEngine) DiscardWriteBuffer(bundleName string) error {
 	b.bufferMutex.Lock()
 	defer b.bufferMutex.Unlock()
 
-	if buffer, exists := b.writeBuffers[bundleName]; exists {
+	var errors []error
+	bundlePattern := "/" + bundleName + "/"
+
+	for bufferKey, buffer := range b.writeBuffers {
+		// Check if this buffer belongs to the specified bundle
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
 		if err := buffer.Discard(); err != nil {
-			b.logger.Warnf("Failed to discard write buffer for bundle %s: %v", bundleName, err)
-			return err
+			b.logger.Warnf("Failed to discard write buffer for %s: %v", bufferKey, err)
+			errors = append(errors, err)
 		}
 		// Remove from map so next write creates a fresh buffer
-		delete(b.writeBuffers, bundleName)
-		b.logger.Debugf("Discarded write buffer for bundle '%s' without flushing", bundleName)
+		delete(b.writeBuffers, bufferKey)
+		b.logger.Debugf("Discarded write buffer for '%s' without flushing", bufferKey)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to discard %d write buffers for bundle %s", len(errors), bundleName)
 	}
 
 	return nil
 }
 
 // GetBufferedDocumentsForTransaction returns all buffered documents for a specific transaction
+// MULTI-FILE STORAGE: Aggregates documents from all file buffers for this bundle
 func (b *BundleStorageEngine) GetBufferedDocumentsForTransaction(bundleName string, txID string) ([]*models.Document, error) {
 	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bundleName]
-	b.bufferMutex.RUnlock()
+	defer b.bufferMutex.RUnlock()
 
-	if !exists {
-		return nil, nil // No buffer = no buffered documents
+	var allDocs []*models.Document
+	bundlePattern := "/" + bundleName + "/"
+
+	for bufferKey, buffer := range b.writeBuffers {
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
+		docs, err := buffer.GetDocumentsForTransaction(txID)
+		if err != nil {
+			return nil, err
+		}
+		allDocs = append(allDocs, docs...)
 	}
 
-	return buffer.GetDocumentsForTransaction(txID)
+	return allDocs, nil
 }
 
 // MarkDocumentDiscarded marks a document as discarded (for rollback)
+// MULTI-FILE STORAGE: Marks document in whichever buffer contains it
 func (b *BundleStorageEngine) MarkDocumentDiscarded(bundleName string, docID string) error {
 	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bundleName]
-	b.bufferMutex.RUnlock()
+	defer b.bufferMutex.RUnlock()
 
-	if !exists {
-		return nil // No buffer = document already flushed, nothing to mark
+	bundlePattern := "/" + bundleName + "/"
+
+	for bufferKey, buffer := range b.writeBuffers {
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
+		// Mark in this buffer (no-op if document not in this buffer)
+		buffer.MarkDiscarded(docID)
 	}
 
-	buffer.MarkDiscarded(docID)
 	return nil
 }
 
-// IsDocumentBuffered checks if a document is currently in the write buffer
+// IsDocumentBuffered checks if a document is currently in any write buffer for this bundle
+// MULTI-FILE STORAGE: Checks all file buffers for this bundle
 func (b *BundleStorageEngine) IsDocumentBuffered(bundleName string, docID string) bool {
 	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bundleName]
-	b.bufferMutex.RUnlock()
+	defer b.bufferMutex.RUnlock()
 
-	if !exists {
-		return false
+	bundlePattern := "/" + bundleName + "/"
+
+	for bufferKey, buffer := range b.writeBuffers {
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
+		if buffer.IsDocumentAvailable(docID) {
+			return true
+		}
 	}
 
-	return buffer.IsDocumentAvailable(docID)
+	return false
 }
 
-// GetDiscardedDocuments returns document IDs that were discarded in a bundle's buffer
+// GetDiscardedDocuments returns document IDs that were discarded in a bundle's buffers
+// MULTI-FILE STORAGE: Aggregates discarded documents from all file buffers
 func (b *BundleStorageEngine) GetDiscardedDocuments(bundleName string) []string {
 	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bundleName]
-	b.bufferMutex.RUnlock()
+	defer b.bufferMutex.RUnlock()
 
-	if !exists {
-		return nil
+	var allDiscarded []string
+	bundlePattern := "/" + bundleName + "/"
+
+	for bufferKey, buffer := range b.writeBuffers {
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
+		discarded := buffer.GetDiscardedDocuments()
+		allDiscarded = append(allDiscarded, discarded...)
 	}
 
-	return buffer.GetDiscardedDocuments()
+	return allDiscarded
 }
 
 // ClearDiscardedDocuments removes the specified document IDs from the discarded set
+// MULTI-FILE STORAGE: Clears from all file buffers for this bundle
 func (b *BundleStorageEngine) ClearDiscardedDocuments(bundleName string, docIDs []string) {
 	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bundleName]
-	b.bufferMutex.RUnlock()
+	defer b.bufferMutex.RUnlock()
 
-	if exists {
+	bundlePattern := "/" + bundleName + "/"
+
+	for bufferKey, buffer := range b.writeBuffers {
+		if !strings.Contains(bufferKey, bundlePattern) {
+			continue
+		}
+
 		buffer.ClearDiscardedDocuments(docIDs)
 	}
 }
@@ -1561,6 +1996,29 @@ func (b *BundleStorageEngine) CloseWriteBuffers() error {
 
 	// Clear the map
 	b.writeBuffers = make(map[string]*WriteBuffer)
+	return nil
+}
+
+// Shutdown gracefully stops the compaction scheduler and closes all resources
+func (b *BundleStorageEngine) Shutdown() error {
+	b.logger.Info("Shutting down bundle storage engine...")
+
+	// Cancel compaction context to stop periodic evaluator
+	if b.compactionCancel != nil {
+		b.compactionCancel()
+	}
+
+	// Stop compaction scheduler
+	if b.compactionScheduler != nil {
+		b.compactionScheduler.Stop()
+	}
+
+	// Close all write buffers
+	if err := b.CloseWriteBuffers(); err != nil {
+		b.logger.Warnf("Error closing write buffers during shutdown: %v", err)
+	}
+
+	b.logger.Info("Bundle storage engine shutdown complete")
 	return nil
 }
 
@@ -1742,7 +2200,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 
 			// Convert to Document struct
 			// STEP 1: Use document pool to reduce allocations
-			// TODO: Option C: Implement reference counting for automatic pool return when last consumer releases document
+			// TODO: Implement reference counting for automatic pool return when last consumer releases document
 			doc := document.GetPooledDocument()
 			if docID, ok := docMap["DocumentID"].(string); ok {
 				doc.DocumentID = docID
@@ -2001,7 +2459,7 @@ func (b *BundleStorageEngine) parseAppendedDocuments(data []byte) (map[string]mo
 
 			// Convert to Document struct
 			// STEP 1: Use document pool to reduce allocations
-			// TODO: Option C: Implement reference counting for automatic pool return when last consumer releases document
+			// TODO: Implement reference counting for automatic pool return when last consumer releases document
 			doc := document.GetPooledDocument()
 			if docID, ok := docMap["DocumentID"].(string); ok {
 				doc.DocumentID = docID

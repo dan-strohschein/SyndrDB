@@ -36,9 +36,9 @@ func (f *BundleFactoryImpl) NewBundle(name string, description string) *models.B
 		IndexNames:        []string{},
 		Constraints:       make(map[string]models.Constraint),
 		// Initialize pagination metadata to prevent divide by zero
-		// Use consistent PageSize with BundleService default (1000)
+		// Use consistent PageSize with BundleService default (4096)
 		TotalDocuments: 0,
-		PageSize:       1000, // Match BundleService defaultPageSize
+		PageSize:       4096, // Match BundleService defaultPageSize (power of 2)
 		PageCount:      0,
 	}
 }

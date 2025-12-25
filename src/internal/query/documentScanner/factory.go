@@ -259,7 +259,7 @@ func (ba *BundleAdapter) getSafePageCount() uint32 {
 	// CRITICAL FIX: If PageCount is 0 but TotalDocuments > 0, calculate from documents
 	// This handles cases where metadata persistence failed but documents exist
 	if pageCount == 0 && ba.bundle.TotalDocuments > 0 {
-		pageSize := uint32(1000) // Standard page size
+		pageSize := uint32(4096) // Standard page size (power of 2)
 		pageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
 		ba.logger.Warnf("RECOVERY: PageCount was 0 but TotalDocuments=%d, calculated pageCount=%d",
 			ba.bundle.TotalDocuments, pageCount)
@@ -549,7 +549,7 @@ func (ba *BundleAdapter) HasIndexOnField(fieldName string) bool {
 // while allowing legitimate large datasets. Returns validated pageCount.
 // DEPRECATED: Use getSafePageCount() instead for consistency
 func (ba *BundleAdapter) validatePageCount(caller string) uint32 {
-	const pageSize = uint32(1000)                // Standard page size
+	const pageSize = uint32(4096)                // Standard page size
 	maxReasonablePages := MaxReasonablePageCount // Use global constant
 
 	pageCount := uint32(ba.bundle.PageCount)

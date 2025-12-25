@@ -28,6 +28,19 @@ Switches the current session context to use a specific database.
 USE "<DATABASE_NAME>";
 ```
 
+## Server Configuration Commands
+
+### SET SYSTEM
+Dynamically adjusts server configuration parameters without requiring a restart.
+
+#### Storage Configuration
+
+**Set Bundle File Size Threshold:**
+```
+SET SYSTEM bundle_file_max_size_mb = 64;
+```
+Changes the maximum size (in MB) for bundle files before rotation. New value applies to subsequent file rotations. Default: 32MB, Range: 16-512MB.
+
 ## Bundle Management Commands
 
 ### CREATE BUNDLE
