@@ -384,7 +384,7 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		logger:          logger,
 		bundleMetadata:  make(map[string]*models.Bundle),
 		documentPages:   make(map[string]*models.DocumentPage),
-	defaultPageSize: 4096, // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
+		defaultPageSize: 4096, // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
 		// OPTIMIZATION: Use configurable performance settings
 		indexUpdateBuffer:    make([]IndexUpdate, 0, globalSettings.MetadataBatchSize),
 		indexUpdateBatchSize: globalSettings.MetadataBatchSize,                                       // INCREASED: 50 → 500
@@ -4183,6 +4183,31 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 		return fmt.Errorf("failed to acquire write lock: %w", err)
 	}
 	defer s.ReleaseBundleWriteLock(bundle.Name)
+
+	// TODO: Unique constraint validation disabled for AddDocumentToBundleByStruct
+	// This method is primarily used for primary catalog initialization where we trust
+	// the developer to create bundles correctly. Enabling validation would require
+	// creating unique indexes for all catalog bundles, which adds unnecessary overhead.
+	// If needed in the future, add validation selectively based on bundle/database context.
+	//
+	// Validate unique constraints for all IsUnique fields
+	// Convert Document struct to DocumentCommand for validation
+	// docCommand := &models.DocumentCommand{
+	// 	BundleName: bundle.Name,
+	// 	Fields:     make([]models.KeyValue, 0, len(document.Fields)),
+	// }
+	// for fieldName, field := range document.Fields {
+	// 	docCommand.Fields = append(docCommand.Fields, models.KeyValue{
+	// 		Key:   fieldName,
+	// 		Value: field.Value,
+	// 	})
+	// }
+	//
+	// uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
+	// err := uniqueValidator.ValidateUniqueConstraints(bundle, docCommand)
+	// if err != nil {
+	// 	return fmt.Errorf("unique constraint validation failed: %w", err)
+	// }
 
 	// Schedule deferred metadata update instead of immediate calculation
 	s.scheduleMetadataUpdate(bundle.Name, "increment_docs", 1)

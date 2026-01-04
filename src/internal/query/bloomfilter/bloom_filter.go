@@ -434,7 +434,7 @@ func (bf *BloomFilter) SetBitArray(bitArray []uint64) error {
 	if uint64(len(bitArray)) != expectedSize {
 		return fmt.Errorf("bit array size mismatch: got %d, expected %d", len(bitArray), expectedSize)
 	}
-	
+
 	bf.bitArray = make([]uint64, len(bitArray))
 	copy(bf.bitArray, bitArray)
 	return nil

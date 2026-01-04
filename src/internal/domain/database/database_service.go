@@ -200,8 +200,8 @@ func (s *DatabaseService) UpdateDatabase(databaseCommand models.DatabaseCommand)
 		return fmt.Errorf("failed to get database: %w", err)
 	}
 
-	// Update in-memory database
-	s.Databases[db.DatabaseID] = db
+	// Update in-memory database (use Name as key for consistency)
+	s.Databases[db.Name] = db
 
 	// Update on disk
 	err = s.Store.UpdateDatabaseDataFile(db)

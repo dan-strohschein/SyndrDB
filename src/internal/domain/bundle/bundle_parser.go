@@ -841,12 +841,6 @@ func ParseAddRelationshipCommand(command string) (*models.RelationshipCommand, e
 	// command = strings.ReplaceAll(command, "\t", " ")
 	command = strings.TrimSuffix(command, ";")
 
-	/*
-	   UPDATE BUNDLE "Authors"
-	   ADD RELATIONSHIP ("1toMany", "Authors", "DocumentID", "Books", "AuthorsID");
-
-	*/
-
 	// Regular expression to parse the ADD RELATIONSHIP command
 	// UPDATE BUNDLE "<SourceBundleName>" ADD RELATIONSHIP ("<RelationshipName>" {"<RelationshipType>", "<SourceBundle>", "<SourceFieldName>", "<DestinationBundleName>", "<DestinationFieldName>"})
 	relationshipRegex := regexp.MustCompile(`UPDATE\s+BUNDLE\s+"([^"]+)"\s+ADD\s+RELATIONSHIP\s*\(\s*"([^"]+)"\s*\{\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*\}\s*\)`)

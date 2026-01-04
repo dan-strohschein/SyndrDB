@@ -28,10 +28,12 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
 			//"BundleID":    {Name: "BundleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
-			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
-			"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"FilePath":   {Name: "FilePath", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"DatabaseID":   {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"FilePath":     {Name: "FilePath", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"DatabaseName": {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"FieldCount":   {Name: "FieldCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
 		},
 	}
 	dbBundle := &models.Bundle{
@@ -85,6 +87,9 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 			"IsLockedOut":         {Name: "IsLockedOut", Type: "BOOLEAN", IsRequired: false, IsUnique: false, DefaultValue: "false"},
 			"FailedLoginAttempts": {Name: "FailedLoginAttempts", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
 			"LockoutExpiresOn":    {Name: "LockoutExpiresOn", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"DatabaseName":        {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"FieldCount":          {Name: "FieldCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"FilePath":            {Name: "FilePath", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 		},
 	}
 	users_Bundle := &models.Bundle{
@@ -106,6 +111,9 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
 			"PermissionID": {Name: "PermissionID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"DatabaseName": {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"FieldCount":   {Name: "FieldCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"FilePath":     {Name: "FilePath", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 		},
 	}
 	permissions_Bundle := &models.Bundle{
@@ -146,9 +154,12 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create databaseusers bundle
 	databaseUsers_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
-			"UserID":     {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
-			"DatabaseID": {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"UserID":       {Name: "UserID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"DatabaseID":   {Name: "DatabaseID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"DatabaseName": {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"FieldCount":   {Name: "FieldCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"FilePath":     {Name: "FilePath", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 		},
 	}
 	databaseUsers_Bundle := &models.Bundle{
@@ -167,9 +178,12 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// create roles bundle
 	roles_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{
-			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
-			"RoleID":     {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
-			"Name":       {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"RoleID":       {Name: "RoleID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"Name":         {Name: "Name", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"DatabaseName": {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"FieldCount":   {Name: "FieldCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"FilePath":     {Name: "FilePath", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
 		},
 	}
 	roles_Bundle := &models.Bundle{
@@ -575,10 +589,26 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(dbBundle.Name),
 	}
+	field3 := models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(dbBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 := models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 := models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", dbBundle.Name)),
+	}
+
 	fields := map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	dbBundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
@@ -607,15 +637,15 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(bundles_Bundle.Name),
 	}
-	field3 := models.Field{
+	field3 = models.Field{
 		Name:  "FieldCount",
 		Value: models.NewIntValue(int64(len(bundles_Bundle.DocumentStructure.FieldDefinitions))),
 	}
-	field4 := models.Field{
+	field4 = models.Field{
 		Name:  "DatabaseName",
 		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
 	}
-	field5 := models.Field{
+	field5 = models.Field{
 		Name:  "FilePath",
 		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", bundles_Bundle.Name)),
 	}
@@ -654,10 +684,25 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(permissionsBundle.Name),
 	}
+	field3 = models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(permissionsBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 = models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", permissionsBundle.Name)),
+	}
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	permissions_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
@@ -685,10 +730,26 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(rolesBundle.Name),
 	}
+	field3 = models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(rolesBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 = models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", rolesBundle.Name)),
+	}
+
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	roles_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
@@ -716,10 +777,26 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(usersBundle.Name),
 	}
+	field3 = models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(usersBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 = models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", usersBundle.Name)),
+	}
+
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	users_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
@@ -747,10 +824,26 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(userPermissionsBundle.Name),
 	}
+	field3 = models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(userPermissionsBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 = models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", userPermissionsBundle.Name)),
+	}
+
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	userPermissions_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
@@ -778,10 +871,26 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(databaseUsersBundle.Name),
 	}
+	field3 = models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(databaseUsersBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 = models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", databaseUsersBundle.Name)),
+	}
+
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	databaseUsers_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
@@ -809,10 +918,25 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(userRolesBundle.Name),
 	}
+	field3 = models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(userRolesBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 = models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", userRolesBundle.Name)),
+	}
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	userRoles_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
@@ -840,10 +964,25 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 		Name:  "Name",
 		Value: models.NewStringValue(viewsBundle.Name),
 	}
+	field3 = models.Field{
+		Name:  "FieldCount",
+		Value: models.NewIntValue(int64(len(viewsBundle.DocumentStructure.FieldDefinitions))),
+	}
+	field4 = models.Field{
+		Name:  "DatabaseName",
+		Value: models.NewStringValue(databaseService.Databases["primary"].Name),
+	}
+	field5 = models.Field{
+		Name:  "FilePath",
+		Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", "primary", viewsBundle.Name)),
+	}
 	fields = map[string]models.Field{}
 	fields["DatabaseID"] = field1
 	fields["BundleID"] = dbBundleIdField
 	fields["Name"] = field2
+	fields["FieldCount"] = field3
+	fields["DatabaseName"] = field4
+	fields["FilePath"] = field5
 
 	views_Bundle_doc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),

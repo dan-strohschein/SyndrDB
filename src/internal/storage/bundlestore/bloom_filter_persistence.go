@@ -32,16 +32,16 @@ func SerializeBloomFilter(bf *bloomfilter.BloomFilter) (string, uint64, uint32, 
 	}
 
 	stats := bf.GetStats()
-	
+
 	// Get bit array from bloom filter
 	bitArray := bf.GetBitArray()
-	
+
 	// Serialize bit array to bytes
 	data := SerializeBloomFilterToBytes(bitArray)
-	
+
 	// Encode as base64 for JSON storage
 	encoded := base64.StdEncoding.EncodeToString(data)
-	
+
 	return encoded, stats.Size, stats.NumHashFunctions, nil
 }
 
@@ -106,7 +106,7 @@ func EstimateBloomFilterSize(docCount int, falsePositiveRate float64) (bitSize u
 	// Use bloom filter's internal calculation
 	bf := bloomfilter.NewBloomFilter(docCount, falsePositiveRate)
 	stats := bf.GetStats()
-	
+
 	return stats.Size, stats.NumHashFunctions
 }
 

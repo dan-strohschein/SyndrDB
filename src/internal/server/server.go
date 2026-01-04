@@ -429,23 +429,28 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	if catalogService != nil && len(server.Databases) > 0 {
 		sugar.Infof("Synchronizing %d loaded databases with system catalog", len(server.Databases))
 		syncCount := 0
-		for dbName, db := range server.Databases {
+		for _, db := range server.Databases {
 			// Skip primary database - it was already registered above
-			if strings.ToLower(dbName) == "primary" {
+			// Note: server.Databases uses DatabaseID as keys, so we check db.Name
+			if strings.ToLower(db.Name) == "primary" {
+				sugar.Debugf("Skipping primary database in sync loop (already registered)")
 				continue
 			}
 
-			// Check if database already exists in catalog
-			existingDB, err := catalogService.GetDatabaseFromCatalogByName(dbName)
+			// Check if database already exists in catalog before adding
+			existingDB, err := catalogService.GetDatabaseFromCatalogByName(db.Name)
 			if err != nil || existingDB == nil {
 				// Database not in catalog, add it
+				sugar.Debugf("Database '%s' not found in catalog, adding it", db.Name)
 				err = catalogService.AddDatabaseToCatalog(db)
 				if err != nil {
-					sugar.Warnf("Failed to register database '%s' in catalog: %v", dbName, err)
+					sugar.Warnf("Failed to register database '%s' in catalog: %v", db.Name, err)
 				} else {
 					syncCount++
-					sugar.Debugf("Registered database '%s' in system catalog", dbName)
+					sugar.Debugf("Registered database '%s' in system catalog", db.Name)
 				}
+			} else {
+				sugar.Debugf("Database '%s' already exists in catalog, skipping", db.Name)
 			}
 		}
 		if syncCount > 0 {

@@ -67,7 +67,7 @@ type ManifestFileInfo struct {
 	FileSize    int64     `json:"fileSize"`
 	CreatedAt   time.Time `json:"createdAt"`
 	IsImmutable bool      `json:"isImmutable"` // True when file is frozen (no more writes)
-	
+
 	// Bloom filter for document ID lookups (serialized as base64)
 	BloomFilterData   string `json:"bloomFilterData,omitempty"`   // Base64 encoded bloom filter
 	BloomFilterSize   uint64 `json:"bloomFilterSize,omitempty"`   // Size in bits
@@ -424,7 +424,7 @@ func (mm *ManifestManager) UpdateBloomFilter(fileID int, bloomData string, bloom
 			file.BloomFilterData = bloomData
 			file.BloomFilterSize = bloomSize
 			file.BloomFilterHashes = bloomHashes
-			
+
 			mm.manifest.LastUpdated = time.Now()
 			return mm.persistManifestUnsafe()
 		}

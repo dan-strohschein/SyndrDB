@@ -36,9 +36,9 @@ type CompactionTrigger int
 
 const (
 	TriggerTombstoneRatio CompactionTrigger = iota // Trigger A: Tombstone ratio exceeds threshold
-	TriggerFileCount                                // Trigger B: Too many files
-	TriggerSmallFileMerge                           // Trigger C: Small old files need merging
-	TriggerFragmentation                            // Trigger D: Large bundle fragmentation
+	TriggerFileCount                               // Trigger B: Too many files
+	TriggerSmallFileMerge                          // Trigger C: Small old files need merging
+	TriggerFragmentation                           // Trigger D: Large bundle fragmentation
 )
 
 func (t CompactionTrigger) String() string {
@@ -61,21 +61,21 @@ type CompactionRequest struct {
 	DatabaseName string
 	BundleName   string
 	Trigger      CompactionTrigger
-	Priority     int       // Higher = more urgent (based on tombstone ratio)
+	Priority     int // Higher = more urgent (based on tombstone ratio)
 	RequestedAt  time.Time
 }
 
 // BundleCompactor handles file-level compaction for bundle storage
 type BundleCompactor struct {
-	dataDir         string
-	logger          *zap.SugaredLogger
-	storageEngine   *BundleStorageEngine
-	compactionMutex sync.Mutex              // Protects active compactions map
-	activeCompactions map[string]bool       // bundleName -> is compacting
-	
+	dataDir           string
+	logger            *zap.SugaredLogger
+	storageEngine     *BundleStorageEngine
+	compactionMutex   sync.Mutex      // Protects active compactions map
+	activeCompactions map[string]bool // bundleName -> is compacting
+
 	// I/O throttling for rate-limited compaction
 	throttler *IOThrottler
-	
+
 	// Configuration thresholds
 	tombstoneRatioThreshold float64
 	fileCountThreshold      int
@@ -90,7 +90,7 @@ func NewBundleCompactor(dataDir string, storageEngine *BundleStorageEngine, logg
 	// TODO: I will load these from settings.GetSettings().Compaction when CompactionConfig is added
 	// Initialize I/O throttler (50 MB/s normal, 10 MB/s degraded)
 	throttler := NewIOThrottler(50.0, 10.0, logger)
-	
+
 	return &BundleCompactor{
 		dataDir:                 dataDir,
 		logger:                  logger,
@@ -417,10 +417,10 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 	}
 
 	duration := time.Since(startTime)
-	
+
 	// Get throttling statistics
 	throttleStats := bc.throttler.GetStatistics()
-	
+
 	bc.logger.Infow("Compaction completed",
 		"database", databaseName,
 		"bundle", bundleName,
