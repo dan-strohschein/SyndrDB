@@ -39,6 +39,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syndrdb/src/pkg/common"
 	"time"
 
 	"go.uber.org/zap"
@@ -325,7 +326,7 @@ func (fm *FileManager) Sync() error {
 		return fmt.Errorf("file handle is nil")
 	}
 
-	if err := fm.file.Sync(); err != nil {
+	if err := common.Fdatasync(fm.file); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
 
@@ -568,7 +569,7 @@ func (fm *FileManager) writePageASCIISafe(pageNum uint32, pageData interface{}) 
 	}
 
 	// CRITICAL FIX: Force sync after every page write to ensure durability
-	if err := fm.file.Sync(); err != nil {
+	if err := common.Fdatasync(fm.file); err != nil {
 		return fmt.Errorf("failed to sync page %d to disk: %w", pageNum, err)
 	}
 

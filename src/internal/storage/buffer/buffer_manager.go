@@ -3,7 +3,6 @@ package buffer
 import (
 	"errors"
 	"fmt"
-
 	"time"
 
 	"go.uber.org/zap"

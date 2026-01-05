@@ -55,13 +55,13 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syndrdb/src/internal/domain/index/hashindexV3"
+	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common"
+	"syndrdb/src/pkg/common/helpers"
 	"time"
 
 	"go.uber.org/zap"
-
-	"syndrdb/src/internal/domain/index/hashindexV3"
-	"syndrdb/src/internal/domain/models"
-	"syndrdb/src/pkg/common/helpers"
 )
 
 // MetricsReporter is a callback function for reporting metrics without import cycles
@@ -477,7 +477,7 @@ func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleF
 	}
 
 	// Ensure all data is written to disk before replacing
-	if syncErr := tempFile.Sync(); syncErr != nil {
+	if syncErr := common.Fdatasync(tempFile); syncErr != nil {
 		err = fmt.Errorf("failed to sync temporary file: %w", syncErr)
 		cm.logger.Errorw("Failed to sync temporary file", "error", syncErr)
 		return "", err

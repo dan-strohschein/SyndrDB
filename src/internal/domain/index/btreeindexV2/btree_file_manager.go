@@ -59,6 +59,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syndrdb/src/pkg/common"
 	"time"
 
 	"go.uber.org/zap"
@@ -68,14 +69,17 @@ import (
 // This structure manages all file operations including reading, writing,
 // and maintaining the index file format
 type BTreeFileManager struct {
-	FilePath   string             // Path to the index file
-	File       *os.File           // File handle for I/O operations
-	pageSize   uint32             // Size of each page in bytes
-	debugMode  bool               // Whether to use ASCII format
-	isOpen     bool               // Whether the file is currently open
-	logger     *zap.SugaredLogger // Logger for debug and error messages
-	fileHeader *FileHeader        // File header information
-	mutex      sync.RWMutex       // Thread safety for file operations
+	FilePath     string             // Path to the index file
+	File         *os.File           // File handle for I/O operations
+	pageSize     uint32             // Size of each page in bytes
+	debugMode    bool               // Whether to use ASCII format
+	isOpen       bool               // Whether the file is currently open
+	logger       *zap.SugaredLogger // Logger for debug and error messages
+	fileHeader   *FileHeader        // File header information
+	mutex        sync.RWMutex       // Thread safety for file operations
+	syncMode     string             // Sync mode: "immediate", "batched", "scheduled"
+	coordinator  interface{}        // Write coordinator reference (injected from journal package)
+	pendingPages map[string]bool    // Dirty pages pending checkpoint (only in batched mode)
 }
 
 func (fm *BTreeFileManager) AllocatePage() (uint32, error) {
@@ -107,13 +111,57 @@ func (fm *BTreeFileManager) Sync() error {
 	defer fm.mutex.Unlock()
 
 	// Sync the file to ensure all changes are written to disk
-	if err := fm.File.Sync(); err != nil {
+	if err := common.Fdatasync(fm.File); err != nil {
 		fm.logger.Warnf("Failed to sync file: %v", err)
 		return fmt.Errorf("failed to sync file: %w", err)
 	}
 
 	fm.logger.Debugf("File synced successfully")
 	return nil
+}
+
+// SyncDirtyPages syncs all dirty pages during checkpoint (batched mode)
+// This is called by the Checkpointer goroutine to flush accumulated dirty pages
+func (fm *BTreeFileManager) SyncDirtyPages() error {
+	if !fm.isOpen {
+		return fmt.Errorf("file manager is not open")
+	}
+
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+
+	// Sync all dirty pages to disk
+	if err := common.Fdatasync(fm.File); err != nil {
+		return fmt.Errorf("failed to sync dirty pages: %w", err)
+	}
+
+	// Clear pending pages after successful sync
+	if fm.pendingPages != nil {
+		pageCount := len(fm.pendingPages)
+		fm.pendingPages = make(map[string]bool)
+		fm.logger.Debugf("Checkpoint synced %d dirty BTree pages", pageCount)
+	}
+
+	return nil
+}
+
+// SetSyncMode sets the sync mode (immediate, batched, scheduled)
+func (fm *BTreeFileManager) SetSyncMode(mode string) {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+	fm.syncMode = mode
+	if mode == "batched" && fm.pendingPages == nil {
+		fm.pendingPages = make(map[string]bool)
+	}
+	fm.logger.Infof("BTree sync mode set to: %s", mode)
+}
+
+// SetCoordinator sets the write coordinator reference for dirty page tracking
+func (fm *BTreeFileManager) SetCoordinator(coordinator interface{}) {
+	fm.mutex.Lock()
+	defer fm.mutex.Unlock()
+	fm.coordinator = coordinator
+	fm.logger.Debug("Write coordinator registered with BTree file manager")
 }
 
 // FileHeader contains file-level metadata
@@ -319,21 +367,35 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 		}
 	}
 
-	// TODO: Skip fsync when BTreeSyncMode="batched" - batched mode relies on WAL for durability, fsync happens at checkpoint
-	// IMPORTANT NOTE: Immediate mode (default) uses fsync for safety, batched mode trades latency for throughput
-	// syncMode := fm.settings.BTreeSyncMode // Inject settings into FileManager
-	// if syncMode != "batched" {
-	// 		if err := fm.File.Sync(); err != nil {
-	// 			return fmt.Errorf("failed to sync page %d to disk: %w", pageNum, err)
-	// 		}
-	// }
+	// Checkpoint-based batched mode: skip immediate fsync, register dirty page with coordinator
+	// Batched mode relies on WAL for durability - fsync happens during checkpoint
+	if fm.syncMode == "batched" {
+		// Register dirty page with write coordinator for checkpoint
+		if fm.coordinator != nil {
+			// Track dirty page internally
+			if fm.pendingPages == nil {
+				fm.pendingPages = make(map[string]bool)
+			}
+			pageKey := fmt.Sprintf("%s:%d", fm.FilePath, pageNum)
+			fm.pendingPages[pageKey] = true
 
-	// Sync to disk to ensure durability
-	if err := fm.File.Sync(); err != nil {
+			// Register with coordinator (using type assertion to avoid import cycle)
+			if wc, ok := fm.coordinator.(interface {
+				RegisterDirtyPage(filePath string, pageNum int, lsn uint64, fileType string)
+			}); ok {
+				wc.RegisterDirtyPage(fm.FilePath, int(pageNum), 0, "btree")
+			}
+		}
+		fm.logger.Debugf("Registered dirty page %d for checkpoint (batched mode)", pageNum)
+		return nil // Skip immediate sync
+	}
+
+	// Immediate mode (default): sync to disk for immediate durability
+	if err := common.Fdatasync(fm.File); err != nil {
 		return fmt.Errorf("failed to sync page %d to disk: %w", pageNum, err)
 	}
 
-	fm.logger.Debugf("Successfully wrote page %d to file", pageNum)
+	fm.logger.Debugf("Successfully wrote page %d to file (immediate sync)", pageNum)
 
 	return nil
 }
@@ -441,7 +503,7 @@ func (fm *BTreeFileManager) Close() error {
 	fm.logger.Debugf("Closing BTree file manager")
 
 	// Sync any pending changes
-	if err := fm.File.Sync(); err != nil {
+	if err := common.Fdatasync(fm.File); err != nil {
 		fm.logger.Warnf("Failed to sync file during close: %v", err)
 	}
 

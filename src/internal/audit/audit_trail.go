@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syndrdb/src/pkg/common"
 	"time"
 
 	"go.uber.org/zap"
@@ -322,7 +323,7 @@ func (sa *SecurityAuditor) flushBuffer() {
 
 	// Sync to disk
 	if sa.currentFile != nil {
-		sa.currentFile.Sync()
+		common.Fdatasync(sa.currentFile)
 	}
 }
 

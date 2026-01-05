@@ -282,8 +282,7 @@ func main() {
 		// logFilePath := filepath.Join(args.LogDir, logFilename)
 
 		// Ensure log directory exists
-		logDir := filepath.Dir(args.LogDir)
-		if err := os.MkdirAll(logDir, 0755); err != nil {
+		if err := os.MkdirAll(args.LogDir, 0755); err != nil {
 			log.Fatalf("Failed to create log directory: %v", err)
 		}
 
@@ -433,13 +432,10 @@ func validateArguments(args *settings.Arguments) error {
 
 	// Check if log file can be written to
 	if args.LogDir != "" {
-		logDir := filepath.Dir(args.LogDir)
-		if logDir != "." {
-			if _, err := os.Stat(logDir); os.IsNotExist(err) {
-				err = os.MkdirAll(logDir, 0755)
-				if err != nil {
-					return fmt.Errorf("could not create log directory: %w", err)
-				}
+		if _, err := os.Stat(args.LogDir); os.IsNotExist(err) {
+			err = os.MkdirAll(args.LogDir, 0755)
+			if err != nil {
+				return fmt.Errorf("could not create log directory: %w", err)
 			}
 		}
 

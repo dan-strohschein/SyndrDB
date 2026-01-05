@@ -38,6 +38,7 @@ package hashindexV2
 import (
 	"fmt"
 	"os"
+	"syndrdb/src/pkg/common"
 
 	"go.uber.org/zap"
 )
@@ -556,7 +557,7 @@ func (s *HashIndexStorage) DeleteOverflowPage(pageNum uint32) error {
 //   - error: Any error that occurred during closing
 func (s *HashIndexStorage) Close(file *os.File) error {
 	if file != nil {
-		err := file.Sync()
+		err := common.Fdatasync(file)
 		if err != nil {
 			s.logger.Errorf("Failed to sync file: %v", err)
 		}

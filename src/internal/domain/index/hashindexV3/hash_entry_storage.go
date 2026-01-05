@@ -85,18 +85,23 @@ type BucketFileHandle struct {
 // BucketFileManager manages per-bucket file handles for optimized writes
 // Enables O(1) bucket lookup and parallel compaction
 type BucketFileManager struct {
-	buckets         map[uint32]*BucketFileHandle // Map of bucket number to file handle
-	numBuckets      uint32                       // Total number of buckets
-	bucketMaxSize   int64                        // Max file size per bucket file
-	writeBufferSize int                          // Write buffer size
-	indexName       string                       // Index name for header creation
-	fieldName       string                       // Field name for file naming
-	bundleName      string                       // Bundle name for header creation
-	isForeignKey    bool                         // Whether this is a foreign key index
-	namingHelper    *FileNamingHelper            // File naming utilities
-	headerManager   *HeaderManager               // Header manager for writing headers
-	globalMutex     sync.RWMutex                 // Protects buckets map
-	logger          *zap.SugaredLogger           // Logger
+	buckets             map[uint32]*BucketFileHandle // Map of bucket number to file handle
+	numBuckets          uint32                       // Total number of buckets
+	bucketMaxSize       int64                        // Max file size per bucket file
+	writeBufferSize     int                          // Write buffer size
+	indexName           string                       // Index name for header creation
+	fieldName           string                       // Field name for file naming
+	bundleName          string                       // Bundle name for header creation
+	isForeignKey        bool                         // Whether this is a foreign key index
+	namingHelper        *FileNamingHelper            // File naming utilities
+	headerManager       *HeaderManager               // Header manager for writing headers
+	globalMutex         sync.RWMutex                 // Protects buckets map
+	logger              *zap.SugaredLogger           // Logger
+	batchThreshold      int                          // Entries to accumulate before flush (default: 100)
+	batchSizeBytes      int                          // Bytes to accumulate before flush (default: 32KB)
+	pendingEntries      int32                        // Atomic counter of pending entries across buckets
+	coordinator         interface{}                  // Write coordinator reference
+	lastBackgroundFlush time.Time                    // Last time background writer flushed
 }
 
 // NewBucketFileManager creates a new bucket file manager
@@ -660,6 +665,17 @@ func (es *EntryStorage) AppendEntries(entries []*HashIndexEntry) error {
 		es.currentFileSize += int64(n)
 		es.totalEntries++
 		es.totalBytes += uint64(n)
+
+		// Batch-append mode: accumulate entries before flush
+		// Check if we should flush based on thresholds
+		bufferSize := es.writeBuffer.Buffered()
+		if es.totalEntries%100 == 0 || bufferSize >= 32*1024 {
+			// Flush buffer but skip fsync - Background Writer will handle sync
+			if err := es.writeBuffer.Flush(); err != nil {
+				return fmt.Errorf("failed to flush write buffer: %w", err)
+			}
+			es.logger.Debugf("Flushed hash index write buffer (%d entries, %d bytes)", es.totalEntries, bufferSize)
+		}
 	}
 
 	return nil
@@ -676,6 +692,16 @@ func (es *EntryStorage) Flush() error {
 			return fmt.Errorf("failed to flush write buffer: %w", err)
 		}
 	}
+
+	// Note: Sync is handled by Background Writer in coordinated mode
+	// For immediate durability, call SyncToDisk() explicitly
+	return nil
+}
+
+// SyncToDisk forces fsync for immediate durability (called by Background Writer or explicit flush)
+func (es *EntryStorage) SyncToDisk() error {
+	es.fileMutex.Lock()
+	defer es.fileMutex.Unlock()
 
 	if es.currentFile != nil {
 		if err := es.currentFile.Sync(); err != nil {

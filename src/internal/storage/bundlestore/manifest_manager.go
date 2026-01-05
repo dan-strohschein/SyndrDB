@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syndrdb/src/pkg/common"
 	"time"
 
 	"go.uber.org/zap"
@@ -376,7 +377,7 @@ func (mm *ManifestManager) persistManifestUnsafe() error {
 	if err != nil {
 		return fmt.Errorf("failed to open temp manifest for sync: %w", err)
 	}
-	if err := tempFile.Sync(); err != nil {
+	if err := common.Fdatasync(tempFile); err != nil {
 		tempFile.Close()
 		return fmt.Errorf("failed to sync temp manifest: %w", err)
 	}

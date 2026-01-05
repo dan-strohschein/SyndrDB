@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common"
 	"time"
 
 	"go.uber.org/zap"
@@ -347,7 +348,7 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 	}
 
 	// Flush and sync to disk
-	if err := tempFile.Sync(); err != nil {
+	if err := common.Fdatasync(tempFile); err != nil {
 		return fmt.Errorf("failed to sync compacted file: %w", err)
 	}
 	tempFile.Close()

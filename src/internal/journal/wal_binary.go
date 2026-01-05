@@ -305,18 +305,42 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 		return fmt.Errorf("failed to write binary WAL entry: %w", err)
 	}
 
-	// PERFORMANCE OPTIMIZATION: Batch flushing (Priority 2 - Speed First Profile)
+	// PERFORMANCE OPTIMIZATION: Batch flushing (PostgreSQL-style group commit)
 	// Increment pending operations counter
 	wal.pendingOps++
 
 	// Determine if we should flush based on multiple triggers:
-	// 1. Batch size reached (default: 10 operations)
-	// 2. Time threshold exceeded (default: 10ms since last flush)
-	// NOTE: fsyncOnCommit check removed per "Speed First" priority - batching always active
-	shouldFlush := wal.pendingOps >= wal.walBatchSize ||
-		time.Since(wal.lastFlush) >= wal.walMaxFlushDelay
+	// 1. Transaction commit with fsyncOnCommit=true (zero data loss guarantee)
+	// 2. Checkpoint markers (OpCheckpointBegin, OpCheckpointComplete)
+	// 3. Batch size reached (configurable, default: 100 operations)
+	// 4. Time threshold exceeded (configurable, default: 100ms since last flush)
+	// 5. Durability mode: strict=every op, balanced=batch with forced commits, performance=batch only
 
-	if shouldFlush {
+	isCommitOp := operation == OpCommitTx || operation == OpCheckpointBegin || operation == OpCheckpointComplete
+	forceFlush := false
+
+	// Strict mode: sync every operation
+	if wal.durabilityMode == "strict" {
+		forceFlush = true
+	}
+
+	// Balanced mode: sync on commits (zero data loss) or when batch full
+	if wal.durabilityMode == "balanced" {
+		if wal.fsyncOnCommit && isCommitOp {
+			forceFlush = true // Force immediate sync on transaction boundaries
+		} else if wal.pendingOps >= wal.walBatchSize || time.Since(wal.lastFlush) >= wal.walMaxFlushDelay {
+			forceFlush = true // Batch threshold reached
+		}
+	}
+
+	// Performance mode: only sync when batch full or time exceeded (no forced commits)
+	if wal.durabilityMode == "performance" {
+		if wal.pendingOps >= wal.walBatchSize || time.Since(wal.lastFlush) >= wal.walMaxFlushDelay {
+			forceFlush = true
+		}
+	}
+
+	if forceFlush {
 		if err := wal.flushUnsafe(); err != nil {
 			return err
 		}

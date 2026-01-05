@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syndrdb/src/pkg/common"
 )
 
 // SchemaFile manages a GraphQL schema file for a database
@@ -74,7 +75,7 @@ func CreateSchemaFile(filePath string, databaseName, databaseID string) (*Schema
 	}
 
 	// Sync to disk
-	if err := file.Sync(); err != nil {
+	if err := common.Fdatasync(file); err != nil {
 		file.Close()
 		os.Remove(filePath)
 		return nil, fmt.Errorf("failed to sync file: %w", err)
@@ -175,7 +176,7 @@ func (sf *SchemaFile) AppendSchema(record *SchemaRecord) error {
 	}
 
 	// Sync to disk
-	if err := sf.file.Sync(); err != nil {
+	if err := common.Fdatasync(sf.file); err != nil {
 		return fmt.Errorf("failed to sync file: %w", err)
 	}
 
@@ -361,7 +362,7 @@ func (sf *SchemaFile) Close() error {
 	}
 
 	// Sync before closing
-	if err := sf.file.Sync(); err != nil {
+	if err := common.Fdatasync(sf.file); err != nil {
 		return fmt.Errorf("failed to sync before close: %w", err)
 	}
 

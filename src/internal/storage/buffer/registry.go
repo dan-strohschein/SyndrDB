@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syndrdb/src/pkg/common"
 	"time"
 
 	"go.uber.org/zap"
@@ -63,7 +64,7 @@ func (mf *ManagedFile) Write(b []byte) (int, error) {
 
 // Sync synchronizes the file data to disk
 func (mf *ManagedFile) Sync() error {
-	return mf.file.Sync()
+	return common.Fdatasync(mf.file)
 }
 
 // FileRegistry manages access to files used by the buffer pool

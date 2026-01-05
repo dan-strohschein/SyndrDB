@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common"
 	"time"
 )
 
@@ -108,6 +109,7 @@ func (wb *WriteBuffer) Flush() error {
 
 // Sync forces a sync to disk (fsync) to ensure durability
 // This can be called after Flush() to ensure OS has written data to physical disk
+// Uses platform-optimized Fdatasync for 2-3x faster sync on Linux
 func (wb *WriteBuffer) Sync() error {
 	wb.mutex.Lock()
 	defer wb.mutex.Unlock()
@@ -115,7 +117,7 @@ func (wb *WriteBuffer) Sync() error {
 	if wb.file == nil {
 		return fmt.Errorf("write buffer file is nil")
 	}
-	return wb.file.Sync()
+	return common.Fdatasync(wb.file)
 }
 
 // flushInternal performs the actual flush operation (must be called with mutex held)

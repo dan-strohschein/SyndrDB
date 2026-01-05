@@ -12,6 +12,7 @@ import (
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/format"
+	"syndrdb/src/pkg/common"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 	"time"
@@ -1187,7 +1188,7 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 
 	// CRITICAL: Force OS to flush to disk to ensure deletion marker is persisted
 	// Without this, subsequent reads might not see the tombstone marker
-	if err := file.Sync(); err != nil {
+	if err := common.Fdatasync(file); err != nil {
 		b.logger.Warnf("Failed to sync deletion marker to disk: %v (continuing anyway)", err)
 		// Don't fail - the data was written, sync is durability optimization
 	}
@@ -1249,7 +1250,7 @@ func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, 
 	}
 
 	// CRITICAL: Single sync at the end for all markers
-	if err := file.Sync(); err != nil {
+	if err := common.Fdatasync(file); err != nil {
 		b.logger.Warnf("Failed to sync %d deletion markers to disk: %v (continuing anyway)", len(documentIDs), err)
 	}
 
