@@ -229,6 +229,52 @@ func (mm *ManifestManager) UpdateFileStats(fileID int, docCount, tombstones int6
 	return mm.persistManifestUnsafe()
 }
 
+// UpdateFileStatsDeferred updates statistics in-memory without persistence
+// This avoids fsync on every write, improving performance significantly
+// Persistence will happen on explicit Flush() or periodic background flush
+func (mm *ManifestManager) UpdateFileStatsDeferred(fileID int, docCount, tombstones int64, minSeq, maxSeq uint64, fileSize int64) {
+	mm.mutex.Lock()
+	defer mm.mutex.Unlock()
+
+	if mm.manifest == nil {
+		return
+	}
+
+	// Find the file
+	var targetFile *ManifestFileInfo
+	for _, file := range mm.manifest.Files {
+		if file.FileID == fileID {
+			targetFile = file
+			break
+		}
+	}
+
+	if targetFile == nil {
+		return
+	}
+
+	// Update file stats (in-memory only, no persistence)
+	targetFile.FileSize = fileSize
+	// Only update other stats if provided (non-zero values)
+	if docCount > 0 {
+		targetFile.DocCount = docCount
+	}
+	if tombstones > 0 {
+		targetFile.Tombstones = tombstones
+	}
+	if minSeq > 0 {
+		targetFile.MinSeq = minSeq
+	}
+	if maxSeq > 0 {
+		targetFile.MaxSeq = maxSeq
+	}
+
+	// Recalculate totals
+	mm.recalculateTotalsUnsafe()
+	mm.manifest.LastUpdated = time.Now()
+	// NOTE: No persistManifestUnsafe() call - deferred for performance
+}
+
 // FreezeFile marks a file as immutable (no more writes)
 func (mm *ManifestManager) FreezeFile(fileID int) error {
 	mm.mutex.Lock()

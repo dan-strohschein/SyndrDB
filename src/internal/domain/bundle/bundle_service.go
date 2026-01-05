@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -3972,6 +3973,24 @@ func (s *BundleService) GetOrLoadHashIndexInterface(bundle *models.Bundle, index
 }
 
 func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentCommand) (string, error) {
+	// #region agent log
+	startTime := time.Now()
+	logEntry := map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "H",
+		"location":     "bundle_service.go:3974",
+		"message":      "AddDocumentToBundle start",
+		"timestamp":    startTime.UnixNano() / 1e6,
+		"data":         map[string]interface{}{"bundle": docCommand.BundleName},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	// Check if the bundle exists
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot add document")
@@ -3986,21 +4005,78 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// CRITICAL: Process NULL values and defaults FIRST, before validation
 	// This allows default value substitution for required fields that are missing or NULL
 	// Must happen before validation so that required fields with defaults can be satisfied
+	processNullStart := time.Now()
 	err := s.processNullValues(bundle, docCommand)
+	processNullTime := time.Since(processNullStart)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "I",
+		"location":     "bundle_service.go:3990",
+		"message":      "After processNullValues",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"processNullTimeMs": processNullTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	if err != nil {
 		return "", fmt.Errorf("failed to process NULL values: %w", err)
 	}
 
 	// Validate document fields against bundle field definitions
 	// This runs AFTER processNullValues so that default values are already substituted
+	validateStart := time.Now()
 	err = s.validateDocumentFields(bundle, docCommand)
+	validateTime := time.Since(validateStart)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "J",
+		"location":     "bundle_service.go:3996",
+		"message":      "After validateDocumentFields",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"validateTimeMs": validateTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	if err != nil {
 		return "", fmt.Errorf("document field validation failed: %w", err)
 	}
 
 	// Validate unique constraints for all IsUnique fields
+	uniqueStart := time.Now()
 	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
 	err = uniqueValidator.ValidateUniqueConstraints(bundle, docCommand)
+	uniqueTime := time.Since(uniqueStart)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "K",
+		"location":     "bundle_service.go:4002",
+		"message":      "After ValidateUniqueConstraints",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"uniqueTimeMs": uniqueTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	if err != nil {
 		return "", fmt.Errorf("failed to process NULL values: %w", err)
 	}
@@ -4023,7 +4099,26 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	s.scheduleMetadataUpdate(docCommand.BundleName, "increment_docs", 1)
 
 	// Add document to bundle file (storage layer handles page allocation and returns pageID)
+	storageStart := time.Now()
 	pageID, err := s.store.AddDocumentToBundleFile(bundle, newDocument)
+	storageTime := time.Since(storageStart)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "L",
+		"location":     "bundle_service.go:4026",
+		"message":      "After AddDocumentToBundleFile",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"storageTimeMs": storageTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	if err != nil {
 		// Note: Metadata updates are deferred, so no rollback needed here
 		// Failed operations won't have their metadata updates applied
@@ -4083,6 +4178,24 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	s.RemoveDocumentScanner(docCommand.BundleName)
 	s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after addition", docCommand.BundleName)
 
+	totalTime := time.Since(startTime)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "M",
+		"location":     "bundle_service.go:4086",
+		"message":      "AddDocumentToBundle end",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"totalTimeMs": totalTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	return newDocument.DocumentID, nil
 }
 

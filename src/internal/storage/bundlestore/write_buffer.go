@@ -92,9 +92,11 @@ func (wb *WriteBuffer) WriteWithTxID(data []byte, docID string, txID string) err
 	// Add data to buffer
 	wb.buffer = append(wb.buffer, data...)
 
-	// Flush if buffer is getting full or timeout reached
+	// PERFORMANCE FIX: Flush buffer without sync for better performance
+	// Only sync on explicit Flush() calls (transaction commits) or when buffer is full
+	// This allows the OS to batch writes more efficiently
 	if len(wb.buffer) >= wb.flushSize || time.Since(wb.lastFlush) >= wb.flushTimeout {
-		return wb.flushInternal()
+		return wb.flushWithoutSync()
 	}
 
 	return nil
@@ -120,7 +122,8 @@ func (wb *WriteBuffer) Sync() error {
 	return common.Fdatasync(wb.file)
 }
 
-// flushInternal performs the actual flush operation (must be called with mutex held)
+// flushInternal performs the actual flush operation with sync (must be called with mutex held)
+// Use this for explicit flush requests (transaction commits) where durability is required
 func (wb *WriteBuffer) flushInternal() error {
 	if len(wb.buffer) == 0 {
 		return nil
@@ -147,6 +150,44 @@ func (wb *WriteBuffer) flushInternal() error {
 	if err != nil {
 		return err
 	}
+
+	// Reset buffer and transaction tracking
+	wb.buffer = wb.buffer[:0]
+	wb.bufferedDocs = make(map[string]*BufferedDocument)
+	// NOTE: Don't clear discardedDocs - these need to persist for post-rollback cleanup
+	// They'll be cleared after physical deletion in post-rollback cleanup
+	wb.lastFlush = time.Now()
+
+	return nil
+}
+
+// flushWithoutSync performs flush without fsync for better performance
+// Used for automatic flushes when buffer is full or timeout reached
+// Durability is ensured by WAL logging and explicit Flush() calls on transaction commits
+func (wb *WriteBuffer) flushWithoutSync() error {
+	if len(wb.buffer) == 0 {
+		return nil
+	}
+
+	// CRITICAL: Handle short writes - file.Write() can return n < len(buffer) with err == nil
+	// We must loop until all bytes are written to prevent data corruption from partial writes
+	toWrite := wb.buffer
+	written := 0
+	for written < len(toWrite) {
+		n, err := wb.file.Write(toWrite[written:])
+		if err != nil {
+			return fmt.Errorf("write failed after %d of %d bytes: %w", written, len(toWrite), err)
+		}
+		if n == 0 {
+			// Write returned 0 with no error - this should never happen but signals a problem
+			return fmt.Errorf("write returned 0 bytes written with no error (stuck write)")
+		}
+		written += n
+	}
+
+	// PERFORMANCE FIX: Don't sync here - let OS batch writes
+	// Explicit Flush() calls (transaction commits) will sync when needed
+	// WAL provides durability guarantee, so we don't need to sync every write
 
 	// Reset buffer and transaction tracking
 	wb.buffer = wb.buffer[:0]

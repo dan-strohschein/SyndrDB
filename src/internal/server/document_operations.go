@@ -1,9 +1,12 @@
 package server
 
 import (
+	//"encoding/json"
 	"fmt"
+	"os"
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -123,6 +126,24 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 // AddDocument handles ADD DOCUMENT commands
 // Syntax: ADD DOCUMENT TO "<BUNDLE_NAME>" (<FIELD_NAME>: <VALUE>, ...);
 func AddDocument(commandParts []string, command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
+	// #region agent log
+	startTime := time.Now()
+	logEntry := map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "A",
+		"location":     "document_operations.go:125",
+		"message":      "AddDocument start",
+		"timestamp":    startTime.UnixNano() / 1e6,
+		"data":         map[string]interface{}{"bundle": commandParts[3]},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	logger.Debugf("Trying to add document to %s.%s", database.Name, commandParts[3])
 
 	if len(commandParts) < 4 {
@@ -131,14 +152,52 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 
 	// Parse the document command using new parser with fallback
 	// This uses the same feature flag and fallback pattern as SELECT queries
+	parseStart := time.Now()
 	docCommand, err := parseAddDocument(command, logger)
+	parseTime := time.Since(parseStart)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "B",
+		"location":     "document_operations.go:138",
+		"message":      "After parse",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"parseTimeMs": parseTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	if err != nil {
 		return nil, fmt.Errorf("error parsing add document command: %v", err)
 	}
 
 	bundleName := docCommand.BundleName
 	// Get the bundle by name
+	bundleLookupStart := time.Now()
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, docCommand.BundleName)
+	bundleLookupTime := time.Since(bundleLookupStart)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "C",
+		"location":     "document_operations.go:144",
+		"message":      "After bundle lookup",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"bundleLookupTimeMs": bundleLookupTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	if err != nil {
 		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
 	}
@@ -185,18 +244,75 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 			globalMetrics := GetGlobalServerMetrics()
 			globalMetrics.TransactionsBegun.Add(1)
 
+			walLogStart := time.Now()
 			err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
 				// Log the document insertion before execution
 				// Note: Document ID will be generated during bundle service execution
+				walLogOpStart := time.Now()
 				err := serviceManager.WALManager.LogDocumentInsert(txID, bundleName, "pending", docCommand.Fields)
+				walLogOpTime := time.Since(walLogOpStart)
+				// #region agent log
+				logEntry := map[string]interface{}{
+					"sessionId":    "debug-session",
+					"runId":        "run1",
+					"hypothesisId": "D",
+					"location":     "document_operations.go:191",
+					"message":      "After WAL LogDocumentInsert",
+					"timestamp":    time.Now().UnixNano() / 1e6,
+					"data":         map[string]interface{}{"walLogOpTimeMs": walLogOpTime.Nanoseconds() / 1e6},
+				}
+				if logBytes, err := json.Marshal(logEntry); err == nil {
+					if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+						f.Write(append(logBytes, '\n'))
+						f.Close()
+					}
+				}
+				// #endregion
 				if err != nil {
 					return fmt.Errorf("failed to log document insert: %w", err)
 				}
 
 				// Add the document to the bundle
+				addDocStart := time.Now()
 				docID, err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+				addDocTime := time.Since(addDocStart)
+				// #region agent log
+				logEntry = map[string]interface{}{
+					"sessionId":    "debug-session",
+					"runId":        "run1",
+					"hypothesisId": "E",
+					"location":     "document_operations.go:197",
+					"message":      "After AddDocumentToBundle",
+					"timestamp":    time.Now().UnixNano() / 1e6,
+					"data":         map[string]interface{}{"addDocTimeMs": addDocTime.Nanoseconds() / 1e6},
+				}
+				if logBytes, err := json.Marshal(logEntry); err == nil {
+					if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+						f.Write(append(logBytes, '\n'))
+						f.Close()
+					}
+				}
+				// #endregion
 				return err
 			})
+			walLogTotalTime := time.Since(walLogStart)
+			// #region agent log
+			logEntry := map[string]interface{}{
+				"sessionId":    "debug-session",
+				"runId":        "run1",
+				"hypothesisId": "F",
+				"location":     "document_operations.go:199",
+				"message":      "After ExecuteWithLogging",
+				"timestamp":    time.Now().UnixNano() / 1e6,
+				"data":         map[string]interface{}{"walLogTotalTimeMs": walLogTotalTime.Nanoseconds() / 1e6},
+			}
+			if logBytes, err := json.Marshal(logEntry); err == nil {
+				if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+					f.Write(append(logBytes, '\n'))
+					f.Close()
+				}
+			}
+			// #endregion
 
 			// METRICS: Track transaction outcome
 			if err != nil {
@@ -233,6 +349,24 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	}
 
 	result := fmt.Sprintf("{\"DocumentID\": \"%s\", \"message\": \"Document added successfully to bundle '%s'.\"}", docID, bundleName)
+	totalTime := time.Since(startTime)
+	// #region agent log
+	logEntry = map[string]interface{}{
+		"sessionId":    "debug-session",
+		"runId":        "run1",
+		"hypothesisId": "G",
+		"location":     "document_operations.go:240",
+		"message":      "AddDocument end",
+		"timestamp":    time.Now().UnixNano() / 1e6,
+		"data":         map[string]interface{}{"totalTimeMs": totalTime.Nanoseconds() / 1e6},
+	}
+	if logBytes, err := json.Marshal(logEntry); err == nil {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(logBytes, '\n'))
+			f.Close()
+		}
+	}
+	// #endregion
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
 		Result:      result,
