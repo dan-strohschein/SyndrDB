@@ -18,6 +18,7 @@ for all durability-critical operations like WAL flushes and checkpoint writes.
 Performance impact:
 - Linux: fdatasync() is 2-3x faster than fsync() (skips atime, mtime, file size updates)
 - macOS: F_FULLFSYNC ensures true durability by forcing disk cache flush
+- Windows: Uses FlushFileBuffers for durability
 - Other platforms: Falls back to standard file.Sync()
 
 File opening optimization:
@@ -28,23 +29,16 @@ File opening optimization:
 import (
 	"fmt"
 	"os"
-	"runtime"
-	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
-// O_NOATIME is Linux-specific - define it here for cross-platform compilation
-// On non-Linux platforms, this will just be 0 and have no effect
-const O_NOATIME = 0x40000
-
-// Fdatasync synchronizes file data to disk without syncing metadata
+// Fdatasync synchronizes file data to disk without syncing unnecessary metadata
 // This is 2-3x faster than Sync() on Linux because it skips unnecessary metadata updates
 // like access time, modification time, and inode changes when file size hasn't changed.
 //
 // Platform-specific behavior:
 // - Linux: Uses SYS_FDATASYNC syscall (fast, trusts disk cache by default)
 // - macOS: Uses F_FULLFSYNC fcntl (slow but ensures true durability by bypassing disk cache)
+// - Windows: Uses FlushFileBuffers (standard Windows durability)
 // - Other: Falls back to file.Sync() (safe default)
 //
 // For database workloads, this should be used instead of file.Sync() at all sync points:
@@ -52,37 +46,16 @@ const O_NOATIME = 0x40000
 // - Checkpoint completions
 // - Transaction commits
 // - Storage engine writes
+//
+// Implementation is in platform-specific files:
+// - fsync_linux.go
+// - fsync_darwin.go
+// - fsync_windows.go
 func Fdatasync(file *os.File) error {
 	if file == nil {
 		return fmt.Errorf("cannot sync nil file")
 	}
-
-	switch runtime.GOOS {
-	case "linux":
-		// Use fdatasync on Linux - only syncs data, skips metadata
-		// This is safe because we don't need atime/mtime updates for durability
-		// File size changes are still synced via fdatasync
-		_, _, errno := syscall.Syscall(syscall.SYS_FDATASYNC, file.Fd(), 0, 0)
-		if errno != 0 {
-			return fmt.Errorf("fdatasync failed: %w", errno)
-		}
-		return nil
-
-	case "darwin":
-		// macOS: Use F_FULLFSYNC to bypass disk cache for true durability
-		// This is slower than fsync but necessary because macOS fsync is async
-		// PostgreSQL and SQLite use this approach on macOS
-		_, err := unix.FcntlInt(file.Fd(), unix.F_FULLFSYNC, 0)
-		if err != nil {
-			return fmt.Errorf("fcntl F_FULLFSYNC failed: %w", err)
-		}
-		return nil
-
-	default:
-		// Fallback to standard Sync() for other platforms (Windows, BSD, etc.)
-		// TODO: I will add Windows-specific optimizations using FlushFileBuffers
-		return file.Sync()
-	}
+	return fdatasyncImpl(file)
 }
 
 // OpenFileOptimized opens a file with platform-specific optimizations for database workloads
@@ -91,6 +64,7 @@ func Fdatasync(file *os.File) error {
 // Platform-specific optimizations:
 // - Linux: Adds O_NOATIME to skip access time updates (reduces metadata writes)
 // - macOS: Uses standard flags (no optimization available)
+// - Windows: Uses standard flags
 // - Other: Uses standard flags
 //
 // The O_NOATIME flag on Linux reduces disk I/O by preventing atime (access time) updates
@@ -104,35 +78,10 @@ func Fdatasync(file *os.File) error {
 //		return fmt.Errorf("failed to open WAL file: %w", err)
 //	}
 //	defer file.Close()
+//
+// Implementation is in platform-specific files using build tags.
 func OpenFileOptimized(path string, baseFlags int, perm os.FileMode) (*os.File, error) {
-	flags := baseFlags
-
-	// Add platform-specific optimizations
-	switch runtime.GOOS {
-	case "linux":
-		// O_NOATIME: Don't update file access time on reads
-		// This reduces metadata writes and improves performance
-		// Requires file ownership or CAP_FOWNER capability
-		flags |= O_NOATIME
-	}
-
-	// Attempt to open with optimized flags
-	file, err := os.OpenFile(path, flags, perm)
-	if err != nil {
-		// If O_NOATIME fails (permission issue), retry without it
-		if runtime.GOOS == "linux" && (flags&O_NOATIME) != 0 {
-			flags &^= O_NOATIME
-			file, err = os.OpenFile(path, flags, perm)
-			if err != nil {
-				return nil, fmt.Errorf("failed to open file %s: %w", path, err)
-			}
-			// Successfully opened without O_NOATIME
-			return file, nil
-		}
-		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
-	}
-
-	return file, nil
+	return openFileOptimizedImpl(path, baseFlags, perm)
 }
 
 // SyncDirectory syncs a directory to ensure file metadata is durable
