@@ -10,6 +10,8 @@ github.com/dan-strohschein/syndrdb-simd v0.0.0-20251109221634-d7d56fa53796 h1:xr
 github.com/dan-strohschein/syndrdb-simd v0.0.0-20251109221634-d7d56fa53796/go.mod h1:3kyQj8tYOR+3xCfy+G4TmPRdBwYqYsfztuxEeGyT6eY=
 github.com/dan-strohschein/syndrdb-simd v0.0.0-20251120182802-07db4ea39898 h1:0YnhFSv7AosJGmOasaIDOc4opTduE0dKO2hUhIp7D8o=
 github.com/dan-strohschein/syndrdb-simd v0.0.0-20251120182802-07db4ea39898/go.mod h1:3kyQj8tYOR+3xCfy+G4TmPRdBwYqYsfztuxEeGyT6eY=
+github.com/dan-strohschein/syndrdb-simd v0.0.0-20260104214443-4f424066b091 h1:iWcMcMSkMs5Ju1/NAIGlxOgD4eV8TFXiXQvbrXCB5Cc=
+github.com/dan-strohschein/syndrdb-simd v0.0.0-20260104214443-4f424066b091/go.mod h1:3kyQj8tYOR+3xCfy+G4TmPRdBwYqYsfztuxEeGyT6eY=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
