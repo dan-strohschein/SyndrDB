@@ -59,10 +59,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syndrdb/src/pkg/common"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"go.uber.org/zap"
+	"syndrdb/src/pkg/common"
 )
 
 // BTreeFileManager handles file I/O operations for BTree indexes
@@ -284,11 +285,11 @@ func (fm *BTreeFileManager) ReadPage(pageNum uint32) (interface{}, error) {
 	pageData = pageData[:n]
 
 	// Deserialize based on format
-	if fm.debugMode {
-		return fm.deserializePageASCII(pageData)
-	} else {
-		return fm.deserializePageBinary(pageData, pageNum)
-	}
+	// if fm.debugMode {
+	// 	return fm.deserializePageASCII(pageData)
+	// } else {
+	return fm.deserializePageBinary(pageData, pageNum)
+	// }
 }
 
 // WritePage writes a page to the file
@@ -314,26 +315,42 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 		fm.logger.Debugf("Writing page %d to file", pageNum)
 	}
 
-	// Compute and store checksum for BTreeNode pages (skip metadata page 0)
-	if pageNum > 0 {
-		if btreeNode, ok := pageData.(*BTreeNode); ok {
-			// TODO: I need to implement proper CRC32 checksum computation
-			// For now, use simple checksum based on node fields
-			btreeNode.Checksum = btreeNode.PageNum ^ btreeNode.KeyCount ^ btreeNode.NextLeaf ^ btreeNode.PrevLeaf
-			fm.logger.Debugf("Computed checksum 0x%X for page %d", btreeNode.Checksum, pageNum)
-		}
-	}
-
-	// Serialize page data
+	// Serialize page data first (before checksum)
 	var serialized []byte
 	var err error
 
-	if fm.debugMode {
-		serialized, err = fm.serializePageASCII(pageData)
-	} else {
-		serialized, err = fm.serializePageBinary(pageData)
+	// if fm.debugMode {
+	// 	serialized, err = fm.serializePageASCII(pageData)
+	// } else {
+	// 	serialized, err = fm.serializePageBinary(pageData)
+	// }
+
+	// Compute xxHash64 checksum BEFORE serialization (skip metadata page 0)
+	// Zero out checksum field first to ensure deterministic hash computation
+	if pageNum > 0 {
+		if btreeNode, ok := pageData.(*BTreeNode); ok {
+			// Save original checksum and zero it out for consistent hash computation
+			originalChecksum := btreeNode.Checksum
+			btreeNode.Checksum = 0
+
+			// Serialize with zero checksum
+			var tempSerialized []byte
+			tempSerialized, err = fm.SerializePageBinary(pageData)
+			if err != nil {
+				btreeNode.Checksum = originalChecksum // Restore on error
+				return fmt.Errorf("failed to serialize page %d for checksum: %w", pageNum, err)
+			}
+
+			// Compute xxHash64 over serialized bytes (with checksum=0)
+			checksum := xxhash.Sum64(tempSerialized)
+			btreeNode.Checksum = checksum
+			fm.logger.Debugf("Computed xxHash64 checksum 0x%X for page %d (size=%d bytes)",
+				btreeNode.Checksum, pageNum, len(tempSerialized))
+		}
 	}
 
+	// Final serialization with correct checksum
+	serialized, err = fm.SerializePageBinary(pageData)
 	if err != nil {
 		return fmt.Errorf("failed to serialize page %d: %w", pageNum, err)
 	}
@@ -602,11 +619,13 @@ func (fm *BTreeFileManager) writeFileHeader() error {
 	var headerData []byte
 	var err error
 
-	if fm.debugMode {
-		headerData, err = fm.serializeFileHeaderASCII(fm.fileHeader)
-	} else {
-		headerData, err = fm.serializeFileHeaderBinary()
-	}
+	// if fm.debugMode {
+	// 	headerData, err = fm.serializeFileHeaderASCII(fm.fileHeader)
+	// } else {
+	// 	headerData, err = fm.serializeFileHeaderBinary()
+	// }
+
+	headerData, err = fm.serializeFileHeaderBinary()
 
 	if err != nil {
 		return fmt.Errorf("failed to serialize file header: %w", err)
@@ -632,23 +651,25 @@ func (fm *BTreeFileManager) readFileHeader() error {
 
 	headerBytes = headerBytes[:n]
 
-	// Try to determine format by looking for magic number or ASCII markers
-	if bytes.Contains(headerBytes, []byte("BTREE_INDEX_METADATA")) {
-		// ASCII format
-		fm.debugMode = true
-		// Deserialize ASCII header
-		fm.logger.Debugf("Detected ASCII format for file: %s", fm.FilePath)
-		fileHeader, err := fm.deserializeFileHeaderASCII(headerBytes)
-		if err != nil {
-			return fmt.Errorf("failed to deserialize ASCII file header: %w", err)
-		}
-		fm.fileHeader = fileHeader
-		return nil
-	} else {
-		// Binary format
-		fm.debugMode = false
-		return fm.deserializeFileHeaderBinary(headerBytes)
-	}
+	// // Try to determine format by looking for magic number or ASCII markers
+	// if bytes.Contains(headerBytes, []byte("BTREE_INDEX_METADATA")) {
+	// 	// ASCII format
+	// 	fm.debugMode = true
+	// 	// Deserialize ASCII header
+	// 	fm.logger.Debugf("Detected ASCII format for file: %s", fm.FilePath)
+	// 	fileHeader, err := fm.deserializeFileHeaderASCII(headerBytes)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to deserialize ASCII file header: %w", err)
+	// 	}
+	// 	fm.fileHeader = fileHeader
+	// 	return nil
+	// } else {
+	// 	// Binary format
+	// 	fm.debugMode = false
+
+	// }
+
+	return fm.deserializeFileHeaderBinary(headerBytes)
 }
 
 // calculatePageOffset calculates the file offset for a given page number
@@ -916,7 +937,7 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 	var node *BTreeNode
 	var metadata *BTreeMetadata
 
-	fm.logger.Debugf("Starting ASCII page deserialization, data length: %d", len(data))
+	fm.logger.Infof("Starting ASCII page deserialization, data length: %d", len(data))
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -926,13 +947,13 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 			continue
 		}
 
-		fm.logger.Debugf("Processing line: '%s'", line)
+		fm.logger.Infof("Processing line: '%s'", line)
 
 		// Check for section headers with unique patterns
 		if line == "## METADATA HEADER" {
 			currentSection = "metadata"
 			metadata = &BTreeMetadata{}
-			fm.logger.Debugf("Found metadata section header")
+			fm.logger.Infof("Found metadata section header")
 			continue
 		} else if line == "## BTREE NODE" {
 			currentSection = "node"
@@ -941,17 +962,17 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 				Children: make([]uint32, 0),
 				Values:   make([][]string, 0),
 			}
-			fm.logger.Debugf("Found node section header")
+			fm.logger.Infof("Found node section header")
 			continue
 		}
 
 		// Check for section endings with unique patterns
 		if line == "|| END METADATA HEADER" {
-			fm.logger.Debugf("Found metadata section ending")
+			fm.logger.Infof("Found metadata section ending")
 			currentSection = ""
 			continue
 		} else if line == "|| END BTREE NODE" {
-			fm.logger.Debugf("Found node section ending")
+			fm.logger.Infof("Found node section ending")
 			currentSection = ""
 			continue
 		}
@@ -979,7 +1000,7 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 
 	// Return the parsed structure with validation
 	if node != nil {
-		fm.logger.Debugf("Successfully parsed BTree node: PageNum=%d, Keys=%d, Children=%d",
+		fm.logger.Infof("Successfully parsed BTree node: PageNum=%d, Keys=%d, Children=%d",
 			node.PageNum, len(node.Keys), len(node.Children))
 		return node, nil
 	} else if metadata != nil {
@@ -1267,7 +1288,15 @@ func (fm *BTreeFileManager) deserializeFileHeaderBinary(data []byte) error {
 // 	return b
 // }
 
-func (fm *BTreeFileManager) serializePageBinary(pageData interface{}) ([]byte, error) {
+// SerializePageBinary serializes page data to binary format (exported for checksum computation)
+// This method is used both for writing pages to disk and computing checksums
+// Parameters:
+//   - pageData: The page data to serialize (BTreeNode or BTreeMetadata)
+//
+// Returns:
+//   - []byte: The serialized data
+//   - error: Any error that occurred during serialization
+func (fm *BTreeFileManager) SerializePageBinary(pageData interface{}) ([]byte, error) {
 	//  handle different page types
 	switch data := pageData.(type) {
 	case *BTreeNode:
@@ -1290,6 +1319,10 @@ func (fm *BTreeFileManager) serializePageBinary(pageData interface{}) ([]byte, e
 			return nil, err
 		}
 		if err := binary.Write(buf, binary.LittleEndian, data.PrevLeaf); err != nil {
+			return nil, err
+		}
+		// Write Checksum field
+		if err := binary.Write(buf, binary.LittleEndian, data.Checksum); err != nil {
 			return nil, err
 		}
 		if err := binary.Write(buf, binary.LittleEndian, uint32(len(data.Keys))); err != nil {
@@ -1643,6 +1676,7 @@ func (fm *BTreeFileManager) deserializeNodeBinary(buf *bytes.Reader) (*BTreeNode
 	var pageNum uint32
 	var isLeaf bool
 	var parentPage, nextLeaf, prevLeaf uint32
+	var checksum uint64 // xxHash64 checksum is 64-bit
 
 	if err := binary.Read(buf, binary.LittleEndian, &pageNum); err != nil {
 		return nil, fmt.Errorf("failed to read page number: %w", err)
@@ -1660,6 +1694,10 @@ func (fm *BTreeFileManager) deserializeNodeBinary(buf *bytes.Reader) (*BTreeNode
 	}
 	if err := binary.Read(buf, binary.LittleEndian, &prevLeaf); err != nil {
 		return nil, fmt.Errorf("failed to read previous leaf page: %w", err)
+	}
+	// Read Checksum field
+	if err := binary.Read(buf, binary.LittleEndian, &checksum); err != nil {
+		return nil, fmt.Errorf("failed to read checksum: %w", err)
 	}
 	// Read keys
 	var keyCount uint32
@@ -1751,6 +1789,7 @@ func (fm *BTreeFileManager) deserializeNodeBinary(buf *bytes.Reader) (*BTreeNode
 		ParentPage:     parentPage,
 		NextLeaf:       nextLeaf,
 		PrevLeaf:       prevLeaf,
+		Checksum:       checksum, // CRITICAL: Set the Checksum field from deserialized data
 		Keys:           keys,
 		Values:         values, // CRITICAL: Set the Values field from deserialized data
 		Children:       children,

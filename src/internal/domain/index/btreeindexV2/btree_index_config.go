@@ -54,7 +54,7 @@ type IndexConfig struct {
 	IndexName    string // Optional custom name for the index (auto-generated if empty)
 
 	// Storage configuration
-	DataDir   string // Directory where index files are stored
+	IndexDir  string // Directory where index files are stored
 	DebugMode bool   // Whether to use ASCII format for debugging
 
 	// Index properties
@@ -107,7 +107,7 @@ func DefaultIndexConfig(bundleName, fieldName, dataDir, databaseName string) *In
 		BundleName:       bundleName,
 		FieldName:        fieldName,
 		IndexName:        "", // Will be auto-generated
-		DataDir:          dataDir,
+		IndexDir:         dataDir,
 		DebugMode:        false,
 		IsUnique:         false,
 		AllowNulls:       true,
@@ -190,7 +190,7 @@ func (config *IndexConfig) Validate() error {
 		return fmt.Errorf("field name cannot be empty")
 	}
 
-	if config.DataDir == "" {
+	if config.IndexDir == "" {
 		return fmt.Errorf("data directory cannot be empty")
 	}
 
@@ -263,25 +263,38 @@ func (config *IndexConfig) Validate() error {
 // Returns:
 //   - string: The complete file path for the index
 func (config *IndexConfig) GetIndexFilePath() string {
+
 	indexName := config.IndexName
 	if indexName == "" {
 		indexName = config.generateIndexName()
 	}
 
-	databaseName := helpers.GetDatabaseFolderPath(config.DatabaseName)
+	if config.IndexDir != "" {
+		databaseName := config.IndexDir
+		filename := fmt.Sprintf("%s.btidx", indexName)
+		return filepath.Join(databaseName, filename)
+	} else {
+		// Get proper database path structure (same as hash index)
+		databasePath := helpers.GetDatabaseFolderPath(config.DatabaseName)
 
-	filename := fmt.Sprintf("%s.btidx", indexName)
-	indexFilePath := filepath.Join(databaseName, filename)
+		// Format: /data_dir/<database>/<bundle>/indexes/btree/<btree-index-file-name>.btidx
+		btreeIndexesPath := filepath.Join(databasePath, config.BundleName, "indexes", "btree")
+		filename := fmt.Sprintf("%s.btidx", indexName)
+		return filepath.Join(btreeIndexesPath, filename)
+	}
+	// databaseName := helpers.GetDatabaseFolderPath(config.DatabaseName)
+
+	// filename := fmt.Sprintf("%s.btidx", indexName)
 
 	// DIAGNOSTIC LOGGING: Log path construction for debugging file path issues
 	// This helps identify if paths are being constructed incorrectly
-	if strings.Contains(indexFilePath, ".bnd") || !strings.HasSuffix(indexFilePath, ".btidx") {
-		// CRITICAL: Path construction error detected!
-		panic(fmt.Sprintf("CRITICAL BUG: BTree index path has wrong extension! DatabaseName=%s, IndexName=%s, Path=%s",
-			config.DatabaseName, indexName, indexFilePath))
-	}
+	// if strings.Contains(indexFilePath, ".bnd") || !strings.HasSuffix(indexFilePath, ".btidx") {
+	// 	// CRITICAL: Path construction error detected!
+	// 	panic(fmt.Sprintf("CRITICAL BUG: BTree index path has wrong extension! DatabaseName=%s, IndexName=%s, Path=%s",
+	// 		config.DatabaseName, indexName, indexFilePath))
+	// }
 
-	return indexFilePath
+	//return indexFilePath
 }
 
 // GetTempFilePath returns the path for temporary files during operations
@@ -338,7 +351,7 @@ func (config *IndexConfig) Clone() *IndexConfig {
 		BundleName:       config.BundleName,
 		FieldName:        config.FieldName,
 		IndexName:        config.IndexName,
-		DataDir:          config.DataDir,
+		IndexDir:         config.IndexDir,
 		DebugMode:        config.DebugMode,
 		IsUnique:         config.IsUnique,
 		AllowNulls:       config.AllowNulls,

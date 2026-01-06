@@ -77,10 +77,11 @@ type BTreePageManager struct {
 	// Statistics (using atomic operations for thread safety)
 	stats cacheStatistics
 
-	// TODO: Add memory-pressure flush logic - track dirtyPageCount, auto-flush when >= BTreeMaxDirtyPages, prefer evicting clean pages to avoid write stalls during reads
-	// IMPORTANT NOTE: Memory pressure triggers proactive flush to prevent OOM - clean pages evicted first to minimize I/O blocking during read-heavy workloads
-	// dirtyPageCount int // Current number of dirty pages in cache
-	// maxDirtyPages int  // Threshold from settings.BTreeMaxDirtyPages (default: 1000)
+	// Dirty page tracking and auto-flush infrastructure (PostgreSQL-style in-memory caching)
+	dirtyPageCount   int32           // Current number of dirty pages (atomic access)
+	flushTriggerChan chan struct{}   // Buffered channel (size 1) for signaling background flush worker
+	// TODO: Make dirty page threshold configurable via settings (currently hardcoded to 80%)
+	// Automatic flush triggers when dirtyPageCount/cacheSize > 0.8 to prevent memory pressure
 }
 
 // TODO: Add GetDirtyPageCount() method for monitoring and metrics integration
@@ -180,21 +181,51 @@ func NewBTreePageManager(pageSize uint32, cacheSize int, logger *zap.SugaredLogg
 	tail.prev = head
 
 	pm := &BTreePageManager{
-		cache:       make(map[uint32]*cacheEntry, cacheSize),
-		lruHead:     head,
-		lruTail:     tail,
-		maxSize:     cacheSize,
-		currentSize: 0,
-		pageSize:    pageSize,
-		mutex:       sync.RWMutex{},
-		logger:      logger,
-		stats:       cacheStatistics{},
+		cache:            make(map[uint32]*cacheEntry, cacheSize),
+		lruHead:          head,
+		lruTail:          tail,
+		maxSize:          cacheSize,
+		currentSize:      0,
+		pageSize:         pageSize,
+		mutex:            sync.RWMutex{},
+		logger:           logger,
+		stats:            cacheStatistics{},
+		dirtyPageCount:   0,
+		flushTriggerChan: make(chan struct{}, 1), // Buffered size 1 for non-blocking sends
 	}
 
 	logger.Infof("Successfully created BTree page manager (maxSize: %d, pageSize: %d)",
 		cacheSize, pageSize)
 
 	return pm, nil
+}
+
+// StartFlushWorker launches a background goroutine that monitors dirty page ratio
+// and triggers flush operations when the 80% threshold is exceeded.
+// This prevents memory pressure and ensures dirty pages don't accumulate indefinitely.
+//
+// The worker runs until the flushTriggerChan is closed (during index Close).
+// TODO: Add configurable cooldown period if continuous flushing impacts performance
+func (pm *BTreePageManager) StartFlushWorker() {
+	go func() {
+		pm.logger.Debug("B-tree flush worker started")
+		for range pm.flushTriggerChan {
+			// Flush triggered by PutPage when dirty ratio exceeded 80%
+			pm.logger.Debug("Flush worker triggered by dirty page threshold")
+			
+			// Note: pageWriter must be set before flush can work
+			if pm.pageWriter != nil {
+				if err := pm.Flush(pm.pageWriter); err != nil {
+					pm.logger.Warnw("Background flush failed", zap.Error(err))
+				} else {
+					pm.logger.Debug("Background flush completed successfully")
+				}
+			} else {
+				pm.logger.Warn("Flush triggered but pageWriter not set, skipping")
+			}
+		}
+		pm.logger.Debug("B-tree flush worker stopped")
+	}()
 }
 
 // GetPage retrieves a page from cache or loads it using the provided loader function
@@ -273,6 +304,9 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 
 	// Check if page is already in cache
 	if entry, exists := pm.cache[pageNum]; exists {
+		// Track dirty page count changes
+		wasAlreadyDirty := entry.isDirty
+		
 		// CRITICAL: Only update pageData if it's a different object
 		// If same pointer, just update dirty flag to avoid no-op overwrites
 		if entry.pageData != pageData {
@@ -291,7 +325,15 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 					pageNum, pageData)
 			}
 		}
+		
 		entry.isDirty = entry.isDirty || dirty // Once dirty, stays dirty until flushed
+		
+		// Atomically increment dirty page count if newly marked dirty
+		if !wasAlreadyDirty && entry.isDirty {
+			newCount := atomic.AddInt32(&pm.dirtyPageCount, 1)
+			pm.logger.Debugf("Dirty page count increased to %d after marking page %d dirty", newCount, pageNum)
+		}
+		
 		entry.lastAccess = time.Now()
 		atomic.AddUint64(&entry.accessCount, 1)
 
@@ -299,6 +341,10 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 		pm.moveToFront(entry)
 
 		pm.logger.Debugf("Updated existing cache entry for page %d", pageNum)
+		
+		// Check if dirty page ratio exceeds 80% threshold and trigger auto-flush
+		pm.checkAndTriggerFlush()
+		
 		return
 	}
 
@@ -308,6 +354,36 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 			pageNum, node.KeyCount, pageData)
 	}
 	pm.addToCache(pageNum, pageData, dirty)
+	
+	// Check if dirty page ratio exceeds 80% threshold and trigger auto-flush
+	pm.checkAndTriggerFlush()
+}
+
+// checkAndTriggerFlush checks if dirty page ratio exceeds 80% and triggers background flush
+// This is called by PutPage and MarkPageDirty after modifying pages
+// Note: Must be called while holding pm.mutex lock
+func (pm *BTreePageManager) checkAndTriggerFlush() {
+	if pm.currentSize == 0 {
+		return // Avoid division by zero
+	}
+	
+	dirtyCount := atomic.LoadInt32(&pm.dirtyPageCount)
+	dirtyRatio := float64(dirtyCount) / float64(pm.currentSize)
+	
+	// Trigger flush if dirty ratio exceeds 80% threshold
+	if dirtyRatio > 0.8 {
+		pm.logger.Debugf("Dirty page ratio %.2f%% exceeds 80%% threshold (%d/%d), triggering background flush",
+			dirtyRatio*100, dirtyCount, pm.currentSize)
+		
+		// Non-blocking send to flush trigger channel (buffered size 1)
+		// If channel already has a pending signal, skip (flush already queued)
+		select {
+		case pm.flushTriggerChan <- struct{}{}:
+			pm.logger.Debug("Sent flush trigger signal to background worker")
+		default:
+			pm.logger.Debug("Flush already queued, skipping duplicate trigger")
+		}
+	}
 }
 
 // MarkPageDirty marks a cached page as dirty without replacing its data
@@ -321,19 +397,21 @@ func (pm *BTreePageManager) MarkPageDirty(pageNum uint32) error {
 		return fmt.Errorf("cannot mark page %d as dirty: not in cache", pageNum)
 	}
 
-	// TODO: Increment dirtyPageCount when marking page dirty, check memory pressure threshold
-	// IMPORTANT NOTE: Auto-flush when dirtyPageCount >= settings.BTreeMaxDirtyPages to prevent OOM
-	// if !entry.isDirty {
-	// 		pm.dirtyPageCount++
-	// 		if pm.dirtyPageCount >= pm.maxDirtyPages {
-	// 			// Trigger proactive flush to avoid memory pressure during reads
-	// 			go pm.Flush(pm.pageWriter)
-	// 		}
-	// }
-
+	wasAlreadyDirty := entry.isDirty
 	entry.isDirty = true
+	
+	// Atomically increment dirty page count if newly marked dirty
+	if !wasAlreadyDirty {
+		newCount := atomic.AddInt32(&pm.dirtyPageCount, 1)
+		pm.logger.Debugf("Dirty page count increased to %d after marking page %d dirty", newCount, pageNum)
+	}
+	
 	entry.lastAccess = time.Now()
 	pm.logger.Debugf("Marked page %d as dirty", pageNum)
+	
+	// Check if dirty page ratio exceeds 80% threshold and trigger auto-flush
+	pm.checkAndTriggerFlush()
+	
 	return nil
 }
 
@@ -362,17 +440,17 @@ func (pm *BTreePageManager) Flush(writer func(uint32, interface{}) error) error 
 				continue
 			}
 
-			// TODO: Decrement dirtyPageCount when flushing dirty page
-			// IMPORTANT NOTE: Keep dirtyPageCount accurate for memory pressure monitoring
-			// if entry.isDirty {
-			// 		pm.dirtyPageCount--
-			// }
-
 			// Mark as clean after successful write
 			entry.isDirty = false
 			dirtyCount++
 			atomic.AddUint64(&pm.stats.dirtyWrites, 1)
 		}
+	}
+
+	// Atomically reset dirty page count after flushing all dirty pages
+	if dirtyCount > 0 {
+		atomic.StoreInt32(&pm.dirtyPageCount, 0)
+		pm.logger.Debugf("Reset dirty page count to 0 after flushing %d pages", dirtyCount)
 	}
 
 	atomic.AddUint64(&pm.stats.flushes, 1)
@@ -574,6 +652,12 @@ func (pm *BTreePageManager) addToCache(pageNum uint32, pageData interface{}, dir
 	// Add to cache map
 	pm.cache[pageNum] = entry
 	pm.currentSize++
+	
+	// Atomically increment dirty page count if adding dirty page
+	if dirty {
+		newCount := atomic.AddInt32(&pm.dirtyPageCount, 1)
+		pm.logger.Debugf("Dirty page count increased to %d after adding page %d", newCount, pageNum)
+	}
 
 	// Add to front of LRU list
 	pm.addToFront(entry)

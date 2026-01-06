@@ -38,7 +38,7 @@ func createConcurrencyTestIndex(t *testing.T, testName string, cacheSize int) *b
 		DatabaseName: "testdb",
 		BundleName:   fmt.Sprintf("concurrent_test_%s", testName),
 		FieldName:    "test_field",
-		DataDir:      "data", // Required by validation, though GetIndexFilePath ignores it
+		IndexDir:     "data", // Required by validation, though GetIndexFilePath ignores it
 		IsUnique:     true,   // IMPORTANT: Unique index prevents duplicate keys
 		PageSize:     4096,
 		CacheSize:    cacheSize,

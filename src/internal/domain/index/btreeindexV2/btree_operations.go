@@ -1054,6 +1054,17 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 		// Save updated leaf nodes
 		idx.PageManager.PutPage(leaf.PageNum, leaf, true)
 		idx.PageManager.PutPage(newLeafPageNum, newLeaf, true)
+		
+		// CRITICAL: Flush both leaf pages immediately after root split
+		// These pages are referenced by the new root and must exist on disk
+		if err := idx.FileManager.WritePage(leaf.PageNum, leaf); err != nil {
+			idx.logger.Errorf("Failed to flush original leaf page %d: %v", leaf.PageNum, err)
+			return 0, false, 0, fmt.Errorf("failed to persist original leaf: %w", err)
+		}
+		if err := idx.FileManager.WritePage(newLeafPageNum, newLeaf); err != nil {
+			idx.logger.Errorf("Failed to flush new leaf page %d: %v", newLeafPageNum, err)
+			return 0, false, 0, fmt.Errorf("failed to persist new leaf: %w", err)
+		}
 
 		nodesCreated++ // We also created a new root
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -548,6 +549,16 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 // Start begins listening for incoming connections
 func (s *Server) Start() error {
+	// Initialize trace helper if enabled via environment variable
+	enableTrace := os.Getenv("ENABLE_TRACE") == "true"
+	if err := InitTrace(s.logger, enableTrace); err != nil {
+		s.logger.Warnf("Failed to initialize tracing: %v", err)
+	}
+	if enableTrace {
+		defer StopTrace()
+		s.logger.Infof("🔍 Execution tracing ENABLED - capturing detailed performance data")
+	}
+
 	// Start TCP server
 	addr := fmt.Sprintf("%s:%d", s.Host, s.Port)
 

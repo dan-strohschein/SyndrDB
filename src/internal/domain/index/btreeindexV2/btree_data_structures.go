@@ -57,6 +57,11 @@ type BTreeIndex struct {
 	fieldName   string             // Name of the field being indexed
 	logger      *zap.SugaredLogger // Logger for debug and error messages
 
+	// Crash recovery optimization: skip validation for recently-validated cached indexes
+	// PostgreSQL uses similar approach to avoid redundant validation overhead
+	lastValidated time.Time // Timestamp of last successful crash recovery validation
+	fromCache     bool      // Whether index was loaded from memory cache vs disk
+
 	// WAL integration for durability and crash recovery
 	// Following PostgreSQL's WAL design: log BEFORE modifying index
 	// TODO: I could add async WAL writing with batching for higher throughput
@@ -149,6 +154,11 @@ type BTreeMetadata struct {
 
 	// Performance optimization: throttle expensive maintenance checks
 	OperationsSinceLastCheck uint64 // Counter to throttle checkMaintenanceNeeded() calls
+
+	// UNIQUE INDEX MEMORY MANAGEMENT: Estimated memory usage for in-memory loading
+	// This is calculated as TotalPages × PageSize × 1.2 (20% overhead for Go structures)
+	// Updated on every batch of insert/delete operations and persisted during metadata flush
+	EstimatedMemorySizeBytes int64 // Estimated memory usage in bytes for in-memory loading
 }
 
 // BTreeNode represents a node in the BTree (internal or leaf)
@@ -166,7 +176,7 @@ type BTreeNode struct {
 	ParentPage   uint32     // Page number of parent node (0 for root)
 	LastModified time.Time  // When this node was last modified
 	FreeSpace    uint32     // Available space in bytes for new entries
-	Checksum     uint32     // CRC32 checksum for corruption detection
+	Checksum     uint64     // xxHash64 checksum for corruption detection (8 bytes)
 
 	// Lazy deletion support (PostgreSQL-style deferred merging)
 	Tombstones      map[string]bool // Map of deleted document IDs (key: key+docID)
@@ -187,7 +197,7 @@ type BTreePage struct {
 	PrevPage     uint32    // For leaf pages: previous leaf page number
 	ParentPage   uint32    // Parent page number
 	LastModified time.Time // Last modification timestamp
-	Checksum     uint32    // Page integrity checksum
+	Checksum     uint64    // xxHash64 page integrity checksum (8 bytes)
 	Data         []byte    // Serialized page data
 }
 
@@ -304,7 +314,8 @@ func NewBTreeIndex(config *BTreeConfig, fileManager *BTreeFileManager, pageManag
 		AllowNulls:       config.AllowNulls,
 		DebugMode:        config.DebugMode,
 		LastCompaction:   time.Now(),
-		FragmentationPct: 0.0,
+		// Initialize memory size: 2 pages × PageSize × 1.2 overhead
+		EstimatedMemorySizeBytes: int64(float64(2*config.PageSize) * 1.2),
 	}
 
 	index := &BTreeIndex{
@@ -319,6 +330,10 @@ func NewBTreeIndex(config *BTreeConfig, fileManager *BTreeFileManager, pageManag
 		fieldName:   config.FieldName,
 		logger:      logger,
 	}
+
+	// Start background flush worker for automatic dirty page management
+	pageManager.StartFlushWorker()
+	logger.Debugf("Started flush worker for BTree index '%s'", config.BundleName)
 
 	logger.Debugf("Created new BTree index for bundle '%s' field '%s' with order %d",
 		config.BundleName, config.FieldName, order)
@@ -431,7 +446,8 @@ func NewBTreeMetadata(config *IndexConfig) *BTreeMetadata {
 		AllowNulls:       config.AllowNulls,
 		DebugMode:        config.DebugMode,
 		LastCompaction:   time.Now(),
-		FragmentationPct: 0.0,
+		// Initialize memory size: 2 pages × PageSize × 1.2 overhead
+		EstimatedMemorySizeBytes: int64(float64(2*config.PageSize) * 1.2),
 	}
 }
 
@@ -462,6 +478,29 @@ func (meta *BTreeMetadata) UpdateDeletionMetrics(nodesDeleted int, structuralCha
 	if meta.DeleteCount > 0 {
 		meta.AverageNodesDeleted = float64(meta.TotalNodesDeleted) / float64(meta.DeleteCount)
 	}
+}
+
+// CalculateMemorySize calculates the estimated memory usage for in-memory loading
+// Uses TotalPages × PageSize × 1.2 to account for Go structure overhead (20%)
+// This estimation allows for LRU eviction decisions based on memory budget
+// Returns:
+//   - int64: Estimated memory usage in bytes
+func (meta *BTreeMetadata) CalculateMemorySize() int64 {
+	// Base calculation: total pages × page size
+	baseSize := int64(meta.TotalPages) * int64(meta.PageSize)
+	
+	// Add 20% overhead for Go data structures (slices, maps, pointers, etc.)
+	// This accounts for: slice headers, string headers, map buckets, alignment padding
+	estimatedSize := int64(float64(baseSize) * 1.2)
+	
+	return estimatedSize
+}
+
+// UpdateMemorySize recalculates and updates the EstimatedMemorySizeBytes field
+// Should be called periodically (e.g., every 100 operations) to keep estimate current
+// This method is cheap (just multiplication) so calling it frequently is acceptable
+func (meta *BTreeMetadata) UpdateMemorySize() {
+	meta.EstimatedMemorySizeBytes = meta.CalculateMemorySize()
 }
 
 // CanMerge checks if this node can be merged with a sibling

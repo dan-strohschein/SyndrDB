@@ -300,6 +300,12 @@ func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager Servi
 
 	logger.Debugf("Successfully validated database '%s' exists (ID: %s)", databaseName, database.DatabaseID)
 
+	// PERFORMANCE OPTIMIZATION: Load unique constraint B-tree indexes into memory
+	// PostgreSQL-style approach: pre-load indexes on database context switch for fast unique validation
+	if err := serviceManager.BundleService.LoadDatabaseIndexes(databaseName); err != nil {
+		logger.Warnf("Failed to load database indexes for '%s': %v (will fall back to disk-based indexes)", databaseName, err)
+	}
+
 	response := &CommandResponse{
 		ResultCount: 1,
 		Result:      fmt.Sprintf("Database context switched to '%s'.", databaseName),

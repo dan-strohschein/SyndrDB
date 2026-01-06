@@ -40,6 +40,7 @@ import (
 
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -80,6 +81,10 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file manager: %w", err)
 	}
+	
+	// Set to batched mode for better performance - rely on WAL for durability
+	// This prevents individual fsync calls on each page write during batch flushes
+	fileManager.SetSyncMode("batched")
 	//logger.Infof("DEBUG: File manager created successfully")
 
 	// Create page manager
@@ -176,6 +181,9 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file manager: %w", err)
 	}
+	
+	// Set to batched mode for better performance - rely on WAL for durability
+	fileManager.SetSyncMode("batched")
 
 	// Read metadata from file
 	metadata, err := fileManager.ReadMetadata()
@@ -213,6 +221,9 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 		return fileManager.WritePage(pageNum, node)
 	})
 
+	// Mark as fresh disk load (not from cache)
+	index.fromCache = false
+
 	// CRASH RECOVERY: Validate index integrity and repair if needed
 	// Following PostgreSQL's hybrid approach: auto-repair minor issues, fail-fast on major corruption
 	// Single Responsibility: Each validation function checks one aspect of integrity
@@ -221,6 +232,9 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 	if err := index.performCrashRecovery(); err != nil {
 		return nil, fmt.Errorf("crash recovery failed: %w", err)
 	}
+
+	// Mark validation timestamp after successful recovery
+	index.lastValidated = time.Now()
 
 	logger.Infof("Successfully opened BTree index '%s' for bundle '%s' field '%s'",
 		filePath, metadata.BundleName, metadata.FieldName)
@@ -247,6 +261,15 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 //
 // TODO: I could add parallel page validation for faster recovery on large indexes
 func (idx *BTreeIndex) performCrashRecovery() error {
+	// PERFORMANCE OPTIMIZATION: Skip validation for recently-validated cached indexes
+	// This eliminates 40-50ms recovery overhead when index is already in memory
+	const validationTTL = 5 * time.Minute
+	if idx.fromCache && !idx.lastValidated.IsZero() && time.Since(idx.lastValidated) < validationTTL {
+		idx.logger.Debugf("Skipping crash recovery for cached index '%s' (validated %v ago)",
+			idx.Metadata.IndexName, time.Since(idx.lastValidated))
+		return nil
+	}
+
 	idx.logger.Infof("Starting crash recovery for index '%s'", idx.Metadata.IndexName)
 
 	// Step 1: Validate file header magic number
@@ -394,39 +417,46 @@ func (idx *BTreeIndex) verifyPageChecksums() ([]uint32, error) {
 	return corruptPages, nil
 }
 
-// computePageChecksum calculates CRC32 checksum for a B-tree node
+// computePageChecksum computes an xxHash64 checksum for a BTree node
+// Used for crash recovery validation to detect corruption
 //
 // CHECKSUM ALGORITHM:
-// Uses CRC32 IEEE polynomial (0xedb88320) which is hardware-accelerated on modern CPUs
-// The checksum includes all node data: keys, values, children, metadata
-// Excludes the checksum field itself to avoid circular dependency
+// 1. Zero out the Checksum field (to match write-time computation)
+// 2. Serialize the entire node to bytes
+// 3. Compute xxHash64 over serialized bytes
+// 4. Restore original checksum
 //
-// SIMD ACCELERATION:
-// Go's hash/crc32 package automatically uses SSE 4.2 crc32c instruction when available
-// This provides ~10x faster checksums on Intel/AMD CPUs with SSE4.2
-//
-// Single Responsibility: Only computes checksum, doesn't modify node
+// This ensures the checksum computed at verification time matches
+// the checksum computed at write time.
 //
 // Parameters:
 //   - node: The node to compute checksum for
 //
 // Returns:
-//   - uint32: CRC32 checksum value
-//
-// TODO: I could add support for other hash functions (xxHash, SHA256) for higher security
-func (idx *BTreeIndex) computePageChecksum(node interface{}) uint32 {
-	// Import hash/crc32 at package level for CRC32 computation
-	// For now, return simple checksum based on page number as placeholder
-	// Full implementation requires serializing entire node structure
-
+//   - uint64: xxHash64 checksum value
+func (idx *BTreeIndex) computePageChecksum(node interface{}) uint64 {
 	btreeNode, ok := node.(*BTreeNode)
 	if !ok {
 		return 0
 	}
 
-	// Simple checksum: XOR of all field values
-	// TODO: I need to implement proper CRC32 computation using hash/crc32 package
-	checksum := btreeNode.PageNum ^ btreeNode.KeyCount ^ btreeNode.NextLeaf ^ btreeNode.PrevLeaf
+	// Save and zero out checksum field for consistent computation
+	originalChecksum := btreeNode.Checksum
+	btreeNode.Checksum = 0
+
+	// Serialize node using the same method as WritePage
+	serialized, err := idx.FileManager.SerializePageBinary(btreeNode)
+	if err != nil {
+		idx.logger.Warnf("Failed to serialize node for checksum: %v", err)
+		btreeNode.Checksum = originalChecksum
+		return 0
+	}
+
+	// Compute xxHash64 over serialized bytes
+	checksum := xxhash.Sum64(serialized)
+
+	// Restore original checksum
+	btreeNode.Checksum = originalChecksum
 
 	return checksum
 }
@@ -712,6 +742,23 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 			idx.rootPageNum, newRootPageNum)
 		idx.rootPageNum = newRootPageNum
 		idx.Metadata.RootPageNum = newRootPageNum
+		
+		// CRITICAL: Flush new root page to disk immediately to prevent corruption on crash
+		// The new root is essential for tree traversal - if it's lost, the entire tree becomes inaccessible
+		// Get the page from cache and write it directly to disk
+		pageData, err := idx.PageManager.GetPage(newRootPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
+		})
+		if err != nil {
+			idx.logger.Errorf("Failed to retrieve new root page %d from cache: %v", newRootPageNum, err)
+			return fmt.Errorf("failed to retrieve new root page: %w", err)
+		}
+		
+		if err := idx.FileManager.WritePage(newRootPageNum, pageData); err != nil {
+			idx.logger.Errorf("Failed to flush new root page %d to disk: %v", newRootPageNum, err)
+			return fmt.Errorf("failed to persist new root page: %w", err)
+		}
+		idx.logger.Debugf("Flushed new root page %d to disk after root change", newRootPageNum)
 	}
 
 	// Log structural changes for monitoring and debugging
@@ -1089,6 +1136,12 @@ func (idx *BTreeIndex) Close() error {
 
 	idx.logger.Debugf("Closing BTree index '%s'", idx.FilePath)
 
+	// Stop the flush worker goroutine by closing the trigger channel
+	if idx.PageManager.flushTriggerChan != nil {
+		close(idx.PageManager.flushTriggerChan)
+		idx.logger.Debugf("Closed flush worker channel for BTree index '%s'", idx.FilePath)
+	}
+
 	// Flush any dirty pages
 	if err := idx.PageManager.Flush(idx.FileManager.WritePage); err != nil {
 		idx.logger.Warnf("Failed to flush pages during close: %v", err)
@@ -1385,6 +1438,26 @@ func (idx *BTreeIndex) calculateFillFactor() (float64, error) {
 
 func (idx *BTreeIndex) calculateAverageKeyLength() (float64, error) {
 	return CalculateAverageKeyLength(idx)
+}
+
+// FlushDirtyPages flushes all dirty pages to disk with a single fsync at the end
+// This method is optimized for batched writes to minimize sync overhead
+// Returns:
+//   - error: Any error that occurred during flushing
+func (idx *BTreeIndex) FlushDirtyPages() error {
+	// Flush all dirty pages through the page manager (writes without fsync in batched mode)
+	if err := idx.PageManager.Flush(func(pageNum uint32, pageData interface{}) error {
+		return idx.FileManager.WritePage(pageNum, pageData)
+	}); err != nil {
+		return fmt.Errorf("failed to flush dirty pages: %w", err)
+	}
+	
+	// Now do a single fdatasync to ensure all writes are durable (faster than fsync)
+	if err := idx.FileManager.Sync(); err != nil {
+		return fmt.Errorf("failed to sync after batch flush: %w", err)
+	}
+	
+	return nil
 }
 
 // GetCacheStats returns current cache statistics

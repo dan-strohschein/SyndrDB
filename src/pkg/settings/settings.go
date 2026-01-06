@@ -86,11 +86,12 @@ type Arguments struct {
 	AsyncWALQueueSize    int    `yaml:"async_wal_queue_size"`    // Async WAL queue size (default: 1000)
 
 	// Durability Configuration (PostgreSQL-style fsync optimizations)
-	DurabilityMode             string  `yaml:"durability_mode"`              // Durability mode: "strict", "balanced", "performance" (default: "balanced")
+	DurabilityMode             string  `yaml:"durability_mode"`              // Durability mode: "strict", "balanced", "performance" (default: "performance")
 	WALBatchSize               int     `yaml:"wal_batch_size"`               // Operations before WAL flush in balanced mode (default: 100)
 	WALMaxFlushDelay           int     `yaml:"wal_max_flush_delay"`          // Max milliseconds before forcing WAL flush (default: 100)
-	FsyncOnCommit              bool    `yaml:"fsync_on_commit"`              // Force immediate fsync on transaction commit (default: true)
+	FsyncOnCommit              bool    `yaml:"fsync_on_commit"`              // Force immediate fsync on transaction commit (default: false for group commits)
 	CheckpointCompletionTarget float64 `yaml:"checkpoint_completion_target"` // Spread checkpoint writes over this fraction of checkpoint interval (default: 0.9)
+	UniqueIndexMemoryBudgetMB  int     `yaml:"unique_index_memory_budget_mb"` // Memory budget for in-memory unique constraint B-tree indexes in MB (default: 500)
 	BackgroundWriterDelay      int     `yaml:"background_writer_delay"`      // Milliseconds between background writer cycles (default: 200)
 	MinBatchSize               int     `yaml:"min_batch_size"`               // Minimum operations per batch for auto-tuning (default: 10)
 	MaxBatchSize               int     `yaml:"max_batch_size"`               // Maximum operations per batch for auto-tuning (default: 10000)
@@ -276,11 +277,12 @@ func GetSettings() *Arguments {
 			AsyncWALQueueSize: 1000,   // 1000 operation queue
 
 			// Durability Configuration Defaults (PostgreSQL-style)
-			DurabilityMode:             "balanced", // Balanced mode: zero data loss with group commit
-			WALBatchSize:               100,        // Batch 100 operations before flush
-			WALMaxFlushDelay:           100,        // Force flush after 100ms max
-			FsyncOnCommit:              true,       // Always fsync on transaction commit
-			CheckpointCompletionTarget: 0.9,        // Spread writes over 90% of checkpoint interval
+			DurabilityMode:             "performance",      // Performance mode: group commits with async fsync
+			WALBatchSize:               100,                // Batch 100 operations before flush
+			WALMaxFlushDelay:           100,                // Force flush after 100ms max
+			FsyncOnCommit:              false,              // Disable immediate fsync to enable group commits
+			CheckpointCompletionTarget: 0.9,                // Spread writes over 90% of checkpoint interval
+			UniqueIndexMemoryBudgetMB:  500,                // Default: 500MB memory budget for in-memory unique indexes
 			BackgroundWriterDelay:      200,        // Background writer runs every 200ms
 			MinBatchSize:               10,         // Minimum 10 ops per batch (auto-tune lower bound)
 			MaxBatchSize:               10000,      // Maximum 10000 ops per batch (auto-tune upper bound)

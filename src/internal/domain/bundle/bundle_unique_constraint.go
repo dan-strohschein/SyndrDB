@@ -2,7 +2,16 @@ package bundle
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/registry"
+
+	"syndrdb/src/pkg/settings"
+	"time"
+
+	"syndrdb/src/pkg/common/helpers"
 
 	"go.uber.org/zap"
 )
@@ -80,6 +89,7 @@ func (v *UniqueConstraintValidator) ValidateUniqueConstraints(bundle *models.Bun
 	violations := make([]string, 0, 5)
 
 	// Check each field in the document command
+	loopStart := time.Now()
 	for _, field := range docCommand.Fields {
 		fieldName := field.Key
 		fieldValue := field.Value
@@ -99,7 +109,14 @@ func (v *UniqueConstraintValidator) ValidateUniqueConstraints(bundle *models.Bun
 		v.logger.Infof("[UNIQUE] Validating uniqueness for field '%s' with value '%v'", fieldName, fieldValue)
 
 		// Validate uniqueness for this field
+		fieldStart := time.Now()
 		violation, err := v.validateFieldUniqueness(bundle, fieldName, fieldValue)
+		fieldDuration := time.Since(fieldStart)
+		if fieldDuration > 1*time.Millisecond {
+			v.logger.Warnf("    ⚠️  validateFieldUniqueness('%s') took %v", fieldName, fieldDuration)
+		} else {
+			v.logger.Debugf("    ✓ validateFieldUniqueness('%s') took %v", fieldName, fieldDuration)
+		}
 		if err != nil {
 			// Technical error (index not found, etc.) - log warning but continue
 			v.logger.Warnf("Failed to validate uniqueness for field '%s': %v", fieldName, err)
@@ -110,6 +127,12 @@ func (v *UniqueConstraintValidator) ValidateUniqueConstraints(bundle *models.Bun
 		if violation != "" {
 			violations = append(violations, violation)
 		}
+	}
+	loopDuration := time.Since(loopStart)
+	if loopDuration > 1*time.Millisecond {
+		v.logger.Warnf("    ⚠️  Field loop took %v", loopDuration)
+	} else {
+		v.logger.Debugf("    ✓ Field loop took %v", loopDuration)
 	}
 
 	// If any violations found, return detailed error
@@ -147,14 +170,30 @@ func (v *UniqueConstraintValidator) validateFieldUniqueness(
 		return "", fmt.Errorf("no unique index found on field '%s' (expected '%s') - index required for uniqueness enforcement", fieldName, indexName)
 	}
 
-	v.logger.Debugf("Using unique index '%s' for field '%s' uniqueness check", indexName, fieldName)
+	v.logger.Debugf("Using unique index '%s' (type: %s) for field '%s' uniqueness check", indexName, indexRef.IndexType, fieldName)
 
-	// Load the unique index (reuses existing infrastructure - DRY principle)
-	if indexRef.IndexType == "hash" {
-		return v.checkHashIndexForDuplicates(bundle, indexName, indexRef, fieldName, valueStr)
-	} else if indexRef.IndexType == "btree" {
-		// TODO (FUTURE): Implement BTree index checking for unique constraints
-		return "", fmt.Errorf("BTree unique index support not yet implemented")
+	// POSTGRESQL-STYLE: Check B-tree index first (in-memory), fall back to hash (disk) if needed
+	if indexRef.IndexType == "btree" {
+		checkStart := time.Now()
+		result, err := v.checkBTreeIndexForDuplicates(bundle, indexName, indexRef, fieldName, valueStr)
+		checkDuration := time.Since(checkStart)
+		if checkDuration > 100*time.Microsecond {
+			v.logger.Warnf("      ⚠️  checkBTreeIndexForDuplicates took %v (expected <100μs for in-memory)", checkDuration)
+		} else {
+			v.logger.Debugf("      ⚡ checkBTreeIndexForDuplicates took %v (in-memory)", checkDuration)
+		}
+		return result, err
+	} else if indexRef.IndexType == "hash" {
+		// FALLBACK: Hash index for disk-based lookups (slower, 5-7ms)
+		checkStart := time.Now()
+		result, err := v.checkHashIndexForDuplicates(bundle, indexName, indexRef, fieldName, valueStr)
+		checkDuration := time.Since(checkStart)
+		if checkDuration > 1*time.Millisecond {
+			v.logger.Warnf("      ⚠️  checkHashIndexForDuplicates took %v (disk-based fallback)", checkDuration)
+		} else {
+			v.logger.Debugf("      ✓ checkHashIndexForDuplicates took %v", checkDuration)
+		}
+		return result, err
 	}
 
 	return "", fmt.Errorf("unsupported index type '%s' for unique constraint", indexRef.IndexType)
@@ -171,35 +210,42 @@ func (v *UniqueConstraintValidator) checkHashIndexForDuplicates(
 	valueStr string,
 ) (string, error) {
 	// Load hash index using existing infrastructure (DRY principle)
+	loadStart := time.Now()
 	hashIndex, err := v.bundleService.GetOrLoadHashIndex(bundle, indexName, indexRef)
+	loadDuration := time.Since(loadStart)
+	if loadDuration > 1*time.Millisecond {
+		v.logger.Warnf("        ⚠️  GetOrLoadHashIndex took %v", loadDuration)
+	} else {
+		v.logger.Debugf("        ✓ GetOrLoadHashIndex took %v", loadDuration)
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to load unique index '%s': %w", indexName, err)
 	}
 
 	// Perform O(1) hash lookup to check if value already exists
 	v.logger.Infof("[UNIQUE] Searching unique index '%s' for value '%s'", indexName, valueStr)
+	searchStart := time.Now()
 	results, err := hashIndex.Search(valueStr)
+	searchDuration := time.Since(searchStart)
+	if searchDuration > 1*time.Millisecond {
+		v.logger.Warnf("        ⚠️  hashIndex.Search took %v", searchDuration)
+	} else {
+		v.logger.Debugf("        ✓ hashIndex.Search took %v", searchDuration)
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to search unique index '%s': %w", indexName, err)
 	}
 
-	// Filter out deleted documents from results
-	// Hash indexes may contain references to deleted documents until compaction
-	var existingDocID string
-	for _, docID := range results {
-		// Verify document still exists (not deleted)
-		_, err := v.bundleService.GetDocument(bundle.Name, bundle.Database.Name, docID)
-		if err == nil {
-			// Document exists and is not deleted
-			existingDocID = docID
-			break
-		}
-		// Document is deleted or doesn't exist, skip it
-		v.logger.Debugf("[UNIQUE] Skipping deleted/missing document '%s' in index '%s'", docID, indexName)
-	}
-
-	// If any non-deleted documents have this value, it's a uniqueness violation
-	if existingDocID != "" {
+	// PERFORMANCE FIX: Trust the hash index without GetDocument verification
+	// GetDocument causes full page scans (10ms per validation). The hash index
+	// is the source of truth for uniqueness. Deleted documents will be cleaned
+	// during compaction, but for active writes we assume index is current.
+	//
+	// Trade-off: Extremely rare case where deleted doc not yet compacted could
+	// cause false positive uniqueness violation, but this is acceptable vs 10ms
+	// penalty on every single document insertion.
+	if len(results) > 0 {
+		existingDocID := results[0] // Take first match (any match is a violation)
 		violation := fmt.Sprintf("Unique constraint violation: Field '%s' must be unique, but value '%s' already exists in document '%s'",
 			fieldName, valueStr, existingDocID)
 		v.logger.Warnf("[UNIQUE] %s", violation)
@@ -207,6 +253,53 @@ func (v *UniqueConstraintValidator) checkHashIndexForDuplicates(
 	}
 
 	v.logger.Infof("[UNIQUE] No duplicates found for field '%s' value '%s'", fieldName, valueStr)
+	return "", nil
+}
+
+// checkBTreeIndexForDuplicates performs B-tree index lookup for unique constraint validation
+// This is the fast path for in-memory indexes: O(log n) lookup, typically <100μs
+// B-tree indexes are loaded into memory by LoadDatabaseIndexes() on database context switch
+func (v *UniqueConstraintValidator) checkBTreeIndexForDuplicates(
+	bundle *models.Bundle,
+	indexName string,
+	indexRef models.IndexReference,
+	fieldName string,
+	valueStr string,
+) (string, error) {
+	v.logger.Infof("[UNIQUE] Searching unique B-tree index '%s' for value '%s'", indexName, valueStr)
+
+	// Try to load the B-tree index from cache or disk
+	btreeIndex, err := v.bundleService.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+	if err != nil {
+		return "", fmt.Errorf("failed to load B-tree index '%s': %w", indexName, err)
+	}
+
+	// Search for existing value in the B-tree
+	searchStart := time.Now()
+	keyBytes := []byte(valueStr)
+	documentIDs, err := btreeIndex.Search(keyBytes)
+	searchDuration := time.Since(searchStart)
+
+	// Log performance (in-memory should be <100μs)
+	if searchDuration > 100*time.Microsecond {
+		v.logger.Warnf("        ⚠️  btreeIndex.Search took %v (expected <100μs for in-memory)", searchDuration)
+	} else {
+		v.logger.Debugf("        ⚡ btreeIndex.Search took %v (in-memory)", searchDuration)
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("B-tree index search failed for field '%s': %w", fieldName, err)
+	}
+
+	// Check if any documents were found with this value
+	if len(documentIDs) > 0 {
+		v.logger.Infof("[UNIQUE] Duplicate value found in B-tree index '%s': value '%s' exists in %d document(s)",
+			indexName, valueStr, len(documentIDs))
+		return fmt.Sprintf("field '%s' with value '%s' already exists (unique constraint violation)",
+			fieldName, valueStr), nil
+	}
+
+	v.logger.Infof("[UNIQUE] No duplicates found for field '%s' value '%s' in B-tree index", fieldName, valueStr)
 	return "", nil
 }
 
@@ -288,14 +381,18 @@ func (v *UniqueConstraintValidator) CreateUniqueIndexesForBundle(bundle *models.
 			continue
 		}
 
-		// Create hash index for this unique field
-		v.logger.Infof("[UNIQUE] Creating unique hash index '%s' for field '%s'", indexName, fieldDef.Name)
-		err := createHashIndexInternal(v.bundleService, bundle, indexName)
+		// POSTGRESQL-STYLE: Create B-tree index for unique field (stored in memory)
+		// Hash indexes are disk-based with lazy loading, B-trees can be loaded into memory
+		v.logger.Infof("[UNIQUE] Creating unique B-tree index '%s' for field '%s'", indexName, fieldDef.Name)
+		err := createBTreeIndexForUniqueField(v.bundleService, bundle, indexName, fieldDef)
 		if err != nil {
-			return fmt.Errorf("failed to create unique index '%s' for field '%s': %w", indexName, fieldDef.Name, err)
+			return fmt.Errorf("failed to create unique B-tree index '%s' for field '%s': %w", indexName, fieldDef.Name, err)
 		}
 
-		v.logger.Infof("[UNIQUE] Successfully created unique index '%s' for field '%s'", indexName, fieldDef.Name)
+		// OLD HASH INDEX APPROACH (kept commented for potential disk-based fallback)
+		// err := createHashIndexInternal(v.bundleService, bundle, indexName)
+
+		v.logger.Infof("[UNIQUE] Successfully created unique B-tree index '%s' for field '%s'", indexName, fieldDef.Name)
 	}
 
 	return nil
@@ -331,3 +428,155 @@ func (v *UniqueConstraintValidator) CreateUniqueIndexesForBundle(bundle *models.
 // Decision: Should NULL == NULL for uniqueness purposes?
 //
 // func (v *UniqueConstraintValidator) ValidateNullableUniqueness(bundle *Bundle, fieldName string, value interface{}) error
+
+// createBTreeIndexForUniqueField creates a B-tree index for a unique field constraint
+// This follows PostgreSQL's approach: UNIQUE constraints automatically create B-tree indexes
+// The index will be loaded into memory by LoadDatabaseIndexes() for fast lookups
+//
+// Parameters:
+//   - s: BundleService instance
+//   - bundle: Bundle to create index for
+//   - indexName: Name of the unique index (format: "{fieldName}_unique")
+//   - fieldDef: Field definition containing IsUnique=true
+//
+// Returns:
+//   - error: Any error during index creation or population
+func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, indexName string, fieldDef models.FieldDefinition) error {
+	args := settings.GetSettings()
+
+	// Validate that field is marked unique
+	if !fieldDef.IsUnique {
+		return fmt.Errorf("field '%s' is not marked as unique, cannot create unique B-tree index", fieldDef.Name)
+	}
+
+	s.logger.Infof("Creating unique B-tree index '%s' on field '%s' for bundle '%s'",
+		indexName, fieldDef.Name, bundle.Name)
+
+	// Get proper database path structure (same as hash index)
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	// CRITICAL: Construct full B-tree indexes path to match bundle structure
+	// B-tree indexes must be stored in: database/bundle/indexes/btree/
+	// Format: /data_dir/<database>/<bundle>/indexes/btree/<btree-index-file-name>.btidx
+	btreeIndexesPath := filepath.Join(databasePath, bundle.Name, "indexes", "btree")
+
+	// Calculate optimal split ratio for unique indexes (higher fill factor)
+	splitRatio := calculateOptimalSplitRatio(fieldDef, true)
+
+	// Create configuration for the B-tree index
+	config := btreeindexV2.IndexConfig{
+		IndexName:    indexName, // CRITICAL: Must set IndexName for proper file path construction
+		DatabaseName: bundle.Database.Name,
+		BundleName:   bundle.Name,
+		FieldName:    fieldDef.Name,
+		IsUnique:     true,             // Enforce uniqueness at index level
+		IndexDir:      btreeIndexesPath, // Use full path: database/bundle/indexes/btree
+		DebugMode:    args.Debug,
+		PageSize:     8192,       // 8KB pages (PostgreSQL-style)
+		CacheSize:    100,        // Cache 100 pages
+		FillFactor:   0.8,        // 80% fill factor for unique indexes (higher than default)
+		MaxKeyLength: 2048,       // 2KB max key length
+		SplitRatio:   splitRatio, // Optimized split ratio
+	}
+
+	// Configure WAL for durability (reuse service registry pattern)
+	serviceRegistry := registry.GetRegistry()
+	if serviceRegistry.IsWALAvailable() {
+		config.WALManager = serviceRegistry.GetWALManager()
+		s.logger.Debugf("WAL enabled for unique B-tree index '%s'", indexName)
+	}
+
+	// Ensure the btree indexes directory exists before creating the index
+	if err := os.MkdirAll(btreeIndexesPath, 0755); err != nil {
+		s.logger.Errorf("Failed to create btree indexes directory: %v", err)
+		return fmt.Errorf("failed to create btree indexes directory: %w", err)
+	}
+
+	// Create the B-tree index
+	btreeIndex, err := btreeindexV2.CreateBTreeIndex(&config, s.logger)
+	if err != nil {
+		s.logger.Errorf("Failed to create B-tree index: %v", err)
+		return fmt.Errorf("failed to create B-tree index: %w", err)
+	}
+
+	// Populate index with existing documents from bundle
+	s.logger.Debugf("Populating unique B-tree index with documents from bundle '%s'", bundle.Name)
+	allDocuments, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
+	if err != nil {
+		s.logger.Warnf("Failed to load documents for indexing: %v", err)
+		return err
+	}
+
+	if len(allDocuments) > 0 {
+		s.logger.Debugf("Populating unique B-tree index with %d existing documents", len(allDocuments))
+
+		for documentID, document := range allDocuments {
+			// Extract field value for indexing
+			fieldValue, err := extractFieldValueForIndex(*document, fieldDef.Name)
+			if err != nil {
+				s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, err)
+				continue
+			}
+
+			// Convert to bytes for B-tree storage
+			keyBytes, err := convertValueToBytes(fieldValue)
+			if err != nil {
+				s.logger.Warnf("Failed to convert field value to bytes for document '%s': %v", documentID, err)
+				continue
+			}
+
+			// Insert into B-tree - will fail if duplicate (unique constraint)
+			err = btreeIndex.Insert(keyBytes, document.DocumentID)
+			if err != nil {
+				s.logger.Errorf("Failed to insert document '%s' into unique B-tree index: %v", documentID, err)
+				btreeIndex.Close()
+				return fmt.Errorf("failed to populate unique B-tree index - duplicate value found during initial load: %w", err)
+			}
+		}
+
+		s.logger.Infof("Successfully populated unique B-tree index with %d documents", len(allDocuments))
+	} else {
+		s.logger.Debugf("No existing documents to populate unique B-tree index")
+	}
+
+	// Create index field structure
+	indexField := models.IndexField{
+		FieldName: fieldDef.Name,
+		IsUnique:  true,
+		Collation: "",
+	}
+
+	// Create index reference
+	indexRef := models.IndexReference{
+		IndexName:       indexName,
+		Fields:          []models.FieldDefinition{fieldDef},
+		IndexType:       "btree", // POSTGRESQL-STYLE: B-tree for unique constraints
+		CreateTime:      time.Now(),
+		IndexInstance:   btreeIndex, // Will be cleared after close, loaded on-demand
+		BTreeIndexField: indexField,
+	}
+
+	// Initialize indexes map if nil
+	if bundle.Indexes == nil {
+		bundle.Indexes = make(map[string]models.IndexReference)
+	}
+
+	// Add index to bundle
+	bundle.Indexes[indexName] = indexRef
+	bundle.IndexNames = append(bundle.IndexNames, indexName)
+
+	// Update bundle file
+	err = s.store.UpdateBundleFile(bundle.Database, bundle)
+	if err != nil {
+		s.logger.Errorf("Failed to update bundle file: %v", err)
+		return fmt.Errorf("failed to update bundle file: %w", err)
+	}
+
+	// Update metadata size estimate
+	btreeIndex.Metadata.UpdateMemorySize()
+
+	s.logger.Infof("Successfully created unique B-tree index '%s' for field '%s' (%d MB estimated memory)",
+		indexName, fieldDef.Name, btreeIndex.Metadata.EstimatedMemorySizeBytes/(1024*1024))
+
+	return nil
+}
