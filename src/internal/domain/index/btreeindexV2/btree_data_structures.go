@@ -294,26 +294,26 @@ func NewBTreeIndex(config *BTreeConfig, fileManager *BTreeFileManager, pageManag
 	order := calculateTreeOrder(config.PageSize, config.MaxKeyLength)
 
 	metadata := &BTreeMetadata{
-		Version:          1,
-		CreatedAt:        time.Now(),
-		LastModified:     time.Now(),
-		PageSize:         config.PageSize,
-		Order:            order,
-		TreeHeight:       1,
-		RootPageNum:      1, // Page 0 is metadata, root starts at page 1
-		NextPageNum:      2,
-		TotalPages:       2, // Metadata page + root page
-		FreePages:        make([]uint32, 0),
-		TotalRecords:     0,
-		TotalNodes:       1,
-		LeafNodes:        1,
-		InternalNodes:    0,
-		BundleName:       config.BundleName,
-		FieldName:        config.FieldName,
-		IsUnique:         config.IsUnique,
-		AllowNulls:       config.AllowNulls,
-		DebugMode:        config.DebugMode,
-		LastCompaction:   time.Now(),
+		Version:        1,
+		CreatedAt:      time.Now(),
+		LastModified:   time.Now(),
+		PageSize:       config.PageSize,
+		Order:          order,
+		TreeHeight:     1,
+		RootPageNum:    1, // Page 0 is metadata, root starts at page 1
+		NextPageNum:    2,
+		TotalPages:     2, // Metadata page + root page
+		FreePages:      make([]uint32, 0),
+		TotalRecords:   0,
+		TotalNodes:     1,
+		LeafNodes:      1,
+		InternalNodes:  0,
+		BundleName:     config.BundleName,
+		FieldName:      config.FieldName,
+		IsUnique:       config.IsUnique,
+		AllowNulls:     config.AllowNulls,
+		DebugMode:      config.DebugMode,
+		LastCompaction: time.Now(),
 		// Initialize memory size: 2 pages × PageSize × 1.2 overhead
 		EstimatedMemorySizeBytes: int64(float64(2*config.PageSize) * 1.2),
 	}
@@ -425,27 +425,27 @@ func NewBTreeMetadata(config *IndexConfig) *BTreeMetadata {
 	order := calculateTreeOrder(config.PageSize, config.MaxKeyLength)
 
 	return &BTreeMetadata{
-		MagicNumber:      0x42545245, // "BTRE" - file integrity validation
-		Version:          1,
-		CreatedAt:        time.Now(),
-		LastModified:     time.Now(),
-		PageSize:         config.PageSize,
-		Order:            order,
-		TreeHeight:       1,
-		RootPageNum:      1,
-		NextPageNum:      2,
-		TotalPages:       2,
-		FreePages:        make([]uint32, 0),
-		TotalRecords:     0,
-		TotalNodes:       1,
-		LeafNodes:        1,
-		InternalNodes:    0,
-		BundleName:       config.BundleName,
-		FieldName:        config.FieldName,
-		IsUnique:         config.IsUnique,
-		AllowNulls:       config.AllowNulls,
-		DebugMode:        config.DebugMode,
-		LastCompaction:   time.Now(),
+		MagicNumber:    0x42545245, // "BTRE" - file integrity validation
+		Version:        1,
+		CreatedAt:      time.Now(),
+		LastModified:   time.Now(),
+		PageSize:       config.PageSize,
+		Order:          order,
+		TreeHeight:     1,
+		RootPageNum:    1,
+		NextPageNum:    2,
+		TotalPages:     2,
+		FreePages:      make([]uint32, 0),
+		TotalRecords:   0,
+		TotalNodes:     1,
+		LeafNodes:      1,
+		InternalNodes:  0,
+		BundleName:     config.BundleName,
+		FieldName:      config.FieldName,
+		IsUnique:       config.IsUnique,
+		AllowNulls:     config.AllowNulls,
+		DebugMode:      config.DebugMode,
+		LastCompaction: time.Now(),
 		// Initialize memory size: 2 pages × PageSize × 1.2 overhead
 		EstimatedMemorySizeBytes: int64(float64(2*config.PageSize) * 1.2),
 	}
@@ -488,11 +488,11 @@ func (meta *BTreeMetadata) UpdateDeletionMetrics(nodesDeleted int, structuralCha
 func (meta *BTreeMetadata) CalculateMemorySize() int64 {
 	// Base calculation: total pages × page size
 	baseSize := int64(meta.TotalPages) * int64(meta.PageSize)
-	
+
 	// Add 20% overhead for Go data structures (slices, maps, pointers, etc.)
 	// This accounts for: slice headers, string headers, map buckets, alignment padding
 	estimatedSize := int64(float64(baseSize) * 1.2)
-	
+
 	return estimatedSize
 }
 

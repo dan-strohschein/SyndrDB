@@ -4534,7 +4534,7 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	}
 
 	// Now schedule index updates with the actual pageID from storage
-	indexStart := time.Now()
+	//indexStart := time.Now()
 	indexCount := 0
 	if bundle.Indexes != nil {
 		// Look for indexes and schedule updates
@@ -4583,12 +4583,12 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 			}
 		}
 	}
-	indexDuration := time.Since(indexStart)
-	if indexDuration > 1*time.Millisecond {
-		s.logger.Warnf("  ⚠️  Index scheduling (%d indexes) took %v", indexCount, indexDuration)
-	} else {
-		s.logger.Debugf("  ✓ Index scheduling (%d indexes) took %v", indexCount, indexDuration)
-	}
+	//indexDuration := time.Since(indexStart)
+	// if indexDuration > 1*time.Millisecond {
+	// 	s.logger.Warnf("  ⚠️  Index scheduling (%d indexes) took %v", indexCount, indexDuration)
+	// } else {
+	// 	s.logger.Debugf("  ✓ Index scheduling (%d indexes) took %v", indexCount, indexDuration)
+	// }
 	if bundle.Indexes == nil {
 		s.logger.Warnf("No indexes found for bundle '%s'", bundle.Name)
 	}

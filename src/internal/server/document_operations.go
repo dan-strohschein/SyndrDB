@@ -4,6 +4,7 @@ import (
 	"fmt"
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -123,6 +124,8 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 // AddDocument handles ADD DOCUMENT commands
 // Syntax: ADD DOCUMENT TO "<BUNDLE_NAME>" (<FIELD_NAME>: <VALUE>, ...);
 func AddDocument(commandParts []string, command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
+	startingTime := time.Now()
+
 	// TRACE: Start comprehensive tracing
 	tr := StartRegion("AddDocument.TOTAL", logger)
 	defer tr.End()
@@ -303,5 +306,7 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		ResultCount: 1,
 		Result:      result,
 	}
+	endingTime := time.Since(startingTime)
+	logger.Infof("DEBUG DEBUG :: AddDocument total time: %s", endingTime.String())
 	return cmdResponse, nil
 }

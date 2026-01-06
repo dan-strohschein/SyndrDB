@@ -40,8 +40,9 @@ import (
 
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"syndrdb/src/pkg/settings"
+
+	"github.com/cespare/xxhash/v2"
 
 	"go.uber.org/zap"
 )
@@ -81,7 +82,7 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file manager: %w", err)
 	}
-	
+
 	// Set to batched mode for better performance - rely on WAL for durability
 	// This prevents individual fsync calls on each page write during batch flushes
 	fileManager.SetSyncMode("batched")
@@ -181,7 +182,7 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file manager: %w", err)
 	}
-	
+
 	// Set to batched mode for better performance - rely on WAL for durability
 	fileManager.SetSyncMode("batched")
 
@@ -742,7 +743,7 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 			idx.rootPageNum, newRootPageNum)
 		idx.rootPageNum = newRootPageNum
 		idx.Metadata.RootPageNum = newRootPageNum
-		
+
 		// CRITICAL: Flush new root page to disk immediately to prevent corruption on crash
 		// The new root is essential for tree traversal - if it's lost, the entire tree becomes inaccessible
 		// Get the page from cache and write it directly to disk
@@ -753,7 +754,7 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 			idx.logger.Errorf("Failed to retrieve new root page %d from cache: %v", newRootPageNum, err)
 			return fmt.Errorf("failed to retrieve new root page: %w", err)
 		}
-		
+
 		if err := idx.FileManager.WritePage(newRootPageNum, pageData); err != nil {
 			idx.logger.Errorf("Failed to flush new root page %d to disk: %v", newRootPageNum, err)
 			return fmt.Errorf("failed to persist new root page: %w", err)
@@ -1451,12 +1452,12 @@ func (idx *BTreeIndex) FlushDirtyPages() error {
 	}); err != nil {
 		return fmt.Errorf("failed to flush dirty pages: %w", err)
 	}
-	
+
 	// Now do a single fdatasync to ensure all writes are durable (faster than fsync)
 	if err := idx.FileManager.Sync(); err != nil {
 		return fmt.Errorf("failed to sync after batch flush: %w", err)
 	}
-	
+
 	return nil
 }
 
