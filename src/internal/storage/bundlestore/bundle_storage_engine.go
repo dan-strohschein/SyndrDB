@@ -1339,6 +1339,8 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 // This eliminates the need to rewrite the entire bundle file on every document insert
 // Returns the physical page ID where the document was stored (0-based)
 func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.Bundle, document *models.Document, txID string) (uint32, error) {
+	b.logger.Infof("Starting time: %s", time.Now().Format(time.RFC3339Nano))
+	testingStart := time.Now()
 	// CRITICAL FIX: Acquire write lock to prevent dirty reads during concurrent access
 	// This prevents readers from seeing partially written documents or corrupted data
 	// The lock is released after metadata is updated to ensure data consistency
@@ -1613,7 +1615,9 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 			"newTotalDocuments", bundle.TotalDocuments,
 			"newPageCount", bundle.PageCount)
 	}
-
+	b.logger.Infof("Ending time: %s", time.Now().Format(time.RFC3339Nano))
+	endingTesting := time.Since(testingStart)
+	b.logger.Infof("DEBUG DEBUG DEBUG AppendDocumentToBundleFileWithTxID took %s", endingTesting.String())
 	// COMPACTION INTEGRATION: Trigger compaction evaluation after write
 	// Don't block the write path - evaluate asynchronously
 	// PostgreSQL autovacuum-inspired: check triggers after mutations
