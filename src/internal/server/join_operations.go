@@ -285,10 +285,13 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 		return []string{}
 	}
 
+	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+	ba.bundle.DocumentsMutex.RLock()
 	ids := make([]string, 0, len(*ba.bundle.Documents))
 	for docID := range *ba.bundle.Documents {
 		ids = append(ids, docID)
 	}
+	ba.bundle.DocumentsMutex.RUnlock()
 
 	return ids
 }

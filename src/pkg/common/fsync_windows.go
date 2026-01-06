@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	kernel32         = syscall.NewLazyDLL("kernel32.dll")
+	kernel32             = syscall.NewLazyDLL("kernel32.dll")
 	procFlushFileBuffers = kernel32.NewProc("FlushFileBuffers")
 )
 
@@ -20,7 +20,7 @@ var (
 func fdatasyncImpl(file *os.File) error {
 	// Get the Windows file handle
 	handle := syscall.Handle(file.Fd())
-	
+
 	// Call FlushFileBuffers to ensure durability
 	r1, _, err := procFlushFileBuffers.Call(uintptr(handle))
 	if r1 == 0 {

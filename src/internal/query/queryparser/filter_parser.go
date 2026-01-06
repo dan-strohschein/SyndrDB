@@ -1526,7 +1526,15 @@ func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.Suga
 	// 	logger.Infof("No documents found matching the filter")
 	// }
 	var result []*models.Document
-	for _, doc := range *bundle.Documents {
+	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+	bundle.DocumentsMutex.RLock()
+	documentsSnapshot := make(map[string]models.Document, len(*bundle.Documents))
+	for docID, doc := range *bundle.Documents {
+		documentsSnapshot[docID] = doc
+	}
+	bundle.DocumentsMutex.RUnlock()
+	// Now iterate over the snapshot safely
+	for _, doc := range documentsSnapshot {
 		if EvaluateWhereClause(&doc, whereGroup, logger) {
 			result = append(result, &doc)
 		}

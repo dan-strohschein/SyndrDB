@@ -636,10 +636,13 @@ func (pba *PlannerBundleAdapter) GetDocumentIDs() []string {
 		return []string{}
 	}
 
+	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+	pba.bundle.DocumentsMutex.RLock()
 	ids := make([]string, 0, len(*pba.bundle.Documents))
 	for docID := range *pba.bundle.Documents {
 		ids = append(ids, docID)
 	}
+	pba.bundle.DocumentsMutex.RUnlock()
 
 	return ids
 }

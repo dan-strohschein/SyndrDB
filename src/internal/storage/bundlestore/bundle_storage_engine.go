@@ -3,7 +3,6 @@ package bundlestore
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -1532,29 +1531,29 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	copy(combinedData[8:], documentBytes)
 
 	// Use WriteWithTxID to track transaction context
-	writeStart := time.Now()
+	// writeStart := time.Now()
 	if err := writeBuffer.WriteWithTxID(combinedData[:len(headerBytes)+len(documentBytes)], document.DocumentID, txID); err != nil {
 		b.returnCombinedBuffer(combinedData) // Return buffer to pool
 		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, 0, fmt.Errorf("failed to write document data: %w", err))
 		return 0, fmt.Errorf("failed to write document data: %w", err)
 	}
-	writeTime := time.Since(writeStart)
-	// #region agent log
-	logEntry := map[string]interface{}{
-		"sessionId":    "debug-session",
-		"runId":        "run1",
-		"hypothesisId": "N",
-		"location":     "bundle_storage_engine.go:1534",
-		"message":      "After WriteWithTxID",
-		"timestamp":    time.Now().UnixNano() / 1e6,
-		"data":         map[string]interface{}{"writeTimeMs": writeTime.Nanoseconds() / 1e6},
-	}
-	if logBytes, err := json.Marshal(logEntry); err == nil {
-		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			f.Write(append(logBytes, '\n'))
-			f.Close()
-		}
-	}
+	// writeTime := time.Since(writeStart)
+	// #region agent log (commented out - performance debugging)
+	// logEntry := map[string]interface{}{
+	// 	"sessionId":    "debug-session",
+	// 	"runId":        "run1",
+	// 	"hypothesisId": "N",
+	// 	"location":     "bundle_storage_engine.go:1534",
+	// 	"message":      "After WriteWithTxID",
+	// 	"timestamp":    time.Now().UnixNano() / 1e6,
+	// 	"data":         map[string]interface{}{"writeTimeMs": writeTime.Nanoseconds() / 1e6},
+	// }
+	// if logBytes, err := json.Marshal(logEntry); err == nil {
+	// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+	// 		f.Write(append(logBytes, '\n'))
+	// 		f.Close()
+	// 	}
+	// }
 	// #endregion
 
 	b.returnCombinedBuffer(combinedData) // Return buffer to pool
@@ -1566,7 +1565,7 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	// 1. WAL logging (which has its own batching/flushing logic)
 	// 2. WriteBuffer auto-flush when buffer full or timeout (100ms default)
 	// 3. Transaction commit will force flush if needed
-	// 
+	//
 	// NOTE: Readers will still see consistent data because:
 	// - Documents are added to memtable immediately (bundle.Documents map)
 	// - WAL ensures durability and crash recovery
@@ -2661,7 +2660,9 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 	convertedBundle := BundleToMap(bundle)
 
 	// 2. Make sure Documents are included in the map
-	docMap := make(map[string]interface{})
+	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+	bundle.DocumentsMutex.RLock()
+	docMap := make(map[string]interface{}, len(*bundle.Documents))
 	for docID, doc := range *bundle.Documents {
 		docMap[docID] = map[string]interface{}{
 			"DocumentID": doc.DocumentID,
@@ -2670,6 +2671,7 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 			"UpdatedAt":  doc.UpdatedAt,
 		}
 	}
+	bundle.DocumentsMutex.RUnlock()
 	convertedBundle["Documents"] = docMap
 
 	// docs := make([]interface{}, 0, len(bundle.Documents))
