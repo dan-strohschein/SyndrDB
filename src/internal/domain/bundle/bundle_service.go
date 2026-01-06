@@ -1996,7 +1996,10 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 
 // getAllDocumentsForIndexing loads all documents from all pages for index building
 // This is a temporary method during the transition to page-based architecture
-func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models.Document, error) {
+// snapshotSeq: Optional snapshot sequence for MVCC filtering (0 = no filtering)
+// txID: Optional transaction ID for read-your-own-writes (0 = no filtering)
+// activeTxIDs: Optional map of active transaction IDs at snapshot time (nil = no filtering)
+func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool) ([]*models.Document, error) {
 
 	bundle, exists := s.bundleMetadata[bundleName]
 	if !exists {
@@ -2032,23 +2035,29 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, 0, databasePath)
 		if err != nil {
 
-		// Even if page 0 fails, check memtable before returning empty
-		if bundle.Documents != nil && !bundle.DocumentsComplete {
-			s.logger.Debugf("Page 0 failed, but memtable has %d documents", len(*bundle.Documents))
-			// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-			bundle.DocumentsMutex.RLock()
-			memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-			for docID, doc := range *bundle.Documents {
-				memtableSnapshot[docID] = doc
+			// Even if page 0 fails, check memtable before returning empty
+			if bundle.Documents != nil && !bundle.DocumentsComplete {
+				s.logger.Debugf("Page 0 failed, but memtable has %d documents", len(*bundle.Documents))
+				// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+				bundle.DocumentsMutex.RLock()
+				memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
+				for docID, doc := range *bundle.Documents {
+					memtableSnapshot[docID] = doc
+				}
+				bundle.DocumentsMutex.RUnlock()
+				// Now iterate over the snapshot safely
+				for _, doc := range memtableSnapshot {
+					docCopy := doc
+					// Apply MVCC visibility filter if snapshot is provided
+					if snapshotSeq > 0 {
+						if !docCopy.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
+							continue // Skip invisible documents
+						}
+					}
+					allDocuments = append(allDocuments, &docCopy)
+				}
+				return allDocuments, nil
 			}
-			bundle.DocumentsMutex.RUnlock()
-			// Now iterate over the snapshot safely
-			for _, doc := range memtableSnapshot {
-				docCopy := doc
-				allDocuments = append(allDocuments, &docCopy)
-			}
-			return allDocuments, nil
-		}
 			return []*models.Document{}, nil
 		}
 
@@ -2079,9 +2088,26 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 			for docID, doc := range memtableSnapshot {
 				if !diskDocIDs[docID] {
 					docCopy := doc
+					// Apply MVCC visibility filter if snapshot is provided
+					if snapshotSeq > 0 {
+						if !docCopy.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
+							continue // Skip invisible documents
+						}
+					}
 					allDocuments = append(allDocuments, &docCopy)
 				}
 			}
+		}
+
+		// Apply MVCC visibility filter to disk documents if snapshot is provided
+		if snapshotSeq > 0 {
+			filteredDocuments := make([]*models.Document, 0, len(allDocuments))
+			for _, doc := range allDocuments {
+				if doc.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
+					filteredDocuments = append(filteredDocuments, doc)
+				}
+			}
+			allDocuments = filteredDocuments
 		}
 
 		return allDocuments, nil
@@ -2127,17 +2153,35 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string) ([]*models
 		for docID, doc := range memtableSnapshot {
 			if !diskDocIDs[docID] {
 				docCopy := doc
+				// Apply MVCC visibility filter if snapshot is provided
+				if snapshotSeq > 0 {
+					if !docCopy.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
+						continue // Skip invisible documents
+					}
+				}
 				allDocuments = append(allDocuments, &docCopy)
 			}
 		}
+	}
+
+	// Apply MVCC visibility filter to disk documents if snapshot is provided
+	if snapshotSeq > 0 {
+		filteredDocuments := make([]*models.Document, 0, len(allDocuments))
+		for _, doc := range allDocuments {
+			if doc.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
+				filteredDocuments = append(filteredDocuments, doc)
+			}
+		}
+		allDocuments = filteredDocuments
 	}
 
 	return allDocuments, nil
 }
 
 // GetAllDocumentsForIndexing is a public wrapper for document scanner integration
+// For backward compatibility, calls getAllDocumentsForIndexing without snapshot filtering
 func (s *BundleService) GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error) {
-	return s.getAllDocumentsForIndexing(bundleName)
+	return s.getAllDocumentsForIndexing(bundleName, 0, 0, nil)
 }
 
 func (s *BundleService) LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error) {
@@ -2147,7 +2191,7 @@ func (s *BundleService) LoadDocumentPage(bundleName, databaseName string, pageID
 
 func (s *BundleService) LoadCatalogBundleDocuments(bundleName string) ([]*models.Document, error) {
 	// Load all documents for the specified catalog bundle
-	return s.getAllDocumentsForIndexing(bundleName)
+	return s.getAllDocumentsForIndexing(bundleName, 0, 0, nil)
 }
 
 // simpleHash provides a basic hash function for document ID to page mapping
@@ -3699,7 +3743,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 
 	// For now, we need to load all documents to build the index
 	// In the future, this should be done incrementally as pages are loaded
-	allDocuments, err := s.getAllDocumentsForIndexing(bundle.Name)
+	allDocuments, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
 	if err != nil {
 		s.logger.Warnf("Failed to load documents for indexing: %v", err)
 		return err
@@ -4274,6 +4318,9 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 	// Create the document
 	newDocument := s.documentFactory.NewDocument(*docCommand)
 
+	// Set MVCC version metadata
+	s.setDocumentVersionFields(newDocument, txID, 1) // VersionSequence starts at 1
+
 	// Schedule deferred metadata update
 	s.scheduleMetadataUpdate(docCommand.BundleName, "increment_docs", 1)
 
@@ -4680,7 +4727,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		}
 
 		// Get all document IDs from the bundle
-		allDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+		allDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
 		if err != nil {
 			return fmt.Errorf("failed to retrieve documents for bulk delete: %w", err)
 		}
@@ -4983,7 +5030,7 @@ func (s *BundleService) DeleteAllDocumentsFromBundle(
 	defer s.ReleaseBundleWriteLock(bundle.Name)
 
 	// Get all document IDs from the bundle
-	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve documents for bulk delete: %w", err)
 	}
@@ -5120,7 +5167,7 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 	// If no WHERE clause, return all documents (disk + buffered)
 	if whereParts == "" {
 		//s.logger.Infof("DEBUG: GetDocumentsByFilter - empty filter, calling getAllDocumentsForIndexing")
-		diskDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+		diskDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -5237,7 +5284,7 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 	s.logger.Debugf("No suitable index found, performing full document scan with page-based loading")
 
 	// Load all documents using the modern page-based system
-	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name)
+	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load documents for filtering: %w", err)
 	}
@@ -6273,4 +6320,30 @@ func (s *BundleService) RegisterBundleForTesting(bundle *models.Bundle) {
 	}
 	s.bundleMetadata[bundle.Name] = bundle
 	s.logger.Debugf("[Testing] Registered bundle '%s' in memory cache", bundle.Name)
+}
+
+// setDocumentVersionFields sets MVCC version metadata on a document
+// txID: Transaction ID as hex string (empty for autocommit)
+// versionSequence: Version number within document ID (1, 2, 3...)
+func (s *BundleService) setDocumentVersionFields(document *models.Document, txID string, versionSequence uint64) {
+	if document == nil {
+		return
+	}
+
+	// Convert txID string to uint64 (if present)
+	var createdByTxID uint64 = 0
+	if txID != "" {
+		_, err := fmt.Sscanf(txID, "%016x", &createdByTxID)
+		if err != nil {
+			// If parsing fails, use 0 (autocommit)
+			s.logger.Warnf("Failed to parse txID '%s' as uint64, using 0 (autocommit)", txID)
+			createdByTxID = 0
+		}
+	}
+
+	// Set version fields
+	document.CreatedByTxID = createdByTxID
+	document.DeletedByTxID = 0  // Not deleted
+	document.CommitSequence = 0 // Uncommitted (will be set on commit)
+	document.VersionSequence = versionSequence
 }

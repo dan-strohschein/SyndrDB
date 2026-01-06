@@ -59,6 +59,12 @@ func (s *FastDocumentSerializer) SerializeDocument(document *models.Document) ([
 	s.writeInt64(document.CreatedAt.UnixNano())
 	s.writeInt64(document.UpdatedAt.UnixNano())
 
+	// Write MVCC version metadata (4 × uint64 = 32 bytes)
+	s.writeUint64(document.CreatedByTxID)
+	s.writeUint64(document.DeletedByTxID)
+	s.writeUint64(document.CommitSequence)
+	s.writeUint64(document.VersionSequence)
+
 	// Return copy of buffer to avoid mutation
 	result := make([]byte, len(s.buffer))
 	copy(result, s.buffer)
@@ -118,6 +124,26 @@ func (s *FastDocumentSerializer) SerializeDocumentMap(docEntry map[string]interf
 	} else {
 		s.writeInt64(time.Now().UnixNano())
 	}
+
+	// Write MVCC version metadata (4 × uint64 = 32 bytes)
+	// Default to 0 if not present (backward compatibility)
+	var createdByTxID, deletedByTxID, commitSequence, versionSequence uint64
+	if val, ok := docEntry["CreatedByTxID"].(uint64); ok {
+		createdByTxID = val
+	}
+	if val, ok := docEntry["DeletedByTxID"].(uint64); ok {
+		deletedByTxID = val
+	}
+	if val, ok := docEntry["CommitSequence"].(uint64); ok {
+		commitSequence = val
+	}
+	if val, ok := docEntry["VersionSequence"].(uint64); ok {
+		versionSequence = val
+	}
+	s.writeUint64(createdByTxID)
+	s.writeUint64(deletedByTxID)
+	s.writeUint64(commitSequence)
+	s.writeUint64(versionSequence)
 
 	// Return copy of buffer
 	result := make([]byte, len(s.buffer))
@@ -221,6 +247,12 @@ func (s *FastDocumentSerializer) writeInt64(value int64) {
 
 func (s *FastDocumentSerializer) writeFloat64(value float64) {
 	s.writeInt64(int64(math.Float64bits(value)))
+}
+
+func (s *FastDocumentSerializer) writeUint64(value uint64) {
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, value)
+	s.buffer = append(s.buffer, buf...)
 }
 
 // Global fast serializer instance with mutex protection

@@ -105,7 +105,15 @@ func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldN
 		require.NoError(t, err, "Should create index")
 
 		// Populate index
+		// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+		bundle.DocumentsMutex.RLock()
+		documentsSnapshot := make(map[string]models.Document, len(*bundle.Documents))
 		for docID, doc := range *bundle.Documents {
+			documentsSnapshot[docID] = doc
+		}
+		bundle.DocumentsMutex.RUnlock()
+		// Now iterate over the snapshot safely
+		for docID, doc := range documentsSnapshot {
 			field := doc.Fields[indexFieldName]
 			keyValue := field.Value.StringVal
 			err = index.Put(keyValue, docID, 0)
@@ -132,24 +140,38 @@ type mockBundleAdapter struct {
 }
 
 func (m *mockBundleAdapter) GetDocumentIDs() []string {
+	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+	m.bundle.DocumentsMutex.RLock()
 	ids := make([]string, 0, len(*m.bundle.Documents))
 	for id := range *m.bundle.Documents {
 		ids = append(ids, id)
 	}
+	m.bundle.DocumentsMutex.RUnlock()
 	return ids
 }
 
 func (m *mockBundleAdapter) GetDocument(docID string) *models.Document {
+	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map access
+	m.bundle.DocumentsMutex.RLock()
+	defer m.bundle.DocumentsMutex.RUnlock()
 	if doc, ok := (*m.bundle.Documents)[docID]; ok {
-		return &doc
+		docCopy := doc
+		return &docCopy
 	}
 	return nil
 }
 
 func (m *mockBundleAdapter) GetAllDocuments() map[string]*models.Document {
-	// Convert map[string]Document to map[string]*Document
-	result := make(map[string]*models.Document, len(*m.bundle.Documents))
+	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
+	m.bundle.DocumentsMutex.RLock()
+	documentsSnapshot := make(map[string]models.Document, len(*m.bundle.Documents))
 	for id, doc := range *m.bundle.Documents {
+		documentsSnapshot[id] = doc
+	}
+	m.bundle.DocumentsMutex.RUnlock()
+	// Convert map[string]Document to map[string]*Document
+	result := make(map[string]*models.Document, len(documentsSnapshot))
+	for id, doc := range documentsSnapshot {
 		docCopy := doc
 		result[id] = &docCopy
 	}
@@ -344,7 +366,7 @@ func TestJoinIndex_ProbeStrategySelection(t *testing.T) {
 
 func TestJoinIndex_BatchGetBehavior(t *testing.T) {
 	// Arrange: Create bundle with many unique keys to test BatchGet
-	buildBundle, _ := createTestBundle(t, "build", 300, "join_key", false) // 300 docs, 100 unique keys
+	buildBundle, _ := createTestBundle(t, "build", 300, "join_key", false)          // 300 docs, 100 unique keys
 	probeBundle, probeIndex := createTestBundle(t, "probe", 3000, "join_key", true) // 3000 docs
 	defer probeIndex.Close()
 
@@ -514,7 +536,7 @@ func TestJoinIndex_NoIndexFallback(t *testing.T) {
 func TestJoinIndex_BuildSideIndexNotUsed(t *testing.T) {
 	// Arrange: Index on build side (smaller), not probe side
 	buildBundle, buildIndex := createTestBundle(t, "build", 100, "join_key", true) // Index on build
-	probeBundle, _ := createTestBundle(t, "probe", 1000, "join_key", false) // No index on probe
+	probeBundle, _ := createTestBundle(t, "probe", 1000, "join_key", false)        // No index on probe
 	defer buildIndex.Close()
 
 	logger := createTestLogger(t)

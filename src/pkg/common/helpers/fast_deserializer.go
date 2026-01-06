@@ -65,11 +65,27 @@ func (d *FastDocumentDeserializer) DeserializeDocument(data []byte) (*models.Doc
 	createdAt := time.Unix(0, createdAtNano)
 	updatedAt := time.Unix(0, updatedAtNano)
 
+	// Read MVCC version metadata (4 × uint64 = 32 bytes)
+	// Default to 0 if not present (backward compatibility with old documents)
+	var createdByTxID, deletedByTxID, commitSequence, versionSequence uint64
+	if d.offset+32 <= len(d.data) {
+		// Version fields are present
+		createdByTxID, _ = d.readUint64()
+		deletedByTxID, _ = d.readUint64()
+		commitSequence, _ = d.readUint64()
+		versionSequence, _ = d.readUint64()
+	}
+	// If not present, values remain 0 (default)
+
 	return &models.Document{
-		DocumentID: documentID,
-		Fields:     fields,
-		CreatedAt:  createdAt,
-		UpdatedAt:  updatedAt,
+		DocumentID:      documentID,
+		Fields:          fields,
+		CreatedAt:       createdAt,
+		UpdatedAt:       updatedAt,
+		CreatedByTxID:   createdByTxID,
+		DeletedByTxID:   deletedByTxID,
+		CommitSequence:  commitSequence,
+		VersionSequence: versionSequence,
 	}, nil
 }
 
@@ -119,6 +135,22 @@ func (d *FastDocumentDeserializer) DeserializeDocumentMap(data []byte) (map[stri
 	// Convert timestamps back to time.Time
 	docEntry["CreatedAt"] = time.Unix(0, createdAtNano)
 	docEntry["UpdatedAt"] = time.Unix(0, updatedAtNano)
+
+	// Read MVCC version metadata (4 × uint64 = 32 bytes)
+	// Default to 0 if not present (backward compatibility with old documents)
+	var createdByTxID, deletedByTxID, commitSequence, versionSequence uint64
+	if d.offset+32 <= len(d.data) {
+		// Version fields are present
+		createdByTxID, _ = d.readUint64()
+		deletedByTxID, _ = d.readUint64()
+		commitSequence, _ = d.readUint64()
+		versionSequence, _ = d.readUint64()
+	}
+	// If not present, values remain 0 (default)
+	docEntry["CreatedByTxID"] = createdByTxID
+	docEntry["DeletedByTxID"] = deletedByTxID
+	docEntry["CommitSequence"] = commitSequence
+	docEntry["VersionSequence"] = versionSequence
 
 	return docEntry, nil
 }
@@ -263,6 +295,15 @@ func (d *FastDocumentDeserializer) readInt64() (int64, error) {
 	value := binary.LittleEndian.Uint64(d.data[d.offset : d.offset+8])
 	d.offset += 8
 	return int64(value), nil
+}
+
+func (d *FastDocumentDeserializer) readUint64() (uint64, error) {
+	if d.offset+8 > len(d.data) {
+		return 0, fmt.Errorf("insufficient data for uint64 at offset %d", d.offset)
+	}
+	value := binary.LittleEndian.Uint64(d.data[d.offset : d.offset+8])
+	d.offset += 8
+	return value, nil
 }
 
 func (d *FastDocumentDeserializer) readFloat64() (float64, error) {

@@ -12,8 +12,6 @@ before execution, maintaining ACID properties and enabling recovery.
 */
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"syndrdb/src/pkg/settings"
@@ -24,9 +22,11 @@ import (
 
 // WALManager provides a high-level interface for WAL operations
 type WALManager struct {
-	wal       *WriteAheadLog
-	logger    *zap.SugaredLogger
-	activeTxs map[string]*Transaction
+	wal                *WriteAheadLog
+	logger             *zap.SugaredLogger
+	activeTxs          map[string]*Transaction
+	transactionCounter *TransactionCounter // Monotonic transaction ID generator for MVCC
+	snapshotManager    *SnapshotManager    // MVCC snapshot management
 }
 
 // Transaction represents an active database transaction
@@ -73,20 +73,28 @@ func NewWALManager(logger *zap.SugaredLogger) (*WALManager, error) {
 	}
 
 	manager := &WALManager{
-		wal:       wal,
-		logger:    logger,
-		activeTxs: make(map[string]*Transaction),
+		wal:                wal,
+		logger:             logger,
+		activeTxs:          make(map[string]*Transaction),
+		transactionCounter: NewTransactionCounter(),
+		snapshotManager:    NewSnapshotManager(),
 	}
 
 	logger.Info("WAL Manager initialized successfully")
 	return manager, nil
 }
 
-// generateTxID generates a unique transaction ID
+// generateTxID generates a unique transaction ID using monotonic counter
+// Returns string for backward compatibility, but internally uses uint64
 func (wm *WALManager) generateTxID() string {
-	bytes := make([]byte, 8)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
+	txID := wm.transactionCounter.Next()
+	// Convert uint64 to hex string for backward compatibility
+	return fmt.Sprintf("%016x", txID)
+}
+
+// generateTxIDUint64 generates a transaction ID as uint64 (for MVCC)
+func (wm *WALManager) generateTxIDUint64() uint64 {
+	return wm.transactionCounter.Next()
 }
 
 // BeginTransaction starts a new transaction and returns the transaction ID
@@ -119,18 +127,32 @@ func (wm *WALManager) CommitTransaction(txID string) error {
 		return fmt.Errorf("transaction %s not found", txID)
 	}
 
+	// Get commit sequence for this transaction
+	commitSequence := wm.snapshotManager.GetNextCommitSequence()
+
 	// Log the transaction commit
 	err := wm.wal.LogOperation(txID, OpCommitTx, "", "", "", "", "")
 	if err != nil {
 		return fmt.Errorf("failed to log transaction commit: %w", err)
 	}
 
+	// Convert txID string to uint64 for snapshot cleanup
+	// txID is hex string, parse it
+	var txIDUint64 uint64
+	_, err = fmt.Sscanf(txID, "%016x", &txIDUint64)
+	if err == nil {
+		// Unregister from active transactions
+		wm.snapshotManager.UnregisterActiveTransaction(txIDUint64)
+		// Remove snapshot
+		wm.snapshotManager.RemoveSnapshot(txIDUint64)
+	}
+
 	// Remove from active transactions
 	delete(wm.activeTxs, txID)
 
 	duration := time.Since(tx.StartTime)
-	wm.logger.Debugf("Committed transaction: %s (duration: %v, operations: %d)",
-		txID, duration, len(tx.Operations))
+	wm.logger.Debugf("Committed transaction: %s (duration: %v, operations: %d, commitSeq: %d)",
+		txID, duration, len(tx.Operations), commitSequence)
 	return nil
 }
 
@@ -145,6 +167,16 @@ func (wm *WALManager) RollbackTransaction(txID string) error {
 	err := wm.wal.LogOperation(txID, OpRollbackTx, "", "", "", "", "")
 	if err != nil {
 		return fmt.Errorf("failed to log transaction rollback: %w", err)
+	}
+
+	// Convert txID string to uint64 for snapshot cleanup
+	var txIDUint64 uint64
+	_, err = fmt.Sscanf(txID, "%016x", &txIDUint64)
+	if err == nil {
+		// Unregister from active transactions
+		wm.snapshotManager.UnregisterActiveTransaction(txIDUint64)
+		// Remove snapshot
+		wm.snapshotManager.RemoveSnapshot(txIDUint64)
 	}
 
 	// Remove from active transactions
@@ -497,4 +529,59 @@ func (wm *WALManager) UndoToLSN(targetLSN uint64, txID string, undoFunc func(WAL
 
 	wm.logger.Infof("Undo complete: %d operations reversed for txID=%s", undoCount, txID)
 	return nil
+}
+
+// GetTransactionCounter returns the transaction counter for persistence/recovery
+func (wm *WALManager) GetTransactionCounter() *TransactionCounter {
+	return wm.transactionCounter
+}
+
+// InitializeTransactionCounter sets the counter value during recovery
+// Should be called after loading persisted counter value or scanning WAL
+func (wm *WALManager) InitializeTransactionCounter(value uint64) {
+	wm.transactionCounter.SetValue(value)
+	wm.logger.Infof("Initialized transaction counter to %d", value)
+}
+
+// BeginTransactionUint64 starts a new transaction and returns the transaction ID as uint64
+// This is the MVCC-compatible version that returns numeric IDs
+func (wm *WALManager) BeginTransactionUint64() (uint64, error) {
+	txID := wm.generateTxIDUint64()
+	txIDStr := fmt.Sprintf("%016x", txID)
+
+	tx := &Transaction{
+		ID:         txIDStr,
+		StartTime:  time.Now(),
+		Operations: make([]WALEntry, 0),
+	}
+
+	wm.activeTxs[txIDStr] = tx
+
+	// Register transaction as active in snapshot manager
+	wm.snapshotManager.RegisterActiveTransaction(txID)
+
+	// Create snapshot for this transaction
+	snapshot, err := wm.snapshotManager.CreateSnapshot(txID)
+	if err != nil {
+		delete(wm.activeTxs, txIDStr)
+		wm.snapshotManager.UnregisterActiveTransaction(txID)
+		return 0, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
+	// Log the transaction begin
+	err = wm.wal.LogOperation(txIDStr, OpBeginTx, "", "", "", "", "")
+	if err != nil {
+		delete(wm.activeTxs, txIDStr)
+		wm.snapshotManager.UnregisterActiveTransaction(txID)
+		wm.snapshotManager.RemoveSnapshot(txID)
+		return 0, fmt.Errorf("failed to log transaction begin: %w", err)
+	}
+
+	wm.logger.Debugf("Started transaction: %d (hex: %s) with snapshot sequence %d", txID, txIDStr, snapshot.SnapshotSequence)
+	return txID, nil
+}
+
+// GetSnapshotManager returns the snapshot manager for external access
+func (wm *WALManager) GetSnapshotManager() *SnapshotManager {
+	return wm.snapshotManager
 }
