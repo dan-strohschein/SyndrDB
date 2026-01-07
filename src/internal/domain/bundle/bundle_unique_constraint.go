@@ -275,17 +275,17 @@ func (v *UniqueConstraintValidator) checkBTreeIndexForDuplicates(
 	}
 
 	// Search for existing value in the B-tree
-	searchStart := time.Now()
+	//searchStart := time.Now()
 	keyBytes := []byte(valueStr)
 	documentIDs, err := btreeIndex.Search(keyBytes)
-	searchDuration := time.Since(searchStart)
+	//searchDuration := time.Since(searchStart)
 
 	// Log performance (in-memory should be <100μs)
-	if searchDuration > 100*time.Microsecond {
-		v.logger.Warnf("        ⚠️  btreeIndex.Search took %v (expected <100μs for in-memory)", searchDuration)
-	} else {
-		v.logger.Debugf("        ⚡ btreeIndex.Search took %v (in-memory)", searchDuration)
-	}
+	// if searchDuration > 100*time.Microsecond {
+	// 	v.logger.Warnf("        ⚠️  btreeIndex.Search took %v (expected <100μs for in-memory)", searchDuration)
+	// } else {
+	// 	v.logger.Debugf("        ⚡ btreeIndex.Search took %v (in-memory)", searchDuration)
+	// }
 
 	if err != nil {
 		return "", fmt.Errorf("B-tree index search failed for field '%s': %w", fieldName, err)
@@ -470,7 +470,7 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 		BundleName:   bundle.Name,
 		FieldName:    fieldDef.Name,
 		IsUnique:     true,             // Enforce uniqueness at index level
-		IndexDir:      btreeIndexesPath, // Use full path: database/bundle/indexes/btree
+		IndexDir:     btreeIndexesPath, // Use full path: database/bundle/indexes/btree
 		DebugMode:    args.Debug,
 		PageSize:     8192,       // 8KB pages (PostgreSQL-style)
 		CacheSize:    100,        // Cache 100 pages

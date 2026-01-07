@@ -274,10 +274,10 @@ func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interfa
 	}
 
 	// INTENSIVE DEBUG: Log details for loaded internal nodes
-	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-		pm.logger.Infof("GetPage LOADED FROM DISK: page %d is internal node with %d keys (ptr=%p)",
-			pageNum, node.KeyCount, pageData)
-	}
+	// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+	// 	pm.logger.Infof("GetPage LOADED FROM DISK: page %d is internal node with %d keys (ptr=%p)",
+	// 		pageNum, node.KeyCount, pageData)
+	// }
 
 	// Add to cache
 	pm.addToCache(pageNum, pageData, false)
@@ -320,10 +320,10 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 			}
 			entry.pageData = pageData
 		} else {
-			if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-				pm.logger.Infof("PutPage SAME POINTER: page %d already cached with same object (ptr=%p), just updating dirty flag",
-					pageNum, pageData)
-			}
+			// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+			// 	pm.logger.Infof("PutPage SAME POINTER: page %d already cached with same object (ptr=%p), just updating dirty flag",
+			// 		pageNum, pageData)
+			// }
 		}
 
 		entry.isDirty = entry.isDirty || dirty // Once dirty, stays dirty until flushed
