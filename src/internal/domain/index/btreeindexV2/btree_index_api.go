@@ -1441,21 +1441,32 @@ func (idx *BTreeIndex) calculateAverageKeyLength() (float64, error) {
 	return CalculateAverageKeyLength(idx)
 }
 
-// FlushDirtyPages flushes all dirty pages to disk with a single fsync at the end
-// This method is optimized for batched writes to minimize sync overhead
+// FlushDirtyPages flushes all dirty pages to disk
+// In batched mode: skips final sync, relies on WAL checkpoint
+// In immediate mode: syncs after writing all pages
 // Returns:
 //   - error: Any error that occurred during flushing
 func (idx *BTreeIndex) FlushDirtyPages() error {
-	// Flush all dirty pages through the page manager (writes without fsync in batched mode)
+	// Flush all dirty pages through the page manager
+	// WritePage() will skip individual fsyncs in batched mode
 	if err := idx.PageManager.Flush(func(pageNum uint32, pageData interface{}) error {
 		return idx.FileManager.WritePage(pageNum, pageData)
 	}); err != nil {
 		return fmt.Errorf("failed to flush dirty pages: %w", err)
 	}
 
-	// Now do a single fdatasync to ensure all writes are durable (faster than fsync)
-	if err := idx.FileManager.Sync(); err != nil {
-		return fmt.Errorf("failed to sync after batch flush: %w", err)
+	// CRITICAL FIX: Only sync in immediate mode
+	// In batched mode, WAL provides durability - defer sync to checkpoint
+	syncMode := idx.FileManager.GetSyncMode()
+	if syncMode != "batched" {
+		// Immediate mode: do final fsync for durability
+		if err := idx.FileManager.Sync(); err != nil {
+			return fmt.Errorf("failed to sync after batch flush: %w", err)
+		}
+		idx.logger.Debugf("Synced pages to disk (immediate mode)")
+	} else {
+		// Batched mode: skip expensive fsync, rely on WAL
+		idx.logger.Debugf("Skipped sync after flush (batched mode - WAL provides durability)")
 	}
 
 	return nil
