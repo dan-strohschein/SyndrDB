@@ -84,6 +84,15 @@ type BTreeFileManager struct {
 	pendingPages map[string]bool    // Dirty pages pending checkpoint (only in batched mode)
 }
 
+// GetSyncMode returns the current sync mode setting
+// Returns:
+//   - string: Current sync mode ("immediate" or "batched")
+func (fm *BTreeFileManager) GetSyncMode() string {
+	fm.mutex.RLock()
+	defer fm.mutex.RUnlock()
+	return fm.syncMode
+}
+
 func (fm *BTreeFileManager) AllocatePage() (uint32, error) {
 	// Ensure the file is open
 	if !fm.isOpen {
@@ -210,12 +219,14 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 	logger.Debugf("Creating BTree file manager for: %s", filePath)
 
 	fm := &BTreeFileManager{
-		FilePath:  filePath,
-		pageSize:  pageSize,
-		debugMode: debugMode,
-		isOpen:    false,
-		logger:    logger,
-		mutex:     sync.RWMutex{},
+		FilePath:     filePath,
+		pageSize:     pageSize,
+		debugMode:    debugMode,
+		isOpen:       false,
+		logger:       logger,
+		mutex:        sync.RWMutex{},
+		syncMode:     "batched",
+		pendingPages: make(map[string]bool),
 	}
 
 	// Check if file exists
@@ -309,12 +320,12 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 	defer fm.mutex.Unlock()
 
 	// INTENSIVE DEBUG: Log what we're writing
-	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-		fm.logger.Infof("WritePage CALLED: page %d internal node with %d keys (ptr=%p)",
-			pageNum, node.KeyCount, pageData)
-	} else {
-		fm.logger.Debugf("Writing page %d to file", pageNum)
-	}
+	// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
+	// 	fm.logger.Infof("WritePage CALLED: page %d internal node with %d keys (ptr=%p)",
+	// 		pageNum, node.KeyCount, pageData)
+	// } else {
+	// 	fm.logger.Debugf("Writing page %d to file", pageNum)
+	// }
 
 	// Serialize page data first (before checksum)
 	var serialized []byte

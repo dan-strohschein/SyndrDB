@@ -322,14 +322,17 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	// Strict mode: sync every operation
 	if wal.durabilityMode == "strict" {
 		forceFlush = true
+		wal.logger.Debugf("WAL flush triggered: strict mode")
 	}
 
 	// Balanced mode: sync on commits (zero data loss) or when batch full
 	if wal.durabilityMode == "balanced" {
 		if wal.fsyncOnCommit && isCommitOp {
 			forceFlush = true // Force immediate sync on transaction boundaries
+			wal.logger.Debugf("WAL flush triggered: balanced mode commit")
 		} else if wal.pendingOps >= wal.walBatchSize || time.Since(wal.lastFlush) >= wal.walMaxFlushDelay {
 			forceFlush = true // Batch threshold reached
+			wal.logger.Debugf("WAL flush triggered: balanced mode batch (pendingOps=%d, timeSince=%v)", wal.pendingOps, time.Since(wal.lastFlush))
 		}
 	}
 
@@ -337,12 +340,19 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	if wal.durabilityMode == "performance" {
 		if wal.pendingOps >= wal.walBatchSize || time.Since(wal.lastFlush) >= wal.walMaxFlushDelay {
 			forceFlush = true
+			wal.logger.Warnf("⚠️  WAL flush triggered in PERFORMANCE mode: pendingOps=%d, batchSize=%d, timeSince=%v, maxDelay=%v",
+				wal.pendingOps, wal.walBatchSize, time.Since(wal.lastFlush), wal.walMaxFlushDelay)
 		}
 	}
 
 	if forceFlush {
+		flushStart := time.Now()
 		if err := wal.flushUnsafe(); err != nil {
 			return err
+		}
+		flushDuration := time.Since(flushStart)
+		if flushDuration > 10*time.Millisecond {
+			wal.logger.Warnf("⚠️  WAL flushUnsafe() took %v (mode=%s)", flushDuration, wal.durabilityMode)
 		}
 		wal.pendingOps = 0
 		wal.lastFlush = time.Now()

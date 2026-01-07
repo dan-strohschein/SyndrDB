@@ -51,10 +51,13 @@ func NewWALManager(logger *zap.SugaredLogger) (*WALManager, error) {
 		MaxFileSize:        settings.MaxJournalFileSize,
 		FlushInterval:      1 * time.Second,
 		RetentionDays:      30,
-		FsyncOnCommit:      true,
+		FsyncOnCommit:      settings.FsyncOnCommit,
 		CompressionEnabled: false,
 		EncryptionEnabled:  false,
 		AutoFlush:          true,
+		DurabilityMode:     settings.DurabilityMode,
+		WALBatchSize:       settings.WALBatchSize,
+		WALMaxFlushDelay:   time.Duration(settings.WALMaxFlushDelay) * time.Millisecond,
 	}
 
 	// Use default log directory if not set

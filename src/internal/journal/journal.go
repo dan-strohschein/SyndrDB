@@ -213,6 +213,10 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 	}
 
 	logger.Infof("Write Ahead Log initialized at %s with LSN starting at %d", config.LogDir, wal.currentLSN)
+
+	wal.logger.Infof("WAL Configuration: durabilityMode=%s, batchSize=%d, maxFlushDelay=%v, fsyncOnCommit=%v",
+		durabilityMode, walBatchSize, walMaxFlushDelay, config.FsyncOnCommit)
+
 	return wal, nil
 }
 
@@ -458,19 +462,23 @@ func (wal *WriteAheadLog) flushUnsafe() error {
 		return fmt.Errorf("failed to flush WAL buffer: %w", err)
 	}
 
+	// CRITICAL PERFORMANCE FIX: Skip expensive fsync in performance mode
+	// Write-ahead log is written to OS page cache, background checkpoint handles durability
+	// This matches behavior of PostgreSQL "synchronous_commit = off" for high throughput
+	if wal.durabilityMode == "performance" {
+		wal.logger.Debugf("WAL flushed to OS cache (performance mode - fsync deferred to checkpoint)")
+		wal.lastFlush = time.Now()
+		return nil // Skip fsync, rely on checkpoint for durability
+	}
+
 	// Force sync to disk for durability using platform-optimized fsync
 	// Uses fdatasync on Linux (2-3x faster), F_FULLFSYNC on macOS (true durability)
 	if err := common.Fdatasync(wal.file); err != nil {
-		// Handle sync errors based on durability mode
-		if wal.durabilityMode == "performance" {
-			wal.logger.Warnf("WAL sync failed in performance mode (continuing): %v", err)
-			// In performance mode, log and continue (best-effort durability)
-		} else {
-			// In strict/balanced modes, sync failures are fatal
-			return fmt.Errorf("failed to sync WAL to disk: %w", err)
-		}
+		// In strict/balanced modes, sync failures are fatal
+		return fmt.Errorf("failed to sync WAL to disk: %w", err)
 	}
 
+	wal.logger.Debugf("WAL synced to disk (strict/balanced mode)")
 	wal.lastFlush = time.Now()
 	return nil
 }
