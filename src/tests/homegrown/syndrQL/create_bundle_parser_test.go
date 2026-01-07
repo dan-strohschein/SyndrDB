@@ -3,6 +3,7 @@ package homegrown
 import (
 	"testing"
 
+	"syndrdb/src/internal/domain/models"
 	syndrQL "syndrdb/src/internal/syndrQL"
 )
 
@@ -66,8 +67,8 @@ WITH FIELDS (
 			expectedFields: 1,
 		},
 		{
-			name: "Compact format (no newlines)",
-			input: `CREATE BUNDLE "logs" WITH FIELDS ({"id", "int", TRUE, TRUE, 0}, {"message", "string", TRUE, FALSE, ""});`,
+			name:           "Compact format (no newlines)",
+			input:          `CREATE BUNDLE "logs" WITH FIELDS ({"id", "int", TRUE, TRUE, 0}, {"message", "string", TRUE, FALSE, ""});`,
 			expectError:    false,
 			expectedBundle: "logs",
 			expectedFields: 2,
@@ -551,8 +552,8 @@ func TestCreateBundleParser_EdgeCases(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "Tab characters",
-			input: "CREATE\tBUNDLE\t\"test\"\tWITH\tFIELDS\t(\n\t{\"id\", \"int\", TRUE, TRUE, 0}\n);",
+			name:        "Tab characters",
+			input:       "CREATE\tBUNDLE\t\"test\"\tWITH\tFIELDS\t(\n\t{\"id\", \"int\", TRUE, TRUE, 0}\n);",
 			expectError: false,
 		},
 		{

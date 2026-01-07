@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -29,36 +28,12 @@ Architecture Pattern:
 */
 
 func TestBTreeSynchronousInsertPerformance(t *testing.T) {
-	// Create test index with clean slate
-	testDatabaseDir := filepath.Join("data", "testdb")
-	indexFileName := "sync_insert_test_email_btree.btidx"
-	indexFilePath := filepath.Join(testDatabaseDir, indexFileName)
-
-	// Clean up before and after
-	os.Remove(indexFilePath)
-	defer os.Remove(indexFilePath)
-	os.MkdirAll(testDatabaseDir, 0755)
-
-	logger, _ := zap.NewDevelopment()
-
-	config := &btreeindexV2.IndexConfig{
-		DatabaseName: "testdb",
-		BundleName:   "sync_insert_test",
-		FieldName:    "email",
-		IndexDir:     "data",
-		IsUnique:     true,
-		PageSize:     8192,
-		CacheSize:    100,
-		FillFactor:   0.7,
-		MaxKeyLength: 256,
-		SplitRatio:   0.5,
-	}
-
-	idx, err := btreeindexV2.CreateBTreeIndex(config, logger.Sugar())
-	require.NoError(t, err, "Failed to create test index")
-	defer idx.Close()
+	// Each subtest creates its own isolated index via createCleanTestIndex()
 
 	t.Run("Read-your-own-writes immediate visibility", func(t *testing.T) {
+		idx, _ := createCleanTestIndex(t, "read_your_own_writes")
+		defer idx.Close()
+
 		email := []byte("alice@example.com")
 		docID := "doc_alice"
 
@@ -89,6 +64,8 @@ func TestBTreeSynchronousInsertPerformance(t *testing.T) {
 	})
 
 	t.Run("Performance meets PostgreSQL target", func(t *testing.T) {
+		idx, _ := createCleanTestIndex(t, "performance_target")
+		defer idx.Close()
 		// Target: <500μs (PostgreSQL baseline + 15% margin)
 		const targetLatency = 500 * time.Microsecond
 		const numInserts = 100
@@ -133,6 +110,8 @@ func TestBTreeSynchronousInsertPerformance(t *testing.T) {
 	})
 
 	t.Run("Sequential searches verify immediate visibility", func(t *testing.T) {
+		idx, _ := createCleanTestIndex(t, "sequential_visibility")
+		defer idx.Close()
 		// Insert multiple documents rapidly
 		emails := []string{
 			"rapid1@example.com",
@@ -159,6 +138,8 @@ func TestBTreeSynchronousInsertPerformance(t *testing.T) {
 	})
 
 	t.Run("Dirty page auto-flush threshold", func(t *testing.T) {
+		idx, _ := createCleanTestIndex(t, "dirty_page_flush")
+		defer idx.Close()
 		// Insert enough documents to potentially trigger 80% dirty threshold
 		// With cache size 100, we need ~80 dirty pages to trigger auto-flush
 		const numDocs = 150
@@ -183,4 +164,49 @@ func TestBTreeSynchronousInsertPerformance(t *testing.T) {
 
 		t.Logf("✓ All %d bulk documents remain searchable after potential auto-flush", numDocs)
 	})
+}
+
+// createCleanTestIndex creates a fresh BTree index for testing with proper cleanup
+func createCleanTestIndex(t *testing.T, testName string) (*btreeindexV2.BTreeIndex, string) {
+	logger, _ := zap.NewDevelopment()
+
+	config := &btreeindexV2.IndexConfig{
+		DatabaseName: "testdb",
+		BundleName:   testName,
+		FieldName:    "email",
+		IndexDir:     "data",
+		IsUnique:     true,
+		PageSize:     8192,
+		CacheSize:    100,
+		FillFactor:   0.7,
+		MaxKeyLength: 256,
+		SplitRatio:   0.5,
+	}
+
+	// Get the actual path that will be used by CreateBTreeIndex
+	// This uses the config's GetIndexFilePath() logic
+	indexFilePath := config.GetIndexFilePath()
+
+	// Remove any existing index files BEFORE creating the index
+	// This is critical - CreateBTreeIndex may load existing data if files exist
+	cleanupIndexFiles(indexFilePath)
+
+	// Register cleanup for test end
+	t.Cleanup(func() {
+		cleanupIndexFiles(indexFilePath)
+	})
+
+	idx, err := btreeindexV2.CreateBTreeIndex(config, logger.Sugar())
+	require.NoError(t, err, "Failed to create test index")
+
+	return idx, indexFilePath
+}
+
+// cleanupIndexFiles removes all files associated with a BTree index
+func cleanupIndexFiles(basePath string) {
+	os.Remove(basePath)
+	os.Remove(basePath + ".meta")
+	os.Remove(basePath + ".journal")
+	os.Remove(basePath + ".lock")
+	// TODO: Add any other index-related file extensions discovered
 }

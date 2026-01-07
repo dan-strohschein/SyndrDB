@@ -3893,7 +3893,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		BundleName:   bundle.Name,
 		FieldName:    fieldDef.Name,
 		IsUnique:     fieldDef.IsUnique,
-		IndexDir:     args.DataDir,
+		// IndexDir removed - use proper database/bundle/indexes/btree path structure
 		DebugMode:    args.Debug,
 		PageSize:     8192,       // 8KB pages (PostgreSQL-style)
 		CacheSize:    100,        // Cache 100 pages for performance

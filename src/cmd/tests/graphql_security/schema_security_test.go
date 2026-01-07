@@ -43,7 +43,7 @@ func TestWithSimpleSchema(t *testing.T) {
 
 	// Add a few test documents
 	for i := 1; i <= 5; i++ {
-		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "TestUsers" WITH ({UserID=%d, Username="user%d", Email="user%d@test.com", Age=%d})`,
+		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "TestUsers" WITH ({"UserID"=%d}, {"Username"="user%d"}, {"Email"="user%d@test.com"}, {"Age"=%d});`,
 			i, i, i, 20+i)
 
 		startTime = time.Now()
@@ -60,7 +60,7 @@ func TestWithSimpleSchema(t *testing.T) {
 
 	// Now test GraphQL queries with security layers
 	t.Run("SimpleQuery", func(t *testing.T) {
-		query := `GRAPHQL::{ testUsers { UserID Username } }`
+		query := `GRAPHQL::{"query": "{ testUsers { UserID Username } }"}`
 
 		result, err := env.handler.ProcessGraphQLCommand(query, nil, "127.0.0.1")
 
@@ -78,7 +78,7 @@ func TestWithSimpleSchema(t *testing.T) {
 
 	t.Run("ComplexityCheck", func(t *testing.T) {
 		// A query with nested fields (if we had relationships)
-		query := `GRAPHQL::{ testUsers { UserID Username Email Age } }`
+		query := `GRAPHQL::{"query": "{ testUsers { UserID Username Email Age } }"}`
 
 		result, err := env.handler.ProcessGraphQLCommand(query, nil, "127.0.0.1")
 
@@ -96,7 +96,7 @@ func TestWithSimpleSchema(t *testing.T) {
 	})
 
 	t.Run("RateLimiting", func(t *testing.T) {
-		query := `GRAPHQL::{ testUsers { UserID } }`
+		query := `GRAPHQL::{"query": "{ testUsers { UserID } }"}`
 
 		successCount := 0
 		rateLimitedCount := 0
@@ -182,7 +182,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 		// Add 2 books per author
 		for j := 1; j <= 2; j++ {
 			bookID := (i-1)*2 + j
-			addBookCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"BookID"=%d}, {"Title"="Book%d"}, {"AuthorID"=%d}, {"Genre"="Fiction"})`,
+			addBookCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"BookID"=%d}, {"Title"="Book%d"}, {"AuthorID"=%d}, {"Genre"="Fiction"});`,
 				bookID, bookID, i)
 			startTime = time.Now()
 			_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, addBookCmd, env.logger, startTime, nil, "127.0.0.1")
@@ -196,7 +196,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 
 	// Test simple query
 	t.Run("SimpleListQuery", func(t *testing.T) {
-		query := `GRAPHQL::{ authors { Name Country } }`
+		query := `GRAPHQL::{"query": "{ authors { Name Country } }"}`
 
 		_, err := env.handler.ProcessGraphQLCommand(query, nil, "127.0.0.1")
 
@@ -213,7 +213,7 @@ func TestComplexityWithNestedQuery(t *testing.T) {
 
 	// Test nested query (if relationships work)
 	t.Run("NestedQuery", func(t *testing.T) {
-		query := `GRAPHQL::{ authors { Name books { Title Genre } } }`
+		query := `GRAPHQL::{"query": "{ authors { Name books { Title Genre } } }"}`
 
 		_, err := env.handler.ProcessGraphQLCommand(query, nil, "127.0.0.1")
 
@@ -252,7 +252,7 @@ func TestSecurityLayersWithMutation(t *testing.T) {
 
 	t.Run("MutationRateLimiting", func(t *testing.T) {
 		// Mutations should cost 5x more than queries
-		mutation := `GRAPHQL::mutation { createProduct(ProductID: 1, Name: "Test", Price: 9.99) }`
+		mutation := `GRAPHQL::{"query": "mutation { createProduct(ProductID: 1, Name: \"Test\", Price: 9.99) }"}`
 
 		successCount := 0
 		rateLimitedCount := 0
@@ -302,7 +302,7 @@ func TestTimeoutEnforcement(t *testing.T) {
 
 	// Add some data
 	for i := 1; i <= 10; i++ {
-		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "LargeData" WITH ({"ID"=%d}, {"Data"="Row%d"})`, i, i)
+		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "LargeData" WITH ({"ID"=%d}, {"Data"="Row%d"});`, i, i)
 		startTime = time.Now()
 		_, err = server.CommandDirector(ctx, env.database, *env.serviceManager, addDocCmd, env.logger, startTime, nil, "127.0.0.1")
 		if err != nil {
@@ -311,7 +311,7 @@ func TestTimeoutEnforcement(t *testing.T) {
 	}
 
 	t.Run("QueryTimeout", func(t *testing.T) {
-		query := `GRAPHQL::{ largeData { ID Data } }`
+		query := `GRAPHQL::{"query": "{ largeData { ID Data } }"}`
 
 		_, err := env.handler.ProcessGraphQLCommand(query, nil, "127.0.0.1")
 
@@ -350,7 +350,7 @@ func TestMonitoringMetrics(t *testing.T) {
 	// Execute several queries
 	executedCount := 0
 	for i := 0; i < 5; i++ {
-		query := `GRAPHQL::{ metrics { ID } }`
+		query := `GRAPHQL::{"query": "{ metrics { ID } }"}`
 		_, err := env.handler.ProcessGraphQLCommand(query, nil, "127.0.0.1")
 		if err == nil || !contains(err.Error(), "rate limit") {
 			executedCount++

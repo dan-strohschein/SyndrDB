@@ -894,11 +894,11 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 		return nil
 	}
 
-	if b.logger != nil && settings.GetSettings().Debug {
-		b.logger.Infow("BATCH UPDATE: Starting batch document update",
-			"bundle", bundle.Name,
-			"documentCount", len(documents))
-	}
+	// if b.logger != nil && settings.GetSettings().Debug {
+	// 	b.logger.Infow("BATCH UPDATE: Starting batch document update",
+	// 		"bundle", bundle.Name,
+	// 		"documentCount", len(documents))
+	// }
 
 	// CRITICAL: Acquire write lock ONCE for entire batch
 	// This prevents lock contention and ensures atomic batch operation
@@ -1009,13 +1009,13 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	// Mark bundle as dirty to trigger metadata persistence
 	bundle.IsDirty = true
 
-	if b.logger != nil {
-		b.logger.Infow("BATCH UPDATE: Successfully updated documents",
-			"bundle", bundle.Name,
-			"updatedCount", successCount,
-			"totalCount", len(documents),
-			"pageCount", bundle.PageCount)
-	}
+	// if b.logger != nil {
+	// 	b.logger.Infow("BATCH UPDATE: Successfully updated documents",
+	// 		"bundle", bundle.Name,
+	// 		"updatedCount", successCount,
+	// 		"totalCount", len(documents),
+	// 		"pageCount", bundle.PageCount)
+	// }
 
 	// CRITICAL: Lock is released here by defer, ensuring atomic visibility
 	return nil
