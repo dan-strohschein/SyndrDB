@@ -2,11 +2,11 @@ package server
 
 import (
 	"fmt"
+	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
-
-	"syndrdb/src/pkg/settings"
 )
 
 // Checkpoint flushes all in-memory data to disk to ensure consistency
@@ -22,7 +22,8 @@ func Checkpoint(command string, logger *zap.SugaredLogger, serviceManager *Servi
 	// Flush WAL if enabled
 	if serviceManager.WALManager != nil && args.WALEnabled {
 		if err := serviceManager.WALManager.Flush(); err != nil {
-			return nil, fmt.Errorf("WAL flush failed: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+				"WAL flush failed", errors.LayerWAL)
 		}
 		stats.WALFlushed = true
 		logger.Debug("WAL flushed successfully")

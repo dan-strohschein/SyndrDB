@@ -28,11 +28,11 @@ package server
 import (
 	"fmt"
 	"strings"
+	"syndrdb/src/internal/backup"
+	"syndrdb/src/pkg/errors"
 	"time"
 
 	"go.uber.org/zap"
-
-	"syndrdb/src/internal/backup"
 )
 
 // RestoreDatabase handles the RESTORE DATABASE command
@@ -44,7 +44,8 @@ func RestoreDatabase(command string, logger *zap.SugaredLogger, serviceManager *
 	// Parse the command to extract backup path and database name
 	backupPath, dbName, options, err := parseRestoreCommand(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse RESTORE command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse RESTORE command", errors.LayerCommand)
 	}
 
 	logger.Infof("Starting database restore: backupPath=%s, database=%s", backupPath, dbName)
@@ -63,7 +64,7 @@ func RestoreDatabase(command string, logger *zap.SugaredLogger, serviceManager *
 	// Execute the restore
 	startTime := time.Now()
 	if err := restoreService.RestoreBackup(backupPath, options); err != nil {
-		return nil, fmt.Errorf("restore failed: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("backup_path", backupPath).WithContext("database", dbName)
 	}
 	duration := time.Since(startTime)
 
@@ -92,40 +93,51 @@ func parseRestoreCommand(command string) (string, string, backup.RestoreOptions,
 
 	// Minimum tokens: RESTORE DATABASE FROM "path" AS "name" = 6 tokens
 	if len(tokens) < 6 {
-		return "", "", options, fmt.Errorf("invalid RESTORE syntax: expected RESTORE DATABASE FROM \"path\" AS \"name\"")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid RESTORE syntax: expected RESTORE DATABASE FROM \"path\" AS \"name\"",
+			errors.LayerCommand)
 	}
 
 	// Validate command structure
 	if strings.ToUpper(tokens[0]) != "RESTORE" || strings.ToUpper(tokens[1]) != "DATABASE" {
-		return "", "", options, fmt.Errorf("invalid RESTORE syntax: expected RESTORE DATABASE")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid RESTORE syntax: expected RESTORE DATABASE",
+			errors.LayerCommand)
 	}
 
 	// Validate FROM keyword (token 2)
 	if strings.ToUpper(tokens[2]) != "FROM" {
-		return "", "", options, fmt.Errorf("invalid RESTORE syntax: expected FROM keyword")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid RESTORE syntax: expected FROM keyword",
+			errors.LayerCommand)
 	}
 
 	// Extract backup path (token 3)
 	backupPath := strings.Trim(tokens[3], "\"'")
 	if backupPath == "" {
-		return "", "", options, fmt.Errorf("backup path cannot be empty")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"backup path cannot be empty", errors.LayerCommand)
 	}
 
 	// Validate AS keyword (token 4)
 	if strings.ToUpper(tokens[4]) != "AS" {
-		return "", "", options, fmt.Errorf("invalid RESTORE syntax: expected AS keyword")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid RESTORE syntax: expected AS keyword",
+			errors.LayerCommand)
 	}
 
 	// Extract database name (token 5)
 	dbName := strings.Trim(tokens[5], "\"'")
 	if dbName == "" {
-		return "", "", options, fmt.Errorf("database name cannot be empty")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"database name cannot be empty", errors.LayerCommand)
 	}
 
 	// Parse optional WITH clause for options (tokens 6+)
 	if len(tokens) > 6 {
 		if err := parseRestoreOptions(tokens[6:], &options); err != nil {
-			return "", "", options, fmt.Errorf("failed to parse restore options: %w", err)
+			return "", "", options, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+				"failed to parse restore options", errors.LayerCommand)
 		}
 	}
 
@@ -148,14 +160,16 @@ func parseRestoreOptions(tokens []string, options *backup.RestoreOptions) error 
 
 	// First token should be WITH
 	if strings.ToUpper(tokens[0]) != "WITH" {
-		return fmt.Errorf("expected WITH keyword for options")
+		return errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"expected WITH keyword for options", errors.LayerCommand)
 	}
 
 	// Parse key=value pairs
 	i := 1
 	for i < len(tokens) {
 		if i+2 >= len(tokens) {
-			return fmt.Errorf("incomplete option specification")
+			return errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete option specification", errors.LayerCommand)
 		}
 
 		key := strings.ToUpper(tokens[i])
@@ -163,7 +177,8 @@ func parseRestoreOptions(tokens []string, options *backup.RestoreOptions) error 
 		value := strings.Trim(tokens[i+2], "\"'")
 
 		if equals != "=" {
-			return fmt.Errorf("expected '=' after option key")
+			return errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"expected '=' after option key", errors.LayerCommand).WithContext("option_key", key)
 		}
 
 		switch key {
@@ -175,11 +190,15 @@ func parseRestoreOptions(tokens []string, options *backup.RestoreOptions) error 
 			} else if value == "false" || value == "0" {
 				options.Force = false
 			} else {
-				return fmt.Errorf("invalid boolean value for FORCE: %s", value)
+				return errors.New(errors.ERR_VALIDATION_TYPE,
+					fmt.Sprintf("invalid boolean value for FORCE: %s", value),
+					errors.LayerCommand).WithContext("value", value)
 			}
 
 		default:
-			return fmt.Errorf("unknown restore option: %s", key)
+			return errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown restore option: %s", key),
+				errors.LayerCommand).WithContext("option", key)
 		}
 
 		// Move to next option (skip key, =, value)

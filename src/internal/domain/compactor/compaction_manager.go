@@ -254,7 +254,7 @@ func (cm *CompactionManager) CompactHashIndexFiles(bundleName, indexName string,
 
 // compactHashIndexFilesInternal performs the actual compaction logic
 // Separated from main function for cleaner error handling
-func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName string, entryFiles []string) (string, CompactionStats, error) {
+func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName string, entryFiles []string) (string, *CompactionStats, error) {
 	stats := CompactionStats{}
 
 	// Sort files by name (ensures temporal ordering)
@@ -268,7 +268,7 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 
 	outputFile, err := os.Create(outputFilePath)
 	if err != nil {
-		return "", stats, fmt.Errorf("failed to create output file: %w", err)
+		return "", &stats, fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer outputFile.Close()
 
@@ -281,7 +281,7 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 	for _, filePath := range sortedFiles {
 		entries, err := cm.readEntriesFromFile(filePath)
 		if err != nil {
-			return "", stats, fmt.Errorf("failed to read entries from %s: %w", filePath, err)
+			return "", &stats, fmt.Errorf("failed to read entries from %s: %w", filePath, err)
 		}
 
 		stats.TotalFilesCompacted++
@@ -333,12 +333,12 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 	for _, entry := range entriesToWrite {
 		data, err := cm.serializeEntry(entry)
 		if err != nil {
-			return "", stats, fmt.Errorf("failed to serialize entry: %w", err)
+			return "", &stats, fmt.Errorf("failed to serialize entry: %w", err)
 		}
 
 		n, err := outputFile.Write(data)
 		if err != nil {
-			return "", stats, fmt.Errorf("failed to write entry: %w", err)
+			return "", &stats, fmt.Errorf("failed to write entry: %w", err)
 		}
 
 		stats.TotalBytesWritten += uint64(n)
@@ -346,7 +346,7 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 
 	// Sync to disk
 	if err := outputFile.Sync(); err != nil {
-		return "", stats, fmt.Errorf("failed to sync output file: %w", err)
+		return "", &stats, fmt.Errorf("failed to sync output file: %w", err)
 	}
 
 	// Close output file before rename
@@ -360,7 +360,7 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 	if err := os.Rename(outputFilePath, finalFilePath); err != nil {
 		// Clean up temp file
 		os.Remove(outputFilePath)
-		return "", stats, fmt.Errorf("failed to rename output file: %w", err)
+		return "", &stats, fmt.Errorf("failed to rename output file: %w", err)
 	}
 
 	// TODO: Delete old files after successful compaction
@@ -373,7 +373,7 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 		"entriesRemoved", stats.TotalEntriesRemoved,
 		"bytesWritten", stats.TotalBytesWritten)
 
-	return finalFilePath, stats, nil
+	return finalFilePath, &stats, nil
 }
 
 // CompactBundleFile compacts a bundle file to remove tombstones
@@ -518,7 +518,7 @@ func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleF
 		// Note: mutex field is zero-valued and not used in transfer
 	}
 
-	cm.updateStats(stats, duration, nil)
+	cm.updateStats(&stats, duration, nil)
 
 	cm.logger.Infow("Bundle file compaction complete",
 		"bundle", bundleName,
@@ -674,12 +674,12 @@ func (cm *CompactionManager) acquireIndexLock(bundleName, indexName string) *syn
 	return lock
 }
 
-func (cm *CompactionManager) UpdateStats(stats CompactionStats, duration time.Duration, err error) {
+func (cm *CompactionManager) UpdateStats(stats *CompactionStats, duration time.Duration, err error) {
 	cm.UpdateStats(stats, duration, err)
 }
 
 // updateStats updates compaction statistics
-func (cm *CompactionManager) updateStats(stats CompactionStats, duration time.Duration, err error) {
+func (cm *CompactionManager) updateStats(stats *CompactionStats, duration time.Duration, err error) {
 	cm.stats.mutex.Lock()
 	defer cm.stats.mutex.Unlock()
 
@@ -1041,7 +1041,7 @@ func (cm *CompactionManager) CompactBucketFiles(fieldName string, isForeignKey b
 
 // compactBucketFilesInternal performs the actual bucket compaction logic
 // Separated from main function for cleaner error handling
-func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isForeignKey bool, bucketNum uint32, bucketFiles []string) (string, CompactionStats, error) {
+func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isForeignKey bool, bucketNum uint32, bucketFiles []string) (string, *CompactionStats, error) {
 	stats := CompactionStats{}
 
 	// Sort files by entry number (ensures temporal ordering within bucket)
@@ -1059,7 +1059,7 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 
 	outputFile, err := os.Create(outputFilePath)
 	if err != nil {
-		return "", stats, fmt.Errorf("failed to create output file: %w", err)
+		return "", &stats, fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer outputFile.Close()
 
@@ -1072,7 +1072,7 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 	for _, filePath := range sortedFiles {
 		entries, err := cm.readEntriesFromFile(filePath)
 		if err != nil {
-			return "", stats, fmt.Errorf("failed to read entries from %s: %w", filePath, err)
+			return "", &stats, fmt.Errorf("failed to read entries from %s: %w", filePath, err)
 		}
 
 		stats.TotalFilesCompacted++
@@ -1131,12 +1131,12 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 	for _, entry := range entriesToWrite {
 		data, err := cm.serializeEntry(entry)
 		if err != nil {
-			return "", stats, fmt.Errorf("failed to serialize entry: %w", err)
+			return "", &stats, fmt.Errorf("failed to serialize entry: %w", err)
 		}
 
 		n, err := outputFile.Write(data)
 		if err != nil {
-			return "", stats, fmt.Errorf("failed to write entry: %w", err)
+			return "", &stats, fmt.Errorf("failed to write entry: %w", err)
 		}
 
 		stats.TotalBytesWritten += uint64(n)
@@ -1144,7 +1144,7 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 
 	// Sync to disk
 	if err := outputFile.Sync(); err != nil {
-		return "", stats, fmt.Errorf("failed to sync output file: %w", err)
+		return "", &stats, fmt.Errorf("failed to sync output file: %w", err)
 	}
 
 	// Close output file before rename
@@ -1159,7 +1159,7 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 	if err := os.Rename(outputFilePath, finalFilePath); err != nil {
 		// Clean up temp file
 		os.Remove(outputFilePath)
-		return "", stats, fmt.Errorf("failed to rename output file: %w", err)
+		return "", &stats, fmt.Errorf("failed to rename output file: %w", err)
 	}
 
 	cm.logger.Infow("Compacted bucket file created",
@@ -1169,7 +1169,7 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 		"entriesRemoved", stats.TotalEntriesRemoved,
 		"bytesWritten", stats.TotalBytesWritten)
 
-	return finalFilePath, stats, nil
+	return finalFilePath, &stats, nil
 }
 
 // CompactAllBucketsParallel compacts all buckets in parallel

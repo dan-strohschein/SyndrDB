@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
-
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	joinexecutor "syndrdb/src/internal/query/join_executor"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/query/results"
+	"syndrdb/src/pkg/errors"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -32,7 +32,8 @@ type WhereAnalysis struct {
 func convertToJoinRequestWithWhereOptimization(joinQuery *queryparser.SelectJoinQuery, database *models.Database, serviceManager ServiceManager, logger *zap.SugaredLogger) (*joinexecutor.JoinRequest, *WhereAnalysis, error) {
 	// For now, handle only the first JOIN clause (Phase 1 supports single JOIN)
 	if len(joinQuery.JoinClauses) == 0 {
-		return nil, nil, fmt.Errorf("no JOIN clauses found in query")
+		return nil, nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"no JOIN clauses found in query", errors.LayerCommand)
 	}
 
 	firstJoin := joinQuery.JoinClauses[0]
@@ -54,23 +55,25 @@ func convertToJoinRequestWithWhereOptimization(joinQuery *queryparser.SelectJoin
 	// Get and pre-filter left bundle
 	leftBundle, err := serviceManager.BundleService.GetBundleByName(database, leftBundleName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get left bundle '%s': %w", leftBundleName, err)
+		return nil, nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", leftBundleName)
 	}
 
 	leftBundleAdapter, err := createFilteredBundleAdapter(leftBundle, whereAnalysis.LeftBundleConditions, serviceManager, logger, "left")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create filtered left bundle adapter: %w", err)
+		return nil, nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to create filtered left bundle adapter", errors.LayerQuery).WithContext("bundle", leftBundleName)
 	}
 
 	// Get and pre-filter right bundle
 	rightBundle, err := serviceManager.BundleService.GetBundleByName(database, rightBundleName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get right bundle '%s': %w", rightBundleName, err)
+		return nil, nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", rightBundleName)
 	}
 
 	rightBundleAdapter, err := createFilteredBundleAdapter(rightBundle, whereAnalysis.RightBundleConditions, serviceManager, logger, "right")
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create filtered right bundle adapter: %w", err)
+		return nil, nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to create filtered right bundle adapter", errors.LayerQuery).WithContext("bundle", rightBundleName)
 	}
 
 	// Convert JOIN conditions to new format
@@ -128,7 +131,9 @@ func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser
 	// The BundleService now properly handles page-based filtering without relying on legacy bundle.Documents
 	filteredDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, whereClause, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to apply WHERE filter to %s bundle: %w", side, err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			fmt.Sprintf("failed to apply WHERE filter to %s bundle", side),
+			errors.LayerQuery).WithContext("bundle", bundle.Name).WithContext("side", side)
 	}
 
 	// Get original document count for performance metrics
@@ -172,7 +177,7 @@ func convertToJoinRequest(joinQuery *queryparser.SelectJoinQuery, database *mode
 	// Get left bundle (FROM bundle)
 	leftBundle, err := serviceManager.BundleService.GetBundleByName(database, joinQuery.FromBundle)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get left bundle '%s': %w", joinQuery.FromBundle, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", joinQuery.FromBundle)
 	}
 
 	// NEW: Create bundle interface adapters for JOIN executor compatibility using page-based loading
@@ -180,7 +185,9 @@ func convertToJoinRequest(joinQuery *queryparser.SelectJoinQuery, database *mode
 
 	// For now, handle only the first JOIN clause (Phase 1 supports single JOIN)
 	if len(joinQuery.JoinClauses) == 0 {
-		return nil, fmt.Errorf("no JOIN clauses found in query")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no JOIN clauses found in query",
+			errors.LayerQuery)
 	}
 
 	firstJoin := joinQuery.JoinClauses[0]
@@ -188,7 +195,7 @@ func convertToJoinRequest(joinQuery *queryparser.SelectJoinQuery, database *mode
 	// Get right bundle
 	rightBundle, err := serviceManager.BundleService.GetBundleByName(database, firstJoin.RightBundle)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get right bundle '%s': %w", firstJoin.RightBundle, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", firstJoin.RightBundle)
 	}
 
 	// NEW: Create bundle interface adapter for right bundle using page-based loading
@@ -360,17 +367,18 @@ func transformToHierarchicalResults(joinResults []*joinexecutor.JoinedDocument, 
 	// Get bundles for relationship analysis
 	leftBundle, err := serviceManager.BundleService.GetBundleByName(database, joinQuery.FromBundle)
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving left bundle '%s': %w", joinQuery.FromBundle, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", joinQuery.FromBundle)
 	}
 
 	var rightBundle *models.Bundle
 	if len(joinQuery.JoinClauses) > 0 {
 		rightBundle, err = serviceManager.BundleService.GetBundleByName(database, joinQuery.JoinClauses[0].RightBundle)
 		if err != nil {
-			return nil, fmt.Errorf("error retrieving right bundle '%s': %w", joinQuery.JoinClauses[0].RightBundle, err)
+			return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", joinQuery.JoinClauses[0].RightBundle)
 		}
 	} else {
-		return nil, fmt.Errorf("no JOIN clauses found in query")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"no JOIN clauses found in query", errors.LayerCommand)
 	}
 
 	// Extract join conditions for relationship analysis
@@ -397,7 +405,9 @@ func transformToHierarchicalResults(joinResults []*joinexecutor.JoinedDocument, 
 
 	analysisResult := analyzer.AnalyzeRelationship(analysisRequest)
 	if !analysisResult.IsSupported {
-		return nil, fmt.Errorf("relationship analysis failed: %s", analysisResult.ErrorMessage)
+		return nil, errors.New(errors.ERR_INTERNAL_QUERY,
+			fmt.Sprintf("relationship analysis failed: %s", analysisResult.ErrorMessage),
+			errors.LayerQuery).WithContext("left_bundle", joinQuery.FromBundle).WithContext("right_bundle", joinQuery.JoinClauses[0].RightBundle)
 	}
 
 	// Transform using hierarchical transformer
@@ -411,7 +421,8 @@ func transformToHierarchicalResults(joinResults []*joinexecutor.JoinedDocument, 
 
 	transformResult, err := transformer.Transform(transformRequest)
 	if err != nil {
-		return nil, fmt.Errorf("hierarchical transformation failed: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"hierarchical transformation failed", errors.LayerQuery)
 	}
 
 	logger.Infof("Hierarchical transformation completed: %d parent documents with %d total child documents in %v",
@@ -749,6 +760,8 @@ func convertToFloat64(value interface{}) (float64, error) {
 	case string:
 		return strconv.ParseFloat(v, 64)
 	default:
-		return 0, fmt.Errorf("cannot convert %T to float64", value)
+		return 0, errors.New(errors.ERR_VALIDATION_TYPE,
+			fmt.Sprintf("cannot convert %T to float64", value),
+			errors.LayerQuery).WithContext("value_type", fmt.Sprintf("%T", value))
 	}
 }

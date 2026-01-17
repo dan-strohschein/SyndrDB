@@ -39,9 +39,10 @@ type DeleteStatement struct {
 
 // DeleteParser handles parsing of DELETE DOCUMENTS statements
 type DeleteParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer       *Tokenizer
+	current         int
+	tokens          []Token
+	originalCommand string // Original command for error reporting
 }
 
 // NewDeleteParser creates a new DELETE parser
@@ -49,12 +50,13 @@ func NewDeleteParser(input string) (*DeleteParser, error) {
 	tokenizer := NewTokenizer(input)
 	tokens, err := tokenizer.Tokenize()
 	if err != nil {
-		return nil, fmt.Errorf("tokenization failed: %w", err)
+		return nil, err // Tokenization errors are handled by the tokenizer
 	}
 	return &DeleteParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+		tokenizer:       tokenizer,
+		tokens:          tokens,
+		current:         0,
+		originalCommand: input,
 	}, nil
 }
 
@@ -80,7 +82,7 @@ func (p *DeleteParser) Parse() (*DeleteStatement, error) {
 	// Expect: bundle name (string)
 	bundleName, err := p.expectString()
 	if err != nil {
-		return nil, fmt.Errorf("expected bundle name: %w", err)
+		return nil, err // expectString already returns detailed error
 	}
 
 	// Check for optional CONFIRMED keyword
@@ -98,7 +100,7 @@ func (p *DeleteParser) Parse() (*DeleteStatement, error) {
 		// Parse WHERE clause expression
 		whereClause, err = p.parseWhereClause()
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
+			return nil, err // parseWhereClause already returns detailed error
 		}
 	}
 
@@ -108,8 +110,14 @@ func (p *DeleteParser) Parse() (*DeleteStatement, error) {
 	}
 
 	// Verify we're at the end of the statement
+	peekToken := p.peek()
 	if !p.isAtEnd() {
-		return nil, fmt.Errorf("unexpected token after DELETE statement: %s", p.peek().Value)
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("unexpected token after DELETE statement: %s", peekToken.Value),
+			peekToken,
+			"EOF or semicolon",
+			p.originalCommand,
+		)
 	}
 
 	return &DeleteStatement{
@@ -126,14 +134,19 @@ func (p *DeleteParser) parseWhereClause() (Expression, error) {
 	whereTokens := p.collectWhereTokens()
 
 	if len(whereTokens) == 0 {
-		return nil, fmt.Errorf("WHERE clause cannot be empty")
+		return nil, CreateParserErrorWithToken(
+			"WHERE clause cannot be empty",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"WHERE condition",
+			p.originalCommand,
+		)
 	}
 
 	// Use ExpressionParser to parse WHERE condition
 	exprParser := NewExpressionParser(whereTokens, nil)
 	expr, err := exprParser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("invalid WHERE clause expression: %w", err)
+		return nil, err // ExpressionParser already returns detailed error
 	}
 
 	return expr, nil
@@ -185,12 +198,22 @@ func (p *DeleteParser) isAtEnd() bool {
 // expectKeyword expects a specific keyword token
 func (p *DeleteParser) expectKeyword(tokenType TokenType, keyword string) error {
 	if p.isAtEnd() {
-		return fmt.Errorf("unexpected end of input, expected %s", keyword)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("unexpected end of input, expected %s", keyword),
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			keyword,
+			p.originalCommand,
+		)
 	}
 
 	token := p.peek()
 	if token.Type != tokenType {
-		return fmt.Errorf("expected %s, got %s", keyword, token.Value)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("expected %s, got %s", keyword, token.Value),
+			token,
+			keyword,
+			p.originalCommand,
+		)
 	}
 
 	p.advance()
@@ -200,12 +223,22 @@ func (p *DeleteParser) expectKeyword(tokenType TokenType, keyword string) error 
 // expectString expects a string token and returns its value
 func (p *DeleteParser) expectString() (string, error) {
 	if p.isAtEnd() {
-		return "", fmt.Errorf("unexpected end of input, expected string")
+		return "", CreateParserErrorWithToken(
+			"unexpected end of input, expected string",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"quoted string",
+			p.originalCommand,
+		)
 	}
 
 	token := p.peek()
 	if token.Type != TOKEN_STRING {
-		return "", fmt.Errorf("expected string, got %s", token.Value)
+		return "", CreateParserErrorWithToken(
+			fmt.Sprintf("expected string, got %s", token.Value),
+			token,
+			"quoted string",
+			p.originalCommand,
+		)
 	}
 
 	p.advance()
@@ -215,12 +248,22 @@ func (p *DeleteParser) expectString() (string, error) {
 // expectToken expects a specific token type
 func (p *DeleteParser) expectToken(tokenType TokenType, description string) error {
 	if p.isAtEnd() {
-		return fmt.Errorf("unexpected end of input, expected %s", description)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("unexpected end of input, expected %s", description),
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			description,
+			p.originalCommand,
+		)
 	}
 
 	token := p.peek()
 	if token.Type != tokenType {
-		return fmt.Errorf("expected %s, got %s", description, token.Value)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("expected %s, got %s", description, token.Value),
+			token,
+			description,
+			p.originalCommand,
+		)
 	}
 
 	p.advance()

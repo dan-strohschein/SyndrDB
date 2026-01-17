@@ -1348,7 +1348,12 @@ func updateInternalAfterMerge(idx *BTreeIndex, internal *BTreeNode, oldChildPage
 // Utility functions for slice operations
 
 // insertByteSliceAt inserts a byte slice at a specific position
+// Panics if index is out of bounds [0, len(slice)] (index == len(slice) is allowed for appending)
 func insertByteSliceAt(slice [][]byte, index int, value []byte) [][]byte {
+	// Defensive bounds checking
+	if index < 0 || index > len(slice) {
+		panic(fmt.Sprintf("insertByteSliceAt: index %d out of bounds [0, %d]", index, len(slice)))
+	}
 	slice = append(slice, nil)
 	copy(slice[index+1:], slice[index:])
 	slice[index] = value
@@ -1356,7 +1361,12 @@ func insertByteSliceAt(slice [][]byte, index int, value []byte) [][]byte {
 }
 
 // insertStringSliceAt inserts a string slice at a specific position
+// Panics if index is out of bounds [0, len(slice)] (index == len(slice) is allowed for appending)
 func insertStringSliceAt(slice [][]string, index int, value []string) [][]string {
+	// Defensive bounds checking
+	if index < 0 || index > len(slice) {
+		panic(fmt.Sprintf("insertStringSliceAt: index %d out of bounds [0, %d]", index, len(slice)))
+	}
 	slice = append(slice, nil)
 	copy(slice[index+1:], slice[index:])
 	slice[index] = value
@@ -1364,12 +1374,22 @@ func insertStringSliceAt(slice [][]string, index int, value []string) [][]string
 }
 
 // removeByteSliceAt removes a byte slice at a specific position
+// Panics if index is out of bounds [0, len(slice))
 func removeByteSliceAt(slice [][]byte, index int) [][]byte {
+	// Defensive bounds checking
+	if index < 0 || index >= len(slice) {
+		panic(fmt.Sprintf("removeByteSliceAt: index %d out of bounds [0, %d)", index, len(slice)))
+	}
 	return append(slice[:index], slice[index+1:]...)
 }
 
 // removeStringSliceAt removes a string slice at a specific position
+// Panics if index is out of bounds [0, len(slice))
 func removeStringSliceAt(slice [][]string, index int) [][]string {
+	// Defensive bounds checking
+	if index < 0 || index >= len(slice) {
+		panic(fmt.Sprintf("removeStringSliceAt: index %d out of bounds [0, %d)", index, len(slice)))
+	}
 	return append(slice[:index], slice[index+1:]...)
 }
 

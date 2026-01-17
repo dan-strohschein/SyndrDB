@@ -14,6 +14,7 @@ type AsyncManager struct {
 	walWriter        *AsyncWALWriter
 	consistentReader *MultiSourceReader
 	workerPools      map[string]*WorkerPool // Named worker pools for different operation types
+	config           AsyncManagerConfig     // HIGH-007: Store config for access to max pools
 	mu               sync.RWMutex
 	started          bool
 	metrics          *AsyncManagerMetrics
@@ -56,6 +57,8 @@ func NewAsyncManager(config AsyncManagerConfig, diskReader DiskReader, walReader
 		walWriter:        walWriter,
 		consistentReader: consistentReader,
 		workerPools:      make(map[string]*WorkerPool),
+		config:           config, // HIGH-007: Store config for access to max pools
+		started:          false,
 		metrics: &AsyncManagerMetrics{
 			operationsByType: make(map[string]uint64),
 			systemStartTime:  time.Now(),
@@ -130,9 +133,14 @@ func (am *AsyncManager) GetOrCreateWorkerPool(name string, config WorkerPoolConf
 		return pool, nil
 	}
 
-	// Check if we've hit the maximum number of pools
-	if len(am.workerPools) >= 10 { // TODO: I should make this configurable
-		return nil, fmt.Errorf("maximum number of worker pools (%d) reached", 10)
+	// HIGH-007: Use configurable max pools from config
+	maxPools := 10 // Default fallback
+	if am.config.MaxPools > 0 {
+		maxPools = am.config.MaxPools
+	}
+
+	if len(am.workerPools) >= maxPools {
+		return nil, fmt.Errorf("maximum number of worker pools (%d) reached", maxPools)
 	}
 
 	// Create new pool

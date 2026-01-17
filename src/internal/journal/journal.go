@@ -46,6 +46,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syndrdb/src/pkg/common"
 	"time"
 
@@ -120,6 +121,10 @@ type WriteAheadLog struct {
 
 	// Write coordinator integration
 	coordinator *WriteCoordinator // Reference to write coordinator for checkpoint coordination
+
+	// HIGH-008: Error tracking for async operations
+	// Use pointer to error since atomic.Value cannot store nil directly
+	lastFlushError atomic.Value // Stores *error from async flush goroutine (type: *error)
 }
 
 // WALConfig holds configuration for the WAL
@@ -364,15 +369,31 @@ func (wal *WriteAheadLog) readLastLSNFromFile(filePath string) (uint64, error) {
 }
 
 // startAutoFlush starts the auto-flush goroutine
+// HIGH-008: Errors from async flush are now stored and can be retrieved via GetLastFlushError()
 func (wal *WriteAheadLog) startAutoFlush() {
 	wal.flushTicker = time.NewTicker(wal.flushInterval)
+	
+	// Initialize error storage with nil pointer
+	var nilErr error
+	wal.lastFlushError.Store(&nilErr)
 
 	go func() {
 		for {
 			select {
 			case <-wal.flushTicker.C:
 				if !wal.isShuttingDown {
-					wal.Flush()
+					// HIGH-008: Store flush errors for retrieval
+					if err := wal.Flush(); err != nil {
+						wal.lastFlushError.Store(&err)
+						wal.logger.Errorw("WAL auto-flush failed",
+							"error", err,
+							"durabilityMode", wal.durabilityMode,
+							"description", "Async flush error - use GetLastFlushError() to retrieve")
+					} else {
+						// Clear error on successful flush
+						var nilErr error
+						wal.lastFlushError.Store(&nilErr)
+					}
 				}
 			case <-wal.flushStopChan:
 				return
@@ -555,9 +576,39 @@ func (wal *WriteAheadLog) ReplayOperations(fromLSN uint64, replayFunc func(WALEn
 	return nil
 }
 
+// RecoveryError represents an error during WAL recovery with entry context
+// HIGH-008: Provides detailed error information for recovery failures
+type RecoveryError struct {
+	LSN     uint64 // Log Sequence Number of the problematic entry
+	File    string // WAL file path
+	Reason  string // Reason for error (unmarshal, checksum, replay)
+	Err     error  // Underlying error
+}
+
+func (re *RecoveryError) Error() string {
+	if re.Err != nil {
+		return fmt.Sprintf("recovery error at LSN %d in file %s (%s): %v", re.LSN, re.File, re.Reason, re.Err)
+	}
+	return fmt.Sprintf("recovery error at LSN %d in file %s (%s)", re.LSN, re.File, re.Reason)
+}
+
+// RecoveryErrorList aggregates multiple recovery errors
+type RecoveryErrorList struct {
+	Errors []*RecoveryError
+	File   string
+}
+
+func (rel *RecoveryErrorList) Error() string {
+	if len(rel.Errors) == 0 {
+		return "no recovery errors"
+	}
+	return fmt.Sprintf("recovery encountered %d error(s) in file %s: first error: %v", len(rel.Errors), rel.File, rel.Errors[0])
+}
+
 // replayFromFileASCII replays operations from a specific WAL file using ASCII format
 // DEPRECATED: This function is for backwards compatibility with old ASCII WAL files.
 // New WAL files use binary format for better performance.
+// HIGH-008: Now aggregates errors and returns them instead of silently skipping entries
 func (wal *WriteAheadLog) replayFromFileASCII(filePath string, fromLSN uint64, replayFunc func(WALEntry) error) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -565,8 +616,12 @@ func (wal *WriteAheadLog) replayFromFileASCII(filePath string, fromLSN uint64, r
 	}
 	defer file.Close()
 
+	var recoveryErrors []*RecoveryError
+	lineNum := 0
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
+		lineNum++
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
 			continue
@@ -574,8 +629,15 @@ func (wal *WriteAheadLog) replayFromFileASCII(filePath string, fromLSN uint64, r
 
 		var entry WALEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			wal.logger.Warnf("Failed to unmarshal WAL entry: %v", err)
-			continue
+			// HIGH-008: Track unmarshal errors instead of silently skipping
+			recoveryErrors = append(recoveryErrors, &RecoveryError{
+				LSN:    entry.LSN, // May be 0 if unmarshal failed
+				File:   filePath,
+				Reason: "unmarshal",
+				Err:    fmt.Errorf("line %d: %w", lineNum, err),
+			})
+			wal.logger.Warnf("Failed to unmarshal WAL entry at line %d: %v", lineNum, err)
+			continue // Continue processing other entries
 		}
 
 		// Skip entries before the specified LSN
@@ -586,17 +648,45 @@ func (wal *WriteAheadLog) replayFromFileASCII(filePath string, fromLSN uint64, r
 		// Verify checksum
 		expectedChecksum := wal.calculateChecksum(entry)
 		if entry.Checksum != expectedChecksum {
-			wal.logger.Warnf("Checksum mismatch for LSN %d, skipping", entry.LSN)
-			continue
+			// HIGH-008: Track checksum errors instead of silently skipping
+			recoveryErrors = append(recoveryErrors, &RecoveryError{
+				LSN:    entry.LSN,
+				File:   filePath,
+				Reason: "checksum_mismatch",
+				Err:    fmt.Errorf("expected %d, got %d", expectedChecksum, entry.Checksum),
+			})
+			wal.logger.Warnf("Checksum mismatch for LSN %d: expected %d, got %d", entry.LSN, expectedChecksum, entry.Checksum)
+			continue // Continue processing other entries
 		}
 
 		// Call replay function
 		if err := replayFunc(entry); err != nil {
-			return fmt.Errorf("replay failed for LSN %d: %w", entry.LSN, err)
+			// HIGH-008: Track replay function errors
+			recoveryErrors = append(recoveryErrors, &RecoveryError{
+				LSN:    entry.LSN,
+				File:   filePath,
+				Reason: "replay_function",
+				Err:    err,
+			})
+			wal.logger.Warnf("Replay function failed for LSN %d: %v", entry.LSN, err)
+			// Continue processing other entries (non-fatal)
 		}
 	}
 
-	return scanner.Err()
+	// HIGH-008: Return scanner error if any
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scanner error while reading WAL file %s: %w", filePath, err)
+	}
+
+	// HIGH-008: Return aggregated errors if any occurred
+	if len(recoveryErrors) > 0 {
+		return &RecoveryErrorList{
+			Errors: recoveryErrors,
+			File:   filePath,
+		}
+	}
+
+	return nil
 }
 
 // CleanupOldFiles removes WAL files older than the retention period
@@ -681,4 +771,16 @@ func GetOperationTypeName(op OperationType) string {
 // SetCoordinator sets the write coordinator reference for checkpoint coordination
 func (wal *WriteAheadLog) SetCoordinator(coordinator *WriteCoordinator) {
 	wal.coordinator = coordinator
+}
+
+// GetLastFlushError returns the last error from the async flush goroutine, if any
+// HIGH-008: Allows callers to detect and handle flush errors from background operations
+// Returns nil if no error has occurred or if the last flush was successful
+func (wal *WriteAheadLog) GetLastFlushError() error {
+	if val := wal.lastFlushError.Load(); val != nil {
+		if errPtr, ok := val.(*error); ok && errPtr != nil && *errPtr != nil {
+			return *errPtr
+		}
+	}
+	return nil
 }

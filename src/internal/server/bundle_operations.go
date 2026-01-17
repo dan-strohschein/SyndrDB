@@ -7,6 +7,7 @@ import (
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -15,12 +16,12 @@ import (
 func AddRelationshipToBundle(serviceManager ServiceManager, database *models.Database, bundleName string, relationshipCommand *models.RelationshipCommand) (*CommandResponse, error) {
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
 	err = serviceManager.BundleService.AddRelationshipToBundle(bundle, relationshipCommand)
 	if err != nil {
-		return nil, fmt.Errorf("error adding relationship to bundle '%s': %v", bundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
 	cmdResponse := &CommandResponse{
@@ -36,7 +37,7 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 	// Use new parser if feature flag is enabled, fallback to legacy on error
 	bundleCmd, err := parseCreateBundle(command, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing bundle command: %v", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 	}
 
 	//Check if the bundle already exists
@@ -44,12 +45,16 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, bundleCmd.BundleName))
 	existingBundle := helpers.FileExists(filePath, *logger)
 	if existingBundle {
-		return nil, fmt.Errorf("bundle '%s' already exists", bundleCmd.BundleName)
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+			fmt.Sprintf("bundle '%s' already exists", bundleCmd.BundleName),
+			errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 	}
 
 	// Validate the bundle name with a regex
 	if !bndle.IsValidBundleName(bundleCmd.BundleName) {
-		return nil, fmt.Errorf("invalid bundle name: %s. Bundle names must start with a letter, can be alphanumeric, with underscores and hyphens", bundleCmd.BundleName)
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("invalid bundle name: %s. Bundle names must start with a letter, can be alphanumeric, with underscores and hyphens", bundleCmd.BundleName),
+			errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 	}
 
 	// Get database object by name
@@ -65,13 +70,14 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 			// Log the bundle creation before execution
 			err := serviceManager.WALManager.LogBundleCreate(txID, bundleCmd.BundleName, bundleCmd)
 			if err != nil {
-				return fmt.Errorf("failed to log bundle create: %w", err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+					"failed to log bundle create", errors.LayerWAL).WithContext("bundle", bundleCmd.BundleName)
 			}
 
 			// Add the bundle to the database
 			bundle, err := serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
 			if err != nil {
-				return fmt.Errorf("error creating bundle: %v", err)
+				return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 			}
 
 			// CRITICAL FIX: Check for errors when adding bundle to catalog
@@ -80,7 +86,8 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 			if err != nil {
 				// Bundle was created but catalog registration failed
 				logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundle.Name, err)
-				return fmt.Errorf("bundle created but catalog registration failed: %v", err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+					"bundle created but catalog registration failed", errors.LayerCommand).WithContext("bundle", bundle.Name)
 			}
 
 			return err
@@ -91,7 +98,7 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 		bundle, err := serviceManager.BundleService.AddBundle(serviceManager.DatabaseService, database, bundleCmd)
 
 		if err != nil {
-			return nil, fmt.Errorf("error creating bundle: %v", err)
+			return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 		}
 
 		// CRITICAL FIX: Check for errors when adding bundle to catalog
@@ -100,12 +107,13 @@ func CreateBundleCommand(command string, logger *zap.SugaredLogger, serviceManag
 		if err != nil {
 			// Bundle was created but catalog registration failed
 			logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundle.Name, err)
-			return nil, fmt.Errorf("bundle created but catalog registration failed: %v", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+				"bundle created but catalog registration failed", errors.LayerCommand).WithContext("bundle", bundle.Name)
 		}
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("error creating bundle: %v", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 	}
 
 	// Return the response
@@ -125,19 +133,23 @@ func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLog
 	// 3. if there are relationships associated with the bundle
 	bundleMetadata, err := serviceManager.BundleService.GetBundleMetadata(database, bundleCmd.BundleName)
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleCmd.BundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 	}
 
 	hasDocuments := bundleMetadata.TotalDocuments > 0
 	hasRelationships := len(bundleMetadata.Relationships) > 0
 
 	if hasRelationships  {
-		return nil, fmt.Errorf("cannot drop bundle '%s' because it has relationships. ", bundleCmd.BundleName)
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+			fmt.Sprintf("cannot drop bundle '%s' because it has relationships", bundleCmd.BundleName),
+			errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 	}
 
 
 	if hasDocuments && !bundleCmd.HasForceSwitch {
-		return nil, fmt.Errorf("cannot drop bundle '%s' because it contains documents. Use WITH FORCE to override", bundleCmd.BundleName)
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+			fmt.Sprintf("cannot drop bundle '%s' because it contains documents. Use WITH FORCE to override", bundleCmd.BundleName),
+			errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 	}
 
 	if serviceManager.WALManager != nil {
@@ -145,13 +157,14 @@ func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLog
 			// Log the bundle creation before execution
 			err := serviceManager.WALManager.LogBundleDelete(txID, bundleCmd.BundleName, bundleCmd)
 			if err != nil {
-				return fmt.Errorf("failed to log bundle create: %w", err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+					"failed to log bundle delete", errors.LayerWAL).WithContext("bundle", bundleCmd.BundleName)
 			}
 
 			//Delete the bundle from the database
 			err = serviceManager.BundleService.DeleteBundle(database, bundleCmd)
 			if err != nil {
-				return fmt.Errorf("error deleting bundle: %v", err)
+				return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 			}
 
 			// CRITICAL FIX: Check for errors when adding bundle to catalog
@@ -159,9 +172,10 @@ func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLog
 			err = serviceManager.InternalCatalogService.UnRegisterBundleInCatalog(bundleMetadata.BundleID,
 				bundleCmd.BundleName, database.DatabaseID, database.Name)
 			if err != nil {
-				// Bundle was created but catalog registration failed
-				logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundleMetadata.Name, err)
-				return fmt.Errorf("bundle created but catalog registration failed: %v", err)
+				// Bundle was deleted but catalog unregistration failed
+				logger.Errorf("Bundle '%s' deleted but failed to unregister from catalog: %v", bundleMetadata.Name, err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+					"bundle deleted but catalog unregistration failed", errors.LayerCommand).WithContext("bundle", bundleMetadata.Name)
 			}
 
 			return err
@@ -175,7 +189,7 @@ func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLog
 
 		err = serviceManager.BundleService.DeleteBundle(database, bundleCmd)
 		if err != nil {
-			return nil, fmt.Errorf("error deleting bundle: %v", err)
+			return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleCmd.BundleName)
 		}
 
 		// CRITICAL FIX: Check for errors when adding bundle to catalog
@@ -183,9 +197,10 @@ func DeleteBundleCommand(bundleCmd *models.BundleCommand, logger *zap.SugaredLog
 		err = serviceManager.InternalCatalogService.UnRegisterBundleInCatalog(bundleMetadata.BundleID,
 			bundleCmd.BundleName, database.DatabaseID, database.Name)
 		if err != nil {
-			// Bundle was created but catalog registration failed
-			logger.Errorf("Bundle '%s' created but failed to register in catalog: %v", bundleMetadata.Name, err)
-			return nil, fmt.Errorf("bundle created but catalog registration failed: %v", err)
+			// Bundle was deleted but catalog unregistration failed
+			logger.Errorf("Bundle '%s' deleted but failed to unregister from catalog: %v", bundleMetadata.Name, err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+				"bundle deleted but catalog unregistration failed", errors.LayerCommand).WithContext("bundle", bundleMetadata.Name)
 		}
 	}
 

@@ -52,6 +52,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -62,18 +63,23 @@ import (
 func HandleBeginTransaction(session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) (*CommandResponse, error) {
 	// Check if already in a transaction
 	if session.IsInTransaction() {
-		return nil, fmt.Errorf("transaction already active (transaction ID: %s)", session.ActiveTransactionID)
+		return nil, errors.New(errors.ERR_TRANSACTION_CONFLICT,
+			fmt.Sprintf("transaction already active (transaction ID: %s)", session.ActiveTransactionID),
+			errors.LayerTransaction).WithContext("tx_id", session.ActiveTransactionID)
 	}
 
 	// Check WAL availability
 	if serviceManager.WALManager == nil {
-		return nil, fmt.Errorf("transactions not available: WAL manager not initialized")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"transactions not available: WAL manager not initialized",
+			errors.LayerAPI)
 	}
 
 	// Begin transaction in WAL
 	txID, err := serviceManager.WALManager.BeginTransaction()
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+			"failed to begin transaction", errors.LayerTransaction)
 	}
 
 	// Get current LSN for transaction start
@@ -98,7 +104,9 @@ func HandleBeginTransaction(session *Session, serviceManager ServiceManager, log
 func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) (*CommandResponse, error) {
 	// Check if in a transaction
 	if !session.IsInTransaction() {
-		return nil, fmt.Errorf("no active transaction to commit")
+		return nil, errors.New(errors.ERR_TRANSACTION_NOT_STARTED,
+			"no active transaction to commit",
+			errors.LayerTransaction)
 	}
 
 	txID := session.ActiveTransactionID
@@ -111,7 +119,8 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 		if serviceManager.LockManager != nil {
 			serviceManager.LockManager.ReleaseLocks(txID)
 		}
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+			"failed to commit transaction", errors.LayerTransaction).WithContext("tx_id", txID)
 	}
 
 	// Release all locks for this transaction
@@ -151,7 +160,9 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 				err := serviceManager.BundleService.MarkDocumentDiscarded(entry.BundleName, entry.DocumentID)
 				if err != nil {
 					logger.Errorf("UNDO INSERT: Failed to discard buffered document: %v", err)
-					return fmt.Errorf("failed to discard buffered document %s: %w", entry.DocumentID, err)
+					return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+						fmt.Sprintf("failed to discard buffered document %s", entry.DocumentID),
+						errors.LayerTransaction).WithContext("document_id", entry.DocumentID).WithContext("bundle", entry.BundleName)
 				}
 				logger.Infof("UNDO INSERT SUCCESS: Discarded buffered document %s from bundle %s", entry.DocumentID, entry.BundleName)
 				return nil
@@ -165,7 +176,9 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 				// Get the bundle
 				bundle, err := serviceManager.BundleService.GetBundleByName(database, entry.BundleName)
 				if err != nil {
-					return fmt.Errorf("failed to get bundle: %w", err)
+					return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+						fmt.Sprintf("failed to get bundle %s", entry.BundleName),
+						errors.LayerStorage).WithContext("bundle", entry.BundleName)
 				}
 
 				// Create delete command with specific document ID (no WHERE clause needed)
@@ -179,24 +192,31 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 
 			if err != nil {
 				logger.Errorf("UNDO INSERT FAILED: %v", err)
-				return fmt.Errorf("failed to undo insert of document %s: %w", entry.DocumentID, err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+					fmt.Sprintf("failed to undo insert of document %s", entry.DocumentID),
+					errors.LayerTransaction).WithContext("document_id", entry.DocumentID).WithContext("bundle", entry.BundleName)
 			}
 			logger.Infof("UNDO INSERT SUCCESS: Physically deleted flushed document %s from bundle %s", entry.DocumentID, entry.BundleName)
 
 		case journal.OpUpdate:
 			// For UPDATE, restore the before-image
 			if entry.BeforeData == "" {
-				return fmt.Errorf("no before-data available for update undo: doc=%s", entry.DocumentID)
+				return errors.New(errors.ERR_INTERNAL_WAL,
+					fmt.Sprintf("no before-data available for update undo: doc=%s", entry.DocumentID),
+					errors.LayerWAL).WithContext("document_id", entry.DocumentID).WithContext("operation", "update")
 			}
 
 			var beforeDoc map[string]interface{}
 			if err := encodingjson.Unmarshal([]byte(entry.BeforeData), &beforeDoc); err != nil {
-				return fmt.Errorf("failed to unmarshal before-data: %w", err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+					"failed to unmarshal before-data for undo", errors.LayerTransaction).WithContext("document_id", entry.DocumentID)
 			}
 
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, entry.BundleName)
 			if err != nil {
-				return fmt.Errorf("failed to get bundle %s for undo: %w", entry.BundleName, err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+					fmt.Sprintf("failed to get bundle %s for undo", entry.BundleName),
+					errors.LayerStorage).WithContext("bundle", entry.BundleName)
 			}
 
 			// Convert the map to KeyValue pairs for update command
@@ -217,24 +237,31 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 
 			err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, updateCmd)
 			if err != nil {
-				return fmt.Errorf("failed to undo update of document %s: %w", entry.DocumentID, err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+					fmt.Sprintf("failed to undo update of document %s", entry.DocumentID),
+					errors.LayerTransaction).WithContext("document_id", entry.DocumentID).WithContext("bundle", entry.BundleName)
 			}
 			logger.Debugf("Undid UPDATE: restored document %s in bundle %s", entry.DocumentID, entry.BundleName)
 
 		case journal.OpDelete:
 			// For DELETE, restore the document from before-image
 			if entry.BeforeData == "" {
-				return fmt.Errorf("no before-data available for delete undo: doc=%s", entry.DocumentID)
+				return errors.New(errors.ERR_INTERNAL_WAL,
+					fmt.Sprintf("no before-data available for delete undo: doc=%s", entry.DocumentID),
+					errors.LayerWAL).WithContext("document_id", entry.DocumentID).WithContext("operation", "delete")
 			}
 
 			var beforeDoc map[string]interface{}
 			if err := encodingjson.Unmarshal([]byte(entry.BeforeData), &beforeDoc); err != nil {
-				return fmt.Errorf("failed to unmarshal before-data: %w", err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+					"failed to unmarshal before-data for undo", errors.LayerTransaction).WithContext("document_id", entry.DocumentID)
 			}
 
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, entry.BundleName)
 			if err != nil {
-				return fmt.Errorf("failed to get bundle %s for undo: %w", entry.BundleName, err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+					fmt.Sprintf("failed to get bundle %s for undo", entry.BundleName),
+					errors.LayerStorage).WithContext("bundle", entry.BundleName)
 			}
 
 			// Convert the map to KeyValue pairs for document command
@@ -256,7 +283,9 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 			// TODO: Implement RestoreDocumentWithID method to preserve original DocumentID
 			_, err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
 			if err != nil {
-				return fmt.Errorf("failed to undo delete of document %s: %w", entry.DocumentID, err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+					fmt.Sprintf("failed to undo delete of document %s", entry.DocumentID),
+					errors.LayerTransaction).WithContext("document_id", entry.DocumentID).WithContext("bundle", entry.BundleName)
 			}
 			logger.Debugf("Undid DELETE: restored document to bundle %s (new DocumentID generated)", entry.BundleName)
 
@@ -273,7 +302,9 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 func HandleRollback(session *Session, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (*CommandResponse, error) {
 	// Check if in a transaction
 	if !session.IsInTransaction() {
-		return nil, fmt.Errorf("no active transaction to rollback")
+		return nil, errors.New(errors.ERR_TRANSACTION_NOT_STARTED,
+			"no active transaction to rollback",
+			errors.LayerTransaction)
 	}
 
 	txID := session.ActiveTransactionID
@@ -358,12 +389,16 @@ func HandleRollback(session *Session, serviceManager ServiceManager, database *m
 func HandleSavepoint(savepointName string, session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) (*CommandResponse, error) {
 	// Check if in a transaction
 	if !session.IsInTransaction() {
-		return nil, fmt.Errorf("no active transaction: savepoints can only be created within a transaction")
+		return nil, errors.New(errors.ERR_TRANSACTION_NOT_STARTED,
+			"no active transaction: savepoints can only be created within a transaction",
+			errors.LayerTransaction)
 	}
 
 	// Check if savepoint already exists (single-level savepoints only)
 	if session.CurrentSavepoint != nil {
-		return nil, fmt.Errorf("savepoint already exists: '%s' (nested savepoints not supported)", session.CurrentSavepoint.Name)
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+			fmt.Sprintf("savepoint already exists: '%s' (nested savepoints not supported)", session.CurrentSavepoint.Name),
+			errors.LayerTransaction).WithContext("savepoint", session.CurrentSavepoint.Name)
 	}
 
 	// Get current LSN for savepoint
@@ -389,18 +424,24 @@ func HandleSavepoint(savepointName string, session *Session, serviceManager Serv
 func HandleRollbackToSavepoint(savepointName string, session *Session, serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) (*CommandResponse, error) {
 	// Check if in a transaction
 	if !session.IsInTransaction() {
-		return nil, fmt.Errorf("no active transaction: cannot rollback to savepoint outside transaction")
+		return nil, errors.New(errors.ERR_TRANSACTION_NOT_STARTED,
+			"no active transaction: cannot rollback to savepoint outside transaction",
+			errors.LayerTransaction)
 	}
 
 	// Check if savepoint exists
 	if session.CurrentSavepoint == nil {
-		return nil, fmt.Errorf("savepoint not found: '%s'", savepointName)
+		return nil, errors.New(errors.ERR_NOT_FOUND_INDEX,
+			fmt.Sprintf("savepoint not found: '%s'", savepointName),
+			errors.LayerTransaction).WithContext("savepoint", savepointName)
 	}
 
 	// Verify savepoint name matches (single-level savepoints only)
 	if session.CurrentSavepoint.Name != savepointName {
-		return nil, fmt.Errorf("savepoint not found: '%s' (active savepoint: '%s')",
-			savepointName, session.CurrentSavepoint.Name)
+		return nil, errors.New(errors.ERR_NOT_FOUND_INDEX,
+			fmt.Sprintf("savepoint not found: '%s' (active savepoint: '%s')",
+				savepointName, session.CurrentSavepoint.Name),
+			errors.LayerTransaction).WithContext("savepoint", savepointName).WithContext("active_savepoint", session.CurrentSavepoint.Name)
 	}
 
 	txID := session.ActiveTransactionID
@@ -417,7 +458,9 @@ func HandleRollbackToSavepoint(savepointName string, session *Session, serviceMa
 		undoFunc := createUndoFunction(serviceManager, database, logger)
 		err := serviceManager.WALManager.UndoToLSN(savepointLSN, txID, undoFunc, serviceManager.LockManager)
 		if err != nil {
-			return nil, fmt.Errorf("failed to rollback to savepoint '%s': %w", savepointName, err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+				fmt.Sprintf("failed to rollback to savepoint '%s'", savepointName),
+				errors.LayerTransaction).WithContext("savepoint", savepointName).WithContext("tx_id", txID)
 		}
 	}
 
@@ -440,7 +483,8 @@ func ParseAndExecuteTransactionCommand(command string, session *Session, service
 	tokenizer := syndrQL.NewTokenizer(command)
 	tokens, err := tokenizer.Tokenize()
 	if err != nil {
-		return nil, fmt.Errorf("failed to tokenize transaction command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to tokenize transaction command", errors.LayerParser).WithContext("command", command)
 	}
 
 	// Remove EOF token if present
@@ -451,7 +495,8 @@ func ParseAndExecuteTransactionCommand(command string, session *Session, service
 	// Parse transaction command
 	txNode, err := syndrQL.ParseTransactionCommand(tokens)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse transaction command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse transaction command", errors.LayerParser).WithContext("command", command)
 	}
 
 	// Execute based on transaction type
@@ -472,7 +517,9 @@ func ParseAndExecuteTransactionCommand(command string, session *Session, service
 		return HandleRollbackToSavepoint(txNode.SavepointName, session, serviceManager, database, logger)
 
 	default:
-		return nil, fmt.Errorf("unknown transaction type: %s", txNode.Type)
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("unknown transaction type: %s", txNode.Type),
+			errors.LayerParser).WithContext("type", fmt.Sprintf("%s", txNode.Type))
 	}
 }
 
@@ -496,8 +543,9 @@ func CheckTransactionIdleTimeout(session *Session, logger *zap.SugaredLogger) er
 		logger.Warnf("Transaction idle timeout exceeded: txID=%s, idle=%v, session=%s",
 			txID, idleDuration, session.SessionID)
 
-		return fmt.Errorf("transaction idle timeout exceeded (txID: %s, idle: %v)",
-			txID, idleDuration)
+		return errors.New(errors.ERR_RESOURCE_TIMEOUT,
+			fmt.Sprintf("transaction idle timeout exceeded (txID: %s, idle: %v)", txID, idleDuration),
+			errors.LayerTransaction).WithContext("tx_id", txID).WithContext("idle_duration", idleDuration.String())
 	}
 
 	return nil

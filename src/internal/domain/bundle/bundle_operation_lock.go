@@ -22,9 +22,12 @@ package bundle
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // BundleOperationLock manages concurrent access to a bundle, tracking active
@@ -51,33 +54,75 @@ type BundleOperationLock struct {
 
 	// bundleName is stored for better error messages and debugging
 	bundleName string
+
+	// logger is optional for error reporting when negative counters are detected
+	// Nil-safe: if nil, no logging occurs (maintains backward compatibility)
+	logger *zap.SugaredLogger
 }
 
 // NewBundleOperationLock creates a new operation lock for a bundle
-func NewBundleOperationLock(bundleName string) *BundleOperationLock {
+// Logger is optional - if nil, no logging will occur (maintains backward compatibility)
+func NewBundleOperationLock(bundleName string, logger ...*zap.SugaredLogger) *BundleOperationLock {
 	lock := &BundleOperationLock{
 		bundleName: bundleName,
 	}
+	if len(logger) > 0 && logger[0] != nil {
+		lock.logger = logger[0]
+	}
 	lock.cond = sync.NewCond(&lock.mutex)
 	return lock
+}
+
+// SetLogger sets the logger for this lock (useful when logger isn't available at construction)
+func (bol *BundleOperationLock) SetLogger(logger *zap.SugaredLogger) {
+	bol.logger = logger
+}
+
+// captureStackTrace captures a stack trace for error reporting
+// Returns a formatted string with up to 10 stack frames
+func (bol *BundleOperationLock) captureStackTrace() string {
+	// Capture up to 10 stack frames
+	pc := make([]uintptr, 10)
+	n := runtime.Callers(3, pc) // Skip captureStackTrace, release method, and runtime
+	frames := runtime.CallersFrames(pc[:n])
+
+	var trace []string
+	for {
+		frame, more := frames.Next()
+		if !more {
+			break
+		}
+		// Format as "file:line function"
+		trace = append(trace, fmt.Sprintf("%s:%d %s", frame.File, frame.Line, frame.Function))
+	}
+
+	if len(trace) == 0 {
+		return "no stack trace available"
+	}
+
+	// Join with " -> " for readability
+	result := ""
+	for i, frame := range trace {
+		if i > 0 {
+			result += " -> "
+		}
+		result += frame
+	}
+	return result
 }
 
 // AcquireReadLock attempts to acquire a read lock on the bundle.
 // Returns an error if a rename operation is in progress.
 // Multiple readers can hold the lock simultaneously.
 func (bol *BundleOperationLock) AcquireReadLock() error {
+	bol.mutex.Lock()
+	defer bol.mutex.Unlock()
+
 	if bol.renameInProgress.Load() {
 		return fmt.Errorf("bundle '%s' is being renamed, operation blocked", bol.bundleName)
 	}
 
 	atomic.AddInt64(&bol.activeReaders, 1)
-
-	// Double-check after incrementing (rare race condition)
-	if bol.renameInProgress.Load() {
-		atomic.AddInt64(&bol.activeReaders, -1)
-		return fmt.Errorf("bundle '%s' is being renamed, operation blocked", bol.bundleName)
-	}
-
 	return nil
 }
 
@@ -87,8 +132,18 @@ func (bol *BundleOperationLock) AcquireReadLock() error {
 func (bol *BundleOperationLock) ReleaseReadLock() {
 	newCount := atomic.AddInt64(&bol.activeReaders, -1)
 	if newCount < 0 {
-		// This should never happen but log if it does
-		// TODO: Add logger parameter or use a package-level logger
+		// Negative counter indicates serious bug: double-release or missing acquire
+		// Log error with stack trace for debugging
+		if bol.logger != nil {
+			stackTrace := bol.captureStackTrace()
+			bol.logger.Errorw("Negative counter detected in BundleOperationLock (CRITICAL BUG)",
+				"bundle", bol.bundleName,
+				"counter_type", "readers",
+				"detected_value", newCount,
+				"stack_trace", stackTrace,
+				"description", "Double-release or missing acquire detected - indicates lock usage bug")
+		}
+		// Reset to 0 to prevent cascading failures
 		atomic.StoreInt64(&bol.activeReaders, 0)
 	}
 
@@ -102,18 +157,14 @@ func (bol *BundleOperationLock) ReleaseReadLock() {
 // Returns an error if a rename operation is in progress.
 // Only one writer can hold the lock at a time, and no readers can be active.
 func (bol *BundleOperationLock) AcquireWriteLock() error {
+	bol.mutex.Lock()
+	defer bol.mutex.Unlock()
+
 	if bol.renameInProgress.Load() {
 		return fmt.Errorf("bundle '%s' is being renamed, operation blocked", bol.bundleName)
 	}
 
 	atomic.AddInt64(&bol.activeWriters, 1)
-
-	// Double-check after incrementing (rare race condition)
-	if bol.renameInProgress.Load() {
-		atomic.AddInt64(&bol.activeWriters, -1)
-		return fmt.Errorf("bundle '%s' is being renamed, operation blocked", bol.bundleName)
-	}
-
 	return nil
 }
 
@@ -123,8 +174,18 @@ func (bol *BundleOperationLock) AcquireWriteLock() error {
 func (bol *BundleOperationLock) ReleaseWriteLock() {
 	newCount := atomic.AddInt64(&bol.activeWriters, -1)
 	if newCount < 0 {
-		// This should never happen but log if it does
-		// TODO: Add logger parameter or use a package-level logger
+		// Negative counter indicates serious bug: double-release or missing acquire
+		// Log error with stack trace for debugging
+		if bol.logger != nil {
+			stackTrace := bol.captureStackTrace()
+			bol.logger.Errorw("Negative counter detected in BundleOperationLock (CRITICAL BUG)",
+				"bundle", bol.bundleName,
+				"counter_type", "writers",
+				"detected_value", newCount,
+				"stack_trace", stackTrace,
+				"description", "Double-release or missing acquire detected - indicates lock usage bug")
+		}
+		// Reset to 0 to prevent cascading failures
 		atomic.StoreInt64(&bol.activeWriters, 0)
 	}
 

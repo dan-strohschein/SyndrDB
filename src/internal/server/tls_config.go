@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syndrdb/src/pkg/constants"
+	"syndrdb/src/pkg/errors"
 	"time"
 )
 
@@ -49,8 +51,9 @@ func SetupTLS(config *TLSConfig) (*tls.Config, error) {
 	}
 
 	// Ensure certificate directory exists
-	if err := os.MkdirAll(config.CertDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create certificate directory: %w", err)
+	if err := os.MkdirAll(config.CertDir, constants.DirPermissionsDefault); err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to create certificate directory", errors.LayerAPI).WithContext("cert_dir", config.CertDir)
 	}
 
 	certPath := filepath.Join(config.CertDir, config.CertFile)
@@ -60,7 +63,8 @@ func SetupTLS(config *TLSConfig) (*tls.Config, error) {
 	if config.GenerateSelfSigned {
 		if !fileExists(certPath) || !fileExists(keyPath) {
 			if err := generateSelfSignedCert(certPath, keyPath); err != nil {
-				return nil, fmt.Errorf("failed to generate self-signed certificate: %w", err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+					"failed to generate self-signed certificate", errors.LayerAPI).WithContext("cert_path", certPath).WithContext("key_path", keyPath)
 			}
 		}
 	}
@@ -68,7 +72,8 @@ func SetupTLS(config *TLSConfig) (*tls.Config, error) {
 	// Load certificate and key
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load TLS certificate: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to load TLS certificate", errors.LayerAPI).WithContext("cert_path", certPath).WithContext("key_path", keyPath)
 	}
 
 	tlsConfig := &tls.Config{
@@ -97,11 +102,13 @@ func SetupTLS(config *TLSConfig) (*tls.Config, error) {
 		if config.CAFile != "" {
 			caCert, err := os.ReadFile(config.CAFile)
 			if err != nil {
-				return nil, fmt.Errorf("failed to read CA file: %w", err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+					"failed to read CA file", errors.LayerAPI).WithContext("ca_file", config.CAFile)
 			}
 			caCertPool := x509.NewCertPool()
 			if !caCertPool.AppendCertsFromPEM(caCert) {
-				return nil, fmt.Errorf("failed to parse CA certificate")
+				return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+					"failed to parse CA certificate", errors.LayerAPI).WithContext("ca_file", config.CAFile)
 			}
 			tlsConfig.ClientCAs = caCertPool
 		}
@@ -115,7 +122,8 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	// Generate private key
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return fmt.Errorf("failed to generate private key: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+			"failed to generate private key", errors.LayerAPI)
 	}
 
 	// Create certificate template
@@ -140,34 +148,40 @@ func generateSelfSignedCert(certPath, keyPath string) error {
 	// Create certificate
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
 	if err != nil {
-		return fmt.Errorf("failed to create certificate: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+			"failed to create certificate", errors.LayerAPI)
 	}
 
 	// Save certificate
 	certOut, err := os.Create(certPath)
 	if err != nil {
-		return fmt.Errorf("failed to create certificate file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to create certificate file", errors.LayerAPI).WithContext("cert_path", certPath)
 	}
 	defer certOut.Close()
 
 	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
-		return fmt.Errorf("failed to write certificate: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to write certificate", errors.LayerAPI).WithContext("cert_path", certPath)
 	}
 
 	// Save private key
 	keyOut, err := os.Create(keyPath)
 	if err != nil {
-		return fmt.Errorf("failed to create key file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to create key file", errors.LayerAPI).WithContext("key_path", keyPath)
 	}
 	defer keyOut.Close()
 
 	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
-		return fmt.Errorf("failed to marshal private key: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+			"failed to marshal private key", errors.LayerAPI)
 	}
 
 	if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: privateKeyDER}); err != nil {
-		return fmt.Errorf("failed to write private key: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to write private key", errors.LayerAPI).WithContext("key_path", keyPath)
 	}
 
 	return nil
@@ -186,11 +200,13 @@ func ValidateTLSConfig(config *TLSConfig) error {
 	}
 
 	if config.MinVersion < tls.VersionTLS12 {
-		return fmt.Errorf("minimum TLS version must be 1.2 or higher for security")
+		return errors.New(errors.ERR_VALIDATION_FIELD,
+			"minimum TLS version must be 1.2 or higher for security", errors.LayerAPI)
 	}
 
 	if config.MinVersion > config.MaxVersion {
-		return fmt.Errorf("minimum TLS version cannot be higher than maximum version")
+		return errors.New(errors.ERR_VALIDATION_FIELD,
+			"minimum TLS version cannot be higher than maximum version", errors.LayerAPI)
 	}
 
 	if !config.GenerateSelfSigned {
@@ -198,17 +214,20 @@ func ValidateTLSConfig(config *TLSConfig) error {
 		keyPath := filepath.Join(config.CertDir, config.KeyFile)
 
 		if !fileExists(certPath) {
-			return fmt.Errorf("certificate file not found: %s", certPath)
+			return errors.New(errors.ERR_INTERNAL_STORAGE,
+				fmt.Sprintf("certificate file not found: %s", certPath), errors.LayerAPI).WithContext("cert_path", certPath)
 		}
 
 		if !fileExists(keyPath) {
-			return fmt.Errorf("private key file not found: %s", keyPath)
+			return errors.New(errors.ERR_INTERNAL_STORAGE,
+				fmt.Sprintf("private key file not found: %s", keyPath), errors.LayerAPI).WithContext("key_path", keyPath)
 		}
 	}
 
 	if config.RequireClientCert && config.CAFile != "" {
 		if !fileExists(config.CAFile) {
-			return fmt.Errorf("CA file not found: %s", config.CAFile)
+			return errors.New(errors.ERR_INTERNAL_STORAGE,
+				fmt.Sprintf("CA file not found: %s", config.CAFile), errors.LayerAPI).WithContext("ca_file", config.CAFile)
 		}
 	}
 

@@ -54,6 +54,15 @@ print_to_screen: true
 # Enable authentication (default: false)
 auth_enabled: false
 
+# Default users to create when authentication is enabled (optional)
+# These users are only created if they don't already exist
+# WARNING: Change default passwords before production use!
+default_users:
+  - username: "admin"
+    password: "admin123"
+  - username: "syndrdb"
+    password: "password"
+
 # Session timeout in minutes (default: 30)
 session_timeout_minutes: 30
 
@@ -65,6 +74,26 @@ max_connections: 100
 
 # Connection idle timeout in minutes (default: 30)
 connection_idle_timeout: 30
+
+# ==============================================================================
+# INPUT LENGTH LIMITS (MED-003: Memory Exhaustion DoS Prevention)
+# ==============================================================================
+
+# Maximum length for individual parameter values in bytes (default: 10000 = 10KB)
+# Prevents memory exhaustion attacks via oversized parameter values in parameterized queries
+# Example: EXECUTE stmt_name WHERE field = $1 (with large $1 value)
+max_parameter_value_length: 10000
+
+# Maximum length for individual field values in bytes (default: 50000 = 50KB)
+# Prevents memory exhaustion attacks via oversized JSON/document field values
+# Example: ADD DOCUMENT TO BUNDLE "users" WITH {description = "very long string..."}
+# Note: Allows reasonable JSON payloads while preventing DoS attacks
+max_field_value_length: 50000
+
+# Maximum length for field names in bytes (default: 256)
+# Prevents attacks via excessively long field names in document operations
+# Example: ADD DOCUMENT TO BUNDLE "users" WITH {"very_long_field_name..." = "value"}
+max_field_name_length: 256
 
 # ==============================================================================
 # TRANSACTION CONFIGURATION
@@ -385,6 +414,28 @@ stats_scheduled_analyze_time: "02:00"
 # Minimum bundle size for scheduled analysis (default: 100000)
 # Only bundles with at least this many documents are analyzed on schedule
 stats_scheduled_analyze_min_docs: 100000
+
+# ==============================================================================
+# CONCURRENCY & LOCKING CONFIGURATION (HIGH-007)
+# ==============================================================================
+
+# Timeout for lock acquisition in seconds (default: 30)
+# Used by document-level locks during transactions
+# Increase for complex multi-statement transactions that may hold locks longer
+# Decrease to fail fast on deadlocks or stuck operations
+lock_timeout_seconds: 30
+
+# Maximum number of worker pools (default: 10)
+# Limits the number of named worker pools that can be created for async operations
+# Increase if you need many different async operation types running concurrently
+# Decrease to limit resource usage on constrained systems
+max_worker_pools: 10
+
+# Timeout for stopping worker pools in seconds (default: 30)
+# When shutting down, worker pools have this much time to finish current tasks
+# Increase if operations take longer to complete during shutdown
+# Decrease to force faster shutdown (may interrupt operations)
+worker_pool_stop_timeout_seconds: 30
 
 # ==============================================================================
 # GHOST CLEANUP (AUTOMATIC COMPACTION) CONFIGURATION

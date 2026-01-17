@@ -1,12 +1,12 @@
 package server
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -30,21 +30,28 @@ func parseQueryWithNewParser(query string, logger *zap.SugaredLogger) (*querypar
 	tokenizer := syndrQL.NewTokenizer(normalizedQuery)
 	tokens, err := tokenizer.Tokenize()
 	if err != nil {
-		return nil, fmt.Errorf("tokenization failed: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"tokenization failed", errors.LayerParser)
 	}
 
-	// Parse
+	// Parse (pass original query for error reporting)
 	parser := syndrQL.NewSelectParser(tokens)
-	stmt, err := parser.Parse(logger)
+	stmt, err := parser.Parse(logger, normalizedQuery)
 	if err != nil {
-		return nil, fmt.Errorf("parsing failed: %w", err)
+		// Error is already SyndrDBError from parser if it was a parser error
+		// Otherwise wrap it
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
+		}
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"parsing failed", errors.LayerParser)
 	}
 
 	// Convert to UnifiedSelectQuery using adapter
 	adapter := syndrQL.NewSelectStatementAdapter(logger)
 	unifiedQuery, err := adapter.ToUnifiedSelectQuery(stmt)
 	if err != nil {
-		return nil, fmt.Errorf("conversion failed: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("query", normalizedQuery)
 	}
 
 	// Log pattern and complexity info

@@ -240,8 +240,8 @@ func TestPreparedStatement_InvalidStatementName(t *testing.T) {
 
 	if err == nil {
 		t.Errorf("Expected error for invalid statement name, got success: %v", response)
-	} else if !strings.Contains(err.Error(), "invalid statement name") && !strings.Contains(err.Error(), "illegal token") {
-		t.Errorf("Expected 'invalid statement name' or 'illegal token' error, got: %v", err)
+	} else if !strings.Contains(err.Error(), "invalid statement name") && !strings.Contains(err.Error(), "illegal token") && !strings.Contains(err.Error(), "failed to tokenize") && !strings.Contains(err.Error(), "statement name") {
+		t.Errorf("Expected error about invalid statement name, illegal token, or tokenization failure, got: %v", err)
 	}
 
 	t.Log("✓ Invalid statement name correctly rejected")

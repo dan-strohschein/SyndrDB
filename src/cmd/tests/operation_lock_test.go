@@ -1,4 +1,5 @@
 package main
+
 // operation_lock_test.go
 //
 // This file contains unit tests for the BundleOperationLock functionality.
@@ -14,10 +15,10 @@ package main
 // - Timeout behavior when operations don't complete
 // - Proper cleanup after administrative operations
 
-
 import (
-	"syndrdb/src/internal/domain/bundle"
+	"fmt"
 	"sync"
+	"syndrdb/src/internal/domain/bundle"
 	"testing"
 	"time"
 )
@@ -325,4 +326,67 @@ func TestBundleOperationLock_ConcurrentReadersAndWait(t *testing.T) {
 
 	// Clean up
 	lock.CompleteAdministrativeOperation()
+}
+
+// TestBundleOperationLock_RaceConditionFix tests that the mutex-protected check-and-acquire
+// pattern prevents race conditions. This test should pass with -race flag to verify no data races.
+// The test intentionally creates a scenario where multiple goroutines try to acquire locks
+// while a rename operation might start, testing the fix for CRIT-002.
+func TestBundleOperationLock_RaceConditionFix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping race condition test in short mode")
+	}
+
+	lock := bundle.NewBundleOperationLock("test_bundle")
+	const numGoroutines = 50
+	const iterations = 10
+
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines*iterations)
+
+	// Start many goroutines that try to acquire read/write locks concurrently
+	// This tests the mutex protection in AcquireReadLock/AcquireWriteLock
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if id%2 == 0 {
+					// Even IDs acquire read locks
+					if err := lock.AcquireReadLock(); err != nil {
+						errors <- fmt.Errorf("goroutine %d iteration %d: %v", id, j, err)
+						return
+					}
+					time.Sleep(1 * time.Millisecond)
+					lock.ReleaseReadLock()
+				} else {
+					// Odd IDs acquire write locks
+					if err := lock.AcquireWriteLock(); err != nil {
+						errors <- fmt.Errorf("goroutine %d iteration %d: %v", id, j, err)
+						return
+					}
+					time.Sleep(1 * time.Millisecond)
+					lock.ReleaseWriteLock()
+				}
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	wg.Wait()
+	close(errors)
+
+	// Check for errors
+	errorCount := 0
+	for err := range errors {
+		t.Logf("Error during concurrent lock acquisition: %v", err)
+		errorCount++
+	}
+
+	// We expect some errors if rename is in progress, but no data races
+	// The mutex protection should prevent race conditions
+	readers, writers := lock.GetActiveOperationCounts()
+	if readers != 0 || writers != 0 {
+		t.Errorf("Expected all locks to be released, got readers=%d, writers=%d", readers, writers)
+	}
 }

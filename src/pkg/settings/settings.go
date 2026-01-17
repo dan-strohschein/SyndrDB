@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"syndrdb/src/pkg/constants"
 )
 
 // TODO: I will add support for environment variable overrides with ENV > CLI > YAML > defaults precedence
@@ -13,6 +15,12 @@ import (
 // StorageConfig holds storage engine configuration
 type StorageConfig struct {
 	BundleFileMaxSizeMB int `yaml:"bundle_file_max_size_mb"` // Maximum bundle file size in MB before rotation (default: 32)
+}
+
+// DefaultUser represents a default user to be created from configuration
+type DefaultUser struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
 }
 
 type Arguments struct {
@@ -51,7 +59,8 @@ type Arguments struct {
 	Storage StorageConfig `yaml:"storage"` // Storage engine configuration
 
 	// Authentication Configuration
-	AuthEnabled bool `yaml:"auth_enabled"` // Enable authentication
+	AuthEnabled  bool          `yaml:"auth_enabled"`   // Enable authentication
+	DefaultUsers []DefaultUser `yaml:"default_users"`  // Default users to create when authentication is enabled (optional)
 
 	// Session Management Configuration
 	SessionTimeoutMinutes int `yaml:"session_timeout_minutes"` // Session timeout in minutes
@@ -192,6 +201,11 @@ type Arguments struct {
 	GhostCleanupPauseThreshold  int     `yaml:"ghost_cleanup_pause_threshold"`  // Active query pause threshold (default: 500)
 	GhostCleanupTombstoneRatio  float64 `yaml:"ghost_cleanup_tombstone_ratio"`  // Tombstone ratio threshold for compaction (default: 0.3)
 
+	// Concurrency & Locking Configuration (HIGH-007)
+	LockTimeoutSeconds          int `yaml:"lock_timeout_seconds"`          // Timeout for lock acquisition in seconds (default: 30)
+	MaxWorkerPools              int `yaml:"max_worker_pools"`              // Maximum number of worker pools (default: 10)
+	WorkerPoolStopTimeoutSeconds int `yaml:"worker_pool_stop_timeout_seconds"` // Timeout for stopping worker pools in seconds (default: 30)
+
 	// Query Plan Cache Configuration
 	PlanCacheEnabled           bool `yaml:"plan_cache_enabled"`             // Enable query plan caching (default: true)
 	PlanCacheCapacity          int  `yaml:"plan_cache_capacity"`            // Maximum cached plans per shard (default: 1000, 8 shards = 8000 total)
@@ -206,6 +220,11 @@ type Arguments struct {
 	PreparedStatementCacheEnabled  bool `yaml:"prepared_statement_cache_enabled"`  // Enable prepared statement caching (default: true)
 	PreparedStatementCacheCapacity int  `yaml:"prepared_statement_cache_capacity"` // Maximum cached statements per shard (default: 1000, 8 shards = 8000 total)
 	MaxParametersPerQuery          int  `yaml:"max_parameters_per_query"`          // Maximum parameters per query (default: 1000)
+
+	// Input Length Limits (MED-003: Memory exhaustion DoS prevention)
+	MaxParameterValueLength int `yaml:"max_parameter_value_length"` // Maximum length for individual parameter values in bytes (default: 10000 = 10KB)
+	MaxFieldValueLength     int `yaml:"max_field_value_length"`     // Maximum length for individual field values in bytes (default: 50000 = 50KB)
+	MaxFieldNameLength      int `yaml:"max_field_name_length"`      // Maximum length for field names in bytes (default: 256 = 256 bytes)
 	// TODO: Could expose prepared statement metrics via SELECT * FROM 'system.prepared_statements' for observability in future metrics system expansion
 	// TODO: Could support preloading common statements on server startup from configuration file for cache warming
 
@@ -233,6 +252,12 @@ type Arguments struct {
 	RestrictValidationThorough    bool `yaml:"restrict_validation_thorough"`     // Enable thorough validation (all documents) vs sampling mode (default: true)
 	RestrictValidationSampleSize  int  `yaml:"restrict_validation_sample_size"`  // Sample size for probabilistic sampling mode (default: 1000, stops at 100 violations)
 	RestrictValidationLogProgress bool `yaml:"restrict_validation_log_progress"` // Enable progress logging for DROP validation scans - useful for debugging large bundles but generates significant log output in production. Recommended: false for production, true for development/troubleshooting (default: false)
+
+	// Error Reporting Configuration (MED-004)
+	ErrorInternalLogFile string `yaml:"error_internal_log_file"` // Internal error log file path (default: "errors_internal.log")
+	ErrorExternalLogFile string `yaml:"error_external_log_file"` // External/access error log file path (default: "errors_external.log")
+	ErrorShowInConsole   bool   `yaml:"error_show_in_console"`   // Show errors in console (debug mode only, default: true when debug=true)
+	ErrorIncludeStack    bool   `yaml:"error_include_stack"`     // Include stack traces in internal logs (default: true)
 }
 
 var (
@@ -380,6 +405,11 @@ func GetSettings() *Arguments {
 			GhostCleanupPauseThreshold:  500,   // Pause when 500+ queries active
 			GhostCleanupTombstoneRatio:  0.3,   // Compact when 30% tombstones
 
+			// Concurrency & Locking Configuration Defaults (HIGH-007)
+			LockTimeoutSeconds:          30,  // 30 seconds timeout for lock acquisition
+			MaxWorkerPools:              10,  // Maximum 10 worker pools
+			WorkerPoolStopTimeoutSeconds: 30, // 30 seconds timeout for stopping worker pools
+
 			// Query Plan Cache Defaults
 			PlanCacheEnabled:           true, // Enable plan caching by default
 			PlanCacheCapacity:          1000, // 1000 plans per shard (8000 total)
@@ -392,6 +422,11 @@ func GetSettings() *Arguments {
 			PreparedStatementCacheEnabled:  true, // Enable prepared statement caching by default
 			PreparedStatementCacheCapacity: 1000, // 1000 statements per shard (8000 total)
 			MaxParametersPerQuery:          1000, // Maximum 1000 parameters per query
+
+			// Input Length Limits Defaults (MED-003)
+			MaxParameterValueLength: 10000, // 10KB max per parameter value (prevents memory exhaustion)
+			MaxFieldValueLength:     50000, // 50KB max per field value (allows JSON payloads, prevents DoS)
+			MaxFieldNameLength:      256,   // 256 bytes max field name (reasonable limit)
 
 			// TIER 1 SUBQUERY SUPPORT: Subquery Execution Defaults
 			SubqueryEnabled:           true,  // Enable subquery support by default
@@ -416,6 +451,12 @@ func GetSettings() *Arguments {
 			RestrictValidationThorough:    true,  // Thorough validation by default for safety
 			RestrictValidationSampleSize:  1000,  // Sample 1000 DocumentIDs in sampling mode
 			RestrictValidationLogProgress: false, // Disable progress logging by default (production)
+
+			// Error Reporting Defaults (MED-004)
+			ErrorInternalLogFile: "errors_internal.log", // Internal error log
+			ErrorExternalLogFile: "errors_external.log", // External/access log
+			ErrorShowInConsole:   true,                  // Show in console (will be set based on debug mode)
+			ErrorIncludeStack:    true,                  // Include stack traces in logs
 		}
 	})
 	return instance
@@ -630,7 +671,7 @@ func (a *Arguments) GetQueryMemoryLimit(isAdmin bool) int64 {
 	if isAdmin {
 		limitMB = a.AdminQueryMaxMemoryMB
 	}
-	return int64(limitMB) * 1024 * 1024 // Convert MB to bytes
+	return int64(limitMB) * constants.MemoryMBToBytes // Convert MB to bytes
 }
 
 // GetTransactionIdleTimeout returns the parsed transaction idle timeout duration

@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/internal/storage/databasestore"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -68,7 +69,7 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) (*
 
 	// Check if the database already exists
 	if _, err := s.GetDatabaseByName(databaseCommand.DatabaseName); err == nil {
-		return nil, fmt.Errorf("database '%s' already exists", databaseCommand.DatabaseName)
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT, fmt.Sprintf("Database '%s' already exists", databaseCommand.DatabaseName), errors.LayerDomain).WithContext("database_name", databaseCommand.DatabaseName)
 	}
 
 	db := s.Factory.NewDatabase(databaseCommand.DatabaseName, "")
@@ -80,7 +81,7 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) (*
 	// Create the database data file
 	err := s.Store.CreateDatabaseDataFile(db)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create database data file: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Failed to create database data file for '%s'", db.Name), errors.LayerStorage).WithContext("database_name", db.Name)
 	}
 
 	// Register the new database in the Primary database's "Databases" bundle
@@ -102,13 +103,13 @@ func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) erro
 	// Get the Primary database
 	primaryDB, err := s.GetDatabaseByName("primary")
 	if err != nil {
-		return fmt.Errorf("primary database not found: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "Primary database not found", errors.LayerDomain)
 	}
 
 	// Find the "Databases" bundle in the Primary database
 	databasesBundle, exists := primaryDB.Bundles["Databases"]
 	if !exists {
-		return fmt.Errorf("databases bundle not found in Primary database")
+		return errors.New(errors.ERR_NOT_FOUND_BUNDLE, "Databases bundle not found in Primary database", errors.LayerDomain)
 	}
 
 	// Create a document representing the new database
@@ -194,10 +195,10 @@ func (s *DatabaseService) UpdateDatabase(databaseCommand models.DatabaseCommand)
 	// Check if database exists
 	db, err := s.GetDatabaseByName(databaseCommand.DatabaseName)
 	if db == nil {
-		return fmt.Errorf("database '%s' not found", databaseCommand.DatabaseName)
+		return errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", databaseCommand.DatabaseName), errors.LayerDomain).WithContext("database_name", databaseCommand.DatabaseName)
 	}
 	if err != nil {
-		return fmt.Errorf("failed to get database: %w", err)
+		return errors.ConvertError(err, errors.LayerDomain).WithContext("database_name", databaseCommand.DatabaseName)
 	}
 
 	// Update in-memory database (use Name as key for consistency)
@@ -206,7 +207,7 @@ func (s *DatabaseService) UpdateDatabase(databaseCommand models.DatabaseCommand)
 	// Update on disk
 	err = s.Store.UpdateDatabaseDataFile(db)
 	if err != nil {
-		return fmt.Errorf("failed to update database file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Failed to update database file for '%s'", db.Name), errors.LayerStorage).WithContext("database_name", db.Name)
 	}
 
 	log.Printf("Updated database %s (ID: %s)", db.Name, db.DatabaseID)
@@ -221,7 +222,7 @@ func GetDatabase(databases *map[string]*models.Database, databaseName string) (*
 		}
 	}
 
-	return nil, fmt.Errorf("database '%s' not found", databaseName)
+	return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", databaseName), errors.LayerDomain).WithContext("database_name", databaseName)
 }
 
 // DeleteDatabase removes a database from the server
@@ -273,7 +274,7 @@ func (s *DatabaseService) RenameDatabase(oldName, newName string) (*models.Datab
 	// Get the existing database
 	database, err := s.GetDatabaseByName(oldName)
 	if err != nil {
-		return nil, fmt.Errorf("database '%s' not found: %w", oldName, err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", oldName), errors.LayerDomain).WithContext("database_name", oldName)
 	}
 
 	// Check that new name doesn't already exist (case-insensitive)
@@ -325,7 +326,7 @@ func (s *DatabaseService) GetDatabaseByID(id string) (*models.Database, error) {
 	if db, exists := s.Databases[id]; exists {
 		return db, nil
 	}
-	return nil, fmt.Errorf("database with ID %s not found", id)
+	return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database with ID '%s' not found", id), errors.LayerDomain).WithContext("database_id", id)
 }
 
 // GetDatabaseByName retrieves a database by name (case insensitive)
@@ -336,7 +337,7 @@ func (s *DatabaseService) GetDatabaseByName(name string) (*models.Database, erro
 			return db, nil
 		}
 	}
-	return nil, fmt.Errorf("database '%s' not found", name)
+	return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", name), errors.LayerDomain).WithContext("database_name", name)
 }
 
 // ListDatabases returns all databases

@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/graphQL"
 	"syndrdb/src/internal/graphQL/schema"
 	"syndrdb/src/internal/server"
+	"syndrdb/src/pkg/constants"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
 	"syndrdb/src/internal/monitoring"
@@ -55,6 +58,11 @@ func main() {
 	flag.IntVar(&args.MaxSessions, "max-sessions", 1000, "Maximum number of concurrent sessions")
 	flag.IntVar(&args.MaxConnections, "max-connections", 100, "Maximum connection pool size")
 	flag.IntVar(&args.ConnectionIdleTimeoutMinutes, "connection-idle-timeout", 30, "Connection idle timeout in minutes")
+
+	// HIGH-007: Concurrency & Locking Configuration flags
+	flag.IntVar(&args.LockTimeoutSeconds, "lock-timeout", 30, "Timeout for lock acquisition in seconds (default: 30)")
+	flag.IntVar(&args.MaxWorkerPools, "max-worker-pools", 10, "Maximum number of worker pools (default: 10)")
+	flag.IntVar(&args.WorkerPoolStopTimeoutSeconds, "worker-pool-stop-timeout", 30, "Timeout for stopping worker pools in seconds (default: 30)")
 	flag.StringVar(&args.Version, "version", "0.0.1alpha", "Shows version")
 	flag.BoolVar(&args.PrintToScreen, "print", true, "Print Log Messages to screen")
 	flag.BoolVar(&args.Debug, "debug", true, "Enable debug mode")
@@ -282,13 +290,13 @@ func main() {
 		// logFilePath := filepath.Join(args.LogDir, logFilename)
 
 		// Ensure log directory exists
-		if err := os.MkdirAll(args.LogDir, 0755); err != nil {
+		if err := os.MkdirAll(args.LogDir, constants.DirPermissionsDefault); err != nil {
 			log.Fatalf("Failed to create log directory: %v", err)
 		}
 
 		log.Printf("Logging to file: %s", args.LogFile)
 
-		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, constants.FilePermissionsDefault)
 		if err != nil {
 			log.Fatalf("Failed to open log file: %v", err)
 		}
@@ -304,7 +312,7 @@ func main() {
 	}
 
 	// Ensure data directory exists
-	if err := os.MkdirAll(args.DataDir, 0755); err != nil {
+	if err := os.MkdirAll(args.DataDir, constants.DirPermissionsDefault); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
 
@@ -315,10 +323,41 @@ func main() {
 	}
 	//srv := server.NewServer(args.Host, args.Port, db, args.AuthEnabled)
 
-	// Add users if authentication is enabled
+	// Create default users from configuration if authentication is enabled
+	if args.AuthEnabled && len(args.DefaultUsers) > 0 {
+		serviceManager := server.GetServiceManager()
+		if serviceManager != nil && serviceManager.UserService != nil {
+			createdCount := 0
+			for _, defaultUser := range args.DefaultUsers {
+				_, err := serviceManager.UserService.CreateUser(defaultUser.Username, defaultUser.Password)
+				if err != nil {
+					// User might already exist, which is fine - log but continue
+					if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "already taken") {
+						log.Printf("Default user '%s' already exists, skipping creation", defaultUser.Username)
+					} else {
+						log.Printf("Warning: Failed to create default user '%s': %v", defaultUser.Username, err)
+					}
+				} else {
+					log.Printf("Created default user '%s' from configuration", defaultUser.Username)
+					createdCount++
+				}
+			}
+			if createdCount > 0 {
+				log.Printf("Created %d default user(s) from configuration", createdCount)
+			}
+		}
+	}
+
+	// Warn if authentication is enabled but no users exist
 	if args.AuthEnabled {
-		srv.AddUser("admin", "admin123")   // Example user
-		srv.AddUser("syndrdb", "password") // Example user
+		serviceManager := server.GetServiceManager()
+		userCount := 0
+		if serviceManager != nil && serviceManager.UserService != nil && srv.UserStore != nil {
+			userCount = len(srv.UserStore.ListUsers())
+		}
+		if userCount == 0 && len(args.DefaultUsers) == 0 {
+			log.Printf("⚠️  WARNING: Authentication is enabled but no users exist. Create users using 'ADD USER' command or configure default_users in config file.")
+		}
 	}
 
 	// Start the server
@@ -413,66 +452,213 @@ func main() {
 }
 
 // validateArguments validates the arguments and returns an error if invalid
+// MED-007: Comprehensive configuration validation including negative timeouts, invalid paths, and conflicting settings
 func validateArguments(args *settings.Arguments) error {
-	// Check if data directory exists and is accessible
-	dirInfo, err := os.Stat(args.DataDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Try to create the directory
-			err = os.MkdirAll(args.DataDir, 0755)
-			if err != nil {
-				return fmt.Errorf("could not create data directory: %w", err)
-			}
-		} else {
-			return fmt.Errorf("error accessing data directory: %w", err)
-		}
-	} else if !dirInfo.IsDir() {
-		return fmt.Errorf("data directory path exists but is not a directory: %s", args.DataDir)
+	var validationErrors []string
+
+	// Validate directory paths
+	if err := validateDirectoryPath(args.DataDir, "data directory"); err != nil {
+		validationErrors = append(validationErrors, err.Error())
 	}
 
-	// Check if log file can be written to
 	if args.LogDir != "" {
-		if _, err := os.Stat(args.LogDir); os.IsNotExist(err) {
-			err = os.MkdirAll(args.LogDir, 0755)
-			if err != nil {
-				return fmt.Errorf("could not create log directory: %w", err)
-			}
+		if err := validateDirectoryPath(args.LogDir, "log directory"); err != nil {
+			validationErrors = append(validationErrors, err.Error())
 		}
 
 		// Check if we can create/open the log file
-		logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-		if err != nil {
-			return fmt.Errorf("could not open log file for writing: %w", err)
+		if args.LogFile != "" {
+			logFile, err := os.OpenFile(args.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, constants.FilePermissionsDefault)
+			if err != nil {
+				validationErrors = append(validationErrors, fmt.Sprintf("could not open log file for writing: %v", err))
+			} else {
+				logFile.Close()
+			}
 		}
-		logFile.Close()
+	}
+
+	if args.TempDir != "" {
+		if err := validateDirectoryPath(args.TempDir, "temp directory"); err != nil {
+			validationErrors = append(validationErrors, err.Error())
+		}
 	}
 
 	// Validate port range
-	if args.Port < 1 || args.Port > 65535 {
-		return fmt.Errorf("invalid port number: %d (must be between 1 and 65535)", args.Port)
+	if args.Port < constants.PortMin || args.Port > constants.PortMax {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid port number: %d (must be between %d and %d)", args.Port, constants.PortMin, constants.PortMax))
 	}
 
 	// If config file is specified, check if it exists and is readable
 	if args.ConfigFile != "" {
-		_, err := os.Stat(args.ConfigFile)
-		if err != nil {
-			return fmt.Errorf("could not access config file: %w", err)
+		if _, err := os.Stat(args.ConfigFile); err != nil {
+			validationErrors = append(validationErrors, fmt.Sprintf("could not access config file: %v", err))
 		}
 	}
 
 	// Validate mode
 	validModes := map[string]bool{"standalone": true, "cluster": true}
 	if _, valid := validModes[args.Mode]; !valid {
-		return fmt.Errorf("invalid mode: %s (must be 'standalone' or 'cluster')", args.Mode)
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid mode: %s (must be 'standalone' or 'cluster')", args.Mode))
+	}
+
+	// MED-007: Validate all timeout values (prevent negative timeouts)
+	if args.SessionTimeoutMinutes < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid session timeout: %d minutes (must be at least 1)", args.SessionTimeoutMinutes))
+	}
+	if args.ConnectionIdleTimeoutMinutes < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid connection idle timeout: %d minutes (must be at least 1)", args.ConnectionIdleTimeoutMinutes))
+	}
+	if args.LockTimeoutSeconds < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid lock timeout: %d seconds (must be at least 1)", args.LockTimeoutSeconds))
+	}
+	if args.WorkerPoolStopTimeoutSeconds < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid worker pool stop timeout: %d seconds (must be at least 1)", args.WorkerPoolStopTimeoutSeconds))
+	}
+	if args.MigrationTimeoutSeconds < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid migration timeout: %d seconds (must be at least 1)", args.MigrationTimeoutSeconds))
 	}
 
 	// Validate query timeout configuration
-	if args.QueryTimeoutSeconds < 1 || args.QueryTimeoutSeconds > 3600 {
-		return fmt.Errorf("invalid query timeout: %d seconds (must be between 1 and 3600)", args.QueryTimeoutSeconds)
+	if args.QueryTimeoutSeconds < constants.TimeoutMin || args.QueryTimeoutSeconds > constants.TimeoutMaxDefault {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid query timeout: %d seconds (must be between %d and %d)", args.QueryTimeoutSeconds, constants.TimeoutMin, constants.TimeoutMaxDefault))
 	}
-	if args.AdminQueryTimeoutSeconds < 60 || args.AdminQueryTimeoutSeconds > 3600 {
-		return fmt.Errorf("invalid admin query timeout: %d seconds (must be between 60 and 3600)", args.AdminQueryTimeoutSeconds)
+	if args.AdminQueryTimeoutSeconds < 60 || args.AdminQueryTimeoutSeconds > constants.TimeoutMaxDefault {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid admin query timeout: %d seconds (must be between 60 and %d)", args.AdminQueryTimeoutSeconds, constants.TimeoutMaxDefault))
 	}
+
+	// Validate transaction idle timeout string format
+	if args.TransactionIdleTimeout != "" {
+		if _, err := time.ParseDuration(args.TransactionIdleTimeout); err != nil {
+			validationErrors = append(validationErrors, fmt.Sprintf("invalid transaction idle timeout format: %s (must be a valid duration like '5m', '30s', '1h')", args.TransactionIdleTimeout))
+		}
+	}
+
+	// MED-007: Validate memory limits (must be positive)
+	if args.QueryMaxMemoryMB < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid query max memory: %d MB (must be at least 1)", args.QueryMaxMemoryMB))
+	}
+	if args.AdminQueryMaxMemoryMB < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid admin query max memory: %d MB (must be at least 1)", args.AdminQueryMaxMemoryMB))
+	}
+	if args.SortMaxMemoryMB < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid sort max memory: %d MB (must be at least 1)", args.SortMaxMemoryMB))
+	}
+	if args.UniqueIndexMemoryBudgetMB < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid unique index memory budget: %d MB (must be at least 1)", args.UniqueIndexMemoryBudgetMB))
+	}
+
+	// MED-007: Validate connection/session limits (must be positive)
+	if args.MaxConnections < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid max connections: %d (must be at least 1)", args.MaxConnections))
+	}
+	if args.MaxSessions < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid max sessions: %d (must be at least 1)", args.MaxSessions))
+	}
+	if args.MaxWorkerPools < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid max worker pools: %d (must be at least 1)", args.MaxWorkerPools))
+	}
+
+	// MED-007: Validate WAL configuration
+	if args.WALMode != "sync" && args.WALMode != "async" {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid WAL mode: %s (must be 'sync' or 'async')", args.WALMode))
+	}
+	if args.AsyncWALWorkers < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid async WAL workers: %d (must be at least 1)", args.AsyncWALWorkers))
+	}
+	if args.AsyncWALQueueSize < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid async WAL queue size: %d (must be at least 1)", args.AsyncWALQueueSize))
+	}
+
+	// MED-007: Validate bundle storage format
+	if args.BundleStorageFormat != "json" && args.BundleStorageFormat != "binary" {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid bundle storage format: %s (must be 'json' or 'binary')", args.BundleStorageFormat))
+	}
+
+	// MED-007: Validate TLS configuration (check file paths if TLS is enabled)
+	if args.TLSEnabled {
+		if args.TLSCertFile == "" {
+			validationErrors = append(validationErrors, "TLS is enabled but TLS certificate file is not specified")
+		} else if _, err := os.Stat(args.TLSCertFile); err != nil {
+			validationErrors = append(validationErrors, fmt.Sprintf("TLS certificate file not found: %s", args.TLSCertFile))
+		}
+
+		if args.TLSKeyFile == "" {
+			validationErrors = append(validationErrors, "TLS is enabled but TLS key file is not specified")
+		} else if _, err := os.Stat(args.TLSKeyFile); err != nil {
+			validationErrors = append(validationErrors, fmt.Sprintf("TLS key file not found: %s", args.TLSKeyFile))
+		}
+
+		if args.TLSRequireClientCert && args.TLSCAFile == "" {
+			validationErrors = append(validationErrors, "TLS client certificate required but CA file is not specified")
+		}
+		if args.TLSRequireClientCert && args.TLSCAFile != "" {
+			if _, err := os.Stat(args.TLSCAFile); err != nil {
+				validationErrors = append(validationErrors, fmt.Sprintf("TLS CA file not found: %s", args.TLSCAFile))
+			}
+		}
+	}
+
+	// MED-007: Validate input length limits (MED-003)
+	if args.MaxParameterValueLength < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid max parameter value length: %d bytes (must be at least 1)", args.MaxParameterValueLength))
+	}
+	if args.MaxFieldValueLength < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid max field value length: %d bytes (must be at least 1)", args.MaxFieldValueLength))
+	}
+	if args.MaxFieldNameLength < 1 {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid max field name length: %d bytes (must be at least 1)", args.MaxFieldNameLength))
+	}
+
+	// MED-007: Validate conflicting settings
+	if args.MaxSessions < args.MaxConnections {
+		validationErrors = append(validationErrors, fmt.Sprintf("conflicting settings: max_sessions (%d) must be >= max_connections (%d)", args.MaxSessions, args.MaxConnections))
+	}
+
+	if args.AdminQueryTimeoutSeconds < args.QueryTimeoutSeconds {
+		validationErrors = append(validationErrors, fmt.Sprintf("conflicting settings: admin_query_timeout_seconds (%d) should be >= query_timeout_seconds (%d)", args.AdminQueryTimeoutSeconds, args.QueryTimeoutSeconds))
+	}
+
+	// MED-007: Validate GraphQL rate limiting algorithm
+	if args.GraphQLRateAlgorithm != "token-bucket" && args.GraphQLRateAlgorithm != "time-bucket" {
+		validationErrors = append(validationErrors, fmt.Sprintf("invalid GraphQL rate algorithm: %s (must be 'token-bucket' or 'time-bucket')", args.GraphQLRateAlgorithm))
+	}
+
+	// Return all validation errors as a single error
+	if len(validationErrors) > 0 {
+		errorMsg := "Configuration validation failed:\n  " + strings.Join(validationErrors, "\n  ")
+		return errors.New(errors.ERR_SYSTEM_CONFIG, errorMsg, errors.LayerAPI)
+	}
+
+	return nil
+}
+
+// validateDirectoryPath validates that a directory path exists, is accessible, and can be created if needed
+// MED-007: Comprehensive path validation
+func validateDirectoryPath(path, description string) error {
+	if path == "" {
+		return fmt.Errorf("%s cannot be empty", description)
+	}
+
+	dirInfo, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Try to create the directory
+			err = os.MkdirAll(path, constants.DirPermissionsDefault)
+			if err != nil {
+				return fmt.Errorf("could not create %s at %s: %w", description, path, err)
+			}
+		} else {
+			return fmt.Errorf("error accessing %s at %s: %w", description, path, err)
+		}
+	} else if !dirInfo.IsDir() {
+		return fmt.Errorf("%s path exists but is not a directory: %s", description, path)
+	}
+
+	// Check if directory is writable
+	if err := os.WriteFile(filepath.Join(path, ".syndrdb_write_test"), []byte("test"), constants.FilePermissionsDefault); err != nil {
+		return fmt.Errorf("%s at %s is not writable: %w", description, path, err)
+	}
+	os.Remove(filepath.Join(path, ".syndrdb_write_test"))
 
 	return nil
 }

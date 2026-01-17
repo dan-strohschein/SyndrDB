@@ -8,6 +8,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/journal"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -66,7 +67,9 @@ func (a *BundleServiceAdapter) resolveDatabaseAndBundle(dbName, bundleName strin
 	// Get bundle by name
 	bndl, err := a.bundleService.GetBundleByName(db, bundleName)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bundle '%s' not found in database '%s': %w", bundleName, dbName, err)
+		return nil, nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
+			fmt.Sprintf("bundle '%s' not found in database '%s'", bundleName, dbName),
+			errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	return db, bndl, nil
@@ -114,7 +117,9 @@ func (a *BundleServiceAdapter) InsertDocument(dbName, bundleName string, doc map
 	// Call BundleService.AddDocumentToBundle
 	_, err = a.bundleService.AddDocumentToBundle(db, bndl, docCommand)
 	if err != nil {
-		return fmt.Errorf("failed to insert document into bundle '%s': %w", bundleName, err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			fmt.Sprintf("failed to insert document into bundle '%s'", bundleName),
+			errors.LayerStorage).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	return nil
@@ -150,7 +155,9 @@ func (a *BundleServiceAdapter) UpdateDocument(dbName, bundleName, docID string, 
 	// Call BundleService.UpdateDocumentInBundle
 	err = a.bundleService.UpdateDocumentInBundle(db, bndl, updateCommand)
 	if err != nil {
-		return fmt.Errorf("failed to update document '%s' in bundle '%s': %w", docID, bundleName, err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			fmt.Sprintf("failed to update document '%s' in bundle '%s'", docID, bundleName),
+			errors.LayerStorage).WithContext("document_id", docID).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	return nil
@@ -189,7 +196,9 @@ func (a *BundleServiceAdapter) UpdateDocumentByField(dbName, bundleName, fieldNa
 	// Call BundleService.UpdateDocumentInBundle
 	err = a.bundleService.UpdateDocumentInBundle(db, bndl, updateCommand)
 	if err != nil {
-		return fmt.Errorf("failed to update document in bundle '%s' where %s='%s': %w", bundleName, fieldName, fieldValue, err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			fmt.Sprintf("failed to update document in bundle '%s' where %s='%s'", bundleName, fieldName, fieldValue),
+			errors.LayerStorage).WithContext("bundle", bundleName).WithContext("field", fieldName).WithContext("field_value", fieldValue).WithContext("database", dbName)
 	}
 
 	return nil
@@ -210,7 +219,9 @@ func (a *BundleServiceAdapter) DeleteDocument(dbName, bundleName, docID string) 
 	// Call BundleService.DeleteDocumentFromBundle
 	err = a.bundleService.DeleteDocumentFromBundle(bndl, deleteCommand, []string{docID})
 	if err != nil {
-		return fmt.Errorf("failed to delete document '%s' from bundle '%s': %w", docID, bundleName, err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			fmt.Sprintf("failed to delete document '%s' from bundle '%s'", docID, bundleName),
+			errors.LayerStorage).WithContext("document_id", docID).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	return nil
@@ -232,7 +243,9 @@ func (a *BundleServiceAdapter) QueryDocuments(dbName, bundleName string, filter 
 	// Call BundleService.GetDocumentsByFilter
 	documents, err := a.bundleService.GetDocumentsByFilter(bndl, whereClause, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query documents from bundle '%s': %w", bundleName, err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			fmt.Sprintf("failed to query documents from bundle '%s'", bundleName),
+			errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	a.logger.Debugf("QueryDocuments: bundle=%s, filter=%+v, found %d documents", bundleName, filter, len(documents))
@@ -309,12 +322,15 @@ func (a *BundleServiceAdapter) GetDocumentCount(dbName, bundleName string) (int,
 // TODO: I will add database-specific transaction context when WALManager supports per-database transactions
 func (a *BundleServiceAdapter) BeginTransaction(dbName string) (string, error) {
 	if a.walManager == nil {
-		return "", fmt.Errorf("WAL manager not initialized")
+		return "", errors.New(errors.ERR_SYSTEM_CONFIG,
+			"WAL manager not initialized", errors.LayerTransaction)
 	}
 
 	txID, err := a.walManager.BeginTransaction()
 	if err != nil {
-		return "", fmt.Errorf("failed to begin transaction for database '%s': %w", dbName, err)
+		return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+			fmt.Sprintf("failed to begin transaction for database '%s'", dbName),
+			errors.LayerTransaction).WithContext("database", dbName)
 	}
 
 	a.logger.Debugf("Started transaction %s for database '%s'", txID, dbName)
@@ -324,12 +340,15 @@ func (a *BundleServiceAdapter) BeginTransaction(dbName string) (string, error) {
 // CommitTransaction commits a WAL transaction
 func (a *BundleServiceAdapter) CommitTransaction(txID string) error {
 	if a.walManager == nil {
-		return fmt.Errorf("WAL manager not initialized")
+		return errors.New(errors.ERR_SYSTEM_CONFIG,
+			"WAL manager not initialized", errors.LayerTransaction)
 	}
 
 	err := a.walManager.CommitTransaction(txID)
 	if err != nil {
-		return fmt.Errorf("failed to commit transaction %s: %w", txID, err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+			fmt.Sprintf("failed to commit transaction %s", txID),
+			errors.LayerTransaction).WithContext("transaction_id", txID)
 	}
 
 	a.logger.Debugf("Committed transaction %s", txID)
@@ -339,12 +358,15 @@ func (a *BundleServiceAdapter) CommitTransaction(txID string) error {
 // RollbackTransaction rolls back a WAL transaction
 func (a *BundleServiceAdapter) RollbackTransaction(txID string) error {
 	if a.walManager == nil {
-		return fmt.Errorf("WAL manager not initialized")
+		return errors.New(errors.ERR_SYSTEM_CONFIG,
+			"WAL manager not initialized", errors.LayerTransaction)
 	}
 
 	err := a.walManager.RollbackTransaction(txID)
 	if err != nil {
-		return fmt.Errorf("failed to rollback transaction %s: %w", txID, err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
+			fmt.Sprintf("failed to rollback transaction %s", txID),
+			errors.LayerTransaction).WithContext("transaction_id", txID)
 	}
 
 	a.logger.Debugf("Rolled back transaction %s", txID)
@@ -374,7 +396,7 @@ func (a *BundleServiceAdapter) CreateBundle(dbName, bundleName string, fields []
 	// Use AddBundle to create the new bundle
 	newBundle, err := a.bundleService.AddBundle(a.databaseService, db, bundleCmd)
 	if err != nil {
-		return fmt.Errorf("failed to create bundle '%s': %w", bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	// Register the bundle in the system catalog (critical for SHOW BUNDLES to work)
@@ -404,10 +426,13 @@ func (a *BundleServiceAdapter) DeleteBundle(dbName, bundleName string, force boo
 	if !force {
 		count, err := a.GetDocumentCount(dbName, bundleName)
 		if err != nil {
-			return fmt.Errorf("failed to check document count: %w", err)
+			return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+				"failed to check document count", errors.LayerStorage).WithContext("bundle", bundleName).WithContext("database", dbName)
 		}
 		if count > 0 {
-			return fmt.Errorf("cannot delete bundle '%s': contains %d documents (use force=true to override)", bundleName, count)
+			return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+				fmt.Sprintf("cannot delete bundle '%s': contains %d documents (use force=true to override)", bundleName, count),
+				errors.LayerCommand).WithContext("bundle", bundleName).WithContext("document_count", fmt.Sprintf("%d", count))
 		}
 	}
 
@@ -421,7 +446,7 @@ func (a *BundleServiceAdapter) DeleteBundle(dbName, bundleName string, force boo
 	// Use DeleteBundle to remove the bundle
 	err = a.bundleService.DeleteBundle(db, bundleCmd)
 	if err != nil {
-		return fmt.Errorf("failed to delete bundle '%s': %w", bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	a.logger.Infof("Deleted bundle '%s' from database '%s'", bundleName, dbName)
@@ -439,13 +464,13 @@ func (a *BundleServiceAdapter) RenameBundle(dbName, oldName, newName string) err
 	// Get the bundle to rename
 	bndl, err := a.bundleService.GetBundleByName(db, oldName)
 	if err != nil {
-		return fmt.Errorf("bundle '%s' not found: %w", oldName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", oldName).WithContext("database", dbName)
 	}
 
 	// Use RenameBundle service method
 	err = a.bundleService.RenameBundle(db, bndl, newName)
 	if err != nil {
-		return fmt.Errorf("failed to rename bundle from '%s' to '%s': %w", oldName, newName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", oldName).WithContext("new_bundle", newName).WithContext("database", dbName)
 	}
 
 	a.logger.Infof("Renamed bundle from '%s' to '%s' in database '%s'", oldName, newName, dbName)
@@ -462,7 +487,7 @@ func (a *BundleServiceAdapter) AddField(dbName, bundleName string, field models.
 
 	bndl, err := a.bundleService.GetBundleByName(db, bundleName)
 	if err != nil {
-		return fmt.Errorf("bundle '%s' not found: %w", bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	// Create field change for ADD operation
@@ -474,7 +499,7 @@ func (a *BundleServiceAdapter) AddField(dbName, bundleName string, field models.
 	// Apply the field change directly (no BundleCommand wrapper needed)
 	err = a.bundleService.ApplyFieldChanges(db, bndl, []models.FieldChange{change})
 	if err != nil {
-		return fmt.Errorf("failed to add field '%s' to bundle '%s': %w", field.Name, bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("field", field.Name).WithContext("database", dbName)
 	}
 
 	a.logger.Infof("Added field '%s' to bundle '%s' in database '%s'", field.Name, bundleName, dbName)
@@ -491,7 +516,7 @@ func (a *BundleServiceAdapter) DropField(dbName, bundleName, fieldName string) e
 
 	bndl, err := a.bundleService.GetBundleByName(db, bundleName)
 	if err != nil {
-		return fmt.Errorf("bundle '%s' not found: %w", bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	// Create field change for REMOVE operation
@@ -503,7 +528,7 @@ func (a *BundleServiceAdapter) DropField(dbName, bundleName, fieldName string) e
 	// Apply the field change directly (no BundleCommand wrapper needed)
 	err = a.bundleService.ApplyFieldChanges(db, bndl, []models.FieldChange{change})
 	if err != nil {
-		return fmt.Errorf("failed to drop field '%s' from bundle '%s': %w", fieldName, bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("field", fieldName).WithContext("database", dbName)
 	}
 
 	a.logger.Infof("Dropped field '%s' from bundle '%s' in database '%s'", fieldName, bundleName, dbName)
@@ -519,14 +544,16 @@ func (a *BundleServiceAdapter) RenameField(dbName, bundleName, oldFieldName, new
 
 	bndl, err := a.bundleService.GetBundleByName(db, bundleName)
 	if err != nil {
-		return fmt.Errorf("bundle '%s' not found: %w", bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	// Get the existing field definition from DocumentStructure
-	existingField, exists := bndl.DocumentStructure.FieldDefinitions[oldFieldName]
-	if !exists {
-		return fmt.Errorf("field '%s' not found in bundle '%s'", oldFieldName, bundleName)
-	}
+		existingField, exists := bndl.DocumentStructure.FieldDefinitions[oldFieldName]
+		if !exists {
+			return errors.New(errors.ERR_VALIDATION_FIELD,
+				fmt.Sprintf("field '%s' not found in bundle '%s'", oldFieldName, bundleName),
+				errors.LayerCommand).WithContext("field", oldFieldName).WithContext("bundle", bundleName).WithContext("database", dbName)
+		}
 
 	// Create new field definition with updated name
 	newField := existingField
@@ -543,7 +570,7 @@ func (a *BundleServiceAdapter) RenameField(dbName, bundleName, oldFieldName, new
 	// This also rebuilds the indexes if the rename is successful
 	err = a.bundleService.ApplyFieldChanges(db, bndl, []models.FieldChange{change})
 	if err != nil {
-		return fmt.Errorf("failed to rename field from '%s' to '%s' in bundle '%s': %w", oldFieldName, newFieldName, bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("old_field", oldFieldName).WithContext("new_field", newFieldName).WithContext("database", dbName)
 	}
 
 	a.logger.Infof("Renamed field from '%s' to '%s' in bundle '%s' (database '%s')", oldFieldName, newFieldName, bundleName, dbName)
@@ -562,7 +589,7 @@ func (a *BundleServiceAdapter) AddRelationship(dbName, bundleName string, relati
 	// Add relationship using BundleService
 	err = a.bundleService.AddRelationshipToBundle(bndl, relationshipCommand)
 	if err != nil {
-		return fmt.Errorf("failed to add relationship to bundle '%s': %w", bundleName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
 	a.logger.Infof("Successfully added relationship to bundle '%s' in database '%s'", bundleName, dbName)
@@ -574,7 +601,7 @@ func (a *BundleServiceAdapter) CreateHashIndex(dbName, command string) error {
 	// Get database
 	db, err := a.databaseService.GetDatabaseByName(dbName)
 	if err != nil {
-		return fmt.Errorf("database '%s' not found: %w", dbName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	// Use the existing CreateHashIndex function from index_operations.go
@@ -586,7 +613,7 @@ func (a *BundleServiceAdapter) CreateHashIndex(dbName, command string) error {
 
 	_, err, _ = CreateHashIndex(command, a.logger, sm, db)
 	if err != nil {
-		return fmt.Errorf("failed to create hash index: %w", err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	return nil
@@ -597,7 +624,7 @@ func (a *BundleServiceAdapter) CreateBTreeIndex(dbName, command string) error {
 	// Get database
 	db, err := a.databaseService.GetDatabaseByName(dbName)
 	if err != nil {
-		return fmt.Errorf("database '%s' not found: %w", dbName, err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	// Use the existing CreateBTreeIndex function from index_operations.go
@@ -609,7 +636,7 @@ func (a *BundleServiceAdapter) CreateBTreeIndex(dbName, command string) error {
 
 	_, err = CreateBTreeIndex(command, a.logger, sm, db)
 	if err != nil {
-		return fmt.Errorf("failed to create B-Tree index: %w", err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	return nil

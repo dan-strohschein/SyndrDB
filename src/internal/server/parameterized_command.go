@@ -1,9 +1,10 @@
 package server
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 )
 
 // ParameterDelimiter matches the client-side delimiter for parameter separation
@@ -13,29 +14,39 @@ const ParameterDelimiter = "\x05"
 // ParseParameterizedCommand parses a command with delimiter-separated parameters
 // Format: EXECUTE stmt_name\x05param1\x05param2\x05...\x04
 // Returns the command part and the parameter values (with escape sequences unescaped)
-func ParseParameterizedCommand(rawCommand string) (command string, params []string, hasParams bool) {
+// MED-003: Validates individual parameter value lengths to prevent memory exhaustion DoS
+func ParseParameterizedCommand(rawCommand string) (command string, params []string, hasParams bool, err error) {
 	// Check if command contains parameter delimiter
 	if !strings.Contains(rawCommand, ParameterDelimiter) {
-		return rawCommand, nil, false
+		return rawCommand, nil, false, nil
 	}
 
 	// Split on parameter delimiter
 	parts := strings.Split(rawCommand, ParameterDelimiter)
 	if len(parts) < 2 {
-		return rawCommand, nil, false
+		return rawCommand, nil, false, nil
 	}
 
 	// First part is the command
 	command = parts[0]
 
+	// Get security config for validation
+	securityConfig := DefaultSecurityConfig()
+
 	// Remaining parts are parameters (unescape special characters)
 	params = make([]string, 0, len(parts)-1)
 	for i := 1; i < len(parts); i++ {
 		unescaped := unescapeParameterValue(parts[i])
+		
+		// MED-003: Validate individual parameter value length
+		if err := ValidateParameterValue(unescaped, securityConfig); err != nil {
+			return "", nil, false, err
+		}
+		
 		params = append(params, unescaped)
 	}
 
-	return command, params, true
+	return command, params, true, nil
 }
 
 // unescapeParameterValue unescapes special characters in parameter values
@@ -84,7 +95,7 @@ func CreateParameterContext(params []string) (*syndrQL.ParameterContext, error) 
 	// Create parameter context (validates count against MaxParametersPerQuery)
 	paramContext, err := syndrQL.NewParameterContext(interfaceParams)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create parameter context: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("parameter_count", strconv.Itoa(len(params)))
 	}
 
 	return paramContext, nil

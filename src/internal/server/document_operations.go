@@ -4,6 +4,7 @@ import (
 	"fmt"
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -14,34 +15,38 @@ import (
 func UpdateDocument(commandParts []string, serviceManager ServiceManager, database *models.Database, command string, logger *zap.SugaredLogger, session *Session) (*CommandResponse, error) {
 	// Enhanced bundle name parsing following SyndrDB comprehensive error handling
 	// This replaces the fragile index-based parsing with robust string extraction
-	bundleName, err := parseBundleNameFromCommand(command, "IN")
+		bundleName, err := parseBundleNameFromCommand(command, "IN")
 	if err != nil {
 		logger.Errorf("Failed to parse bundle name from UPDATE command: %v", err)
 		logger.Debugf("Command was: %s", command)
-		return nil, fmt.Errorf("UPDATE DOCUMENTS command parsing failed: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"UPDATE DOCUMENTS command parsing failed", errors.LayerCommand).WithContext("command", command)
 	}
 
 	// Additional validation following SyndrDB defensive programming practices
 	if bundleName == "" {
-		return nil, fmt.Errorf("bundle name cannot be empty in UPDATE DOCUMENTS command")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"bundle name cannot be empty in UPDATE DOCUMENTS command", errors.LayerCommand)
 	}
 
 	// Parse the document command using new parser with feature flag support
 	// This will attempt new parser if enabled, fallback to legacy parser on failure
 	docCommand, err := parseUpdateDocument(command, logger)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing update document command: %v", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 	}
 
 	// SAFETY: Validate CONFIRMED keyword requirement for bulk updates without WHERE clause
 	if docCommand.WhereClause == "" && !docCommand.Confirmed {
-		return nil, fmt.Errorf("bulk UPDATE without WHERE clause requires CONFIRMED keyword. Use: UPDATE DOCUMENTS IN BUNDLE \"%s\" (...) CONFIRMED", bundleName)
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			fmt.Sprintf("bulk UPDATE without WHERE clause requires CONFIRMED keyword. Use: UPDATE DOCUMENTS IN BUNDLE \"%s\" (...) CONFIRMED", bundleName),
+			errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
 	// Get the bundle by name
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
 	// TRANSACTION SUPPORT: Acquire write locks for documents being updated when in a transaction
@@ -52,13 +57,15 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
 		docIDs, err := whereService.GetDocumentIDsByFilter(bundle, docCommand.WhereClause)
 		if err != nil {
-			return nil, fmt.Errorf("failed to filter documents by WHERE clause: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+				"failed to filter documents by WHERE clause", errors.LayerQuery).WithContext("bundle", bundleName)
 		}
 
 		// Acquire write locks for all matching documents
 		for _, docID := range docIDs {
 			if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
-				return nil, fmt.Errorf("failed to acquire write lock for document %s: %w", docID, err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+					fmt.Sprintf("failed to acquire write lock for document %s", docID), errors.LayerTransaction).WithContext("document_id", docID)
 			}
 		}
 		logger.Debugf("Acquired write locks for %d documents in transaction %s", len(docIDs), session.ActiveTransactionID)
@@ -75,7 +82,8 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			// Note: We'll log the fields being updated, actual before/after data is captured by bundle service
 			err := serviceManager.WALManager.LogDocumentUpdate(txID, bundleName, "multiple", nil, docCommand.Fields)
 			if err != nil {
-				return fmt.Errorf("failed to log document update: %w", err)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+					"failed to log document update", errors.LayerWAL).WithContext("bundle", bundleName)
 			}
 
 			// Update the document in the bundle
@@ -95,7 +103,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("error updating document in bundle '%s': %v", bundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
 	// METRICS: Track document update
@@ -133,7 +141,8 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	logger.Debugf("Trying to add document to %s.%s", database.Name, commandParts[3])
 
 	if len(commandParts) < 4 {
-		return nil, fmt.Errorf("ADD DOCUMENT requires the spec 'TO <bundle_name>'")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"ADD DOCUMENT requires the spec 'TO <bundle_name>'", errors.LayerCommand)
 	}
 
 	// Parse the document command using new parser with fallback
@@ -159,7 +168,7 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	// }
 	// #endregion
 	if err != nil {
-		return nil, fmt.Errorf("error parsing add document command: %v", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 	}
 
 	bundleName := docCommand.BundleName
@@ -168,7 +177,7 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, docCommand.BundleName)
 	bundleLookupRegion.End()
 	if err != nil {
-		return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
 	docID := ""
@@ -181,7 +190,8 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		// Acquire a bundle-level lock using a special convention: "bundle:<bundle_name>"
 		bundleLockID := fmt.Sprintf("bundle:%s", bundleName)
 		if err := serviceManager.LockManager.AcquireWriteLock(bundleName, bundleLockID, session.ActiveTransactionID, session.SessionID); err != nil {
-			return nil, fmt.Errorf("failed to acquire bundle lock for insert: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+				"failed to acquire bundle lock for insert", errors.LayerTransaction).WithContext("bundle", bundleName)
 		}
 		logger.Debugf("Acquired bundle lock for insert in transaction %s", session.ActiveTransactionID)
 	}
@@ -198,13 +208,14 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 			// Add document with transaction ID tracking (buffer-aware)
 			docID, err = serviceManager.BundleService.AddDocumentToBundleWithTxID(database, bundle, docCommand, txID)
 			if err != nil {
-				return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
+				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
 			// Log the insertion to the WAL
 			err = serviceManager.WALManager.LogDocumentInsert(txID, bundleName, docID, docCommand.Fields)
 			if err != nil {
-				return nil, fmt.Errorf("failed to log document insert: %w", err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+					"failed to log document insert", errors.LayerWAL).WithContext("bundle", bundleName).WithContext("document_id", docID)
 			}
 
 			logger.Infof("TRANSACTION INSERT LOGGED: txID=%s, bundle=%s, docID=%s", txID, bundleName, docID)
@@ -221,7 +232,8 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 				err := serviceManager.WALManager.LogDocumentInsert(txID, bundleName, "pending", docCommand.Fields)
 				walLogRegion.End()
 				if err != nil {
-					return fmt.Errorf("failed to log document insert: %w", err)
+					return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+						"failed to log document insert", errors.LayerWAL).WithContext("bundle", bundleName)
 				}
 
 				// Add the document to the bundle
@@ -263,7 +275,7 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("error adding document to bundle '%s': %v", bundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
 	// METRICS: Track document insert

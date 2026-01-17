@@ -41,9 +41,10 @@ type InsertStatement struct {
 
 // InsertParser handles parsing of ADD DOCUMENT statements
 type InsertParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer      *Tokenizer
+	current        int
+	tokens         []Token
+	originalCommand string // Original command for error reporting
 }
 
 // NewInsertParser creates a new INSERT parser
@@ -51,12 +52,14 @@ func NewInsertParser(input string) (*InsertParser, error) {
 	tokenizer := NewTokenizer(input)
 	tokens, err := tokenizer.Tokenize()
 	if err != nil {
-		return nil, fmt.Errorf("tokenization failed: %w", err)
+		// Tokenization errors are handled by the tokenizer
+		return nil, err
 	}
 	return &InsertParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+		tokenizer:       tokenizer,
+		tokens:          tokens,
+		current:         0,
+		originalCommand: input,
 	}, nil
 }
 
@@ -86,7 +89,7 @@ func (p *InsertParser) Parse() (*InsertStatement, error) {
 	// Expect: bundle name (string)
 	bundleName, err := p.expectString()
 	if err != nil {
-		return nil, fmt.Errorf("expected bundle name: %w", err)
+		return nil, err // expectString already returns detailed error
 	}
 
 	// Expect: WITH
@@ -102,7 +105,7 @@ func (p *InsertParser) Parse() (*InsertStatement, error) {
 	// Parse field-value pairs
 	fields, err := p.parseFieldValues()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse field values: %w", err)
+		return nil, err // parseFieldValues already returns detailed error
 	}
 
 	// Expect: closing parenthesis
@@ -153,24 +156,34 @@ func (p *InsertParser) parseFieldSet(fields map[string]interface{}) error {
 	// Parse field name (identifier or string)
 	fieldName, err := p.parseFieldName()
 	if err != nil {
-		return fmt.Errorf("expected field name: %w", err)
+		return err // parseFieldName already returns detailed error
 	}
 
 	// Expect: equals sign (TOKEN_ASSIGN for single =)
 	if p.isAtEnd() {
-		return fmt.Errorf("unexpected end of input, expected '='")
+		return CreateParserErrorWithToken(
+			"unexpected end of input, expected '='",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"=",
+			p.originalCommand,
+		)
 	}
 
 	tok := p.peek()
 	if tok.Type != TOKEN_ASSIGN {
-		return fmt.Errorf("expected '=' after field name, got %s", tok.Value)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("expected '=' after field name, got %s", tok.Value),
+			tok,
+			"=",
+			p.originalCommand,
+		)
 	}
 	p.advance()
 
 	// Parse value (can be string, number, boolean, null, or identifier)
 	value, err := p.parseValue()
 	if err != nil {
-		return fmt.Errorf("failed to parse field value: %w", err)
+		return err // parseValue already returns detailed error
 	}
 
 	// Expect: closing brace
@@ -187,7 +200,12 @@ func (p *InsertParser) parseFieldSet(fields map[string]interface{}) error {
 // parseFieldName parses a field name (identifier or string)
 func (p *InsertParser) parseFieldName() (string, error) {
 	if p.isAtEnd() {
-		return "", fmt.Errorf("unexpected end of input")
+		return "", CreateParserErrorWithToken(
+			"unexpected end of input, expected field name",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"field name (identifier or string)",
+			p.originalCommand,
+		)
 	}
 
 	tok := p.peek()
@@ -199,14 +217,24 @@ func (p *InsertParser) parseFieldName() (string, error) {
 		p.advance()
 		return tok.Value, nil
 	default:
-		return "", fmt.Errorf("expected field name (identifier or string), got %s", tok.Value)
+		return "", CreateParserErrorWithToken(
+			fmt.Sprintf("expected field name (identifier or string), got %s", tok.Value),
+			tok,
+			"field name (identifier or string)",
+			p.originalCommand,
+		)
 	}
 }
 
 // parseValue parses a field value (literal or identifier)
 func (p *InsertParser) parseValue() (interface{}, error) {
 	if p.isAtEnd() {
-		return nil, fmt.Errorf("unexpected end of input")
+		return nil, CreateParserErrorWithToken(
+			"unexpected end of input, expected value",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"value (string, number, boolean, null, or identifier)",
+			p.originalCommand,
+		)
 	}
 
 	tok := p.peek()
@@ -237,12 +265,27 @@ func (p *InsertParser) parseValue() (interface{}, error) {
 		return tok.Value, nil
 	case TOKEN_LBRACKET:
 		// TODO: I should add support for array values [1, 2, 3] for array fields
-		return nil, fmt.Errorf("array values not yet supported")
+		return nil, CreateParserErrorWithToken(
+			"array values not yet supported",
+			tok,
+			"string, number, boolean, null, or identifier",
+			p.originalCommand,
+		)
 	case TOKEN_LBRACE:
 		// TODO: I should add support for nested object values {key: value} for object fields
-		return nil, fmt.Errorf("nested object values not yet supported")
+		return nil, CreateParserErrorWithToken(
+			"nested object values not yet supported",
+			tok,
+			"string, number, boolean, null, or identifier",
+			p.originalCommand,
+		)
 	default:
-		return nil, fmt.Errorf("unexpected value type: %s", tok.Value)
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("unexpected value type: %s", tok.Value),
+			tok,
+			"string, number, boolean, null, or identifier",
+			p.originalCommand,
+		)
 	}
 }
 
@@ -250,12 +293,22 @@ func (p *InsertParser) parseValue() (interface{}, error) {
 
 func (p *InsertParser) expectKeyword(tokenType TokenType, keyword string) error {
 	if p.isAtEnd() {
-		return fmt.Errorf("unexpected end of input, expected %s", keyword)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("unexpected end of input, expected %s", keyword),
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			keyword,
+			p.originalCommand,
+		)
 	}
 
 	tok := p.peek()
 	if tok.Type != tokenType {
-		return fmt.Errorf("expected %s, got %s", keyword, tok.Value)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("expected %s, got %s", keyword, tok.Value),
+			tok,
+			keyword,
+			p.originalCommand,
+		)
 	}
 
 	p.advance()
@@ -264,12 +317,22 @@ func (p *InsertParser) expectKeyword(tokenType TokenType, keyword string) error 
 
 func (p *InsertParser) expectToken(tokenType TokenType, symbol string) error {
 	if p.isAtEnd() {
-		return fmt.Errorf("unexpected end of input, expected %s", symbol)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("unexpected end of input, expected %s", symbol),
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			symbol,
+			p.originalCommand,
+		)
 	}
 
 	tok := p.peek()
 	if tok.Type != tokenType {
-		return fmt.Errorf("expected %s, got %s", symbol, tok.Value)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("expected %s, got %s", symbol, tok.Value),
+			tok,
+			symbol,
+			p.originalCommand,
+		)
 	}
 
 	p.advance()
@@ -278,12 +341,22 @@ func (p *InsertParser) expectToken(tokenType TokenType, symbol string) error {
 
 func (p *InsertParser) expectString() (string, error) {
 	if p.isAtEnd() {
-		return "", fmt.Errorf("unexpected end of input")
+		return "", CreateParserErrorWithToken(
+			"unexpected end of input, expected string",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"quoted string",
+			p.originalCommand,
+		)
 	}
 
 	tok := p.peek()
 	if tok.Type != TOKEN_STRING {
-		return "", fmt.Errorf("expected string, got %s", tok.Value)
+		return "", CreateParserErrorWithToken(
+			fmt.Sprintf("expected string, got %s", tok.Value),
+			tok,
+			"quoted string",
+			p.originalCommand,
+		)
 	}
 
 	p.advance()

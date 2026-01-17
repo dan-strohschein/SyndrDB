@@ -8,6 +8,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -78,13 +79,13 @@ func (us *UserService) isSystemUser(username string) error {
 	// Get primary database
 	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return fmt.Errorf("primary database not found: %w", err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get Users bundle
 	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
-		return fmt.Errorf("Users bundle not found: %w", err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
 	// Find user document by username (case-insensitive)
@@ -97,7 +98,9 @@ func (us *UserService) isSystemUser(username string) error {
 					// Check IsSystem field
 					if isSystemField, ok := doc.Fields["IsSystem"]; ok {
 						if isSystem, ok := isSystemField.Value.AsBool(); ok && isSystem {
-							return fmt.Errorf("Cannot modify system user '%s'", username)
+							return errors.New(errors.ERR_PERMISSION_DENIED,
+								fmt.Sprintf("Cannot modify system user '%s'", username),
+								errors.LayerAuth).WithContext("username", username)
 						}
 					}
 					// User found but not a system user
@@ -129,30 +132,26 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 	// Validate username format
 	securityConfig := DefaultSecurityConfig()
 	if err := ValidateInput(username, "username", securityConfig); err != nil {
-		return "", fmt.Errorf("invalid username: %w", err)
+		return "", errors.WrapWithMessage(err, errors.ERR_VALIDATION_FIELD,
+			"invalid username", errors.LayerCommand).WithContext("username", username)
 	}
 
 	// Validate password strength
 	if err := ValidateInput(password, "password", securityConfig); err != nil {
-		return "", fmt.Errorf("invalid password: %w", err)
+		return "", errors.WrapWithMessage(err, errors.ERR_VALIDATION_FIELD,
+			"invalid password", errors.LayerCommand)
 	}
 
 	// Get the primary database
 	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if us.debugMode {
-			return "", fmt.Errorf("primary database not found: %w", err)
-		}
-		return "", fmt.Errorf("internal error: database access failed")
+		return "", errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get the Users bundle
 	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
-		if us.debugMode {
-			return "", fmt.Errorf("Users bundle not found: %w", err)
-		}
-		return "", fmt.Errorf("internal error: user storage not available")
+		return "", errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
 	// Check if username already exists (case-insensitive)
@@ -160,10 +159,9 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 		for _, doc := range *usersBundle.Documents {
 			if nameField, ok := doc.Fields["Name"]; ok {
 				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-					if us.debugMode {
-						return "", fmt.Errorf("user '%s' already exists", username)
-					}
-					return "", fmt.Errorf("username already taken")
+					return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+						fmt.Sprintf("user '%s' already exists", username),
+						errors.LayerCommand).WithContext("username", username)
 				}
 			}
 		}
@@ -182,10 +180,7 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 
 	storedUser, err := us.userStore.AddUser(newUser)
 	if err != nil {
-		if us.debugMode {
-			return "", fmt.Errorf("failed to hash password: %w", err)
-		}
-		return "", fmt.Errorf("internal error: user creation failed")
+		return "", errors.ConvertError(err, errors.LayerCommand).WithContext("username", username)
 	}
 
 	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
@@ -238,10 +233,7 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 	if err != nil {
 		// Rollback: Remove from UserStore if bundle insertion fails
 		// TODO: I will implement proper transaction support for atomic operations
-		if us.debugMode {
-			return "", fmt.Errorf("failed to add user document to bundle: %w", err)
-		}
-		return "", fmt.Errorf("internal error: user creation failed")
+		return "", errors.ConvertError(err, errors.LayerCommand).WithContext("username", username).WithContext("bundle", "Users")
 	}
 
 	us.logger.Infof("User '%s' created successfully with ID: %s", username, userID)
@@ -262,19 +254,13 @@ func (us *UserService) GetUserByUsername(username string) (*models.Document, err
 	// Get the primary database
 	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if us.debugMode {
-			return nil, fmt.Errorf("primary database not found: %w", err)
-		}
-		return nil, fmt.Errorf("internal error: database access failed")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get the Users bundle
 	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
-		if us.debugMode {
-			return nil, fmt.Errorf("Users bundle not found: %w", err)
-		}
-		return nil, fmt.Errorf("internal error: user storage not available")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
 	// Search for user (case-insensitive)
@@ -290,10 +276,9 @@ func (us *UserService) GetUserByUsername(username string) (*models.Document, err
 	}
 
 	// User not found
-	if us.debugMode {
-		return nil, fmt.Errorf("user '%s' not found", username)
-	}
-	return nil, fmt.Errorf("invalid credentials")
+	return nil, errors.New(errors.ERR_NOT_FOUND_USER,
+		fmt.Sprintf("user '%s' not found", username),
+		errors.LayerAuth).WithContext("username", username)
 }
 
 // GetUserByID retrieves a user document by UserID
@@ -307,19 +292,13 @@ func (us *UserService) GetUserByID(userID string) (*models.Document, error) {
 	// Get the primary database
 	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if us.debugMode {
-			return nil, fmt.Errorf("primary database not found: %w", err)
-		}
-		return nil, fmt.Errorf("internal error: database access failed")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get the Users bundle
 	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
-		if us.debugMode {
-			return nil, fmt.Errorf("Users bundle not found: %w", err)
-		}
-		return nil, fmt.Errorf("internal error: user storage not available")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
 	// Search for user by UserID
@@ -335,10 +314,9 @@ func (us *UserService) GetUserByID(userID string) (*models.Document, error) {
 	}
 
 	// User not found
-	if us.debugMode {
-		return nil, fmt.Errorf("user with ID '%s' not found", userID)
-	}
-	return nil, fmt.Errorf("user not found")
+	return nil, errors.New(errors.ERR_NOT_FOUND_USER,
+		fmt.Sprintf("user with ID '%s' not found", userID),
+		errors.LayerAuth).WithContext("user_id", userID)
 }
 
 // ValidateUserCredentials checks if the provided username/password combination is valid
@@ -358,10 +336,7 @@ func (us *UserService) ValidateUserCredentials(username, password string) (bool,
 	// Use UserStore for credential verification (includes Argon2id verification)
 	isValid, _, err := us.userStore.VerifyCredentials(username, password)
 	if err != nil {
-		if us.debugMode {
-			return false, fmt.Errorf("credential verification error: %w", err)
-		}
-		return false, fmt.Errorf("authentication failed")
+		return false, errors.ConvertError(err, errors.LayerAuth).WithContext("username", username)
 	}
 
 	return isValid, nil
@@ -392,18 +367,18 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if us.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
+			return errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	// Get Users bundle
 	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
 		if us.debugMode {
-			return fmt.Errorf("Users bundle not found: %w", err)
+			return errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE, "Users bundle not found", errors.LayerCommand)
 		}
-		return fmt.Errorf("internal error: user storage not available")
+		return errors.New(errors.ERR_INTERNAL, "internal error: user storage not available", errors.LayerCommand)
 	}
 
 	// Find user document (case-insensitive)
@@ -423,10 +398,9 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 	}
 
 	if targetDocID == "" {
-		if us.debugMode {
-			return fmt.Errorf("user '%s' not found", username)
-		}
-		return fmt.Errorf("user not found")
+		return errors.New(errors.ERR_NOT_FOUND_USER,
+			fmt.Sprintf("user '%s' not found", username),
+			errors.LayerAuth).WithContext("username", username)
 	}
 
 	// Check for active sessions if not forcing
@@ -434,8 +408,10 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 	if !force && serviceManager.SessionManager != nil {
 		sessions := serviceManager.SessionManager.GetUserSessions(username)
 		if len(sessions) > 0 {
-			return fmt.Errorf("user '%s' has %d active session(s). Use FORCE to terminate sessions and proceed",
-				username, len(sessions))
+			return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+				fmt.Sprintf("user '%s' has %d active session(s). Use FORCE to terminate sessions and proceed",
+					username, len(sessions)),
+				errors.LayerCommand).WithContext("username", username).WithContext("session_count", fmt.Sprintf("%d", len(sessions)))
 		}
 	}
 
@@ -469,10 +445,7 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 					}
 					storedUser, err := us.userStore.AddUser(newUser) // This updates if exists
 					if err != nil {
-						if us.debugMode {
-							return fmt.Errorf("failed to hash new password: %w", err)
-						}
-						return fmt.Errorf("internal error: password update failed")
+						return errors.ConvertError(err, errors.LayerCommand).WithContext("username", username)
 					}
 
 					// Update PasswordHash field in document
@@ -520,18 +493,18 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 	primaryDB, err := us.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if us.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
+			return errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	// Get Users bundle
 	usersBundle, err := us.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
 		if us.debugMode {
-			return fmt.Errorf("Users bundle not found: %w", err)
+			return errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE, "Users bundle not found", errors.LayerCommand)
 		}
-		return fmt.Errorf("internal error: user storage not available")
+		return errors.New(errors.ERR_INTERNAL, "internal error: user storage not available", errors.LayerCommand)
 	}
 
 	// Find user document (case-insensitive)
@@ -558,10 +531,9 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 	}
 
 	if targetDocID == "" {
-		if us.debugMode {
-			return fmt.Errorf("user '%s' not found", username)
-		}
-		return fmt.Errorf("user not found")
+		return errors.New(errors.ERR_NOT_FOUND_USER,
+			fmt.Sprintf("user '%s' not found", username),
+			errors.LayerAuth).WithContext("username", username)
 	}
 
 	// Check for active sessions if not forcing
@@ -569,8 +541,10 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 	if !force && serviceManager.SessionManager != nil {
 		sessions := serviceManager.SessionManager.GetUserSessions(username)
 		if len(sessions) > 0 {
-			return fmt.Errorf("user '%s' has %d active session(s). Use FORCE to terminate sessions and proceed",
-				username, len(sessions))
+			return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+				fmt.Sprintf("user '%s' has %d active session(s). Use FORCE to terminate sessions and proceed",
+					username, len(sessions)),
+				errors.LayerCommand).WithContext("username", username).WithContext("session_count", fmt.Sprintf("%d", len(sessions)))
 		}
 	}
 

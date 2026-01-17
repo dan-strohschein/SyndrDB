@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"strings"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -29,7 +30,9 @@ func ShowSession(command string, logger *zap.SugaredLogger, serviceManager Servi
 
 	parts := strings.Fields(command)
 	if len(parts) < 3 {
-		return nil, fmt.Errorf("invalid SHOW SESSION syntax: expected 'SHOW SESSION session_id'")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid SHOW SESSION syntax: expected 'SHOW SESSION session_id'",
+			errors.LayerCommand)
 	}
 
 	sessionID := parts[2]
@@ -51,7 +54,9 @@ func InvalidateSession(command string, logger *zap.SugaredLogger, serviceManager
 
 	parts := strings.Fields(command)
 	if len(parts) < 3 {
-		return nil, fmt.Errorf("invalid INVALIDATE SESSION syntax: expected 'INVALIDATE SESSION session_id'")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid INVALIDATE SESSION syntax: expected 'INVALIDATE SESSION session_id'",
+			errors.LayerCommand)
 	}
 
 	sessionID := parts[2]

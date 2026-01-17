@@ -10,6 +10,7 @@ import (
 	db "syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -39,12 +40,16 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	// Check if the database already exists
 	existingDB, err := serviceManager.DatabaseService.GetDatabaseByName(dbCommand.DatabaseName)
 	if err == nil {
-		return nil, fmt.Errorf("database '%s' already exists", existingDB.Name)
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+			fmt.Sprintf("database '%s' already exists", existingDB.Name),
+			errors.LayerCommand).WithContext("database", existingDB.Name)
 	}
 
 	//Validate the database name with a regex
 	if !db.IsValidDatabaseName(dbCommand.DatabaseName) {
-		return nil, fmt.Errorf("invalid database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", dbCommand.DatabaseName)
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("invalid database name: %s. Database names must start with a letter, can be alphanumeric, with underscores and hyphens", dbCommand.DatabaseName),
+			errors.LayerCommand).WithContext("database", dbCommand.DatabaseName)
 	}
 
 	// Execute the database creation with WAL logging
@@ -67,7 +72,8 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 
 			logErr := serviceManager.WALManager.LogDatabaseCreate(txID, dbCommand.DatabaseName, walData)
 			if logErr != nil {
-				return fmt.Errorf("failed to log database creation to WAL: %w", logErr)
+				return errors.WrapWithMessage(logErr, errors.ERR_INTERNAL_WAL,
+					"failed to log database creation to WAL", errors.LayerWAL).WithContext("database", dbCommand.DatabaseName)
 			}
 
 			return nil
@@ -78,7 +84,7 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("error creating database: %v", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbCommand.DatabaseName)
 	}
 
 	// CRITICAL FIX: Check for errors when adding database to catalog
@@ -88,7 +94,8 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		// Database was created but catalog registration failed
 		// This is a critical issue as the database won't be discoverable
 		logger.Errorf("Database '%s' created but failed to register in catalog: %v", newDb.Name, err)
-		return nil, fmt.Errorf("database created but catalog registration failed: %v", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+			"database created but catalog registration failed", errors.LayerCommand).WithContext("database", newDb.Name)
 	}
 
 	result = fmt.Sprintf("Database '%s' created successfully.", dbCommand.DatabaseName)
@@ -127,17 +134,20 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	if session != nil && serviceManager.PermissionService != nil {
 		hasAdmin, err := serviceManager.PermissionService.UserHasPermission(session.Username, "Admin")
 		if err != nil {
-			return nil, fmt.Errorf("permission check failed: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+				"permission check failed", errors.LayerAuth).WithContext("username", session.Username)
 		}
 		if !hasAdmin {
-			return nil, fmt.Errorf("access denied: RENAME DATABASE requires Admin permission")
+			return nil, errors.New(errors.ERR_PERMISSION_DENIED,
+				"access denied: RENAME DATABASE requires Admin permission",
+				errors.LayerAuth).WithContext("username", session.Username)
 		}
 	}
 
 	// Get the database to verify it exists
 	database, err := serviceManager.DatabaseService.GetDatabaseByName(oldName)
 	if err != nil {
-		return nil, fmt.Errorf("database '%s' not found: %w", oldName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", oldName)
 	}
 
 	// Check for active sessions using this database
@@ -156,7 +166,9 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	sessionsTerminated := 0
 	if len(activeSessions) > 0 {
 		if !force {
-			return nil, fmt.Errorf("cannot rename database '%s': %d active session(s) exist. Use FORCE to terminate sessions and proceed", oldName, len(activeSessions))
+			return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+				fmt.Sprintf("cannot rename database '%s': %d active session(s) exist. Use FORCE to terminate sessions and proceed", oldName, len(activeSessions)),
+				errors.LayerCommand).WithContext("database", oldName).WithContext("session_count", fmt.Sprintf("%d", len(activeSessions)))
 		}
 
 		// FORCE specified: terminate all active sessions
@@ -221,7 +233,7 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to rename database: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("old_database", oldName).WithContext("new_database", newName)
 	}
 
 	// Update any remaining active sessions to use the new database name
@@ -268,13 +280,14 @@ func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager Servi
 	// Parse the database name from the USE command
 	databaseName, err := parseDatabaseNameFromUse(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse database name from USE command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse database name from USE command", errors.LayerCommand).WithContext("command", command)
 	}
 
 	// Check if the database exists in the loaded databases (consistent with SHOW DATABASES)
 	database, err := serviceManager.DatabaseService.GetDatabaseByName(databaseName)
 	if err != nil {
-		return nil, fmt.Errorf("database '%s' not found in system: %w", databaseName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", databaseName)
 	}
 
 	// Verify database is also in catalog (for additional validation)
@@ -321,12 +334,15 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	// Expected format: ATTACH DATABASE "<file_path>" "<database_name>";
 	filePath, databaseName, err := parseAttachDatabaseCommand(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse ATTACH command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse ATTACH command", errors.LayerCommand).WithContext("command", command)
 	}
 
 	// Check if the database file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("database file does not exist: %s", filePath)
+		return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
+			fmt.Sprintf("database file does not exist: %s", filePath),
+			errors.LayerCommand).WithContext("file_path", filePath)
 	}
 
 	// Check if database already exists in catalog (optional - continue if catalog is corrupted)
@@ -340,7 +356,9 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 			// Check if the database already exists in catalog
 			for _, dbInfo := range allDatabases {
 				if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
-					return nil, fmt.Errorf("database '%s' already exists in system catalog", databaseName)
+					return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+						fmt.Sprintf("database '%s' already exists in system catalog", databaseName),
+						errors.LayerCommand).WithContext("database", databaseName)
 				}
 			}
 		}
@@ -479,12 +497,15 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 	if session != nil && serviceManager.PermissionService != nil {
 		hasAdmin, err := serviceManager.PermissionService.UserHasPermission(session.Username, "Admin")
 		if err != nil {
-			return nil, fmt.Errorf("permission check failed: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+				"permission check failed", errors.LayerAuth).WithContext("username", session.Username)
 		}
 		if !hasAdmin {
 			// TODO: I will integrate with SecurityAuditor to log failed DROP DATABASE attempts
 			logger.Warnf("User '%s' attempted to drop database '%s' without Admin permission", session.Username, dbName)
-			return nil, fmt.Errorf("access denied: DROP DATABASE requires Admin permission")
+			return nil, errors.New(errors.ERR_PERMISSION_DENIED,
+				"access denied: DROP DATABASE requires Admin permission",
+				errors.LayerAuth).WithContext("username", session.Username).WithContext("database", dbName)
 		}
 	}
 
@@ -495,13 +516,15 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 		if session != nil {
 			logger.Errorf("CRITICAL: User '%s' attempted to drop protected system database 'primary'", session.Username)
 		}
-		return nil, fmt.Errorf("cannot drop database 'primary': this is a protected system database")
+		return nil, errors.New(errors.ERR_PERMISSION_DENIED,
+			"cannot drop database 'primary': this is a protected system database",
+			errors.LayerAuth).WithContext("database", dbName)
 	}
 
 	// Step 3: Verify database exists
 	database, err := serviceManager.DatabaseService.GetDatabaseByName(dbName)
 	if err != nil {
-		return nil, fmt.Errorf("database '%s' not found: %w", dbName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	// Step 4: Detect and terminate all active sessions
@@ -618,7 +641,8 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 				err := serviceManager.InternalCatalogService.RemoveDatabaseFromCatalog(database.DatabaseID)
 				if err != nil {
 					logger.Errorf("Failed to remove database '%s' from catalog: %v", dbName, err)
-					return fmt.Errorf("catalog cleanup failed: %w", err)
+					return errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+						"catalog cleanup failed", errors.LayerCommand).WithContext("database", dbName)
 				}
 			}
 
@@ -698,10 +722,14 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 	// Build response
 	if !overallSuccess {
 		if !dropSuccess {
-			return nil, fmt.Errorf("failed to drop database '%s': catalog cleanup failed", dbName)
+			return nil, errors.New(errors.ERR_INTERNAL,
+				fmt.Sprintf("failed to drop database '%s': catalog cleanup failed", dbName),
+				errors.LayerCommand).WithContext("database", dbName)
 		}
 		if !filesystemSuccess {
-			return nil, fmt.Errorf("database '%s' catalog entries removed but filesystem deletion failed - manual cleanup required: %s", dbName, databasePath)
+			return nil, errors.New(errors.ERR_INTERNAL_STORAGE,
+				fmt.Sprintf("database '%s' catalog entries removed but filesystem deletion failed - manual cleanup required: %s", dbName, databasePath),
+				errors.LayerStorage).WithContext("database", dbName).WithContext("path", databasePath)
 		}
 	}
 

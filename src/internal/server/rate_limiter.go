@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net"
+	"syndrdb/src/pkg/errors"
 	"sync"
 	"time"
 )
@@ -86,7 +87,9 @@ func (rl *RateLimiter) CheckRequest(ip string) error {
 
 	// Check if IP is currently banned
 	if now.Before(tracker.BannedUntil) {
-		return fmt.Errorf("IP %s is temporarily banned until %v", ip, tracker.BannedUntil)
+		return errors.New(errors.ERR_AUTH_RATE_LIMIT,
+			fmt.Sprintf("IP %s is temporarily banned until %v", ip, tracker.BannedUntil),
+			errors.LayerAuth).WithContext("ip", ip).WithContext("banned_until", tracker.BannedUntil.String())
 	}
 
 	// Reset request window if it's been more than a minute
@@ -101,8 +104,9 @@ func (rl *RateLimiter) CheckRequest(ip string) error {
 
 	if tracker.RequestCount > rl.config.MaxRequestsPerMinute {
 		tracker.BannedUntil = now.Add(rl.config.BanDuration)
-		return fmt.Errorf("IP %s exceeded rate limit (%d requests/min), banned for %v",
-			ip, rl.config.MaxRequestsPerMinute, rl.config.BanDuration)
+		return errors.New(errors.ERR_AUTH_RATE_LIMIT,
+			fmt.Sprintf("IP %s exceeded rate limit (%d requests/min), banned for %v", ip, rl.config.MaxRequestsPerMinute, rl.config.BanDuration),
+			errors.LayerAuth).WithContext("ip", ip).WithContext("max_requests_per_minute", fmt.Sprintf("%d", rl.config.MaxRequestsPerMinute))
 	}
 
 	return nil
@@ -115,8 +119,9 @@ func (rl *RateLimiter) CheckConnection(ip string) error {
 
 	// Check global connection limit
 	if rl.globalConnections >= rl.config.MaxGlobalConnections {
-		return fmt.Errorf("server has reached maximum global connection limit (%d)",
-			rl.config.MaxGlobalConnections)
+		return errors.New(errors.ERR_RESOURCE_EXHAUSTED,
+			fmt.Sprintf("server has reached maximum global connection limit (%d)", rl.config.MaxGlobalConnections),
+			errors.LayerAPI).WithContext("max_global_connections", fmt.Sprintf("%d", rl.config.MaxGlobalConnections))
 	}
 
 	// Check if IP is whitelisted
@@ -130,13 +135,16 @@ func (rl *RateLimiter) CheckConnection(ip string) error {
 
 	// Check if IP is currently banned
 	if now.Before(tracker.BannedUntil) {
-		return fmt.Errorf("IP %s is temporarily banned until %v", ip, tracker.BannedUntil)
+		return errors.New(errors.ERR_AUTH_RATE_LIMIT,
+			fmt.Sprintf("IP %s is temporarily banned until %v", ip, tracker.BannedUntil),
+			errors.LayerAuth).WithContext("ip", ip).WithContext("banned_until", tracker.BannedUntil.String())
 	}
 
 	// Check per-IP connection limit
 	if tracker.ConnectionCount >= rl.config.MaxConnectionsPerIP {
-		return fmt.Errorf("IP %s has reached maximum connection limit (%d)",
-			ip, rl.config.MaxConnectionsPerIP)
+		return errors.New(errors.ERR_RESOURCE_EXHAUSTED,
+			fmt.Sprintf("IP %s has reached maximum connection limit (%d)", ip, rl.config.MaxConnectionsPerIP),
+			errors.LayerAPI).WithContext("ip", ip).WithContext("max_connections_per_ip", fmt.Sprintf("%d", rl.config.MaxConnectionsPerIP))
 	}
 
 	tracker.ConnectionCount++

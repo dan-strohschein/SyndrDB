@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"syndrdb/src/pkg/errors"
+
 	"go.uber.org/zap"
 )
 
@@ -397,7 +399,11 @@ func (p *ExpressionParser) Parse() (Expression, error) {
 
 	// Verify we consumed all tokens (except EOF)
 	if p.current.Type != TOKEN_EOF && !p.isStatementTerminator() {
-		return nil, fmt.Errorf("unexpected token after expression: %s", p.current.Type.String())
+		// For expression parser, we don't have original command, so create a simple error
+		// The calling parser can enhance it if needed
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX, 
+			fmt.Sprintf("unexpected token after expression: %s", p.current.Type.String()),
+			errors.LayerParser)
 	}
 
 	return expr, nil
@@ -408,8 +414,10 @@ func (p *ExpressionParser) parseExpression(precedence Precedence) (Expression, e
 	// Get prefix parser for current token
 	prefix := p.prefixParsers[p.current.Type]
 	if prefix == nil {
-		return nil, fmt.Errorf("no prefix parser for token type: %s (value: %s)",
-			p.current.Type.String(), p.current.Value)
+		// For expression parser errors, create a simple error - calling parser can enhance it
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("no prefix parser for token type: %s (value: %s)", p.current.Type.String(), p.current.Value),
+			errors.LayerParser)
 	}
 
 	leftExpr, err := prefix()

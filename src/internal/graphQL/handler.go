@@ -38,6 +38,7 @@ import (
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -458,9 +459,18 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 	if err != nil {
 		metric.ErrorCode = "PARSE_ERROR"
 		metric.ErrorMessage = err.Error()
+		// Convert parser error to SyndrDBError and log it
+		sdbErr := errors.New(errors.ERR_VALIDATION_SYNTAX, fmt.Sprintf("GraphQL query parsing error: %v", err), errors.LayerParser)
+		if h.logger != nil {
+			h.logger.Errorw("GraphQL parse error", "error", sdbErr.Error())
+		}
 		return GraphQLResponse{
 			Errors: []GraphQLError{{
-				Message: fmt.Sprintf("Query parsing error: %v", err),
+				Message: sdbErr.UserMessage(),
+				Extensions: map[string]interface{}{
+					"code":  sdbErr.Code().String(),
+					"layer": sdbErr.Layer().String(),
+				},
 			}},
 		}
 	}
@@ -655,8 +665,11 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 		if !req.IsAdmin {
 			go func() {
 				warningTime := time.Duration(float64(timeout) * h.securityConfig.TimeoutWarningThreshold)
+				timer := time.NewTimer(warningTime)
+				defer timer.Stop() // Ensure timer is stopped even if goroutine exits early
+
 				select {
-				case <-time.After(warningTime):
+				case <-timer.C:
 					h.logger.Warnw("GraphQL query approaching timeout",
 						"username", req.Username,
 						"clientIP", req.ClientIP,
@@ -666,7 +679,7 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 					)
 				case <-ctx.Done():
 					// Context completed before warning
-					return
+					return // timer.Stop() will be called by defer
 				}
 			}()
 		}
@@ -696,9 +709,23 @@ func (h *GraphQLHandler) processGraphQLRequest(req GraphQLRequest) GraphQLRespon
 
 		metric.ErrorCode = "EXECUTION_ERROR"
 		metric.ErrorMessage = err.Error()
+		// Convert execution error to SyndrDBError
+		var sdbErr errors.SyndrDBError
+		if existingErr, ok := err.(errors.SyndrDBError); ok {
+			sdbErr = existingErr
+		} else {
+			sdbErr = errors.ConvertError(err, errors.LayerQuery)
+		}
+		if h.logger != nil {
+			h.logger.Errorw("GraphQL execution error", "error", sdbErr.Error())
+		}
 		return GraphQLResponse{
 			Errors: []GraphQLError{{
-				Message: fmt.Sprintf("Execution error: %v", err),
+				Message: sdbErr.UserMessage(),
+				Extensions: map[string]interface{}{
+					"code":  sdbErr.Code().String(),
+					"layer": sdbErr.Layer().String(),
+				},
 			}},
 		}
 	}

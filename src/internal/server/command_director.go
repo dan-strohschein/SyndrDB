@@ -11,6 +11,7 @@ import (
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -67,12 +68,16 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 	// PARAMETER PARSING: Check if command has delimiter-separated parameters
 	rawCommand := command
-	command, params, hasParams := ParseParameterizedCommand(rawCommand)
+	command, params, hasParams, err := ParseParameterizedCommand(rawCommand)
+	if err != nil {
+		return nil, err // ParseParameterizedCommand already returns SyndrDBError with validation details
+	}
 	if hasParams && len(params) > 0 {
 		// Create parameter context and add to context
 		paramContext, err := CreateParameterContext(params)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create parameter context: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+				"failed to create parameter context", errors.LayerCommand)
 		}
 		// Add parameter context to the context for prepared statement operations
 		ctx = context.WithValue(ctx, "paramContext", paramContext)
@@ -81,7 +86,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// Check if this is a GraphQL command first
 	if strings.HasPrefix(command, "GRAPHQL::") {
 		if serviceManager.GraphQLProcessor == nil {
-			return nil, fmt.Errorf("GraphQL is not enabled on this server")
+			return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+				"GraphQL is not enabled on this server", errors.LayerAPI)
 		}
 		return serviceManager.GraphQLProcessor.ProcessGraphQLCommand(command, session, clientIP)
 	}
@@ -90,7 +96,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	securityConfig := DefaultSecurityConfig()
 	if err := ValidateInput(command, "command", securityConfig); err != nil {
 		logger.Warnf("Command validation failed: %v", err)
-		return nil, fmt.Errorf("invalid command: %v", err)
+		// Convert validation error to detailed SyndrDBError
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX, fmt.Sprintf("Invalid command: %v", err), errors.LayerCommand).WithContext("command_snippet", command)
 	}
 
 	// Sanitize input
@@ -102,7 +109,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// Use Fields only for extracting command keywords, NOT for splitting the entire command
 	firstWords := strings.Fields(command)
 	if len(firstWords) == 0 {
-		return nil, fmt.Errorf("empty command")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX, "Empty command", errors.LayerCommand)
 	}
 
 	// PREPARED STATEMENTS: Check for PREPARE/EXECUTE/DEALLOCATE commands first
@@ -125,7 +132,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// TRANSACTION MANAGEMENT: Enforce DML-only within transactions
 	if session != nil && session.IsInTransaction() {
 		if IsDDLCommand(command) {
-			return nil, fmt.Errorf("DDL commands not allowed in transactions (txID: %s)", session.ActiveTransactionID)
+			return nil, errors.New(errors.ERR_TRANSACTION_CONFLICT,
+				fmt.Sprintf("DDL commands not allowed in transactions (txID: %s)", session.ActiveTransactionID),
+				errors.LayerTransaction).WithContext("tx_id", session.ActiveTransactionID)
 		}
 	}
 
@@ -169,7 +178,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	if strings.HasPrefix(commandLower, "show") {
 		// Parse SHOW command
 		if len(firstWords) < 2 {
-			return nil, fmt.Errorf("incomplete SHOW command")
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete SHOW command", errors.LayerCommand)
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "databases":
@@ -195,26 +205,34 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "limit" {
 				return ShowRateLimit(command, logger, serviceManager)
 			}
-			return nil, fmt.Errorf("unknown SHOW RATE command: %s", command)
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW RATE command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		}
-		return nil, fmt.Errorf("unknown SHOW command: %s", command)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("unknown SHOW command: %s", command),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	if strings.HasPrefix(commandLower, "invalidate") {
 		// Parse INVALIDATE command
 		if len(firstWords) < 2 {
-			return nil, fmt.Errorf("incomplete INVALIDATE command")
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete INVALIDATE command", errors.LayerCommand)
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "session":
 			return InvalidateSession(command, logger, serviceManager)
 		}
-		return nil, fmt.Errorf("unknown INVALIDATE command: %s", command)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("unknown INVALIDATE command: %s", command),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	if strings.HasPrefix(commandLower, "create") {
 		if len(firstWords) < 2 {
-			return nil, fmt.Errorf("incomplete CREATE command")
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete CREATE command", errors.LayerCommand)
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "database":
@@ -238,7 +256,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					return result1, err
 				}
 			} else {
-				return &result, fmt.Errorf("unknown command format: %s", command)
+				return &result, errors.New(errors.ERR_VALIDATION_SYNTAX,
+					fmt.Sprintf("unknown command format: %s", command),
+					errors.LayerCommand).WithContext("command", command)
 			}
 		case "h-index":
 			result1, err, shouldReturn := CreateHashIndex(command, logger, serviceManager, database)
@@ -255,7 +275,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			return CreateRole(command, logger, serviceManager)
 		default:
 
-			return &result, fmt.Errorf("unknown command format: %s", command)
+			return &result, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown command format: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		}
 		return &result, nil
 	}
@@ -263,7 +285,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// Parse Add Document command
 	if strings.HasPrefix(commandLower, "add") {
 		if len(firstWords) < 2 {
-			return nil, fmt.Errorf("incomplete ADD command")
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete ADD command", errors.LayerCommand)
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "document":
@@ -277,7 +300,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// Parse UPDATE  command
 	if strings.HasPrefix(commandLower, "update") {
 		if len(firstWords) < 2 {
-			return nil, fmt.Errorf("incomplete UPDATE command")
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete UPDATE command", errors.LayerCommand)
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "database":
@@ -302,7 +326,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				// Get the bundle
 				bundle, err := serviceManager.BundleService.GetBundleByName(database, RelationshipCommand.BundleName)
 				if err != nil {
-					return &result, fmt.Errorf("bundle '%s' not found: %w", RelationshipCommand.BundleName, err)
+					return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", RelationshipCommand.BundleName)
 				}
 
 				// Execute DROP RELATIONSHIP with WAL logging if available
@@ -316,7 +340,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 						// TODO: Implement WAL replay logic for relationship drops in LogRelationshipDrop method for crash recovery
 						err := serviceManager.WALManager.LogRelationshipDrop(txID, RelationshipCommand.BundleName, RelationshipCommand.Name)
 						if err != nil {
-							return fmt.Errorf("failed to log relationship drop: %w", err)
+							return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+								"failed to log relationship drop", errors.LayerWAL).WithContext("bundle", RelationshipCommand.BundleName)
 						}
 
 						// Remove the relationship from the bundle
@@ -326,7 +351,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					// METRICS: Track transaction outcome
 					if err != nil {
 						globalMetrics.TransactionsRolledBack.Add(1)
-						return &result, fmt.Errorf("failed to drop relationship: %w", err)
+						return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", RelationshipCommand.BundleName).WithContext("relationship", RelationshipCommand.Name)
 					} else {
 						globalMetrics.TransactionsCommitted.Add(1)
 					}
@@ -335,7 +360,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					logger.Warn("WAL Manager not available, executing without transaction logging")
 					err = serviceManager.BundleService.RemoveRelationshipFromBundle(bundle, RelationshipCommand.Name)
 					if err != nil {
-						return &result, fmt.Errorf("failed to drop relationship: %w", err)
+						return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", RelationshipCommand.BundleName).WithContext("relationship", RelationshipCommand.Name)
 					}
 				}
 
@@ -360,7 +385,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			if bndleCommand.NewBundleName != "" || len(bndleCommand.Changes) > 0 || bndleCommand.HasRelationshipCommands {
 				bundle, err = serviceManager.BundleService.GetBundleByName(database, bndleCommand.BundleName)
 				if err != nil {
-					return &result, fmt.Errorf("bundle '%s' not found: %w", bndleCommand.BundleName, err)
+					return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bndleCommand.BundleName)
 				}
 			}
 
@@ -369,14 +394,14 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				logger.Infof("Renaming bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
 				err := serviceManager.BundleService.RenameBundle(database, bundle, bndleCommand.NewBundleName)
 				if err != nil {
-					return &result, fmt.Errorf("failed to rename bundle: %w", err)
+					return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bndleCommand.BundleName).WithContext("new_bundle", bndleCommand.NewBundleName)
 				}
 				logger.Infof("Successfully renamed bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
 
 				// Update the bundle reference after rename
 				bundle, err = serviceManager.BundleService.GetBundleByName(database, bndleCommand.NewBundleName)
 				if err != nil {
-					return &result, fmt.Errorf("failed to get renamed bundle: %w", err)
+					return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bndleCommand.NewBundleName)
 				}
 				result = fmt.Sprintf("Bundle renamed to '%s' successfully.", bndleCommand.NewBundleName)
 			}
@@ -386,7 +411,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				logger.Infof("Applying %d field changes to bundle '%s'", len(bndleCommand.Changes), bundle.Name)
 				err := serviceManager.BundleService.ApplyFieldChanges(database, bundle, bndleCommand.Changes)
 				if err != nil {
-					return &result, fmt.Errorf("failed to apply field changes: %w", err)
+					return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bndleCommand.BundleName)
 				}
 				logger.Infof("Successfully applied field changes to bundle '%s'", bundle.Name)
 
@@ -442,7 +467,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// UPDATE ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE];
 			return UpdateRole(command, logger, serviceManager)
 		default:
-			return &result, fmt.Errorf("unknown command format: %s", command)
+			return &result, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown command format: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		}
 		return &result, nil
 	}
@@ -481,7 +508,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// START MIGRATION [WITH DESCRIPTION "..."] <commands> COMMIT
 			return StartMigrationCommand(command, database, logger, serviceManager)
 		}
-		return nil, fmt.Errorf("unknown START command: %s", command)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("unknown START command: %s", command),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	// Parse APPLY command
@@ -494,7 +523,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// APPLY ROLLBACK TO VERSION <number>
 			return ApplyRollbackCommand(command, database, logger, serviceManager)
 		}
-		return nil, fmt.Errorf("unknown APPLY command: %s", command)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("unknown APPLY command: %s", command),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	// Parse VALIDATE command
@@ -507,12 +538,15 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// VALIDATE ROLLBACK TO VERSION <number>
 			return ValidateRollbackCommand(command, database, logger, serviceManager)
 		}
-		return nil, fmt.Errorf("unknown VALIDATE command: %s", command)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("unknown VALIDATE command: %s", command),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	if strings.HasPrefix(commandLower, "drop") {
 		if len(firstWords) < 2 {
-			return nil, fmt.Errorf("incomplete DROP command")
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete DROP command", errors.LayerCommand)
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "database":
@@ -520,26 +554,29 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		case "bundle":
 			bundleCmd, err := parseDropBundle(command, logger)
 			if err != nil {
-				return &result, fmt.Errorf("error parsing DROP BUNDLE command: %v", err)
+				return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 			}
 
 			// Validate bundle name
 			bundleName := bundleCmd.BundleName
 			if bundleName == "" {
-				return &result, fmt.Errorf("bundle name cannot be empty in DROP BUNDLE command")
+				return &result, errors.New(errors.ERR_VALIDATION_REQUIRED,
+					"bundle name cannot be empty in DROP BUNDLE command", errors.LayerCommand)
 			}
 
 			// Validate that the bundle exists
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
-				return &result, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+				return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
 			// Validate that there are no documents in the bundle
 			// We will eventually need to add a force option to make this work even with documents
 			// but that will also require a more granular permission setup and careful handling
 			if bundle.Documents != nil && len(*bundle.Documents) > 0 && !bundleCmd.HasForceSwitch {
-				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
+				return &result, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("bundle '%s' is not empty and cannot be deleted", bundleName),
+					errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
 			return DeleteBundleCommand(bundleCmd, logger, serviceManager, database)
@@ -555,7 +592,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// Parse DELETE  command
 	if strings.HasPrefix(commandLower, "delete") {
 		if len(firstWords) < 2 {
-			return nil, fmt.Errorf("incomplete DELETE command")
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete DELETE command", errors.LayerCommand)
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "database":
@@ -573,26 +611,29 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// the same. This should get wrapped up in a common function
 			bundleCmd, err := parseDropBundle(command, logger)
 			if err != nil {
-				return &result, fmt.Errorf("error parsing DROP BUNDLE command: %v", err)
+				return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 			}
 
 			// Validate bundle name
 			bundleName := bundleCmd.BundleName
 			if bundleName == "" {
-				return &result, fmt.Errorf("bundle name cannot be empty in DROP BUNDLE command")
+				return &result, errors.New(errors.ERR_VALIDATION_REQUIRED,
+					"bundle name cannot be empty in DROP BUNDLE command", errors.LayerCommand)
 			}
 
 			// Validate that the bundle exists
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
-				return &result, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+				return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
 			// Validate that there are no documents in the bundle
 			// We will eventually need to add a force option to make this work even with documents
 			// but that will also require a more granular permission setup and careful handling
 			if bundle.Documents != nil && len(*bundle.Documents) > 0 && !bundleCmd.HasForceSwitch {
-				return &result, fmt.Errorf("bundle '%s' is not empty and cannot be deleted", bundleName)
+				return &result, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("bundle '%s' is not empty and cannot be deleted", bundleName),
+					errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
 			return DeleteBundleCommand(bundleCmd, logger, serviceManager, database)
@@ -602,23 +643,26 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// Use new parser if feature flag is enabled, fallback to legacy on error
 			docCommand, err := parseDeleteDocument(command, logger)
 			if err != nil {
-				return nil, fmt.Errorf("error parsing delete document command: %v", err)
+				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 			}
 
 			// Additional validation following SyndrDB defensive programming practices
 			if docCommand.BundleName == "" {
-				return nil, fmt.Errorf("bundle name cannot be empty in DELETE DOCUMENTS command")
+				return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+					"bundle name cannot be empty in DELETE DOCUMENTS command", errors.LayerCommand)
 			}
 
 			// SAFETY: Validate CONFIRMED keyword requirement for bulk deletes without WHERE clause
 			if docCommand.WhereClause == "" && !docCommand.Confirmed {
-				return nil, fmt.Errorf("bulk DELETE without WHERE clause requires CONFIRMED keyword. Use: DELETE DOCUMENTS FROM \"%s\" CONFIRMED", docCommand.BundleName)
+				return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+					fmt.Sprintf("bulk DELETE without WHERE clause requires CONFIRMED keyword. Use: DELETE DOCUMENTS FROM \"%s\" CONFIRMED", docCommand.BundleName),
+					errors.LayerCommand).WithContext("bundle", docCommand.BundleName)
 			}
 
 			bundleName := docCommand.BundleName
 			bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 			if err != nil {
-				return nil, fmt.Errorf("error retrieving bundle '%s': %v", bundleName, err)
+				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
 			// OPTIMIZATION: Use dedicated WHERE filter service for efficient ID extraction
@@ -627,7 +671,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
 			docIDs, err := whereService.GetDocumentIDsByFilter(bundle, docCommand.WhereClause)
 			if err != nil {
-				return nil, fmt.Errorf("failed to filter documents by WHERE clause: %w", err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+					"failed to filter documents by WHERE clause", errors.LayerCommand)
 			}
 
 			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs))
@@ -638,7 +683,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				// Acquire write locks for all matching documents
 				for _, docID := range docIDs {
 					if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
-						return nil, fmt.Errorf("failed to acquire write lock for document %s: %w", docID, err)
+						return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+							fmt.Sprintf("failed to acquire write lock for document %s", docID),
+							errors.LayerTransaction).WithContext("document_id", docID)
 					}
 				}
 				logger.Debugf("Acquired write locks for %d documents in transaction %s", len(docIDs), session.ActiveTransactionID)
@@ -655,7 +702,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					// Note: We'll log the where clause as metadata for the deletion
 					err := serviceManager.WALManager.LogDocumentDelete(txID, bundleName, "multiple", docCommand.WhereClause)
 					if err != nil {
-						return fmt.Errorf("failed to log document delete: %w", err)
+						return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+							"failed to log document delete", errors.LayerWAL)
 					}
 
 					// Delete the document from the bundle
@@ -675,7 +723,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			}
 
 			if err != nil {
-				return nil, fmt.Errorf("error deleting document from bundle '%s': %v", bundleName, err)
+				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
 			// METRICS: Track document deletes
@@ -722,7 +770,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// DELETE ROLE "role_name" [FORCE];
 			return DeleteRole(command, logger, serviceManager)
 		default:
-			return &result, fmt.Errorf("unknown command format: %s", command)
+			return &result, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown command format: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		}
 		return &result, nil
 	}
@@ -762,7 +812,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// RENAME DATABASE "old_name" TO "new_name" [FORCE]
 			return RenameDatabase(command, logger, serviceManager, session)
 		}
-		return nil, fmt.Errorf("unknown RENAME command: %s", command)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("unknown RENAME command: %s", command),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	return &result, nil
@@ -822,7 +874,8 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	// STEP 1: Parse the query using parseQuery (respects feature flag, has fallback)
 	query, err := ParseQuery(fullCommand, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse query: %w", err)
+		// Convert parser error to detailed SyndrDBError with validation details
+		return nil, convertParserError(err, fullCommand)
 	}
 
 	logger.Debugf("Parsed unified query: WHERE:%v, Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
@@ -834,7 +887,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	// STEP 3: Create execution plan
 	plan, err := unifiedPlanner.CreatePlan(query, database)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create execution plan: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", query.FromBundle)
 	}
 
 	// METRICS: Track query plan cache performance (cache hit/miss tracking happens in planner)
@@ -876,8 +929,11 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		// TODO: Make warning threshold configurable for different deployment scenarios
 		go func() {
 			warningTime := time.Duration(float64(timeout) * 0.8)
+			timer := time.NewTimer(warningTime)
+			defer timer.Stop() // Ensure timer is stopped even if goroutine exits early
+
 			select {
-			case <-time.After(warningTime):
+			case <-timer.C:
 				username := "anonymous"
 				if session != nil {
 					username = session.Username
@@ -889,7 +945,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 					"username", username,
 				)
 			case <-ctx.Done():
-				return
+				return // timer.Stop() will be called by defer
 			}
 		}()
 	}
@@ -902,7 +958,9 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			// METRICS: Track query timeout
 			metrics.QueryTimeoutsTotal.Add(1)
 			timeoutOccurred = true
-			timeoutError = fmt.Errorf("query execution timeout exceeded (%v)", timeout)
+			timeoutError = errors.New(errors.ERR_RESOURCE_EXHAUSTED,
+				fmt.Sprintf("query execution timeout exceeded (%v)", timeout),
+				errors.LayerCommand).WithContext("timeout", timeout.String())
 			logger.Warnw("Query timed out, returning partial results",
 				"timeout", timeout,
 				"partial_results", len(documents),
@@ -934,7 +992,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 				Error:           &errorMsg,
 			}, nil
 		} else {
-			return nil, fmt.Errorf("failed to execute query plan: %w", err)
+			return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", query.FromBundle)
 		}
 	}
 
@@ -948,7 +1006,9 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		bundleName := query.FromBundle
 		for docID := range documents {
 			if err := serviceManager.LockManager.AcquireReadLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
-				return nil, fmt.Errorf("failed to acquire read lock for document %s: %w", docID, err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+					fmt.Sprintf("failed to acquire read lock for document %s", docID),
+					errors.LayerTransaction).WithContext("document_id", docID)
 			}
 		}
 		logger.Debugf("Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
@@ -1144,22 +1204,26 @@ func ParseAndExecutePreparedStatementCommand(
 	logger *zap.SugaredLogger,
 ) (interface{}, error) {
 	if session == nil {
-		return nil, fmt.Errorf("prepared statements require an active session")
+		return nil, errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+			"prepared statements require an active session", errors.LayerCommand)
 	}
 
 	if session.PreparedStatements == nil {
-		return nil, fmt.Errorf("prepared statement cache is not initialized for this session")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"prepared statement cache is not initialized for this session", errors.LayerCommand)
 	}
 
 	// Tokenize the command using SyndrQL tokenizer
 	tokenizer := syndrQL.NewTokenizer(command)
 	tokens, err := tokenizer.Tokenize()
 	if err != nil {
-		return nil, fmt.Errorf("failed to tokenize prepared statement command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to tokenize prepared statement command", errors.LayerParser)
 	}
 
 	if len(tokens) == 0 {
-		return nil, fmt.Errorf("empty prepared statement command")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"empty prepared statement command", errors.LayerCommand)
 	}
 
 	// Create operations handler
@@ -1168,10 +1232,11 @@ func ParseAndExecutePreparedStatementCommand(
 	// Route based on first token
 	switch tokens[0].Type {
 	case syndrQL.TOKEN_PREPARE:
-		// Parse PREPARE statement
-		prepareStmt, err := syndrQL.ParsePrepareStatement(tokens, logger)
+		// Parse PREPARE statement (pass original command for error reporting)
+		prepareStmt, err := syndrQL.ParsePrepareStatement(tokens, logger, command)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse PREPARE statement: %w", err)
+			// Error is already SyndrDBError from parser
+			return nil, err
 		}
 
 		// Handle PREPARE
@@ -1185,10 +1250,11 @@ func ParseAndExecutePreparedStatementCommand(
 		}, nil
 
 	case syndrQL.TOKEN_EXECUTE:
-		// Parse EXECUTE statement
-		execStmt, err := syndrQL.ParseExecuteStatement(tokens, logger)
+		// Parse EXECUTE statement (pass original command for error reporting)
+		execStmt, err := syndrQL.ParseExecuteStatement(tokens, logger, command)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse EXECUTE statement: %w", err)
+			// Error is already SyndrDBError from parser
+			return nil, err
 		}
 
 		// Check if parameters were provided via protocol (already parsed in parameterized_command.go)
@@ -1214,7 +1280,7 @@ func ParseAndExecutePreparedStatementCommand(
 		// Parse DEALLOCATE statement
 		deallocateStmt, err := syndrQL.ParseDeallocateStatement(tokens, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse DEALLOCATE statement: %w", err)
+			return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 		}
 
 		// Handle DEALLOCATE
@@ -1233,7 +1299,8 @@ func ParseAndExecutePreparedStatementCommand(
 		}, nil
 
 	default:
-		return nil, fmt.Errorf("expected PREPARE, EXECUTE, or DEALLOCATE keyword")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"expected PREPARE, EXECUTE, or DEALLOCATE keyword", errors.LayerCommand)
 	}
 }
 
@@ -1269,14 +1336,17 @@ func ExecutePreparedQuery(
 		// Start timeout warning goroutine
 		go func() {
 			warningTime := time.Duration(float64(timeout) * 0.8)
+			timer := time.NewTimer(warningTime)
+			defer timer.Stop() // Ensure timer is stopped even if goroutine exits early
+
 			select {
-			case <-time.After(warningTime):
+			case <-timer.C:
 				if ctx.Err() == nil {
 					logger.Warnf("Prepared query execution approaching timeout: %s (%.0f%% of %s)",
 						time.Since(startTime), 80.0, timeout)
 				}
 			case <-ctx.Done():
-				return
+				return // timer.Stop() will be called by defer
 			}
 		}()
 	}
@@ -1284,7 +1354,7 @@ func ExecutePreparedQuery(
 	// Create execution plan through unified planner
 	plan, err := serviceManager.UnifiedPlanner.CreatePlan(preparedStmt.ParsedQuery, database)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create execution plan: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", preparedStmt.ParsedQuery.FromBundle)
 	}
 
 	// Execute the plan with parameter context
@@ -1292,12 +1362,16 @@ func ExecutePreparedQuery(
 	if err != nil {
 		// Check for timeout or memory limit errors
 		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("query execution timeout after %s", time.Since(startTime))
+			return nil, errors.New(errors.ERR_RESOURCE_EXHAUSTED,
+				fmt.Sprintf("query execution timeout after %s", time.Since(startTime)),
+				errors.LayerCommand).WithContext("timeout", timeout.String())
 		}
 		if err == planner.ErrMemoryLimitExceeded {
-			return nil, fmt.Errorf("query exceeded memory limit of %d bytes", memoryLimit)
+			return nil, errors.New(errors.ERR_RESOURCE_EXHAUSTED,
+				fmt.Sprintf("query exceeded memory limit of %d bytes", memoryLimit),
+				errors.LayerCommand).WithContext("memory_limit", fmt.Sprintf("%d", memoryLimit))
 		}
-		return nil, fmt.Errorf("failed to execute prepared query: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", preparedStmt.ParsedQuery.FromBundle)
 	}
 
 	// Acquire read locks for documents in transaction (if applicable)
@@ -1305,7 +1379,9 @@ func ExecutePreparedQuery(
 		bundleName := preparedStmt.BundleName
 		for docID := range documents {
 			if err := serviceManager.LockManager.AcquireReadLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
-				return nil, fmt.Errorf("failed to acquire read lock for document %s: %w", docID, err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+					fmt.Sprintf("failed to acquire read lock for document %s", docID),
+					errors.LayerTransaction).WithContext("document_id", docID)
 			}
 		}
 		logger.Debugf("Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
@@ -1326,7 +1402,8 @@ func ExecutePreparedQuery(
 
 func SelectDatabases(firstWords []string, serviceManager ServiceManager) (*CommandResponse, error, bool) {
 	if len(firstWords) < 4 {
-		return nil, fmt.Errorf("SELECT DATABASES requires the spec 'FROM Default'"), false
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"SELECT DATABASES requires the spec 'FROM Default'", errors.LayerCommand), false
 	}
 	if strings.EqualFold(firstWords[3], "DEFAULT") {
 		databases := serviceManager.DatabaseService.ListDatabases()

@@ -4,9 +4,10 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"errors"
 	"io"
 	"strings"
+
+	"syndrdb/src/pkg/errors"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -53,7 +54,8 @@ func decrypt(data, key []byte) ([]byte, error) {
 	// Get nonce size
 	nonceSize := gcm.NonceSize()
 	if len(data) < nonceSize {
-		return nil, errors.New("ciphertext too short")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			"ciphertext too short for decryption", errors.LayerAuth)
 	}
 
 	// Extract nonce and ciphertext

@@ -7,7 +7,13 @@ import (
 	"time"
 
 	"syndrdb/src/internal/async"
+	"syndrdb/src/pkg/settings"
 )
+
+// getSettingsFunc allows dependency injection for testing (can be overridden)
+var getSettingsFunc = func() *settings.Arguments {
+	return settings.GetSettings()
+}
 
 // WALOperation implements the AsyncOperation interface for WAL entries
 type WALOperation struct {
@@ -50,10 +56,19 @@ func (wo *WALOperation) Execute(ctx context.Context) error {
 		}
 	})
 
-	// Send result back through channel
+	// HIGH-008: Ensure result channel always receives error (even on context cancellation)
+	// This prevents callers from hanging waiting for a result
 	select {
 	case wo.resultChan <- err:
+		// Successfully sent error to channel
 	case <-ctx.Done():
+		// Context cancelled - still send the error to channel if possible
+		// This ensures the caller doesn't hang waiting for a result
+		select {
+		case wo.resultChan <- ctx.Err():
+		default:
+			// Channel is full or closed - error will be lost but context error is returned
+		}
 		return ctx.Err()
 	}
 
@@ -391,8 +406,13 @@ func (awa *AsyncWALAdapter) Close() error {
 	// Cancel context to stop all operations
 	awa.cancel()
 
-	// Close worker pool with a reasonable timeout
-	if err := awa.workerPool.Stop(30 * time.Second); err != nil {
+	// HIGH-007: Use configurable timeout for stopping worker pool
+	stopTimeout := 30 * time.Second // Default fallback
+	if settings := getSettingsFunc(); settings != nil {
+		stopTimeout = time.Duration(settings.WorkerPoolStopTimeoutSeconds) * time.Second
+	}
+	
+	if err := awa.workerPool.Stop(stopTimeout); err != nil {
 		return fmt.Errorf("failed to stop worker pool: %w", err)
 	}
 

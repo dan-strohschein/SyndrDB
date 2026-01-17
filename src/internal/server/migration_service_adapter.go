@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"syndrdb/src/internal/domain/migration"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -37,11 +38,13 @@ func NewMigrationServiceAdapter(service *migration.MigrationService, logger *zap
 	}
 }
 
-// CreateMigration adapts the interface{} parameter to MigrationCommand
+	// CreateMigration adapts the interface{} parameter to MigrationCommand
 func (a *MigrationServiceAdapter) CreateMigration(cmd interface{}) (interface{}, error) {
 	migCmd, ok := cmd.(migration.MigrationCommand)
 	if !ok {
-		return nil, fmt.Errorf("invalid migration command type: expected MigrationCommand, got %T", cmd)
+		return nil, errors.New(errors.ERR_VALIDATION_TYPE,
+			fmt.Sprintf("invalid migration command type: expected MigrationCommand, got %T", cmd),
+			errors.LayerCommand).WithContext("command_type", fmt.Sprintf("%T", cmd))
 	}
 
 	migration, err := a.service.CreateMigration(migCmd)

@@ -2,11 +2,12 @@ package auth
 
 import (
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"time"
+
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 	"golang.org/x/crypto/argon2"
@@ -76,7 +77,7 @@ func (s *UserStore) GetUser(username string) (*User, error) {
 		}
 	}
 
-	return nil, errors.New("user not found")
+	return nil, errors.New(errors.ERR_NOT_FOUND_USER, "user not found", errors.LayerAuth)
 }
 
 // ListUsers returns a list of all usernames
@@ -100,14 +101,17 @@ func (s *UserStore) AddUser(user NewUser) (*User, error) {
 	// Check if username already exists
 	for _, existingUser := range s.users {
 		if existingUser.Username == user.Username {
-			return nil, errors.New("username already exists")
+			return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT, 
+				fmt.Sprintf("username '%s' already exists", user.Username), 
+				errors.LayerAuth).WithContext("username", user.Username)
 		}
 	}
 
 	// Generate salt
 	salt := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, fmt.Errorf("failed to generate salt: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL, 
+			"failed to generate cryptographic salt", errors.LayerAuth)
 	}
 
 	// Hash the password using Argon2id
@@ -184,7 +188,7 @@ func (s *UserStore) UpdateUser(updatedUser NewUser) error {
 		}
 	}
 
-	return errors.New("user not found")
+	return errors.New(errors.ERR_NOT_FOUND_USER, "user not found", errors.LayerAuth)
 }
 
 // RemoveUser removes a user from the store
@@ -203,7 +207,7 @@ func (s *UserStore) RemoveUser(username string) error {
 		}
 	}
 
-	return errors.New("user not found")
+	return errors.New(errors.ERR_NOT_FOUND_USER, "user not found", errors.LayerAuth)
 }
 
 // Close shuts down the UserStore and its rate limiter

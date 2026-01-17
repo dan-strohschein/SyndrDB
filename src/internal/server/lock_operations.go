@@ -30,6 +30,7 @@ package server
 import (
 	"fmt"
 	"strings"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -43,7 +44,8 @@ func LockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceManag
 	// Parse the command to extract database name, reason, and comment
 	dbName, reason, comment, err := parseLockCommand(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse LOCK command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse LOCK command", errors.LayerCommand)
 	}
 
 	logger.Infof("Locking database: database=%s, reason=%s, comment=%s", dbName, reason, comment)
@@ -54,7 +56,7 @@ func LockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceManag
 	// Lock the database
 	adminUser := "admin" // TODO: Get from session context
 	if err := serviceManager.LockService.LockDatabase(dbName, adminUser, reason, comment); err != nil {
-		return nil, fmt.Errorf("failed to lock database: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	logger.Infof("Database locked successfully: database=%s", dbName)
@@ -77,7 +79,8 @@ func UnlockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceMan
 	// Parse the command to extract database name
 	dbName, err := parseUnlockCommand(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse UNLOCK command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse UNLOCK command", errors.LayerCommand)
 	}
 
 	logger.Infof("Unlocking database: database=%s", dbName)
@@ -88,7 +91,7 @@ func UnlockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceMan
 	// Unlock the database
 	adminUser := "admin" // TODO: Get from session context
 	if err := serviceManager.LockService.UnlockDatabase(dbName, adminUser); err != nil {
-		return nil, fmt.Errorf("failed to unlock database: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	logger.Infof("Database unlocked successfully: database=%s", dbName)
@@ -110,18 +113,23 @@ func parseLockCommand(command string) (string, string, string, error) {
 
 	// Minimum tokens: LOCK DATABASE "name" = 3 tokens
 	if len(tokens) < 3 {
-		return "", "", "", fmt.Errorf("invalid LOCK syntax: expected LOCK DATABASE \"name\"")
+		return "", "", "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid LOCK syntax: expected LOCK DATABASE \"name\"",
+			errors.LayerCommand)
 	}
 
 	// Validate command structure
 	if strings.ToUpper(tokens[0]) != "LOCK" || strings.ToUpper(tokens[1]) != "DATABASE" {
-		return "", "", "", fmt.Errorf("invalid LOCK syntax: expected LOCK DATABASE")
+		return "", "", "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid LOCK syntax: expected LOCK DATABASE",
+			errors.LayerCommand)
 	}
 
 	// Extract database name (token 2)
 	dbName := strings.Trim(tokens[2], "\"'")
 	if dbName == "" {
-		return "", "", "", fmt.Errorf("database name cannot be empty")
+		return "", "", "", errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"database name cannot be empty", errors.LayerCommand)
 	}
 
 	// Parse optional FOR and COMMENT clauses
@@ -136,7 +144,8 @@ func parseLockCommand(command string) (string, string, string, error) {
 		case "FOR":
 			// Next token is the reason
 			if i+1 >= len(tokens) {
-				return "", "", "", fmt.Errorf("FOR clause requires a reason")
+				return "", "", "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+					"FOR clause requires a reason", errors.LayerCommand)
 			}
 			reason = strings.Trim(tokens[i+1], "\"'")
 			i += 2
@@ -144,13 +153,16 @@ func parseLockCommand(command string) (string, string, string, error) {
 		case "COMMENT":
 			// Next token is the comment
 			if i+1 >= len(tokens) {
-				return "", "", "", fmt.Errorf("COMMENT clause requires a comment")
+				return "", "", "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+					"COMMENT clause requires a comment", errors.LayerCommand)
 			}
 			comment = strings.Trim(tokens[i+1], "\"'")
 			i += 2
 
 		default:
-			return "", "", "", fmt.Errorf("unexpected keyword in LOCK command: %s", tokens[i])
+			return "", "", "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unexpected keyword in LOCK command: %s", tokens[i]),
+				errors.LayerCommand).WithContext("keyword", tokens[i])
 		}
 	}
 
@@ -164,23 +176,30 @@ func parseUnlockCommand(command string) (string, error) {
 
 	// Minimum tokens: UNLOCK DATABASE "name" = 3 tokens
 	if len(tokens) < 3 {
-		return "", fmt.Errorf("invalid UNLOCK syntax: expected UNLOCK DATABASE \"name\"")
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid UNLOCK syntax: expected UNLOCK DATABASE \"name\"",
+			errors.LayerCommand)
 	}
 
 	// Validate command structure
 	if strings.ToUpper(tokens[0]) != "UNLOCK" || strings.ToUpper(tokens[1]) != "DATABASE" {
-		return "", fmt.Errorf("invalid UNLOCK syntax: expected UNLOCK DATABASE")
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid UNLOCK syntax: expected UNLOCK DATABASE",
+			errors.LayerCommand)
 	}
 
 	// Extract database name (token 2)
 	dbName := strings.Trim(tokens[2], "\"'")
 	if dbName == "" {
-		return "", fmt.Errorf("database name cannot be empty")
+		return "", errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"database name cannot be empty", errors.LayerCommand)
 	}
 
 	// UNLOCK command doesn't support additional options
 	if len(tokens) > 3 {
-		return "", fmt.Errorf("UNLOCK DATABASE does not accept additional options")
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"UNLOCK DATABASE does not accept additional options",
+			errors.LayerCommand)
 	}
 
 	return dbName, nil

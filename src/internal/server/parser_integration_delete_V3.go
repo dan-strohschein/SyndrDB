@@ -1,11 +1,10 @@
 package server
 
 import (
-	"fmt"
-
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -16,20 +15,21 @@ func parseDeleteDocumentWithNewParser(command string, logger *zap.SugaredLogger)
 	// Create DELETE parser
 	deleteParser, err := syndrQL.NewDeleteParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create DELETE parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create DELETE parser", errors.LayerParser)
 	}
 
 	// Parse the DELETE statement
 	deleteStmt, err := deleteParser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse DELETE statement: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	// Convert to DocumentDeleteCommand using adapter
 	adapter := syndrQL.NewDeleteStatementAdapter(logger)
 	docDeleteCommand, err := adapter.ToDocumentDeleteCommand(deleteStmt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert DeleteStatement to DocumentDeleteCommand: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	return docDeleteCommand, nil
@@ -58,7 +58,7 @@ func parseDeleteDocument(command string, logger *zap.SugaredLogger) (*models.Doc
 
 		// // Fallback to legacy parser
 		// return bndle.ParseDeleteDocumentCommand(command, logger)
-		return nil, fmt.Errorf(" DELETE DOCUMENTS %s parser failed: %w", command, err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	// Record success

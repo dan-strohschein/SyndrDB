@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -17,15 +18,19 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	// Parse the command: ADD USER username WITH PASSWORD 'password'
 	parts := strings.Fields(command)
 	if len(parts) < 6 {
-		return nil, fmt.Errorf("invalid ADD USER syntax: expected 'ADD USER username WITH PASSWORD password'")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid ADD USER syntax: expected 'ADD USER username WITH PASSWORD password'",
+			errors.LayerCommand)
 	}
 
 	if !strings.EqualFold(parts[0], "ADD") || !strings.EqualFold(parts[1], "USER") {
-		return nil, fmt.Errorf("invalid ADD USER command format")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid ADD USER command format", errors.LayerCommand)
 	}
 
 	if !strings.EqualFold(parts[3], "WITH") || !strings.EqualFold(parts[4], "PASSWORD") {
-		return nil, fmt.Errorf("invalid ADD USER syntax: expected 'WITH PASSWORD'")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid ADD USER syntax: expected 'WITH PASSWORD'", errors.LayerCommand)
 	}
 
 	username := parts[2]
@@ -34,13 +39,15 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	// Get the Primary database
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Find the Users bundle
 	usersBundle, exists := primaryDB.Bundles["Users"]
 	if !exists {
-		return nil, fmt.Errorf("Users bundle not found in Primary database")
+		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+			"Users bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	// Check if user already exists
@@ -48,7 +55,9 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 		for _, doc := range *usersBundle.Documents {
 			if usernameField, ok := doc.Fields["Username"]; ok {
 				if str, ok := usernameField.Value.AsString(); ok && str == username {
-					return nil, fmt.Errorf("user '%s' already exists", username)
+					return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+						fmt.Sprintf("user '%s' already exists", username),
+						errors.LayerCommand).WithContext("username", username)
 				}
 			}
 		}
@@ -104,7 +113,8 @@ func GrantPermission(command string, logger *zap.SugaredLogger, serviceManager S
 	// Get the Primary database for context
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Use the new parser-based handler with debug mode disabled (secure errors)
@@ -126,7 +136,8 @@ func RevokePermission(command string, logger *zap.SugaredLogger, serviceManager 
 	// Get the Primary database for context
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Use the new parser-based handler with debug mode disabled (secure errors)
@@ -141,12 +152,15 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 	// Parse the command: ATTACH USER username TO DATABASE database_name
 	parts := strings.Fields(command)
 	if len(parts) < 6 {
-		return nil, fmt.Errorf("invalid ATTACH syntax: expected 'ATTACH USER username TO DATABASE database_name'")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid ATTACH syntax: expected 'ATTACH USER username TO DATABASE database_name'",
+			errors.LayerCommand)
 	}
 
 	if !strings.EqualFold(parts[0], "ATTACH") || !strings.EqualFold(parts[1], "USER") ||
 		!strings.EqualFold(parts[3], "TO") || !strings.EqualFold(parts[4], "DATABASE") {
-		return nil, fmt.Errorf("invalid ATTACH command format")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid ATTACH command format", errors.LayerCommand)
 	}
 
 	username := parts[2]
@@ -155,13 +169,15 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 	// Get the Primary database
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Find the user
 	usersBundle, exists := primaryDB.Bundles["Users"]
 	if !exists {
-		return nil, fmt.Errorf("Users bundle not found in Primary database")
+		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+			"Users bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var userID string
@@ -179,16 +195,21 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("user '%s' not found", username)
+			return nil, errors.New(errors.ERR_NOT_FOUND_USER,
+				fmt.Sprintf("user '%s' not found", username),
+				errors.LayerCommand).WithContext("username", username)
 		}
 	} else {
-		return nil, fmt.Errorf("user '%s' not found", username)
+		return nil, errors.New(errors.ERR_NOT_FOUND_USER,
+			fmt.Sprintf("user '%s' not found", username),
+			errors.LayerCommand).WithContext("username", username)
 	}
 
 	// Find the database
 	databasesBundle, exists := primaryDB.Bundles["Databases"]
 	if !exists {
-		return nil, fmt.Errorf("Databases bundle not found in Primary database")
+		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+			"Databases bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var databaseID string
@@ -206,16 +227,21 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("database '%s' not found", databaseName)
+			return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
+				fmt.Sprintf("database '%s' not found", databaseName),
+				errors.LayerCommand).WithContext("database", databaseName)
 		}
 	} else {
-		return nil, fmt.Errorf("database '%s' not found", databaseName)
+		return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
+			fmt.Sprintf("database '%s' not found", databaseName),
+			errors.LayerCommand).WithContext("database", databaseName)
 	}
 
 	// Add the user-database relationship to DatabaseUsers bundle
 	databaseUsersBundle, exists := primaryDB.Bundles["DatabaseUsers"]
 	if !exists {
-		return nil, fmt.Errorf("DatabaseUsers bundle not found in Primary database")
+		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+			"DatabaseUsers bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	// Check if the relationship already exists
@@ -226,7 +252,9 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 					str1, ok1 := userIDField.Value.AsString()
 					str2, ok2 := dbIDField.Value.AsString()
 					if ok1 && ok2 && str1 == userID && str2 == databaseID {
-						return nil, fmt.Errorf("user '%s' is already attached to database '%s'", username, databaseName)
+						return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+							fmt.Sprintf("user '%s' is already attached to database '%s'", username, databaseName),
+							errors.LayerCommand).WithContext("username", username).WithContext("database", databaseName)
 					}
 				}
 			}
@@ -268,13 +296,15 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 	// Get the Primary database
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return false, fmt.Errorf("primary database not found: %w", err)
+		return false, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Find the user
 	usersBundle, exists := primaryDB.Bundles["Users"]
 	if !exists {
-		return false, fmt.Errorf("Users bundle not found in Primary database")
+		return false, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+			"Users bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var userID string
@@ -292,16 +322,21 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 			}
 		}
 		if !found {
-			return false, fmt.Errorf("user '%s' not found", username)
+			return false, errors.New(errors.ERR_NOT_FOUND_USER,
+				fmt.Sprintf("user '%s' not found", username),
+				errors.LayerCommand).WithContext("username", username)
 		}
 	} else {
-		return false, fmt.Errorf("user '%s' not found", username)
+		return false, errors.New(errors.ERR_NOT_FOUND_USER,
+			fmt.Sprintf("user '%s' not found", username),
+			errors.LayerCommand).WithContext("username", username)
 	}
 
 	// Find the permission
 	permissionsBundle, exists := primaryDB.Bundles["Permissions"]
 	if !exists {
-		return false, fmt.Errorf("Permissions bundle not found in Primary database")
+		return false, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+			"Permissions bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var permissionID string
@@ -328,7 +363,8 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 	// Check if the user has this permission in UserPermissions bundle
 	userPermissionsBundle, exists := primaryDB.Bundles["UserPermissions"]
 	if !exists {
-		return false, fmt.Errorf("UserPermissions bundle not found in Primary database")
+		return false, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+			"UserPermissions bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	if userPermissionsBundle.Documents != nil {
@@ -356,7 +392,8 @@ func UpdateUser(command string, logger *zap.SugaredLogger, serviceManager Servic
 	// Get the primary database for RBAC operations
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Delegate to UpdateUserCommand with debugMode=false for production
@@ -373,7 +410,8 @@ func DeleteUser(command string, logger *zap.SugaredLogger, serviceManager Servic
 	// Get the primary database for RBAC operations
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Delegate to DeleteUserCommand with debugMode=false for production
@@ -388,7 +426,8 @@ func CreateRole(command string, logger *zap.SugaredLogger, serviceManager Servic
 	// Get the primary database for RBAC operations
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Delegate to CreateRoleCommand with debugMode=false for production
@@ -405,7 +444,8 @@ func UpdateRole(command string, logger *zap.SugaredLogger, serviceManager Servic
 	// Get the primary database for RBAC operations
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Delegate to UpdateRoleCommand with debugMode=false for production
@@ -422,7 +462,8 @@ func DeleteRole(command string, logger *zap.SugaredLogger, serviceManager Servic
 	// Get the primary database for RBAC operations
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return nil, fmt.Errorf("primary database not found: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found", errors.LayerCommand)
 	}
 
 	// Delegate to DeleteRoleCommand with debugMode=false for production

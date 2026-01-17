@@ -47,12 +47,15 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"syndrdb/src/pkg/constants"
 )
 
 // SAMPLE_RATE defines how often to sample documents for memory tracking
-// 100 means every 100th document is sampled
+// Uses constants.SampleRateDefault (100), meaning every 100th document is sampled
 // TODO: I could make this configurable via server settings instead of a constant
-const SAMPLE_RATE = 100
+// MED-008: Use constant from constants package
+var SAMPLE_RATE = constants.SampleRateDefault
 
 // WithMemoryTracker injects a MemoryTracker into the context
 // CRITICAL: Must use raw string "memory_tracker" to match planner package's key
@@ -239,4 +242,6 @@ func GetMemoryTracker(ctx context.Context) *MemoryTracker {
 }
 
 // ErrMemoryLimitExceeded is the error returned when memory limit is exceeded
+// Note: This error is created with fmt.Errorf for backwards compatibility
+// but should be replaced with errors.New in new code
 var ErrMemoryLimitExceeded = fmt.Errorf("query memory limit exceeded")

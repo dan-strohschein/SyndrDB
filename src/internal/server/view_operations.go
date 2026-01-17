@@ -5,6 +5,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -28,11 +29,13 @@ func HandleCreateView(command string, logger *zap.SugaredLogger, serviceManager 
 	// Parse CREATE VIEW statement
 	parser, err := syndrQL.NewCreateViewParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create CREATE VIEW parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create CREATE VIEW parser", errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse CREATE VIEW command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse CREATE VIEW command", errors.LayerParser)
 	}
 
 	logger.Infof("Creating regular view '%s' in database '%s'", stmt.ViewName, database.Name)
@@ -71,15 +74,18 @@ func HandleCreateMaterializedView(command string, logger *zap.SugaredLogger, ser
 	// Parse CREATE MATERIALIZED VIEW statement
 	parser, err := syndrQL.NewCreateViewParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create CREATE MATERIALIZED VIEW parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create CREATE MATERIALIZED VIEW parser", errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse CREATE MATERIALIZED VIEW command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse CREATE MATERIALIZED VIEW command", errors.LayerParser)
 	}
 
 	if !stmt.IsMaterialized {
-		return nil, fmt.Errorf("Internal error: parsed as regular view, expected materialized view")
+		return nil, errors.New(errors.ERR_INTERNAL,
+			"internal error: parsed as regular view, expected materialized view", errors.LayerParser)
 	}
 
 	logger.Infof("Creating materialized view '%s' in database '%s'", stmt.ViewName, database.Name)
@@ -120,11 +126,13 @@ func HandleDropView(command string, logger *zap.SugaredLogger, serviceManager Se
 	// Parse DROP VIEW statement
 	parser, err := syndrQL.NewDropViewParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create DROP VIEW parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create DROP VIEW parser", errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse DROP VIEW command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse DROP VIEW command", errors.LayerParser)
 	}
 
 	viewType := "view"
@@ -166,11 +174,13 @@ func HandleRefreshMaterializedView(command string, logger *zap.SugaredLogger, se
 	// Parse REFRESH MATERIALIZED VIEW statement
 	parser, err := syndrQL.NewRefreshViewParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create REFRESH MATERIALIZED VIEW parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create REFRESH MATERIALIZED VIEW parser", errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse REFRESH MATERIALIZED VIEW command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse REFRESH MATERIALIZED VIEW command", errors.LayerParser)
 	}
 
 	logger.Infof("Refreshing materialized view '%s' in database '%s'", stmt.ViewName, database.Name)
@@ -206,11 +216,13 @@ func HandleShowViews(command string, logger *zap.SugaredLogger, serviceManager S
 	// Parse SHOW VIEWS statement
 	parser, err := syndrQL.NewShowViewsParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create SHOW VIEWS parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create SHOW VIEWS parser", errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse SHOW VIEWS command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse SHOW VIEWS command", errors.LayerParser)
 	}
 
 	// Determine which database to query
@@ -246,11 +258,13 @@ func HandleDescribeView(command string, logger *zap.SugaredLogger, serviceManage
 	// Parse DESCRIBE VIEW statement
 	parser, err := syndrQL.NewDescribeViewParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create DESCRIBE VIEW parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create DESCRIBE VIEW parser", errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse DESCRIBE VIEW command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse DESCRIBE VIEW command", errors.LayerParser)
 	}
 
 	logger.Infof("Describing view '%s' in database '%s'", stmt.ViewName, database.Name)
@@ -329,7 +343,9 @@ func isViewCommand(commandParts []string) bool {
 // This is called by CommandDirector when a view command is detected
 func RouteViewCommand(command string, commandParts []string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (interface{}, error) {
 	if len(commandParts) < 2 {
-		return nil, fmt.Errorf("Invalid view command: %s", command)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("invalid view command: %s", command),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	switch strings.ToLower(commandParts[0]) {
@@ -357,5 +373,7 @@ func RouteViewCommand(command string, commandParts []string, logger *zap.Sugared
 		}
 	}
 
-	return nil, fmt.Errorf("Unknown view command: %s", command)
+	return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+		fmt.Sprintf("unknown view command: %s", command),
+		errors.LayerCommand).WithContext("command", command)
 }

@@ -136,6 +136,9 @@ type SelectParser struct {
 
 	// Logger for error reporting and debugging
 	logger *zap.SugaredLogger
+
+	// Original command string for error reporting (set during Parse)
+	originalCommand string
 }
 
 // NewSelectParser creates a new SELECT parser
@@ -154,9 +157,18 @@ func NewSelectParser(tokens []Token) *SelectParser {
 }
 
 // Parse parses a SELECT statement
-func (p *SelectParser) Parse(logger *zap.SugaredLogger) (*SelectStatement, error) {
+// command is the original command string for error reporting (optional, will reconstruct if not provided)
+func (p *SelectParser) Parse(logger *zap.SugaredLogger, command ...string) (*SelectStatement, error) {
 	// Store logger for use by child parsers (ExpressionParser, nested SelectParsers)
 	p.logger = logger
+	
+	// Store original command if provided
+	if len(command) > 0 && command[0] != "" {
+		p.originalCommand = command[0]
+	} else {
+		// Reconstruct command from tokens for error reporting
+		p.originalCommand = reconstructCommandFromTokens(p.tokens)
+	}
 
 	stmt := &SelectStatement{
 		Fields:  make([]SelectField, 0),
@@ -183,7 +195,12 @@ func (p *SelectParser) Parse(logger *zap.SugaredLogger) (*SelectStatement, error
 func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPattern, logger *zap.SugaredLogger) (*SelectStatement, error) {
 	// Expect SELECT keyword
 	if p.current.Type != TOKEN_SELECT {
-		return nil, fmt.Errorf("expected SELECT, got %s", p.current.Type.String())
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("expected SELECT, got %s", p.current.Type.String()),
+			p.current,
+			"SELECT",
+			p.originalCommand,
+		)
 	}
 	p.advance()
 
@@ -213,7 +230,12 @@ func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPatter
 
 		// Parse bundle name
 		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
-			return nil, fmt.Errorf("expected bundle name after FROM, got %s", p.current.Type.String())
+			return nil, CreateParserErrorWithToken(
+				fmt.Sprintf("expected bundle name after FROM, got %s", p.current.Type.String()),
+				p.current,
+				"bundle name (identifier or string)",
+				p.originalCommand,
+			)
 		}
 		stmt.BundleName = p.current.Value
 		p.advance()
@@ -262,7 +284,12 @@ func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPatter
 func (p *SelectParser) parseFullPath(stmt *SelectStatement, logger *zap.SugaredLogger) (*SelectStatement, error) {
 	// Expect SELECT keyword
 	if p.current.Type != TOKEN_SELECT {
-		return nil, fmt.Errorf("expected SELECT, got %s", p.current.Type.String())
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("expected SELECT, got %s", p.current.Type.String()),
+			p.current,
+			"SELECT",
+			p.originalCommand,
+		)
 	}
 	p.advance()
 
@@ -299,7 +326,12 @@ func (p *SelectParser) parseFullPath(stmt *SelectStatement, logger *zap.SugaredL
 
 		// Parse bundle name
 		if p.current.Type != TOKEN_IDENT && p.current.Type != TOKEN_STRING {
-			return nil, fmt.Errorf("expected bundle name after FROM, got %s", p.current.Type.String())
+			return nil, CreateParserErrorWithToken(
+				fmt.Sprintf("expected bundle name after FROM, got %s", p.current.Type.String()),
+				p.current,
+				"bundle name (identifier or string)",
+				p.originalCommand,
+			)
 		}
 		stmt.BundleName = p.current.Value
 		p.advance()

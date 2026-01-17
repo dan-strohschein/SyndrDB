@@ -1,11 +1,10 @@
 package server
 
 import (
-	"fmt"
-
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -16,20 +15,38 @@ func parseUpdateDocumentWithNewParser(command string, logger *zap.SugaredLogger)
 	// Create UPDATE parser
 	updateParser, err := syndrQL.NewUpdateParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create UPDATE parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create UPDATE parser", errors.LayerParser)
 	}
 
 	// Parse the UPDATE statement
 	updateStmt, err := updateParser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse UPDATE statement: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
+	}
+
+	// MED-003: Validate field names and values length limits
+	securityConfig := DefaultSecurityConfig()
+	for fieldName, fieldValue := range updateStmt.Fields {
+		// Validate field name length
+		if err := ValidateFieldName(fieldName, securityConfig); err != nil {
+			return nil, err
+		}
+		// Validate field value length
+		if err := ValidateFieldValue(fieldValue, securityConfig); err != nil {
+			// Add field name context to error
+			if sdbErr, ok := err.(errors.SyndrDBError); ok {
+				return nil, sdbErr.WithContext("field_name", fieldName)
+			}
+			return nil, err
+		}
 	}
 
 	// Convert to DocumentUpdateCommand using adapter
 	adapter := syndrQL.NewUpdateStatementAdapter(logger)
 	docUpdateCommand, err := adapter.ToDocumentUpdateCommand(updateStmt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert UpdateStatement to DocumentUpdateCommand: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	return docUpdateCommand, nil
@@ -58,7 +75,7 @@ func parseUpdateDocument(command string, logger *zap.SugaredLogger) (*models.Doc
 
 		// Fallback to legacy parser
 		//return bndle.ParseUpdateDocumentCommand(command, logger)
-		return nil, fmt.Errorf(" UPDATE DOCUMENTS %s parser failed: %w", command, err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	// Record success

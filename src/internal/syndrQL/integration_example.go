@@ -196,9 +196,9 @@ func ExampleEndToEndIntegration(query string, logger *zap.SugaredLogger) (*query
 		return queryparser.ParseUnifiedSelectQuery(query, logger)
 	}
 
-	// Parse
+	// Parse (pass original query for error reporting)
 	parser := NewSelectParser(tokens)
-	stmt, err := parser.Parse(logger)
+	stmt, err := parser.Parse(logger, query)
 	if err != nil {
 		logger.Warnf("Parsing failed: %v. Falling back to legacy parser.", err)
 		return queryparser.ParseUnifiedSelectQuery(query, logger)

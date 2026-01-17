@@ -65,6 +65,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syndrdb/src/pkg/constants"
 	"time"
 
 	"go.uber.org/zap"
@@ -360,6 +361,11 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 	}
 
 	// Get next sequence number (atomic for thread safety)
+	// MED-011: Check for overflow before incrementing sequence
+	currentSequence := atomic.LoadUint64(&idx.GlobalSequence)
+	if err := constants.CheckUint64Increment(currentSequence, "GlobalSequence"); err != nil {
+		return fmt.Errorf("sequence number overflow: %w", err)
+	}
 	sequence := atomic.AddUint64(&idx.GlobalSequence, 1)
 
 	// Update max sequence in stats and mark dirty
@@ -375,7 +381,12 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 
 	// Populate bucket number based on hash value
 	// This enables bucket-based file organization and O(1) lookups
-	entry.BucketNum = ComputeBucketNum(entry.HashValue, idx.config.NumBuckets)
+	// MED-011: Added overflow protection for bucket calculation
+	bucketNum, err := ComputeBucketNum(entry.HashValue, idx.config.NumBuckets)
+	if err != nil {
+		return fmt.Errorf("bucket calculation failed: %w", err)
+	}
+	entry.BucketNum = bucketNum
 
 	// WRITE PATH (LSM-style):
 	// 1. Write to disk first (durability)
@@ -383,7 +394,7 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 	// This ensures we never lose writes even if we crash
 
 	// Step 1: Append to disk storage
-	err := idx.storage.AppendEntry(entry)
+	err = idx.storage.AppendEntry(entry)
 	if err != nil {
 		return fmt.Errorf("failed to append entry to storage: %w", err)
 	}
@@ -484,8 +495,12 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 
 	if idx.storage.useBuckets {
 		// OPTIMIZED PATH: Scan only the specific bucket (50-100x faster)
+		// MED-011: Added overflow protection for bucket calculation
 		hashValue := ComputeHash(keyValue)
-		bucketNum := ComputeBucketNum(hashValue, idx.config.NumBuckets)
+		bucketNum, err := ComputeBucketNum(hashValue, idx.config.NumBuckets)
+		if err != nil {
+			return nil, nil, fmt.Errorf("bucket calculation failed: %w", err)
+		}
 
 		latestEntry, err = idx.storage.GetLatestEntryFromBucket(keyValue, bucketNum)
 		if err != nil {

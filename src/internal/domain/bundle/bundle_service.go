@@ -17,6 +17,7 @@ import (
 	syndrQL "syndrdb/src/internal/syndrQL"
 	"syndrdb/src/internal/utils"
 	"syndrdb/src/pkg/common/conversion"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
 	"syndrdb/src/internal/domain/index/btreeindexV2"
@@ -681,8 +682,8 @@ func (s *BundleService) getBundleLock(bundleName string) *BundleOperationLock {
 		return lock
 	}
 
-	// Create new lock
-	lock = NewBundleOperationLock(bundleName)
+	// Create new lock with logger for error reporting
+	lock = NewBundleOperationLock(bundleName, s.logger)
 	s.bundleLocks[bundleName] = lock
 
 	return lock
@@ -1376,7 +1377,7 @@ func (s *BundleService) FlushAllIndexesToDisk() error {
 						}
 						errorMsg := fmt.Sprintf("failed to flush hash index '%s' in bundle '%s': %v", indexName, bundleName, err)
 						s.logger.Warnf(errorMsg)
-						errors = append(errors, fmt.Errorf(errorMsg))
+						errors = append(errors, fmt.Errorf("%s", errorMsg))
 					} else {
 						flushedCount++
 						s.logger.Debugf("Flushed hash index '%s' in bundle '%s' to disk", indexName, bundleName)
@@ -1394,7 +1395,7 @@ func (s *BundleService) FlushAllIndexesToDisk() error {
 						}
 						errorMsg := fmt.Sprintf("failed to flush BTree index '%s' in bundle '%s': %v", indexName, bundleName, err)
 						s.logger.Warnf(errorMsg)
-						errors = append(errors, fmt.Errorf(errorMsg))
+						errors = append(errors, fmt.Errorf("%s", errorMsg))
 					} else {
 						flushedCount++
 						s.logger.Debugf("Flushed BTree index '%s' in bundle '%s' to disk", indexName, bundleName)
@@ -1751,12 +1752,21 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 
 	// Validate bundle name (includes _mv_ prefix check)
 	if err := s.validateBundleName(bundleCommand.BundleName); err != nil {
-		return nil, fmt.Errorf("invalid bundle name '%s': %w", bundleCommand.BundleName, err)
+		return nil, errors.NewValidationError(
+			errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid bundle name '%s'", bundleCommand.BundleName),
+			errors.LayerDomain,
+			&errors.ValidationErrorDetails{
+				SubmittedInput: bundleCommand.BundleName,
+				ExpectedFormat: "valid bundle name (alphanumeric, underscores, no spaces)",
+				Suggestions:    []string{"Bundle names must start with a letter and contain only alphanumeric characters and underscores"},
+			},
+		).WithContext("bundle_name", bundleCommand.BundleName)
 	}
 
 	// Check if the bundle already exists
 	if _, err := s.GetBundleByName(db, bundleCommand.BundleName); err == nil {
-		return nil, fmt.Errorf("bundle '%s' already exists", bundleCommand.BundleName)
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT, fmt.Sprintf("Bundle '%s' already exists", bundleCommand.BundleName), errors.LayerDomain).WithContext("bundle_name", bundleCommand.BundleName)
 	}
 
 	// Create a new bundle
@@ -1793,7 +1803,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	//This needs to be added to a bundle file
 	err := s.store.CreateBundleFile(db, bundle)
 	if err != nil {
-		return nil, fmt.Errorf("error creating bundle file: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Error creating bundle file for bundle '%s'", bundle.Name), errors.LayerStorage)
 	}
 
 	// and then the bundle file name needs to be added to the database file
@@ -1802,7 +1812,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	// Write the updated database file
 	err = databaseService.Store.UpdateDatabaseDataFile(db)
 	if err != nil {
-		return nil, fmt.Errorf("error updating database file: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Error updating database file after creating bundle '%s'", bundle.Name), errors.LayerStorage)
 	}
 
 	createHashIndexInternal(s, bundle, "DocumentID") // Create a hash index on DocumentID
@@ -1811,7 +1821,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
 	err = uniqueValidator.CreateUniqueIndexesForBundle(bundle)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create unique indexes for bundle '%s': %w", bundle.Name, err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_INDEX, fmt.Sprintf("Failed to create unique indexes for bundle '%s'", bundle.Name), errors.LayerIndex)
 	}
 
 	s.bundleMetadata[bundleCommand.BundleName] = bundle
@@ -1935,10 +1945,10 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 	//args := settings.GetSettings()
 	fileExists := s.store.BundleFileExists(name, database.Name)
 
-	// Check if the bundle file exists in the store
-	if !fileExists {
-		return nil, fmt.Errorf("bundle file '%s' does not exist on disk", name)
-	}
+		// Check if the bundle file exists in the store
+		if !fileExists {
+			return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE, fmt.Sprintf("Bundle file '%s' does not exist on disk", name), errors.LayerStorage).WithContext("bundle_name", name)
+		}
 
 	bundle, exists := s.bundleMetadata[name]
 	if !exists {
@@ -1952,7 +1962,7 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 
 			bundle, err := s.store.LoadBundleMetadata(database, databasePath, fmt.Sprintf("%s_%s.bnd", database.Name, name))
 			if err != nil {
-				return nil, fmt.Errorf("failed to load bundle metadata '%s': %w", name, err)
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Failed to load bundle metadata '%s'", name), errors.LayerStorage).WithContext("bundle_name", name)
 			}
 
 			// Discover and populate existing index files
@@ -1971,7 +1981,7 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 			s.bundleMetadata[name] = bundle
 			return bundle, nil
 		} else {
-			return nil, fmt.Errorf("bundle file exists in memory but not on disk. '%s_%s.bnd' not found", database.Name, name)
+			return nil, errors.New(errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Bundle file exists in memory but not on disk. '%s_%s.bnd' not found", database.Name, name), errors.LayerStorage).WithContext("bundle_name", name)
 		}
 	}
 
@@ -2416,13 +2426,13 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 	// Check if the bundle exists in metadata
 	bundle, exists := s.bundleMetadata[name]
 	if !exists {
-		return fmt.Errorf("bundle '%s' not found", name)
+		return errors.New(errors.ERR_NOT_FOUND_BUNDLE, fmt.Sprintf("Bundle '%s' not found", name), errors.LayerDomain)
 	}
 
 	// Remove the bundle from the store
 	err := s.store.RemoveBundleFile(db, bundle.Name)
 	if err != nil {
-		return fmt.Errorf("failed to remove bundle from store: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Failed to remove bundle '%s' from store", name), errors.LayerStorage).WithContext("bundle_name", name)
 	}
 
 	// Remove from metadata
@@ -4495,7 +4505,7 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// DIAGNOSTIC: Log bundle index status (only if verbose logging enabled)
 	if s.verboseLogging {
 		s.logger.Infof("DIAGNOSTIC: Bundle '%s' has Indexes map: %v, count: %d", bundle.Name, bundle.Indexes != nil, len(bundle.Indexes))
-		if bundle.Indexes != nil && len(bundle.Indexes) > 0 {
+		if len(bundle.Indexes) > 0 {
 			for idxName := range bundle.Indexes {
 				s.logger.Infof("DIAGNOSTIC: Found index: %s", idxName)
 			}

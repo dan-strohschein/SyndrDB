@@ -1,11 +1,10 @@
 package server
 
 import (
-	"fmt"
-
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -16,20 +15,21 @@ func parseUpdateBundleWithNewParser(command string, logger *zap.SugaredLogger) (
 	// Create UPDATE BUNDLE parser
 	updateBundleParser, err := syndrQL.NewUpdateBundleParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create CREATE BUNDLE parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create UPDATE BUNDLE parser", errors.LayerParser)
 	}
 
 	// Parse the UPDATE BUNDLE statement
 	updateBundleStmt, err := updateBundleParser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse UPDATE BUNDLE statement: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	// Convert to BundleCommand using adapter
 	adapter := syndrQL.NewUpdateBundleStatementAdapter(logger)
 	bundleCommand, err := adapter.ToBundleCommand(updateBundleStmt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert CreateBundleStatement to BundleCommand: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	return bundleCommand, nil
@@ -58,7 +58,7 @@ func parseUpdateBundle(command string, logger *zap.SugaredLogger) (*models.Bundl
 
 		// // Fallback to legacy parser
 		// return bndle.ParseCreateBundleCommand(command, logger)
-		return nil, fmt.Errorf(" UPDATE BUNDLE %s parser failed: %w", command, err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	// Record success

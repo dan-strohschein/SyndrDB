@@ -2,10 +2,12 @@ package auth
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+
+	"syndrdb/src/pkg/constants"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -28,20 +30,21 @@ func NewUserStoreWithRateLimit(filePath string, encryptionKeyString string, logg
 func NewUserStoreWithAuditor(filePath string, encryptionKeyString string, logger *zap.SugaredLogger, rateLimitConfig *AuthRateLimitConfig, auditor SecurityAuditor) (*UserStore, error) {
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create directory: %w", err)
+	if err := os.MkdirAll(dir, constants.DirPermissionsSecure); err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to create user store directory", errors.LayerAuth).WithContext("path", dir)
 	}
 
 	// Convert encryption key string to bytes (32 bytes for AES-256)
 	encryptionKey := []byte(encryptionKeyString)
-	if len(encryptionKey) < 32 {
+	if len(encryptionKey) < constants.EncryptionKeyMinLength {
 		// Pad the key if it's too short
-		paddedKey := make([]byte, 32)
+		paddedKey := make([]byte, constants.EncryptionKeyMinLength)
 		copy(paddedKey, encryptionKey)
 		encryptionKey = paddedKey
-	} else if len(encryptionKey) > 32 {
+	} else if len(encryptionKey) > constants.EncryptionKeyMinLength {
 		// Truncate if too long
-		encryptionKey = encryptionKey[:32]
+		encryptionKey = encryptionKey[:constants.EncryptionKeyMinLength]
 	}
 
 	// Initialize rate limiter if logger is provided
@@ -63,7 +66,8 @@ func NewUserStoreWithAuditor(filePath string, encryptionKeyString string, logger
 	// Load existing users if the file exists
 	if _, err := os.Stat(filePath); err == nil {
 		if err := store.Load(); err != nil {
-			return nil, fmt.Errorf("failed to load user store: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+				"failed to load user store", errors.LayerAuth).WithContext("path", filePath)
 		}
 	}
 
@@ -79,19 +83,22 @@ func (s *UserStore) Save() error {
 	// Serialize users to JSON
 	data, err := json.Marshal(s.users)
 	if err != nil {
-		return fmt.Errorf("failed to marshal users: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to marshal users", errors.LayerAuth)
 	}
 
 	// Encrypt the data
 	encryptedData, err := encrypt(data, s.encryptionKey)
 	if err != nil {
-		return fmt.Errorf("failed to encrypt data: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to encrypt user data", errors.LayerAuth)
 	}
 
 	// Create a temporary file
 	tempFile, err := os.CreateTemp(filepath.Dir(s.filePath), "users-*.tmp")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to create temporary file for user store", errors.LayerAuth)
 	}
 	tempFilePath := tempFile.Name()
 
@@ -99,25 +106,29 @@ func (s *UserStore) Save() error {
 	if _, err := tempFile.Write(encryptedData); err != nil {
 		tempFile.Close()
 		os.Remove(tempFilePath)
-		return fmt.Errorf("failed to write to temp file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to write to temporary file", errors.LayerAuth)
 	}
 
 	// Close the file before renaming
 	if err := tempFile.Close(); err != nil {
 		os.Remove(tempFilePath)
-		return fmt.Errorf("failed to close temp file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to close temporary file", errors.LayerAuth)
 	}
 
 	// Set restrictive permissions
-	if err := os.Chmod(tempFilePath, 0600); err != nil {
+	if err := os.Chmod(tempFilePath, constants.FilePermissionsSecure); err != nil {
 		os.Remove(tempFilePath)
-		return fmt.Errorf("failed to set file permissions: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to set file permissions", errors.LayerAuth)
 	}
 
 	// Atomically replace the old file with the new one
 	if err := os.Rename(tempFilePath, s.filePath); err != nil {
 		os.Remove(tempFilePath)
-		return fmt.Errorf("failed to rename temp file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to replace user store file atomically", errors.LayerAuth)
 	}
 
 	s.dirty = false
@@ -129,26 +140,30 @@ func (s *UserStore) Load() error {
 	// Open the file
 	file, err := os.Open(s.filePath)
 	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to open user store file", errors.LayerAuth).WithContext("path", s.filePath)
 	}
 	defer file.Close()
 
 	// Read encrypted data
 	encryptedData, err := io.ReadAll(file)
 	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to read user store file", errors.LayerAuth)
 	}
 
 	// Decrypt the data
 	data, err := decrypt(encryptedData, s.encryptionKey)
 	if err != nil {
-		return fmt.Errorf("failed to decrypt data: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to decrypt user data", errors.LayerAuth)
 	}
 
 	// Unmarshal the JSON
 	var users []User
 	if err := json.Unmarshal(data, &users); err != nil {
-		return fmt.Errorf("failed to unmarshal users: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to unmarshal user data", errors.LayerAuth)
 	}
 
 	s.users = users

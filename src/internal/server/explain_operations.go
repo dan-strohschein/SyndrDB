@@ -7,6 +7,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -94,21 +95,23 @@ func HandleExplainCommand(
 	// Validate that we have a SELECT query
 	selectQueryLower := strings.ToLower(strings.TrimSpace(selectQuery))
 	if !strings.HasPrefix(selectQueryLower, "select") {
-		return nil, fmt.Errorf("EXPLAIN currently only supports SELECT statements, got: %s", selectQuery)
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("EXPLAIN currently only supports SELECT statements, got: %s", selectQuery),
+			errors.LayerCommand).WithContext("statement_type", selectQuery)
 	}
 
 	// Parse the SELECT query using existing parser
 	logger.Debugf("Parsing SELECT query for EXPLAIN")
 	query, err := ParseQuery(selectQuery, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse query for EXPLAIN: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", "EXPLAIN")
 	}
 
 	// Create execution plan using existing unified planner
 	logger.Debugf("Creating execution plan for EXPLAIN")
 	plan, err := serviceManager.UnifiedPlanner.CreatePlan(query, database)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create execution plan: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerQuery).WithContext("command", "EXPLAIN")
 	}
 
 	// Initialize node metrics map for ANALYZE mode

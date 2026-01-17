@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -107,20 +108,21 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 		// Extract database name from "SHOW BUNDLES FOR "<DATABASE_NAME>""
 		databaseName, err := parseDatabaseNameFromShowBundlesFor(command)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse database name from command: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+				"failed to parse database name from command", errors.LayerCommand)
 		}
 
 		// First check if the database exists in the loaded databases (consistent with USE DATABASE)
 		targetDatabase, err = serviceManager.DatabaseService.GetDatabaseByName(databaseName)
 		if err != nil {
-			return nil, fmt.Errorf("database '%s' not found in system: %w", databaseName, err)
+			return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", databaseName)
 		}
 
 		// Verify database is also in catalog (for additional validation, similar to UseDatabase)
 		if serviceManager.InternalCatalogService != nil {
 			dbDocument, dbErr := serviceManager.InternalCatalogService.GetDatabaseFromCatalogByName(databaseName)
 			if dbErr != nil {
-				return nil, fmt.Errorf("database '%s' not found in catalog: %w", databaseName, dbErr)
+				return nil, errors.ConvertError(dbErr, errors.LayerCommand).WithContext("database", databaseName)
 			}
 			if dbDocument == nil {
 				logger.Warnf("Warning: Database '%s' is loaded but not found in catalog", databaseName)
@@ -133,7 +135,9 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 	} else {
 		// Original syntax - use current database and show bundles from catalog for that database
 		if database == nil {
-			return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
+			return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+				"no database selected: use 'USE database_name' to select a database first",
+				errors.LayerCommand)
 		}
 
 		targetDatabaseID = database.DatabaseID
@@ -144,12 +148,15 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 	// For "SHOW BUNDLES FOR database" syntax, use catalog approach
 	// Get bundles from the catalog for the target database ID
 	if serviceManager.InternalCatalogService == nil {
-		return nil, fmt.Errorf("internal catalog service is not available")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"internal catalog service is not available", errors.LayerCommand)
 	}
 
 	allBundles, err := serviceManager.InternalCatalogService.GetBundlesFromCatalogByDatabaseName(targetDatabaseName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve bundles for database '%s' from catalog: %w", targetDatabaseName, err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+			fmt.Sprintf("failed to retrieve bundles for database '%s' from catalog", targetDatabaseName),
+			errors.LayerCommand).WithContext("database", targetDatabaseName)
 	}
 
 	response := &CommandResponse{
@@ -170,20 +177,23 @@ func ShowBundle(command string, database *models.Database, logger *zap.SugaredLo
 	logger.Infof("Processing SHOW BUNDLE command: %s", command)
 
 	if database == nil {
-		return nil, fmt.Errorf("no database selected: use 'USE database_name' to select a database first")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no database selected: use 'USE database_name' to select a database first",
+			errors.LayerCommand)
 	}
 
 	// Parse the bundle name from the command
 	// Expected format: SHOW BUNDLE "<BUNDLE_NAME>";
 	bundleName, err := parseBundleNameFromShowCommand(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse bundle name from command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse bundle name from command", errors.LayerCommand)
 	}
 
 	// Get the bundle metadata (without documents) from the bundle service
 	bundle, err := serviceManager.BundleService.GetBundleMetadata(database, bundleName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve bundle '%s': %w", bundleName, err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", database.Name)
 	}
 
 	// Convert bundle to a response-friendly format
@@ -238,19 +248,21 @@ func ShowUsers(command string, database *models.Database, logger *zap.SugaredLog
 	// Always use the primary database for system catalogs like Users
 	primaryDB := serviceManager.DatabaseService.Databases["primary"]
 	if primaryDB == nil {
-		return nil, fmt.Errorf("primary database not found - system catalogs unavailable")
+		return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
+			"primary database not found - system catalogs unavailable", errors.LayerCommand)
 	}
 
 	// Get the Users bundle from the primary database
 	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve Users bundle: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
 	// Get all documents from the Users bundle (empty WHERE clause returns all)
 	userDocs, err := serviceManager.BundleService.GetDocumentsByFilter(usersBundle, "", nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to retrieve user documents: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve user documents", errors.LayerCommand)
 	}
 
 	// Convert documents to response format

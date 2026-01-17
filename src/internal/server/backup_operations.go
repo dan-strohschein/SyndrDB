@@ -26,12 +26,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"syndrdb/src/internal/backup"
+	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
-
-	"syndrdb/src/internal/backup"
-	"syndrdb/src/pkg/settings"
 )
 
 // BackupDatabase handles the BACKUP DATABASE command
@@ -43,7 +43,8 @@ func BackupDatabase(command string, logger *zap.SugaredLogger, serviceManager *S
 	// Parse the command to extract database name and backup path
 	dbName, backupPath, options, err := parseBackupCommand(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse BACKUP command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse BACKUP command", errors.LayerCommand)
 	}
 
 	logger.Infof("Starting database backup: database=%s, backupPath=%s", dbName, backupPath)
@@ -64,7 +65,7 @@ func BackupDatabase(command string, logger *zap.SugaredLogger, serviceManager *S
 	startTime := time.Now()
 	backupFilePath, err := backupService.CreateBackup(dbName, options)
 	if err != nil {
-		return nil, fmt.Errorf("backup failed: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName).WithContext("backup_path", backupPath)
 	}
 	duration := time.Since(startTime)
 
@@ -95,29 +96,37 @@ func parseBackupCommand(command string) (string, string, backup.BackupOptions, e
 
 	// Minimum tokens: BACKUP DATABASE "name" TO "path" = 5 tokens
 	if len(tokens) < 5 {
-		return "", "", options, fmt.Errorf("invalid BACKUP syntax: expected BACKUP DATABASE \"name\" TO \"path\"")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid BACKUP syntax: expected BACKUP DATABASE \"name\" TO \"path\"",
+			errors.LayerCommand)
 	}
 
 	// Validate command structure
 	if strings.ToUpper(tokens[0]) != "BACKUP" || strings.ToUpper(tokens[1]) != "DATABASE" {
-		return "", "", options, fmt.Errorf("invalid BACKUP syntax: expected BACKUP DATABASE")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid BACKUP syntax: expected BACKUP DATABASE",
+			errors.LayerCommand)
 	}
 
 	// Extract database name (token 2)
 	dbName := strings.Trim(tokens[2], "\"'")
 	if dbName == "" {
-		return "", "", options, fmt.Errorf("database name cannot be empty")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"database name cannot be empty", errors.LayerCommand)
 	}
 
 	// Validate TO keyword (token 3)
 	if strings.ToUpper(tokens[3]) != "TO" {
-		return "", "", options, fmt.Errorf("invalid BACKUP syntax: expected TO keyword")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid BACKUP syntax: expected TO keyword",
+			errors.LayerCommand)
 	}
 
 	// Extract backup path (token 4)
 	backupPath := strings.Trim(tokens[4], "\"'")
 	if backupPath == "" {
-		return "", "", options, fmt.Errorf("backup path cannot be empty")
+		return "", "", options, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"backup path cannot be empty", errors.LayerCommand)
 	}
 
 	// TODO: I will add support for absolute paths vs relative paths
@@ -134,7 +143,8 @@ func parseBackupCommand(command string) (string, string, backup.BackupOptions, e
 	// Parse optional WITH clause for options (tokens 5+)
 	if len(tokens) > 5 {
 		if err := parseBackupOptions(tokens[5:], &options); err != nil {
-			return "", "", options, fmt.Errorf("failed to parse backup options: %w", err)
+			return "", "", options, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+				"failed to parse backup options", errors.LayerCommand)
 		}
 	}
 
@@ -157,14 +167,16 @@ func parseBackupOptions(tokens []string, options *backup.BackupOptions) error {
 
 	// First token should be WITH
 	if strings.ToUpper(tokens[0]) != "WITH" {
-		return fmt.Errorf("expected WITH keyword for options")
+		return errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"expected WITH keyword for options", errors.LayerCommand)
 	}
 
 	// Parse key=value pairs
 	i := 1
 	for i < len(tokens) {
 		if i+2 >= len(tokens) {
-			return fmt.Errorf("incomplete option specification")
+			return errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete option specification", errors.LayerCommand)
 		}
 
 		key := strings.ToUpper(tokens[i])
@@ -172,7 +184,8 @@ func parseBackupOptions(tokens []string, options *backup.BackupOptions) error {
 		value := strings.Trim(tokens[i+2], "\"'")
 
 		if equals != "=" {
-			return fmt.Errorf("expected '=' after option key")
+			return errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"expected '=' after option key", errors.LayerCommand).WithContext("option_key", key)
 		}
 
 		switch key {
@@ -180,7 +193,9 @@ func parseBackupOptions(tokens []string, options *backup.BackupOptions) error {
 			// Validate compression type
 			value = strings.ToLower(value)
 			if value != "gzip" && value != "zstd" && value != "none" {
-				return fmt.Errorf("invalid compression type: %s (supported: gzip, zstd, none)", value)
+				return errors.New(errors.ERR_VALIDATION_FIELD,
+					fmt.Sprintf("invalid compression type: %s (supported: gzip, zstd, none)", value),
+					errors.LayerCommand).WithContext("compression_type", value)
 			}
 			options.Compression = value
 
@@ -192,11 +207,15 @@ func parseBackupOptions(tokens []string, options *backup.BackupOptions) error {
 			} else if value == "false" || value == "0" {
 				options.IncludeIndexes = false
 			} else {
-				return fmt.Errorf("invalid boolean value for INCLUDE_INDEXES: %s", value)
+				return errors.New(errors.ERR_VALIDATION_TYPE,
+					fmt.Sprintf("invalid boolean value for INCLUDE_INDEXES: %s", value),
+					errors.LayerCommand).WithContext("value", value)
 			}
 
 		default:
-			return fmt.Errorf("unknown backup option: %s", key)
+			return errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown backup option: %s", key),
+				errors.LayerCommand).WithContext("option", key)
 		}
 
 		// Move to next option (skip key, =, value)

@@ -2,20 +2,36 @@ package auth
 
 // Add custom error definitions here
 import (
-	"errors"
 	"fmt"
 	"time"
+
+	"syndrdb/src/pkg/errors"
 )
 
 // ErrUserAlreadyExists is returned when a user already exists in the system.
-var ErrUserAlreadyExists = errors.New("user already exists")
-var ErrUserNotFound = errors.New("user not found")
+// DEPRECATED: Use errors.New(errors.ERR_VALIDATION_CONSTRAINT, ...) instead
+var ErrUserAlreadyExists = errors.New(errors.ERR_VALIDATION_CONSTRAINT, "user already exists", errors.LayerAuth)
 
-// Authentication rate limiting errors
+// ErrUserNotFound is returned when a user is not found.
+// DEPRECATED: Use errors.New(errors.ERR_NOT_FOUND_USER, ...) instead
+var ErrUserNotFound = errors.New(errors.ERR_NOT_FOUND_USER, "user not found", errors.LayerAuth)
+
+// Authentication rate limiting errors - converted to use error framework
 var (
-	ErrUserAccountLocked = errors.New("user account is temporarily locked due to too many failed authentication attempts")
-	ErrIPAddressBlocked  = errors.New("IP address is temporarily blocked due to suspicious activity")
-	ErrTooManyAttempts   = errors.New("too many authentication attempts, please wait before trying again")
+	// ErrUserAccountLocked is returned when a user account is locked due to too many failed attempts
+	ErrUserAccountLocked = errors.New(errors.ERR_AUTH_LOCKOUT, 
+		"user account is temporarily locked due to too many failed authentication attempts", 
+		errors.LayerAuth)
+	
+	// ErrIPAddressBlocked is returned when an IP address is blocked due to suspicious activity
+	ErrIPAddressBlocked = errors.New(errors.ERR_AUTH_LOCKOUT,
+		"IP address is temporarily blocked due to suspicious activity",
+		errors.LayerAuth)
+	
+	// ErrTooManyAttempts is returned when rate limiting delays authentication
+	ErrTooManyAttempts = errors.New(errors.ERR_AUTH_RATE_LIMIT,
+		"too many authentication attempts, please wait before trying again",
+		errors.LayerAuth)
 )
 
 // AuthLockoutError provides detailed information about lockout status

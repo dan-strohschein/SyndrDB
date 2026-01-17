@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"syndrdb/src/pkg/constants"
 	"time"
 )
 
@@ -420,10 +421,16 @@ func (op *OverflowPage) AddRecord(record *IndexRecord) {
 }
 
 // Add helper methods to keep NumTuples and TotalRecords in sync:
-func (m *HashIndexMetadata) IncrementRecordCount() {
+// MED-011: Added overflow protection for record count increment
+func (m *HashIndexMetadata) IncrementRecordCount() error {
+	// MED-011: Check for overflow before incrementing total records
+	if err := constants.CheckUint64Increment(m.TotalRecords, "TotalRecords"); err != nil {
+		return fmt.Errorf("total records overflow: %w", err)
+	}
+	
 	m.TotalRecords++
-
 	m.LastModified = time.Now()
+	return nil
 }
 
 func (m *HashIndexMetadata) DecrementRecordCount() {
@@ -435,8 +442,27 @@ func (m *HashIndexMetadata) DecrementRecordCount() {
 }
 
 // Add method to update masks when buckets are split:
-func (m *HashIndexMetadata) UpdateMasksForSplit() {
+// MED-011: Added overflow protection for bucket count increment
+func (m *HashIndexMetadata) UpdateMasksForSplit() error {
+	// MED-011: Check for overflow before incrementing bucket count
+	if err := constants.CheckUint32Increment(m.BucketCount, "BucketCount"); err != nil {
+		return fmt.Errorf("bucket count overflow: %w", err)
+	}
+	
+	// MED-011: Check for overflow in mask calculations
+	if m.BucketCount >= constants.MaxUint32Safe {
+		return fmt.Errorf("bucket count %d would cause overflow in mask calculations", m.BucketCount)
+	}
+	
 	m.BucketCount++
+	
+	// MED-011: Check for overflow in mask calculations after increment
+	if m.BucketCount > constants.MaxUint32Safe {
+		// Rollback increment
+		m.BucketCount--
+		return fmt.Errorf("bucket count %d would cause overflow in mask calculations", m.BucketCount+1)
+	}
+	
 	m.MaxBucket = m.BucketCount - 1
 	m.HighMask = m.BucketCount - 1
 	m.LowMask = (m.BucketCount >> 1) - 1
@@ -448,6 +474,7 @@ func (m *HashIndexMetadata) UpdateMasksForSplit() {
 	}
 
 	m.LastModified = time.Now()
+	return nil
 }
 
 // BINARY SERIALIZATION METHODS

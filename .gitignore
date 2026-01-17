@@ -10,7 +10,7 @@ src/log_files
 src/.DS_STORE
 src/cmd/tests/temp_files
 src/cmd/tests/bin
-src/cmd/test/data
+src/cmd/tests/data
 
 temp_files/*
 
@@ -25,3 +25,6 @@ bin/tests/log_files
 
 .VSCodeCounter
 .cursor
+trace_test.sh
+TRACE_ANALYSIS_GUIDE.md
+run_fsync_benchmarks.sh

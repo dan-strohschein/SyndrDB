@@ -366,8 +366,10 @@ func (hi *HashIndex) Insert(key, value string) error {
 	}
 
 	// Update metadata
-	hi.metadata.TotalRecords++
-	hi.metadata.LastModified = time.Now()
+	// MED-011: Added overflow protection for total records increment
+	if err := hi.metadata.IncrementRecordCount(); err != nil {
+		return fmt.Errorf("failed to increment record count: %w", err)
+	}
 
 	// PERFORMANCE FIX: Only check for split periodically, not on every insert
 	// Check split condition every 100 documents to avoid O(n) cost per insert

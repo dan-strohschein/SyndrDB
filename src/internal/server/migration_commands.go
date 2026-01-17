@@ -8,6 +8,8 @@ import (
 	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/constants"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -46,11 +48,13 @@ TODO: Implement approval token validation for APPLY ROLLBACK
 // Parses migration definition, creates migration record in PENDING status
 func StartMigrationCommand(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (interface{}, error) {
 	if serviceManager.MigrationService == nil {
-		return nil, fmt.Errorf("migration service not initialized")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"migration service not initialized", errors.LayerCommand)
 	}
 
 	if database == nil {
-		return nil, fmt.Errorf("no active database selected. Use 'USE DATABASE \"name\"' first")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no active database selected. Use 'USE DATABASE \"name\"' first", errors.LayerCommand)
 	}
 
 	logger.Infof("Executing START MIGRATION command for database '%s'", database.Name)
@@ -65,8 +69,10 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 		description = matches[1]
 
 		// Validate description length (500 char limit)
-		if len(description) > 500 {
-			return nil, fmt.Errorf("description exceeds 500 character limit: %d chars", len(description))
+		if len(description) > constants.DescriptionMaxLength {
+			return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+				fmt.Sprintf("description exceeds %d character limit: %d chars", constants.DescriptionMaxLength, len(description)),
+				errors.LayerCommand).WithContext("max_length", fmt.Sprintf("%d", constants.DescriptionMaxLength)).WithContext("actual_length", fmt.Sprintf("%d", len(description)))
 		}
 	}
 
@@ -83,7 +89,8 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 	commandBody = strings.TrimSpace(commandBody)
 
 	if commandBody == "" {
-		return nil, fmt.Errorf("migration must contain at least one command")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"migration must contain at least one command", errors.LayerCommand)
 	}
 
 	// Split commands by semicolon, respecting quoted strings
@@ -97,7 +104,8 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 	}
 
 	if len(cleanCommands) == 0 {
-		return nil, fmt.Errorf("migration must contain at least one command")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"migration must contain at least one command", errors.LayerCommand)
 	}
 
 	// Create MigrationCommand struct
@@ -113,14 +121,15 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 	migrationResult, err := serviceManager.MigrationService.CreateMigration(migrationCmd)
 	if err != nil {
 		logger.Errorf("Failed to create migration: %v", err)
-		return nil, fmt.Errorf("failed to create migration: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", database.Name)
 	}
 
 	// Type assert to get the migration details
 	mig, ok := migrationResult.(*migration.Migration)
 	if !ok {
 		logger.Errorf("Unexpected migration result type: %T", migrationResult)
-		return nil, fmt.Errorf("unexpected migration result type")
+		return nil, errors.New(errors.ERR_INTERNAL,
+			"unexpected migration result type", errors.LayerCommand).WithContext("type", fmt.Sprintf("%T", migrationResult))
 	}
 
 	logger.Infof("Migration created successfully for database '%s'", database.Name)
@@ -137,11 +146,13 @@ func StartMigrationCommand(command string, database *models.Database, logger *za
 // Executes pending migration with optional FORCE flag to override warnings
 func ApplyMigrationCommand(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (interface{}, error) {
 	if serviceManager.MigrationService == nil {
-		return nil, fmt.Errorf("migration service not initialized")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"migration service not initialized", errors.LayerCommand)
 	}
 
 	if database == nil {
-		return nil, fmt.Errorf("no active database selected. Use 'USE DATABASE \"name\"' first")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no active database selected. Use 'USE DATABASE \"name\"' first", errors.LayerCommand)
 	}
 
 	logger.Infof("Executing APPLY MIGRATION command for database '%s'", database.Name)
@@ -151,12 +162,15 @@ func ApplyMigrationCommand(command string, database *models.Database, logger *za
 	versionPattern := regexp.MustCompile(`(?i)WITH\s+VERSION\s+(\d+)`)
 	matches := versionPattern.FindStringSubmatch(command)
 	if len(matches) < 2 {
-		return nil, fmt.Errorf("invalid APPLY MIGRATION syntax. Expected: APPLY MIGRATION WITH VERSION <number> [FORCE]")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid APPLY MIGRATION syntax. Expected: APPLY MIGRATION WITH VERSION <number> [FORCE]",
+			errors.LayerCommand)
 	}
 
 	version, err := strconv.Atoi(matches[1])
 	if err != nil {
-		return nil, fmt.Errorf("invalid version number: %v", err)
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("invalid version number: %v", err), errors.LayerCommand).WithContext("version_string", matches[1])
 	}
 
 	// Check for FORCE flag
@@ -166,7 +180,7 @@ func ApplyMigrationCommand(command string, database *models.Database, logger *za
 	err = serviceManager.MigrationService.ApplyMigration(database.Name, version, force)
 	if err != nil {
 		logger.Errorf("Failed to apply migration: %v", err)
-		return nil, fmt.Errorf("failed to apply migration: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", database.Name).WithContext("version", fmt.Sprintf("%d", version))
 	}
 
 	logger.Infof("Migration version %d applied successfully for database '%s'", version, database.Name)
@@ -182,11 +196,13 @@ func ApplyMigrationCommand(command string, database *models.Database, logger *za
 // Reverts database to specified version with strict ordering enforcement
 func ApplyRollbackCommand(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (interface{}, error) {
 	if serviceManager.MigrationService == nil {
-		return nil, fmt.Errorf("migration service not initialized")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"migration service not initialized", errors.LayerCommand)
 	}
 
 	if database == nil {
-		return nil, fmt.Errorf("no active database selected. Use 'USE DATABASE \"name\"' first")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no active database selected. Use 'USE DATABASE \"name\"' first", errors.LayerCommand)
 	}
 
 	logger.Infof("Executing APPLY ROLLBACK command for database '%s'", database.Name)
@@ -196,12 +212,15 @@ func ApplyRollbackCommand(command string, database *models.Database, logger *zap
 	versionPattern := regexp.MustCompile(`(?i)TO\s+VERSION\s+(\d+)`)
 	matches := versionPattern.FindStringSubmatch(command)
 	if len(matches) < 2 {
-		return nil, fmt.Errorf("invalid APPLY ROLLBACK syntax. Expected: APPLY ROLLBACK TO VERSION <number>")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid APPLY ROLLBACK syntax. Expected: APPLY ROLLBACK TO VERSION <number>",
+			errors.LayerCommand)
 	}
 
 	targetVersion, err := strconv.Atoi(matches[1])
 	if err != nil {
-		return nil, fmt.Errorf("invalid version number: %v", err)
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("invalid version number: %v", err), errors.LayerCommand).WithContext("version_string", matches[1])
 	}
 
 	// TODO: Check for approval token when approval workflow is implemented
@@ -211,7 +230,7 @@ func ApplyRollbackCommand(command string, database *models.Database, logger *zap
 	err = serviceManager.MigrationService.RollbackToVersion(database.Name, targetVersion)
 	if err != nil {
 		logger.Errorf("Failed to rollback to version %d: %v", targetVersion, err)
-		return nil, fmt.Errorf("failed to rollback: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", database.Name).WithContext("target_version", fmt.Sprintf("%d", targetVersion))
 	}
 
 	logger.Infof("Database '%s' rolled back to version %d successfully", database.Name, targetVersion)
@@ -226,11 +245,13 @@ func ApplyRollbackCommand(command string, database *models.Database, logger *zap
 // Runs 5-phase validation pipeline without executing migration
 func ValidateMigrationCommand(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (interface{}, error) {
 	if serviceManager.MigrationService == nil {
-		return nil, fmt.Errorf("migration service not initialized")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"migration service not initialized", errors.LayerCommand)
 	}
 
 	if database == nil {
-		return nil, fmt.Errorf("no active database selected. Use 'USE DATABASE \"name\"' first")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no active database selected. Use 'USE DATABASE \"name\"' first", errors.LayerCommand)
 	}
 
 	logger.Infof("Executing VALIDATE MIGRATION command for database '%s'", database.Name)
@@ -240,19 +261,22 @@ func ValidateMigrationCommand(command string, database *models.Database, logger 
 	versionPattern := regexp.MustCompile(`(?i)WITH\s+VERSION\s+(\d+)`)
 	matches := versionPattern.FindStringSubmatch(command)
 	if len(matches) < 2 {
-		return nil, fmt.Errorf("invalid VALIDATE MIGRATION syntax. Expected: VALIDATE MIGRATION WITH VERSION <number>")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid VALIDATE MIGRATION syntax. Expected: VALIDATE MIGRATION WITH VERSION <number>",
+			errors.LayerCommand)
 	}
 
 	version, err := strconv.Atoi(matches[1])
 	if err != nil {
-		return nil, fmt.Errorf("invalid version number: %v", err)
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("invalid version number: %v", err), errors.LayerCommand).WithContext("version_string", matches[1])
 	}
 
 	// Delegate to migration service
 	report, err := serviceManager.MigrationService.ValidateMigration(database.Name, version, "system") // TODO: Get user from session
 	if err != nil {
 		logger.Errorf("Failed to validate migration: %v", err)
-		return nil, fmt.Errorf("failed to validate migration: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", database.Name).WithContext("version", fmt.Sprintf("%d", version))
 	}
 
 	logger.Infof("Migration version %d validated for database '%s'", version, database.Name)
@@ -267,11 +291,13 @@ func ValidateMigrationCommand(command string, database *models.Database, logger 
 // Simulates rollback execution to verify safety without applying changes
 func ValidateRollbackCommand(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (interface{}, error) {
 	if serviceManager.MigrationService == nil {
-		return nil, fmt.Errorf("migration service not initialized")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"migration service not initialized", errors.LayerCommand)
 	}
 
 	if database == nil {
-		return nil, fmt.Errorf("no active database selected. Use 'USE DATABASE \"name\"' first")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no active database selected. Use 'USE DATABASE \"name\"' first", errors.LayerCommand)
 	}
 
 	logger.Infof("Executing VALIDATE ROLLBACK command for database '%s'", database.Name)
@@ -281,19 +307,22 @@ func ValidateRollbackCommand(command string, database *models.Database, logger *
 	versionPattern := regexp.MustCompile(`(?i)TO\s+VERSION\s+(\d+)`)
 	matches := versionPattern.FindStringSubmatch(command)
 	if len(matches) < 2 {
-		return nil, fmt.Errorf("invalid VALIDATE ROLLBACK syntax. Expected: VALIDATE ROLLBACK TO VERSION <number>")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid VALIDATE ROLLBACK syntax. Expected: VALIDATE ROLLBACK TO VERSION <number>",
+			errors.LayerCommand)
 	}
 
 	targetVersion, err := strconv.Atoi(matches[1])
 	if err != nil {
-		return nil, fmt.Errorf("invalid version number: %v", err)
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("invalid version number: %v", err), errors.LayerCommand).WithContext("version_string", matches[1])
 	}
 
 	// Delegate to migration service
 	report, err := serviceManager.MigrationService.ValidateRollback(database.Name, targetVersion, "system") // TODO: Get user from session
 	if err != nil {
 		logger.Errorf("Failed to validate rollback: %v", err)
-		return nil, fmt.Errorf("failed to validate rollback: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", database.Name).WithContext("target_version", fmt.Sprintf("%d", targetVersion))
 	}
 
 	logger.Infof("Rollback to version %d validated for database '%s'", targetVersion, database.Name)
@@ -309,20 +338,24 @@ func ValidateRollbackCommand(command string, database *models.Database, logger *
 // Lists migrations with per-database isolation
 func ShowMigrationsCommand(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (interface{}, error) {
 	if serviceManager.MigrationService == nil {
-		return nil, fmt.Errorf("migration service not initialized")
+		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+			"migration service not initialized", errors.LayerCommand)
 	}
 
 	if database == nil {
-		return nil, fmt.Errorf("no active database selected. Use 'USE DATABASE \"name\"' first")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"no active database selected. Use 'USE DATABASE \"name\"' first", errors.LayerCommand)
 	}
 
 	parser, err := syndrQL.NewShowMigrationsParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create SHOW MIGRATIONS parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create SHOW MIGRATIONS parser", errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse SHOW MIGRATIONS command: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to parse SHOW MIGRATIONS command", errors.LayerParser)
 	}
 
 	dbName := stmt.DatabaseName
@@ -350,7 +383,7 @@ func ShowMigrationsCommand(command string, database *models.Database, logger *za
 	migrations, err := serviceManager.MigrationService.ListMigrations(dbName, filters)
 	if err != nil {
 		logger.Errorf("Failed to list migrations: %v", err)
-		return nil, fmt.Errorf("failed to list migrations: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
 	// Get current version for context

@@ -17,6 +17,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/constants"
 
 	"go.uber.org/zap"
 	//"syndrdb/src/engine"
@@ -26,7 +27,7 @@ import (
 var stringBuilderPool = sync.Pool{
 	New: func() interface{} {
 		sb := &strings.Builder{}
-		sb.Grow(128) // Pre-allocate for typical token size
+		sb.Grow(constants.BufferSizeSmall) // Pre-allocate for typical token size
 		return sb
 	},
 }
@@ -38,7 +39,7 @@ func getStringBuilder() *strings.Builder {
 }
 
 func putStringBuilder(sb *strings.Builder) {
-	if sb.Cap() <= 4096 { // Only pool up to 4KB
+	if sb.Cap() <= constants.BufferSizeDefault { // Only pool up to 4KB
 		stringBuilderPool.Put(sb)
 	}
 }

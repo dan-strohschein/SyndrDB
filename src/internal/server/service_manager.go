@@ -117,7 +117,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		permissionService := NewPermissionService(bundleService, dbService, nil, logger, debugMode) // Initialize Lock service
 		lockService := lock.NewLockService(logger.Desugar())
 
-		// Initialize transaction lock manager
+		// Initialize transaction lock manager (HIGH-007: uses configurable timeout from settings)
 		lockManager := storage.NewLockManager(logger)
 
 		// STEP 2: Initialize unified query planner with plan caching

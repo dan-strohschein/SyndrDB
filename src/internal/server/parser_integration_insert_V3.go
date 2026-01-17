@@ -1,11 +1,10 @@
 package server
 
 import (
-	"fmt"
-
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -16,20 +15,38 @@ func parseAddDocumentWithNewParser(command string, logger *zap.SugaredLogger) (*
 	// Create INSERT parser
 	parser, err := syndrQL.NewInsertParser(command)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create insert parser: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create insert parser", errors.LayerParser)
 	}
 
 	// Parse the ADD DOCUMENT statement
 	insertStmt, err := parser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse ADD DOCUMENT statement: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
+	}
+
+	// MED-003: Validate field names and values length limits
+	securityConfig := DefaultSecurityConfig()
+	for fieldName, fieldValue := range insertStmt.Fields {
+		// Validate field name length
+		if err := ValidateFieldName(fieldName, securityConfig); err != nil {
+			return nil, err
+		}
+		// Validate field value length
+		if err := ValidateFieldValue(fieldValue, securityConfig); err != nil {
+			// Add field name context to error
+			if sdbErr, ok := err.(errors.SyndrDBError); ok {
+				return nil, sdbErr.WithContext("field_name", fieldName)
+			}
+			return nil, err
+		}
 	}
 
 	// Convert to DocumentCommand using adapter
 	adapter := syndrQL.NewInsertStatementAdapter(logger)
 	docCommand, err := adapter.ToDocumentCommand(insertStmt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert InsertStatement to DocumentCommand: %w", err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	return docCommand, nil
@@ -58,7 +75,7 @@ func parseAddDocument(command string, logger *zap.SugaredLogger) (*models.Docume
 
 		// // Fallback to legacy parser
 		// return bndle.ParseAddDocumentCommand(command, logger)
-		return nil, fmt.Errorf(" ADD DOCUMENT %s parser failed: %w", command, err)
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
 	}
 
 	// Record success

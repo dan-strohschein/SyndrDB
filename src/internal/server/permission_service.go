@@ -7,6 +7,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -78,13 +79,13 @@ func (ps *PermissionService) isSystemRole(roleName string) error {
 	// Get primary database
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		return fmt.Errorf("primary database not found: %w", err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get Roles bundle
 	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
 	if err != nil {
-		return fmt.Errorf("Roles bundle not found: %w", err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
 	}
 
 	// Find role document by name (case-insensitive)
@@ -97,7 +98,9 @@ func (ps *PermissionService) isSystemRole(roleName string) error {
 					// Check IsSystem field
 					if isSystemField, ok := doc.Fields["IsSystem"]; ok {
 						if isSystem, ok := isSystemField.Value.AsBool(); ok && isSystem {
-							return fmt.Errorf("Cannot modify system role '%s'", roleName)
+							return errors.New(errors.ERR_PERMISSION_DENIED,
+								fmt.Sprintf("Cannot modify system role '%s'", roleName),
+								errors.LayerAuth).WithContext("role", roleName)
 						}
 					}
 					// Role found but not a system role
@@ -128,19 +131,13 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	// Get primary database
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
-		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get Users bundle
 	usersBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("Users bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: user storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
 	// Find user (case-insensitive)
@@ -161,25 +158,21 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	}
 
 	if !found {
-		if ps.debugMode {
-			return fmt.Errorf("user '%s' not found", username)
-		}
-		return fmt.Errorf("user not found")
+		return errors.New(errors.ERR_NOT_FOUND_USER,
+			fmt.Sprintf("user '%s' not found", username),
+			errors.LayerAuth).WithContext("username", username)
 	}
 
 	// Get or create permission
 	permissionID, err := ps.GetOrCreatePermission(permissionName)
 	if err != nil {
-		return fmt.Errorf("failed to get/create permission: %w", err)
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("permission", permissionName)
 	}
 
 	// Get UserPermissions bundle
 	userPermissionsBundle, err := ps.bundleService.GetBundleByName(primaryDB, "UserPermissions")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("UserPermissions bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: permission storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserPermissions")
 	}
 
 	// Check if permission already granted (prevent duplicates)
@@ -190,10 +183,9 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 					str1, ok1 := userIDField.Value.AsString()
 					str2, ok2 := permIDField.Value.AsString()
 					if ok1 && ok2 && str1 == userID && str2 == permissionID {
-						if ps.debugMode {
-							return fmt.Errorf("user '%s' already has permission '%s'", username, permissionName)
-						}
-						return fmt.Errorf("permission already granted")
+						return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+							fmt.Sprintf("user '%s' already has permission '%s'", username, permissionName),
+							errors.LayerCommand).WithContext("username", username).WithContext("permission", permissionName)
 					}
 				}
 			}
@@ -228,10 +220,7 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	// Add to UserPermissions bundle
 	err = ps.bundleService.AddDocumentToBundleByStruct(primaryDB, userPermissionsBundle, userPermDoc)
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("failed to add permission grant to bundle: %w", err)
-		}
-		return fmt.Errorf("internal error: permission grant failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("username", username).WithContext("permission", permissionName)
 	}
 
 	ps.logger.Infof("Permission '%s' granted to user '%s'", permissionName, username)
@@ -267,19 +256,13 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	// Get primary database
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
-		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get Users bundle
 	usersBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("Users bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: user storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
 	// Find user (case-insensitive)
@@ -300,28 +283,21 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	}
 
 	if !found {
-		if ps.debugMode {
-			return fmt.Errorf("user '%s' not found", username)
-		}
-		return fmt.Errorf("user not found")
+		return errors.New(errors.ERR_NOT_FOUND_USER,
+			fmt.Sprintf("user '%s' not found", username),
+			errors.LayerAuth).WithContext("username", username)
 	}
 
 	// Get role
 	roleID, err := ps.getRoleID(roleName)
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("role '%s' not found: %w", roleName, err)
-		}
-		return fmt.Errorf("role not found")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("role", roleName)
 	}
 
 	// Get UserRoles bundle
 	userRolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "UserRoles")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("UserRoles bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: role storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserRoles")
 	}
 
 	// Check if role already granted (prevent duplicates)
@@ -332,10 +308,9 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 					str1, ok1 := userIDField.Value.AsString()
 					str2, ok2 := roleIDField.Value.AsString()
 					if ok1 && ok2 && str1 == userID && str2 == roleID {
-						if ps.debugMode {
-							return fmt.Errorf("user '%s' already has role '%s'", username, roleName)
-						}
-						return fmt.Errorf("role already granted")
+						return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+							fmt.Sprintf("user '%s' already has role '%s'", username, roleName),
+							errors.LayerCommand).WithContext("username", username).WithContext("role", roleName)
 					}
 				}
 			}
@@ -366,10 +341,7 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	// Add to UserRoles bundle
 	err = ps.bundleService.AddDocumentToBundleByStruct(primaryDB, userRolesBundle, userRoleDoc)
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("failed to add role grant to bundle: %w", err)
-		}
-		return fmt.Errorf("internal error: role grant failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("username", username).WithContext("role", roleName)
 	}
 
 	ps.logger.Infof("Role '%s' granted to user '%s'", roleName, username)
@@ -403,10 +375,7 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 	// Get primary database
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
-		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get user ID
@@ -418,19 +387,13 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 	// Get permission ID
 	permissionID, err := ps.getPermissionID(permissionName)
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("permission '%s' not found: %w", permissionName, err)
-		}
-		return fmt.Errorf("permission not found")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("permission", permissionName)
 	}
 
 	// Get UserPermissions bundle
 	userPermissionsBundle, err := ps.bundleService.GetBundleByName(primaryDB, "UserPermissions")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("UserPermissions bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: permission storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserPermissions")
 	}
 
 	// Find and remove the UserPermission document
@@ -452,10 +415,9 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 	}
 
 	if !found {
-		if ps.debugMode {
-			return fmt.Errorf("user '%s' does not have permission '%s'", username, permissionName)
-		}
-		return fmt.Errorf("permission not granted to user")
+		return errors.New(errors.ERR_NOT_FOUND_INDEX,
+			fmt.Sprintf("user '%s' does not have permission '%s'", username, permissionName),
+			errors.LayerCommand).WithContext("username", username).WithContext("permission", permissionName)
 	}
 
 	ps.logger.Infof("Permission '%s' revoked from user '%s'", permissionName, username)
@@ -487,10 +449,7 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 	// Get primary database
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
-		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get user ID
@@ -502,19 +461,13 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 	// Get role ID
 	roleID, err := ps.getRoleID(roleName)
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("role '%s' not found: %w", roleName, err)
-		}
-		return fmt.Errorf("role not found")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("role", roleName)
 	}
 
 	// Get UserRoles bundle
 	userRolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "UserRoles")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("UserRoles bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: role storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserRoles")
 	}
 
 	// Find and remove the UserRole document
@@ -536,10 +489,9 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 	}
 
 	if !found {
-		if ps.debugMode {
-			return fmt.Errorf("user '%s' does not have role '%s'", username, roleName)
-		}
-		return fmt.Errorf("role not granted to user")
+		return errors.New(errors.ERR_NOT_FOUND_INDEX,
+			fmt.Sprintf("user '%s' does not have role '%s'", username, roleName),
+			errors.LayerCommand).WithContext("username", username).WithContext("role", roleName)
 	}
 
 	ps.logger.Infof("Role '%s' revoked from user '%s'", roleName, username)
@@ -574,18 +526,18 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("primary database not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: database access failed")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	// Get Permissions bundle
 	permissionsBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Permissions")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("Permissions bundle not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE, "Permissions bundle not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: permission storage not available")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission storage not available", errors.LayerCommand)
 	}
 
 	// Try to find existing permission
@@ -627,9 +579,9 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 	err = ps.bundleService.AddDocumentToBundleByStruct(primaryDB, permissionsBundle, permDoc)
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("failed to create permission: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, "failed to create permission", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: permission creation failed")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission creation failed", errors.LayerCommand)
 	}
 
 	ps.logger.Infof("Created new permission: %s", permissionName)
@@ -666,9 +618,9 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if ps.debugMode {
-			return false, fmt.Errorf("primary database not found: %w", err)
+			return false, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return false, fmt.Errorf("internal error: database access failed")
+		return false, errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	// Check direct permissions in UserPermissions bundle
@@ -751,17 +703,17 @@ func (ps *PermissionService) getUserID(username string) (string, error) {
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("primary database not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: database access failed")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	usersBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Users")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("Users bundle not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE, "Users bundle not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: user storage not available")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: user storage not available", errors.LayerCommand)
 	}
 
 	if usersBundle.Documents != nil {
@@ -778,9 +730,9 @@ func (ps *PermissionService) getUserID(username string) (string, error) {
 	}
 
 	if ps.debugMode {
-		return "", fmt.Errorf("user '%s' not found", username)
+		return "", errors.New(errors.ERR_NOT_FOUND_USER, fmt.Sprintf("user '%s' not found", username), errors.LayerCommand).WithContext("username", username)
 	}
-	return "", fmt.Errorf("user not found")
+	return "", errors.New(errors.ERR_NOT_FOUND_USER, "user not found", errors.LayerCommand)
 }
 
 // Helper function to get RoleID by role name
@@ -788,17 +740,17 @@ func (ps *PermissionService) getRoleID(roleName string) (string, error) {
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("primary database not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: database access failed")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("Roles bundle not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE, "Roles bundle not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: role storage not available")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: role storage not available", errors.LayerCommand)
 	}
 
 	if rolesBundle.Documents != nil {
@@ -814,7 +766,9 @@ func (ps *PermissionService) getRoleID(roleName string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("role not found")
+	return "", errors.New(errors.ERR_NOT_FOUND_INDEX,
+		fmt.Sprintf("role '%s' not found", roleName),
+		errors.LayerCommand).WithContext("role", roleName)
 }
 
 // Helper function to get PermissionID by permission name
@@ -822,17 +776,17 @@ func (ps *PermissionService) getPermissionID(permissionName string) (string, err
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("primary database not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: database access failed")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	permissionsBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Permissions")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("Permissions bundle not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE, "Permissions bundle not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: permission storage not available")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission storage not available", errors.LayerCommand)
 	}
 
 	if permissionsBundle.Documents != nil {
@@ -848,7 +802,9 @@ func (ps *PermissionService) getPermissionID(permissionName string) (string, err
 		}
 	}
 
-	return "", fmt.Errorf("permission not found")
+	return "", errors.New(errors.ERR_NOT_FOUND_INDEX,
+		fmt.Sprintf("permission '%s' not found", permissionName),
+		errors.LayerCommand).WithContext("permission", permissionName)
 }
 
 // CreateRole creates a new role in the primary database Roles bundle
@@ -870,18 +826,18 @@ func (ps *PermissionService) CreateRole(roleName, description string) (string, e
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("primary database not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, "primary database not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: database access failed")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: database access failed", errors.LayerCommand)
 	}
 
 	// Get Roles bundle
 	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
 	if err != nil {
 		if ps.debugMode {
-			return "", fmt.Errorf("Roles bundle not found: %w", err)
+			return "", errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE, "Roles bundle not found", errors.LayerCommand)
 		}
-		return "", fmt.Errorf("internal error: role storage not available")
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: role storage not available", errors.LayerCommand)
 	}
 
 	// Check if role already exists (case-insensitive)
@@ -890,9 +846,9 @@ func (ps *PermissionService) CreateRole(roleName, description string) (string, e
 			if nameField, ok := doc.Fields["Name"]; ok {
 				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, roleName) {
 					if ps.debugMode {
-						return "", fmt.Errorf("role '%s' already exists", roleName)
+						return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT, fmt.Sprintf("role '%s' already exists", roleName), errors.LayerCommand).WithContext("role", roleName)
 					}
-					return "", fmt.Errorf("role already exists")
+					return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT, "role already exists", errors.LayerCommand)
 				}
 			}
 		}
@@ -962,19 +918,13 @@ func (ps *PermissionService) UpdateRole(roleName string, updates map[string]stri
 	// Get primary database
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
-		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get Roles bundle
 	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("Roles bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: role storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
 	}
 
 	// Find role document (case-insensitive)
@@ -994,10 +944,9 @@ func (ps *PermissionService) UpdateRole(roleName string, updates map[string]stri
 	}
 
 	if targetDocID == "" {
-		if ps.debugMode {
-			return fmt.Errorf("role '%s' not found", roleName)
-		}
-		return fmt.Errorf("role not found")
+		return errors.New(errors.ERR_NOT_FOUND_INDEX,
+			fmt.Sprintf("role '%s' not found", roleName),
+			errors.LayerCommand).WithContext("role", roleName)
 	}
 
 	// Check for active sessions of users with this role if not forcing
@@ -1013,8 +962,10 @@ func (ps *PermissionService) UpdateRole(roleName string, updates map[string]stri
 				totalSessions += len(sessions)
 			}
 			if totalSessions > 0 {
-				return fmt.Errorf("role '%s' is assigned to users with %d active session(s). Use FORCE to terminate sessions and proceed",
-					roleName, totalSessions)
+				return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("role '%s' is assigned to users with %d active session(s). Use FORCE to terminate sessions and proceed",
+						roleName, totalSessions),
+					errors.LayerCommand).WithContext("role", roleName).WithContext("session_count", fmt.Sprintf("%d", totalSessions))
 			}
 		}
 	}
@@ -1088,19 +1039,13 @@ func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
 	// Get primary database
 	primaryDB, err := ps.databaseService.GetDatabaseByName("primary")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("primary database not found: %w", err)
-		}
-		return fmt.Errorf("internal error: database access failed")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("database", "primary")
 	}
 
 	// Get Roles bundle
 	rolesBundle, err := ps.bundleService.GetBundleByName(primaryDB, "Roles")
 	if err != nil {
-		if ps.debugMode {
-			return fmt.Errorf("Roles bundle not found: %w", err)
-		}
-		return fmt.Errorf("internal error: role storage not available")
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
 	}
 
 	// Find role document (case-insensitive)
@@ -1127,10 +1072,9 @@ func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
 	}
 
 	if targetDocID == "" {
-		if ps.debugMode {
-			return fmt.Errorf("role '%s' not found", roleName)
-		}
-		return fmt.Errorf("role not found")
+		return errors.New(errors.ERR_NOT_FOUND_INDEX,
+			fmt.Sprintf("role '%s' not found", roleName),
+			errors.LayerCommand).WithContext("role", roleName)
 	}
 
 	// Check for active sessions of users with this role if not forcing
@@ -1144,8 +1088,10 @@ func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
 				totalSessions += len(sessions)
 			}
 			if totalSessions > 0 {
-				return fmt.Errorf("role '%s' is assigned to users with %d active session(s). Use FORCE to terminate sessions and proceed",
-					roleName, totalSessions)
+				return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("role '%s' is assigned to users with %d active session(s). Use FORCE to terminate sessions and proceed",
+						roleName, totalSessions),
+					errors.LayerCommand).WithContext("role", roleName).WithContext("session_count", fmt.Sprintf("%d", totalSessions))
 			}
 		}
 	}

@@ -326,9 +326,10 @@ func (wc *WriteCoordinator) performCheckpoint() {
 
 	// Log checkpoint complete to WAL
 	if wc.wal != nil {
-		wc.wal.mutex.Lock()
 		// TODO: I will log OpCheckpointComplete marker to WAL stream in next step
-		wc.wal.mutex.Unlock()
+		// wc.wal.mutex.Lock()
+		// - Thie is where the WAL opCheckpointCOmplete marker will be set to the WAL
+		// wc.wal.mutex.Unlock()
 	}
 
 	wc.mutex.Lock()

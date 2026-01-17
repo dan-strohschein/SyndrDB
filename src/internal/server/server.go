@@ -35,6 +35,8 @@ import (
 	"syndrdb/src/internal/storage/databasestore"
 
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/constants"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
 	"time"
@@ -69,6 +71,7 @@ type Server struct {
 	Running               bool
 	databaseService       *database.DatabaseService
 	logger                *zap.SugaredLogger
+	errorLogger           *errors.ErrorLogger           // MED-004: Error framework logger
 	bufferPool            *buffer.BufferPool
 	wg                    sync.WaitGroup                // WaitGroup for tracking active connections
 	activeQueryCount      atomic.Uint64                 // Number of currently executing queries (for ghost cleanup pausing)
@@ -142,7 +145,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize logger: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+			"failed to initialize logger", errors.LayerAPI)
 	}
 
 	// Create a sugared logger for easier API
@@ -151,10 +155,37 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	// Replace standard log with zap
 	zap.ReplaceGlobals(logger)
 
+	// Initialize error logger (MED-004)
+	errorLoggerConfig := &errors.ErrorLoggerConfig{
+		InternalLogFile: config.ErrorInternalLogFile,
+		ExternalLogFile: config.ErrorExternalLogFile,
+		LogDir:          config.LogDir,
+		DebugMode:       config.Debug && config.ErrorShowInConsole,
+		IncludeStack:    config.ErrorIncludeStack,
+	}
+	
+	// Set defaults if not configured
+	if errorLoggerConfig.InternalLogFile == "" {
+		errorLoggerConfig.InternalLogFile = "errors_internal.log"
+	}
+	if errorLoggerConfig.ExternalLogFile == "" {
+		errorLoggerConfig.ExternalLogFile = "errors_external.log"
+	}
+	if !config.Debug {
+		errorLoggerConfig.DebugMode = false // Always false in production
+	}
+
+	errorLogger, err := errors.NewErrorLogger(errorLoggerConfig)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+			"failed to initialize error logger", errors.LayerAPI)
+	}
+
 	// Create database storage
 	databaseStore, err := databasestore.NewDatabaseStore(config.DataDir, logger.Sugar())
 	if err != nil {
-		return nil, fmt.Errorf("failed to create database store: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+			"failed to create database store", errors.LayerAPI).WithContext("data_dir", config.DataDir)
 	}
 	databaseFactory := database.NewDatabaseFactory()
 
@@ -164,7 +195,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	// Create the File Registry
 	fileRegistry, err := buffer.NewFileRegistry(config.DataDir, buffer.SyncInterval, logger.Sugar())
 	if err != nil {
-		return nil, fmt.Errorf("failed to create file registry: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+			"failed to create file registry", errors.LayerAPI).WithContext("data_dir", config.DataDir)
 	}
 
 	// Create buffer pool
@@ -173,7 +205,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	// Create bundle service
 	bundleStore, err := bundlestore.NewBundleStore(config.DataDir, bufferPool, logger.Sugar(), config.BundleStorageFormat)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create bundle store: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+			"failed to create bundle store", errors.LayerAPI).WithContext("data_dir", config.DataDir)
 	}
 	bundleFactory := bundle.NewBundleFactory()
 	documentFactory := document.NewDocumentFactory()
@@ -212,6 +245,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		ConnectionIdleTimeout: time.Duration(config.ConnectionIdleTimeoutMinutes) * time.Minute,
 		databaseService:       databaseService,
 		logger:                sugar,
+		errorLogger:           errorLogger,
 		bufferPool:            bufferPool,
 		ServiceManager:        serviceManager,
 	}
@@ -282,7 +316,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		// Create SecurityAuditor for comprehensive security event logging
 		auditor, err := audit.NewSecurityAuditor(auditConfig, sugar)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize security auditor: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+				"failed to initialize security auditor", errors.LayerAPI)
 		}
 
 		// Create auth rate limiting config
@@ -300,7 +335,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 			auditor,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize user store: %w", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+				"failed to initialize user store", errors.LayerAPI).WithContext("path", userStorePath)
 		}
 
 		server.UserStore = userStore
@@ -513,7 +549,8 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		MetricsReporter: metricsReporter,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create compaction manager: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+			"failed to create compaction manager", errors.LayerAPI)
 	}
 
 	// Initialize ghost cleanup worker if enabled in configuration
@@ -569,7 +606,8 @@ func (s *Server) Start() error {
 		// Start TLS server
 		listener, err = tls.Listen("tcp", addr, s.TLSConfig)
 		if err != nil {
-			return fmt.Errorf("error starting TLS server on %s: %w", addr, err)
+			return errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+				fmt.Sprintf("error starting TLS server on %s", addr), errors.LayerAPI).WithContext("address", addr)
 		}
 		log.Printf("SyndrDB TLS server listening on %s", addr)
 		s.logger.Infof("Server started with TLS encryption on %s", addr)
@@ -577,7 +615,8 @@ func (s *Server) Start() error {
 		// Start regular TCP server
 		listener, err = net.Listen("tcp", addr)
 		if err != nil {
-			return fmt.Errorf("error starting TCP server on %s: %w", addr, err)
+			return errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
+				fmt.Sprintf("error starting TCP server on %s", addr), errors.LayerAPI).WithContext("address", addr)
 		}
 		log.Printf("SyndrDB TCP server listening on %s", addr)
 		s.logger.Warnf("Server started WITHOUT encryption on %s - consider enabling TLS", addr)
@@ -780,14 +819,14 @@ func (s *Server) authenticateWithIP(username, password, clientIP string) error {
 			return err
 		}
 		if !isValid {
-			return fmt.Errorf("invalid credentials")
+			return errors.New(errors.ERR_AUTH_FAILED, "invalid credentials", errors.LayerAuth)
 		}
 		return nil
 	}
 
 	// Fallback to legacy authentication (no rate limiting)
 	if !s.authenticate(username, password) {
-		return fmt.Errorf("authentication failed")
+		return errors.New(errors.ERR_AUTH_FAILED, "authentication failed", errors.LayerAuth)
 	}
 	return nil
 }
@@ -912,7 +951,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		defer close(dataCh)
 		defer close(errCh)
 
-		buffer := make([]byte, 4096)
+		buffer := make([]byte, constants.BufferSizeDefault)
 		var partialData string // For storing incomplete data between reads
 
 		for {
@@ -1018,7 +1057,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				if err != nil {
 					connLogger.Errorw("Error parsing connection string", "error", err, "input", line)
 					connLogger.Sync()
-					sendError(writer, fmt.Sprintf("Invalid connection string: %v", err))
+					s.sendError(writer, errors.Wrap(err, errors.ERR_VALIDATION_SYNTAX, errors.LayerAPI).WithContext("input", line))
 					// Give TCP stack time to send the data
 					time.Sleep(100 * time.Millisecond)
 
@@ -1046,11 +1085,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 				//if !strings.EqualFold(connStr.Database, "primary") {
 				db, err := s.databaseService.GetDatabaseByName(connStr.Database)
 				if err != nil {
-					sendError(writer, fmt.Sprintf("encountered error while looking for Database %s: %v", connStr.Database, err))
+					s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", connStr.Database), errors.LayerAPI))
 					return
 				}
 				if db == nil {
-					sendError(writer, fmt.Sprintf("Database %s does not exist", connStr.Database))
+					s.sendError(writer, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' does not exist", connStr.Database), errors.LayerAPI))
 					return
 				}
 				connection.Database = db
@@ -1065,21 +1104,20 @@ func (s *Server) handleConnection(conn net.Conn) {
 					if err != nil {
 						// Check if this is a rate limiting error for better user feedback
 						if authErr, ok := err.(*auth.AuthLockoutError); ok {
+							var authError errors.SyndrDBError
 							switch authErr.Type {
 							case "user":
-								sendError(writer, fmt.Sprintf("Account locked until %s due to too many failed attempts",
-									authErr.LockedUntil.Format("15:04:05")))
+								authError = errors.New(errors.ERR_AUTH_LOCKOUT, fmt.Sprintf("Account locked until %s due to too many failed attempts", authErr.LockedUntil.Format("15:04:05")), errors.LayerAuth)
 							case "ip":
-								sendError(writer, fmt.Sprintf("IP address blocked until %s due to suspicious activity",
-									authErr.LockedUntil.Format("15:04:05")))
+								authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, fmt.Sprintf("IP address blocked until %s due to suspicious activity", authErr.LockedUntil.Format("15:04:05")), errors.LayerAuth)
 							case "delay":
-								sendError(writer, fmt.Sprintf("Too many attempts. Please wait %s before trying again",
-									authErr.Delay.String()))
+								authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, fmt.Sprintf("Too many attempts. Please wait %s before trying again", authErr.Delay.String()), errors.LayerAuth)
 							default:
-								sendError(writer, "Authentication blocked due to security restrictions")
+								authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, "Authentication blocked due to security restrictions", errors.LayerAuth)
 							}
+							s.sendError(writer, authError)
 						} else {
-							sendError(writer, "Authentication failed")
+							s.sendError(writer, errors.New(errors.ERR_AUTH_FAILED, "Authentication failed", errors.LayerAuth))
 						}
 						return
 					}
@@ -1099,7 +1137,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 					connectionFingerprint,
 				)
 				if err != nil {
-					sendError(writer, fmt.Sprintf("Failed to create session: %v", err))
+					s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_INTERNAL, "Failed to create session", errors.LayerAPI))
 					return
 				}
 
@@ -1123,7 +1161,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 			//log.Printf("Processing command from %s: %s", connection.ID, line)
 			result, err := s.processCommand(connection, line)
 			if err != nil {
-				sendError(writer, err.Error())
+				// Convert error to SyndrDBError and send using error framework
+				s.sendError(writer, err)
 			} else {
 				sendResult(writer, result, connLogger)
 			}
@@ -1172,15 +1211,25 @@ func (s *Server) processCommand(conn *Connection, command string) (interface{}, 
 			"ip", clientIP,
 			"user", conn.User,
 			"error", err)
-		return nil, fmt.Errorf("rate limit exceeded: %v", err)
+		return nil, errors.New(errors.ERR_RESOURCE_EXHAUSTED, fmt.Sprintf("Rate limit exceeded: %v", err), errors.LayerAPI)
 	}
 
 	// Check if command is empty (don't use strings.Fields as it breaks multi-line commands)
 	if strings.TrimSpace(command) == "" {
-		return nil, fmt.Errorf("empty command")
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX, "Empty command", errors.LayerCommand)
 	}
 	// Use the new function to process and print the client data
-	return s.ProcessClientData(conn, command)
+	// Convert any errors returned from ProcessClientData to SyndrDBError if needed
+	result, err := s.ProcessClientData(conn, command)
+	if err != nil {
+		// If error is already SyndrDBError, return as-is
+		if _, ok := err.(errors.SyndrDBError); ok {
+			return result, err
+		}
+		// Otherwise, convert to SyndrDBError
+		return result, errors.ConvertError(err, errors.LayerCommand)
+	}
+	return result, err
 }
 
 func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, error) {
@@ -1227,7 +1276,8 @@ func (s *Server) handleTextCommand(conn *Connection, command string) (interface{
 				"error", err,
 				"clientIP", clientIP)
 			// Return security error - session may be compromised
-			return nil, fmt.Errorf("session security validation failed: %v", err)
+			return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_FIELD,
+				"session security validation failed", errors.LayerAuth).WithContext("session_id", conn.Session.SessionID).WithContext("client_ip", clientIP)
 		}
 
 		// Generate a query ID and start tracking the query
@@ -1325,18 +1375,21 @@ func parseConnectionString(server *Server, connStr string) (ConnectionString, er
 	// Convert port string to integer
 	portNum, err := strconv.Atoi(optionsParts[1])
 	if err != nil {
-		return result, fmt.Errorf("invalid port number: %v", err)
+		return result, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("invalid port number: %v", err), errors.LayerAPI).WithContext("port", optionsParts[1])
 	}
 	result.Port = portNum
 	result.Database = optionsParts[2]
 
 	if result.Database == "" {
-		return result, fmt.Errorf("database name cannot be empty")
+		return result, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"database name cannot be empty", errors.LayerAPI)
 	}
 
 	// Check to make sure the database exists
 	if !DatabaseExists(server.Databases, result.Database) {
-		return result, fmt.Errorf("invalid database name: %s", result.Database)
+		return result, errors.New(errors.ERR_NOT_FOUND_DATABASE,
+			fmt.Sprintf("invalid database name: %s", result.Database), errors.LayerAPI).WithContext("database", result.Database)
 	}
 
 	result.Username = optionsParts[3]
@@ -1357,6 +1410,47 @@ func DatabaseExists(databases map[string]*models.Database, dbName string) bool {
 }
 
 // Helper functions
+// sendError sends an error response to the client
+// Accepts either a string message or a SyndrDBError
+// If a SyndrDBError is provided, it's logged and sanitized before sending
+func (s *Server) sendError(writer *bufio.Writer, err interface{}) {
+	var sdbErr errors.SyndrDBError
+	var response map[string]interface{}
+
+	// Convert error to SyndrDBError if needed
+	switch v := err.(type) {
+	case errors.SyndrDBError:
+		sdbErr = v
+	case error:
+		// Convert standard error to SyndrDBError
+		sdbErr = errors.ConvertError(v, errors.LayerAPI)
+	case string:
+		// Legacy string error - convert to SyndrDBError
+		sdbErr = errors.New(errors.ERR_INTERNAL, v, errors.LayerAPI)
+	default:
+		// Unknown type - create generic error
+		sdbErr = errors.New(errors.ERR_INTERNAL, fmt.Sprintf("%v", err), errors.LayerAPI)
+	}
+
+	// Log the error using the error framework
+	if s.errorLogger != nil {
+		s.errorLogger.LogError(sdbErr)
+	}
+
+	// Format user response (sanitized)
+	errorResponse := errors.FormatUserResponse(sdbErr)
+	response = map[string]interface{}{
+		"status": "error",
+		"error":  errorResponse,
+	}
+
+	jsonResponse, _ := json.Marshal(response)
+	writer.WriteString(string(jsonResponse) + "\n")
+	writer.Flush()
+}
+
+// sendErrorLegacy maintains backward compatibility for callers using string errors
+// DEPRECATED: Use sendError with SyndrDBError instead
 func sendError(writer *bufio.Writer, message string) {
 	response := map[string]interface{}{
 		"status":  "error",

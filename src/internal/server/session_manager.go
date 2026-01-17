@@ -6,11 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sync"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/constants"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -184,22 +187,30 @@ type SessionManager struct {
 	// Cleanup
 	stopCleanup chan struct{}
 	cleanupWG   sync.WaitGroup
+
+	// Temp file cleanup queue (async, non-blocking)
+	tempFileCleanupQueue  chan []string
+	tempFileCleanupWG     sync.WaitGroup
+	stopTempFileCleanup   chan struct{}
 }
 
 // NewSessionManager creates a new session manager
 func NewSessionManager(logger *zap.SugaredLogger, defaultTimeout time.Duration, maxSessions int) *SessionManager {
 	sm := &SessionManager{
-		sessions:           make(map[string]*Session),
-		userSessions:       make(map[string][]*Session),
-		sessionsByUser:     make(map[string][]*Session),
-		connectionSessions: make(map[string]*Session),
-		logger:             logger,
-		defaultTimeout:     defaultTimeout,
-		maxSessions:        maxSessions,
-		cleanupInterval:    time.Minute * 5, // Cleanup every 5 minutes
-		stopCleanup:        make(chan struct{}),
+		sessions:            make(map[string]*Session),
+		userSessions:        make(map[string][]*Session),
+		sessionsByUser:      make(map[string][]*Session),
+		connectionSessions:  make(map[string]*Session),
+		logger:              logger,
+		defaultTimeout:      defaultTimeout,
+		maxSessions:         maxSessions,
+		cleanupInterval:     time.Minute * 5, // Cleanup every 5 minutes
+		stopCleanup:         make(chan struct{}),
+		tempFileCleanupQueue: make(chan []string, 100), // Buffered channel for async cleanup
+		stopTempFileCleanup:  make(chan struct{}),
 	} // Start cleanup routine
 	sm.startCleanupRoutine()
+	sm.startTempFileCleanupWorker()
 
 	return sm
 }
@@ -230,19 +241,24 @@ func generateIPValidationHash(sessionID, clientIP, userAgent string) string {
 // validateSessionBinding validates IP and user agent binding for session security
 func validateSessionBinding(session *Session, clientIP, userAgent string) error {
 	if session == nil {
-		return fmt.Errorf("session is nil")
+		return errors.New(errors.ERR_VALIDATION_FIELD,
+			"session is nil", errors.LayerAPI)
 	}
 
 	// Check IP address binding
 	if session.ClientIP != clientIP {
-		return fmt.Errorf("session IP mismatch: expected %s, got %s", session.ClientIP, clientIP)
+		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+			fmt.Sprintf("session IP mismatch: expected %s, got %s", session.ClientIP, clientIP),
+			errors.LayerAuth).WithContext("expected_ip", session.ClientIP).WithContext("actual_ip", clientIP)
 	}
 
 	// Check user agent binding (allow some variance for browser updates)
 	if session.UserAgent != userAgent {
 		// Calculate similarity score for user agent (basic check for major differences)
 		if !isUserAgentSimilar(session.UserAgent, userAgent) {
-			return fmt.Errorf("session user agent mismatch: significant difference detected")
+			return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+				"session user agent mismatch: significant difference detected",
+				errors.LayerAuth)
 		}
 	}
 
@@ -252,7 +268,9 @@ func validateSessionBinding(session *Session, clientIP, userAgent string) error 
 		// Re-generate hash with current date in case it's a date change
 		currentHash := generateIPValidationHash(session.SessionID, clientIP, session.UserAgent)
 		if session.IPValidationHash != currentHash {
-			return fmt.Errorf("session validation hash mismatch: potential tampering detected")
+			return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+				"session validation hash mismatch: potential tampering detected",
+				errors.LayerAuth)
 		}
 	}
 
@@ -294,7 +312,9 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 
 	// Check if we've hit the max sessions limit
 	if len(sm.sessions) >= sm.maxSessions {
-		return nil, fmt.Errorf("maximum number of sessions (%d) reached", sm.maxSessions)
+		return nil, errors.New(errors.ERR_RESOURCE_EXHAUSTED,
+			fmt.Sprintf("maximum number of sessions (%d) reached", sm.maxSessions),
+			errors.LayerAPI).WithContext("max_sessions", fmt.Sprintf("%d", sm.maxSessions))
 	}
 
 	// Generate secure session ID
@@ -373,8 +393,8 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		"database", databaseName,
 		"clientIP", clientIP,
 		"userAgent", func() string {
-			if len(userAgent) > 100 {
-				return userAgent[:100]
+			if len(userAgent) > constants.UserAgentMaxLength {
+				return userAgent[:constants.UserAgentMaxLength]
 			}
 			return userAgent
 		}(), // Truncate user agent for logging
@@ -444,7 +464,9 @@ func (sm *SessionManager) InvalidateSession(sessionID string) error {
 
 	session, exists := sm.sessions[sessionID]
 	if !exists {
-		return fmt.Errorf("session %s not found", sessionID)
+		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+			fmt.Sprintf("session %s not found", sessionID),
+			errors.LayerAuth).WithContext("session_id", sessionID)
 	}
 
 	// METRICS: Track session termination
@@ -553,7 +575,9 @@ func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) 
 	sm.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session %s not found", sessionID)
+		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+			fmt.Sprintf("session %s not found", sessionID),
+			errors.LayerAuth).WithContext("session_id", sessionID)
 	}
 
 	// Validate session binding before updating activity
@@ -563,12 +587,13 @@ func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) 
 			"clientIP", clientIP,
 			"expectedIP", session.ClientIP,
 			"userAgent", userAgent[:func() int {
-				if len(userAgent) > 50 {
-					return 50
+				if len(userAgent) > constants.UserAgentTruncateLength {
+					return constants.UserAgentTruncateLength
 				}
 				return len(userAgent)
 			}()])
-		return fmt.Errorf("session security validation failed: %v", err)
+		return errors.WrapWithMessage(err, errors.ERR_VALIDATION_FIELD,
+			"session security validation failed", errors.LayerAuth)
 	}
 
 	session.mu.Lock()
@@ -587,7 +612,9 @@ func (sm *SessionManager) SetDatabaseContext(sessionID string, databaseName stri
 	sm.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session %s not found", sessionID)
+		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+			fmt.Sprintf("session %s not found", sessionID),
+			errors.LayerAuth).WithContext("session_id", sessionID)
 	}
 
 	session.mu.Lock()
@@ -619,7 +646,9 @@ func (sm *SessionManager) ValidateSessionSecurity(sessionID, clientIP, userAgent
 	sm.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("session %s not found", sessionID)
+		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
+			fmt.Sprintf("session %s not found", sessionID),
+			errors.LayerAuth).WithContext("session_id", sessionID)
 	}
 
 	return validateSessionBinding(session, clientIP, userAgent)
@@ -653,17 +682,46 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 	}
 	session.BundleLocks = make(map[string]*LockInfo)
 
-	// Clean up temp files
-	for _, tempFile := range session.TempFiles {
-		session.Logger.Infow("Removing temp file", "file", tempFile)
-		// TODO: Add actual file removal logic
+	// Clean up temp files (async, non-blocking)
+	// Copy temp files slice to avoid race conditions and allow safe async processing
+	tempFiles := make([]string, len(session.TempFiles))
+	copy(tempFiles, session.TempFiles)
+	session.TempFiles = []string{} // Clear the slice immediately
+
+	// Enqueue files for async deletion (non-blocking)
+	if len(tempFiles) > 0 {
+		session.Logger.Infow("Enqueueing temp files for async cleanup", "count", len(tempFiles))
+		select {
+		case sm.tempFileCleanupQueue <- tempFiles:
+			// Successfully enqueued
+		default:
+			// Queue is full - log warning but don't block
+			// This prevents session cleanup from hanging if cleanup worker is overloaded
+			session.Logger.Warnw("Temp file cleanup queue is full, files will not be cleaned up",
+				"count", len(tempFiles),
+				"files", tempFiles)
+		}
 	}
-	session.TempFiles = []string{}
 
 	// Clean up buffer pool if exists
 	if session.BufferPool != nil {
 		session.Logger.Info("Releasing buffer pool resources")
-		// TODO: Add buffer pool cleanup
+		
+		// Flush any dirty buffers to ensure data integrity
+		if err := session.BufferPool.FlushAllDirty(); err != nil {
+			session.Logger.Warnw("Failed to flush dirty buffers during session cleanup",
+				"error", err)
+			// Continue with cleanup even if flush fails
+		}
+
+		// Attempt to clear the buffer pool (graceful - won't fail if buffers are in use)
+		if err := session.BufferPool.ClearBufferPool(); err != nil {
+			// If buffers are still in use, log warning but don't block session cleanup
+			// This can happen if other goroutines are still accessing buffers
+			session.Logger.Debugw("Could not fully clear buffer pool (buffers may still be in use)",
+				"error", err)
+		}
+
 		session.BufferPool = nil
 	}
 
@@ -709,6 +767,100 @@ func (sm *SessionManager) startCleanupRoutine() {
 	}()
 }
 
+// startTempFileCleanupWorker starts the background worker for async temp file cleanup
+// This worker processes temp file deletion requests in batches to avoid blocking session cleanup
+func (sm *SessionManager) startTempFileCleanupWorker() {
+	sm.tempFileCleanupWG.Add(1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				sm.logger.Errorw("Temp file cleanup worker panicked, restarting", "error", r)
+				// Restart the worker on panic
+				sm.startTempFileCleanupWorker()
+			}
+			sm.tempFileCleanupWG.Done()
+		}()
+
+		batchSize := 20 // Process up to 20 files per batch
+		maxRetries := 3
+		retryDelays := []time.Duration{
+			constants.RetryDelayShort * time.Millisecond,
+			constants.RetryDelayMedium * time.Millisecond,
+			constants.RetryDelayLong * time.Millisecond,
+		}
+
+		for {
+			select {
+			case files := <-sm.tempFileCleanupQueue:
+				// Process files in batches
+				for i := 0; i < len(files); i += batchSize {
+					end := i + batchSize
+					if end > len(files) {
+						end = len(files)
+					}
+					batch := files[i:end]
+
+					// Delete files in this batch
+					for _, filePath := range batch {
+						err := sm.deleteTempFileWithRetry(filePath, maxRetries, retryDelays)
+						if err != nil {
+							sm.logger.Warnw("Failed to delete temp file after retries",
+								"file", filePath,
+								"retries", maxRetries,
+								"error", err)
+						} else {
+							sm.logger.Debugw("Successfully deleted temp file", "file", filePath)
+						}
+					}
+				}
+
+			case <-sm.stopTempFileCleanup:
+				// Process any remaining files in queue before stopping
+				for {
+					select {
+					case files := <-sm.tempFileCleanupQueue:
+						for _, filePath := range files {
+							_ = sm.deleteTempFileWithRetry(filePath, maxRetries, retryDelays)
+						}
+					default:
+						return
+					}
+				}
+			}
+		}
+	}()
+}
+
+// deleteTempFileWithRetry attempts to delete a temp file with exponential backoff retry logic
+func (sm *SessionManager) deleteTempFileWithRetry(filePath string, maxRetries int, retryDelays []time.Duration) error {
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := os.Remove(filePath)
+		if err == nil {
+			return nil // Success
+		}
+
+		lastErr = err
+
+		// If file doesn't exist, consider it a success (already deleted)
+		if os.IsNotExist(err) {
+			return nil
+		}
+
+		// Wait before retry (except on last attempt)
+		if attempt < maxRetries-1 {
+			delay := retryDelays[attempt]
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+		}
+	}
+
+	return errors.WrapWithMessage(lastErr, errors.ERR_INTERNAL_STORAGE,
+		fmt.Sprintf("failed to delete temp file after %d attempts", maxRetries),
+		errors.LayerAPI).WithContext("max_retries", fmt.Sprintf("%d", maxRetries))
+}
+
 // cleanupExpiredSessions removes expired sessions
 func (sm *SessionManager) cleanupExpiredSessions() {
 	sm.mu.Lock()
@@ -741,8 +893,13 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 
 // Stop stops the session manager and cleans up all sessions
 func (sm *SessionManager) Stop() {
+	// Stop cleanup routines
 	close(sm.stopCleanup)
+	close(sm.stopTempFileCleanup)
+
+	// Wait for both cleanup workers to finish
 	sm.cleanupWG.Wait()
+	sm.tempFileCleanupWG.Wait()
 
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -894,7 +1051,9 @@ func (s *Session) AcquireDocumentLock(documentID, lockMode string) error {
 
 	// Check if we already have this lock
 	if _, exists := s.DocumentLocks[lockID]; exists {
-		return fmt.Errorf("document lock already held: %s", documentID)
+		return errors.New(errors.ERR_INTERNAL_LOCK,
+			fmt.Sprintf("document lock already held: %s", documentID),
+			errors.LayerTransaction).WithContext("document_id", documentID)
 	}
 
 	lockInfo := &LockInfo{
@@ -922,7 +1081,9 @@ func (s *Session) ReleaseDocumentLock(documentID, lockMode string) error {
 	lockID := fmt.Sprintf("doc_%s_%s", documentID, lockMode)
 
 	if _, exists := s.DocumentLocks[lockID]; !exists {
-		return fmt.Errorf("document lock not held: %s", documentID)
+		return errors.New(errors.ERR_INTERNAL_LOCK,
+			fmt.Sprintf("document lock not held: %s", documentID),
+			errors.LayerTransaction).WithContext("document_id", documentID)
 	}
 
 	delete(s.DocumentLocks, lockID)
@@ -943,7 +1104,9 @@ func (s *Session) AcquireBundleLock(bundleName, lockMode string) error {
 
 	// Check if we already have this lock
 	if _, exists := s.BundleLocks[lockID]; exists {
-		return fmt.Errorf("bundle lock already held: %s", bundleName)
+		return errors.New(errors.ERR_INTERNAL_LOCK,
+			fmt.Sprintf("bundle lock already held: %s", bundleName),
+			errors.LayerTransaction).WithContext("bundle", bundleName)
 	}
 
 	lockInfo := &LockInfo{
@@ -971,7 +1134,9 @@ func (s *Session) ReleaseBundleLock(bundleName, lockMode string) error {
 	lockID := fmt.Sprintf("bundle_%s_%s", bundleName, lockMode)
 
 	if _, exists := s.BundleLocks[lockID]; !exists {
-		return fmt.Errorf("bundle lock not held: %s", bundleName)
+		return errors.New(errors.ERR_INTERNAL_LOCK,
+			fmt.Sprintf("bundle lock not held: %s", bundleName),
+			errors.LayerTransaction).WithContext("bundle", bundleName)
 	}
 
 	delete(s.BundleLocks, lockID)
@@ -1024,8 +1189,8 @@ func (s *Session) GetSessionInfo() map[string]interface{} {
 	info["database"] = s.DatabaseName
 	info["clientIP"] = s.ClientIP
 	info["userAgent"] = func() string {
-		if len(s.UserAgent) > 100 {
-			return s.UserAgent[:100] + "..."
+		if len(s.UserAgent) > constants.UserAgentMaxLength {
+			return s.UserAgent[:constants.UserAgentMaxLength] + "..."
 		}
 		return s.UserAgent
 	}()

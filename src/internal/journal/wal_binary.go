@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -296,13 +297,21 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	// Write entry length header (4 bytes) followed by binary data
 	// This allows for easy reading of variable-length entries
 	entryLen := uint32(len(binaryData))
-	if err := binary.Write(wal.buffer, binary.LittleEndian, entryLen); err != nil {
+	
+	// Write entry length with retry for transient errors
+	if err := wal.writeEntryLengthWithRetry(entryLen); err != nil {
 		return fmt.Errorf("failed to write entry length: %w", err)
 	}
 
-	// Write binary data
-	if _, err := wal.buffer.Write(binaryData); err != nil {
+	// Write binary data with retry and verification
+	bytesWritten, err := wal.writeBinaryDataWithRetry(binaryData)
+	if err != nil {
 		return fmt.Errorf("failed to write binary WAL entry: %w", err)
+	}
+	
+	// Verify all bytes were written (HIGH-002: comprehensive write verification)
+	if bytesWritten != len(binaryData) {
+		return fmt.Errorf("partial write detected: wrote %d of %d bytes for WAL entry", bytesWritten, len(binaryData))
 	}
 
 	// PERFORMANCE OPTIMIZATION: Batch flushing (PostgreSQL-style group commit)
@@ -371,8 +380,107 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	return nil
 }
 
+// writeEntryLengthWithRetry writes the entry length header with retry logic for transient errors
+// HIGH-002: Retry on transient I/O errors (EAGAIN, EINTR) to handle temporary system conditions
+func (wal *WriteAheadLog) writeEntryLengthWithRetry(entryLen uint32) error {
+	maxRetries := 3
+	retryDelays := []time.Duration{1 * time.Millisecond, 5 * time.Millisecond, 25 * time.Millisecond}
+	
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		err := binary.Write(wal.buffer, binary.LittleEndian, entryLen)
+		if err == nil {
+			return nil
+		}
+		
+		// Check if error is transient (EAGAIN, EINTR, temporary errors)
+		if !isTransientError(err) {
+			return fmt.Errorf("permanent write error (attempt %d/%d): %w", attempt+1, maxRetries+1, err)
+		}
+		
+		// If not last attempt, wait before retrying with exponential backoff
+		if attempt < maxRetries {
+			delay := retryDelays[attempt]
+			wal.logger.Warnw("Transient error writing entry length, retrying",
+				"attempt", attempt+1,
+				"maxRetries", maxRetries,
+				"delay", delay,
+				"error", err)
+			time.Sleep(delay)
+		}
+	}
+	
+	return fmt.Errorf("failed to write entry length after %d retries", maxRetries+1)
+}
+
+// writeBinaryDataWithRetry writes binary data with retry logic and returns bytes written
+// HIGH-002: Retry on transient I/O errors and verify bytes written
+func (wal *WriteAheadLog) writeBinaryDataWithRetry(data []byte) (int, error) {
+	maxRetries := 3
+	retryDelays := []time.Duration{1 * time.Millisecond, 5 * time.Millisecond, 25 * time.Millisecond}
+	
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		bytesWritten, err := wal.buffer.Write(data)
+		if err == nil {
+			// Verify all bytes were written
+			if bytesWritten != len(data) {
+				return bytesWritten, fmt.Errorf("partial write: wrote %d of %d bytes", bytesWritten, len(data))
+			}
+			return bytesWritten, nil
+		}
+		
+		// Check if error is transient
+		if !isTransientError(err) {
+			return bytesWritten, fmt.Errorf("permanent write error (attempt %d/%d): %w", attempt+1, maxRetries+1, err)
+		}
+		
+		// If not last attempt, wait before retrying
+		if attempt < maxRetries {
+			delay := retryDelays[attempt]
+			wal.logger.Warnw("Transient error writing binary data, retrying",
+				"attempt", attempt+1,
+				"maxRetries", maxRetries,
+				"delay", delay,
+				"error", err)
+			time.Sleep(delay)
+		}
+	}
+	
+	return 0, fmt.Errorf("failed to write binary data after %d retries", maxRetries+1)
+}
+
+// isTransientError checks if an error is transient and can be retried
+// Returns true for EAGAIN, EINTR, and other temporary I/O errors
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
+	// Check for syscall errors (EAGAIN, EINTR)
+	if pathErr, ok := err.(*os.PathError); ok {
+		if errno, ok := pathErr.Err.(syscall.Errno); ok {
+			// EAGAIN: Resource temporarily unavailable
+			// EINTR: Interrupted system call
+			// Both can be safely retried
+			return errno == syscall.EAGAIN || errno == syscall.EINTR
+		}
+	}
+	
+	// Check for temporary errors from bufio.Writer
+	if err == io.ErrShortWrite || err == io.ErrShortBuffer {
+		return true
+	}
+	
+	// Check for temporary errors (some I/O operations return this)
+	if tempErr, ok := err.(interface{ Temporary() bool }); ok {
+		return tempErr.Temporary()
+	}
+	
+	return false
+}
+
 // ReplayOperationsBinary replays WAL operations from binary format for recovery
 // This provides much faster recovery compared to JSON parsing
+// HIGH-008: Now tracks and aggregates errors instead of failing immediately
 func (wal *WriteAheadLog) ReplayOperationsBinary(filePath string, fromLSN uint64, replayFunc func(WALEntry) error) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -381,6 +489,9 @@ func (wal *WriteAheadLog) ReplayOperationsBinary(filePath string, fromLSN uint64
 	defer file.Close()
 
 	reader := bufio.NewReader(file)
+	var recoveryErrors []*RecoveryError
+	entryCount := 0
+	var lastLSN uint64 = 0
 
 	for {
 		// Read entry length
@@ -389,42 +500,99 @@ func (wal *WriteAheadLog) ReplayOperationsBinary(filePath string, fromLSN uint64
 			if err == io.EOF {
 				break // End of file
 			}
-			return fmt.Errorf("failed to read entry length: %w", err)
+			// HIGH-008: File read errors are fatal - return immediately
+			return fmt.Errorf("failed to read entry length at entry %d: %w", entryCount, err)
 		}
 
 		// Validate entry length
 		if entryLen == 0 || entryLen > 1024*1024*10 { // Max 10MB per entry
-			return fmt.Errorf("invalid entry length: %d", entryLen)
+			// HIGH-008: Invalid entry length is fatal - return immediately
+			return fmt.Errorf("invalid entry length at entry %d: %d (max: 10MB)", entryCount, entryLen)
 		}
 
 		// Read entry data
 		entryData := make([]byte, entryLen)
 		if _, err := io.ReadFull(reader, entryData); err != nil {
-			return fmt.Errorf("failed to read entry data: %w", err)
+			// HIGH-008: Read errors are fatal - return immediately
+			return fmt.Errorf("failed to read entry data at entry %d: %w", entryCount, err)
 		}
 
 		// Deserialize entry
 		entry, err := wal.DeserializeWALEntryBinary(entryData)
 		if err != nil {
-			wal.logger.Warnf("Failed to deserialize binary WAL entry: %v", err)
+			// HIGH-008: Track deserialization errors but continue processing
+			recoveryErrors = append(recoveryErrors, &RecoveryError{
+				LSN:    0, // May be unknown if deserialization failed
+				File:   filePath,
+				Reason: "deserialize",
+				Err:    fmt.Errorf("entry %d: %w", entryCount, err),
+			})
+			wal.logger.Warnf("Failed to deserialize binary WAL entry at entry %d: %v", entryCount, err)
+			entryCount++
 			continue
 		}
 
 		// Skip entries before the specified LSN
 		if entry.LSN < fromLSN {
+			if entry.LSN > lastLSN {
+				lastLSN = entry.LSN
+			}
+			entryCount++
 			continue
 		}
 
 		// Verify checksum
 		expectedChecksum := wal.calculateChecksum(*entry)
 		if entry.Checksum != expectedChecksum {
-			wal.logger.Warnf("Checksum mismatch for LSN %d, skipping", entry.LSN)
+			// HIGH-008: Track checksum errors but continue processing
+			recoveryErrors = append(recoveryErrors, &RecoveryError{
+				LSN:    entry.LSN,
+				File:   filePath,
+				Reason: "checksum_mismatch",
+				Err:    fmt.Errorf("expected %d, got %d", expectedChecksum, entry.Checksum),
+			})
+			wal.logger.Warnf("Checksum mismatch for LSN %d: expected %d, got %d", entry.LSN, expectedChecksum, entry.Checksum)
+			entryCount++
 			continue
 		}
 
+		// Verify LSN ordering
+		if entry.LSN <= lastLSN && entryCount > 0 {
+			// HIGH-008: LSN ordering errors are tracked but non-fatal
+			recoveryErrors = append(recoveryErrors, &RecoveryError{
+				LSN:    entry.LSN,
+				File:   filePath,
+				Reason: "lsn_out_of_order",
+				Err:    fmt.Errorf("entry LSN %d <= previous LSN %d", entry.LSN, lastLSN),
+			})
+			wal.logger.Warnf("LSN out of order at entry %d: %d <= %d", entryCount, entry.LSN, lastLSN)
+			lastLSN = entry.LSN
+			entryCount++
+			continue
+		}
+		lastLSN = entry.LSN
+
+		entryCount++
+
 		// Call replay function
 		if err := replayFunc(*entry); err != nil {
-			return fmt.Errorf("replay failed for LSN %d: %w", entry.LSN, err)
+			// HIGH-008: Track replay function errors but continue processing
+			recoveryErrors = append(recoveryErrors, &RecoveryError{
+				LSN:    entry.LSN,
+				File:   filePath,
+				Reason: "replay_function",
+				Err:    err,
+			})
+			wal.logger.Warnf("Replay function failed for entry %d (LSN %d): %v", entryCount, entry.LSN, err)
+			// Continue processing other entries (non-fatal)
+		}
+	}
+
+	// HIGH-008: Return aggregated errors if any occurred
+	if len(recoveryErrors) > 0 {
+		return &RecoveryErrorList{
+			Errors: recoveryErrors,
+			File:   filePath,
 		}
 	}
 

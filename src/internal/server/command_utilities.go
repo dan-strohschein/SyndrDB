@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"syndrdb/src/pkg/errors"
 	"time"
 )
 
@@ -36,7 +37,9 @@ func parseBundleNameFromCommand(command, keyword string) (string, error) {
 	keywordPos := strings.Index(commandUpper, keywordUpper)
 
 	if keywordPos == -1 {
-		return "", fmt.Errorf("keyword '%s' not found in command", keyword)
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("keyword '%s' not found in command", keyword),
+			errors.LayerCommand).WithContext("keyword", keyword)
 	}
 
 	// Extract the part after the keyword
@@ -48,7 +51,9 @@ func parseBundleNameFromCommand(command, keyword string) (string, error) {
 	bundlePos := strings.Index(strings.ToUpper(afterKeyword), bundleUpper)
 
 	if bundlePos == -1 {
-		return "", fmt.Errorf("'BUNDLE' keyword not found after '%s'", keyword)
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("'BUNDLE' keyword not found after '%s'", keyword),
+			errors.LayerCommand).WithContext("keyword", keyword)
 	}
 
 	// Extract the part after "BUNDLE"
@@ -58,7 +63,8 @@ func parseBundleNameFromCommand(command, keyword string) (string, error) {
 	// Find the quoted bundle name
 	bundleName, err := extractQuotedString(afterBundle)
 	if err != nil {
-		return "", fmt.Errorf("failed to extract bundle name: %w", err)
+		return "", errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to extract bundle name", errors.LayerCommand)
 	}
 
 	return bundleName, nil
@@ -77,7 +83,8 @@ func extractQuotedString(text string) (string, error) {
 	text = strings.TrimSpace(text)
 
 	if len(text) == 0 {
-		return "", fmt.Errorf("empty text provided for quote extraction")
+		return "", errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"empty text provided for quote extraction", errors.LayerCommand)
 	}
 
 	// Check for different quote types
@@ -92,7 +99,9 @@ func extractQuotedString(text string) (string, error) {
 					return text[1:i], nil
 				}
 			}
-			return "", fmt.Errorf("unterminated quoted string starting with %c", quoteChar)
+			return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unterminated quoted string starting with %c", quoteChar),
+				errors.LayerCommand).WithContext("quote_char", string(quoteChar))
 		}
 	}
 
@@ -115,7 +124,9 @@ func extractQuotedString(text string) (string, error) {
 		return firstWord, nil
 	}
 
-	return "", fmt.Errorf("no quoted string or valid identifier found in text: %s", text)
+	return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+		fmt.Sprintf("no quoted string or valid identifier found in text: %s", text),
+		errors.LayerCommand).WithContext("text", text)
 }
 
 // parseBundleNameFromShowCommand extracts the bundle name from SHOW BUNDLE "<NAME>" command
@@ -126,7 +137,9 @@ func parseBundleNameFromShowCommand(command string) (string, error) {
 	matches := re.FindStringSubmatch(command)
 
 	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid SHOW BUNDLE command format. Expected: SHOW BUNDLE \"<bundle_name>\";")
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid SHOW BUNDLE command format. Expected: SHOW BUNDLE \"<bundle_name>\"",
+			errors.LayerCommand)
 	}
 
 	return matches[1], nil
@@ -140,7 +153,9 @@ func parseDatabaseNameFromShowBundlesFor(command string) (string, error) {
 	matches := re.FindStringSubmatch(command)
 
 	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid SHOW BUNDLES FOR command format. Expected: SHOW BUNDLES FOR \"<database_name>\";")
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid SHOW BUNDLES FOR command format. Expected: SHOW BUNDLES FOR \"<database_name>\"",
+			errors.LayerCommand)
 	}
 
 	return matches[1], nil
@@ -154,7 +169,9 @@ func parseDatabaseNameFromUse(command string) (string, error) {
 	matches := re.FindStringSubmatch(command)
 
 	if len(matches) < 2 {
-		return "", fmt.Errorf("invalid USE command format. Expected: USE \"<database_name>\";")
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid USE command format. Expected: USE \"<database_name>\"",
+			errors.LayerCommand)
 	}
 
 	return matches[1], nil
@@ -168,7 +185,9 @@ func parseAttachDatabaseCommand(command string) (string, string, error) {
 	matches := re.FindStringSubmatch(command)
 
 	if len(matches) < 3 {
-		return "", "", fmt.Errorf("invalid ATTACH DATABASE command format. Expected: ATTACH DATABASE \"<file_path>\" \"<database_name>\";")
+		return "", "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid ATTACH DATABASE command format. Expected: ATTACH DATABASE \"<file_path>\" \"<database_name>\"",
+			errors.LayerCommand)
 	}
 
 	filePath := matches[1]

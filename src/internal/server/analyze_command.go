@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/domain/statistics"
+	"syndrdb/src/pkg/errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -74,7 +75,8 @@ func NewAnalyzeCommand(
 // Execute runs the ANALYZE command
 func (ac *AnalyzeCommand) Execute(request *AnalyzeCommandRequest, database *models.Database) (*AnalyzeCommandResult, error) {
 	if request.BundleName == "" {
-		return nil, fmt.Errorf("bundle name is required")
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"bundle name is required", errors.LayerCommand)
 	}
 
 	ac.logger.Infof("ANALYZE BUNDLE %s: starting statistics collection", request.BundleName)
@@ -83,20 +85,23 @@ func (ac *AnalyzeCommand) Execute(request *AnalyzeCommandRequest, database *mode
 	// Load bundle from database
 	bundle, err := ac.loadBundle(request.BundleName, database)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load bundle: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
+			"failed to load bundle", errors.LayerCommand).WithContext("bundle", request.BundleName)
 	}
 
 	// Collect statistics
 	ac.logger.Debugf("ANALYZE BUNDLE %s: analyzing %d documents", request.BundleName, bundle.TotalDocuments)
 	stats, err := ac.statsCollector.AnalyzeBundle(bundle)
 	if err != nil {
-		return nil, fmt.Errorf("failed to analyze bundle: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+			"failed to analyze bundle", errors.LayerCommand).WithContext("bundle", request.BundleName)
 	}
 
 	// Save statistics
 	ac.logger.Debugf("ANALYZE BUNDLE %s: saving statistics to disk", request.BundleName)
 	if err := ac.statsStorage.SaveStatistics(stats); err != nil {
-		return nil, fmt.Errorf("failed to save statistics: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to save statistics", errors.LayerStorage).WithContext("bundle", request.BundleName)
 	}
 
 	// Update auto-analyze tracker to reset change counter
@@ -129,7 +134,7 @@ func (ac *AnalyzeCommand) AnalyzeAllBundles(database *models.Database) ([]*Analy
 	ac.logger.Infof("ANALYZE ALL: starting analysis of all bundles")
 
 	results := make([]*AnalyzeCommandResult, 0)
-	errors := make([]error, 0)
+	errList := make([]error, 0)
 
 	// Get all bundles
 	bundleNames := ac.listBundles(database)
@@ -140,18 +145,22 @@ func (ac *AnalyzeCommand) AnalyzeAllBundles(database *models.Database) ([]*Analy
 		result, err := ac.Execute(&AnalyzeCommandRequest{BundleName: bundleName}, database)
 		if err != nil {
 			ac.logger.Errorf("ANALYZE ALL: failed to analyze %s: %v", bundleName, err)
-			errors = append(errors, fmt.Errorf("bundle %s: %w", bundleName, err))
+			errList = append(errList, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
+				fmt.Sprintf("failed to analyze bundle %s", bundleName),
+				errors.LayerCommand).WithContext("bundle", bundleName))
 			continue
 		}
 
 		results = append(results, result)
 	}
 
-	if len(errors) > 0 {
+	if len(errList) > 0 {
 		ac.logger.Warnf("ANALYZE ALL: completed with %d errors out of %d bundles",
-			len(errors), len(bundleNames))
+			len(errList), len(bundleNames))
 		// Return partial results with error
-		return results, fmt.Errorf("analysis completed with %d errors: %v", len(errors), errors[0])
+		return results, errors.New(errors.ERR_INTERNAL,
+			fmt.Sprintf("analysis completed with %d errors", len(errList)),
+			errors.LayerCommand).WithContext("error_count", fmt.Sprintf("%d", len(errList)))
 	}
 
 	ac.logger.Infof("ANALYZE ALL: completed successfully (%d bundles)", len(results))
@@ -162,7 +171,8 @@ func (ac *AnalyzeCommand) AnalyzeAllBundles(database *models.Database) ([]*Analy
 func (ac *AnalyzeCommand) GetStatistics(bundleName string) (*statistics.BundleStatistics, error) {
 	stats, err := ac.statsStorage.LoadStatistics(bundleName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load statistics: %w", err)
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to load statistics", errors.LayerStorage).WithContext("bundle", bundleName)
 	}
 	return stats, nil
 }
@@ -170,7 +180,8 @@ func (ac *AnalyzeCommand) GetStatistics(bundleName string) (*statistics.BundleSt
 // DeleteStatistics removes statistics for a bundle
 func (ac *AnalyzeCommand) DeleteStatistics(bundleName string) error {
 	if err := ac.statsStorage.DeleteStatistics(bundleName); err != nil {
-		return fmt.Errorf("failed to delete statistics: %w", err)
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to delete statistics", errors.LayerStorage).WithContext("bundle", bundleName)
 	}
 	ac.logger.Infof("Deleted statistics for bundle: %s", bundleName)
 	return nil
@@ -181,8 +192,9 @@ func (ac *AnalyzeCommand) DeleteStatistics(bundleName string) error {
 func (ac *AnalyzeCommand) loadBundle(bundleName string, database *models.Database) (*models.Bundle, error) {
 	// TODO: I will replace this with actual bundle loading from database when integrated
 	// For now, return error indicating integration is needed
-	return nil, fmt.Errorf("bundle loading integration pending - bundleName: %s, database: %s",
-		bundleName, database.Name)
+	return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
+		fmt.Sprintf("bundle loading integration pending - bundleName: %s, database: %s", bundleName, database.Name),
+		errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", database.Name)
 }
 
 func (ac *AnalyzeCommand) listBundles(database *models.Database) []string {

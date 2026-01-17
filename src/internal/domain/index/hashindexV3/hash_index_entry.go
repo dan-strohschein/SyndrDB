@@ -35,6 +35,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"syndrdb/src/pkg/constants"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -516,7 +517,8 @@ func ComputeHash(key string) uint32 {
 // ComputeBucketNum determines which bucket a hash value belongs to.
 // Uses simple modulo operation to map hash values to bucket range [0, numBuckets).
 //
-// This function is inline-able and has zero allocations.
+// MED-011: Added input validation for bucket count to prevent invalid operations.
+// The modulo operation itself is safe and cannot overflow.
 //
 // Parameters:
 //   - hashValue: The 32-bit hash of the key (from ComputeHash)
@@ -524,8 +526,17 @@ func ComputeHash(key string) uint32 {
 //
 // Returns:
 //   - Bucket number in range [0, numBuckets)
-func ComputeBucketNum(hashValue uint32, numBuckets uint32) uint32 {
-	return hashValue % numBuckets
+//   - Error if numBuckets is zero or invalid
+func ComputeBucketNum(hashValue uint32, numBuckets uint32) (uint32, error) {
+	// MED-011: Validate bucket count (cannot be zero for modulo operation)
+	if numBuckets == 0 {
+		return 0, fmt.Errorf("bucket count cannot be zero")
+	}
+	if err := constants.CheckBucketCount(numBuckets); err != nil {
+		return 0, fmt.Errorf("invalid bucket count: %w", err)
+	}
+	// Modulo operation is safe - it always returns a value in [0, numBuckets)
+	return hashValue % numBuckets, nil
 }
 
 // ComputeHashAndBucket is a convenience function that computes both hash and bucket
@@ -538,9 +549,9 @@ func ComputeBucketNum(hashValue uint32, numBuckets uint32) uint32 {
 // Returns:
 //   - hashValue: 32-bit hash of the key
 //   - bucketNum: Bucket number in range [0, numBuckets)
-func ComputeHashAndBucket(key string, numBuckets uint32) (hashValue uint32, bucketNum uint32) {
+func ComputeHashAndBucket(key string, numBuckets uint32) (hashValue uint32, bucketNum uint32, err error) {
 	hashValue = ComputeHash(key)
-	bucketNum = ComputeBucketNum(hashValue, numBuckets)
+	bucketNum, err = ComputeBucketNum(hashValue, numBuckets)
 	return
 }
 

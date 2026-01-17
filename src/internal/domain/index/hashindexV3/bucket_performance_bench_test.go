@@ -129,7 +129,7 @@ func BenchmarkBucketLookup_Optimized(b *testing.B) {
 
 		// Calculate bucket number using exported hash function
 		hash := ComputeHash(key)
-		bucket := ComputeBucketNum(hash, storage.numBuckets)
+		bucket, _ := ComputeBucketNum(hash, storage.numBuckets)
 		buckets[i] = bucket
 
 		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i))
@@ -228,7 +228,7 @@ func BenchmarkBucketDistribution(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		key := keys[i%len(keys)]
 		hash := ComputeHash(key)
-		_ = ComputeBucketNum(hash, numBuckets)
+		_, _ = ComputeBucketNum(hash, numBuckets)
 	}
 }
 
@@ -291,7 +291,7 @@ func BenchmarkScanBucket(b *testing.B) {
 	for i := 0; i < 100000 && entriesAdded < 1000; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		hash := ComputeHash(key)
-		bucket := ComputeBucketNum(hash, storage.numBuckets)
+		bucket, _ := ComputeBucketNum(hash, storage.numBuckets)
 
 		if bucket == targetBucket {
 			entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%100), uint64(i))

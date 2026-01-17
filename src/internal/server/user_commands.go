@@ -5,6 +5,7 @@ import (
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
 )
@@ -44,18 +45,19 @@ func CreateUserCommand(command string, logger *zap.SugaredLogger, serviceManager
 	parser := syndrQL.NewCreateUserParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse CREATE USER command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in CREATE USER command")
+		// Convert parser errors to detailed SyndrDBError
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid CREATE USER statement: %v", err)
+		// Convert validation errors
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid CREATE USER syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD, 
+			fmt.Sprintf("Invalid CREATE USER statement: %v", err), 
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	logger.Infof("Creating user '%s' in database '%s'", stmt.Username, database.Name)
@@ -63,10 +65,8 @@ func CreateUserCommand(command string, logger *zap.SugaredLogger, serviceManager
 	// Create the user using UserService (includes Argon2id password hashing)
 	userID, err := serviceManager.UserService.CreateUser(stmt.Username, stmt.Password)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to create user '%s': %v", stmt.Username, err)
-		}
-		return nil, fmt.Errorf("failed to create user")
+		// Convert service errors (already SyndrDBError from auth layer)
+		return nil, errors.ConvertError(err, errors.LayerCommand)
 	}
 
 	logger.Infof("User '%s' created successfully with ID %s", stmt.Username, userID)
@@ -98,18 +98,17 @@ func GrantPermissionOrRoleCommand(command string, logger *zap.SugaredLogger, ser
 	parser := syndrQL.NewGrantParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse GRANT command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in GRANT command")
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid GRANT statement: %v", err)
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid GRANT syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid GRANT statement: %v", err),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	// Handle based on grant type
@@ -119,10 +118,9 @@ func GrantPermissionOrRoleCommand(command string, logger *zap.SugaredLogger, ser
 	case syndrQL.GrantTypeRole:
 		return grantRole(stmt, logger, serviceManager, database, debugMode)
 	default:
-		if debugMode {
-			return nil, fmt.Errorf("unknown grant type: %v", stmt.Type)
-		}
-		return nil, fmt.Errorf("invalid grant type")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Unknown grant type: %v", stmt.Type),
+			errors.LayerCommand).WithContext("grant_type", fmt.Sprintf("%v", stmt.Type))
 	}
 }
 
@@ -133,10 +131,7 @@ func grantPermission(stmt *syndrQL.GrantStatement, logger *zap.SugaredLogger, se
 	// Grant the permission using PermissionService
 	err := serviceManager.PermissionService.GrantPermissionToUser(stmt.Username, stmt.PermissionName)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to grant permission '%s' to user '%s': %v", stmt.PermissionName, stmt.Username, err)
-		}
-		return nil, fmt.Errorf("failed to grant permission")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("username", stmt.Username).WithContext("permission", stmt.PermissionName)
 	}
 
 	logger.Infof("Permission '%s' granted successfully to user '%s'", stmt.PermissionName, stmt.Username)
@@ -156,10 +151,7 @@ func grantRole(stmt *syndrQL.GrantStatement, logger *zap.SugaredLogger, serviceM
 	// Grant the role using PermissionService
 	err := serviceManager.PermissionService.GrantRoleToUser(stmt.Username, stmt.RoleName)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to grant role '%s' to user '%s': %v", stmt.RoleName, stmt.Username, err)
-		}
-		return nil, fmt.Errorf("failed to grant role")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("role", stmt.RoleName).WithContext("username", stmt.Username)
 	}
 
 	logger.Infof("Role '%s' granted successfully to user '%s'", stmt.RoleName, stmt.Username)
@@ -188,31 +180,26 @@ func RevokePermissionOrRoleCommand(command string, logger *zap.SugaredLogger, se
 	parser := syndrQL.NewRevokeParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse REVOKE command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in REVOKE command")
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid REVOKE statement: %v", err)
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid REVOKE syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid REVOKE statement: %v", err),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	// Check for active sessions if not using FORCE
 	if !stmt.Force {
 		sessions := sessionManager.GetUserSessions(stmt.Username)
 		if len(sessions) > 0 {
-			err := fmt.Errorf("Cannot revoke from user '%s': user has %d active session(s). Use FORCE to terminate sessions", stmt.Username, len(sessions))
-			// TODO: Integrate with SecurityAuditor to log revoke attempt blocked by active sessions
-			logger.Warnw("REVOKE command blocked by active sessions",
-				"username", stmt.Username,
-				"sessionCount", len(sessions),
-				"force", false)
-			return nil, err
+			return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+				fmt.Sprintf("Cannot revoke from user '%s': user has %d active session(s). Use FORCE to terminate sessions", stmt.Username, len(sessions)),
+				errors.LayerCommand).WithContext("username", stmt.Username).WithContext("session_count", fmt.Sprintf("%d", len(sessions)))
 		}
 	}
 
@@ -240,10 +227,9 @@ func RevokePermissionOrRoleCommand(command string, logger *zap.SugaredLogger, se
 	case syndrQL.RevokeTypeRole:
 		return revokeRole(stmt, logger, serviceManager, database, debugMode)
 	default:
-		if debugMode {
-			return nil, fmt.Errorf("unknown revoke type: %v", stmt.Type)
-		}
-		return nil, fmt.Errorf("invalid revoke type")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Unknown revoke type: %v", stmt.Type),
+			errors.LayerCommand).WithContext("revoke_type", fmt.Sprintf("%v", stmt.Type))
 	}
 }
 
@@ -254,10 +240,7 @@ func revokePermission(stmt *syndrQL.RevokeStatement, logger *zap.SugaredLogger, 
 	// Revoke the permission using PermissionService
 	err := serviceManager.PermissionService.RevokePermissionFromUser(stmt.Username, stmt.PermissionName)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to revoke permission '%s' from user '%s': %v", stmt.PermissionName, stmt.Username, err)
-		}
-		return nil, fmt.Errorf("failed to revoke permission")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("username", stmt.Username).WithContext("permission", stmt.PermissionName)
 	}
 
 	// TODO: Integrate with SecurityAuditor to log permission revocation
@@ -291,10 +274,7 @@ func revokeRole(stmt *syndrQL.RevokeStatement, logger *zap.SugaredLogger, servic
 	// Revoke the role using PermissionService
 	err := serviceManager.PermissionService.RevokeRoleFromUser(stmt.Username, stmt.RoleName)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to revoke role '%s' from user '%s': %v", stmt.RoleName, stmt.Username, err)
-		}
-		return nil, fmt.Errorf("failed to revoke role")
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("role", stmt.RoleName).WithContext("username", stmt.Username)
 	}
 
 	// TODO: Integrate with SecurityAuditor to log role revocation
@@ -328,18 +308,17 @@ func UpdateUserCommand(command string, logger *zap.SugaredLogger, serviceManager
 	parser := syndrQL.NewUpdateUserParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse UPDATE USER command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in UPDATE USER command")
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid UPDATE USER statement: %v", err)
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid UPDATE USER syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid UPDATE USER statement: %v", err),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	logger.Infof("Updating user '%s' (force=%v)", stmt.Username, stmt.Force)
@@ -347,10 +326,8 @@ func UpdateUserCommand(command string, logger *zap.SugaredLogger, serviceManager
 	// Update the user using UserService
 	err = serviceManager.UserService.UpdateUser(stmt.Username, stmt.Updates, stmt.Force)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to update user '%s': %v", stmt.Username, err)
-		}
-		return nil, err // Pass through system user protection errors
+		// Convert service errors (already SyndrDBError from auth layer)
+		return nil, errors.ConvertError(err, errors.LayerCommand)
 	}
 
 	// TODO: Integrate with SecurityAuditor to log user updates
@@ -384,18 +361,17 @@ func DeleteUserCommand(command string, logger *zap.SugaredLogger, serviceManager
 	parser := syndrQL.NewDeleteUserParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse DELETE USER command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in DELETE USER command")
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid DELETE USER statement: %v", err)
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid DELETE USER syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid DELETE USER statement: %v", err),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	logger.Infof("Deleting user '%s' (force=%v)", stmt.Username, stmt.Force)
@@ -403,10 +379,8 @@ func DeleteUserCommand(command string, logger *zap.SugaredLogger, serviceManager
 	// Delete the user using UserService
 	err = serviceManager.UserService.DeleteUser(stmt.Username, stmt.Force)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to delete user '%s': %v", stmt.Username, err)
-		}
-		return nil, err // Pass through system user protection errors
+		// Convert service errors (already SyndrDBError from auth layer)
+		return nil, errors.ConvertError(err, errors.LayerCommand)
 	}
 
 	// TODO: Integrate with SecurityAuditor to log user deletion
@@ -437,18 +411,17 @@ func CreateRoleCommand(command string, logger *zap.SugaredLogger, serviceManager
 	parser := syndrQL.NewCreateRoleParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse CREATE ROLE command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in CREATE ROLE command")
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid CREATE ROLE statement: %v", err)
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid CREATE ROLE syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid CREATE ROLE statement: %v", err),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	logger.Infof("Creating role '%s'", stmt.RoleName)
@@ -456,10 +429,7 @@ func CreateRoleCommand(command string, logger *zap.SugaredLogger, serviceManager
 	// Create the role using PermissionService
 	roleID, err := serviceManager.PermissionService.CreateRole(stmt.RoleName, stmt.Description)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to create role '%s': %v", stmt.RoleName, err)
-		}
-		return nil, err
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("role", stmt.RoleName)
 	}
 
 	logger.Infof("Role '%s' created successfully with ID: %s", stmt.RoleName, roleID)
@@ -479,18 +449,17 @@ func UpdateRoleCommand(command string, logger *zap.SugaredLogger, serviceManager
 	parser := syndrQL.NewUpdateRoleParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse UPDATE/ALTER ROLE command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in UPDATE/ALTER ROLE command")
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid UPDATE/ALTER ROLE statement: %v", err)
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid UPDATE/ALTER ROLE syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid UPDATE/ALTER ROLE statement: %v", err),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	logger.Infof("Updating role '%s' (force=%v)", stmt.RoleName, stmt.Force)
@@ -498,10 +467,7 @@ func UpdateRoleCommand(command string, logger *zap.SugaredLogger, serviceManager
 	// Update the role using PermissionService
 	err = serviceManager.PermissionService.UpdateRole(stmt.RoleName, stmt.Updates, stmt.Force)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to update role '%s': %v", stmt.RoleName, err)
-		}
-		return nil, err
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("role", stmt.RoleName)
 	}
 
 	// TODO: Integrate with SecurityAuditor to log role updates
@@ -535,18 +501,17 @@ func DeleteRoleCommand(command string, logger *zap.SugaredLogger, serviceManager
 	parser := syndrQL.NewDeleteRoleParser(command)
 	stmt, err := parser.Parse()
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to parse DELETE/DROP ROLE command: %v", err)
-		}
-		return nil, fmt.Errorf("syntax error in DELETE/DROP ROLE command")
+		return nil, convertParserError(err, command)
 	}
 
 	// Validate the statement
 	if err := stmt.Validate(); err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("invalid DELETE/DROP ROLE statement: %v", err)
+		if sdbErr, ok := err.(errors.SyndrDBError); ok {
+			return nil, sdbErr
 		}
-		return nil, fmt.Errorf("invalid DELETE/DROP ROLE syntax")
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("Invalid DELETE/DROP ROLE statement: %v", err),
+			errors.LayerCommand).WithContext("command", command)
 	}
 
 	logger.Infof("Deleting role '%s' (force=%v)", stmt.RoleName, stmt.Force)
@@ -554,10 +519,7 @@ func DeleteRoleCommand(command string, logger *zap.SugaredLogger, serviceManager
 	// Delete the role using PermissionService
 	err = serviceManager.PermissionService.DeleteRole(stmt.RoleName, stmt.Force)
 	if err != nil {
-		if debugMode {
-			return nil, fmt.Errorf("failed to delete role '%s': %v", stmt.RoleName, err)
-		}
-		return nil, err
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("role", stmt.RoleName)
 	}
 
 	// TODO: Integrate with SecurityAuditor to log role deletion

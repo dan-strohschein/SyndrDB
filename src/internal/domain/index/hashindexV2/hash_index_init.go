@@ -29,6 +29,7 @@ package hashindexV2
 
 import (
 	"fmt"
+	"syndrdb/src/pkg/constants"
 	"time"
 )
 
@@ -565,6 +566,11 @@ func (hi *HashIndex) allocateNewPage() (uint32, error) {
 
 	// Store the current NextPageNum before incrementing (for rollback purposes)
 	originalNextPageNum := hi.metadata.NextPageNum
+
+	// MED-011: Check for overflow before incrementing page number
+	if err := constants.CheckUint32Increment(originalNextPageNum, "NextPageNum"); err != nil {
+		return 0, fmt.Errorf("page number overflow: %w", err)
+	}
 
 	// Allocate new page number - this should be consecutive and valid
 	newPageNum := hi.metadata.NextPageNum

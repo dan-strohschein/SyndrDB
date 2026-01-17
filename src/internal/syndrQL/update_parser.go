@@ -41,9 +41,10 @@ type UpdateStatement struct {
 
 // UpdateParser handles parsing of UPDATE DOCUMENTS statements
 type UpdateParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer       *Tokenizer
+	current         int
+	tokens          []Token
+	originalCommand string // Original command for error reporting
 }
 
 // NewUpdateParser creates a new UPDATE parser
@@ -51,12 +52,13 @@ func NewUpdateParser(input string) (*UpdateParser, error) {
 	tokenizer := NewTokenizer(input)
 	tokens, err := tokenizer.Tokenize()
 	if err != nil {
-		return nil, fmt.Errorf("tokenization failed: %w", err)
+		return nil, err // Tokenization errors are handled by the tokenizer
 	}
 	return &UpdateParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+		tokenizer:       tokenizer,
+		tokens:          tokens,
+		current:         0,
+		originalCommand: input,
 	}, nil
 }
 
@@ -72,7 +74,12 @@ func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 	// Expect: DOCUMENTS or DOCUMENT (both are valid)
 	currentToken := p.peek()
 	if currentToken.Type != TOKEN_DOCUMENTS && currentToken.Type != TOKEN_DOCUMENT {
-		return nil, fmt.Errorf("expected DOCUMENTS or DOCUMENT, got %s at line %d", currentToken.Value, currentToken.Line)
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("expected DOCUMENTS or DOCUMENT, got %s", currentToken.Value),
+			currentToken,
+			"DOCUMENTS or DOCUMENT",
+			p.originalCommand,
+		)
 	}
 	p.advance()
 
@@ -89,7 +96,12 @@ func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 	// Parse bundle name (quoted string)
 	bundleNameToken := p.peek()
 	if bundleNameToken.Type != TOKEN_STRING {
-		return nil, fmt.Errorf("expected bundle name (quoted string), got %s at line %d", bundleNameToken.Value, bundleNameToken.Line)
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("expected bundle name (quoted string), got %s", bundleNameToken.Value),
+			bundleNameToken,
+			"quoted string",
+			p.originalCommand,
+		)
 	}
 	bundleName := bundleNameToken.Value
 	p.advance()
@@ -102,7 +114,7 @@ func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 	// Parse field-value pairs
 	fields, err := p.parseFieldUpdates()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse field updates: %w", err)
+		return nil, err // parseFieldUpdates already returns detailed error
 	}
 
 	// Expect: closing parenthesis
@@ -126,7 +138,7 @@ func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 		var err error
 		whereClause, err = p.parseWhereClause()
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
+			return nil, err // parseWhereClause already returns detailed error
 		}
 	}
 
@@ -136,8 +148,14 @@ func (p *UpdateParser) Parse() (*UpdateStatement, error) {
 	}
 
 	// Verify we're at EOF
-	if p.peek().Type != TOKEN_EOF {
-		return nil, fmt.Errorf("unexpected tokens after UPDATE statement at line %d", p.peek().Line)
+	peekToken := p.peek()
+	if peekToken.Type != TOKEN_EOF {
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("unexpected tokens after UPDATE statement: %s", peekToken.Value),
+			peekToken,
+			"EOF or semicolon",
+			p.originalCommand,
+		)
 	}
 
 	return &UpdateStatement{
@@ -156,7 +174,12 @@ func (p *UpdateParser) parseFieldUpdates() (map[string]interface{}, error) {
 		// Parse field name (can be quoted string or unquoted identifier)
 		fieldToken := p.peek()
 		if fieldToken.Type != TOKEN_IDENT && fieldToken.Type != TOKEN_STRING {
-			return nil, fmt.Errorf("expected field name (identifier or quoted string), got %s at line %d", fieldToken.Value, fieldToken.Line)
+			return nil, CreateParserErrorWithToken(
+				fmt.Sprintf("expected field name (identifier or quoted string), got %s", fieldToken.Value),
+				fieldToken,
+				"field name (identifier or quoted string)",
+				p.originalCommand,
+			)
 		}
 		fieldName := fieldToken.Value
 		p.advance()
@@ -169,7 +192,7 @@ func (p *UpdateParser) parseFieldUpdates() (map[string]interface{}, error) {
 		// Parse field value
 		value, err := p.parseFieldValue()
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse value for field '%s': %w", fieldName, err)
+			return nil, err // parseValue already returns detailed error
 		}
 
 		// Store field-value pair
@@ -184,12 +207,22 @@ func (p *UpdateParser) parseFieldUpdates() (map[string]interface{}, error) {
 			// End of field list, stop parsing
 			break
 		} else {
-			return nil, fmt.Errorf("expected ',' or ')' after field value, got %s at line %d", nextToken.Value, nextToken.Line)
+			return nil, CreateParserErrorWithToken(
+				fmt.Sprintf("expected ',' or ')' after field value, got %s", nextToken.Value),
+				nextToken,
+				", or )",
+				p.originalCommand,
+			)
 		}
 	}
 
 	if len(fields) == 0 {
-		return nil, fmt.Errorf("UPDATE statement must specify at least one field to update")
+		return nil, CreateParserErrorWithToken(
+			"UPDATE statement must specify at least one field to update",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"field = value",
+			p.originalCommand,
+		)
 	}
 
 	return fields, nil
@@ -222,7 +255,12 @@ func (p *UpdateParser) parseFieldValue() (interface{}, error) {
 		return nil, nil
 
 	default:
-		return nil, fmt.Errorf("expected value (string, number, boolean, or null), got %s at line %d", token.Value, token.Line)
+		return nil, CreateParserErrorWithToken(
+			fmt.Sprintf("expected value (string, number, boolean, or null), got %s", token.Value),
+			token,
+			"value (string, number, boolean, or null)",
+			p.originalCommand,
+		)
 	}
 }
 
@@ -232,14 +270,19 @@ func (p *UpdateParser) parseWhereClause() (Expression, error) {
 	whereTokens := p.collectWhereTokens()
 
 	if len(whereTokens) == 0 {
-		return nil, fmt.Errorf("expected WHERE condition")
+		return nil, CreateParserErrorWithToken(
+			"expected WHERE condition",
+			Token{Type: TOKEN_EOF, Line: 0, Column: 0},
+			"WHERE condition",
+			p.originalCommand,
+		)
 	}
 
 	// Use ExpressionParser to parse WHERE condition
 	exprParser := NewExpressionParser(whereTokens, nil)
 	expr, err := exprParser.Parse()
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse WHERE expression: %w", err)
+		return nil, err // ExpressionParser already returns detailed error
 	}
 
 	return expr, nil
@@ -294,7 +337,12 @@ func (p *UpdateParser) expectKeyword(expectedType TokenType, keyword string) err
 func (p *UpdateParser) expectToken(expectedType TokenType, expected string) error {
 	token := p.peek()
 	if token.Type != expectedType {
-		return fmt.Errorf("expected '%s', got %s at line %d", expected, token.Value, token.Line)
+		return CreateParserErrorWithToken(
+			fmt.Sprintf("expected '%s', got %s", expected, token.Value),
+			token,
+			expected,
+			p.originalCommand,
+		)
 	}
 	p.advance()
 	return nil

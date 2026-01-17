@@ -40,6 +40,11 @@ func init() {
 		MinArgs: 2,
 		MaxArgs: 2,
 		Implementation: func(args []models.FieldValue, evalCtx *EvaluationContext) (models.FieldValue, error) {
+			// Defensive bounds checking
+			if len(args) < 2 {
+				return models.FieldValue{}, fmt.Errorf("EXTRACT: requires 2 arguments, got %d", len(args))
+			}
+			
 			// args[0]: unit (string: 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND')
 			// args[1]: datetime value
 			if args[0].Type != models.FieldTypeString {
@@ -82,6 +87,11 @@ func init() {
 		MinArgs: 2,
 		MaxArgs: 2,
 		Implementation: func(args []models.FieldValue, evalCtx *EvaluationContext) (models.FieldValue, error) {
+			// Defensive bounds checking
+			if len(args) < 2 {
+				return models.FieldValue{}, fmt.Errorf("DATE_TRUNC: requires 2 arguments, got %d", len(args))
+			}
+			
 			// args[0]: unit (string: 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND')
 			// args[1]: datetime value
 			if args[0].Type != models.FieldTypeString {
@@ -124,6 +134,11 @@ func init() {
 		MinArgs: 3,
 		MaxArgs: 3,
 		Implementation: func(args []models.FieldValue, evalCtx *EvaluationContext) (models.FieldValue, error) {
+			// Defensive bounds checking
+			if len(args) < 3 {
+				return models.FieldValue{}, fmt.Errorf("DATE_ADD: requires 3 arguments, got %d", len(args))
+			}
+			
 			// args[0]: datetime value
 			// args[1]: interval amount (int or float)
 			// args[2]: unit (string: 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND')
@@ -182,6 +197,11 @@ func init() {
 		MinArgs: 3,
 		MaxArgs: 3,
 		Implementation: func(args []models.FieldValue, evalCtx *EvaluationContext) (models.FieldValue, error) {
+			// Defensive bounds checking
+			if len(args) < 3 {
+				return models.FieldValue{}, fmt.Errorf("DATE_SUB: requires 3 arguments, got %d", len(args))
+			}
+			
 			// args[0]: datetime value
 			// args[1]: interval amount (int or float)
 			// args[2]: unit (string: 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND')
@@ -243,6 +263,11 @@ func init() {
 		MinArgs: 1,
 		MaxArgs: 2,
 		Implementation: func(args []models.FieldValue, evalCtx *EvaluationContext) (models.FieldValue, error) {
+			// Defensive bounds checking
+			if len(args) < 1 {
+				return models.FieldValue{}, fmt.Errorf("AGE: requires at least 1 argument, got %d", len(args))
+			}
+			
 			var dt1, dt2 time.Time
 
 			if len(args) == 1 {
@@ -257,6 +282,10 @@ func init() {
 				dt2 = args[0].DateTimeVal
 			} else {
 				// Two arguments: calculate age between two datetimes
+				// Defensive check for second argument
+				if len(args) < 2 {
+					return models.FieldValue{}, fmt.Errorf("AGE: requires 2 arguments for two-datetime calculation, got %d", len(args))
+				}
 				if args[0].Type != models.FieldTypeDateTime {
 					return models.FieldValue{}, fmt.Errorf("AGE: first argument must be a DATETIME")
 				}
@@ -346,18 +375,28 @@ func ParseInterval(value string, unit TokenType, isNumericFormat bool) (years in
 		// Check for time format (HH:MM:SS)
 		if strings.Contains(value, ":") {
 			timeParts := strings.Split(value, ":")
-			if len(timeParts) == 3 {
+			if len(timeParts) >= 3 {
+				// Defensive bounds checking before accessing indices
 				hours, _ = strconv.Atoi(timeParts[0])
 				minutes, _ = strconv.Atoi(timeParts[1])
 				seconds, _ = strconv.Atoi(timeParts[2])
+				return
+			} else if len(timeParts) > 0 {
+				// Invalid time format
+				err = fmt.Errorf("invalid time format: expected HH:MM:SS, got '%s'", value)
 				return
 			}
 		}
 
 		// Parse "X unit Y unit" format
 		for i := 0; i < len(parts); i += 2 {
+			// Defensive bounds checking
+			if i >= len(parts) {
+				err = fmt.Errorf("invalid interval format: unexpected end at index %d", i)
+				return
+			}
 			if i+1 >= len(parts) {
-				err = fmt.Errorf("invalid interval format: '%s'", value)
+				err = fmt.Errorf("invalid interval format: '%s' - missing unit after value at index %d", value, i)
 				return
 			}
 
