@@ -1099,8 +1099,13 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields)
 		} else {
 			// Fallback: SortNode/LimitNode not found in plan tree
-			// This shouldn't happen with the new planner design, but keep for safety
-			logger.Warn("SortNode/LimitNode not found in plan tree, using fallback transform")
+			// This is expected for aggregate-only queries without ORDER BY (optimization)
+			// Only warn if it's not an aggregate-only query, as that might indicate a problem
+			if !query.IsAggregateOnly {
+				logger.Warn("SortNode/LimitNode not found in plan tree, using fallback transform")
+			} else {
+				logger.Debug("SortNode/LimitNode not found for aggregate-only query (expected optimization)")
+			}
 			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
 		}
 	} // NOTE: Sorting is handled by the SortNode in the unified query planner execution tree.
@@ -1166,7 +1171,13 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		// CRITICAL FIX: For direct function calls (E2E tests), convert StreamDocuments to Result
 		// HTTP responses use StreamDocuments for efficient streaming, but direct callers expect Result
 		// This ensures backward compatibility with existing tests while maintaining streaming optimization
-		cmdResponse.Result = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
+		// For full scans without ORDER BY, use non-sorting transform to preserve order from GetAllDocuments()
+		// Convert documents map to slice preserving order (no sorting for queries without ORDER BY)
+		docSlice := make([]*models.Document, 0, len(documents))
+		for _, doc := range documents {
+			docSlice = append(docSlice, doc)
+		}
+		cmdResponse.Result = helpers.TransformSortedDocumentsToFlatFormatWithProjection(docSlice, selectedFields)
 	} else {
 		// PHASE A: Store pooled maps for cleanup after JSON marshaling (avoids closure allocation)
 		if flattenedDocs, ok := results.([]map[string]interface{}); ok {

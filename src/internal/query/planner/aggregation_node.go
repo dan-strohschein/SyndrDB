@@ -51,6 +51,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/executor"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
@@ -169,11 +170,12 @@ func NewAggregationNode(
 // PHASE 3: Main execution method for AggregationNode
 //
 // Execution flow:
-// 1. Execute child node to get input documents
-// 2. Execute aggregation based on strategy (hash vs sort)
-// 3. Apply HAVING clause filtering if present
-// 4. Convert group results to documents
-// 5. Return aggregated results
+// 1. Check for COUNT(*) optimization (skip scanning if possible)
+// 2. Execute child node to get input documents
+// 3. Execute aggregation based on strategy (hash vs sort)
+// 4. Apply HAVING clause filtering if present
+// 5. Convert group results to documents
+// 6. Return aggregated results
 //
 // Returns:
 //   - map[string]*models.Document: Aggregated group documents
@@ -186,6 +188,72 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 
 	n.Logger.Infof("Executing AggregationNode with %d GROUP BY fields, %d aggregates, strategy=%s",
 		groupByFieldCount, len(n.AggregateFields), n.executionStrategy.String())
+
+	// OPTIMIZATION: For COUNT(*) queries without GROUP BY, without WHERE, and without HAVING,
+	// use efficient count-only operation instead of scanning all documents
+	hasHavingClause := (n.HavingExpression != nil) || (n.HavingClause != nil && n.HavingClause.Condition != "")
+	isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+	isCountStarOnly := isAggregateOnly && len(n.AggregateFields) == 1 &&
+		n.AggregateFields[0].Function == "COUNT" && n.AggregateFields[0].Field == "*"
+	
+	if isCountStarOnly && !hasHavingClause {
+		// Check if child is a FullScanNode (meaning no WHERE clause was applied)
+		if fullScan, ok := n.Child.(*FullScanNode); ok {
+			var totalDocs int64
+			
+			// Fast path: If documents are complete in memory, count them directly
+			if fullScan.Bundle.Documents != nil && fullScan.Bundle.DocumentsComplete {
+				totalDocs = int64(len(*fullScan.Bundle.Documents))
+				n.Logger.Infof("OPTIMIZATION: Counting in-memory documents for COUNT(*) - Count=%d", totalDocs)
+			} else if fullScan.DocumentScanner != nil {
+				// Use BundleInterface.GetTotalDocuments() which counts documents efficiently
+				// by scanning pages but only counting document IDs (not loading full document data)
+				bundleInterface, ok := fullScan.DocumentScanner.(documentscanner.BundleInterface)
+				if ok {
+					totalDocs = int64(bundleInterface.GetTotalDocuments())
+					n.Logger.Infof("OPTIMIZATION: Using efficient count-only scan for COUNT(*) - Count=%d", totalDocs)
+				} else {
+					// Fallback: Use ScanAllDocuments() and count
+					// This is slower but better than nothing
+					n.Logger.Debug("COUNT(*) optimization: DocumentScanner is not BundleInterface, using ScanAllDocuments fallback")
+					scanResult, err := fullScan.DocumentScanner.ScanAllDocuments()
+					if err != nil {
+						n.Logger.Warnf("COUNT(*) optimization: ScanAllDocuments failed, falling back to document scan: %v", err)
+						goto executeChild
+					}
+					totalDocs = int64(len(scanResult.Documents))
+					n.Logger.Infof("OPTIMIZATION: Using document scanner for COUNT(*) - Count=%d (scanned %d total)", totalDocs, scanResult.TotalScanned)
+				}
+			} else {
+				// No scanner available, need to execute child
+				n.Logger.Debug("COUNT(*) optimization: No DocumentScanner available, falling back to document scan")
+				goto executeChild
+			}
+			
+			// Create synthetic document with count result
+			// Match the field naming convention used by convertAggregateOnlyToSyntheticDocument
+			fields := make(map[string]models.Field)
+			columnName := "Column1" // First aggregate field uses Column1
+			
+			fields[columnName] = models.Field{
+				Name:  columnName,
+				Value: models.NewInterfaceValue(totalDocs),
+			}
+			
+			doc := document.GetPooledDocument()
+			doc.DocumentID = "synthetic_0"
+			doc.Fields = fields
+			
+			result := map[string]*models.Document{
+				"synthetic_0": doc,
+			}
+			
+			n.Logger.Infof("COUNT(*) optimization completed: returning count=%d", totalDocs)
+			return result, nil
+		}
+	}
+	
+executeChild:
 
 	// Execute child node to get input documents (WHERE already applied by FilterNode)
 	documents, err := n.Child.Execute(ctx)

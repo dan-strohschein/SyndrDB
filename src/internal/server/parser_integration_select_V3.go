@@ -54,6 +54,12 @@ func parseQueryWithNewParser(query string, logger *zap.SugaredLogger) (*querypar
 		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("query", normalizedQuery)
 	}
 
+	// Validate the unified query (ensures GROUP BY validation, etc.)
+	if err := queryparser.ValidateUnifiedQuery(unifiedQuery, logger); err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"query validation failed", errors.LayerParser).WithContext("query", normalizedQuery)
+	}
+
 	// Log pattern and complexity info
 	logger.Debugf("New parser succeeded: Pattern=%s, Complexity=%d", stmt.Pattern, stmt.Complexity)
 

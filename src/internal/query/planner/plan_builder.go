@@ -126,17 +126,25 @@ func (pb *PlanBuilder) BuildPlan(
 		pb.logger.Debug("Added DistinctNode to tree")
 	}
 
-	// ALWAYS add sorting for deterministic ordering
-	// If user specified ORDER BY, use it; otherwise default to CreatedAt ASC
-	sortNode, err := pb.addSortNode(currentTree, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to add sort: %w", err)
-	}
-	currentTree = sortNode
-	if query.HasOrderBy() {
-		pb.logger.Debug("Added SortNode with user ORDER BY clause")
+	// Add sorting for deterministic ordering, but skip for aggregate-only queries
+	// (no GROUP BY) when there's no explicit ORDER BY, as there's nothing to sort
+	if !query.IsAggregateOnly || query.HasOrderBy() {
+		// Add sorting if:
+		// 1. Not an aggregate-only query (has other fields to sort), OR
+		// 2. Aggregate-only query but user explicitly specified ORDER BY
+		sortNode, err := pb.addSortNode(currentTree, query)
+		if err != nil {
+			return nil, fmt.Errorf("failed to add sort: %w", err)
+		}
+		currentTree = sortNode
+		if query.HasOrderBy() {
+			pb.logger.Debug("Added SortNode with user ORDER BY clause")
+		} else {
+			pb.logger.Debug("Added SortNode with default CreatedAt ASC ordering")
+		}
 	} else {
-		pb.logger.Debug("Added SortNode with default CreatedAt ASC ordering")
+		// Skip sort node for aggregate-only queries without explicit ORDER BY
+		pb.logger.Debug("Skipping SortNode for aggregate-only query without ORDER BY (nothing to sort)")
 	}
 
 	// Add limiting if TOP/LIMIT/OFFSET present

@@ -527,6 +527,21 @@ func (b *BundleStorageEngine) LoadBundleIntoMemory(database *models.Database, bu
 	if pageCount, ok := bundleData["PageCount"].(int64); ok {
 		bundle.PageCount = pageCount
 	}
+	
+	// CRITICAL FIX: Detect and fix corruption when loading from disk
+	// If TotalDocuments or PageCount is negative, it's corrupted - reset to 0
+	// The recovery logic in getSafePageCount() will recalculate from actual documents
+	if bundle.TotalDocuments < 0 || bundle.PageCount < 0 {
+		if b.logger != nil {
+			b.logger.Warnf("CORRUPTION DETECTED when loading bundle '%s': TotalDocuments=%d, PageCount=%d, resetting to 0 (will be recovered on next access)",
+				bundle.Name, bundle.TotalDocuments, bundle.PageCount)
+		}
+		bundle.TotalDocuments = 0
+		bundle.PageCount = 0
+		// Mark as dirty so corrected metadata gets persisted
+		bundle.IsDirty = true
+	}
+	
 	if pageSize, ok := bundleData["PageSize"].(int); ok {
 		bundle.PageSize = pageSize
 	}
@@ -1081,11 +1096,18 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		}
 	}
 
-	// CRITICAL FIX: Update bundle metadata after successful deletion
-	// Decrement TotalDocuments to reflect the deleted document
-	if bundle.TotalDocuments > 0 {
-		bundle.TotalDocuments--
-	}
+	// CRITICAL FIX: Do NOT decrement TotalDocuments on deletion
+	// In append-only storage, tombstones are still entries on disk, so TotalDocuments
+	// should represent total document entries (including tombstones), not active documents.
+	// Active document count is calculated dynamically by filtering tombstones during queries.
+	// Decrementing TotalDocuments causes corruption when:
+	// 1. Documents exist that were never counted (pre-tracking, migration, etc.)
+	// 2. Same document is deleted multiple times
+	// 3. Documents are deleted that exist only in memtable (not yet flushed)
+	//
+	// TotalDocuments now represents: total document entries ever written (inserts + tombstones)
+	// Active document count = TotalDocuments - tombstone count (calculated dynamically)
+	// Since we no longer decrement TotalDocuments, it cannot go negative
 
 	// Always calculate PageCount from TotalDocuments to ensure consistency
 	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
@@ -1094,7 +1116,8 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		pageSize = uint32(bundle.PageSize)
 	}
 	if bundle.TotalDocuments > 0 {
-		bundle.PageCount = int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
+		calculatedPageCount := int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
+		bundle.PageCount = calculatedPageCount
 	} else {
 		bundle.PageCount = 0
 	}
@@ -1261,16 +1284,15 @@ func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, 
 		b.logger.Warnf("Failed to close file after deletion markers: %v", err)
 	}
 
-	// CRITICAL FIX: Update bundle metadata after successful batch deletion
-	// Decrement TotalDocuments by the number of deleted documents
-	deletedCount := int64(len(documentIDs))
-	if bundle.TotalDocuments >= deletedCount {
-		bundle.TotalDocuments -= deletedCount
-	} else {
-		bundle.TotalDocuments = 0 // Safety: don't go negative
-	}
+	// CRITICAL FIX: Do NOT decrement TotalDocuments on batch deletion
+	// In append-only storage, tombstones are still entries on disk, so TotalDocuments
+	// should represent total document entries (including tombstones), not active documents.
+	// Active document count is calculated dynamically by filtering tombstones during queries.
+	// See DeleteDocumentFromBundleFile for detailed explanation.
+	// Since we no longer decrement TotalDocuments, it cannot go negative
 
 	// Always calculate PageCount from TotalDocuments to ensure consistency
+	// Note: TotalDocuments now represents total entries (documents + tombstones), not active count
 	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
 	pageSize := uint32(4096)
 	if bundle.PageSize > 0 {
@@ -1288,7 +1310,7 @@ func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, 
 	if b.logger != nil {
 		b.logger.Infow("Successfully appended batch deletion markers and updated metadata",
 			"bundle", bundle.Name,
-			"deletedCount", deletedCount,
+			"deletedCount", len(documentIDs),
 			"newTotalDocuments", bundle.TotalDocuments,
 			"newPageCount", bundle.PageCount)
 	}
@@ -1533,30 +1555,11 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	copy(combinedData[8:], documentBytes)
 
 	// Use WriteWithTxID to track transaction context
-	// writeStart := time.Now()
 	if err := writeBuffer.WriteWithTxID(combinedData[:len(headerBytes)+len(documentBytes)], document.DocumentID, txID); err != nil {
 		b.returnCombinedBuffer(combinedData) // Return buffer to pool
 		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, 0, fmt.Errorf("failed to write document data: %w", err))
 		return 0, fmt.Errorf("failed to write document data: %w", err)
 	}
-	// writeTime := time.Since(writeStart)
-	// #region agent log (commented out - performance debugging)
-	// logEntry := map[string]interface{}{
-	// 	"sessionId":    "debug-session",
-	// 	"runId":        "run1",
-	// 	"hypothesisId": "N",
-	// 	"location":     "bundle_storage_engine.go:1534",
-	// 	"message":      "After WriteWithTxID",
-	// 	"timestamp":    time.Now().UnixNano() / 1e6,
-	// 	"data":         map[string]interface{}{"writeTimeMs": writeTime.Nanoseconds() / 1e6},
-	// }
-	// if logBytes, err := json.Marshal(logEntry); err == nil {
-	// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-	// 		f.Write(append(logBytes, '\n'))
-	// 		f.Close()
-	// 	}
-	// }
-	// #endregion
 
 	b.returnCombinedBuffer(combinedData) // Return buffer to pool
 
@@ -1595,7 +1598,8 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	// FIXED: Always calculate PageCount from TotalDocuments to ensure consistency
 	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
 	if bundle.TotalDocuments > 0 {
-		bundle.PageCount = int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
+		calculatedPageCount := int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
+		bundle.PageCount = calculatedPageCount
 	} else {
 		bundle.PageCount = 0
 	}
@@ -1740,14 +1744,10 @@ func (b *BundleStorageEngine) getOrCreateWriteBuffer(bundleName, filePath string
 	}
 
 	// Ensure the bundle directory exists
-	// Extract database and bundle names from file path (format: data_files/<db>/<bundle>/<file>.bnd)
-	pathParts := strings.Split(filePath, string(filepath.Separator))
-	if len(pathParts) >= 3 {
-		databaseName := pathParts[len(pathParts)-3]
-		bundleName := pathParts[len(pathParts)-2]
-		if err := EnsureBundleDirectory(databaseName, bundleName); err != nil {
-			return nil, fmt.Errorf("failed to create bundle directory: %w", err)
-		}
+	// Use the directory from filePath directly instead of reconstructing
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create bundle directory: %w", err)
 	}
 
 	// Open file in append mode with O_CREATE to handle first-time creation

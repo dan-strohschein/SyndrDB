@@ -150,23 +150,6 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	parseRegion := StartRegion("AddDocument.ParseCommand", logger)
 	docCommand, err := parseAddDocument(command, logger)
 	parseRegion.End()
-	// #region agent log (commented out - performance debugging)
-	// logEntry = map[string]interface{}{
-	// 	"sessionId":    "debug-session",
-	// 	"runId":        "run1",
-	// 	"hypothesisId": "B",
-	// 	"location":     "document_operations.go:138",
-	// 	"message":      "After parse",
-	// 	"timestamp":    time.Now().UnixNano() / 1e6,
-	// 	"data":         map[string]interface{}{"parseTimeMs": parseTime.Nanoseconds() / 1e6},
-	// }
-	// if logBytes, err := json.Marshal(logEntry); err == nil {
-	// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-	// 		f.Write(append(logBytes, '\n'))
-	// 		f.Close()
-	// 	}
-	// }
-	// #endregion
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
 	}
@@ -243,23 +226,6 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 				return err
 			})
 			walRegion.End()
-			// #region agent log (commented out - performance debugging)
-			// logEntry := map[string]interface{}{
-			// 	"sessionId":    "debug-session",
-			// 	"runId":        "run1",
-			// 	"hypothesisId": "F",
-			// 	"location":     "document_operations.go:199",
-			// 	"message":      "After ExecuteWithLogging",
-			// 	"timestamp":    time.Now().UnixNano() / 1e6,
-			// 	"data":         map[string]interface{}{"walLogTotalTimeMs": walLogTotalTime.Nanoseconds() / 1e6},
-			// }
-			// if logBytes, err := json.Marshal(logEntry); err == nil {
-			// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			// 		f.Write(append(logBytes, '\n'))
-			// 		f.Close()
-			// 	}
-			// }
-			// #endregion
 
 			// METRICS: Track transaction outcome
 			if err != nil {
@@ -296,24 +262,6 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	}
 
 	result := fmt.Sprintf("{\"DocumentID\": \"%s\", \"message\": \"Document added successfully to bundle '%s'.\"}", docID, bundleName)
-	// totalTime := time.Since(startTime)
-	// #region agent log (commented out - performance debugging)
-	// logEntry = map[string]interface{}{
-	// 	"sessionId":    "debug-session",
-	// 	"runId":        "run1",
-	// 	"hypothesisId": "G",
-	// 	"location":     "document_operations.go:240",
-	// 	"message":      "AddDocument end",
-	// 	"timestamp":    time.Now().UnixNano() / 1e6,
-	// 	"data":         map[string]interface{}{"totalTimeMs": totalTime.Nanoseconds() / 1e6},
-	// }
-	// if logBytes, err := json.Marshal(logEntry); err == nil {
-	// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-	// 		f.Write(append(logBytes, '\n'))
-	// 		f.Close()
-	// 	}
-	// }
-	// #endregion
 	cmdResponse := &CommandResponse{
 		ResultCount: 1,
 		Result:      result,

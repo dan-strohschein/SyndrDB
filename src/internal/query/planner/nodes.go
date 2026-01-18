@@ -457,11 +457,9 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		return nil, fmt.Errorf("document scanner is required for paginated document scanning")
 	}
 
-	// Use predicate-based scan to get all documents
-	// This leverages the scanner's batching, caching, and memory management
-	scanResult, err := node.DocumentScanner.ScanWithPredicate(func(doc *models.Document) bool {
-		return true // Accept all documents for full scan
-	})
+	// Use ScanAllDocuments() for full scans - this bypasses the O(n*m) GetDocumentIDs() + GetDocument() loop
+	// by using the efficient GetAllDocuments() method that loads pages sequentially
+	scanResult, err := node.DocumentScanner.ScanAllDocuments()
 	if err != nil {
 		return nil, fmt.Errorf("document scanner failed: %w", err)
 	}

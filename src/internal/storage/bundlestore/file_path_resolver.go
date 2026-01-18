@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syndrdb/src/pkg/common/helpers"
 )
 
 /*
@@ -94,9 +96,10 @@ func (fpr *FilePathResolver) GetLegacySingleFilePath(databaseName, bundleName st
 // ============================================================================
 
 // GetBundleDirectory returns the directory path for a bundle (standalone version)
-// Format: data_files/<database>/<bundle>/
+// Format: <DataDir>/<database>/<bundle>/
 func GetBundleDirectory(databaseName, bundleName string) string {
-	return filepath.Join("data_files", databaseName, bundleName)
+	databasePath := strings.TrimSuffix(helpers.GetDatabaseFolderPath(databaseName), "/")
+	return filepath.Join(databasePath, bundleName)
 }
 
 // GetBundleFilePath returns the full path for a specific bundle file (standalone version)

@@ -42,6 +42,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syndrdb/src/pkg/common/helpers"
 
 	"go.uber.org/zap"
 )
@@ -142,7 +144,7 @@ func (s *ViewFileStore) DeleteView(databaseName, viewName string) error {
 
 // ListViews loads all views for a database from binary files
 func (s *ViewFileStore) ListViews(databaseName string) ([]*View, error) {
-	dataDir := filepath.Join("data_files", databaseName)
+	dataDir := strings.TrimSuffix(helpers.GetDatabaseFolderPath(databaseName), "/")
 
 	// Check if directory exists
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -223,7 +225,8 @@ func (s *ViewFileStore) deleteBinaryFile(databaseName, viewName string) error {
 // getViewFilePath returns the file path for a view's binary file
 func (s *ViewFileStore) getViewFilePath(databaseName, viewName string) string {
 	filename := fmt.Sprintf("%s_%s.view", databaseName, viewName)
-	return filepath.Join("data_files", databaseName, filename)
+	databasePath := strings.TrimSuffix(helpers.GetDatabaseFolderPath(databaseName), "/")
+	return filepath.Join(databasePath, filename)
 }
 
 // copyFile copies a file from src to dst

@@ -256,20 +256,110 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 func (ba *BundleAdapter) getSafePageCount() uint32 {
 	pageCount := uint32(ba.bundle.PageCount)
 
+	// CRITICAL FIX: Handle negative TotalDocuments (corruption from over-deletion)
+	// If TotalDocuments is negative, it's corrupted - set to 0 to trigger recovery below
+	if ba.bundle.TotalDocuments < 0 {
+		ba.logger.Errorf("CORRUPTION DETECTED: Bundle '%s' has negative TotalDocuments (%d), will recover by scanning pages",
+			ba.bundle.Name, ba.bundle.TotalDocuments)
+		ba.bundle.TotalDocuments = 0
+		ba.bundle.PageCount = 0
+		pageCount = 0
+		// Mark bundle as dirty so corrected metadata gets persisted
+		ba.bundle.IsDirty = true
+	}
+
+	// Calculate expected PageCount from TotalDocuments and PageSize for validation
+	pageSize := uint32(4096) // Standard page size (power of 2)
+	if ba.bundle.PageSize > 0 {
+		pageSize = uint32(ba.bundle.PageSize)
+	}
+	expectedPageCount := uint32(0)
+	if ba.bundle.TotalDocuments > 0 {
+		expectedPageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
+	}
+
 	// CRITICAL FIX: If PageCount is 0 but TotalDocuments > 0, calculate from documents
 	// This handles cases where metadata persistence failed but documents exist
 	if pageCount == 0 && ba.bundle.TotalDocuments > 0 {
-		pageSize := uint32(4096) // Standard page size (power of 2)
-		pageCount = uint32((ba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
+		pageCount = expectedPageCount
+		ba.bundle.PageCount = int64(pageCount)
+		ba.bundle.IsDirty = true
 		ba.logger.Warnf("RECOVERY: PageCount was 0 but TotalDocuments=%d, calculated pageCount=%d",
 			ba.bundle.TotalDocuments, pageCount)
 	}
 
-	// DEFENSIVE: If both are 0, return minimum to allow at least one page check
+	// CRITICAL FIX: Validate PageCount matches expected value based on TotalDocuments and PageSize
+	// This fixes cases where PageCount was calculated with incorrect PageSize (e.g., old default of 100)
+	if pageCount > 0 && expectedPageCount > 0 && pageCount != expectedPageCount {
+		ba.logger.Warnf("CORRECTION: PageCount (%d) doesn't match expected value (%d) based on TotalDocuments=%d, PageSize=%d. Correcting...",
+			pageCount, expectedPageCount, ba.bundle.TotalDocuments, ba.bundle.PageSize)
+		pageCount = expectedPageCount
+		ba.bundle.PageCount = int64(pageCount)
+		ba.bundle.IsDirty = true
+	}
+
+	// DEFENSIVE: If both are 0, try to recover by scanning pages
+	// This is expensive but necessary when metadata is completely corrupted
 	if pageCount == 0 {
-		ba.logger.Warnf("SAFETY: Both PageCount and TotalDocuments are 0 for bundle '%s', using MinPageCount",
+		ba.logger.Warnf("SAFETY: Both PageCount and TotalDocuments are 0 for bundle '%s', attempting recovery by scanning pages",
 			ba.bundle.Name)
-		return MinPageCount
+		
+		// Try to find actual page count by scanning pages up to a reasonable limit
+		// Scan up to MaxReasonablePageCount pages to find where documents actually end
+		maxScanPages := MaxReasonablePageCount
+		actualPageCount := uint32(0)
+		
+		for testPageID := uint32(0); testPageID < maxScanPages; testPageID++ {
+			page, err := ba.loadDocumentPage(testPageID)
+			if err != nil {
+				// Page doesn't exist or error loading - we've reached the end
+				break
+			}
+			if len(page.Documents) == 0 {
+				// Empty page - might be the end, but continue a bit more to be sure
+				// Check a few more pages to confirm
+				emptyCount := 0
+				for i := uint32(1); i <= 3 && (testPageID+i) < maxScanPages; i++ {
+					testPage, testErr := ba.loadDocumentPage(testPageID + i)
+					if testErr != nil || len(testPage.Documents) == 0 {
+						emptyCount++
+					} else {
+						emptyCount = 0
+						break
+					}
+				}
+				if emptyCount >= 3 {
+					// Found 3+ consecutive empty pages - we've reached the end
+					break
+				}
+			}
+			actualPageCount = testPageID + 1
+		}
+		
+		if actualPageCount > 0 {
+			// Recovered page count - now count documents
+			actualDocCount := 0
+			for pageID := uint32(0); pageID < actualPageCount; pageID++ {
+				page, err := ba.loadDocumentPage(pageID)
+				if err != nil {
+					continue
+				}
+				actualDocCount += len(page.Documents)
+			}
+			
+			ba.bundle.TotalDocuments = int64(actualDocCount)
+			ba.bundle.PageCount = int64(actualPageCount)
+			pageCount = actualPageCount
+			ba.bundle.IsDirty = true
+			
+			ba.logger.Warnf("RECOVERY SUCCESS: Recovered TotalDocuments=%d, PageCount=%d for bundle '%s'",
+				ba.bundle.TotalDocuments, pageCount, ba.bundle.Name)
+		} else {
+			// Could not recover - use minimum
+			ba.logger.Warnf("RECOVERY FAILED: Could not recover page count for bundle '%s', using MinPageCount",
+				ba.bundle.Name)
+			return MinPageCount
+		}
 	}
 
 	// DEFENSIVE: Cap at reasonable maximum to prevent DoS from corrupt metadata
@@ -403,12 +493,28 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 // GetAllDocuments returns all documents - WARNING: Use sparingly for large bundles!
 // This method is kept for compatibility but should be avoided for large datasets
 func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
-	ba.logger.Infof("GetAllDocuments called for bundle '%s'", ba.bundle.Name)
-	ba.logger.Infof("GetAllDocuments: PageCount=%d, TotalDocuments=%d, DocumentsComplete=%v, Documents!=nil=%v",
+	ba.logger.Debugf("GetAllDocuments called for bundle '%s'", ba.bundle.Name)
+
+	// EARLY RETURN OPTIMIZATION: Check DocumentsComplete at the start to skip all disk I/O
+	// If Documents is marked complete, use it directly without loading any pages
+	ba.bundle.DocumentsMutex.RLock()
+	if ba.bundle.Documents != nil && ba.bundle.DocumentsComplete {
+		ba.bundle.DocumentsMutex.RUnlock()
+		ba.logger.Debugf("Using complete Documents cache with %d documents (skipping disk I/O)", len(*ba.bundle.Documents))
+		allDocs := make(map[string]*models.Document, len(*ba.bundle.Documents))
+		for docID, doc := range *ba.bundle.Documents {
+			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
+			allDocs[docID] = &doc
+		}
+		return allDocs
+	}
+	ba.bundle.DocumentsMutex.RUnlock()
+
+	ba.logger.Debugf("GetAllDocuments: PageCount=%d, TotalDocuments=%d, DocumentsComplete=%v, Documents!=nil=%v",
 		ba.bundle.PageCount, ba.bundle.TotalDocuments, ba.bundle.DocumentsComplete, ba.bundle.Documents != nil)
 
 	if ba.bundle.Documents != nil {
-		ba.logger.Infof("GetAllDocuments: Bundle.Documents has %d entries", len(*ba.bundle.Documents))
+		ba.logger.Debugf("GetAllDocuments: Bundle.Documents has %d entries", len(*ba.bundle.Documents))
 	}
 
 	allDocs := make(map[string]*models.Document)
@@ -425,25 +531,22 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 
 	// Load all pages from disk
 	if pageCount > 0 {
-		ba.logger.Infof("Loading documents from disk (PageCount=%d)", pageCount)
+		ba.logger.Debugf("Loading documents from disk (PageCount=%d)", pageCount)
 
 		// Stream through pages and collect all documents
 		for pageID := uint32(0); pageID < pageCount; pageID++ {
-			ba.logger.Infof("Loading page %d...", pageID)
 			page, err := ba.loadDocumentPage(pageID)
 			if err != nil {
 				ba.logger.Errorf("Failed to load page %d: %v", pageID, err)
 				continue
 			}
 
-			ba.logger.Infof("Page %d loaded successfully with %d documents", pageID, len(page.Documents))
-
 			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			for docID, doc := range page.Documents {
 				allDocs[docID] = &doc
 			}
 		}
-		ba.logger.Infof("Loaded %d documents from disk", len(allDocs))
+		ba.logger.Debugf("Loaded %d documents from disk", len(allDocs))
 	}
 
 	// Merge with memtable (recent writes not yet flushed to new pages)
@@ -451,7 +554,7 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 	// CRITICAL: Must hold DocumentsMutex to prevent concurrent map iteration/write
 	ba.bundle.DocumentsMutex.RLock()
 	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
-		ba.logger.Infof("Merging %d documents from memtable with %d from disk",
+		ba.logger.Debugf("Merging %d documents from memtable with %d from disk",
 			len(*ba.bundle.Documents), len(allDocs))
 
 		// Add memtable documents that aren't already in disk results
@@ -464,20 +567,13 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 				mergedCount++
 			}
 		}
-		ba.logger.Infof("Merged %d new documents from memtable", mergedCount)
-	} else if ba.bundle.Documents != nil && ba.bundle.DocumentsComplete {
-		// If Documents is marked complete, use it directly (optimization path)
-		ba.logger.Infof("Using complete Documents cache with %d documents", len(*ba.bundle.Documents))
-		for docID, doc := range *ba.bundle.Documents {
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-			allDocs[docID] = &doc
-		}
+		ba.logger.Debugf("Merged %d new documents from memtable", mergedCount)
 	} else {
-		ba.logger.Infof("No memtable to merge (Documents=nil or DocumentsComplete=true)")
+		ba.logger.Debugf("No memtable to merge (Documents=nil or DocumentsComplete=true)")
 	}
 	ba.bundle.DocumentsMutex.RUnlock()
 
-	ba.logger.Infof("Returning %d total documents (disk + memtable)", len(allDocs))
+	ba.logger.Debugf("Returning %d total documents (disk + memtable)", len(allDocs))
 	return allDocs
 }
 

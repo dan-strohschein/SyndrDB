@@ -229,3 +229,127 @@ func BenchmarkSelect_Join_HashJoin(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkSelect_FullScan_1K benchmarks SELECT * FROM bundle with 1K documents
+// This tests the optimized ScanAllDocuments() path vs old GetDocumentIDs() + GetDocument() loop
+func BenchmarkSelect_FullScan_1K(b *testing.B) {
+	// Setup once outside the measured loop
+	fixture := setupRealServerTB(b)
+	seedSimpleAuthorsBundleTB(b, fixture, 1000)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	query := `SELECT * FROM "Authors"`
+
+	// Reset timer to exclude setup time from measurements
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	// The actual benchmark loop - only the query execution is timed
+	for i := 0; i < b.N; i++ {
+		result, err := server.CommandDirector(
+			ctx,
+			fixture.Database,
+			*fixture.ServiceManager,
+			query,
+			fixture.Logger,
+			time.Now(),
+			nil,
+			"127.0.0.1",
+		)
+		if err != nil {
+			b.Fatalf("Query failed: %v", err)
+		}
+
+		// Clean up pooled maps after each query
+		if cmdResp, ok := result.(*server.CommandResponse); ok {
+			if len(cmdResp.PooledMaps) > 0 {
+				helpers.FreeResultSet(cmdResp.PooledMaps)
+			}
+		}
+	}
+}
+
+// BenchmarkSelect_FullScan_10K benchmarks SELECT * FROM bundle with 10K documents
+// This tests the optimized ScanAllDocuments() path for medium-sized bundles
+func BenchmarkSelect_FullScan_10K(b *testing.B) {
+	// Setup once outside the measured loop
+	fixture := setupRealServerTB(b)
+	seedSimpleAuthorsBundleTB(b, fixture, 10000)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	query := `SELECT * FROM "Authors"`
+
+	// Reset timer to exclude setup time from measurements
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	// The actual benchmark loop - only the query execution is timed
+	for i := 0; i < b.N; i++ {
+		result, err := server.CommandDirector(
+			ctx,
+			fixture.Database,
+			*fixture.ServiceManager,
+			query,
+			fixture.Logger,
+			time.Now(),
+			nil,
+			"127.0.0.1",
+		)
+		if err != nil {
+			b.Fatalf("Query failed: %v", err)
+		}
+
+		// Clean up pooled maps after each query
+		if cmdResp, ok := result.(*server.CommandResponse); ok {
+			if len(cmdResp.PooledMaps) > 0 {
+				helpers.FreeResultSet(cmdResp.PooledMaps)
+			}
+		}
+	}
+}
+
+// BenchmarkSelect_FullScan_100K benchmarks SELECT * FROM bundle with 100K documents
+// This tests the optimized ScanAllDocuments() path for large bundles
+// Note: This may trigger memory fallback to batched scanning for very large bundles
+func BenchmarkSelect_FullScan_100K(b *testing.B) {
+	// Setup once outside the measured loop
+	fixture := setupRealServerTB(b)
+	seedSimpleAuthorsBundleTB(b, fixture, 100000)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	query := `SELECT * FROM "Authors"`
+
+	// Reset timer to exclude setup time from measurements
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	// The actual benchmark loop - only the query execution is timed
+	for i := 0; i < b.N; i++ {
+		result, err := server.CommandDirector(
+			ctx,
+			fixture.Database,
+			*fixture.ServiceManager,
+			query,
+			fixture.Logger,
+			time.Now(),
+			nil,
+			"127.0.0.1",
+		)
+		if err != nil {
+			b.Fatalf("Query failed: %v", err)
+		}
+
+		// Clean up pooled maps after each query
+		if cmdResp, ok := result.(*server.CommandResponse); ok {
+			if len(cmdResp.PooledMaps) > 0 {
+				helpers.FreeResultSet(cmdResp.PooledMaps)
+			}
+		}
+	}
+}

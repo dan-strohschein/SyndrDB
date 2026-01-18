@@ -190,9 +190,15 @@ func (config *IndexConfig) Validate() error {
 		return fmt.Errorf("field name cannot be empty")
 	}
 
-	if config.IndexDir == "" {
-		return fmt.Errorf("data directory cannot be empty")
+	// IndexDir is optional - if empty, GetIndexFilePath() will construct the path
+	// from DatabaseName and BundleName. If provided, validate it's accessible.
+	if config.IndexDir != "" {
+		if err := validateDataDirectory(config.IndexDir); err != nil {
+			return fmt.Errorf("invalid index directory: %w", err)
+		}
 	}
+	// Note: If IndexDir is empty, GetIndexFilePath() will use the standard path structure
+	// based on DatabaseName and BundleName, which is already validated above
 
 	// Validate bundle and field names
 	if err := validateName(config.BundleName); err != nil {

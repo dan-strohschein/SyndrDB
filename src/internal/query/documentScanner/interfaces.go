@@ -133,6 +133,10 @@ type DocumentScannerInterface interface {
 	// ScanWithPredicate performs a scan using a custom predicate function
 	ScanWithPredicate(predicate func(*models.Document) bool) (*ScanResult, error)
 
+	// ScanAllDocuments performs a full scan using GetAllDocuments() for optimal performance
+	// This bypasses the O(n*m) GetDocumentIDs() + GetDocument() loop
+	ScanAllDocuments() (*ScanResult, error)
+
 	// GetMetrics returns current scanner performance metrics
 	GetMetrics() *ScanMetrics
 

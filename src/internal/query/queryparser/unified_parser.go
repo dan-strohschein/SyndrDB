@@ -196,7 +196,7 @@ func ParseUnifiedSelectQuery(query string, logger *zap.SugaredLogger) (*UnifiedS
 	}
 
 	// Step 5: Validate the complete query structure
-	if err := validateUnifiedQuery(unifiedQuery, logger); err != nil {
+	if err := ValidateUnifiedQuery(unifiedQuery, logger); err != nil {
 		return nil, fmt.Errorf("query validation failed: %w", err)
 	}
 
@@ -563,8 +563,29 @@ func parseGroupByClausesForUnified(query string, unified *UnifiedSelectQuery, lo
 	return nil
 }
 
-// validateUnifiedQuery performs comprehensive validation on the parsed query
-func validateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger) error {
+// extractFieldNameFromQualified extracts the actual field name from a qualified identifier
+// Handles formats like "BundleName"."FieldName" -> "FieldName", or just "FieldName" -> "FieldName"
+func extractFieldNameFromQualified(qualifiedName string) string {
+	// Remove surrounding quotes first
+	qualifiedName = strings.Trim(qualifiedName, "\"'")
+
+	// Handle qualified names: "BundleName"."FieldName" or BundleName.FieldName
+	// Split by dots and take the last part
+	parts := strings.Split(qualifiedName, ".")
+	if len(parts) > 1 {
+		// Get the last part and remove any remaining quotes
+		fieldName := parts[len(parts)-1]
+		fieldName = strings.Trim(fieldName, "\"'")
+		return fieldName
+	}
+
+	// Simple field name - return as is (with quotes removed)
+	return qualifiedName
+}
+
+// ValidateUnifiedQuery performs comprehensive validation on the parsed query
+// This function is exported so it can be called from the syndrQL parser integration
+func ValidateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger) error {
 	// Validation 1: Must have FROM bundle
 	if unified.FromBundle == "" {
 		return fmt.Errorf("FROM clause is required")
@@ -574,9 +595,16 @@ func validateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger
 	if unified.GroupBy != nil {
 		// All non-aggregate SELECT fields must be in GROUP BY
 		for _, field := range unified.SelectFields {
+			// Extract actual field name from qualified identifier (e.g., "products"."DocumentID" -> "DocumentID")
+			selectFieldName := extractFieldNameFromQualified(field)
+			
 			found := false
 			for _, groupField := range unified.GroupBy.Fields {
-				if strings.EqualFold(field, groupField) {
+				// Extract actual field name from GROUP BY field (may also be qualified)
+				groupFieldName := extractFieldNameFromQualified(groupField)
+				
+				// Compare the actual field names (case-insensitive)
+				if strings.EqualFold(selectFieldName, groupFieldName) {
 					found = true
 					break
 				}
@@ -590,11 +618,15 @@ func validateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger
 		if unified.OrderBy != nil {
 			for _, orderField := range unified.OrderBy.Fields {
 				fieldName := orderField.FieldName
+				// Extract actual field name from qualified identifier
+				orderFieldName := extractFieldNameFromQualified(fieldName)
 
 				// Check if it's in GROUP BY clause
 				foundInGroupBy := false
 				for _, groupField := range unified.GroupBy.Fields {
-					if strings.EqualFold(fieldName, groupField) {
+					// Extract actual field name from GROUP BY field
+					groupFieldName := extractFieldNameFromQualified(groupField)
+					if strings.EqualFold(orderFieldName, groupFieldName) {
 						foundInGroupBy = true
 						break
 					}

@@ -950,24 +950,6 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 	if shouldFlush {
 		// flushStart := time.Now()
 		s.flushIndexUpdates()
-		// flushTime := time.Since(flushStart)
-		// #region agent log (commented out - performance debugging)
-		// logEntry := map[string]interface{}{
-		// 	"sessionId":    "debug-session",
-		// 	"runId":        "run1",
-		// 	"hypothesisId": "P",
-		// 	"location":     "bundle_service.go:846",
-		// 	"message":      "After flushIndexUpdates",
-		// 	"timestamp":    time.Now().UnixNano() / 1e6,
-		// 	"data":         map[string]interface{}{"flushIndexTimeMs": flushTime.Nanoseconds() / 1e6, "bufferSize": len(s.indexUpdateBuffer)},
-		// }
-		// if logBytes, err := json.Marshal(logEntry); err == nil {
-		// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		// 		f.Write(append(logBytes, '\n'))
-		// 		f.Close()
-		// 	}
-		// }
-		// #endregion
 	}
 
 	// PHASE 1 ENHANCEMENT: Additional flush check for idle periods on index updates
@@ -1120,7 +1102,13 @@ func (s *BundleService) FlushMetadataUpdates() {
 			case "increment_docs":
 				docCountDelta += update.Value
 			case "decrement_docs":
-				docCountDelta -= update.Value
+				// CRITICAL FIX: Ignore decrement_docs operations to prevent corruption
+				// In append-only storage, tombstones are still entries on disk, so TotalDocuments
+				// should represent total document entries (including tombstones), not active documents.
+				// Active document count is calculated dynamically by filtering tombstones during queries.
+				// Decrementing TotalDocuments causes corruption when documents exist that were never counted.
+				// docCountDelta -= update.Value // REMOVED: Causes corruption
+				// Silently ignore - no logging needed for performance
 			}
 		}
 
@@ -1945,10 +1933,10 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 	//args := settings.GetSettings()
 	fileExists := s.store.BundleFileExists(name, database.Name)
 
-		// Check if the bundle file exists in the store
-		if !fileExists {
-			return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE, fmt.Sprintf("Bundle file '%s' does not exist on disk", name), errors.LayerStorage).WithContext("bundle_name", name)
-		}
+	// Check if the bundle file exists in the store
+	if !fileExists {
+		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE, fmt.Sprintf("Bundle file '%s' does not exist on disk", name), errors.LayerStorage).WithContext("bundle_name", name)
+	}
 
 	bundle, exists := s.bundleMetadata[name]
 	if !exists {
@@ -3923,6 +3911,23 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		s.logger.Debugf("WAL not available for B-tree index '%s' (proceeding without durability)", indexCommand.IndexName)
 	}
 
+	// Set IndexName for proper file path construction
+	config.IndexName = indexCommand.IndexName
+
+	// Get proper database path structure (same as hash index)
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	// CRITICAL: Construct full B-tree indexes path to match bundle structure
+	// B-tree indexes must be stored in: database/bundle/indexes/btree/
+	// Format: /data_dir/<database>/<bundle>/indexes/btree/<btree-index-file-name>.btidx
+	btreeIndexesPath := filepath.Join(databasePath, bundle.Name, "indexes", "btree")
+
+	// Ensure the btree indexes directory exists before creating the index
+	if err := os.MkdirAll(btreeIndexesPath, 0755); err != nil {
+		s.logger.Errorf("Failed to create btree indexes directory: %v", err)
+		return fmt.Errorf("failed to create btree indexes directory: %w", err)
+	}
+
 	// Create the BTree index using the V2 implementation
 	btreeIndex, err := btreeindexV2.CreateBTreeIndex(&config, s.logger)
 	if err != nil {
@@ -4151,7 +4156,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 		if cachedIndex, found := bundleCache[indexName]; found {
 			if hashIndex, ok := cachedIndex.(*hashindex.HashIndexV3); ok {
 				s.indexCacheMutex.RUnlock()
-				s.logger.Infof("✓ Hash index V3 '%s' CACHE HIT (already in memory)", indexName)
+				s.logger.Debugf("✓ Hash index V3 '%s' CACHE HIT (already in memory)", indexName)
 				return hashIndex, nil
 			}
 		}
@@ -4427,24 +4432,6 @@ func (s *BundleService) LoadDatabaseIndexes(databaseName string) error {
 }
 
 func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentCommand) (string, error) {
-	// #region agent log (commented out - performance debugging)
-	// startTime := time.Now()
-	// logEntry := map[string]interface{}{
-	// 	"sessionId":    "debug-session",
-	// 	"runId":        "run1",
-	// 	"hypothesisId": "H",
-	// 	"location":     "bundle_service.go:3974",
-	// 	"message":      "AddDocumentToBundle start",
-	// 	"timestamp":    startTime.UnixNano() / 1e6,
-	// 	"data":         map[string]interface{}{"bundle": docCommand.BundleName},
-	// }
-	// if logBytes, err := json.Marshal(logEntry); err == nil {
-	// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-	// 		f.Write(append(logBytes, '\n'))
-	// 		f.Close()
-	// 	}
-	// }
-	// #endregion
 	// Check if the bundle exists
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot add document")
@@ -4517,26 +4504,7 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	s.scheduleMetadataUpdate(docCommand.BundleName, "increment_docs", 1)
 
 	// Add document to bundle file (storage layer handles page allocation and returns pageID)
-	// storageStart := time.Now()
 	pageID, err := s.store.AddDocumentToBundleFile(bundle, newDocument)
-	// storageTime := time.Since(storageStart)
-	// #region agent log (commented out - performance debugging)
-	// logEntry = map[string]interface{}{
-	// 	"sessionId":    "debug-session",
-	// 	"runId":        "run1",
-	// 	"hypothesisId": "L",
-	// 	"location":     "bundle_service.go:4026",
-	// 	"message":      "After AddDocumentToBundleFile",
-	// 	"timestamp":    time.Now().UnixNano() / 1e6,
-	// 	"data":         map[string]interface{}{"storageTimeMs": storageTime.Nanoseconds() / 1e6},
-	// }
-	// if logBytes, err := json.Marshal(logEntry); err == nil {
-	// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-	// 		f.Write(append(logBytes, '\n'))
-	// 		f.Close()
-	// 	}
-	// }
-	// #endregion
 	if err != nil {
 		// Note: Metadata updates are deferred, so no rollback needed here
 		// Failed operations won't have their metadata updates applied
@@ -4614,24 +4582,6 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	}
 	s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after addition", docCommand.BundleName)
 
-	// totalTime := time.Since(startTime)
-	// #region agent log (commented out - performance debugging)
-	// logEntry = map[string]interface{}{
-	// 	"sessionId":    "debug-session",
-	// 	"runId":        "run1",
-	// 	"hypothesisId": "M",
-	// 	"location":     "bundle_service.go:4086",
-	// 	"message":      "AddDocumentToBundle end",
-	// 	"timestamp":    time.Now().UnixNano() / 1e6,
-	// 	"data":         map[string]interface{}{"totalTimeMs": totalTime.Nanoseconds() / 1e6},
-	// }
-	// if logBytes, err := json.Marshal(logEntry); err == nil {
-	// 	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-	// 		f.Write(append(logBytes, '\n'))
-	// 		f.Close()
-	// 	}
-	// }
-	// #endregion
 	return newDocument.DocumentID, nil
 }
 
@@ -5106,8 +5056,11 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			return fmt.Errorf("bulk delete execution failed: %w", err)
 		}
 
-		// Schedule single metadata update for all deleted documents
-		s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", int64(len(bulkDocIDs)))
+		// CRITICAL FIX: Do NOT schedule decrement_docs metadata update
+		// In append-only storage, tombstones are still entries on disk, so TotalDocuments
+		// should represent total document entries (including tombstones), not active documents.
+		// See DeleteDocumentFromBundleFile for detailed explanation.
+		// s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", int64(len(bulkDocIDs))) // REMOVED: Causes corruption
 
 		// Flush all pending operations to ensure consistency
 		if err := s.FlushAllBuffers(); err != nil {
@@ -5331,10 +5284,13 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 			}
 		}
 
-		// Schedule deferred metadata update (unless caller is handling bulk update)
-		if !skipMetadataUpdate {
-			s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", 1)
-		}
+		// CRITICAL FIX: Do NOT schedule decrement_docs metadata update
+		// In append-only storage, tombstones are still entries on disk, so TotalDocuments
+		// should represent total document entries (including tombstones), not active documents.
+		// See DeleteDocumentFromBundleFile for detailed explanation.
+		// if !skipMetadataUpdate {
+		// 	s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", 1) // REMOVED: Causes corruption
+		// }
 	}
 
 	// CRITICAL: For bulk deletes, invalidate query planner cache
@@ -5409,8 +5365,11 @@ func (s *BundleService) DeleteAllDocumentsFromBundle(
 		return fmt.Errorf("bulk delete execution failed: %w", err)
 	}
 
-	// Schedule single metadata update for all deleted documents
-	s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", int64(len(docIDs)))
+	// CRITICAL FIX: Do NOT schedule decrement_docs metadata update
+	// In append-only storage, tombstones are still entries on disk, so TotalDocuments
+	// should represent total document entries (including tombstones), not active documents.
+	// See DeleteDocumentFromBundleFile for detailed explanation.
+	// s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", int64(len(docIDs))) // REMOVED: Causes corruption
 
 	// Flush all pending operations to ensure consistency
 	if err := s.FlushAllBuffers(); err != nil {

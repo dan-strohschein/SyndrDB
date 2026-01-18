@@ -162,6 +162,45 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 	return result, nil
 }
 
+// ScanAllDocuments performs a full scan using GetAllDocuments() for optimal performance
+// This bypasses the O(n*m) GetDocumentIDs() + GetDocument() loop by using the efficient
+// GetAllDocuments() method that loads pages sequentially
+func (sbs *SmartBundleScanner) ScanAllDocuments() (*ScanResult, error) {
+	startTime := time.Now()
+
+	sbs.logger.Debug("Starting full document scan using GetAllDocuments()")
+
+	// BundleInterface already has GetAllDocuments() method (interfaces.go:41)
+	// No type assertion needed - use interface method directly
+	allDocs := sbs.bundle.GetAllDocuments()
+
+	// Pre-allocate slices with exact capacity to avoid growth allocations
+	result := &ScanResult{
+		Documents:   make([]*models.Document, 0, len(allDocs)),
+		DocumentIDs: make([]string, 0, len(allDocs)),
+		ScanLatency: 0,
+		CacheHits:   0,
+	}
+
+	// Convert map to slices (preserve order from GetAllDocuments)
+	for docID, doc := range allDocs {
+		result.Documents = append(result.Documents, doc)
+		result.DocumentIDs = append(result.DocumentIDs, docID)
+	}
+
+	// Finalize results
+	result.ScanLatency = time.Since(startTime)
+	result.BatchesUsed = 1 // Single "batch" since we loaded everything at once
+	result.TotalScanned = len(allDocs)
+
+	sbs.updateMetrics(result, 0, result.ScanLatency)
+
+	sbs.logger.Debugf("Full document scan completed: found %d documents in %v",
+		len(result.Documents), result.ScanLatency)
+
+	return result, nil
+}
+
 // ScanForInList performs an optimized scan for documents matching an IN query
 // This method implements hash set lookups for efficient membership testing
 // Parameters:

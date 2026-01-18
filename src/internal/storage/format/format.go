@@ -138,11 +138,26 @@ func (b *BinarySerializer) DeserializeBundleMetadata(data []byte) (*models.Bundl
 	// Parse pagination metadata
 	bundle.TotalDocuments = getInt64(bundleData, "TotalDocuments")
 	bundle.PageCount = getInt64(bundleData, "PageCount")
+
+	// CRITICAL FIX: Detect and fix corruption when loading from disk
+	// If TotalDocuments or PageCount is negative, it's corrupted - reset to 0
+	// The recovery logic in getSafePageCount() will recalculate from actual documents
+	if bundle.TotalDocuments < 0 || bundle.PageCount < 0 {
+		// Log the corruption but we can't use logger here (format package doesn't have it)
+		// The recovery in getSafePageCount() will log it properly
+		bundle.TotalDocuments = 0
+		bundle.PageCount = 0
+		// Mark as dirty so corrected metadata gets persisted
+		// Note: We can't set IsDirty here as format package doesn't have access to bundle service
+		// The recovery in getSafePageCount() will mark it dirty
+	}
+
 	bundle.PageSize = getInt(bundleData, "PageSize")
 
 	// Ensure PageSize has a default value to prevent divide by zero
+	// Use standard default of 4096 (consistent with BundleService and other components)
 	if bundle.PageSize == 0 {
-		bundle.PageSize = 100 // Default page size
+		bundle.PageSize = 4096 // Default page size (matches BundleService.defaultPageSize)
 	}
 
 	return bundle, nil

@@ -28,3 +28,5 @@ bin/tests/log_files
 trace_test.sh
 TRACE_ANALYSIS_GUIDE.md
 run_fsync_benchmarks.sh
+CR1.md
+docs/remaining_err.md

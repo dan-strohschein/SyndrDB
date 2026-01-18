@@ -162,20 +162,110 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 	// Print the initial prompt
 	fmt.Print("> ")
 
+	// Track TimeOnly mode for the current command (accessible to both sync and async response handlers)
+	var currentTimeOnlyMode bool
+	// Track if we're currently receiving a streamed response
+	var isStreaming bool
+	// Buffer for reassembling streamed responses
+	var responseBuffer strings.Builder
+	// Track chunk count for progress dots
+	var chunkCount int
+
 	for !done {
 		select {
 		case message := <-messageChan:
-			// Clear the current line if needed
-			fmt.Print("\r                                                    \r")
+			// Check if this is a streamed response (large chunk, typically 4096 bytes)
+			isLargeChunk := len(message) >= 4096
 
-			// Print the received message
-			if args.PrettyPrintResults {
-				message = prettyPrintJSON(message)
+			// If this is a large chunk and we're not already streaming, start streaming mode
+			if isLargeChunk && !isStreaming {
+				isStreaming = true
+				chunkCount = 0
+				responseBuffer.Reset()
+				fmt.Print("Receiving response")
 			}
-			fmt.Printf("Server: %s\n", message)
 
-			// Re-print the prompt and any partial input
-			fmt.Print("> " + inputBuffer.String())
+			if isStreaming {
+				// Buffer the chunk
+				responseBuffer.WriteString(message)
+				chunkCount++
+
+				// Show progress dot
+				fmt.Print(".")
+
+				// Check if response is complete (balanced braces and ends with })
+				assembledResponse := responseBuffer.String()
+				trimmedResponse := strings.TrimSpace(assembledResponse)
+				openBraces := strings.Count(trimmedResponse, "{")
+				closeBraces := strings.Count(trimmedResponse, "}")
+				hasBalancedBraces := openBraces > 0 && openBraces == closeBraces
+				endsWithBrace := strings.HasSuffix(trimmedResponse, "}")
+
+				// Try to parse as complete JSON
+				var jsonData map[string]interface{}
+				parseErr := json.Unmarshal([]byte(trimmedResponse), &jsonData)
+
+				// If we can parse it and it appears complete, we're done streaming
+				if parseErr == nil && hasBalancedBraces && endsWithBrace {
+					// Streaming complete - clear the progress dots line
+					fmt.Print("\r                                                    \r")
+
+					// Display the response based on TimeOnly mode
+					if currentTimeOnlyMode {
+						filteredResponse := filterTimeOnlyResponse(assembledResponse, args.PrettyPrintResults)
+						fmt.Printf("Server: %s\n", filteredResponse)
+					} else {
+						// Display full response
+						if args.PrettyPrintResults {
+							formattedResponse := prettyPrintJSON(assembledResponse)
+							fmt.Printf("Server: %s\n", formattedResponse)
+						} else {
+							fmt.Printf("Server: %s\n", assembledResponse)
+						}
+					}
+
+					// Reset streaming state
+					isStreaming = false
+					currentTimeOnlyMode = false
+					responseBuffer.Reset()
+					chunkCount = 0
+
+					// Re-print the prompt
+					fmt.Print("> " + inputBuffer.String())
+					continue
+				}
+				// Otherwise, continue buffering and showing dots
+				continue
+			} else {
+				// Not streaming - handle as normal response
+				// Check if this looks like a complete JSON response
+				trimmedMessage := strings.TrimSpace(message)
+				var jsonData map[string]interface{}
+				parseErr := json.Unmarshal([]byte(trimmedMessage), &jsonData)
+
+				if parseErr == nil {
+					// Complete JSON response - handle based on TimeOnly mode
+					if currentTimeOnlyMode {
+						filteredResponse := filterTimeOnlyResponse(message, args.PrettyPrintResults)
+						fmt.Printf("Server: %s\n", filteredResponse)
+						currentTimeOnlyMode = false
+					} else {
+						if args.PrettyPrintResults {
+							message = prettyPrintJSON(message)
+						}
+						fmt.Printf("Server: %s\n", message)
+					}
+				} else {
+					// Not JSON or incomplete - display as-is
+					if args.PrettyPrintResults {
+						message = prettyPrintJSON(message)
+					}
+					fmt.Printf("Server: %s\n", message)
+				}
+
+				// Re-print the prompt and any partial input
+				fmt.Print("> " + inputBuffer.String())
+			}
 
 		case err := <-errorChan:
 			// Handle error from the message listener
@@ -223,14 +313,59 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 				// Reset the buffer for next command
 				inputBuffer.Reset()
 
+				// Reset response buffer and streaming state for new command
+				responseBuffer.Reset()
+				isStreaming = false
+				chunkCount = 0
+
+				// Check if command starts with "TimeOnly" prefix (case-insensitive)
+				trimmedCommand := strings.TrimSpace(command)
+				// Check if command starts with "TimeOnly" prefix (case-insensitive)
+				currentTimeOnlyMode = false
+				if len(trimmedCommand) >= 8 && strings.EqualFold(trimmedCommand[:8], "TimeOnly") {
+					currentTimeOnlyMode = true
+					// Remove "TimeOnly" prefix and any following whitespace
+					if len(trimmedCommand) > 8 {
+						command = strings.TrimSpace(trimmedCommand[8:])
+					} else {
+						command = ""
+					}
+				}
+
 				// Send the command to the server
 				response, err := sendCommandToServer(dbClient, command)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					log.Printf("Error: %v\n", err)
+					// Check if it's a timeout error - for large queries, response comes through async
+					if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o timeout") {
+						// Timeout is expected for large queries - response will come through async
+						// Keep currentTimeOnlyMode true so async chunks get filtered
+					} else {
+						// Real error - reset TimeOnly mode
+						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						log.Printf("Error: %v\n", err)
+						currentTimeOnlyMode = false
+					}
 				} else if response != "" { // Only print non-empty responses
-					if args.PrettyPrintResults {
-						response = prettyPrintJSON(response)
+					if currentTimeOnlyMode {
+						// Check if this is a complete JSON response
+						var jsonData map[string]interface{}
+						if err := json.Unmarshal([]byte(strings.TrimSpace(response)), &jsonData); err == nil {
+							// Complete JSON - filter it
+							response = filterTimeOnlyResponse(response, args.PrettyPrintResults)
+							// Reset after processing
+							currentTimeOnlyMode = false
+							responseBuffer.Reset()
+						} else {
+							// Incomplete JSON - buffer it and wait for async chunks
+							responseBuffer.WriteString(response)
+							// Don't reset currentTimeOnlyMode - keep it true for async chunks
+							// Don't print this partial response yet
+							response = "" // Suppress printing
+						}
+					} else {
+						if args.PrettyPrintResults {
+							response = prettyPrintJSON(response)
+						}
 					}
 					fmt.Printf("Response: %s\n", response)
 				}
@@ -317,4 +452,41 @@ func prettyPrintJSON(jsonStr string) string {
 	}
 
 	return string(prettyJSON)
+}
+
+// filterTimeOnlyResponse extracts only ResultCount and ExecutionTimeMS from the JSON response
+func filterTimeOnlyResponse(jsonStr string, prettyPrint bool) string {
+	// Trim whitespace/newlines from the JSON string before parsing
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	// Try to parse the JSON
+	var jsonData map[string]interface{}
+	err := json.Unmarshal([]byte(jsonStr), &jsonData)
+	if err != nil {
+		// If it's not valid JSON, return the original string
+		return jsonStr
+	}
+
+	// Create a new map with only ResultCount and ExecutionTimeMS
+	filteredData := make(map[string]interface{})
+	if resultCount, ok := jsonData["ResultCount"]; ok {
+		filteredData["ResultCount"] = resultCount
+	}
+	if executionTime, ok := jsonData["ExecutionTimeMS"]; ok {
+		filteredData["ExecutionTimeMS"] = executionTime
+	}
+
+	// Marshal the filtered data
+	var filteredJSON []byte
+	if prettyPrint {
+		filteredJSON, err = json.MarshalIndent(filteredData, "", "  ")
+	} else {
+		filteredJSON, err = json.Marshal(filteredData)
+	}
+	if err != nil {
+		// If marshaling fails, return the original string
+		return jsonStr
+	}
+
+	return string(filteredJSON)
 }

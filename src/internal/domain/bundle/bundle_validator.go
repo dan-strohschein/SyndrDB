@@ -87,11 +87,11 @@ func (v *ReferentialIntegrityValidator) ValidateDelete(bundle *models.Bundle, do
 
 	// OPTIMIZATION: Early exit if bundle has no relationships
 	if len(bundle.Relationships) == 0 {
-		v.logger.Infof("[REFINT] Bundle '%s' has no relationships - skipping referential integrity check", bundle.Name)
+		v.logger.Debugf("[REFINT] Bundle '%s' has no relationships - skipping referential integrity check", bundle.Name)
 		return nil
 	}
 
-	v.logger.Infof("[REFINT] Validating referential integrity for document '%s' in bundle '%s' (%d relationships)", documentID, bundle.Name, len(bundle.Relationships))
+	v.logger.Debugf("[REFINT] Validating referential integrity for document '%s' in bundle '%s' (%d relationships)", documentID, bundle.Name, len(bundle.Relationships))
 
 	// Check each relationship where this bundle is the source (referenced by others)
 	violations := make([]string, 0, 5)
