@@ -195,7 +195,8 @@ func SelectIndexStrategy(
 	// TODO Codesmells with these deeply nested ifs - refactor later
 	// Check for probe-side index (preferred)
 	var probeStrategy *ProbeIndexStrategy
-	if probeBundle.HasIndexOnField(probeKey) {
+	hasProbe := probeBundle.HasIndexOnField(probeKey)
+	if hasProbe {
 		indexRef := probeBundle.GetHashIndexForField(probeKey)
 		if indexRef != nil {
 			// Type assert to HashIndexV3

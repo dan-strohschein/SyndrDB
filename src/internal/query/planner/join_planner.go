@@ -35,12 +35,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: For JOIN executor integration
 	"syndrdb/src/internal/query/queryparser"
-	"time" // NEW: For document timestamps
+	"syndrdb/src/internal/syndrQL" // For predicate pushdown Expression handling
+	"time"                         // For document timestamps and performance timing
 
 	"go.uber.org/zap"
 )
@@ -121,15 +124,55 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 	estimatedRows := leftSize / 10 // Assume 10% selectivity as default
 
 	// NEW: Predicate pushdown optimization for WHERE clause
-	// NOTE: For now, we apply WHERE filtering after JOIN using WhereExpression
-	// TODO: Implement Expression-based predicate pushdown analysis in future
+	// Analyzes WHERE expression to identify single-bundle predicates that can be
+	// pushed down to filter during JOIN instead of after
 	var leftBundleInterface, rightBundleInterface documentscanner.BundleInterface
 	hasWhereExpression := query.WhereExpression != nil
+	var remainingPredicate syndrQL.Expression
 
 	if hasWhereExpression {
-		jp.Logger.Info("WHERE expression detected - will apply post-JOIN filtering")
-		// Predicate pushdown for Expressions is not yet implemented
-		// For now, we'll apply the entire WHERE clause after JOIN execution
+		// Cast WhereExpression to syndrQL.Expression for analysis
+		if whereExpr, ok := query.WhereExpression.(syndrQL.Expression); ok {
+			// Get join type for safety analysis
+			joinType := queryparser.InnerJoin // Default
+			if len(query.JoinClauses) > 0 {
+				joinType = query.JoinClauses[0].JoinType
+			}
+
+			// Analyze predicates for pushdown
+			rightBundleName := ""
+			if len(query.JoinClauses) > 0 {
+				rightBundleName = query.JoinClauses[0].RightBundle
+			}
+
+			pushdownResult := AnalyzePredicateForPushdown(
+				whereExpr,
+				query.FromBundle,
+				rightBundleName,
+				joinType,
+				jp.Logger,
+			)
+
+			// Log pushdown analysis results
+			jp.Logger.Infof("Predicate pushdown analysis: left=%d, right=%d, remaining=%d predicates",
+				len(pushdownResult.LeftPredicates),
+				len(pushdownResult.RightPredicates),
+				len(pushdownResult.RemainingPredicates))
+
+			// Store remaining predicates for post-JOIN filtering
+			remainingPredicate = pushdownResult.CombinedRemainingPredicate
+
+			// Log pushdown analysis
+			if pushdownResult.CombinedLeftPredicate != nil {
+				jp.Logger.Infof("LEFT predicate pushdown enabled: %s", pushdownResult.CombinedLeftPredicate.String())
+			}
+			if pushdownResult.CombinedRightPredicate != nil {
+				jp.Logger.Infof("RIGHT predicate pushdown enabled: %s", pushdownResult.CombinedRightPredicate.String())
+			}
+		} else {
+			jp.Logger.Info("WHERE expression detected but not syndrQL.Expression - will apply post-JOIN filtering")
+			remainingPredicate = nil
+		}
 	}
 
 	// NEW: Create service manager adapter for the execution node
@@ -139,7 +182,37 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		bundleService: jp.BundleServiceInt,
 	}
 
-	// Create the new JOIN execution node with optional filtered bundle interfaces
+	// Extract pushdown predicates if analysis was performed
+	var leftPredicate, rightPredicate syndrQL.Expression
+	if hasWhereExpression {
+		if whereExpr, ok := query.WhereExpression.(syndrQL.Expression); ok {
+			joinType := queryparser.InnerJoin
+			if len(query.JoinClauses) > 0 {
+				joinType = query.JoinClauses[0].JoinType
+			}
+			rightBundleName := ""
+			if len(query.JoinClauses) > 0 {
+				rightBundleName = query.JoinClauses[0].RightBundle
+			}
+			pushdownResult := AnalyzePredicateForPushdown(
+				whereExpr,
+				query.FromBundle,
+				rightBundleName,
+				joinType,
+				jp.Logger,
+			)
+			leftPredicate = pushdownResult.CombinedLeftPredicate
+			rightPredicate = pushdownResult.CombinedRightPredicate
+		}
+	}
+
+	// Compute MergeRequiredFields for opt #3 (merge only required fields)
+	var mergeRequired map[string]bool
+	if len(query.JoinClauses) > 0 {
+		mergeRequired = computeMergeRequiredFields(query, query.JoinClauses[0])
+	}
+
+	// Create the new JOIN execution node with pushdown predicates
 	joinNode := &JoinExecutionNode{
 		Query:                query,
 		Database:             database,
@@ -150,6 +223,9 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		JoinExecutor:         joinExecutor,
 		LeftBundleInterface:  leftBundleInterface,  // May be nil or FilteredBundleAdapter
 		RightBundleInterface: rightBundleInterface, // May be nil or FilteredBundleAdapter
+		LeftPredicate:        leftPredicate,        // Predicate to push to left bundle
+		RightPredicate:       rightPredicate,       // Predicate to push to right bundle
+		MergeRequiredFields:  mergeRequired,
 	}
 
 	jp.Logger.Infof("Created JOIN execution plan: cost=%.2f, estimated_rows=%d, algorithm=hash_join",
@@ -160,12 +236,12 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 	finalCost := estimatedCost
 	finalEstimatedRows := estimatedRows
 
-	// Check for Expression-based WHERE filtering (new unified parser)
-	if hasWhereExpression {
-		// Create FilterNode to apply WHERE expression after JOIN
+	// Check for remaining predicates that couldn't be pushed down
+	if remainingPredicate != nil {
+		// Create FilterNode to apply only the remaining predicates after JOIN
 		filterNode := &FilterNode{
 			Child:            joinNode,
-			WhereExpression:  query.WhereExpression,
+			WhereExpression:  remainingPredicate,                         // Only remaining predicates, not all!
 			Cost:             estimatedCost + float64(estimatedRows)*0.1, // Add filter cost
 			EstimatedRows:    estimatedRows / 10,                         // Assume 10% selectivity
 			Logger:           jp.Logger,
@@ -174,9 +250,23 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		rootNode = filterNode
 		finalCost = filterNode.Cost
 		finalEstimatedRows = filterNode.EstimatedRows
-		jp.Logger.Info("Wrapped JOIN with FilterNode using WhereExpression (unified parser)")
-	} else if leftBundleInterface != nil || rightBundleInterface != nil {
+		jp.Logger.Infof("Wrapped JOIN with FilterNode for remaining predicates: %s", remainingPredicate.String())
+	} else if hasWhereExpression && (leftPredicate != nil || rightPredicate != nil) {
 		jp.Logger.Info("All WHERE conditions pushed down - no post-JOIN filtering needed")
+	} else if hasWhereExpression {
+		// No predicates could be pushed down, apply full WHERE expression
+		filterNode := &FilterNode{
+			Child:            joinNode,
+			WhereExpression:  query.WhereExpression,
+			Cost:             estimatedCost + float64(estimatedRows)*0.1,
+			EstimatedRows:    estimatedRows / 10,
+			Logger:           jp.Logger,
+			SubqueryExecutor: nil,
+		}
+		rootNode = filterNode
+		finalCost = filterNode.Cost
+		finalEstimatedRows = filterNode.EstimatedRows
+		jp.Logger.Info("No predicates could be pushed down - applying full WHERE expression after JOIN")
 	}
 
 	// Create the final execution plan using the wrapped node
@@ -402,11 +492,37 @@ type JoinExecutionNode struct {
 	joinedResults        []*joinexecutor.JoinedDocument  // PHASE 3: Store JoinedDocument results for hierarchical transformation
 	LeftBundleInterface  documentscanner.BundleInterface // NEW: Optional filtered bundle for LEFT side (predicate pushdown)
 	RightBundleInterface documentscanner.BundleInterface // NEW: Optional filtered bundle for RIGHT side (predicate pushdown)
+	LeftPredicate        syndrQL.Expression              // Predicate to push to left bundle (may be nil)
+	RightPredicate       syndrQL.Expression              // Predicate to push to right bundle (may be nil)
+	// MergeRequiredFields: when non-nil and non-empty, mergeJoinedDocument copies only these fields (opt #3)
+	MergeRequiredFields map[string]bool
 }
 
 // Execute implements ExecutionNode interface using the new JOIN executor
 func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	jen.Logger.Infof("Executing JOIN using Phase 1 JOIN executor")
+
+	// Opt #1: set projection for join bundles to reduce I/O and deserialization
+	var bundleService BundleServiceInterface
+	if psm, ok := jen.ServiceManager.(*PlannerServiceManager); ok {
+		bundleService = psm.bundleService
+	}
+	if bundleService != nil && len(jen.Query.JoinClauses) > 0 {
+		first := jen.Query.JoinClauses[0]
+		leftF, rightF := computeRequiredFieldsForJoin(jen.Query, first, jen.Query.FromBundle, first.RightBundle)
+		// Do not set projection when a predicate is pushed to that side: the predicate may reference
+		// fields (e.g. rating) that computeRequiredFieldsForJoin does not include (it only uses join
+		// keys, SelectFields, OrderBy; it does not extract fields from the Expression predicate).
+		// Projecting would omit those fields and cause the filter to drop all rows (e.g. 0 results).
+		if len(leftF) > 0 && jen.LeftPredicate == nil {
+			bundleService.SetProjectionFieldsForBundle(jen.Query.FromBundle, leftF)
+			defer bundleService.SetProjectionFieldsForBundle(jen.Query.FromBundle, nil)
+		}
+		if len(rightF) > 0 && jen.RightPredicate == nil {
+			bundleService.SetProjectionFieldsForBundle(first.RightBundle, rightF)
+			defer bundleService.SetProjectionFieldsForBundle(first.RightBundle, nil)
+		}
+	}
 
 	// Convert query to JOIN request format
 	joinRequest, err := jen.convertQueryToJoinRequest()
@@ -490,30 +606,51 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 	// Otherwise create standard adapters from bundles
 	var leftAdapter, rightAdapter documentscanner.BundleInterface
 
+	// Create base adapters first
+	baseLeftAdapter := &PlannerBundleAdapter{
+		bundle:        leftBundle,
+		logger:        jen.Logger,
+		bundleService: bundleService,
+	}
+	baseRightAdapter := &PlannerBundleAdapter{
+		bundle:        rightBundle,
+		logger:        jen.Logger,
+		bundleService: bundleService,
+	}
+
+	// Apply predicate pushdown if predicates are available
 	if jen.LeftBundleInterface != nil {
-		// Use the filtered adapter created during query planning (predicate pushdown)
+		// Use pre-created filtered adapter
 		leftAdapter = jen.LeftBundleInterface
-		jen.Logger.Infof("Using predicate-filtered LEFT bundle adapter")
-	} else {
-		// Create standard adapter
-		leftAdapter = &PlannerBundleAdapter{
-			bundle:        leftBundle,
-			logger:        jen.Logger,
-			bundleService: bundleService,
+		jen.Logger.Infof("Using pre-created predicate-filtered LEFT bundle adapter")
+	} else if jen.LeftPredicate != nil {
+		// Create filtered adapter with pushdown predicate; pass streaming opts when bundleService available
+		var leftStreamOpts *ExprFilterAdapterOpts
+		if bundleService != nil {
+			leftStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: leftBundle.Name}
 		}
+		leftAdapter = NewExpressionFilteredBundleAdapter(baseLeftAdapter, jen.LeftPredicate, jen.Logger, leftStreamOpts)
+		jen.Logger.Infof("Created ExpressionFilteredBundleAdapter for LEFT bundle with predicate: %s", jen.LeftPredicate.String())
+	} else {
+		// Use standard adapter
+		leftAdapter = baseLeftAdapter
 	}
 
 	if jen.RightBundleInterface != nil {
-		// Use the filtered adapter created during query planning (predicate pushdown)
+		// Use pre-created filtered adapter
 		rightAdapter = jen.RightBundleInterface
-		jen.Logger.Infof("Using predicate-filtered RIGHT bundle adapter")
-	} else {
-		// Create standard adapter
-		rightAdapter = &PlannerBundleAdapter{
-			bundle:        rightBundle,
-			logger:        jen.Logger,
-			bundleService: bundleService,
+		jen.Logger.Infof("Using pre-created predicate-filtered RIGHT bundle adapter")
+	} else if jen.RightPredicate != nil {
+		// Create filtered adapter with pushdown predicate; pass streaming opts when bundleService available
+		var rightStreamOpts *ExprFilterAdapterOpts
+		if bundleService != nil {
+			rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name}
 		}
+		rightAdapter = NewExpressionFilteredBundleAdapter(baseRightAdapter, jen.RightPredicate, jen.Logger, rightStreamOpts)
+		jen.Logger.Infof("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
+	} else {
+		// Use standard adapter
+		rightAdapter = baseRightAdapter
 	}
 
 	// Convert JOIN conditions
@@ -552,36 +689,126 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 	}, nil
 }
 
+// normalizeQualifiedField converts "bundle"."field" (parser may leave embedded ".")
+// to "bundle.field" so prefix/base splitting works. No-op if pattern absent.
+func normalizeQualifiedField(s string) string {
+	return strings.ReplaceAll(s, `"."`, ".")
+}
+
+// stripBundlePrefix returns the field name after the first ".", or s if no dot. e.g. "products.name" -> "name".
+func stripBundlePrefix(s string) string {
+	s = normalizeQualifiedField(s)
+	if i := strings.Index(s, "."); i >= 0 && i < len(s)-1 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// computeRequiredFieldsForJoin returns field lists for projection pushdown (opt #1).
+// leftBundleName and rightBundleName are from query.FromBundle and firstJoin.RightBundle.
+// Join keys, SELECT, and ORDER BY are attributed to left or right when they have a "bundle." prefix.
+func computeRequiredFieldsForJoin(
+	query *queryparser.SelectJoinQuery,
+	firstJoin queryparser.JoinClause,
+	leftBundleName, rightBundleName string,
+) (leftFields, rightFields []string) {
+	leftSet := make(map[string]bool)
+	rightSet := make(map[string]bool)
+	addLeft := func(f string) { leftSet[stripBundlePrefix(f)] = true }
+	addRight := func(f string) { rightSet[stripBundlePrefix(f)] = true }
+
+	// Helper: add to left or right when field has "bundle.field" and bundle matches.
+	// Normalize "bundle"."field" -> bundle.field so the split works (parser can leave embedded ".").
+	// Unqualified fields (e.g. "name", "rating" with no dot) are added to BOTH sides so we never
+	// drop them; the side that lacks the field simply won't have it, the other will.
+	addByPrefix := func(s string) {
+		s = normalizeQualifiedField(s)
+		if s == "" {
+			return
+		}
+		if i := strings.Index(s, "."); i >= 0 && i < len(s)-1 {
+			prefix, base := s[:i], s[i+1:]
+			if prefix == leftBundleName {
+				leftSet[base] = true
+			}
+			if prefix == rightBundleName {
+				rightSet[base] = true
+			}
+		} else {
+			leftSet[s] = true
+			rightSet[s] = true
+		}
+	}
+
+	for _, c := range firstJoin.JoinConditions {
+		if c.LeftBundle == leftBundleName {
+			addLeft(c.LeftField)
+		}
+		if c.RightBundle == rightBundleName {
+			addRight(c.RightField)
+		}
+	}
+	for _, f := range query.SelectFields {
+		addByPrefix(f)
+	}
+	for _, f := range query.OrderBy {
+		addByPrefix(f)
+	}
+
+	for k := range leftSet {
+		leftFields = append(leftFields, k)
+	}
+	for k := range rightSet {
+		rightFields = append(rightFields, k)
+	}
+	return leftFields, rightFields
+}
+
+// computeMergeRequiredFields returns the set of field names to copy in mergeJoinedDocument (opt #3).
+// Includes: join key names (stripped), SelectFields (stripped), OrderBy (stripped), and "join_key".
+func computeMergeRequiredFields(query *queryparser.SelectJoinQuery, firstJoin queryparser.JoinClause) map[string]bool {
+	set := make(map[string]bool)
+	add := func(f string) { set[stripBundlePrefix(f)] = true }
+	for _, c := range firstJoin.JoinConditions {
+		add(c.LeftField)
+		add(c.RightField)
+	}
+	for _, f := range query.SelectFields {
+		add(f)
+	}
+	for _, f := range query.OrderBy {
+		add(f)
+	}
+	set["join_key"] = true
+	return set
+}
+
 // mergeJoinedDocument creates a single document from JOIN results
 // LIFECYCLE: After this function copies fields to the final result document, the input JoinedDocument
 // will be returned to the pool via deferred cleanup in the Execute() function.
 // This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup.
+// Opt #3: when MergeRequiredFields is non-nil and non-empty, only those fields are copied.
 func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, index int) *models.Document {
 	// Create merged document with fields from both sides
 	mergedFields := make(map[string]models.Field)
+	onlyRequired := jen.MergeRequiredFields != nil && len(jen.MergeRequiredFields) > 0
 
-	// Add left document fields WITHOUT prefix (commented out prefix code to fix WHERE clause filtering)
+	// Add left document fields
 	if joinedDoc.LeftDocument != nil {
 		for fieldName, field := range joinedDoc.LeftDocument.Fields {
-			// ORIGINAL CODE (added prefixes that broke WHERE filtering):
-			// prefixedName := fmt.Sprintf("left_%s", fieldName)
-			// mergedFields[prefixedName] = field
-
-			// NEW CODE: Use original field names without prefix
+			if onlyRequired && !jen.MergeRequiredFields[fieldName] {
+				continue
+			}
 			mergedFields[fieldName] = field
 		}
 	}
 
-	// Add right document fields WITHOUT prefix (commented out prefix code to fix WHERE clause filtering)
+	// Add right document fields (right overwrites left on collision)
 	if joinedDoc.RightDocument != nil {
 		for fieldName, field := range joinedDoc.RightDocument.Fields {
-			// ORIGINAL CODE (added prefixes that broke WHERE filtering):
-			// prefixedName := fmt.Sprintf("right_%s", fieldName)
-			// mergedFields[prefixedName] = field
-
-			// NEW CODE: Use original field names without prefix
-			// NOTE: This may cause field name collisions if left and right have same field names
-			// In that case, right side will overwrite left side
+			if onlyRequired && !jen.MergeRequiredFields[fieldName] {
+				continue
+			}
 			mergedFields[fieldName] = field
 		}
 	}
@@ -779,19 +1006,41 @@ func (pba *PlannerBundleAdapter) GetHashIndexForField(fieldName string) interfac
 	}
 
 	// Iterate through all indexes to find one that has this field
-	for _, indexRef := range pba.bundle.Indexes {
+	for indexName, indexRef := range pba.bundle.Indexes {
 		// Only consider hash indexes (skip btree, etc.)
 		if indexRef.IndexType != "hash" {
 			continue
 		}
 
 		// Check if any field in this index matches the requested field name
+		matched := false
 		for _, field := range indexRef.Fields {
 			if field.Name == fieldName {
-				// Return the actual index reference (contains IndexInstance)
-				return indexRef
+				matched = true
+				break
 			}
 		}
+		// Fallback: IndexReference.Fields may be nil when populated by discoverBundleIndexes
+		// before the fix; HashIndexField.FieldName can be "product_id_fk" for document field "product_id"
+		if !matched && indexRef.HashIndexField.FieldName != "" {
+			hf := indexRef.HashIndexField.FieldName
+			if hf == fieldName || strings.TrimSuffix(hf, "_fk") == fieldName {
+				matched = true
+			}
+		}
+		if !matched {
+			continue
+		}
+
+		// Load index from disk when IndexInstance is nil (not persisted)
+		inst := indexRef.IndexInstance
+		if inst == nil && pba.bundleService != nil {
+			loaded, err := pba.bundleService.GetOrLoadHashIndexInterface(pba.bundle, indexName, indexRef)
+			if err == nil {
+				inst = loaded
+			}
+		}
+		return inst
 	}
 
 	return nil
@@ -818,6 +1067,13 @@ func (pba *PlannerBundleAdapter) HasIndexOnField(fieldName string) bool {
 				return true
 			}
 		}
+		// Fallback: Fields may be nil when from discoverBundleIndexes before fix; HashIndexField may be "product_id_fk" for "product_id"
+		if indexRef.HashIndexField.FieldName != "" {
+			hf := indexRef.HashIndexField.FieldName
+			if hf == fieldName || strings.TrimSuffix(hf, "_fk") == fieldName {
+				return true
+			}
+		}
 	}
 
 	return false
@@ -838,4 +1094,488 @@ func (psm *PlannerServiceManager) GetBundleByName(database *models.Database, nam
 		return nil, fmt.Errorf("bundle '%s' not found", name)
 	}
 	return bundle, nil
+}
+
+// =============================================================================
+// PREDICATE PUSHDOWN - Phase 2 Optimization
+// =============================================================================
+
+// PredicatePushdownResult holds the result of analyzing WHERE predicates for pushdown
+type PredicatePushdownResult struct {
+	// LeftPredicates are predicates that only reference the left (FROM) bundle
+	LeftPredicates []syndrQL.Expression
+	// RightPredicates are predicates that only reference the right (JOIN) bundle
+	RightPredicates []syndrQL.Expression
+	// RemainingPredicates are predicates that span multiple bundles or can't be pushed
+	RemainingPredicates []syndrQL.Expression
+	// CombinedLeftPredicate is all left predicates combined with AND (nil if none)
+	CombinedLeftPredicate syndrQL.Expression
+	// CombinedRightPredicate is all right predicates combined with AND (nil if none)
+	CombinedRightPredicate syndrQL.Expression
+	// CombinedRemainingPredicate is all remaining predicates combined with AND (nil if none)
+	CombinedRemainingPredicate syndrQL.Expression
+}
+
+// AnalyzePredicateForPushdown analyzes a WHERE expression and separates predicates
+// by which bundle they reference. This enables pushing single-bundle predicates
+// down to be evaluated during the JOIN instead of after.
+//
+// Safety rules:
+// - INNER JOIN: Both left and right predicates can be pushed down
+// - LEFT JOIN: Only left predicates can be pushed (right side must preserve NULLs)
+// - RIGHT JOIN: Only right predicates can be pushed (left side must preserve NULLs)
+// - FULL OUTER JOIN: No predicates can be pushed (both sides must preserve NULLs)
+func AnalyzePredicateForPushdown(
+	expr syndrQL.Expression,
+	leftBundleName string,
+	rightBundleName string,
+	joinType queryparser.JoinType,
+	logger *zap.SugaredLogger,
+) *PredicatePushdownResult {
+	result := &PredicatePushdownResult{
+		LeftPredicates:      make([]syndrQL.Expression, 0),
+		RightPredicates:     make([]syndrQL.Expression, 0),
+		RemainingPredicates: make([]syndrQL.Expression, 0),
+	}
+
+	if expr == nil {
+		return result
+	}
+
+	// Split the expression into individual predicates connected by AND
+	predicates := splitByAnd(expr)
+
+	for _, pred := range predicates {
+		// Analyze which bundles this predicate references
+		bundles := extractReferencedBundles(pred, leftBundleName, rightBundleName)
+
+		switch {
+		case len(bundles) == 0:
+			// Predicate doesn't reference any bundle fields (e.g., "1 = 1")
+			// Keep in remaining predicates
+			result.RemainingPredicates = append(result.RemainingPredicates, pred)
+
+		case len(bundles) == 1 && bundles[0] == leftBundleName:
+			// Only references left bundle
+			// Safe to push for INNER JOIN, LEFT JOIN
+			if joinType == queryparser.InnerJoin || joinType == queryparser.LeftJoin {
+				result.LeftPredicates = append(result.LeftPredicates, pred)
+				logger.Debugf("Pushing predicate to LEFT bundle: %s", pred.String())
+			} else {
+				result.RemainingPredicates = append(result.RemainingPredicates, pred)
+			}
+
+		case len(bundles) == 1 && bundles[0] == rightBundleName:
+			// Only references right bundle
+			// Safe to push for INNER JOIN, RIGHT JOIN
+			// NOT safe for LEFT JOIN (would filter out NULL rows)
+			if joinType == queryparser.InnerJoin || joinType == queryparser.RightJoin {
+				result.RightPredicates = append(result.RightPredicates, pred)
+				logger.Debugf("Pushing predicate to RIGHT bundle: %s", pred.String())
+			} else {
+				result.RemainingPredicates = append(result.RemainingPredicates, pred)
+				logger.Debugf("Cannot push right predicate for %s: %s", joinType.String(), pred.String())
+			}
+
+		default:
+			// References multiple bundles - cannot push
+			result.RemainingPredicates = append(result.RemainingPredicates, pred)
+			logger.Debugf("Predicate spans multiple bundles, keeping in filter: %s", pred.String())
+		}
+	}
+
+	// Combine predicates with AND for each category
+	result.CombinedLeftPredicate = combineWithAnd(result.LeftPredicates)
+	result.CombinedRightPredicate = combineWithAnd(result.RightPredicates)
+	result.CombinedRemainingPredicate = combineWithAnd(result.RemainingPredicates)
+
+	return result
+}
+
+// splitByAnd recursively splits an expression tree at AND nodes
+// Returns individual predicates that were connected by AND
+func splitByAnd(expr syndrQL.Expression) []syndrQL.Expression {
+	if expr == nil {
+		return nil
+	}
+
+	// Check if this is a binary AND expression
+	if binary, ok := expr.(*syndrQL.BinaryExpression); ok {
+		if binary.Operator == syndrQL.TOKEN_AND {
+			// Recursively split both sides
+			left := splitByAnd(binary.Left)
+			right := splitByAnd(binary.Right)
+			return append(left, right...)
+		}
+	}
+
+	// Check if this is a grouped expression containing AND
+	if grouped, ok := expr.(*syndrQL.GroupedExpression); ok {
+		return splitByAnd(grouped.Expression)
+	}
+
+	// Not an AND - return as single predicate
+	return []syndrQL.Expression{expr}
+}
+
+// extractReferencedBundles finds which bundles are referenced by field identifiers
+func extractReferencedBundles(expr syndrQL.Expression, leftBundleName, rightBundleName string) []string {
+	bundleSet := make(map[string]bool)
+	extractBundleRefs(expr, leftBundleName, rightBundleName, bundleSet)
+
+	bundles := make([]string, 0, len(bundleSet))
+	for bundle := range bundleSet {
+		bundles = append(bundles, bundle)
+	}
+	return bundles
+}
+
+// extractBundleRefs recursively extracts bundle references from an expression
+func extractBundleRefs(expr syndrQL.Expression, leftBundleName, rightBundleName string, bundleSet map[string]bool) {
+	if expr == nil {
+		return
+	}
+
+	switch e := expr.(type) {
+	case *syndrQL.QualifiedIdentifierExpression:
+		// Qualified field like "reviews"."rating" - extract bundle name
+		bundleSet[e.Bundle] = true
+
+	case *syndrQL.IdentifierExpression:
+		// Unqualified field name - need to determine which bundle it belongs to
+		// For now, assume unqualified fields belong to the right (joined) bundle
+		// since the query is typically "FROM left JOIN right WHERE right.field ..."
+		// This is a simplification - a more robust implementation would check
+		// field definitions in both bundles
+		bundleSet[rightBundleName] = true
+
+	case *syndrQL.BinaryExpression:
+		extractBundleRefs(e.Left, leftBundleName, rightBundleName, bundleSet)
+		extractBundleRefs(e.Right, leftBundleName, rightBundleName, bundleSet)
+
+	case *syndrQL.UnaryExpression:
+		extractBundleRefs(e.Right, leftBundleName, rightBundleName, bundleSet)
+
+	case *syndrQL.GroupedExpression:
+		extractBundleRefs(e.Expression, leftBundleName, rightBundleName, bundleSet)
+
+	case *syndrQL.CallExpression:
+		for _, arg := range e.Arguments {
+			extractBundleRefs(arg, leftBundleName, rightBundleName, bundleSet)
+		}
+
+	case *syndrQL.ArrayExpression:
+		for _, elem := range e.Elements {
+			extractBundleRefs(elem, leftBundleName, rightBundleName, bundleSet)
+		}
+
+	case *syndrQL.LiteralExpression:
+		// Literals don't reference bundles
+	}
+}
+
+// combineWithAnd combines multiple predicates into a single AND expression
+// Returns nil if the slice is empty
+func combineWithAnd(predicates []syndrQL.Expression) syndrQL.Expression {
+	if len(predicates) == 0 {
+		return nil
+	}
+	if len(predicates) == 1 {
+		return predicates[0]
+	}
+
+	// Build AND chain: pred1 AND pred2 AND pred3 ...
+	result := predicates[0]
+	for i := 1; i < len(predicates); i++ {
+		result = &syndrQL.BinaryExpression{
+			Left:     result,
+			Operator: syndrQL.TOKEN_AND,
+			Right:    predicates[i],
+		}
+	}
+	return result
+}
+
+// =============================================================================
+// ExpressionFilteredBundleAdapter - Applies Expression predicates during iteration
+// =============================================================================
+
+// parallelFilterThreshold is the minimum number of documents to use parallel filtering
+const parallelFilterThreshold = 500
+
+// maxFilterWorkers is the maximum number of parallel filter workers
+const maxFilterWorkers = 4
+
+// ExprFilterAdapterOpts enables streaming filter and parallel page loading when provided to
+// NewExpressionFilteredBundleAdapter. When nil, the adapter falls back to load-all-then-filter.
+type ExprFilterAdapterOpts struct {
+	BundleService BundleServiceInterface // required for streaming+parallel path
+	BundleName    string                 // bundle to load
+}
+
+// ExpressionFilteredBundleAdapter wraps a BundleInterface and applies a syndrQL.Expression
+// predicate filter during document retrieval. This enables predicate pushdown optimization
+// for the modern Expression-based WHERE clause system.
+//
+// OPTIMIZATION: When streamingOpts is set, uses streaming filter-while-loading and parallel
+// page loading via BundleService.GetAllDocumentsForIndexingWithOptions. Otherwise uses
+// parallel in-memory filtering for large sets (>500 docs).
+//
+// Note: This is different from FilteredBundleAdapter in predicate_pushdown.go which uses
+// the older WhereClause system. This adapter uses the unified syndrQL.Expression system.
+type ExpressionFilteredBundleAdapter struct {
+	inner         documentscanner.BundleInterface
+	predicate     syndrQL.Expression
+	logger        *zap.SugaredLogger
+	evaluator     *syndrQL.ExpressionEvaluator
+	streamingOpts *ExprFilterAdapterOpts // optional; when set, use streaming+parallel load
+}
+
+// NewExpressionFilteredBundleAdapter creates a new expression-filtered bundle adapter.
+// opts is optional: when non-nil and BundleService/BundleName are set, uses streaming
+// filter-while-loading and parallel page loading.
+func NewExpressionFilteredBundleAdapter(
+	inner documentscanner.BundleInterface,
+	predicate syndrQL.Expression,
+	logger *zap.SugaredLogger,
+	opts *ExprFilterAdapterOpts,
+) *ExpressionFilteredBundleAdapter {
+	return &ExpressionFilteredBundleAdapter{
+		inner:         inner,
+		predicate:     predicate,
+		logger:        logger,
+		evaluator:     syndrQL.NewExpressionEvaluator(logger),
+		streamingOpts: opts,
+	}
+}
+
+// GetDocumentIDs returns document IDs that match the predicate
+// Note: This requires evaluating all documents, so it's less efficient
+// than GetAllDocuments for filtered access
+func (f *ExpressionFilteredBundleAdapter) GetDocumentIDs() []string {
+	all := f.inner.GetAllDocuments()
+	filtered := make([]string, 0, len(all)/2) // Estimate 50% selectivity
+
+	for id, doc := range all {
+		if f.matchesPredicate(doc) {
+			filtered = append(filtered, id)
+		}
+	}
+
+	return filtered
+}
+
+// GetDocument retrieves a document by ID only if it matches the predicate
+func (f *ExpressionFilteredBundleAdapter) GetDocument(docID string) *models.Document {
+	doc := f.inner.GetDocument(docID)
+	if doc == nil {
+		return nil
+	}
+
+	if f.matchesPredicate(doc) {
+		return doc
+	}
+	return nil
+}
+
+// filterResult holds a document that passed the predicate filter
+type filterResult struct {
+	docID string
+	doc   *models.Document
+}
+
+// GetAllDocuments returns all documents that match the predicate
+// OPTIMIZATION: When streamingOpts is set, uses streaming filter-while-loading and parallel
+// page loading. Otherwise uses load-all-then-filter (with parallel in-memory filter for large sets).
+func (f *ExpressionFilteredBundleAdapter) GetAllDocuments() map[string]*models.Document {
+	startTime := time.Now()
+
+	// Streaming + parallel path: filter while loading pages, never materialize full unfiltered set
+	if f.streamingOpts != nil && f.streamingOpts.BundleService != nil && f.streamingOpts.BundleName != "" {
+		filter := func(d *models.Document) bool {
+			r, err := f.evaluator.EvaluateAsBool(f.predicate, d, nil, nil, nil)
+			if err != nil {
+				f.logger.Warnf("streaming filter eval error for doc %s: %v", d.DocumentID, err)
+				return false
+			}
+			return r
+		}
+		// opts := &bundle.IndexingOptions{Filter: filter, Concurrency: 4} // lower probe concurrency
+		opts := &bundle.IndexingOptions{Filter: filter, Concurrency: 8}
+		docs, err := f.streamingOpts.BundleService.GetAllDocumentsForIndexingWithOptions(f.streamingOpts.BundleName, opts)
+		if err != nil {
+			f.logger.Warnf("GetAllDocumentsForIndexingWithOptions failed, falling back to load-then-filter: %v", err)
+			// fall through to load-then-filter
+		} else {
+			m := make(map[string]*models.Document, len(docs))
+			for _, d := range docs {
+				m[d.DocumentID] = d
+			}
+			f.logger.Infof("ExpressionFilteredBundleAdapter: streaming+parallel returned %d documents in %v",
+				len(m), time.Since(startTime))
+			return m
+		}
+	}
+
+	// Fallback: load all from inner, then filter (parallel or sequential)
+	all := f.inner.GetAllDocuments()
+	f.logger.Infof("ExpressionFilteredBundleAdapter.GetAllDocuments: loaded %d documents, parallelThreshold=%d",
+		len(all), parallelFilterThreshold)
+
+	if len(all) >= parallelFilterThreshold {
+		return f.getAllDocumentsParallel(all)
+	}
+
+	filtered := make(map[string]*models.Document, len(all)/2)
+	matchCount := 0
+	for id, doc := range all {
+		if f.matchesPredicate(doc) {
+			filtered[id] = doc
+			matchCount++
+		}
+	}
+
+	f.logger.Infof("ExpressionFilteredBundleAdapter: %d/%d documents matched predicate in %v (sequential)",
+		matchCount, len(all), time.Since(startTime))
+
+	return filtered
+}
+
+// getAllDocumentsParallel filters documents using parallel workers
+func (f *ExpressionFilteredBundleAdapter) getAllDocumentsParallel(all map[string]*models.Document) map[string]*models.Document {
+	startTime := time.Now()
+
+	// Determine number of workers based on document count
+	numWorkers := maxFilterWorkers
+	if len(all) < parallelFilterThreshold*2 {
+		numWorkers = 2 // Use fewer workers for smaller sets
+	}
+
+	// Convert map to slice for partitioning
+	type docEntry struct {
+		id  string
+		doc *models.Document
+	}
+	docs := make([]docEntry, 0, len(all))
+	for id, doc := range all {
+		docs = append(docs, docEntry{id, doc})
+	}
+
+	// Create result channel
+	resultChan := make(chan filterResult, len(docs))
+	var wg sync.WaitGroup
+
+	// Calculate partition size
+	partitionSize := (len(docs) + numWorkers - 1) / numWorkers
+
+	// Launch workers
+	for w := 0; w < numWorkers; w++ {
+		start := w * partitionSize
+		end := start + partitionSize
+		if end > len(docs) {
+			end = len(docs)
+		}
+		if start >= len(docs) {
+			break
+		}
+
+		wg.Add(1)
+		go func(partition []docEntry) {
+			defer wg.Done()
+
+			// Each worker has its own evaluator to avoid mutex contention
+			evaluator := syndrQL.NewExpressionEvaluator(f.logger)
+
+			for _, entry := range partition {
+				result, err := evaluator.EvaluateAsBool(f.predicate, entry.doc, nil, nil, nil)
+				if err != nil {
+					// Skip documents with evaluation errors
+					continue
+				}
+				if result {
+					resultChan <- filterResult{docID: entry.id, doc: entry.doc}
+				}
+			}
+		}(docs[start:end])
+	}
+
+	// Close channel when all workers complete
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	filtered := make(map[string]*models.Document, len(all)/2)
+	for result := range resultChan {
+		filtered[result.docID] = result.doc
+	}
+
+	f.logger.Infof("ExpressionFilteredBundleAdapter: %d/%d documents matched predicate in %v (parallel, %d workers)",
+		len(filtered), len(all), time.Since(startTime), numWorkers)
+
+	return filtered
+}
+
+// GetAllDocumentsWithLimit returns filtered documents up to the limit
+func (f *ExpressionFilteredBundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.Document {
+	if limit <= 0 {
+		return f.GetAllDocuments()
+	}
+
+	all := f.inner.GetAllDocuments()
+	filtered := make(map[string]*models.Document, limit)
+
+	count := 0
+	for id, doc := range all {
+		if count >= limit {
+			break
+		}
+		if f.matchesPredicate(doc) {
+			filtered[id] = doc
+			count++
+		}
+	}
+
+	return filtered
+}
+
+// GetName returns the bundle name with a filter indicator
+func (f *ExpressionFilteredBundleAdapter) GetName() string {
+	return f.inner.GetName() + " [expr-filtered]"
+}
+
+// GetTotalDocuments returns an estimate of matching documents
+// Note: Returns inner total as upper bound since we can't know exact count
+// without evaluating all documents
+func (f *ExpressionFilteredBundleAdapter) GetTotalDocuments() int {
+	// Return inner total as upper bound
+	// The actual count will be determined during iteration
+	return f.inner.GetTotalDocuments()
+}
+
+// GetHashIndexForField delegates to the inner bundle
+func (f *ExpressionFilteredBundleAdapter) GetHashIndexForField(fieldName string) interface{} {
+	return f.inner.GetHashIndexForField(fieldName)
+}
+
+// HasIndexOnField delegates to the inner bundle
+func (f *ExpressionFilteredBundleAdapter) HasIndexOnField(fieldName string) bool {
+	return f.inner.HasIndexOnField(fieldName)
+}
+
+// matchesPredicate evaluates the predicate against a document
+func (f *ExpressionFilteredBundleAdapter) matchesPredicate(doc *models.Document) bool {
+	if f.predicate == nil {
+		return true
+	}
+
+	result, err := f.evaluator.EvaluateAsBool(f.predicate, doc, nil, nil, nil)
+	if err != nil {
+		// Log error but don't crash - treat as non-match
+		f.logger.Warnf("Predicate evaluation error for doc %s: %v", doc.DocumentID, err)
+		return false
+	}
+
+	return result
 }

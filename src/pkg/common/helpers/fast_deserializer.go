@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sync"
 	"syndrdb/src/internal/domain/models"
 	"time"
 )
@@ -780,25 +781,42 @@ func readFieldAt(data []byte, offset int) (string, models.Field, int, error) {
 	}, offset, nil
 }
 
-// Global fast deserializer instance to avoid repeated allocations
-var globalFastDeserializer = NewFastDocumentDeserializer()
+// deserializerPool recycles FastDocumentDeserializer instances for concurrent-safe use.
+// Each Decode* call gets a deserializer from the pool, uses it (single goroutine only),
+// resets d.data/d.offset to avoid retaining buffers, then returns it to the pool.
+var deserializerPool = sync.Pool{
+	New: func() interface{} { return NewFastDocumentDeserializer() },
+}
 
-// DecodeFastBinary replaces DecodeBSON for high-performance document deserialization
-// Provides 5-10x faster deserialization by eliminating BSON overhead
+// DecodeFastBinary replaces DecodeBSON for high-performance document deserialization.
+// Provides 5-10x faster deserialization by eliminating BSON overhead.
+// Safe for concurrent use (uses a sync.Pool of deserializers; no shared mutable state).
 // Mirrors EncodeFastBinary function from fast_serializer.go
 func DecodeFastBinary(data []byte) (map[string]interface{}, error) {
-	return globalFastDeserializer.DeserializeDocumentMap(data)
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+	return d.DeserializeDocumentMap(data)
 }
 
-// DecodeFastBinaryToDocument deserializes binary data directly to a models.Document
-// Provides direct deserialization without the map conversion overhead
+// DecodeFastBinaryToDocument deserializes binary data directly to a models.Document.
+// Provides direct deserialization without the map conversion overhead.
+// Safe for concurrent use.
 func DecodeFastBinaryToDocument(data []byte) (*models.Document, error) {
-	return globalFastDeserializer.DeserializeDocument(data)
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+	return d.DeserializeDocument(data)
 }
 
-// DecodeFastBinaryProjected deserializes only specified fields for projection pushdown optimization
-// For ORDER BY queries, this saves deserializing unused fields (e.g., only "name" + "DocumentID")
-// Still reads DocumentID, CreatedAt, UpdatedAt, and MVCC fields for correctness
+// DecodeFastBinaryProjected deserializes only specified fields for projection pushdown optimization.
+// For ORDER BY queries, this saves deserializing unused fields (e.g., only "name" + "DocumentID").
+// Still reads DocumentID, CreatedAt, UpdatedAt, and MVCC fields for correctness.
+// Safe for concurrent use.
 //
 // Parameters:
 //   - data: Binary document data
@@ -809,8 +827,14 @@ func DecodeFastBinaryToDocument(data []byte) (*models.Document, error) {
 //   - error: Any deserialization error
 //
 // Usage:
-//   For ORDER BY name queries, call with fieldsToExtract=["name"]
-//   This reduces deserialization overhead by ~80-90% when documents have many unused fields
+//
+//	For ORDER BY name queries, call with fieldsToExtract=["name"]
+//	This reduces deserialization overhead by ~80-90% when documents have many unused fields
 func DecodeFastBinaryProjected(data []byte, fieldsToExtract []string) (*models.Document, error) {
-	return globalFastDeserializer.DeserializeProjectedFields(data, fieldsToExtract)
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+	return d.DeserializeProjectedFields(data, fieldsToExtract)
 }

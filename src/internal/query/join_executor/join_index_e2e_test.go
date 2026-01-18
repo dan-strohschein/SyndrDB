@@ -178,6 +178,24 @@ func (m *mockBundleAdapter) GetAllDocuments() map[string]*models.Document {
 	return result
 }
 
+func (m *mockBundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.Document {
+	if limit <= 0 {
+		return m.GetAllDocuments()
+	}
+	all := m.GetAllDocuments()
+	if len(all) <= limit {
+		return all
+	}
+	result := make(map[string]*models.Document, limit)
+	for id, doc := range all {
+		if len(result) >= limit {
+			break
+		}
+		result[id] = doc
+	}
+	return result
+}
+
 func (m *mockBundleAdapter) GetName() string {
 	return m.bundle.Name
 }

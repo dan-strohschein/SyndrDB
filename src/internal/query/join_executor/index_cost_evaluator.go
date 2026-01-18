@@ -18,15 +18,16 @@ DESIGN PRINCIPLES:
 - Open/Closed: Extensible for additional cost factors without modification
 - Data-Driven: Uses actual index statistics rather than fixed heuristics
 
-COST MODEL:
-Full Scan Cost = tableSize * scanCostPerRow
-	Where scanCostPerRow = 1.0 (baseline unit cost)
+COST MODEL (all costs in scan-equivalent units; 1 unit = cost to scan one document):
+Full Scan Cost = probeSize * scanCostPerDocument
 
-Index Cost = (hashTableKeys * avgLookupTimeNs) + (hashTableKeys * selectivity * processCostPerRow)
-	Where:
-	- avgLookupTimeNs = Average index lookup time from statistics
-	- selectivity = Average rows returned per lookup
-	- processCostPerRow = Cost to process each returned row (join operation)
+Index Cost = lookupCost + processingCost
+	- lookupCost = hashTableKeys * lookupUnitsPerKey
+	  lookupUnitsPerKey: from index stats, min(1.0, avgLookupTimeNs/nsPerDocScan); else defaultLookupUnitsPerKey
+	  (Converts index lookup time from ns to scan units so indexCost and scanCost are comparable.)
+	- processingCost = matchedRows * processCostPerDocument
+	  matchedRows = min(hashTableKeys * selectivity, probeSize)
+	- processCostPerDocument = cost to fetch+probe one matched document
 
 USAGE EXAMPLE:
 	// During join planning
@@ -52,25 +53,23 @@ import (
 )
 
 // Cost model constants
-// These values are tuned based on observed performance characteristics
+// All costs are in "scan-equivalent units" (1 unit = cost to scan one document).
 const (
-	// scanCostPerDocument is the baseline cost to scan one row (unitless)
-	// This is our reference point - all other costs are relative to this
+	// scanCostPerDocument is the baseline cost to scan one document
 	scanCostPerDocument = 1.0
 
-	// processCostPerDocument is the cost to process a row after retrieval (join operation)
-	// This includes field comparisons, document creation, etc.
-	// Set slightly higher than scan because processing is more expensive than raw reads
+	// processCostPerDocument is the cost to fetch and probe one matched document (index path)
 	processCostPerDocument = 1.2
 
-	// defaultAvgLookupTimeNs is used when index has no statistics yet
-	// Conservative estimate: assume index lookups are moderately expensive
-	// 10.0 means index lookup is 10x more expensive than scanning one row
-	defaultAvgLookupTimeNs = 10.0
+	// nsPerDocScan: assumed ns to scan one document; used to convert avgLookupTimeNs to scan units.
+	// lookupUnitsPerKey = min(1.0, avgLookupTimeNs / nsPerDocScan)
+	nsPerDocScan = 50000 // 50 µs per document (read+deserialize)
 
-	// defaultSelectivity is used when index has no statistics yet
-	// Conservative estimate: assume 10% selectivity (0.1 rows per lookup)
-	// This prevents over-optimistic index usage for untested indexes
+	// defaultLookupUnitsPerKey is used when index has no statistics (cold index).
+	// One index lookup is assumed to cost 10% of scanning one document.
+	defaultLookupUnitsPerKey = 0.1
+
+	// defaultSelectivity is used when index has no statistics yet (0.1 = 10% avg rows per lookup)
 	defaultSelectivity = 0.1
 )
 
@@ -115,31 +114,33 @@ func EvaluateIndexUsage(
 	indexStats *hashindexV3.QueryOptimizationStats,
 ) *IndexCostEstimate {
 
-	// Calculate full scan cost: simply scan every row in probe table
+	// Calculate full scan cost: probeSize * cost per document (scan-equivalent units)
 	scanCost := float64(probeSize) * scanCostPerDocument
 
-	// Extract index statistics (use defaults if not available)
-	var avgLookupTimeNs float64
+	// Lookup cost: convert index lookup time to scan-equivalent units so it’s comparable to scanCost
+	var lookupUnitsPerKey float64
 	var selectivity float64
 	usedDefaults := false
 
 	if indexStats != nil && indexStats.TotalLookups > 0 {
-		// Use real statistics from index
-		avgLookupTimeNs = indexStats.AverageLookupTimeNs
 		selectivity = indexStats.Selectivity
+		// avgLookupTimeNs is in nanoseconds; convert to units where 1.0 = one doc scan
+		ratio := indexStats.AverageLookupTimeNs / nsPerDocScan
+		if ratio > 1.0 {
+			ratio = 1.0
+		}
+		lookupUnitsPerKey = ratio
 	} else {
-		// No statistics available yet (cold index)
-		// Use conservative defaults to avoid over-optimization
-		avgLookupTimeNs = defaultAvgLookupTimeNs
+		lookupUnitsPerKey = defaultLookupUnitsPerKey
 		selectivity = defaultSelectivity
 		usedDefaults = true
 	}
 
-	// Calculate index cost:
-	// 1. Lookup cost: k lookups * average lookup time
-	// 2. Processing cost: k lookups * average rows per lookup * process cost
-	lookupCost := float64(hashTableKeys) * avgLookupTimeNs
+	lookupCost := float64(hashTableKeys) * lookupUnitsPerKey
 	matchedRows := float64(hashTableKeys) * selectivity
+	if matchedRows > float64(probeSize) {
+		matchedRows = float64(probeSize)
+	}
 	processingCost := matchedRows * processCostPerDocument
 	indexCost := lookupCost + processingCost
 

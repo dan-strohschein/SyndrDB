@@ -139,11 +139,12 @@ func NewLimitNode(child ExecutionNode, limit, offset int, logger *zap.SugaredLog
 // PHASE 2: Main execution method for LimitNode
 //
 // Execution flow:
-// 1. Execute child node to get input documents
-// 2. Convert to slice for deterministic ordering
-// 3. Apply offset (skip first N documents)
-// 4. Apply limit (take next M documents)
-// 5. Convert back to map and return
+// 1. Check if child is SortNode (use Top-N optimization path)
+// 2. Otherwise execute child node to get input documents
+// 3. Convert to slice for deterministic ordering
+// 4. Apply offset (skip first N documents)
+// 5. Apply limit (take next M documents)
+// 6. Convert back to map and return
 //
 // Returns:
 //   - map[string]*models.Document: Limited documents
@@ -151,37 +152,22 @@ func NewLimitNode(child ExecutionNode, limit, offset int, logger *zap.SugaredLog
 func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.Logger.Infof("Executing LimitNode: Limit=%d, Offset=%d", n.Limit, n.Offset)
 
-	// Execute child node to get input documents
-	documents, err := n.Child.Execute(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("LimitNode: child execution failed: %w", err)
-	}
-
-	n.Logger.Debugf("LimitNode received %d documents from child", len(documents))
-
-	// Handle empty result set
-	if len(documents) == 0 {
-		n.Logger.Debug("LimitNode: no documents to limit, returning empty result")
-		return documents, nil
-	}
-
-	// If no limit and no offset, return all documents (pass-through)
-	if n.Limit <= 0 && n.Offset <= 0 {
-		n.Logger.Debug("LimitNode: no limit or offset specified, returning all documents")
-		return documents, nil
-	}
-
-	// Convert map to slice for deterministic processing
-	// Check if child is a SortNode to use Top-N optimization
+	// CRITICAL FIX: Check if child is SortNode BEFORE executing
+	// This prevents double execution of the child chain (e.g., JOIN executed twice)
+	// Previously, we called n.Child.Execute() first, then called ExecuteWithLimit(),
+	// which caused the entire child chain to execute twice.
 	var docSlice []*models.Document
+	var documents map[string]*models.Document
+
 	if sortNode, isSortNode := n.Child.(*SortNode); isSortNode {
-		// Child is SortNode - use Top-N optimization if beneficial
-		n.Logger.Debugf("LimitNode: child is SortNode, attempting Top-N optimization")
+		// Child is SortNode - use Top-N optimization path (single execution)
+		n.Logger.Debugf("LimitNode: child is SortNode, using Top-N optimization (single execution path)")
 
 		// Calculate effective limit (LIMIT + OFFSET)
 		effectiveLimit := n.GetEffectiveLimit()
 
 		// Call ExecuteWithLimit to enable Top-N heapsort
+		// This is the ONLY execution of the child chain for SortNode children
 		var err error
 		docSlice, err = sortNode.ExecuteWithLimit(ctx, effectiveLimit)
 		if err != nil {
@@ -193,26 +179,47 @@ func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, e
 		// Store the sorted documents slice to preserve ORDER BY sort order
 		// This is critical! The documents are correctly sorted here, we must preserve that order
 		n.sortedDocuments = docSlice
-	} else {
-		// Child is not using Top-N optimization
-		// Check if child is a SortNode that has sorted documents available
-		if sortNode, isSortNode := n.Child.(*SortNode); isSortNode {
-			sortedDocs := sortNode.GetSortedDocuments()
-			if sortedDocs != nil {
-				// SortNode executed a full sort - use those sorted documents!
-				n.Logger.Debugf("LimitNode: using sorted documents from SortNode (%d documents)", len(sortedDocs))
-				docSlice = sortedDocs
-				n.sortedDocuments = sortedDocs
-			} else {
-				// SortNode hasn't executed yet? This shouldn't happen, but fall back
-				n.Logger.Warn("LimitNode: SortNode child has no sorted documents, falling back to DocumentID order")
-				docSlice = buildDocSliceByDocumentID(documents)
-			}
-		} else {
-			// No SortNode - sort by DocumentID for deterministic ordering
-			n.Logger.Debugf("LimitNode: using DocumentID order (%d documents)", len(documents))
-			docSlice = buildDocSliceByDocumentID(documents)
+
+		// Handle empty result set
+		if len(docSlice) == 0 {
+			n.Logger.Debug("LimitNode: no documents to limit, returning empty result")
+			return make(map[string]*models.Document), nil
 		}
+
+		// If no limit and no offset, convert all to map and return
+		if n.Limit <= 0 && n.Offset <= 0 {
+			n.Logger.Debug("LimitNode: no limit or offset specified, returning all documents")
+			resultMap := make(map[string]*models.Document, len(docSlice))
+			for _, doc := range docSlice {
+				resultMap[doc.DocumentID] = doc
+			}
+			return resultMap, nil
+		}
+	} else {
+		// Child is NOT a SortNode - use standard execution path
+		var err error
+		documents, err = n.Child.Execute(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("LimitNode: child execution failed: %w", err)
+		}
+
+		n.Logger.Debugf("LimitNode received %d documents from child", len(documents))
+
+		// Handle empty result set
+		if len(documents) == 0 {
+			n.Logger.Debug("LimitNode: no documents to limit, returning empty result")
+			return documents, nil
+		}
+
+		// If no limit and no offset, return all documents (pass-through)
+		if n.Limit <= 0 && n.Offset <= 0 {
+			n.Logger.Debug("LimitNode: no limit or offset specified, returning all documents")
+			return documents, nil
+		}
+
+		// No SortNode - sort by DocumentID for deterministic ordering
+		n.Logger.Debugf("LimitNode: using DocumentID order (%d documents)", len(documents))
+		docSlice = buildDocSliceByDocumentID(documents)
 	}
 
 	n.Logger.Debugf("LimitNode: processing %d documents", len(docSlice))

@@ -3,6 +3,8 @@ package sorting
 import (
 	"container/heap"
 	"fmt"
+	"strings"
+
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 
@@ -263,6 +265,168 @@ func toFloat64(v interface{}) (float64, bool) {
 	}
 }
 
+// getFieldValueForExtract extracts a sort key from a document for pre-extraction (opt #4).
+// Handles doc.Fields[fieldName] and DocumentID when fieldName is "documentid".
+func getFieldValueForExtract(doc *models.Document, fieldName string) (interface{}, bool) {
+	if strings.EqualFold(fieldName, "documentid") {
+		if doc != nil && doc.DocumentID != "" {
+			return doc.DocumentID, true
+		}
+		return nil, false
+	}
+	if doc == nil || doc.Fields == nil {
+		return nil, false
+	}
+	field, exists := doc.Fields[fieldName]
+	if !exists {
+		return nil, false
+	}
+	return field.Value, true
+}
+
+// compareValuesStatic compares two values; returns -1, 0, 1. Used by topNHeapWithKeys.
+func compareValuesStatic(v1, v2 interface{}) int {
+	if num1, ok1 := toFloat64(v1); ok1 {
+		if num2, ok2 := toFloat64(v2); ok2 {
+			if num1 < num2 {
+				return -1
+			} else if num1 > num2 {
+				return 1
+			}
+			return 0
+		}
+	}
+	str1 := fmt.Sprint(v1)
+	str2 := fmt.Sprint(v2)
+	if str1 < str2 {
+		return -1
+	} else if str1 > str2 {
+		return 1
+	}
+	return 0
+}
+
+// shouldNullsSortFirstField returns whether nulls sort first for an OrderByField.
+func shouldNullsSortFirstField(field queryparser.OrderByField) bool {
+	switch field.NullsPosition {
+	case queryparser.NullsFirst:
+		return true
+	case queryparser.NullsLast:
+		return false
+	default:
+		return field.Direction == queryparser.SortDesc
+	}
+}
+
+// topNHeapWithKeys is a heap of indices into docs/sortKeys; Less uses pre-extracted keys (opt #4).
+type topNHeapWithKeys struct {
+	indices    []int
+	docs       []*models.Document
+	sortKeys   []interface{}
+	isNull     []bool
+	capacity   int
+	ascending  bool
+	nullsFirst bool
+}
+
+func (h *topNHeapWithKeys) Len() int { return len(h.indices) }
+func (h *topNHeapWithKeys) Swap(i, j int) {
+	h.indices[i], h.indices[j] = h.indices[j], h.indices[i]
+}
+
+// Less returns true when element i is worse than j (i should be closer to root / get popped).
+func (h *topNHeapWithKeys) Less(i, j int) bool {
+	ii, jj := h.indices[i], h.indices[j]
+	ni, nj := h.isNull[ii], h.isNull[jj]
+	if ni && nj {
+		return false
+	}
+	if ni {
+		return !h.nullsFirst // i null: worse only when nullsLast
+	}
+	if nj {
+		return h.nullsFirst // j null: i worse when nullsFirst (j is best)
+	}
+	cmp := compareValuesStatic(h.sortKeys[ii], h.sortKeys[jj])
+	if h.ascending {
+		return cmp > 0
+	}
+	return cmp < 0
+}
+
+func (h *topNHeapWithKeys) Push(x interface{}) {
+	h.indices = append(h.indices, x.(int))
+}
+
+func (h *topNHeapWithKeys) Pop() interface{} {
+	old := h.indices
+	n := len(old)
+	item := old[n-1]
+	h.indices = old[0 : n-1]
+	return item
+}
+
+// isBetter returns true when idx is better than rootIdx (should replace root).
+func (h *topNHeapWithKeys) isBetter(idx, rootIdx int) bool {
+	ni, nr := h.isNull[idx], h.isNull[rootIdx]
+	if ni && nr {
+		return false
+	}
+	nullsFirst := h.nullsFirst
+	if ni {
+		return nullsFirst // idx null and nullsFirst: idx is best, better
+	}
+	if nr {
+		return !nullsFirst // root null and nullsFirst: root best, idx not better
+	}
+	cmp := compareValuesStatic(h.sortKeys[idx], h.sortKeys[rootIdx])
+	if h.ascending {
+		return cmp < 0 // ASC: smaller is better
+	}
+	return cmp > 0 // DESC: larger is better
+}
+
+// topNHeapSortWithKeys runs Top-N using pre-extracted keys for single-column ORDER BY.
+func topNHeapSortWithKeys(
+	docsSlice []*models.Document,
+	sortKeys []interface{},
+	isNull []bool,
+	limit int,
+	field queryparser.OrderByField,
+	logger *zap.SugaredLogger,
+) ([]*models.Document, error) {
+	h := &topNHeapWithKeys{
+		indices:    make([]int, 0, limit),
+		docs:       docsSlice,
+		sortKeys:   sortKeys,
+		isNull:     isNull,
+		capacity:   limit,
+		ascending:  field.Direction != queryparser.SortDesc,
+		nullsFirst: shouldNullsSortFirstField(field),
+	}
+	heap.Init(h)
+
+	for idx := 0; idx < len(docsSlice); idx++ {
+		if h.Len() < limit {
+			heap.Push(h, idx)
+		} else if h.isBetter(idx, h.indices[0]) {
+			heap.Pop(h)
+			heap.Push(h, idx)
+		}
+	}
+
+	result := make([]*models.Document, h.Len())
+	for i := 0; i < len(result); i++ {
+		idx := heap.Pop(h).(int)
+		result[i] = h.docs[idx]
+	}
+	for i := 0; i < len(result)/2; i++ {
+		j := len(result) - 1 - i
+		result[i], result[j] = result[j], result[i]
+	}
+	return result, nil
+}
+
 // TopNHeapSort performs Top-N selection using a bounded heap
 //
 // Parameters:
@@ -278,6 +442,7 @@ func toFloat64(v interface{}) (float64, bool) {
 // Performance:
 //   - O(n log k) time where n = len(documents), k = limit
 //   - O(k) space
+//   - Opt #4: for single-column ORDER BY, uses pre-extracted keys to avoid repeated map lookups
 func TopNHeapSort(
 	documents map[string]*models.Document,
 	limit int,
@@ -295,36 +460,40 @@ func TopNHeapSort(
 
 	logger.Debugf("TopNHeapSort: selecting top %d from %d documents", limit, len(documents))
 
-	// Create bounded heap
+	// Opt #4: single-column ORDER BY — pre-extract sort keys to avoid map lookups in hot loop
+	if orderBy != nil && len(orderBy.Fields) == 1 {
+		field := orderBy.Fields[0]
+		docsSlice := make([]*models.Document, 0, len(documents))
+		sortKeys := make([]interface{}, 0, len(documents))
+		isNull := make([]bool, 0, len(documents))
+		for _, doc := range documents {
+			v, ok := getFieldValueForExtract(doc, field.FieldName)
+			docsSlice = append(docsSlice, doc)
+			sortKeys = append(sortKeys, v)
+			isNull = append(isNull, !ok)
+		}
+		return topNHeapSortWithKeys(docsSlice, sortKeys, isNull, limit, field, logger)
+	}
+
+	// Multi-column or no ORDER BY: use document-based heap
 	topNHeap := NewTopNHeap(limit, orderBy, logger)
 	heap.Init(topNHeap)
 
-	// Process all documents
 	for _, doc := range documents {
 		if len(topNHeap.data) < limit {
-			// Heap not full yet, add document
 			heap.Push(topNHeap, doc)
 		} else {
-			// Heap full, check if new document is better than worst
-			// compareDocuments returns true if doc1 < doc2 in sort order
-			// The root contains the worst element (due to inverted Less)
-			// So if new doc is better (less than root for ASC, greater for DESC)
 			if topNHeap.compareDocuments(doc, topNHeap.data[0]) {
-				// New document is better, replace worst
 				heap.Pop(topNHeap)
 				heap.Push(topNHeap, doc)
 			}
 		}
 	}
 
-	// Extract all documents from heap
 	result := make([]*models.Document, topNHeap.Len())
 	for i := 0; i < len(result); i++ {
 		result[i] = heap.Pop(topNHeap).(*models.Document)
 	}
-
-	// The heap pops in "worst-first" order due to inverted Less()
-	// We need to reverse to get correct sort order
 	for i := 0; i < len(result)/2; i++ {
 		j := len(result) - 1 - i
 		result[i], result[j] = result[j], result[i]

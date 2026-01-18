@@ -3268,14 +3268,16 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 			if indexMap, ok := indexes.(map[string]interface{}); ok {
 				for key, val := range indexMap {
 					if indexData, ok := val.(map[string]interface{}); ok {
+						idxName := stringValue(indexData, "IndexName", key)
+						// Derive document field name for Fields (e.g. product_id_fk -> product_id)
+						fieldName := idxName
+						if strings.HasSuffix(idxName, "_fk") {
+							fieldName = strings.TrimSuffix(idxName, "_fk")
+						}
 						indexRef := models.IndexReference{
-							IndexName: stringValue(indexData, "IndexName", ""),
-							// Fields:    stringArrayValue(indexData, "Fields"),
+							IndexName: idxName,
 							IndexType: stringValue(indexData, "IndexType", ""),
-
-							// IsUnique:  boolValue(indexData, "IsUnique", false),
-							// IsPartial: boolValue(indexData, "IsPartial", false),
-							// Condition: stringValue(indexData, "Condition", ""),
+							Fields:    []models.FieldDefinition{{Name: fieldName, Type: "string"}},
 						}
 						bundle.Indexes[key] = indexRef
 					}

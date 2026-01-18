@@ -41,6 +41,7 @@ TODO: Future enhancements
 
 import (
 	"fmt"
+	"strings"
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/conversion"
@@ -124,14 +125,32 @@ func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, field
 
 	// Process each document in the batch
 	for _, doc := range batch {
-		if doc == nil || doc.Fields == nil {
+		if doc == nil {
+			continue
+		}
+
+		// Special case: DocumentID field refers to the document's structural ID, not Fields["DocumentID"]
+		// This matches the behavior in document_sorter.go and filter_parser.go
+		var foundValue interface{} = nil
+		if strings.EqualFold(string(fieldNameBytes), "documentid") {
+			if doc.DocumentID != "" {
+				foundValue = doc.DocumentID
+			}
+			// Store result (even if nil - maintains parallel arrays)
+			keyValues = append(keyValues, foundValue)
+			docsSlice = append(docsSlice, doc)
+			continue
+		}
+
+		if doc.Fields == nil {
+			// DocumentID was already handled above, so this is a different field but Fields is nil
+			keyValues = append(keyValues, nil)
+			docsSlice = append(docsSlice, doc)
 			continue
 		}
 
 		// Use SIMD to find matching field
 		// We iterate through fields and use SIMD string comparison
-		var foundValue interface{} = nil
-
 		for fieldName, field := range doc.Fields {
 			// Convert current field name to bytes
 			currentFieldBytes := []byte(fieldName)

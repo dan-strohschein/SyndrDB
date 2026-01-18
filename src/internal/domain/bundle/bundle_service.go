@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -2378,6 +2379,213 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 // For backward compatibility, calls getAllDocumentsForIndexing without snapshot filtering
 func (s *BundleService) GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error) {
 	return s.getAllDocumentsForIndexing(bundleName, 0, 0, nil)
+}
+
+// IndexingOptions configures streaming filter and parallel page loading for GetAllDocumentsForIndexingWithOptions.
+// - Filter: if non-nil, only documents for which Filter(doc) is true are included (streaming filter-while-loading).
+// - Concurrency: 1 = sequential; 0 = use default (4); otherwise min(Concurrency, NumCPU, 8) workers.
+type IndexingOptions struct {
+	Filter      func(*models.Document) bool // optional; nil means no filter
+	Concurrency int                         // 1=sequential, 0=default 4, else min(Concurrency, NumCPU, 8)
+}
+
+// defaultIndexingConcurrency is the default number of parallel page-load workers when opts.Concurrency is 0.
+const defaultIndexingConcurrency = 4
+
+// maxIndexingConcurrency caps parallel workers to avoid I/O thrashing (e.g. on HDD).
+const maxIndexingConcurrency = 8
+
+// GetAllDocumentsForIndexingWithOptions supports streaming filter and parallel page loading.
+// When opts is nil, delegates to GetAllDocumentsForIndexing (sequential, no filter).
+// Safeguards: Concurrency is capped at min(opt, runtime.NumCPU(), 8). Use Concurrency=1 to force sequential.
+func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string, opts *IndexingOptions) ([]*models.Document, error) {
+	if opts == nil {
+		return s.GetAllDocumentsForIndexing(bundleName)
+	}
+
+	bundle, exists := s.bundleMetadata[bundleName]
+	if !exists {
+		return nil, fmt.Errorf("bundle metadata not found for %s", bundleName)
+	}
+
+	if len(s.metadataUpdateBuffer) > 0 {
+		s.FlushMetadataUpdates()
+	}
+
+	concurrency := opts.Concurrency
+	if concurrency == 0 {
+		concurrency = defaultIndexingConcurrency
+	}
+	if n := runtime.NumCPU(); concurrency > n {
+		concurrency = n
+	}
+	if concurrency > maxIndexingConcurrency {
+		concurrency = maxIndexingConcurrency
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	filter := opts.Filter
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+
+	// --- PageCount == 0 (reuse existing special-case structure, with filter) ---
+	if bundle.PageCount == 0 {
+		var allDocuments []*models.Document
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, 0, databasePath)
+		if err != nil {
+			if bundle.Documents != nil && !bundle.DocumentsComplete {
+				bundle.DocumentsMutex.RLock()
+				memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
+				for docID, doc := range *bundle.Documents {
+					memtableSnapshot[docID] = doc
+				}
+				bundle.DocumentsMutex.RUnlock()
+				for _, doc := range memtableSnapshot {
+					docCopy := doc
+					if filter != nil && !filter(&docCopy) {
+						continue
+					}
+					allDocuments = append(allDocuments, &docCopy)
+				}
+				return allDocuments, nil
+			}
+			return []*models.Document{}, nil
+		}
+		for _, doc := range page.Documents {
+			docCopy := doc
+			if filter != nil && !filter(&docCopy) {
+				continue
+			}
+			allDocuments = append(allDocuments, &docCopy)
+		}
+		if bundle.Documents != nil && !bundle.DocumentsComplete {
+			diskDocIDs := make(map[string]bool, len(allDocuments))
+			for _, d := range allDocuments {
+				diskDocIDs[d.DocumentID] = true
+			}
+			bundle.DocumentsMutex.RLock()
+			memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
+			for docID, doc := range *bundle.Documents {
+				memtableSnapshot[docID] = doc
+			}
+			bundle.DocumentsMutex.RUnlock()
+			for docID, doc := range memtableSnapshot {
+				if diskDocIDs[docID] {
+					continue
+				}
+				docCopy := doc
+				if filter != nil && !filter(&docCopy) {
+					continue
+				}
+				allDocuments = append(allDocuments, &docCopy)
+			}
+		}
+		return allDocuments, nil
+	}
+
+	pageCount := uint32(bundle.PageCount)
+
+	// --- Sequential: load each page, filter, append; then memtable ---
+	if concurrency <= 1 {
+		var allDocuments []*models.Document
+		for pageID := uint32(0); pageID < pageCount; pageID++ {
+			page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+			if err != nil {
+				s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
+				continue
+			}
+			for _, doc := range page.Documents {
+				docCopy := doc
+				if filter != nil && !filter(&docCopy) {
+					continue
+				}
+				allDocuments = append(allDocuments, &docCopy)
+			}
+		}
+		allDocuments = s.mergeMemtableWithFilter(bundle, allDocuments, filter)
+		return allDocuments, nil
+	}
+
+	// --- Parallel: workers load page ranges, filter, send batches; main collects; then memtable ---
+	type batch struct {
+		docs []*models.Document
+	}
+	ch := make(chan batch, concurrency)
+	var wg sync.WaitGroup
+
+	partition := (int(pageCount) + concurrency - 1) / concurrency
+	for w := 0; w < concurrency; w++ {
+		start := w * partition
+		end := start + partition
+		if start >= int(pageCount) {
+			break
+		}
+		if end > int(pageCount) {
+			end = int(pageCount)
+		}
+		wg.Add(1)
+		go func(pageStart, pageEnd int) {
+			defer wg.Done()
+			var local []*models.Document
+			for pageID := uint32(pageStart); pageID < uint32(pageEnd); pageID++ {
+				page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+				if err != nil {
+					s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
+					continue
+				}
+				for _, doc := range page.Documents {
+					docCopy := doc
+					if filter != nil && !filter(&docCopy) {
+						continue
+					}
+					local = append(local, &docCopy)
+				}
+			}
+			ch <- batch{docs: local}
+		}(start, end)
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	var allDocuments []*models.Document
+	for b := range ch {
+		allDocuments = append(allDocuments, b.docs...)
+	}
+
+	allDocuments = s.mergeMemtableWithFilter(bundle, allDocuments, filter)
+	return allDocuments, nil
+}
+
+// mergeMemtableWithFilter merges memtable documents not already in diskDocs, applying filter if non-nil.
+func (s *BundleService) mergeMemtableWithFilter(bundle *models.Bundle, diskDocs []*models.Document, filter func(*models.Document) bool) []*models.Document {
+	if bundle.Documents == nil || bundle.DocumentsComplete {
+		return diskDocs
+	}
+	diskDocIDs := make(map[string]bool, len(diskDocs))
+	for _, d := range diskDocs {
+		diskDocIDs[d.DocumentID] = true
+	}
+	bundle.DocumentsMutex.RLock()
+	memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
+	for docID, doc := range *bundle.Documents {
+		memtableSnapshot[docID] = doc
+	}
+	bundle.DocumentsMutex.RUnlock()
+	for docID, doc := range memtableSnapshot {
+		if diskDocIDs[docID] {
+			continue
+		}
+		docCopy := doc
+		if filter != nil && !filter(&docCopy) {
+			continue
+		}
+		diskDocs = append(diskDocs, &docCopy)
+	}
+	return diskDocs
 }
 
 func (s *BundleService) LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error) {
@@ -6282,9 +6490,19 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 			}
 		}
 
-		// Create index reference (preserving _fk suffix in index name)
+		// Resolve field type from DocumentStructure when available
+		fdType := "string"
+		if bundle.DocumentStructure.FieldDefinitions != nil {
+			if fd, ok := bundle.DocumentStructure.FieldDefinitions[fieldName]; ok {
+				fdType = fd.Type
+			}
+		}
+		// Create index reference (preserving _fk suffix in index name).
+		// Fields must be set so HasIndexOnField/GetHashIndexForField can match by document field (e.g. product_id).
 		indexRef := models.IndexReference{
+			IndexName: indexName,
 			IndexType: "hash",
+			Fields:    []models.FieldDefinition{{Name: fieldName, Type: fdType}},
 			HashIndexField: models.IndexField{
 				FieldName: indexName, // Includes _fk if foreign key
 			},
@@ -6336,9 +6554,17 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 
 		// Only add if not already discovered as new format
 		if _, exists := bundle.Indexes[indexName]; !exists {
-			// Create index reference (preserving _fk suffix)
+			fdType := "string"
+			if bundle.DocumentStructure.FieldDefinitions != nil {
+				if fd, ok := bundle.DocumentStructure.FieldDefinitions[fieldName]; ok {
+					fdType = fd.Type
+				}
+			}
+			// Create index reference (preserving _fk suffix). Fields required for join index lookup.
 			indexRef := models.IndexReference{
+				IndexName: indexName,
 				IndexType: "hash",
+				Fields:    []models.FieldDefinition{{Name: fieldName, Type: fdType}},
 				HashIndexField: models.IndexField{
 					FieldName: indexName, // Preserve _fk suffix
 				},

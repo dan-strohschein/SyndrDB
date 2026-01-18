@@ -17,6 +17,11 @@ type BundleServiceInterface interface {
 	GetOrCreateDocumentScanner(bundle *models.Bundle) (documentscanner.DocumentScannerInterface, error)
 	GetBundleByName(database *models.Database, name string) (*models.Bundle, error)
 	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
+	// GetAllDocumentsForIndexingWithOptions supports streaming filter and parallel page loading for predicate pushdown.
+	// opts may be nil (delegates to GetAllDocumentsForIndexing). Uses bundle.IndexingOptions.
+	GetAllDocumentsForIndexingWithOptions(bundleName string, opts *bundle.IndexingOptions) ([]*models.Document, error)
+	// SetProjectionFieldsForBundle sets projection for a bundle (opt #1). Pass nil or empty to clear.
+	SetProjectionFieldsForBundle(bundleName string, fields []string)
 }
 
 // ExecutionNode represents a node in the execution tree

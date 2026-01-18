@@ -2,6 +2,7 @@ package joinexecutor
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,23 +137,31 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 	if request.IndexStrategy != nil {
 		// Check if this is a ProbeIndexStrategy
 		if probeStrategy, ok := request.IndexStrategy.(*ProbeIndexStrategy); ok && probeStrategy.IsApplicable() {
-			hjs.logger.Infof("Using index-assisted probe strategy on %s", probeBundle.GetName())
-
-			// Calculate estimated speedup for feedback loop
-			hashTableSize := hashTable.Size()
-			probeSize := probeBundle.GetTotalDocuments()
-			indexStats := probeStrategy.GetIndex().GetQueryOptimizationStats()
-			costEstimate := EvaluateIndexUsage(hashTableSize, probeSize, &indexStats)
-			estimatedSpeedup = costEstimate.EstimatedSpeedup
-
-			joinedDocs, probeStats, err = hjs.probeWithIndex(hashTable, probeStrategy, probeBundle, probeKey, request, swapped)
-			if err != nil {
-				hjs.logger.Warnf("Index-assisted probe failed, falling back to full scan: %v", err)
-				// Fall back to regular probe
+			// Do NOT use index-assisted probe when the probe has predicate pushdown: the index does
+			// not apply the predicate, and HashIndex returns only 1 doc per key, which produces wrong
+			// counts and extra GetDocument I/O. Use full probe instead.
+			if strings.Contains(probeBundle.GetName(), " [expr-filtered]") {
+				hjs.logger.Infof("Skipping index-assisted probe: probe has expression filter (index does not apply predicate)")
 				joinedDocs, probeStats, err = hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
 				indexUsed = false
 			} else {
-				indexUsed = true
+				hjs.logger.Infof("Using index-assisted probe strategy on %s", probeBundle.GetName())
+
+				// Calculate estimated speedup for feedback loop
+				hashTableSize := hashTable.Size()
+				probeSize := probeBundle.GetTotalDocuments()
+				indexStats := probeStrategy.GetIndex().GetQueryOptimizationStats()
+				costEstimate := EvaluateIndexUsage(hashTableSize, probeSize, &indexStats)
+				estimatedSpeedup = costEstimate.EstimatedSpeedup
+
+				joinedDocs, probeStats, err = hjs.probeWithIndex(hashTable, probeStrategy, probeBundle, probeKey, request, swapped)
+				if err != nil {
+					hjs.logger.Warnf("Index-assisted probe failed, falling back to full scan: %v", err)
+					joinedDocs, probeStats, err = hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
+					indexUsed = false
+				} else {
+					indexUsed = true
+				}
 			}
 		} else {
 			// Not a probe strategy or not applicable, use regular probe
@@ -268,8 +277,13 @@ func (hjs *HashJoinStrategy) buildHashTable(
 	hjs.logger.Debugf("Building hash table from bundle %s on key %s",
 		buildBundle.GetName(), buildKey)
 
-	// Create hash table with estimated size
-	hashTable := NewInMemoryHashTable(hjs.initialHashTableSize, hjs.loadFactor)
+	// Pre-size hash table from build bundle size to avoid rehashes (opt #2)
+	est := buildBundle.GetTotalDocuments()
+	initialCap := hjs.initialHashTableSize
+	if est > 0 && est <= 500_000 {
+		initialCap = int(est)
+	}
+	hashTable := NewInMemoryHashTable(initialCap, hjs.loadFactor)
 
 	// Create Bloom filter if enabled
 	var bloom *bloomfilter.BloomFilter
@@ -304,7 +318,11 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		// Get pre-extracted key value (no map lookup!)
 		keyValue := buildKeyValues[idx]
 		if keyValue == nil {
-			hjs.logger.Warnf("Skipping document %d: missing key %s", idx, buildKey)
+			docID := "unknown"
+			if doc != nil {
+				docID = doc.DocumentID
+			}
+			hjs.logger.Warnf("Skipping document %s (index %d): missing key %s", docID, idx, buildKey)
 			continue
 		}
 
@@ -387,7 +405,11 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		// Get pre-extracted key value (no map lookup!)
 		keyValue := probeKeyValues[idx]
 		if keyValue == nil {
-			hjs.logger.Warnf("Skipping document %d: missing key %s", idx, probeKey)
+			docID := "unknown"
+			if probeDoc != nil {
+				docID = probeDoc.DocumentID
+			}
+			hjs.logger.Warnf("Skipping document %s (index %d): missing key %s", docID, idx, probeKey)
 			continue
 		}
 
@@ -527,13 +549,19 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 			stats.DocumentsScanned++
 
 			// Extract the actual key value from the document (for hash table lookup)
-			field, exists := probeDoc.Fields[probeKey]
-			if !exists {
-				hjs.logger.Warnf("Document %s missing join key %s", docID, probeKey)
-				continue
+			// Special case: DocumentID field refers to the document's structural ID, not Fields["DocumentID"]
+			var keyValue interface{}
+			if strings.EqualFold(probeKey, "documentid") {
+				keyValue = probeDoc.DocumentID
+			} else {
+				field, exists := probeDoc.Fields[probeKey]
+				if !exists {
+					hjs.logger.Warnf("Document %s missing join key %s", docID, probeKey)
+					continue
+				}
+				// Convert FieldValue to interface{} to match what's stored in hash table from build phase
+				keyValue = field.Value.AsInterface()
 			}
-
-			keyValue := field.Value
 
 			// Step 4: Look up matching documents in hash table
 			buildDocs, found := hashTable.Get(keyValue)
