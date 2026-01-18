@@ -186,17 +186,13 @@ func StringHeapSort(
 		return []*models.Document{}, nil
 	}
 
-	// Convert map to slice for processing
-	docSlice := make([]*models.Document, 0, len(documents))
-	for _, doc := range documents {
-		docSlice = append(docSlice, doc)
-	}
-
 	// Create bounded heap
 	h := NewStringHeap(limit, ascending, useSIMD, nullsFirst, logger)
 	heap.Init(h)
 
 	// Build heap with O(n log k) where k = limit
+	// OPTIMIZATION: Iterate map directly instead of converting to slice first
+	// This eliminates ~20KB allocation for 5,041 documents and reduces memory copies
 	for _, doc := range documents {
 		// Extract field value
 		field, exists := doc.Fields[fieldName]

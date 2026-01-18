@@ -12,6 +12,7 @@ import (
 type BundleServiceInterface interface {
 	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
 	LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error)
+	CountDocuments(bundleName, databaseName string) (int, error) // Count all documents using optimized count-only parser
 }
 
 // ScannerIntegration provides example integration between the document scanner and SyndrDB
@@ -50,10 +51,6 @@ func (si *ScannerIntegration) CreateScannerForBundle(bundle *models.Bundle, bund
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scanner: %w", err)
 	}
-
-	// Clear any cached pages that may have been loaded during scanner creation
-	// This ensures subsequent queries reload from disk and see tombstones
-	bundleAdapter.cachedPages = make(map[uint32]*models.DocumentPage)
 
 	// Register with metrics manager
 	si.metricsManager.RegisterScanner(bundle.Name, scanner)

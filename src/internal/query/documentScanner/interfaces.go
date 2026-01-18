@@ -40,6 +40,11 @@ type BundleInterface interface {
 	// GetAllDocuments returns all documents in the bundle as a map
 	GetAllDocuments() map[string]*models.Document
 
+	// GetAllDocumentsWithLimit returns documents up to the specified limit
+	// Used for early termination optimization in simple LIMIT-only queries
+	// If limit is 0 or negative, behaves the same as GetAllDocuments()
+	GetAllDocumentsWithLimit(limit int) map[string]*models.Document
+
 	// GetName returns the bundle name for logging and metrics
 	GetName() string
 

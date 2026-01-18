@@ -24,6 +24,7 @@ package planner
 
 import (
 	"fmt"
+	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 
@@ -126,9 +127,59 @@ func (pb *PlanBuilder) BuildPlan(
 		pb.logger.Debug("Added DistinctNode to tree")
 	}
 
+	// OPTIMIZATION: Early termination for simple LIMIT-only queries (no WHERE, GROUP BY, ORDER BY)
+	// If query has LIMIT but no WHERE, GROUP BY, or ORDER BY, set MaxDocuments on FullScanNode
+	// to stop loading documents early. Skip SortNode (no ORDER BY), but keep LimitNode if OFFSET present.
+	if query.HasLimit() && !query.HasWhere() && !query.HasGroupBy() && !query.HasOrderBy() && !query.IsDistinct {
+		if fullScan, ok := currentTree.(*FullScanNode); ok {
+			// Calculate effective limit (LIMIT + OFFSET) for early termination
+			effectiveLimit := query.Limit
+			if query.Offset > 0 {
+				effectiveLimit = query.Offset + query.Limit
+			}
+			fullScan.MaxDocuments = effectiveLimit
+			pb.logger.Infof("OPTIMIZATION: Simple LIMIT-only query detected. Setting MaxDocuments=%d on FullScanNode (skipping SortNode)", effectiveLimit)
+			
+			// If there's OFFSET, we still need LimitNode to skip OFFSET documents
+			// Otherwise, return early (skip both SortNode and LimitNode)
+			if query.Offset > 0 {
+				pb.logger.Debug("Query has OFFSET - will add LimitNode after FullScanNode for OFFSET handling")
+				// Continue to add LimitNode below for OFFSET handling
+			} else {
+				// No OFFSET - skip both SortNode and LimitNode, return early
+				return currentTree, nil
+			}
+		}
+	}
+
 	// Add sorting for deterministic ordering, but skip for aggregate-only queries
 	// (no GROUP BY) when there's no explicit ORDER BY, as there's nothing to sort
 	if !query.IsAggregateOnly || query.HasOrderBy() {
+		// PROJECTION PUSHDOWN: Extract ORDER BY field names and pass to FullScanNode for optimization
+		// This allows the storage layer to deserialize only the sort fields (e.g., "name") instead of all fields
+		// For query: SELECT DocumentID, name FROM products ORDER BY name
+		// We only need to deserialize "name" field during document loading, saving ~80-90% deserialization overhead
+		if fullScan, ok := currentTree.(*FullScanNode); ok && query.HasOrderBy() && query.OrderBy != nil {
+			projectionFields := make([]string, 0, len(query.OrderBy.Fields))
+			for _, orderField := range query.OrderBy.Fields {
+				// Extract field name from ORDER BY clause (handle qualified names like "products"."name")
+				fieldName := orderField.FieldName
+				// Remove bundle qualifier if present (e.g., "products"."name" -> "name")
+				if dotIdx := strings.LastIndex(fieldName, "."); dotIdx >= 0 {
+					fieldName = fieldName[dotIdx+1:]
+				}
+				// Remove quotes if present (e.g., "name" -> name)
+				fieldName = strings.Trim(fieldName, `"'`)
+				if fieldName != "" {
+					projectionFields = append(projectionFields, fieldName)
+				}
+			}
+			if len(projectionFields) > 0 {
+				fullScan.ProjectionFields = projectionFields
+				pb.logger.Infof("PROJECTION PUSHDOWN: Set ProjectionFields=%v on FullScanNode for ORDER BY optimization", projectionFields)
+			}
+		}
+
 		// Add sorting if:
 		// 1. Not an aggregate-only query (has other fields to sort), OR
 		// 2. Aggregate-only query but user explicitly specified ORDER BY

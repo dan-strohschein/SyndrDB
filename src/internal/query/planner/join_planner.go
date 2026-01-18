@@ -720,6 +720,38 @@ func (pba *PlannerBundleAdapter) GetAllDocuments() map[string]*models.Document {
 	return result
 }
 
+// GetAllDocumentsWithLimit returns documents up to the specified limit with early termination
+// OPTIMIZATION: For PlannerBundleAdapter, this is a simple wrapper that delegates to GetAllDocuments()
+// and then truncates to the limit. Full early termination would require changes to bundleService.
+func (pba *PlannerBundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.Document {
+	if limit <= 0 {
+		// No limit or invalid limit - delegate to regular GetAllDocuments()
+		return pba.GetAllDocuments()
+	}
+
+	// Get all documents first (PlannerBundleAdapter is used in join contexts where
+	// early termination at page level is less applicable)
+	allDocs := pba.GetAllDocuments()
+
+	// Truncate to limit
+	if len(allDocs) <= limit {
+		return allDocs
+	}
+
+	// Return only first 'limit' documents
+	result := make(map[string]*models.Document, limit)
+	count := 0
+	for docID, doc := range allDocs {
+		if count >= limit {
+			break
+		}
+		result[docID] = doc
+		count++
+	}
+
+	return result
+}
+
 // GetName returns the bundle name for logging and metrics
 func (pba *PlannerBundleAdapter) GetName() string {
 	if pba.bundle == nil {

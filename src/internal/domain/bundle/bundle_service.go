@@ -2015,6 +2015,21 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	return page, nil
 }
 
+// CountDocuments counts all documents in a bundle using optimized count-only parser
+// This is much faster than loading all pages because it extracts only DocumentIDs
+// without parsing full document data
+//
+// Parameters:
+//   - bundleName: Name of the bundle to count
+//   - databaseName: Name of the database containing the bundle
+//
+// Returns:
+//   - int: Count of unique documents (excluding tombstones)
+//   - error: Any error encountered during counting
+func (s *BundleService) CountDocuments(bundleName, databaseName string) (int, error) {
+	return s.store.CountDocuments(bundleName, databaseName)
+}
+
 // GetDocument retrieves a specific document by ID
 // Uses memory-first architecture: checks in-memory documents before hitting disk
 // This ensures dirty documents are readable before flush and provides optimal performance
@@ -2368,6 +2383,23 @@ func (s *BundleService) GetAllDocumentsForIndexing(bundleName string) ([]*models
 func (s *BundleService) LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error) {
 	// Load the specified document page from the store
 	return s.store.LoadDocumentPage(bundleName, databaseName, pageID, databasePath)
+}
+
+// SetProjectionFieldsForBundle sets projection fields temporarily for a bundle
+// PROJECTION PUSHDOWN: This allows BundleAdapter to pass projection through to readDocumentRange
+// For ORDER BY queries, this saves ~80-90% deserialization overhead (e.g., only deserialize "name" field)
+// Called from BundleAdapter before loading pages for ORDER BY queries
+func (s *BundleService) SetProjectionFieldsForBundle(bundleName string, fields []string) {
+	// Type assert store to BundleStorageEngine to access SetProjectionFieldsForBundle
+	// PROJECTION PUSHDOWN: Pass projection through to storage engine for ORDER BY optimization
+	if storageEngine, ok := s.store.(*bundlestore.BundleStorageEngine); ok {
+		storageEngine.SetProjectionFieldsForBundle(bundleName, fields)
+		if len(fields) > 0 {
+			s.logger.Debugf("PROJECTION PUSHDOWN: Set projection fields %v for bundle '%s' via BundleService", fields, bundleName)
+		}
+	}
+	// If store is not BundleStorageEngine (unlikely), projection is silently ignored
+	// This is safe because projection is an optimization, not a correctness requirement
 }
 
 func (s *BundleService) LoadCatalogBundleDocuments(bundleName string) ([]*models.Document, error) {

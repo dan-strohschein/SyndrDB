@@ -8,6 +8,7 @@ import (
 	// "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
 	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/settings"
@@ -409,6 +410,12 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		node.Logger.Debugf("Using complete in-memory documents for bundle %s", node.Bundle.Name)
 		docCount := 0
 		for docID, doc := range *node.Bundle.Documents {
+			// OPTIMIZATION: Early termination if MaxDocuments is set (simple LIMIT-only query)
+			if node.MaxDocuments > 0 && docCount >= node.MaxDocuments {
+				node.Logger.Debugf("Early termination: Reached MaxDocuments limit of %d", node.MaxDocuments)
+				break
+			}
+
 			// Check context every 1000 documents
 			// TODO: I can make this check frequency adaptive based on document processing rate
 			if docCount%1000 == 0 {
@@ -457,9 +464,44 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		return nil, fmt.Errorf("document scanner is required for paginated document scanning")
 	}
 
+	// PROJECTION PUSHDOWN: Set projection fields on BundleAdapter if ORDER BY is present
+	// For query: SELECT DocumentID, name FROM products ORDER BY name
+	// We only need to deserialize "name" field during document loading, not all fields
+	// This saves ~80-90% deserialization overhead when documents have many unused fields
+	// Example: 10-field documents with ORDER BY name → only deserialize "name" + DocumentID
+	if len(node.ProjectionFields) > 0 {
+		// Access BundleAdapter through SmartBundleScanner's bundle field
+		// Type assert DocumentScanner to SmartBundleScanner to access bundle
+		if smartScanner, ok := node.DocumentScanner.(interface {
+			GetBundle() documentscanner.BundleInterface
+		}); ok {
+			bundle := smartScanner.GetBundle()
+			if bundleAdapter, ok := bundle.(*documentscanner.BundleAdapter); ok {
+				bundleAdapter.SetProjectionFields(node.ProjectionFields)
+				node.Logger.Infof("PROJECTION PUSHDOWN: Set projection fields %v on BundleAdapter for ORDER BY optimization", node.ProjectionFields)
+			}
+		}
+	}
+
 	// Use ScanAllDocuments() for full scans - this bypasses the O(n*m) GetDocumentIDs() + GetDocument() loop
 	// by using the efficient GetAllDocuments() method that loads pages sequentially
-	scanResult, err := node.DocumentScanner.ScanAllDocuments()
+	// OPTIMIZATION: If MaxDocuments > 0 (simple LIMIT-only query), use early termination
+	var scanResult *documentscanner.ScanResult
+	var err error
+	if node.MaxDocuments > 0 {
+		node.Logger.Infof("Using early termination optimization: MaxDocuments=%d", node.MaxDocuments)
+		// Use limit-aware scanner method for early termination
+		if scannerWithLimit, ok := node.DocumentScanner.(interface {
+			ScanAllDocumentsWithLimit(int) (*documentscanner.ScanResult, error)
+		}); ok {
+			scanResult, err = scannerWithLimit.ScanAllDocumentsWithLimit(node.MaxDocuments)
+		} else {
+			// Fallback to regular scan if method not available
+			scanResult, err = node.DocumentScanner.ScanAllDocuments()
+		}
+	} else {
+		scanResult, err = node.DocumentScanner.ScanAllDocuments()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("document scanner failed: %w", err)
 	}

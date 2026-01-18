@@ -165,14 +165,19 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 // ScanAllDocuments performs a full scan using GetAllDocuments() for optimal performance
 // This bypasses the O(n*m) GetDocumentIDs() + GetDocument() loop by using the efficient
 // GetAllDocuments() method that loads pages sequentially
-func (sbs *SmartBundleScanner) ScanAllDocuments() (*ScanResult, error) {
+// OPTIMIZATION: If maxDocuments > 0, uses GetAllDocumentsWithLimit() for early termination
+func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*ScanResult, error) {
 	startTime := time.Now()
 
-	sbs.logger.Debug("Starting full document scan using GetAllDocuments()")
+	sbs.logger.Debugf("Starting document scan using GetAllDocumentsWithLimit(limit=%d)", maxDocuments)
 
-	// BundleInterface already has GetAllDocuments() method (interfaces.go:41)
-	// No type assertion needed - use interface method directly
-	allDocs := sbs.bundle.GetAllDocuments()
+	// Use limit-aware method if limit specified, otherwise full scan
+	var allDocs map[string]*models.Document
+	if maxDocuments > 0 {
+		allDocs = sbs.bundle.GetAllDocumentsWithLimit(maxDocuments)
+	} else {
+		allDocs = sbs.bundle.GetAllDocuments()
+	}
 
 	// Pre-allocate slices with exact capacity to avoid growth allocations
 	result := &ScanResult{
@@ -199,6 +204,12 @@ func (sbs *SmartBundleScanner) ScanAllDocuments() (*ScanResult, error) {
 		len(result.Documents), result.ScanLatency)
 
 	return result, nil
+}
+
+// ScanAllDocuments performs a full scan using GetAllDocuments() for optimal performance
+// This is a convenience method that calls ScanAllDocumentsWithLimit(0) for backward compatibility
+func (sbs *SmartBundleScanner) ScanAllDocuments() (*ScanResult, error) {
+	return sbs.ScanAllDocumentsWithLimit(0)
 }
 
 // ScanForInList performs an optimized scan for documents matching an IN query
@@ -731,6 +742,12 @@ func (sbs *SmartBundleScanner) GetConfig() *ScannerConfig {
 	// Return a copy to prevent external modification
 	configCopy := *sbs.config
 	return &configCopy
+}
+
+// GetBundle returns the bundle interface for accessing BundleAdapter methods
+// PROJECTION PUSHDOWN: Used to set projection fields on BundleAdapter for ORDER BY optimization
+func (sbs *SmartBundleScanner) GetBundle() BundleInterface {
+	return sbs.bundle
 }
 
 func (sbs *SmartBundleScanner) Close() error {

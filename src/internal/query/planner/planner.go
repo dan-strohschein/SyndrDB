@@ -76,6 +76,8 @@ type FullScanNode struct {
 	Logger           *zap.SugaredLogger
 	BundleServiceInt BundleServiceInterface
 	DocumentScanner  documentscanner.DocumentScannerInterface
+	MaxDocuments     int // OPTIMIZATION: Early termination limit (0 = no limit, set when LIMIT-only query)
+	ProjectionFields []string // PROJECTION PUSHDOWN: Field names to deserialize (e.g., ["name"] for ORDER BY name queries)
 } // FilterNode represents post-scan filtering
 type FilterNode struct {
 	Child      ExecutionNode

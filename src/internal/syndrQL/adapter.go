@@ -195,6 +195,10 @@ func (a *SelectStatementAdapter) extractFieldName(expr Expression) string {
 	case *IdentifierExpression:
 		return expr.Name
 
+	case *QualifiedIdentifierExpression:
+		// Return just the field name (e.g., "name") instead of the full qualified string (e.g., "products"."name")
+		return expr.Field
+
 	case *LiteralExpression:
 		// Literal in SELECT (e.g., SELECT 1, 'hello')
 		if expr.Value == nil {

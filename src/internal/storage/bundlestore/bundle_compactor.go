@@ -253,7 +253,8 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 		bc.throttler.Throttle(int64(len(fileData)))
 
 		// Parse all documents from this file (no range filtering)
-		fileDocuments, _, err := bc.storageEngine.parseAppendedDocumentsRange(&fileData, 0, ^uint32(0))
+		// PROJECTION PUSHDOWN: Pass nil projection fields (full deserialization) for compaction
+		fileDocuments, _, err := bc.storageEngine.parseAppendedDocumentsRange(&fileData, 0, ^uint32(0), nil)
 		if err != nil {
 			bc.logger.Warnf("Failed to parse documents from file %s: %v", filePath, err)
 			continue
