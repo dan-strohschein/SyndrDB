@@ -398,8 +398,7 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 		// Create group key from GROUP BY fields
 		gKey, groupFields, err := n.createGroupKey(doc)
 		if err != nil {
-			n.Logger.Warnf("Skipping document %s: %v", doc.DocumentID, err)
-			continue
+			return nil, err
 		}
 
 		// Get or create group result
@@ -506,8 +505,7 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 		// Create group key
 		gKey, groupFields, err := n.createGroupKey(doc)
 		if err != nil {
-			n.Logger.Warnf("Skipping document %s: %v", doc.DocumentID, err)
-			continue
+			return nil, err
 		}
 
 		// Check if we're starting a new group

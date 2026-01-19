@@ -56,6 +56,9 @@ type UnifiedQueryPlanner struct {
 	router  *QueryRouter // Routes queries to appropriate planner
 	builder *PlanBuilder // Composes plans with additional nodes
 
+	// bundleService for bundle metadata (e.g. GROUP BY schema validation)
+	bundleService BundleServiceInterface
+
 	// Query plan cache - PostgreSQL-inspired sharded LRU with MongoDB-style invalidation
 	planCache       *ShardedPlanCache    // 8-shard cache with adaptive planning and stale serving
 	invalidationMgr *InvalidationManager // Write-threshold invalidation manager
@@ -128,6 +131,7 @@ func NewUnifiedQueryPlanner(
 		joinPlanner:       joinPlanner,
 		router:            router,
 		builder:           builder,
+		bundleService:     bundleService,
 		logger:            logger,
 		planCache:         planCache,
 		invalidationMgr:   invalidationMgr,
@@ -203,6 +207,16 @@ func (uqp *UnifiedQueryPlanner) CreatePlan(
 ) (*ExecutionPlan, error) {
 
 	uqp.logger.Debugf("Creating unified execution plan for query type: %s", query.QueryType)
+
+	// Validate GROUP BY fields against bundle schema (fail fast, before planning or cache)
+	if query.GroupBy != nil && len(query.GroupBy.Fields) > 0 {
+		getBundle := func(db *models.Database, n string) (*models.Bundle, error) {
+			return uqp.bundleService.GetBundleByName(db, n)
+		}
+		if err := ValidateGroupByFieldsAgainstSchema(query, database, getBundle, uqp.logger); err != nil {
+			return nil, err
+		}
+	}
 
 	// Check plan cache first to avoid re-planning identical queries
 	if uqp.planCache != nil {

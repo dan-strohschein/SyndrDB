@@ -775,7 +775,7 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 
 	field, exists := document.Fields[clause.Field]
 	if !exists && !strings.EqualFold(clause.Field, "documentid") {
-		logger.Infof("[FILTER DEBUG] Field '%s' does not exist in document, returning false", clause.Field)
+		logger.Infof("[FILTER DEBUG] Field '%s' does not exist in document for value %s, returning false", clause.Field, clause.Value)
 		return false // Field doesn't exist
 	}
 

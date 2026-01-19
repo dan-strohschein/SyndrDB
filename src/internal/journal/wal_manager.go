@@ -14,6 +14,7 @@ before execution, maintaining ACID properties and enabling recovery.
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -25,6 +26,7 @@ type WALManager struct {
 	wal                *WriteAheadLog
 	logger             *zap.SugaredLogger
 	activeTxs          map[string]*Transaction
+	activeTxsMu        sync.Mutex          // protects activeTxs from concurrent access by multiple connection goroutines
 	transactionCounter *TransactionCounter // Monotonic transaction ID generator for MVCC
 	snapshotManager    *SnapshotManager    // MVCC snapshot management
 }
@@ -110,14 +112,15 @@ func (wm *WALManager) BeginTransaction() (string, error) {
 		Operations: make([]WALEntry, 0),
 	}
 
+	wm.activeTxsMu.Lock()
 	wm.activeTxs[txID] = tx
-
-	// Log the transaction begin
 	err := wm.wal.LogOperation(txID, OpBeginTx, "", "", "", "", "")
 	if err != nil {
 		delete(wm.activeTxs, txID)
+		wm.activeTxsMu.Unlock()
 		return "", fmt.Errorf("failed to log transaction begin: %w", err)
 	}
+	wm.activeTxsMu.Unlock()
 
 	wm.logger.Debugf("Started transaction: %s", txID)
 	return txID, nil
@@ -125,10 +128,14 @@ func (wm *WALManager) BeginTransaction() (string, error) {
 
 // CommitTransaction commits a transaction
 func (wm *WALManager) CommitTransaction(txID string) error {
+	wm.activeTxsMu.Lock()
 	tx, exists := wm.activeTxs[txID]
 	if !exists {
+		wm.activeTxsMu.Unlock()
 		return fmt.Errorf("transaction %s not found", txID)
 	}
+	delete(wm.activeTxs, txID)
+	wm.activeTxsMu.Unlock()
 
 	// Get commit sequence for this transaction
 	commitSequence := wm.snapshotManager.GetNextCommitSequence()
@@ -150,9 +157,6 @@ func (wm *WALManager) CommitTransaction(txID string) error {
 		wm.snapshotManager.RemoveSnapshot(txIDUint64)
 	}
 
-	// Remove from active transactions
-	delete(wm.activeTxs, txID)
-
 	duration := time.Since(tx.StartTime)
 	wm.logger.Debugf("Committed transaction: %s (duration: %v, operations: %d, commitSeq: %d)",
 		txID, duration, len(tx.Operations), commitSequence)
@@ -161,10 +165,14 @@ func (wm *WALManager) CommitTransaction(txID string) error {
 
 // RollbackTransaction rolls back a transaction
 func (wm *WALManager) RollbackTransaction(txID string) error {
+	wm.activeTxsMu.Lock()
 	tx, exists := wm.activeTxs[txID]
 	if !exists {
+		wm.activeTxsMu.Unlock()
 		return fmt.Errorf("transaction %s not found", txID)
 	}
+	delete(wm.activeTxs, txID)
+	wm.activeTxsMu.Unlock()
 
 	// Log the transaction rollback
 	err := wm.wal.LogOperation(txID, OpRollbackTx, "", "", "", "", "")
@@ -181,9 +189,6 @@ func (wm *WALManager) RollbackTransaction(txID string) error {
 		// Remove snapshot
 		wm.snapshotManager.RemoveSnapshot(txIDUint64)
 	}
-
-	// Remove from active transactions
-	delete(wm.activeTxs, txID)
 
 	duration := time.Since(tx.StartTime)
 	wm.logger.Debugf("Rolled back transaction: %s (duration: %v, operations: %d)",
@@ -407,8 +412,15 @@ func (wm *WALManager) Flush() error {
 
 // Close gracefully shuts down the WAL manager
 func (wm *WALManager) Close() error {
-	// Rollback any active transactions
+	// Collect active txIDs under lock to avoid concurrent map iteration
+	wm.activeTxsMu.Lock()
+	ids := make([]string, 0, len(wm.activeTxs))
 	for txID := range wm.activeTxs {
+		ids = append(ids, txID)
+	}
+	wm.activeTxsMu.Unlock()
+
+	for _, txID := range ids {
 		if err := wm.RollbackTransaction(txID); err != nil {
 			wm.logger.Errorf("Failed to rollback active transaction %s during shutdown: %v", txID, err)
 		}
@@ -558,7 +570,9 @@ func (wm *WALManager) BeginTransactionUint64() (uint64, error) {
 		Operations: make([]WALEntry, 0),
 	}
 
+	wm.activeTxsMu.Lock()
 	wm.activeTxs[txIDStr] = tx
+	wm.activeTxsMu.Unlock()
 
 	// Register transaction as active in snapshot manager
 	wm.snapshotManager.RegisterActiveTransaction(txID)
@@ -566,7 +580,9 @@ func (wm *WALManager) BeginTransactionUint64() (uint64, error) {
 	// Create snapshot for this transaction
 	snapshot, err := wm.snapshotManager.CreateSnapshot(txID)
 	if err != nil {
+		wm.activeTxsMu.Lock()
 		delete(wm.activeTxs, txIDStr)
+		wm.activeTxsMu.Unlock()
 		wm.snapshotManager.UnregisterActiveTransaction(txID)
 		return 0, fmt.Errorf("failed to create snapshot: %w", err)
 	}
@@ -574,7 +590,9 @@ func (wm *WALManager) BeginTransactionUint64() (uint64, error) {
 	// Log the transaction begin
 	err = wm.wal.LogOperation(txIDStr, OpBeginTx, "", "", "", "", "")
 	if err != nil {
+		wm.activeTxsMu.Lock()
 		delete(wm.activeTxs, txIDStr)
+		wm.activeTxsMu.Unlock()
 		wm.snapshotManager.UnregisterActiveTransaction(txID)
 		wm.snapshotManager.RemoveSnapshot(txID)
 		return 0, fmt.Errorf("failed to log transaction begin: %w", err)

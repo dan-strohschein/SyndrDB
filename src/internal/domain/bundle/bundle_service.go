@@ -2202,9 +2202,13 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	if !exists {
 		return nil, fmt.Errorf("bundle metadata not found for %s", bundleName)
 	}
-	//s.logger.Infof("getAllDocumentsForIndexing called for bundle '%s'", bundle.Name)
-	//s.logger.Infof("DEBUG: getAllDocumentsForIndexing ENTRY - bundle '%s'", bundle.Name)
-	//s.logger.Infof("DEBUG: Bundle PageCount: %d, TotalDocuments: %d", bundle.PageCount, bundle.TotalDocuments)
+
+	// CRITICAL: Clear any per-bundle projection before loading so we get full documents.
+	// Projection pushdown (e.g. ORDER BY) sets projection on the storage engine; it is never
+	// cleared by BundleAdapter. Without this, readDocumentRange(nil) falls back to
+	// getProjectionFieldsForBundle and returns partial docs (e.g. only name, rating, DocumentID),
+	// causing WHERE on category/price/stock to fail with "Field does not exist".
+	s.SetProjectionFieldsForBundle(bundleName, nil)
 
 	// CRITICAL: Force flush pending metadata updates to ensure PageCount is current
 	// This is necessary because document additions schedule deferred metadata updates
@@ -5692,6 +5696,13 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 
 	// Force flush any pending metadata updates to ensure accurate PageCount
 	s.FlushMetadataUpdates()
+
+	// CRITICAL: Clear any per-bundle projection so we load full documents.
+	// A prior ORDER BY (or similar) sets projection on the storage engine and never clears it.
+	// readDocumentRange(nil) then uses that projection and returns partial docs, so WHERE
+	// on non-projected fields (e.g. category) fails. Clearing here ensures both the
+	// index path (GetDocument) and full-scan path get full docs.
+	s.SetProjectionFieldsForBundle(bundle.Name, nil)
 
 	// Get buffered documents if in transaction
 	var bufferedDocs []*models.Document

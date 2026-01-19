@@ -84,6 +84,8 @@ func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string
 		return results, nil
 	}
 
+	node.Bundle.DocumentsMutex.RLock()
+	defer node.Bundle.DocumentsMutex.RUnlock()
 	docCount := 0
 	for _, docID := range documentIDs {
 		// Check context every 1000 documents
@@ -98,8 +100,10 @@ func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string
 			}
 		}
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-			results[docID] = &doc
+			// Copy document to avoid loop variable aliasing
+			docCopy := new(models.Document)
+			*docCopy = doc
+			results[docID] = docCopy
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		} else {
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
@@ -189,6 +193,12 @@ func (node *IndexScanNode) executeBTreeIndexScan(ctx context.Context) (map[strin
 
 	// Retrieve the actual documents from the bundle
 	results := make(map[string]*models.Document)
+	if node.Bundle.Documents == nil {
+		node.Logger.Warnf("Bundle %s has no documents loaded", node.Bundle.Name)
+		return results, nil
+	}
+	node.Bundle.DocumentsMutex.RLock()
+	defer node.Bundle.DocumentsMutex.RUnlock()
 	docCount := 0
 	for _, docID := range documentIDs {
 		// Check context every 1000 documents
@@ -203,8 +213,10 @@ func (node *IndexScanNode) executeBTreeIndexScan(ctx context.Context) (map[strin
 			}
 		}
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-			results[docID] = &doc
+			// Copy document to avoid loop variable aliasing
+			docCopy := new(models.Document)
+			*docCopy = doc
+			results[docID] = docCopy
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		} else {
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
@@ -287,6 +299,12 @@ func (node *IndexScanNode) executeBTreeRangeScan(ctx context.Context) (map[strin
 
 	// Retrieve the actual documents from the bundle
 	results := make(map[string]*models.Document)
+	if node.Bundle.Documents == nil {
+		node.Logger.Warnf("Bundle %s has no documents loaded", node.Bundle.Name)
+		return results, nil
+	}
+	node.Bundle.DocumentsMutex.RLock()
+	defer node.Bundle.DocumentsMutex.RUnlock()
 	docCount := 0
 	for _, docID := range documentIDs {
 		// Check context every 1000 documents
@@ -301,8 +319,10 @@ func (node *IndexScanNode) executeBTreeRangeScan(ctx context.Context) (map[strin
 			}
 		}
 		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-			results[docID] = &doc
+			// Copy document to avoid loop variable aliasing
+			docCopy := new(models.Document)
+			*docCopy = doc
+			results[docID] = docCopy
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		} else {
 			// Document ID is in index but not in bundle - this could indicate data inconsistency
@@ -408,6 +428,8 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 	// MUST use scanner to merge memtable with disk data
 	if node.Bundle.Documents != nil && node.Bundle.DocumentsComplete {
 		node.Logger.Debugf("Using complete in-memory documents for bundle %s", node.Bundle.Name)
+		node.Bundle.DocumentsMutex.RLock()
+		defer node.Bundle.DocumentsMutex.RUnlock()
 		docCount := 0
 		for docID, doc := range *node.Bundle.Documents {
 			// OPTIMIZATION: Early termination if MaxDocuments is set (simple LIMIT-only query)
@@ -445,8 +467,10 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 				}
 			}
 
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-			results[docID] = &doc
+			// Copy document to avoid loop variable aliasing (all pointers would otherwise point to the same final iteration's doc)
+			docCopy := new(models.Document)
+			*docCopy = doc
+			results[docID] = docCopy
 			docCount++
 		}
 		return results, nil

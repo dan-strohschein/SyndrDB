@@ -555,8 +555,10 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 		ba.logger.Debugf("Using complete Documents cache with %d documents (skipping disk I/O)", len(*ba.bundle.Documents))
 		allDocs := make(map[string]*models.Document, len(*ba.bundle.Documents))
 		for docID, doc := range *ba.bundle.Documents {
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-			allDocs[docID] = &doc
+			// Copy document to avoid loop variable aliasing
+			docCopy := new(models.Document)
+			*docCopy = doc
+			allDocs[docID] = docCopy
 		}
 		return allDocs
 	}
@@ -593,9 +595,11 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 				continue
 			}
 
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			for docID, doc := range page.Documents {
-				allDocs[docID] = &doc
+				// Copy document to avoid loop variable aliasing
+				docCopy := new(models.Document)
+				*docCopy = doc
+				allDocs[docID] = docCopy
 			}
 		}
 		ba.logger.Debugf("Loaded %d documents from disk", len(allDocs))
@@ -614,8 +618,10 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 		mergedCount := 0
 		for docID, doc := range *ba.bundle.Documents {
 			if _, exists := allDocs[docID]; !exists {
-				// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-				allDocs[docID] = &doc
+				// Copy document to avoid loop variable aliasing
+				docCopy := new(models.Document)
+				*docCopy = doc
+				allDocs[docID] = docCopy
 				mergedCount++
 			}
 		}
@@ -650,7 +656,10 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 			if count >= limit {
 				break // Early termination
 			}
-			allDocs[docID] = &doc
+			// Copy document to avoid loop variable aliasing
+			docCopy := new(models.Document)
+			*docCopy = doc
+			allDocs[docID] = docCopy
 			count++
 		}
 		return allDocs
@@ -680,13 +689,15 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 				continue
 			}
 
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
 			for docID, doc := range page.Documents {
 				if len(allDocs) >= limit {
 					// Reached limit during this page - stop early
 					break
 				}
-				allDocs[docID] = &doc
+				// Copy document to avoid loop variable aliasing
+				docCopy := new(models.Document)
+				*docCopy = doc
+				allDocs[docID] = docCopy
 			}
 		}
 		ba.logger.Debugf("Loaded %d documents from disk (limit was %d)", len(allDocs), limit)
@@ -705,7 +716,10 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 				break // Early termination: reached limit
 			}
 			if _, exists := allDocs[docID]; !exists {
-				allDocs[docID] = &doc
+				// Copy document to avoid loop variable aliasing
+				docCopy := new(models.Document)
+				*docCopy = doc
+				allDocs[docID] = docCopy
 				mergedCount++
 			}
 		}
