@@ -85,6 +85,15 @@ type MetadataUpdate struct {
 	Timestamp  time.Time
 }
 
+// btreeRollbackOp records one B-tree index update for rollback if UpdateDocumentsBatch fails.
+// Rollback: Delete(newKey, documentID) then Insert(oldKey, documentID) to restore pre-update state.
+type btreeRollbackOp struct {
+	idx        *btreeindexV2.BTreeIndex
+	oldKey     []byte
+	newKey     []byte
+	documentID string
+}
+
 // TypeConverter represents a fast type conversion function
 type TypeConverter func(interface{}) (interface{}, error)
 
@@ -4332,6 +4341,20 @@ func convertValueToBytes(value interface{}) ([]byte, error) {
 	}
 }
 
+// runBTreeRollback undoes B-tree index updates when UpdateDocumentsBatch fails.
+// For each op: Delete(newKey, documentID) then Insert(oldKey) to restore pre-update state.
+// Logs and continues on individual op failures since we are already in an error path.
+func (s *BundleService) runBTreeRollback(ops []btreeRollbackOp) {
+	for _, op := range ops {
+		if err := op.idx.Delete(op.newKey, op.documentID); err != nil {
+			s.logger.Warnf("rollback: B-tree Delete failed for doc %s: %v", op.documentID, err)
+		}
+		if err := op.idx.Insert(op.oldKey, op.documentID); err != nil {
+			s.logger.Warnf("rollback: B-tree Insert failed for doc %s: %v", op.documentID, err)
+		}
+	}
+}
+
 // calculateOptimalSplitRatio determines the best split ratio based on field characteristics
 // This function follows the Single Responsibility Principle for split ratio calculation
 // Parameters:
@@ -5022,7 +5045,7 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 
 	return nil
 }
-func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) error {
+func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) (err error) {
 	args := settings.GetSettings()
 	// Check if the bundle exists
 	if bundle == nil {
@@ -5031,7 +5054,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	}
 
 	// Acquire write lock to prevent concurrent modifications during rename
-	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
+	if err = s.AcquireBundleWriteLock(bundle.Name); err != nil {
 		return fmt.Errorf("failed to acquire write lock: %w", err)
 	}
 	defer s.ReleaseBundleWriteLock(bundle.Name)
@@ -5114,120 +5137,118 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		}
 	}
 
-	for _, doc := range filteredDocs {
-		// Store the original document state for index maintenance
-		originalDoc := *doc
+	// Set of updated field names for B-tree index pre-load (R5: load each B-tree once per batch).
+	updatedFieldsSet := make(map[string]bool)
+	for _, kv := range docCommand.Fields {
+		updatedFieldsSet[kv.Key] = true
+	}
 
-		// Update the document fields
-		// loop through the fields in the command and update the document
-		for _, kv := range docCommand.Fields {
-
-			foundField := doc.Fields[kv.Key]
-			foundField.Name = kv.Key
-			foundField.Value = models.NewInterfaceValue(kv.Value) // ✅ Use NewInterfaceValue
-			doc.Fields[kv.Key] = foundField
-		}
-
-		// Update indexes if they exist and if indexed fields have changed
-		if bundle.Indexes != nil {
-			for indexName, indexRef := range bundle.Indexes {
-				s.logger.Debugf("Processing index '%s' of type '%s' for document update", indexName, indexRef.IndexType)
-
-				if indexRef.IndexType == "btree" {
-					// Check if the indexed field was updated
-					fieldName := indexRef.BTreeIndexField.FieldName
-					fieldWasUpdated := false
-
-					// Check if this field was in the update command
-					for _, kv := range docCommand.Fields {
-						if kv.Key == fieldName {
-							fieldWasUpdated = true
-							break
-						}
+	// R5: Pre-load each B-tree index whose field is updated. Reuse in the per-doc loop.
+	// TODO: Future: batched B-tree Delete/Insert for index maintenance during UPDATE; would require
+	// btreeindexV2 (or relevant index package) API changes to support batched Delete and batched Insert.
+	btreesToUpdate := make(map[string]*btreeindexV2.BTreeIndex)
+	if bundle.Indexes != nil {
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "btree" {
+				fieldName := indexRef.BTreeIndexField.FieldName
+				if updatedFieldsSet[fieldName] {
+					idx, loadErr := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+					if loadErr != nil {
+						return fmt.Errorf("failed to load BTree index '%s': %w", indexName, loadErr)
 					}
-
-					if fieldWasUpdated {
-						s.logger.Debugf("Indexed field '%s' was updated, maintaining BTree index '%s'", fieldName, indexName)
-
-						// Load BTree index on-demand
-						btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
-						if err != nil {
-							s.logger.Errorf("Failed to load BTree index '%s': %v", indexName, err)
-							return fmt.Errorf("failed to load BTree index: %w", err)
-						}
-
-						// Extract the old field value for deletion
-						oldFieldValue, err := extractFieldValueForIndex(originalDoc, fieldName)
-						if err != nil {
-							s.logger.Warnf("Failed to extract old field value for document '%s': %v", doc.DocumentID, err)
-						} else {
-							// Convert old field value to bytes for BTree storage
-							oldKeyBytes, err := convertValueToBytes(oldFieldValue)
-							if err != nil {
-								s.logger.Warnf("Failed to convert old field value to bytes for document '%s': %v", doc.DocumentID, err)
-							} else {
-								// Delete old key-value pair from the BTree index
-								err = btreeIndex.Delete(oldKeyBytes, doc.DocumentID)
-								if err != nil {
-									s.logger.Warnf("Failed to delete old entry for document '%s' from BTree index '%s': %v", doc.DocumentID, indexName, err)
-								} else {
-									s.logger.Debugf("Successfully deleted old entry for document '%s' from BTree index '%s'", doc.DocumentID, indexName)
-								}
-							}
-						}
-
-						// Extract the new field value for insertion
-						newFieldValue, err := extractFieldValueForIndex(*doc, fieldName)
-						if err != nil {
-							s.logger.Warnf("Failed to extract new field value for document '%s': %v", doc.DocumentID, err)
-						} else {
-							// Convert new field value to bytes for BTree storage
-							newKeyBytes, err := convertValueToBytes(newFieldValue)
-							if err != nil {
-								s.logger.Warnf("Failed to convert new field value to bytes for document '%s': %v", doc.DocumentID, err)
-							} else {
-								// Insert new key-value pair into the BTree index
-								err = btreeIndex.Insert(newKeyBytes, doc.DocumentID)
-								if err != nil {
-									s.logger.Errorf("Failed to insert new entry for document '%s' into BTree index '%s': %v", doc.DocumentID, indexName, err)
-									return fmt.Errorf("failed to update document in BTree index: %w", err)
-								} else {
-									s.logger.Debugf("Successfully inserted new entry for document '%s' into BTree index '%s'", doc.DocumentID, indexName)
-								}
-							}
-						}
-					} else {
-						s.logger.Debugf("Indexed field '%s' was not updated, skipping BTree index maintenance for '%s'", fieldName, indexName)
-					}
-				} else if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
-					// DocumentID hash indexes don't need update maintenance since DocumentID never changes
-					s.logger.Debugf("Skipping DocumentID hash index '%s' - DocumentID cannot be updated", indexName)
+					btreesToUpdate[indexName] = idx
 				}
 			}
 		}
-
-		// Save the updated document back to the bundle
-		err = s.store.UpdateDocumentInBundleFile(bundle, doc)
-		if err != nil {
-			return fmt.Errorf("failed to update document in bundle: %w", err)
-		}
-
-		// CRITICAL: Invalidate cached pages for this bundle to force reload from disk
-		// Without this, queries will return stale data from the page cache
-		keysToDelete := make([]string, 0, 50)
-		for pageKey := range s.documentPages {
-			if strings.HasPrefix(pageKey, bundle.Name+":") {
-				keysToDelete = append(keysToDelete, pageKey)
-			}
-		}
-		for _, key := range keysToDelete {
-			delete(s.documentPages, key)
-		}
-
-		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update", len(keysToDelete), bundle.Name)
-
-		// Document is now updated in the persistent store and will be loaded from pages as needed
 	}
+
+	// R1 rollback: if UpdateDocumentsBatch (or an earlier B-tree Insert) fails, undo B-tree updates
+	// so indexes stay consistent with storage. Defer runs on any return with err != nil.
+	var rollbackOps []btreeRollbackOp
+	defer func() {
+		if err != nil && len(rollbackOps) > 0 {
+			s.runBTreeRollback(rollbackOps)
+		}
+	}()
+
+	// R1: Per-doc loop: update fields and B-tree only. Collect updatedDocs; call UpdateDocumentsBatch once after.
+	updatedDocs := make([]*models.Document, 0, len(filteredDocs))
+	for _, doc := range filteredDocs {
+		originalDoc := *doc
+
+		// Update the document fields
+		for _, kv := range docCommand.Fields {
+			foundField := doc.Fields[kv.Key]
+			foundField.Name = kv.Key
+			foundField.Value = models.NewInterfaceValue(kv.Value)
+			doc.Fields[kv.Key] = foundField
+		}
+
+		// B-tree maintenance using pre-loaded indexes (R5)
+		for indexName, btreeIndex := range btreesToUpdate {
+			fieldName := bundle.Indexes[indexName].BTreeIndexField.FieldName
+			s.logger.Debugf("Indexed field '%s' was updated, maintaining BTree index '%s'", fieldName, indexName)
+
+			oldFieldValue, extErr := extractFieldValueForIndex(originalDoc, fieldName)
+			if extErr != nil {
+				s.logger.Warnf("Failed to extract old field value for document '%s': %v", doc.DocumentID, extErr)
+				continue
+			}
+			oldKeyBytes, convErr := convertValueToBytes(oldFieldValue)
+			if convErr != nil {
+				s.logger.Warnf("Failed to convert old field value to bytes for document '%s': %v", doc.DocumentID, convErr)
+				continue
+			}
+			if delErr := btreeIndex.Delete(oldKeyBytes, doc.DocumentID); delErr != nil {
+				s.logger.Warnf("Failed to delete old entry for document '%s' from BTree index '%s': %v", doc.DocumentID, indexName, delErr)
+				continue
+			}
+
+			newFieldValue, extErr := extractFieldValueForIndex(*doc, fieldName)
+			if extErr != nil {
+				s.logger.Warnf("Failed to extract new field value for document '%s': %v", doc.DocumentID, extErr)
+				rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: oldKeyBytes, documentID: doc.DocumentID})
+				return fmt.Errorf("failed to extract new field value for B-tree rollback: %w", extErr)
+			}
+			newKeyBytes, convErr := convertValueToBytes(newFieldValue)
+			if convErr != nil {
+				s.logger.Warnf("Failed to convert new field value to bytes for document '%s': %v", doc.DocumentID, convErr)
+				rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: oldKeyBytes, documentID: doc.DocumentID})
+				return fmt.Errorf("failed to convert new field value for B-tree rollback: %w", convErr)
+			}
+			rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: newKeyBytes, documentID: doc.DocumentID})
+			if insErr := btreeIndex.Insert(newKeyBytes, doc.DocumentID); insErr != nil {
+				return fmt.Errorf("failed to update document in BTree index '%s': %w", indexName, insErr)
+			}
+			s.logger.Debugf("Successfully updated BTree index '%s' for document '%s'", indexName, doc.DocumentID)
+		}
+
+		updatedDocs = append(updatedDocs, doc)
+	}
+
+	// R1: Single UpdateDocumentsBatch for all updated docs (was N calls to UpdateDocumentInBundleFile).
+	// R7 audit: UpdateDocumentInBundle holds AcquireBundleWriteLock (application) before this call, which
+	// acquires getWriteLock (storage) inside UpdateDocumentsBatch. Lock order: application then storage.
+	// Other callers of UpdateDocumentInBundleFile: applyDefaultToExistingDocuments, removeFieldFromExistingDocuments,
+	// renameFieldInDocuments, convertFieldType, applyDefaultToMissingField (via ApplyFieldChanges). Those do not
+	// hold AcquireBundleWriteLock; they use only the storage lock. No deadlock: no path holds application then
+	// waits on storage while another holds storage then waits on application.
+	err = s.store.UpdateDocumentsBatch(bundle, updatedDocs)
+	if err != nil {
+		return fmt.Errorf("failed to update documents in bundle: %w", err)
+	}
+
+	// R2: Invalidate document page cache once after the batch (was inside the loop).
+	keysToDelete := make([]string, 0, 50)
+	for pageKey := range s.documentPages {
+		if strings.HasPrefix(pageKey, bundle.Name+":") {
+			keysToDelete = append(keysToDelete, pageKey)
+		}
+	}
+	for _, key := range keysToDelete {
+		delete(s.documentPages, key)
+	}
+	s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update", len(keysToDelete), bundle.Name)
 
 	return nil
 }
@@ -5837,9 +5858,14 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 		return result, nil
 	}
 
-	// Fallback to full document scan using modern page-based loading
-	// provide some fallback
+	// Fallback to full document scan using modern page-based loading.
+	// R4 observability: log when index optimization is not used (UPDATE/SELECT with WHERE that
+	// doesn't match tryHashIndexOptimization or tryBTreeIndexOptimization).
 	s.logger.Debugf("No suitable index found, performing full document scan with page-based loading")
+	s.logger.Infow("GetDocumentsByFilter: no suitable index, using full scan",
+		"bundle", bundle.Name,
+		"whereClause", whereClause,
+	)
 
 	// Load all documents using the modern page-based system
 	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)

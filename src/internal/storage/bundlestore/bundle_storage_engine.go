@@ -918,6 +918,11 @@ func (b *BundleStorageEngine) UpdateDocumentInBundleFile(bundle *models.Bundle, 
 // 4. Bulk metadata update
 //
 // PERFORMANCE: For 1000 documents, this is ~1000x faster than individual updates
+//
+// R7 LOCK ORDER: This acquires getWriteLock(bundle.Name) (storage). Callers that also use
+// application-level AcquireBundleWriteLock(bundle.Name) (BundleService) must acquire the
+// application lock FIRST, then call UpdateDocumentsBatch or UpdateDocumentInBundleFile.
+// Same ordering for AppendDocumentToBundleFile. UpdateDocumentInBundle follows this order.
 func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, documents []*models.Document) error {
 	if len(documents) == 0 {
 		return nil
@@ -1022,10 +1027,18 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 		return fmt.Errorf("BATCH UPDATE: Failed to flush write buffer: %w", err)
 	}
 
-	// CRITICAL FIX: Force OS to sync to disk BEFORE releasing lock
-	// This ensures readers see complete data when lock is released
-	if err := writeBuffer.Sync(); err != nil {
-		b.logger.Warnf("BATCH UPDATE: Failed to sync to disk: %v (continuing anyway)", err)
+	// R3: Sync is configurable via DurabilityMode. Read settings.GetSettings().DurabilityMode
+	// directly here; bundle_storage_engine does not use it elsewhere for the Sync decision.
+	// - "performance" (default): skip Sync; rely on WAL + write buffer flush policy (matches ADD).
+	// - "strict": sync to disk before releasing lock.
+	// TODO: If we experience durability or Sync-throughput issues, consider a "balanced" coalesced Sync:
+	// queue batches to a background goroutine, coalesce, single Sync per N batches or per time window
+	// (PostgreSQL wal_writer_delay–style).
+	dm := settings.GetSettings().DurabilityMode
+	if dm == "strict" {
+		if err := writeBuffer.Sync(); err != nil {
+			b.logger.Warnf("BATCH UPDATE: Failed to sync to disk: %v (continuing anyway)", err)
+		}
 	}
 
 	// Update bundle metadata ONCE after all documents are written
