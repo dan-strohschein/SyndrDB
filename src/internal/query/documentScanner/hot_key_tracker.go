@@ -101,7 +101,8 @@ func (hkt *HotKeyTracker) RecordQuery(keyName string, value interface{}, latency
 
 	// Track value frequency for cardinality estimation
 	// Limit frequency map size to prevent memory explosion
-	if len(stats.valueFrequency) < 10000 {
+	// Cap at 1000 entries per key (reduced from 10000 to limit memory usage)
+	if len(stats.valueFrequency) < 1000 {
 		stats.valueFrequency[value]++
 		stats.UniqueValues = len(stats.valueFrequency)
 	}
@@ -256,12 +257,22 @@ func (hkt *HotKeyTracker) cleanup() {
 
 	now := time.Now()
 	keysRemoved := 0
+	valueFrequencyCleared := 0
 
 	// Remove keys that haven't been queried recently
+	// Also clear valueFrequency for stale but retained keys (older than half maxAge)
+	halfMaxAge := hkt.maxAge / 2
 	for keyName, stats := range hkt.keyStats {
-		if now.Sub(stats.LastQueried) > hkt.maxAge {
+		age := now.Sub(stats.LastQueried)
+		if age > hkt.maxAge {
 			delete(hkt.keyStats, keyName)
 			keysRemoved++
+		} else if age > halfMaxAge && len(stats.valueFrequency) > 0 {
+			// Key is stale but retained - clear valueFrequency to free memory
+			// Keep the key stats (QueryCount, etc.) for pattern tracking
+			stats.valueFrequency = make(map[interface{}]int)
+			stats.UniqueValues = 0
+			valueFrequencyCleared++
 		}
 	}
 
@@ -297,7 +308,8 @@ func (hkt *HotKeyTracker) cleanup() {
 
 	hkt.lastCleanup = now
 
-	if keysRemoved > 0 {
-		hkt.logger.Debugf("Cleaned up %d old key statistics", keysRemoved)
+	if keysRemoved > 0 || valueFrequencyCleared > 0 {
+		hkt.logger.Debugf("Cleaned up %d old key statistics, cleared valueFrequency for %d stale keys",
+			keysRemoved, valueFrequencyCleared)
 	}
 }

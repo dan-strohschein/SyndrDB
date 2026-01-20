@@ -182,7 +182,6 @@ type BundleAdapter struct {
 	bundleService BundleServiceInterface // Service for loading documents
 	// Cached metadata (small and efficient)
 	totalDocuments   *int                            // Cached total document count
-	documentIDs      []string                        // Cached document IDs (loaded lazily)
 	cachedPages      map[uint32]*models.DocumentPage // Page-level cache (bounded by bundle_adapter_max_cached_pages, LRU eviction)
 	cachedPagesMutex sync.RWMutex                    // Protects cachedPages for concurrent eviction and access
 	logger           *zap.SugaredLogger              // Logger for debugging and monitoring

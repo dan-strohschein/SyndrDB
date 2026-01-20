@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof" // pprof for memory/CPU profiling at :6060
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -367,6 +369,17 @@ func main() {
 			log.Printf("⚠️  WARNING: Authentication is enabled but no users exist. Create users using 'ADD USER' command or configure default_users in config file.")
 		}
 	}
+
+	// Start pprof server for memory/CPU profiling
+	// Access at: http://localhost:6060/debug/pprof/
+	// Heap profile: go tool pprof http://localhost:6060/debug/pprof/heap
+	// Goroutines: curl http://localhost:6060/debug/pprof/goroutine?debug=2
+	go func() {
+		log.Println("Starting pprof server on :6060 (http://localhost:6060/debug/pprof/)")
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			log.Printf("pprof server error: %v", err)
+		}
+	}()
 
 	// Start the server
 	if err := srv.Start(); err != nil {

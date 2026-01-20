@@ -314,11 +314,35 @@ func (jpt *JoinPatternTracker) cleanup() {
 		}
 	}
 
-	// If we still have too many patterns, remove the least frequently used
+	// If we still have too many patterns, remove the least frequently used (LFU eviction)
 	if len(jpt.patterns) > jpt.maxPatternHistory {
-		// TODO: Implement LRU-style cleanup
-		jpt.logger.Debugf("Pattern history exceeds limit (%d), LRU cleanup not yet implemented",
-			jpt.maxPatternHistory)
+		// Build a slice of patterns sorted by execution count (ascending)
+		type patternEntry struct {
+			key   string
+			count int64
+		}
+		entries := make([]patternEntry, 0, len(jpt.patterns))
+		for key, stats := range jpt.patterns {
+			entries = append(entries, patternEntry{key: key, count: stats.ExecutionCount})
+		}
+
+		// Sort by execution count (ascending) - least used first
+		for i := 0; i < len(entries)-1; i++ {
+			for j := i + 1; j < len(entries); j++ {
+				if entries[j].count < entries[i].count {
+					entries[i], entries[j] = entries[j], entries[i]
+				}
+			}
+		}
+
+		// Remove excess patterns (least frequently used)
+		excess := len(jpt.patterns) - jpt.maxPatternHistory
+		for i := 0; i < excess && i < len(entries); i++ {
+			delete(jpt.patterns, entries[i].key)
+			removed++
+		}
+		jpt.logger.Debugf("LFU eviction: removed %d least-used join patterns (limit: %d)",
+			excess, jpt.maxPatternHistory)
 	}
 
 	jpt.lastCleanup = now
