@@ -297,9 +297,9 @@ type BundleService struct {
 	settings        *settings.Arguments
 
 	// Changed: Store only bundle metadata, not full bundles with documents
-	bundleMetadata       map[string]*models.Bundle       // Only schema/structure
-	documentPages        map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
-	documentPagesMutex   sync.RWMutex                    // Protects documentPages; prevents concurrent map read/write
+	bundleMetadata     map[string]*models.Bundle       // Only schema/structure
+	documentPages      map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
+	documentPagesMutex sync.RWMutex                    // Protects documentPages; prevents concurrent map read/write
 
 	logger *zap.SugaredLogger
 
