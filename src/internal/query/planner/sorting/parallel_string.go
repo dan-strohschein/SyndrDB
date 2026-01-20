@@ -126,6 +126,12 @@ func ParallelStringSort(
 		return []*models.Document{}, nil
 	}
 
+	// allKeys can be smaller than documents (many docs may lack the sort field).
+	// Avoid numWorkers > len(allKeys) so we don't create chunks with start >= len(keys).
+	if numWorkers > len(allKeys) {
+		numWorkers = len(allKeys)
+	}
+
 	// Phase 2: Divide keys into chunks
 	chunks := divideKeysIntoChunks(allKeys, numWorkers)
 
@@ -163,17 +169,22 @@ func ParallelStringSort(
 }
 
 // divideKeysIntoChunks splits abbreviated keys into numChunks roughly equal parts.
+// When numChunks > len(keys), some chunks will be empty (numWorkers is often
+// runtime.NumCPU() while allKeys can be smaller when many documents lack the sort field).
 func divideKeysIntoChunks(keys []AbbreviatedKey, numChunks int) [][]AbbreviatedKey {
 	chunks := make([][]AbbreviatedKey, numChunks)
 	chunkSize := (len(keys) + numChunks - 1) / numChunks
 
 	for i := 0; i < numChunks; i++ {
 		start := i * chunkSize
+		if start >= len(keys) {
+			chunks[i] = keys[0:0]
+			continue
+		}
 		end := start + chunkSize
 		if end > len(keys) {
 			end = len(keys)
 		}
-
 		chunks[i] = keys[start:end]
 	}
 
