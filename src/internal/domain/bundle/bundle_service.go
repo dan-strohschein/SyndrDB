@@ -1730,6 +1730,13 @@ func (s *BundleService) processBTreeIndexBatch(bundle *models.Bundle, indexName 
 		}
 	}
 
+	// Persist metadata once per batch (Insert/Delete no longer do it on the hot path)
+	if err := btreeIndex.PersistMetadata(); err != nil {
+		s.logger.Warnw("Failed to persist B-tree index metadata",
+			zap.String("index", indexName),
+			zap.Error(err))
+	}
+
 	return nil
 }
 
@@ -4228,6 +4235,9 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 			}
 		}
 
+		if err := btreeIndex.PersistMetadata(); err != nil {
+			s.logger.Warnf("Failed to persist B-tree index metadata after population: %v", err)
+		}
 		s.logger.Debugf("Successfully populated BTree index with existing documents")
 	}
 
@@ -5222,6 +5232,13 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		}
 
 		updatedDocs = append(updatedDocs, doc)
+	}
+
+	// Persist B-tree index metadata after in-place updates (Insert/Delete no longer do it)
+	for _, btreeIndex := range btreesToUpdate {
+		if err := btreeIndex.PersistMetadata(); err != nil {
+			s.logger.Warnf("Failed to persist B-tree index metadata after update: %v", err)
+		}
 	}
 
 	// R1: Single UpdateDocumentsBatch for all updated docs (was N calls to UpdateDocumentInBundleFile).

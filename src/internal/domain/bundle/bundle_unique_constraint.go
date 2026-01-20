@@ -523,6 +523,9 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 			}
 		}
 
+		if err := btreeIndex.PersistMetadata(); err != nil {
+			s.logger.Warnf("Failed to persist unique B-tree index metadata after population: %v", err)
+		}
 		s.logger.Infof("Successfully populated unique B-tree index with %d documents", len(allDocuments))
 	} else {
 		s.logger.Debugf("No existing documents to populate unique B-tree index")

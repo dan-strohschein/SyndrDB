@@ -1090,6 +1090,105 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 	}
 }
 
+// splitLeafValueList splits a leaf that has one key with many values (e.g. FK index
+// where one user has many orders). Both resulting leaves keep the same key; the
+// value list is split in half. Used when the leaf exceeds page size but
+// splitLeafNode cannot run (too few keys). Returns the new root page (or current
+// root if unchanged).
+func splitLeafValueList(idx *BTreeIndex, leaf *BTreeNode) (uint32, error) {
+	if idx == nil || leaf == nil || !leaf.IsLeaf {
+		return 0, fmt.Errorf("splitLeafValueList: invalid node")
+	}
+	if len(leaf.Keys) != 1 || len(leaf.Values) != 1 {
+		return 0, fmt.Errorf("splitLeafValueList: node must have exactly one key and one value list")
+	}
+	vals := leaf.Values[0]
+	if len(vals) < 2 {
+		return 0, fmt.Errorf("splitLeafValueList: value list has %d items, need at least 2", len(vals))
+	}
+
+	split := len(vals) / 2
+	firstHalf := make([]string, split)
+	copy(firstHalf, vals[:split])
+	secondHalf := make([]string, len(vals)-split)
+	copy(secondHalf, vals[split:])
+
+	keyCopy := make([]byte, len(leaf.Keys[0]))
+	copy(keyCopy, leaf.Keys[0])
+
+	newLeafPageNum, err := idx.FileManager.AllocatePage()
+	if err != nil {
+		return 0, fmt.Errorf("splitLeafValueList: allocate page: %w", err)
+	}
+
+	newLeaf := &BTreeNode{
+		PageNum:    newLeafPageNum,
+		IsLeaf:     true,
+		KeyCount:   1,
+		ParentPage: leaf.ParentPage,
+		NextLeaf:   leaf.NextLeaf,
+		PrevLeaf:   leaf.PageNum,
+		Keys:       [][]byte{keyCopy},
+		Values:     [][]string{secondHalf},
+		Children:   []uint32{},
+	}
+
+	leaf.Values[0] = firstHalf
+	oldNext := leaf.NextLeaf
+	leaf.NextLeaf = newLeafPageNum
+
+	if oldNext != 0 {
+		nextOrig := oldNext
+		nextData, err := idx.PageManager.GetPage(nextOrig, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
+		})
+		if err != nil {
+			idx.FileManager.DeallocatePage(newLeafPageNum)
+			return 0, fmt.Errorf("splitLeafValueList: load next leaf %d: %w", nextOrig, err)
+		}
+		nextNode, ok := nextData.(*BTreeNode)
+		if !ok {
+			idx.FileManager.DeallocatePage(newLeafPageNum)
+			return 0, fmt.Errorf("splitLeafValueList: next page %d is not a BTreeNode", nextOrig)
+		}
+		nextNode.PrevLeaf = newLeafPageNum
+		idx.PageManager.PutPage(nextOrig, nextNode, true)
+	}
+
+	idx.PageManager.PutPage(leaf.PageNum, leaf, true)
+	idx.PageManager.PutPage(newLeafPageNum, newLeaf, true)
+
+	if leaf.ParentPage == 0 {
+		newRootPageNum, err := createNewRoot(idx, leaf.PageNum, newLeafPageNum, keyCopy)
+		if err != nil {
+			idx.FileManager.DeallocatePage(newLeafPageNum)
+			return 0, err
+		}
+		leaf.ParentPage = newRootPageNum
+		newLeaf.ParentPage = newRootPageNum
+		idx.PageManager.PutPage(leaf.PageNum, leaf, true)
+		idx.PageManager.PutPage(newLeafPageNum, newLeaf, true)
+		if err := idx.FileManager.WritePage(leaf.PageNum, leaf); err != nil {
+			return 0, fmt.Errorf("splitLeafValueList: write leaf: %w", err)
+		}
+		if err := idx.FileManager.WritePage(newLeafPageNum, newLeaf); err != nil {
+			return 0, fmt.Errorf("splitLeafValueList: write new leaf: %w", err)
+		}
+		idx.logger.Debugf("splitLeafValueList: created new root %d for 1-key value-list split", newRootPageNum)
+		return newRootPageNum, nil
+	}
+
+	newLeaf.ParentPage = leaf.ParentPage
+	idx.PageManager.PutPage(newLeafPageNum, newLeaf, true)
+	newRoot, err := insertIntoParent(idx, leaf.ParentPage, keyCopy, newLeafPageNum)
+	if err != nil {
+		idx.FileManager.DeallocatePage(newLeafPageNum)
+		return 0, err
+	}
+	idx.logger.Debugf("splitLeafValueList: split 1-key value list, newLeaf=%d", newLeafPageNum)
+	return newRoot, nil
+}
+
 // createNewRoot creates a new root internal node for leaf node splits
 // This function is called when the root leaf node is split and a new internal root is needed
 // Parameters:

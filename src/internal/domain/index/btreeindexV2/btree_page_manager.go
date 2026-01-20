@@ -702,44 +702,33 @@ func (pm *BTreePageManager) evictLRU() {
 		return
 	}
 
-	// TODO: Prefer evicting clean pages to avoid I/O blocking during read-heavy workloads
-	// IMPORTANT NOTE: Two-pass eviction: first pass for clean unpinned pages, second pass for dirty unpinned pages
-	// This minimizes write stalls during OLTP queries that need to evict pages
-	// First pass: look for clean unpinned pages
-	// var lru *cacheEntry
-	// current := pm.lruTail.prev
-	// for current != pm.lruHead {
-	// 		if current.pinCount == 0 && !current.isDirty {
-	// 			lru = current
-	// 			break
-	// 		}
-	// 		current = current.prev
-	// }
-	// Second pass: if no clean pages, evict dirty unpinned page
-	// if lru == nil {
-	// 		current = pm.lruTail.prev
-	// 		for current != pm.lruHead {
-	// 			if current.pinCount == 0 {
-	// 				lru = current
-	// 				break
-	// 			}
-	// 			current = current.prev
-	// 		}
-	// }
-
-	// Find the least recently used UNPINNED page
-	// Walk backwards through LRU list to find first unpinned page
+	// Two-pass eviction: prefer clean pages to avoid synchronous write during eviction.
+	// First pass: find unpinned clean page (no I/O).
+	// Second pass: if none, find unpinned dirty page (must flush before eviction).
 	var lru *cacheEntry
 	current := pm.lruTail.prev
-
 	for current != pm.lruHead {
-		if current.pinCount == 0 {
+		if current.pinCount == 0 && !current.isDirty {
 			lru = current
 			break
 		}
-		pm.logger.Debugf("Skipping pinned page %d (pinCount: %d) during eviction",
-			current.pageNum, current.pinCount)
+		if current.pinCount != 0 {
+			pm.logger.Debugf("Skipping pinned page %d (pinCount: %d) during eviction",
+				current.pageNum, current.pinCount)
+		}
 		current = current.prev
+	}
+	if lru == nil {
+		current = pm.lruTail.prev
+		for current != pm.lruHead {
+			if current.pinCount == 0 {
+				lru = current
+				break
+			}
+			pm.logger.Debugf("Skipping pinned page %d (pinCount: %d) during eviction",
+				current.pageNum, current.pinCount)
+			current = current.prev
+		}
 	}
 
 	// If all pages are pinned, we cannot evict

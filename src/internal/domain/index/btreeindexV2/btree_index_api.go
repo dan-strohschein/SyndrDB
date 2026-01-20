@@ -36,8 +36,10 @@ package btreeindexV2
 import (
 	"bytes"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
-
 	"time"
 
 	"syndrdb/src/pkg/settings"
@@ -786,11 +788,6 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 		idx.checkMaintenanceNeeded()
 	}
 
-	// Write updated metadata
-	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
-		idx.logger.Warnf("Failed to update metadata after insert: %v", err)
-	}
-
 	idx.logger.Debugf("Successfully inserted key '%s' with document ID '%s', nodes created: %d",
 		string(key), documentID, nodesCreated)
 
@@ -900,9 +897,6 @@ func (idx *BTreeIndex) deleteOneLocked(key []byte, documentID string) error {
 	idx.Metadata.UpdateDeletionMetrics(nodesDeleted, affectsParentNode)
 	if affectsParentNode || nodesDeleted > 0 {
 		idx.checkMaintenanceNeeded()
-	}
-	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
-		idx.logger.Warnf("Failed to update metadata after delete: %v", err)
 	}
 	idx.logger.Debugf("Successfully deleted key '%s' with document ID '%s', nodes deleted: %d",
 		string(key), documentID, nodesDeleted)
@@ -1472,17 +1466,148 @@ func (idx *BTreeIndex) calculateAverageKeyLength() (float64, error) {
 	return CalculateAverageKeyLength(idx)
 }
 
+// PersistMetadata writes current in-memory metadata to page 0. Call when
+// using Insert/Delete in a context that does not run processBTreeIndexBatch
+// (e.g. bulk populate, in-place update loops). The batch path calls this once
+// after FlushDirtyPages.
+func (idx *BTreeIndex) PersistMetadata() error {
+	idx.mutex.Lock()
+	defer idx.mutex.Unlock()
+	return idx.FileManager.WriteMetadata(idx.Metadata)
+}
+
+// extractPageNumFromOverflowError parses the page number from a "exceeds page size" error.
+// e.g. "failed to flush page 62: serialized page 62 size (8254) exceeds page size (8192)" -> 62
+func extractPageNumFromOverflowError(s string) uint32 {
+	// Match "page 62 size" from "serialized page 62 size (8254) exceeds page size (8192)"
+	re := regexp.MustCompile(`page (\d+) size`)
+	m := re.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return 0
+	}
+	n, err := strconv.ParseUint(m[1], 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
+}
+
+// ForceSplitOverflowingLeaf splits a leaf that exceeds the page size so both halves fit.
+// Run after CompactOverflowNode when the node is still too large. Clears tombstones
+// first so split does not need to partition them. Caller must not hold PageManager mutex.
+func (idx *BTreeIndex) ForceSplitOverflowingLeaf(pageNum uint32) error {
+	idx.mutex.Lock()
+	defer idx.mutex.Unlock()
+
+	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+		return idx.FileManager.ReadPage(pn)
+	})
+	if err != nil {
+		return err
+	}
+	node, ok := pageData.(*BTreeNode)
+	if !ok || !node.IsLeaf {
+		return fmt.Errorf("page %d is not a leaf node", pageNum)
+	}
+	idx.CompactOverflowNode(node)
+
+	var newRoot uint32
+	if len(node.Keys) == 1 && len(node.Values) == 1 && len(node.Values[0]) >= 2 {
+		newRoot, err = splitLeafValueList(idx, node)
+	} else if len(node.Keys) >= 2 {
+		newRoot, _, _, err = splitLeafNode(idx, node)
+	} else {
+		v0 := 0
+		if len(node.Values) > 0 {
+			v0 = len(node.Values[0])
+		}
+		return fmt.Errorf("page %d has too few keys to split (keys=%d, values[0]=%d)", pageNum, len(node.Keys), v0)
+	}
+	if err != nil {
+		return err
+	}
+	if newRoot != 0 && newRoot != idx.rootPageNum {
+		idx.rootPageNum = newRoot
+		idx.Metadata.RootPageNum = newRoot
+	}
+	return nil
+}
+
+// CompactOverflowNode physically removes tombstone entries from a leaf node to
+// reduce its serialized size. Used when a node would exceed the page size on
+// flush because Tombstones (and/or variable-length Keys/Values) grew without
+// IsFull having triggered a split. Modifies the node in place; caller must
+// not hold PageManager mutex (e.g. when called from the flush writer).
+func (idx *BTreeIndex) CompactOverflowNode(node *BTreeNode) {
+	if node == nil || !node.IsLeaf || node.Tombstones == nil || len(node.Tombstones) == 0 {
+		return
+	}
+	removed := uint64(0)
+	for k := range node.Tombstones {
+		sep := strings.LastIndex(k, ":")
+		if sep < 0 {
+			continue
+		}
+		keyPart := []byte(k[:sep])
+		docID := k[sep+1:]
+		for i, key := range node.Keys {
+			if bytes.Equal(key, keyPart) {
+				newVals := make([]string, 0, len(node.Values[i]))
+				for _, d := range node.Values[i] {
+					if d != docID {
+						newVals = append(newVals, d)
+					}
+				}
+				node.Values[i] = newVals
+				if len(newVals) == 0 {
+					node.Keys = append(node.Keys[:i], node.Keys[i+1:]...)
+					node.Values = append(node.Values[:i], node.Values[i+1:]...)
+					node.KeyCount--
+				}
+				break
+			}
+		}
+		delete(node.Tombstones, k)
+		removed++
+	}
+	node.TombstoneCount = 0
+	node.Tombstones = nil
+	if removed > 0 && idx.Metadata.TotalTombstones >= removed {
+		idx.Metadata.TotalTombstones -= removed
+	}
+}
+
 // FlushDirtyPages flushes all dirty pages to disk
 // In batched mode: skips final sync, relies on WAL checkpoint
 // In immediate mode: syncs after writing all pages
 // Returns:
 //   - error: Any error that occurred during flushing
 func (idx *BTreeIndex) FlushDirtyPages() error {
-	// Flush all dirty pages through the page manager
-	// WritePage() will skip individual fsyncs in batched mode
-	if err := idx.PageManager.Flush(func(pageNum uint32, pageData interface{}) error {
-		return idx.FileManager.WritePage(pageNum, pageData)
-	}); err != nil {
+	writer := func(pageNum uint32, pageData interface{}) error {
+		err := idx.FileManager.WritePage(pageNum, pageData)
+		if err != nil && strings.Contains(err.Error(), "exceeds page size") {
+			if node, ok := pageData.(*BTreeNode); ok {
+				idx.CompactOverflowNode(node)
+				err = idx.FileManager.WritePage(pageNum, pageData)
+				if err != nil && strings.Contains(err.Error(), "exceeds page size") {
+					idx.logger.Warnf("Page %d still exceeds page size after compacting tombstones; will try split on flush retry", pageNum)
+				}
+			}
+		}
+		return err
+	}
+
+	err := idx.PageManager.Flush(writer)
+	if err != nil && strings.Contains(err.Error(), "exceeds page size") {
+		if pg := extractPageNumFromOverflowError(err.Error()); pg != 0 {
+			if splitErr := idx.ForceSplitOverflowingLeaf(pg); splitErr == nil {
+				err = idx.PageManager.Flush(writer)
+			} else {
+				idx.logger.Warnf("Cannot split overflowing page %d: %v; run COMPACT INDEX", pg, splitErr)
+			}
+		}
+	}
+	if err != nil {
 		return fmt.Errorf("failed to flush dirty pages: %w", err)
 	}
 
