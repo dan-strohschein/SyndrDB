@@ -178,11 +178,11 @@ type BundleAdapter struct {
 	bundle        *models.Bundle         // SyndrDB Bundle model
 	bundleService BundleServiceInterface // Service for loading documents
 	// Cached metadata (small and efficient)
-	totalDocuments *int                            // Cached total document count
-	documentIDs    []string                        // Cached document IDs (loaded lazily)
-	cachedPages    map[uint32]*models.DocumentPage // Page-level cache
-	logger         *zap.SugaredLogger              // Logger for debugging and monitoring
-	projectionFields []string // PROJECTION PUSHDOWN: Field names to deserialize during page loading (nil = all fields)
+	totalDocuments   *int                            // Cached total document count
+	documentIDs      []string                        // Cached document IDs (loaded lazily)
+	cachedPages      map[uint32]*models.DocumentPage // Page-level cache
+	logger           *zap.SugaredLogger              // Logger for debugging and monitoring
+	projectionFields []string                        // PROJECTION PUSHDOWN: Field names to deserialize during page loading (nil = all fields)
 }
 
 // NewBundleAdapter creates a new adapter for a SyndrDB Bundle with streaming support
@@ -331,12 +331,12 @@ func (ba *BundleAdapter) getSafePageCount() uint32 {
 	if pageCount == 0 {
 		ba.logger.Warnf("SAFETY: Both PageCount and TotalDocuments are 0 for bundle '%s', attempting recovery by scanning pages",
 			ba.bundle.Name)
-		
+
 		// Try to find actual page count by scanning pages up to a reasonable limit
 		// Scan up to MaxReasonablePageCount pages to find where documents actually end
 		maxScanPages := MaxReasonablePageCount
 		actualPageCount := uint32(0)
-		
+
 		for testPageID := uint32(0); testPageID < maxScanPages; testPageID++ {
 			page, err := ba.loadDocumentPage(testPageID)
 			if err != nil {
@@ -363,7 +363,7 @@ func (ba *BundleAdapter) getSafePageCount() uint32 {
 			}
 			actualPageCount = testPageID + 1
 		}
-		
+
 		if actualPageCount > 0 {
 			// Recovered page count - now count documents
 			actualDocCount := 0
@@ -374,12 +374,12 @@ func (ba *BundleAdapter) getSafePageCount() uint32 {
 				}
 				actualDocCount += len(page.Documents)
 			}
-			
+
 			ba.bundle.TotalDocuments = int64(actualDocCount)
 			ba.bundle.PageCount = int64(actualPageCount)
 			pageCount = actualPageCount
 			ba.bundle.IsDirty = true
-			
+
 			ba.logger.Warnf("RECOVERY SUCCESS: Recovered TotalDocuments=%d, PageCount=%d for bundle '%s'",
 				ba.bundle.TotalDocuments, pageCount, ba.bundle.Name)
 		} else {
