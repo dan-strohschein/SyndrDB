@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -28,10 +29,45 @@ import (
 	"time"
 )
 
+// resolvePprofDir returns an absolute directory for pprof output. Tries TempDir, DataDir, cwd, then /tmp (Unix).
+// Ensures the chosen directory exists (MkdirAll for TempDir/DataDir). Used so profile files can be found even
+// when run in containers or under service managers where cwd/signals may differ.
+func resolvePprofDir(tempDir, dataDir string) string {
+	try := func(d string, mkdir bool) string {
+		if d == "" {
+			return ""
+		}
+		abs, err := filepath.Abs(d)
+		if err != nil {
+			return ""
+		}
+		if mkdir {
+			if err := os.MkdirAll(abs, 0755); err != nil {
+				return ""
+			}
+		}
+		return abs
+	}
+	if p := try(tempDir, true); p != "" {
+		return p
+	}
+	if p := try(dataDir, true); p != "" {
+		return p
+	}
+	if wd, err := os.Getwd(); err == nil && wd != "" {
+		return wd
+	}
+	if runtime.GOOS != "windows" {
+		return "/tmp"
+	}
+	return "."
+}
+
 // writeHeapProfileToFile runs GC then writes a heap profile to dir/pprof_heap_<timestamp>.prof.
-// Use when memory balloons: kill -USR1 <pid> then copy the file and run:
-//   go tool pprof -alloc_space pprof_heap_<ts>.prof
-//   (pprof) top20
+// Returns an absolute path. Use when memory balloons: kill -USR1 <pid> or GET /debug/write-heap
+//
+//	go tool pprof -alloc_space pprof_heap_<ts>.prof
+//	(pprof) top20
 func writeHeapProfileToFile(dir string) (path string, err error) {
 	if dir == "" {
 		dir = "."
@@ -46,11 +82,14 @@ func writeHeapProfileToFile(dir string) (path string, err error) {
 	if err := pprof.WriteHeapProfile(f); err != nil {
 		return path, err
 	}
+	if abs, e := filepath.Abs(path); e == nil {
+		path = abs
+	}
 	return path, nil
 }
 
 // writeGoroutineProfileToFile writes a goroutine profile to dir/pprof_goroutines_<timestamp>.txt.
-// Use to inspect goroutine leaks: kill -USR2 <pid> then inspect the file.
+// Returns an absolute path. Use for goroutine leaks: kill -USR2 <pid> or GET /debug/write-goroutines
 func writeGoroutineProfileToFile(dir string) (path string, err error) {
 	if dir == "" {
 		dir = "."
@@ -67,6 +106,9 @@ func writeGoroutineProfileToFile(dir string) (path string, err error) {
 	}
 	if err := p.WriteTo(f, 2); err != nil {
 		return path, err
+	}
+	if abs, e := filepath.Abs(path); e == nil {
+		path = abs
 	}
 	return path, nil
 }
@@ -415,27 +457,41 @@ func main() {
 		}
 	}
 
-	// Start pprof server for memory/CPU profiling
-	// Access at: http://localhost:6060/debug/pprof/
-	// Heap: go tool pprof -alloc_space http://localhost:6060/debug/pprof/heap (then: top20)
-	// Goroutines: curl "http://localhost:6060/debug/pprof/goroutine?debug=1" (debug=2 for full stacks)
+	// Pprof: resolve output dir (TempDir -> DataDir -> cwd -> /tmp) and ensure it exists
+	pprofDir := resolvePprofDir(args.TempDir, args.DataDir)
+	log.Printf("pprof: profile files will be written to: %s", pprofDir)
+
+	// HTTP: write-heap / write-goroutines write to file and return JSON {path, ok} — no signals needed
+	http.HandleFunc("/debug/write-heap", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path, err := writeHeapProfileToFile(pprofDir)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"ok": "false", "error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true", "path": path})
+	})
+	http.HandleFunc("/debug/write-goroutines", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path, err := writeGoroutineProfileToFile(pprofDir)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"ok": "false", "error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true", "path": path})
+	})
+
+	// Start pprof server on :6060 (serves /debug/pprof/* and /debug/write-heap, /debug/write-goroutines)
 	go func() {
-		log.Println("Starting pprof server on :6060 (http://localhost:6060/debug/pprof/)")
+		log.Println("Starting pprof server on :6060 (http://localhost:6060/debug/pprof/ ; /debug/write-heap ; /debug/write-goroutines)")
 		if err := http.ListenAndServe(":6060", nil); err != nil {
 			log.Printf("pprof server error: %v", err)
 		}
 	}()
 
-	// Signal-triggered profile dumps (Unix): write files to TempDir, no curl needed.
-	// When memory balloons: kill -USR1 <pid>  -> pprof_heap_<ts>.prof
-	// For goroutine leak:  kill -USR2 <pid>   -> pprof_goroutines_<ts>.txt
-	pprofDir := args.TempDir
-	if pprofDir == "" {
-		pprofDir = args.DataDir
-	}
-	if pprofDir == "" {
-		pprofDir = "."
-	}
+	// Signal-triggered dumps (Unix): kill -USR1 <pid> (heap), kill -USR2 <pid> (goroutines)
 	if runtime.GOOS != "windows" {
 		usrCh := make(chan os.Signal, 2)
 		signal.Notify(usrCh, syscall.SIGUSR1, syscall.SIGUSR2)
@@ -443,6 +499,7 @@ func main() {
 			for sig := range usrCh {
 				switch sig {
 				case syscall.SIGUSR1:
+					log.Printf("pprof: received SIGUSR1, writing heap profile to %s ...", pprofDir)
 					p, err := writeHeapProfileToFile(pprofDir)
 					if err != nil {
 						log.Printf("pprof: failed to write heap profile: %v", err)
@@ -450,6 +507,7 @@ func main() {
 						log.Printf("pprof: wrote heap profile to %s (analyze: go tool pprof -alloc_space %s)", p, p)
 					}
 				case syscall.SIGUSR2:
+					log.Printf("pprof: received SIGUSR2, writing goroutine profile to %s ...", pprofDir)
 					p, err := writeGoroutineProfileToFile(pprofDir)
 					if err != nil {
 						log.Printf("pprof: failed to write goroutine profile: %v", err)
@@ -459,7 +517,7 @@ func main() {
 				}
 			}
 		}()
-		log.Printf("pprof: signal dumps enabled. Heap: kill -USR1 %d  Goroutines: kill -USR2 %d", os.Getpid(), os.Getpid())
+		log.Printf("pprof: signal dumps. Heap: kill -USR1 %d  Goroutines: kill -USR2 %d", os.Getpid(), os.Getpid())
 	}
 
 	// Start the server
