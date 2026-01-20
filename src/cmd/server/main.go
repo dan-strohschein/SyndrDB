@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
@@ -25,6 +27,49 @@ import (
 	"syscall"
 	"time"
 )
+
+// writeHeapProfileToFile runs GC then writes a heap profile to dir/pprof_heap_<timestamp>.prof.
+// Use when memory balloons: kill -USR1 <pid> then copy the file and run:
+//   go tool pprof -alloc_space pprof_heap_<ts>.prof
+//   (pprof) top20
+func writeHeapProfileToFile(dir string) (path string, err error) {
+	if dir == "" {
+		dir = "."
+	}
+	path = filepath.Join(dir, fmt.Sprintf("pprof_heap_%s.prof", time.Now().Format("2006-01-02_15-04-05")))
+	f, err := os.Create(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	runtime.GC()
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		return path, err
+	}
+	return path, nil
+}
+
+// writeGoroutineProfileToFile writes a goroutine profile to dir/pprof_goroutines_<timestamp>.txt.
+// Use to inspect goroutine leaks: kill -USR2 <pid> then inspect the file.
+func writeGoroutineProfileToFile(dir string) (path string, err error) {
+	if dir == "" {
+		dir = "."
+	}
+	path = filepath.Join(dir, fmt.Sprintf("pprof_goroutines_%s.txt", time.Now().Format("2006-01-02_15-04-05")))
+	f, err := os.Create(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	p := pprof.Lookup("goroutine")
+	if p == nil {
+		return path, fmt.Errorf("pprof.Lookup(\"goroutine\") is nil")
+	}
+	if err := p.WriteTo(f, 2); err != nil {
+		return path, err
+	}
+	return path, nil
+}
 
 // printUsage prints helpful usage information
 func printUsage() {
@@ -372,14 +417,50 @@ func main() {
 
 	// Start pprof server for memory/CPU profiling
 	// Access at: http://localhost:6060/debug/pprof/
-	// Heap profile: go tool pprof http://localhost:6060/debug/pprof/heap
-	// Goroutines: curl http://localhost:6060/debug/pprof/goroutine?debug=2
+	// Heap: go tool pprof -alloc_space http://localhost:6060/debug/pprof/heap (then: top20)
+	// Goroutines: curl "http://localhost:6060/debug/pprof/goroutine?debug=1" (debug=2 for full stacks)
 	go func() {
 		log.Println("Starting pprof server on :6060 (http://localhost:6060/debug/pprof/)")
 		if err := http.ListenAndServe(":6060", nil); err != nil {
 			log.Printf("pprof server error: %v", err)
 		}
 	}()
+
+	// Signal-triggered profile dumps (Unix): write files to TempDir, no curl needed.
+	// When memory balloons: kill -USR1 <pid>  -> pprof_heap_<ts>.prof
+	// For goroutine leak:  kill -USR2 <pid>   -> pprof_goroutines_<ts>.txt
+	pprofDir := args.TempDir
+	if pprofDir == "" {
+		pprofDir = args.DataDir
+	}
+	if pprofDir == "" {
+		pprofDir = "."
+	}
+	if runtime.GOOS != "windows" {
+		usrCh := make(chan os.Signal, 2)
+		signal.Notify(usrCh, syscall.SIGUSR1, syscall.SIGUSR2)
+		go func() {
+			for sig := range usrCh {
+				switch sig {
+				case syscall.SIGUSR1:
+					p, err := writeHeapProfileToFile(pprofDir)
+					if err != nil {
+						log.Printf("pprof: failed to write heap profile: %v", err)
+					} else {
+						log.Printf("pprof: wrote heap profile to %s (analyze: go tool pprof -alloc_space %s)", p, p)
+					}
+				case syscall.SIGUSR2:
+					p, err := writeGoroutineProfileToFile(pprofDir)
+					if err != nil {
+						log.Printf("pprof: failed to write goroutine profile: %v", err)
+					} else {
+						log.Printf("pprof: wrote goroutine profile to %s", p)
+					}
+				}
+			}
+		}()
+		log.Printf("pprof: signal dumps enabled. Heap: kill -USR1 %d  Goroutines: kill -USR2 %d", os.Getpid(), os.Getpid())
+	}
 
 	// Start the server
 	if err := srv.Start(); err != nil {
