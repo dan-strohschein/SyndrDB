@@ -160,6 +160,9 @@ type Arguments struct {
 	WhereExpressionCacheEnabled bool `yaml:"where_expression_cache_enabled"` // Enable expression caching and predicate reordering (default: true)
 	WhereExpressionCacheSize    int  `yaml:"where_expression_cache_size"`    // LRU cache size for compiled expressions (default: 1000)
 
+	// GROUP BY Strategy Configuration
+	GroupByHashAggregateRowThreshold int `yaml:"groupby_hash_aggregate_row_threshold"` // Rows below this use HashAggregate, above use Sort+GroupAggregate (default: 10000)
+
 	// Backup & Restore Configuration
 	BackupDir            string `yaml:"backup_dir"`             // Directory for backup files (default: "./backups")
 	BackupCompression    string `yaml:"backup_compression"`     // Compression format: "gzip", "zstd", "none" (default: "gzip")
@@ -362,6 +365,7 @@ func GetSettings() *Arguments {
 			// WHERE Expression Caching Configuration (Priority 4)
 			WhereExpressionCacheEnabled: true,  // Enable expression caching and predicate reordering
 			WhereExpressionCacheSize:    1000,  // Cache 1000 compiled expressions
+			GroupByHashAggregateRowThreshold: 10000, // Use HashAggregate for <10k rows, else Sort+GroupAggregate
 			SortEnableParallel:          false, // DEPRECATED: use SortParallelEnabled
 			SortParallelThreshold:       10000, // DEPRECATED: use SortParallelMinSize
 			SortParallelEnabled:         true,  // Phase 5: Enable parallel sorting

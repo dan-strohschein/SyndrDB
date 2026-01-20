@@ -1106,20 +1106,21 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		return fmt.Errorf("failed to append deletion marker: %w", err)
 	}
 
-	// CRITICAL FIX: Flush write buffers AND sync to disk BEFORE releasing lock
+	// D7: Keep FlushWriteBuffers — ensures pending ADDs/UPDATEs are on disk before the tombstone.
+	// Without it, a crash could leave a tombstone for a "never existed" doc. Flush is cheap.
 	err = b.FlushWriteBuffers(bundle.Name)
 	if err != nil {
 		b.logger.Warnf("Failed to flush write buffer for bundle %s: %v", bundle.Name, err)
-		// Don't fail - the deletion marker was written, flush is an optimization
 	}
 
-	// CRITICAL FIX: Force OS to sync to disk to ensure durability
+	// D7: Make only writeBuffer.Sync() conditional on DurabilityMode. Tombstone is in appendDeletionMarker's
+	// file; Sync here orders buffered writes. D3: "strict" sync, else skip.
 	b.bufferMutex.RLock()
 	writeBuffer, exists := b.writeBuffers[bundle.Name]
 	b.bufferMutex.RUnlock()
-	if exists {
+	if exists && settings.GetSettings().DurabilityMode == "strict" {
 		if err := writeBuffer.Sync(); err != nil {
-			b.logger.Warnf("Failed to sync deletion marker to disk: %v (continuing anyway)", err)
+			b.logger.Warnf("Failed to sync write buffer to disk: %v (continuing anyway)", err)
 		}
 	}
 
@@ -1236,11 +1237,11 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 		return fmt.Errorf("failed to write deletion marker data: %w", err)
 	}
 
-	// CRITICAL: Force OS to flush to disk to ensure deletion marker is persisted
-	// Without this, subsequent reads might not see the tombstone marker
-	if err := common.Fdatasync(file); err != nil {
-		b.logger.Warnf("Failed to sync deletion marker to disk: %v (continuing anyway)", err)
-		// Don't fail - the data was written, sync is durability optimization
+	// D3: Fdatasync conditional on DurabilityMode. "strict": sync; "performance" (default): skip.
+	if settings.GetSettings().DurabilityMode == "strict" {
+		if err := common.Fdatasync(file); err != nil {
+			b.logger.Warnf("Failed to sync deletion marker to disk: %v (continuing anyway)", err)
+		}
 	}
 
 	if b.logger != nil {
@@ -1252,10 +1253,15 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 	return nil
 }
 
-// AppendDeletionMarkersBatch writes multiple deletion markers in a single file operation
-// This is CRITICAL for bulk delete performance - opens file once, writes all markers, syncs once
+// AppendDeletionMarkersBatch writes multiple deletion markers in a single file operation.
+// TODO Phase 3: route tombstones through the write buffer (D8) for single Flush/Sync with ADD/UPDATE.
+// This is CRITICAL for bulk delete performance - opens file once, writes all markers, syncs once.
+//
+// R7 LOCK ORDER: This acquires getWriteLock(bundle.Name) (storage). Callers using application-level
+// AcquireBundleWriteLock(bundle.Name) (BundleService) must acquire the application lock FIRST, then
+// call AppendDeletionMarkersBatch. Same as UpdateDocumentInBundle -> UpdateDocumentsBatch.
 func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error {
-	// CRITICAL FIX: Acquire write lock to prevent dirty reads during batch deletion
+	// CRITICAL: Acquire storage write lock (application lock must already be held by caller)
 	lock := b.getWriteLock(bundle.Name)
 	lock.Lock()
 	defer lock.Unlock()
@@ -1299,9 +1305,14 @@ func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, 
 		}
 	}
 
-	// CRITICAL: Single sync at the end for all markers
-	if err := common.Fdatasync(file); err != nil {
-		b.logger.Warnf("Failed to sync %d deletion markers to disk: %v (continuing anyway)", len(documentIDs), err)
+	// D3: Fdatasync conditional on DurabilityMode. "strict": sync; "performance" (default): skip.
+	// TODO: If we experience durability or Sync-throughput issues, consider a "balanced" coalesced
+	// Sync (PostgreSQL wal_writer_delay–style), as in UpdateDocumentsBatch R3.
+	dm := settings.GetSettings().DurabilityMode
+	if dm == "strict" {
+		if err := common.Fdatasync(file); err != nil {
+			b.logger.Warnf("Failed to sync %d deletion markers to disk: %v (continuing anyway)", len(documentIDs), err)
+		}
 	}
 
 	// CRITICAL: Close file IMMEDIATELY after sync to ensure OS updates file metadata

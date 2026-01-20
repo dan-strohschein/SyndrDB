@@ -170,6 +170,12 @@ func formatExecutionTree(
 		result["NodeType"] = "FullScanNode"
 		result["BundleName"] = n.Bundle.Name
 
+	case *BTreeOrderedScanNode:
+		result["NodeType"] = "BTreeOrderedScanNode"
+		result["IndexName"] = n.IndexName
+		result["OrderedByField"] = n.OrderedByFieldName
+		result["BundleName"] = n.Bundle.Name
+
 	case *FilterNode:
 		result["NodeType"] = "FilterNode"
 		result["FilterConditions"] = len(n.Conditions)
@@ -285,6 +291,8 @@ func describePlanType(node ExecutionNode) string {
 		return formatScanType(n.ScanType)
 	case *FullScanNode:
 		return "FullScan"
+	case *BTreeOrderedScanNode:
+		return "BTreeOrderedScan(" + n.OrderedByFieldName + ")"
 	case *FilterNode:
 		childType := describePlanType(n.Child)
 		return childType + " -> Filter"
@@ -366,6 +374,9 @@ func collectCostFormulas(node ExecutionNode, formulas map[string]string) {
 
 	case *FullScanNode:
 		formulas["FullScanCost"] = "N * 1.0 (linear scan)"
+
+	case *BTreeOrderedScanNode:
+		formulas["BTreeOrderedScanCost"] = "0.5*N (full index range, ordered)"
 
 	case *FilterNode:
 		formulas["FilterCost"] = "N * 0.1 (per-row evaluation)"

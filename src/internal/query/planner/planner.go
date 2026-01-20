@@ -73,6 +73,28 @@ type IndexScanNode struct {
 	DocumentScanner documentscanner.DocumentScannerInterface
 }
 
+// OrderedChild is an optional interface for execution nodes that can produce documents
+// in a defined order (e.g. B-tree index key order). AggregationNode uses this to skip
+// the in-memory sort in SortGroupAggregate when the child is already ordered by the first GROUP BY field.
+type OrderedChild interface {
+	ExecuteOrdered(ctx context.Context) ([]*models.Document, error)
+	OrderedByField() string
+}
+
+// BTreeOrderedScanNode performs a full B-tree index scan and returns documents in index key order.
+// Used for single-field GROUP BY when that field has a B-tree index: avoids in-memory sort.
+// Implements ExecutionNode and OrderedChild. When Bundle.Documents is not available, ExecuteOrdered
+// returns an error so the consumer can fall back to Execute (map) and a regular sort.
+type BTreeOrderedScanNode struct {
+	Bundle              *models.Bundle
+	IndexName           string
+	OrderedByFieldName  string
+	Logger              *zap.SugaredLogger
+	BundleServiceInt    BundleServiceInterface
+	Cost                float64
+	EstimatedRows       int
+}
+
 // FullScanNode represents a full bundle scan
 type FullScanNode struct {
 	Bundle           *models.Bundle

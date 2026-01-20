@@ -415,6 +415,103 @@ func (node *IndexScanNode) convertToBytes(value interface{}) []byte {
 	return encoded
 }
 
+// Full-range key bounds for B-tree ordered scan (all keys)
+var (
+	btreeOrderedScanStart = []byte{0x00}
+	btreeOrderedScanEnd   = []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+)
+
+// executeBTreeOrderedScanFull runs a full B-tree range scan and returns documents in index key order.
+// Requires node.Bundle.Documents to be non-nil (in-memory). Returns error if Documents is nil.
+func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Context) ([]*models.Document, error) {
+	if node.Bundle.Indexes == nil {
+		return nil, fmt.Errorf("no indexes found in bundle %s", node.Bundle.Name)
+	}
+	indexRef, exists := node.Bundle.Indexes[node.IndexName]
+	if !exists {
+		return nil, fmt.Errorf("btree index %s not found in bundle %s", node.IndexName, node.Bundle.Name)
+	}
+	if indexRef.IndexType != "btree" {
+		return nil, fmt.Errorf("index %s is not a btree (type: %s)", node.IndexName, indexRef.IndexType)
+	}
+
+	var btreeIndex *btreeindexV2.BTreeIndex
+	if indexRef.IndexInstance == nil {
+		if node.BundleServiceInt == nil {
+			return nil, fmt.Errorf("BundleServiceInt required to load btree index %s", node.IndexName)
+		}
+		loaded, err := node.BundleServiceInt.GetOrLoadBTreeIndex(node.Bundle, node.IndexName, indexRef)
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		btreeIndex, ok = loaded.(*btreeindexV2.BTreeIndex)
+		if !ok {
+			return nil, fmt.Errorf("index %s is not *btreeindexV2.BTreeIndex", node.IndexName)
+		}
+	} else {
+		var ok bool
+		btreeIndex, ok = indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
+		if !ok {
+			return nil, fmt.Errorf("index %s is not *btreeindexV2.BTreeIndex", node.IndexName)
+		}
+	}
+
+	docIDs, err := btreeIndex.RangeSearchWithBounds(btreeOrderedScanStart, btreeOrderedScanEnd, false, false)
+	if err != nil {
+		return nil, err
+	}
+
+	if node.Bundle.Documents == nil {
+		return nil, fmt.Errorf("BTreeOrderedScanNode: bundle %s has no in-memory documents (ordered scan requires Documents)", node.Bundle.Name)
+	}
+
+	node.Bundle.DocumentsMutex.RLock()
+	defer node.Bundle.DocumentsMutex.RUnlock()
+
+	out := make([]*models.Document, 0, len(docIDs))
+	for i, docID := range docIDs {
+		if i > 0 && i%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+		}
+		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
+			cp := new(models.Document)
+			*cp = doc
+			out = append(out, cp)
+		}
+	}
+	return out, nil
+}
+
+func (node *BTreeOrderedScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
+	slice, err := node.executeBTreeOrderedScanFull(ctx)
+	if err != nil {
+		// Return empty map on error so callers that only need a map can still proceed (e.g. no docs)
+		return make(map[string]*models.Document), nil
+	}
+	m := make(map[string]*models.Document, len(slice))
+	for _, d := range slice {
+		m[d.DocumentID] = d
+	}
+	return m, nil
+}
+
+func (node *BTreeOrderedScanNode) ExecuteOrdered(ctx context.Context) ([]*models.Document, error) {
+	return node.executeBTreeOrderedScanFull(ctx)
+}
+
+func (node *BTreeOrderedScanNode) OrderedByField() string {
+	return node.OrderedByFieldName
+}
+
+func (node *BTreeOrderedScanNode) GetCost() float64       { return node.Cost }
+func (node *BTreeOrderedScanNode) GetEstimatedRows() int  { return node.EstimatedRows }
+func (node *BTreeOrderedScanNode) EstimateMemoryUsage() int64 { return 0 }
+
 func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	node.Logger.Infof("Executing optimized full bundle scan on %s using document scanner", node.Bundle.Name)
 
@@ -488,21 +585,23 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		return nil, fmt.Errorf("document scanner is required for paginated document scanning")
 	}
 
-	// PROJECTION PUSHDOWN: Set projection fields on BundleAdapter if ORDER BY is present
-	// For query: SELECT DocumentID, name FROM products ORDER BY name
-	// We only need to deserialize "name" field during document loading, not all fields
-	// This saves ~80-90% deserialization overhead when documents have many unused fields
-	// Example: 10-field documents with ORDER BY name → only deserialize "name" + DocumentID
-	if len(node.ProjectionFields) > 0 {
-		// Access BundleAdapter through SmartBundleScanner's bundle field
-		// Type assert DocumentScanner to SmartBundleScanner to access bundle
-		if smartScanner, ok := node.DocumentScanner.(interface {
-			GetBundle() documentscanner.BundleInterface
-		}); ok {
-			bundle := smartScanner.GetBundle()
-			if bundleAdapter, ok := bundle.(*documentscanner.BundleAdapter); ok {
-				bundleAdapter.SetProjectionFields(node.ProjectionFields)
-				node.Logger.Infof("PROJECTION PUSHDOWN: Set projection fields %v on BundleAdapter for ORDER BY optimization", node.ProjectionFields)
+	// PROJECTION: Establish projection for this scan (overwrites any previous query's projection).
+	// - When ProjectionFields is nil/empty: clear storage and adapter so we get full deserialization.
+	//   (A prior ORDER BY or other query may have set projection; leaving it causes "GROUP BY field X
+	//   not found in document" when this scan expects all fields.)
+	// - When ProjectionFields is set: use it for projection pushdown; defer clear when done.
+	if node.BundleServiceInt != nil {
+		node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, node.ProjectionFields)
+		if len(node.ProjectionFields) > 0 {
+			defer node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, nil)
+		}
+	}
+	if smartScanner, ok := node.DocumentScanner.(interface{ GetBundle() documentscanner.BundleInterface }); ok {
+		if bundleAdapter, ok := smartScanner.GetBundle().(*documentscanner.BundleAdapter); ok {
+			bundleAdapter.SetProjectionFields(node.ProjectionFields)
+			if len(node.ProjectionFields) > 0 {
+				defer bundleAdapter.SetProjectionFields(nil)
+				node.Logger.Infof("PROJECTION PUSHDOWN: Set projection fields %v on BundleAdapter", node.ProjectionFields)
 			}
 		}
 	}

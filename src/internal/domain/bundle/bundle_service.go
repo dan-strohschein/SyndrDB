@@ -297,8 +297,9 @@ type BundleService struct {
 	settings        *settings.Arguments
 
 	// Changed: Store only bundle metadata, not full bundles with documents
-	bundleMetadata map[string]*models.Bundle       // Only schema/structure
-	documentPages  map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
+	bundleMetadata       map[string]*models.Bundle       // Only schema/structure
+	documentPages        map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
+	documentPagesMutex   sync.RWMutex                    // Protects documentPages; prevents concurrent map read/write
 
 	logger *zap.SugaredLogger
 
@@ -1995,32 +1996,35 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 	return bundle, nil
 }
 
-// GetDocumentPage loads a specific page of documents for a bundle
+// GetDocumentPage loads a specific page of documents for a bundle.
+// documentPagesMutex is used to prevent concurrent map read/write (evictOldestPage range vs other goroutines' read/write).
 func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, pageID uint32) (*models.DocumentPage, error) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 
-	// Check if page is already loaded in memory
+	s.documentPagesMutex.RLock()
 	if page, exists := s.documentPages[pageKey]; exists {
-		//s.logger.Debugf("Document page %s already loaded in memory", pageKey)
+		s.documentPagesMutex.RUnlock()
 		return page, nil
 	}
+	s.documentPagesMutex.RUnlock()
 
-	// Load the page from disk
+	// Load the page from disk (outside RLock to avoid holding during I/O)
 	s.logger.Debugf("Loading document page %s from disk", pageKey)
-
 	databasePath := helpers.GetDatabaseFolderPath(databaseName)
-
 	page, err := s.store.LoadDocumentPage(bundleName, databaseName, pageID, databasePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load document page %s: %w", pageKey, err)
 	}
 
-	// Check if we need to evict old pages to stay within memory limits
-	if len(s.documentPages) >= s.maxLoadedPages {
-		s.evictOldestPage()
+	s.documentPagesMutex.Lock()
+	defer s.documentPagesMutex.Unlock()
+	// Double-check: another goroutine may have filled it while we were loading
+	if p, exists := s.documentPages[pageKey]; exists {
+		return p, nil
 	}
-
-	// Store in memory
+	if len(s.documentPages) >= s.maxLoadedPages {
+		s.evictOldestPageLocked()
+	}
 	s.documentPages[pageKey] = page
 	return page, nil
 }
@@ -2082,28 +2086,23 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string)
 	return nil, fmt.Errorf("document %s not found in page %d of bundle %s", documentID, pageID, bundleName)
 }
 
-// evictOldestPage removes the least recently used page from memory
-func (s *BundleService) evictOldestPage() {
+// evictOldestPageLocked removes the least recently used page from memory.
+// Caller must hold s.documentPagesMutex (Lock).
+func (s *BundleService) evictOldestPageLocked() {
 	var oldestKey string
 	var oldestTime time.Time
-
-	// Find the oldest page by LoadedAt timestamp
 	for key, page := range s.documentPages {
 		if oldestKey == "" || page.LoadedAt.Before(oldestTime) {
 			oldestKey = key
 			oldestTime = page.LoadedAt
 		}
 	}
-
 	if oldestKey != "" {
 		s.logger.Debugf("Evicting document page %s from memory", oldestKey)
-
-		// If the page is dirty, write it back to disk first
 		if s.documentPages[oldestKey].IsDirty {
-			// TODO: Implement page write-back
 			s.logger.Debugf("Page %s is dirty, writing back to disk", oldestKey)
+			// TODO: Implement page write-back
 		}
-
 		delete(s.documentPages, oldestKey)
 	}
 }
@@ -2680,6 +2679,7 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 	delete(s.bundleMetadata, name)
 
 	// Remove any loaded document pages for this bundle
+	s.documentPagesMutex.Lock()
 	keysToDelete := make([]string, 0, 50)
 	for pageKey := range s.documentPages {
 		if strings.HasPrefix(pageKey, name+":") {
@@ -2689,6 +2689,7 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 	for _, key := range keysToDelete {
 		delete(s.documentPages, key)
 	}
+	s.documentPagesMutex.Unlock()
 
 	return nil
 }
@@ -3547,21 +3548,20 @@ func (s *BundleService) rebuildFieldIndex(bundle *models.Bundle, fieldName strin
 
 // invalidateBundlePageCache invalidates all cached pages for a bundle
 func (s *BundleService) invalidateBundlePageCache(bundleName string) {
+	s.documentPagesMutex.Lock()
+	defer s.documentPagesMutex.Unlock()
 	if s.documentPages == nil {
 		return
 	}
-
 	keysToDelete := make([]string, 0, 50)
 	for pageKey := range s.documentPages {
 		if strings.HasPrefix(pageKey, bundleName+":") {
 			keysToDelete = append(keysToDelete, pageKey)
 		}
 	}
-
 	for _, key := range keysToDelete {
 		delete(s.documentPages, key)
 	}
-
 	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", len(keysToDelete), bundleName)
 }
 
@@ -4492,7 +4492,6 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 		if cachedIndex, found := bundleCache[indexName]; found {
 			if btreeIndex, ok := cachedIndex.(*btreeindexV2.BTreeIndex); ok {
 				s.indexCacheMutex.RUnlock()
-				s.logger.Debugf("✓ BTree index '%s' CACHE HIT (already in memory)", indexName)
 				return btreeIndex, nil
 			}
 		}
@@ -5034,14 +5033,13 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 	}
 
 	// Update in-memory cache: if the appropriate document page is loaded, add the document to it
-	// This prevents cache inconsistency where disk has the new document but memory cache is stale
-	// We already have pageID from the storage layer, so use it directly
 	pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
+	s.documentPagesMutex.Lock()
 	if page, exists := s.documentPages[pageKey]; exists {
-		// Page is loaded in memory, add the new document to it
 		page.Documents[document.DocumentID] = *document
 		s.logger.Debugf("Added document '%s' to in-memory page %s", document.DocumentID, pageKey)
 	}
+	s.documentPagesMutex.Unlock()
 
 	return nil
 }
@@ -5239,6 +5237,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	}
 
 	// R2: Invalidate document page cache once after the batch (was inside the loop).
+	s.documentPagesMutex.Lock()
 	keysToDelete := make([]string, 0, 50)
 	for pageKey := range s.documentPages {
 		if strings.HasPrefix(pageKey, bundle.Name+":") {
@@ -5248,6 +5247,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	for _, key := range keysToDelete {
 		delete(s.documentPages, key)
 	}
+	s.documentPagesMutex.Unlock()
 	s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update", len(keysToDelete), bundle.Name)
 
 	return nil
@@ -5336,18 +5336,12 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		return nil
 	}
 
-	// ==========  VALIDATE REFERENTIAL INTEGRITY ==========
-	//  Check that deleting these documents won't break relationships
-	// This prevents orphaned foreign key references in related bundles
+	// D9: Use ValidateBulkDeleteOptimized for all deletes (not only >10). Removes N×ValidateDelete
+	// (N×GetBundleByName + N×GetOrLoadHashIndex per relationship) for 1–10 doc deletes.
 	s.logger.Debugf("[REFINT] Starting referential integrity validation for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
 	validator := NewReferentialIntegrityValidator(s, s.logger)
-	for _, documentID := range docIDs {
-		err := validator.ValidateDelete(bundle, documentID)
-		if err != nil {
-			// Referential integrity violation - block deletion
-			s.logger.Warnf("[REFINT] Referential integrity violation for document '%s': %v", documentID, err)
-			return fmt.Errorf("cannot delete document '%s': %w", documentID, err)
-		}
+	if err := validator.ValidateBulkDeleteOptimized(bundle, docIDs); err != nil {
+		return fmt.Errorf("referential integrity: %w", err)
 	}
 	s.logger.Debugf("[REFINT] Referential integrity validated successfully for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
 
@@ -5363,207 +5357,236 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 // Parameters:
 //   - skipMetadataUpdate: if true, caller is responsible for scheduling metadata updates (used for bulk operations)
 func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, skipMetadataUpdate bool) error {
-	// CRITICAL OPTIMIZATION: For bulk deletes, use batched file operations
-	isBulkDelete := len(docIDs) > 10 // Consider > 10 deletions as "bulk"
+	// D1: Use AppendDeletionMarkersBatch for all deletes (threshold 1). Removes N×DeleteDocumentFromBundleFile,
+	// N×verifyDocumentExistsStreaming, N×appendDeletionMarker, N×lock. Delete is idempotent: tombstones for
+	// non-existent docs are acceptable in append-only storage; callers should pass IDs from a valid WHERE result.
+	if len(docIDs) == 0 {
+		return nil
+	}
 
-	if isBulkDelete {
-		// CRITICAL: Flush write buffer FIRST to ensure all documents are on disk
-		// Otherwise tombstones might be written before some document inserts are flushed
-		err := s.store.FlushWriteBuffers(docCommand.BundleName)
-		if err != nil {
-			s.logger.Warnf("Failed to flush write buffers before bulk delete: %v", err)
-		}
-
-		// CRITICAL: Write ALL deletion markers to disk FIRST (durability)
-		err = s.store.AppendDeletionMarkersBatch(bundle, docIDs)
-		if err != nil {
-			return fmt.Errorf("failed to append batch deletion markers: %w", err)
-		}
-		s.logger.Infof("BULK DELETE: Wrote %d deletion markers to disk", len(docIDs))
-
-		// CRITICAL: Close the write buffer to ensure file handle is released and
-		// OS metadata cache is invalidated. This ensures subsequent opens get
-		// the correct file size (including tombstones).
-		err = s.store.CloseWriteBuffer(docCommand.BundleName)
-		if err != nil {
-			s.logger.Warnf("Failed to close write buffer after tombstones: %v", err)
-		}
-
-		// CRITICAL: Now remove documents from ALL memory structures to ensure consistency
-		// This must happen AFTER disk write to maintain durability
-
-		// 1. Remove from Bundle.Documents if loaded
-		if bundle.Documents != nil {
+	// D6 (Phase 1a): Harvest B-tree index keys BEFORE in-memory removal. GetDocument after removal is
+	// semantically broken (doc already cleared). Use WHERE result; here we GetDocument while docs are still
+	// in bundle.Documents/documentPageMap. If harvest fails for a doc, we skip B-tree delete for that doc.
+	// A: Log at Debug to avoid WARN storms. B: Hash delete for this docID still runs in the index cleanup loop.
+	// C: B-tree entries for harvest-failed docIDs are removed via DeleteByDocumentIDs after the per-doc loop.
+	//
+	// Large-delete optimization: when len(docIDs) > harvestSkipThreshold, skip the harvest loop entirely.
+	// N×GetDocument (each with findDocumentPage, GetDocumentPage, possible eviction) causes timeouts and
+	// documentPages contention. Put all docIDs in harvestFailedDocIDs; C (DeleteByDocumentIDs) does one
+	// full B-tree scan per index instead. Trade: N×GetDocument vs M×fullScan (M = number of B-trees).
+	const harvestSkipThreshold = 500
+	btreeKeys := make(map[string]map[string][]byte)  // docID -> indexName -> keyBytes
+	harvestFailedDocIDs := make(map[string]struct{}) // C: docIDs where GetDocument failed; DeleteByDocumentIDs will clean B-trees
+	if bundle.Indexes != nil && bundle.Database != nil {
+		if len(docIDs) > harvestSkipThreshold {
 			for _, docID := range docIDs {
-				delete(*bundle.Documents, docID)
+				harvestFailedDocIDs[docID] = struct{}{}
 			}
-			s.logger.Infof("BULK DELETE: Removed %d documents from Bundle.Documents in-memory map", len(docIDs))
-		}
-
-		// 2. Remove from documentPageMap (page location cache)
-		s.pageCacheMutex.Lock()
-		if pageMap, exists := s.documentPageMap[docCommand.BundleName]; exists {
+			s.logger.Debugf("B-tree harvest: skipped for %d docs (>%d); C (DeleteByDocumentIDs) will clean B-trees", len(docIDs), harvestSkipThreshold)
+		} else {
 			for _, docID := range docIDs {
-				delete(pageMap, docID)
-			}
-		}
-		s.pageCacheMutex.Unlock()
-
-		// 3. Clear documentPages cache (actual page data)
-		s.invalidateBundlePageCache(docCommand.BundleName)
-
-		// 3.5. Update the document scanner's cached pages to remove deleted documents
-		// This ensures queries don't return stale cached data
-		if scanner, exists := s.bundleScanners[docCommand.BundleName]; exists {
-			// Get the BundleAdapter from the scanner
-			if smartScanner, ok := scanner.(*documentscanner.SmartBundleScanner); ok {
-				smartScanner.RemoveDocumentsFromCache(docIDs)
-			}
-		}
-
-		// 4. Clear document scanner cache
-		s.RemoveDocumentScanner(docCommand.BundleName)
-
-		s.logger.Infof("BULK DELETE: Removed %d documents from all memory structures for bundle '%s'", len(docIDs), docCommand.BundleName)
-	} else {
-		// Non-bulk: process each document individually
-		for _, documentID := range docIDs {
-			// STEP 1: Remove from physical bundle file (append tombstone marker) - DURABILITY FIRST
-			err := s.store.DeleteDocumentFromBundleFile(bundle, documentID)
-			if err != nil {
-				// DEFENSIVE: Check if error is "document not found" - this can happen if:
-				// 1. Document exists only in memtable (not yet flushed to disk)
-				// 2. Document was already deleted but index still has stale entry
-				// 3. Concurrent deletion happened
-				// 4. Index cache is out of sync with bundle file
-				if strings.Contains(err.Error(), "not found") {
-					s.logger.Warnf("Document %s not found in bundle file during deletion (may be in memtable only or already deleted) - removing from memory", documentID)
-					// Document may be in memtable only (not yet flushed to disk)
-					// Remove it from memory structures anyway
-				} else {
-					return fmt.Errorf("failed to remove document %s from bundle file: %w", documentID, err)
+				doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
+				if err != nil {
+					harvestFailedDocIDs[docID] = struct{}{}
+					s.logger.Debugf("B-tree harvest: failed to load document '%s': %v; B will clean hash, C will clean B-tree", docID, err)
+					continue
+				}
+				for indexName, indexRef := range bundle.Indexes {
+					if indexRef.IndexType != "btree" {
+						continue
+					}
+					fieldName := indexRef.BTreeIndexField.FieldName
+					fv, err := extractFieldValueForIndex(*doc, fieldName)
+					if err != nil {
+						s.logger.Warnf("B-tree harvest: extract %s for %s: %v; skipping", fieldName, docID, err)
+						continue
+					}
+					kb, err := convertValueToBytes(fv)
+					if err != nil {
+						s.logger.Warnf("B-tree harvest: convert for %s: %v; skipping", docID, err)
+						continue
+					}
+					if btreeKeys[docID] == nil {
+						btreeKeys[docID] = make(map[string][]byte)
+					}
+					btreeKeys[docID][indexName] = kb
 				}
 			}
+		}
+	}
 
-			// STEP 2: Remove from in-memory structures - CONSISTENCY
-			// Do this regardless of whether file deletion succeeded, because document
-			// might exist only in memtable (not yet flushed to disk)
+	// Flush write buffer FIRST so pending ADDs/UPDATEs are on disk before tombstones (D7: keep FlushWriteBuffers).
+	// Otherwise a crash could leave a tombstone for a "never existed" doc.
+	err := s.store.FlushWriteBuffers(docCommand.BundleName)
+	if err != nil {
+		s.logger.Warnf("Failed to flush write buffers before delete: %v", err)
+	}
 
-			// Remove from Bundle.Documents if loaded (memtable)
-			if bundle.Documents != nil {
-				delete(*bundle.Documents, documentID)
+	// Write ALL deletion markers in one batch (one lock, one open, one Fdatasync). D2: we no longer call
+	// verifyDocumentExistsStreaming; delete is idempotent.
+	err = s.store.AppendDeletionMarkersBatch(bundle, docIDs)
+	if err != nil {
+		return fmt.Errorf("failed to append batch deletion markers: %w", err)
+	}
+	s.logger.Debugf("DELETE: Wrote %d deletion markers to disk", len(docIDs))
+	// Observability (Phase 1b): log batch delete. TODO: metrics.DeleteBatchDuration, DeleteVerifySkipCount, requested vs deleted.
+	s.logger.Infow("Delete batch", "bundle", docCommand.BundleName, "docCount", len(docIDs))
+
+	// Close the write buffer so subsequent opens see the correct file size (including tombstones).
+	// Subsequent ADDs will recreate the buffer. Documented in plan §1.5 CloseWriteBuffer.
+	err = s.store.CloseWriteBuffer(docCommand.BundleName)
+	if err != nil {
+		s.logger.Warnf("Failed to close write buffer after tombstones: %v", err)
+	}
+
+	// D5: In-memory and cache invalidation once per batch (unify bulk and non-bulk). Remove from all structures
+	// after disk write to maintain durability.
+
+	// 1. Remove from Bundle.Documents if loaded
+	if bundle.Documents != nil {
+		for _, docID := range docIDs {
+			delete(*bundle.Documents, docID)
+		}
+	}
+
+	// 2. Targeted page invalidation: collect pageIDs for deleted docs from documentPageMap before
+	//    removing them; invalidate only those pages from documentPages. If any deleted doc is not
+	//    in documentPageMap, we cannot know all affected pages → fall back to full invalidate.
+	//    This avoids the 20–30s stall on the next statement caused by wiping all documentPages.
+	s.pageCacheMutex.Lock()
+	pageIDsToInvalidate := make(map[uint32]struct{})
+	allDocsInMap := true
+	if pageMap, exists := s.documentPageMap[docCommand.BundleName]; exists {
+		for _, docID := range docIDs {
+			if pageID, ok := pageMap[docID]; ok {
+				pageIDsToInvalidate[pageID] = struct{}{}
+			} else {
+				allDocsInMap = false
 			}
+			delete(pageMap, docID)
+		}
+	} else {
+		allDocsInMap = false
+	}
+	s.pageCacheMutex.Unlock()
 
-			// Remove from documentPageMap (page location cache)
-			s.pageCacheMutex.Lock()
-			if pageMap, exists := s.documentPageMap[docCommand.BundleName]; exists {
-				delete(pageMap, documentID)
+	if s.documentPages != nil {
+		if !allDocsInMap {
+			s.invalidateBundlePageCache(docCommand.BundleName)
+		} else {
+			s.documentPagesMutex.Lock()
+			for pageID := range pageIDsToInvalidate {
+				pageKey := fmt.Sprintf("%s:%d", docCommand.BundleName, pageID)
+				delete(s.documentPages, pageKey)
 			}
-			s.pageCacheMutex.Unlock()
+			s.documentPagesMutex.Unlock()
+			if len(pageIDsToInvalidate) > 0 {
+				s.logger.Debugf("Invalidated %d cached pages for bundle '%s' (targeted)", len(pageIDsToInvalidate), docCommand.BundleName)
+			}
+		}
+	}
 
-			// Invalidate specific page if known, otherwise all pages
-			s.invalidateDocumentPage(docCommand.BundleName, documentID)
-
-			// Invalidate the document scanner cache to force reload from disk on next call
+	// 3. Remove deleted docs from scanner's cache when SmartBundleScanner; keep scanner alive to
+	//    avoid 20–30s stall on next SELECT (new scanner would have empty cachedPages + cold
+	//    documentPages → full reload from disk). Only tear down when we can't do targeted invalidation.
+	if scanner, exists := s.bundleScanners[docCommand.BundleName]; exists {
+		if smartScanner, ok := scanner.(*documentscanner.SmartBundleScanner); ok {
+			smartScanner.RemoveDocumentsFromCache(docIDs)
+			// do NOT call RemoveDocumentScanner — keep scanner and its cachedPages
+		} else {
 			s.RemoveDocumentScanner(docCommand.BundleName)
 		}
 	}
 
-	// Process each document for index/relationship cleanup (same for bulk and non-bulk)
-	for _, documentID := range docIDs {
+	// D6: Pre-load each index once per batch (Phase 2). TODO: batched B-tree Delete and BatchDelete for hash.
+	// TODO Phase 3: Deferred index cleanup (config: tombstone+in-memory sync; index cleanup async via channel+worker).
+	hashIndexes := make(map[string]*hashindex.HashIndexV3)
+	btreeIndexes := make(map[string]*btreeindexV2.BTreeIndex)
+	if bundle.Indexes != nil {
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
+				idx, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
+				if err != nil {
+					s.logger.Errorf("Failed to load hash index '%s': %v", indexName, err)
+					continue
+				}
+				hashIndexes[indexName] = idx
+			} else if indexRef.IndexType == "btree" {
+				idx, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
+				if err != nil {
+					s.logger.Errorf("Failed to load BTree index '%s': %v", indexName, err)
+					continue
+				}
+				btreeIndexes[indexName] = idx
+			}
+		}
+	}
 
-		//  Remove from hash indexes with disk persistence
+	// Process each document for index cleanup (hash Delete, B-tree Delete using harvested keys).
+	for _, documentID := range docIDs {
 		if bundle.Indexes != nil {
 			for indexName, indexRef := range bundle.Indexes {
 				if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
-					// Load hash index on-demand
-					hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
-					if err != nil {
-						s.logger.Errorf("Failed to load hash index '%s': %v", indexName, err)
-						continue // Continue with other indexes
+					hashIndex := hashIndexes[indexName]
+					if hashIndex == nil {
+						continue
 					}
-
-					// === NEW V3 DELETE (LSM-style) ===
-					// For DocumentID index, the key is the documentID itself
 					deleted, err := hashIndex.Delete(documentID)
 					if err != nil {
-						s.logger.Warnf("Failed to delete DocumentID '%s' from hash index V3 '%s': %v",
-							documentID, indexName, err)
+						s.logger.Warnf("Failed to delete DocumentID '%s' from hash index '%s': %v", documentID, indexName, err)
 					} else if deleted {
-						s.logger.Debugf("Successfully deleted DocumentID '%s' from hash index '%s'",
-							documentID, indexName)
-					} else {
-						s.logger.Debugf("DocumentID '%s' was not found in hash index '%s'",
-							documentID, indexName)
+						s.logger.Debugf("Successfully deleted DocumentID '%s' from hash index '%s'", documentID, indexName)
 					}
-
-					// Persist hash index changes to disk
-					err = s.flushHashIndexToDisk(hashIndex, bundle, indexName)
-					if err != nil {
-						s.logger.Warnf("Failed to persist hash index '%s' to disk: %v", indexName, err)
-						// Continue - the in-memory deletion was successful
-					}
+					// D6: flushHashIndexToDisk once per index after the loop, not per doc
 				} else if indexRef.IndexType == "btree" {
-					// B-Tree index deletion with persistence (MVP feature - required for launch)
-					// Load the document first to extract the indexed field value
-					doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, documentID)
-					if err != nil {
-						s.logger.Warnf("Failed to load document '%s' for B-Tree index deletion: %v", documentID, err)
-						continue // Continue with other indexes
-					}
-
-					// Extract the field value for deletion
-					fieldValue, err := extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName)
-					if err != nil {
-						s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, err)
+					btreeIndex := btreeIndexes[indexName]
+					if btreeIndex == nil {
 						continue
 					}
-
-					// Convert field value to bytes for BTree storage
-					keyBytes, err := convertValueToBytes(fieldValue)
-					if err != nil {
-						s.logger.Warnf("Failed to convert field value to bytes for document '%s': %v", documentID, err)
-						continue
+					if m := btreeKeys[documentID]; m != nil {
+						if keyBytes, ok := m[indexName]; ok {
+							err := btreeIndex.Delete(keyBytes, documentID)
+							if err != nil {
+								s.logger.Warnf("Failed to delete document '%s' from BTree index '%s': %v", documentID, indexName, err)
+							} else {
+								s.logger.Debugf("Successfully deleted document '%s' from BTree index '%s'", documentID, indexName)
+							}
+						}
 					}
-
-					// Load BTree index on-demand
-					btreeIndex, err := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
-					if err != nil {
-						s.logger.Errorf("Failed to load BTree index '%s': %v", indexName, err)
-						continue // Continue with other indexes
-					}
-
-					// Delete from the BTree index
-					err = btreeIndex.Delete(keyBytes, documentID)
-					if err != nil {
-						s.logger.Warnf("Failed to delete document '%s' from BTree index '%s': %v", documentID, indexName, err)
-					} else {
-						s.logger.Debugf("Successfully deleted document '%s' from BTree index '%s'",
-							documentID, indexName)
-					}
-
-					// TODO: Add explicit BTree index persistence (flush) to ensure durability
-					// Currently relies on BTreeIndex internal flush mechanisms
-					// Future enhancement: Add btreeIndex.Flush() call here or use batched persistence
+					// Harvest failed for this docID: C (DeleteByDocumentIDs) runs after this loop
 				}
 			}
 		}
-
-		// CRITICAL FIX: Do NOT schedule decrement_docs metadata update
-		// In append-only storage, tombstones are still entries on disk, so TotalDocuments
-		// should represent total document entries (including tombstones), not active documents.
-		// See DeleteDocumentFromBundleFile for detailed explanation.
-		// if !skipMetadataUpdate {
-		// 	s.scheduleMetadataUpdate(docCommand.BundleName, "decrement_docs", 1) // REMOVED: Causes corruption
-		// }
 	}
 
-	// CRITICAL: For bulk deletes, invalidate query planner cache
-	// The planner caches Bundle objects with full document sets
-	if isBulkDelete {
-		s.invalidatePlanCacheForBundle(docCommand.BundleName)
-		s.logger.Infof("BULK DELETE: Invalidated query planner cache for bundle '%s'", docCommand.BundleName)
+	// C: For docIDs where harvest failed, remove stale B-tree entries by documentID.
+	// One full scan per B-tree over all failed docIDs (batched) instead of one scan per docID.
+	if len(harvestFailedDocIDs) > 0 {
+		failedList := make([]string, 0, len(harvestFailedDocIDs))
+		for d := range harvestFailedDocIDs {
+			failedList = append(failedList, d)
+		}
+		for _, btreeIndex := range btreeIndexes {
+			if btreeIndex != nil {
+				n, err := btreeIndex.DeleteByDocumentIDs(failedList)
+				if err != nil {
+					s.logger.Warnf("B-tree DeleteByDocumentIDs for harvest-failed docs: %v", err)
+				} else if n > 0 {
+					s.logger.Debugf("B-tree DeleteByDocumentIDs: removed %d stale entries for harvest-failed docIDs", n)
+				}
+			}
+		}
 	}
+
+	// D6: Flush each DocumentID hash index once per index after the loop (was per doc).
+	for indexName, hashIndex := range hashIndexes {
+		if err := s.flushHashIndexToDisk(hashIndex, bundle, indexName); err != nil {
+			s.logger.Warnf("Failed to persist hash index '%s' to disk: %v", indexName, err)
+		}
+	}
+
+	// Invalidate query planner cache (planner caches Bundle objects with full document sets)
+	s.invalidatePlanCacheForBundle(docCommand.BundleName)
 
 	// STEP 7: Update command with deleted document IDs for response
 	docCommand.DeletedDocumentIDs = docIDs //deletedDocumentIDs
@@ -6728,30 +6751,30 @@ func (s *BundleService) CloseAllScanners() {
 }
 
 // invalidateDocumentPage invalidates the page cache for a specific document
-// Uses the documentPageMap for O(1) lookup when available, otherwise invalidates all pages
+// Uses the documentPageMap for O(1) lookup when available, otherwise invalidates all pages.
+// Lock order: pageCacheMutex before documentPagesMutex.
 func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	s.pageCacheMutex.Lock()
 	defer s.pageCacheMutex.Unlock()
 
-	// Check if we have page location info for this bundle
 	if bundlePages, exists := s.documentPageMap[bundleName]; exists {
 		if pageID, hasPage := bundlePages[documentID]; hasPage {
-			// We know the exact page - invalidate just that page
 			pageKey := fmt.Sprintf("%s:page_%d", bundleName, pageID)
+			s.documentPagesMutex.Lock()
 			delete(s.documentPages, pageKey)
+			s.documentPagesMutex.Unlock()
 
-			// Clean up the page location mapping
 			delete(bundlePages, documentID)
 			if len(bundlePages) == 0 {
 				delete(s.documentPageMap, bundleName)
 			}
-
 			s.logger.Debugf("Invalidated page %d for document %s in bundle %s", pageID, documentID, bundleName)
 			return
 		}
 	}
 
 	// Fall back to invalidating all pages for this bundle
+	s.documentPagesMutex.Lock()
 	keysToDelete := make([]string, 0, 50)
 	for pageKey := range s.documentPages {
 		if strings.HasPrefix(pageKey, bundleName+":") {
@@ -6761,10 +6784,9 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	for _, key := range keysToDelete {
 		delete(s.documentPages, key)
 	}
+	s.documentPagesMutex.Unlock()
 
-	// Clean up entire bundle from page map since we invalidated all pages
 	delete(s.documentPageMap, bundleName)
-
 	s.logger.Debugf("Invalidated all pages for bundle %s (document %s not in page map)", bundleName, documentID)
 }
 

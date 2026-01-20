@@ -854,82 +854,95 @@ func (idx *BTreeIndex) Delete(key []byte, documentID string) error {
 	if !idx.isOpen {
 		return fmt.Errorf("index is not open")
 	}
-
 	if len(key) == 0 {
 		return fmt.Errorf("key cannot be empty")
 	}
-
 	if documentID == "" {
 		return fmt.Errorf("document ID cannot be empty")
 	}
-
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
+	return idx.deleteOneLocked(key, documentID)
+}
 
-	// WAL Integration: Log BEFORE creating tombstone (PostgreSQL-style durability)
-	// This ensures we can replay the deletion after a crash
-	// DRY Principle: Reuse same WAL infrastructure as Insert
+// deleteOneLocked performs one (key, documentID) deletion. Caller must hold idx.mutex.
+// Used by Delete and by DeleteByDocumentIDs.
+func (idx *BTreeIndex) deleteOneLocked(key []byte, documentID string) error {
 	if idx.walEnabled && idx.walManager != nil {
 		lsn := idx.nextLSN
-		idx.nextLSN++ // Increment LSN for next operation
-
+		idx.nextLSN++
 		if err := idx.walManager.LogDelete(idx.Metadata.IndexName, idx.bundleName, key, documentID, lsn); err != nil {
 			idx.logger.Errorf("Failed to log delete to WAL: %v", err)
 			return fmt.Errorf("WAL delete failed: %w", err)
 		}
-
 		idx.logger.Debugf("Logged delete to WAL: LSN=%d, key=%s, docID=%s", lsn, string(key), documentID)
 	}
-
 	idx.logger.Debugf("Deleting key '%s' with document ID '%s'", string(key), documentID)
-
-	// Perform the deletion
 	newRootPageNum, affectsParentNode, nodesDeleted, err := idx.deleteInternal(key, documentID, idx.rootPageNum)
 	if err != nil {
 		return fmt.Errorf("failed to delete key: %w", err)
 	}
-
-	// Handle root page changes if deletion affected tree structure
 	if newRootPageNum != idx.rootPageNum {
-		idx.logger.Debugf("Root page changed from %d to %d due to deletion",
-			idx.rootPageNum, newRootPageNum)
+		idx.logger.Debugf("Root page changed from %d to %d due to deletion", idx.rootPageNum, newRootPageNum)
 		idx.rootPageNum = newRootPageNum
 		idx.Metadata.RootPageNum = newRootPageNum
 	}
-
-	// Log structural changes for monitoring and debugging
 	if affectsParentNode {
 		idx.logger.Debugf("Deletion caused structural changes affecting parent nodes")
 	}
-
-	// Track nodes deleted for maintenance and statistics
 	if nodesDeleted > 0 {
 		idx.logger.Debugf("Deletion resulted in %d nodes being removed/merged", nodesDeleted)
 		idx.Metadata.TotalNodes -= uint32(nodesDeleted)
-
-		// Update fragmentation metrics
 		idx.updateFragmentationAfterDeletion(nodesDeleted)
 	}
-
-	// Update metadata statistics
 	idx.Metadata.DecrementRecordCount()
 	idx.Metadata.UpdateStatistics("delete")
 	idx.Metadata.UpdateDeletionMetrics(nodesDeleted, affectsParentNode)
-
-	// Check if tree needs maintenance after significant structural changes
 	if affectsParentNode || nodesDeleted > 0 {
 		idx.checkMaintenanceNeeded()
 	}
-
-	// Write updated metadata
 	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
 		idx.logger.Warnf("Failed to update metadata after delete: %v", err)
 	}
-
 	idx.logger.Debugf("Successfully deleted key '%s' with document ID '%s', nodes deleted: %d",
 		string(key), documentID, nodesDeleted)
-
 	return nil
+}
+
+// DeleteByDocumentIDs removes all B-tree entries whose documentID is in the given list.
+// Used when harvest fails (GetDocument fails) and we cannot obtain the index key.
+// Does one full in-order scan per B-tree, then deletes each (key, documentID) found.
+// Batched for speed: one scan for all documentIDs instead of one scan per documentID.
+//
+// Returns the number of entries deleted.
+func (idx *BTreeIndex) DeleteByDocumentIDs(documentIDs []string) (int, error) {
+	if !idx.isOpen {
+		return 0, fmt.Errorf("index is not open")
+	}
+	if len(documentIDs) == 0 {
+		return 0, nil
+	}
+	set := make(map[string]struct{}, len(documentIDs))
+	for _, d := range documentIDs {
+		if d != "" {
+			set[d] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return 0, nil
+	}
+	idx.mutex.Lock()
+	defer idx.mutex.Unlock()
+	keys, docIDsOut, err := scanKeysForDocumentIDs(idx, set, idx.rootPageNum)
+	if err != nil {
+		return 0, err
+	}
+	for i := range keys {
+		if err := idx.deleteOneLocked(keys[i], docIDsOut[i]); err != nil {
+			idx.logger.Warnf("DeleteByDocumentIDs: deleteOneLocked failed for docID %s: %v", docIDsOut[i], err)
+		}
+	}
+	return len(keys), nil
 }
 
 // updateFragmentationAfterDeletion updates fragmentation metrics after node deletions
@@ -1022,6 +1035,24 @@ func (idx *BTreeIndex) Search(key []byte) ([]string, error) {
 	idx.logger.Debugf("Search for key '%s' returned %d results", string(key), len(results))
 
 	return results, nil
+}
+
+// Exists reports whether the key has at least one entry. For uniqueness checks.
+// Skips stats and logging to meet <100µs for in-memory indexes.
+func (idx *BTreeIndex) Exists(key []byte) (bool, error) {
+	if !idx.isOpen {
+		return false, fmt.Errorf("index is not open")
+	}
+	if len(key) == 0 {
+		return false, fmt.Errorf("key cannot be empty")
+	}
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+	results, _, err := idx.searchInternal(key, idx.rootPageNum)
+	if err != nil {
+		return false, err
+	}
+	return len(results) > 0, nil
 }
 
 // RangeSearch finds all document IDs for keys within the specified range

@@ -55,6 +55,7 @@ import (
 	"syndrdb/src/internal/query/executor"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
@@ -120,29 +121,37 @@ func NewAggregationNode(
 	logger *zap.SugaredLogger,
 ) *AggregationNode {
 
-	// Determine execution strategy based on input size
+	// Determine execution strategy based on input size, estimated groups, and configurable threshold
 	childRows := child.GetEstimatedRows()
 	var strategy queryparser.GroupByStrategy
 	var costFactor float64
 
-	// Hash aggregate is faster for smaller datasets or when memory is available
-	// Sort+GroupAggregate is better for very large datasets that may need disk spilling
-	if childRows < 10000 {
-		strategy = queryparser.HashAggregate
-		costFactor = 0.01 // Hash aggregate is O(n)
-	} else {
-		strategy = queryparser.SortGroupAggregate
-		costFactor = 0.02 // Sort+GroupAggregate is O(n log n)
-	}
-
-	// Estimate number of output groups (assume 10% uniqueness for now)
-	// This is a heuristic - actual cardinality depends on data distribution
+	// Estimate number of output groups (heuristic: assume ~10% uniqueness; actual cardinality varies)
 	estimatedGroups := childRows / 10
 	if estimatedGroups < 1 {
 		estimatedGroups = 1
 	}
 	if estimatedGroups > childRows {
 		estimatedGroups = childRows
+	}
+
+	// Threshold from settings (default 10000); 0 or unset means use default
+	threshold := settings.GetSettings().GroupByHashAggregateRowThreshold
+	if threshold <= 0 {
+		threshold = 10000
+	}
+
+	// Prefer Sort+GroupAggregate when estimated distinct groups are very large (hash would use too much memory)
+	// e.g. estimatedGroups >= 50% of rows or > 500k groups
+	if estimatedGroups > childRows/2 || estimatedGroups > 500000 {
+		strategy = queryparser.SortGroupAggregate
+		costFactor = 0.02
+	} else if childRows < threshold {
+		strategy = queryparser.HashAggregate
+		costFactor = 0.01 // Hash aggregate is O(n)
+	} else {
+		strategy = queryparser.SortGroupAggregate
+		costFactor = 0.02 // Sort+GroupAggregate is O(n log n)
 	}
 
 	node := &AggregationNode{
@@ -255,38 +264,58 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 	
 executeChild:
 
-	// Execute child node to get input documents (WHERE already applied by FilterNode)
-	documents, err := n.Child.Execute(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
-	}
-
-	n.Logger.Debugf("AggregationNode received %d documents from child", len(documents))
-
-	// Handle empty result set
-	if len(documents) == 0 {
-		// Check if this is an aggregate-only query (no GROUP BY clause)
-		isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-
-		if !isAggregateOnly {
-			// Regular GROUP BY queries with no documents - return empty result
-			n.Logger.Debug("AggregationNode: no documents to aggregate (GROUP BY query), returning empty result")
-			return documents, nil
-		}
-
-		// For aggregate-only queries (e.g., COUNT(*)), we MUST create synthetic document
-		// even with 0 input documents because COUNT(*)=0, SUM(x)=0, etc. are valid results
-		n.Logger.Debug("AggregationNode: no documents but aggregate-only query - creating synthetic document with zero values")
-		// Fall through to execute aggregation with empty input
-	}
-
 	// Execute aggregation based on chosen strategy
+	// For SortGroupAggregate we may use OrderedChild.ExecuteOrdered to skip the in-memory sort;
+	// otherwise we call Child.Execute to get the input map.
 	var groupResults map[groupKey]*groupResult
+	var totalInput int
+	var documents map[string]*models.Document
+	var err error
+
 	switch n.executionStrategy {
 	case queryparser.HashAggregate:
+		documents, err = n.Child.Execute(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+		}
+		totalInput = len(documents)
+		n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+		if totalInput == 0 {
+			isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+			if !isAggregateOnly {
+				return documents, nil
+			}
+		}
 		groupResults, err = n.executeHashAggregate(ctx, documents)
+
 	case queryparser.SortGroupAggregate:
-		groupResults, err = n.executeSortGroupAggregate(ctx, documents)
+		var preSorted []*models.Document
+		if oc, ok := n.Child.(OrderedChild); ok && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
+			if n.extractFieldName(n.GroupBy.Fields[0]) == oc.OrderedByField() {
+				preSorted, err = oc.ExecuteOrdered(ctx)
+				if err == nil {
+					totalInput = len(preSorted)
+					n.Logger.Debugf("AggregationNode received %d documents from OrderedChild (skip sort)", totalInput)
+					groupResults, err = n.executeSortGroupAggregate(ctx, nil, preSorted)
+				}
+			}
+		}
+		if groupResults == nil && err == nil {
+			documents, err = n.Child.Execute(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+			}
+			totalInput = len(documents)
+			n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+			if totalInput == 0 {
+				isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+				if !isAggregateOnly {
+					return documents, nil
+				}
+			}
+			groupResults, err = n.executeSortGroupAggregate(ctx, documents, nil)
+		}
+
 	default:
 		return nil, fmt.Errorf("unsupported execution strategy: %s", n.executionStrategy.String())
 	}
@@ -314,7 +343,7 @@ executeChild:
 	}
 
 	n.Logger.Infof("AggregationNode completed: produced %d groups from %d documents",
-		len(resultDocs), len(documents))
+		len(resultDocs), totalInput)
 
 	return resultDocs, nil
 }
@@ -324,11 +353,11 @@ type groupKey string
 
 // aggregateValue stores intermediate aggregated values for a group
 type aggregateValue struct {
-	Count  int64       // For COUNT(*)
-	Sum    float64     // For SUM()
-	Min    interface{} // For MIN()
-	Max    interface{} // For MAX()
-	Values []float64   // For AVG() calculation
+	Count    int64       // For COUNT(*)
+	Sum      float64     // For SUM()
+	AvgCount int64       // For AVG(): count of non-null numeric values (AVG = Sum / AvgCount)
+	Min      interface{} // For MIN()
+	Max      interface{} // For MAX()
 }
 
 // groupResult represents the final result for a group
@@ -427,56 +456,52 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 	return groupMap, nil
 }
 
-// executeSortGroupAggregate implements sort-based aggregation strategy
-// PHASE 3: Sort + group aggregate implementation
+// executeSortGroupAggregate implements sort-based aggregation strategy.
+// When preSorted is non-nil it is used as the document slice and the in-memory sort is skipped
+// (e.g. when child is OrderedChild and already ordered by the first GROUP BY field).
 //
 // Algorithm:
-// 1. Convert documents map to slice
-// 2. Sort documents by GROUP BY fields
-// 3. Sequentially scan sorted documents, detecting group boundaries
-// 4. Aggregate each group as we encounter it
+// 1. Build docSlice: from preSorted if provided, else from documents map and sort by GROUP BY fields
+// 2. Sequentially scan sorted documents, detecting group boundaries
+// 3. Aggregate each group as we encounter it
 //
-// Performance: O(n log n) time, O(1) space (excluding sort buffer)
-//
-// TODO: Phase 2 - I should implement external merge sort for datasets larger than memory
-// TODO: Phase 2 - Add streaming aggregation to reduce memory footprint
-// TODO: Phase 2 - Consider index scans when GROUP BY fields match an index for pre-sorted data
-func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documents map[string]*models.Document) (map[groupKey]*groupResult, error) {
+// Performance: O(n log n) when sorting, O(n) when preSorted is used
+func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documents map[string]*models.Document, preSorted []*models.Document) (map[groupKey]*groupResult, error) {
 	n.Logger.Debugf("Executing Sort + GroupAggregate strategy")
 
-	// Check if this is an aggregate-only query (no GROUP BY clause)
-	isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-	if isAggregateOnly {
-		n.Logger.Debug("Aggregate-only query detected in Sort strategy - delegating to Hash strategy for efficiency")
-		// For aggregate-only queries, sorting is unnecessary since all documents go into one group
-		// Delegate to hash aggregate which handles this case efficiently
-		return n.executeHashAggregate(ctx, documents)
+	// When preSorted is nil we need documents for the aggregate-only delegation and for building the slice
+	if preSorted == nil {
+		isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+		if isAggregateOnly {
+			n.Logger.Debug("Aggregate-only query detected in Sort strategy - delegating to Hash strategy for efficiency")
+			return n.executeHashAggregate(ctx, documents)
+		}
 	}
 
 	// Memory tracking: Get tracker from context
 	memoryTracker := GetMemoryTrackerFromContext(ctx)
 	docCount := 0
 
-	// Convert documents to sortable slice
-	// Filter out nil documents during concurrent operations
-	docSlice := make([]*models.Document, 0, len(documents))
-	nilCount := 0
-	for _, doc := range documents {
-		if doc != nil {
-			docSlice = append(docSlice, doc)
-		} else {
-			nilCount++
+	var docSlice []*models.Document
+	if preSorted != nil {
+		docSlice = preSorted
+	} else {
+		docSlice = make([]*models.Document, 0, len(documents))
+		nilCount := 0
+		for _, doc := range documents {
+			if doc != nil {
+				docSlice = append(docSlice, doc)
+			} else {
+				nilCount++
+			}
 		}
-	}
-
-	if nilCount > 0 {
-		n.Logger.Warnf("Filtered out %d nil documents during sort-aggregate (concurrent access issue)", nilCount)
-	}
-
-	// Sort by GROUP BY fields
-	err := n.sortDocumentsByGroupFields(docSlice)
-	if err != nil {
-		return nil, fmt.Errorf("error sorting documents: %w", err)
+		if nilCount > 0 {
+			n.Logger.Warnf("Filtered out %d nil documents during sort-aggregate (concurrent access issue)", nilCount)
+		}
+		// Sort by GROUP BY fields
+		if err := n.sortDocumentsByGroupFields(docSlice); err != nil {
+			return nil, fmt.Errorf("error sorting documents: %w", err)
+		}
 	}
 
 	// Group and aggregate sorted documents
@@ -497,7 +522,7 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 			docSize := models.EstimateDocumentSize(doc)
 			memoryTracker.Sample(docSize, docCount)
 
-			if memoryTracker.WillExceedLimit(len(documents)) {
+			if memoryTracker.WillExceedLimit(len(docSlice)) {
 				return nil, ErrMemoryLimitExceeded
 			}
 		}
@@ -530,7 +555,7 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 		}
 	}
 
-	n.Logger.Debugf("Sort aggregate created %d groups from %d documents", len(groupMap), len(documents))
+	n.Logger.Debugf("Sort aggregate created %d groups from %d documents", len(groupMap), len(docSlice))
 
 	return groupMap, nil
 }
@@ -660,14 +685,20 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 				}
 			}
 
-		case "SUM", "AVG":
-			// Extract actual field name from qualified identifier
+		case "SUM":
 			fieldName := n.extractFieldName(aggFunc.Field)
-			// Use case-insensitive field lookup
 			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
 				if numValue, err := n.convertToFloat(field.Value); err == nil {
 					aggVal.Sum += numValue
-					aggVal.Values = append(aggVal.Values, numValue)
+				}
+			}
+
+		case "AVG":
+			fieldName := n.extractFieldName(aggFunc.Field)
+			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
+				if numValue, err := n.convertToFloat(field.Value); err == nil {
+					aggVal.Sum += numValue
+					aggVal.AvgCount++
 				}
 			}
 
@@ -787,8 +818,8 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 			case "SUM":
 				finalValue = aggVal.Sum
 			case "AVG":
-				if len(aggVal.Values) > 0 {
-					finalValue = aggVal.Sum / float64(len(aggVal.Values))
+				if aggVal.AvgCount > 0 {
+					finalValue = aggVal.Sum / float64(aggVal.AvgCount)
 				} else {
 					finalValue = nil
 				}
@@ -865,8 +896,8 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 		case "SUM":
 			finalValue = aggVal.Sum
 		case "AVG":
-			if len(aggVal.Values) > 0 {
-				finalValue = aggVal.Sum / float64(len(aggVal.Values))
+			if aggVal.AvgCount > 0 {
+				finalValue = aggVal.Sum / float64(aggVal.AvgCount)
 			} else {
 				finalValue = nil
 			}
@@ -952,11 +983,13 @@ func (n *AggregationNode) sortDocumentsByGroupFields(docs []*models.Document) er
 				return false
 			}
 
-			valueI := fmt.Sprintf("%v", fieldI.Value)
-			valueJ := fmt.Sprintf("%v", fieldJ.Value)
-
-			if valueI != valueJ {
-				return valueI < valueJ
+			// Type-aware comparison: uses models.FieldValue.CompareLessThan for correct
+			// ordering of numeric, date, and string types (avoids "10" < "2" for numbers)
+			if fieldI.Value.CompareLessThan(fieldJ.Value) {
+				return true
+			}
+			if fieldJ.Value.CompareLessThan(fieldI.Value) {
+				return false
 			}
 		}
 		return false
@@ -978,7 +1011,7 @@ func (n *AggregationNode) convertToFloat(value interface{}) (float64, error) {
 		case models.FieldTypeString:
 			return strconv.ParseFloat(fv.StringVal, 64)
 		default:
-			return 0, fmt.Errorf("cannot convert FieldValue of type %s to float64", fv.Type)
+			return 0, fmt.Errorf("cannot convert FieldValue of type %v to float64", fv.Type)
 		}
 	}
 

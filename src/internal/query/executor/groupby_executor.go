@@ -85,11 +85,11 @@ type GroupByExecutor struct {
 
 // AggregateValue stores aggregated values for a group
 type AggregateValue struct {
-	Count  int64       // For COUNT(*)
-	Sum    float64     // For SUM()
-	Min    interface{} // For MIN()
-	Max    interface{} // For MAX()
-	Values []float64   // For AVG() calculation
+	Count    int64       // For COUNT(*)
+	Sum      float64     // For SUM()
+	AvgCount int64       // For AVG(): count of non-null numeric values (AVG = Sum / AvgCount)
+	Min      interface{} // For MIN()
+	Max      interface{} // For MAX()
 }
 
 // GroupKey represents the key for grouping (combination of GROUP BY field values)
@@ -318,11 +318,18 @@ func (e *GroupByExecutor) updateAggregates(groupResult *GroupResult, doc *models
 				}
 			}
 
-		case "SUM", "AVG":
+		case "SUM":
 			if field, exists := doc.Fields[aggFunc.Field]; exists {
 				if numValue, err := e.convertToFloat(field.Value); err == nil {
 					aggValue.Sum += numValue
-					aggValue.Values = append(aggValue.Values, numValue)
+				}
+			}
+
+		case "AVG":
+			if field, exists := doc.Fields[aggFunc.Field]; exists {
+				if numValue, err := e.convertToFloat(field.Value); err == nil {
+					aggValue.Sum += numValue
+					aggValue.AvgCount++
 				}
 			}
 
@@ -359,8 +366,8 @@ func (e *GroupByExecutor) finalizeAggregates(groupResult *GroupResult) error {
 			groupResult.AggregateValues[aggKey] = aggValue.Sum
 
 		case "AVG":
-			if len(aggValue.Values) > 0 {
-				groupResult.AggregateValues[aggKey] = aggValue.Sum / float64(len(aggValue.Values))
+			if aggValue.AvgCount > 0 {
+				groupResult.AggregateValues[aggKey] = aggValue.Sum / float64(aggValue.AvgCount)
 			} else {
 				groupResult.AggregateValues[aggKey] = nil
 			}
@@ -436,11 +443,13 @@ func (e *GroupByExecutor) sortDocumentsByGroupFields(docs []*models.Document) er
 				return false
 			}
 
-			valueI := fmt.Sprintf("%v", fieldI.Value)
-			valueJ := fmt.Sprintf("%v", fieldJ.Value)
-
-			if valueI != valueJ {
-				return valueI < valueJ
+			// Type-aware comparison: uses models.FieldValue.CompareLessThan for correct
+			// ordering of numeric, date, and string types (avoids "10" < "2" for numbers)
+			if fieldI.Value.CompareLessThan(fieldJ.Value) {
+				return true
+			}
+			if fieldJ.Value.CompareLessThan(fieldI.Value) {
+				return false
 			}
 		}
 		return false

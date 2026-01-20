@@ -266,7 +266,7 @@ func (v *UniqueConstraintValidator) checkBTreeIndexForDuplicates(
 	fieldName string,
 	valueStr string,
 ) (string, error) {
-	v.logger.Infof("[UNIQUE] Searching unique B-tree index '%s' for value '%s'", indexName, valueStr)
+	v.logger.Debugf("[UNIQUE] Searching unique B-tree index '%s' for value '%s'", indexName, valueStr)
 
 	// Try to load the B-tree index from cache or disk
 	btreeIndex, err := v.bundleService.getOrLoadBTreeIndex(bundle, indexName, indexRef)
@@ -274,32 +274,21 @@ func (v *UniqueConstraintValidator) checkBTreeIndexForDuplicates(
 		return "", fmt.Errorf("failed to load B-tree index '%s': %w", indexName, err)
 	}
 
-	// Search for existing value in the B-tree
-	//searchStart := time.Now()
+	// Search for existing value in the B-tree (Exists is lean: no stats/logging)
 	keyBytes := []byte(valueStr)
-	documentIDs, err := btreeIndex.Search(keyBytes)
-	//searchDuration := time.Since(searchStart)
-
-	// Log performance (in-memory should be <100μs)
-	// if searchDuration > 100*time.Microsecond {
-	// 	v.logger.Warnf("        ⚠️  btreeIndex.Search took %v (expected <100μs for in-memory)", searchDuration)
-	// } else {
-	// 	v.logger.Debugf("        ⚡ btreeIndex.Search took %v (in-memory)", searchDuration)
-	// }
-
+	exists, err := btreeIndex.Exists(keyBytes)
 	if err != nil {
 		return "", fmt.Errorf("B-tree index search failed for field '%s': %w", fieldName, err)
 	}
 
-	// Check if any documents were found with this value
-	if len(documentIDs) > 0 {
-		v.logger.Infof("[UNIQUE] Duplicate value found in B-tree index '%s': value '%s' exists in %d document(s)",
-			indexName, valueStr, len(documentIDs))
+	if exists {
+		v.logger.Debugf("[UNIQUE] Duplicate value found in B-tree index '%s': value '%s' already exists",
+			indexName, valueStr)
 		return fmt.Sprintf("field '%s' with value '%s' already exists (unique constraint violation)",
 			fieldName, valueStr), nil
 	}
 
-	v.logger.Infof("[UNIQUE] No duplicates found for field '%s' value '%s' in B-tree index", fieldName, valueStr)
+	v.logger.Debugf("[UNIQUE] No duplicates found for field '%s' value '%s' in B-tree index", fieldName, valueStr)
 	return "", nil
 }
 

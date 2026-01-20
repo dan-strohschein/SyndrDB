@@ -297,7 +297,7 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	// Write entry length header (4 bytes) followed by binary data
 	// This allows for easy reading of variable-length entries
 	entryLen := uint32(len(binaryData))
-	
+
 	// Write entry length with retry for transient errors
 	if err := wal.writeEntryLengthWithRetry(entryLen); err != nil {
 		return fmt.Errorf("failed to write entry length: %w", err)
@@ -308,7 +308,7 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	if err != nil {
 		return fmt.Errorf("failed to write binary WAL entry: %w", err)
 	}
-	
+
 	// Verify all bytes were written (HIGH-002: comprehensive write verification)
 	if bytesWritten != len(binaryData) {
 		return fmt.Errorf("partial write detected: wrote %d of %d bytes for WAL entry", bytesWritten, len(binaryData))
@@ -349,7 +349,7 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	if wal.durabilityMode == "performance" {
 		if wal.pendingOps >= wal.walBatchSize || time.Since(wal.lastFlush) >= wal.walMaxFlushDelay {
 			forceFlush = true
-			wal.logger.Warnf("⚠️  WAL flush triggered in PERFORMANCE mode: pendingOps=%d, batchSize=%d, timeSince=%v, maxDelay=%v",
+			wal.logger.Debugf("⚠️  WAL flush triggered in PERFORMANCE mode: pendingOps=%d, batchSize=%d, timeSince=%v, maxDelay=%v",
 				wal.pendingOps, wal.walBatchSize, time.Since(wal.lastFlush), wal.walMaxFlushDelay)
 		}
 	}
@@ -385,18 +385,18 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 func (wal *WriteAheadLog) writeEntryLengthWithRetry(entryLen uint32) error {
 	maxRetries := 3
 	retryDelays := []time.Duration{1 * time.Millisecond, 5 * time.Millisecond, 25 * time.Millisecond}
-	
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		err := binary.Write(wal.buffer, binary.LittleEndian, entryLen)
 		if err == nil {
 			return nil
 		}
-		
+
 		// Check if error is transient (EAGAIN, EINTR, temporary errors)
 		if !isTransientError(err) {
 			return fmt.Errorf("permanent write error (attempt %d/%d): %w", attempt+1, maxRetries+1, err)
 		}
-		
+
 		// If not last attempt, wait before retrying with exponential backoff
 		if attempt < maxRetries {
 			delay := retryDelays[attempt]
@@ -408,7 +408,7 @@ func (wal *WriteAheadLog) writeEntryLengthWithRetry(entryLen uint32) error {
 			time.Sleep(delay)
 		}
 	}
-	
+
 	return fmt.Errorf("failed to write entry length after %d retries", maxRetries+1)
 }
 
@@ -417,7 +417,7 @@ func (wal *WriteAheadLog) writeEntryLengthWithRetry(entryLen uint32) error {
 func (wal *WriteAheadLog) writeBinaryDataWithRetry(data []byte) (int, error) {
 	maxRetries := 3
 	retryDelays := []time.Duration{1 * time.Millisecond, 5 * time.Millisecond, 25 * time.Millisecond}
-	
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		bytesWritten, err := wal.buffer.Write(data)
 		if err == nil {
@@ -427,12 +427,12 @@ func (wal *WriteAheadLog) writeBinaryDataWithRetry(data []byte) (int, error) {
 			}
 			return bytesWritten, nil
 		}
-		
+
 		// Check if error is transient
 		if !isTransientError(err) {
 			return bytesWritten, fmt.Errorf("permanent write error (attempt %d/%d): %w", attempt+1, maxRetries+1, err)
 		}
-		
+
 		// If not last attempt, wait before retrying
 		if attempt < maxRetries {
 			delay := retryDelays[attempt]
@@ -444,7 +444,7 @@ func (wal *WriteAheadLog) writeBinaryDataWithRetry(data []byte) (int, error) {
 			time.Sleep(delay)
 		}
 	}
-	
+
 	return 0, fmt.Errorf("failed to write binary data after %d retries", maxRetries+1)
 }
 
@@ -454,7 +454,7 @@ func isTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Check for syscall errors (EAGAIN, EINTR)
 	if pathErr, ok := err.(*os.PathError); ok {
 		if errno, ok := pathErr.Err.(syscall.Errno); ok {
@@ -464,17 +464,17 @@ func isTransientError(err error) bool {
 			return errno == syscall.EAGAIN || errno == syscall.EINTR
 		}
 	}
-	
+
 	// Check for temporary errors from bufio.Writer
 	if err == io.ErrShortWrite || err == io.ErrShortBuffer {
 		return true
 	}
-	
+
 	// Check for temporary errors (some I/O operations return this)
 	if tempErr, ok := err.(interface{ Temporary() bool }); ok {
 		return tempErr.Temporary()
 	}
-	
+
 	return false
 }
 

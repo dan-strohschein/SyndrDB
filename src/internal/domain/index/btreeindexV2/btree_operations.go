@@ -310,9 +310,8 @@ func searchInternal(idx *BTreeIndex, key []byte, pageNum uint32) ([]string, int,
 	}
 
 	nodesVisited := 0
-	idx.logger.Debugf("internalSearch :: Searching for key '%s' starting at page %d", string(key), pageNum)
 	// Load the current node
-	pageData, err := idx.PageManager.GetPage(pageNum, func(pn uint32) (interface{}, error) {
+	pageData, err := idx.PageManager.GetPageReadOnly(pageNum, func(pn uint32) (interface{}, error) {
 		return idx.FileManager.ReadPage(pn)
 	})
 	if err != nil {
@@ -1402,4 +1401,46 @@ func removeStringFromSlice(slice []string, value string) []string {
 		}
 	}
 	return result
+}
+
+// scanKeysForDocumentIDs does one full in-order pass over the B-tree and returns (key, documentID)
+// pairs for every live entry whose documentID is in the documentIDs set. Used by
+// DeleteByDocumentIDs to clean stale B-tree entries when harvest failed (no key available).
+// Caller must hold idx.mutex.
+func scanKeysForDocumentIDs(idx *BTreeIndex, documentIDs map[string]struct{}, rootPageNum uint32) (keys [][]byte, docIDsOut []string, err error) {
+	if len(documentIDs) == 0 {
+		return nil, nil, nil
+	}
+	startLeaf, err := findLeftmostLeaf(idx, rootPageNum)
+	if err != nil {
+		return nil, nil, err
+	}
+	keys = make([][]byte, 0, len(documentIDs))
+	docIDsOut = make([]string, 0, len(documentIDs))
+	currentPageNum := startLeaf
+	for currentPageNum != 0 {
+		pageData, err := idx.PageManager.GetPage(currentPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to load leaf page %d: %w", currentPageNum, err)
+		}
+		leaf, ok := pageData.(*BTreeNode)
+		if !ok || !leaf.IsLeaf {
+			return nil, nil, fmt.Errorf("page %d is not a valid leaf node", currentPageNum)
+		}
+		for i := range leaf.Keys {
+			live := leaf.GetLiveDocumentIDs(i)
+			for _, d := range live {
+				if _, want := documentIDs[d]; want {
+					keyCopy := make([]byte, len(leaf.Keys[i]))
+					copy(keyCopy, leaf.Keys[i])
+					keys = append(keys, keyCopy)
+					docIDsOut = append(docIDsOut, d)
+				}
+			}
+		}
+		currentPageNum = leaf.NextLeaf
+	}
+	return keys, docIDsOut, nil
 }

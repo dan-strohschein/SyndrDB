@@ -240,8 +240,6 @@ func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interfa
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 
-	pm.logger.Debugf("Getting page %d from cache", pageNum)
-
 	// Check if page is in cache
 	if entry, exists := pm.cache[pageNum]; exists {
 		// Update access time and count
@@ -283,6 +281,22 @@ func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interfa
 	pm.addToCache(pageNum, pageData, false)
 
 	return pageData, nil
+}
+
+// GetPageReadOnly is for read-only traversals (e.g. Search, Exists). On cache hit it uses
+// RLock and skips moveToFront/lastAccess to reduce latency and allow concurrent readers.
+// On cache miss it falls back to GetPage.
+func (pm *BTreePageManager) GetPageReadOnly(pageNum uint32, loader func(uint32) (interface{}, error)) (interface{}, error) {
+	pm.mutex.RLock()
+	entry, exists := pm.cache[pageNum]
+	if exists {
+		atomic.AddUint64(&pm.stats.hits, 1)
+		pageData := entry.pageData
+		pm.mutex.RUnlock()
+		return pageData, nil
+	}
+	pm.mutex.RUnlock()
+	return pm.GetPage(pageNum, loader)
 }
 
 // PutPage stores a page in the cache, optionally marking it as dirty

@@ -409,3 +409,24 @@ func findIndexForDistinctFields(bundle *models.Bundle, fields []string) *models.
 	_ = hashIndex
 	return nil
 }
+
+// findBTreeIndexForGroupByField returns the name of a B-tree index on the given field, if one exists.
+// Used to enable index-ordered scan for single-field GROUP BY (avoids in-memory sort when data is already ordered by the index).
+//
+// Parameters:
+//   - bundle: Bundle containing index metadata
+//   - fieldName: Unqualified GROUP BY field name (e.g. "category")
+//
+// Returns:
+//   - indexName and true if a B-tree index on that field exists, else ("", false)
+func findBTreeIndexForGroupByField(bundle *models.Bundle, fieldName string) (indexName string, ok bool) {
+	if bundle == nil || bundle.Indexes == nil {
+		return "", false
+	}
+	for name, ir := range bundle.Indexes {
+		if ir.IndexType == "btree" && len(ir.Fields) == 1 && ir.Fields[0].Name == fieldName {
+			return name, true
+		}
+	}
+	return "", false
+}

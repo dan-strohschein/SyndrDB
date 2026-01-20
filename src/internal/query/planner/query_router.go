@@ -26,6 +26,7 @@ package planner
 
 import (
 	"fmt"
+	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
@@ -208,6 +209,46 @@ func (qr *QueryRouter) routeSimpleQuery(
 	return scanNode, nil, nil
 }
 
+// extractFieldNameForProjection strips bundle qualifiers from a field reference.
+// e.g. "Authors"."Name" -> Name, "name" -> name
+func extractFieldNameForProjection(qualifiedName string) string {
+	s := strings.Trim(qualifiedName, "\"'")
+	parts := strings.Split(s, ".")
+	if len(parts) > 1 {
+		return strings.Trim(parts[len(parts)-1], "\"'")
+	}
+	return s
+}
+
+// getProjectionFieldsForGroupBy returns the distinct set of field names needed for
+// GROUP BY and aggregates: GroupBy.Fields plus each agg.Field for SUM/AVG/MIN/MAX/COUNT(field).
+// Used for projection pushdown so the storage layer deserializes only those fields.
+func getProjectionFieldsForGroupBy(query *queryparser.UnifiedSelectQuery) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if query.GroupBy != nil {
+		for _, f := range query.GroupBy.Fields {
+			add(extractFieldNameForProjection(f))
+		}
+	}
+	for _, a := range query.AggregateFields {
+		if a.Field != "*" {
+			add(extractFieldNameForProjection(a.Field))
+		}
+	}
+	return out
+}
+
 // routeGroupByQuery handles GROUP BY queries by creating a base execution tree
 // PHASE 3: GROUP BY query routing
 //
@@ -233,9 +274,40 @@ func (qr *QueryRouter) routeGroupByQuery(
 	var rootNode ExecutionNode
 	var indexesUsed []string
 
-	// Step 1: Create scan node (either index scan or full scan)
-	// TODO: Phase 2 - Optimize scan selection based on WHERE clause and GROUP BY fields
-	// For now, I'll create a full scan as the base
+	// When WHERE exists and WhereExpression is set, use createExpressionBasedPlan to allow
+	// index optimization (hash/BTree) for the WHERE clause. Fallback is FullScan+FilterNode.
+	if query.HasWhere() && query.WhereExpression != nil {
+		var err error
+		rootNode, indexesUsed, err = qr.createExpressionBasedPlan(query, bundle, database, docScanner)
+		if err != nil {
+			return nil, nil, err
+		}
+		qr.logger.Debugf("Created base execution tree for GROUP BY using createExpressionBasedPlan (indexes: %v)", indexesUsed)
+		return rootNode, indexesUsed, nil
+	}
+
+	// Index-ordered scan for single-field GROUP BY when no WHERE: use B-tree full range
+	// to supply rows already ordered by the GROUP BY field, so AggregationNode can skip the sort.
+	if !query.HasWhere() && query.GroupBy != nil && len(query.GroupBy.Fields) == 1 {
+		fieldName := extractFieldNameForProjection(query.GroupBy.Fields[0])
+		if idxName, found := findBTreeIndexForGroupByField(bundle, fieldName); found &&
+			bundle.Documents != nil && bundle.DocumentsComplete {
+			rootNode = &BTreeOrderedScanNode{
+				Bundle:             bundle,
+				IndexName:          idxName,
+				OrderedByFieldName: fieldName,
+				Logger:             qr.logger,
+				BundleServiceInt:   qr.bundleService,
+				Cost:               float64(bundle.TotalDocuments) * 0.5, // cheaper than full scan + sort
+				EstimatedRows:      int(bundle.TotalDocuments),
+			}
+			indexesUsed = []string{idxName}
+			qr.logger.Infof("Using BTreeOrderedScanNode on index %s for GROUP BY %s (skip sort)", idxName, fieldName)
+			return rootNode, indexesUsed, nil
+		}
+	}
+
+	// No WHERE, or legacy WHERE (WhereExpression is nil): create full scan as the base
 	scanNode := &FullScanNode{
 		Bundle:           bundle,
 		Cost:             float64(bundle.TotalDocuments),
@@ -244,14 +316,19 @@ func (qr *QueryRouter) routeGroupByQuery(
 		BundleServiceInt: qr.bundleService,
 		DocumentScanner:  docScanner,
 	}
+	// NOTE: Projection pushdown for GROUP BY is intentionally NOT applied here.
+	// DecodeFastBinaryProjected uses exact field-name matching; stored names can differ in case
+	// or the projection list can omit a needed field due to qualifier/alias handling, causing
+	// "GROUP BY field 'X' not found in document". Full deserialization is used until the
+	// deserializer supports case-insensitive projection and we validate qualifier stripping.
+	// getProjectionFieldsForGroupBy and extractFieldNameForProjection remain for future use.
 
 	rootNode = scanNode
 
-	// Step 2: Add FilterNode if WHERE clause exists
+	// Add FilterNode if WHERE clause exists (legacy path: WhereExpression is nil but HasWhere)
 	if query.HasWhere() {
-		qr.logger.Debug("Adding FilterNode for WHERE clause in GROUP BY query")
+		qr.logger.Debug("Adding FilterNode for WHERE clause in GROUP BY query (legacy path)")
 
-		// Create BundleContext for qualified field resolution
 		bundleCtx := syndrQL.NewBundleContextForSingleBundle(bundle)
 
 		filterNode := &FilterNode{
@@ -261,15 +338,12 @@ func (qr *QueryRouter) routeGroupByQuery(
 			Cost:             scanNode.GetCost(),
 			EstimatedRows:    scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
 			Logger:           qr.logger,
-			QueryCache:       qr.queryCache,       // Priority 4: Enable expression caching
-			SubqueryExecutor: qr.subqueryExecutor, // TIER 1: Enable subquery support
-			Database:         database,            // TIER 1: Database for subquery execution
+			QueryCache:       qr.queryCache,
+			SubqueryExecutor: qr.subqueryExecutor,
+			Database:         database,
 		}
 
 		rootNode = filterNode
-
-		// TODO: Phase 2 - Track which indexes were considered for the WHERE clause
-		// TODO: Phase 2 - Add index statistics to improve EstimatedRows calculation
 	}
 
 	qr.logger.Debugf("Created base execution tree for GROUP BY")
