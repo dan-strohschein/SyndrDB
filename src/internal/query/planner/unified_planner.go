@@ -363,6 +363,14 @@ func (uqp *UnifiedQueryPlanner) InvalidateBundleCache(bundleName string) {
 	}
 }
 
+// RemoveBundleMetadata removes the bundle from plan-cache metadata (bundleInvalidations,
+// staleServesByBundle, collectionVersions). Call when a bundle is dropped.
+func (uqp *UnifiedQueryPlanner) RemoveBundleMetadata(bundleName string) {
+	if uqp.planCache != nil {
+		uqp.planCache.RemoveBundleMetadata(bundleName)
+	}
+}
+
 // InvalidateViewCache invalidates all cached plans that reference a specific view
 // Call this when a view definition changes or a view is dropped
 // This ensures queries against the view will be re-planned with the new definition

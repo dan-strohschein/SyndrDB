@@ -42,6 +42,7 @@ import (
 // This avoids circular dependencies with the server package
 type QueryPlannerInterface interface {
 	InvalidateBundleCache(bundleName string)
+	RemoveBundleMetadata(bundleName string) // Remove from plan-cache metadata when bundle is dropped
 }
 
 // SessionInterface defines the interface for transaction-aware queries
@@ -332,8 +333,9 @@ type BundleService struct {
 	scannerMutex       sync.RWMutex                                        // Protects bundleScanners map
 
 	// PERFORMANCE OPTIMIZATION: Document location cache for O(1) page lookups
-	documentPageMap map[string]map[string]uint32 // bundleName -> documentID -> pageID
-	pageCacheMutex  sync.RWMutex                 // Protects documentPageMap
+	documentPageMap     map[string]map[string]uint32 // bundleName -> documentID -> pageID
+	documentPageMapFIFO map[string][]string          // bundleName -> FIFO of documentIDs for eviction when at cap
+	pageCacheMutex      sync.RWMutex                 // Protects documentPageMap and documentPageMapFIFO
 
 	// OPERATION LOCKING: Fine-grained locks for bundle operations
 	// Tracks active read/write operations to ensure safety during administrative operations
@@ -402,6 +404,11 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	// Get performance settings from global configuration
 	globalSettings := settings.GetSettings()
 
+	maxLoaded := globalSettings.MaxLoadedDocumentPages
+	if maxLoaded <= 0 {
+		maxLoaded = 500
+	}
+
 	service := &BundleService{
 		store:           store,
 		factory:         factory,
@@ -411,6 +418,7 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		bundleMetadata:  make(map[string]*models.Bundle),
 		documentPages:   make(map[string]*models.DocumentPage),
 		defaultPageSize: 4096, // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
+		maxLoadedPages:  maxLoaded,
 		// OPTIMIZATION: Use configurable performance settings
 		indexUpdateBuffer:    make([]IndexUpdate, 0, globalSettings.MetadataBatchSize),
 		indexUpdateBatchSize: globalSettings.MetadataBatchSize,                                       // INCREASED: 50 → 500
@@ -434,7 +442,8 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		bundleScanners:     make(map[string]documentscanner.DocumentScannerInterface),
 
 		// PERFORMANCE OPTIMIZATION: Initialize document-page location cache
-		documentPageMap: make(map[string]map[string]uint32),
+		documentPageMap:     make(map[string]map[string]uint32),
+		documentPageMapFIFO: make(map[string][]string),
 
 		// OPERATION LOCKING: Initialize bundle operation locks
 		bundleLocks: make(map[string]*BundleOperationLock),
@@ -2118,6 +2127,28 @@ func (s *BundleService) evictOldestPageLocked() {
 	}
 }
 
+// evictDocumentPageMapOneLocked evicts one documentID->pageID entry from the bundle's documentPageMap.
+// Uses FIFO order when available; otherwise removes an arbitrary entry. Caller must hold s.pageCacheMutex (Lock).
+func (s *BundleService) evictDocumentPageMapOneLocked(bundleID string) {
+	bc := s.documentPageMap[bundleID]
+	if bc == nil {
+		return
+	}
+	fifo := s.documentPageMapFIFO[bundleID]
+	if len(fifo) > 0 {
+		docID := fifo[0]
+		s.documentPageMapFIFO[bundleID] = fifo[1:]
+		delete(bc, docID)
+		s.logger.Debugf("Evicted document %s from documentPageMap for bundle %s (FIFO)", docID, bundleID)
+		return
+	}
+	for docID := range bc {
+		delete(bc, docID)
+		s.logger.Debugf("Evicted document %s from documentPageMap for bundle %s (fallback)", docID, bundleID)
+		return
+	}
+}
+
 // findDocumentPage uses the DocumentID hash index to determine which page contains a specific document
 // This provides O(1) document location lookup instead of scanning all pages
 func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, error) {
@@ -2167,7 +2198,15 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 					if s.documentPageMap[bundleID] == nil {
 						s.documentPageMap[bundleID] = make(map[string]uint32)
 					}
+					maxEntries := settings.GetSettings().DocumentPageMapMaxEntriesPerBundle
+					if maxEntries <= 0 {
+						maxEntries = 100000
+					}
+					for len(s.documentPageMap[bundleID]) >= maxEntries {
+						s.evictDocumentPageMapOneLocked(bundleID)
+					}
 					s.documentPageMap[bundleID][documentID] = pageID
+					s.documentPageMapFIFO[bundleID] = append(s.documentPageMapFIFO[bundleID], documentID)
 					s.pageCacheMutex.Unlock()
 
 					return pageID, nil
@@ -2200,7 +2239,15 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 			if s.documentPageMap[bundleID] == nil {
 				s.documentPageMap[bundleID] = make(map[string]uint32)
 			}
+			maxEntries := settings.GetSettings().DocumentPageMapMaxEntriesPerBundle
+			if maxEntries <= 0 {
+				maxEntries = 100000
+			}
+			for len(s.documentPageMap[bundleID]) >= maxEntries {
+				s.evictDocumentPageMapOneLocked(bundleID)
+			}
 			s.documentPageMap[bundleID][documentID] = pageID
+			s.documentPageMapFIFO[bundleID] = append(s.documentPageMapFIFO[bundleID], documentID)
 			s.pageCacheMutex.Unlock()
 
 			return pageID, nil
@@ -3625,6 +3672,21 @@ func (s *BundleService) invalidatePlanCacheForBundle(bundleName string) {
 	// Invalidate all plans for this bundle
 	planner.InvalidateBundleCache(bundleName)
 	s.logger.Debugf("Invalidated query plan cache for bundle '%s' (schema change)", bundleName)
+}
+
+// removeBundleFromPlanCacheMetadata removes the bundle from plan-cache metadata
+// (bundleInvalidations, staleServesByBundle, collectionVersions). Call when a bundle is dropped.
+func (s *BundleService) removeBundleFromPlanCacheMetadata(bundleName string) {
+	plannerMutex.RLock()
+	planner := globalQueryPlanner
+	plannerMutex.RUnlock()
+
+	if planner == nil {
+		return
+	}
+
+	planner.RemoveBundleMetadata(bundleName)
+	s.logger.Debugf("Removed bundle '%s' from plan cache metadata (bundle dropped)", bundleName)
 }
 
 // min returns the minimum of two integers
@@ -6826,6 +6888,7 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 			delete(bundlePages, documentID)
 			if len(bundlePages) == 0 {
 				delete(s.documentPageMap, bundleName)
+				delete(s.documentPageMapFIFO, bundleName)
 			}
 			s.logger.Debugf("Invalidated page %d for document %s in bundle %s", pageID, documentID, bundleName)
 			return
@@ -6846,6 +6909,7 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	s.documentPagesMutex.Unlock()
 
 	delete(s.documentPageMap, bundleName)
+	delete(s.documentPageMapFIFO, bundleName)
 	s.logger.Debugf("Invalidated all pages for bundle %s (document %s not in page map)", bundleName, documentID)
 }
 
@@ -6956,9 +7020,13 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 	// Clear the document-page location cache for this bundle
 	s.pageCacheMutex.Lock()
 	delete(s.documentPageMap, bundle.Name)
+	delete(s.documentPageMapFIFO, bundle.Name)
 	s.pageCacheMutex.Unlock()
 
 	s.logger.Debugf("Cleared document-page cache for deleted bundle: %s", bundle.Name)
+
+	// Remove bundle from plan-cache metadata to avoid unbounded growth
+	s.removeBundleFromPlanCacheMetadata(bundle.Name)
 
 	// GRAPHQL INTEGRATION: Tombstone all GraphQL schemas when bundle is deleted
 	// This marks all schema versions as deleted in the schema file, preventing their use in queries.

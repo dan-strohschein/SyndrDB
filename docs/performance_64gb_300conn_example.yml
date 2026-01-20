@@ -1,0 +1,40 @@
+# Example: 64GB RAM, 12 cores, 300 concurrent connections, mixed workload
+# Copy relevant sections into your config to tune for maximum QPS.
+# See memory leak remediation plan for full rationale.
+
+# Connections and sessions
+max_connections: 350
+connection_idle_timeout: 30
+
+# Page-cache / memory-leak fix knobs
+max_loaded_document_pages: 1500
+bundle_adapter_max_cached_pages: 2000
+document_page_map_max_entries_per_bundle: 500000
+
+# Plan and expression caches (plan_cache_capacity is total; 12000 = 1500 per shard)
+plan_cache_capacity: 12000
+where_expression_cache_size: 2000
+
+# Memory and sorts
+query_max_memory_mb: 50
+admin_query_max_memory_mb: 50
+sort_max_memory_mb: 1024
+
+# WAL and writes (async)
+wal_mode: "async"
+async_wal_workers: 6
+async_wal_queue_size: 5000
+
+# Indexes and buffers
+unique_index_memory_budget_mb: 1024
+btree_max_dirty_pages: 2000
+bundle_buffer_size: 2000
+
+# Aggregation and metadata
+groupby_hash_aggregate_row_threshold: 20000
+metadata_batch_size: 1000
+
+# Background
+ghost_cleanup_pause_threshold: 600
+
+# Runtime: set GOMAXPROCS=12 to match 12 cores

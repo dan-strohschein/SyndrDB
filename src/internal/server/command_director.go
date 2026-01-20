@@ -6,7 +6,6 @@ import (
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
-	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/syndrQL"
@@ -847,14 +846,14 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 			}
 		}
 
-		// STEP 1: Use document pool to reduce allocations
-		// TODO: Option C - Implement reference counting for automatic pool return
-		// Create new document with filtered fields
-		filteredDoc := document.GetPooledDocument()
-		filteredDoc.DocumentID = doc.DocumentID
-		filteredDoc.Fields = filteredFields
-		filteredDoc.CreatedAt = doc.CreatedAt
-		filteredDoc.UpdatedAt = doc.UpdatedAt
+		// Use plain allocation; GetPooledDocument was not being Put back, causing pool drain.
+		// If pool return is added (e.g. via CommandResponse.PooledDocuments), consider GetPooledDocument again.
+		filteredDoc := &models.Document{
+			DocumentID: doc.DocumentID,
+			Fields:     filteredFields,
+			CreatedAt:  doc.CreatedAt,
+			UpdatedAt:  doc.UpdatedAt,
+		}
 
 		filteredDocuments[docID] = filteredDoc
 	}

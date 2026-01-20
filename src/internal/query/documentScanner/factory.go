@@ -2,9 +2,12 @@ package documentscanner
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -180,7 +183,8 @@ type BundleAdapter struct {
 	// Cached metadata (small and efficient)
 	totalDocuments   *int                            // Cached total document count
 	documentIDs      []string                        // Cached document IDs (loaded lazily)
-	cachedPages      map[uint32]*models.DocumentPage // Page-level cache
+	cachedPages      map[uint32]*models.DocumentPage // Page-level cache (bounded by bundle_adapter_max_cached_pages, LRU eviction)
+	cachedPagesMutex sync.RWMutex                    // Protects cachedPages for concurrent eviction and access
 	logger           *zap.SugaredLogger              // Logger for debugging and monitoring
 	projectionFields []string                        // PROJECTION PUSHDOWN: Field names to deserialize during page loading (nil = all fields)
 }
@@ -236,28 +240,26 @@ func (ba *BundleAdapter) SetProjectionFields(fields []string) {
 
 // ===== STREAMING IMPLEMENTATION - NO MORE INFINITE LOOPS =====
 
-// loadDocumentPage loads a specific page with caching
-// PROJECTION PUSHDOWN: Passes projection fields to storage layer if set
+// loadDocumentPage loads a specific page with caching and LRU eviction when at cap.
+// PROJECTION PUSHDOWN: Passes projection fields to storage layer if set.
 func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, error) {
-	// Check cache first
+	// Check cache first (read lock)
+	ba.cachedPagesMutex.RLock()
 	if page, exists := ba.cachedPages[pageID]; exists {
+		ba.cachedPagesMutex.RUnlock()
 		return page, nil
 	}
+	ba.cachedPagesMutex.RUnlock()
 
 	if ba.bundleService == nil {
 		return nil, fmt.Errorf("bundle service not available")
 	}
 
 	// Get database path from bundle
-	databasePath := helpers.GetDatabaseFolderPath(ba.bundle.Name) //fmt.Sprintf("data_files/%s", ba.bundle.Database.Name)
+	databasePath := helpers.GetDatabaseFolderPath(ba.bundle.Name)
 
 	// PROJECTION PUSHDOWN: Set projection fields on storage engine before loading page
-	// For ORDER BY queries, this allows the storage layer to deserialize only specified fields
-	// This saves ~80-90% deserialization overhead when documents have many unused fields
-	// Example: ORDER BY name query with 10-field documents → only deserialize "name" + DocumentID
 	if len(ba.projectionFields) > 0 {
-		// Type assert bundleService to access SetProjectionFieldsForBundle method
-		// This passes projection through BundleService → BundleStorageEngine → readDocumentRange
 		if projectionService, ok := ba.bundleService.(interface {
 			SetProjectionFieldsForBundle(bundleName string, fields []string)
 		}); ok {
@@ -266,16 +268,67 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 		}
 	}
 
-	// Load page from storage
+	// Load page from storage (outside lock)
 	page, err := ba.bundleService.LoadDocumentPage(ba.bundle.Name, ba.bundle.Database.Name, pageID, databasePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load page %d: %w", pageID, err)
 	}
 
-	// Cache the page for future access
+	// Insert into cache with eviction when at cap
+	ba.cachedPagesMutex.Lock()
+	defer ba.cachedPagesMutex.Unlock()
+	// Double-check: another goroutine may have filled while we were loading
+	if p, exists := ba.cachedPages[pageID]; exists {
+		return p, nil
+	}
+	maxCached := settings.GetSettings().BundleAdapterMaxCachedPages
+	if maxCached <= 0 {
+		maxCached = 500
+	}
+	if len(ba.cachedPages) >= maxCached {
+		ba.evictOldestCachedPageLocked()
+	}
 	ba.cachedPages[pageID] = page
-
 	return page, nil
+}
+
+// evictOldestCachedPageLocked removes the page with the oldest LoadedAt.
+// Caller must hold ba.cachedPagesMutex (write lock).
+func (ba *BundleAdapter) evictOldestCachedPageLocked() {
+	var oldestID uint32
+	var oldestTime time.Time
+	first := true
+	for id, p := range ba.cachedPages {
+		if first || p.LoadedAt.Before(oldestTime) {
+			oldestID = id
+			oldestTime = p.LoadedAt
+			first = false
+		}
+	}
+	if !first {
+		delete(ba.cachedPages, oldestID)
+		ba.logger.Debugf("Evicted cached page %d from BundleAdapter for bundle '%s' (LRU)", oldestID, ba.bundle.Name)
+	}
+}
+
+// ClearCachedPages removes all entries from cachedPages. Call from scanner Close() to avoid
+// retaining pages after the scanner is removed.
+func (ba *BundleAdapter) ClearCachedPages() {
+	ba.cachedPagesMutex.Lock()
+	defer ba.cachedPagesMutex.Unlock()
+	ba.cachedPages = make(map[uint32]*models.DocumentPage)
+}
+
+// RemoveDocumentsFromCachedPages removes the given document IDs from all cached pages.
+// Used by RemoveDocumentsFromCache on the scanner. Holds cachedPagesMutex for consistency with loadDocumentPage.
+func (ba *BundleAdapter) RemoveDocumentsFromCachedPages(documentIDs []string) {
+	ba.cachedPagesMutex.Lock()
+	defer ba.cachedPagesMutex.Unlock()
+	for _, p := range ba.cachedPages {
+		for _, docID := range documentIDs {
+			delete(p.Documents, docID)
+		}
+	}
 }
 
 // getSafePageCount returns a validated page count with defensive bounds checking
@@ -852,10 +905,11 @@ type DocumentIterator interface {
 
 // BundleDocumentIterator implements streaming document iteration
 type BundleDocumentIterator struct {
-	adapter     *BundleAdapter
-	currentPage uint32
-	pageIDs     []string
-	pageIndex   int
+	adapter         *BundleAdapter
+	currentPage     uint32
+	pageIDs         []string
+	pageIndex       int
+	currentPageData *models.DocumentPage // page returned from loadDocumentPage; avoid reading cachedPages without lock
 }
 
 func (iter *BundleDocumentIterator) HasNext() bool {
@@ -881,10 +935,12 @@ func (iter *BundleDocumentIterator) Next() (*models.Document, error) {
 			page, err := iter.adapter.loadDocumentPage(iter.currentPage)
 			if err != nil {
 				iter.currentPage++
+				iter.currentPageData = nil
 				attempts++
 				continue // Try next page instead of recursion
 			}
 
+			iter.currentPageData = page
 			// Reset page iteration
 			iter.pageIDs = make([]string, 0, len(page.Documents))
 			for docID := range page.Documents {
@@ -895,6 +951,7 @@ func (iter *BundleDocumentIterator) Next() (*models.Document, error) {
 			// If page is empty, move to next page
 			if len(iter.pageIDs) == 0 {
 				iter.currentPage++
+				iter.currentPageData = nil
 				attempts++
 				continue // Try next page instead of recursion
 			}
@@ -908,16 +965,16 @@ func (iter *BundleDocumentIterator) Next() (*models.Document, error) {
 		return nil, fmt.Errorf("exceeded maximum attempts (%d) to find valid page", maxAttempts)
 	}
 
-	// Get document from current page
+	// Get document from current page (use currentPageData from loadDocumentPage, not cachedPages)
 	docID := iter.pageIDs[iter.pageIndex]
-	page := iter.adapter.cachedPages[iter.currentPage]
-	doc := page.Documents[docID]
+	doc := iter.currentPageData.Documents[docID]
 
 	iter.pageIndex++
 
 	// If we've exhausted this page, move to next page
 	if iter.pageIndex >= len(iter.pageIDs) {
 		iter.currentPage++
+		iter.currentPageData = nil
 	}
 
 	// Return copy of document
@@ -929,4 +986,5 @@ func (iter *BundleDocumentIterator) Reset() {
 	iter.currentPage = 0
 	iter.pageIDs = []string{}
 	iter.pageIndex = 0
+	iter.currentPageData = nil
 }

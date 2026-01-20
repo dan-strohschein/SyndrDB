@@ -219,6 +219,11 @@ type Arguments struct {
 	// TODO: I will add PlanCacheMemoryLimitMB for memory-aware eviction when memory profiling reveals actual cache memory usage
 	// TODO: I will add PlanCacheCompressionEnabled for large plan compression when we have plans exceeding 10KB
 
+	// Page cache / memory-leak fix knobs
+	MaxLoadedDocumentPages            int `yaml:"max_loaded_document_pages"`              // Max pages in BundleService.documentPages (shared); 0 = use default 500
+	BundleAdapterMaxCachedPages       int `yaml:"bundle_adapter_max_cached_pages"`        // Max pages in BundleAdapter.cachedPages per scanner; 0 = use default 500
+	DocumentPageMapMaxEntriesPerBundle int `yaml:"document_page_map_max_entries_per_bundle"` // Max documentID->pageID entries per bundle in documentPageMap; 0 = use default 100000
+
 	// Prepared Statement Cache Configuration (for parameterized queries)
 	PreparedStatementCacheEnabled  bool `yaml:"prepared_statement_cache_enabled"`  // Enable prepared statement caching (default: true)
 	PreparedStatementCacheCapacity int  `yaml:"prepared_statement_cache_capacity"` // Maximum cached statements per shard (default: 1000, 8 shards = 8000 total)
@@ -421,6 +426,11 @@ func GetSettings() *Arguments {
 			PlanCacheCustomThreshold:   5,    // 5 custom executions before generic plan
 			PlanCacheWriteThreshold:    1000, // Invalidate after 1000 writes
 			PlanCacheStaleServeSeconds: 60,   // 60 second stale serving window
+
+			// Page cache / memory-leak fix defaults
+			MaxLoadedDocumentPages:             500,     // Max pages in BundleService.documentPages (shared)
+			BundleAdapterMaxCachedPages:        500,     // Max pages in BundleAdapter.cachedPages per scanner
+			DocumentPageMapMaxEntriesPerBundle: 100000,  // Max documentID->pageID entries per bundle
 
 			// Prepared Statement Cache Defaults
 			PreparedStatementCacheEnabled:  true, // Enable prepared statement caching by default

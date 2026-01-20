@@ -258,12 +258,13 @@ func (shard *PlanCacheShard) get(
 	isValid := entry.collectionVersion == currentVersion
 
 	if isValid {
-		// Plan is fresh - update LRU and stats
+		// Plan is fresh - update LRU and stats. Clone before return so concurrent
+		// callers do not share the same plan (avoids race on sortedDocuments etc.).
 		shard.lru.MoveToFront(elem)
 		entry.lastUsed = time.Now()
 		entry.execCount++
 		shard.mu.RUnlock()
-		return entry.plan
+		return entry.plan.Clone()
 	}
 
 	// Plan is stale - check if we can serve it anyway (SELECT queries only)
@@ -301,9 +302,8 @@ func (shard *PlanCacheShard) get(
 	maxStale := time.Duration(settings.GetSettings().PlanCacheStaleServeSeconds) * time.Second
 
 	if entry.isStale && staleDuration < maxStale {
-		// Still within stale serve window - return stale plan
-		// I can extend the stale serve window here if needed
-		return entry.plan
+		// Still within stale serve window - return clone of stale plan
+		return entry.plan.Clone()
 	}
 
 	// Either first time stale or window expired - mark stale and trigger rebuild
@@ -314,7 +314,7 @@ func (shard *PlanCacheShard) get(
 	// I'll implement a proper async rebuild mechanism here someday
 	// TODO: Implement async rebuild with proper context handling and WaitGroup tracking
 
-	return entry.plan
+	return entry.plan.Clone()
 }
 
 // insert adds a plan to the cache with LRU eviction
@@ -532,6 +532,23 @@ func (spc *ShardedPlanCache) UpdatePlanStats(key uint64, duration time.Duration,
 	} else if isGeneric {
 		entry.genericPlanCost = duration.Seconds()
 	}
+}
+
+// RemoveBundleMetadata removes bundle entries from bundleInvalidations, staleServesByBundle,
+// and each shard's collectionVersions. Call when a bundle is dropped to avoid unbounded growth.
+func (spc *ShardedPlanCache) RemoveBundleMetadata(bundleName string) {
+	if spc == nil {
+		return
+	}
+	spc.bundleInvalidations.Delete(bundleName)
+	spc.staleServesByBundle.Delete(bundleName)
+	for i := 0; i < 8; i++ {
+		shard := spc.shards[i]
+		shard.mu.Lock()
+		delete(shard.collectionVersions, bundleName)
+		shard.mu.Unlock()
+	}
+	spc.logger.Debugf("Removed bundle %s from plan cache metadata", bundleName)
 }
 
 // InvalidateBundle invalidates all plans for a bundle (lazy invalidation via version bump)

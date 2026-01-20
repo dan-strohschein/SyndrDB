@@ -768,25 +768,22 @@ func (sbs *SmartBundleScanner) Close() error {
 		sbs.cache.Clear()
 	}
 
+	// Clear BundleAdapter.cachedPages so pages are not retained after Close
+	if adapter, ok := sbs.bundle.(*BundleAdapter); ok {
+		adapter.ClearCachedPages()
+	}
+
 	return nil
 }
 
 // RemoveDocumentsFromCache removes deleted documents from the scanner's cached pages
 // This is called after documents are deleted to keep the cache consistent with disk
 func (s *SmartBundleScanner) RemoveDocumentsFromCache(documentIDs []string) {
-
-	// Get the BundleAdapter (which holds the cachedPages map)
-	if bundleAdapter, ok := s.bundle.(*BundleAdapter); ok {
-		// Remove documents from each cached page
-		for _, cachedPage := range bundleAdapter.cachedPages {
-			for _, docID := range documentIDs {
-				delete(cachedPage.Documents, docID)
-			}
-		}
-
+	if adapter, ok := s.bundle.(*BundleAdapter); ok {
+		adapter.RemoveDocumentsFromCachedPages(documentIDs)
 		if s.logger != nil {
 			s.logger.Infof("Removed %d documents from scanner cache for bundle '%s'",
-				len(documentIDs), bundleAdapter.bundle.Name)
+				len(documentIDs), adapter.bundle.Name)
 		}
 	}
 }

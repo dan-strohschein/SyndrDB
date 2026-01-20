@@ -912,12 +912,12 @@ func (s *Server) acceptConnections() {
 			zap.String("remoteAddr", conn.RemoteAddr().String()),
 			zap.String("clientIP", clientIP))
 
-		// Handle each connection in a new goroutine
-		go func(c net.Conn, ip string) {
+		// Handle each connection in a new goroutine. ReleaseConnection is called in
+		// handleConnection's defer to avoid double-release (was here and in handleConnection).
+		go func(c net.Conn) {
 			defer s.wg.Done()
-			defer s.RateLimiter.ReleaseConnection(ip) // Release connection when done
 			s.handleConnection(c)
-		}(conn, clientIP)
+		}(conn)
 	}
 }
 
