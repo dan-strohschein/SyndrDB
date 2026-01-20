@@ -197,6 +197,8 @@ func main() {
 	flag.BoolVar(&args.AuthEnabled, "auth", args.AuthEnabled, "Enable authentication")
 	flag.IntVar(&args.SessionTimeoutMinutes, "session-timeout", args.SessionTimeoutMinutes, "Session timeout in minutes")
 	flag.IntVar(&args.MaxSessions, "max-sessions", args.MaxSessions, "Maximum concurrent sessions")
+	flag.IntVar(&args.MaxConnections, "max-connections", args.MaxConnections, "Maximum connection pool size")
+	flag.IntVar(&args.ConnectionIdleTimeoutMinutes, "connection-idle-timeout", args.ConnectionIdleTimeoutMinutes, "Connection idle timeout in minutes")
 	flag.StringVar(&args.Version, "version", args.Version, "Version information")
 	flag.BoolVar(&args.EnableGraphQL, "graphql", args.EnableGraphQL, "Enable GraphQL API")
 	flag.StringVar(&args.BundleStorageFormat, "bundle-format", args.BundleStorageFormat, "Bundle storage format")
