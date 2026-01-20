@@ -527,13 +527,22 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 		return []string{}, []uint32{}, nil
 	}
 
-	// Step 3: Cache in MemTable for future reads
-	err = idx.MemTable.Put(latestEntry)
-	if err != nil {
-		// Just log warning - we still have the result
-		idx.logger.Warnw("Failed to cache entry in MemTable",
-			"key", keyValue,
-			"error", err)
+	// Step 3: Re-check MemTable for concurrent writes, then cache.
+	// Another goroutine may have written a newer entry after our initial miss.
+	// If we blindly cache our disk result, MemTable.Put would reject an older
+	// entry and we could return stale data. Re-check and use MemTable's value
+	// when it is newer; on Put "attempted to insert older" use the in-memory
+	// entry as the authoritative result (no WARN—expected under concurrency).
+	entryNow, foundNow := idx.MemTable.Get(keyValue)
+	if foundNow && entryNow.IsNewer(latestEntry) {
+		latestEntry = entryNow
+	} else {
+		err = idx.MemTable.Put(latestEntry)
+		if err != nil {
+			if entryFinal, foundFinal := idx.MemTable.Get(keyValue); foundFinal {
+				latestEntry = entryFinal
+			}
+		}
 	}
 
 	// Check if this is a tombstone

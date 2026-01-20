@@ -126,6 +126,34 @@ type ConnectionString struct {
 // This allows multi-statement commands (migrations, transactions) to be processed as a unit.
 const CommandTerminator = "\x04"
 
+// splitOnCommandTerminator splits data on CommandTerminator (\x04), respecting
+// \x04\x04 as an escaped literal (e.g. in parameterized command values).
+// Returns complete commands and any incomplete remainder to carry to the next read.
+func splitOnCommandTerminator(data string) (complete []string, incomplete string) {
+	var seg strings.Builder
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\x04' {
+			if i+1 < len(data) && data[i+1] == '\x04' {
+				// Escaped \x04\x04: keep both in segment, skip second
+				seg.WriteByte('\x04')
+				seg.WriteByte('\x04')
+				i++
+			} else {
+				// Delimiter: end of command
+				s := strings.TrimSpace(seg.String())
+				if s != "" {
+					complete = append(complete, s)
+				}
+				seg.Reset()
+			}
+		} else {
+			seg.WriteByte(data[i])
+		}
+	}
+	incomplete = seg.String()
+	return complete, incomplete
+}
+
 // InitServer initializes the SyndrDB server
 func InitServer(config *settings.Arguments) (*Server, error) {
 
@@ -987,21 +1015,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 					// Append to any previous partial data
 					partialData += data
 
-					// Check for command terminator
-					if strings.Contains(partialData, CommandTerminator) {
-						// Remove terminator and send complete command batch
-						cmd := strings.TrimSuffix(partialData, CommandTerminator)
-						cmd = strings.TrimSpace(cmd)
-
-						if cmd != "" {
-							// Send complete command batch for processing
-							// CommandDirector handles multi-statement batches (migrations, transactions)
-							dataCh <- cmd
-						}
-
-						// Reset for next command batch
-						partialData = ""
+					// Split on CommandTerminator, respecting \x04\x04 in parameterized values.
+					// Sends each complete command separately to avoid bunching when TCP
+					// coalesces multiple commands into one read.
+					complete, incomplete := splitOnCommandTerminator(partialData)
+					for _, cmd := range complete {
+						dataCh <- cmd
 					}
+					partialData = incomplete
 
 					// if strings.Contains(data, "\n") {
 					// 	lines := strings.Split(data, "\n")
