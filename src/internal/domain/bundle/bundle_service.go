@@ -2062,9 +2062,13 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string)
 	}
 
 	// MEMORY-FIRST: Check if document is already loaded in memory (hot path)
-	// This includes recently added documents that haven't been flushed to disk yet
+	// This includes recently added documents that haven't been flushed to disk yet.
+	// RLock prevents races with delete/update of *bundle.Documents (concurrent map read and write).
 	if bundle.Documents != nil {
-		if doc, exists := (*bundle.Documents)[documentID]; exists {
+		bundle.DocumentsMutex.RLock()
+		doc, exists := (*bundle.Documents)[documentID]
+		bundle.DocumentsMutex.RUnlock()
+		if exists {
 			//s.logger.Debugf("Document %s found in memory for bundle %s", documentID, bundleName)
 			return &doc, nil
 		}
@@ -5460,10 +5464,14 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	// after disk write to maintain durability.
 
 	// 1. Remove from Bundle.Documents if loaded
+	// CRITICAL: Hold DocumentsMutex to prevent concurrent map iteration (e.g. mergeMemtableWithFilter)
+	// and map write; without this, "fatal error: concurrent map iteration and map write" can occur.
 	if bundle.Documents != nil {
+		bundle.DocumentsMutex.Lock()
 		for _, docID := range docIDs {
 			delete(*bundle.Documents, docID)
 		}
+		bundle.DocumentsMutex.Unlock()
 	}
 
 	// 2. Targeted page invalidation: collect pageIDs for deleted docs from documentPageMap before
