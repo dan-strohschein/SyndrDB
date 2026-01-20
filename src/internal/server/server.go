@@ -706,6 +706,9 @@ func (s *Server) Stop() error {
 		s.logger.Info("Ghost cleanup worker stopped")
 	}
 
+	// Optional: clean up index temp files (*.tmp, *.idx.tmp, *.compact.tmp) on shutdown
+	bundle.CleanupIndexTempFiles(settings.GetSettings().DataDir, s.logger)
+
 	// Stop session manager first to cleanup all sessions
 	if s.SessionManager != nil {
 		s.SessionManager.Stop()

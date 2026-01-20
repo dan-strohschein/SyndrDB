@@ -2915,10 +2915,7 @@ func (s *BundleService) ApplyFieldChanges(database *models.Database, bundle *mod
 			if err := s.applyRemoveField(database, bundle, fieldName); err != nil {
 				return fmt.Errorf("failed to remove field '%s': %w", fieldName, err)
 			}
-			// Track if this field was indexed
-			if s.isFieldIndexed(bundle, fieldName) {
-				indexesToRebuild[fieldName] = true
-			}
+			// Indexes on this field are removed and their files deleted in applyRemoveField; no rebuild
 
 		case "MODIFY":
 			if err := s.applyModifyField(bundle, &change); err != nil {
@@ -3015,7 +3012,8 @@ func (s *BundleService) applyAddField(bundle *models.Bundle, change *models.Fiel
 	return nil
 }
 
-// applyRemoveField removes a field from the bundle schema and all documents
+// applyRemoveField removes a field from the bundle schema and all documents.
+// Indexes on this field are removed from bundle.Indexes and their files deleted from disk.
 func (s *BundleService) applyRemoveField(database *models.Database, bundle *models.Bundle, fieldName string) error {
 	// Validate field exists
 	if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldName]; !exists {
@@ -3035,6 +3033,42 @@ func (s *BundleService) applyRemoveField(database *models.Database, bundle *mode
 	if violation != nil {
 		s.logger.Warnf("[REFINT] %s | Suggested: %s", violation.Error(), violation.SuggestedAction)
 		return fmt.Errorf("%s", violation.Error())
+	}
+
+	// Remove indexes on this field from bundle.Indexes and delete their files from disk
+	if bundle.Indexes != nil && database != nil {
+		var toRemove []string
+		for indexName, indexRef := range bundle.Indexes {
+			match := indexRef.BTreeIndexField.FieldName == fieldName ||
+				indexRef.HashIndexField.FieldName == fieldName
+			for _, f := range indexRef.Fields {
+				if f.Name == fieldName {
+					match = true
+					break
+				}
+			}
+			if match {
+				toRemove = append(toRemove, indexName)
+			}
+		}
+		indexesPath := filepath.Join(database.DataDirectory, database.Name, bundle.Name, "indexes")
+		for _, indexName := range toRemove {
+			ir := bundle.Indexes[indexName]
+			_ = DeleteIndexFiles(indexesPath, indexName, ir.IndexType, s.logger)
+			delete(bundle.Indexes, indexName)
+			// Remove from IndexNames
+			for i, n := range bundle.IndexNames {
+				if n == indexName {
+					bundle.IndexNames = append(bundle.IndexNames[:i], bundle.IndexNames[i+1:]...)
+					break
+				}
+			}
+			s.indexCacheMutex.Lock()
+			if cx, ok := s.loadedIndexes[bundle.Name]; ok {
+				delete(cx, indexName)
+			}
+			s.indexCacheMutex.Unlock()
+		}
 	}
 
 	// Remove from schema

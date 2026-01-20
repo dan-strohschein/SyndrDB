@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/graphQL"
 	"syndrdb/src/internal/graphQL/schema"
@@ -324,6 +325,11 @@ func main() {
 		log.Fatalf("Failed to initialize server: %v", err)
 	}
 	//srv := server.NewServer(args.Host, args.Port, db, args.AuthEnabled)
+
+	// Run index cleanup (temp + schema-based orphans) before starting
+	if err := bundle.RunIndexCleanup(args.DataDir, srv.Databases, srv.GetLogger()); err != nil {
+		log.Printf("Warning: index cleanup failed: %v", err)
+	}
 
 	// Create default users from configuration if authentication is enabled
 	if args.AuthEnabled && len(args.DefaultUsers) > 0 {

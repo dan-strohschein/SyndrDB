@@ -28,6 +28,8 @@ package bundle
 
 import (
 	"fmt"
+	"path/filepath"
+
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/models"
 )
@@ -99,7 +101,10 @@ func (s *BundleService) InvalidateBTreeIndexesOnBundleChange(
 	return nil
 }
 
-// OnBundleDeleteCleanupIndexes removes all B-tree indexes when a bundle is deleted.
+// OnBundleDeleteCleanupIndexes removes all index files (B-tree and hash) when a bundle is deleted.
+// If the bundle directory is removed via os.RemoveAll (e.g. in DeleteBundle), this is redundant
+// but harmless. It ensures index files are deleted when this is called from paths that do not
+// remove the whole directory.
 //
 // Parameters:
 //   - bundle: The bundle being deleted
@@ -110,17 +115,15 @@ func (s *BundleService) OnBundleDeleteCleanupIndexes(bundle *models.Bundle) erro
 	if bundle == nil || bundle.Indexes == nil {
 		return nil
 	}
+	if bundle.Database == nil {
+		return nil
+	}
 
-	s.logger.Infof("Cleaning up B-tree indexes for deleted bundle '%s'", bundle.Name)
+	indexesPath := filepath.Join(bundle.Database.DataDirectory, bundle.Database.Name, bundle.Name, "indexes")
+	s.logger.Infof("Cleaning up index files for deleted bundle '%s'", bundle.Name)
 
 	for indexName, indexRef := range bundle.Indexes {
-		if indexRef.IndexType != "btree" {
-			continue
-		}
-
-		// TODO: I should implement actual index file deletion here
-		// For now, just log that cleanup is needed
-		s.logger.Debugf("B-tree index '%s' needs cleanup after bundle deletion", indexName)
+		_ = DeleteIndexFiles(indexesPath, indexName, indexRef.IndexType, s.logger)
 	}
 
 	return nil

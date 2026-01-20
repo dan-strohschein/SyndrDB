@@ -39,6 +39,7 @@ This requires version chain tracking in document storage format.
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -241,7 +242,9 @@ func (gcw *GhostCleanupWorker) shouldPauseForLoad() bool {
 	return activeQueries >= uint64(gcw.pauseThreshold)
 }
 
-// cleanupOrphanedTempFiles removes old .compact.tmp files from crashes
+// cleanupOrphanedTempFiles removes old *.tmp, *.idx.tmp, and *.compact.tmp files from
+// .../indexes and .../indexes/btree under dataDir. Uses filepath.WalkDir to recurse
+// (filepath.Glob does not support "**"). Files older than orphanedFileThreshold are deleted.
 func (gcw *GhostCleanupWorker) cleanupOrphanedTempFiles() {
 	// TODO: I can make the orphaned file age threshold configurable via settings.GhostCleanup.OrphanedFileTTLHours
 	// when more users request customization. Current hardcoded 1 hour threshold is safe for 99% of workloads
@@ -252,52 +255,60 @@ func (gcw *GhostCleanupWorker) cleanupOrphanedTempFiles() {
 		return
 	}
 
-	gcw.logger.Infow("Scanning for orphaned compaction temp files",
+	gcw.logger.Infow("Scanning for orphaned temp files in index dirs",
 		"dataDir", gcw.dataDir,
 		"threshold", orphanedFileThreshold)
 
-	// Scan for .compact.tmp files
-	pattern := filepath.Join(gcw.dataDir, "**", "*.compact.tmp")
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		gcw.logger.Warnw("Failed to scan for orphaned temp files",
-			"pattern", pattern,
-			"error", err)
-		return
+	isTemp := func(name string) bool {
+		return strings.HasSuffix(name, ".tmp") ||
+			strings.HasSuffix(name, ".idx.tmp") ||
+			strings.HasSuffix(name, ".compact.tmp")
 	}
 
-	removedCount := 0
-	for _, filePath := range matches {
-		info, err := os.Stat(filePath)
-		if err != nil {
-			gcw.logger.Warnw("Failed to stat temp file",
-				"path", filePath,
-				"error", err)
-			continue
-		}
-
-		age := time.Since(info.ModTime())
-		if age > orphanedFileThreshold {
-			// Remove the old temp file
-			if err := os.Remove(filePath); err != nil {
-				gcw.logger.Warnw("Failed to remove orphaned temp file",
-					"path", filePath,
-					"age", age,
-					"error", err)
-			} else {
-				gcw.logger.Infow("Cleaned up orphaned compaction temp file",
-					"path", filePath,
-					"age", age)
-				removedCount++
+	var removedCount int
+	err := filepath.WalkDir(gcw.dataDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) {
+				return nil
 			}
+			return nil
 		}
+		if d.IsDir() {
+			return nil
+		}
+		dir, name := filepath.Split(path)
+		dir = filepath.Clean(dir)
+		base := filepath.Base(dir)
+		// Only under .../indexes or .../indexes/btree
+		if base != "indexes" && !(base == "btree" && filepath.Base(filepath.Dir(dir)) == "indexes") {
+			return nil
+		}
+		if !isTemp(name) {
+			return nil
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			gcw.logger.Warnw("Failed to stat temp file", "path", path, "error", err)
+			return nil
+		}
+		age := time.Since(info.ModTime())
+		if age <= orphanedFileThreshold {
+			return nil
+		}
+		if err := os.Remove(path); err != nil {
+			gcw.logger.Warnw("Failed to remove orphaned temp file", "path", path, "age", age, "error", err)
+		} else {
+			gcw.logger.Infow("Cleaned up orphaned temp file", "path", path, "age", age)
+			removedCount++
+		}
+		return nil
+	})
+	if err != nil {
+		gcw.logger.Warnw("Failed to walk for orphaned temp files", "dataDir", gcw.dataDir, "error", err)
 	}
 
 	if removedCount > 0 {
-		gcw.logger.Infow("Orphaned temp file cleanup complete",
-			"filesRemoved", removedCount)
-
-		// Update metric
+		gcw.logger.Infow("Orphaned temp file cleanup complete", "filesRemoved", removedCount)
 		if gcw.metricsReporter != nil {
 			gcw.metricsReporter("OrphanedTempFilesRemoved", uint64(removedCount))
 		}

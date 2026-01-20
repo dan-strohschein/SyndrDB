@@ -163,15 +163,31 @@ func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*Bucket
 		// Sort files by file number
 		sort.Strings(existingFiles)
 		handle.AllFiles = existingFiles
-
-		// Parse latest file number
-		parsed := bfm.namingHelper.ParseBucketIndexFileName(existingFiles[len(existingFiles)-1])
+		lastPath := existingFiles[len(existingFiles)-1]
+		parsed := bfm.namingHelper.ParseBucketIndexFileName(lastPath)
 		if parsed.IsValid {
-			handle.CurrentFileNum = parsed.FileNumber + 1 // Next file number
+			// Reuse the last file for appending if it's not full. This avoids creating
+			// a new header-only file on every server restart (which caused hundreds
+			// of near-empty files per index).
+			file, openErr := os.OpenFile(lastPath, os.O_WRONLY|os.O_APPEND, 0644)
+			if openErr == nil {
+				stat, statErr := file.Stat()
+				if statErr == nil && stat.Size() < bfm.bucketMaxSize {
+					handle.CurrentFile = file
+					handle.CurrentSize = stat.Size()
+					handle.CurrentFileNum = parsed.FileNumber
+					handle.WriteBuffer = bufio.NewWriterSize(file, bfm.writeBufferSize)
+					bfm.buckets[bucketNum] = handle
+					return handle, nil
+				}
+				_ = file.Close()
+			}
+			// Last file is full or unavailable: create next file
+			handle.CurrentFileNum = parsed.FileNumber + 1
 		}
 	}
 
-	// Open current file for writing
+	// Open or create current file for writing
 	if err := bfm.openBucketFile(handle); err != nil {
 		return nil, fmt.Errorf("failed to open bucket file: %w", err)
 	}
