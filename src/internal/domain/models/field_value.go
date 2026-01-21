@@ -103,12 +103,14 @@ func NewInterfaceValue(v interface{}) FieldValue {
 	// Try to avoid interface{} if possible
 	switch val := v.(type) {
 	case string:
-		// Auto-parse DateTime strings (MVP: automatic type detection)
-		// Try parsing as DateTime first - if successful, return as DateTime
-		if parsedTime, err := tryParseDateTime(val); err == nil {
-			return NewDateTimeValue(parsedTime)
+		// Auto-parse DateTime only when string looks like a date (YYYY-MM-DD or YYYY-MM-DDThh:mm:ss).
+		// Skip tryParseDateTime for plain strings (names, IDs, enums) to avoid 5x failed time.Parse
+		// per value, which allocates ~204GB via time.newParseError under load (see pprof alloc_space).
+		if len(val) >= 10 && val[4] == '-' && val[7] == '-' {
+			if parsedTime, err := tryParseDateTime(val); err == nil {
+				return NewDateTimeValue(parsedTime)
+			}
 		}
-		// Not a DateTime - return as string
 		return NewStringValue(val)
 	case int:
 		return NewIntValue(int64(val))
