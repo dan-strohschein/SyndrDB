@@ -12,6 +12,7 @@ import (
 type BundleServiceInterface interface {
 	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
 	LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error)
+	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error) // GetDocumentPage uses shared documentPages cache
 	CountDocuments(bundleName, databaseName string) (int, error) // Count all documents using optimized count-only parser
 }
 
@@ -51,6 +52,10 @@ func (si *ScannerIntegration) CreateScannerForBundle(bundle *models.Bundle, bund
 	if err != nil {
 		return nil, fmt.Errorf("failed to create scanner: %w", err)
 	}
+
+	// SNAPSHOT ISOLATION: Set scanner reference in adapter for MVCC filtering
+	// bundleAdapter is already *BundleAdapter, so we can directly assign
+	bundleAdapter.scanner = scanner
 
 	// Register with metrics manager
 	si.metricsManager.RegisterScanner(bundle.Name, scanner)

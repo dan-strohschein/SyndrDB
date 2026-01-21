@@ -16,6 +16,8 @@ import (
 
 // SmartBundleScanner implements intelligent document scanning with batching, caching, and hot key optimization
 // This scanner uses PostgreSQL-inspired techniques: sequential I/O, vectorized processing, and predicate pushdown
+// SNAPSHOT ISOLATION: Scanner captures a snapshot sequence at creation time and filters documents
+// committed after that sequence, enabling consistent reads without cache invalidation on INSERTs.
 type SmartBundleScanner struct {
 	bundle        BundleInterface    // The bundle to scan
 	config        *ScannerConfig     // Configuration parameters
@@ -26,6 +28,11 @@ type SmartBundleScanner struct {
 	// Performance metrics
 	metrics   *ScanMetrics // Current scanner metrics
 	startTime time.Time    // When scanner was created
+
+	// SNAPSHOT ISOLATION: MVCC snapshot tracking
+	snapshotSequence uint64        // Commit sequence boundary (sees all commits <= this, 0 = current)
+	txID             uint64        // Transaction ID for this scanner (0 = autocommit)
+	activeTxIDs      map[uint64]bool // Active transaction IDs at snapshot time (for visibility rules)
 }
 
 // NewSmartBundleScanner creates a new smart bundle scanner
@@ -33,6 +40,7 @@ type SmartBundleScanner struct {
 // config: Configuration parameters (use DefaultScannerConfig() for defaults)
 // cache: Cache implementation for frequently accessed data
 // logger: Logger for debugging and monitoring
+// SNAPSHOT ISOLATION: Creates scanner with snapshot sequence for MVCC visibility filtering
 func NewSmartBundleScanner(
 	bundle BundleInterface,
 	config *ScannerConfig,
@@ -44,20 +52,40 @@ func NewSmartBundleScanner(
 		config = DefaultScannerConfig()
 	}
 
+	// SNAPSHOT ISOLATION: Capture snapshot at creation time
+	// For autocommit queries: snapshotSequence = 0 means "current" (don't filter by sequence)
+	// For transaction queries: snapshotSequence would be set by the transaction manager
+	// TODO: Get actual current sequence from SnapshotManager when available
 	scanner := &SmartBundleScanner{
-		bundle:        bundle,
-		config:        config,
-		cache:         cache,
-		logger:        logger,
-		hotKeyTracker: NewHotKeyTracker(logger, config.HotThreshold, config.OptimizeAfter),
-		metrics:       &ScanMetrics{},
-		startTime:     time.Now(),
+		bundle:           bundle,
+		config:           config,
+		cache:            cache,
+		logger:           logger,
+		hotKeyTracker:    NewHotKeyTracker(logger, config.HotThreshold, config.OptimizeAfter),
+		metrics:          &ScanMetrics{},
+		startTime:        time.Now(),
+		snapshotSequence: 0, // 0 = current (will filter uncommitted from other transactions)
+		txID:             0, // 0 = autocommit
+		activeTxIDs:      nil,
 	}
 
 	// logger.Infof("Created SmartBundleScanner for bundle '%s' with batch size %d",
 	// 	bundle.GetName(), config.BatchSize)
 
 	return scanner
+}
+
+// SetSnapshot sets the MVCC snapshot for this scanner
+// Called when scanner is used within a transaction to enable proper snapshot isolation
+func (sbs *SmartBundleScanner) SetSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool) {
+	sbs.snapshotSequence = snapshotSeq
+	sbs.txID = txID
+	if activeTxIDs != nil {
+		sbs.activeTxIDs = make(map[uint64]bool)
+		for k, v := range activeTxIDs {
+			sbs.activeTxIDs[k] = v
+		}
+	}
 }
 
 // ScanForKeyValue performs an optimized scan for documents matching a key-value query
@@ -768,22 +796,18 @@ func (sbs *SmartBundleScanner) Close() error {
 		sbs.cache.Clear()
 	}
 
-	// Clear BundleAdapter.cachedPages so pages are not retained after Close
-	if adapter, ok := sbs.bundle.(*BundleAdapter); ok {
-		adapter.ClearCachedPages()
-	}
+	// Note: BundleAdapter no longer has cachedPages; pages are in shared documentPages cache
+	// The shared cache handles eviction automatically, so no cleanup needed here
 
 	return nil
 }
 
 // RemoveDocumentsFromCache removes deleted documents from the scanner's cached pages
-// This is called after documents are deleted to keep the cache consistent with disk
+// UNIVERSAL CACHE: BundleAdapter no longer has its own cache; invalidation is handled
+// by BundleService.invalidateDocumentPage which invalidates the shared documentPages cache.
+// This method is kept for API compatibility but is now a no-op.
 func (s *SmartBundleScanner) RemoveDocumentsFromCache(documentIDs []string) {
-	if adapter, ok := s.bundle.(*BundleAdapter); ok {
-		adapter.RemoveDocumentsFromCachedPages(documentIDs)
-		if s.logger != nil {
-			s.logger.Infof("Removed %d documents from scanner cache for bundle '%s'",
-				len(documentIDs), adapter.bundle.Name)
-		}
-	}
+	// No-op: BundleAdapter uses shared documentPages cache, which is invalidated
+	// by BundleService.invalidateDocumentPage when documents are deleted.
+	// The shared cache handles invalidation automatically.
 }

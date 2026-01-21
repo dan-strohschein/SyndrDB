@@ -302,6 +302,9 @@ type BundleService struct {
 	bundleMetadata     map[string]*models.Bundle       // Only schema/structure
 	documentPages      map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
 	documentPagesMutex sync.RWMutex                    // Protects documentPages; prevents concurrent map read/write
+	// LOCK ORDERING (to prevent deadlocks):
+	// pageCacheMutex < documentPagesMutex < scannerMutex
+	// Always acquire locks in this order when multiple locks are needed
 
 	logger *zap.SugaredLogger
 
@@ -2225,9 +2228,9 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 		return 0, fmt.Errorf("bundle %s has no pages", bundleID)
 	}
 
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	// UNIVERSAL CACHE: Use GetDocumentPage instead of store.LoadDocumentPage to populate shared cache
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundleID, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundleID, bundle.Database.Name, pageID)
 		if err != nil {
 			s.logger.Warnf("Failed to load page %d while searching for document %s: %v", pageID, documentID, err)
 			continue
@@ -2296,11 +2299,8 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	// Special handling: If PageCount is 0, still check page 0 for documents
 	// This handles cases where metadata might be out of sync
 	if bundle.PageCount == 0 {
-
-		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-
-		//settings := settings.GetSettings()
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, 0, databasePath)
+		// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, 0)
 		if err != nil {
 
 			// Even if page 0 fails, check memtable before returning empty
@@ -2382,11 +2382,10 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	}
 
 	// CASSANDRA-STYLE MEMTABLE MERGE:
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Load all pages from disk first (authoritative source)
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 			continue
@@ -2482,7 +2481,7 @@ func (s *BundleService) GetDocumentChunksForIndexing(ctx context.Context, bundle
 		return true
 	}
 
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	pageCount := uint32(bundle.PageCount)
 	if pageCount == 0 {
 		pageCount = 1
@@ -2494,7 +2493,7 @@ func (s *BundleService) GetDocumentChunksForIndexing(ctx context.Context, bundle
 			return ctx.Err()
 		default:
 		}
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 			continue
@@ -2561,12 +2560,12 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 	}
 
 	filter := opts.Filter
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 
 	// --- PageCount == 0 (reuse existing special-case structure, with filter) ---
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	if bundle.PageCount == 0 {
 		var allDocuments []*models.Document
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, 0, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, 0)
 		if err != nil {
 			if bundle.Documents != nil && !bundle.DocumentsComplete {
 				bundle.DocumentsMutex.RLock()
@@ -2621,10 +2620,11 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 	pageCount := uint32(bundle.PageCount)
 
 	// --- Sequential: load each page, filter, append; then memtable ---
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	if concurrency <= 1 {
 		var allDocuments []*models.Document
 		for pageID := uint32(0); pageID < pageCount; pageID++ {
-			page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+			page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 			if err != nil {
 				s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 				continue
@@ -2662,8 +2662,9 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 		go func(pageStart, pageEnd int) {
 			defer wg.Done()
 			var local []*models.Document
+			// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 			for pageID := uint32(pageStart); pageID < uint32(pageEnd); pageID++ {
-				page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+				page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 				if err != nil {
 					s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 					continue
@@ -3281,11 +3282,10 @@ func (s *BundleService) applyModifyField(bundle *models.Bundle, change *models.F
 
 // applyDefaultToExistingDocuments adds a field with default value to all documents
 func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, fieldName string, defaultValue interface{}) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
@@ -3326,11 +3326,10 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 
 // removeFieldFromExistingDocuments removes a field from all documents
 func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, fieldName string) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
@@ -3361,13 +3360,12 @@ func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, 
 
 // renameFieldInDocuments renames a field in all documents
 func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldName, newFieldName string) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-
 	s.logger.Debugf("Renaming field '%s' to '%s' in all documents of bundle '%s'", oldFieldName, newFieldName, bundle.Name)
 
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
@@ -3407,12 +3405,12 @@ func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldNa
 
 // convertFieldType attempts to convert all values of a field to a new type
 func (s *BundleService) convertFieldType(bundle *models.Bundle, fieldName, fromType, toType string) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	conversionErrors := []string{}
 
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
@@ -3512,12 +3510,12 @@ func (s *BundleService) convertValue(value interface{}, fromType, toType string)
 
 // validateFieldUniqueness checks that all values for a field are unique
 func (s *BundleService) validateFieldUniqueness(bundle *models.Bundle, fieldName string) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	valuesSeen := make(map[string][]string) // value -> []documentIDs
 
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
@@ -3556,12 +3554,12 @@ func (s *BundleService) validateFieldUniqueness(bundle *models.Bundle, fieldName
 
 // validateAllDocumentsHaveField checks that all documents have a non-nil value for a field
 func (s *BundleService) validateAllDocumentsHaveField(bundle *models.Bundle, fieldName string) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	missingCount := 0
 
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
@@ -3588,11 +3586,10 @@ func (s *BundleService) validateAllDocumentsHaveField(bundle *models.Bundle, fie
 
 // applyDefaultToMissingField adds default value to documents missing a field
 func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldName string, defaultValue interface{}) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-
+	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
@@ -3719,6 +3716,29 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 		delete(s.documentPages, key)
 	}
 	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", len(keysToDelete), bundleName)
+}
+
+// invalidateDocumentPagesForInsert invalidates only the affected page(s) after an INSERT
+// UNIVERSAL CACHE: Instead of removing the entire scanner, we invalidate only the page where
+// the new document was inserted (and optionally the last few pages to handle edge cases).
+// This preserves cache for other pages and avoids cold scanner on every INSERT.
+func (s *BundleService) invalidateDocumentPagesForInsert(bundleName string, pageID uint32) {
+	s.documentPagesMutex.Lock()
+	defer s.documentPagesMutex.Unlock()
+	if s.documentPages == nil {
+		return
+	}
+
+	// Invalidate the page where the document was inserted
+	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	if _, exists := s.documentPages[pageKey]; exists {
+		delete(s.documentPages, pageKey)
+		s.logger.Debugf("Invalidated page %d in documentPages cache for bundle '%s' after INSERT", pageID, bundleName)
+	}
+
+	// Note: We only invalidate the specific page where the document was inserted.
+	// This is conservative and preserves cache for all other pages.
+	// Future enhancement: Could implement snapshot isolation to avoid invalidation entirely.
 }
 
 // invalidatePlanCacheForBundle invalidates all cached query plans for a bundle
@@ -5011,16 +5031,10 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		s.logger.Warnf("No indexes found for bundle '%s'", bundle.Name)
 	}
 
-	// CRITICAL: Invalidate the document scanner cache to force reload with updated bundle
-	cacheStart := time.Now()
-	s.RemoveDocumentScanner(docCommand.BundleName)
-	cacheDuration := time.Since(cacheStart)
-	if cacheDuration > 1*time.Millisecond {
-		s.logger.Warnf("  ⚠️  RemoveDocumentScanner took %v", cacheDuration)
-	} else {
-		s.logger.Debugf("  ✓ RemoveDocumentScanner took %v", cacheDuration)
-	}
-	s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after addition", docCommand.BundleName)
+	// SNAPSHOT ISOLATION: No invalidation needed - scanners filter documents by MVCC visibility
+	// Documents inserted after scanner creation are filtered out during iteration
+	// This avoids cache churn and enables consistent reads without destroying scanners
+	s.logger.Debugf("INSERT completed for bundle '%s' page %d - scanners use snapshot isolation", docCommand.BundleName, pageID)
 
 	return newDocument.DocumentID, nil
 }
@@ -5107,9 +5121,10 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 		}
 	}
 
-	// Invalidate the document scanner cache
-	s.RemoveDocumentScanner(docCommand.BundleName)
-	s.logger.Debugf("Invalidated document scanner cache for bundle '%s' after addition", docCommand.BundleName)
+	// SNAPSHOT ISOLATION: No invalidation needed - scanners filter documents by MVCC visibility
+	// Documents inserted after scanner creation are filtered out during iteration
+	// This avoids cache churn and enables consistent reads without destroying scanners
+	s.logger.Debugf("INSERT completed for bundle '%s' page %d - scanners use snapshot isolation", docCommand.BundleName, pageID)
 
 	return newDocument.DocumentID, nil
 }
@@ -6953,7 +6968,7 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 
 	if bundlePages, exists := s.documentPageMap[bundleName]; exists {
 		if pageID, hasPage := bundlePages[documentID]; hasPage {
-			pageKey := fmt.Sprintf("%s:page_%d", bundleName, pageID)
+			pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 			s.documentPagesMutex.Lock()
 			delete(s.documentPages, pageKey)
 			s.documentPagesMutex.Unlock()

@@ -3,12 +3,8 @@ package documentscanner
 import (
 	"context"
 	"fmt"
-	"sync"
-	"time"
 
 	"syndrdb/src/internal/domain/models"
-	"syndrdb/src/pkg/common/helpers"
-	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -182,11 +178,10 @@ type BundleAdapter struct {
 	bundle        *models.Bundle         // SyndrDB Bundle model
 	bundleService BundleServiceInterface // Service for loading documents
 	// Cached metadata (small and efficient)
-	totalDocuments   *int                            // Cached total document count
-	cachedPages      map[uint32]*models.DocumentPage // Page-level cache (bounded by bundle_adapter_max_cached_pages, LRU eviction)
-	cachedPagesMutex sync.RWMutex                    // Protects cachedPages for concurrent eviction and access
-	logger           *zap.SugaredLogger              // Logger for debugging and monitoring
-	projectionFields []string                        // PROJECTION PUSHDOWN: Field names to deserialize during page loading (nil = all fields)
+	totalDocuments *int   // Cached total document count
+	logger         *zap.SugaredLogger    // Logger for debugging and monitoring
+	projectionFields []string            // PROJECTION: Field names for in-memory projection (full pages cached, projection applied after retrieval)
+	scanner        interface{}          // Reference to scanner for snapshot isolation (set by scanner factory, type SmartBundleScanner)
 }
 
 // NewBundleAdapter creates a new adapter for a SyndrDB Bundle with streaming support
@@ -218,117 +213,81 @@ func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterfac
 	adapter := &BundleAdapter{
 		bundle:        bundle,
 		bundleService: bundleService,
-		cachedPages:   make(map[uint32]*models.DocumentPage),
 		logger:        logger,
 	}
-
-	//logger.Infof("DEBUG: Created BundleAdapter instance %p with fresh cachedPages map %p", adapter, adapter.cachedPages)
 
 	return adapter
 }
 
-// SetProjectionFields sets the projection fields for projection pushdown optimization
-// PROJECTION PUSHDOWN: This allows the storage layer to deserialize only specified fields
-// For ORDER BY queries, this saves ~80-90% deserialization overhead (e.g., only deserialize "name" field)
+// SetProjectionFields sets the projection fields for in-memory projection
+// PROJECTION: Full pages are cached; projection is applied in memory after retrieval
+// This prevents cache poisoning where a partial page can't serve queries needing all fields
 // Called from FullScanNode when ORDER BY is present to optimize document loading
 func (ba *BundleAdapter) SetProjectionFields(fields []string) {
 	ba.projectionFields = fields
 	if len(fields) > 0 {
-		ba.logger.Debugf("PROJECTION PUSHDOWN: Set projection fields on BundleAdapter: %v", fields)
+		ba.logger.Debugf("PROJECTION: Set projection fields on BundleAdapter (will apply in-memory): %v", fields)
 	}
 }
 
 // ===== STREAMING IMPLEMENTATION - NO MORE INFINITE LOOPS =====
 
-// loadDocumentPage loads a specific page with caching and LRU eviction when at cap.
-// PROJECTION PUSHDOWN: Passes projection fields to storage layer if set.
+// loadDocumentPage loads a specific page using the shared documentPages cache.
+// UNIVERSAL CACHE: Routes through GetDocumentPage to use shared cache instead of per-adapter cache.
+// PROJECTION: Full pages are cached; projection is applied in memory after retrieval if projectionFields is set.
 func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, error) {
-	// Check cache first (read lock)
-	ba.cachedPagesMutex.RLock()
-	if page, exists := ba.cachedPages[pageID]; exists {
-		ba.cachedPagesMutex.RUnlock()
-		return page, nil
-	}
-	ba.cachedPagesMutex.RUnlock()
-
 	if ba.bundleService == nil {
 		return nil, fmt.Errorf("bundle service not available")
 	}
 
-	// Get database path from bundle
-	databasePath := helpers.GetDatabaseFolderPath(ba.bundle.Name)
-
-	// PROJECTION PUSHDOWN: Set projection fields on storage engine before loading page
-	if len(ba.projectionFields) > 0 {
-		if projectionService, ok := ba.bundleService.(interface {
-			SetProjectionFieldsForBundle(bundleName string, fields []string)
-		}); ok {
-			projectionService.SetProjectionFieldsForBundle(ba.bundle.Name, ba.projectionFields)
-			ba.logger.Debugf("PROJECTION PUSHDOWN: Set projection fields %v on storage engine for bundle '%s'", ba.projectionFields, ba.bundle.Name)
-		}
-	}
-
-	// Load page from storage (outside lock)
-	page, err := ba.bundleService.LoadDocumentPage(ba.bundle.Name, ba.bundle.Database.Name, pageID, databasePath)
+	// Use GetDocumentPage to leverage the shared documentPages cache
+	// This ensures all callers (scanner, get-by-id, etc.) share the same cached pages
+	page, err := ba.bundleService.GetDocumentPage(ba.bundle.Name, ba.bundle.Database.Name, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load page %d: %w", pageID, err)
 	}
 
-	// Insert into cache with eviction when at cap
-	ba.cachedPagesMutex.Lock()
-	defer ba.cachedPagesMutex.Unlock()
-	// Double-check: another goroutine may have filled while we were loading
-	if p, exists := ba.cachedPages[pageID]; exists {
-		return p, nil
+	// Apply projection in memory if projectionFields is set
+	// This prevents cache poisoning: we cache full pages, then filter fields in memory
+	if len(ba.projectionFields) > 0 {
+		// Create a copy of the page with only projected fields
+		projectedPage := &models.DocumentPage{
+			PageID:         page.PageID,
+			BundleID:       page.BundleID,
+			Documents:      make(map[string]models.Document),
+			NextPageID:     page.NextPageID,
+			PreviousPageID: page.PreviousPageID,
+			IsDirty:        page.IsDirty,
+			LoadedAt:       page.LoadedAt,
+			DocumentCount:  0,
+		}
+
+		// Project each document to only include specified fields
+		for docID, doc := range page.Documents {
+			projectedDoc := models.Document{
+				DocumentID: doc.DocumentID,
+				Fields:     make(map[string]models.Field),
+			}
+			// Always include DocumentID
+			if docIDField, exists := doc.Fields["DocumentID"]; exists {
+				projectedDoc.Fields["DocumentID"] = docIDField
+			}
+			// Include only projected fields
+			for _, fieldName := range ba.projectionFields {
+				if field, exists := doc.Fields[fieldName]; exists {
+					projectedDoc.Fields[fieldName] = field
+				}
+			}
+			projectedPage.Documents[docID] = projectedDoc
+			projectedPage.DocumentCount++
+		}
+
+		ba.logger.Debugf("PROJECTION: Applied in-memory projection to page %d (fields: %v)", pageID, ba.projectionFields)
+		return projectedPage, nil
 	}
-	maxCached := settings.GetSettings().BundleAdapterMaxCachedPages
-	if maxCached <= 0 {
-		maxCached = 500
-	}
-	if len(ba.cachedPages) >= maxCached {
-		ba.evictOldestCachedPageLocked()
-	}
-	ba.cachedPages[pageID] = page
+
+	// No projection: return full page from cache
 	return page, nil
-}
-
-// evictOldestCachedPageLocked removes the page with the oldest LoadedAt.
-// Caller must hold ba.cachedPagesMutex (write lock).
-func (ba *BundleAdapter) evictOldestCachedPageLocked() {
-	var oldestID uint32
-	var oldestTime time.Time
-	first := true
-	for id, p := range ba.cachedPages {
-		if first || p.LoadedAt.Before(oldestTime) {
-			oldestID = id
-			oldestTime = p.LoadedAt
-			first = false
-		}
-	}
-	if !first {
-		delete(ba.cachedPages, oldestID)
-		ba.logger.Debugf("Evicted cached page %d from BundleAdapter for bundle '%s' (LRU)", oldestID, ba.bundle.Name)
-	}
-}
-
-// ClearCachedPages removes all entries from cachedPages. Call from scanner Close() to avoid
-// retaining pages after the scanner is removed.
-func (ba *BundleAdapter) ClearCachedPages() {
-	ba.cachedPagesMutex.Lock()
-	defer ba.cachedPagesMutex.Unlock()
-	ba.cachedPages = make(map[uint32]*models.DocumentPage)
-}
-
-// RemoveDocumentsFromCachedPages removes the given document IDs from all cached pages.
-// Used by RemoveDocumentsFromCache on the scanner. Holds cachedPagesMutex for consistency with loadDocumentPage.
-func (ba *BundleAdapter) RemoveDocumentsFromCachedPages(documentIDs []string) {
-	ba.cachedPagesMutex.Lock()
-	defer ba.cachedPagesMutex.Unlock()
-	for _, p := range ba.cachedPages {
-		for _, docID := range documentIDs {
-			delete(p.Documents, docID)
-		}
-	}
 }
 
 // getSafePageCount returns a validated page count with defensive bounds checking
@@ -957,7 +916,7 @@ type BundleDocumentIterator struct {
 	currentPage     uint32
 	pageIDs         []string
 	pageIndex       int
-	currentPageData *models.DocumentPage // page returned from loadDocumentPage; avoid reading cachedPages without lock
+			currentPageData *models.DocumentPage // page returned from loadDocumentPage (from shared documentPages cache)
 }
 
 func (iter *BundleDocumentIterator) HasNext() bool {
@@ -1013,11 +972,43 @@ func (iter *BundleDocumentIterator) Next() (*models.Document, error) {
 		return nil, fmt.Errorf("exceeded maximum attempts (%d) to find valid page", maxAttempts)
 	}
 
-	// Get document from current page (use currentPageData from loadDocumentPage, not cachedPages)
+	// Get document from current page (use currentPageData from loadDocumentPage)
 	docID := iter.pageIDs[iter.pageIndex]
 	doc := iter.currentPageData.Documents[docID]
 
 	iter.pageIndex++
+
+	// SNAPSHOT ISOLATION: Filter documents based on MVCC visibility
+	// Skip documents that are not visible to the scanner's snapshot
+	// This allows scanners to see a consistent view even when INSERTs happen concurrently
+	if iter.adapter.scanner != nil {
+		if smartScanner, ok := iter.adapter.scanner.(*SmartBundleScanner); ok {
+			// Check if document is visible to snapshot
+			// For snapshotSequence = 0 (autocommit), only filter uncommitted from other transactions
+			if smartScanner.snapshotSequence == 0 {
+				// Autocommit: filter uncommitted documents from other transactions
+				if doc.CommitSequence == 0 && doc.CreatedByTxID != 0 && doc.CreatedByTxID != smartScanner.txID {
+					// Skip uncommitted document from another transaction
+					// Continue to next document
+					if iter.pageIndex >= len(iter.pageIDs) {
+						iter.currentPage++
+						iter.currentPageData = nil
+					}
+					return iter.Next() // Recursively get next document
+				}
+			} else {
+				// Transaction with snapshot: use full MVCC visibility rules
+				if !doc.IsVisibleToSnapshot(smartScanner.snapshotSequence, smartScanner.txID, smartScanner.activeTxIDs) {
+					// Skip invisible document, continue to next
+					if iter.pageIndex >= len(iter.pageIDs) {
+						iter.currentPage++
+						iter.currentPageData = nil
+					}
+					return iter.Next() // Recursively get next document
+				}
+			}
+		}
+	}
 
 	// If we've exhausted this page, move to next page
 	if iter.pageIndex >= len(iter.pageIDs) {
