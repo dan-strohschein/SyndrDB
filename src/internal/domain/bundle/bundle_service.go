@@ -2099,6 +2099,10 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string)
 	// Document not in memory - need to load from disk using index
 	//s.logger.Debugf("Document %s not in memory, loading from disk for bundle %s", documentID, bundleName)
 
+	// CRITICAL: Clear any projection fields before loading to ensure full document is retrieved.
+	// GetDocumentPage already does this, but we do it here too as a safety measure for any direct callers.
+	s.SetProjectionFieldsForBundle(bundleName, nil)
+
 	// Find which page contains this document using the index
 	pageID, err := s.findDocumentPage(bundleName, documentID)
 	if err != nil {
@@ -2106,6 +2110,7 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string)
 	}
 
 	// Load the page containing the document from disk
+	// GetDocumentPage will also clear projection, ensuring full pages are cached
 	page, err := s.GetDocumentPage(bundleName, databaseName, pageID)
 	if err != nil {
 		return nil, err

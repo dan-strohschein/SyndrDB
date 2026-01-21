@@ -590,17 +590,17 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 	//   (A prior ORDER BY or other query may have set projection; leaving it causes "GROUP BY field X
 	//   not found in document" when this scan expects all fields.)
 	// - When ProjectionFields is set: use it for projection pushdown; defer clear when done.
+	// CRITICAL: Always use defer to ensure projection is cleared, even if ProjectionFields is empty.
+	// This prevents projection from a previous query from affecting this query.
 	if node.BundleServiceInt != nil {
 		node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, node.ProjectionFields)
-		if len(node.ProjectionFields) > 0 {
-			defer node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, nil)
-		}
+		defer node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, nil) // Always clear
 	}
 	if smartScanner, ok := node.DocumentScanner.(interface{ GetBundle() documentscanner.BundleInterface }); ok {
 		if bundleAdapter, ok := smartScanner.GetBundle().(*documentscanner.BundleAdapter); ok {
 			bundleAdapter.SetProjectionFields(node.ProjectionFields)
+			defer bundleAdapter.SetProjectionFields(nil) // Always clear
 			if len(node.ProjectionFields) > 0 {
-				defer bundleAdapter.SetProjectionFields(nil)
 				node.Logger.Infof("PROJECTION PUSHDOWN: Set projection fields %v on BundleAdapter", node.ProjectionFields)
 			}
 		}
