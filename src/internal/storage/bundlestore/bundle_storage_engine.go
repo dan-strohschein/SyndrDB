@@ -150,12 +150,12 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		logger:           logger,
 		serializer:       serializer,
 		writeBuffers:     make(map[string]*WriteBuffer),
-		projectionFields:  make(map[string][]string),          // PROJECTION PUSHDOWN: Initialize projection fields map
-		manifestManagers:  make(map[string]*ManifestManager),  // Initialize manifest managers map
-		writeLocks:        make(map[string]*sync.RWMutex),     // Initialize write locks map
-		writeVerifier:     NewDocumentWriteVerifier(logger),   // Initialize write verification
-		writeLogger:       NewBundleWriteLogger(logger, 1000), // Keep last 1000 write operations
-		fileReadCache:     make(map[string]*fileReadCacheEntry), // FILE READ CACHE: avoids repeated full-file reads per page
+		projectionFields: make(map[string][]string),            // PROJECTION PUSHDOWN: Initialize projection fields map
+		manifestManagers: make(map[string]*ManifestManager),    // Initialize manifest managers map
+		writeLocks:       make(map[string]*sync.RWMutex),       // Initialize write locks map
+		writeVerifier:    NewDocumentWriteVerifier(logger),     // Initialize write verification
+		writeLogger:      NewBundleWriteLogger(logger, 1000),   // Keep last 1000 write operations
+		fileReadCache:    make(map[string]*fileReadCacheEntry), // FILE READ CACHE: avoids repeated full-file reads per page
 	}
 
 	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
