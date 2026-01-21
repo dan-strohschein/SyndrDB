@@ -64,7 +64,7 @@ type BundleStorageEngine struct {
 	// This allows BundleAdapter to pass projection through to readDocumentRange
 	// Keyed by bundle name, cleared after page loading
 	projectionFields map[string][]string // Per-bundle projection fields
-	projectionMutex sync.RWMutex       // Protects projectionFields map
+	projectionMutex  sync.RWMutex        // Protects projectionFields map
 }
 
 type BundleFactory interface {
@@ -138,7 +138,7 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		logger:           logger,
 		serializer:       serializer,
 		writeBuffers:     make(map[string]*WriteBuffer),
-		projectionFields: make(map[string][]string), // PROJECTION PUSHDOWN: Initialize projection fields map
+		projectionFields: make(map[string][]string),          // PROJECTION PUSHDOWN: Initialize projection fields map
 		manifestManagers: make(map[string]*ManifestManager),  // Initialize manifest managers map
 		writeLocks:       make(map[string]*sync.RWMutex),     // Initialize write locks map
 		writeVerifier:    NewDocumentWriteVerifier(logger),   // Initialize write verification
@@ -2477,8 +2477,8 @@ func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName, databaseName str
 //   - error: Any parsing error
 func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startIndex, endIndex uint32, projectionFields []string) (map[string]models.Document, uint32, error) {
 	pageDocuments := make(map[string]models.Document)
-	deletedDocuments := make(map[string]bool)   // Track deleted documents
-	seenDocIDs := make(map[string]struct{})     // Track unique DocumentIDs for counting (avoids storing full docs; was allDocuments)
+	deletedDocuments := make(map[string]bool) // Track deleted documents
+	seenDocIDs := make(map[string]struct{})   // Track unique DocumentIDs for counting (avoids storing full docs; was allDocuments)
 	offset := 0
 	documentIndex := uint32(0)
 
