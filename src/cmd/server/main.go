@@ -22,6 +22,7 @@ import (
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/constants"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/fatal"
 	"syndrdb/src/pkg/settings"
 
 	"syndrdb/src/internal/monitoring"
@@ -130,6 +131,14 @@ func main() {
 	// Create a new settings.Arguments instance
 	// Get the global settings instance
 	args := settings.GetSettings()
+
+	// Capture panics to fatal_errors.log before the process exits (main goroutine)
+	defer func() {
+		if r := recover(); r != nil {
+			fatal.LogFatal(r)
+			panic(r)
+		}
+	}()
 
 	//args := settings.Arguments{}
 

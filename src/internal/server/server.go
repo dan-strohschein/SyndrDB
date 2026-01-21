@@ -37,6 +37,7 @@ import (
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/constants"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/fatal"
 	"syndrdb/src/pkg/settings"
 
 	"time"
@@ -864,6 +865,12 @@ func (s *Server) authenticateWithIP(username, password, clientIP string) error {
 
 // acceptConnections handles incoming connection requests
 func (s *Server) acceptConnections() {
+	defer func() {
+		if r := recover(); r != nil {
+			fatal.LogFatal(r)
+			panic(r)
+		}
+	}()
 	s.logger.Info("Server started accepting connections",
 		zap.String("host", s.Host),
 		zap.Int("port", s.Port))
@@ -916,6 +923,12 @@ func (s *Server) acceptConnections() {
 		// handleConnection's defer to avoid double-release (was here and in handleConnection).
 		go func(c net.Conn) {
 			defer s.wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					fatal.LogFatal(r)
+					panic(r)
+				}
+			}()
 			s.handleConnection(c)
 		}(conn)
 	}
@@ -978,7 +991,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	// Start a goroutine for reading
 	go func() {
-
+		defer func() {
+			if r := recover(); r != nil {
+				fatal.LogFatal(r)
+			}
+		}()
 		defer close(dataCh)
 		defer close(errCh)
 
