@@ -2461,7 +2461,6 @@ func (s *BundleService) GetDocumentChunksForIndexing(ctx context.Context, bundle
 	if !exists {
 		return fmt.Errorf("bundle metadata not found for %s", bundleName)
 	}
-	s.SetProjectionFieldsForBundle(bundleName, nil)
 	if len(s.metadataUpdateBuffer) > 0 {
 		s.FlushMetadataUpdates()
 	}

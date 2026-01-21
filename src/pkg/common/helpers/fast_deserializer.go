@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -42,7 +43,7 @@ func (d *FastDocumentDeserializer) DeserializeDocument(data []byte) (*models.Doc
 	}
 
 	// Read each field
-	fields := make(map[string]models.Field)
+	fields := make(map[string]models.Field, int(fieldCount))
 	for i := uint32(0); i < fieldCount; i++ {
 		fieldName, field, err := d.readField()
 		if err != nil {
@@ -112,7 +113,7 @@ func (d *FastDocumentDeserializer) DeserializeDocumentMap(data []byte) (map[stri
 	}
 
 	// Read each field
-	fields := make(map[string]models.Field)
+	fields := make(map[string]models.Field, int(fieldCount))
 	for i := uint32(0); i < fieldCount; i++ {
 		fieldName, field, err := d.readField()
 		if err != nil {
@@ -333,16 +334,48 @@ func (d *FastDocumentDeserializer) readBytes(length int) ([]byte, error) {
 	return value, nil
 }
 
+// tryInternCommonName returns a static string for common field names to avoid allocations.
+// Uses bytes.Equal against pre-allocated []byte; no allocation in the hot path.
+func tryInternCommonName(b []byte) (string, bool) {
+	if bytes.Equal(b, commonDocumentID) {
+		return "DocumentID", true
+	}
+	if bytes.Equal(b, commonName) {
+		return "name", true
+	}
+	if bytes.Equal(b, commonID) {
+		return "id", true
+	}
+	if bytes.Equal(b, commonFields) {
+		return "Fields", true
+	}
+	if bytes.Equal(b, commonJoinKey) {
+		return "join_key", true
+	}
+	return "", false
+}
+
+var (
+	commonDocumentID = []byte("DocumentID")
+	commonName       = []byte("name")
+	commonID         = []byte("id")
+	commonFields     = []byte("Fields")
+	commonJoinKey    = []byte("join_key")
+)
+
 func (d *FastDocumentDeserializer) readString() (string, error) {
 	length, err := d.readUint32()
 	if err != nil {
 		return "", fmt.Errorf("failed to read string length: %w", err)
 	}
-	bytes, err := d.readBytes(int(length))
+	b, err := d.readBytes(int(length))
 	if err != nil {
 		return "", fmt.Errorf("failed to read string bytes: %w", err)
 	}
-	return string(bytes), nil
+	if s, ok := tryInternCommonName(b); ok {
+		return s, nil
+	}
+	return string(b), nil
 }
 
 // skipField skips over a field value that we don't need for projection pushdown
@@ -464,7 +497,7 @@ func (d *FastDocumentDeserializer) DeserializeProjectedFields(data []byte, field
 	}
 
 	// Read each field - only deserialize requested fields, skip others
-	fields := make(map[string]models.Field)
+	fields := make(map[string]models.Field, len(fieldsToExtract)+2)
 	for i := uint32(0); i < fieldCount; i++ {
 		// Read field name first to check if we need it
 		fieldName, err := d.readString()

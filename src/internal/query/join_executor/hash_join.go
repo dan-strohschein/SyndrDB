@@ -14,6 +14,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// maxJoinedDocsPrealloc caps the initial joinedDocs slice capacity to avoid huge
+// allocations (e.g. 20k*20k*0.1=40M) when many concurrent joins run. Slice can grow.
+const maxJoinedDocsPrealloc = 512 * 1024
+
 // HashJoinStrategy implements the hash join algorithm optimized for SyndrDB's hybrid document model
 // This is the primary join algorithm for equi-joins across large bundles
 type HashJoinStrategy struct {
@@ -346,6 +350,11 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		}
 	}
 
+	// Release references to the build map and key/slice; hash table retains the *Document
+	allDocs = nil
+	buildKeyValues = nil
+	buildDocsSlice = nil
+
 	var bloomStats string
 	if bloom != nil {
 		stats := bloom.GetStats()
@@ -373,11 +382,15 @@ func (hjs *HashJoinStrategy) probeHashTable(
 	hjs.logger.Debugf("Probing hash table with bundle %s on key %s (Bloom filter: %v)",
 		probeBundle.GetName(), probeKey, bloom != nil)
 
-	// OPTIMIZATION: Pre-allocate result slice with estimated capacity
+	// OPTIMIZATION: Pre-allocate result slice with estimated capacity, but cap to avoid
+	// huge allocations (e.g. 20k*20k*0.1=40M => 320MB) when many concurrent joins run.
 	probeSize := int64(probeBundle.GetTotalDocuments())
 	buildSize := int64(hashTable.Size())
 	selectivity := 0.1 // Default 10% selectivity estimate
 	estimatedResults := int(float64(probeSize) * float64(buildSize) * selectivity)
+	if estimatedResults > maxJoinedDocsPrealloc {
+		estimatedResults = maxJoinedDocsPrealloc
+	}
 	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
@@ -522,8 +535,11 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 		totalMatches, len(docIDsByKey), float64(totalMatches)/float64(len(docIDsByKey)))
 
 	// Step 3: Fetch the matching documents from the bundle
-	// Pre-allocate result slice
+	// Pre-allocate result slice, cap to avoid huge allocations with many concurrent joins
 	estimatedResults := totalMatches
+	if estimatedResults > maxJoinedDocsPrealloc {
+		estimatedResults = maxJoinedDocsPrealloc
+	}
 	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 

@@ -435,7 +435,7 @@ func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databa
 func (bse *BundleStorageEngine) getOrReadFile(filePath string) ([]byte, error) {
 	maxEntries := settings.GetSettings().FileReadCacheMaxEntries
 	if maxEntries <= 0 {
-		maxEntries = 8
+		maxEntries = 32
 	}
 
 	bse.fileReadCacheMutex.RLock()
