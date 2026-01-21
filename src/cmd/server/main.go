@@ -299,6 +299,10 @@ func main() {
 	flag.IntVar(&args.MaxSessions, "max-sessions", args.MaxSessions, "Maximum concurrent sessions")
 	flag.IntVar(&args.MaxConnections, "max-connections", args.MaxConnections, "Maximum connection pool size")
 	flag.IntVar(&args.ConnectionIdleTimeoutMinutes, "connection-idle-timeout", args.ConnectionIdleTimeoutMinutes, "Connection idle timeout in minutes")
+	// HIGH-007: Concurrency & Locking Configuration flags (re-register)
+	flag.IntVar(&args.LockTimeoutSeconds, "lock-timeout", args.LockTimeoutSeconds, "Timeout for lock acquisition in seconds")
+	flag.IntVar(&args.MaxWorkerPools, "max-worker-pools", args.MaxWorkerPools, "Maximum number of worker pools")
+	flag.IntVar(&args.WorkerPoolStopTimeoutSeconds, "worker-pool-stop-timeout", args.WorkerPoolStopTimeoutSeconds, "Timeout for stopping worker pools in seconds")
 	flag.StringVar(&args.Version, "version", args.Version, "Version information")
 	flag.BoolVar(&args.EnableGraphQL, "graphql", args.EnableGraphQL, "Enable GraphQL API")
 	flag.StringVar(&args.BundleStorageFormat, "bundle-format", args.BundleStorageFormat, "Bundle storage format")
@@ -341,6 +345,38 @@ func main() {
 	flag.BoolVar(&args.EnableQueryTimeout, "enable-query-timeout", args.EnableQueryTimeout, "Enable GraphQL query execution timeout (Layer 4)")
 	flag.BoolVar(&args.EnableQueryMonitoring, "enable-query-monitoring", args.EnableQueryMonitoring, "Enable GraphQL query metrics monitoring (Layer 5)")
 	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", args.GraphQLRateAlgorithm, "GraphQL rate limiting algorithm")
+
+	// SyndrQL Query Timeout Flags (re-register)
+	flag.IntVar(&args.QueryTimeoutSeconds, "query-timeout", args.QueryTimeoutSeconds, "Default query execution timeout in seconds (1-3600)")
+	flag.IntVar(&args.AdminQueryTimeoutSeconds, "admin-query-timeout", args.AdminQueryTimeoutSeconds, "Admin query execution timeout in seconds (60-3600)")
+
+	// Per-Query Memory Limit Flags (DoS Protection) - CRITICAL: These were missing!
+	flag.IntVar(&args.QueryMaxMemoryMB, "query-max-memory", args.QueryMaxMemoryMB, "Maximum memory per query in MB (any positive integer)")
+	flag.IntVar(&args.AdminQueryMaxMemoryMB, "admin-query-max-memory", args.AdminQueryMaxMemoryMB, "Maximum memory per admin query in MB (any positive integer)")
+
+	// Page Cache Configuration (Memory Management)
+	flag.IntVar(&args.MaxLoadedDocumentPages, "max-loaded-document-pages", args.MaxLoadedDocumentPages, "Max pages in shared documentPages cache (0 = use default 500)")
+	flag.IntVar(&args.BundleAdapterMaxCachedPages, "bundle-adapter-max-cached-pages", args.BundleAdapterMaxCachedPages, "Max pages per BundleAdapter scanner (0 = use default 500)")
+	flag.IntVar(&args.DocumentPageMapMaxEntriesPerBundle, "document-page-map-max-entries", args.DocumentPageMapMaxEntriesPerBundle, "Max documentID->pageID entries per bundle (0 = use default 100000)")
+	flag.IntVar(&args.FileReadCacheMaxEntries, "file-read-cache-max-entries", args.FileReadCacheMaxEntries, "Max file/segment buffers in read cache (0 = use default 32)")
+
+	// Query Plan Cache Configuration
+	flag.BoolVar(&args.PlanCacheEnabled, "plan-cache-enabled", args.PlanCacheEnabled, "Enable query plan caching")
+	flag.IntVar(&args.PlanCacheCapacity, "plan-cache-capacity", args.PlanCacheCapacity, "Maximum cached plans per shard (default: 1000, 8 shards = 8000 total)")
+	flag.BoolVar(&args.PlanCacheAdaptivePlanning, "plan-cache-adaptive-planning", args.PlanCacheAdaptivePlanning, "Enable PostgreSQL-style adaptive planning")
+	flag.IntVar(&args.PlanCacheCustomThreshold, "plan-cache-custom-threshold", args.PlanCacheCustomThreshold, "Custom executions before generic plan evaluation")
+	flag.IntVar(&args.PlanCacheWriteThreshold, "plan-cache-write-threshold", args.PlanCacheWriteThreshold, "Write count threshold for invalidation")
+	flag.IntVar(&args.PlanCacheStaleServeSeconds, "plan-cache-stale-serve-seconds", args.PlanCacheStaleServeSeconds, "Stale plan serving window in seconds")
+
+	// WHERE Expression Cache Configuration
+	flag.BoolVar(&args.WhereExpressionCacheEnabled, "where-expression-cache-enabled", args.WhereExpressionCacheEnabled, "Enable expression caching and predicate reordering")
+	flag.IntVar(&args.WhereExpressionCacheSize, "where-expression-cache-size", args.WhereExpressionCacheSize, "LRU cache size for compiled expressions (default: 1000)")
+
+	// GROUP BY Configuration
+	flag.IntVar(&args.GroupByHashAggregateRowThreshold, "groupby-hash-aggregate-threshold", args.GroupByHashAggregateRowThreshold, "Rows below this use HashAggregate, above use Sort+GroupAggregate (default: 10000)")
+
+	// JOIN Concurrency Configuration
+	flag.IntVar(&args.JoinConcurrencyLimit, "join-concurrency-limit", args.JoinConcurrencyLimit, "Max concurrent join executions; 0 = no limit (default: 16)")
 
 	// Final parse with CLI taking precedence
 	flag.Parse()
