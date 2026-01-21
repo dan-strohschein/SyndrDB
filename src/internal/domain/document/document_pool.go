@@ -35,21 +35,27 @@ func NewDocumentPool() *DocumentPool {
 func (p *DocumentPool) GetDocument() *models.Document {
 	doc := p.documentPool.Get().(*models.Document)
 
-	// Reset document fields but reuse the map
 	doc.DocumentID = ""
-	for k := range doc.Fields {
-		delete(doc.Fields, k)
+	if doc.Fields == nil {
+		doc.Fields = make(map[string]models.Field, 8)
+	} else {
+		for k := range doc.Fields {
+			delete(doc.Fields, k)
+		}
 	}
-
 	return doc
 }
 
 // PutDocument returns a Document instance to the pool
 func (p *DocumentPool) PutDocument(doc *models.Document) {
 	if doc != nil {
-		// Clear sensitive data but keep the map allocated
+		if doc.PooledFields {
+			ReturnPooledFieldMap(doc.Fields)
+			doc.Fields = nil
+			doc.PooledFields = false
+		}
+		// Clear sensitive data but keep the map allocated (or nil; GetDocument will re-init if needed)
 		doc.DocumentID = ""
-		// Note: We keep the Fields map allocated for reuse
 		p.documentPool.Put(doc)
 	}
 }

@@ -220,6 +220,32 @@ func (m *mockBundleAdapter) HasIndexOnField(fieldName string) bool {
 	return false
 }
 
+func (m *mockBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	all := m.GetAllDocuments()
+	slice := make([]*models.Document, 0, len(all))
+	for _, d := range all {
+		slice = append(slice, d)
+	}
+	if chunkSize <= 0 {
+		chunkSize = 4096
+	}
+	for i := 0; i < len(slice); i += chunkSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		end := i + chunkSize
+		if end > len(slice) {
+			end = len(slice)
+		}
+		if !fn(slice[i:end]) {
+			return nil
+		}
+	}
+	return nil
+}
+
 // ============================================================================
 // TEST 1: INDEX USAGE VERIFICATION
 // ============================================================================

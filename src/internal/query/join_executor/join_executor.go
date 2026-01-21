@@ -4,10 +4,18 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	"syndrdb/src/internal/query/documentscanner"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
+)
+
+var (
+	joinConcurrencyMu   sync.Mutex
+	joinConcurrencySem  chan struct{}
+	joinConcurrencyCap  int
 )
 
 // DefaultJoinExecutor implements the JoinExecutor interface
@@ -69,6 +77,19 @@ func (dje *DefaultJoinExecutor) Execute(request *JoinRequest) (*JoinResult, erro
 	// Validate request
 	if err := dje.validateRequest(request); err != nil {
 		return nil, fmt.Errorf("invalid join request: %w", err)
+	}
+
+	// Optional concurrency cap: limit how many joins run full build+probe at once (0 = disabled)
+	if cap := settings.GetSettings().JoinConcurrencyLimit; cap > 0 {
+		joinConcurrencyMu.Lock()
+		if joinConcurrencySem == nil || joinConcurrencyCap != cap {
+			joinConcurrencySem = make(chan struct{}, cap)
+			joinConcurrencyCap = cap
+		}
+		sem := joinConcurrencySem
+		joinConcurrencyMu.Unlock()
+		sem <- struct{}{}
+		defer func() { <-sem }()
 	}
 
 	dje.logger.Infof("Executing join: %s ⋈ %s (type: %v, conditions: %d)",

@@ -65,6 +65,18 @@ type BundleStorageEngine struct {
 	// Keyed by bundle name, cleared after page loading
 	projectionFields map[string][]string // Per-bundle projection fields
 	projectionMutex  sync.RWMutex        // Protects projectionFields map
+
+	// FILE READ CACHE: Bounded cache of file/segment contents to avoid repeated
+	// full-file reads when LoadDocumentPage is called many times (e.g. getAllDocumentsForIndexing).
+	// Key: file path. LRU eviction when at FileReadCacheMaxEntries.
+	fileReadCache      map[string]*fileReadCacheEntry
+	fileReadCacheMutex sync.RWMutex
+}
+
+// fileReadCacheEntry holds a cached file buffer and lastAccess for LRU eviction.
+type fileReadCacheEntry struct {
+	data       []byte
+	lastAccess int64
 }
 
 type BundleFactory interface {
@@ -138,11 +150,12 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		logger:           logger,
 		serializer:       serializer,
 		writeBuffers:     make(map[string]*WriteBuffer),
-		projectionFields: make(map[string][]string),          // PROJECTION PUSHDOWN: Initialize projection fields map
-		manifestManagers: make(map[string]*ManifestManager),  // Initialize manifest managers map
-		writeLocks:       make(map[string]*sync.RWMutex),     // Initialize write locks map
-		writeVerifier:    NewDocumentWriteVerifier(logger),   // Initialize write verification
-		writeLogger:      NewBundleWriteLogger(logger, 1000), // Keep last 1000 write operations
+		projectionFields:  make(map[string][]string),          // PROJECTION PUSHDOWN: Initialize projection fields map
+		manifestManagers:  make(map[string]*ManifestManager),  // Initialize manifest managers map
+		writeLocks:        make(map[string]*sync.RWMutex),     // Initialize write locks map
+		writeVerifier:     NewDocumentWriteVerifier(logger),   // Initialize write verification
+		writeLogger:       NewBundleWriteLogger(logger, 1000), // Keep last 1000 write operations
+		fileReadCache:     make(map[string]*fileReadCacheEntry), // FILE READ CACHE: avoids repeated full-file reads per page
 	}
 
 	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
@@ -298,16 +311,15 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 			continue
 		}
 
-		// Read the file
-		data, err := os.ReadFile(filePath)
+		// Use file-read cache to avoid repeated full-file reads when loading many pages
+		data, err := bse.getOrReadFile(filePath)
 		if err != nil {
 			bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
 			continue
 		}
 
 		// Parse documents from this file in the page range
-		// PROJECTION PUSHDOWN: Pass nil projection (full deserialization) for multi-file storage
-		// TODO: Wire up projection through LoadDocumentPage interface for multi-file support
+		// PROJECTION PUSHDOWN: Pass nil so readDocumentRange uses getProjectionFieldsForBundle(bundleName)
 		fileDocuments, fileTotalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data, nil)
 		if err != nil {
 			bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
@@ -369,8 +381,8 @@ func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databa
 	databasePath := helpers.GetDatabaseFolderPath(databaseName)
 	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 
-	// Read the bundle file header to get metadata
-	data, err := os.ReadFile(filePath)
+	// Use file-read cache to avoid repeated full-file reads when loading many pages
+	data, err := bse.getOrReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bundle file '%s': %w", filePath, err)
 	}
@@ -415,6 +427,102 @@ func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databa
 	}
 
 	return page, nil
+}
+
+// getOrReadFile returns the file content from the file-read cache, or reads from disk and caches it.
+// Callers must not modify the returned slice. Used by LoadDocumentPage to avoid repeated full-file
+// reads when iterating all pages (e.g. getAllDocumentsForIndexing).
+func (bse *BundleStorageEngine) getOrReadFile(filePath string) ([]byte, error) {
+	maxEntries := settings.GetSettings().FileReadCacheMaxEntries
+	if maxEntries <= 0 {
+		maxEntries = 8
+	}
+
+	bse.fileReadCacheMutex.RLock()
+	if e := bse.fileReadCache[filePath]; e != nil {
+		e.lastAccess = time.Now().UnixNano()
+		data := e.data
+		bse.fileReadCacheMutex.RUnlock()
+		return data, nil
+	}
+	bse.fileReadCacheMutex.RUnlock()
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	bse.fileReadCacheMutex.Lock()
+	defer bse.fileReadCacheMutex.Unlock()
+
+	// Double-check: another goroutine may have populated while we were reading
+	if e := bse.fileReadCache[filePath]; e != nil {
+		return e.data, nil
+	}
+
+	// Evict LRU entries until we have room
+	for len(bse.fileReadCache) >= maxEntries {
+		bse.evictFileReadCacheLRULocked()
+	}
+
+	bse.fileReadCache[filePath] = &fileReadCacheEntry{
+		data:       data,
+		lastAccess: time.Now().UnixNano(),
+	}
+	return data, nil
+}
+
+// evictFileReadCacheLRULocked removes the least-recently-accessed entry.
+// Caller must hold bse.fileReadCacheMutex (write).
+func (bse *BundleStorageEngine) evictFileReadCacheLRULocked() {
+	var evictKey string
+	var minAccess int64
+	first := true
+	for k, e := range bse.fileReadCache {
+		if first || e.lastAccess < minAccess {
+			evictKey = k
+			minAccess = e.lastAccess
+			first = false
+		}
+	}
+	if evictKey != "" {
+		delete(bse.fileReadCache, evictKey)
+		if bse.logger != nil && settings.GetSettings().Debug {
+			bse.logger.Debugf("Evicted file read cache entry: %s", evictKey)
+		}
+	}
+}
+
+// InvalidateFileReadCache removes a single path from the file-read cache.
+// Call after compact or replace of that file so subsequent reads see fresh data.
+func (bse *BundleStorageEngine) InvalidateFileReadCache(filePath string) {
+	bse.fileReadCacheMutex.Lock()
+	defer bse.fileReadCacheMutex.Unlock()
+	delete(bse.fileReadCache, filePath)
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Invalidated file read cache: %s", filePath)
+	}
+}
+
+// InvalidateFileReadCacheForBundle removes all cached buffers for a bundle (legacy file and
+// all segment files in the bundle dir). Call on bundle drop or after compaction that
+// replaces segments.
+func (bse *BundleStorageEngine) InvalidateFileReadCacheForBundle(databaseName, bundleName string) {
+	bse.fileReadCacheMutex.Lock()
+	defer bse.fileReadCacheMutex.Unlock()
+
+	legacyPath := filepath.Join(helpers.GetDatabaseFolderPath(databaseName), fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
+	delete(bse.fileReadCache, legacyPath)
+
+	bundleDir := GetBundleDirectory(databaseName, bundleName)
+	for k := range bse.fileReadCache {
+		if filepath.Dir(k) == bundleDir {
+			delete(bse.fileReadCache, k)
+		}
+	}
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Invalidated file read cache for bundle %s/%s", databaseName, bundleName)
+	}
 }
 
 func testRawBundleData(data []byte) {
@@ -3130,6 +3238,9 @@ func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundle
 			b.logger.Infof("Bundle file %s does not exist, skipping removal", fileName)
 		}
 	}
+
+	// Invalidate file-read cache so we don't retain buffers for removed paths
+	b.InvalidateFileReadCacheForBundle(database.Name, bundleName)
 
 	b.logger.Infof("Successfully removed bundle '%s' and all its data files", bundleName)
 

@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2449,6 +2450,70 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 // For backward compatibility, calls getAllDocumentsForIndexing without snapshot filtering
 func (s *BundleService) GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error) {
 	return s.getAllDocumentsForIndexing(bundleName, 0, 0, nil)
+}
+
+// GetDocumentChunksForIndexing streams documents in chunks (page-by-page) to avoid loading the full bundle.
+// Used by the join executor for streaming probe. fn is called with each chunk; return false to stop.
+// NOTE: Does not merge memtable; streams only persisted pages. Callers that need unflushed writes
+// should use GetAllDocumentsForIndexing.
+func (s *BundleService) GetDocumentChunksForIndexing(ctx context.Context, bundleName string, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	bundle, exists := s.bundleMetadata[bundleName]
+	if !exists {
+		return fmt.Errorf("bundle metadata not found for %s", bundleName)
+	}
+	s.SetProjectionFieldsForBundle(bundleName, nil)
+	if len(s.metadataUpdateBuffer) > 0 {
+		s.FlushMetadataUpdates()
+	}
+	if chunkSize <= 0 {
+		chunkSize = 4096
+	}
+
+	buffer := make([]*models.Document, 0, chunkSize)
+	flush := func() bool {
+		if len(buffer) == 0 {
+			return true
+		}
+		chunk := make([]*models.Document, len(buffer))
+		copy(chunk, buffer)
+		if !fn(chunk) {
+			return false
+		}
+		buffer = buffer[:0]
+		return true
+	}
+
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	pageCount := uint32(bundle.PageCount)
+	if pageCount == 0 {
+		pageCount = 1
+	}
+
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		page, err := s.store.LoadDocumentPage(bundle.Name, bundle.Database.Name, pageID, databasePath)
+		if err != nil {
+			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
+			continue
+		}
+		for _, doc := range page.Documents {
+			docCopy := doc
+			buffer = append(buffer, &docCopy)
+			if len(buffer) >= chunkSize {
+				if !flush() {
+					return nil
+				}
+			}
+		}
+	}
+	if len(buffer) > 0 {
+		flush()
+	}
+	return nil
 }
 
 // IndexingOptions configures streaming filter and parallel page loading for GetAllDocumentsForIndexingWithOptions.

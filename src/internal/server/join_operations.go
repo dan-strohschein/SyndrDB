@@ -241,9 +241,10 @@ func convertToJoinRequest(joinQuery *queryparser.SelectJoinQuery, database *mode
 // LIFECYCLE: After this function copies fields to the final result document, the input JoinedDocument
 // is automatically returned to the pool via deferred cleanup in the calling function.
 // This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup.
+// The merged Fields map is from document.GetPooledFieldMap(); ReturnPooledDocument will
+// return it via doc.PooledFields.
 func mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, logger *zap.SugaredLogger) *models.Document {
-	// Create new document with combined fields
-	mergedFields := make(map[string]models.Field)
+	mergedFields := document.GetPooledFieldMap()
 
 	// Add fields from left document with prefix to avoid conflicts
 	if joinedDoc.LeftDocument != nil {
@@ -267,12 +268,10 @@ func mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, logger *zap.Sug
 		Value: models.NewStringValue(joinedDoc.JoinKey),
 	}
 
-	// STEP 1: Use document pool to reduce allocations
-	// TODO: Option C - Implement reference counting for automatic pool return
-	// Create merged document
 	mergedDoc := document.GetPooledDocument()
 	mergedDoc.DocumentID = fmt.Sprintf("join_%s", joinedDoc.JoinKey)
 	mergedDoc.Fields = mergedFields
+	mergedDoc.PooledFields = true
 	mergedDoc.CreatedAt = time.Now()
 	mergedDoc.UpdatedAt = time.Now()
 

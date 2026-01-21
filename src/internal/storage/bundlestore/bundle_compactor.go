@@ -418,6 +418,9 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 		}
 	}
 
+	// Invalidate file-read cache for this bundle so subsequent reads see the new compacted segment
+	bc.storageEngine.InvalidateFileReadCacheForBundle(databaseName, bundleName)
+
 	duration := time.Since(startTime)
 
 	// Get throttling statistics

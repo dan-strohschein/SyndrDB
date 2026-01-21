@@ -1,6 +1,7 @@
 package documentscanner
 
 import (
+	"context"
 	"time"
 
 	"syndrdb/src/internal/domain/models"
@@ -44,6 +45,13 @@ type BundleInterface interface {
 	// Used for early termination optimization in simple LIMIT-only queries
 	// If limit is 0 or negative, behaves the same as GetAllDocuments()
 	GetAllDocumentsWithLimit(limit int) map[string]*models.Document
+
+	// ScanDocumentChunks streams documents in chunks to avoid loading the full bundle.
+	// For each chunk, fn is called with a slice of *models.Document; return false to stop.
+	// chunkSize is a hint (e.g. 4096). Implementations that can stream (e.g. page-by-page)
+	// should use it to avoid holding the full bundle in memory; others may fall back to
+	// GetAllDocuments and chunk.
+	ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error
 
 	// GetName returns the bundle name for logging and metrics
 	GetName() string

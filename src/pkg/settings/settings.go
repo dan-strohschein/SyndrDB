@@ -150,6 +150,10 @@ type Arguments struct {
 	JoinSIMDEnabled    bool `yaml:"join_simd_enabled"`     // Enable SIMD acceleration for JOIN operations (default: true)
 	JoinSIMDAutoDetect bool `yaml:"join_simd_auto_detect"` // Auto-detect CPU SIMD support (default: true)
 
+	// JOIN Concurrency: limits how many joins run full build+probe at once to avoid memory spikes
+	// (e.g. 300 connections each doing a join). 0 = disabled (no limit).
+	JoinConcurrencyLimit int `yaml:"join_concurrency_limit"` // Max concurrent join executions; 0 = disabled (default: 0)
+
 	// WHERE SIMD Configuration
 	WhereSIMDEnabled            bool `yaml:"where_simd_enabled"`             // Enable SIMD acceleration for WHERE clause comparisons (default: true)
 	WhereSIMDAutoDetect         bool `yaml:"where_simd_auto_detect"`         // Auto-detect CPU SIMD support for WHERE clauses (default: true)
@@ -223,6 +227,10 @@ type Arguments struct {
 	MaxLoadedDocumentPages            int `yaml:"max_loaded_document_pages"`              // Max pages in BundleService.documentPages (shared); 0 = use default 500
 	BundleAdapterMaxCachedPages       int `yaml:"bundle_adapter_max_cached_pages"`        // Max pages in BundleAdapter.cachedPages per scanner; 0 = use default 500
 	DocumentPageMapMaxEntriesPerBundle int `yaml:"document_page_map_max_entries_per_bundle"` // Max documentID->pageID entries per bundle in documentPageMap; 0 = use default 100000
+
+	// File/segment read cache: avoids repeated full-file reads when loading many pages (e.g. getAllDocumentsForIndexing).
+	// Bounded by max entries; LRU eviction. Keyed by file path.
+	FileReadCacheMaxEntries int `yaml:"file_read_cache_max_entries"` // Max file/segment buffers in cache; 0 = use default 8
 
 	// Prepared Statement Cache Configuration (for parameterized queries)
 	PreparedStatementCacheEnabled  bool `yaml:"prepared_statement_cache_enabled"`  // Enable prepared statement caching (default: true)
@@ -355,6 +363,9 @@ func GetSettings() *Arguments {
 			JoinSIMDEnabled:    true, // Enable SIMD for JOIN operations
 			JoinSIMDAutoDetect: true, // Auto-detect CPU capabilities
 
+			// JOIN Concurrency: 0 = no limit (disabled by default)
+			JoinConcurrencyLimit: 0,
+
 			// WHERE SIMD Configuration
 			WhereSIMDEnabled:    true, // Enable SIMD for WHERE comparisons
 			WhereSIMDAutoDetect: true, // Auto-detect CPU capabilities
@@ -431,6 +442,7 @@ func GetSettings() *Arguments {
 			MaxLoadedDocumentPages:             500,     // Max pages in BundleService.documentPages (shared)
 			BundleAdapterMaxCachedPages:        500,     // Max pages in BundleAdapter.cachedPages per scanner
 			DocumentPageMapMaxEntriesPerBundle: 100000,  // Max documentID->pageID entries per bundle
+			FileReadCacheMaxEntries:            8,       // Max file/segment buffers (avoids repeated full-file reads per page)
 
 			// Prepared Statement Cache Defaults
 			PreparedStatementCacheEnabled:  true, // Enable prepared statement caching by default

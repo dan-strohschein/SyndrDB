@@ -1,6 +1,7 @@
 package documentscanner
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -783,6 +784,54 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 
 	ba.logger.Debugf("Returning %d documents (limit was %d)", len(allDocs), limit)
 	return allDocs
+}
+
+// ScanDocumentChunks streams documents page-by-page to avoid loading the full bundle.
+// NOTE: Does not merge memtable; streams only persisted pages.
+func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	if chunkSize <= 0 {
+		chunkSize = 4096
+	}
+	pageCount := ba.getSafePageCount()
+	buffer := make([]*models.Document, 0, chunkSize)
+	flush := func() bool {
+		if len(buffer) == 0 {
+			return true
+		}
+		chunk := make([]*models.Document, len(buffer))
+		copy(chunk, buffer)
+		if !fn(chunk) {
+			return false
+		}
+		buffer = buffer[:0]
+		return true
+	}
+
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		page, err := ba.loadDocumentPage(pageID)
+		if err != nil {
+			ba.logger.Errorf("Failed to load page %d: %v", pageID, err)
+			continue
+		}
+		for _, doc := range page.Documents {
+			docCopy := doc
+			buffer = append(buffer, &docCopy)
+			if len(buffer) >= chunkSize {
+				if !flush() {
+					return nil
+				}
+			}
+		}
+	}
+	if len(buffer) > 0 {
+		flush()
+	}
+	return nil
 }
 
 // GetName returns the bundle name for logging and metrics

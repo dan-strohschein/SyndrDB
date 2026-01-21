@@ -358,8 +358,9 @@ func (hjs *HashJoinStrategy) buildHashTable(
 	return hashTable, bloom, stats, nil
 }
 
-// probeHashTable streams through the probe side and finds matching documents
-// Uses Bloom filter (if provided) to skip expensive hash table lookups
+// probeHashTable streams through the probe side and finds matching documents.
+// Uses ScanDocumentChunks to avoid loading the full probe bundle (streaming probe).
+// Uses Bloom filter (if provided) to skip expensive hash table lookups.
 func (hjs *HashJoinStrategy) probeHashTable(
 	hashTable HashTable,
 	bloom *bloomfilter.BloomFilter,
@@ -373,8 +374,6 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		probeBundle.GetName(), probeKey, bloom != nil)
 
 	// OPTIMIZATION: Pre-allocate result slice with estimated capacity
-	// TODO: Integrate with JoinPatternTracker to learn actual selectivity per pattern
-	// from historical execution stats instead of using fixed 0.1 default
 	probeSize := int64(probeBundle.GetTotalDocuments())
 	buildSize := int64(hashTable.Size())
 	selectivity := 0.1 // Default 10% selectivity estimate
@@ -382,78 +381,78 @@ func (hjs *HashJoinStrategy) probeHashTable(
 	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
-	bloomFilterSkips := int64(0) // Track how many lookups were skipped by Bloom filter
+	bloomFilterSkips := int64(0)
 
-	// OPTIMIZATION: Pre-extract join keys once using SIMD acceleration
-	// SIMD-accelerated extraction provides ~1.2x speedup
-	// TODO: Consider parallel extraction for large document sets (>10,000 docs)
-	allDocs := probeBundle.GetAllDocuments()
-	probeKeyValues, probeDocsSlice, err := ExtractJoinKeysWithSIMD(allDocs, probeKey)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to extract probe keys: %w", err)
-	}
-
-	// Stream through all documents in probe bundle using pre-extracted keys
-	for idx, probeDoc := range probeDocsSlice {
-		// Check for cancellation
-		select {
-		case <-request.Context.Done():
-			return nil, nil, request.Context.Err()
-		default:
+	chunkSize := 4096
+	var extractErr error
+	err := probeBundle.ScanDocumentChunks(request.Context, chunkSize, func(chunk []*models.Document) bool {
+		if len(chunk) == 0 {
+			return true
 		}
-
-		// Get pre-extracted key value (no map lookup!)
-		keyValue := probeKeyValues[idx]
-		if keyValue == nil {
-			docID := "unknown"
-			if probeDoc != nil {
-				docID = probeDoc.DocumentID
+		probeKeyValues, probeDocsSlice, e := ExtractJoinKeysWithSIMDSlice(chunk, probeKey)
+		if e != nil {
+			extractErr = e
+			return false
+		}
+		for idx, probeDoc := range probeDocsSlice {
+			select {
+			case <-request.Context.Done():
+				return false
+			default:
 			}
-			hjs.logger.Warnf("Skipping document %s (index %d): missing key %s", docID, idx, probeKey)
-			continue
-		}
 
-		stats.DocumentsScanned++
-
-		// OPTIMIZATION: Check Bloom filter first (if enabled)
-		if bloom != nil {
-			keyStr := conversion.ValueToString(keyValue)
-			if !bloom.MayContain(keyStr) {
-				// Bloom filter says definitely NOT in hash table - skip expensive lookup!
-				bloomFilterSkips++
+			keyValue := probeKeyValues[idx]
+			if keyValue == nil {
+				docID := "unknown"
+				if probeDoc != nil {
+					docID = probeDoc.DocumentID
+				}
+				hjs.logger.Warnf("Skipping document %s (index %d): missing key %s", docID, idx, probeKey)
 				continue
 			}
-			// Bloom filter says "maybe" - proceed with hash table lookup
-		}
 
-		// Look up matching documents in hash table
-		buildDocs, found := hashTable.Get(keyValue)
-		stats.Comparisons++
+			stats.DocumentsScanned++
 
-		if found {
-			// Create joined documents for each match
-			for _, buildDoc := range buildDocs {
-				joinedDoc := hjs.createJoinedDocument(buildDoc, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
+			if bloom != nil {
+				keyStr := conversion.ValueToString(keyValue)
+				if !bloom.MayContain(keyStr) {
+					bloomFilterSkips++
+					continue
+				}
+			}
+
+			buildDocs, found := hashTable.Get(keyValue)
+			stats.Comparisons++
+
+			if found {
+				for _, buildDoc := range buildDocs {
+					joinedDoc := hjs.createJoinedDocument(buildDoc, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
+					if joinedDoc != nil {
+						joinedDocs = append(joinedDocs, joinedDoc)
+					}
+				}
+			} else if request.JoinType == LeftJoin && !swapped {
+				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
+				if joinedDoc != nil {
+					joinedDocs = append(joinedDocs, joinedDoc)
+				}
+			} else if request.JoinType == RightJoin && swapped {
+				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
 				if joinedDoc != nil {
 					joinedDocs = append(joinedDocs, joinedDoc)
 				}
 			}
-		} else if request.JoinType == LeftJoin && !swapped {
-			// Left outer join: include unmatched documents from left (build) side
-			joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
-			if joinedDoc != nil {
-				joinedDocs = append(joinedDocs, joinedDoc)
-			}
-		} else if request.JoinType == RightJoin && swapped {
-			// Right outer join: include unmatched documents from right (probe) side
-			joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
-			if joinedDoc != nil {
-				joinedDocs = append(joinedDocs, joinedDoc)
-			}
 		}
+		return true
+	})
+	if extractErr != nil {
+		return nil, nil, fmt.Errorf("failed to extract probe keys: %w", extractErr)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("probe ScanDocumentChunks: %w", err)
 	}
 
-	if bloom != nil {
+	if bloom != nil && stats.DocumentsScanned > 0 {
 		skipRate := float64(bloomFilterSkips) / float64(stats.DocumentsScanned) * 100
 		hjs.logger.Infof("Probe completed: %d documents scanned, %d comparisons, %d results, Bloom filter skipped %d lookups (%.1f%%)",
 			stats.DocumentsScanned, stats.Comparisons, len(joinedDocs), bloomFilterSkips, skipRate)

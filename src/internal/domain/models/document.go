@@ -11,6 +11,11 @@ type Document struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 
+	// PooledFields is set when Fields was obtained from document.GetPooledFieldMap()
+	// (e.g. in mergeJoinedDocument). ReturnPooledDocument will return that map to the
+	// field map pool and clear Fields when this is true.
+	PooledFields bool
+
 	// MVCC Version Metadata
 	// These fields enable snapshot isolation and version tracking
 	CreatedByTxID   uint64 // Transaction that created this version (0 = autocommit/system)

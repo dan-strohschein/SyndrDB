@@ -26,6 +26,7 @@ Example:
 package planner
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
@@ -235,6 +236,50 @@ func (fba *FilteredBundleAdapter) GetAllDocuments() map[string]*models.Document 
 		100.0*(1.0-float64(len(documents))/float64(fba.totalDocuments)))
 
 	return documents
+}
+
+// ScanDocumentChunks streams documents in chunks via bundleService and filters each chunk by conditions.
+func (fba *FilteredBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	if fba.bundleService == nil {
+		// No bundleService: fall back to loading all and chunking (higher memory)
+		all := fba.GetAllDocuments()
+		slice := make([]*models.Document, 0, len(all))
+		for _, d := range all {
+			slice = append(slice, d)
+		}
+		if chunkSize <= 0 {
+			chunkSize = 4096
+		}
+		for i := 0; i < len(slice); i += chunkSize {
+			end := i + chunkSize
+			if end > len(slice) {
+				end = len(slice)
+			}
+			if !fn(slice[i:end]) {
+				return nil
+			}
+		}
+		return nil
+	}
+	bundleName := fba.bundleName
+	if bundleName == "" && fba.bundle != nil {
+		bundleName = fba.bundle.Name
+	}
+	if bundleName == "" {
+		return fmt.Errorf("FilteredBundleAdapter: bundle name unknown")
+	}
+	return fba.bundleService.GetDocumentChunksForIndexing(ctx, bundleName, chunkSize, func(chunk []*models.Document) bool {
+		filtered := make([]*models.Document, 0, len(chunk))
+		for _, doc := range chunk {
+			if evaluateConditions(doc, fba.conditions, fba.logger) {
+				filtered = append(filtered, doc)
+			}
+		}
+		if len(filtered) == 0 {
+			return true
+		}
+		return fn(filtered)
+	})
 }
 
 // evaluateConditions checks if a document matches all conditions

@@ -20,6 +20,9 @@ type BundleServiceInterface interface {
 	// GetAllDocumentsForIndexingWithOptions supports streaming filter and parallel page loading for predicate pushdown.
 	// opts may be nil (delegates to GetAllDocumentsForIndexing). Uses bundle.IndexingOptions.
 	GetAllDocumentsForIndexingWithOptions(bundleName string, opts *bundle.IndexingOptions) ([]*models.Document, error)
+	// GetDocumentChunksForIndexing streams documents in chunks (e.g. page-by-page) to avoid loading the full bundle.
+	// fn is called with each chunk; return false to stop. Used by ScanDocumentChunks for streaming probe.
+	GetDocumentChunksForIndexing(ctx context.Context, bundleName string, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error
 	// SetProjectionFieldsForBundle sets projection for a bundle (opt #1). Pass nil or empty to clear.
 	SetProjectionFieldsForBundle(bundleName string, fields []string)
 }

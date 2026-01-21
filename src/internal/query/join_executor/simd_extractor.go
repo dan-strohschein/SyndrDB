@@ -173,6 +173,34 @@ func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, field
 	return keyValues, docsSlice, nil
 }
 
+// ExtractJoinKeysWithSIMDSlice extracts join keys from a slice of documents (for streaming probe).
+// Same semantics as ExtractJoinKeysWithSIMD but works on a slice to avoid building a full-bundle map.
+// Used when probing in chunks to limit memory.
+func ExtractJoinKeysWithSIMDSlice(docs []*models.Document, fieldName string) ([]interface{}, []*models.Document, error) {
+	if len(docs) == 0 {
+		return []interface{}{}, []*models.Document{}, nil
+	}
+	fieldNameBytes := []byte(fieldName)
+	fieldNameLen := len(fieldNameBytes)
+	keyValues := make([]interface{}, 0, len(docs))
+	docsSlice := make([]*models.Document, 0, len(docs))
+	const batchSize = 256
+	for i := 0; i < len(docs); i += batchSize {
+		end := i + batchSize
+		if end > len(docs) {
+			end = len(docs)
+		}
+		batch := docs[i:end]
+		batchKeys, batchDocs, err := extractBatchWithSIMD(batch, fieldNameBytes, fieldNameLen)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to extract batch: %w", err)
+		}
+		keyValues = append(keyValues, batchKeys...)
+		docsSlice = append(docsSlice, batchDocs...)
+	}
+	return keyValues, docsSlice, nil
+}
+
 // ExtractJoinKeysOnce is a wrapper around ExtractJoinKeysWithSIMD for backward compatibility
 // This maintains the same interface as the old extractJoinKeysOnce method
 // TODO: Update callers to use ExtractJoinKeysWithSIMD directly and remove this wrapper

@@ -788,10 +788,11 @@ func computeMergeRequiredFields(query *queryparser.SelectJoinQuery, firstJoin qu
 // will be returned to the pool via deferred cleanup in the Execute() function.
 // This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup.
 // Opt #3: when MergeRequiredFields is non-nil and non-empty, only those fields are copied.
+// The merged Fields map is from document.GetPooledFieldMap(); ReturnPooledDocument will
+// return it via doc.PooledFields.
 func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, index int) *models.Document {
-	// Create merged document with fields from both sides
-	mergedFields := make(map[string]models.Field)
-	onlyRequired := jen.MergeRequiredFields != nil && len(jen.MergeRequiredFields) > 0
+	mergedFields := document.GetPooledFieldMap()
+	onlyRequired := len(jen.MergeRequiredFields) > 0
 
 	// Add left document fields
 	if joinedDoc.LeftDocument != nil {
@@ -819,12 +820,10 @@ func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.Joined
 		Value: models.NewStringValue(joinedDoc.JoinKey),
 	}
 
-	// STEP 1: Use document pool to reduce allocations
-	// TODO: Option C - Implement reference counting for automatic pool return
 	doc := document.GetPooledDocument()
-	//doc.DocumentID = fmt.Sprintf("join_%d_%s", index, joinedDoc.JoinKey)
 	doc.DocumentID = joinedDoc.JoinKey
 	doc.Fields = mergedFields
+	doc.PooledFields = true
 	doc.CreatedAt = time.Now()
 	doc.UpdatedAt = time.Now()
 	return doc
@@ -977,6 +976,17 @@ func (pba *PlannerBundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]
 	}
 
 	return result
+}
+
+// ScanDocumentChunks streams documents in chunks via BundleService.GetDocumentChunksForIndexing.
+func (pba *PlannerBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	if pba.bundle == nil {
+		return fmt.Errorf("PlannerBundleAdapter: bundle is nil")
+	}
+	if pba.bundleService == nil {
+		return fmt.Errorf("PlannerBundleAdapter: bundleService is nil")
+	}
+	return pba.bundleService.GetDocumentChunksForIndexing(ctx, pba.bundle.Name, chunkSize, fn)
 }
 
 // GetName returns the bundle name for logging and metrics
@@ -1538,6 +1548,22 @@ func (f *ExpressionFilteredBundleAdapter) GetAllDocumentsWithLimit(limit int) ma
 	}
 
 	return filtered
+}
+
+// ScanDocumentChunks delegates to inner and filters each chunk by the predicate.
+func (f *ExpressionFilteredBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	return f.inner.ScanDocumentChunks(ctx, chunkSize, func(chunk []*models.Document) bool {
+		filtered := make([]*models.Document, 0, len(chunk))
+		for _, doc := range chunk {
+			if f.matchesPredicate(doc) {
+				filtered = append(filtered, doc)
+			}
+		}
+		if len(filtered) == 0 {
+			return true
+		}
+		return fn(filtered)
+	})
 }
 
 // GetName returns the bundle name with a filter indicator
