@@ -102,24 +102,18 @@ func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLog
 		wc.Field = parts[1]
 	}
 
+	// Resolve field value without mutating the document (avoids concurrent map write when
+	// the document's Fields map is shared with memtable and another goroutine is iterating it).
+	var fieldValue models.FieldValue
 	if strings.EqualFold(wc.Field, "documentid") {
-		// Special case for document ID
-
-		field := models.Field{
-			//Name:  "DocumentID",
-			Value: models.NewStringValue(document.DocumentID), // ✅ Convert string to FieldValue
+		fieldValue = models.NewStringValue(document.DocumentID)
+	} else {
+		if _, exists := document.Fields[wc.Field]; !exists {
+			logger.Infof("Field '%s' does not exist in document, returning false", wc.Field)
+			return false
 		}
-		document.Fields["DocumentID"] = field
-		//logger.Infof("DocumentID '%s' is added", document.DocumentID)
+		fieldValue = document.Fields[wc.Field].Value
 	}
-
-	if _, exists := document.Fields[wc.Field]; !exists {
-		logger.Infof("Field '%s' does not exist in document, returning false", wc.Field)
-		return false
-	}
-
-	// Get the field value from the document
-	fieldValue := document.Fields[wc.Field].Value
 
 	// If no value is specified in the clause, we assume it matches any value
 	if wc.Value == nil {
