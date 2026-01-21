@@ -5348,6 +5348,15 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	for _, doc := range filteredDocs {
 		originalDoc := *doc
 
+		// Avoid concurrent map read/write: doc.Fields may be shared with memtable or
+		// page cache (from GetDocumentsByFilter). Copy so we only mutate our own map;
+		// other goroutines can still read the original until UpdateDocumentsBatch replaces it.
+		newFields := make(map[string]models.Field, len(doc.Fields))
+		for k, v := range doc.Fields {
+			newFields[k] = v
+		}
+		doc.Fields = newFields
+
 		// Update the document fields
 		for _, kv := range docCommand.Fields {
 			foundField := doc.Fields[kv.Key]
