@@ -14,6 +14,7 @@ import (
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/constants"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/fatal"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -751,6 +752,11 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 func (sm *SessionManager) startCleanupRoutine() {
 	sm.cleanupWG.Add(1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fatal.LogFatalAndExit(r)
+			}
+		}()
 		defer sm.cleanupWG.Done()
 
 		ticker := time.NewTicker(sm.cleanupInterval)

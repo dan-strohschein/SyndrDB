@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/fatal"
 	"sync"
 	"time"
 )
@@ -249,6 +250,11 @@ func (rl *RateLimiter) getOrCreateTracker(ip string) *IPTracker {
 
 // cleanupRoutine periodically removes old inactive entries
 func (rl *RateLimiter) cleanupRoutine() {
+	defer func() {
+		if r := recover(); r != nil {
+			fatal.LogFatalAndExit(r)
+		}
+	}()
 	ticker := time.NewTicker(rl.config.CleanupInterval)
 	defer ticker.Stop()
 

@@ -44,6 +44,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"syndrdb/src/pkg/fatal"
+
 	"go.uber.org/zap"
 )
 
@@ -169,6 +171,11 @@ func (gcw *GhostCleanupWorker) Stop() {
 
 // run is the main worker loop
 func (gcw *GhostCleanupWorker) run() {
+	defer func() {
+		if r := recover(); r != nil {
+			fatal.LogFatalAndExit(r)
+		}
+	}()
 	defer gcw.wg.Done()
 	defer close(gcw.doneChan)
 

@@ -132,11 +132,12 @@ func main() {
 	// Get the global settings instance
 	args := settings.GetSettings()
 
-	// Capture panics to fatal_errors.log before the process exits (main goroutine)
+	// Capture panics to fatal_errors.log before the process exits (main goroutine).
+	// LogFatalAndExit writes the log, prints only the panicking stack to stderr, then os.Exit(1)
+	// so the runtime never prints the full goroutine dump.
 	defer func() {
 		if r := recover(); r != nil {
-			fatal.LogFatal(r)
-			panic(r)
+			fatal.LogFatalAndExit(r)
 		}
 	}()
 
@@ -494,6 +495,11 @@ func main() {
 
 	// Start pprof server on :6060 (serves /debug/pprof/* and /debug/write-heap, /debug/write-goroutines)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fatal.LogFatalAndExit(r)
+			}
+		}()
 		log.Println("Starting pprof server on :6060 (http://localhost:6060/debug/pprof/ ; /debug/write-heap ; /debug/write-goroutines)")
 		if err := http.ListenAndServe(":6060", nil); err != nil {
 			log.Printf("pprof server error: %v", err)
@@ -505,6 +511,11 @@ func main() {
 		usrCh := make(chan os.Signal, 2)
 		signal.Notify(usrCh, syscall.SIGUSR1, syscall.SIGUSR2)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fatal.LogFatalAndExit(r)
+				}
+			}()
 			for sig := range usrCh {
 				switch sig {
 				case syscall.SIGUSR1:

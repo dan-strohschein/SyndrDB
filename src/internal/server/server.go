@@ -663,6 +663,11 @@ func (s *Server) Start() error {
 	// This runs every 60 seconds to remove locks from transactions that failed without
 	// proper cleanup (server crashes, client disconnects, etc.)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fatal.LogFatalAndExit(r)
+			}
+		}()
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
 
@@ -867,8 +872,7 @@ func (s *Server) authenticateWithIP(username, password, clientIP string) error {
 func (s *Server) acceptConnections() {
 	defer func() {
 		if r := recover(); r != nil {
-			fatal.LogFatal(r)
-			panic(r)
+			fatal.LogFatalAndExit(r)
 		}
 	}()
 	s.logger.Info("Server started accepting connections",
@@ -925,8 +929,7 @@ func (s *Server) acceptConnections() {
 			defer s.wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
-					fatal.LogFatal(r)
-					panic(r)
+					fatal.LogFatalAndExit(r)
 				}
 			}()
 			s.handleConnection(c)
@@ -993,7 +996,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				fatal.LogFatal(r)
+				fatal.LogFatalAndExit(r)
 			}
 		}()
 		defer close(dataCh)
