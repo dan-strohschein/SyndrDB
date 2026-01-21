@@ -2477,8 +2477,8 @@ func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName, databaseName str
 //   - error: Any parsing error
 func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startIndex, endIndex uint32, projectionFields []string) (map[string]models.Document, uint32, error) {
 	pageDocuments := make(map[string]models.Document)
-	deletedDocuments := make(map[string]bool)        // Track deleted documents
-	allDocuments := make(map[string]models.Document) // Track all valid documents for counting
+	deletedDocuments := make(map[string]bool)   // Track deleted documents
+	seenDocIDs := make(map[string]struct{})     // Track unique DocumentIDs for counting (avoids storing full docs; was allDocuments)
 	offset := 0
 	documentIndex := uint32(0)
 
@@ -2542,6 +2542,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 			// Example: ORDER BY name query with 10-field documents → only deserialize "name" + DocumentID
 			var docMap map[string]interface{}
 			var projectedDoc *models.Document
+			var fullDoc *models.Document
 			var err error
 			if len(projectionFields) > 0 {
 				// Use projected deserialization - only deserialize specified fields
@@ -2553,8 +2554,8 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 				}
 				// If projected deserialization succeeded, projectedDoc is set and we'll use it directly below
 			} else {
-				// No projection - deserialize all fields (default behavior)
-				docMap, err = helpers.DecodeFastBinary(documentData)
+				// No projection - deserialize directly to Document (avoids intermediate map vs DecodeFastBinary)
+				fullDoc, err = helpers.DecodeFastBinaryToDocument(documentData)
 			}
 			if err != nil {
 				// CRITICAL: Data corruption detected
@@ -2586,17 +2587,15 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 
 			// Convert to Document struct
 			// PROJECTION PUSHDOWN: If we used projected deserialization, projectedDoc is already set
-			// Otherwise, convert from docMap (full deserialization path)
+			// No projection: fullDoc from DecodeFastBinaryToDocument (avoids docMap intermediate)
+			// Fallback: docMap from failed DecodeFastBinaryProjected, convert via pool
 			var finalDoc *models.Document
 			if projectedDoc != nil {
-				// Use projected Document directly (already deserialized with only needed fields)
-				// PROJECTION PUSHDOWN: This document only contains ProjectionFields (e.g., ["name"])
-				// plus DocumentID, CreatedAt, UpdatedAt, and MVCC fields for correctness
 				finalDoc = projectedDoc
+			} else if fullDoc != nil {
+				finalDoc = fullDoc
 			} else {
-				// Convert from docMap (full deserialization path)
-				// STEP 1: Use document pool to reduce allocations
-				// TODO: Implement reference counting for automatic pool return when last consumer releases document
+				// Fallback from failed projection: convert from docMap
 				pooledDoc := document.GetPooledDocument()
 				if docID, ok := docMap["DocumentID"].(string); ok {
 					pooledDoc.DocumentID = docID
@@ -2610,9 +2609,6 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 				if updatedAt, ok := docMap["UpdatedAt"].(time.Time); ok {
 					pooledDoc.UpdatedAt = updatedAt
 				}
-				// Note: MVCC fields from projected deserialization are already in projectedDoc
-				// For docMap path, they would be in docMap if present, but we skip them here for simplicity
-				// as they're not critical for most queries (only for visibility checks)
 				finalDoc = pooledDoc
 			}
 
@@ -2625,9 +2621,10 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 				isNewDocument := false
 				wasInPageRange := false
 
-				if _, exists := allDocuments[finalDoc.DocumentID]; !exists {
+				if _, exists := seenDocIDs[finalDoc.DocumentID]; !exists {
 					// First time seeing this DocumentID
 					isNewDocument = true
+					seenDocIDs[finalDoc.DocumentID] = struct{}{}
 					// Check if this document's index falls in the requested page range
 					if documentIndex >= startIndex && documentIndex < endIndex {
 						wasInPageRange = true
@@ -2639,9 +2636,6 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 						wasInPageRange = true
 					}
 				}
-
-				// Always update to latest version (last version wins)
-				allDocuments[finalDoc.DocumentID] = *finalDoc
 
 				// If this document belongs in the page range, keep it updated with latest version
 				if wasInPageRange {
@@ -2744,7 +2738,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 			if documentID, ok := deletionMap["DocumentID"].(string); ok && documentID != "" {
 				// Mark document as deleted and remove from current sets
 				deletedDocuments[documentID] = true
-				delete(allDocuments, documentID)
+				delete(seenDocIDs, documentID)
 				delete(pageDocuments, documentID)
 
 				if b.logger != nil {
@@ -2764,7 +2758,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 		}
 	}
 
-	return pageDocuments, uint32(len(allDocuments)), nil
+	return pageDocuments, uint32(len(seenDocIDs)), nil
 }
 
 // parseAppendedDocuments parses documents in the append-only format
