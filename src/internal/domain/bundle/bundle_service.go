@@ -2018,6 +2018,8 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 
 // GetDocumentPage loads a specific page of documents for a bundle.
 // documentPagesMutex is used to prevent concurrent map read/write (evictOldestPage range vs other goroutines' read/write).
+// CRITICAL: Always clears projection fields before loading to ensure full pages are cached, not partial/projected pages.
+// This prevents cache poisoning where a query with projection would cache partial documents that can't serve other queries.
 func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, pageID uint32) (*models.DocumentPage, error) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 
@@ -2027,6 +2029,13 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 		return page, nil
 	}
 	s.documentPagesMutex.RUnlock()
+
+	// CRITICAL: Clear any per-bundle projection before loading so we get full documents.
+	// Projection pushdown (e.g. ORDER BY) sets projection on the storage engine, and if we don't clear it,
+	// LoadDocumentPage will use getProjectionFieldsForBundle and return partial docs, which we'd then cache.
+	// This causes cache poisoning: cached partial pages can't serve queries needing all fields.
+	// Projection is applied in-memory after retrieval, not during disk load.
+	s.SetProjectionFieldsForBundle(bundleName, nil)
 
 	// Load the page from disk (outside RLock to avoid holding during I/O)
 	s.logger.Debugf("Loading document page %s from disk", pageKey)
