@@ -508,8 +508,8 @@ func (node *BTreeOrderedScanNode) OrderedByField() string {
 	return node.OrderedByFieldName
 }
 
-func (node *BTreeOrderedScanNode) GetCost() float64       { return node.Cost }
-func (node *BTreeOrderedScanNode) GetEstimatedRows() int  { return node.EstimatedRows }
+func (node *BTreeOrderedScanNode) GetCost() float64           { return node.Cost }
+func (node *BTreeOrderedScanNode) GetEstimatedRows() int      { return node.EstimatedRows }
 func (node *BTreeOrderedScanNode) EstimateMemoryUsage() int64 { return 0 }
 
 func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
@@ -596,7 +596,9 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, node.ProjectionFields)
 		defer node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, nil) // Always clear
 	}
-	if smartScanner, ok := node.DocumentScanner.(interface{ GetBundle() documentscanner.BundleInterface }); ok {
+	if smartScanner, ok := node.DocumentScanner.(interface {
+		GetBundle() documentscanner.BundleInterface
+	}); ok {
 		if bundleAdapter, ok := smartScanner.GetBundle().(*documentscanner.BundleAdapter); ok {
 			bundleAdapter.SetProjectionFields(node.ProjectionFields)
 			defer bundleAdapter.SetProjectionFields(nil) // Always clear

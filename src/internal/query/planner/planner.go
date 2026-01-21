@@ -25,6 +25,9 @@ type BundleServiceInterface interface {
 	GetDocumentChunksForIndexing(ctx context.Context, bundleName string, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error
 	// SetProjectionFieldsForBundle sets projection for a bundle (opt #1). Pass nil or empty to clear.
 	SetProjectionFieldsForBundle(bundleName string, fields []string)
+	// CountDocuments counts all documents using optimized count-only parser (does NOT cache pages)
+	// Used for COUNT(*) optimization to avoid massive memory spikes from caching full pages
+	CountDocuments(bundleName, databaseName string) (int, error)
 }
 
 // ExecutionNode represents a node in the execution tree

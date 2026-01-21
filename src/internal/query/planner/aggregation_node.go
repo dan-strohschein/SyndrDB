@@ -214,24 +214,45 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 			if fullScan.Bundle.Documents != nil && fullScan.Bundle.DocumentsComplete {
 				totalDocs = int64(len(*fullScan.Bundle.Documents))
 				n.Logger.Infof("OPTIMIZATION: Counting in-memory documents for COUNT(*) - Count=%d", totalDocs)
+			} else if fullScan.BundleServiceInt != nil {
+				// COUNT(*) OPTIMIZATION: Use CountDocuments() directly from BundleService
+				// This uses the count-only parser which extracts only DocumentIDs without parsing full documents
+				// and does NOT cache pages, preventing massive memory spikes on server startup
+				databaseName := ""
+				if fullScan.Bundle.Database != nil {
+					databaseName = fullScan.Bundle.Database.Name
+				}
+				count, err := fullScan.BundleServiceInt.CountDocuments(fullScan.Bundle.Name, databaseName)
+				if err == nil {
+					totalDocs = int64(count)
+					n.Logger.Infof("OPTIMIZATION: Using count-only parser for COUNT(*) - Count=%d (no pages cached)", totalDocs)
+				} else {
+					n.Logger.Warnf("COUNT(*) optimization: CountDocuments() failed (%v), falling back to GetTotalDocuments()", err)
+					// Fallback to GetTotalDocuments() if CountDocuments() fails
+					if fullScan.DocumentScanner != nil {
+						bundleInterface, ok := fullScan.DocumentScanner.(documentscanner.BundleInterface)
+						if ok {
+							totalDocs = int64(bundleInterface.GetTotalDocuments())
+							n.Logger.Infof("OPTIMIZATION: Using GetTotalDocuments() for COUNT(*) - Count=%d", totalDocs)
+						} else {
+							n.Logger.Debug("COUNT(*) optimization: DocumentScanner is not BundleInterface, falling back to document scan")
+							goto executeChild
+						}
+					} else {
+						n.Logger.Debug("COUNT(*) optimization: No DocumentScanner available, falling back to document scan")
+						goto executeChild
+					}
+				}
 			} else if fullScan.DocumentScanner != nil {
-				// Use BundleInterface.GetTotalDocuments() which counts documents efficiently
-				// by scanning pages but only counting document IDs (not loading full document data)
+				// Fallback: Use BundleInterface.GetTotalDocuments() if BundleServiceInt not available
+				// WARNING: This may cache pages if CountDocuments() fails and falls back to page loading
 				bundleInterface, ok := fullScan.DocumentScanner.(documentscanner.BundleInterface)
 				if ok {
 					totalDocs = int64(bundleInterface.GetTotalDocuments())
-					n.Logger.Infof("OPTIMIZATION: Using efficient count-only scan for COUNT(*) - Count=%d", totalDocs)
+					n.Logger.Infof("OPTIMIZATION: Using GetTotalDocuments() for COUNT(*) - Count=%d", totalDocs)
 				} else {
-					// Fallback: Use ScanAllDocuments() and count
-					// This is slower but better than nothing
-					n.Logger.Debug("COUNT(*) optimization: DocumentScanner is not BundleInterface, using ScanAllDocuments fallback")
-					scanResult, err := fullScan.DocumentScanner.ScanAllDocuments()
-					if err != nil {
-						n.Logger.Warnf("COUNT(*) optimization: ScanAllDocuments failed, falling back to document scan: %v", err)
-						goto executeChild
-					}
-					totalDocs = int64(len(scanResult.Documents))
-					n.Logger.Infof("OPTIMIZATION: Using document scanner for COUNT(*) - Count=%d (scanned %d total)", totalDocs, scanResult.TotalScanned)
+					n.Logger.Debug("COUNT(*) optimization: DocumentScanner is not BundleInterface, falling back to document scan")
+					goto executeChild
 				}
 			} else {
 				// No scanner available, need to execute child
