@@ -204,12 +204,12 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 	isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
 	isCountStarOnly := isAggregateOnly && len(n.AggregateFields) == 1 &&
 		n.AggregateFields[0].Function == "COUNT" && n.AggregateFields[0].Field == "*"
-	
+
 	if isCountStarOnly && !hasHavingClause {
 		// Check if child is a FullScanNode (meaning no WHERE clause was applied)
 		if fullScan, ok := n.Child.(*FullScanNode); ok {
 			var totalDocs int64
-			
+
 			// Fast path: If documents are complete in memory, count them directly
 			if fullScan.Bundle.Documents != nil && fullScan.Bundle.DocumentsComplete {
 				totalDocs = int64(len(*fullScan.Bundle.Documents))
@@ -259,30 +259,30 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 				n.Logger.Debug("COUNT(*) optimization: No DocumentScanner available, falling back to document scan")
 				goto executeChild
 			}
-			
+
 			// Create synthetic document with count result
 			// Match the field naming convention used by convertAggregateOnlyToSyntheticDocument
 			fields := make(map[string]models.Field)
 			columnName := "Column1" // First aggregate field uses Column1
-			
+
 			fields[columnName] = models.Field{
 				Name:  columnName,
 				Value: models.NewInterfaceValue(totalDocs),
 			}
-			
+
 			doc := document.GetPooledDocument()
 			doc.DocumentID = "synthetic_0"
 			doc.Fields = fields
-			
+
 			result := map[string]*models.Document{
 				"synthetic_0": doc,
 			}
-			
+
 			n.Logger.Infof("COUNT(*) optimization completed: returning count=%d", totalDocs)
 			return result, nil
 		}
 	}
-	
+
 executeChild:
 
 	// Execute aggregation based on chosen strategy

@@ -319,8 +319,10 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 		}
 
 		// Parse documents from this file in the page range
-		// PROJECTION PUSHDOWN: Pass nil so readDocumentRange uses getProjectionFieldsForBundle(bundleName)
-		fileDocuments, fileTotalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data, nil)
+		// CRITICAL: Pass empty slice (not nil) to bypass global projection state and always load full documents
+		// This prevents race conditions where concurrent queries set projection and poison the cache with partial pages
+		// Projection is applied in-memory after retrieval, not during disk load
+		fileDocuments, fileTotalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data, []string{})
 		if err != nil {
 			bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
 			continue
@@ -399,9 +401,10 @@ func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databa
 	endIndex := startIndex + pageSize
 
 	// Load only the documents needed for this page using range-based loading
-	// PROJECTION PUSHDOWN: Pass nil projection (full deserialization) for legacy format
-	// TODO: Wire up projection through LoadDocumentPage interface
-	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data, nil)
+	// CRITICAL: Pass empty slice (not nil) to bypass global projection state and always load full documents
+	// This prevents race conditions where concurrent queries set projection and poison the cache with partial pages
+	// Projection is applied in-memory after retrieval, not during disk load
+	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data, []string{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load document range for bundle %s page %d: %w", bundleName, pageID, err)
 	}

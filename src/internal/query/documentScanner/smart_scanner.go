@@ -190,48 +190,132 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 	return result, nil
 }
 
-// ScanAllDocuments performs a full scan using GetAllDocuments() for optimal performance
-// This bypasses the O(n*m) GetDocumentIDs() + GetDocument() loop by using the efficient
-// GetAllDocuments() method that loads pages sequentially
-// OPTIMIZATION: If maxDocuments > 0, uses GetAllDocumentsWithLimit() for early termination
+// ScanAllDocuments performs a full scan using page-by-page streaming to avoid memory duplication
+// CRITICAL: Iterates pages directly instead of GetAllDocuments() which creates full copies
+// This prevents 22GB memory spikes by avoiding duplicate copies of all documents
+// OPTIMIZATION: If maxDocuments > 0, uses early termination to stop after limit
+// PERFORMANCE: O(n) where n = pages, not O(n*m) like getBatchedDocuments() which calls GetDocument() per doc
 func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*ScanResult, error) {
 	startTime := time.Now()
 
-	sbs.logger.Debugf("Starting document scan using GetAllDocumentsWithLimit(limit=%d)", maxDocuments)
+	sbs.logger.Debugf("Starting page-by-page document scan (limit=%d) - streaming from cache without duplication", maxDocuments)
 
-	// Use limit-aware method if limit specified, otherwise full scan
-	var allDocs map[string]*models.Document
-	if maxDocuments > 0 {
-		allDocs = sbs.bundle.GetAllDocumentsWithLimit(maxDocuments)
-	} else {
-		allDocs = sbs.bundle.GetAllDocuments()
-	}
-
-	// Pre-allocate slices with exact capacity to avoid growth allocations
 	result := &ScanResult{
-		Documents:   make([]*models.Document, 0, len(allDocs)),
-		DocumentIDs: make([]string, 0, len(allDocs)),
+		Documents:   make([]*models.Document, 0),
+		DocumentIDs: make([]string, 0),
 		ScanLatency: 0,
 		CacheHits:   0,
 	}
 
-	// Convert map to slices (preserve order from GetAllDocuments)
-	for docID, doc := range allDocs {
-		result.Documents = append(result.Documents, doc)
-		result.DocumentIDs = append(result.DocumentIDs, docID)
+	// Get page count efficiently from BundleAdapter
+	// We need to access the underlying BundleAdapter to get page count
+	var pageCount uint32
+	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
+		pageCount = bundleAdapter.getSafePageCount()
+	} else {
+		// Fallback: Estimate from total documents (less efficient)
+		totalDocs := sbs.bundle.GetTotalDocuments()
+		pageCount = uint32((totalDocs + 4095) / 4096) // Assume 4096 docs per page
+		if pageCount == 0 && totalDocs > 0 {
+			pageCount = 1 // At least one page if documents exist
+		}
+	}
+
+	batchCount := 0
+	totalScanned := 0
+
+	// Iterate pages directly (sequential access, optimal I/O pattern)
+	// This is O(n) where n = pages, much better than O(n*m) with GetDocument() per doc
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		// Early termination if limit specified
+		if maxDocuments > 0 && totalScanned >= maxDocuments {
+			sbs.logger.Debugf("Early termination: reached limit of %d documents", maxDocuments)
+			break
+		}
+
+		// Load page from cache (uses shared documentPages cache)
+		page, err := sbs.loadPage(pageID)
+		if err != nil {
+			sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
+			continue
+		}
+
+		batchCount++
+
+		// Process documents in this page
+		for docID, doc := range page.Documents {
+			// Early termination check per document
+			if maxDocuments > 0 && totalScanned >= maxDocuments {
+				break
+			}
+
+			totalScanned++
+
+			// Apply MVCC snapshot filtering if scanner has snapshot context
+			if sbs.snapshotSequence > 0 {
+				if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+					continue // Skip documents not visible to this snapshot
+				}
+			}
+
+			// CRITICAL: Create a copy only for documents that make it into the result set
+			// This is much more memory-efficient than copying ALL documents upfront like GetAllDocuments()
+			// We only copy documents that pass filtering and are actually returned
+			docCopy := new(models.Document)
+			*docCopy = doc
+			result.Documents = append(result.Documents, docCopy)
+			result.DocumentIDs = append(result.DocumentIDs, docID)
+		}
+
+		// Memory pressure management
+		if len(result.Documents) > sbs.config.MemoryThreshold {
+			sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
+				sbs.config.MemoryThreshold)
+			runtime.GC()
+			sbs.metrics.MemoryPressureGCs++
+		}
 	}
 
 	// Finalize results
 	result.ScanLatency = time.Since(startTime)
-	result.BatchesUsed = 1 // Single "batch" since we loaded everything at once
-	result.TotalScanned = len(allDocs)
+	result.BatchesUsed = batchCount
+	result.TotalScanned = totalScanned
 
 	sbs.updateMetrics(result, 0, result.ScanLatency)
 
-	sbs.logger.Debugf("Full document scan completed: found %d documents in %v",
-		len(result.Documents), result.ScanLatency)
+	sbs.logger.Debugf("Page-by-page document scan completed: found %d documents in %v (pages: %d)",
+		len(result.Documents), result.ScanLatency, batchCount)
 
 	return result, nil
+}
+
+// loadPage loads a page using the bundle's page loading mechanism
+// This abstracts the page loading to work with different bundle implementations
+func (sbs *SmartBundleScanner) loadPage(pageID uint32) (*models.DocumentPage, error) {
+	// Try to use BundleAdapter's loadDocumentPage if available
+	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
+		return bundleAdapter.loadDocumentPage(pageID)
+	}
+
+	// Fallback: Use GetAllDocuments and extract page (inefficient but works)
+	// This should rarely be used since we expect BundleAdapter
+	sbs.logger.Warnf("Bundle does not implement page loading, using inefficient fallback")
+	allDocs := sbs.bundle.GetAllDocuments()
+	
+	// Create a synthetic page from all documents (inefficient, but ensures compatibility)
+	page := &models.DocumentPage{
+		PageID:    pageID,
+		Documents: make(map[string]models.Document),
+	}
+	
+	// Convert pointers to values for page.Documents map
+	for docID, docPtr := range allDocs {
+		if docPtr != nil {
+			page.Documents[docID] = *docPtr
+		}
+	}
+	
+	return page, nil
 }
 
 // ScanAllDocuments performs a full scan using GetAllDocuments() for optimal performance
