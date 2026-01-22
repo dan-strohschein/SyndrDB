@@ -199,6 +199,11 @@ type GlobalServerMetrics struct {
 	// TODO: Add conflict rate over time metrics
 	// TODO: Add conflict detection latency metrics
 
+	// PHASE 5: MVCC - Compaction Metrics (not priority 1)
+	// TODO: Add version preservation count metrics (how many versions preserved during compaction)
+	// TODO: Add oldest preserved version metrics (oldest CommitSequence preserved)
+	// TODO: Add compaction efficiency metrics (versions removed vs preserved ratio)
+
 	// WAL (Write-Ahead Log) Metrics
 	WALWritesTotal      atomic.Uint64 // Total number of WAL write operations
 	WALFlushesTotal     atomic.Uint64 // Total number of WAL flush operations

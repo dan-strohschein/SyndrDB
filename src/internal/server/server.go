@@ -27,6 +27,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/registry"
 
 	jsoniter "github.com/json-iterator/go"
 
@@ -580,6 +581,19 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_SYSTEM_INIT,
 			"failed to create compaction manager", errors.LayerAPI)
+	}
+
+	// PHASE 5: MVCC - Set oldest snapshot getter for MVCC-aware compaction
+	// Access WALManager through service registry to get snapshot manager
+	serviceRegistry := registry.GetRegistry()
+	if walManager := serviceRegistry.GetWALManager(); walManager != nil {
+		snapshotMgr := walManager.GetSnapshotManager()
+		if snapshotMgr != nil {
+			compactionManager.SetOldestSnapshotGetter(func() uint64 {
+				return snapshotMgr.GetOldestActiveSnapshot()
+			})
+			sugar.Debug("Compaction manager configured with MVCC snapshot awareness")
+		}
 	}
 
 	// Initialize ghost cleanup worker if enabled in configuration

@@ -628,16 +628,32 @@ func (wal *WriteAheadLog) replayFromFileASCII(filePath string, fromLSN uint64, r
 			continue
 		}
 
+		// Skip empty lines and binary data (lines starting with non-printable characters)
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		
+		// Check if line looks like binary data (starts with non-printable or control characters)
+		if len(line) > 0 && (line[0] < 32 && line[0] != '\t' && line[0] != '\n' && line[0] != '\r') {
+			// This is likely binary data, skip it
+			wal.logger.Debugf("Skipping binary WAL entry at line %d (first byte: 0x%02x)", lineNum, line[0])
+			continue
+		}
+		
 		var entry WALEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			// HIGH-008: Track unmarshal errors instead of silently skipping
-			recoveryErrors = append(recoveryErrors, &RecoveryError{
-				LSN:    entry.LSN, // May be 0 if unmarshal failed
-				File:   filePath,
-				Reason: "unmarshal",
-				Err:    fmt.Errorf("line %d: %w", lineNum, err),
-			})
-			wal.logger.Warnf("Failed to unmarshal WAL entry at line %d: %v", lineNum, err)
+			// Only log if it's not a binary data issue (which we already handle above)
+			if !strings.Contains(err.Error(), "invalid character") || len(line) == 0 {
+				recoveryErrors = append(recoveryErrors, &RecoveryError{
+					LSN:    0, // Unknown LSN if unmarshal failed
+					File:   filePath,
+					Reason: "unmarshal",
+					Err:    fmt.Errorf("line %d: %w", lineNum, err),
+				})
+				wal.logger.Warnf("Failed to unmarshal WAL entry at line %d: %v", lineNum, err)
+			}
 			continue // Continue processing other entries
 		}
 

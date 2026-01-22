@@ -209,6 +209,25 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown SHOW RATE command: %s", command),
 				errors.LayerCommand).WithContext("command", command)
+		case "versions":
+			// PHASE 6: MVCC - SHOW VERSIONS [FOR "documentID"] [IN BUNDLE "bundleName"]
+			return ShowVersions(command, database, logger, serviceManager)
+		case "active":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "snapshots" {
+				// PHASE 6: MVCC - SHOW ACTIVE SNAPSHOTS
+				return ShowActiveSnapshots(command, logger, serviceManager)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW ACTIVE command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
+		case "conflict":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "log" {
+				// PHASE 6: MVCC - SHOW CONFLICT LOG
+				return ShowConflictLog(command, logger, serviceManager)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW CONFLICT command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		}
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unknown SHOW command: %s", command),
@@ -922,6 +941,33 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	memoryLimit := args.GetQueryMemoryLimit(isAdmin)
 	memoryTracker := NewMemoryTracker(memoryLimit)
 	ctx = WithMemoryTracker(ctx, memoryTracker)
+
+	// PHASE 4: MVCC - Add snapshot information to context if in transaction
+	if session != nil && session.IsInTransaction() && serviceManager.WALManager != nil {
+		txIDStr := session.ActiveTransactionID
+		// Convert string txID to uint64
+		var txID uint64
+		if txIDStr != "" {
+			// Parse hex string to uint64 (txID format: "0000000000000004")
+			_, err := fmt.Sscanf(txIDStr, "%016x", &txID)
+			if err == nil {
+				snapshotMgr := serviceManager.WALManager.GetSnapshotManager()
+				if snapshotMgr != nil {
+					snapshot, exists := snapshotMgr.GetSnapshot(txID)
+					if exists && snapshot != nil {
+						// Add snapshot info to context
+						snapshotInfo := &planner.SnapshotInfo{
+							SnapshotSequence: snapshot.SnapshotSequence,
+							TransactionID:    snapshot.TransactionID,
+							ActiveTxIDs:      snapshot.ActiveTxIDs,
+						}
+						ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
+						logger.Debugf("MVCC: Added snapshot to query context: seq=%d, txID=%d", snapshot.SnapshotSequence, txID)
+					}
+				}
+			}
+		}
+	}
 	if timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()

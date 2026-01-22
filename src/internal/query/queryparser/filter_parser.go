@@ -1442,8 +1442,34 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 	}
 
 	// Handle string comparison
-	aStr, aIsString := a.(string)
-	bStr, bIsString := b.(string)
+	// CRITICAL: Handle FieldValue types that might be returned from AsInterface()
+	// FieldValue.AsInterface() returns the underlying value, but we need to ensure string extraction
+	var aStr, bStr string
+	var aIsString, bIsString bool
+	
+	// Try direct string first
+	if str, ok := a.(string); ok {
+		aStr, aIsString = str, true
+	} else {
+		// Try FieldValue - extract string value
+		if fv, ok := a.(models.FieldValue); ok {
+			if str, ok := fv.AsString(); ok {
+				aStr, aIsString = str, true
+			}
+		}
+	}
+	
+	if str, ok := b.(string); ok {
+		bStr, bIsString = str, true
+	} else {
+		// Try FieldValue - extract string value
+		if fv, ok := b.(models.FieldValue); ok {
+			if str, ok := fv.AsString(); ok {
+				bStr, bIsString = str, true
+			}
+		}
+	}
+	
 	if aIsString && bIsString {
 		// Check if either value is a magic value - if so, use direct string comparison
 		// This prevents magic values like "::SYNDR_NULL::" from being parsed as numbers

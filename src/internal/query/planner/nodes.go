@@ -520,6 +520,12 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 	// Get memory tracker from context for per-query memory limit
 	memoryTracker := GetMemoryTrackerFromContext(ctx)
 
+	// PHASE 4: MVCC - Get snapshot info from context for in-memory filtering
+	var snapshotInfo *SnapshotInfo
+	if snapshotInfo = GetSnapshotInfoFromContext(ctx); snapshotInfo != nil {
+		node.Logger.Debugf("MVCC: Using snapshot filtering: seq=%d, txID=%d", snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID)
+	}
+
 	// CRITICAL: Check if documents are complete before using fast path
 	// If DocumentsComplete is false, Documents is a memtable (recent writes only), not a complete cache
 	// MUST use scanner to merge memtable with disk data
@@ -529,6 +535,12 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		defer node.Bundle.DocumentsMutex.RUnlock()
 		docCount := 0
 		for docID, doc := range *node.Bundle.Documents {
+			// PHASE 4: MVCC - Apply snapshot visibility filtering for in-memory documents
+			if snapshotInfo != nil {
+				if !doc.IsVisibleToSnapshot(snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID, snapshotInfo.ActiveTxIDs) {
+					continue // Skip documents not visible to this snapshot
+				}
+			}
 			// OPTIMIZATION: Early termination if MaxDocuments is set (simple LIMIT-only query)
 			if node.MaxDocuments > 0 && docCount >= node.MaxDocuments {
 				node.Logger.Debugf("Early termination: Reached MaxDocuments limit of %d", node.MaxDocuments)
@@ -583,6 +595,16 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 	// Use document scanner for optimized scanning with batching and caching
 	if node.DocumentScanner == nil {
 		return nil, fmt.Errorf("document scanner is required for paginated document scanning")
+	}
+
+	// PHASE 4: MVCC - Set snapshot on scanner if available in context
+	if snapshotInfo := GetSnapshotInfoFromContext(ctx); snapshotInfo != nil {
+		if smartScanner, ok := node.DocumentScanner.(interface {
+			SetSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool)
+		}); ok {
+			smartScanner.SetSnapshot(snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID, snapshotInfo.ActiveTxIDs)
+			node.Logger.Debugf("MVCC: Set snapshot on scanner: seq=%d, txID=%d", snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID)
+		}
 	}
 
 	// PROJECTION: Establish projection for this scan (overwrites any previous query's projection).

@@ -86,6 +86,13 @@ func setupFullServer(t *testing.T) *TestFixture {
 	return setupFullServerTB(t)
 }
 
+// SetupFullServer is the exported version for use in other test packages
+// PHASE 6: MVCC - Export setup function for MVCC tests
+func SetupFullServer(t *testing.T) *TestFixture {
+	t.Helper()
+	return setupFullServerTB(t)
+}
+
 // setupFullServerTB is the testing.TB version for benchmarks
 func setupFullServerTB(tb testing.TB) *TestFixture {
 	tb.Helper()

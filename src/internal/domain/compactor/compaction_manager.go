@@ -92,6 +92,10 @@ type CompactionManager struct {
 	// Metrics reporting (optional callback to avoid import cycles)
 	metricsReporter MetricsReporter
 
+	// PHASE 5: MVCC - Callback to get oldest active snapshot sequence
+	// Used to determine which versions to preserve during compaction
+	getOldestSnapshot func() uint64
+
 	// Logging
 	logger *zap.SugaredLogger
 
@@ -157,9 +161,19 @@ func NewCompactionManager(config CompactionConfig) (*CompactionManager, error) {
 		bundleLocks: sync.Map{}, // Initialize per-bundle lock map
 		stats:       CompactionStats{},
 		logger:      config.Logger,
+		// PHASE 5: MVCC - Initialize getOldestSnapshot callback (can be set later)
+		getOldestSnapshot: nil,
 	}
 
 	return cm, nil
+}
+
+// SetOldestSnapshotGetter sets the callback function to get oldest active snapshot
+// PHASE 5: MVCC - Allows CompactionManager to query oldest snapshot without import cycles
+func (cm *CompactionManager) SetOldestSnapshotGetter(getter func() uint64) {
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+	cm.getOldestSnapshot = getter
 }
 
 func (cm *CompactionManager) GetCompacting() bool {
@@ -272,6 +286,17 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 	}
 	defer outputFile.Close()
 
+	// PHASE 5: MVCC - Get oldest snapshot sequence to determine which entries to preserve
+	var oldestSnapshotSeq uint64
+	if cm.getOldestSnapshot != nil {
+		oldestSnapshotSeq = cm.getOldestSnapshot()
+		cm.logger.Debugw("MVCC index compaction filtering",
+			"oldestSnapshotSeq", oldestSnapshotSeq)
+	} else {
+		// No snapshot getter - preserve all entries (safe default)
+		oldestSnapshotSeq = 0 // 0 means preserve all
+	}
+
 	// Track unique keys and their latest entries
 	// Map: key -> latest entry
 	latestEntries := make(map[string]*hashIndexEntryWrapper)
@@ -309,17 +334,62 @@ func (cm *CompactionManager) compactHashIndexFilesInternal(bundleName, indexName
 		}
 	}
 
+	// PHASE 5: MVCC - Filter entries: preserve those with CommitSequence >= oldestSnapshot
 	// Write non-tombstone entries to output file
 	var entriesToWrite []*hashindexV3.HashIndexEntry
+	preservedCount := 0
+	removedCount := 0
+
 	for _, wrapper := range latestEntries {
-		if wrapper.entry.Deleted {
-			// Skip tombstones - they can be removed during compaction
-			stats.TotalEntriesRemoved++
+		entry := wrapper.entry
+		shouldPreserve := false
+
+		if oldestSnapshotSeq == 0 {
+			// No snapshot filtering - preserve all entries (safe default)
+			shouldPreserve = true
 		} else {
-			entriesToWrite = append(entriesToWrite, wrapper.entry)
-			stats.TotalEntriesKept++
+			// Preserve if:
+			// 1. Uncommitted (CommitSequence == 0) - may be visible to active transactions
+			// 2. Committed and visible to oldest snapshot (CommitSequence >= oldestSnapshotSeq)
+			if entry.CommitSequence == 0 {
+				// Uncommitted - preserve to be safe
+				shouldPreserve = true
+			} else if entry.CommitSequence >= oldestSnapshotSeq {
+				// Committed and visible to oldest snapshot - preserve
+				shouldPreserve = true
+			} else {
+				// Committed before oldest snapshot - safe to remove
+				shouldPreserve = false
+			}
+		}
+
+		if shouldPreserve {
+			if entry.Deleted {
+				// PHASE 5: MVCC - Preserve tombstones if they're visible to active snapshots
+				// Tombstones are needed for MVCC visibility filtering
+				entriesToWrite = append(entriesToWrite, entry)
+				preservedCount++
+				stats.TotalEntriesKept++
+			} else {
+				entriesToWrite = append(entriesToWrite, entry)
+				preservedCount++
+				stats.TotalEntriesKept++
+			}
+		} else {
+			// Entry not visible to any active snapshot - safe to remove
+			removedCount++
+			stats.TotalEntriesRemoved++
+			cm.logger.Debugw("Removing index entry (not visible to any active snapshot)",
+				"key", entry.KeyValue,
+				"commitSequence", entry.CommitSequence,
+				"oldestSnapshotSeq", oldestSnapshotSeq)
 		}
 	}
+
+	cm.logger.Debugw("Index compaction filtering complete",
+		"preservedEntries", preservedCount,
+		"removedEntries", removedCount,
+		"oldestSnapshotSeq", oldestSnapshotSeq)
 
 	// Sort entries by key for better locality
 	sort.Slice(entriesToWrite, func(i, j int) bool {
@@ -415,11 +485,24 @@ func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleF
 		return "", fmt.Errorf("failed to parse bundle file: %w", err)
 	}
 
-	// Step 2: PHASE 0: MVCC - Collect all versions (temporary, Phase 5 will add MVCC filtering)
-	// For each DocumentID, keep all versions sorted by VersionSequence
+	// Step 2: PHASE 5: MVCC - Filter versions based on oldest active snapshot
+	// Get oldest snapshot sequence to determine which versions to preserve
+	var oldestSnapshotSeq uint64
+	if cm.getOldestSnapshot != nil {
+		oldestSnapshotSeq = cm.getOldestSnapshot()
+		cm.logger.Debugw("MVCC compaction filtering",
+			"oldestSnapshotSeq", oldestSnapshotSeq)
+	} else {
+		// No snapshot getter - preserve all versions (safe default)
+		cm.logger.Debugw("No snapshot getter available, preserving all versions")
+		oldestSnapshotSeq = 0 // 0 means preserve all
+	}
+
 	activeDocuments := make([]*models.Document, 0)
 	tombstoneCount := 0
 	totalVersions := 0
+	preservedVersions := 0
+	removedVersions := 0
 
 	for documentID, versions := range documentWrappers {
 		totalVersions += len(versions)
@@ -429,18 +512,48 @@ func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleF
 			return versions[i].document.VersionSequence > versions[j].document.VersionSequence
 		})
 
-		// PHASE 0: Keep all versions (Phase 5 will filter by CommitSequence)
+		// PHASE 5: MVCC - Filter versions: preserve those with CommitSequence >= oldestSnapshot
+		// Also preserve uncommitted versions (CommitSequence == 0) as they may be visible to active transactions
 		for _, wrapper := range versions {
-			if cm.isTombstoneDocument(wrapper) {
-				tombstoneCount++
-				cm.logger.Debugw("Found tombstone version",
-					"documentID", documentID,
-					"versionSequence", wrapper.document.VersionSequence)
-				// Still add tombstone as document (with DeletedByTxID set)
-				// Phase 5 will filter these based on visibility
-				activeDocuments = append(activeDocuments, &wrapper.document)
+			doc := &wrapper.document
+			shouldPreserve := false
+
+			if oldestSnapshotSeq == 0 {
+				// No snapshot filtering - preserve all versions (safe default)
+				shouldPreserve = true
 			} else {
-				activeDocuments = append(activeDocuments, &wrapper.document)
+				// Preserve if:
+				// 1. Uncommitted (CommitSequence == 0) - may be visible to active transactions
+				// 2. Committed and visible to oldest snapshot (CommitSequence >= oldestSnapshotSeq)
+				if doc.CommitSequence == 0 {
+					// Uncommitted - preserve to be safe (active transactions may see it)
+					shouldPreserve = true
+				} else if doc.CommitSequence >= oldestSnapshotSeq {
+					// Committed and visible to oldest snapshot - preserve
+					shouldPreserve = true
+				} else {
+					// Committed before oldest snapshot and no active snapshots can see it - safe to remove
+					shouldPreserve = false
+				}
+			}
+
+			if shouldPreserve {
+				preservedVersions++
+				if cm.isTombstoneDocument(wrapper) {
+					tombstoneCount++
+					cm.logger.Debugw("Preserving tombstone version",
+						"documentID", documentID,
+						"versionSequence", doc.VersionSequence,
+						"commitSequence", doc.CommitSequence)
+				}
+				activeDocuments = append(activeDocuments, doc)
+			} else {
+				removedVersions++
+				cm.logger.Debugw("Removing version (not visible to any active snapshot)",
+					"documentID", documentID,
+					"versionSequence", doc.VersionSequence,
+					"commitSequence", doc.CommitSequence,
+					"oldestSnapshotSeq", oldestSnapshotSeq)
 			}
 		}
 	}
@@ -448,8 +561,11 @@ func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleF
 	cm.logger.Infow("Document analysis complete",
 		"uniqueDocuments", len(documentWrappers),
 		"totalVersions", totalVersions,
+		"preservedVersions", preservedVersions,
+		"removedVersions", removedVersions,
 		"activeDocuments", len(activeDocuments),
-		"tombstones", tombstoneCount)
+		"tombstones", tombstoneCount,
+		"oldestSnapshotSeq", oldestSnapshotSeq)
 
 	// If no tombstones, no compaction needed
 	if tombstoneCount == 0 {
@@ -1082,6 +1198,18 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 	}
 	defer outputFile.Close()
 
+	// PHASE 5: MVCC - Get oldest snapshot sequence to determine which entries to preserve
+	var oldestSnapshotSeq uint64
+	if cm.getOldestSnapshot != nil {
+		oldestSnapshotSeq = cm.getOldestSnapshot()
+		cm.logger.Debugw("MVCC bucket compaction filtering",
+			"bucketNum", bucketNum,
+			"oldestSnapshotSeq", oldestSnapshotSeq)
+	} else {
+		// No snapshot getter - preserve all entries (safe default)
+		oldestSnapshotSeq = 0 // 0 means preserve all
+	}
+
 	// Track unique keys and their latest entries
 	// Map: key -> latest entry
 	latestEntries := make(map[string]*hashIndexEntryWrapper)
@@ -1129,17 +1257,58 @@ func (cm *CompactionManager) compactBucketFilesInternal(fieldName string, isFore
 		}
 	}
 
+	// PHASE 5: MVCC - Filter entries: preserve those with CommitSequence >= oldestSnapshot
 	// Write non-tombstone entries to output file
 	var entriesToWrite []*hashindexV3.HashIndexEntry
+	preservedCount := 0
+	removedCount := 0
+
 	for _, wrapper := range latestEntries {
-		if wrapper.entry.Deleted {
-			// Skip tombstones - they can be removed during compaction
-			stats.TotalEntriesRemoved++
+		entry := wrapper.entry
+		shouldPreserve := false
+
+		if oldestSnapshotSeq == 0 {
+			// No snapshot filtering - preserve all entries (safe default)
+			shouldPreserve = true
 		} else {
-			entriesToWrite = append(entriesToWrite, wrapper.entry)
+			// Preserve if:
+			// 1. Uncommitted (CommitSequence == 0) - may be visible to active transactions
+			// 2. Committed and visible to oldest snapshot (CommitSequence >= oldestSnapshotSeq)
+			if entry.CommitSequence == 0 {
+				// Uncommitted - preserve to be safe
+				shouldPreserve = true
+			} else if entry.CommitSequence >= oldestSnapshotSeq {
+				// Committed and visible to oldest snapshot - preserve
+				shouldPreserve = true
+			} else {
+				// Committed before oldest snapshot - safe to remove
+				shouldPreserve = false
+			}
+		}
+
+		if shouldPreserve {
+			// PHASE 5: MVCC - Preserve tombstones if they're visible to active snapshots
+			// Tombstones are needed for MVCC visibility filtering
+			entriesToWrite = append(entriesToWrite, entry)
+			preservedCount++
 			stats.TotalEntriesKept++
+		} else {
+			// Entry not visible to any active snapshot - safe to remove
+			removedCount++
+			stats.TotalEntriesRemoved++
+			cm.logger.Debugw("Removing bucket index entry (not visible to any active snapshot)",
+				"key", entry.KeyValue,
+				"bucketNum", bucketNum,
+				"commitSequence", entry.CommitSequence,
+				"oldestSnapshotSeq", oldestSnapshotSeq)
 		}
 	}
+
+	cm.logger.Debugw("Bucket compaction filtering complete",
+		"bucketNum", bucketNum,
+		"preservedEntries", preservedCount,
+		"removedEntries", removedCount,
+		"oldestSnapshotSeq", oldestSnapshotSeq)
 
 	// Sort entries by key for better locality
 	sort.Slice(entriesToWrite, func(i, j int) bool {
