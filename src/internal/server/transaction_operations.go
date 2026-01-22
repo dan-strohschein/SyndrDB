@@ -49,6 +49,7 @@ import (
 	encodingjson "encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/syndrQL"
@@ -58,6 +59,55 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// PHASE 2: MVCC - TransactionBuffer tracks document locations for commit sequence assignment
+// DocumentLocation stores where a document was written so we can update its CommitSequence on commit
+type DocumentLocation struct {
+	BundleName string
+	PageID     uint32
+	FileID     uint32
+	Offset     int64 // Optional: for precise updates (future optimization)
+}
+
+// TransactionBuffer tracks all documents written in a transaction
+// Used to update CommitSequence on commit
+type TransactionBuffer struct {
+	DocumentLocations map[string]DocumentLocation // docID -> location
+	mu                sync.RWMutex
+}
+
+// NewTransactionBuffer creates a new transaction buffer
+func NewTransactionBuffer() *TransactionBuffer {
+	return &TransactionBuffer{
+		DocumentLocations: make(map[string]DocumentLocation),
+	}
+}
+
+// AddDocumentLocation adds a document location to the buffer
+func (tb *TransactionBuffer) AddDocumentLocation(documentID string, location DocumentLocation) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.DocumentLocations[documentID] = location
+}
+
+// GetDocumentLocations returns all document locations in the buffer
+func (tb *TransactionBuffer) GetDocumentLocations() map[string]DocumentLocation {
+	tb.mu.RLock()
+	defer tb.mu.RUnlock()
+	// Return a copy to prevent external modification
+	result := make(map[string]DocumentLocation, len(tb.DocumentLocations))
+	for k, v := range tb.DocumentLocations {
+		result[k] = v
+	}
+	return result
+}
+
+// Clear clears all document locations from the buffer
+func (tb *TransactionBuffer) Clear() {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	tb.DocumentLocations = make(map[string]DocumentLocation)
+}
 
 // HandleBeginTransaction handles BEGIN TRANSACTION command
 func HandleBeginTransaction(session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) (*CommandResponse, error) {
@@ -101,6 +151,7 @@ func HandleBeginTransaction(session *Session, serviceManager ServiceManager, log
 }
 
 // HandleCommit handles COMMIT command
+// PHASE 2: MVCC - Implements async batch commit sequence assignment
 func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) (*CommandResponse, error) {
 	// Check if in a transaction
 	if !session.IsInTransaction() {
@@ -111,7 +162,43 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 
 	txID := session.ActiveTransactionID
 
-	// Commit transaction in WAL
+	// PHASE 2: MVCC - Get commit sequence from snapshot manager (via WALManager)
+	var commitSequence uint64
+	if serviceManager.WALManager != nil {
+		// WALManager.CommitTransaction already gets commit sequence internally
+		// We need to get it before calling CommitTransaction to use it for document updates
+		// Access snapshot manager through WALManager
+		snapshotMgr := serviceManager.WALManager.GetSnapshotManager()
+		if snapshotMgr != nil {
+			commitSequence = snapshotMgr.GetNextCommitSequence()
+		}
+	}
+
+	// PHASE 2: MVCC - Get document locations from transaction buffer
+	var documentLocations map[string]DocumentLocation
+	if session.TransactionBuffer != nil {
+		documentLocations = session.TransactionBuffer.GetDocumentLocations()
+	}
+
+	// PHASE 2: MVCC - Write WAL entry for commit sequence assignment (batch)
+	// This marks the transaction as committing immediately
+	if len(documentLocations) > 0 && serviceManager.WALManager != nil {
+		// Serialize document locations for WAL entry metadata
+		// Format: JSON array of {documentID, bundleName, pageID, fileID}
+		locationsJSON, err := encodingjson.Marshal(documentLocations)
+		if err != nil {
+			logger.Warnf("Failed to serialize document locations for WAL: %v", err)
+		} else {
+			// Log COMMIT_SEQUENCE_ASSIGN operation
+			err = serviceManager.WALManager.LogCommitSequenceAssign(txID, commitSequence, string(locationsJSON))
+			if err != nil {
+				logger.Warnf("Failed to log commit sequence assignment: %v", err)
+				// Don't fail commit if WAL logging fails - transaction is still committed
+			}
+		}
+	}
+
+	// Commit transaction in WAL (existing logic)
 	err := serviceManager.WALManager.CommitTransaction(txID)
 	if err != nil {
 		// Abort transaction on commit failure
@@ -121,6 +208,18 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 		}
 		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
 			"failed to commit transaction", errors.LayerTransaction).WithContext("tx_id", txID)
+	}
+
+	// PHASE 2: MVCC - Start async background update of documents with commit sequence
+	// This doesn't block the commit response
+	if len(documentLocations) > 0 && commitSequence > 0 {
+		go updateDocumentsCommitSequenceAsync(
+			serviceManager,
+			txID,
+			commitSequence,
+			documentLocations,
+			logger,
+		)
 	}
 
 	// Release all locks for this transaction
@@ -134,14 +233,33 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 	// Debug-aware logging
 	debugMode := settings.GetSettings().Debug
 	if debugMode {
-		logger.Infof("COMMIT: txID=%s, operations=%d, session=%s",
-			txID, len(session.PendingOperations), session.SessionID)
+		logger.Infof("COMMIT: txID=%s, operations=%d, commitSeq=%d, documents=%d, session=%s",
+			txID, len(session.PendingOperations), commitSequence, len(documentLocations), session.SessionID)
 	}
 
 	return &CommandResponse{
-		Result:      fmt.Sprintf("Transaction committed: %s", txID),
+		Result:      fmt.Sprintf("Transaction committed: %s (commitSeq: %d)", txID, commitSequence),
 		ResultCount: 0,
 	}, nil
+}
+
+// updateDocumentsCommitSequenceAsync updates documents with commit sequence in background
+// PHASE 2: MVCC - Async batch commit sequence assignment
+func updateDocumentsCommitSequenceAsync(
+	serviceManager ServiceManager,
+	txID string,
+	commitSequence uint64,
+	documentLocations map[string]DocumentLocation,
+	logger *zap.SugaredLogger,
+) {
+	// TODO: Implement document update logic
+	// For each document location:
+	// 1. Load the document from bundle file
+	// 2. Update CommitSequence field
+	// 3. Write back to bundle file (or update in-place if possible)
+	// This is a placeholder - full implementation requires document update infrastructure
+	logger.Debugf("PHASE 2: Async commit sequence update started: txID=%s, commitSeq=%d, documents=%d",
+		txID, commitSequence, len(documentLocations))
 }
 
 // createUndoFunction creates a function that can undo WAL operations

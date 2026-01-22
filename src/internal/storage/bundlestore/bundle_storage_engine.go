@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/format"
@@ -51,6 +53,11 @@ type BundleStorageEngine struct {
 	// RWMutex allows concurrent reads while blocking during writes
 	writeLocks      map[string]*sync.RWMutex // Per-bundle write locks
 	writeLocksMutex sync.Mutex               // Protects writeLocks map
+
+	// PHASE 1: MVCC - Per-bundle rotation locks for file rotation coordination
+	// Rotation is rare but needs exclusive access to prevent multiple rotations
+	rotationLocks      map[string]*sync.Mutex // Per-bundle rotation locks
+	rotationLocksMutex sync.Mutex             // Protects rotationLocks map
 
 	// PERFORMANCE OPTIMIZATION: Pre-allocated buffers to avoid memory allocations
 	headerBuffer    [32]byte  // Reusable 32-byte buffer for headers
@@ -96,6 +103,9 @@ type BundleStore interface {
 
 	// Document counting - optimized count-only operations
 	CountDocuments(bundleName, databaseName string) (int, error) // Count all documents in bundle (multi-file or legacy)
+
+	// PHASE 0: MVCC - Version retrieval
+	GetDocumentVersions(bundleName, databaseName, documentID string) ([]*models.Document, error) // Get all versions of a document
 
 	// Bundle management
 	CreateBundleFile(database *models.Database, bundle *models.Bundle) error
@@ -153,6 +163,7 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		projectionFields: make(map[string][]string),            // PROJECTION PUSHDOWN: Initialize projection fields map
 		manifestManagers: make(map[string]*ManifestManager),    // Initialize manifest managers map
 		writeLocks:       make(map[string]*sync.RWMutex),       // Initialize write locks map
+		rotationLocks:    make(map[string]*sync.Mutex),         // PHASE 1: Initialize rotation locks map
 		writeVerifier:    NewDocumentWriteVerifier(logger),     // Initialize write verification
 		writeLogger:      NewBundleWriteLogger(logger, 1000),   // Keep last 1000 write operations
 		fileReadCache:    make(map[string]*fileReadCacheEntry), // FILE READ CACHE: avoids repeated full-file reads per page
@@ -1512,12 +1523,8 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.Bundle, document *models.Document, txID string) (uint32, error) {
 	//b.logger.Infof("Starting time: %s", time.Now().Format(time.RFC3339Nano))
 	//testingStart := time.Now()
-	// CRITICAL FIX: Acquire write lock to prevent dirty reads during concurrent access
-	// This prevents readers from seeing partially written documents or corrupted data
-	// The lock is released after metadata is updated to ensure data consistency
-	lock := b.getWriteLock(bundle.Name)
-	lock.Lock()
-	defer lock.Unlock()
+	// PHASE 1: MVCC - Removed bundle-wide write lock to allow concurrent writes
+	// Fine-grained locking: rotation lock protects file rotation, atomic operations protect metadata
 
 	// MULTI-FILE STORAGE: Determine current active file and check if rotation is needed
 	// Get or create manifest manager for this bundle
@@ -1560,6 +1567,11 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 				"fileName", fileName)
 		}
 	}
+
+	// PHASE 1: MVCC - Acquire rotation lock before checking file size
+	// This protects rotation decision AND execution from race conditions
+	rotationLock := b.getRotationLock(bundle.Name)
+	rotationLock.Lock()
 
 	// Check if file rotation is needed (file size exceeds threshold)
 	// TODO: add configuration override per bundle when per-bundle tuning becomes necessary
@@ -1628,6 +1640,9 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		}
 	}
 
+	// PHASE 1: MVCC - Release rotation lock after rotation decision/execution complete
+	rotationLock.Unlock()
+
 	// Track the file offset where this write will occur for corruption debugging
 	writeOffset := currentFileSize
 	if needsRotation {
@@ -1645,14 +1660,15 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		return 0, fmt.Errorf("document must have a valid ID")
 	}
 
-	// CRITICAL: Calculate page ID BEFORE incrementing document count
+	// PHASE 1: MVCC - Use atomic get-and-increment pattern for thread-safe page calculation
 	// Page ID is based on current position: pageID = currentDocCount / pageSize
 	// Use consistent page size with virtual pagination (4096 documents per page, power of 2)
 	pageSize := uint32(4096)
 	if bundle.PageSize > 0 {
 		pageSize = uint32(bundle.PageSize)
 	}
-	currentDocCount := uint32(bundle.TotalDocuments)
+	// FIXED: Get pre-increment value atomically to ensure atomic read-modify-write
+	currentDocCount := uint32(atomic.AddInt64(&bundle.TotalDocuments, 1) - 1)
 	pageID := currentDocCount / pageSize
 
 	// PERFORMANCE FIX: Skip file existence check for known bundles
@@ -1740,17 +1756,15 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	// Log successful write operation
 	b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, totalWriteSize, nil)
 
-	// CRITICAL FIX: Update bundle metadata after successful append
-	// Increment TotalDocuments to reflect the new document
-	bundle.TotalDocuments++
-
-	// FIXED: Always calculate PageCount from TotalDocuments to ensure consistency
+	// PHASE 1: MVCC - TotalDocuments already incremented atomically above
+	// Calculate PageCount atomically from current TotalDocuments
 	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
-	if bundle.TotalDocuments > 0 {
-		calculatedPageCount := int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
-		bundle.PageCount = calculatedPageCount
+	totalDocs := atomic.LoadInt64(&bundle.TotalDocuments)
+	if totalDocs > 0 {
+		calculatedPageCount := int64((uint32(totalDocs) + pageSize - 1) / pageSize)
+		atomic.StoreInt64(&bundle.PageCount, calculatedPageCount)
 	} else {
-		bundle.PageCount = 0
+		atomic.StoreInt64(&bundle.PageCount, 0)
 	}
 
 	// Mark bundle as dirty to trigger metadata persistence
@@ -1846,6 +1860,23 @@ func (b *BundleStorageEngine) getWriteLock(bundleName string) *sync.RWMutex {
 	// Create new lock for this bundle
 	lock := &sync.RWMutex{}
 	b.writeLocks[bundleName] = lock
+	return lock
+}
+
+// getRotationLock gets or creates a rotation lock for a specific bundle
+// PHASE 1: MVCC - Protects file rotation decision and execution
+// This ensures only one goroutine can rotate a bundle's file at a time
+func (b *BundleStorageEngine) getRotationLock(bundleName string) *sync.Mutex {
+	b.rotationLocksMutex.Lock()
+	defer b.rotationLocksMutex.Unlock()
+
+	if lock, exists := b.rotationLocks[bundleName]; exists {
+		return lock
+	}
+
+	// Create new rotation lock for this bundle
+	lock := &sync.Mutex{}
+	b.rotationLocks[bundleName] = lock
 	return lock
 }
 
@@ -2566,6 +2597,171 @@ func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName, databaseName str
 	}
 
 	return documents, nil
+}
+
+// GetDocumentVersions scans backward through all bundle files to find all versions of a document
+// PHASE 0: MVCC Version Storage Foundation
+// This function collects all versions of a DocumentID from append-only storage
+// Returns versions sorted by VersionSequence (descending - newest first)
+//
+// Parameters:
+//   - bundleName: Name of the bundle
+//   - databaseName: Name of the database
+//   - documentID: The document ID to find versions for
+//
+// Returns:
+//   - []*models.Document: All versions of the document, sorted by VersionSequence (descending)
+//   - error: Any error encountered
+func (b *BundleStorageEngine) GetDocumentVersions(bundleName, databaseName, documentID string) ([]*models.Document, error) {
+	// Get manifest to find all files
+	manifestMgr := b.getOrCreateManifestManager(databaseName, bundleName)
+	manifest, err := manifestMgr.LoadOrCreate(databaseName, bundleName)
+	if err != nil {
+		// Fall back to legacy single-file format
+		return b.getDocumentVersionsLegacy(bundleName, databaseName, documentID)
+	}
+
+	// Check if we have any files in the manifest
+	if len(manifest.Files) == 0 {
+		// No files yet - fall back to legacy format
+		return b.getDocumentVersionsLegacy(bundleName, databaseName, documentID)
+	}
+
+	// Collect all versions from all files (scanning backward - newest first)
+	allVersions := make([]*models.Document, 0)
+
+	// Get files sorted by fileID descending (newest first)
+	files := manifestMgr.GetFileList(true) // newestFirst = true
+
+	// Scan each file backward to find all versions
+	for _, fileInfo := range files {
+		bundleDir := GetBundleDirectory(databaseName, bundleName)
+		filePath := filepath.Join(bundleDir, fileInfo.FileName)
+
+		// Check if file exists (skip if not - may have been compacted)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			continue
+		}
+
+		// Read file data
+		data, err := b.getOrReadFile(filePath)
+		if err != nil {
+			b.logger.Warnf("Failed to read bundle file '%s' for version scan: %v", filePath, err)
+			continue
+		}
+
+		// Scan backward through this file to find all versions of documentID
+		fileVersions := b.scanFileBackwardForDocument(&data, documentID)
+		allVersions = append(allVersions, fileVersions...)
+	}
+
+	// Sort by VersionSequence descending (newest first)
+	sort.Slice(allVersions, func(i, j int) bool {
+		return allVersions[i].VersionSequence > allVersions[j].VersionSequence
+	})
+
+	return allVersions, nil
+}
+
+// getDocumentVersionsLegacy scans a legacy single-file bundle for document versions
+func (b *BundleStorageEngine) getDocumentVersionsLegacy(bundleName, databaseName, documentID string) ([]*models.Document, error) {
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return []*models.Document{}, nil
+	}
+
+	// Read file data
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bundle file: %w", err)
+	}
+
+	// Scan backward through file
+	versions := b.scanFileBackwardForDocument(&data, documentID)
+
+	// Sort by VersionSequence descending (newest first)
+	sort.Slice(versions, func(i, j int) bool {
+		return versions[i].VersionSequence > versions[j].VersionSequence
+	})
+
+	return versions, nil
+}
+
+// scanFileBackwardForDocument scans a file forward to find all versions of a document
+// PHASE 0: MVCC - Scans forward through file to collect all versions
+// Note: Despite the name, we scan forward because append-only storage has newer versions at the end
+// We collect all versions and sort by VersionSequence later
+func (b *BundleStorageEngine) scanFileBackwardForDocument(data *[]byte, documentID string) []*models.Document {
+	versions := make([]*models.Document, 0)
+
+	// Skip bundle metadata header if present
+	headerOffset := 0
+	if len(*data) >= 8 {
+		magic := binary.LittleEndian.Uint32((*data)[0:4])
+		if magic == 0x42444D44 { // "BDMD" = Bundle Metadata
+			metadataSize := binary.LittleEndian.Uint32((*data)[4:8])
+			headerOffset = int(8 + metadataSize)
+		}
+	}
+
+	// Scan backward from end of file
+	// We'll scan forward but collect in reverse order, or scan backward by reading sizes
+	// For efficiency, scan forward but track all versions, then reverse
+	seenVersions := make(map[uint64]*models.Document) // VersionSequence -> Document
+
+	// Scan forward through file to find all versions
+	currentOffset := headerOffset
+	for currentOffset < len(*data) {
+		// Need at least 8 bytes for header
+		if currentOffset+8 > len(*data) {
+			break
+		}
+
+		// Read magic number and size
+		magic := binary.LittleEndian.Uint32((*data)[currentOffset : currentOffset+4])
+		size := binary.LittleEndian.Uint32((*data)[currentOffset+4 : currentOffset+8])
+
+		// Handle document records
+		if magic == 0xDEADBEEF {
+			// Validate size
+			if currentOffset+8+int(size) > len(*data) {
+				break
+			}
+
+			// Extract document data
+			documentData := (*data)[currentOffset+8 : currentOffset+8+int(size)]
+
+			// Decode document
+			doc, err := helpers.DecodeFastBinaryToDocument(documentData)
+			if err != nil {
+				// Skip corrupted documents
+				currentOffset += 8 + int(size)
+				continue
+			}
+
+			// Check if this is the document we're looking for
+			if doc.DocumentID == documentID {
+				// Store version (will overwrite if same VersionSequence, keeping latest)
+				// Since we scan forward, later occurrences (higher offset) are newer
+				seenVersions[doc.VersionSequence] = doc
+			}
+		} else if magic == 0xDEADDEAD {
+			// Tombstone - skip
+		}
+
+		// Move to next record
+		currentOffset += 8 + int(size)
+	}
+
+	// Convert map to slice
+	for _, doc := range seenVersions {
+		versions = append(versions, doc)
+	}
+
+	return versions
 }
 
 // parseAppendedDocumentsRange parses documents in the append-only format with range limiting

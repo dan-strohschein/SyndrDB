@@ -378,11 +378,17 @@ func (wm *WALManager) LogRelationshipDrop(txID, bundleName, relationshipName str
 }
 
 // ExecuteWithLogging executes a function within a transaction with automatic logging
+// PHASE 2: MVCC - Autocommit mode: Creates per-statement snapshot for MVCC isolation
 func (wm *WALManager) ExecuteWithLogging(operation func(txID string) error) error {
-	txID, err := wm.BeginTransaction()
+	// PHASE 2: MVCC - Use BeginTransactionUint64 for autocommit to get snapshot
+	// This ensures each autocommit statement has its own snapshot for MVCC isolation
+	txIDUint64, err := wm.BeginTransactionUint64()
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+
+	// Convert to string for compatibility with existing operation function
+	txID := fmt.Sprintf("%016x", txIDUint64)
 
 	// Execute the operation
 	if err := operation(txID); err != nil {
@@ -401,6 +407,9 @@ func (wm *WALManager) ExecuteWithLogging(operation func(txID string) error) erro
 		}
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
+	// PHASE 2: MVCC - Snapshot is automatically cleaned up in CommitTransaction
+	// via snapshotManager.RemoveSnapshot() and UnregisterActiveTransaction()
 
 	return nil
 }
@@ -605,4 +614,72 @@ func (wm *WALManager) BeginTransactionUint64() (uint64, error) {
 // GetSnapshotManager returns the snapshot manager for external access
 func (wm *WALManager) GetSnapshotManager() *SnapshotManager {
 	return wm.snapshotManager
+}
+
+// LogCommitSequenceAssign logs a batch commit sequence assignment operation
+// PHASE 2: MVCC - Used for async batch commit sequence updates
+func (wm *WALManager) LogCommitSequenceAssign(txID string, commitSequence uint64, documentLocationsJSON string) error {
+	metadata := fmt.Sprintf("commitSequence=%d", commitSequence)
+	err := wm.wal.LogOperation(txID, OpCommitSequenceAssign, "", "", "", documentLocationsJSON, metadata)
+	if err != nil {
+		return fmt.Errorf("failed to log commit sequence assignment: %w", err)
+	}
+	wm.logger.Debugf("Logged commit sequence assignment: tx=%s, commitSeq=%d", txID, commitSequence)
+	return nil
+}
+
+// RecoverCommitSequenceAssignments replays COMMIT_SEQUENCE_ASSIGN entries during recovery
+// PHASE 2: MVCC - WAL Recovery
+// This function should be called during server startup to replay any unprocessed commit sequence assignments
+// Returns the highest commit sequence found, which should be used to initialize the snapshot manager
+func (wm *WALManager) RecoverCommitSequenceAssignments() (uint64, error) {
+	highestCommitSeq := uint64(0)
+	recoveredCount := 0
+
+	err := wm.wal.ReplayOperations(0, func(entry WALEntry) error {
+		if entry.Operation == OpCommitSequenceAssign {
+			// Parse commit sequence from metadata
+			var commitSeq uint64
+			_, err := fmt.Sscanf(entry.Metadata, "commitSequence=%d", &commitSeq)
+			if err != nil {
+				wm.logger.Warnf("Failed to parse commit sequence from WAL entry LSN=%d: %v", entry.LSN, err)
+				return nil // Continue recovery even if one entry fails
+			}
+
+			// Track highest commit sequence
+			if commitSeq > highestCommitSeq {
+				highestCommitSeq = commitSeq
+			}
+
+			// Parse document locations from AfterData (JSON)
+			var documentLocations map[string]interface{}
+			if entry.AfterData != "" {
+				if err := json.Unmarshal([]byte(entry.AfterData), &documentLocations); err != nil {
+					wm.logger.Warnf("Failed to parse document locations from WAL entry LSN=%d: %v", entry.LSN, err)
+					// Continue recovery - document locations parsing failure doesn't block recovery
+				} else {
+					// TODO: Replay document commit sequence updates
+					// For now, we just track the highest commit sequence
+					// Full implementation will update documents with commit sequences
+					wm.logger.Debugf("Recovered COMMIT_SEQUENCE_ASSIGN: txID=%s, commitSeq=%d, documents=%d",
+						entry.TxID, commitSeq, len(documentLocations))
+					recoveredCount++
+				}
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return highestCommitSeq, fmt.Errorf("failed to recover commit sequence assignments: %w", err)
+	}
+
+	if highestCommitSeq > 0 {
+		// Initialize snapshot manager with recovered commit sequence
+		wm.snapshotManager.SetGlobalSequence(highestCommitSeq)
+		wm.logger.Infof("Recovered %d COMMIT_SEQUENCE_ASSIGN entries, highest commit sequence: %d",
+			recoveredCount, highestCommitSeq)
+	}
+
+	return highestCommitSeq, nil
 }

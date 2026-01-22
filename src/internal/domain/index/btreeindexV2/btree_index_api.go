@@ -887,7 +887,7 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 
 	// Handle root page changes if insertion caused tree restructuring
 	if newRootPageNum != idx.rootPageNum {
-		idx.logger.Warnf("ROOT CHANGE: Root page changed from %d to %d due to insertion",
+		idx.logger.Infof("Root page changed from %d to %d due to insertion (tree height increased - normal B-tree growth)",
 			idx.rootPageNum, newRootPageNum)
 		idx.rootPageNum = newRootPageNum
 		idx.Metadata.RootPageNum = newRootPageNum

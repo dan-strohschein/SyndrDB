@@ -194,6 +194,21 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
+			// PHASE 2: MVCC - Track document location in transaction buffer for commit sequence assignment
+			// Get pageID and fileID from bundle storage (we'll need to enhance this to return location info)
+			// For now, we'll track what we can - the full implementation will get fileID from manifest
+			if session.TransactionBuffer != nil {
+				// Get fileID from manifest (simplified - full implementation will get from AppendDocumentToBundleFileWithTxID return)
+				// TODO: Enhance AppendDocumentToBundleFileWithTxID to return location struct with pageID, fileID, offset
+				location := DocumentLocation{
+					BundleName: bundleName,
+					PageID:     0, // Will be updated when we enhance the return value
+					FileID:     0, // Will be updated when we enhance the return value
+					Offset:     0, // Optional for now
+				}
+				session.TransactionBuffer.AddDocumentLocation(docID, location)
+			}
+
 			// Log the insertion to the WAL
 			err = serviceManager.WALManager.LogDocumentInsert(txID, bundleName, docID, docCommand.Fields)
 			if err != nil {

@@ -151,6 +151,8 @@ type Session struct {
 	PendingOperations    []string          // Buffered commands within the transaction
 	CurrentSavepoint     *Savepoint        // Single-level savepoint (nil if no savepoint set)
 	TransactionStatus    TransactionStatus // Current status of the transaction
+	// PHASE 2: MVCC - TransactionBuffer tracks document locations for commit sequence assignment
+	TransactionBuffer *TransactionBuffer // Tracks document locations written in this transaction
 
 	// Prepared statement cache (session-scoped)
 	PreparedStatements *syndrQL.ShardedPreparedStatementCache // Session-isolated prepared statement cache
@@ -1375,6 +1377,8 @@ func (s *Session) BeginTransaction(txID string, startLSN uint64) {
 	s.PendingOperations = make([]string, 0)
 	s.CurrentSavepoint = nil
 	s.TransactionStatus = TransactionStatusActive
+	// PHASE 2: MVCC - Initialize transaction buffer for document location tracking
+	s.TransactionBuffer = NewTransactionBuffer()
 }
 
 // CommitTransaction marks the transaction as committed and clears state
@@ -1403,6 +1407,11 @@ func (s *Session) clearTransactionState() {
 	s.TransactionStartTime = time.Time{}
 	s.PendingOperations = nil
 	s.CurrentSavepoint = nil
+	// PHASE 2: MVCC - Clear transaction buffer
+	if s.TransactionBuffer != nil {
+		s.TransactionBuffer.Clear()
+		s.TransactionBuffer = nil
+	}
 }
 
 // AddPendingOperation adds a command to the transaction's pending operations buffer

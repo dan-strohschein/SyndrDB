@@ -415,22 +415,39 @@ func (cm *CompactionManager) CompactBundleFile(bundleName, databaseName, bundleF
 		return "", fmt.Errorf("failed to parse bundle file: %w", err)
 	}
 
-	// Step 2: Separate active documents from tombstones
+	// Step 2: PHASE 0: MVCC - Collect all versions (temporary, Phase 5 will add MVCC filtering)
+	// For each DocumentID, keep all versions sorted by VersionSequence
 	activeDocuments := make([]*models.Document, 0)
 	tombstoneCount := 0
+	totalVersions := 0
 
-	for _, wrapper := range documentWrappers {
-		if cm.isTombstoneDocument(wrapper) {
-			tombstoneCount++
-			cm.logger.Debugw("Skipping tombstone document",
-				"documentID", wrapper.document.DocumentID)
-		} else {
-			activeDocuments = append(activeDocuments, &wrapper.document)
+	for documentID, versions := range documentWrappers {
+		totalVersions += len(versions)
+		// Sort versions by VersionSequence (descending - newest first)
+		// This ensures we write versions in correct order
+		sort.Slice(versions, func(i, j int) bool {
+			return versions[i].document.VersionSequence > versions[j].document.VersionSequence
+		})
+
+		// PHASE 0: Keep all versions (Phase 5 will filter by CommitSequence)
+		for _, wrapper := range versions {
+			if cm.isTombstoneDocument(wrapper) {
+				tombstoneCount++
+				cm.logger.Debugw("Found tombstone version",
+					"documentID", documentID,
+					"versionSequence", wrapper.document.VersionSequence)
+				// Still add tombstone as document (with DeletedByTxID set)
+				// Phase 5 will filter these based on visibility
+				activeDocuments = append(activeDocuments, &wrapper.document)
+			} else {
+				activeDocuments = append(activeDocuments, &wrapper.document)
+			}
 		}
 	}
 
 	cm.logger.Infow("Document analysis complete",
-		"totalDocuments", len(documentWrappers),
+		"uniqueDocuments", len(documentWrappers),
+		"totalVersions", totalVersions,
 		"activeDocuments", len(activeDocuments),
 		"tombstones", tombstoneCount)
 
@@ -790,11 +807,12 @@ type bundleDocumentWrapper struct {
 
 // parseBundleDocuments reads and parses all documents from a bundle file
 // This function follows the parseAppendedDocuments pattern from BundleStorageEngine
-// Returns a map of documentID -> document wrapper
+// PHASE 0: MVCC - Returns a map of documentID -> slice of document wrappers (all versions)
+// Phase 5 will add MVCC filtering to only keep visible versions
 //
 // TODO: Add support for compressed bundle formats in future
-func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string]*bundleDocumentWrapper, error) {
-	documents := make(map[string]*bundleDocumentWrapper)
+func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string][]*bundleDocumentWrapper, error) {
+	documents := make(map[string][]*bundleDocumentWrapper)
 
 	// Read entire file into memory
 	// TODO: Implement streaming for very large files (>1GB)
@@ -852,8 +870,21 @@ func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string]*
 			if updatedAt, ok := docMap["UpdatedAt"].(time.Time); ok {
 				doc.UpdatedAt = updatedAt
 			}
+			// PHASE 0: MVCC - Extract version metadata fields
+			if createdByTxID, ok := docMap["CreatedByTxID"].(uint64); ok {
+				doc.CreatedByTxID = createdByTxID
+			}
+			if deletedByTxID, ok := docMap["DeletedByTxID"].(uint64); ok {
+				doc.DeletedByTxID = deletedByTxID
+			}
+			if commitSequence, ok := docMap["CommitSequence"].(uint64); ok {
+				doc.CommitSequence = commitSequence
+			}
+			if versionSequence, ok := docMap["VersionSequence"].(uint64); ok {
+				doc.VersionSequence = versionSequence
+			}
 
-			// Store or update document (latest wins)
+			// PHASE 0: MVCC - Store all versions (temporary, Phase 5 will add MVCC filtering)
 			wrapper := &bundleDocumentWrapper{
 				document:    doc,
 				isTombstone: false,
@@ -861,14 +892,8 @@ func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string]*
 				timestamp:   doc.UpdatedAt,
 			}
 
-			// If document already exists, keep the newer one
-			if existing, exists := documents[doc.DocumentID]; exists {
-				if wrapper.timestamp.After(existing.timestamp) {
-					documents[doc.DocumentID] = wrapper
-				}
-			} else {
-				documents[doc.DocumentID] = wrapper
-			}
+			// Append to versions list (keep all versions)
+			documents[doc.DocumentID] = append(documents[doc.DocumentID], wrapper)
 
 		} else if magic == 0xDEADDEAD {
 			// Deletion marker (tombstone)
@@ -892,14 +917,8 @@ func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string]*
 					timestamp:   time.Now(), // TODO: Extract actual deletion timestamp if available
 				}
 
-				// Tombstone always wins (marks document for deletion)
-				if existing, exists := documents[documentID]; exists {
-					if wrapper.timestamp.After(existing.timestamp) {
-						documents[documentID] = wrapper
-					}
-				} else {
-					documents[documentID] = wrapper
-				}
+				// PHASE 0: MVCC - Append tombstone to versions list (keep all versions)
+				documents[documentID] = append(documents[documentID], wrapper)
 
 				cm.logger.Debugw("Found deletion marker",
 					"documentID", documentID,

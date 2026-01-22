@@ -2076,6 +2076,9 @@ func (s *BundleService) CountDocuments(bundleName, databaseName string) (int, er
 // GetDocument retrieves a specific document by ID
 // Uses memory-first architecture: checks in-memory documents before hitting disk
 // This ensures dirty documents are readable before flush and provides optimal performance
+//
+// PHASE 0: MVCC Support - Memtable keeps latest version for performance
+// For version queries, use GetDocumentVersions() which scans all versions
 func (s *BundleService) GetDocument(bundleName, databaseName, documentID string) (*models.Document, error) {
 	// Get the bundle metadata
 	bundle, exists := s.bundleMetadata[bundleName]
@@ -2086,6 +2089,8 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string)
 	// MEMORY-FIRST: Check if document is already loaded in memory (hot path)
 	// This includes recently added documents that haven't been flushed to disk yet.
 	// RLock prevents races with delete/update of *bundle.Documents (concurrent map read and write).
+	// PHASE 0: MVCC - Memtable keeps latest version, which is fine for most queries
+	// Uncommitted visibility will be handled in Phase 4 when snapshot is passed
 	if bundle.Documents != nil {
 		bundle.DocumentsMutex.RLock()
 		doc, exists := (*bundle.Documents)[documentID]
@@ -2122,6 +2127,24 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string)
 	}
 
 	return nil, fmt.Errorf("document %s not found in page %d of bundle %s", documentID, pageID, bundleName)
+}
+
+// GetDocumentVersions retrieves all versions of a document for MVCC visibility filtering
+// PHASE 0: MVCC Version Storage Foundation
+// This scans backward through all bundle files to find all versions of a DocumentID
+// Returns versions sorted by VersionSequence (descending - newest first)
+//
+// Parameters:
+//   - bundleName: Name of the bundle
+//   - databaseName: Name of the database
+//   - documentID: The document ID to find versions for
+//
+// Returns:
+//   - []*models.Document: All versions of the document, sorted by VersionSequence (descending)
+//   - error: Any error encountered
+func (s *BundleService) GetDocumentVersions(bundleName, databaseName, documentID string) ([]*models.Document, error) {
+	// Delegate to storage engine's GetDocumentVersions
+	return s.store.GetDocumentVersions(bundleName, databaseName, documentID)
 }
 
 // evictOldestPageLocked removes the least recently used page from memory.

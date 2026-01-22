@@ -187,6 +187,14 @@ type GlobalServerMetrics struct {
 	TransactionsRolledBack atomic.Uint64 // Number of transactions rolled back
 	TransactionsAborted    atomic.Uint64 // Number of transactions aborted due to errors
 
+	// PHASE 1: MVCC - Lock Contention Metrics (Priority 1)
+	RotationLockWaitTimeTotal   atomic.Uint64 // Total time spent waiting for rotation locks (nanoseconds)
+	RotationLockAcquisitions    atomic.Uint64 // Total number of rotation lock acquisitions
+	AtomicOperationsTotal       atomic.Uint64 // Total number of atomic operations (AddInt64, LoadInt64, StoreInt64)
+	// TODO: Add version chain length distribution metrics
+	// TODO: Add conflict rate per bundle metrics
+	// TODO: Add snapshot age distribution metrics
+
 	// WAL (Write-Ahead Log) Metrics
 	WALWritesTotal      atomic.Uint64 // Total number of WAL write operations
 	WALFlushesTotal     atomic.Uint64 // Total number of WAL flush operations
@@ -394,6 +402,11 @@ func (gsm *GlobalServerMetrics) GetMetrics() map[string]uint64 {
 		"transactions_committed":   gsm.TransactionsCommitted.Load(),
 		"transactions_rolled_back": gsm.TransactionsRolledBack.Load(),
 		"transactions_aborted":     gsm.TransactionsAborted.Load(),
+
+		// PHASE 1: MVCC - Lock Contention Metrics
+		"rotation_lock_wait_time_total_ns": gsm.RotationLockWaitTimeTotal.Load(),
+		"rotation_lock_acquisitions":        gsm.RotationLockAcquisitions.Load(),
+		"atomic_operations_total":            gsm.AtomicOperationsTotal.Load(),
 
 		// WAL Metrics
 		"wal_writes_total":      gsm.WALWritesTotal.Load(),

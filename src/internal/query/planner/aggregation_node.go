@@ -864,9 +864,9 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 				Name:  aggKey,
 				Value: models.NewInterfaceValue(finalValue),
 			}
-			n.Logger.Info("Added aggregate field to result",
-				zap.String("aggKey", aggKey),
-				zap.Any("value", finalValue))
+			// n.Logger.Info("Added aggregate field to result",
+			// 	zap.String("aggKey", aggKey),
+			// 	zap.Any("value", finalValue))
 		}
 
 		// STEP 1: Use document pool to reduce allocations
@@ -886,9 +886,9 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 // For queries like SELECT COUNT(*) FROM table, SELECT SUM(x), AVG(y) FROM table
 func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults map[groupKey]*groupResult) map[string]*models.Document {
 	// Aggregate-only queries should have exactly one group (the "" key representing all documents)
-	if len(groupResults) != 1 {
-		n.Logger.Warnf("Aggregate-only query has unexpected group count: %d", len(groupResults))
-	}
+	// if len(groupResults) != 1 {
+	// 	n.Logger.Warnf("Aggregate-only query has unexpected group count: %d", len(groupResults))
+	// }
 
 	// Get the single group result
 	var gResult *groupResult

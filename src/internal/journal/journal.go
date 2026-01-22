@@ -70,8 +70,9 @@ const (
 	OpBeginTx
 	OpCommitTx
 	OpRollbackTx
-	OpCheckpointBegin    // Marks the start of a checkpoint (for crash recovery)
-	OpCheckpointComplete // Marks successful checkpoint completion (recovery point)
+	OpCommitSequenceAssign // PHASE 2: MVCC - Batch commit sequence assignment for documents
+	OpCheckpointBegin       // Marks the start of a checkpoint (for crash recovery)
+	OpCheckpointComplete    // Marks successful checkpoint completion (recovery point)
 )
 
 // WALEntry represents a single entry in the Write Ahead Log
