@@ -1303,18 +1303,31 @@ func (s *Server) ProcessClientData(conn *Connection, data string) (interface{}, 
 
 // handleTextCommand processes commands received in plain text format
 func (s *Server) handleTextCommand(conn *Connection, command string) (interface{}, error) {
+	// Check if server is shutting down - reject new commands during shutdown
+	if !s.Running {
+		return nil, errors.New(errors.ERR_SYSTEM_SHUTDOWN,
+			"server is shutting down", errors.LayerAPI)
+	}
+
 	serviceManager := GetServiceManager()
 
 	// DEBUG: Log exact command received from client with boundaries
 	//s.logger.Infof("[CLIENT INPUT] Received command (length=%d): |%s|", len(command), command)
 
 	// Update session activity with security validation
+	// Skip validation if server is shutting down to avoid errors from cleaned-up sessions
 	if conn.Session != nil {
 		clientIP := ExtractIPFromConn(conn.Conn)
 		connectionFingerprint := ExtractConnectionFingerprint(conn.Conn)
 
 		err := s.SessionManager.UpdateActivity(conn.Session.SessionID, clientIP, connectionFingerprint)
 		if err != nil {
+			// During shutdown, sessions may be cleaned up before connections close
+			// Check if server is still running - if not, return graceful shutdown message
+			if !s.Running {
+				return nil, errors.New(errors.ERR_SYSTEM_SHUTDOWN,
+					"server is shutting down", errors.LayerAPI)
+			}
 			s.logger.Warnw("Session security validation failed",
 				"sessionID", conn.Session.SessionID,
 				"error", err,

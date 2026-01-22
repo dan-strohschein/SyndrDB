@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
@@ -1071,12 +1073,13 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	}
 
 	var flattenedDocs []map[string]interface{}
+	var sortedDocs []*models.Document // Declare at function scope for memory cleanup
 
 	if !useStreaming {
 		// BUSINESS RULE: Every query has a SortNode (user ORDER BY or default CreatedAt ASC)
 		// Get sorted documents from SortNode to preserve sort order
-		var sortedDocs []*models.Document
 		foundSortNode := false
+		// Note: sortedDocs is declared at function scope above for cleanup
 
 		// Check if RootNode is a SortNode or a LimitNode (which may wrap a SortNode)
 		// SortNode and LimitNode both have GetSortedDocuments() to preserve sort order
@@ -1189,6 +1192,33 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 
 	// Record memory tracking metrics for successful queries
 	memoryTracker.RecordMetrics(cmdResponse.ResultCount)
+
+	// MEMORY CLEANUP: Force garbage collection and return memory to OS after query execution
+	// This prevents memory spikes from accumulating across queries, especially under high concurrency
+	// We only do this for large result sets (>1000 docs) or when projected memory is high (>50% of limit)
+	// to avoid performance impact for small queries
+	projectedMemory := memoryTracker.ProjectTotalMemory(cmdResponse.ResultCount)
+	shouldCleanup := cmdResponse.ResultCount > 1000 || projectedMemory > memoryLimit/2
+	
+	if shouldCleanup {
+		// Clear large intermediate variables to help GC identify unreachable memory
+		documents = nil
+		flattenedDocs = nil
+		sortedDocs = nil // Clear if it exists
+		
+		// Force GC to free heap memory
+		// This marks unreachable objects and makes them available for reallocation
+		runtime.GC()
+		
+		// Try to return memory to OS (Linux/Unix: calls madvise MADV_DONTNEED)
+		// This reduces RSS (Resident Set Size) shown by OS monitoring tools
+		// Note: Go runtime may not return all memory immediately due to fragmentation
+		// or because it's holding onto memory for reuse (memory pressure management)
+		debug.FreeOSMemory()
+		
+		logger.Debugf("Memory cleanup completed: freed memory after query with %d results (projected memory was %d bytes, limit %d bytes)",
+			cmdResponse.ResultCount, projectedMemory, memoryLimit)
+	}
 
 	return cmdResponse, nil
 
