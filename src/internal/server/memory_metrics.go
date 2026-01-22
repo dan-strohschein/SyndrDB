@@ -192,8 +192,12 @@ type GlobalServerMetrics struct {
 	RotationLockAcquisitions    atomic.Uint64 // Total number of rotation lock acquisitions
 	AtomicOperationsTotal       atomic.Uint64 // Total number of atomic operations (AddInt64, LoadInt64, StoreInt64)
 	// TODO: Add version chain length distribution metrics
-	// TODO: Add conflict rate per bundle metrics
 	// TODO: Add snapshot age distribution metrics
+
+	// PHASE 3: MVCC - Conflict Detection Metrics (not priority 1)
+	// TODO: Add conflict rate per bundle metrics
+	// TODO: Add conflict rate over time metrics
+	// TODO: Add conflict detection latency metrics
 
 	// WAL (Write-Ahead Log) Metrics
 	WALWritesTotal      atomic.Uint64 // Total number of WAL write operations

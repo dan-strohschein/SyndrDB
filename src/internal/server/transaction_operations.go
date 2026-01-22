@@ -162,6 +162,55 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 
 	txID := session.ActiveTransactionID
 
+	// PHASE 3: MVCC - Get snapshot for conflict checking
+	// Convert txID string to uint64 for snapshot lookup
+	var txIDUint64 uint64
+	var snapshotSequence uint64
+	if serviceManager.WALManager != nil {
+		snapshotMgr := serviceManager.WALManager.GetSnapshotManager()
+		if snapshotMgr != nil {
+			// Parse txID hex string to uint64
+			_, err := fmt.Sscanf(txID, "%016x", &txIDUint64)
+			if err == nil {
+				// Get snapshot to retrieve snapshot sequence
+				if snapshot, exists := snapshotMgr.GetSnapshot(txIDUint64); exists {
+					snapshotSequence = snapshot.SnapshotSequence
+				}
+			}
+		}
+	}
+
+	// PHASE 2: MVCC - Get document locations from transaction buffer
+	var documentLocations map[string]DocumentLocation
+	if session.TransactionBuffer != nil {
+		documentLocations = session.TransactionBuffer.GetDocumentLocations()
+	}
+
+	// PHASE 3: MVCC - Check for write-write conflicts before commit
+	// If any document was modified after snapshot, abort transaction
+	if serviceManager.ConflictTracker != nil && len(documentLocations) > 0 && snapshotSequence > 0 {
+		conflictingDocs := make([]string, 0)
+		for docID := range documentLocations {
+			if serviceManager.ConflictTracker.CheckConflict(docID, snapshotSequence) {
+				conflictingDocs = append(conflictingDocs, docID)
+			}
+		}
+
+		if len(conflictingDocs) > 0 {
+			// Conflict detected - abort transaction
+			session.AbortTransaction()
+			if serviceManager.LockManager != nil {
+				serviceManager.LockManager.ReleaseLocks(txID)
+			}
+			// Convert slice to comma-separated string for context
+			conflictingDocsStr := strings.Join(conflictingDocs, ", ")
+			return nil, errors.New(errors.ERR_TRANSACTION_CONFLICT,
+				fmt.Sprintf("write conflict detected: documents [%s] were modified after transaction snapshot (snapshotSeq: %d)",
+					conflictingDocsStr, snapshotSequence),
+				errors.LayerTransaction).WithContext("tx_id", txID).WithContext("conflicting_documents", conflictingDocsStr)
+		}
+	}
+
 	// PHASE 2: MVCC - Get commit sequence from snapshot manager (via WALManager)
 	var commitSequence uint64
 	if serviceManager.WALManager != nil {
@@ -172,12 +221,6 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 		if snapshotMgr != nil {
 			commitSequence = snapshotMgr.GetNextCommitSequence()
 		}
-	}
-
-	// PHASE 2: MVCC - Get document locations from transaction buffer
-	var documentLocations map[string]DocumentLocation
-	if session.TransactionBuffer != nil {
-		documentLocations = session.TransactionBuffer.GetDocumentLocations()
 	}
 
 	// PHASE 2: MVCC - Write WAL entry for commit sequence assignment (batch)
@@ -220,6 +263,15 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 			documentLocations,
 			logger,
 		)
+
+		// PHASE 3: MVCC - Update conflict tracker with new commit sequences
+		// Extract document IDs from locations
+		documentIDs := make([]string, 0, len(documentLocations))
+		for docID := range documentLocations {
+			documentIDs = append(documentIDs, docID)
+		}
+		// Batch update conflict tracker
+		serviceManager.ConflictTracker.UpdateCommitSequencesBatch(documentIDs, commitSequence)
 	}
 
 	// Release all locks for this transaction

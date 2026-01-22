@@ -843,8 +843,18 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 					// Get next sequence number (atomic for thread safety)
 					sequence := atomic.AddUint64(&hashIndex.GlobalSequence, 1)
 
+					// PHASE 4: MVCC - Get document's version metadata
+					// For now, use 0 (uncommitted) - will be updated when commit sequence is assigned
+					// TODO: Get actual CommitSequence and VersionSequence from document
+					var commitSeq, versionSeq uint64
+					// Try to get document to retrieve version metadata
+					if doc, err := s.GetDocument(bundleName, bundle.Database.Name, documentID); err == nil {
+						commitSeq = doc.CommitSequence
+						versionSeq = doc.VersionSequence
+					}
+
 					// Create entry and add to MemTable
-					entry := hashindex.NewHashIndexEntry(keyValue, documentID, pageID, sequence)
+					entry := hashindex.NewHashIndexEntry(keyValue, documentID, pageID, sequence, commitSeq, versionSeq)
 
 					switch operation {
 					case "insert":
@@ -1559,7 +1569,15 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 		switch update.Operation {
 		case "insert":
 			// Put handles both MemTable (already done, idempotent) and disk persistence
-			err := hashIndex.Put(keyValue, update.DocumentID, update.PageID)
+			// PHASE 4: MVCC - Get document version metadata
+			var commitSeq, versionSeq uint64
+			if bundle.Database != nil {
+				if doc, err := s.GetDocument(update.BundleName, bundle.Database.Name, update.DocumentID); err == nil {
+					commitSeq = doc.CommitSequence
+					versionSeq = doc.VersionSequence
+				}
+			}
+			err := hashIndex.Put(keyValue, update.DocumentID, update.PageID, commitSeq, versionSeq)
 			if err != nil {
 				errorCount++
 				s.logger.Warnf("Failed to persist insert to disk for key '%s' (doc '%s') in index V3 '%s': %v",
@@ -1570,7 +1588,14 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 
 		case "delete":
 			// Delete handles both MemTable (already done, idempotent) and disk persistence
-			_, err := hashIndex.Delete(keyValue)
+			// PHASE 4: MVCC - Get document commit sequence for deletion
+			var commitSeq uint64
+			if bundle.Database != nil {
+				if doc, err := s.GetDocument(update.BundleName, bundle.Database.Name, update.DocumentID); err == nil {
+					commitSeq = doc.CommitSequence
+				}
+			}
+			_, err := hashIndex.Delete(keyValue, commitSeq)
 			if err != nil {
 				errorCount++
 				s.logger.Warnf("Failed to persist delete to disk for key '%s' (doc '%s') in index V3 '%s': %v",
@@ -2077,20 +2102,66 @@ func (s *BundleService) CountDocuments(bundleName, databaseName string) (int, er
 // Uses memory-first architecture: checks in-memory documents before hitting disk
 // This ensures dirty documents are readable before flush and provides optimal performance
 //
-// PHASE 0: MVCC Support - Memtable keeps latest version for performance
-// For version queries, use GetDocumentVersions() which scans all versions
-func (s *BundleService) GetDocument(bundleName, databaseName, documentID string) (*models.Document, error) {
+// PHASE 4: MVCC - Optional snapshot filtering for visibility
+// Parameters:
+//   - bundleName: Name of the bundle
+//   - databaseName: Name of the database
+//   - documentID: Document ID to retrieve
+//   - snapshotSequence: Optional snapshot sequence for MVCC filtering (0 = no filtering, return latest)
+//   - txID: Optional transaction ID for uncommitted visibility (0 = no filtering)
+//   - activeTxIDs: Optional map of active transaction IDs at snapshot time (nil = no filtering)
+//
+// Returns the first visible version of the document, or error if not found
+func (s *BundleService) GetDocument(bundleName, databaseName, documentID string, snapshotParams ...interface{}) (*models.Document, error) {
+	// PHASE 4: MVCC - Extract snapshot parameters if provided
+	var snapshotSeq uint64
+	var txID uint64
+	var activeTxIDs map[uint64]bool
+	if len(snapshotParams) >= 1 {
+		if seq, ok := snapshotParams[0].(uint64); ok {
+			snapshotSeq = seq
+		}
+	}
+	if len(snapshotParams) >= 2 {
+		if id, ok := snapshotParams[1].(uint64); ok {
+			txID = id
+		}
+	}
+	if len(snapshotParams) >= 3 {
+		if ids, ok := snapshotParams[2].(map[uint64]bool); ok {
+			activeTxIDs = ids
+		}
+	}
+
 	// Get the bundle metadata
 	bundle, exists := s.bundleMetadata[bundleName]
 	if !exists {
 		return nil, fmt.Errorf("bundle %s not found", bundleName)
 	}
 
+	// PHASE 4: MVCC - If snapshot provided, use version scanning with visibility filtering
+	if snapshotSeq > 0 {
+		// Get all versions and filter by visibility
+		versions, err := s.GetDocumentVersions(bundleName, databaseName, documentID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get document versions: %w", err)
+		}
+
+		// Scan backward (newest first) and return first visible version
+		for _, doc := range versions {
+			if doc.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
+				return doc, nil
+			}
+		}
+
+		// No visible version found
+		return nil, fmt.Errorf("document %s not visible to snapshot (seq: %d)", documentID, snapshotSeq)
+	}
+
+	// No snapshot filtering - use fast path (latest version)
 	// MEMORY-FIRST: Check if document is already loaded in memory (hot path)
 	// This includes recently added documents that haven't been flushed to disk yet.
 	// RLock prevents races with delete/update of *bundle.Documents (concurrent map read and write).
-	// PHASE 0: MVCC - Memtable keeps latest version, which is fine for most queries
-	// Uncommitted visibility will be handled in Phase 4 when snapshot is passed
 	if bundle.Documents != nil {
 		bundle.DocumentsMutex.RLock()
 		doc, exists := (*bundle.Documents)[documentID]
@@ -5777,7 +5848,12 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 					if hashIndex == nil {
 						continue
 					}
-					deleted, err := hashIndex.Delete(documentID)
+					// PHASE 4: MVCC - Get document commit sequence for deletion
+					var commitSeq uint64
+					if doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, documentID); err == nil {
+						commitSeq = doc.CommitSequence
+					}
+					deleted, err := hashIndex.Delete(documentID, commitSeq)
 					if err != nil {
 						s.logger.Warnf("Failed to delete DocumentID '%s' from hash index '%s': %v", documentID, indexName, err)
 					} else if deleted {

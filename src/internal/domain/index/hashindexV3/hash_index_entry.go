@@ -52,8 +52,10 @@ const (
 
 	// EntryHeaderSize is the fixed size of the entry header in bytes
 	// Magic(4) + EntryID(8) + Timestamp(8) + Sequence(8) + HashValue(4) +
-	// BucketNum(4) + PageID(4) + Checksum(4) + Deleted(1) + Reserved(3) = 48 bytes
-	EntryHeaderSize = 48
+	// BucketNum(4) + PageID(4) + Checksum(4) + Deleted(1) + Reserved(3) +
+	// CommitSequence(8) + VersionSequence(8) = 64 bytes
+	// PHASE 4: MVCC - Added CommitSequence and VersionSequence for visibility filtering
+	EntryHeaderSize = 64
 
 	// MaxKeySize is the maximum size for a key value (64KB)
 	MaxKeySize = 65536
@@ -81,6 +83,10 @@ type HashIndexEntry struct {
 	Timestamp time.Time // When this entry was written (8 bytes as Unix nano)
 	Sequence  uint64    // Global sequence number for ordering conflicts (8 bytes)
 
+	// PHASE 4: MVCC - Version metadata for snapshot isolation (16 bytes total)
+	CommitSequence  uint64 // Document's commit sequence (0 = uncommitted)
+	VersionSequence uint64 // Document's version sequence within DocumentID
+
 	// Lifecycle management (1 byte + 3 padding = 4 bytes)
 	Deleted bool // True if this is a tombstone entry
 
@@ -98,16 +104,21 @@ type HashIndexEntry struct {
 //   - documentID: The UUID of the document
 //   - pageID: The physical page number where the document resides
 //   - sequence: Global sequence number for ordering
+//   - commitSequence: Document's commit sequence (0 = uncommitted)
+//   - versionSequence: Document's version sequence within DocumentID
 //
 // Returns a new HashIndexEntry with computed hash and timestamp
-func NewHashIndexEntry(keyValue, documentID string, pageID uint32, sequence uint64) *HashIndexEntry {
+// PHASE 4: MVCC - Added commitSequence and versionSequence parameters
+func NewHashIndexEntry(keyValue, documentID string, pageID uint32, sequence uint64, commitSequence, versionSequence uint64) *HashIndexEntry {
 	entry := &HashIndexEntry{
-		KeyValue:   keyValue,
-		DocumentID: documentID,
-		PageID:     pageID,
-		Timestamp:  time.Now(),
-		Sequence:   sequence,
-		Deleted:    false,
+		KeyValue:        keyValue,
+		DocumentID:      documentID,
+		PageID:          pageID,
+		Timestamp:       time.Now(),
+		Sequence:        sequence,
+		CommitSequence:  commitSequence,
+		VersionSequence: versionSequence,
+		Deleted:         false,
 	}
 
 	// Compute hash and bucket for this entry
@@ -124,15 +135,19 @@ func NewHashIndexEntry(keyValue, documentID string, pageID uint32, sequence uint
 // Parameters:
 //   - keyValue: The value being deleted
 //   - sequence: Global sequence number
+//   - commitSequence: Commit sequence when deletion was committed (0 = uncommitted)
 //
 // Returns a new HashIndexEntry marked as deleted
-func NewTombstoneEntry(keyValue string, sequence uint64) *HashIndexEntry {
+// PHASE 4: MVCC - Added commitSequence parameter
+func NewTombstoneEntry(keyValue string, sequence uint64, commitSequence uint64) *HashIndexEntry {
 	entry := &HashIndexEntry{
-		KeyValue:   keyValue,
-		DocumentID: "", // No document ID for tombstones
-		Timestamp:  time.Now(),
-		Sequence:   sequence,
-		Deleted:    true,
+		KeyValue:        keyValue,
+		DocumentID:      "", // No document ID for tombstones
+		Timestamp:       time.Now(),
+		Sequence:        sequence,
+		CommitSequence:  commitSequence,
+		VersionSequence: 0, // Tombstones don't have version sequences
+		Deleted:         true,
 	}
 
 	entry.HashValue = ComputeHash(keyValue)
@@ -216,6 +231,13 @@ func (e *HashIndexEntry) Serialize() ([]byte, error) {
 		buffer[offset] = 0
 	}
 	offset += 4 // Include 3 reserved bytes
+
+	// PHASE 4: MVCC - Write version metadata
+	binary.LittleEndian.PutUint64(buffer[offset:], e.CommitSequence)
+	offset += 8
+
+	binary.LittleEndian.PutUint64(buffer[offset:], e.VersionSequence)
+	offset += 8
 
 	// Write variable-length key
 	binary.LittleEndian.PutUint32(buffer[offset:], uint32(len(keyBytes)))
@@ -302,6 +324,19 @@ func DeserializeEntry(data []byte) (*HashIndexEntry, int, error) {
 	if (deletedFlag == 1) != entry.Deleted {
 		return nil, 0, fmt.Errorf("deleted flag mismatch: flag=%v, magic indicates=%v",
 			deletedFlag == 1, entry.Deleted)
+	}
+
+	// PHASE 4: MVCC - Read version metadata
+	if len(data) >= offset+16 {
+		// New format with version metadata
+		entry.CommitSequence = binary.LittleEndian.Uint64(data[offset:])
+		offset += 8
+		entry.VersionSequence = binary.LittleEndian.Uint64(data[offset:])
+		offset += 8
+	} else {
+		// Old format without version metadata - default to 0 (uncommitted)
+		entry.CommitSequence = 0
+		entry.VersionSequence = 0
 	}
 
 	// Read variable-length key
@@ -470,6 +505,12 @@ func (e *HashIndexEntry) computeChecksum() uint32 {
 	}
 	// deletedBuf[1], [2], [3] are already 0 (reserved bytes)
 	h.Write(deletedBuf)
+
+	// PHASE 4: MVCC - Include version metadata in checksum
+	binary.LittleEndian.PutUint64(buf, e.CommitSequence)
+	h.Write(buf)
+	binary.LittleEndian.PutUint64(buf, e.VersionSequence)
+	h.Write(buf)
 
 	// Variable-length fields (raw bytes, no length prefix in checksum)
 	h.Write([]byte(e.KeyValue))

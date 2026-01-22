@@ -345,9 +345,12 @@ func OpenHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 //   - keyValue: The value being indexed
 //   - documentID: The document UUID
 //   - pageID: The physical page number where the document resides
+//   - commitSequence: Document's commit sequence (0 = uncommitted)
+//   - versionSequence: Document's version sequence within DocumentID
 //
 // Returns error if operation fails
-func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
+// PHASE 4: MVCC - Added commitSequence and versionSequence parameters for visibility filtering
+func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32, commitSequence, versionSequence uint64) error {
 	if idx.closed {
 		return fmt.Errorf("index is closed")
 	}
@@ -376,8 +379,8 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 	}
 	idx.statsMutex.Unlock()
 
-	// Create entry with page location
-	entry := NewHashIndexEntry(keyValue, documentID, pageID, sequence)
+	// Create entry with page location and version metadata
+	entry := NewHashIndexEntry(keyValue, documentID, pageID, sequence, commitSequence, versionSequence)
 
 	// Populate bucket number based on hash value
 	// This enables bucket-based file organization and O(1) lookups
@@ -442,14 +445,18 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32) error {
 }
 
 // Get retrieves document IDs and page locations for a given key value
+// PHASE 4: MVCC - Optional snapshot filtering for visibility
 // Parameters:
 //   - keyValue: The value to search for
+//   - snapshotSequence: Optional snapshot sequence for MVCC filtering (0 = no filtering, return latest)
+//   - txID: Optional transaction ID for uncommitted visibility (0 = no filtering)
+//   - activeTxIDs: Optional map of active transaction IDs at snapshot time (nil = no filtering)
 //
 // Returns:
-//   - documentIDs: List of document IDs matching the key
+//   - documentIDs: List of document IDs matching the key (filtered by visibility if snapshot provided)
 //   - pageIDs: Corresponding page locations for each document (parallel array)
 //   - error: Any error that occurred
-func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
+func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]string, []uint32, error) {
 	if idx.closed {
 		return nil, nil, fmt.Errorf("index is closed")
 	}
@@ -469,6 +476,12 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 	// Performance: MemTable is always fast (O(1)). Bucket-optimized disk scan is 50-100x faster
 	// than full disk scan because we only read 1/256th of the files.
 
+	// PHASE 4: MVCC - Extract snapshot parameters if provided
+	var snapshotSeq uint64
+	if len(snapshotSequence) > 0 {
+		snapshotSeq = snapshotSequence[0]
+	}
+
 	// Step 1: Check MemTable
 	entry, found := idx.MemTable.Get(keyValue)
 	if found {
@@ -482,14 +495,28 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 			return []string{}, []uint32{}, nil
 		}
 
-		// Track lookup with one result
-		idx.queryOptStats.RecordLookup(1, time.Since(startTime))
-		return []string{entry.DocumentID}, []uint32{entry.PageID}, nil
+		// PHASE 4: MVCC - If snapshot provided, check visibility
+		if snapshotSeq > 0 {
+			if !idx.isEntryVisible(entry, snapshotSeq) {
+				// Entry not visible to snapshot - need to scan disk for visible versions
+				// Fall through to disk scan
+			} else {
+				// Entry is visible - return it
+				idx.queryOptStats.RecordLookup(1, time.Since(startTime))
+				return []string{entry.DocumentID}, []uint32{entry.PageID}, nil
+			}
+		} else {
+			// No snapshot filtering - return latest from memtable
+			idx.queryOptStats.RecordLookup(1, time.Since(startTime))
+			return []string{entry.DocumentID}, []uint32{entry.PageID}, nil
+		}
 	}
 
-	// Step 2: MemTable miss - use bucket-optimized disk scan
+	// Step 2: MemTable miss or snapshot filtering needed - use bucket-optimized disk scan
 	idx.updateCacheMiss()
 
+	// PHASE 4: MVCC - Collect all versions if snapshot filtering is needed
+	var allEntries []*HashIndexEntry
 	var latestEntry *HashIndexEntry
 	var err error
 
@@ -502,27 +529,54 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 			return nil, nil, fmt.Errorf("bucket calculation failed: %w", err)
 		}
 
-		latestEntry, err = idx.storage.GetLatestEntryFromBucket(keyValue, bucketNum)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to scan bucket: %w", err)
+		if snapshotSeq > 0 {
+			// PHASE 4: MVCC - Collect all versions for visibility filtering
+			allEntries, err = idx.getAllEntriesFromBucket(keyValue, bucketNum)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to scan bucket for versions: %w", err)
+			}
+			// Filter by visibility and get latest visible
+			latestEntry = idx.getLatestVisibleEntry(allEntries, snapshotSeq)
+		} else {
+			// No snapshot - just get latest
+			latestEntry, err = idx.storage.GetLatestEntryFromBucket(keyValue, bucketNum)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to scan bucket: %w", err)
+			}
 		}
 	} else {
 		// LEGACY PATH: Scan all files (backward compatibility)
-		err = idx.storage.ScanBackward(func(entry *HashIndexEntry) bool {
-			if entry.KeyValue == keyValue {
-				latestEntry = entry
-				return false // Found it, stop scanning
+		if snapshotSeq > 0 {
+			// PHASE 4: MVCC - Collect all versions
+			allEntries = make([]*HashIndexEntry, 0)
+			err = idx.storage.ScanBackward(func(entry *HashIndexEntry) bool {
+				if entry.KeyValue == keyValue {
+					allEntries = append(allEntries, entry)
+				}
+				return true // Continue scanning to collect all versions
+			})
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to scan storage: %w", err)
 			}
-			return true // Keep scanning
-		})
-
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to scan storage: %w", err)
+			// Filter by visibility
+			latestEntry = idx.getLatestVisibleEntry(allEntries, snapshotSeq)
+		} else {
+			// No snapshot - just get latest
+			err = idx.storage.ScanBackward(func(entry *HashIndexEntry) bool {
+				if entry.KeyValue == keyValue {
+					latestEntry = entry
+					return false // Found it, stop scanning
+				}
+				return true // Keep scanning
+			})
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to scan storage: %w", err)
+			}
 		}
 	}
 
 	if latestEntry == nil {
-		// Not found anywhere
+		// Not found anywhere or no visible versions
 		idx.queryOptStats.RecordLookup(0, time.Since(startTime))
 		return []string{}, []uint32{}, nil
 	}
@@ -556,6 +610,66 @@ func (idx *HashIndexV3) Get(keyValue string) ([]string, []uint32, error) {
 	// Track lookup with one result
 	idx.queryOptStats.RecordLookup(1, time.Since(startTime))
 	return []string{latestEntry.DocumentID}, []uint32{latestEntry.PageID}, nil
+}
+
+// getAllEntriesFromBucket collects all entries for a key from a specific bucket
+// PHASE 4: MVCC - Helper to collect all versions for visibility filtering
+func (idx *HashIndexV3) getAllEntriesFromBucket(keyValue string, bucketNum uint32) ([]*HashIndexEntry, error) {
+	allEntries := make([]*HashIndexEntry, 0)
+	err := idx.storage.ScanBucket(bucketNum, func(entry *HashIndexEntry) bool {
+		if entry.KeyValue == keyValue && entry.BucketNum == bucketNum {
+			allEntries = append(allEntries, entry)
+		}
+		return true // Continue scanning to collect all versions
+	})
+	return allEntries, err
+}
+
+// isEntryVisible checks if an index entry is visible to a snapshot
+// PHASE 4: MVCC - Visibility filtering for index entries
+// Uses same rules as Document.IsVisibleToSnapshot but works with index entry metadata
+func (idx *HashIndexV3) isEntryVisible(entry *HashIndexEntry, snapshotSeq uint64) bool {
+	if entry == nil {
+		return false
+	}
+
+	// Rule 1: Uncommitted entries (CommitSequence == 0) are only visible to creating transaction
+	// For index entries, we can't check CreatedByTxID directly, so we skip uncommitted entries
+	// The document-level check will handle read-your-own-writes
+	if entry.CommitSequence == 0 {
+		return false // Uncommitted - not visible (document-level will handle own writes)
+	}
+
+	// Rule 2: Must be committed before snapshot boundary
+	if entry.CommitSequence > snapshotSeq {
+		return false
+	}
+
+	// Rule 3: Not deleted (tombstones are not visible)
+	if entry.Deleted {
+		return false
+	}
+
+	return true
+}
+
+// getLatestVisibleEntry finds the latest visible entry from a list of entries
+// PHASE 4: MVCC - Filters entries by visibility and returns newest visible version
+func (idx *HashIndexV3) getLatestVisibleEntry(entries []*HashIndexEntry, snapshotSeq uint64) *HashIndexEntry {
+	var latestVisible *HashIndexEntry
+	var latestVersionSeq uint64
+
+	for _, entry := range entries {
+		if idx.isEntryVisible(entry, snapshotSeq) {
+			// Keep the entry with highest VersionSequence (newest version)
+			if latestVisible == nil || entry.VersionSequence > latestVersionSeq {
+				latestVisible = entry
+				latestVersionSeq = entry.VersionSequence
+			}
+		}
+	}
+
+	return latestVisible
 }
 
 // BatchGet retrieves document IDs for multiple key values in parallel
@@ -644,9 +758,11 @@ func (idx *HashIndexV3) BatchGet(keyValues []string) (map[string][]string, error
 // The actual entry is not removed until compaction runs
 // Parameters:
 //   - keyValue: The value to delete
+//   - commitSequence: Commit sequence when deletion was committed (0 = uncommitted)
 //
 // Returns true if key was found and deleted, false if not found
-func (idx *HashIndexV3) Delete(keyValue string) (bool, error) {
+// PHASE 4: MVCC - Added commitSequence parameter for visibility filtering
+func (idx *HashIndexV3) Delete(keyValue string, commitSequence uint64) (bool, error) {
 	if idx.closed {
 		return false, fmt.Errorf("index is closed")
 	}
@@ -677,8 +793,8 @@ func (idx *HashIndexV3) Delete(keyValue string) (bool, error) {
 	}
 	idx.statsMutex.Unlock()
 
-	// Create tombstone entry
-	tombstone := NewTombstoneEntry(keyValue, sequence)
+	// Create tombstone entry with commit sequence
+	tombstone := NewTombstoneEntry(keyValue, sequence, commitSequence)
 
 	// DELETE PATH (LSM-style):
 	// 1. Append tombstone to disk (durability)

@@ -56,6 +56,9 @@ type ServiceManager struct {
 	// STEP 2: Query plan caching - shared planner with cache invalidation
 	UnifiedPlanner *planner.UnifiedQueryPlanner
 
+	// PHASE 3: MVCC - Conflict detection for write-write conflicts
+	ConflictTracker *ConflictTracker
+
 	logger *zap.SugaredLogger
 }
 
@@ -126,6 +129,9 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		// Register planner with bundle service for schema change invalidation
 		bundle.SetQueryPlanner(unifiedPlanner)
 
+		// PHASE 3: MVCC - Initialize conflict tracker for write-write conflict detection
+		conflictTracker := NewConflictTracker()
+
 		// Initialize Migration service with adapters
 		migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())
 		bundleServiceAdapter := NewBundleServiceAdapter(bundleService, dbService, catalogService, walManager, logger)
@@ -144,6 +150,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			PermissionService:      permissionService,
 			MigrationService:       migrationService,
 			UnifiedPlanner:         unifiedPlanner,
+			ConflictTracker:        conflictTracker,
 			logger:                 logger,
 		}
 

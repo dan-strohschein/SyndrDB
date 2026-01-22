@@ -152,14 +152,16 @@ func (mt *HashMemTable) Get(key string) (*HashIndexEntry, bool) {
 // Parameters:
 //   - key: The key to delete
 //   - sequence: Global sequence number for the delete operation
+//   - commitSequence: Commit sequence when deletion was committed (0 = uncommitted)
 //
 // Returns error if operation fails
-func (mt *HashMemTable) Delete(key string, sequence uint64) error {
+// PHASE 4: MVCC - Added commitSequence parameter
+func (mt *HashMemTable) Delete(key string, sequence uint64, commitSequence uint64) error {
 	mt.mutex.Lock()
 	defer mt.mutex.Unlock()
 
-	// Create tombstone entry
-	tombstone := NewTombstoneEntry(key, sequence)
+	// Create tombstone entry with commit sequence
+	tombstone := NewTombstoneEntry(key, sequence, commitSequence)
 
 	// Store tombstone in MemTable
 	mt.entries[key] = tombstone
