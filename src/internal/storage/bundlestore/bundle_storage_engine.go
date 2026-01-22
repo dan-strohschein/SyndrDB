@@ -2492,6 +2492,19 @@ func (b *BundleStorageEngine) Shutdown() error {
 // PROJECTION PUSHDOWN: This allows BundleAdapter to pass projection through to readDocumentRange
 // Called from BundleAdapter before loading pages for ORDER BY queries
 func (b *BundleStorageEngine) SetProjectionFieldsForBundle(bundleName string, fields []string) {
+	// PERFORMANCE: Optimize for nil fields (clearing projection) - common case in GetDocumentsByFilter
+	// Check if we actually need to modify anything before acquiring write lock
+	if len(fields) == 0 {
+		// Clearing projection - check if it's already cleared to avoid write lock
+		b.projectionMutex.RLock()
+		_, exists := b.projectionFields[bundleName]
+		b.projectionMutex.RUnlock()
+		if !exists {
+			// Already cleared - no need to acquire write lock
+			return
+		}
+	}
+	
 	b.projectionMutex.Lock()
 	defer b.projectionMutex.Unlock()
 	if len(fields) > 0 {

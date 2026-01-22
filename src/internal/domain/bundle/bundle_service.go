@@ -323,7 +323,7 @@ type BundleService struct {
 	metadataPersistInterval int              // Number of operations before forcing metadata persist
 	metadataOperationCount  int              // Count of operations since last metadata flush
 	lastMetadataFlush       time.Time        // Last time metadata updates were flushed
-	metadataUpdateMutex     sync.Mutex       // Protects metadata update buffer and operation count
+	metadataUpdateMutex     sync.RWMutex     // Protects metadata update buffer and operation count (RWMutex for read optimization)
 
 	// PHASE 1 OPTIMIZATION: Bulk operation detection for WAL bypass
 	bulkModeEnabled        bool      // Current bulk mode state
@@ -2070,16 +2070,27 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 		return nil, fmt.Errorf("failed to load document page %s: %w", pageKey, err)
 	}
 
-	s.documentPagesMutex.Lock()
-	defer s.documentPagesMutex.Unlock()
-	// Double-check: another goroutine may have filled it while we were loading
+	// PERFORMANCE: Minimize write lock hold time - check cache again before acquiring write lock
+	// This reduces contention when multiple goroutines load the same page concurrently
+	s.documentPagesMutex.RLock()
 	if p, exists := s.documentPages[pageKey]; exists {
+		s.documentPagesMutex.RUnlock()
+		return p, nil // Another goroutine loaded it first
+	}
+	s.documentPagesMutex.RUnlock()
+
+	// Acquire write lock only when we need to insert
+	s.documentPagesMutex.Lock()
+	// Double-check again after acquiring write lock (another goroutine may have inserted it)
+	if p, exists := s.documentPages[pageKey]; exists {
+		s.documentPagesMutex.Unlock()
 		return p, nil
 	}
 	if len(s.documentPages) >= s.maxLoadedPages {
 		s.evictOldestPageLocked()
 	}
 	s.documentPages[pageKey] = page
+	s.documentPagesMutex.Unlock()
 	return page, nil
 }
 
@@ -6270,8 +6281,15 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 	}
 	defer s.ReleaseBundleReadLock(bundle.Name)
 
-	// Force flush any pending metadata updates to ensure accurate PageCount
-	s.FlushMetadataUpdates()
+	// PERFORMANCE: Only flush metadata if buffer is non-empty (avoid write lock contention)
+	// Use RLock to check buffer size without blocking other readers
+	s.metadataUpdateMutex.RLock()
+	needsFlush := len(s.metadataUpdateBuffer) > 0
+	s.metadataUpdateMutex.RUnlock()
+	if needsFlush {
+		// Only flush if actually needed - this avoids write lock contention under high concurrency
+		s.FlushMetadataUpdates()
+	}
 
 	// CRITICAL: Clear any per-bundle projection so we load full documents.
 	// A prior ORDER BY (or similar) sets projection on the storage engine and never clears it.
