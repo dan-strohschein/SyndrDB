@@ -54,16 +54,16 @@ import (
 // Follows SQL Server's ghost cleanup pattern for removing obsolete versions
 type MVCCGCWorker struct {
 	// Configuration
-	interval           time.Duration  // How often to run GC cycle (default: 30s)
-	batchSize          int            // Max bundles/indexes to process per cycle (default: 10)
-	pauseThreshold     int            // Pause if active queries >= this (default: 500)
-	maxVersionsThreshold int         // Trigger compaction if document has >N versions (default: 5)
-	minVersionAge      time.Duration // Minimum age before considering version for GC (default: 1h)
-	dataDir            string        // Data directory for bundle file paths
-	activeQueryCount   *atomic.Uint64 // Server's query counter for load detection
+	interval             time.Duration  // How often to run GC cycle (default: 30s)
+	batchSize            int            // Max bundles/indexes to process per cycle (default: 10)
+	pauseThreshold       int            // Pause if active queries >= this (default: 500)
+	maxVersionsThreshold int            // Trigger compaction if document has >N versions (default: 5)
+	minVersionAge        time.Duration  // Minimum age before considering version for GC (default: 1h)
+	dataDir              string         // Data directory for bundle file paths
+	activeQueryCount     *atomic.Uint64 // Server's query counter for load detection
 
 	// Service access (using interface to avoid import cycles)
-	serviceManagerGetter func() interface{} // Returns ServiceManager to avoid direct import
+	serviceManagerGetter  func() interface{} // Returns ServiceManager to avoid direct import
 	snapshotManagerGetter func() interface{} // Returns SnapshotManager to check oldest snapshot
 
 	// Lifecycle management
@@ -81,24 +81,24 @@ type MVCCGCWorker struct {
 	logger *zap.SugaredLogger
 
 	// Immediate GC trigger support
-	immediateGCChan chan string // Channel for triggering immediate GC ("startup" or "shutdown")
+	immediateGCChan  chan string // Channel for triggering immediate GC ("startup" or "shutdown")
 	immediateGCMutex sync.Mutex  // Protects immediate GC execution
 }
 
 // MVCCGCConfig holds configuration for the worker
 type MVCCGCConfig struct {
-	Interval             time.Duration
-	BatchSize            int
-	PauseThreshold       int
-	MaxVersionsThreshold int
-	MinVersionAge        time.Duration
-	DataDir              string         // Data directory for bundle file paths
-	ServiceManagerGetter func() interface{} // Function to get ServiceManager (avoids import cycle)
+	Interval              time.Duration
+	BatchSize             int
+	PauseThreshold        int
+	MaxVersionsThreshold  int
+	MinVersionAge         time.Duration
+	DataDir               string             // Data directory for bundle file paths
+	ServiceManagerGetter  func() interface{} // Function to get ServiceManager (avoids import cycle)
 	SnapshotManagerGetter func() interface{} // Function to get SnapshotManager (avoids import cycle)
-	ActiveQueryCount     *atomic.Uint64
-	Compactor            *CompactionManager
-	MetricsReporter      MetricsReporter // Callback for reporting metrics
-	Logger               *zap.SugaredLogger
+	ActiveQueryCount      *atomic.Uint64
+	Compactor             *CompactionManager
+	MetricsReporter       MetricsReporter // Callback for reporting metrics
+	Logger                *zap.SugaredLogger
 }
 
 // NewMVCCGCWorker creates a new MVCC GC worker
@@ -140,7 +140,7 @@ func NewMVCCGCWorker(config MVCCGCConfig) *MVCCGCWorker {
 	}
 
 	return &MVCCGCWorker{
-		interval:             config.Interval,
+		interval:              config.Interval,
 		batchSize:             config.BatchSize,
 		pauseThreshold:        config.PauseThreshold,
 		maxVersionsThreshold:  config.MaxVersionsThreshold,
