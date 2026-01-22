@@ -208,6 +208,14 @@ type Arguments struct {
 	GhostCleanupPauseThreshold  int     `yaml:"ghost_cleanup_pause_threshold"`  // Active query pause threshold (default: 500)
 	GhostCleanupTombstoneRatio  float64 `yaml:"ghost_cleanup_tombstone_ratio"`  // Tombstone ratio threshold for compaction (default: 0.3)
 
+	// MVCC GC (Automatic Version Cleanup) Configuration
+	MVCCGCEnabled         bool   `yaml:"mvcc_gc_enabled"`          // Enable automatic MVCC version cleanup (default: true)
+	MVCCGCIntervalSeconds int    `yaml:"mvcc_gc_interval_seconds"` // GC cycle interval in seconds (default: 30)
+	MVCCGCBatchSize       int    `yaml:"mvcc_gc_batch_size"`       // Max bundles to process per cycle (default: 10)
+	MVCCGCPauseThreshold  int    `yaml:"mvcc_gc_pause_threshold"`   // Active query pause threshold (default: 500)
+	MVCCGCMaxVersionsThreshold int `yaml:"mvcc_gc_max_versions_threshold"` // Trigger compaction if document has >N versions (default: 5)
+	MVCCGCMinVersionAgeHours    int    `yaml:"mvcc_gc_min_version_age_hours"` // Minimum age in hours before considering version for GC (default: 1)
+
 	// Concurrency & Locking Configuration (HIGH-007)
 	LockTimeoutSeconds          int `yaml:"lock_timeout_seconds"`          // Timeout for lock acquisition in seconds (default: 30)
 	MaxWorkerPools              int `yaml:"max_worker_pools"`              // Maximum number of worker pools (default: 10)
@@ -424,6 +432,14 @@ func GetSettings() *Arguments {
 			GhostCleanupBatchSize:       10000, // Process up to 10,000 records per cycle
 			GhostCleanupPauseThreshold:  500,   // Pause when 500+ queries active
 			GhostCleanupTombstoneRatio:  0.3,   // Compact when 30% tombstones
+
+			// MVCC GC (Automatic Version Cleanup) Defaults
+			MVCCGCEnabled:              true,  // Enable MVCC GC by default
+			MVCCGCIntervalSeconds:      30,    // Run every 30 seconds
+			MVCCGCBatchSize:            10,    // Process up to 10 bundles per cycle
+			MVCCGCPauseThreshold:       500,   // Pause when 500+ queries active
+			MVCCGCMaxVersionsThreshold: 5,     // Trigger compaction if document has >5 versions
+			MVCCGCMinVersionAgeHours:    1,     // Minimum 1 hour age before considering version for GC
 
 			// Concurrency & Locking Configuration Defaults (HIGH-007)
 			LockTimeoutSeconds:          30,  // 30 seconds timeout for lock acquisition

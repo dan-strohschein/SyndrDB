@@ -300,6 +300,19 @@ type GlobalServerMetrics struct {
 	OrphanedTempFilesRemoved atomic.Uint64 // Number of orphaned .compact.tmp files cleaned up
 
 	// ============================================================================
+	// MVCC GC Metrics (Async MVCC Garbage Collection)
+	// ============================================================================
+	MVCCGCCyclesTotal        atomic.Uint64 // Total GC cycles executed (periodic + immediate)
+	MVCCGCBundlesScanned      atomic.Uint64 // Bundles analyzed per cycle
+	MVCCGCVersionsRemoved     atomic.Uint64 // Total versions removed by GC
+	MVCCGCCompactionsTriggered atomic.Uint64 // Compactions triggered by GC
+	MVCCGCPausedForLoad       atomic.Uint64 // Times GC paused due to high load
+	MVCCGCDurationMs          atomic.Uint64 // Duration of last GC cycle (milliseconds)
+	MVCCGCVersionsPreserved   atomic.Uint64 // Versions kept due to active snapshots
+	MVCCGCStartupTriggers     atomic.Uint64 // GC cycles triggered on server startup
+	MVCCGCShutdownTriggers    atomic.Uint64 // GC cycles triggered on server shutdown
+
+	// ============================================================================
 	// DateTime Parsing Metrics
 	// ============================================================================
 	DateTimeParseAttemptsTotal atomic.Uint64 // Total datetime parse attempts
@@ -493,6 +506,17 @@ func (gsm *GlobalServerMetrics) GetMetrics() map[string]uint64 {
 		"compaction_triggered_ghost":      gsm.CompactionTriggeredGhost.Load(),
 		"compaction_blocked_by_lock":      gsm.CompactionBlockedByLock.Load(),
 		"orphaned_temp_files_removed":     gsm.OrphanedTempFilesRemoved.Load(),
+
+		// MVCC GC Metrics
+		"mvcc_gc_cycles_total":         gsm.MVCCGCCyclesTotal.Load(),
+		"mvcc_gc_bundles_scanned":       gsm.MVCCGCBundlesScanned.Load(),
+		"mvcc_gc_versions_removed":       gsm.MVCCGCVersionsRemoved.Load(),
+		"mvcc_gc_compactions_triggered":  gsm.MVCCGCCompactionsTriggered.Load(),
+		"mvcc_gc_paused_for_load":       gsm.MVCCGCPausedForLoad.Load(),
+		"mvcc_gc_duration_ms":           gsm.MVCCGCDurationMs.Load(),
+		"mvcc_gc_versions_preserved":     gsm.MVCCGCVersionsPreserved.Load(),
+		"mvcc_gc_startup_triggers":       gsm.MVCCGCStartupTriggers.Load(),
+		"mvcc_gc_shutdown_triggers":      gsm.MVCCGCShutdownTriggers.Load(),
 
 		// DateTime Parsing Metrics
 		"datetime_parse_attempts_total": gsm.DateTimeParseAttemptsTotal.Load(),

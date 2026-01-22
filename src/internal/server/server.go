@@ -78,6 +78,7 @@ type Server struct {
 	wg                    sync.WaitGroup                // WaitGroup for tracking active connections
 	activeQueryCount      atomic.Uint64                 // Number of currently executing queries (for ghost cleanup pausing)
 	GhostCleanupWorker    *compactor.GhostCleanupWorker // Background worker for automatic compaction
+	MVCCGCWorker          *compactor.MVCCGCWorker       // Background worker for MVCC garbage collection
 }
 
 // Connection represents an active client connection
@@ -562,6 +563,24 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 			metrics.CompactionBlockedByLock.Add(value)
 		case "OrphanedTempFilesRemoved":
 			metrics.OrphanedTempFilesRemoved.Add(value)
+		case "MVCCGCCyclesTotal":
+			metrics.MVCCGCCyclesTotal.Add(value)
+		case "MVCCGCBundlesScanned":
+			metrics.MVCCGCBundlesScanned.Add(value)
+		case "MVCCGCVersionsRemoved":
+			metrics.MVCCGCVersionsRemoved.Add(value)
+		case "MVCCGCCompactionsTriggered":
+			metrics.MVCCGCCompactionsTriggered.Add(value)
+		case "MVCCGCPausedForLoad":
+			metrics.MVCCGCPausedForLoad.Add(value)
+		case "MVCCGCDurationMs":
+			metrics.MVCCGCDurationMs.Store(value)
+		case "MVCCGCVersionsPreserved":
+			metrics.MVCCGCVersionsPreserved.Add(value)
+		case "MVCCGCStartupTriggers":
+			metrics.MVCCGCStartupTriggers.Add(value)
+		case "MVCCGCShutdownTriggers":
+			metrics.MVCCGCShutdownTriggers.Add(value)
 		}
 	}
 
@@ -622,6 +641,47 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		)
 	} else {
 		sugar.Info("Ghost cleanup worker disabled in configuration")
+	}
+
+	// Initialize MVCC GC worker if enabled in configuration
+	if config.MVCCGCEnabled {
+		mvccGCWorker := compactor.NewMVCCGCWorker(compactor.MVCCGCConfig{
+			Interval:             time.Duration(config.MVCCGCIntervalSeconds) * time.Second,
+			BatchSize:            config.MVCCGCBatchSize,
+			PauseThreshold:       config.MVCCGCPauseThreshold,
+			MaxVersionsThreshold: config.MVCCGCMaxVersionsThreshold,
+			MinVersionAge:        time.Duration(config.MVCCGCMinVersionAgeHours) * time.Hour,
+			DataDir:              config.DataDir,
+			ServiceManagerGetter: func() interface{} { return GetServiceManager() },
+			SnapshotManagerGetter: func() interface{} {
+				serviceRegistry := registry.GetRegistry()
+				if walManager := serviceRegistry.GetWALManager(); walManager != nil {
+					return walManager.GetSnapshotManager()
+				}
+				return nil
+			},
+			ActiveQueryCount: &server.activeQueryCount,
+			Compactor:        compactionManager,
+			MetricsReporter:  metricsReporter,
+			Logger:           sugar,
+		})
+
+		server.MVCCGCWorker = mvccGCWorker
+
+		// Start the MVCC GC worker
+		mvccGCWorker.Start()
+		sugar.Infow("MVCC GC worker started for automatic version cleanup",
+			"interval", config.MVCCGCIntervalSeconds,
+			"batchSize", config.MVCCGCBatchSize,
+			"pauseThreshold", config.MVCCGCPauseThreshold,
+			"maxVersionsThreshold", config.MVCCGCMaxVersionsThreshold,
+			"minVersionAgeHours", config.MVCCGCMinVersionAgeHours,
+		)
+
+		// Trigger immediate GC on startup
+		mvccGCWorker.TriggerImmediateGC("startup")
+	} else {
+		sugar.Info("MVCC GC worker disabled in configuration")
 	}
 
 	return server, nil
@@ -719,6 +779,18 @@ func (s *Server) Start() error {
 // Stop gracefully shuts down the server
 func (s *Server) Stop() error {
 	s.Running = false
+
+	// Trigger immediate GC on shutdown before stopping workers
+	if s.MVCCGCWorker != nil {
+		s.logger.Info("Triggering immediate MVCC GC on shutdown...")
+		s.MVCCGCWorker.TriggerImmediateGC("shutdown")
+	}
+
+	// Stop MVCC GC worker
+	if s.MVCCGCWorker != nil {
+		s.MVCCGCWorker.Stop()
+		s.logger.Info("MVCC GC worker stopped")
+	}
 
 	// Stop ghost cleanup worker to prevent background compaction during shutdown
 	if s.GhostCleanupWorker != nil {
