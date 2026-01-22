@@ -140,7 +140,9 @@ func (sbs *SmartBundleScanner) ScanForKeyValue(query *ScanQuery) (*ScanResult, e
 }
 
 // ScanWithPredicate performs a scan using a custom predicate function
-// This provides flexibility for complex queries that don't fit the key-value model
+// CRITICAL PERFORMANCE FIX: Uses page-by-page scanning instead of GetDocument() per doc
+// This is O(n) where n = pages, not O(n*m) like getBatchedDocuments() which calls GetDocument() per doc
+// With 300 concurrent connections, this eliminates massive lock contention
 func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document) bool) (*ScanResult, error) {
 	startTime := time.Now()
 
@@ -148,7 +150,7 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 		return nil, fmt.Errorf("predicate function is required")
 	}
 
-	sbs.logger.Debug("Starting predicate-based scan")
+	sbs.logger.Debug("Starting predicate-based scan with page-by-page optimization")
 
 	result := &ScanResult{
 		Documents:   make([]*models.Document, 0),
@@ -157,18 +159,82 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 		CacheHits:   0,
 	}
 
-	// Use batched processing for predicate scans too
+	// Get page count efficiently from BundleAdapter
+	var pageCount uint32
+	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
+		pageCount = bundleAdapter.getSafePageCount()
+	} else {
+		// Fallback: Estimate from total documents
+		totalDocs := sbs.bundle.GetTotalDocuments()
+		pageCount = uint32((totalDocs + 4095) / 4096) // Assume 4096 docs per page
+		if pageCount == 0 && totalDocs > 0 {
+			pageCount = 1 // At least one page if documents exist
+		}
+	}
+
 	batchCount := 0
-	for batch := range sbs.getBatchedDocuments() {
+	totalScanned := 0
+
+	// PHASE 4: MVCC - Include memtable documents (uncommitted writes) for read-your-own-writes
+	memtableDocs := make(map[string]*models.Document)
+	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
+		if bundleAdapter.bundle.Documents != nil && !bundleAdapter.bundle.DocumentsComplete {
+			bundleAdapter.bundle.DocumentsMutex.RLock()
+			for docID, doc := range *bundleAdapter.bundle.Documents {
+				if sbs.snapshotSequence > 0 {
+					if doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+						docCopy := new(models.Document)
+						*docCopy = doc
+						memtableDocs[docID] = docCopy
+					}
+				} else {
+					docCopy := new(models.Document)
+					*docCopy = doc
+					memtableDocs[docID] = docCopy
+				}
+			}
+			bundleAdapter.bundle.DocumentsMutex.RUnlock()
+		}
+	}
+
+	// Iterate pages directly (sequential access, optimal I/O pattern)
+	// This uses the universal page cache efficiently - no individual GetDocument() calls
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		// Load page from cache (uses shared documentPages cache - fast!)
+		page, err := sbs.loadPage(pageID)
+		if err != nil {
+			sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
+			continue
+		}
+
 		batchCount++
 
-		// Apply predicate to each document in the batch
-		for _, doc := range batch {
-			if predicate(doc) {
-				result.Documents = append(result.Documents, doc)
-				result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
+		// Process documents in this page - apply predicate filter
+		for docID, doc := range page.Documents {
+			// Skip if this document is in memtable (memtable takes precedence)
+			if _, inMemtable := memtableDocs[docID]; inMemtable {
+				continue // Use memtable version instead
 			}
-		} // Memory pressure management
+
+			totalScanned++
+
+			// Apply MVCC snapshot filtering if scanner has snapshot context
+			if sbs.snapshotSequence > 0 {
+				if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+					continue // Skip documents not visible to this snapshot
+				}
+			}
+
+			// Apply predicate filter - only copy documents that match
+			docCopy := new(models.Document)
+			*docCopy = doc
+			if predicate(docCopy) {
+				result.Documents = append(result.Documents, docCopy)
+				result.DocumentIDs = append(result.DocumentIDs, docID)
+			}
+		}
+
+		// Memory pressure management
 		if len(result.Documents) > sbs.config.MemoryThreshold {
 			sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
 				sbs.config.MemoryThreshold)
@@ -177,15 +243,25 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 		}
 	}
 
+	// PHASE 4: MVCC - Add memtable documents to results (after disk scan to avoid duplicates)
+	for docID, doc := range memtableDocs {
+		// Apply predicate to memtable documents too
+		if predicate(doc) {
+			result.Documents = append(result.Documents, doc)
+			result.DocumentIDs = append(result.DocumentIDs, docID)
+		}
+		totalScanned++
+	}
+
 	// Finalize results
 	result.ScanLatency = time.Since(startTime)
 	result.BatchesUsed = batchCount
-	result.TotalScanned = sbs.bundle.GetTotalDocuments()
+	result.TotalScanned = totalScanned
 
 	sbs.updateMetrics(result, 0, result.ScanLatency)
 
-	sbs.logger.Debugf("Predicate scan completed: found %d documents in %v",
-		len(result.Documents), result.ScanLatency)
+	sbs.logger.Debugf("Predicate scan completed: found %d documents in %v (pages: %d)",
+		len(result.Documents), result.ScanLatency, batchCount)
 
 	return result, nil
 }
