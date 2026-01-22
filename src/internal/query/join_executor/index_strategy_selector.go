@@ -53,6 +53,7 @@ TODO: Add CostBasedStrategyCache to remember optimal strategies for query patter
 
 import (
 	"fmt"
+	"strings"
 
 	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/query/documentscanner"
@@ -144,17 +145,29 @@ func (s *BuildIndexStrategy) GetName() string {
 }
 
 // EstimateCost calculates the cost of build index strategy
-// TODO: Implement proper cost model when strategy is fully implemented
+// Cost: O(uniqueKeys * indexLookup) + O(filteredDocs * hash) vs O(buildSize * scan)
 func (s *BuildIndexStrategy) EstimateCost(hashTableSize int, buildSize int, probeSize int) float64 {
-	// For now, estimate as slightly more expensive than regular hash join
-	// This discourages selection until fully implemented
-	return float64(buildSize+probeSize) * 1.1
+	// Estimate unique keys as ~70% of build size (conservative)
+	estimatedUniqueKeys := float64(buildSize) * 0.7
+	// Index lookup cost per key (using same constant as probe strategy)
+	// For build side, we need to get all unique values from build bundle first
+	// Then use index to get documents - this is much cheaper than scanning all docs
+	indexLookupCost := 0.1 // Index lookup is ~10x faster than document scan
+	indexCost := estimatedUniqueKeys * indexLookupCost
+	// Hash table construction from indexed documents (same as regular build)
+	hashInsertCost := 0.01 // Hash insert is very cheap
+	hashCost := estimatedUniqueKeys * hashInsertCost
+	// Total cost: index lookups + hash table construction
+	// This should be much cheaper than scanning all buildSize documents
+	return indexCost + hashCost
 }
 
 // IsApplicable checks if build index strategy can be used
 func (s *BuildIndexStrategy) IsApplicable() bool {
-	// TODO: Return true when BuildIndexStrategy is fully implemented
-	return false // Not yet implemented
+	// CRITICAL FIX: Enable build-side index usage for DocumentID and foreign key joins
+	// When there's a hash index on the build key (e.g., DocumentID or foreign key field),
+	// we should use it instead of loading all documents via GetAllDocuments()
+	return s.buildIndex != nil
 }
 
 // GetIndex returns the build-side index
@@ -195,7 +208,15 @@ func SelectIndexStrategy(
 	// TODO Codesmells with these deeply nested ifs - refactor later
 	// Check for probe-side index (preferred)
 	var probeStrategy *ProbeIndexStrategy
-	hasProbe := probeBundle.HasIndexOnField(probeKey)
+	// DocumentID ALWAYS has a hash index (system-created, system-managed)
+	// For other fields, check if index exists
+	var hasProbe bool
+	if strings.EqualFold(probeKey, "documentid") {
+		hasProbe = true // DocumentID always has an index
+	} else {
+		hasProbe = probeBundle.HasIndexOnField(probeKey)
+	}
+	
 	if hasProbe {
 		indexRef := probeBundle.GetHashIndexForField(probeKey)
 		if indexRef != nil {
@@ -210,9 +231,18 @@ func SelectIndexStrategy(
 		}
 	}
 
-	// Check for build-side index (less common, not yet fully implemented)
+	// Check for build-side index
+	// DocumentID ALWAYS has a hash index (system-created, system-managed)
+	// For other fields, check if index exists
 	var buildStrategy *BuildIndexStrategy
-	if buildBundle.HasIndexOnField(buildKey) {
+	var hasBuild bool
+	if strings.EqualFold(buildKey, "documentid") {
+		hasBuild = true // DocumentID always has an index
+	} else {
+		hasBuild = buildBundle.HasIndexOnField(buildKey)
+	}
+	
+	if hasBuild {
 		indexRef := buildBundle.GetHashIndexForField(buildKey)
 		if indexRef != nil {
 			if hashIndex, ok := indexRef.(*hashindexV3.HashIndexV3); ok {

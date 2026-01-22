@@ -30,8 +30,8 @@ type SmartBundleScanner struct {
 	startTime time.Time    // When scanner was created
 
 	// SNAPSHOT ISOLATION: MVCC snapshot tracking
-	snapshotSequence uint64        // Commit sequence boundary (sees all commits <= this, 0 = current)
-	txID             uint64        // Transaction ID for this scanner (0 = autocommit)
+	snapshotSequence uint64          // Commit sequence boundary (sees all commits <= this, 0 = current)
+	txID             uint64          // Transaction ID for this scanner (0 = autocommit)
 	activeTxIDs      map[uint64]bool // Active transaction IDs at snapshot time (for visibility rules)
 }
 
@@ -423,20 +423,20 @@ func (sbs *SmartBundleScanner) loadPage(pageID uint32) (*models.DocumentPage, er
 	// This should rarely be used since we expect BundleAdapter
 	sbs.logger.Warnf("Bundle does not implement page loading, using inefficient fallback")
 	allDocs := sbs.bundle.GetAllDocuments()
-	
+
 	// Create a synthetic page from all documents (inefficient, but ensures compatibility)
 	page := &models.DocumentPage{
 		PageID:    pageID,
 		Documents: make(map[string]models.Document),
 	}
-	
+
 	// Convert pointers to values for page.Documents map
 	for docID, docPtr := range allDocs {
 		if docPtr != nil {
 			page.Documents[docID] = *docPtr
 		}
 	}
-	
+
 	return page, nil
 }
 
