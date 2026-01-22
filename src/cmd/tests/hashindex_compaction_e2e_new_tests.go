@@ -82,7 +82,7 @@ func TestCompaction_ConcurrentReadWriteDuringCompaction(t *testing.T) {
 			key := fmt.Sprintf("key_%d", i%100) // Reuse keys to create updates
 			docID := uuid.New().String()
 
-			err := idx.Put(key, docID, 1)
+			err := idx.Put(key, docID, 1, 0, 0)
 			if err != nil {
 				errChan <- fmt.Errorf("write error at iteration %d: %w", i, err)
 				return
@@ -184,7 +184,7 @@ func TestCompaction_LargeScale(t *testing.T) {
 		docID := uuid.New().String()
 		entries[key] = docID
 
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err, "Failed to put entry %d", i)
 
 		if (i+1)%1000 == 0 {
@@ -200,7 +200,7 @@ func TestCompaction_LargeScale(t *testing.T) {
 		newDocID := uuid.New().String()
 		entries[key] = newDocID
 
-		err := idx.Put(key, newDocID, 1)
+		err := idx.Put(key, newDocID, 1, 0, 0)
 		require.NoError(t, err, "Failed to update entry %d", i)
 	}
 	updateTime := time.Since(updateStartTime)
@@ -269,7 +269,7 @@ func TestCompaction_MetricsTracking(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		docID := uuid.New().String()
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err)
 	}
 
@@ -333,7 +333,7 @@ func TestCompaction_ErrorRecovery(t *testing.T) {
 		docID := uuid.New().String()
 		entries[key] = docID
 
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err)
 	}
 
@@ -354,7 +354,7 @@ func TestCompaction_ErrorRecovery(t *testing.T) {
 		docID := uuid.New().String()
 		entries[key] = docID
 
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err)
 	}
 
