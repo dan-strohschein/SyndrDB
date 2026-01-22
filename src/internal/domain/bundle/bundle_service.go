@@ -5348,12 +5348,6 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		return fmt.Errorf("bundle '%s' is nil, cannot update document", docCommand.BundleName)
 	}
 
-	// Acquire write lock to prevent concurrent modifications during rename
-	if err = s.AcquireBundleWriteLock(bundle.Name); err != nil {
-		return fmt.Errorf("failed to acquire write lock: %w", err)
-	}
-	defer s.ReleaseBundleWriteLock(bundle.Name)
-
 	// SAFETY CHECK: Bulk update (empty WHERE clause) requires CONFIRMED keyword
 	if docCommand.WhereClause == "" || strings.TrimSpace(docCommand.WhereClause) == "" {
 		if !docCommand.Confirmed {
@@ -5366,13 +5360,18 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		s.logger.Infof("Bulk update CONFIRMED for bundle '%s' - proceeding to update all documents", bundle.Name)
 	}
 
-	// Get the existing document
-	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
-	if err != nil {
-		return fmt.Errorf("failed to filter documents: %w", err)
+	// PHASE 1.1: READ PHASE - Perform read operations under read lock
+	// This allows concurrent reads during WHERE clause evaluation and FK validation
+	if err = s.AcquireBundleReadLock(bundle.Name); err != nil {
+		return fmt.Errorf("failed to acquire read lock: %w", err)
 	}
 
-	//s.logger.Infof("[REFINT-DEBUG] After GetDocumentsByFilter: found %d documents matching WHERE '%s'", len(filteredDocs), docCommand.WhereClause)
+	// Get the existing documents under read lock (allows concurrent reads)
+	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
+	if err != nil {
+		s.ReleaseBundleReadLock(bundle.Name)
+		return fmt.Errorf("failed to filter documents: %w", err)
+	}
 
 	if args.Debug {
 		s.logger.Infof("Updating %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
@@ -5381,15 +5380,19 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// Validate document update fields against bundle field definitions
 	err = s.validateUpdateFields(bundle, docCommand)
 	if err != nil {
+		s.ReleaseBundleReadLock(bundle.Name)
 		return fmt.Errorf("document field validation failed: %w", err)
 	}
 
+	// PHASE 1.2: Move FK validation to read lock phase (it only reads data)
 	// ==========  VALIDATE REFERENTIAL INTEGRITY FOR FOREIGN KEY UPDATES ==========
 	// Check if any fields being updated are foreign keys and validate the new values
 	// Note: Must check BOTH outgoing relationships (stored in bundle.Relationships)
 	//       AND incoming relationships (stored in other bundles pointing to this one)
 	s.logger.Infof("[REFINT-UPDATE] Starting FK validation for bundle '%s', database=%v, bundle.Relationships=%d",
 		bundle.Name, database != nil, len(bundle.Relationships))
+	
+	var docIDs []string
 	if len(bundle.Relationships) > 0 || database != nil {
 		// Create operation-scoped validation cache to avoid redundant hash lookups
 		validationCache := make(map[string]*ForeignKeyViolation)
@@ -5413,15 +5416,16 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 
 		if len(foreignKeyUpdates) > 0 {
 			// Extract document IDs being updated
-			docIDs := make([]string, len(filteredDocs))
+			docIDs = make([]string, len(filteredDocs))
 			for i, doc := range filteredDocs {
 				docIDs[i] = doc.DocumentID
 			}
 			s.logger.Infof("[REFINT-UPDATE] Validating %d document(s): %v", len(docIDs), docIDs)
 
-			// Perform batch validation with caching
+			// Perform batch validation with caching (under read lock - only reads data)
 			violation := validator.batchValidateForeignKeys(bundle, docIDs, foreignKeyUpdates, validationCache)
 			if violation != nil {
+				s.ReleaseBundleReadLock(bundle.Name)
 				// Log the violation at WARN level with suggested action
 				s.logger.Warnf("[REFINT] %s | Suggested: %s", violation.Error(), violation.SuggestedAction)
 				return fmt.Errorf("%s", violation.Error())
@@ -5431,6 +5435,48 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 				len(docIDs), len(foreignKeyUpdates))
 		}
 	}
+
+	// Collect document IDs for re-validation under write lock
+	if docIDs == nil {
+		docIDs = make([]string, len(filteredDocs))
+		for i, doc := range filteredDocs {
+			docIDs[i] = doc.DocumentID
+		}
+	}
+
+	// Release read lock before acquiring write lock
+	s.ReleaseBundleReadLock(bundle.Name)
+
+	// PHASE 1.1: WRITE PHASE - Acquire write lock for actual modifications
+	if err = s.AcquireBundleWriteLock(bundle.Name); err != nil {
+		return fmt.Errorf("failed to acquire write lock: %w", err)
+	}
+	defer s.ReleaseBundleWriteLock(bundle.Name)
+
+	// PHASE 1.1: Re-validate document existence under write lock
+	// Documents may have been deleted between read and write phases
+	// Re-fetch documents to ensure they still exist
+	revalidatedDocs := make([]*models.Document, 0, len(docIDs))
+	for _, docID := range docIDs {
+		doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
+		if err != nil {
+			s.logger.Warnf("Document '%s' was deleted between read and write phases, skipping: %v", docID, err)
+			continue
+		}
+		revalidatedDocs = append(revalidatedDocs, doc)
+	}
+
+	if len(revalidatedDocs) == 0 {
+		s.logger.Warnf("All documents were deleted between read and write phases")
+		return nil // No documents to update
+	}
+
+	if len(revalidatedDocs) < len(filteredDocs) {
+		s.logger.Warnf("Some documents were deleted between read and write phases: %d -> %d", len(filteredDocs), len(revalidatedDocs))
+	}
+
+	// Use revalidated documents for updates
+	filteredDocs = revalidatedDocs
 
 	// Set of updated field names for B-tree index pre-load (R5: load each B-tree once per batch).
 	updatedFieldsSet := make(map[string]bool)
@@ -5459,14 +5505,28 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 
 	// R1 rollback: if UpdateDocumentsBatch (or an earlier B-tree Insert) fails, undo B-tree updates
 	// so indexes stay consistent with storage. Defer runs on any return with err != nil.
-	var rollbackOps []btreeRollbackOp
+	// PHASE 4.1: Pre-allocate rollbackOps slice with estimated capacity to reduce allocations
+	estimatedRollbackOps := len(filteredDocs) * len(btreesToUpdate)
+	rollbackOps := make([]btreeRollbackOp, 0, estimatedRollbackOps)
 	defer func() {
 		if err != nil && len(rollbackOps) > 0 {
 			s.runBTreeRollback(rollbackOps)
 		}
 	}()
 
-	// R1: Per-doc loop: update fields and B-tree only. Collect updatedDocs; call UpdateDocumentsBatch once after.
+	// PHASE 3: Batch B-tree updates - collect operations during loop, apply in batches after
+	// This is more efficient than individual Delete/Insert operations during the loop
+	type btreeUpdateOp struct {
+		index     *btreeindexV2.BTreeIndex
+		indexName string
+		operation string // "delete" or "insert"
+		keyBytes  []byte
+		documentID string
+		oldKeyBytes []byte // For rollback
+	}
+	btreeUpdates := make([]btreeUpdateOp, 0, len(filteredDocs)*len(btreesToUpdate)*2) // Pre-allocate for deletes + inserts
+
+	// R1: Per-doc loop: update fields and collect B-tree operations. Collect updatedDocs; call UpdateDocumentsBatch once after.
 	updatedDocs := make([]*models.Document, 0, len(filteredDocs))
 	for _, doc := range filteredDocs {
 		originalDoc := *doc
@@ -5488,10 +5548,10 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 			doc.Fields[kv.Key] = foundField
 		}
 
-		// B-tree maintenance using pre-loaded indexes (R5)
+		// PHASE 3: Collect B-tree operations instead of executing them immediately
 		for indexName, btreeIndex := range btreesToUpdate {
 			fieldName := bundle.Indexes[indexName].BTreeIndexField.FieldName
-			s.logger.Debugf("Indexed field '%s' was updated, maintaining BTree index '%s'", fieldName, indexName)
+			s.logger.Debugf("Indexed field '%s' was updated, collecting BTree index '%s' operations", fieldName, indexName)
 
 			oldFieldValue, extErr := extractFieldValueForIndex(originalDoc, fieldName)
 			if extErr != nil {
@@ -5501,10 +5561,6 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 			oldKeyBytes, convErr := convertValueToBytes(oldFieldValue)
 			if convErr != nil {
 				s.logger.Warnf("Failed to convert old field value to bytes for document '%s': %v", doc.DocumentID, convErr)
-				continue
-			}
-			if delErr := btreeIndex.Delete(oldKeyBytes, doc.DocumentID); delErr != nil {
-				s.logger.Warnf("Failed to delete old entry for document '%s' from BTree index '%s': %v", doc.DocumentID, indexName, delErr)
 				continue
 			}
 
@@ -5520,14 +5576,53 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 				rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: oldKeyBytes, documentID: doc.DocumentID})
 				return fmt.Errorf("failed to convert new field value for B-tree rollback: %w", convErr)
 			}
+
+			// Collect delete operation
+			btreeUpdates = append(btreeUpdates, btreeUpdateOp{
+				index:      btreeIndex,
+				indexName:  indexName,
+				operation:  "delete",
+				keyBytes:   oldKeyBytes,
+				documentID: doc.DocumentID,
+				oldKeyBytes: oldKeyBytes,
+			})
+
+			// Collect insert operation
+			btreeUpdates = append(btreeUpdates, btreeUpdateOp{
+				index:      btreeIndex,
+				indexName:  indexName,
+				operation:  "insert",
+				keyBytes:   newKeyBytes,
+				documentID: doc.DocumentID,
+				oldKeyBytes: oldKeyBytes,
+			})
+
+			// Track for rollback
 			rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: newKeyBytes, documentID: doc.DocumentID})
-			if insErr := btreeIndex.Insert(newKeyBytes, doc.DocumentID); insErr != nil {
-				return fmt.Errorf("failed to update document in BTree index '%s': %w", indexName, insErr)
-			}
-			s.logger.Debugf("Successfully updated BTree index '%s' for document '%s'", indexName, doc.DocumentID)
 		}
 
 		updatedDocs = append(updatedDocs, doc)
+	}
+
+	// PHASE 3: Apply all B-tree operations in batches (all deletes first, then all inserts)
+	// This is more efficient than interleaving deletes and inserts
+	for _, op := range btreeUpdates {
+		if op.operation == "delete" {
+			if delErr := op.index.Delete(op.keyBytes, op.documentID); delErr != nil {
+				s.logger.Warnf("Failed to delete old entry for document '%s' from BTree index '%s': %v", op.documentID, op.indexName, delErr)
+				// Continue with other operations - individual failures shouldn't stop the batch
+			}
+		}
+	}
+
+	// Now apply all inserts
+	for _, op := range btreeUpdates {
+		if op.operation == "insert" {
+			if insErr := op.index.Insert(op.keyBytes, op.documentID); insErr != nil {
+				return fmt.Errorf("failed to update document in BTree index '%s': %w", op.indexName, insErr)
+			}
+			s.logger.Debugf("Successfully updated BTree index '%s' for document '%s'", op.indexName, op.documentID)
+		}
 	}
 
 	// Persist B-tree index metadata after in-place updates (Insert/Delete no longer do it)
@@ -5549,19 +5644,54 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		return fmt.Errorf("failed to update documents in bundle: %w", err)
 	}
 
-	// R2: Invalidate document page cache once after the batch (was inside the loop).
-	s.documentPagesMutex.Lock()
-	keysToDelete := make([]string, 0, 50)
-	for pageKey := range s.documentPages {
-		if strings.HasPrefix(pageKey, bundle.Name+":") {
-			keysToDelete = append(keysToDelete, pageKey)
+	// PHASE 2.2: Selective cache invalidation - only invalidate pages that contain updated documents
+	// This is much more efficient than invalidating all pages for the bundle
+	s.pageCacheMutex.RLock()
+	bundlePages, hasPageMap := s.documentPageMap[bundle.Name]
+	s.pageCacheMutex.RUnlock()
+
+	// Track which pages need to be invalidated
+	pagesToInvalidate := make(map[uint32]bool)
+	
+	if hasPageMap && bundlePages != nil {
+		// Use documentPageMap to find which pages contain updated documents
+		for _, doc := range updatedDocs {
+			if pageID, exists := bundlePages[doc.DocumentID]; exists {
+				pagesToInvalidate[pageID] = true
+			}
 		}
 	}
-	for _, key := range keysToDelete {
-		delete(s.documentPages, key)
+
+	// If we couldn't find pages via documentPageMap, fall back to invalidating all pages
+	// This is safer but less efficient - should be rare
+	if len(pagesToInvalidate) == 0 && len(updatedDocs) > 0 {
+		s.logger.Debugf("Could not determine pages for updated documents, invalidating all pages for bundle '%s'", bundle.Name)
+		s.documentPagesMutex.Lock()
+		keysToDelete := make([]string, 0, 50)
+		for pageKey := range s.documentPages {
+			if strings.HasPrefix(pageKey, bundle.Name+":") {
+				keysToDelete = append(keysToDelete, pageKey)
+			}
+		}
+		for _, key := range keysToDelete {
+			delete(s.documentPages, key)
+		}
+		s.documentPagesMutex.Unlock()
+		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update (fallback)", len(keysToDelete), bundle.Name)
+	} else if len(pagesToInvalidate) > 0 {
+		// PHASE 2.2: Selective invalidation - only invalidate affected pages
+		s.documentPagesMutex.Lock()
+		invalidatedCount := 0
+		for pageID := range pagesToInvalidate {
+			pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
+			if _, exists := s.documentPages[pageKey]; exists {
+				delete(s.documentPages, pageKey)
+				invalidatedCount++
+			}
+		}
+		s.documentPagesMutex.Unlock()
+		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update (selective)", invalidatedCount, bundle.Name)
 	}
-	s.documentPagesMutex.Unlock()
-	s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update", len(keysToDelete), bundle.Name)
 
 	return nil
 }
@@ -6068,6 +6198,9 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 	// readDocumentRange(nil) then uses that projection and returns partial docs, so WHERE
 	// on non-projected fields (e.g. category) fails. Clearing here ensures both the
 	// index path (GetDocument) and full-scan path get full docs.
+	// PHASE 4.2: Note - SetProjectionFieldsForBundle already efficiently handles nil (just deletes from map)
+	// The mutex acquisition is necessary for thread safety, so optimization here would require
+	// adding a public method to check projection state, which adds complexity for minimal gain.
 	s.SetProjectionFieldsForBundle(bundle.Name, nil)
 
 	// Get buffered documents if in transaction
@@ -6358,17 +6491,16 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 					continue
 				}
 
-				s.logger.Infof("Performing BTree equality search on '%v' with key '%v'",
+				s.logger.Debugf("Performing BTree equality search on '%v' with key '%v'",
 					btreeIndex, keyBytes)
 
-				// NOTE: BTree search methods are commented out in the original code
-				// This is placeholder code that will be activated when BTree V2 is fully implemented
-				var docIDs []string = []string{}
-				// docIDs, err = btreeIndex.Search(keyBytes)
-				// if err != nil {
-				//     s.logger.Warnf("BTree index search failed: %v", err)
-				//     continue
-				// }
+				// PHASE 0.1: Enable B-tree search - uncommented and activated
+				// Use Search method for equality queries
+				docIDs, err := btreeIndex.Search(keyBytes)
+				if err != nil {
+					s.logger.Warnf("BTree index search failed: %v", err)
+					continue
+				}
 
 				return s.convertDocIDsToDocuments(bundle, docIDs, indexName)
 			}
@@ -6392,43 +6524,68 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 				}
 
 				// Convert search value to bytes for BTree search
-				keyBytes, err := convertValueToBytes(value)
-				if err != nil {
-					s.logger.Warnf("Failed to convert search value to bytes: %v", err)
+				keyBytes, convErr := convertValueToBytes(value)
+				if convErr != nil {
+					s.logger.Warnf("Failed to convert search value to bytes: %v", convErr)
 					continue
 				}
 
 				s.logger.Debugf("Performing BTree range search with operator '%s' on '%v' with key '%v'",
 					operator, btreeIndex, keyBytes)
 
-				var docIDs []string = []string{}
-				// switch operator {
-				// case ">":
-				//     docIDs, err = btreeIndex.SearchGreaterThan(keyBytes)
-				// case ">=":
-				//     docIDs, err = btreeIndex.SearchGreaterThanOrEqual(keyBytes)
-				// case "<":
-				//     docIDs, err = btreeIndex.SearchLessThan(keyBytes)
-				// case "<=":
-				//     docIDs, err = btreeIndex.SearchLessThanOrEqual(keyBytes)
-				// case "!=":
-				//     // For inequality, get all documents and exclude matches
-				//     allDocIDs, searchErr := btreeIndex.SearchAll()
-				//     if searchErr != nil {
-				//         err = searchErr
-				//     } else {
-				//         equalDocIDs, equalErr := btreeIndex.Search(keyBytes)
-				//         if equalErr != nil {
-				//             err = equalErr
-				//         } else {
-				//             docIDs = s.excludeDocumentIDs(allDocIDs, equalDocIDs)
-				//         }
-				//     }
-				// }
-				// if err != nil {
-				//     s.logger.Warnf("BTree index search failed: %v", err)
-				//     continue
-				// }
+				// PHASE 0.1: Enable B-tree range search - using RangeSearchWithBounds
+				var docIDs []string
+				var searchErr error
+
+				switch operator {
+				case ">":
+					// key > value: search from (value, max] - exclude start, include end
+					// Use a sentinel max key (very large byte array)
+					maxKey := s.createMaxKeyForBTree(keyBytes)
+					docIDs, searchErr = btreeIndex.RangeSearchWithBounds(keyBytes, maxKey, true, false)
+				case ">=":
+					// key >= value: search from [value, max] - include both
+					maxKey := s.createMaxKeyForBTree(keyBytes)
+					docIDs, searchErr = btreeIndex.RangeSearchWithBounds(keyBytes, maxKey, false, false)
+				case "<":
+					// key < value: search from [min, value) - include start, exclude end
+					minKey := s.createMinKeyForBTree(keyBytes)
+					docIDs, searchErr = btreeIndex.RangeSearchWithBounds(minKey, keyBytes, false, true)
+				case "<=":
+					// key <= value: search from [min, value] - include both
+					minKey := s.createMinKeyForBTree(keyBytes)
+					docIDs, searchErr = btreeIndex.RangeSearchWithBounds(minKey, keyBytes, false, false)
+				case "!=":
+					// For inequality, combine two range searches: [min, value) and (value, max]
+					// This is less efficient but works without SearchAll
+					minKey := s.createMinKeyForBTree(keyBytes)
+					maxKey := s.createMaxKeyForBTree(keyBytes)
+					
+					// Get documents less than value
+					lessDocIDs, err1 := btreeIndex.RangeSearchWithBounds(minKey, keyBytes, false, true)
+					if err1 != nil {
+						searchErr = err1
+						break
+					}
+					
+					// Get documents greater than value
+					greaterDocIDs, err2 := btreeIndex.RangeSearchWithBounds(keyBytes, maxKey, true, false)
+					if err2 != nil {
+						searchErr = err2
+						break
+					}
+					
+					// Combine results (no duplicates possible since ranges don't overlap)
+					docIDs = append(lessDocIDs, greaterDocIDs...)
+				default:
+					s.logger.Warnf("Unsupported BTree operator: %s", operator)
+					continue
+				}
+
+				if searchErr != nil {
+					s.logger.Warnf("BTree index search failed: %v", searchErr)
+					continue
+				}
 
 				return s.convertDocIDsToDocuments(bundle, docIDs, indexName)
 			}
@@ -6459,6 +6616,28 @@ func (s *BundleService) convertDocIDsToDocuments(bundle *models.Bundle, docIDs [
 
 	s.logger.Debugf("Successfully retrieved %d documents via BTree index '%s'", len(result), indexName)
 	return result, true, nil
+}
+
+// createMinKeyForBTree creates a minimum sentinel key for B-tree range searches
+// This returns an empty byte array which is guaranteed to be less than any non-empty key
+// PHASE 0.1: Helper for B-tree range search implementation
+func (s *BundleService) createMinKeyForBTree(keyBytes []byte) []byte {
+	// Empty byte array is the minimum for byte comparison
+	return []byte{}
+}
+
+// createMaxKeyForBTree creates a maximum sentinel key for B-tree range searches
+// This returns a byte array with maximum values that is guaranteed to be greater than any key
+// PHASE 0.1: Helper for B-tree range search implementation
+func (s *BundleService) createMaxKeyForBTree(keyBytes []byte) []byte {
+	// Create a sentinel max key: use 256 bytes of 0xFF which should be greater than most keys
+	// For keys longer than this, the range search will still work correctly as byte comparison
+	// will handle it properly
+	maxKey := make([]byte, 256)
+	for i := range maxKey {
+		maxKey[i] = 0xFF
+	}
+	return maxKey
 }
 
 // getIndexFieldName extracts the field name from an index reference

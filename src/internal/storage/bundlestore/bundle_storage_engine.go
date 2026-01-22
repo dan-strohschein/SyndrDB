@@ -1156,11 +1156,17 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	// TODO: If we experience durability or Sync-throughput issues, consider a "balanced" coalesced Sync:
 	// queue batches to a background goroutine, coalesce, single Sync per N batches or per time window
 	// (PostgreSQL wal_writer_delay–style).
+	// PHASE 0.2: Verify durability mode is correctly applied
 	dm := settings.GetSettings().DurabilityMode
 	if dm == "strict" {
+		// PHASE 0.2: Log warning if strict mode is enabled (causes fsync on every update)
+		b.logger.Warnf("BATCH UPDATE: DurabilityMode is 'strict' - performing synchronous fsync (may cause performance degradation under high concurrency)")
 		if err := writeBuffer.Sync(); err != nil {
 			b.logger.Warnf("BATCH UPDATE: Failed to sync to disk: %v (continuing anyway)", err)
 		}
+	} else {
+		// PHASE 0.2: Log at debug level that we're using performance mode (no fsync)
+		b.logger.Debugf("BATCH UPDATE: DurabilityMode is '%s' - skipping fsync for performance", dm)
 	}
 
 	// Update bundle metadata ONCE after all documents are written
