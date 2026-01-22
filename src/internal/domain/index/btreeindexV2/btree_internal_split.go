@@ -90,18 +90,23 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 		internal.PageNum, internal.KeyCount, newInternalPageNum, newInternal.KeyCount)
 
 	// Step 4: Update parent pointers for children of new internal node
+	// CRITICAL: All parent pointer updates must succeed or the split fails
+	// Inconsistent parent pointers can cause cycles and tree corruption
+	failedChildren := []uint32{}
 	for _, childPageNum := range newInternal.Children {
 		childData, err := idx.PageManager.GetPage(childPageNum, func(pn uint32) (interface{}, error) {
 			return idx.FileManager.ReadPage(pn)
 		})
 		if err != nil {
-			idx.logger.Warnf("Failed to load child %d to update parent pointer: %v", childPageNum, err)
+			idx.logger.Errorf("Failed to load child %d to update parent pointer: %v", childPageNum, err)
+			failedChildren = append(failedChildren, childPageNum)
 			continue
 		}
 
 		child, ok := childData.(*BTreeNode)
 		if !ok {
-			idx.logger.Warnf("Child page %d is not a valid BTree node", childPageNum)
+			idx.logger.Errorf("Child page %d is not a valid BTree node", childPageNum)
+			failedChildren = append(failedChildren, childPageNum)
 			continue
 		}
 
@@ -109,7 +114,22 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 		child.ParentPage = newInternalPageNum
 		idx.PageManager.PutPage(childPageNum, child, true)
 
+		// CRITICAL: Flush child page immediately to ensure parent pointer is persisted
+		// This prevents corruption if a crash occurs before the full split is committed
+		if err := idx.FileManager.WritePage(childPageNum, child); err != nil {
+			idx.logger.Errorf("Failed to flush child %d after parent pointer update: %v", childPageNum, err)
+			failedChildren = append(failedChildren, childPageNum)
+			continue
+		}
+
 		idx.logger.Debugf("Updated child %d parent pointer to new internal node %d", childPageNum, newInternalPageNum)
+	}
+
+	// If any child updates failed, we cannot safely complete the split
+	// Rollback by deallocating the new node and returning an error
+	if len(failedChildren) > 0 {
+		idx.FileManager.DeallocatePage(newInternalPageNum)
+		return 0, false, 0, fmt.Errorf("failed to update parent pointers for %d children: %v - split aborted to prevent corruption", len(failedChildren), failedChildren)
 	}
 
 	// Step 5: Save both internal nodes to storage
@@ -146,6 +166,33 @@ func splitInternalNode(idx *BTreeIndex, internal *BTreeNode) (uint32, bool, int,
 		// Save updated internal nodes
 		idx.PageManager.PutPage(internal.PageNum, internal, true)
 		idx.PageManager.PutPage(newInternalPageNum, newInternal, true)
+
+		// CRITICAL: Flush both internal nodes immediately after root split
+		// These nodes are referenced by the new root and must exist on disk
+		if err := idx.FileManager.WritePage(internal.PageNum, internal); err != nil {
+			idx.logger.Errorf("Failed to flush original internal page %d: %v", internal.PageNum, err)
+			idx.FileManager.DeallocatePage(newInternalPageNum)
+			return 0, false, 0, fmt.Errorf("failed to persist original internal node: %w", err)
+		}
+		if err := idx.FileManager.WritePage(newInternalPageNum, newInternal); err != nil {
+			idx.logger.Errorf("Failed to flush new internal page %d: %v", newInternalPageNum, err)
+			idx.FileManager.DeallocatePage(newInternalPageNum)
+			return 0, false, 0, fmt.Errorf("failed to persist new internal node: %w", err)
+		}
+
+		// CRITICAL: Flush the new root immediately to ensure it's persisted
+		// The root is essential for tree traversal - if it's lost, the entire tree becomes inaccessible
+		rootData, err := idx.PageManager.GetPage(newRootPageNum, func(pn uint32) (interface{}, error) {
+			return idx.FileManager.ReadPage(pn)
+		})
+		if err != nil {
+			idx.logger.Errorf("Failed to retrieve new root page %d: %v", newRootPageNum, err)
+			return 0, false, 0, fmt.Errorf("failed to retrieve new root for flushing: %w", err)
+		}
+		if err := idx.FileManager.WritePage(newRootPageNum, rootData); err != nil {
+			idx.logger.Errorf("Failed to flush new root page %d: %v", newRootPageNum, err)
+			return 0, false, 0, fmt.Errorf("failed to persist new root: %w", err)
+		}
 
 		nodesCreated++ // We also created a new root
 

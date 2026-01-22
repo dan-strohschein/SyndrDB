@@ -973,6 +973,17 @@ func (s *Server) handleConnection(conn net.Conn) {
 		// TODO: I could add connection lifetime metrics here for monitoring
 		clientIP := ExtractIPFromConn(conn)
 
+		// Invalidate the session associated with this connection before cleanup
+		// This prevents race conditions where commands try to validate sessions after connection drops
+		if connection.Session != nil {
+			if err := s.SessionManager.InvalidateSession(connection.Session.SessionID); err != nil {
+				// Log but don't fail - session may have already been cleaned up
+				connLogger.Debugw("Session already invalidated or not found during connection cleanup",
+					"sessionID", connection.Session.SessionID,
+					"error", err)
+			}
+		}
+
 		// Release from rate limiter FIRST (before removing from ActiveConnections)
 		s.RateLimiter.ReleaseConnection(clientIP)
 

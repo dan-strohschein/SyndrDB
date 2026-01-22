@@ -601,20 +601,166 @@ func (idx *BTreeIndex) validateNodeRecursive(pageNum uint32, level uint32, visit
 // rebuildTreeStructure reconstructs the tree from valid pages
 //
 // REBUILD STRATEGY:
-// 1. Scan all pages to find valid leaf nodes
-// 2. Rebuild internal nodes from leaf keys
-// 3. Update root page number
-// 4. Persist new tree structure
+// 1. Scan all pages to find valid leaf nodes (bypassing corrupted tree structure)
+// 2. Extract all key-value pairs from valid leaf nodes
+// 3. Clear existing tree structure (mark pages as free)
+// 4. Create new empty root node
+// 5. Re-insert all extracted key-value pairs using Insert operation
+// 6. Update root page number and metadata
+// 7. Persist new tree structure
 //
 // Single Responsibility: Only rebuilds tree, doesn't validate
 //
 // Returns:
 //   - error: If rebuild is not possible
-//
-// TODO: I could add incremental rebuild to avoid full tree reconstruction
 func (idx *BTreeIndex) rebuildTreeStructure() error {
-	idx.logger.Warnf("Tree rebuild not yet implemented - marking index as damaged")
-	return fmt.Errorf("tree rebuild not implemented - manual recovery required")
+	idx.logger.Infof("Starting tree rebuild for index '%s'", idx.Metadata.IndexName)
+
+	// Step 1: Extract all key-value pairs from valid leaf nodes
+	// We scan all pages directly (not traversing the tree) to avoid cycles
+	type keyValuePair struct {
+		key        []byte
+		documentID string
+	}
+	var allPairs []keyValuePair
+
+	idx.logger.Infof("Scanning %d pages to extract key-value pairs", idx.Metadata.TotalPages)
+	validLeafCount := 0
+
+	// Scan all pages (skip page 0 which is metadata)
+	for pageNum := uint32(1); pageNum < idx.Metadata.TotalPages; pageNum++ {
+		// Try to read the page
+		node, err := idx.FileManager.ReadPage(pageNum)
+		if err != nil {
+			// Skip pages that can't be read (they're likely corrupt or free)
+			continue
+		}
+
+		btreeNode, ok := node.(*BTreeNode)
+		if !ok {
+			// Not a valid B-tree node, skip
+			continue
+		}
+
+		// Only process leaf nodes
+		if !btreeNode.IsLeaf {
+			continue
+		}
+
+		validLeafCount++
+
+		// Extract all key-value pairs from this leaf node
+		// Skip tombstones (deleted entries)
+		for i, key := range btreeNode.Keys {
+			if i >= len(btreeNode.Values) {
+				continue
+			}
+
+			// Get live document IDs (excluding tombstones)
+			liveDocIDs := btreeNode.GetLiveDocumentIDs(i)
+			if len(liveDocIDs) == 0 {
+				// All entries for this key are tombstoned, skip
+				continue
+			}
+
+			// Add all live document IDs for this key
+			for _, docID := range liveDocIDs {
+				allPairs = append(allPairs, keyValuePair{
+					key:        append([]byte(nil), key...), // Make a copy
+					documentID: docID,
+				})
+			}
+		}
+	}
+
+	idx.logger.Infof("Extracted %d key-value pairs from %d valid leaf nodes", len(allPairs), validLeafCount)
+
+	if len(allPairs) == 0 {
+		idx.logger.Warnf("No valid key-value pairs found - creating empty tree")
+		// Still need to create a valid empty tree structure
+	}
+
+	// Step 2: Clear existing tree structure
+	// Clear the page cache
+	idx.PageManager.ClearCache()
+
+	// Mark all pages except metadata (page 0) as free
+	idx.Metadata.FreePages = make([]uint32, 0)
+	for pageNum := uint32(1); pageNum < idx.Metadata.TotalPages; pageNum++ {
+		idx.Metadata.FreePages = append(idx.Metadata.FreePages, pageNum)
+	}
+
+	// Reset tree structure
+	idx.Metadata.TotalPages = 1 // Only metadata page exists
+	idx.Metadata.NextPageNum = 2
+	idx.Metadata.TotalNodes = 0
+	idx.Metadata.LeafNodes = 0
+	idx.Metadata.InternalNodes = 0
+	idx.Metadata.TreeHeight = 0
+
+	// Step 3: Create new empty root leaf node
+	newRootPageNum, err := idx.FileManager.AllocatePage()
+	if err != nil {
+		return fmt.Errorf("failed to allocate page for new root: %w", err)
+	}
+
+	newRoot := NewBTreeNode(true, idx.Metadata.PageSize)
+	newRoot.PageNum = newRootPageNum
+	newRoot.ParentPage = 0 // Root has no parent
+
+	// Write the new root node
+	if err := idx.FileManager.WritePage(newRootPageNum, newRoot); err != nil {
+		return fmt.Errorf("failed to write new root node: %w", err)
+	}
+
+	// Update root page number
+	idx.rootPageNum = newRootPageNum
+	idx.Metadata.RootPageNum = newRootPageNum
+	idx.Metadata.TotalPages = 2 // Metadata + root
+	idx.Metadata.NextPageNum = 3
+	idx.Metadata.TotalNodes = 1
+	idx.Metadata.LeafNodes = 1
+	idx.Metadata.TreeHeight = 1
+
+	idx.logger.Infof("Created new empty root node at page %d", newRootPageNum)
+
+	// Step 4: Re-insert all extracted key-value pairs
+	// Temporarily disable WAL during rebuild to avoid logging rebuild operations
+	walEnabled := idx.walEnabled
+	idx.walEnabled = false
+
+	insertedCount := 0
+	for _, pair := range allPairs {
+		// Use the Insert method which handles tree balancing automatically
+		if err := idx.Insert(pair.key, pair.documentID); err != nil {
+			idx.logger.Warnf("Failed to re-insert key '%s' with document ID '%s': %v",
+				string(pair.key), pair.documentID, err)
+			// Continue with other pairs even if one fails
+			continue
+		}
+		insertedCount++
+	}
+
+	// Re-enable WAL
+	idx.walEnabled = walEnabled
+
+	idx.logger.Infof("Re-inserted %d/%d key-value pairs", insertedCount, len(allPairs))
+
+	// Step 5: Persist metadata
+	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
+		return fmt.Errorf("failed to persist metadata after rebuild: %w", err)
+	}
+
+	// Flush all dirty pages
+	if err := idx.PageManager.Flush(idx.FileManager.WritePage); err != nil {
+		idx.logger.Warnf("Failed to flush pages after rebuild: %v", err)
+		// Don't fail the rebuild if flush fails
+	}
+
+	idx.logger.Infof("Tree rebuild completed successfully: %d pairs re-inserted, new root at page %d",
+		insertedCount, idx.rootPageNum)
+
+	return nil
 }
 
 // replayWALEntries replays uncommitted WAL entries after crash
