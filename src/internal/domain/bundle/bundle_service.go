@@ -6407,75 +6407,34 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 		return result, nil
 	}
 
-	// CRITICAL PERFORMANCE FIX: Stream pages and filter on-the-fly instead of loading ALL documents
-	// This prevents loading entire bundle into memory when WHERE clause doesn't match an index
-	// For large bundles, this can be 100x faster than getAllDocumentsForIndexing
-	s.logger.Debugf("No suitable index found, performing streaming WHERE clause evaluation")
-	s.logger.Infow("GetDocumentsByFilter: no suitable index, using streaming scan",
+	// Fallback to full document scan using modern page-based loading.
+	// R4 observability: log when index optimization is not used (UPDATE/SELECT with WHERE that
+	// doesn't match tryHashIndexOptimization or tryBTreeIndexOptimization).
+	s.logger.Debugf("No suitable index found, performing full document scan with page-based loading")
+	s.logger.Infow("GetDocumentsByFilter: no suitable index, using full scan",
 		"bundle", bundle.Name,
 		"whereClause", whereClause,
 	)
 
-	// Stream pages and filter on-the-fly
-	filteredDocs := make([]*models.Document, 0, 100) // Pre-allocate with reasonable capacity
-	pageCount := uint32(bundle.PageCount)
-	if pageCount == 0 {
-		pageCount = 1 // At least check page 0
+	// Load all documents using the modern page-based system
+	// NOTE: This is faster than streaming for SELECT queries because:
+	// 1. Pages are already cached, so loading all at once is efficient
+	// 2. WHERE clause is parsed only once instead of once per page
+	// 3. Single filter operation is more efficient than multiple small filters
+	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load documents for filtering: %w", err)
 	}
 
-	// Process pages one at a time to avoid loading entire bundle
-	for pageID := uint32(0); pageID < pageCount; pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
-		if err != nil {
-			// Page doesn't exist or error - continue to next page
-			continue
-		}
+	s.logger.Debugf("Loaded %d documents for filtering", len(allDocs))
 
-		// Convert page documents to slice for filtering
-		pageDocs := make([]*models.Document, 0, len(page.Documents))
-		for _, doc := range page.Documents {
-			docCopy := doc
-			pageDocs = append(pageDocs, &docCopy)
-		}
-
-		// Filter this page's documents using the WHERE clause
-		pageFiltered, err := queryparser.FilterDocumentsRaw(pageDocs, whereClause, s.logger)
-		if err != nil {
-			s.logger.Warnf("Failed to filter page %d: %v", pageID, err)
-			continue
-		}
-
-		// Append matching documents from this page
-		filteredDocs = append(filteredDocs, pageFiltered...)
+	// Apply filtering using the raw document filter (works with document slice)
+	filteredDocs, err := queryparser.FilterDocumentsRaw(allDocs, whereClause, s.logger)
+	if err != nil {
+		return nil, fmt.Errorf("full document scan failed: %w", err)
 	}
 
-	// Also check memtable if bundle has unflushed documents
-	if bundle.Documents != nil && !bundle.DocumentsComplete {
-		memtableDocs := make([]*models.Document, 0, len(*bundle.Documents))
-		bundle.DocumentsMutex.RLock()
-		for _, doc := range *bundle.Documents {
-			docCopy := doc
-			memtableDocs = append(memtableDocs, &docCopy)
-		}
-		bundle.DocumentsMutex.RUnlock()
-
-		// Filter memtable documents
-		memtableFiltered, err := queryparser.FilterDocumentsRaw(memtableDocs, whereClause, s.logger)
-		if err == nil {
-			// Deduplicate: memtable may have newer versions of documents already in filteredDocs
-			existingIDs := make(map[string]bool, len(filteredDocs))
-			for _, doc := range filteredDocs {
-				existingIDs[doc.DocumentID] = true
-			}
-			for _, doc := range memtableFiltered {
-				if !existingIDs[doc.DocumentID] {
-					filteredDocs = append(filteredDocs, doc)
-				}
-			}
-		}
-	}
-
-	s.logger.Debugf("Streaming WHERE clause evaluation completed, found %d matching documents", len(filteredDocs))
+	s.logger.Debugf("Full document scan completed, found %d matching documents", len(filteredDocs))
 	return filteredDocs, nil
 }
 
