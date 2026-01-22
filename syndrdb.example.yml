@@ -462,6 +462,34 @@ ghost_cleanup_pause_threshold: 500
 ghost_cleanup_tombstone_ratio: 0.3
 
 # ==============================================================================
+# MVCC GC (AUTOMATIC VERSION CLEANUP) CONFIGURATION
+# ==============================================================================
+
+# Enable automatic MVCC version cleanup (default: true)
+# Background worker that scans for version accumulation and triggers compaction
+mvcc_gc_enabled: true
+
+# GC cycle interval in seconds (default: 30)
+# How often the MVCC GC worker scans for version accumulation
+mvcc_gc_interval_seconds: 30
+
+# Batch size for bundle processing (default: 10)
+# Maximum number of bundles to process in a single GC cycle
+mvcc_gc_batch_size: 10
+
+# Active query pause threshold (default: 500)
+# GC worker pauses when this many queries are active to avoid contention
+mvcc_gc_pause_threshold: 500
+
+# Max versions threshold (default: 5)
+# Trigger compaction if document has more than this many versions
+mvcc_gc_max_versions_threshold: 5
+
+# Minimum version age in hours (default: 1)
+# Versions must be at least this old before being considered for GC
+mvcc_gc_min_version_age_hours: 1
+
+# ==============================================================================
 # BUNDLE FILE COMPACTION CONFIGURATION
 # ==============================================================================
 compaction:

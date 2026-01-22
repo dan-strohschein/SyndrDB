@@ -301,59 +301,74 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// OPTIMIZATION: Pre-extract join keys once to eliminate repeated map lookups
-	// SIMD-accelerated extraction provides ~1.2x speedup
-	// TODO: Consider parallel extraction for large document sets (>10,000 docs)
-	allDocs := buildBundle.GetAllDocuments()
-	buildKeyValues, buildDocsSlice, err := ExtractJoinKeysWithSIMD(allDocs, buildKey)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to extract build keys: %w", err)
-	}
-
-	// Stream through all documents in build bundle using pre-extracted keys
-	for idx, doc := range buildDocsSlice {
-		// Check for cancellation
-		select {
-		case <-request.Context.Done():
-			return nil, nil, nil, request.Context.Err()
-		default:
+	// CRITICAL PERFORMANCE FIX: Use ScanDocumentChunks instead of GetAllDocuments()
+	// This streams pages from cache instead of loading all documents into memory
+	// With 300 concurrent connections, this eliminates massive lock contention and memory copying
+	// The probe phase already uses ScanDocumentChunks - build phase should too
+	chunkSize := 4096
+	var extractErr error
+	err := buildBundle.ScanDocumentChunks(request.Context, chunkSize, func(chunk []*models.Document) bool {
+		if len(chunk) == 0 {
+			return true
 		}
 
-		// Get pre-extracted key value (no map lookup!)
-		keyValue := buildKeyValues[idx]
-		if keyValue == nil {
-			docID := "unknown"
-			if doc != nil {
-				docID = doc.DocumentID
+		// Extract join keys from this chunk using SIMD-accelerated extraction
+		buildKeyValues, buildDocsSlice, e := ExtractJoinKeysWithSIMDSlice(chunk, buildKey)
+		if e != nil {
+			extractErr = e
+			return false
+		}
+
+		// Process each document in the chunk
+		for idx, doc := range buildDocsSlice {
+			// Check for cancellation
+			select {
+			case <-request.Context.Done():
+				return false
+			default:
 			}
-			hjs.logger.Warnf("Skipping document %s (index %d): missing key %s", docID, idx, buildKey)
-			continue
+
+			// Get pre-extracted key value
+			keyValue := buildKeyValues[idx]
+			if keyValue == nil {
+				docID := "unknown"
+				if doc != nil {
+					docID = doc.DocumentID
+				}
+				hjs.logger.Warnf("Skipping document %s (index %d): missing key %s", docID, idx, buildKey)
+				continue
+			}
+
+			// Add to hash table
+			putErr := hashTable.Put(keyValue, doc)
+			if putErr != nil {
+				extractErr = fmt.Errorf("failed to add document to hash table: %w", putErr)
+				return false
+			}
+
+			// Add to Bloom filter (if enabled)
+			if bloom != nil {
+				bloom.Add(conversion.ValueToString(keyValue))
+			}
+
+			stats.DocumentsScanned++
+
+			// PHASE 2: Check for memory pressure and spill to disk if needed
+			// TODO: Implement graceful disk spillover when memory limit exceeded
+			if hashTable.GetMemoryUsage() > request.MemoryLimit && request.AllowDiskSpillover {
+				hjs.logger.Warnf("Memory limit exceeded, disk spillover not yet implemented")
+			}
 		}
 
-		// Add to hash table
-		err = hashTable.Put(keyValue, doc)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to add document to hash table: %w", err)
-		}
+		return true // Continue to next chunk
+	})
 
-		// Add to Bloom filter (if enabled)
-		if bloom != nil {
-			bloom.Add(conversion.ValueToString(keyValue))
-		}
-
-		stats.DocumentsScanned++
-
-		// PHASE 2: Check for memory pressure and spill to disk if needed
-		// TODO: Implement graceful disk spillover when memory limit exceeded
-		if hashTable.GetMemoryUsage() > request.MemoryLimit && request.AllowDiskSpillover {
-			hjs.logger.Warnf("Memory limit exceeded, disk spillover not yet implemented")
-		}
+	if extractErr != nil {
+		return nil, nil, nil, extractErr
 	}
-
-	// Release references to the build map and key/slice; hash table retains the *Document
-	allDocs = nil
-	buildKeyValues = nil
-	buildDocsSlice = nil
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to scan build bundle: %w", err)
+	}
 
 	var bloomStats string
 	if bloom != nil {
