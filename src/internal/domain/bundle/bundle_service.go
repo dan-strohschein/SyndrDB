@@ -2492,6 +2492,13 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	// CASSANDRA-STYLE MEMTABLE MERGE:
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Load all pages from disk first (authoritative source)
+	// PERFORMANCE: Pre-allocate slice with estimated capacity to avoid repeated allocations
+	estimatedDocCount := int(bundle.TotalDocuments)
+	if estimatedDocCount <= 0 {
+		estimatedDocCount = int(bundle.PageCount) * 100 // Rough estimate: 100 docs per page
+	}
+	allDocuments = make([]*models.Document, 0, estimatedDocCount)
+	
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
@@ -2499,7 +2506,9 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 			continue
 		}
 
-		// Convert map to slice and append
+		// Convert map to slice - must copy since map values are not pointers
+		// This is necessary for thread safety (pages may be evicted from cache)
+		// PERFORMANCE: Use append with pre-allocated capacity (more efficient than manual indexing)
 		for _, doc := range page.Documents {
 			docCopy := doc
 			allDocuments = append(allDocuments, &docCopy)
