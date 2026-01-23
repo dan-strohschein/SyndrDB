@@ -1089,6 +1089,26 @@ func (pba *PlannerBundleAdapter) HasIndexOnField(fieldName string) bool {
 	return false
 }
 
+// LoadPage implements BundleInterface - loads a page by page ID
+func (pba *PlannerBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error) {
+	if pba.bundle == nil {
+		return nil, fmt.Errorf("bundle is nil")
+	}
+	
+	if pba.bundleService == nil {
+		return nil, fmt.Errorf("bundleService is not available")
+	}
+	
+	// Get database name
+	databaseName := ""
+	if pba.bundle.Database != nil {
+		databaseName = pba.bundle.Database.Name
+	}
+	
+	// Use bundleService to get document page (uses shared cache)
+	return pba.bundleService.GetDocumentPage(pba.bundle.Name, databaseName, pageID)
+}
+
 // PlannerServiceManager adapts bundle operations for the JOIN execution node
 // This provides the service interface needed by the JOIN executor without circular imports
 type PlannerServiceManager struct {
@@ -1588,6 +1608,37 @@ func (f *ExpressionFilteredBundleAdapter) GetHashIndexForField(fieldName string)
 // HasIndexOnField delegates to the inner bundle
 func (f *ExpressionFilteredBundleAdapter) HasIndexOnField(fieldName string) bool {
 	return f.inner.HasIndexOnField(fieldName)
+}
+
+// LoadPage implements BundleInterface - delegates to inner and filters documents by predicate
+func (f *ExpressionFilteredBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error) {
+	// Delegate to inner adapter
+	page, err := f.inner.LoadPage(pageID)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Filter documents by predicate
+	filteredPage := &models.DocumentPage{
+		PageID:         page.PageID,
+		BundleID:       page.BundleID,
+		Documents:      make(map[string]models.Document),
+		NextPageID:     page.NextPageID,
+		PreviousPageID: page.PreviousPageID,
+		IsDirty:        page.IsDirty,
+		LoadedAt:       page.LoadedAt,
+		DocumentCount:  0,
+	}
+	
+	for docID, doc := range page.Documents {
+		docPtr := &doc
+		if f.matchesPredicate(docPtr) {
+			filteredPage.Documents[docID] = doc
+			filteredPage.DocumentCount++
+		}
+	}
+	
+	return filteredPage, nil
 }
 
 // matchesPredicate evaluates the predicate against a document

@@ -238,6 +238,47 @@ func (fba *FilteredBundleAdapter) GetAllDocuments() map[string]*models.Document 
 	return documents
 }
 
+// LoadPage implements BundleInterface - loads a page and filters documents by conditions
+func (fba *FilteredBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error) {
+	// Load page from bundleService if available
+	if fba.bundleService != nil {
+		// Get database name
+		databaseName := ""
+		if fba.bundle != nil && fba.bundle.Database != nil {
+			databaseName = fba.bundle.Database.Name
+		}
+		
+		page, err := fba.bundleService.GetDocumentPage(fba.bundleName, databaseName, pageID)
+		if err != nil {
+			return nil, err
+		}
+		
+		// Filter documents by conditions
+		filteredPage := &models.DocumentPage{
+			PageID:         page.PageID,
+			BundleID:       page.BundleID,
+			Documents:      make(map[string]models.Document),
+			NextPageID:     page.NextPageID,
+			PreviousPageID: page.PreviousPageID,
+			IsDirty:        page.IsDirty,
+			LoadedAt:       page.LoadedAt,
+			DocumentCount:  0,
+		}
+		
+		for docID, doc := range page.Documents {
+			if evaluateConditions(&doc, fba.conditions, fba.logger) {
+				filteredPage.Documents[docID] = doc
+				filteredPage.DocumentCount++
+			}
+		}
+		
+		return filteredPage, nil
+	}
+	
+	// Fallback: can't load page without bundleService
+	return nil, fmt.Errorf("FilteredBundleAdapter: bundleService not available for LoadPage")
+}
+
 // ScanDocumentChunks streams documents in chunks via bundleService and filters each chunk by conditions.
 func (fba *FilteredBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
 	if fba.bundleService == nil {

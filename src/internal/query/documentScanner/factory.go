@@ -232,6 +232,12 @@ func (ba *BundleAdapter) SetProjectionFields(fields []string) {
 
 // ===== STREAMING IMPLEMENTATION - NO MORE INFINITE LOOPS =====
 
+// LoadPage implements BundleInterface - loads a specific page by page ID
+// PUBLIC API: Exposed for PostgreSQL-style index-based joins
+func (ba *BundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error) {
+	return ba.loadDocumentPage(pageID)
+}
+
 // loadDocumentPage loads a specific page using the shared documentPages cache.
 // UNIVERSAL CACHE: Routes through GetDocumentPage to use shared cache instead of per-adapter cache.
 // PROJECTION: Full pages are cached; projection is applied in memory after retrieval if projectionFields is set.
@@ -753,15 +759,19 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 	}
 	pageCount := ba.getSafePageCount()
 	buffer := make([]*models.Document, 0, chunkSize)
+	
+	// OPTIMIZATION: Avoid double copying - reuse buffer slice directly instead of copying
 	flush := func() bool {
 		if len(buffer) == 0 {
 			return true
 		}
-		chunk := make([]*models.Document, len(buffer))
-		copy(chunk, buffer)
-		if !fn(chunk) {
+		// CRITICAL FIX: Pass buffer directly instead of copying
+		// The callback can use the documents, and we'll reset the buffer after
+		// This eliminates the expensive copy() call that was causing slowdown
+		if !fn(buffer) {
 			return false
 		}
+		// Reset buffer for next chunk (reuse underlying array)
 		buffer = buffer[:0]
 		return true
 	}
@@ -778,6 +788,8 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 			continue
 		}
 		for _, doc := range page.Documents {
+			// CRITICAL: Still need to copy document to avoid loop variable aliasing
+			// But we avoid the second copy in flush()
 			docCopy := doc
 			buffer = append(buffer, &docCopy)
 			if len(buffer) >= chunkSize {

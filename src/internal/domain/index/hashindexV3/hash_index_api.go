@@ -820,6 +820,75 @@ func (idx *HashIndexV3) Delete(keyValue string, commitSequence uint64) (bool, er
 	return true, nil
 }
 
+// GetAllDocumentIDs returns all document IDs from the index grouped by page ID
+// Used for hash join build phase to avoid GetAllDocuments() lock contention
+// PostgreSQL-style: Uses index to get document IDs, then loads by page
+//
+// Returns:
+//   - docIDsByPage: Map from pageID -> []documentID for efficient page-based loading
+//   - error: Any error that occurred during index scan
+//
+// Performance: Scans index files once, groups by page to minimize page loads
+// Filters out tombstones (deleted documents) automatically
+// MemTable entries take precedence (newer than disk)
+func (idx *HashIndexV3) GetAllDocumentIDs() (map[uint32][]string, error) {
+	if idx.closed {
+		return nil, fmt.Errorf("index is closed")
+	}
+
+	docIDsByPage := make(map[uint32][]string)
+	seenDocs := make(map[string]bool) // Deduplicate: docID -> pageID mapping
+
+	// First, collect from MemTable (newest entries, takes precedence)
+	idx.MemTable.mutex.RLock()
+	memTableDocs := make(map[string]*HashIndexEntry)
+	for key, entry := range idx.MemTable.entries {
+		if !entry.Deleted {
+			// Use key (which is the indexed value, e.g., DocumentID) to track
+			// For DocumentID index, key == DocumentID
+			memTableDocs[key] = entry
+		}
+	}
+	idx.MemTable.mutex.RUnlock()
+
+	// Add MemTable entries first (they're the latest)
+	for _, entry := range memTableDocs {
+		docKey := fmt.Sprintf("%s:%d", entry.DocumentID, entry.PageID)
+		if !seenDocs[docKey] {
+			seenDocs[docKey] = true
+			docIDsByPage[entry.PageID] = append(docIDsByPage[entry.PageID], entry.DocumentID)
+		}
+	}
+
+	// Then scan disk entries, but skip if already in MemTable (MemTable wins)
+	err := idx.storage.ScanForward(func(entry *HashIndexEntry) bool {
+		// Skip tombstones
+		if entry.Deleted {
+			return true
+		}
+
+		// Check if this entry is already in MemTable (MemTable has latest version)
+		keyStr := entry.KeyValue
+		if _, inMemTable := memTableDocs[keyStr]; inMemTable {
+			return true // Skip - MemTable has newer version
+		}
+
+		// Deduplicate: same document ID might appear multiple times (updates)
+		docKey := fmt.Sprintf("%s:%d", entry.DocumentID, entry.PageID)
+		if !seenDocs[docKey] {
+			seenDocs[docKey] = true
+			docIDsByPage[entry.PageID] = append(docIDsByPage[entry.PageID], entry.DocumentID)
+		}
+		return true
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan index for document IDs: %w", err)
+	}
+
+	return docIDsByPage, nil
+}
+
 // Search is an alias for Get to maintain compatibility with hashindexV2
 // Returns document IDs only (discards page IDs) for backward compatibility
 func (idx *HashIndexV3) Search(keyValue string) ([]string, error) {

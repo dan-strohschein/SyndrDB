@@ -28,6 +28,9 @@ type BundleServiceInterface interface {
 	// CountDocuments counts all documents using optimized count-only parser (does NOT cache pages)
 	// Used for COUNT(*) optimization to avoid massive memory spikes from caching full pages
 	CountDocuments(bundleName, databaseName string) (int, error)
+	// GetDocumentPage loads a specific page by page ID
+	// Used for PostgreSQL-style index-based joins to load pages directly
+	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error)
 }
 
 // ExecutionNode represents a node in the execution tree

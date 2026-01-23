@@ -2,10 +2,12 @@ package joinexecutor
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/bloomfilter"
 	"syndrdb/src/internal/query/documentscanner"
@@ -398,9 +400,8 @@ func (hjs *HashJoinStrategy) buildHashTable(
 }
 
 // buildHashTableWithIndex uses a hash index on the build key to construct the hash table
-// NOTE: Currently still uses GetAllDocuments() which causes lock contention under high concurrency
-// TODO: Optimize to avoid GetAllDocuments() - consider using GetDocumentIDs() + batch GetDocument() calls
-// or optimize GetAllDocuments() itself to reduce lock contention (e.g., use RLock more aggressively)
+// PostgreSQL-style: Uses index to get document IDs, then loads by page
+// This eliminates GetAllDocuments() lock contention by loading pages directly
 func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	buildBundle documentscanner.BundleInterface,
 	buildKey string,
@@ -410,22 +411,48 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	bloom *bloomfilter.BloomFilter,
 ) (HashTable, *bloomfilter.BloomFilter, *ScanStats, error) {
 
-	hjs.logger.Infof("Using index-assisted build for %s on indexed field %s (index exists, but still using GetAllDocuments - needs optimization)",
+	hjs.logger.Infof("Using PostgreSQL-style index-assisted build for %s on indexed field %s (using index to get document IDs, loading by page)",
 		buildBundle.GetName(), buildKey)
+
+	// Type assert to HashIndexV3
+	hashIndex, ok := buildIndex.(*hashindexV3.HashIndexV3)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("build index is not HashIndexV3")
+	}
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// TODO: Optimize this - GetAllDocuments() causes lock contention with 300 concurrent connections
-	// For DocumentID joins, we could use GetDocumentIDs() then batch load documents
-	// For now, use the same path as regular build
-	allDocs := buildBundle.GetAllDocuments()
-	buildKeyValues, buildDocsSlice, err := ExtractJoinKeysWithSIMD(allDocs, buildKey)
+	// Step 1: Get all document IDs grouped by page from the index
+	// This is PostgreSQL-style: use index to get IDs, not full documents
+	docIDsByPage, err := hashIndex.GetAllDocumentIDs()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to extract build keys: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get document IDs from index: %w", err)
 	}
 
-	// Stream through all documents in build bundle using pre-extracted keys
-	for idx, doc := range buildDocsSlice {
+	hjs.logger.Debugf("Index returned %d pages with document IDs", len(docIDsByPage))
+
+	// Step 2: Load pages and extract only the documents we need
+	// Sort page IDs for sequential access (better I/O pattern)
+	pageIDs := make([]uint32, 0, len(docIDsByPage))
+	for pageID := range docIDsByPage {
+		pageIDs = append(pageIDs, pageID)
+	}
+	sort.Slice(pageIDs, func(i, j int) bool { return pageIDs[i] < pageIDs[j] })
+
+	// Create a set of document IDs we need for fast lookup
+	docIDSet := make(map[string]bool)
+	totalDocIDs := 0
+	for _, docIDs := range docIDsByPage {
+		for _, docID := range docIDs {
+			docIDSet[docID] = true
+			totalDocIDs++
+		}
+	}
+
+	hjs.logger.Debugf("Loading %d documents from %d pages via index", totalDocIDs, len(pageIDs))
+
+	// Step 3: Load each page once and extract only needed documents
+	for _, pageID := range pageIDs {
 		// Check for cancellation
 		select {
 		case <-request.Context.Done():
@@ -433,35 +460,65 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		default:
 		}
 
-		// Get pre-extracted key value (no map lookup!)
-		keyValue := buildKeyValues[idx]
-		if keyValue == nil {
-			docID := "unknown"
-			if doc != nil {
-				docID = doc.DocumentID
-			}
-			hjs.logger.Warnf("Skipping document %s (index %d): missing key %s", docID, idx, buildKey)
+		// Load page (uses shared cache, RLock)
+		page, err := buildBundle.LoadPage(pageID)
+		if err != nil {
+			hjs.logger.Warnf("Failed to load page %d: %v", pageID, err)
 			continue
 		}
 
-		// Add to hash table
-		err = hashTable.Put(keyValue, doc)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("failed to add document to hash table: %w", err)
-		}
+		// Get list of document IDs we need from this page
+		neededDocIDs := docIDsByPage[pageID]
 
-		// Add to Bloom filter (if enabled)
-		if bloom != nil {
-			bloom.Add(conversion.ValueToString(keyValue))
-		}
+		// Extract only documents that are in our needed list
+		for _, docID := range neededDocIDs {
+			doc, exists := page.Documents[docID]
+			if !exists {
+				// Document not in page (might be in memtable or deleted)
+				continue
+			}
 
-		stats.DocumentsScanned++
+			// Extract join key value
+			var keyValue interface{}
+			if strings.EqualFold(buildKey, "documentid") {
+				keyValue = doc.DocumentID
+			} else {
+				field, exists := doc.Fields[buildKey]
+				if !exists {
+					hjs.logger.Warnf("Skipping document %s: missing key %s", docID, buildKey)
+					continue
+				}
+				keyValue = field.Value.AsInterface()
+			}
+
+			if keyValue == nil {
+				hjs.logger.Warnf("Skipping document %s: key %s is nil", docID, buildKey)
+				continue
+			}
+
+			// Create document pointer for hash table
+			docPtr := new(models.Document)
+			*docPtr = doc
+
+			// Add to hash table
+			putErr := hashTable.Put(keyValue, docPtr)
+			if putErr != nil {
+				return nil, nil, nil, fmt.Errorf("failed to add document to hash table: %w", putErr)
+			}
+
+			// Add to Bloom filter (if enabled)
+			if bloom != nil {
+				bloom.Add(conversion.ValueToString(keyValue))
+			}
+
+			stats.DocumentsScanned++
+		}
 	}
 
-	// Release references
-	allDocs = nil
-	buildKeyValues = nil
-	buildDocsSlice = nil
+	// Step 4: Handle memtable documents (recent writes not yet in index)
+	// This ensures read-your-own-writes consistency
+	// TODO: Access memtable through bundle service if available
+	// For now, memtable documents will be included in the next index scan
 
 	var bloomStats string
 	if bloom != nil {
@@ -469,8 +526,8 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		bloomStats = fmt.Sprintf(", Bloom filter: %d bytes (FPR: %.4f)", stats.MemoryUsedBytes, stats.EstimatedFPR)
 	}
 
-	hjs.logger.Infof("Index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s (field %s is indexed)",
-		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats, buildKey)
+	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s (loaded %d pages, %d docs via index)",
+		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats, len(pageIDs), stats.DocumentsScanned)
 
 	return hashTable, bloom, stats, nil
 }

@@ -69,6 +69,11 @@ type BundleInterface interface {
 	// This is a quick check without loading the index
 	// Returns true if any index type exists on this field
 	HasIndexOnField(fieldName string) bool
+
+	// LoadPage loads a specific page by page ID
+	// Used for PostgreSQL-style index-based joins to load pages directly
+	// Returns the page or error if page doesn't exist
+	LoadPage(pageID uint32) (*models.DocumentPage, error)
 }
 
 // ScanMetrics holds performance and usage metrics for the scanner
