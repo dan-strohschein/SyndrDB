@@ -302,7 +302,7 @@ executeChild:
 		// Check if child is FullScanNode (or FilterNode wrapping FullScanNode) and we can use session cache or stream documents
 		var fullScan *FullScanNode
 		var ok bool
-		
+
 		// Try direct FullScanNode first
 		if fullScan, ok = n.Child.(*FullScanNode); !ok {
 			// Try FilterNode wrapping FullScanNode
@@ -312,7 +312,7 @@ executeChild:
 				}
 			}
 		}
-		
+
 		if ok && fullScan != nil && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
 			n.Logger.Debugf("AggregationNode: Child is FullScanNode with GROUP BY, attempting session cache optimization")
 			if fullScan.DocumentScanner != nil {

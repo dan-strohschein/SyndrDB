@@ -329,7 +329,44 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 	if buildIndex != nil {
 		// Use index-assisted build: get documents via index instead of scanning all
-		return hjs.buildHashTableWithIndex(buildBundle, buildKey, buildIndex, request, hashTable, bloom)
+		indexHashTable, indexBloom, indexStats, indexErr := hjs.buildHashTableWithIndex(buildBundle, buildKey, buildIndex, request, hashTable, bloom)
+		
+		// CRITICAL: If index-assisted build returns 0 documents but index claims to have data,
+		// fall back to regular build to avoid incorrect results
+		if indexErr == nil && indexStats.DocumentsScanned == 0 {
+			// Check if index actually has data
+			if hashIndex, ok := buildIndex.(*hashindexV3.HashIndexV3); ok {
+				docIDsByPage, checkErr := hashIndex.GetAllDocumentIDs()
+				if checkErr == nil && len(docIDsByPage) > 0 {
+					totalDocIDs := 0
+					for _, docIDs := range docIDsByPage {
+						totalDocIDs += len(docIDs)
+					}
+					if totalDocIDs > 0 {
+						// Index has data but we found 0 documents - this is a bug, fall back to regular build
+						hjs.logger.Warnf("Index-assisted build found 0 documents but index has %d document IDs across %d pages. Falling back to regular build to avoid incorrect results.",
+							totalDocIDs, len(docIDsByPage))
+						// Continue to regular build path below
+					} else {
+						// Index is empty, use the empty result
+						return indexHashTable, indexBloom, indexStats, nil
+					}
+				} else {
+					// Index check failed or index is empty, use the empty result
+					return indexHashTable, indexBloom, indexStats, nil
+				}
+			} else {
+				// Not HashIndexV3, use the result as-is
+				return indexHashTable, indexBloom, indexStats, nil
+			}
+		} else if indexErr != nil {
+			// Index build failed, fall back to regular build
+			hjs.logger.Warnf("Index-assisted build failed: %v. Falling back to regular build.", indexErr)
+			// Continue to regular build path below
+		} else {
+			// Index build succeeded with documents, use it
+			return indexHashTable, indexBloom, indexStats, nil
+		}
 	}
 
 	// Fallback: No index available, use traditional scan
@@ -429,7 +466,20 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		return nil, nil, nil, fmt.Errorf("failed to get document IDs from index: %w", err)
 	}
 
-	hjs.logger.Debugf("Index returned %d pages with document IDs", len(docIDsByPage))
+	// Log detailed information about what the index returned
+	totalDocIDsFromIndex := 0
+	for pageID, docIDs := range docIDsByPage {
+		totalDocIDsFromIndex += len(docIDs)
+		hjs.logger.Debugf("Index returned page %d with %d document IDs: %v", pageID, len(docIDs), docIDs[:min(5, len(docIDs))])
+	}
+
+	hjs.logger.Infof("Index returned %d pages with %d total document IDs", len(docIDsByPage), totalDocIDsFromIndex)
+
+	if len(docIDsByPage) == 0 {
+		hjs.logger.Warnf("Index returned 0 pages - index may be empty or not populated")
+		// Fall back to regular build (not index-assisted)
+		return nil, nil, nil, fmt.Errorf("index is empty, cannot use index-assisted build")
+	}
 
 	// Step 2: Load pages and extract only the documents we need
 	// Sort page IDs for sequential access (better I/O pattern)
@@ -469,14 +519,19 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 		// Get list of document IDs we need from this page
 		neededDocIDs := docIDsByPage[pageID]
+		hjs.logger.Debugf("Page %d: looking for %d document IDs, page has %d documents", pageID, len(neededDocIDs), len(page.Documents))
 
 		// Extract only documents that are in our needed list
+		foundInPage := 0
+		missingDocIDs := make([]string, 0)
 		for _, docID := range neededDocIDs {
 			doc, exists := page.Documents[docID]
 			if !exists {
 				// Document not in page (might be in memtable or deleted)
+				missingDocIDs = append(missingDocIDs, docID)
 				continue
 			}
+			foundInPage++
 
 			// Extract join key value
 			var keyValue interface{}
@@ -513,6 +568,17 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 			stats.DocumentsScanned++
 		}
+		if foundInPage < len(neededDocIDs) {
+			// Log first few missing document IDs for debugging
+			missingSample := missingDocIDs
+			if len(missingSample) > 5 {
+				missingSample = missingDocIDs[:5]
+			}
+			hjs.logger.Warnf("Page %d: found only %d/%d documents from index. Missing: %v (showing first %d)", 
+				pageID, foundInPage, len(neededDocIDs), missingSample, len(missingSample))
+		} else {
+			hjs.logger.Debugf("Page %d: found %d/%d documents from index", pageID, foundInPage, len(neededDocIDs))
+		}
 	}
 
 	// Step 4: Handle memtable documents (recent writes not yet in index)
@@ -524,6 +590,10 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	if bloom != nil {
 		stats := bloom.GetStats()
 		bloomStats = fmt.Sprintf(", Bloom filter: %d bytes (FPR: %.4f)", stats.MemoryUsedBytes, stats.EstimatedFPR)
+	}
+
+	if stats.DocumentsScanned == 0 && totalDocIDsFromIndex > 0 {
+		hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were found in pages! This indicates a mismatch between index and pages.", totalDocIDsFromIndex)
 	}
 
 	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s (loaded %d pages, %d docs via index)",
