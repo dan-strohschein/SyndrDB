@@ -371,7 +371,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 			}
 		} else if indexErr != nil {
 			// Index build failed, fall back to regular build
-			hjs.logger.Warnf("Index-assisted build failed: %v. Falling back to regular build.", indexErr)
+			hjs.logger.Debugf("Index-assisted build failed: %v. Falling back to regular build.", indexErr)
 			// Continue to regular build path below
 		} else {
 			// Index build succeeded with documents, use it
@@ -491,7 +491,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		totalDocIDsFromIndex, len(docIDsByPage))
 
 	if totalDocIDsFromIndex == 0 {
-		hjs.logger.Warnf("Index returned 0 document IDs - index may be empty or not populated")
+		hjs.logger.Debugf("Index returned 0 document IDs - index may be empty or not populated")
 		// Fall back to regular build (not index-assisted)
 		return nil, nil, nil, fmt.Errorf("index is empty, cannot use index-assisted build")
 	}
