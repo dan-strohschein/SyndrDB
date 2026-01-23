@@ -2586,7 +2586,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 		estimatedDocCount = int(bundle.PageCount) * 100 // Rough estimate: 100 docs per page
 	}
 	allDocuments = make([]*models.Document, 0, estimatedDocCount)
-	
+
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
@@ -5588,7 +5588,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	//       AND incoming relationships (stored in other bundles pointing to this one)
 	s.logger.Infof("[REFINT-UPDATE] Starting FK validation for bundle '%s', database=%v, bundle.Relationships=%d",
 		bundle.Name, database != nil, len(bundle.Relationships))
-	
+
 	var docIDs []string
 	if len(bundle.Relationships) > 0 || database != nil {
 		// Create operation-scoped validation cache to avoid redundant hash lookups
@@ -5702,11 +5702,11 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// PHASE 3: Batch B-tree updates - collect operations during loop, apply in batches after
 	// This is more efficient than individual Delete/Insert operations during the loop
 	type btreeUpdateOp struct {
-		index     *btreeindexV2.BTreeIndex
-		indexName string
-		operation string // "delete" or "insert"
-		keyBytes  []byte
-		documentID string
+		index       *btreeindexV2.BTreeIndex
+		indexName   string
+		operation   string // "delete" or "insert"
+		keyBytes    []byte
+		documentID  string
 		oldKeyBytes []byte // For rollback
 	}
 	btreeUpdates := make([]btreeUpdateOp, 0, len(filteredDocs)*len(btreesToUpdate)*2) // Pre-allocate for deletes + inserts
@@ -5764,21 +5764,21 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 
 			// Collect delete operation
 			btreeUpdates = append(btreeUpdates, btreeUpdateOp{
-				index:      btreeIndex,
-				indexName:  indexName,
-				operation:  "delete",
-				keyBytes:   oldKeyBytes,
-				documentID: doc.DocumentID,
+				index:       btreeIndex,
+				indexName:   indexName,
+				operation:   "delete",
+				keyBytes:    oldKeyBytes,
+				documentID:  doc.DocumentID,
 				oldKeyBytes: oldKeyBytes,
 			})
 
 			// Collect insert operation
 			btreeUpdates = append(btreeUpdates, btreeUpdateOp{
-				index:      btreeIndex,
-				indexName:  indexName,
-				operation:  "insert",
-				keyBytes:   newKeyBytes,
-				documentID: doc.DocumentID,
+				index:       btreeIndex,
+				indexName:   indexName,
+				operation:   "insert",
+				keyBytes:    newKeyBytes,
+				documentID:  doc.DocumentID,
 				oldKeyBytes: oldKeyBytes,
 			})
 
@@ -5837,7 +5837,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 
 	// Track which pages need to be invalidated
 	pagesToInvalidate := make(map[uint32]bool)
-	
+
 	if hasPageMap && bundlePages != nil {
 		// Use documentPageMap to find which pages contain updated documents
 		for _, doc := range updatedDocs {
@@ -6756,21 +6756,21 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 					// This is less efficient but works without SearchAll
 					minKey := s.createMinKeyForBTree(keyBytes)
 					maxKey := s.createMaxKeyForBTree(keyBytes)
-					
+
 					// Get documents less than value
 					lessDocIDs, err1 := btreeIndex.RangeSearchWithBounds(minKey, keyBytes, false, true)
 					if err1 != nil {
 						searchErr = err1
 						break
 					}
-					
+
 					// Get documents greater than value
 					greaterDocIDs, err2 := btreeIndex.RangeSearchWithBounds(keyBytes, maxKey, true, false)
 					if err2 != nil {
 						searchErr = err2
 						break
 					}
-					
+
 					// Combine results (no duplicates possible since ranges don't overlap)
 					docIDs = append(lessDocIDs, greaterDocIDs...)
 				default:

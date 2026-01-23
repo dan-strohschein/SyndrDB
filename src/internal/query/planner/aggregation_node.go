@@ -474,7 +474,6 @@ type groupResult struct {
 	AggregateValues map[string]*aggregateValue // Intermediate aggregate values
 }
 
-
 // executeHashAggregate implements hash-based aggregation strategy
 // PHASE 3: Hash aggregate implementation
 //
@@ -755,7 +754,7 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 							compareVal = fv.AsInterface()
 						}
 					}
-					
+
 					if aggFunc.Function == "MIN" {
 						if aggVal.Min == nil || n.isLess(compareVal, aggVal.Min) {
 							aggVal.Min = compareVal

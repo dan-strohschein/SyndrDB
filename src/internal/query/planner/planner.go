@@ -31,6 +31,11 @@ type BundleServiceInterface interface {
 	// GetDocumentPage loads a specific page by page ID
 	// Used for PostgreSQL-style index-based joins to load pages directly
 	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error)
+	// CopyProjectedFromCache copies projected documents from documentPages cache under one RLock
+	// OPTIMIZATION: One-time lock acquisition, iterates cached pages, copies only projected fields
+	// Returns: (projected docs map, docs copied, pages that were cached, total pages, error)
+	// effectiveLimit: 0 = no limit, >0 = stop after that many docs
+	CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error)
 }
 
 // ExecutionNode represents a node in the execution tree
