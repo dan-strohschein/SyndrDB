@@ -299,8 +299,22 @@ executeChild:
 	switch n.executionStrategy {
 	case queryparser.HashAggregate:
 		// OPTIMIZATION: For GROUP BY queries, try session cache first, then streaming
-		// Check if child is FullScanNode and we can use session cache or stream documents
-		if fullScan, ok := n.Child.(*FullScanNode); ok && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
+		// Check if child is FullScanNode (or FilterNode wrapping FullScanNode) and we can use session cache or stream documents
+		var fullScan *FullScanNode
+		var ok bool
+		
+		// Try direct FullScanNode first
+		if fullScan, ok = n.Child.(*FullScanNode); !ok {
+			// Try FilterNode wrapping FullScanNode
+			if filterNode, filterOk := n.Child.(*FilterNode); filterOk {
+				if fullScan, ok = filterNode.Child.(*FullScanNode); ok {
+					n.Logger.Debugf("AggregationNode: Child is FilterNode wrapping FullScanNode")
+				}
+			}
+		}
+		
+		if ok && fullScan != nil && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
+			n.Logger.Debugf("AggregationNode: Child is FullScanNode with GROUP BY, attempting session cache optimization")
 			if fullScan.DocumentScanner != nil {
 				// Try session cache first (Phase 1-3: Session-specific projected cache)
 				bundleInterface, ok := fullScan.DocumentScanner.(interface {
@@ -326,11 +340,14 @@ executeChild:
 						projectFields = append(projectFields, "DocumentID")
 
 						// Try session cache (effectiveLimit=0 for GROUP BY - we need all docs)
+						n.Logger.Debugf("AggregationNode: Attempting to copy projected fields to session cache: %v", projectFields)
 						sessionCache, docsCopied, cachedPages, totalPages, cacheErr := ba.CopyProjectedToSessionCache(ctx, projectFields, 0)
 						if cacheErr == nil && len(sessionCache) > 0 && totalPages > 0 {
 							// Check cache hit rate (Phase 3: Hybrid approach)
+							// LOWERED THRESHOLD: Use session cache if >=50% cached (more aggressive)
+							// Session cache is still faster than per-page streaming even with partial cache
 							cacheHitRate := float64(cachedPages) / float64(totalPages)
-							if cacheHitRate >= 0.8 || cachedPages == totalPages {
+							if cacheHitRate >= 0.5 || cachedPages == totalPages {
 								// High cache hit rate - use session cache
 								n.Logger.Infof("OPTIMIZATION: Using session cache for GROUP BY (cache hit rate: %.1f%%, %d/%d pages cached, %d docs)",
 									cacheHitRate*100, cachedPages, totalPages, docsCopied)
@@ -338,46 +355,61 @@ executeChild:
 								if err == nil {
 									// Success - session cache worked, skip to post-aggregation processing
 									// (groupResults and totalInput are set, will be processed after switch)
+									n.Logger.Debugf("AggregationNode: Session cache aggregation succeeded with %d groups", len(groupResults))
 								} else {
 									// If session cache aggregation failed, fall through to streaming
 									n.Logger.Warnf("Session cache aggregation failed, falling back to streaming: %v", err)
 									groupResults = nil // Clear so streaming path runs
 								}
 							} else {
-								// Low cache hit rate - fall back to streaming
+								// Very low cache hit rate - fall back to streaming
 								n.Logger.Infof("Cache hit rate too low (%.1f%%, %d/%d pages), falling back to streaming", cacheHitRate*100, cachedPages, totalPages)
 								groupResults = nil // Clear so streaming path runs
 							}
-						} else if cacheErr != nil {
-							n.Logger.Debugf("Session cache copy failed, falling back to streaming: %v", cacheErr)
+						} else {
+							if cacheErr != nil {
+								n.Logger.Debugf("Session cache copy failed, falling back to streaming: %v", cacheErr)
+							} else if len(sessionCache) == 0 {
+								n.Logger.Debugf("Session cache is empty (docsCopied=%d, cachedPages=%d, totalPages=%d), falling back to streaming", docsCopied, cachedPages, totalPages)
+							} else if totalPages == 0 {
+								n.Logger.Debugf("Total pages is 0, falling back to streaming")
+							}
 							groupResults = nil // Clear so streaming path runs
 						}
+					} else {
+						n.Logger.Debugf("AggregationNode: bundleInterface.GetBundle() returned nil")
 					}
+				} else {
+					n.Logger.Debugf("AggregationNode: DocumentScanner does not implement GetBundle() interface")
 				}
+			} else {
+				n.Logger.Debugf("AggregationNode: FullScanNode.DocumentScanner is nil")
+			}
 
-				// Fall back to streaming aggregation if session cache didn't succeed
-				if groupResults == nil {
+			// Fall back to streaming aggregation if session cache didn't succeed
+			if groupResults == nil {
+				if fullScan.DocumentScanner != nil {
 					n.Logger.Infof("OPTIMIZATION: Using streaming aggregation for GROUP BY to avoid GetAllDocuments() lock contention")
 					groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
 					if err != nil {
 						return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
 					}
-				}
-			} else {
-				// Fallback to regular execution
-				documents, err = n.Child.Execute(ctx)
-				if err != nil {
-					return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
-				}
-				totalInput = len(documents)
-				n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
-				if totalInput == 0 {
-					isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-					if !isAggregateOnly {
-						return documents, nil
+				} else {
+					// Fallback to regular execution (no scanner available)
+					documents, err = n.Child.Execute(ctx)
+					if err != nil {
+						return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
 					}
+					totalInput = len(documents)
+					n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+					if totalInput == 0 {
+						isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+						if !isAggregateOnly {
+							return documents, nil
+						}
+					}
+					groupResults, err = n.executeHashAggregate(ctx, documents)
 				}
-				groupResults, err = n.executeHashAggregate(ctx, documents)
 			}
 		} else {
 			// Regular execution path
