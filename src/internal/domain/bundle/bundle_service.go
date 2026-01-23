@@ -88,15 +88,16 @@ func SetUnifiedPlanner(planner UnifiedPlannerInterface) {
 
 // IndexUpdate represents a deferred index update operation
 type IndexUpdate struct {
-	BundleName string
-	IndexName  string
-	IndexType  string
-	Operation  string // "insert", "delete", "update"
-	DocumentID string
-	FieldValue interface{}
-	PageID     uint32      // Physical page where document resides
-	OldValue   interface{} // For updates
-	Timestamp  time.Time
+	BundleName  string
+	IndexName   string
+	IndexType   string
+	Operation   string // "insert", "delete", "update"
+	DocumentID  string
+	FieldValue  interface{}
+	PageID      uint32      // Physical page where document resides
+	OldValue    interface{} // For updates
+	Timestamp   time.Time
+	AppliedSync bool // True if already applied synchronously (for read-your-own-writes)
 }
 
 // MetadataUpdate represents a deferred metadata update operation
@@ -119,10 +120,10 @@ type btreeRollbackOp struct {
 // DocumentLockInfo contains information about pre-acquired document locks
 // This allows UpdateDocumentInBundle to skip bundle write lock when document locks are already held
 type DocumentLockInfo struct {
-	LockManager interface{} // *storage.LockManager - use interface{} to avoid import cycle
-	TxID        string     // Transaction ID for the locks
-	SessionID   string     // Session ID for the locks
-	LockedDocIDs []string   // Document IDs that are already locked
+	LockManager  interface{} // *storage.LockManager - use interface{} to avoid import cycle
+	TxID         string      // Transaction ID for the locks
+	SessionID    string      // Session ID for the locks
+	LockedDocIDs []string    // Document IDs that are already locked
 }
 
 // TypeConverter represents a fast type conversion function
@@ -839,17 +840,18 @@ func IsFieldForeignKey(bundle *models.Bundle, fieldName string) (bool, string, s
 // This optimizes write performance by batching index updates
 // Parameters:
 //   - pageID: Physical page number where the document resides (use 0 if unknown, will need update later)
-func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, operation, documentID string, fieldValue interface{}, pageID uint32, oldValue interface{}) {
+func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, operation, documentID string, fieldValue interface{}, pageID uint32, oldValue interface{}, deferred bool) {
 	update := IndexUpdate{
-		BundleName: bundleName,
-		IndexName:  indexName,
-		IndexType:  indexType,
-		Operation:  operation,
-		DocumentID: documentID,
-		FieldValue: fieldValue,
-		PageID:     pageID,
-		OldValue:   oldValue,
-		Timestamp:  time.Now(),
+		BundleName:  bundleName,
+		IndexName:   indexName,
+		IndexType:   indexType,
+		Operation:   operation,
+		DocumentID:  documentID,
+		FieldValue:  fieldValue,
+		PageID:      pageID,
+		OldValue:    oldValue,
+		Timestamp:   time.Now(),
+		AppliedSync: !deferred, // Mark as synchronously applied if not deferred
 	}
 
 	// CRITICAL FIX: For hash indexes, update MemTable IMMEDIATELY for read-your-own-writes consistency
@@ -925,7 +927,9 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 
 	// CRITICAL FIX: For B-tree indexes, update in-memory cache IMMEDIATELY for read-your-own-writes consistency
 	// This ensures PostgreSQL-style semantics where reads always see recent writes via page cache
-	if indexType == "btree" {
+	// PERFORMANCE: Skip synchronous updates when deferred=true (batch UPDATE operations)
+	// Deferred operations will be applied in processBTreeIndexBatch without duplicate checking
+	if indexType == "btree" && !deferred {
 		// Get the bundle to access the index
 		bundle, exists := s.bundleMetadata[bundleName]
 		if exists {
@@ -1699,28 +1703,32 @@ func (s *BundleService) processBTreeIndexBatch(bundle *models.Bundle, indexName 
 				continue
 			}
 
-			// Check if key+docID already exists in cache (applied synchronously)
-			// Search() is fast (~100μs) because it checks PageManager cache first
-			existingDocs, searchErr := btreeIndex.Search(keyBytes)
-			if searchErr == nil {
-				// Check if this specific docID is already present
-				alreadyExists := false
-				for _, existingDocID := range existingDocs {
-					if existingDocID == update.DocumentID {
-						alreadyExists = true
-						break
+			// PERFORMANCE: Skip dedup check if update was deferred (not applied synchronously)
+			// Deferred updates haven't been applied yet, so no need to check for duplicates
+			if update.AppliedSync {
+				// Check if key+docID already exists in cache (applied synchronously)
+				// Search() is fast (~100μs) because it checks PageManager cache first
+				existingDocs, searchErr := btreeIndex.Search(keyBytes)
+				if searchErr == nil {
+					// Check if this specific docID is already present
+					alreadyExists := false
+					for _, existingDocID := range existingDocs {
+						if existingDocID == update.DocumentID {
+							alreadyExists = true
+							break
+						}
 					}
-				}
 
-				if alreadyExists {
-					// Skip redundant insert - already applied synchronously
-					skippedCount++
-					s.logger.Debugf("Skipped duplicate insert for key in index '%s' (already in cache)", indexName)
-					continue
+					if alreadyExists {
+						// Skip redundant insert - already applied synchronously
+						skippedCount++
+						s.logger.Debugf("Skipped duplicate insert for key in index '%s' (already in cache)", indexName)
+						continue
+					}
 				}
 			}
 
-			// Key not in cache - apply insert (rare case: evicted or first-time batch)
+			// Apply insert (directly for deferred, or if not in cache for sync)
 			err = btreeIndex.Insert(keyBytes, update.DocumentID)
 			if err != nil {
 				s.logger.Warnf("Failed to insert into BTree index '%s': %v", indexName, err)
@@ -1732,6 +1740,14 @@ func (s *BundleService) processBTreeIndexBatch(bundle *models.Bundle, indexName 
 			keyBytes, err := convertValueToBytes(update.FieldValue)
 			if err != nil {
 				s.logger.Warnf("Failed to convert field value to bytes: %v", err)
+				continue
+			}
+
+			// For deferred deletes, apply directly (no dedup needed for deletes)
+			// For sync deletes, they were already applied but we need to persist
+			if update.AppliedSync {
+				// Already applied synchronously - skip to avoid double-delete errors
+				skippedCount++
 				continue
 			}
 
@@ -5251,7 +5267,8 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 				}
 
 				// Schedule hash index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
+				// deferred=false for ADD operations (read-your-own-writes consistency)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false)
 				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
 					indexName, newDocument.DocumentID, fieldName, pageID)
 				indexCount++
@@ -5265,7 +5282,8 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 				}
 
 				// Schedule BTree index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
+				// deferred=false for ADD operations (read-your-own-writes consistency)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false)
 				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s' (page %d)",
 					newDocument.DocumentID, indexRef.BTreeIndexField.FieldName, pageID)
 				indexCount++
@@ -5354,7 +5372,8 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 					fieldValue = extractedValue
 				}
 
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
+				// deferred=false for ADD operations (read-your-own-writes consistency)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false)
 				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
 					indexName, newDocument.DocumentID, fieldName, pageID)
 
@@ -5365,7 +5384,8 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 					continue
 				}
 
-				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", newDocument.DocumentID, fieldValue, pageID, nil)
+				// deferred=false for ADD operations (read-your-own-writes consistency)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false)
 				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s' (page %d)",
 					newDocument.DocumentID, indexRef.BTreeIndexField.FieldName, pageID)
 			}
@@ -5452,7 +5472,8 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 				}
 
 				// Schedule hash index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, fieldValue, pageID, nil)
+				// deferred=false for ADD operations (read-your-own-writes consistency)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, fieldValue, pageID, nil, false)
 				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
 					indexName, document.DocumentID, fieldName, pageID)
 
@@ -5465,7 +5486,8 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 				}
 
 				// Schedule BTree index update with actual pageID
-				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", document.DocumentID, fieldValue, pageID, nil)
+				// deferred=false for ADD operations (read-your-own-writes consistency)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", document.DocumentID, fieldValue, pageID, nil, false)
 				s.logger.Debugf("Scheduled BTree index update for document '%s' on field '%s' (page %d)",
 					document.DocumentID, indexRef.BTreeIndexField.FieldName, pageID)
 			}
@@ -5816,10 +5838,11 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 			// TASK 3: Schedule deferred B-tree index updates (delete old, insert new)
 			// The indexUpdateBuffer will batch these and apply them later via flushIndexUpdates
 			// This reduces per-document index overhead significantly
+			// deferred=true for UPDATE operations (batch performance, no read-your-own-writes needed)
 			// Schedule delete for old value
-			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "delete", doc.DocumentID, oldFieldValue, pageID, nil)
+			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "delete", doc.DocumentID, oldFieldValue, pageID, nil, true)
 			// Schedule insert for new value
-			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", doc.DocumentID, newFieldValue, pageID, nil)
+			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", doc.DocumentID, newFieldValue, pageID, nil, true)
 			s.logger.Debugf("Scheduled deferred B-tree index updates (delete+insert) for document '%s' on field '%s'", doc.DocumentID, fieldName)
 		}
 
@@ -5843,9 +5866,22 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// renameFieldInDocuments, convertFieldType, applyDefaultToMissingField (via ApplyFieldChanges). Those do not
 	// hold AcquireBundleWriteLock; they use only the storage lock. No deadlock: no path holds application then
 	// waits on storage while another holds storage then waits on application.
-	err = s.store.UpdateDocumentsBatch(bundle, updatedDocs)
-	if err != nil {
-		return fmt.Errorf("failed to update documents in bundle: %w", err)
+	//
+	// DOCUMENT-LEVEL LOCKING: Use UpdateDocumentsBatchWithLocks when caller has pre-acquired document locks
+	// This enables concurrent writes to different documents within the same bundle
+	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
+		// Use document-level locks for concurrent writes
+		err = s.store.UpdateDocumentsBatchWithLocks(bundle, updatedDocs, lockInfo[0].LockedDocIDs)
+		if err != nil {
+			return fmt.Errorf("failed to update documents with document locks: %w", err)
+		}
+		s.logger.Debugf("Updated %d documents using document-level locks", len(updatedDocs))
+	} else {
+		// Fall back to bundle-level lock
+		err = s.store.UpdateDocumentsBatch(bundle, updatedDocs)
+		if err != nil {
+			return fmt.Errorf("failed to update documents in bundle: %w", err)
+		}
 	}
 
 	// PHASE 2.2: Selective cache invalidation - only invalidate pages that contain updated documents

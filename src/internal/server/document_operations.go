@@ -6,6 +6,7 @@ import (
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/errors"
 	"time"
 
@@ -71,21 +72,38 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		docIDs = []string{}
 	}
 
-	// TASK 2: Acquire document-level locks if we have document IDs and are in transaction
-	// For autocommit, we'll acquire locks inside ExecuteWithLogging callback
+	// TASK 2: Acquire document-level locks if we have document IDs
+	// DOCUMENT-LEVEL LOCKING: Extended to autocommit operations for better concurrent write throughput
+	// For explicit transactions, locks are held until commit/rollback
+	// For autocommit, locks are released after the operation completes
 	const lockEscalationThreshold = 100
-	useDocumentLocks := len(docIDs) > 0 && len(docIDs) <= lockEscalationThreshold && session != nil && session.IsInTransaction()
+	useDocumentLocks := len(docIDs) > 0 && len(docIDs) <= lockEscalationThreshold
+	
+	// Determine txID and sessionID for locking
+	var lockTxID, lockSessionID string
+	isAutocommit := false
+	if session != nil && session.IsInTransaction() {
+		// Explicit transaction - use existing IDs
+		lockTxID = session.ActiveTransactionID
+		lockSessionID = session.SessionID
+	} else if useDocumentLocks {
+		// Autocommit - generate temporary IDs for document locks
+		// These locks will be released after the operation completes
+		lockTxID = helpers.GenerateFastUUID()
+		lockSessionID = "autocommit-" + lockTxID[:8]
+		isAutocommit = true
+	}
 
-	if useDocumentLocks {
+	if useDocumentLocks && lockTxID != "" {
 		// Sort document IDs to prevent deadlocks (always acquire in same order)
 		sort.Strings(docIDs)
 		
 		// Acquire write locks for all matching documents
 		lockedDocIDs := make([]string, 0, len(docIDs))
 		for _, docID := range docIDs {
-			if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
+			if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, lockTxID, lockSessionID); err != nil {
 				// Release all locks for this transaction (ReleaseLocks releases all locks for txID)
-				serviceManager.LockManager.ReleaseLocks(session.ActiveTransactionID)
+				serviceManager.LockManager.ReleaseLocks(lockTxID)
 				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
 					fmt.Sprintf("failed to acquire write lock for document %s", docID), errors.LayerTransaction).WithContext("document_id", docID)
 			}
@@ -94,23 +112,31 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		
 		// Create lock info to pass to UpdateDocumentInBundle
 		lockInfo = &bndle.DocumentLockInfo{
-			LockManager: serviceManager.LockManager,
-			TxID:        session.ActiveTransactionID,
-			SessionID:   session.SessionID,
+			LockManager:  serviceManager.LockManager,
+			TxID:         lockTxID,
+			SessionID:    lockSessionID,
 			LockedDocIDs: lockedDocIDs,
 		}
 		
-		// TASK 2: Release locks on error (successful updates keep locks until transaction commit)
-		// For explicit transactions, locks are held until transaction commits/rolls back
-		// But if UpdateDocumentInBundle fails, we need to release locks immediately
+		// TASK 2: Release locks on error or for autocommit
+		// For explicit transactions: locks are held until transaction commits/rolls back (unless error)
+		// For autocommit: always release locks after operation completes
 		defer func() {
-			if err != nil && lockInfo != nil {
-				serviceManager.LockManager.ReleaseLocks(session.ActiveTransactionID)
-				logger.Debugf("Released document locks due to update error")
+			if lockInfo != nil && (err != nil || isAutocommit) {
+				serviceManager.LockManager.ReleaseLocks(lockTxID)
+				if isAutocommit {
+					logger.Debugf("Released document locks after autocommit operation")
+				} else {
+					logger.Debugf("Released document locks due to update error")
+				}
 			}
 		}()
 		
-		logger.Debugf("Acquired document-level write locks for %d documents in transaction %s", len(lockedDocIDs), session.ActiveTransactionID)
+		if isAutocommit {
+			logger.Debugf("Acquired document-level write locks for %d documents (autocommit txID=%s)", len(lockedDocIDs), lockTxID[:8])
+		} else {
+			logger.Debugf("Acquired document-level write locks for %d documents in transaction %s", len(lockedDocIDs), lockTxID)
+		}
 	}
 
 	// Execute with WAL logging if available

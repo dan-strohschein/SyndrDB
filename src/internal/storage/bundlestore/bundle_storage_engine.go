@@ -54,6 +54,12 @@ type BundleStorageEngine struct {
 	writeLocks      map[string]*sync.RWMutex // Per-bundle write locks
 	writeLocksMutex sync.Mutex               // Protects writeLocks map
 
+	// DOCUMENT-LEVEL LOCKING: Per-document write locks for concurrent updates
+	// Allows concurrent writes to different documents within the same bundle
+	// Similar to Postgres row-level locking for improved write throughput
+	documentLocks      map[string]map[string]*sync.Mutex // bundleName -> docID -> mutex
+	documentLocksMutex sync.RWMutex                      // Protects documentLocks map
+
 	// PHASE 1: MVCC - Per-bundle rotation locks for file rotation coordination
 	// Rotation is rare but needs exclusive access to prevent multiple rotations
 	rotationLocks      map[string]*sync.Mutex // Per-bundle rotation locks
@@ -114,6 +120,7 @@ type BundleStore interface {
 	UpdateBundleFilename(database *models.Database, bundle *models.Bundle, oldBundleName string) error
 	UpdateDocumentInBundleFile(bundle *models.Bundle, document *models.Document) error
 	UpdateDocumentsBatch(bundle *models.Bundle, documents []*models.Document) error
+	UpdateDocumentsBatchWithLocks(bundle *models.Bundle, documents []*models.Document, preLockedDocIDs []string) error // Document-level locking
 	DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error
 	AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error // Batch deletion for performance
 
@@ -160,13 +167,14 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		logger:           logger,
 		serializer:       serializer,
 		writeBuffers:     make(map[string]*WriteBuffer),
-		projectionFields: make(map[string][]string),            // PROJECTION PUSHDOWN: Initialize projection fields map
-		manifestManagers: make(map[string]*ManifestManager),    // Initialize manifest managers map
-		writeLocks:       make(map[string]*sync.RWMutex),       // Initialize write locks map
-		rotationLocks:    make(map[string]*sync.Mutex),         // PHASE 1: Initialize rotation locks map
-		writeVerifier:    NewDocumentWriteVerifier(logger),     // Initialize write verification
-		writeLogger:      NewBundleWriteLogger(logger, 1000),   // Keep last 1000 write operations
-		fileReadCache:    make(map[string]*fileReadCacheEntry), // FILE READ CACHE: avoids repeated full-file reads per page
+		projectionFields: make(map[string][]string),                       // PROJECTION PUSHDOWN: Initialize projection fields map
+		manifestManagers: make(map[string]*ManifestManager),               // Initialize manifest managers map
+		writeLocks:       make(map[string]*sync.RWMutex),                  // Initialize write locks map
+		documentLocks:    make(map[string]map[string]*sync.Mutex),         // DOCUMENT-LEVEL LOCKING: Initialize document locks map
+		rotationLocks:    make(map[string]*sync.Mutex),                    // PHASE 1: Initialize rotation locks map
+		writeVerifier:    NewDocumentWriteVerifier(logger),                // Initialize write verification
+		writeLogger:      NewBundleWriteLogger(logger, 1000),              // Keep last 1000 write operations
+		fileReadCache:    make(map[string]*fileReadCacheEntry),            // FILE READ CACHE: avoids repeated full-file reads per page
 	}
 
 	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
@@ -1191,6 +1199,150 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	return nil
 }
 
+// UpdateDocumentsBatchWithLocks updates documents using document-level locks instead of bundle-level locks
+// DOCUMENT-LEVEL LOCKING: Enables concurrent writes to different documents within the same bundle
+//
+// Parameters:
+//   - bundle: The bundle containing the documents
+//   - documents: The documents to update
+//   - preLockedDocIDs: Document IDs that are already locked by the caller (from LockManager)
+//
+// If preLockedDocIDs is empty or doesn't match document IDs, falls back to bundle-level lock
+// This provides Postgres-like row-level locking for improved write throughput
+func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundle, documents []*models.Document, preLockedDocIDs []string) error {
+	if len(documents) == 0 {
+		return nil
+	}
+
+	// Validate inputs
+	if bundle == nil {
+		return fmt.Errorf("bundle cannot be nil")
+	}
+	if bundle.Database == nil {
+		return fmt.Errorf("bundle must have an associated database")
+	}
+
+	// Check if we can use document-level locks
+	useDocumentLocks := len(preLockedDocIDs) > 0 && len(preLockedDocIDs) == len(documents)
+	if useDocumentLocks {
+		// Verify all documents have matching pre-locked IDs
+		preLockedSet := make(map[string]bool, len(preLockedDocIDs))
+		for _, id := range preLockedDocIDs {
+			preLockedSet[id] = true
+		}
+		for _, doc := range documents {
+			if doc != nil && !preLockedSet[doc.DocumentID] {
+				useDocumentLocks = false
+				break
+			}
+		}
+	}
+
+	// If we can't use document locks, fall back to bundle lock
+	if !useDocumentLocks {
+		b.logger.Debugf("BATCH UPDATE WITH LOCKS: Falling back to bundle-level lock (preLockedDocIDs=%d, documents=%d)",
+			len(preLockedDocIDs), len(documents))
+		return b.UpdateDocumentsBatch(bundle, documents)
+	}
+
+	b.logger.Debugf("BATCH UPDATE WITH LOCKS: Using document-level locks for %d documents", len(documents))
+
+	// Calculate file path
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+
+	// Get or create write buffer (thread-safe via its own mutex)
+	writeBuffer, err := b.getOrCreateWriteBuffer(bundle.Name, filePath)
+	if err != nil {
+		return fmt.Errorf("failed to get write buffer: %w", err)
+	}
+
+	// Calculate page size
+	pageSize := uint32(4096)
+	if bundle.PageSize > 0 {
+		pageSize = uint32(bundle.PageSize)
+	}
+
+	// Initialize memtable if needed
+	if bundle.Documents == nil {
+		bundle.Documents = new(map[string]models.Document)
+		*bundle.Documents = make(map[string]models.Document)
+	}
+	bundle.DocumentsComplete = false
+
+	// Process all documents
+	// NOTE: Document locks are already held by caller (from LockManager)
+	// Memtable is protected by bundle.DocumentsMutex (fine-grained)
+	// WriteBuffer is protected by its own mutex (thread-safe)
+	successCount := 0
+	for _, document := range documents {
+		if document == nil || document.DocumentID == "" {
+			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Skipping invalid document")
+			continue
+		}
+
+		// Update memtable (protected by DocumentsMutex)
+		bundle.DocumentsMutex.Lock()
+		(*bundle.Documents)[document.DocumentID] = *document
+		bundle.DocumentsMutex.Unlock()
+
+		// Serialize document
+		documentBytes, err := b.serializeDocumentDirect(document)
+		if err != nil {
+			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Failed to serialize document %s: %v", document.DocumentID, err)
+			continue
+		}
+
+		// Create header
+		headerSize := uint32(len(documentBytes))
+		headerBytes := make([]byte, 8)
+		binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF)
+		binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
+
+		// Combine header + document data
+		combinedData := b.getCombinedBuffer(len(headerBytes) + len(documentBytes))
+		copy(combinedData[:8], headerBytes)
+		copy(combinedData[8:], documentBytes)
+
+		// Write to buffer (thread-safe via WriteBuffer mutex)
+		if err := writeBuffer.Write(combinedData[:len(headerBytes)+len(documentBytes)]); err != nil {
+			b.returnCombinedBuffer(combinedData)
+			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Failed to buffer document %s: %v", document.DocumentID, err)
+			continue
+		}
+
+		b.returnCombinedBuffer(combinedData)
+		successCount++
+	}
+
+	if successCount == 0 {
+		return fmt.Errorf("BATCH UPDATE WITH LOCKS: Failed to update any documents")
+	}
+
+	// Flush buffer to disk
+	if err := writeBuffer.Flush(); err != nil {
+		return fmt.Errorf("BATCH UPDATE WITH LOCKS: Failed to flush write buffer: %w", err)
+	}
+
+	// Handle durability mode
+	dm := settings.GetSettings().DurabilityMode
+	if dm == "strict" {
+		b.logger.Warnf("BATCH UPDATE WITH LOCKS: DurabilityMode is 'strict' - performing synchronous fsync")
+		if err := writeBuffer.Sync(); err != nil {
+			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Failed to sync to disk: %v (continuing anyway)", err)
+		}
+	}
+
+	// Update bundle metadata
+	if bundle.TotalDocuments > 0 {
+		bundle.PageCount = int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
+	}
+	bundle.IsDirty = true
+
+	b.logger.Debugf("BATCH UPDATE WITH LOCKS: Successfully updated %d documents with document-level locks", successCount)
+	return nil
+}
+
 func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error {
 	// CRITICAL FIX: Acquire write lock to prevent dirty reads during deletion
 	lock := b.getWriteLock(bundle.Name)
@@ -1884,6 +2036,57 @@ func (b *BundleStorageEngine) getRotationLock(bundleName string) *sync.Mutex {
 	lock := &sync.Mutex{}
 	b.rotationLocks[bundleName] = lock
 	return lock
+}
+
+// getDocumentLock gets or creates a lock for a specific document within a bundle
+// DOCUMENT-LEVEL LOCKING: Enables concurrent writes to different documents
+func (b *BundleStorageEngine) getDocumentLock(bundleName, documentID string) *sync.Mutex {
+	b.documentLocksMutex.Lock()
+	defer b.documentLocksMutex.Unlock()
+
+	// Ensure bundle map exists
+	if b.documentLocks[bundleName] == nil {
+		b.documentLocks[bundleName] = make(map[string]*sync.Mutex)
+	}
+
+	// Get or create document lock
+	if lock, exists := b.documentLocks[bundleName][documentID]; exists {
+		return lock
+	}
+
+	lock := &sync.Mutex{}
+	b.documentLocks[bundleName][documentID] = lock
+	return lock
+}
+
+// acquireDocumentLocks acquires locks for multiple documents in sorted order to prevent deadlocks
+// Returns the acquired locks in the same order for release
+// DOCUMENT-LEVEL LOCKING: Used by UpdateDocumentsBatchWithLocks for concurrent writes
+func (b *BundleStorageEngine) acquireDocumentLocks(bundleName string, docIDs []string) []*sync.Mutex {
+	// Sort document IDs to prevent deadlocks (always acquire in same order)
+	sortedIDs := make([]string, len(docIDs))
+	copy(sortedIDs, docIDs)
+	sort.Strings(sortedIDs)
+
+	locks := make([]*sync.Mutex, len(sortedIDs))
+	for i, docID := range sortedIDs {
+		lock := b.getDocumentLock(bundleName, docID)
+		lock.Lock()
+		locks[i] = lock
+	}
+
+	return locks
+}
+
+// releaseDocumentLocks releases all acquired document locks
+// DOCUMENT-LEVEL LOCKING: Used by UpdateDocumentsBatchWithLocks after write completes
+func (b *BundleStorageEngine) releaseDocumentLocks(locks []*sync.Mutex) {
+	// Release in reverse order (LIFO) for proper lock ordering
+	for i := len(locks) - 1; i >= 0; i-- {
+		if locks[i] != nil {
+			locks[i].Unlock()
+		}
+	}
 }
 
 // extractDocumentIDOnly extracts just the DocumentID from fast binary format
