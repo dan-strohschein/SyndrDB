@@ -815,6 +815,12 @@ func (ba *BundleAdapter) GetTotalDocuments() int {
 	return ba.getTotalDocumentsCount()
 }
 
+// GetTotalPages returns the total number of pages in the bundle
+// Used for session cache optimization to know how many pages to iterate
+func (ba *BundleAdapter) GetTotalPages() uint32 {
+	return ba.getSafePageCount()
+}
+
 // GetHashIndexForField retrieves the hash index for a specific field
 // Returns nil if no index exists for the field
 // This is used by join executors for index-assisted operations
@@ -841,6 +847,36 @@ func (ba *BundleAdapter) GetHashIndexForField(fieldName string) interface{} {
 	}
 
 	return nil
+}
+
+// CopyProjectedToSessionCache copies projected documents from main cache to session cache
+// OPTIMIZATION: One-time RLock acquisition, copies only GROUP BY fields + DocumentID
+func (ba *BundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*ProjectedDocument, int, int, int, error) {
+	if ba.bundleService == nil {
+		return nil, 0, 0, 0, fmt.Errorf("bundle service not available")
+	}
+
+	// Get total pages
+	totalPages := ba.getSafePageCount()
+	if totalPages == 0 {
+		return make(map[string]*ProjectedDocument), 0, 0, 0, nil
+	}
+
+	// Get database name
+	databaseName := ""
+	if ba.bundle != nil && ba.bundle.Database != nil {
+		databaseName = ba.bundle.Database.Name
+	}
+
+	// Call bundle service to copy projected documents from cache
+	// The service will hold RLock once and iterate all cached pages
+	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := ba.bundleService.CopyProjectedFromCache(
+		ba.bundle.Name, databaseName, totalPages, projectFields, effectiveLimit)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents from cache: %w", err)
+	}
+
+	return sessionCache, docsCopied, cachedPages, totalPagesReturned, nil
 }
 
 // HasIndexOnField checks if an index exists for the specified field

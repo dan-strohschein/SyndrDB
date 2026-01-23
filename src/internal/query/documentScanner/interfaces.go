@@ -7,6 +7,13 @@ import (
 	"syndrdb/src/internal/domain/models"
 )
 
+// ProjectedDocument represents a document with only projected fields (GROUP BY fields + DocumentID)
+// Used for session-specific cache to minimize memory footprint
+type ProjectedDocument struct {
+	DocumentID    string                 // Document ID (always included)
+	GroupByFields map[string]interface{} // GROUP BY field values (only needed fields)
+}
+
 // CacheInterface defines the contract for caching implementations
 // This allows the scanner to work with different cache backends (LRU, TTL, etc.)
 type CacheInterface interface {
@@ -74,6 +81,17 @@ type BundleInterface interface {
 	// Used for PostgreSQL-style index-based joins to load pages directly
 	// Returns the page or error if page doesn't exist
 	LoadPage(pageID uint32) (*models.DocumentPage, error)
+
+	// GetTotalPages returns the total number of pages in the bundle
+	// Used for session cache optimization to know how many pages to iterate
+	GetTotalPages() uint32
+
+	// CopyProjectedToSessionCache copies projected documents from main cache to session cache
+	// OPTIMIZATION: One-time RLock acquisition, copies only GROUP BY fields + DocumentID
+	// Returns: (sessionCache map, totalDocsCopied, cachedPages, totalPages, error)
+	// effectiveLimit: 0 = no limit (GROUP BY), >0 = stop after that many docs (simple scan with LIMIT)
+	// cachedPages: number of pages that were in cache, totalPages: total pages in bundle
+	CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*ProjectedDocument, int, int, int, error)
 }
 
 // ScanMetrics holds performance and usage metrics for the scanner

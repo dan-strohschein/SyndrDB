@@ -14,6 +14,11 @@ type BundleServiceInterface interface {
 	LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error)
 	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error) // GetDocumentPage uses shared documentPages cache
 	CountDocuments(bundleName, databaseName string) (int, error) // Count all documents using optimized count-only parser
+	// CopyProjectedFromCache copies projected documents from documentPages cache under one RLock
+	// OPTIMIZATION: One-time lock acquisition, iterates cached pages, copies only projected fields
+	// Returns: (projected docs map, docs copied, pages that were cached, total pages, error)
+	// effectiveLimit: 0 = no limit, >0 = stop after that many docs
+	CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int) (map[string]*ProjectedDocument, int, int, int, error)
 }
 
 // ScannerIntegration provides example integration between the document scanner and SyndrDB

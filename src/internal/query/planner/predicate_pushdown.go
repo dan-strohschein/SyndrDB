@@ -188,6 +188,51 @@ func (fba *FilteredBundleAdapter) GetTotalDocuments() int {
 	return int(fba.totalDocuments)
 }
 
+// GetTotalPages implements BundleInterface - delegates to bundleService or estimates from totalDocuments
+func (fba *FilteredBundleAdapter) GetTotalPages() uint32 {
+	if fba.bundleService == nil {
+		// Estimate from totalDocuments (pageSize = 4096)
+		pageSize := uint32(4096)
+		if fba.totalDocuments > 0 {
+			return uint32((fba.totalDocuments + int64(pageSize) - 1) / int64(pageSize))
+		}
+		return 1
+	}
+	// Try to get from bundle metadata if available
+	if fba.bundle != nil && fba.bundle.PageCount > 0 {
+		return uint32(fba.bundle.PageCount)
+	}
+	// Estimate
+	pageSize := uint32(4096)
+	if fba.totalDocuments > 0 {
+		return uint32((fba.totalDocuments + int64(pageSize) - 1) / int64(pageSize))
+	}
+	return 1
+}
+
+// CopyProjectedToSessionCache implements BundleInterface - delegates to bundleService
+func (fba *FilteredBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	if fba.bundleService == nil {
+		return nil, 0, 0, 0, fmt.Errorf("bundle service not available")
+	}
+	
+	databaseName := ""
+	if fba.bundle != nil && fba.bundle.Database != nil {
+		databaseName = fba.bundle.Database.Name
+	}
+	
+	totalPages := fba.GetTotalPages()
+	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := fba.bundleService.CopyProjectedFromCache(
+		fba.bundleName, databaseName, totalPages, projectFields, effectiveLimit)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents: %w", err)
+	}
+	
+	// Note: For filtered adapter, we can't filter at cache time since we only have projected fields
+	// Filtering happens during aggregation or scan phase
+	return sessionCache, docsCopied, cachedPages, totalPagesReturned, nil
+}
+
 // GetDocument implements BundleInterface - retrieves and filters a single document
 func (fba *FilteredBundleAdapter) GetDocument(docID string) *models.Document {
 	// Load all filtered documents (they're cached in the scanner)

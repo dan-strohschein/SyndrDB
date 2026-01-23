@@ -2109,6 +2109,83 @@ func (s *BundleService) CountDocuments(bundleName, databaseName string) (int, er
 	return s.store.CountDocuments(bundleName, databaseName)
 }
 
+// CopyProjectedFromCache copies projected documents from documentPages cache under one RLock
+// OPTIMIZATION: One-time lock acquisition, iterates cached pages, copies only projected fields
+// This is used for session-specific cache to reduce lock contention in GROUP BY queries
+//
+// Parameters:
+//   - bundleName: Name of the bundle
+//   - databaseName: Name of the database
+//   - pageCount: Total number of pages to check (from bundle metadata)
+//   - projectFields: Field names to copy (GROUP BY fields + DocumentID)
+//   - effectiveLimit: 0 = no limit (GROUP BY), >0 = stop after that many docs (simple scan with LIMIT)
+//
+// Returns:
+//   - map[string]*ProjectedDocument: Projected documents copied from cache (keyed by DocumentID)
+//   - int: Number of documents copied
+//   - int: Number of pages that were in cache
+//   - int: Total pages checked
+//   - error: Any error encountered
+func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	// Build field set for O(1) lookup
+	fieldSet := make(map[string]bool, len(projectFields))
+	for _, field := range projectFields {
+		fieldSet[field] = true
+	}
+	// Always include DocumentID
+	fieldSet["DocumentID"] = true
+
+	projectedDocs := make(map[string]*documentscanner.ProjectedDocument, 4096) // Pre-allocate reasonable capacity
+	docsCopied := 0
+	cachedPages := 0
+
+	// Acquire RLock once for the entire operation
+	s.documentPagesMutex.RLock()
+	defer s.documentPagesMutex.RUnlock()
+
+	// Iterate through all pages
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+
+		// Check if page is in cache
+		page, exists := s.documentPages[pageKey]
+		if !exists {
+			// Page not cached - skip it (caller will fall back to streaming if needed)
+			continue
+		}
+
+		cachedPages++
+
+		// Copy projected fields from each document in this page
+		for docID, doc := range page.Documents {
+			// Check effectiveLimit (Phase 4: LIMIT + no ORDER BY early termination)
+			if effectiveLimit > 0 && docsCopied >= effectiveLimit {
+				// Reached limit - stop copying (defer will release lock)
+				return projectedDocs, docsCopied, cachedPages, int(pageID + 1), nil
+			}
+
+			// Create projected document with only needed fields
+			projDoc := &documentscanner.ProjectedDocument{
+				DocumentID:    docID,
+				GroupByFields: make(map[string]interface{}),
+			}
+
+			// Copy only projected fields
+			for fieldName, field := range doc.Fields {
+				if fieldSet[fieldName] {
+					// Copy field value
+					projDoc.GroupByFields[fieldName] = field.Value.AsInterface()
+				}
+			}
+
+			projectedDocs[docID] = projDoc
+			docsCopied++
+		}
+	}
+
+	return projectedDocs, docsCopied, cachedPages, int(pageCount), nil
+}
+
 // GetDocument retrieves a specific document by ID
 // Uses memory-first architecture: checks in-memory documents before hitting disk
 // This ensures dirty documents are readable before flush and provides optimal performance

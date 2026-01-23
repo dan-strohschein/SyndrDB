@@ -61,6 +61,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// Alias for convenience
+type ProjectedDocument = documentscanner.ProjectedDocument
+
 // AggregationNode implements GROUP BY and aggregate function execution
 // PHASE 2: Execution Nodes - Aggregation Operation
 type AggregationNode struct {
@@ -295,15 +298,70 @@ executeChild:
 
 	switch n.executionStrategy {
 	case queryparser.HashAggregate:
-		// OPTIMIZATION: For GROUP BY queries, try streaming to avoid GetAllDocuments() lock contention
-		// Check if child is FullScanNode and we can stream documents
+		// OPTIMIZATION: For GROUP BY queries, try session cache first, then streaming
+		// Check if child is FullScanNode and we can use session cache or stream documents
 		if fullScan, ok := n.Child.(*FullScanNode); ok && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
 			if fullScan.DocumentScanner != nil {
-				// Use streaming aggregation to avoid loading all documents at once
-				n.Logger.Infof("OPTIMIZATION: Using streaming aggregation for GROUP BY to avoid GetAllDocuments() lock contention")
-				groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
-				if err != nil {
-					return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
+				// Try session cache first (Phase 1-3: Session-specific projected cache)
+				bundleInterface, ok := fullScan.DocumentScanner.(interface {
+					GetBundle() documentscanner.BundleInterface
+				})
+				if ok {
+					ba := bundleInterface.GetBundle()
+					if ba != nil {
+						// Extract GROUP BY field names for projection
+						projectFields := make([]string, 0, len(n.GroupBy.Fields)+len(n.AggregateFields)+1)
+						for _, qualifiedField := range n.GroupBy.Fields {
+							fieldName := n.extractFieldName(qualifiedField)
+							projectFields = append(projectFields, fieldName)
+						}
+						// Include aggregate field names (for SUM, AVG, MIN, MAX - COUNT(*) doesn't need field)
+						for _, aggFunc := range n.AggregateFields {
+							if aggFunc.Field != "*" {
+								fieldName := n.extractFieldName(aggFunc.Field)
+								projectFields = append(projectFields, fieldName)
+							}
+						}
+						// Always include DocumentID
+						projectFields = append(projectFields, "DocumentID")
+
+						// Try session cache (effectiveLimit=0 for GROUP BY - we need all docs)
+						sessionCache, docsCopied, cachedPages, totalPages, cacheErr := ba.CopyProjectedToSessionCache(ctx, projectFields, 0)
+						if cacheErr == nil && len(sessionCache) > 0 && totalPages > 0 {
+							// Check cache hit rate (Phase 3: Hybrid approach)
+							cacheHitRate := float64(cachedPages) / float64(totalPages)
+							if cacheHitRate >= 0.8 || cachedPages == totalPages {
+								// High cache hit rate - use session cache
+								n.Logger.Infof("OPTIMIZATION: Using session cache for GROUP BY (cache hit rate: %.1f%%, %d/%d pages cached, %d docs)",
+									cacheHitRate*100, cachedPages, totalPages, docsCopied)
+								groupResults, totalInput, err = n.executeHashAggregateWithSessionCache(ctx, sessionCache)
+								if err == nil {
+									// Success - session cache worked, skip to post-aggregation processing
+									// (groupResults and totalInput are set, will be processed after switch)
+								} else {
+									// If session cache aggregation failed, fall through to streaming
+									n.Logger.Warnf("Session cache aggregation failed, falling back to streaming: %v", err)
+									groupResults = nil // Clear so streaming path runs
+								}
+							} else {
+								// Low cache hit rate - fall back to streaming
+								n.Logger.Infof("Cache hit rate too low (%.1f%%, %d/%d pages), falling back to streaming", cacheHitRate*100, cachedPages, totalPages)
+								groupResults = nil // Clear so streaming path runs
+							}
+						} else if cacheErr != nil {
+							n.Logger.Debugf("Session cache copy failed, falling back to streaming: %v", cacheErr)
+							groupResults = nil // Clear so streaming path runs
+						}
+					}
+				}
+
+				// Fall back to streaming aggregation if session cache didn't succeed
+				if groupResults == nil {
+					n.Logger.Infof("OPTIMIZATION: Using streaming aggregation for GROUP BY to avoid GetAllDocuments() lock contention")
+					groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
+					if err != nil {
+						return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
+					}
 				}
 			} else {
 				// Fallback to regular execution
@@ -415,6 +473,7 @@ type groupResult struct {
 	GroupFields     map[string]interface{}     // GROUP BY field values
 	AggregateValues map[string]*aggregateValue // Intermediate aggregate values
 }
+
 
 // executeHashAggregate implements hash-based aggregation strategy
 // PHASE 3: Hash aggregate implementation
@@ -596,6 +655,170 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 	n.Logger.Debugf("Streaming hash aggregate created %d groups from %d documents", len(groupMap), totalInput)
 
 	return groupMap, totalInput, nil
+}
+
+// executeHashAggregateWithSessionCache implements hash-based aggregation using session-specific projected cache
+// OPTIMIZATION: Uses pre-copied projected documents from session cache (one-time RLock acquisition)
+// This eliminates per-page lock contention for GROUP BY queries under high concurrency
+func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Context, sessionCache map[string]*ProjectedDocument) (map[groupKey]*groupResult, int, error) {
+	n.Logger.Debugf("Executing Hash Aggregate strategy with session cache (avoids per-page lock contention)")
+
+	groupMap := make(map[groupKey]*groupResult)
+	totalInput := len(sessionCache)
+
+	// Memory tracking: Get tracker from context
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+	docCount := 0
+
+	// Process documents from session cache (no locks needed)
+	for docID, projDoc := range sessionCache {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return nil, docCount, ctx.Err()
+		default:
+		}
+
+		docCount++
+
+		// Memory tracking: Sample every 100th document
+		if memoryTracker != nil && docCount%100 == 0 {
+			// Estimate size of projected document (much smaller than full document)
+			estimatedSize := int64(50) // ~50 bytes for projected doc (DocumentID + one field)
+			if err := memoryTracker.Sample(estimatedSize, docCount); err != nil {
+				n.Logger.Warnf("Memory tracking error: %v", err)
+			}
+		}
+
+		// Create group key from GROUP BY fields (from projected document)
+		gKey, groupFields, err := n.createGroupKeyFromProjected(projDoc)
+		if err != nil {
+			n.Logger.Warnf("Error creating group key for document %s: %v", docID, err)
+			continue
+		}
+
+		// Get or create group result
+		gResult, exists := groupMap[gKey]
+		if !exists {
+			gResult = &groupResult{
+				GroupFields:     groupFields,
+				AggregateValues: make(map[string]*aggregateValue),
+			}
+			// Initialize aggregate values
+			for _, aggFunc := range n.AggregateFields {
+				gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+			}
+			groupMap[gKey] = gResult
+		}
+
+		// Update aggregates (for COUNT(*), we just increment - no need for full document)
+		// For other aggregates (SUM, AVG, etc.), we'd need field values, but for COUNT(*) this is sufficient
+		for _, aggFunc := range n.AggregateFields {
+			aggKey := n.getAggregateKey(aggFunc)
+			aggVal := gResult.AggregateValues[aggKey]
+
+			switch aggFunc.Function {
+			case "COUNT":
+				if aggFunc.Field == "*" {
+					aggVal.Count++
+				} else {
+					// COUNT(field) - check if field exists and is not nil
+					fieldName := n.extractFieldName(aggFunc.Field)
+					if val, exists := projDoc.GroupByFields[fieldName]; exists && val != nil {
+						aggVal.Count++
+					}
+				}
+			case "SUM", "AVG":
+				// For SUM/AVG, we need the field value from projected document
+				fieldName := n.extractFieldName(aggFunc.Field)
+				if val, exists := projDoc.GroupByFields[fieldName]; exists && val != nil {
+					if numValue, err := n.convertToFloatFromInterface(val); err == nil {
+						aggVal.Sum += numValue
+						if aggFunc.Function == "AVG" {
+							aggVal.AvgCount++
+						}
+					}
+				}
+			case "MIN", "MAX":
+				// For MIN/MAX, we need the field value
+				fieldName := n.extractFieldName(aggFunc.Field)
+				if val, exists := projDoc.GroupByFields[fieldName]; exists && val != nil {
+					// Handle time.Time comparison for DateTime fields
+					var compareVal interface{} = val
+					// If it's a FieldValue, extract the actual value
+					if fv, ok := val.(models.FieldValue); ok {
+						if fv.Type == models.FieldTypeDateTime {
+							compareVal = fv.DateTimeVal
+						} else if fv.Type == models.FieldTypeDate {
+							compareVal = fv.DateVal
+						} else {
+							compareVal = fv.AsInterface()
+						}
+					}
+					
+					if aggFunc.Function == "MIN" {
+						if aggVal.Min == nil || n.isLess(compareVal, aggVal.Min) {
+							aggVal.Min = compareVal
+						}
+					} else { // MAX
+						if aggVal.Max == nil || n.isGreater(compareVal, aggVal.Max) {
+							aggVal.Max = compareVal
+						}
+					}
+				}
+			}
+		}
+	}
+
+	n.Logger.Debugf("Session cache hash aggregate created %d groups from %d documents", len(groupMap), totalInput)
+
+	return groupMap, totalInput, nil
+}
+
+// createGroupKeyFromProjected creates a group key from a projected document
+// Similar to createGroupKey but works with ProjectedDocument instead of full Document
+func (n *AggregationNode) createGroupKeyFromProjected(projDoc *ProjectedDocument) (groupKey, map[string]interface{}, error) {
+	// Handle aggregate-only queries (no GROUP BY clause)
+	if n.GroupBy == nil || len(n.GroupBy.Fields) == 0 {
+		return groupKey(""), make(map[string]interface{}), nil
+	}
+
+	groupFields := make(map[string]interface{})
+	keyParts := make([]string, 0, len(n.GroupBy.Fields))
+
+	for _, qualifiedFieldName := range n.GroupBy.Fields {
+		// Extract the actual field name from qualified identifier
+		fieldName := n.extractFieldName(qualifiedFieldName)
+
+		// Get field value from projected document
+		fieldValue, exists := projDoc.GroupByFields[fieldName]
+		if !exists {
+			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in projected document", qualifiedFieldName)
+		}
+
+		groupFields[fieldName] = fieldValue
+		keyParts = append(keyParts, fmt.Sprintf("%s=%v", fieldName, fieldValue))
+	}
+
+	gKey := groupKey(strings.Join(keyParts, "|"))
+	return gKey, groupFields, nil
+}
+
+// convertToFloatFromInterface converts an interface{} value to float64
+// Helper for SUM/AVG aggregation from projected documents
+func (n *AggregationNode) convertToFloatFromInterface(val interface{}) (float64, error) {
+	switch v := val.(type) {
+	case int:
+		return float64(v), nil
+	case int64:
+		return float64(v), nil
+	case float64:
+		return v, nil
+	case float32:
+		return float64(v), nil
+	default:
+		return 0, fmt.Errorf("cannot convert %T to float64", val)
+	}
 }
 
 // executeSortGroupAggregate implements sort-based aggregation strategy.

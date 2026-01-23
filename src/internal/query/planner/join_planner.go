@@ -1109,6 +1109,47 @@ func (pba *PlannerBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, 
 	return pba.bundleService.GetDocumentPage(pba.bundle.Name, databaseName, pageID)
 }
 
+// GetTotalPages implements BundleInterface - returns page count from bundle metadata
+func (pba *PlannerBundleAdapter) GetTotalPages() uint32 {
+	if pba.bundle == nil {
+		return 0
+	}
+	if pba.bundle.PageCount > 0 {
+		return uint32(pba.bundle.PageCount)
+	}
+	// Estimate from TotalDocuments
+	pageSize := uint32(4096)
+	if pba.bundle.TotalDocuments > 0 {
+		return uint32((pba.bundle.TotalDocuments + int64(pageSize) - 1) / int64(pageSize))
+	}
+	return 1
+}
+
+// CopyProjectedToSessionCache implements BundleInterface - delegates to bundleService
+func (pba *PlannerBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	if pba.bundleService == nil {
+		return nil, 0, 0, 0, fmt.Errorf("bundle service not available")
+	}
+	
+	if pba.bundle == nil {
+		return nil, 0, 0, 0, fmt.Errorf("bundle is nil")
+	}
+	
+	databaseName := ""
+	if pba.bundle.Database != nil {
+		databaseName = pba.bundle.Database.Name
+	}
+	
+	totalPages := pba.GetTotalPages()
+	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := pba.bundleService.CopyProjectedFromCache(
+		pba.bundle.Name, databaseName, totalPages, projectFields, effectiveLimit)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents: %w", err)
+	}
+	
+	return sessionCache, docsCopied, cachedPages, totalPagesReturned, nil
+}
+
 // PlannerServiceManager adapts bundle operations for the JOIN execution node
 // This provides the service interface needed by the JOIN executor without circular imports
 type PlannerServiceManager struct {
@@ -1639,6 +1680,17 @@ func (f *ExpressionFilteredBundleAdapter) LoadPage(pageID uint32) (*models.Docum
 	}
 	
 	return filteredPage, nil
+}
+
+// GetTotalPages implements BundleInterface - delegates to inner
+func (f *ExpressionFilteredBundleAdapter) GetTotalPages() uint32 {
+	return f.inner.GetTotalPages()
+}
+
+// CopyProjectedToSessionCache implements BundleInterface - delegates to inner
+// Note: Filtering happens at scan time, not cache time, so we delegate directly
+func (f *ExpressionFilteredBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	return f.inner.CopyProjectedToSessionCache(ctx, projectFields, effectiveLimit)
 }
 
 // matchesPredicate evaluates the predicate against a document
