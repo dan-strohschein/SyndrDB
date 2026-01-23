@@ -2,7 +2,6 @@ package joinexecutor
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -459,50 +458,47 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// Step 1: Get all document IDs grouped by page from the index
-	// This is PostgreSQL-style: use index to get IDs, not full documents
+	// Step 1: Get all document IDs from the index (ignore page IDs - they may be stale)
+	// CRITICAL FIX: Index page IDs can be stale when documents move pages.
+	// Instead of relying on page IDs, collect all document IDs and search all pages.
 	docIDsByPage, err := hashIndex.GetAllDocumentIDs()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get document IDs from index: %w", err)
 	}
 
-	// Log detailed information about what the index returned
+	// Collect all document IDs (ignore page grouping since page IDs may be stale)
+	allDocIDs := make(map[string]bool)
 	totalDocIDsFromIndex := 0
-	for pageID, docIDs := range docIDsByPage {
-		totalDocIDsFromIndex += len(docIDs)
-		hjs.logger.Debugf("Index returned page %d with %d document IDs: %v", pageID, len(docIDs), docIDs[:min(5, len(docIDs))])
+	for _, docIDs := range docIDsByPage {
+		for _, docID := range docIDs {
+			allDocIDs[docID] = true
+			totalDocIDsFromIndex++
+		}
 	}
 
-	hjs.logger.Infof("Index returned %d pages with %d total document IDs", len(docIDsByPage), totalDocIDsFromIndex)
+	hjs.logger.Infof("Index returned %d total document IDs across %d page groups (page IDs may be stale, will search all pages)", 
+		totalDocIDsFromIndex, len(docIDsByPage))
 
-	if len(docIDsByPage) == 0 {
-		hjs.logger.Warnf("Index returned 0 pages - index may be empty or not populated")
+	if totalDocIDsFromIndex == 0 {
+		hjs.logger.Warnf("Index returned 0 document IDs - index may be empty or not populated")
 		// Fall back to regular build (not index-assisted)
 		return nil, nil, nil, fmt.Errorf("index is empty, cannot use index-assisted build")
 	}
 
-	// Step 2: Load pages and extract only the documents we need
-	// Sort page IDs for sequential access (better I/O pattern)
-	pageIDs := make([]uint32, 0, len(docIDsByPage))
-	for pageID := range docIDsByPage {
-		pageIDs = append(pageIDs, pageID)
-	}
-	sort.Slice(pageIDs, func(i, j int) bool { return pageIDs[i] < pageIDs[j] })
-
-	// Create a set of document IDs we need for fast lookup
-	docIDSet := make(map[string]bool)
-	totalDocIDs := 0
-	for _, docIDs := range docIDsByPage {
-		for _, docID := range docIDs {
-			docIDSet[docID] = true
-			totalDocIDs++
-		}
+	// Step 2: Get total pages and search all pages for the document IDs
+	// This is less efficient than page-grouped loading, but correct when page IDs are stale
+	totalPages := buildBundle.GetTotalPages()
+	if totalPages == 0 {
+		hjs.logger.Warnf("Bundle has 0 pages, cannot use index-assisted build")
+		return nil, nil, nil, fmt.Errorf("bundle has no pages")
 	}
 
-	hjs.logger.Debugf("Loading %d documents from %d pages via index", totalDocIDs, len(pageIDs))
+	hjs.logger.Debugf("Searching %d pages for %d document IDs from index", totalPages, totalDocIDsFromIndex)
 
-	// Step 3: Load each page once and extract only needed documents
-	for _, pageID := range pageIDs {
+	// Step 3: Load each page and extract documents that match our document ID set
+	foundDocs := 0
+	searchedPages := 0
+	for pageID := uint32(0); pageID < totalPages; pageID++ {
 		// Check for cancellation
 		select {
 		case <-request.Context.Done():
@@ -513,25 +509,18 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		// Load page (uses shared cache, RLock)
 		page, err := buildBundle.LoadPage(pageID)
 		if err != nil {
-			hjs.logger.Warnf("Failed to load page %d: %v", pageID, err)
+			// Page doesn't exist or error loading - skip
 			continue
 		}
+		searchedPages++
 
-		// Get list of document IDs we need from this page
-		neededDocIDs := docIDsByPage[pageID]
-		hjs.logger.Debugf("Page %d: looking for %d document IDs, page has %d documents", pageID, len(neededDocIDs), len(page.Documents))
-
-		// Extract only documents that are in our needed list
-		foundInPage := 0
-		missingDocIDs := make([]string, 0)
-		for _, docID := range neededDocIDs {
-			doc, exists := page.Documents[docID]
-			if !exists {
-				// Document not in page (might be in memtable or deleted)
-				missingDocIDs = append(missingDocIDs, docID)
+		// Check each document in this page to see if it's in our needed set
+		for docID, doc := range page.Documents {
+			if !allDocIDs[docID] {
+				// Not in our needed set, skip
 				continue
 			}
-			foundInPage++
+			foundDocs++
 
 			// Extract join key value
 			var keyValue interface{}
@@ -568,18 +557,9 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 			stats.DocumentsScanned++
 		}
-		if foundInPage < len(neededDocIDs) {
-			// Log first few missing document IDs for debugging
-			missingSample := missingDocIDs
-			if len(missingSample) > 5 {
-				missingSample = missingDocIDs[:5]
-			}
-			hjs.logger.Warnf("Page %d: found only %d/%d documents from index. Missing: %v (showing first %d)", 
-				pageID, foundInPage, len(neededDocIDs), missingSample, len(missingSample))
-		} else {
-			hjs.logger.Debugf("Page %d: found %d/%d documents from index", pageID, foundInPage, len(neededDocIDs))
-		}
 	}
+
+	hjs.logger.Debugf("Searched %d pages, found %d/%d documents from index", searchedPages, foundDocs, totalDocIDsFromIndex)
 
 	// Step 4: Handle memtable documents (recent writes not yet in index)
 	// This ensures read-your-own-writes consistency
@@ -593,11 +573,16 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	}
 
 	if stats.DocumentsScanned == 0 && totalDocIDsFromIndex > 0 {
-		hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were found in pages! This indicates a mismatch between index and pages.", totalDocIDsFromIndex)
+		hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were found after searching %d pages! This indicates documents may have been deleted or index is severely out of sync.", 
+			totalDocIDsFromIndex, searchedPages)
+	} else if int64(stats.DocumentsScanned) < int64(totalDocIDsFromIndex)/2 {
+		// Found less than half - likely many documents are missing
+		hjs.logger.Warnf("Found only %d/%d documents from index (%.1f%%). Some documents may be missing or index is out of sync.", 
+			stats.DocumentsScanned, totalDocIDsFromIndex, float64(stats.DocumentsScanned*100)/float64(totalDocIDsFromIndex))
 	}
 
-	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s (loaded %d pages, %d docs via index)",
-		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats, len(pageIDs), stats.DocumentsScanned)
+	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s (searched %d pages, found %d docs via index)",
+		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats, searchedPages, stats.DocumentsScanned)
 
 	return hashTable, bloom, stats, nil
 }
