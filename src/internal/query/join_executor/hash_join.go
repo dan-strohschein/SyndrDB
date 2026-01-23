@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/bloomfilter"
 	"syndrdb/src/internal/query/documentscanner"
