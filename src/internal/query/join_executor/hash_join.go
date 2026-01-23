@@ -310,20 +310,31 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// CRITICAL OPTIMIZATION: DocumentID ALWAYS has a hash index (system-created, system-managed)
-	// For DocumentID joins, use the index directly without checking
-	// For foreign key joins, check if index exists
+	// CRITICAL: Skip index-assisted build for filtered bundles
+	// Filtered bundles (e.g., "products [expr-filtered]") have predicates applied,
+	// but the index contains all documents from the base bundle, not just filtered ones.
+	// Using the index would include documents that don't match the filter, causing incorrect results.
 	var buildIndex interface{}
-	if strings.EqualFold(buildKey, "documentid") {
-		// DocumentID always has a hash index - get it directly
-		buildIndex = buildBundle.GetHashIndexForField("DocumentID")
-		if buildIndex == nil {
-			hjs.logger.Warnf("DocumentID index not found for bundle %s (unexpected - DocumentID should always have an index)",
-				buildBundle.GetName())
-		}
+	bundleName := buildBundle.GetName()
+	if strings.Contains(bundleName, "[expr-filtered]") || strings.Contains(bundleName, "[filtered]") {
+		hjs.logger.Debugf("Skipping index-assisted build for filtered bundle %s (index contains all base bundle documents, not just filtered subset)",
+			bundleName)
+		// Fall through to regular build path (buildIndex remains nil)
 	} else {
-		// For other fields (foreign keys), check if index exists
-		buildIndex = buildBundle.GetHashIndexForField(buildKey)
+		// CRITICAL OPTIMIZATION: DocumentID ALWAYS has a hash index (system-created, system-managed)
+		// For DocumentID joins, use the index directly without checking
+		// For foreign key joins, check if index exists
+		if strings.EqualFold(buildKey, "documentid") {
+			// DocumentID always has a hash index - get it directly
+			buildIndex = buildBundle.GetHashIndexForField("DocumentID")
+			if buildIndex == nil {
+				hjs.logger.Warnf("DocumentID index not found for bundle %s (unexpected - DocumentID should always have an index)",
+					buildBundle.GetName())
+			}
+		} else {
+			// For other fields (foreign keys), check if index exists
+			buildIndex = buildBundle.GetHashIndexForField(buildKey)
+		}
 	}
 
 	if buildIndex != nil {
