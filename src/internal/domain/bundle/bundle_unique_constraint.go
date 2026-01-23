@@ -4,14 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/registry"
 
-	"syndrdb/src/pkg/settings"
-	"time"
-
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -499,6 +500,8 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 	if len(allDocuments) > 0 {
 		s.logger.Debugf("Populating unique B-tree index with %d existing documents", len(allDocuments))
 
+		insertedCount := 0
+		skippedCount := 0
 		for documentID, document := range allDocuments {
 			// Extract field value for indexing
 			fieldValue, err := extractFieldValueForIndex(*document, fieldDef.Name)
@@ -514,14 +517,35 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 				continue
 			}
 
-			// Insert into B-tree - will fail if duplicate (unique constraint)
+			// Insert into B-tree
+			// CRITICAL FIX: Make population idempotent - skip duplicate document IDs gracefully
+			// For unique constraints, we distinguish between:
+			// - Duplicate document ID (same doc indexed twice) -> skip gracefully
+			// - Duplicate value (different docs with same value) -> fail (constraint violation)
 			err = btreeIndex.Insert(keyBytes, document.DocumentID)
 			if err != nil {
+				// Check if this is a duplicate document ID error (idempotent population)
+				if strings.Contains(err.Error(), "document ID already exists for this key") {
+					// Document already in index - skip gracefully (idempotent behavior)
+					skippedCount++
+					s.logger.Debugf("Skipping document '%s' - already exists in unique index (idempotent population)", documentID)
+					continue
+				}
+				// For duplicate key errors (different document with same value), this is a real constraint violation
+				if strings.Contains(err.Error(), "duplicate key in unique index") {
+					s.logger.Errorf("Unique constraint violation: document '%s' has duplicate value for field '%s'", documentID, fieldDef.Name)
+					btreeIndex.Close()
+					return fmt.Errorf("failed to populate unique B-tree index - duplicate value found during initial load: %w", err)
+				}
+				// For other errors, fail
 				s.logger.Errorf("Failed to insert document '%s' into unique B-tree index: %v", documentID, err)
 				btreeIndex.Close()
-				return fmt.Errorf("failed to populate unique B-tree index - duplicate value found during initial load: %w", err)
+				return fmt.Errorf("failed to populate unique B-tree index: %w", err)
 			}
+			insertedCount++
 		}
+
+		s.logger.Infof("Unique B-tree index population complete: inserted %d documents, skipped %d duplicates", insertedCount, skippedCount)
 
 		if err := btreeIndex.PersistMetadata(); err != nil {
 			s.logger.Warnf("Failed to persist unique B-tree index metadata after population: %v", err)

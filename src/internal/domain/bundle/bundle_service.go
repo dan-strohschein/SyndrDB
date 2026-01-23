@@ -4522,6 +4522,8 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 	if len(allDocuments) > 0 {
 		s.logger.Debugf("Populating BTree index with %d existing documents", len(allDocuments))
 
+		insertedCount := 0
+		skippedCount := 0
 		for documentID, document := range allDocuments {
 			// Extract the field value for indexing
 			fieldValue, err := extractFieldValueForIndex(*document, fieldDef.Name)
@@ -4538,14 +4540,29 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 			}
 
 			// Insert into the BTree index
+			// CRITICAL FIX: Make population idempotent - skip duplicates gracefully
+			// This allows index creation to succeed even if:
+			// - Index was partially populated from a previous failed attempt
+			// - Same document appears multiple times in the document set
+			// - Concurrent operations added entries
 			err = btreeIndex.Insert(keyBytes, document.DocumentID)
 			if err != nil {
+				// Check if this is a duplicate document ID error (expected during idempotent population)
+				if strings.Contains(err.Error(), "document ID already exists for this key") {
+					// Document already in index - skip gracefully (idempotent behavior)
+					skippedCount++
+					s.logger.Debugf("Skipping document '%s' - already exists in index (idempotent population)", documentID)
+					continue
+				}
+				// For other errors (e.g., unique constraint violations), log and fail
 				s.logger.Errorf("Failed to insert document '%s' into BTree index: %v", documentID, err)
-				// Close the index and return error if population fails
 				btreeIndex.Close()
 				return fmt.Errorf("failed to populate BTree index with existing documents: %w", err)
 			}
+			insertedCount++
 		}
+
+		s.logger.Infof("BTree index population complete: inserted %d documents, skipped %d duplicates", insertedCount, skippedCount)
 
 		if err := btreeIndex.PersistMetadata(); err != nil {
 			s.logger.Warnf("Failed to persist B-tree index metadata after population: %v", err)
