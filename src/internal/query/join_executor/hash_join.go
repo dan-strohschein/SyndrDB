@@ -125,6 +125,14 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 	buildBundle, probeBundle, swapped := hjs.chooseBuildProbe(request.LeftBundle, request.RightBundle)
 	buildKey, probeKey := hjs.getJoinKeys(request.Conditions, swapped)
 
+	// CRITICAL DEBUG: Log join keys and index strategy
+	hjs.logger.Infof("Hash join: build=%s (key=%s), probe=%s (key=%s), indexStrategy=%v",
+		buildBundle.GetName(), buildKey, probeBundle.GetName(), probeKey,
+		request.IndexStrategy != nil)
+	if request.IndexStrategy != nil {
+		hjs.logger.Infof("Index strategy: %s, applicable=%v", request.IndexStrategy.GetName(), request.IndexStrategy.IsApplicable())
+	}
+
 	// Build phase: Create hash table from smaller bundle (with optional Bloom filter)
 	hashTable, bloom, buildStats, err := hjs.buildHashTable(buildBundle, buildKey, request)
 	if err != nil {
@@ -390,10 +398,9 @@ func (hjs *HashJoinStrategy) buildHashTable(
 }
 
 // buildHashTableWithIndex uses a hash index on the build key to construct the hash table
-// CRITICAL OPTIMIZATION: For DocumentID joins, we can use the index to verify documents exist
-// However, we still need to iterate through all documents to build the hash table.
-// The real benefit is that we know the index exists, so the join key is indexed and should be fast.
-// For now, we still use GetAllDocuments() but log that we're using an indexed field.
+// NOTE: Currently still uses GetAllDocuments() which causes lock contention under high concurrency
+// TODO: Optimize to avoid GetAllDocuments() - consider using GetDocumentIDs() + batch GetDocument() calls
+// or optimize GetAllDocuments() itself to reduce lock contention (e.g., use RLock more aggressively)
 func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	buildBundle documentscanner.BundleInterface,
 	buildKey string,
@@ -403,16 +410,14 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	bloom *bloomfilter.BloomFilter,
 ) (HashTable, *bloomfilter.BloomFilter, *ScanStats, error) {
 
-	hjs.logger.Infof("Using index-assisted build for %s on indexed field %s (index exists, using optimized path)",
+	hjs.logger.Infof("Using index-assisted build for %s on indexed field %s (index exists, but still using GetAllDocuments - needs optimization)",
 		buildBundle.GetName(), buildKey)
 
-	// For the build phase, we still need all documents to build the hash table
-	// The index helps on the probe side, not the build side
-	// However, knowing the field is indexed means it's a foreign key or DocumentID,
-	// so we can use the same optimized path as regular build
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// Use the same optimized path as regular build, but we know the field is indexed
+	// TODO: Optimize this - GetAllDocuments() causes lock contention with 300 concurrent connections
+	// For DocumentID joins, we could use GetDocumentIDs() then batch load documents
+	// For now, use the same path as regular build
 	allDocs := buildBundle.GetAllDocuments()
 	buildKeyValues, buildDocsSlice, err := ExtractJoinKeysWithSIMD(allDocs, buildKey)
 	if err != nil {
