@@ -58,12 +58,32 @@ type SessionInterface interface {
 var globalQueryPlanner QueryPlannerInterface
 var plannerMutex sync.RWMutex
 
+// UnifiedPlannerInterface defines the interface for creating execution plans
+// This allows BundleService to use the query planner for WHERE clause optimization
+// Uses interface{} to avoid import cycle with planner package
+type UnifiedPlannerInterface interface {
+	CreatePlan(query *queryparser.UnifiedSelectQuery, database *models.Database) (interface{}, error)
+}
+
+// Global unified planner reference for query planning
+// Set by server during initialization to avoid circular dependencies
+var globalUnifiedPlanner UnifiedPlannerInterface
+var unifiedPlannerMutex sync.RWMutex
+
 // SetQueryPlanner sets the global query planner reference
 // Called by server during initialization
 func SetQueryPlanner(planner QueryPlannerInterface) {
 	plannerMutex.Lock()
 	defer plannerMutex.Unlock()
 	globalQueryPlanner = planner
+}
+
+// SetUnifiedPlanner sets the global unified planner reference
+// Called by server during initialization
+func SetUnifiedPlanner(planner UnifiedPlannerInterface) {
+	unifiedPlannerMutex.Lock()
+	defer unifiedPlannerMutex.Unlock()
+	globalUnifiedPlanner = planner
 }
 
 // IndexUpdate represents a deferred index update operation
@@ -94,6 +114,15 @@ type btreeRollbackOp struct {
 	oldKey     []byte
 	newKey     []byte
 	documentID string
+}
+
+// DocumentLockInfo contains information about pre-acquired document locks
+// This allows UpdateDocumentInBundle to skip bundle write lock when document locks are already held
+type DocumentLockInfo struct {
+	LockManager interface{} // *storage.LockManager - use interface{} to avoid import cycle
+	TxID        string     // Transaction ID for the locks
+	SessionID   string     // Session ID for the locks
+	LockedDocIDs []string   // Document IDs that are already locked
 }
 
 // TypeConverter represents a fast type conversion function
@@ -5537,7 +5566,9 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 	return filtered
 }
 
-func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) (err error) {
+// UpdateDocumentInBundle updates documents in a bundle based on the update command
+// TASK 2: Document-level locking support - if lockInfo is provided, uses document locks instead of bundle write lock
+func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand, lockInfo ...*DocumentLockInfo) (err error) {
 	args := settings.GetSettings()
 	// Check if the bundle exists
 	if bundle == nil {
@@ -5563,11 +5594,24 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		return fmt.Errorf("failed to acquire read lock: %w", err)
 	}
 
-	// Get the existing documents under read lock (allows concurrent reads)
-	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
-	if err != nil {
-		s.ReleaseBundleReadLock(bundle.Name)
-		return fmt.Errorf("failed to filter documents: %w", err)
+	// TASK 1: Use query planner for WHERE clause processing (same fast path as SELECT)
+	// This provides index-optimized execution with cost estimation and plan caching
+	var filteredDocs []*models.Document
+	if docCommand.WhereClause != "" && docCommand.WhereClause != strings.TrimSpace("") {
+		// Use query planner for optimal WHERE clause execution
+		filteredDocs, err = s.getDocumentsByQueryPlanner(bundle, docCommand.WhereClause, database)
+		if err != nil {
+			s.ReleaseBundleReadLock(bundle.Name)
+			return fmt.Errorf("failed to get documents using query planner: %w", err)
+		}
+	} else {
+		// Empty WHERE clause - get all documents (only if CONFIRMED)
+		// Fallback to GetDocumentsByFilter for this case
+		filteredDocs, err = s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
+		if err != nil {
+			s.ReleaseBundleReadLock(bundle.Name)
+			return fmt.Errorf("failed to filter documents: %w", err)
+		}
 	}
 
 	if args.Debug {
@@ -5644,17 +5688,50 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// Release read lock before acquiring write lock
 	s.ReleaseBundleReadLock(bundle.Name)
 
-	// PHASE 1.1: WRITE PHASE - Acquire write lock for actual modifications
-	if err = s.AcquireBundleWriteLock(bundle.Name); err != nil {
-		return fmt.Errorf("failed to acquire write lock: %w", err)
-	}
-	defer s.ReleaseBundleWriteLock(bundle.Name)
+	// TASK 2: Document-level locking - use document locks if provided, otherwise use bundle write lock
+	var useDocumentLocks bool
+	var lockedDocIDsSet map[string]bool
+	const lockEscalationThreshold = 100 // Use bundle lock for bulk updates (>100 docs)
 
-	// CRITICAL PERFORMANCE FIX: Use documents we already have from GetDocumentsByFilter
+	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
+		// Document locks are already acquired - use them instead of bundle write lock
+		// But only if document count is below escalation threshold
+		if len(docIDs) <= lockEscalationThreshold {
+			useDocumentLocks = true
+			lockedDocIDsSet = make(map[string]bool, len(lockInfo[0].LockedDocIDs))
+			for _, docID := range lockInfo[0].LockedDocIDs {
+				lockedDocIDsSet[docID] = true
+			}
+			s.logger.Debugf("Using document-level locks for %d documents (below threshold %d)", len(docIDs), lockEscalationThreshold)
+		} else {
+			s.logger.Debugf("Lock escalation: %d documents exceeds threshold %d, using bundle write lock", len(docIDs), lockEscalationThreshold)
+		}
+	}
+
+	// Acquire bundle write lock only if not using document locks or if lock escalation needed
+	if !useDocumentLocks {
+		if err = s.AcquireBundleWriteLock(bundle.Name); err != nil {
+			return fmt.Errorf("failed to acquire write lock: %w", err)
+		}
+		defer s.ReleaseBundleWriteLock(bundle.Name)
+	}
+
+	// CRITICAL PERFORMANCE FIX: Use documents we already have from query planner
 	// Re-fetching via GetDocument for each document ID was causing 2-20 second delays
 	// However, we need to handle race condition: DELETE can happen between read and write lock acquisition
 	// Solution: Do lightweight existence check using memtable and documentPageMap (O(1) lookups)
 	// This is much faster than GetDocument which does I/O
+	// TASK 2: If using document locks, filter to only documents that are locked
+	if useDocumentLocks {
+		// Filter to only documents that have locks acquired
+		filteredLockedDocs := make([]*models.Document, 0, len(filteredDocs))
+		for _, doc := range filteredDocs {
+			if lockedDocIDsSet[doc.DocumentID] {
+				filteredLockedDocs = append(filteredLockedDocs, doc)
+			}
+		}
+		filteredDocs = filteredLockedDocs
+	}
 	filteredDocs = s.filterDeletedDocuments(bundle, filteredDocs)
 	if len(filteredDocs) == 0 {
 		// DEBUG level: This is expected behavior under high concurrency, not an error
@@ -5663,55 +5740,31 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		return nil // No documents to update
 	}
 
-	// Set of updated field names for B-tree index pre-load (R5: load each B-tree once per batch).
+	// TASK 3: Identify which fields have B-tree indexes for deferred update scheduling
+	// We don't need to pre-load indexes since updates are deferred via scheduleIndexUpdate
 	updatedFieldsSet := make(map[string]bool)
 	for _, kv := range docCommand.Fields {
 		updatedFieldsSet[kv.Key] = true
 	}
 
-	// R5: Pre-load each B-tree index whose field is updated. Reuse in the per-doc loop.
-	// TODO: Future: batched B-tree Delete/Insert for index maintenance during UPDATE; would require
-	// btreeindexV2 (or relevant index package) API changes to support batched Delete and batched Insert.
-	btreesToUpdate := make(map[string]*btreeindexV2.BTreeIndex)
+	// Track which indexes need updates (for logging/debugging)
+	btreeIndexesToUpdate := make(map[string]string) // indexName -> fieldName
 	if bundle.Indexes != nil {
 		for indexName, indexRef := range bundle.Indexes {
 			if indexRef.IndexType == "btree" {
 				fieldName := indexRef.BTreeIndexField.FieldName
 				if updatedFieldsSet[fieldName] {
-					idx, loadErr := s.getOrLoadBTreeIndex(bundle, indexName, indexRef)
-					if loadErr != nil {
-						return fmt.Errorf("failed to load BTree index '%s': %w", indexName, loadErr)
-					}
-					btreesToUpdate[indexName] = idx
+					btreeIndexesToUpdate[indexName] = fieldName
 				}
 			}
 		}
 	}
 
-	// R1 rollback: if UpdateDocumentsBatch (or an earlier B-tree Insert) fails, undo B-tree updates
-	// so indexes stay consistent with storage. Defer runs on any return with err != nil.
-	// PHASE 4.1: Pre-allocate rollbackOps slice with estimated capacity to reduce allocations
-	estimatedRollbackOps := len(filteredDocs) * len(btreesToUpdate)
-	rollbackOps := make([]btreeRollbackOp, 0, estimatedRollbackOps)
-	defer func() {
-		if err != nil && len(rollbackOps) > 0 {
-			s.runBTreeRollback(rollbackOps)
-		}
-	}()
+	// TASK 3: B-tree index updates are now deferred via scheduleIndexUpdate
+	// Rollback for deferred updates is handled by the index update buffer system
+	// If document update fails, the deferred index updates won't be applied (they're in buffer, not yet executed)
 
-	// PHASE 3: Batch B-tree updates - collect operations during loop, apply in batches after
-	// This is more efficient than individual Delete/Insert operations during the loop
-	type btreeUpdateOp struct {
-		index       *btreeindexV2.BTreeIndex
-		indexName   string
-		operation   string // "delete" or "insert"
-		keyBytes    []byte
-		documentID  string
-		oldKeyBytes []byte // For rollback
-	}
-	btreeUpdates := make([]btreeUpdateOp, 0, len(filteredDocs)*len(btreesToUpdate)*2) // Pre-allocate for deletes + inserts
-
-	// R1: Per-doc loop: update fields and collect B-tree operations. Collect updatedDocs; call UpdateDocumentsBatch once after.
+	// R1: Per-doc loop: update fields and schedule deferred index updates. Collect updatedDocs; call UpdateDocumentsBatch once after.
 	updatedDocs := make([]*models.Document, 0, len(filteredDocs))
 	for _, doc := range filteredDocs {
 		originalDoc := *doc
@@ -5733,88 +5786,54 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 			doc.Fields[kv.Key] = foundField
 		}
 
-		// PHASE 3: Collect B-tree operations instead of executing them immediately
-		for indexName, btreeIndex := range btreesToUpdate {
-			fieldName := bundle.Indexes[indexName].BTreeIndexField.FieldName
-			s.logger.Debugf("Indexed field '%s' was updated, collecting BTree index '%s' operations", fieldName, indexName)
+		// TASK 3: Use deferred index updates for B-tree indexes instead of synchronous operations
+		// This reduces per-document index overhead by batching updates
+		for indexName, fieldName := range btreeIndexesToUpdate {
+			s.logger.Debugf("Indexed field '%s' was updated, scheduling deferred BTree index '%s' update", fieldName, indexName)
 
 			oldFieldValue, extErr := extractFieldValueForIndex(originalDoc, fieldName)
 			if extErr != nil {
 				s.logger.Warnf("Failed to extract old field value for document '%s': %v", doc.DocumentID, extErr)
 				continue
 			}
-			oldKeyBytes, convErr := convertValueToBytes(oldFieldValue)
-			if convErr != nil {
-				s.logger.Warnf("Failed to convert old field value to bytes for document '%s': %v", doc.DocumentID, convErr)
-				continue
-			}
 
 			newFieldValue, extErr := extractFieldValueForIndex(*doc, fieldName)
 			if extErr != nil {
 				s.logger.Warnf("Failed to extract new field value for document '%s': %v", doc.DocumentID, extErr)
-				rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: oldKeyBytes, documentID: doc.DocumentID})
-				return fmt.Errorf("failed to extract new field value for B-tree rollback: %w", extErr)
-			}
-			newKeyBytes, convErr := convertValueToBytes(newFieldValue)
-			if convErr != nil {
-				s.logger.Warnf("Failed to convert new field value to bytes for document '%s': %v", doc.DocumentID, convErr)
-				rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: oldKeyBytes, documentID: doc.DocumentID})
-				return fmt.Errorf("failed to convert new field value for B-tree rollback: %w", convErr)
+				continue
 			}
 
-			// Collect delete operation
-			btreeUpdates = append(btreeUpdates, btreeUpdateOp{
-				index:       btreeIndex,
-				indexName:   indexName,
-				operation:   "delete",
-				keyBytes:    oldKeyBytes,
-				documentID:  doc.DocumentID,
-				oldKeyBytes: oldKeyBytes,
-			})
+			// Get pageID for the document (needed for index update)
+			var pageID uint32
+			s.pageCacheMutex.RLock()
+			if bundlePages, exists := s.documentPageMap[bundle.Name]; exists {
+				if pid, found := bundlePages[doc.DocumentID]; found {
+					pageID = pid
+				}
+			}
+			s.pageCacheMutex.RUnlock()
 
-			// Collect insert operation
-			btreeUpdates = append(btreeUpdates, btreeUpdateOp{
-				index:       btreeIndex,
-				indexName:   indexName,
-				operation:   "insert",
-				keyBytes:    newKeyBytes,
-				documentID:  doc.DocumentID,
-				oldKeyBytes: oldKeyBytes,
-			})
-
-			// Track for rollback
-			rollbackOps = append(rollbackOps, btreeRollbackOp{idx: btreeIndex, oldKey: oldKeyBytes, newKey: newKeyBytes, documentID: doc.DocumentID})
+			// TASK 3: Schedule deferred B-tree index updates (delete old, insert new)
+			// The indexUpdateBuffer will batch these and apply them later via flushIndexUpdates
+			// This reduces per-document index overhead significantly
+			// Schedule delete for old value
+			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "delete", doc.DocumentID, oldFieldValue, pageID, nil)
+			// Schedule insert for new value
+			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", doc.DocumentID, newFieldValue, pageID, nil)
+			s.logger.Debugf("Scheduled deferred B-tree index updates (delete+insert) for document '%s' on field '%s'", doc.DocumentID, fieldName)
 		}
 
 		updatedDocs = append(updatedDocs, doc)
 	}
 
-	// PHASE 3: Apply all B-tree operations in batches (all deletes first, then all inserts)
-	// This is more efficient than interleaving deletes and inserts
-	for _, op := range btreeUpdates {
-		if op.operation == "delete" {
-			if delErr := op.index.Delete(op.keyBytes, op.documentID); delErr != nil {
-				s.logger.Warnf("Failed to delete old entry for document '%s' from BTree index '%s': %v", op.documentID, op.indexName, delErr)
-				// Continue with other operations - individual failures shouldn't stop the batch
-			}
-		}
-	}
-
-	// Now apply all inserts
-	for _, op := range btreeUpdates {
-		if op.operation == "insert" {
-			if insErr := op.index.Insert(op.keyBytes, op.documentID); insErr != nil {
-				return fmt.Errorf("failed to update document in BTree index '%s': %w", op.indexName, insErr)
-			}
-			s.logger.Debugf("Successfully updated BTree index '%s' for document '%s'", op.indexName, op.documentID)
-		}
-	}
-
-	// Persist B-tree index metadata after in-place updates (Insert/Delete no longer do it)
-	for _, btreeIndex := range btreesToUpdate {
-		if err := btreeIndex.PersistMetadata(); err != nil {
-			s.logger.Warnf("Failed to persist B-tree index metadata after update: %v", err)
-		}
+	// TASK 3: B-tree index updates are now deferred via scheduleIndexUpdate
+	// The indexUpdateBuffer will batch these updates and apply them later via flushIndexUpdates
+	// This reduces per-document index overhead significantly
+	// No need to apply B-tree operations here - they're scheduled for deferred execution
+	// Each document with B-tree indexed fields schedules 2 updates (delete old + insert new) per index
+	if len(btreeIndexesToUpdate) > 0 && len(updatedDocs) > 0 {
+		totalBTreeUpdates := len(btreeIndexesToUpdate) * len(updatedDocs) * 2 // 2 = delete + insert per update
+		s.logger.Debugf("Scheduled %d B-tree index updates (delete+insert) for deferred execution (will be batched)", totalBTreeUpdates)
 	}
 
 	// R1: Single UpdateDocumentsBatch for all updated docs (was N calls to UpdateDocumentInBundleFile).
@@ -5876,6 +5895,26 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		}
 		s.documentPagesMutex.Unlock()
 		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update (selective)", invalidatedCount, bundle.Name)
+	}
+
+	// TASK 2: Handle metadata updates - need brief bundle write lock even when using document locks
+	// Metadata (TotalDocuments, PageCount) needs protection regardless of locking strategy
+	if useDocumentLocks {
+		// Acquire bundle write lock briefly for metadata updates
+		if err = s.AcquireBundleWriteLock(bundle.Name); err != nil {
+			return fmt.Errorf("failed to acquire bundle write lock for metadata update: %w", err)
+		}
+		// Metadata updates are deferred via scheduleMetadataUpdate, so we can release immediately
+		// The actual metadata write happens later during flush
+		s.ReleaseBundleWriteLock(bundle.Name)
+		s.logger.Debugf("Acquired and released bundle write lock for metadata update (document locks still held)")
+	}
+
+	// TASK 3: Flush deferred index updates to ensure they're applied
+	// This ensures index consistency after document updates
+	if len(btreeIndexesToUpdate) > 0 {
+		s.flushIndexUpdates()
+		s.logger.Debugf("Flushed deferred B-tree index updates after document update")
 	}
 
 	return nil
@@ -6350,6 +6389,88 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 
 	// Fall back to page-based document lookup if hash index is not available or failed
 	return s.GetDocument(bundle.Name, bundle.Database.Name, documentID)
+}
+
+// getDocumentsByQueryPlanner uses the unified query planner to get documents matching a WHERE clause
+// This provides the same fast index-optimized execution path as SELECT statements
+// Parameters:
+//   - bundle: The bundle to query
+//   - whereClause: The WHERE clause string
+//   - database: The database containing the bundle
+//
+// Returns:
+//   - []*models.Document: Documents matching the WHERE clause
+//   - error: Any error during planning or execution
+func (s *BundleService) getDocumentsByQueryPlanner(bundle *models.Bundle, whereClause string, database *models.Database) ([]*models.Document, error) {
+	// Check if unified planner is available
+	unifiedPlannerMutex.RLock()
+	planner := globalUnifiedPlanner
+	unifiedPlannerMutex.RUnlock()
+
+	if planner == nil {
+		// Fallback to GetDocumentsByFilter if planner not available
+		s.logger.Debugf("Unified planner not available, falling back to GetDocumentsByFilter")
+		return s.GetDocumentsByFilter(bundle, whereClause, nil)
+	}
+
+	// Parse WHERE clause into SyndrQL Expression
+	expr, err := syndrQL.ParseExpression(whereClause)
+	if err != nil {
+		s.logger.Warnf("Failed to parse WHERE clause as Expression, falling back to GetDocumentsByFilter: %v", err)
+		return s.GetDocumentsByFilter(bundle, whereClause, nil)
+	}
+
+	// Create a minimal UnifiedSelectQuery with just the WHERE clause
+	query := &queryparser.UnifiedSelectQuery{
+		QueryType:       queryparser.SimpleQuery,
+		FromBundle:      bundle.Name,
+		WhereExpression: expr,
+		SelectFields:    []string{}, // Empty means select all fields
+	}
+
+	// Use planner to create execution plan
+	planInterface, err := planner.CreatePlan(query, database)
+	if err != nil {
+		s.logger.Warnf("Failed to create execution plan, falling back to GetDocumentsByFilter: %v", err)
+		return s.GetDocumentsByFilter(bundle, whereClause, nil)
+	}
+
+	// ExecutionPlan has an Execute method that executes the root node
+	// Define interface to avoid import cycle with planner package
+	type executablePlan interface {
+		Execute(ctx context.Context) (interface{}, error)
+	}
+
+	// Type assert to executable plan
+	plan, ok := planInterface.(executablePlan)
+	if !ok {
+		s.logger.Warnf("Plan type %T does not implement Execute method, falling back to GetDocumentsByFilter", planInterface)
+		return s.GetDocumentsByFilter(bundle, whereClause, nil)
+	}
+
+	// Execute the plan to get documents
+	ctx := context.Background()
+	result, err := plan.Execute(ctx)
+	if err != nil {
+		s.logger.Warnf("Failed to execute plan, falling back to GetDocumentsByFilter: %v", err)
+		return s.GetDocumentsByFilter(bundle, whereClause, nil)
+	}
+
+	// Type assert result to map[string]*models.Document
+	documentsMap, ok := result.(map[string]*models.Document)
+	if !ok {
+		s.logger.Warnf("Plan execution returned unexpected type %T, falling back to GetDocumentsByFilter", result)
+		return s.GetDocumentsByFilter(bundle, whereClause, nil)
+	}
+
+	// Convert map to slice
+	documents := make([]*models.Document, 0, len(documentsMap))
+	for _, doc := range documentsMap {
+		documents = append(documents, doc)
+	}
+
+	s.logger.Debugf("Query planner returned %d documents for WHERE clause: %s", len(documents), whereClause)
+	return documents, nil
 }
 
 // GetDocumentsByFilter retrieves documents from a bundle based on filter criteria

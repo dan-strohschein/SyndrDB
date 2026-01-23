@@ -178,10 +178,10 @@ type BundleAdapter struct {
 	bundle        *models.Bundle         // SyndrDB Bundle model
 	bundleService BundleServiceInterface // Service for loading documents
 	// Cached metadata (small and efficient)
-	totalDocuments *int   // Cached total document count
-	logger         *zap.SugaredLogger    // Logger for debugging and monitoring
-	projectionFields []string            // PROJECTION: Field names for in-memory projection (full pages cached, projection applied after retrieval)
-	scanner        interface{}          // Reference to scanner for snapshot isolation (set by scanner factory, type SmartBundleScanner)
+	totalDocuments   *int               // Cached total document count
+	logger           *zap.SugaredLogger // Logger for debugging and monitoring
+	projectionFields []string           // PROJECTION: Field names for in-memory projection (full pages cached, projection applied after retrieval)
+	scanner          interface{}        // Reference to scanner for snapshot isolation (set by scanner factory, type SmartBundleScanner)
 }
 
 // NewBundleAdapter creates a new adapter for a SyndrDB Bundle with streaming support
@@ -759,7 +759,7 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 	}
 	pageCount := ba.getSafePageCount()
 	buffer := make([]*models.Document, 0, chunkSize)
-	
+
 	// OPTIMIZATION: Avoid double copying - reuse buffer slice directly instead of copying
 	flush := func() bool {
 		if len(buffer) == 0 {
@@ -964,7 +964,7 @@ type BundleDocumentIterator struct {
 	currentPage     uint32
 	pageIDs         []string
 	pageIndex       int
-			currentPageData *models.DocumentPage // page returned from loadDocumentPage (from shared documentPages cache)
+	currentPageData *models.DocumentPage // page returned from loadDocumentPage (from shared documentPages cache)
 }
 
 func (iter *BundleDocumentIterator) HasNext() bool {

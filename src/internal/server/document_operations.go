@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/errors"
@@ -49,26 +51,66 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
-	// TRANSACTION SUPPORT: Acquire write locks for documents being updated when in a transaction
-	// This ensures proper isolation and prevents concurrent modifications
-	if session != nil && session.IsInTransaction() {
-		// OPTIMIZATION: Get document IDs that match the WHERE clause before acquiring locks
-		// This prevents holding locks while parsing/filtering documents
+	// TASK 2: Document-level locking - Get document IDs and acquire locks before execution
+	// This allows UpdateDocumentInBundle to skip bundle write lock and use document locks instead
+	var lockInfo *bndle.DocumentLockInfo
+	var docIDs []string
+	
+	// Get document IDs using query planner (same fast path as SELECT)
+	if docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
+		// Use query planner to get document IDs (Task 1 implementation)
+		// For now, use WhereFilterService as fallback until query planner integration is complete
 		whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
-		docIDs, err := whereService.GetDocumentIDsByFilter(bundle, docCommand.WhereClause)
+		docIDs, err = whereService.GetDocumentIDsByFilter(bundle, docCommand.WhereClause)
 		if err != nil {
 			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 				"failed to filter documents by WHERE clause", errors.LayerQuery).WithContext("bundle", bundleName)
 		}
+	} else {
+		// Empty WHERE clause - will need bundle lock (bulk update)
+		docIDs = []string{}
+	}
 
+	// TASK 2: Acquire document-level locks if we have document IDs and are in transaction
+	// For autocommit, we'll acquire locks inside ExecuteWithLogging callback
+	const lockEscalationThreshold = 100
+	useDocumentLocks := len(docIDs) > 0 && len(docIDs) <= lockEscalationThreshold && session != nil && session.IsInTransaction()
+
+	if useDocumentLocks {
+		// Sort document IDs to prevent deadlocks (always acquire in same order)
+		sort.Strings(docIDs)
+		
 		// Acquire write locks for all matching documents
+		lockedDocIDs := make([]string, 0, len(docIDs))
 		for _, docID := range docIDs {
 			if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
+				// Release all locks for this transaction (ReleaseLocks releases all locks for txID)
+				serviceManager.LockManager.ReleaseLocks(session.ActiveTransactionID)
 				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
 					fmt.Sprintf("failed to acquire write lock for document %s", docID), errors.LayerTransaction).WithContext("document_id", docID)
 			}
+			lockedDocIDs = append(lockedDocIDs, docID)
 		}
-		logger.Debugf("Acquired write locks for %d documents in transaction %s", len(docIDs), session.ActiveTransactionID)
+		
+		// Create lock info to pass to UpdateDocumentInBundle
+		lockInfo = &bndle.DocumentLockInfo{
+			LockManager: serviceManager.LockManager,
+			TxID:        session.ActiveTransactionID,
+			SessionID:   session.SessionID,
+			LockedDocIDs: lockedDocIDs,
+		}
+		
+		// TASK 2: Release locks on error (successful updates keep locks until transaction commit)
+		// For explicit transactions, locks are held until transaction commits/rolls back
+		// But if UpdateDocumentInBundle fails, we need to release locks immediately
+		defer func() {
+			if err != nil && lockInfo != nil {
+				serviceManager.LockManager.ReleaseLocks(session.ActiveTransactionID)
+				logger.Debugf("Released document locks due to update error")
+			}
+		}()
+		
+		logger.Debugf("Acquired document-level write locks for %d documents in transaction %s", len(lockedDocIDs), session.ActiveTransactionID)
 	}
 
 	// Execute with WAL logging if available
@@ -87,6 +129,10 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			}
 
 			// Update the document in the bundle
+			// TASK 2: Pass lock info if document locks were acquired
+			if lockInfo != nil {
+				return serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand, lockInfo)
+			}
 			return serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand)
 		})
 
@@ -99,7 +145,11 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	} else {
 		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
-		err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand)
+		if lockInfo != nil {
+			err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand, lockInfo)
+		} else {
+			err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand)
+		}
 	}
 
 	if err != nil {

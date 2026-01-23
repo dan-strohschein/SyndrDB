@@ -7,16 +7,36 @@ import (
 	defaultdb "syndrdb/src/internal/defaultDB"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
+	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/internal/query/planner"
+	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/registry"
 	"syndrdb/src/internal/storage"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
+
+// unifiedPlannerAdapter wraps UnifiedQueryPlanner to implement bundle.UnifiedPlannerInterface
+// This adapter bridges the interface{} return type requirement to avoid import cycles
+type unifiedPlannerAdapter struct {
+	planner *planner.UnifiedQueryPlanner
+}
+
+// CreatePlan implements bundle.UnifiedPlannerInterface by wrapping the actual planner
+func (a *unifiedPlannerAdapter) CreatePlan(query *queryparser.UnifiedSelectQuery, database *models.Database) (interface{}, error) {
+	// Call the actual planner
+	plan, err := a.planner.CreatePlan(query, database)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Return as interface{} to satisfy the interface
+	return plan, nil
+}
 
 // MigrationServiceInterface defines the migration service operations needed by command handlers
 type MigrationServiceInterface interface {
@@ -128,6 +148,11 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 
 		// Register planner with bundle service for schema change invalidation
 		bundle.SetQueryPlanner(unifiedPlanner)
+		
+		// Register unified planner for WHERE clause optimization in UPDATE statements
+		// Create adapter to bridge interface{} return type requirement
+		plannerAdapter := &unifiedPlannerAdapter{planner: unifiedPlanner}
+		bundle.SetUnifiedPlanner(plannerAdapter)
 
 		// PHASE 3: MVCC - Initialize conflict tracker for write-write conflict detection
 		conflictTracker := NewConflictTracker()
