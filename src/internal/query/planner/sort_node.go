@@ -37,6 +37,7 @@ import (
 	"context"
 	"fmt"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/planner/sorting"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/pkg/settings"
@@ -156,10 +157,36 @@ func NewSortNode(child ExecutionNode, orderBy *queryparser.OrderByClause, logger
 func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.Logger.Infof("Executing SortNode with %d ORDER BY fields", len(n.OrderBy.Fields))
 
-	// Execute child node to get input documents
-	documents, err := n.Child.Execute(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
+	// OPTIMIZATION: For ORDER BY queries, try streaming to avoid GetAllDocuments() lock contention
+	// Check if child is FullScanNode and we can stream documents
+	var documents map[string]*models.Document
+	var err error
+	if fullScan, ok := n.Child.(*FullScanNode); ok {
+		if fullScan.DocumentScanner != nil {
+			// Use streaming to collect documents into a slice, then convert to map
+			n.Logger.Infof("OPTIMIZATION: Using streaming collection for ORDER BY to avoid GetAllDocuments() lock contention")
+			docSlice, streamErr := n.collectDocumentsStreaming(ctx, fullScan.DocumentScanner)
+			if streamErr != nil {
+				return nil, fmt.Errorf("SortNode: streaming collection failed: %w", streamErr)
+			}
+			// Convert slice to map
+			documents = make(map[string]*models.Document, len(docSlice))
+			for _, doc := range docSlice {
+				documents[doc.DocumentID] = doc
+			}
+		} else {
+			// Fallback to regular execution
+			documents, err = n.Child.Execute(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
+			}
+		}
+	} else {
+		// Regular execution path
+		documents, err = n.Child.Execute(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
+		}
 	}
 
 	n.Logger.Debugf("SortNode received %d documents from child", len(documents))
@@ -221,6 +248,72 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 	return sortedMap, nil
 }
 
+// collectDocumentsStreaming collects documents using streaming to avoid GetAllDocuments() lock contention
+// OPTIMIZATION: Uses ScanDocumentChunks to stream documents into a slice
+func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner documentscanner.DocumentScannerInterface) ([]*models.Document, error) {
+	n.Logger.Debugf("Collecting documents via streaming (avoids GetAllDocuments() lock contention)")
+
+	// Get bundle interface to use ScanDocumentChunks
+	var bundleInterface documentscanner.BundleInterface
+	if smartScanner, ok := scanner.(interface {
+		GetBundle() documentscanner.BundleInterface
+	}); ok {
+		bundleInterface = smartScanner.GetBundle()
+	} else {
+		return nil, fmt.Errorf("scanner does not provide BundleInterface for streaming")
+	}
+
+	// Collect documents into a slice
+	docSlice := make([]*models.Document, 0, 10000) // Pre-allocate with reasonable capacity
+
+	// Memory tracking: Get tracker from context
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+	docCount := 0
+
+	// Stream documents in chunks to avoid loading all at once
+	chunkSize := 4096
+	err := bundleInterface.ScanDocumentChunks(ctx, chunkSize, func(chunk []*models.Document) bool {
+		// Process each document in the chunk
+		for _, doc := range chunk {
+			// Check for cancellation
+			select {
+			case <-ctx.Done():
+				return false
+			default:
+			}
+
+			// Skip nil documents
+			if doc == nil {
+				continue
+			}
+
+			docCount++
+
+			// Memory tracking: Sample every 100th document
+			if memoryTracker != nil && docCount%100 == 0 {
+				docSize := models.EstimateDocumentSize(doc)
+				if err := memoryTracker.Sample(docSize, docCount); err != nil {
+					n.Logger.Warnf("Memory tracking error: %v", err)
+					// Continue processing but log warning
+				}
+			}
+
+			// Append to slice (will grow if needed)
+			docSlice = append(docSlice, doc)
+		}
+
+		return true // Continue to next chunk
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("streaming document collection failed: %w", err)
+	}
+
+	n.Logger.Debugf("Streaming collection gathered %d documents", len(docSlice))
+
+	return docSlice, nil
+}
+
 // ExecuteWithLimit performs Top-N heapsort when LIMIT is known
 // This is called by LimitNode to enable the Top-N optimization
 //
@@ -234,10 +327,35 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 func (n *SortNode) ExecuteWithLimit(ctx context.Context, limit int) ([]*models.Document, error) {
 	n.Logger.Infof("Executing SortNode with LIMIT %d optimization", limit)
 
-	// Execute child node to get input documents
-	documents, err := n.Child.Execute(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
+	// OPTIMIZATION: For ORDER BY queries with LIMIT, try streaming to avoid GetAllDocuments() lock contention
+	var documents map[string]*models.Document
+	var err error
+	if fullScan, ok := n.Child.(*FullScanNode); ok {
+		if fullScan.DocumentScanner != nil {
+			// Use streaming to collect documents into a slice
+			n.Logger.Infof("OPTIMIZATION: Using streaming collection for ORDER BY with LIMIT to avoid GetAllDocuments() lock contention")
+			docSlice, streamErr := n.collectDocumentsStreaming(ctx, fullScan.DocumentScanner)
+			if streamErr != nil {
+				return nil, fmt.Errorf("SortNode: streaming collection failed: %w", streamErr)
+			}
+			// Convert slice to map for compatibility with existing sort logic
+			documents = make(map[string]*models.Document, len(docSlice))
+			for _, doc := range docSlice {
+				documents[doc.DocumentID] = doc
+			}
+		} else {
+			// Fallback to regular execution
+			documents, err = n.Child.Execute(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
+			}
+		}
+	} else {
+		// Regular execution path
+		documents, err = n.Child.Execute(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
+		}
 	}
 
 	n.Logger.Debugf("SortNode received %d documents from child", len(documents))

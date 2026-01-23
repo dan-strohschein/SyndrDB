@@ -295,19 +295,48 @@ executeChild:
 
 	switch n.executionStrategy {
 	case queryparser.HashAggregate:
-		documents, err = n.Child.Execute(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
-		}
-		totalInput = len(documents)
-		n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
-		if totalInput == 0 {
-			isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-			if !isAggregateOnly {
-				return documents, nil
+		// OPTIMIZATION: For GROUP BY queries, try streaming to avoid GetAllDocuments() lock contention
+		// Check if child is FullScanNode and we can stream documents
+		if fullScan, ok := n.Child.(*FullScanNode); ok && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
+			if fullScan.DocumentScanner != nil {
+				// Use streaming aggregation to avoid loading all documents at once
+				n.Logger.Infof("OPTIMIZATION: Using streaming aggregation for GROUP BY to avoid GetAllDocuments() lock contention")
+				groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
+				if err != nil {
+					return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
+				}
+			} else {
+				// Fallback to regular execution
+				documents, err = n.Child.Execute(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+				}
+				totalInput = len(documents)
+				n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+				if totalInput == 0 {
+					isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+					if !isAggregateOnly {
+						return documents, nil
+					}
+				}
+				groupResults, err = n.executeHashAggregate(ctx, documents)
 			}
+		} else {
+			// Regular execution path
+			documents, err = n.Child.Execute(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+			}
+			totalInput = len(documents)
+			n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+			if totalInput == 0 {
+				isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+				if !isAggregateOnly {
+					return documents, nil
+				}
+			}
+			groupResults, err = n.executeHashAggregate(ctx, documents)
 		}
-		groupResults, err = n.executeHashAggregate(ctx, documents)
 
 	case queryparser.SortGroupAggregate:
 		var preSorted []*models.Document
@@ -475,6 +504,98 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 	n.Logger.Debugf("Hash aggregate created %d groups from %d documents", len(groupMap), len(documents))
 
 	return groupMap, nil
+}
+
+// executeHashAggregateStreaming implements hash-based aggregation using streaming documents
+// OPTIMIZATION: Uses ScanDocumentChunks to avoid GetAllDocuments() lock contention
+// This is critical for GROUP BY queries under high concurrency (300+ connections)
+func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, scanner documentscanner.DocumentScannerInterface) (map[groupKey]*groupResult, int, error) {
+	n.Logger.Debugf("Executing Hash Aggregate strategy with streaming (avoids GetAllDocuments() lock contention)")
+
+	groupMap := make(map[groupKey]*groupResult)
+	totalInput := 0
+
+	// Get bundle interface to use ScanDocumentChunks
+	var bundleInterface documentscanner.BundleInterface
+	if smartScanner, ok := scanner.(interface {
+		GetBundle() documentscanner.BundleInterface
+	}); ok {
+		bundleInterface = smartScanner.GetBundle()
+	} else {
+		return nil, 0, fmt.Errorf("scanner does not provide BundleInterface for streaming")
+	}
+
+	// Memory tracking: Get tracker from context
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+	docCount := 0
+
+	// Stream documents in chunks to avoid loading all at once
+	chunkSize := 4096
+	err := bundleInterface.ScanDocumentChunks(ctx, chunkSize, func(chunk []*models.Document) bool {
+		// Process each document in the chunk
+		for _, doc := range chunk {
+			// Check for cancellation
+			select {
+			case <-ctx.Done():
+				return false
+			default:
+			}
+
+			// Skip nil documents
+			if doc == nil {
+				continue
+			}
+
+			docCount++
+			totalInput++
+
+			// Memory tracking: Sample every 100th document
+			if memoryTracker != nil && docCount%100 == 0 {
+				docSize := models.EstimateDocumentSize(doc)
+				if err := memoryTracker.Sample(docSize, docCount); err != nil {
+					n.Logger.Warnf("Memory tracking error: %v", err)
+					// Continue processing but log warning
+				}
+			}
+
+			// Create group key from GROUP BY fields
+			gKey, groupFields, err := n.createGroupKey(doc)
+			if err != nil {
+				n.Logger.Warnf("Error creating group key for document %s: %v", doc.DocumentID, err)
+				continue
+			}
+
+			// Get or create group result
+			gResult, exists := groupMap[gKey]
+			if !exists {
+				gResult = &groupResult{
+					GroupFields:     groupFields,
+					AggregateValues: make(map[string]*aggregateValue),
+				}
+				// Initialize aggregate values
+				for _, aggFunc := range n.AggregateFields {
+					gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+				}
+				groupMap[gKey] = gResult
+			}
+
+			// Update aggregates
+			err = n.updateAggregates(gResult, doc)
+			if err != nil {
+				n.Logger.Warnf("Error updating aggregates for document %s: %v", doc.DocumentID, err)
+			}
+		}
+
+		return true // Continue to next chunk
+	})
+
+	if err != nil {
+		return nil, totalInput, fmt.Errorf("streaming aggregation failed: %w", err)
+	}
+
+	n.Logger.Debugf("Streaming hash aggregate created %d groups from %d documents", len(groupMap), totalInput)
+
+	return groupMap, totalInput, nil
 }
 
 // executeSortGroupAggregate implements sort-based aggregation strategy.
