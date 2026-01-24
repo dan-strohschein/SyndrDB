@@ -120,10 +120,10 @@ type btreeRollbackOp struct {
 // DocumentLockInfo contains information about pre-acquired document locks
 // and optional MVCC version metadata.
 type DocumentLockInfo struct {
-	LockManager  interface{}       // *storage.LockManager - use interface{} to avoid import cycle
-	TxID         string            // Transaction ID for the locks
-	SessionID    string            // Session ID for the locks
-	LockedDocIDs []string          // Document IDs that are already locked
+	LockManager  interface{} // *storage.LockManager - use interface{} to avoid import cycle
+	TxID         string      // Transaction ID for the locks
+	SessionID    string      // Session ID for the locks
+	LockedDocIDs []string    // Document IDs that are already locked
 	// VersionTxID is the WAL transaction ID used for CreatedByTxID (Phase 2b).
 	// When set, prefer over TxID for MVCC version metadata so versioning matches snapshot.
 	VersionTxID string
@@ -5752,14 +5752,13 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	// Release read lock before acquiring write lock
 	s.ReleaseBundleReadLock(bundle.Name)
 
-	// TASK 2: Document-level locking - use document locks if provided, otherwise use bundle write lock
+	// TASK 2: Document-level locking - use document locks if provided, otherwise use bundle write lock.
+	// MUST match document_operations.lockEscalationThreshold (100_000). Phase 5: no bundle-level locking for typical updates.
 	var useDocumentLocks bool
 	var lockedDocIDsSet map[string]bool
-	const lockEscalationThreshold = 1000 // Use bundle lock for bulk updates (>1000 docs)
+	const lockEscalationThreshold = 100_000
 
 	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
-		// Document locks are already acquired - use them instead of bundle write lock
-		// But only if document count is below escalation threshold
 		if len(docIDs) <= lockEscalationThreshold {
 			useDocumentLocks = true
 			lockedDocIDsSet = make(map[string]bool, len(lockInfo[0].LockedDocIDs))
@@ -6104,18 +6103,18 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 	}
 	s.logger.Debugf("[REFINT] Referential integrity validated successfully for %d document(s) in bundle '%s'", len(docIDs), bundle.Name)
 
-	// Delegate to internal delete logic (lock already held)
-	// Use individual metadata updates for WHERE clause deletes (skipMetadataUpdate=false)
-	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, false)
+	// Delegate to internal delete logic (lock already held when useDocLocks)
+	// Pass lockInfo when using document-level locks so we skip storage bundle lock (AppendDeletionMarkersBatchWithLocks).
+	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, false, lockInfo...)
 }
 
 // deleteDocumentsInternal performs the actual document deletion logic without acquiring locks.
-// This method should only be called by public methods that have already acquired necessary locks.
-// Following the Single Responsibility Principle: handles physical deletion, cache invalidation, and index updates.
+// When lockInfo is provided with LockedDocIDs, uses AppendDeletionMarkersBatchWithLocks (no bundle-level lock).
 //
 // Parameters:
 //   - skipMetadataUpdate: if true, caller is responsible for scheduling metadata updates (used for bulk operations)
-func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, skipMetadataUpdate bool) error {
+//   - lockInfo: optional; when present with LockedDocIDs, storage skips bundle write lock (Phase 4).
+func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, skipMetadataUpdate bool, lockInfo ...*DocumentLockInfo) error {
 	// D1: Use AppendDeletionMarkersBatch for all deletes (threshold 1). Removes N×DeleteDocumentFromBundleFile,
 	// N×verifyDocumentExistsStreaming, N×appendDeletionMarker, N×lock. Delete is idempotent: tombstones for
 	// non-existent docs are acceptable in append-only storage; callers should pass IDs from a valid WHERE result.
@@ -6182,8 +6181,12 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	}
 
 	// Write ALL deletion markers in one batch. D2: delete is idempotent.
-	// TODO Phase 4: MVCC tombstones (DeletedByTxID) with dual support for 0xDEADDEAD; create MVCC tombstones for new deletes.
-	err = s.store.AppendDeletionMarkersBatch(bundle, docIDs)
+	// When lockInfo has LockedDocIDs, use WithLocks to skip storage bundle lock (no bundle-level locking).
+	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
+		err = s.store.AppendDeletionMarkersBatchWithLocks(bundle, docIDs, lockInfo[0].LockedDocIDs)
+	} else {
+		err = s.store.AppendDeletionMarkersBatch(bundle, docIDs)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to append batch deletion markers: %w", err)
 	}

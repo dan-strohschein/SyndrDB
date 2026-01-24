@@ -122,7 +122,8 @@ type BundleStore interface {
 	UpdateDocumentsBatch(bundle *models.Bundle, documents []*models.Document) error
 	UpdateDocumentsBatchWithLocks(bundle *models.Bundle, documents []*models.Document, preLockedDocIDs []string) error // Document-level locking
 	DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error
-	AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error // Batch deletion for performance
+	AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error
+	AppendDeletionMarkersBatchWithLocks(bundle *models.Bundle, documentIDs []string, preLockedDocIDs []string) error // No bundle lock when doc-level locks held
 
 	// Returns the physical page ID where the document was stored
 	AddDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error)
@@ -1533,18 +1534,9 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 	return nil
 }
 
-// AppendDeletionMarkersBatch writes multiple deletion markers in a single file operation.
-// TODO Phase 3: route tombstones through the write buffer (D8) for single Flush/Sync with ADD/UPDATE.
-// This is CRITICAL for bulk delete performance - opens file once, writes all markers, syncs once.
-//
-// R7 LOCK ORDER: This acquires getWriteLock(bundle.Name) (storage). Callers using application-level
-// AcquireBundleWriteLock(bundle.Name) (BundleService) must acquire the application lock FIRST, then
-// call AppendDeletionMarkersBatch. Same as UpdateDocumentInBundle -> UpdateDocumentsBatch.
-func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error {
-	// CRITICAL: Acquire storage write lock (application lock must already be held by caller)
-	lock := b.getWriteLock(bundle.Name)
-	lock.Lock()
-	defer lock.Unlock()
+// appendDeletionMarkersBatchCore performs the actual tombstone append and metadata update.
+// Caller must hold getWriteLock(bundle.Name) unless using document-level locks (WithLocks path).
+func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bundle, documentIDs []string) error {
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 
@@ -1633,8 +1625,34 @@ func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, 
 			"newPageCount", bundle.PageCount)
 	}
 
-	// CRITICAL: Lock is released here by defer, ensuring atomic visibility
 	return nil
+}
+
+// AppendDeletionMarkersBatch writes multiple deletion markers in a single file operation.
+// Acquires getWriteLock(bundle). Use AppendDeletionMarkersBatchWithLocks when document-level locks are held.
+func (b *BundleStorageEngine) AppendDeletionMarkersBatch(bundle *models.Bundle, documentIDs []string) error {
+	lock := b.getWriteLock(bundle.Name)
+	lock.Lock()
+	defer lock.Unlock()
+	return b.appendDeletionMarkersBatchCore(bundle, documentIDs)
+}
+
+// AppendDeletionMarkersBatchWithLocks appends tombstones without bundle write lock when preLockedDocIDs matches.
+// Enables concurrent DELETEs with UPDATE/ADD (no bundle-level locking). Falls back to AppendDeletionMarkersBatch otherwise.
+func (b *BundleStorageEngine) AppendDeletionMarkersBatchWithLocks(bundle *models.Bundle, documentIDs []string, preLockedDocIDs []string) error {
+	if len(preLockedDocIDs) == 0 || len(preLockedDocIDs) != len(documentIDs) {
+		return b.AppendDeletionMarkersBatch(bundle, documentIDs)
+	}
+	set := make(map[string]bool, len(preLockedDocIDs))
+	for _, id := range preLockedDocIDs {
+		set[id] = true
+	}
+	for _, id := range documentIDs {
+		if !set[id] {
+			return b.AppendDeletionMarkersBatch(bundle, documentIDs)
+		}
+	}
+	return b.appendDeletionMarkersBatchCore(bundle, documentIDs)
 }
 
 // this version of the functino uses the file manager to add a document to a bundle file
