@@ -76,8 +76,11 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	// DOCUMENT-LEVEL LOCKING: Extended to autocommit operations for better concurrent write throughput
 	// For explicit transactions, locks are held until commit/rollback
 	// For autocommit, locks are released after the operation completes
-	const lockEscalationThreshold = 100
+	const lockEscalationThreshold = 1000 // Increased from 100 to handle larger category queries
 	useDocumentLocks := len(docIDs) > 0 && len(docIDs) <= lockEscalationThreshold
+	
+	logger.Debugf("UPDATE document locking decision: docIDs=%d, threshold=%d, useDocumentLocks=%v",
+		len(docIDs), lockEscalationThreshold, useDocumentLocks)
 	
 	// Determine txID and sessionID for locking
 	var lockTxID, lockSessionID string

@@ -5617,9 +5617,27 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	}
 
 	// TASK 1: Use query planner for WHERE clause processing (same fast path as SELECT)
-	// This provides index-optimized execution with cost estimation and plan caching
+	// OPTIMIZATION: If lockInfo contains pre-fetched document IDs, use those directly
+	// to avoid duplicate WHERE clause evaluation (document_operations.go already did it)
 	var filteredDocs []*models.Document
-	if docCommand.WhereClause != "" && docCommand.WhereClause != strings.TrimSpace("") {
+	
+	// Check if we have pre-fetched document IDs from document_operations.go
+	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
+		// OPTIMIZATION: Fetch documents by ID instead of re-running WHERE clause
+		// This eliminates duplicate I/O from running the same WHERE query twice
+		filteredDocs = make([]*models.Document, 0, len(lockInfo[0].LockedDocIDs))
+		for _, docID := range lockInfo[0].LockedDocIDs {
+			doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
+			if err != nil {
+				s.logger.Warnf("Failed to get document %s: %v (skipping)", docID, err)
+				continue
+			}
+			if doc != nil {
+				filteredDocs = append(filteredDocs, doc)
+			}
+		}
+		s.logger.Debugf("OPTIMIZATION: Used pre-fetched document IDs (%d docs) instead of re-running WHERE query", len(filteredDocs))
+	} else if docCommand.WhereClause != "" && docCommand.WhereClause != strings.TrimSpace("") {
 		// Use query planner for optimal WHERE clause execution
 		filteredDocs, err = s.getDocumentsByQueryPlanner(bundle, docCommand.WhereClause, database)
 		if err != nil {
@@ -5713,7 +5731,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// TASK 2: Document-level locking - use document locks if provided, otherwise use bundle write lock
 	var useDocumentLocks bool
 	var lockedDocIDsSet map[string]bool
-	const lockEscalationThreshold = 100 // Use bundle lock for bulk updates (>100 docs)
+	const lockEscalationThreshold = 1000 // Use bundle lock for bulk updates (>1000 docs)
 
 	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
 		// Document locks are already acquired - use them instead of bundle write lock
@@ -5933,18 +5951,9 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update (selective)", invalidatedCount, bundle.Name)
 	}
 
-	// TASK 2: Handle metadata updates - need brief bundle write lock even when using document locks
-	// Metadata (TotalDocuments, PageCount) needs protection regardless of locking strategy
-	if useDocumentLocks {
-		// Acquire bundle write lock briefly for metadata updates
-		if err = s.AcquireBundleWriteLock(bundle.Name); err != nil {
-			return fmt.Errorf("failed to acquire bundle write lock for metadata update: %w", err)
-		}
-		// Metadata updates are deferred via scheduleMetadataUpdate, so we can release immediately
-		// The actual metadata write happens later during flush
-		s.ReleaseBundleWriteLock(bundle.Name)
-		s.logger.Debugf("Acquired and released bundle write lock for metadata update (document locks still held)")
-	}
+	// NOTE: Metadata updates (TotalDocuments, PageCount) are handled via scheduleMetadataUpdate
+	// which is atomic and uses its own mutex. No bundle write lock needed here.
+	// The deferred metadata flush handles concurrent access safely.
 
 	// TASK 3: Flush deferred index updates to ensure they're applied
 	// This ensures index consistency after document updates
