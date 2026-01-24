@@ -54,29 +54,24 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
-	// TASK 2: Document-level locking - Get document IDs and acquire locks before execution
-	// This allows UpdateDocumentInBundle to skip bundle write lock and use document locks instead
+	// TASK 2: Document-level locking - Get document IDs (and optionally full docs) and acquire locks
+	// Pre-fetched docs are passed to UpdateDocumentInBundle so it never re-fetches by GetDocument(docID),
+	// avoiding index→page lookup failures (e.g. after compaction) and ensuring accurate updates.
 	var lockInfo *bndle.DocumentLockInfo
 	var docIDs []string
-	
-	// OPTIMIZATION: Skip pre-fetch for large bundles where we'd use bundle-level locking anyway
-	// Document-level locking only helps when count <= threshold. For large bundles, the pre-fetch
-	// is wasted work because UpdateDocumentInBundle will re-scan anyway.
-	// Threshold aligns with lockEscalationThreshold (Phase 5: significantly increased).
+	var preFetchedDocs []*models.Document
+
 	preFetchThreshold := int64(200_000)
 	shouldPreFetch := bundle.TotalDocuments <= preFetchThreshold
-	
-	// Get document IDs using query planner (same fast path as SELECT)
+
 	if shouldPreFetch && docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
-		// Use query planner to get document IDs (Task 1 implementation)
-		// For now, use WhereFilterService as fallback until query planner integration is complete
 		whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
-		docIDs, err = whereService.GetDocumentIDsByFilter(bundle, docCommand.WhereClause)
+		docIDs, preFetchedDocs, err = whereService.GetDocumentsAndIDsByFilter(bundle, docCommand.WhereClause)
 		if err != nil {
 			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 				"failed to filter documents by WHERE clause", errors.LayerQuery).WithContext("bundle", bundleName)
 		}
-		logger.Debugf("Pre-fetched %d document IDs for potential document-level locking", len(docIDs))
+		logger.Debugf("Pre-fetched %d document IDs and docs for potential document-level locking", len(docIDs))
 	} else if !shouldPreFetch {
 		// Large bundle - skip pre-fetch, use bundle-level locking
 		// UpdateDocumentInBundle will do a single scan with bundle lock (more efficient)
@@ -130,12 +125,13 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			lockedDocIDs = append(lockedDocIDs, docID)
 		}
 		
-		// Create lock info to pass to UpdateDocumentInBundle
+		// Create lock info to pass to UpdateDocumentInBundle (include pre-fetched docs to avoid GetDocument-by-ID)
 		lockInfo = &bndle.DocumentLockInfo{
-			LockManager:  serviceManager.LockManager,
-			TxID:         lockTxID,
-			SessionID:    lockSessionID,
-			LockedDocIDs: lockedDocIDs,
+			LockManager:    serviceManager.LockManager,
+			TxID:           lockTxID,
+			SessionID:      lockSessionID,
+			LockedDocIDs:   lockedDocIDs,
+			PreFetchedDocs: preFetchedDocs,
 		}
 		
 		// TASK 2: Release locks on error or for autocommit

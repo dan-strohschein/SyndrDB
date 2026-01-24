@@ -54,31 +54,36 @@ func NewWhereFilterService(bundleService *BundleService, logger *zap.SugaredLogg
 //	}
 //	// docIDs = ["doc1", "doc2", "doc3"]
 func (w *WhereFilterService) GetDocumentIDsByFilter(bundle *models.Bundle, whereClause string) ([]string, error) {
+	docIDs, _, err := w.GetDocumentsAndIDsByFilter(bundle, whereClause)
+	return docIDs, err
+}
+
+// GetDocumentsAndIDsByFilter returns both document IDs and full documents for the WHERE clause.
+// Used by UPDATE with document-level locks: one WHERE scan yields docs+IDs; we pass docs to
+// UpdateDocumentInBundle so it never re-fetches by GetDocument(docID), avoiding index→page
+// lookup failures (e.g. after compaction) and ensuring accurate updates.
+func (w *WhereFilterService) GetDocumentsAndIDsByFilter(bundle *models.Bundle, whereClause string) ([]string, []*models.Document, error) {
 	if bundle == nil {
-		return nil, fmt.Errorf("bundle cannot be nil")
+		return nil, nil, fmt.Errorf("bundle cannot be nil")
 	}
 
-	w.logger.Debugf("Filtering documents by WHERE clause for IDs: %s", whereClause)
+	w.logger.Debugf("Filtering documents by WHERE clause for docs+IDs: %s", whereClause)
 
-	// Use existing GetDocumentsByFilter which handles:
-	// - Empty WHERE clauses (returns all)
-	// - Index optimization via planner
-	// - Page-based loading
 	documents, err := w.bundleService.GetDocumentsByFilter(bundle, whereClause, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to filter documents: %w", err)
+		return nil, nil, fmt.Errorf("failed to filter documents: %w", err)
 	}
 
-	// Extract only the DocumentIDs (this is the optimization point)
-	// We load documents but immediately extract IDs, avoiding further processing
 	docIDs := make([]string, 0, len(documents))
+	docs := make([]*models.Document, 0, len(documents))
 	for _, doc := range documents {
 		docIDs = append(docIDs, doc.DocumentID)
+		docs = append(docs, doc)
 	}
 
 	w.logger.Debugf("WHERE filter matched %d documents in bundle '%s'", len(docIDs), bundle.Name)
 
-	return docIDs, nil
+	return docIDs, docs, nil
 }
 
 // GetDocumentCountByFilter returns only the count of documents matching the WHERE clause

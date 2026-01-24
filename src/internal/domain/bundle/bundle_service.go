@@ -120,13 +120,17 @@ type btreeRollbackOp struct {
 // DocumentLockInfo contains information about pre-acquired document locks
 // and optional MVCC version metadata.
 type DocumentLockInfo struct {
-	LockManager  interface{} // *storage.LockManager - use interface{} to avoid import cycle
-	TxID         string      // Transaction ID for the locks
-	SessionID    string      // Session ID for the locks
-	LockedDocIDs []string    // Document IDs that are already locked
+	LockManager  interface{}       // *storage.LockManager - use interface{} to avoid import cycle
+	TxID         string            // Transaction ID for the locks
+	SessionID    string            // Session ID for the locks
+	LockedDocIDs []string          // Document IDs that are already locked
 	// VersionTxID is the WAL transaction ID used for CreatedByTxID (Phase 2b).
 	// When set, prefer over TxID for MVCC version metadata so versioning matches snapshot.
 	VersionTxID string
+	// PreFetchedDocs, when set, are the full documents matching LockedDocIDs from a single WHERE scan.
+	// UpdateDocumentInBundle uses these directly instead of GetDocument-by-ID, avoiding index→page
+	// lookup failures (e.g. after compaction) and duplicate I/O. Ensures accurate updates.
+	PreFetchedDocs []*models.Document
 }
 
 // TypeConverter represents a fast type conversion function
@@ -5632,23 +5636,31 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	// could delete/modify documents, making the IDs stale.
 	var filteredDocs []*models.Document
 
-	// Check if we have pre-fetched document IDs WITH actual locks from document_operations.go
-	if len(lockInfo) > 0 && lockInfo[0] != nil && lockInfo[0].LockManager != nil && len(lockInfo[0].LockedDocIDs) > 0 {
-		// OPTIMIZATION: Fetch documents by ID instead of re-running WHERE clause
-		// This eliminates duplicate I/O from running the same WHERE query twice
-		// Safe because document locks prevent concurrent modifications
-		filteredDocs = make([]*models.Document, 0, len(lockInfo[0].LockedDocIDs))
-		for _, docID := range lockInfo[0].LockedDocIDs {
-			doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
-			if err != nil {
-				s.logger.Warnf("Failed to get document %s: %v (skipping)", docID, err)
-				continue
-			}
-			if doc != nil {
+	// Use pre-fetched docs when available (avoids GetDocument-by-ID and index→page lookup failures)
+	li := len(lockInfo) > 0 && lockInfo[0] != nil
+	hasLocks := li && lockInfo[0].LockManager != nil && len(lockInfo[0].LockedDocIDs) > 0
+	hasPreFetched := li && len(lockInfo[0].PreFetchedDocs) > 0
+
+	if hasLocks && hasPreFetched {
+		// Use PreFetchedDocs from single WHERE scan; no GetDocument-by-ID. Ensures accurate updates.
+		lockedSet := make(map[string]bool, len(lockInfo[0].LockedDocIDs))
+		for _, id := range lockInfo[0].LockedDocIDs {
+			lockedSet[id] = true
+		}
+		filteredDocs = make([]*models.Document, 0, len(lockInfo[0].PreFetchedDocs))
+		for _, doc := range lockInfo[0].PreFetchedDocs {
+			if doc != nil && lockedSet[doc.DocumentID] {
 				filteredDocs = append(filteredDocs, doc)
 			}
 		}
-		s.logger.Debugf("OPTIMIZATION: Used pre-fetched document IDs (%d docs) instead of re-running WHERE query", len(filteredDocs))
+		s.logger.Debugf("OPTIMIZATION: Used pre-fetched documents (%d docs), no GetDocument-by-ID", len(filteredDocs))
+	} else if hasLocks && docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
+		// Locked IDs but no PreFetchedDocs (e.g. legacy caller): re-run WHERE via planner. Do not use GetDocument-by-ID.
+		filteredDocs, err = s.getDocumentsByQueryPlanner(ctx, bundle, docCommand.WhereClause, database)
+		if err != nil {
+			s.ReleaseBundleReadLock(bundle.Name)
+			return fmt.Errorf("failed to get documents using query planner: %w", err)
+		}
 	} else if docCommand.WhereClause != "" && docCommand.WhereClause != strings.TrimSpace("") {
 		// Use query planner for optimal WHERE clause execution (ctx may carry snapshot for MVCC)
 		filteredDocs, err = s.getDocumentsByQueryPlanner(ctx, bundle, docCommand.WhereClause, database)
