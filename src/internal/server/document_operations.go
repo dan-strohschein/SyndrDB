@@ -125,7 +125,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		// For explicit transactions: locks are held until transaction commits/rolls back (unless error)
 		// For autocommit: always release locks after operation completes
 		defer func() {
-			if lockInfo != nil && (err != nil || isAutocommit) {
+			if lockInfo != nil && lockInfo.LockManager != nil && (err != nil || isAutocommit) {
 				serviceManager.LockManager.ReleaseLocks(lockTxID)
 				if isAutocommit {
 					logger.Debugf("Released document locks after autocommit operation")
@@ -140,6 +140,16 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		} else {
 			logger.Debugf("Acquired document-level write locks for %d documents in transaction %s", len(lockedDocIDs), lockTxID)
 		}
+	} else if len(docIDs) > 0 {
+		// OPTIMIZATION: Even without document locks, pass docIDs to avoid double WHERE scan
+		// This allows UpdateDocumentInBundle to fetch documents by ID instead of re-running WHERE
+		lockInfo = &bndle.DocumentLockInfo{
+			LockManager:  nil, // No actual locks acquired
+			TxID:         "",
+			SessionID:    "",
+			LockedDocIDs: docIDs, // Pass IDs for direct document fetch
+		}
+		logger.Debugf("Passing %d document IDs to UpdateDocumentInBundle (no locks, count > threshold)", len(docIDs))
 	}
 
 	// Execute with WAL logging if available

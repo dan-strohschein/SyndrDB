@@ -296,36 +296,26 @@ func (pb *PlanBuilder) addDistinctNode(
 
 // addSortNode wraps tree with sorting
 // PHASE 3: Sorting composition
-// BUSINESS RULE: Always adds sorting for deterministic ordering
-// - If query has ORDER BY: use user's specified sort fields
-// - If no ORDER BY: default to CreatedAt ASC for insertion-order results
+// OPTIMIZATION: Only sort when user explicitly specifies ORDER BY
+// Sorting is expensive O(n log n) and unnecessary for:
+// - Write operations (UPDATE/DELETE) - document order doesn't matter
+// - SELECT without ORDER BY - user didn't request ordering
 func (pb *PlanBuilder) addSortNode(
 	child ExecutionNode,
 	query *queryparser.UnifiedSelectQuery,
 ) (ExecutionNode, error) {
 
-	var orderBy *queryparser.OrderByClause
-
-	if query.HasOrderBy() {
-		// Use user-specified ORDER BY
-		orderBy = query.OrderBy
-	} else {
-		// Default to CreatedAt ASC for deterministic insertion-order results
-		orderBy = &queryparser.OrderByClause{
-			Fields: []queryparser.OrderByField{
-				{
-					FieldName:     "CreatedAt",
-					Direction:     queryparser.SortAsc,
-					NullsPosition: queryparser.NullsLast,
-				},
-			},
-		}
+	// Only add sort if user explicitly specified ORDER BY
+	// Skip default sorting - it's expensive and unnecessary for write operations
+	if !query.HasOrderBy() {
+		pb.logger.Debug("No ORDER BY specified, skipping sort node (optimization for write operations)")
+		return child, nil
 	}
 
-	// Create sort node with ORDER BY clause
+	// Create sort node with user-specified ORDER BY clause
 	sortNode := NewSortNode(
 		child,
-		orderBy,
+		query.OrderBy,
 		pb.logger,
 	)
 

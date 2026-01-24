@@ -5620,7 +5620,7 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// OPTIMIZATION: If lockInfo contains pre-fetched document IDs, use those directly
 	// to avoid duplicate WHERE clause evaluation (document_operations.go already did it)
 	var filteredDocs []*models.Document
-	
+
 	// Check if we have pre-fetched document IDs from document_operations.go
 	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
 		// OPTIMIZATION: Fetch documents by ID instead of re-running WHERE clause
@@ -5885,17 +5885,18 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// hold AcquireBundleWriteLock; they use only the storage lock. No deadlock: no path holds application then
 	// waits on storage while another holds storage then waits on application.
 	//
-	// DOCUMENT-LEVEL LOCKING: Use UpdateDocumentsBatchWithLocks when caller has pre-acquired document locks
+	// DOCUMENT-LEVEL LOCKING: Use UpdateDocumentsBatchWithLocks ONLY when caller has ACTUAL pre-acquired document locks
+	// (LockManager != nil). If lockInfo only contains docIDs for optimization (LockManager == nil), use bundle lock.
 	// This enables concurrent writes to different documents within the same bundle
-	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
-		// Use document-level locks for concurrent writes
+	if len(lockInfo) > 0 && lockInfo[0] != nil && lockInfo[0].LockManager != nil && len(lockInfo[0].LockedDocIDs) > 0 {
+		// Use document-level locks for concurrent writes (actual locks were acquired by caller)
 		err = s.store.UpdateDocumentsBatchWithLocks(bundle, updatedDocs, lockInfo[0].LockedDocIDs)
 		if err != nil {
 			return fmt.Errorf("failed to update documents with document locks: %w", err)
 		}
 		s.logger.Debugf("Updated %d documents using document-level locks", len(updatedDocs))
 	} else {
-		// Fall back to bundle-level lock
+		// Fall back to bundle-level lock (either no lockInfo, or lockInfo only has docIDs for optimization)
 		err = s.store.UpdateDocumentsBatch(bundle, updatedDocs)
 		if err != nil {
 			return fmt.Errorf("failed to update documents in bundle: %w", err)
