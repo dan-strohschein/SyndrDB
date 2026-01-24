@@ -697,10 +697,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs))
 
-			// TRANSACTION SUPPORT: Acquire write locks for documents being deleted when in a transaction
-			// This ensures proper isolation and prevents concurrent modifications
-			if session != nil && session.IsInTransaction() {
-				// Acquire write locks for all matching documents
+			// PHASE 4: Document-level locks for DELETE when in transaction. Hold until COMMIT (strict 2PL).
+			var deleteLockInfo *bndle.DocumentLockInfo
+			if session != nil && session.IsInTransaction() && serviceManager.LockManager != nil && len(docIDs) > 0 {
 				for _, docID := range docIDs {
 					if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
 						return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
@@ -709,24 +708,27 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					}
 				}
 				logger.Debugf("Acquired write locks for %d documents in transaction %s", len(docIDs), session.ActiveTransactionID)
+				deleteLockInfo = &bndle.DocumentLockInfo{
+					LockManager:  serviceManager.LockManager,
+					TxID:         session.ActiveTransactionID,
+					SessionID:    session.SessionID,
+					LockedDocIDs: docIDs,
+				}
 			}
 
-			// Execute with WAL logging if available
 			if serviceManager.WALManager != nil {
-				// METRICS: Track transaction begin
 				globalMetrics := GetGlobalServerMetrics()
 				globalMetrics.TransactionsBegun.Add(1)
 
 				err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
-					// Log the document deletion before execution
-					// Note: We'll log the where clause as metadata for the deletion
 					err := serviceManager.WALManager.LogDocumentDelete(txID, bundleName, "multiple", docCommand.WhereClause)
 					if err != nil {
 						return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
 							"failed to log document delete", errors.LayerWAL)
 					}
-
-					// Delete the document from the bundle
+					if deleteLockInfo != nil {
+						return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs, deleteLockInfo)
+					}
 					return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs)
 				})
 
@@ -942,27 +944,32 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	memoryTracker := NewMemoryTracker(memoryLimit)
 	ctx = WithMemoryTracker(ctx, memoryTracker)
 
-	// PHASE 4: MVCC - Add snapshot information to context if in transaction
-	if session != nil && session.IsInTransaction() && serviceManager.WALManager != nil {
-		txIDStr := session.ActiveTransactionID
-		// Convert string txID to uint64
-		var txID uint64
-		if txIDStr != "" {
-			// Parse hex string to uint64 (txID format: "0000000000000004")
-			_, err := fmt.Sscanf(txIDStr, "%016x", &txID)
-			if err == nil {
-				snapshotMgr := serviceManager.WALManager.GetSnapshotManager()
-				if snapshotMgr != nil {
-					snapshot, exists := snapshotMgr.GetSnapshot(txID)
-					if exists && snapshot != nil {
-						// Add snapshot info to context
+	// PHASE 1/4: MVCC - Add snapshot to context when in transaction (use session-stored snapshot)
+	if session != nil && session.IsInTransaction() {
+		snapshot := session.GetMVCCSnapshot()
+		if snapshot != nil {
+			snapshotInfo := &planner.SnapshotInfo{
+				SnapshotSequence: snapshot.SnapshotSequence,
+				TransactionID:    snapshot.TransactionID,
+				ActiveTxIDs:      snapshot.ActiveTxIDs,
+			}
+			ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
+			logger.Debugf("MVCC: Added snapshot to query context: seq=%d, txID=%d", snapshot.SnapshotSequence, snapshot.TransactionID)
+		} else if serviceManager.WALManager != nil {
+			// Fallback: lookup from SnapshotManager (e.g. legacy sessions)
+			txIDStr := session.ActiveTransactionID
+			var txID uint64
+			if txIDStr != "" {
+				_, _ = fmt.Sscanf(txIDStr, "%016x", &txID)
+				if snapshotMgr := serviceManager.WALManager.GetSnapshotManager(); snapshotMgr != nil {
+					if snap, exists := snapshotMgr.GetSnapshot(txID); exists && snap != nil {
 						snapshotInfo := &planner.SnapshotInfo{
-							SnapshotSequence: snapshot.SnapshotSequence,
-							TransactionID:    snapshot.TransactionID,
-							ActiveTxIDs:      snapshot.ActiveTxIDs,
+							SnapshotSequence: snap.SnapshotSequence,
+							TransactionID:    snap.TransactionID,
+							ActiveTxIDs:      snap.ActiveTxIDs,
 						}
 						ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
-						logger.Debugf("MVCC: Added snapshot to query context: seq=%d, txID=%d", snapshot.SnapshotSequence, txID)
+						logger.Debugf("MVCC: Added snapshot to query context (fallback): seq=%d, txID=%d", snap.SnapshotSequence, txID)
 					}
 				}
 			}

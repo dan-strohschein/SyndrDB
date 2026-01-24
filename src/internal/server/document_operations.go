@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/errors"
 	"time"
@@ -57,8 +59,15 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	var lockInfo *bndle.DocumentLockInfo
 	var docIDs []string
 	
+	// OPTIMIZATION: Skip pre-fetch for large bundles where we'd use bundle-level locking anyway
+	// Document-level locking only helps when count <= threshold. For large bundles, the pre-fetch
+	// is wasted work because UpdateDocumentInBundle will re-scan anyway.
+	// Threshold aligns with lockEscalationThreshold (Phase 5: significantly increased).
+	preFetchThreshold := int64(200_000)
+	shouldPreFetch := bundle.TotalDocuments <= preFetchThreshold
+	
 	// Get document IDs using query planner (same fast path as SELECT)
-	if docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
+	if shouldPreFetch && docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
 		// Use query planner to get document IDs (Task 1 implementation)
 		// For now, use WhereFilterService as fallback until query planner integration is complete
 		whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
@@ -67,6 +76,13 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 				"failed to filter documents by WHERE clause", errors.LayerQuery).WithContext("bundle", bundleName)
 		}
+		logger.Debugf("Pre-fetched %d document IDs for potential document-level locking", len(docIDs))
+	} else if !shouldPreFetch {
+		// Large bundle - skip pre-fetch, use bundle-level locking
+		// UpdateDocumentInBundle will do a single scan with bundle lock (more efficient)
+		logger.Debugf("Skipping pre-fetch for large bundle (%d docs > threshold %d), using bundle-level locking",
+			bundle.TotalDocuments, preFetchThreshold)
+		docIDs = []string{} // Empty - signals to use bundle lock path
 	} else {
 		// Empty WHERE clause - will need bundle lock (bulk update)
 		docIDs = []string{}
@@ -75,8 +91,9 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	// TASK 2: Acquire document-level locks if we have document IDs
 	// DOCUMENT-LEVEL LOCKING: Extended to autocommit operations for better concurrent write throughput
 	// For explicit transactions, locks are held until commit/rollback
-	// For autocommit, locks are released after the operation completes
-	const lockEscalationThreshold = 1000 // Increased from 100 to handle larger category queries
+	// For autocommit, locks are released after the operation completes.
+	// Phase 5: significantly increased (was 1000) so document-level locks used for almost all updates.
+	const lockEscalationThreshold = 100_000
 	useDocumentLocks := len(docIDs) > 0 && len(docIDs) <= lockEscalationThreshold
 	
 	logger.Debugf("UPDATE document locking decision: docIDs=%d, threshold=%d, useDocumentLocks=%v",
@@ -145,43 +162,58 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	// transactions could delete/modify those documents, making the IDs stale.
 	// UpdateDocumentInBundle will re-run the WHERE query which is safer.
 
+	// PHASE 1: Build context with MVCC snapshot when session in transaction (for getDocumentsByQueryPlanner)
+	ctx := context.Background()
+	if session != nil && session.IsInTransaction() {
+		if snap := session.GetMVCCSnapshot(); snap != nil {
+			snapshotInfo := &planner.SnapshotInfo{
+				SnapshotSequence: snap.SnapshotSequence,
+				TransactionID:    snap.TransactionID,
+				ActiveTxIDs:      snap.ActiveTxIDs,
+			}
+			ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
+		}
+	}
+
 	// Execute with WAL logging if available
 	if serviceManager.WALManager != nil {
-		// METRICS: Track transaction begin
 		globalMetrics := GetGlobalServerMetrics()
 		globalMetrics.TransactionsBegun.Add(1)
 
 		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
-			// Log the document update before execution
-			// Note: We'll log the fields being updated, actual before/after data is captured by bundle service
 			err := serviceManager.WALManager.LogDocumentUpdate(txID, bundleName, "multiple", nil, docCommand.Fields)
 			if err != nil {
 				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
 					"failed to log document update", errors.LayerWAL).WithContext("bundle", bundleName)
 			}
-
-			// Update the document in the bundle
-			// TASK 2: Pass lock info if document locks were acquired
-			if lockInfo != nil {
-				return serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand, lockInfo)
+			li := lockInfo
+			if li == nil {
+				li = &bndle.DocumentLockInfo{TxID: txID, VersionTxID: txID}
+			} else {
+				li = &bndle.DocumentLockInfo{
+					LockManager:  li.LockManager,
+					TxID:         li.TxID,
+					SessionID:    li.SessionID,
+					LockedDocIDs: li.LockedDocIDs,
+					VersionTxID:  txID,
+				}
 			}
-			return serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand)
+			return serviceManager.BundleService.UpdateDocumentInBundle(ctx, database, bundle, docCommand, li)
 		})
 
-		// METRICS: Track transaction outcome
 		if err != nil {
 			globalMetrics.TransactionsRolledBack.Add(1)
 		} else {
 			globalMetrics.TransactionsCommitted.Add(1)
 		}
 	} else {
-		// Fallback to direct execution if WAL is not available
 		logger.Warn("WAL Manager not available, executing without transaction logging")
 		if lockInfo != nil {
-			err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand, lockInfo)
+			err = serviceManager.BundleService.UpdateDocumentInBundle(ctx, database, bundle, docCommand, lockInfo)
 		} else {
-			err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, docCommand)
+			err = serviceManager.BundleService.UpdateDocumentInBundle(ctx, database, bundle, docCommand)
 		}
+		// Note: without WAL we have no txID; Phase 2b version fields use 0
 	}
 
 	if err != nil {
@@ -247,32 +279,27 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 
 	docID := ""
 
-	// TRANSACTION SUPPORT: For INSERT operations in transactions, we need to handle locking differently
-	// Since the document ID doesn't exist yet, we'll acquire a bundle-level write lock
-	// to prevent concurrent inserts from conflicting. The actual document lock will be
-	// acquired after the ID is generated during bundle service execution.
-	if session != nil && session.IsInTransaction() {
-		// Acquire a bundle-level lock using a special convention: "bundle:<bundle_name>"
-		bundleLockID := fmt.Sprintf("bundle:%s", bundleName)
-		if err := serviceManager.LockManager.AcquireWriteLock(bundleName, bundleLockID, session.ActiveTransactionID, session.SessionID); err != nil {
-			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
-				"failed to acquire bundle lock for insert", errors.LayerTransaction).WithContext("bundle", bundleName)
-		}
-		logger.Debugf("Acquired bundle lock for insert in transaction %s", session.ActiveTransactionID)
-	}
-
 	// Execute with WAL logging
 	if serviceManager.WALManager != nil {
-		// Check if we're in an explicit transaction
 		if session != nil && session.IsInTransaction() {
-			// Within explicit transaction: log to existing transaction
+			// PHASE 3: Document-level lock for ADD; no bundle lock. Generate ID, lock, then add. Hold until COMMIT (strict 2PL).
 			txID := session.ActiveTransactionID
+			preallocID := helpers.GenerateFastUUID()
+			if serviceManager.LockManager != nil {
+				if err := serviceManager.LockManager.AcquireWriteLock(bundleName, preallocID, txID, session.SessionID); err != nil {
+					return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+						"failed to acquire document lock for insert", errors.LayerTransaction).WithContext("bundle", bundleName)
+				}
+				logger.Debugf("Acquired document lock for insert in transaction %s (docID=%s)", txID, preallocID)
+			}
 
 			logger.Infof("TRANSACTION INSERT: txID=%s, bundle=%s, session=%s", txID, bundleName, session.SessionID)
 
-			// Add document with transaction ID tracking (buffer-aware)
-			docID, err = serviceManager.BundleService.AddDocumentToBundleWithTxID(database, bundle, docCommand, txID)
+			docID, err = serviceManager.BundleService.AddDocumentToBundleWithTxID(database, bundle, docCommand, txID, preallocID)
 			if err != nil {
+				if serviceManager.LockManager != nil {
+					serviceManager.LockManager.ReleaseLocks(txID)
+				}
 				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 

@@ -1,6 +1,7 @@
 package mutations
 
 import (
+	"context"
 	"fmt"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/server"
@@ -152,18 +153,11 @@ func (e *MutationExecutor) ExecuteUpdate(updateCommand *models.DocumentUpdateCom
 				return fmt.Errorf("failed to log document update: %w", err)
 			}
 
-			// Update the document in the bundle
-			// This method handles:
-			// - Acquiring write lock for concurrency safety
-			// - Filtering documents by WHERE clause
-			// - Validating update fields
-			// - Updating indexes (BTree/Hash) for modified fields
-			return e.serviceManager.BundleService.UpdateDocumentInBundle(e.database, bundle, updateCommand)
+			return e.serviceManager.BundleService.UpdateDocumentInBundle(context.Background(), e.database, bundle, updateCommand)
 		})
 	} else {
-		// Fallback to direct execution if WAL is not available
 		e.logger.Warn("WAL Manager not available, executing without transaction logging")
-		err = e.serviceManager.BundleService.UpdateDocumentInBundle(e.database, bundle, updateCommand)
+		err = e.serviceManager.BundleService.UpdateDocumentInBundle(context.Background(), e.database, bundle, updateCommand)
 	}
 
 	if err != nil {

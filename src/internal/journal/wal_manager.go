@@ -126,8 +126,9 @@ func (wm *WALManager) BeginTransaction() (string, error) {
 	return txID, nil
 }
 
-// CommitTransaction commits a transaction
-func (wm *WALManager) CommitTransaction(txID string) error {
+// CommitTransaction commits a transaction.
+// If preallocatedCommitSeq is non-nil, that sequence is used (avoids double GetNextCommitSequence when caller already allocated).
+func (wm *WALManager) CommitTransaction(txID string, preallocatedCommitSeq *uint64) error {
 	wm.activeTxsMu.Lock()
 	tx, exists := wm.activeTxs[txID]
 	if !exists {
@@ -137,10 +138,13 @@ func (wm *WALManager) CommitTransaction(txID string) error {
 	delete(wm.activeTxs, txID)
 	wm.activeTxsMu.Unlock()
 
-	// Get commit sequence for this transaction
-	commitSequence := wm.snapshotManager.GetNextCommitSequence()
+	var commitSequence uint64
+	if preallocatedCommitSeq != nil {
+		commitSequence = *preallocatedCommitSeq
+	} else {
+		commitSequence = wm.snapshotManager.GetNextCommitSequence()
+	}
 
-	// Log the transaction commit
 	err := wm.wal.LogOperation(txID, OpCommitTx, "", "", "", "", "")
 	if err != nil {
 		return fmt.Errorf("failed to log transaction commit: %w", err)
@@ -399,8 +403,8 @@ func (wm *WALManager) ExecuteWithLogging(operation func(txID string) error) erro
 		return err
 	}
 
-	// Commit on success
-	if err := wm.CommitTransaction(txID); err != nil {
+	// Commit on success (nil = allocate commit sequence here; explicit-tx path passes preallocated)
+	if err := wm.CommitTransaction(txID, nil); err != nil {
 		// Try to rollback if commit fails
 		if rollbackErr := wm.RollbackTransaction(txID); rollbackErr != nil {
 			wm.logger.Errorf("Failed to rollback transaction %s after commit failure: %v", txID, rollbackErr)

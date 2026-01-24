@@ -118,12 +118,15 @@ type btreeRollbackOp struct {
 }
 
 // DocumentLockInfo contains information about pre-acquired document locks
-// This allows UpdateDocumentInBundle to skip bundle write lock when document locks are already held
+// and optional MVCC version metadata.
 type DocumentLockInfo struct {
 	LockManager  interface{} // *storage.LockManager - use interface{} to avoid import cycle
 	TxID         string      // Transaction ID for the locks
 	SessionID    string      // Session ID for the locks
 	LockedDocIDs []string    // Document IDs that are already locked
+	// VersionTxID is the WAL transaction ID used for CreatedByTxID (Phase 2b).
+	// When set, prefer over TxID for MVCC version metadata so versioning matches snapshot.
+	VersionTxID string
 }
 
 // TypeConverter represents a fast type conversion function
@@ -5308,9 +5311,13 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	return newDocument.DocumentID, nil
 }
 
-// AddDocumentToBundleWithTxID is a transaction-aware wrapper for AddDocumentToBundle
-// It accepts a txID parameter to track buffered documents during transactions
-func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentCommand, txID string) (string, error) {
+// AddDocumentToBundleWithTxID is a transaction-aware wrapper for AddDocumentToBundle.
+// When preallocDocID is non-empty, the document is created with that ID (Phase 3: document-level lock).
+func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentCommand, txID string, preallocDocID ...string) (string, error) {
+	docID := ""
+	if len(preallocDocID) > 0 {
+		docID = preallocDocID[0]
+	}
 	// Check if the bundle exists
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot add document")
@@ -5336,16 +5343,18 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 		return "", fmt.Errorf("failed to process NULL values: %w", err)
 	}
 
-	// Create the document
-	newDocument := s.documentFactory.NewDocument(*docCommand)
+	var newDocument *models.Document
+	if docID != "" {
+		newDocument = s.documentFactory.NewDocumentWithID(*docCommand, docID)
+	} else {
+		newDocument = s.documentFactory.NewDocument(*docCommand)
+	}
 
 	// Set MVCC version metadata
-	s.setDocumentVersionFields(newDocument, txID, 1) // VersionSequence starts at 1
+	s.setDocumentVersionFields(newDocument, txID, 1)
 
-	// Schedule deferred metadata update
 	s.scheduleMetadataUpdate(docCommand.BundleName, "increment_docs", 1)
 
-	// Add document to bundle file WITH transaction ID for buffer tracking
 	pageID, err := s.store.AppendDocumentToBundleFileWithTxID(bundle, newDocument, txID)
 	if err != nil {
 		return "", fmt.Errorf("failed to add document to bundle: %w", err)
@@ -5404,14 +5413,9 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 	return s.AddDocumentToBundleByStructWithTxID(database, bundle, document, "")
 }
 
-// AddDocumentToBundleByStructWithTxID adds a document with transaction tracking
+// AddDocumentToBundleByStructWithTxID adds a document with transaction tracking.
+// PHASE 3: No bundle write lock; append path is concurrent-safe (WriteBuffer, rotationLock).
 func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Database, bundle *models.Bundle, document *models.Document, txID string) error {
-	// Acquire write lock to prevent concurrent modifications during rename
-	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
-		return fmt.Errorf("failed to acquire write lock: %w", err)
-	}
-	defer s.ReleaseBundleWriteLock(bundle.Name)
-
 	// TODO: Unique constraint validation disabled for AddDocumentToBundleByStruct
 	// This method is primarily used for primary catalog initialization where we trust
 	// the developer to create bundles correctly. Enabling validation would require
@@ -5588,9 +5592,13 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 	return filtered
 }
 
-// UpdateDocumentInBundle updates documents in a bundle based on the update command
-// TASK 2: Document-level locking support - if lockInfo is provided, uses document locks instead of bundle write lock
-func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand, lockInfo ...*DocumentLockInfo) (err error) {
+// UpdateDocumentInBundle updates documents in a bundle based on the update command.
+// TASK 2: Document-level locking support - if lockInfo is provided, uses document locks instead of bundle write lock.
+// PHASE 1: ctx may carry snapshot (e.g. planner.WithSnapshotInfo) for MVCC visibility; use context.Background() if none.
+func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand, lockInfo ...*DocumentLockInfo) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	args := settings.GetSettings()
 	// Check if the bundle exists
 	if bundle == nil {
@@ -5642,8 +5650,8 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 		}
 		s.logger.Debugf("OPTIMIZATION: Used pre-fetched document IDs (%d docs) instead of re-running WHERE query", len(filteredDocs))
 	} else if docCommand.WhereClause != "" && docCommand.WhereClause != strings.TrimSpace("") {
-		// Use query planner for optimal WHERE clause execution
-		filteredDocs, err = s.getDocumentsByQueryPlanner(bundle, docCommand.WhereClause, database)
+		// Use query planner for optimal WHERE clause execution (ctx may carry snapshot for MVCC)
+		filteredDocs, err = s.getDocumentsByQueryPlanner(ctx, bundle, docCommand.WhereClause, database)
 		if err != nil {
 			s.ReleaseBundleReadLock(bundle.Name)
 			return fmt.Errorf("failed to get documents using query planner: %w", err)
@@ -5808,6 +5816,18 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	// Rollback for deferred updates is handled by the index update buffer system
 	// If document update fails, the deferred index updates won't be applied (they're in buffer, not yet executed)
 
+	// PHASE 2b: Resolve txID for CreatedByTxID (VersionTxID or TxID from lockInfo)
+	var createdByTxIDUint64 uint64
+	if len(lockInfo) > 0 && lockInfo[0] != nil {
+		tidStr := lockInfo[0].VersionTxID
+		if tidStr == "" {
+			tidStr = lockInfo[0].TxID
+		}
+		if tidStr != "" {
+			_, _ = fmt.Sscanf(tidStr, "%016x", &createdByTxIDUint64)
+		}
+	}
+
 	// R1: Per-doc loop: update fields and schedule deferred index updates. Collect updatedDocs; call UpdateDocumentsBatch once after.
 	updatedDocs := make([]*models.Document, 0, len(filteredDocs))
 	for _, doc := range filteredDocs {
@@ -5867,6 +5887,15 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", doc.DocumentID, newFieldValue, pageID, nil, true)
 			s.logger.Debugf("Scheduled deferred B-tree index updates (delete+insert) for document '%s' on field '%s'", doc.DocumentID, fieldName)
 		}
+
+		// PHASE 2b: MVCC version metadata for new version (append-only semantics)
+		if doc.VersionSequence == 0 {
+			doc.VersionSequence = 1
+		} else {
+			doc.VersionSequence++
+		}
+		doc.CreatedByTxID = createdByTxIDUint64
+		doc.CommitSequence = 0
 
 		updatedDocs = append(updatedDocs, doc)
 	}
@@ -5971,21 +6000,22 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 }
 
 // DeleteDocumentFromBundle is the public interface for deleting documents from a bundle.
-// It acquires necessary locks and delegates to the internal implementation.
-func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string) error {
+// When lockInfo is provided with LockManager and LockedDocIDs, skips bundle write lock (Phase 4: document-level locking).
+func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, lockInfo ...*DocumentLockInfo) error {
 	args := settings.GetSettings()
 
-	// ========== VALIDATE BUNDLE EXISTS ==========
 	if bundle == nil {
 		s.logger.Errorf("Bundle is nil, cannot delete document")
 		return fmt.Errorf("bundle '%s' is nil, cannot delete document", docCommand.BundleName)
 	}
 
-	// Acquire write lock to prevent concurrent modifications during rename
-	if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
-		return fmt.Errorf("failed to acquire write lock: %w", err)
+	useDocLocks := len(lockInfo) > 0 && lockInfo[0] != nil && lockInfo[0].LockManager != nil && len(lockInfo[0].LockedDocIDs) > 0
+	if !useDocLocks {
+		if err := s.AcquireBundleWriteLock(bundle.Name); err != nil {
+			return fmt.Errorf("failed to acquire write lock: %w", err)
+		}
+		defer s.ReleaseBundleWriteLock(bundle.Name)
 	}
-	defer s.ReleaseBundleWriteLock(bundle.Name)
 
 	if args.Debug {
 		s.logger.Infof("Starting document deletion from bundle '%s' with WHERE clause: %s",
@@ -6139,8 +6169,8 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 		s.logger.Warnf("Failed to flush write buffers before delete: %v", err)
 	}
 
-	// Write ALL deletion markers in one batch (one lock, one open, one Fdatasync). D2: we no longer call
-	// verifyDocumentExistsStreaming; delete is idempotent.
+	// Write ALL deletion markers in one batch. D2: delete is idempotent.
+	// TODO Phase 4: MVCC tombstones (DeletedByTxID) with dual support for 0xDEADDEAD; create MVCC tombstones for new deletes.
 	err = s.store.AppendDeletionMarkersBatch(bundle, docIDs)
 	if err != nil {
 		return fmt.Errorf("failed to append batch deletion markers: %w", err)
@@ -6441,65 +6471,53 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 	return s.GetDocument(bundle.Name, bundle.Database.Name, documentID)
 }
 
-// getDocumentsByQueryPlanner uses the unified query planner to get documents matching a WHERE clause
-// This provides the same fast index-optimized execution path as SELECT statements
-// Parameters:
-//   - bundle: The bundle to query
-//   - whereClause: The WHERE clause string
-//   - database: The database containing the bundle
-//
-// Returns:
-//   - []*models.Document: Documents matching the WHERE clause
-//   - error: Any error during planning or execution
-func (s *BundleService) getDocumentsByQueryPlanner(bundle *models.Bundle, whereClause string, database *models.Database) ([]*models.Document, error) {
+// getDocumentsByQueryPlanner uses the unified query planner to get documents matching a WHERE clause.
+// This provides the same fast index-optimized execution path as SELECT statements.
+// PHASE 1: ctx may carry snapshot (planner.WithSnapshotInfo) for MVCC visibility; use Background if nil.
+func (s *BundleService) getDocumentsByQueryPlanner(ctx context.Context, bundle *models.Bundle, whereClause string, database *models.Database) ([]*models.Document, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// Check if unified planner is available
 	unifiedPlannerMutex.RLock()
 	planner := globalUnifiedPlanner
 	unifiedPlannerMutex.RUnlock()
 
 	if planner == nil {
-		// Fallback to GetDocumentsByFilter if planner not available
 		s.logger.Debugf("Unified planner not available, falling back to GetDocumentsByFilter")
 		return s.GetDocumentsByFilter(bundle, whereClause, nil)
 	}
 
-	// Parse WHERE clause into SyndrQL Expression
 	expr, err := syndrQL.ParseExpression(whereClause)
 	if err != nil {
 		s.logger.Warnf("Failed to parse WHERE clause as Expression, falling back to GetDocumentsByFilter: %v", err)
 		return s.GetDocumentsByFilter(bundle, whereClause, nil)
 	}
 
-	// Create a minimal UnifiedSelectQuery with just the WHERE clause
 	query := &queryparser.UnifiedSelectQuery{
 		QueryType:       queryparser.SimpleQuery,
 		FromBundle:      bundle.Name,
 		WhereExpression: expr,
-		SelectFields:    []string{}, // Empty means select all fields
+		SelectFields:    []string{},
 	}
 
-	// Use planner to create execution plan
 	planInterface, err := planner.CreatePlan(query, database)
 	if err != nil {
 		s.logger.Warnf("Failed to create execution plan, falling back to GetDocumentsByFilter: %v", err)
 		return s.GetDocumentsByFilter(bundle, whereClause, nil)
 	}
 
-	// ExecutionPlan has an Execute method that executes the root node
-	// Define interface to avoid import cycle with planner package
 	type executablePlan interface {
 		Execute(ctx context.Context) (interface{}, error)
 	}
 
-	// Type assert to executable plan
 	plan, ok := planInterface.(executablePlan)
 	if !ok {
 		s.logger.Warnf("Plan type %T does not implement Execute method, falling back to GetDocumentsByFilter", planInterface)
 		return s.GetDocumentsByFilter(bundle, whereClause, nil)
 	}
 
-	// Execute the plan to get documents
-	ctx := context.Background()
 	result, err := plan.Execute(ctx)
 	if err != nil {
 		s.logger.Warnf("Failed to execute plan, falling back to GetDocumentsByFilter: %v", err)

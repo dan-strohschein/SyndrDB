@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	defaultdb "syndrdb/src/internal/defaultDB"
@@ -152,8 +153,7 @@ func (a *BundleServiceAdapter) UpdateDocument(dbName, bundleName, docID string, 
 		Confirmed:   true,
 	}
 
-	// Call BundleService.UpdateDocumentInBundle
-	err = a.bundleService.UpdateDocumentInBundle(db, bndl, updateCommand)
+	err = a.bundleService.UpdateDocumentInBundle(context.Background(), db, bndl, updateCommand)
 	if err != nil {
 		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
 			fmt.Sprintf("failed to update document '%s' in bundle '%s'", docID, bundleName),
@@ -193,8 +193,7 @@ func (a *BundleServiceAdapter) UpdateDocumentByField(dbName, bundleName, fieldNa
 
 	a.logger.Debugf("UpdateDocumentByField: bundle=%s, field=%s, value=%s, updates=%+v", bundleName, fieldName, fieldValue, updates)
 
-	// Call BundleService.UpdateDocumentInBundle
-	err = a.bundleService.UpdateDocumentInBundle(db, bndl, updateCommand)
+	err = a.bundleService.UpdateDocumentInBundle(context.Background(), db, bndl, updateCommand)
 	if err != nil {
 		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
 			fmt.Sprintf("failed to update document in bundle '%s' where %s='%s'", bundleName, fieldName, fieldValue),
@@ -344,7 +343,7 @@ func (a *BundleServiceAdapter) CommitTransaction(txID string) error {
 			"WAL manager not initialized", errors.LayerTransaction)
 	}
 
-	err := a.walManager.CommitTransaction(txID)
+	err := a.walManager.CommitTransaction(txID, nil)
 	if err != nil {
 		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
 			fmt.Sprintf("failed to commit transaction %s", txID),

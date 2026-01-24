@@ -62,7 +62,14 @@ func (d *Document) IsVisibleToSnapshot(snapshotSeq uint64, txID uint64, activeTx
 
 	// Rule 1: Transaction sees its own uncommitted writes (read-your-own-writes)
 	if d.CommitSequence == 0 {
-		return d.CreatedByTxID == txID
+		if d.CreatedByTxID == txID {
+			return true
+		}
+		// Legacy pre-MVCC docs: CommitSequence and CreatedByTxID both 0 → always visible
+		if d.CreatedByTxID == 0 {
+			return true
+		}
+		return false
 	}
 
 	// Rule 2: Must be committed before snapshot boundary
@@ -71,7 +78,8 @@ func (d *Document) IsVisibleToSnapshot(snapshotSeq uint64, txID uint64, activeTx
 	}
 
 	// Rule 3: Not created by a transaction that was active at snapshot time
-	if activeTxIDs != nil && activeTxIDs[d.CreatedByTxID] {
+	// Part 6.2 fast path: skip map lookup when no other active transactions
+	if activeTxIDs != nil && len(activeTxIDs) > 0 && activeTxIDs[d.CreatedByTxID] {
 		return false
 	}
 

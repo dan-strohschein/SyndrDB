@@ -386,8 +386,7 @@ func (w *MVCCGCWorker) performGCCycleWithContext(ctx context.Context, triggerTyp
 			default:
 			}
 
-			// Analyze bundle for version accumulation
-			shouldCompact, versionCount, err := w.analyzeBundleVersions(bundleName, db.Name, bundleService)
+			shouldCompact, versionCount, err := w.analyzeBundleVersions(ctx, bundleName, db.Name, bundleService)
 			if err != nil {
 				w.logger.Warnw("Failed to analyze bundle versions",
 					"bundle", bundleName,
@@ -399,8 +398,7 @@ func (w *MVCCGCWorker) performGCCycleWithContext(ctx context.Context, triggerTyp
 			bundlesScanned++
 
 			if shouldCompact {
-				// Check version age
-				versions, err := w.sampleDocumentVersions(bundleName, db.Name, bundleService)
+				versions, err := w.sampleDocumentVersions(ctx, bundleName, db.Name, bundleService)
 				if err != nil {
 					w.logger.Warnw("Failed to sample document versions for age analysis",
 						"bundle", bundleName,
@@ -498,51 +496,72 @@ func (w *MVCCGCWorker) getServiceManager() interface{} {
 	return w.serviceManagerGetter()
 }
 
-// analyzeBundleVersions analyzes a bundle to detect version accumulation
-// Returns: shouldCompact bool, versionCount int, error
-func (w *MVCCGCWorker) analyzeBundleVersions(bundleName, databaseName string, bundleService *bundle.BundleService) (bool, int, error) {
-	// Sample documents from bundle (check first 100 document IDs)
-	// For simplicity, we'll sample by attempting to get versions for a few document IDs
-	// In a real implementation, we'd get document IDs from an index
-
+// analyzeBundleVersions analyzes a bundle to detect version accumulation.
+// Uses GetDocumentChunksForIndexing to sample doc IDs, then GetDocumentVersions per doc.
+// Returns: shouldCompact, versionCount (avg), error.
+func (w *MVCCGCWorker) analyzeBundleVersions(ctx context.Context, bundleName, databaseName string, bundleService *bundle.BundleService) (bool, int, error) {
+	const sampleSize = 100
 	maxVersionsFound := 0
 	totalVersions := 0
 	samplesChecked := 0
+	var docIDs []string
 
-	// TODO: Get document IDs from bundle's hash index or metadata
-	// For now, this is a placeholder that would need to be implemented
-	// by accessing the bundle's document index or scanning a sample of documents
+	err := bundleService.GetDocumentChunksForIndexing(ctx, bundleName, sampleSize, func(chunk []*models.Document) (stop bool) {
+		for _, d := range chunk {
+			docIDs = append(docIDs, d.DocumentID)
+		}
+		return false
+	})
+	if err != nil {
+		return false, 0, err
+	}
 
-	// Placeholder: We would iterate through document IDs and call GetDocumentVersions
-	// For now, return conservative values
-	// In real implementation:
-	//   for each documentID in sample:
-	//     versions, err := bundleService.GetDocumentVersions(bundleName, databaseName, documentID)
-	//     versionCount := len(versions)
-	//     if versionCount > maxVersionsFound {
-	//       maxVersionsFound = versionCount
-	//     }
-	//     totalVersions += versionCount
-	//     samplesChecked++
+	for _, docID := range docIDs {
+		versions, err := bundleService.GetDocumentVersions(bundleName, databaseName, docID)
+		if err != nil {
+			w.logger.Debugw("GetDocumentVersions failed for sample", "docID", docID, "error", err)
+			continue
+		}
+		n := len(versions)
+		if n > maxVersionsFound {
+			maxVersionsFound = n
+		}
+		totalVersions += n
+		samplesChecked++
+	}
 
-	// For now, return false (don't compact) since we can't sample without document IDs
-	// This will be enhanced when we have access to document ID lists
 	avgVersions := 0
 	if samplesChecked > 0 {
 		avgVersions = totalVersions / samplesChecked
 	}
-
-	shouldCompact := maxVersionsFound > w.maxVersionsThreshold || avgVersions > 2
-
+	shouldCompact := maxVersionsFound > w.maxVersionsThreshold || (samplesChecked > 0 && avgVersions > 2)
 	return shouldCompact, avgVersions, nil
 }
 
-// sampleDocumentVersions samples document versions for age analysis
-func (w *MVCCGCWorker) sampleDocumentVersions(bundleName, databaseName string, bundleService *bundle.BundleService) ([]*models.Document, error) {
-	// TODO: Implement document sampling
-	// For now, return empty slice
-	// In real implementation, would sample documents and return their versions
-	return []*models.Document{}, nil
+// sampleDocumentVersions samples document versions for age analysis.
+// Uses GetDocumentChunksForIndexing to get a chunk of docs, then GetDocumentVersions for each.
+func (w *MVCCGCWorker) sampleDocumentVersions(ctx context.Context, bundleName, databaseName string, bundleService *bundle.BundleService) ([]*models.Document, error) {
+	const chunkSize = 50
+	var docIDs []string
+	err := bundleService.GetDocumentChunksForIndexing(ctx, bundleName, chunkSize, func(chunk []*models.Document) (stop bool) {
+		for _, d := range chunk {
+			docIDs = append(docIDs, d.DocumentID)
+		}
+		return false
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var all []*models.Document
+	for _, docID := range docIDs {
+		versions, err := bundleService.GetDocumentVersions(bundleName, databaseName, docID)
+		if err != nil {
+			continue
+		}
+		all = append(all, versions...)
+	}
+	return all, nil
 }
 
 // shouldCompactByAge checks if versions are old enough for GC

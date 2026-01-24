@@ -128,7 +128,7 @@ func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser
 	logger.Infof("Pushing down WHERE clause to %s bundle '%s': %s", side, bundle.Name, whereClause)
 
 	// Use modern page-based document filtering with architectural fix
-	// The BundleService now properly handles page-based filtering without relying on legacy bundle.Documents
+	// TODO Phase 1.3 URGENT BEFORE PRODUCTION: Pass session when available so GetDocumentsByFilter can use MVCC snapshot for visibility
 	filteredDocs, err := serviceManager.BundleService.GetDocumentsByFilter(bundle, whereClause, nil)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
@@ -140,6 +140,7 @@ func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser
 	originalCount := int(bundle.TotalDocuments)
 	if originalCount == 0 {
 		// Fallback: load all documents to get count (less efficient but accurate)
+		// TODO Phase 1.3: pass session for MVCC snapshot when available
 		allDocs, countErr := serviceManager.BundleService.GetDocumentsByFilter(bundle, "", nil)
 		if countErr == nil {
 			originalCount = len(allDocs)

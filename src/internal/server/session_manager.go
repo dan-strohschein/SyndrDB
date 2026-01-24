@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/helpers"
@@ -153,6 +154,9 @@ type Session struct {
 	TransactionStatus    TransactionStatus // Current status of the transaction
 	// PHASE 2: MVCC - TransactionBuffer tracks document locations for commit sequence assignment
 	TransactionBuffer *TransactionBuffer // Tracks document locations written in this transaction
+
+	// PHASE 1: MVCC - Snapshot created on BEGIN TRANSACTION, stored for read-path visibility
+	MVCCSnapshot *journal.Snapshot
 
 	// Prepared statement cache (session-scoped)
 	PreparedStatements *syndrQL.ShardedPreparedStatementCache // Session-isolated prepared statement cache
@@ -1365,8 +1369,9 @@ func (s *Session) IsIdleExpired(timeout time.Duration) bool {
 	return time.Since(s.TransactionStartTime) > timeout
 }
 
-// BeginTransaction initializes transaction state for the session
-func (s *Session) BeginTransaction(txID string, startLSN uint64) {
+// BeginTransaction initializes transaction state for the session.
+// snapshot is the MVCC snapshot for this transaction (created on BEGIN); may be nil for non-MVCC paths.
+func (s *Session) BeginTransaction(txID string, startLSN uint64, snapshot *journal.Snapshot) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1377,8 +1382,16 @@ func (s *Session) BeginTransaction(txID string, startLSN uint64) {
 	s.PendingOperations = make([]string, 0)
 	s.CurrentSavepoint = nil
 	s.TransactionStatus = TransactionStatusActive
+	s.MVCCSnapshot = snapshot
 	// PHASE 2: MVCC - Initialize transaction buffer for document location tracking
 	s.TransactionBuffer = NewTransactionBuffer()
+}
+
+// GetMVCCSnapshot returns the MVCC snapshot for this session's active transaction, or nil.
+func (s *Session) GetMVCCSnapshot() *journal.Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.MVCCSnapshot
 }
 
 // CommitTransaction marks the transaction as committed and clears state
@@ -1407,6 +1420,7 @@ func (s *Session) clearTransactionState() {
 	s.TransactionStartTime = time.Time{}
 	s.PendingOperations = nil
 	s.CurrentSavepoint = nil
+	s.MVCCSnapshot = nil
 	// PHASE 2: MVCC - Clear transaction buffer
 	if s.TransactionBuffer != nil {
 		s.TransactionBuffer.Clear()

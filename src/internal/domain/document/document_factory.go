@@ -12,6 +12,7 @@ type DocumentFactoryImpl struct {
 
 type DocumentFactory interface {
 	NewDocument(docCommand models.DocumentCommand) *models.Document
+	NewDocumentWithID(docCommand models.DocumentCommand, documentID string) *models.Document
 }
 
 func NewDocumentFactory() DocumentFactory {
@@ -39,6 +40,20 @@ func (f *DocumentFactoryImpl) NewDocument(docCommand models.DocumentCommand) *mo
 		Value: models.NewStringValue(newDoc.DocumentID), // ✅ Convert string to FieldValue
 	}
 
+	return newDoc
+}
+
+func (f *DocumentFactoryImpl) NewDocumentWithID(docCommand models.DocumentCommand, documentID string) *models.Document {
+	now := helpers.GetCachedNow()
+	newDoc := GetPooledDocument()
+	newDoc.DocumentID = documentID
+	newDoc.Fields = f.MakeDocumentFieldsPooled(docCommand)
+	newDoc.CreatedAt = now
+	newDoc.UpdatedAt = now
+	newDoc.Fields["DocumentID"] = models.Field{
+		Name:  "DocumentID",
+		Value: models.NewStringValue(newDoc.DocumentID),
+	}
 	return newDoc
 }
 

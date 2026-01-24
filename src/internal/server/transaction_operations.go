@@ -46,6 +46,7 @@ Design Principles:
 */
 
 import (
+	"context"
 	encodingjson "encoding/json"
 	"fmt"
 	"strings"
@@ -125,27 +126,40 @@ func HandleBeginTransaction(session *Session, serviceManager ServiceManager, log
 			errors.LayerAPI)
 	}
 
-	// Begin transaction in WAL
-	txID, err := serviceManager.WALManager.BeginTransaction()
+	// PHASE 1: MVCC - Use BeginTransactionUint64 to create snapshot; store in session
+	txIDUint64, err := serviceManager.WALManager.BeginTransactionUint64()
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
 			"failed to begin transaction", errors.LayerTransaction)
 	}
+	txIDStr := fmt.Sprintf("%016x", txIDUint64)
 
-	// Get current LSN for transaction start
+	// Get current LSN for transaction start (after begin logged)
 	startLSN := serviceManager.WALManager.GetCurrentLSN()
 
-	// Initialize transaction state in session
-	session.BeginTransaction(txID, startLSN)
+	// Get MVCC snapshot created by BeginTransactionUint64; store in session
+	var snapshot *journal.Snapshot
+	if sm := serviceManager.WALManager.GetSnapshotManager(); sm != nil {
+		if snap, ok := sm.GetSnapshot(txIDUint64); ok && snap != nil {
+			snapshot = snap
+		}
+	}
+
+	// Initialize transaction state in session (including snapshot for read-path visibility)
+	session.BeginTransaction(txIDStr, startLSN, snapshot)
 
 	// Debug-aware logging
 	debugMode := settings.GetSettings().Debug
 	if debugMode {
-		logger.Infof("BEGIN TRANSACTION: txID=%s, startLSN=%d, session=%s", txID, startLSN, session.SessionID)
+		snapSeq := uint64(0)
+		if snapshot != nil {
+			snapSeq = snapshot.SnapshotSequence
+		}
+		logger.Infof("BEGIN TRANSACTION: txID=%s, startLSN=%d, session=%s, snapshotSeq=%d", txIDStr, startLSN, session.SessionID, snapSeq)
 	}
 
 	return &CommandResponse{
-		Result:      fmt.Sprintf("Transaction started: %s", txID),
+		Result:      fmt.Sprintf("Transaction started: %s", txIDStr),
 		ResultCount: 0,
 	}, nil
 }
@@ -241,10 +255,12 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 		}
 	}
 
-	// Commit transaction in WAL (existing logic)
-	err := serviceManager.WALManager.CommitTransaction(txID)
+	var commitSeqArg *uint64
+	if commitSequence > 0 {
+		commitSeqArg = &commitSequence
+	}
+	err := serviceManager.WALManager.CommitTransaction(txID, commitSeqArg)
 	if err != nil {
-		// Abort transaction on commit failure
 		session.AbortTransaction()
 		if serviceManager.LockManager != nil {
 			serviceManager.LockManager.ReleaseLocks(txID)
@@ -253,8 +269,16 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 			"failed to commit transaction", errors.LayerTransaction).WithContext("tx_id", txID)
 	}
 
+	// PHASE 2a: Update ConflictTracker so future conflict checks see this commit
+	if serviceManager.ConflictTracker != nil && len(documentLocations) > 0 && commitSequence > 0 {
+		docIDs := make([]string, 0, len(documentLocations))
+		for id := range documentLocations {
+			docIDs = append(docIDs, id)
+		}
+		serviceManager.ConflictTracker.UpdateCommitSequencesBatch(docIDs, commitSequence)
+	}
+
 	// PHASE 2: MVCC - Start async background update of documents with commit sequence
-	// This doesn't block the commit response
 	if len(documentLocations) > 0 && commitSequence > 0 {
 		go updateDocumentsCommitSequenceAsync(
 			serviceManager,
@@ -263,15 +287,6 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 			documentLocations,
 			logger,
 		)
-
-		// PHASE 3: MVCC - Update conflict tracker with new commit sequences
-		// Extract document IDs from locations
-		documentIDs := make([]string, 0, len(documentLocations))
-		for docID := range documentLocations {
-			documentIDs = append(documentIDs, docID)
-		}
-		// Batch update conflict tracker
-		serviceManager.ConflictTracker.UpdateCommitSequencesBatch(documentIDs, commitSequence)
 	}
 
 	// Release all locks for this transaction
@@ -405,7 +420,7 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 				WhereClause: fmt.Sprintf("DocumentID = '%s'", entry.DocumentID),
 			}
 
-			err = serviceManager.BundleService.UpdateDocumentInBundle(database, bundle, updateCmd)
+			err = serviceManager.BundleService.UpdateDocumentInBundle(context.Background(), database, bundle, updateCmd)
 			if err != nil {
 				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
 					fmt.Sprintf("failed to undo update of document %s", entry.DocumentID),
