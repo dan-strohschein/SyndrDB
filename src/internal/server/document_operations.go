@@ -140,17 +140,10 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		} else {
 			logger.Debugf("Acquired document-level write locks for %d documents in transaction %s", len(lockedDocIDs), lockTxID)
 		}
-	} else if len(docIDs) > 0 {
-		// OPTIMIZATION: Even without document locks, pass docIDs to avoid double WHERE scan
-		// This allows UpdateDocumentInBundle to fetch documents by ID instead of re-running WHERE
-		lockInfo = &bndle.DocumentLockInfo{
-			LockManager:  nil, // No actual locks acquired
-			TxID:         "",
-			SessionID:    "",
-			LockedDocIDs: docIDs, // Pass IDs for direct document fetch
-		}
-		logger.Debugf("Passing %d document IDs to UpdateDocumentInBundle (no locks, count > threshold)", len(docIDs))
 	}
+	// NOTE: When count > threshold, we don't pass docIDs because without locks, concurrent
+	// transactions could delete/modify those documents, making the IDs stale.
+	// UpdateDocumentInBundle will re-run the WHERE query which is safer.
 
 	// Execute with WAL logging if available
 	if serviceManager.WALManager != nil {

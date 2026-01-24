@@ -5617,14 +5617,18 @@ func (s *BundleService) UpdateDocumentInBundle(database *models.Database, bundle
 	}
 
 	// TASK 1: Use query planner for WHERE clause processing (same fast path as SELECT)
-	// OPTIMIZATION: If lockInfo contains pre-fetched document IDs, use those directly
-	// to avoid duplicate WHERE clause evaluation (document_operations.go already did it)
+	// OPTIMIZATION: If lockInfo contains pre-fetched document IDs AND we have actual locks,
+	// use those directly to avoid duplicate WHERE clause evaluation.
+	// IMPORTANT: Only use pre-fetched IDs when we have actual document locks (LockManager != nil)
+	// because locks guarantee the IDs are still valid. Without locks, concurrent transactions
+	// could delete/modify documents, making the IDs stale.
 	var filteredDocs []*models.Document
 
-	// Check if we have pre-fetched document IDs from document_operations.go
-	if len(lockInfo) > 0 && lockInfo[0] != nil && len(lockInfo[0].LockedDocIDs) > 0 {
+	// Check if we have pre-fetched document IDs WITH actual locks from document_operations.go
+	if len(lockInfo) > 0 && lockInfo[0] != nil && lockInfo[0].LockManager != nil && len(lockInfo[0].LockedDocIDs) > 0 {
 		// OPTIMIZATION: Fetch documents by ID instead of re-running WHERE clause
 		// This eliminates duplicate I/O from running the same WHERE query twice
+		// Safe because document locks prevent concurrent modifications
 		filteredDocs = make([]*models.Document, 0, len(lockInfo[0].LockedDocIDs))
 		for _, docID := range lockInfo[0].LockedDocIDs {
 			doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
