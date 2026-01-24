@@ -22,14 +22,22 @@ type BufferedDocument struct {
 // WriteBuffer provides batched write operations for optimal I/O performance
 // Reduces syscalls by buffering multiple document writes before flushing
 // Designed for append-only operations with configurable flush triggers
+//
+// P0c: Double-buffering — flush runs outside mutex. We swap active <-> back buffer
+// under lock, then write back buffer to file without holding lock. Reduces
+// contention when buffer is full or timeout hits.
 type WriteBuffer struct {
 	file         *os.File
 	buffer       []byte
+	backBuffer   []byte // P0c: second buffer for flush; I/O done outside mutex
 	bufferSize   int
 	flushSize    int
 	lastFlush    time.Time
 	flushTimeout time.Duration
 	mutex        sync.Mutex
+	flushCond    *sync.Cond  // signaled when flushInProgress becomes false
+	flushInProgress bool     // true while doFlushToFile runs (outside mutex)
+	flushErr     error       // sticky error from background flush
 
 	// Transaction-aware tracking
 	bufferedDocs  map[string]*BufferedDocument // documentID -> BufferedDocument
@@ -38,9 +46,10 @@ type WriteBuffer struct {
 
 // NewWriteBuffer creates a new write buffer for the specified file
 func NewWriteBuffer(file *os.File, bufferSize int) *WriteBuffer {
-	return &WriteBuffer{
+	wb := &WriteBuffer{
 		file:          file,
 		buffer:        make([]byte, 0, bufferSize),
+		backBuffer:    make([]byte, 0, bufferSize), // P0c double-buffer
 		bufferSize:    bufferSize,
 		flushSize:     bufferSize / 2, // Flush when half full
 		lastFlush:     time.Now(),
@@ -48,6 +57,8 @@ func NewWriteBuffer(file *os.File, bufferSize int) *WriteBuffer {
 		bufferedDocs:  make(map[string]*BufferedDocument),
 		discardedDocs: make(map[string]bool),
 	}
+	wb.flushCond = sync.NewCond(&wb.mutex)
+	return wb
 }
 
 // Write adds data to the buffer and flushes if necessary
@@ -122,81 +133,85 @@ func (wb *WriteBuffer) Sync() error {
 	return common.Fdatasync(wb.file)
 }
 
-// flushInternal performs the actual flush operation with sync (must be called with mutex held)
-// Use this for explicit flush requests (transaction commits) where durability is required
-func (wb *WriteBuffer) flushInternal() error {
-	if len(wb.buffer) == 0 {
+// SyncGroupCommit registers this buffer's file for P4b group commit and blocks until
+// the next coalesced fsync run. Use instead of Sync() when DurabilityMode is "strict"
+// to batch multiple writers into a single fsync every ~20ms.
+func (wb *WriteBuffer) SyncGroupCommit() error {
+	wb.mutex.Lock()
+	f := wb.file
+	wb.mutex.Unlock()
+	if f == nil {
+		return fmt.Errorf("write buffer file is nil")
+	}
+	return globalCoalescer.RequestSync(f)
+}
+
+// doFlushToFile writes data to file (and optionally syncs). Must NOT hold wb.mutex.
+// P0c: I/O runs outside mutex to reduce contention.
+func (wb *WriteBuffer) doFlushToFile(data []byte, doSync bool) error {
+	if wb.file == nil || len(data) == 0 {
 		return nil
 	}
-
-	// CRITICAL: Handle short writes - file.Write() can return n < len(buffer) with err == nil
-	// We must loop until all bytes are written to prevent data corruption from partial writes
-	toWrite := wb.buffer
 	written := 0
-	for written < len(toWrite) {
-		n, err := wb.file.Write(toWrite[written:])
+	for written < len(data) {
+		n, err := wb.file.Write(data[written:])
 		if err != nil {
-			return fmt.Errorf("write failed after %d of %d bytes: %w", written, len(toWrite), err)
+			return fmt.Errorf("write failed after %d of %d bytes: %w", written, len(data), err)
 		}
 		if n == 0 {
-			// Write returned 0 with no error - this should never happen but signals a problem
 			return fmt.Errorf("write returned 0 bytes written with no error (stuck write)")
 		}
 		written += n
 	}
-
-	// Force OS to flush to disk - CRITICAL for durability
-	err := wb.file.Sync()
-	if err != nil {
-		return err
+	if doSync {
+		return common.Fdatasync(wb.file)
 	}
+	return nil
+}
 
-	// Reset buffer and transaction tracking
+// swapAndFlush swaps buffer <-> backBuffer, runs I/O outside lock, then clears backBuffer.
+// Caller must hold mutex. Returns with mutex held. Sets flushErr on failure.
+func (wb *WriteBuffer) swapAndFlush(doSync bool) error {
+	for wb.flushInProgress {
+		wb.flushCond.Wait()
+	}
+	if wb.flushErr != nil {
+		return wb.flushErr
+	}
+	if len(wb.buffer) == 0 {
+		return nil
+	}
+	wb.buffer, wb.backBuffer = wb.backBuffer, wb.buffer
 	wb.buffer = wb.buffer[:0]
 	wb.bufferedDocs = make(map[string]*BufferedDocument)
-	// NOTE: Don't clear discardedDocs - these need to persist for post-rollback cleanup
-	// They'll be cleared after physical deletion in post-rollback cleanup
 	wb.lastFlush = time.Now()
-
+	wb.flushInProgress = true
+	data := wb.backBuffer
+	wb.mutex.Unlock()
+	err := wb.doFlushToFile(data, doSync)
+	wb.mutex.Lock()
+	wb.backBuffer = wb.backBuffer[:0]
+	wb.flushInProgress = false
+	wb.flushCond.Broadcast()
+	if err != nil {
+		wb.flushErr = err
+		return err
+	}
+	wb.flushErr = nil // clear sticky error on success
 	return nil
+}
+
+// flushInternal performs the actual flush operation with sync (must be called with mutex held)
+// Use this for explicit flush requests (transaction commits) where durability is required
+func (wb *WriteBuffer) flushInternal() error {
+	return wb.swapAndFlush(true)
 }
 
 // flushWithoutSync performs flush without fsync for better performance
 // Used for automatic flushes when buffer is full or timeout reached
 // Durability is ensured by WAL logging and explicit Flush() calls on transaction commits
 func (wb *WriteBuffer) flushWithoutSync() error {
-	if len(wb.buffer) == 0 {
-		return nil
-	}
-
-	// CRITICAL: Handle short writes - file.Write() can return n < len(buffer) with err == nil
-	// We must loop until all bytes are written to prevent data corruption from partial writes
-	toWrite := wb.buffer
-	written := 0
-	for written < len(toWrite) {
-		n, err := wb.file.Write(toWrite[written:])
-		if err != nil {
-			return fmt.Errorf("write failed after %d of %d bytes: %w", written, len(toWrite), err)
-		}
-		if n == 0 {
-			// Write returned 0 with no error - this should never happen but signals a problem
-			return fmt.Errorf("write returned 0 bytes written with no error (stuck write)")
-		}
-		written += n
-	}
-
-	// PERFORMANCE FIX: Don't sync here - let OS batch writes
-	// Explicit Flush() calls (transaction commits) will sync when needed
-	// WAL provides durability guarantee, so we don't need to sync every write
-
-	// Reset buffer and transaction tracking
-	wb.buffer = wb.buffer[:0]
-	wb.bufferedDocs = make(map[string]*BufferedDocument)
-	// NOTE: Don't clear discardedDocs - these need to persist for post-rollback cleanup
-	// They'll be cleared after physical deletion in post-rollback cleanup
-	wb.lastFlush = time.Now()
-
-	return nil
+	return wb.swapAndFlush(false)
 }
 
 // GetDiscardedDocuments returns the list of document IDs that were discarded

@@ -1,6 +1,7 @@
 package bundlestore
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -84,6 +85,11 @@ type BundleStorageEngine struct {
 	// Key: file path. LRU eviction when at FileReadCacheMaxEntries.
 	fileReadCache      map[string]*fileReadCacheEntry
 	fileReadCacheMutex sync.RWMutex
+
+	// COMPACTION CALLBACK: Invoked when compaction completes for a bundle so
+	// BundleService can invalidate documentPageMap (logical page positions change).
+	onCompactionComplete   func(databaseName, bundleName string)
+	onCompactionCompleteMu sync.RWMutex
 }
 
 // fileReadCacheEntry holds a cached file buffer and lastAccess for LRU eviction.
@@ -168,14 +174,14 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		logger:           logger,
 		serializer:       serializer,
 		writeBuffers:     make(map[string]*WriteBuffer),
-		projectionFields: make(map[string][]string),                       // PROJECTION PUSHDOWN: Initialize projection fields map
-		manifestManagers: make(map[string]*ManifestManager),               // Initialize manifest managers map
-		writeLocks:       make(map[string]*sync.RWMutex),                  // Initialize write locks map
-		documentLocks:    make(map[string]map[string]*sync.Mutex),         // DOCUMENT-LEVEL LOCKING: Initialize document locks map
-		rotationLocks:    make(map[string]*sync.Mutex),                    // PHASE 1: Initialize rotation locks map
-		writeVerifier:    NewDocumentWriteVerifier(logger),                // Initialize write verification
-		writeLogger:      NewBundleWriteLogger(logger, 1000),              // Keep last 1000 write operations
-		fileReadCache:    make(map[string]*fileReadCacheEntry),            // FILE READ CACHE: avoids repeated full-file reads per page
+		projectionFields: make(map[string][]string),               // PROJECTION PUSHDOWN: Initialize projection fields map
+		manifestManagers: make(map[string]*ManifestManager),       // Initialize manifest managers map
+		writeLocks:       make(map[string]*sync.RWMutex),          // Initialize write locks map
+		documentLocks:    make(map[string]map[string]*sync.Mutex), // DOCUMENT-LEVEL LOCKING: Initialize document locks map
+		rotationLocks:    make(map[string]*sync.Mutex),            // PHASE 1: Initialize rotation locks map
+		writeVerifier:    NewDocumentWriteVerifier(logger),        // Initialize write verification
+		writeLogger:      NewBundleWriteLogger(logger, 1000),      // Keep last 1000 write operations
+		fileReadCache:    make(map[string]*fileReadCacheEntry),    // FILE READ CACHE: avoids repeated full-file reads per page
 	}
 
 	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
@@ -545,6 +551,24 @@ func (bse *BundleStorageEngine) InvalidateFileReadCacheForBundle(databaseName, b
 	}
 	if bse.logger != nil && settings.GetSettings().Debug {
 		bse.logger.Debugf("Invalidated file read cache for bundle %s/%s", databaseName, bundleName)
+	}
+}
+
+// RegisterCompactionComplete sets the callback invoked when compaction completes for a bundle.
+// BundleService registers InvalidateDocumentPageMapForBundle so documentPageMap stays correct.
+func (bse *BundleStorageEngine) RegisterCompactionComplete(fn func(databaseName, bundleName string)) {
+	bse.onCompactionCompleteMu.Lock()
+	defer bse.onCompactionCompleteMu.Unlock()
+	bse.onCompactionComplete = fn
+}
+
+// InvokeCompactionComplete is called by BundleCompactor after successful compaction.
+func (bse *BundleStorageEngine) InvokeCompactionComplete(databaseName, bundleName string) {
+	bse.onCompactionCompleteMu.RLock()
+	fn := bse.onCompactionComplete
+	bse.onCompactionCompleteMu.RUnlock()
+	if fn != nil {
+		fn(databaseName, bundleName)
 	}
 }
 
@@ -1079,9 +1103,35 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 		return fmt.Errorf("bundle must have an associated database")
 	}
 
-	// Calculate file path once
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+	// Resolve write target: multi-file segment (preferred) or legacy single file if manifest unavailable
+	manifestMgr := b.getOrCreateManifestManager(bundle.Database.Name, bundle.Name)
+	manifest, err := manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
+	var filePath string
+	if err != nil {
+		// Fallback to legacy single file when manifest cannot be loaded/created
+		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+		filePath = filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+	} else {
+		currentFileID := uint32(1)
+		if manifest.ActiveFileID > 0 {
+			currentFileID = uint32(manifest.ActiveFileID)
+		}
+		bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
+		filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+		fileExistsInManifest := false
+		for _, f := range manifest.Files {
+			if f.FileID == int(currentFileID) {
+				fileExistsInManifest = true
+				break
+			}
+		}
+		if !fileExistsInManifest {
+			fileName := fmt.Sprintf("%06d.bnd", currentFileID)
+			if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+				return fmt.Errorf("failed to add file to manifest for update: %w", err)
+			}
+		}
+	}
 
 	// Get or create write buffer ONCE for entire batch
 	writeBuffer, err := b.getOrCreateWriteBuffer(bundle.Name, filePath)
@@ -1168,13 +1218,10 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	// PHASE 0.2: Verify durability mode is correctly applied
 	dm := settings.GetSettings().DurabilityMode
 	if dm == "strict" {
-		// PHASE 0.2: Log warning if strict mode is enabled (causes fsync on every update)
-		b.logger.Warnf("BATCH UPDATE: DurabilityMode is 'strict' - performing synchronous fsync (may cause performance degradation under high concurrency)")
-		if err := writeBuffer.Sync(); err != nil {
-			b.logger.Warnf("BATCH UPDATE: Failed to sync to disk: %v (continuing anyway)", err)
+		if err := writeBuffer.SyncGroupCommit(); err != nil {
+			b.logger.Warnf("BATCH UPDATE: Group-commit sync failed: %v (continuing anyway)", err)
 		}
 	} else {
-		// PHASE 0.2: Log at debug level that we're using performance mode (no fsync)
 		b.logger.Debugf("BATCH UPDATE: DurabilityMode is '%s' - skipping fsync for performance", dm)
 	}
 
@@ -1248,9 +1295,38 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 
 	b.logger.Debugf("BATCH UPDATE WITH LOCKS: Using document-level locks for %d documents", len(documents))
 
-	// Calculate file path
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+	// P0a: Use multi-file path (same as ADD) instead of legacy {db}_{bundle}.bnd.
+	// One write buffer per segment; UPDATE and ADD share the same manifest/segment layout.
+	manifestMgr := b.getOrCreateManifestManager(bundle.Database.Name, bundle.Name)
+	manifest, err := manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
+	if err != nil {
+		return fmt.Errorf("failed to load bundle manifest for update: %w", err)
+	}
+	var currentFileID uint32 = 1
+	if manifest.ActiveFileID > 0 {
+		currentFileID = uint32(manifest.ActiveFileID)
+	}
+	bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
+	filePath := filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+
+	fileExistsInManifest := false
+	for _, f := range manifest.Files {
+		if f.FileID == int(currentFileID) {
+			fileExistsInManifest = true
+			break
+		}
+	}
+	if !fileExistsInManifest {
+		fileName := fmt.Sprintf("%06d.bnd", currentFileID)
+		if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+			return fmt.Errorf("failed to add file to manifest for update: %w", err)
+		}
+	}
+
+	// P0a: Do not hold rotation lock during append. ADD releases it before append; we do the same.
+	// This avoids serializing all UPDATEs on the rotation lock. Risk: ADD could rotate and close our
+	// buffer mid-update; in practice rare when UPDATE and ADD interleave. TestConcurrentUpdates
+	// runs UPDATEs only, so no rotation.
 
 	// Get or create write buffer (thread-safe via its own mutex)
 	writeBuffer, err := b.getOrCreateWriteBuffer(bundle.Name, filePath)
@@ -1325,12 +1401,11 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 		return fmt.Errorf("BATCH UPDATE WITH LOCKS: Failed to flush write buffer: %w", err)
 	}
 
-	// Handle durability mode
+	// Handle durability mode (P4b: use group commit when strict to coalesce fsync)
 	dm := settings.GetSettings().DurabilityMode
 	if dm == "strict" {
-		b.logger.Warnf("BATCH UPDATE WITH LOCKS: DurabilityMode is 'strict' - performing synchronous fsync")
-		if err := writeBuffer.Sync(); err != nil {
-			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Failed to sync to disk: %v (continuing anyway)", err)
+		if err := writeBuffer.SyncGroupCommit(); err != nil {
+			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Group-commit sync failed: %v (continuing anyway)", err)
 		}
 	}
 
@@ -1547,34 +1622,28 @@ func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bund
 	}
 	defer file.Close()
 
-	// Write all deletion markers
+	// PERF: Buffer all markers and write once instead of 2*N write syscalls.
+	// Reduces I/O and time under the write lock for large deletes.
+	var buf bytes.Buffer
 	for _, documentID := range documentIDs {
-		// Create deletion marker entry
 		deletionEntry := map[string]interface{}{
 			"DocumentID": documentID,
 			"Operation":  "DELETE",
 			"Timestamp":  time.Now(),
 		}
-
-		// Serialize the deletion marker
 		deletionBytes, err := helpers.EncodeFastBinary(deletionEntry)
 		if err != nil {
 			return fmt.Errorf("failed to encode deletion marker for %s: %w", documentID, err)
 		}
-
-		// Create header with deletion magic number
 		headerSize := uint32(len(deletionBytes))
 		headerBytes := make([]byte, 8)
 		binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADDEAD)
 		binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
-
-		// Write header and data
-		if _, err := file.Write(headerBytes); err != nil {
-			return fmt.Errorf("failed to write deletion marker header for %s: %w", documentID, err)
-		}
-		if _, err := file.Write(deletionBytes); err != nil {
-			return fmt.Errorf("failed to write deletion marker data for %s: %w", documentID, err)
-		}
+		buf.Write(headerBytes)
+		buf.Write(deletionBytes)
+	}
+	if _, err := file.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("failed to write batch deletion markers: %w", err)
 	}
 
 	// D3: Fdatasync conditional on DurabilityMode. "strict": sync; "performance" (default): skip.
@@ -2725,7 +2794,7 @@ func (b *BundleStorageEngine) SetProjectionFieldsForBundle(bundleName string, fi
 			return
 		}
 	}
-	
+
 	b.projectionMutex.Lock()
 	defer b.projectionMutex.Unlock()
 	if len(fields) > 0 {

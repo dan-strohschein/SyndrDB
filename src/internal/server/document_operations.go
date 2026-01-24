@@ -20,7 +20,7 @@ import (
 func UpdateDocument(commandParts []string, serviceManager ServiceManager, database *models.Database, command string, logger *zap.SugaredLogger, session *Session) (*CommandResponse, error) {
 	// Enhanced bundle name parsing following SyndrDB comprehensive error handling
 	// This replaces the fragile index-based parsing with robust string extraction
-		bundleName, err := parseBundleNameFromCommand(command, "IN")
+	bundleName, err := parseBundleNameFromCommand(command, "IN")
 	if err != nil {
 		logger.Errorf("Failed to parse bundle name from UPDATE command: %v", err)
 		logger.Debugf("Command was: %s", command)
@@ -90,10 +90,10 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	// Phase 5: significantly increased (was 1000) so document-level locks used for almost all updates.
 	const lockEscalationThreshold = 100_000
 	useDocumentLocks := len(docIDs) > 0 && len(docIDs) <= lockEscalationThreshold
-	
+
 	logger.Debugf("UPDATE document locking decision: docIDs=%d, threshold=%d, useDocumentLocks=%v",
 		len(docIDs), lockEscalationThreshold, useDocumentLocks)
-	
+
 	// Determine txID and sessionID for locking
 	var lockTxID, lockSessionID string
 	isAutocommit := false
@@ -111,20 +111,30 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 
 	if useDocumentLocks && lockTxID != "" {
 		// Sort document IDs to prevent deadlocks (always acquire in same order)
+		// CRITICAL: Must acquire locks SEQUENTIALLY in sorted order to guarantee deadlock prevention.
+		// Parallel acquisition (chunking) breaks this guarantee and causes circular deadlocks.
 		sort.Strings(docIDs)
-		
-		// Acquire write locks for all matching documents
+
+		// SEQUENTIAL lock acquisition - guarantees global ordering for deadlock prevention
 		lockedDocIDs := make([]string, 0, len(docIDs))
+		var firstErr error
+		var failedDocID string
+
 		for _, docID := range docIDs {
 			if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, lockTxID, lockSessionID); err != nil {
-				// Release all locks for this transaction (ReleaseLocks releases all locks for txID)
-				serviceManager.LockManager.ReleaseLocks(lockTxID)
-				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
-					fmt.Sprintf("failed to acquire write lock for document %s", docID), errors.LayerTransaction).WithContext("document_id", docID)
+				firstErr = err
+				failedDocID = docID
+				break
 			}
 			lockedDocIDs = append(lockedDocIDs, docID)
 		}
-		
+
+		if firstErr != nil {
+			serviceManager.LockManager.ReleaseLocks(lockTxID)
+			return nil, errors.WrapWithMessage(firstErr, errors.ERR_INTERNAL_LOCK,
+				fmt.Sprintf("failed to acquire write lock for document %s", failedDocID), errors.LayerTransaction).WithContext("document_id", failedDocID)
+		}
+
 		// Create lock info to pass to UpdateDocumentInBundle (include pre-fetched docs to avoid GetDocument-by-ID)
 		lockInfo = &bndle.DocumentLockInfo{
 			LockManager:    serviceManager.LockManager,
@@ -133,7 +143,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			LockedDocIDs:   lockedDocIDs,
 			PreFetchedDocs: preFetchedDocs,
 		}
-		
+
 		// TASK 2: Release locks on error or for autocommit
 		// For explicit transactions: locks are held until transaction commits/rolls back (unless error)
 		// For autocommit: always release locks after operation completes
@@ -147,7 +157,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 				}
 			}
 		}()
-		
+
 		if isAutocommit {
 			logger.Debugf("Acquired document-level write locks for %d documents (autocommit txID=%s)", len(lockedDocIDs), lockTxID[:8])
 		} else {
@@ -158,7 +168,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	// transactions could delete/modify those documents, making the IDs stale.
 	// UpdateDocumentInBundle will re-run the WHERE query which is safer.
 
-	// PHASE 1: Build context with MVCC snapshot when session in transaction (for getDocumentsByQueryPlanner)
+	// PHASE 1: Build context with MVCC snapshot when session in transaction (reserved; WHERE uses GetDocumentsByFilter)
 	ctx := context.Background()
 	if session != nil && session.IsInTransaction() {
 		if snap := session.GetMVCCSnapshot(); snap != nil {

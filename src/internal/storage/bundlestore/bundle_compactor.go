@@ -421,6 +421,9 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 	// Invalidate file-read cache for this bundle so subsequent reads see the new compacted segment
 	bc.storageEngine.InvalidateFileReadCacheForBundle(databaseName, bundleName)
 
+	// Notify BundleService to invalidate documentPageMap (logical page positions changed)
+	bc.storageEngine.InvokeCompactionComplete(databaseName, bundleName)
+
 	duration := time.Since(startTime)
 
 	// Get throttling statistics

@@ -22,6 +22,18 @@ These helpers enable the query planner to make intelligent decisions about
 index usage and query execution strategies based on the Expression AST structure.
 */
 
+// UnwrapGrouped strips GroupedExpression (parentheses) wrappers so ExtractSimpleEquality
+// and ExtractRangeCondition can match inner expressions like ("category" == "A").
+func UnwrapGrouped(expr Expression) Expression {
+	for {
+		if g, ok := expr.(*GroupedExpression); ok {
+			expr = g.Expression
+			continue
+		}
+		return expr
+	}
+}
+
 // ExtractSimpleEquality extracts field and value from a simple equality expression
 // Returns (field, value, true) if expr is "field == value" or "Bundle.field == value"
 // Returns ("", nil, false) for any other expression pattern

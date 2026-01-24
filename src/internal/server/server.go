@@ -73,7 +73,7 @@ type Server struct {
 	Running               bool
 	databaseService       *database.DatabaseService
 	logger                *zap.SugaredLogger
-	errorLogger           *errors.ErrorLogger           // MED-004: Error framework logger
+	errorLogger           *errors.ErrorLogger // MED-004: Error framework logger
 	bufferPool            *buffer.BufferPool
 	wg                    sync.WaitGroup                // WaitGroup for tracking active connections
 	activeQueryCount      atomic.Uint64                 // Number of currently executing queries (for ghost cleanup pausing)
@@ -194,7 +194,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		DebugMode:       config.Debug && config.ErrorShowInConsole,
 		IncludeStack:    config.ErrorIncludeStack,
 	}
-	
+
 	// Set defaults if not configured
 	if errorLoggerConfig.InternalLogFile == "" {
 		errorLoggerConfig.InternalLogFile = "errors_internal.log"
@@ -242,6 +242,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	bundleFactory := bundle.NewBundleFactory()
 	documentFactory := document.NewDocumentFactory()
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, config)
+	bundleStore.RegisterCompactionComplete(func(db, b string) { bundleService.InvalidateDocumentPageMapForBundle(b) })
 
 	// Create the internal catalog service
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)

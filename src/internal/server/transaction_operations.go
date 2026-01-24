@@ -372,7 +372,7 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 				}
 
 				// Call DeleteDocumentFromBundle with explicit docID
-				return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, deleteCmd, []string{entry.DocumentID})
+				return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, deleteCmd, []string{entry.DocumentID}, nil)
 			})
 
 			if err != nil {

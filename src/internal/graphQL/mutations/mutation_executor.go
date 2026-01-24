@@ -237,12 +237,12 @@ func (e *MutationExecutor) ExecuteDelete(deleteCommand *models.DocumentDeleteCom
 			// - Deleting from bundle file storage
 			// - Cleaning up indexes
 			// - Updating metadata
-			return e.serviceManager.BundleService.DeleteDocumentFromBundle(bundle, deleteCommand, docIDs)
+			return e.serviceManager.BundleService.DeleteDocumentFromBundle(bundle, deleteCommand, docIDs, nil)
 		})
 	} else {
 		// Fallback to direct execution if WAL is not available
 		e.logger.Warn("WAL Manager not available, executing without transaction logging")
-		err = e.serviceManager.BundleService.DeleteDocumentFromBundle(bundle, deleteCommand, docIDs)
+		err = e.serviceManager.BundleService.DeleteDocumentFromBundle(bundle, deleteCommand, docIDs, nil)
 	}
 
 	if err != nil {

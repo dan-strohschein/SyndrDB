@@ -777,7 +777,7 @@ func (v *ReferentialIntegrityValidator) ExecuteCascadeDelete(plan *CascadeDelete
 			WhereClause: fmt.Sprintf("\"DocumentID\" == \"%s\"", dep.DocumentID),
 		}
 
-		err = v.bundleService.DeleteDocumentFromBundle(bundle, docCommand, []string{dep.DocumentID})
+		err = v.bundleService.DeleteDocumentFromBundle(bundle, docCommand, []string{dep.DocumentID}, nil)
 		if err != nil {
 			return fmt.Errorf("failed to delete document '%s' from bundle '%s': %w",
 				dep.DocumentID, dep.BundleName, err)
@@ -800,7 +800,7 @@ func (v *ReferentialIntegrityValidator) ExecuteCascadeDelete(plan *CascadeDelete
 		WhereClause: fmt.Sprintf("\"DocumentID\" == \"%s\"", plan.RootDocumentID),
 	}
 
-	err = v.bundleService.DeleteDocumentFromBundle(rootBundle, rootCommand, []string{plan.RootDocumentID})
+	err = v.bundleService.DeleteDocumentFromBundle(rootBundle, rootCommand, []string{plan.RootDocumentID}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to delete root document '%s': %w", plan.RootDocumentID, err)
 	}

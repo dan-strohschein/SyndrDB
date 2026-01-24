@@ -34,6 +34,9 @@ package planner
 import (
 	"context"
 	"fmt"
+	"os"
+
+	// "runtime/debug" // NOTE: Uncomment only if troubleshooting join issues
 	"strings"
 	"sync"
 	"syndrdb/src/internal/domain/bundle"
@@ -500,7 +503,14 @@ type JoinExecutionNode struct {
 
 // Execute implements ExecutionNode interface using the new JOIN executor
 func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	jen.Logger.Infof("Executing JOIN using Phase 1 JOIN executor")
+	// NOTE: Uncomment only if troubleshooting join issues
+	// jen.Logger.Infof("Executing JOIN using Phase 1 JOIN executor - stack trace:\n%s", debug.Stack())
+	// #region agent log - JOIN execution tracking
+	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		f.WriteString(fmt.Sprintf(`{"hypothesisId":"JOIN","location":"join_planner.go:Execute","message":"JOIN EXECUTED","data":{"fromBundle":"%s","joinCount":%d},"timestamp":%d}`+"\n", jen.Query.FromBundle, len(jen.Query.JoinClauses), time.Now().UnixMilli()))
+		f.Close()
+	}
+	// #endregion
 
 	// Opt #1: set projection for join bundles to reduce I/O and deserialization
 	var bundleService BundleServiceInterface
@@ -1094,17 +1104,17 @@ func (pba *PlannerBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, 
 	if pba.bundle == nil {
 		return nil, fmt.Errorf("bundle is nil")
 	}
-	
+
 	if pba.bundleService == nil {
 		return nil, fmt.Errorf("bundleService is not available")
 	}
-	
+
 	// Get database name
 	databaseName := ""
 	if pba.bundle.Database != nil {
 		databaseName = pba.bundle.Database.Name
 	}
-	
+
 	// Use bundleService to get document page (uses shared cache)
 	return pba.bundleService.GetDocumentPage(pba.bundle.Name, databaseName, pageID)
 }
@@ -1130,23 +1140,23 @@ func (pba *PlannerBundleAdapter) CopyProjectedToSessionCache(ctx context.Context
 	if pba.bundleService == nil {
 		return nil, 0, 0, 0, fmt.Errorf("bundle service not available")
 	}
-	
+
 	if pba.bundle == nil {
 		return nil, 0, 0, 0, fmt.Errorf("bundle is nil")
 	}
-	
+
 	databaseName := ""
 	if pba.bundle.Database != nil {
 		databaseName = pba.bundle.Database.Name
 	}
-	
+
 	totalPages := pba.GetTotalPages()
 	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := pba.bundleService.CopyProjectedFromCache(
 		pba.bundle.Name, databaseName, totalPages, projectFields, effectiveLimit)
 	if err != nil {
 		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents: %w", err)
 	}
-	
+
 	return sessionCache, docsCopied, cachedPages, totalPagesReturned, nil
 }
 
@@ -1658,7 +1668,7 @@ func (f *ExpressionFilteredBundleAdapter) LoadPage(pageID uint32) (*models.Docum
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Filter documents by predicate
 	filteredPage := &models.DocumentPage{
 		PageID:         page.PageID,
@@ -1670,7 +1680,7 @@ func (f *ExpressionFilteredBundleAdapter) LoadPage(pageID uint32) (*models.Docum
 		LoadedAt:       page.LoadedAt,
 		DocumentCount:  0,
 	}
-	
+
 	for docID, doc := range page.Documents {
 		docPtr := &doc
 		if f.matchesPredicate(docPtr) {
@@ -1678,7 +1688,7 @@ func (f *ExpressionFilteredBundleAdapter) LoadPage(pageID uint32) (*models.Docum
 			filteredPage.DocumentCount++
 		}
 	}
-	
+
 	return filteredPage, nil
 }
 

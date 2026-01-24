@@ -351,6 +351,7 @@ type BundleService struct {
 
 	// Performance optimization: Deferred index updates
 	indexUpdateBuffer    []IndexUpdate // Buffer for pending index updates
+	indexUpdateMutex     sync.Mutex    // Protects indexUpdateBuffer (FIX: was missing, causing data race)
 	indexUpdateBatchSize int           // Maximum updates to batch before flushing
 	indexUpdateInterval  time.Duration // Maximum time to wait before flushing
 	lastIndexFlush       time.Time     // Last time index updates were flushed
@@ -847,7 +848,8 @@ func IsFieldForeignKey(bundle *models.Bundle, fieldName string) (bool, string, s
 // This optimizes write performance by batching index updates
 // Parameters:
 //   - pageID: Physical page number where the document resides (use 0 if unknown, will need update later)
-func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, operation, documentID string, fieldValue interface{}, pageID uint32, oldValue interface{}, deferred bool) {
+//   - docMetadata: optional [commitSeq, versionSeq]; when len>=2, hash index uses these instead of GetDocument
+func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, operation, documentID string, fieldValue interface{}, pageID uint32, oldValue interface{}, deferred bool, docMetadata ...uint64) {
 	update := IndexUpdate{
 		BundleName:  bundleName,
 		IndexName:   indexName,
@@ -882,11 +884,11 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 					sequence := atomic.AddUint64(&hashIndex.GlobalSequence, 1)
 
 					// PHASE 4: MVCC - Get document's version metadata
-					// For now, use 0 (uncommitted) - will be updated when commit sequence is assigned
-					// TODO: Get actual CommitSequence and VersionSequence from document
+					// When caller passes docMetadata (commitSeq, versionSeq), use those to avoid GetDocument.
 					var commitSeq, versionSeq uint64
-					// Try to get document to retrieve version metadata
-					if doc, err := s.GetDocument(bundleName, bundle.Database.Name, documentID); err == nil {
+					if len(docMetadata) >= 2 {
+						commitSeq, versionSeq = docMetadata[0], docMetadata[1]
+					} else if doc, err := s.GetDocument(bundleName, bundle.Database.Name, documentID); err == nil {
 						commitSeq = doc.CommitSequence
 						versionSeq = doc.VersionSequence
 					}
@@ -1016,19 +1018,27 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 	}
 
 	// Schedule disk persistence (deferred for performance)
+	// FIX: Protect indexUpdateBuffer with mutex to prevent data race
+	s.indexUpdateMutex.Lock()
 	s.indexUpdateBuffer = append(s.indexUpdateBuffer, update)
+	bufferLen := len(s.indexUpdateBuffer)
+	lastFlush := s.lastIndexFlush
+	s.indexUpdateMutex.Unlock()
 
 	// Check if we should flush updates to disk
-	shouldFlush := len(s.indexUpdateBuffer) >= s.indexUpdateBatchSize ||
-		time.Since(s.lastIndexFlush) >= s.indexUpdateInterval
+	shouldFlush := bufferLen >= s.indexUpdateBatchSize ||
+		time.Since(lastFlush) >= s.indexUpdateInterval
 	if shouldFlush {
 		// flushStart := time.Now()
 		s.flushIndexUpdates()
 	}
 
 	// PHASE 1 ENHANCEMENT: Additional flush check for idle periods on index updates
-	if len(s.indexUpdateBuffer) > 0 && time.Since(s.lastIndexFlush) >= (s.indexUpdateInterval*5) {
-		s.logger.Debugf("IDLE FLUSH: Flushing %d index updates after extended idle period", len(s.indexUpdateBuffer))
+	s.indexUpdateMutex.Lock()
+	idleFlushNeeded := len(s.indexUpdateBuffer) > 0 && time.Since(s.lastIndexFlush) >= (s.indexUpdateInterval*5)
+	s.indexUpdateMutex.Unlock()
+	if idleFlushNeeded {
+		s.logger.Debugf("IDLE FLUSH: Flushing %d index updates after extended idle period", bufferLen)
 		s.flushIndexUpdates()
 	}
 }
@@ -1070,8 +1080,11 @@ func (s *BundleService) scheduleMetadataUpdate(bundleName, operation string, val
 
 // flushIndexUpdates processes all pending index updates in a batch
 // This significantly improves write performance by reducing I/O operations
+// FIX: Now protected by indexUpdateMutex to prevent data race
 func (s *BundleService) flushIndexUpdates() {
+	s.indexUpdateMutex.Lock()
 	if len(s.indexUpdateBuffer) == 0 {
+		s.indexUpdateMutex.Unlock()
 		return
 	}
 
@@ -1090,7 +1103,12 @@ func (s *BundleService) flushIndexUpdates() {
 			updateGroups[update.BundleName][update.IndexName], update)
 	}
 
-	// Process updates in batches
+	// Clear the buffer and update flush time BEFORE processing (release lock faster)
+	s.indexUpdateBuffer = s.indexUpdateBuffer[:0] // Reset slice but keep capacity
+	s.lastIndexFlush = time.Now()
+	s.indexUpdateMutex.Unlock()
+
+	// Process updates in batches (outside lock to avoid blocking other operations)
 	for bundleName, indexGroups := range updateGroups {
 		bundle, exists := s.bundleMetadata[bundleName]
 		if !exists {
@@ -1113,13 +1131,62 @@ func (s *BundleService) flushIndexUpdates() {
 		}
 	}
 
-	// Clear the buffer and update flush time
-	s.indexUpdateBuffer = s.indexUpdateBuffer[:0] // Reset slice but keep capacity
-	s.lastIndexFlush = time.Now()
-
 	flushTime := time.Since(startTime)
 	s.logger.Debugw("Index update flush completed",
 		zap.Duration("duration", flushTime))
+}
+
+// flushIndexUpdatesForBundle flushes only index updates for the given bundle (P4a scoped flush).
+// Reduces tail latency by avoiding processing the entire global buffer when only this bundle's
+// indexes were touched by the current UPDATE.
+// FIX: Now protected by indexUpdateMutex to prevent data race
+func (s *BundleService) flushIndexUpdatesForBundle(bundleName string) {
+	s.indexUpdateMutex.Lock()
+	var match, keep []IndexUpdate
+	for _, u := range s.indexUpdateBuffer {
+		if u.BundleName == bundleName {
+			match = append(match, u)
+		} else {
+			keep = append(keep, u)
+		}
+	}
+	if len(match) == 0 {
+		s.indexUpdateMutex.Unlock()
+		return
+	}
+
+	// Update buffer and flush time BEFORE processing (release lock faster)
+	s.indexUpdateBuffer = keep
+	s.lastIndexFlush = time.Now()
+	s.indexUpdateMutex.Unlock()
+
+	startTime := time.Now()
+	s.logger.Debugw("Flushing scoped index updates for bundle",
+		zap.String("bundle", bundleName),
+		zap.Int("count", len(match)))
+
+	updateGroups := make(map[string][]IndexUpdate)
+	for _, u := range match {
+		updateGroups[u.IndexName] = append(updateGroups[u.IndexName], u)
+	}
+	bundle, exists := s.bundleMetadata[bundleName]
+	if !exists {
+		s.logger.Warnf("Bundle '%s' not found during scoped index flush", bundleName)
+		return
+	}
+	for indexName, updates := range updateGroups {
+		indexRef, ok := bundle.Indexes[indexName]
+		if !ok {
+			s.logger.Warnf("Index '%s' not found in bundle '%s' during scoped flush", indexName, bundleName)
+			continue
+		}
+		if err := s.processIndexUpdateBatch(bundle, indexName, indexRef, updates); err != nil {
+			s.logger.Errorf("Failed to process index update batch for %s.%s: %v", bundleName, indexName, err)
+		}
+	}
+	s.logger.Debugw("Scoped index flush completed",
+		zap.String("bundle", bundleName),
+		zap.Duration("duration", time.Since(startTime)))
 }
 
 // FlushMetadataUpdates processes all pending metadata updates in a batch
@@ -1485,8 +1552,11 @@ func (s *BundleService) FlushAllBuffers() error {
 	var errors []error
 
 	// 1. Flush index updates first (they may affect metadata)
-	if len(s.indexUpdateBuffer) > 0 {
-
+	// FIX: Use mutex to safely check buffer length
+	s.indexUpdateMutex.Lock()
+	hasIndexUpdates := len(s.indexUpdateBuffer) > 0
+	s.indexUpdateMutex.Unlock()
+	if hasIndexUpdates {
 		s.flushIndexUpdates()
 	}
 
@@ -1556,7 +1626,7 @@ func (s *BundleService) DeleteDiscardedDocuments(database *models.Database, bund
 	}
 
 	// Use internal deletion without metadata updates (we'll batch those)
-	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, true)
+	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, true, nil)
 }
 
 // processIndexUpdateBatch handles a batch of updates for a specific index
@@ -1833,8 +1903,12 @@ func (s *BundleService) processBTreeIndexBatch(bundle *models.Bundle, indexName 
 // forceFlushIndexUpdates ensures all pending updates are processed immediately
 // This should be called before critical operations like shutdown
 func (s *BundleService) forceFlushIndexUpdates() {
-	if len(s.indexUpdateBuffer) > 0 {
-		s.logger.Debugf("Force flushing %d pending index updates", len(s.indexUpdateBuffer))
+	// FIX: Use mutex to safely check buffer length
+	s.indexUpdateMutex.Lock()
+	indexCount := len(s.indexUpdateBuffer)
+	s.indexUpdateMutex.Unlock()
+	if indexCount > 0 {
+		s.logger.Debugf("Force flushing %d pending index updates", indexCount)
 		s.flushIndexUpdates()
 	}
 	if len(s.metadataUpdateBuffer) > 0 {
@@ -2340,6 +2414,89 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string,
 	return nil, fmt.Errorf("document %s not found in page %d of bundle %s", documentID, pageID, bundleName)
 }
 
+// GetDocumentsByIDs loads multiple documents by ID in batch (P2b).
+// Groups by page, loads each page once, then extracts requested docs. Reduces N×GetDocument to
+// fewer page loads. Preserves input order; skips missing docs (logs warn) like convertDocIDsToDocuments.
+func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string) ([]*models.Document, error) {
+	if len(docIDs) == 0 {
+		return nil, nil
+	}
+	bundleName := bundle.Name
+	dbName := bundle.Database.Name
+
+	// Memtable hits + collect docIDs we need to load from disk
+	toLoad := make([]string, 0, len(docIDs))
+	byID := make(map[string]*models.Document, len(docIDs))
+	if bundle.Documents != nil {
+		bundle.DocumentsMutex.RLock()
+		for _, id := range docIDs {
+			if d, ok := (*bundle.Documents)[id]; ok {
+				cp := d
+				byID[id] = &cp
+			} else {
+				toLoad = append(toLoad, id)
+			}
+		}
+		bundle.DocumentsMutex.RUnlock()
+	} else {
+		toLoad = append(toLoad, docIDs...)
+	}
+
+	// Resolve pageID for each, group by page
+	pageToIDs := make(map[uint32][]string)
+	for _, id := range toLoad {
+		pageID, err := s.findDocumentPage(bundleName, id)
+		if err != nil {
+			s.logger.Warnf("GetDocumentsByIDs: document %s not found: %v", id, err)
+			continue
+		}
+		pageToIDs[pageID] = append(pageToIDs[pageID], id)
+	}
+
+	// Load each page once and extract docs
+	for pageID, ids := range pageToIDs {
+		page, err := s.GetDocumentPage(bundleName, dbName, pageID)
+		if err != nil {
+			for _, id := range ids {
+				s.logger.Warnf("GetDocumentsByIDs: failed to load page %d for %s: %v", pageID, id, err)
+			}
+			continue
+		}
+		for _, id := range ids {
+			if d, ok := page.Documents[id]; ok {
+				cp := d
+				byID[id] = &cp
+			} else {
+				// Page-based lookup can miss due to documentPageMap/index vs multi-file layout mismatch.
+				// Invalidate stale entry so we don't keep using the bad pageID; then fallback to GetDocument.
+				s.invalidateDocumentPageMapEntry(bundleName, id)
+				doc, getErr := s.GetDocument(bundleName, dbName, id)
+				if getErr == nil {
+					byID[id] = doc
+					s.logger.Debugf("GetDocumentsByIDs: document %s not in page %d, resolved via GetDocument", id, pageID)
+				} else {
+					// #region agent log - Hypothesis C/D: log when document from B-tree not found
+					if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
+						f.WriteString(fmt.Sprintf(`{"hypothesisId":"D","location":"bundle_service.go:GetDocumentsByIDs","message":"Document from B-tree NOT FOUND","data":{"bundle":"%s","docID":"%s","pageID":%d,"error":"%s"},"timestamp":%d}`+"\n", bundleName, id, pageID, getErr.Error(), time.Now().UnixMilli()))
+						f.Close()
+					}
+					// #endregion
+					s.logger.Warnf("GetDocumentsByIDs: document %s not in page %d; GetDocument fallback failed: %v", id, pageID, getErr)
+				}
+			}
+		}
+	}
+
+	// Preserve order of docIDs; skip missing
+	out := make([]*models.Document, 0, len(docIDs))
+	for _, id := range docIDs {
+		if d := byID[id]; d != nil {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
 // GetDocumentVersions retrieves all versions of a document for MVCC visibility filtering
 // PHASE 0: MVCC Version Storage Foundation
 // This scans backward through all bundle files to find all versions of a DocumentID
@@ -2399,6 +2556,39 @@ func (s *BundleService) evictDocumentPageMapOneLocked(bundleID string) {
 		s.logger.Debugf("Evicted document %s from documentPageMap for bundle %s (fallback)", docID, bundleID)
 		return
 	}
+}
+
+// invalidateDocumentPageMapEntry removes one documentID from documentPageMap and its FIFO.
+// Called when a doc's pageID is stale (e.g. after UPDATE, or when "document not in page").
+func (s *BundleService) invalidateDocumentPageMapEntry(bundleName, documentID string) {
+	s.pageCacheMutex.Lock()
+	defer s.pageCacheMutex.Unlock()
+	bc := s.documentPageMap[bundleName]
+	if bc == nil {
+		return
+	}
+	delete(bc, documentID)
+	if fifo := s.documentPageMapFIFO[bundleName]; len(fifo) > 0 {
+		for i, id := range fifo {
+			if id == documentID {
+				s.documentPageMapFIFO[bundleName] = append(fifo[:i], fifo[i+1:]...)
+				break
+			}
+		}
+	}
+	if len(bc) == 0 {
+		delete(s.documentPageMap, bundleName)
+		delete(s.documentPageMapFIFO, bundleName)
+	}
+}
+
+// InvalidateDocumentPageMapForBundle clears all documentID->pageID entries for a bundle.
+// Called when the whole mapping is stale (e.g. after compaction).
+func (s *BundleService) InvalidateDocumentPageMapForBundle(bundleName string) {
+	s.pageCacheMutex.Lock()
+	defer s.pageCacheMutex.Unlock()
+	delete(s.documentPageMap, bundleName)
+	delete(s.documentPageMapFIFO, bundleName)
 }
 
 // findDocumentPage uses the DocumentID hash index to determine which page contains a specific document
@@ -4953,8 +5143,11 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 //   - *btreeindexV2.BTreeIndex: The loaded BTree index instance
 //   - error: Any error that occurred during loading
 func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName string, indexRef models.IndexReference) (*btreeindexV2.BTreeIndex, error) {
-	// Check persistent cache first (thread-safe read)
-	// This prevents reload overhead when bundle metadata is reloaded from disk
+	// FIX: Use proper double-checked locking pattern to prevent race condition
+	// where multiple goroutines load separate BTreeIndex instances for the same file,
+	// causing tree corruption (each instance has its own mutex but shares the file)
+
+	// Fast path: check cache with read lock
 	s.indexCacheMutex.RLock()
 	if bundleCache, exists := s.loadedIndexes[bundle.Name]; exists {
 		if cachedIndex, found := bundleCache[indexName]; found {
@@ -4965,6 +5158,19 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 		}
 	}
 	s.indexCacheMutex.RUnlock()
+
+	// Slow path: acquire write lock and re-check before loading
+	s.indexCacheMutex.Lock()
+	defer s.indexCacheMutex.Unlock()
+
+	// Double-check: another goroutine may have loaded it while we waited for the lock
+	if bundleCache, exists := s.loadedIndexes[bundle.Name]; exists {
+		if cachedIndex, found := bundleCache[indexName]; found {
+			if btreeIndex, ok := cachedIndex.(*btreeindexV2.BTreeIndex); ok {
+				return btreeIndex, nil
+			}
+		}
+	}
 
 	s.logger.Debugf("⚠️  BTree index '%s' CACHE MISS - loading from disk for bundle '%s'", indexName, bundle.Name)
 
@@ -4991,13 +5197,11 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 		return nil, fmt.Errorf("failed to load BTree index '%s' from disk: %w", indexName, err)
 	}
 
-	// Store in persistent cache (thread-safe write) - matches hash index pattern
-	s.indexCacheMutex.Lock()
+	// Store in persistent cache (already holding write lock)
 	if s.loadedIndexes[bundle.Name] == nil {
 		s.loadedIndexes[bundle.Name] = make(map[string]interface{})
 	}
 	s.loadedIndexes[bundle.Name][indexName] = btreeIndex
-	s.indexCacheMutex.Unlock()
 
 	s.logger.Infof("✅ Successfully loaded and cached BTree index '%s' from disk", indexName)
 	return btreeIndex, nil
@@ -5273,9 +5477,9 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 					fieldValue = extractedValue
 				}
 
-				// Schedule hash index update with actual pageID
+				// Schedule hash index update with actual pageID; pass commitSeq/versionSeq to avoid GetDocument.
 				// deferred=false for ADD operations (read-your-own-writes consistency)
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false, newDocument.CommitSequence, newDocument.VersionSequence)
 				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
 					indexName, newDocument.DocumentID, fieldName, pageID)
 				indexCount++
@@ -5385,8 +5589,8 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 					fieldValue = extractedValue
 				}
 
-				// deferred=false for ADD operations (read-your-own-writes consistency)
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false)
+				// deferred=false for ADD operations; pass commitSeq/versionSeq to avoid GetDocument.
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", newDocument.DocumentID, fieldValue, pageID, nil, false, newDocument.CommitSequence, newDocument.VersionSequence)
 				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
 					indexName, newDocument.DocumentID, fieldName, pageID)
 
@@ -5479,9 +5683,9 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 					fieldValue = extractedValue
 				}
 
-				// Schedule hash index update with actual pageID
+				// Schedule hash index update with actual pageID; pass commitSeq/versionSeq to avoid GetDocument.
 				// deferred=false for ADD operations (read-your-own-writes consistency)
-				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, fieldValue, pageID, nil, false)
+				s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", document.DocumentID, fieldValue, pageID, nil, false, document.CommitSequence, document.VersionSequence)
 				s.logger.Debugf("Scheduled hash index '%s' update for document '%s' on field '%s' (page %d)",
 					indexName, document.DocumentID, fieldName, pageID)
 
@@ -5542,13 +5746,13 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 
 	// For documents not in memtable, check cached pages via documentPageMap
 	// This avoids expensive GetDocument calls
+	// CRITICAL: Must hold lock while iterating over bundlePages to prevent concurrent map read/write
+	pagesToCheck := make(map[uint32]bool)
+
 	s.pageCacheMutex.RLock()
 	bundlePages, hasPageMap := s.documentPageMap[bundle.Name]
-	s.pageCacheMutex.RUnlock()
-
 	if hasPageMap && bundlePages != nil {
-		// Check which pages we need to verify
-		pagesToCheck := make(map[uint32]bool)
+		// Check which pages we need to verify - iterate while holding the lock
 		for docID := range docIDSet {
 			if !stillExists[docID] {
 				if pageID, exists := bundlePages[docID]; exists {
@@ -5556,7 +5760,10 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 				}
 			}
 		}
+	}
+	s.pageCacheMutex.RUnlock()
 
+	if len(pagesToCheck) > 0 {
 		// Check cached pages (no I/O - just memory lookup)
 		s.documentPagesMutex.RLock()
 		for pageID := range pagesToCheck {
@@ -5655,18 +5862,19 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		}
 		s.logger.Debugf("OPTIMIZATION: Used pre-fetched documents (%d docs), no GetDocument-by-ID", len(filteredDocs))
 	} else if hasLocks && docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
-		// Locked IDs but no PreFetchedDocs (e.g. legacy caller): re-run WHERE via planner. Do not use GetDocument-by-ID.
-		filteredDocs, err = s.getDocumentsByQueryPlanner(ctx, bundle, docCommand.WhereClause, database)
+		// Locked IDs but no PreFetchedDocs (e.g. legacy caller): re-run WHERE via filter path.
+		// Use GetDocumentsByFilter only; do not use query planner (avoids JOIN/aggregation on write-only UPDATE).
+		filteredDocs, err = s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
 		if err != nil {
 			s.ReleaseBundleReadLock(bundle.Name)
-			return fmt.Errorf("failed to get documents using query planner: %w", err)
+			return fmt.Errorf("failed to filter documents: %w", err)
 		}
 	} else if docCommand.WhereClause != "" && docCommand.WhereClause != strings.TrimSpace("") {
-		// Use query planner for optimal WHERE clause execution (ctx may carry snapshot for MVCC)
-		filteredDocs, err = s.getDocumentsByQueryPlanner(ctx, bundle, docCommand.WhereClause, database)
+		// Non-empty WHERE: use GetDocumentsByFilter only. Do not use query planner (avoids JOIN/aggregation on write-only UPDATE).
+		filteredDocs, err = s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
 		if err != nil {
 			s.ReleaseBundleReadLock(bundle.Name)
-			return fmt.Errorf("failed to get documents using query planner: %w", err)
+			return fmt.Errorf("failed to filter documents: %w", err)
 		}
 	} else {
 		// Empty WHERE clause - get all documents (only if CONFIRMED)
@@ -5896,6 +6104,12 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "delete", doc.DocumentID, oldFieldValue, pageID, nil, true)
 			// Schedule insert for new value
 			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", doc.DocumentID, newFieldValue, pageID, nil, true)
+			// #region agent log - Hypothesis D: log deferred B-tree update scheduling
+			if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+				f.WriteString(fmt.Sprintf(`{"hypothesisId":"D","location":"bundle_service.go:UpdateDocumentInBundle","message":"Scheduled deferred B-tree updates","data":{"bundle":"%s","index":"%s","docID":"%s","oldValue":"%v","newValue":"%v"},"timestamp":%d}`+"\n", bundle.Name, indexName, doc.DocumentID, oldFieldValue, newFieldValue, time.Now().UnixMilli()))
+				f.Close()
+			}
+			// #endregion
 			s.logger.Debugf("Scheduled deferred B-tree index updates (delete+insert) for document '%s' on field '%s'", doc.DocumentID, fieldName)
 		}
 
@@ -5931,10 +6145,13 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	//
 	// DOCUMENT-LEVEL LOCKING: Use UpdateDocumentsBatchWithLocks ONLY when caller has ACTUAL pre-acquired document locks
 	// (LockManager != nil). If lockInfo only contains docIDs for optimization (LockManager == nil), use bundle lock.
-	// This enables concurrent writes to different documents within the same bundle
+	// P0d: Pass preLockedDocIDs that exactly match updatedDocs (same length, same IDs) to avoid fallback to bundle lock.
 	if len(lockInfo) > 0 && lockInfo[0] != nil && lockInfo[0].LockManager != nil && len(lockInfo[0].LockedDocIDs) > 0 {
-		// Use document-level locks for concurrent writes (actual locks were acquired by caller)
-		err = s.store.UpdateDocumentsBatchWithLocks(bundle, updatedDocs, lockInfo[0].LockedDocIDs)
+		updatedDocIDs := make([]string, 0, len(updatedDocs))
+		for _, d := range updatedDocs {
+			updatedDocIDs = append(updatedDocIDs, d.DocumentID)
+		}
+		err = s.store.UpdateDocumentsBatchWithLocks(bundle, updatedDocs, updatedDocIDs)
 		if err != nil {
 			return fmt.Errorf("failed to update documents with document locks: %w", err)
 		}
@@ -5947,23 +6164,28 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		}
 	}
 
+	// Invalidate documentPageMap for each updated docID (pageID is stale after UPDATE).
+	for _, d := range updatedDocs {
+		s.invalidateDocumentPageMapEntry(bundle.Name, d.DocumentID)
+	}
+
 	// PHASE 2.2: Selective cache invalidation - only invalidate pages that contain updated documents
 	// This is much more efficient than invalidating all pages for the bundle
-	s.pageCacheMutex.RLock()
-	bundlePages, hasPageMap := s.documentPageMap[bundle.Name]
-	s.pageCacheMutex.RUnlock()
-
-	// Track which pages need to be invalidated
+	// CRITICAL: Must hold lock while iterating over bundlePages to prevent concurrent map read/write
 	pagesToInvalidate := make(map[uint32]bool)
 
+	s.pageCacheMutex.RLock()
+	bundlePages, hasPageMap := s.documentPageMap[bundle.Name]
 	if hasPageMap && bundlePages != nil {
 		// Use documentPageMap to find which pages contain updated documents
+		// Iterate while holding the lock to prevent race with invalidateDocumentPageMapEntry
 		for _, doc := range updatedDocs {
 			if pageID, exists := bundlePages[doc.DocumentID]; exists {
 				pagesToInvalidate[pageID] = true
 			}
 		}
 	}
+	s.pageCacheMutex.RUnlock()
 
 	// If we couldn't find pages via documentPageMap, fall back to invalidating all pages
 	// This is safer but less efficient - should be rare
@@ -6000,19 +6222,21 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	// which is atomic and uses its own mutex. No bundle write lock needed here.
 	// The deferred metadata flush handles concurrent access safely.
 
-	// TASK 3: Flush deferred index updates to ensure they're applied
-	// This ensures index consistency after document updates
+	// TASK 3: Flush deferred index updates for this bundle only (P4a scoped flush)
 	if len(btreeIndexesToUpdate) > 0 {
-		s.flushIndexUpdates()
-		s.logger.Debugf("Flushed deferred B-tree index updates after document update")
+		s.flushIndexUpdatesForBundle(bundle.Name)
+		s.logger.Debugf("Flushed deferred B-tree index updates for bundle %s", bundle.Name)
 	}
 
+	// TODO(P5): Memtable-first return — return after memtable+WAL, persist WriteBuffer→disk in background.
+	// Requires explicit durability policy and recovery design. See plan §5 / §8.
 	return nil
 }
 
 // DeleteDocumentFromBundle is the public interface for deleting documents from a bundle.
 // When lockInfo is provided with LockManager and LockedDocIDs, skips bundle write lock (Phase 4: document-level locking).
-func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, lockInfo ...*DocumentLockInfo) error {
+// preFetchedDocs: when provided (e.g. from GetDocumentsAndIDsByFilter), harvest uses these and skips GetDocument in the harvest loop.
+func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, preFetchedDocs []*models.Document, lockInfo ...*DocumentLockInfo) error {
 	args := settings.GetSettings()
 
 	if bundle == nil {
@@ -6074,8 +6298,9 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		}
 
 		// All validations passed - proceed with deletion using internal method (lock already held)
-		// Skip individual metadata updates - we'll do a single bulk update after all deletions
-		if err := s.deleteDocumentsInternal(bundle, docCommand, bulkDocIDs, true); err != nil {
+		// Skip individual metadata updates - we'll do a single bulk update after all deletions.
+		// Pass allDocs as preFetchedDocs so harvest avoids N×GetDocument.
+		if err := s.deleteDocumentsInternal(bundle, docCommand, bulkDocIDs, true, allDocs); err != nil {
 			return fmt.Errorf("bulk delete execution failed: %w", err)
 		}
 
@@ -6105,7 +6330,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 
 	// Delegate to internal delete logic (lock already held when useDocLocks)
 	// Pass lockInfo when using document-level locks so we skip storage bundle lock (AppendDeletionMarkersBatchWithLocks).
-	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, false, lockInfo...)
+	return s.deleteDocumentsInternal(bundle, docCommand, docIDs, false, preFetchedDocs, lockInfo...)
 }
 
 // deleteDocumentsInternal performs the actual document deletion logic without acquiring locks.
@@ -6113,8 +6338,9 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 //
 // Parameters:
 //   - skipMetadataUpdate: if true, caller is responsible for scheduling metadata updates (used for bulk operations)
+//   - preFetchedDocs: when non-nil, harvest uses these for B-tree keys and commitSeqs instead of GetDocument
 //   - lockInfo: optional; when present with LockedDocIDs, storage skips bundle write lock (Phase 4).
-func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, skipMetadataUpdate bool, lockInfo ...*DocumentLockInfo) error {
+func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, skipMetadataUpdate bool, preFetchedDocs []*models.Document, lockInfo ...*DocumentLockInfo) error {
 	// D1: Use AppendDeletionMarkersBatch for all deletes (threshold 1). Removes N×DeleteDocumentFromBundleFile,
 	// N×verifyDocumentExistsStreaming, N×appendDeletionMarker, N×lock. Delete is idempotent: tombstones for
 	// non-existent docs are acceptable in append-only storage; callers should pass IDs from a valid WHERE result.
@@ -6135,20 +6361,42 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	const harvestSkipThreshold = 500
 	btreeKeys := make(map[string]map[string][]byte)  // docID -> indexName -> keyBytes
 	harvestFailedDocIDs := make(map[string]struct{}) // C: docIDs where GetDocument failed; DeleteByDocumentIDs will clean B-trees
+	commitSeqs := make(map[string]uint64)            // docID -> CommitSequence for hash index Delete; 0 when harvest skipped or not found
+	// Build docIDToDoc from preFetchedDocs when provided so harvest can skip GetDocument
+	var docIDToDoc map[string]*models.Document
+	if len(preFetchedDocs) > 0 {
+		docIDToDoc = make(map[string]*models.Document, len(preFetchedDocs))
+		for _, d := range preFetchedDocs {
+			if d != nil && d.DocumentID != "" {
+				docIDToDoc[d.DocumentID] = d
+			}
+		}
+	}
 	if bundle.Indexes != nil && bundle.Database != nil {
-		if len(docIDs) > harvestSkipThreshold {
+		// Skip harvest loop only when over threshold AND no preFetchedDocs (avoids N×GetDocument)
+		if len(docIDs) > harvestSkipThreshold && docIDToDoc == nil {
 			for _, docID := range docIDs {
 				harvestFailedDocIDs[docID] = struct{}{}
 			}
 			s.logger.Debugf("B-tree harvest: skipped for %d docs (>%d); C (DeleteByDocumentIDs) will clean B-trees", len(docIDs), harvestSkipThreshold)
 		} else {
 			for _, docID := range docIDs {
-				doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
-				if err != nil {
-					harvestFailedDocIDs[docID] = struct{}{}
-					s.logger.Debugf("B-tree harvest: failed to load document '%s': %v; B will clean hash, C will clean B-tree", docID, err)
-					continue
+				var doc *models.Document
+				if docIDToDoc != nil {
+					if d, ok := docIDToDoc[docID]; ok {
+						doc = d
+					}
 				}
+				if doc == nil {
+					var err error
+					doc, err = s.GetDocument(bundle.Name, bundle.Database.Name, docID)
+					if err != nil {
+						harvestFailedDocIDs[docID] = struct{}{}
+						s.logger.Debugf("B-tree harvest: failed to load document '%s': %v; B will clean hash, C will clean B-tree", docID, err)
+						continue
+					}
+				}
+				commitSeqs[docID] = doc.CommitSequence // PERF: harvest once for hash index cleanup; avoids N×GetDocument in hash loop
 				for indexName, indexRef := range bundle.Indexes {
 					if indexRef.IndexType != "btree" {
 						continue
@@ -6297,11 +6545,8 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 					if hashIndex == nil {
 						continue
 					}
-					// PHASE 4: MVCC - Get document commit sequence for deletion
-					var commitSeq uint64
-					if doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, documentID); err == nil {
-						commitSeq = doc.CommitSequence
-					}
+					// PHASE 4: MVCC - use commitSeq harvested in D6 (or 0 when harvest skipped / doc not found)
+					commitSeq := commitSeqs[documentID]
 					deleted, err := hashIndex.Delete(documentID, commitSeq)
 					if err != nil {
 						s.logger.Warnf("Failed to delete DocumentID '%s' from hash index '%s': %v", documentID, indexName, err)
@@ -6330,21 +6575,35 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 		}
 	}
 
-	// C: For docIDs where harvest failed, remove stale B-tree entries by documentID.
-	// One full scan per B-tree over all failed docIDs (batched) instead of one scan per docID.
-	if len(harvestFailedDocIDs) > 0 {
-		failedList := make([]string, 0, len(harvestFailedDocIDs))
-		for d := range harvestFailedDocIDs {
-			failedList = append(failedList, d)
-		}
-		for _, btreeIndex := range btreeIndexes {
-			if btreeIndex != nil {
-				n, err := btreeIndex.DeleteByDocumentIDs(failedList)
+	// C: ALWAYS run DeleteByDocumentIDs for ALL deleted docIDs to clean any stale B-tree entries.
+	// This catches stale entries from deferred UPDATE index updates that weren't flushed before DELETE.
+	// Race condition: UPDATE schedules deferred delete(oldKey)+insert(newKey), then DELETE happens
+	// before flush. DELETE's harvest only sees current value (newKey), leaving oldKey entry stale.
+	// DeleteByDocumentIDs scans B-tree and removes ALL entries for the docIDs regardless of key value.
+	// One full scan per B-tree over all docIDs (batched) instead of one scan per docID.
+	// #region agent log - Hypothesis A: verify DeleteByDocumentIDs is called
+	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		f.WriteString(fmt.Sprintf(`{"hypothesisId":"A","location":"bundle_service.go:deleteDocumentsInternal","message":"DeleteByDocumentIDs START","data":{"bundle":"%s","docCount":%d,"btreeCount":%d},"timestamp":%d}`+"\n", docCommand.BundleName, len(docIDs), len(btreeIndexes), time.Now().UnixMilli()))
+		f.Close()
+	}
+	// #endregion
+	for indexName, btreeIndex := range btreeIndexes {
+		if btreeIndex != nil {
+			n, err := btreeIndex.DeleteByDocumentIDs(docIDs)
+			// #region agent log - Hypothesis B: verify DeleteByDocumentIDs result
+			if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
+				errStr := "nil"
 				if err != nil {
-					s.logger.Warnf("B-tree DeleteByDocumentIDs for harvest-failed docs: %v", err)
-				} else if n > 0 {
-					s.logger.Debugf("B-tree DeleteByDocumentIDs: removed %d stale entries for harvest-failed docIDs", n)
+					errStr = err.Error()
 				}
+				f.WriteString(fmt.Sprintf(`{"hypothesisId":"B","location":"bundle_service.go:deleteDocumentsInternal","message":"DeleteByDocumentIDs RESULT","data":{"index":"%s","removed":%d,"error":"%s"},"timestamp":%d}`+"\n", indexName, n, errStr, time.Now().UnixMilli()))
+				f.Close()
+			}
+			// #endregion
+			if err != nil {
+				s.logger.Warnf("B-tree DeleteByDocumentIDs cleanup: %v", err)
+			} else if n > 0 {
+				s.logger.Debugf("B-tree DeleteByDocumentIDs: removed %d total entries for deleted docIDs", n)
 			}
 		}
 	}
@@ -6419,8 +6678,9 @@ func (s *BundleService) DeleteAllDocumentsFromBundle(
 	}
 
 	// All validations passed - proceed with deletion using internal method (lock already held)
-	// Skip individual metadata updates - we'll do a single bulk update after all deletions
-	if err := s.deleteDocumentsInternal(bundle, docCommand, docIDs, true); err != nil {
+	// Skip individual metadata updates - we'll do a single bulk update after all deletions.
+	// Pass allDocs as preFetchedDocs so harvest avoids N×GetDocument.
+	if err := s.deleteDocumentsInternal(bundle, docCommand, docIDs, true, allDocs); err != nil {
 		return fmt.Errorf("bulk delete execution failed: %w", err)
 	}
 
@@ -6732,35 +6992,79 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 		return result, nil
 	}
 
-	// Fallback to full document scan using modern page-based loading.
-	// R4 observability: log when index optimization is not used (UPDATE/SELECT with WHERE that
-	// doesn't match tryHashIndexOptimization or tryBTreeIndexOptimization).
-	s.logger.Debugf("No suitable index found, performing full document scan with page-based loading")
-	s.logger.Infow("GetDocumentsByFilter: no suitable index, using full scan",
+	// Fallback to streaming/chunked full scan (no load-all). Required for non-indexed WHERE
+	// to match PostgreSQL-like throughput; adding indexes is not a viable product fix.
+	s.logger.Debugf("No suitable index found, performing streaming full scan")
+	s.logger.Infow("GetDocumentsByFilter: no suitable index, using streaming full scan",
 		"bundle", bundle.Name,
 		"whereClause", whereClause,
 	)
 
-	// Load all documents using the modern page-based system
-	// NOTE: This is faster than streaming for SELECT queries because:
-	// 1. Pages are already cached, so loading all at once is efficient
-	// 2. WHERE clause is parsed only once instead of once per page
-	// 3. Single filter operation is more efficient than multiple small filters
-	allDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load documents for filtering: %w", err)
+	return s.getDocumentsByFilterStreaming(bundle, whereClause)
+}
+
+// getDocumentsByFilterStreaming streams pages, filters each chunk, and merges memtable.
+// Avoids loading all documents into memory for non-indexed WHERE (getAllDocumentsForIndexing).
+// Does not call FlushMetadataUpdates in the hot path; PageCount may be briefly stale.
+func (s *BundleService) getDocumentsByFilterStreaming(bundle *models.Bundle, whereClause string) ([]*models.Document, error) {
+	pageCount := uint32(bundle.PageCount)
+	if pageCount == 0 {
+		pageCount = 1
 	}
 
-	s.logger.Debugf("Loaded %d documents for filtering", len(allDocs))
-
-	// Apply filtering using the raw document filter (works with document slice)
-	filteredDocs, err := queryparser.FilterDocumentsRaw(allDocs, whereClause, s.logger)
-	if err != nil {
-		return nil, fmt.Errorf("full document scan failed: %w", err)
+	var result []*models.Document
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		if err != nil {
+			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
+			continue
+		}
+		chunk := make([]*models.Document, 0, len(page.Documents))
+		for _, d := range page.Documents {
+			dc := d
+			chunk = append(chunk, &dc)
+		}
+		if len(chunk) == 0 {
+			continue
+		}
+		filtered, err := queryparser.FilterDocumentsRaw(chunk, whereClause, s.logger)
+		if err != nil {
+			return nil, fmt.Errorf("streaming full scan failed on page %d: %w", pageID, err)
+		}
+		result = append(result, filtered...)
 	}
 
-	s.logger.Debugf("Full document scan completed, found %d matching documents", len(filteredDocs))
-	return filteredDocs, nil
+	// Merge memtable: add matching docs not already in disk results (last-write-wins)
+	if bundle.Documents != nil && !bundle.DocumentsComplete {
+		diskDocIDs := make(map[string]bool, len(result))
+		for _, d := range result {
+			diskDocIDs[d.DocumentID] = true
+		}
+		bundle.DocumentsMutex.RLock()
+		memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
+		for docID, doc := range *bundle.Documents {
+			memtableSnapshot[docID] = doc
+		}
+		bundle.DocumentsMutex.RUnlock()
+		var memtableOnly []*models.Document
+		for docID, doc := range memtableSnapshot {
+			if diskDocIDs[docID] {
+				continue
+			}
+			dc := doc
+			memtableOnly = append(memtableOnly, &dc)
+		}
+		if len(memtableOnly) > 0 {
+			filteredMem, err := queryparser.FilterDocumentsRaw(memtableOnly, whereClause, s.logger)
+			if err != nil {
+				return nil, fmt.Errorf("streaming full scan memtable filter failed: %w", err)
+			}
+			result = append(result, filteredMem...)
+		}
+	}
+
+	s.logger.Debugf("Streaming full scan completed, found %d matching documents", len(result))
+	return result, nil
 }
 
 // tryHashIndexOptimization attempts to use hash indexes for query optimization
@@ -6788,6 +7092,7 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)
 	}
+	expr = syndrQL.UnwrapGrouped(expr) // e.g. ("category" == "A")
 
 	// Use Expression helper to extract simple equality conditions
 	// Hash indexes are optimal for simple equality conditions (field == value)
@@ -6821,17 +7126,11 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 
 				s.logger.Debugf("Hash index found %d document IDs for value '%s'", len(docIDs), searchKey)
 
-				// Convert document IDs to actual documents using page-based loading
-				result := make([]*models.Document, 0, len(docIDs))
-				for _, docID := range docIDs {
-					doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
-					if err != nil {
-						s.logger.Warnf("Document ID '%s' found in hash index but could not be loaded: %v", docID, err)
-						continue
-					}
-					result = append(result, doc)
+				// P2b: Batch load by docIDs instead of N×GetDocument
+				result, err := s.GetDocumentsByIDs(bundle, docIDs)
+				if err != nil {
+					return nil, false, err
 				}
-
 				s.logger.Debugf("Successfully retrieved %d documents via hash index '%s'", len(result), indexName)
 				return result, true, nil
 			}
@@ -6867,6 +7166,7 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to parse WHERE clause: %w", err)
 	}
+	expr = syndrQL.UnwrapGrouped(expr)
 
 	// Try simple equality first (can use BTree as well as hash)
 	// Following SyndrDB performance optimization, check for equality before range
@@ -6902,13 +7202,26 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 					continue
 				}
 
+				// #region agent log - Hypothesis C/D: log B-tree search results
+				if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
+					docIDsStr := ""
+					if len(docIDs) <= 10 {
+						docIDsStr = fmt.Sprintf("%v", docIDs)
+					} else {
+						docIDsStr = fmt.Sprintf("[%d docIDs, first 5: %v]", len(docIDs), docIDs[:5])
+					}
+					f.WriteString(fmt.Sprintf(`{"hypothesisId":"C","location":"bundle_service.go:tryBTreeIndexOptimization","message":"BTree Search returned docIDs","data":{"bundle":"%s","index":"%s","keyBytes":"%x","docCount":%d,"docIDs":"%s"},"timestamp":%d}`+"\n", bundle.Name, indexName, keyBytes, len(docIDs), docIDsStr, time.Now().UnixMilli()))
+					f.Close()
+				}
+				// #endregion
+
 				return s.convertDocIDsToDocuments(bundle, docIDs, indexName)
 			}
 		}
 	}
 
 	// Try range conditions (>, >=, <, <=, !=)
-	// Use Expression helper to extract range query information
+	// Use Expression helper to extract range query information (expr already UnwrapGrouped)
 	if fieldName, operator, value, ok := syndrQL.ExtractRangeCondition(expr); ok {
 		// Check if we have a BTree index for this field
 		for indexName, indexRef := range bundle.Indexes {
@@ -6997,21 +7310,58 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 }
 
 // convertDocIDsToDocuments is a helper to convert document IDs to documents
-// Following Single Responsibility Principle, handles only document ID to document conversion
+// P2b: Uses GetDocumentsByIDs for batch load instead of N×GetDocument
+// SELF-HEALING: If documents aren't found, removes stale entries from B-tree index
 func (s *BundleService) convertDocIDsToDocuments(bundle *models.Bundle, docIDs []string, indexName string) ([]*models.Document, bool, error) {
 	if len(docIDs) == 0 {
 		s.logger.Debugf("BTree index search returned no document IDs")
 		return []*models.Document{}, true, nil
 	}
+	result, err := s.GetDocumentsByIDs(bundle, docIDs)
+	if err != nil {
+		return nil, false, err
+	}
 
-	result := make([]*models.Document, 0, len(docIDs))
-	for _, docID := range docIDs {
-		doc, err := s.GetDocument(bundle.Name, bundle.Database.Name, docID)
-		if err != nil {
-			s.logger.Warnf("Document ID '%s' found in index but could not be loaded: %v", docID, err)
-			continue
+	// SELF-HEALING: Check if any docIDs were not found and clean them from B-tree
+	if len(result) < len(docIDs) {
+		// Build set of found docIDs
+		foundIDs := make(map[string]bool, len(result))
+		for _, doc := range result {
+			foundIDs[doc.DocumentID] = true
 		}
-		result = append(result, doc)
+
+		// Collect stale docIDs (in B-tree but not found in storage)
+		var staleDocIDs []string
+		for _, docID := range docIDs {
+			if !foundIDs[docID] {
+				staleDocIDs = append(staleDocIDs, docID)
+			}
+		}
+
+		// Remove stale entries from B-tree index asynchronously to not block the query
+		if len(staleDocIDs) > 0 {
+			s.logger.Infof("SELF-HEALING: Found %d stale B-tree entries in index '%s', removing...", len(staleDocIDs), indexName)
+			// #region agent log - Self-healing cleanup
+			if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
+				f.WriteString(fmt.Sprintf(`{"hypothesisId":"SELFHEAL","location":"bundle_service.go:convertDocIDsToDocuments","message":"Self-healing B-tree cleanup","data":{"bundle":"%s","index":"%s","staleCount":%d,"staleDocIDs":"%v"},"timestamp":%d}`+"\n", bundle.Name, indexName, len(staleDocIDs), staleDocIDs, time.Now().UnixMilli()))
+				f.Close()
+			}
+			// #endregion
+			go func(bundleName, idxName string, staleIDs []string) {
+				// Load B-tree index and remove stale entries
+				if indexRef, exists := bundle.Indexes[idxName]; exists && indexRef.IndexType == "btree" {
+					btreeIndex, loadErr := s.getOrLoadBTreeIndex(bundle, idxName, indexRef)
+					if loadErr == nil {
+						n, delErr := btreeIndex.DeleteByDocumentIDs(staleIDs)
+						if delErr != nil {
+							s.logger.Warnf("SELF-HEALING: Failed to remove stale B-tree entries: %v", delErr)
+						} else if n > 0 {
+							s.logger.Infof("SELF-HEALING: Removed %d stale entries from B-tree index '%s'", n, idxName)
+						}
+					}
+				}
+			}(bundle.Name, indexName, staleDocIDs)
+		}
 	}
 
 	s.logger.Debugf("Successfully retrieved %d documents via BTree index '%s'", len(result), indexName)

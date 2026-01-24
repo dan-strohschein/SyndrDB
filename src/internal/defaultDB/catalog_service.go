@@ -115,7 +115,7 @@ func (cs *CatalogService) RemoveDatabaseFromCatalog(databaseID string) error {
 		}
 		//TODO Make this use the same technique as the CommandDirector.DeleteDocument function
 		// Delete the document from the bundle
-		err = cs.bundleService.DeleteDocumentFromBundle(databasesBundle, deleteCommand, make([]string, 0))
+		err = cs.bundleService.DeleteDocumentFromBundle(databasesBundle, deleteCommand, make([]string, 0), nil)
 		if err != nil {
 			return fmt.Errorf("failed to delete database from catalog: %w", err)
 		}
@@ -399,7 +399,7 @@ func (cs *CatalogService) UnRegisterBundleInCatalog(bundleID, bundleName, databa
 	}
 
 	// Delete the bundle from the bundle
-	err = cs.bundleService.DeleteDocumentFromBundle(bundlesBundle, deleteCommand, docIDs)
+	err = cs.bundleService.DeleteDocumentFromBundle(bundlesBundle, deleteCommand, docIDs, nil)
 	if err != nil {
 		return fmt.Errorf("failed to delete bundle from catalog: %w", err)
 	}
@@ -586,7 +586,7 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 
 		// TODO FIX THIS TO USE THE SAME TECHNIQUE AS THE CommandDirector.DeleteDocument function
 		// Delete the document from the bundle
-		err = cs.bundleService.DeleteDocumentFromBundle(bundlesBundle, deleteCommand, make([]string, 0))
+		err = cs.bundleService.DeleteDocumentFromBundle(bundlesBundle, deleteCommand, make([]string, 0), nil)
 		if err != nil {
 			return fmt.Errorf("failed to delete bundle from catalog: %w", err)
 		}

@@ -216,7 +216,7 @@ func (a *BundleServiceAdapter) DeleteDocument(dbName, bundleName, docID string) 
 	}
 
 	// Call BundleService.DeleteDocumentFromBundle
-	err = a.bundleService.DeleteDocumentFromBundle(bndl, deleteCommand, []string{docID})
+	err = a.bundleService.DeleteDocumentFromBundle(bndl, deleteCommand, []string{docID}, nil)
 	if err != nil {
 		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
 			fmt.Sprintf("failed to delete document '%s' from bundle '%s'", docID, bundleName),
@@ -547,12 +547,12 @@ func (a *BundleServiceAdapter) RenameField(dbName, bundleName, oldFieldName, new
 	}
 
 	// Get the existing field definition from DocumentStructure
-		existingField, exists := bndl.DocumentStructure.FieldDefinitions[oldFieldName]
-		if !exists {
-			return errors.New(errors.ERR_VALIDATION_FIELD,
-				fmt.Sprintf("field '%s' not found in bundle '%s'", oldFieldName, bundleName),
-				errors.LayerCommand).WithContext("field", oldFieldName).WithContext("bundle", bundleName).WithContext("database", dbName)
-		}
+	existingField, exists := bndl.DocumentStructure.FieldDefinitions[oldFieldName]
+	if !exists {
+		return errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("field '%s' not found in bundle '%s'", oldFieldName, bundleName),
+			errors.LayerCommand).WithContext("field", oldFieldName).WithContext("bundle", bundleName).WithContext("database", dbName)
+	}
 
 	// Create new field definition with updated name
 	newField := existingField

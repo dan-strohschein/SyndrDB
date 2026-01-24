@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -29,6 +30,34 @@ func getKeys(m map[string]interface{}) []string {
 }
 
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+	// #region agent log - Track all commands received
+	cmdType := "UNKNOWN"
+	cmdLower := strings.ToLower(strings.TrimSpace(command))
+	if strings.HasPrefix(cmdLower, "select") {
+		cmdType = "SELECT"
+	} else if strings.HasPrefix(cmdLower, "add") {
+		cmdType = "ADD"
+	} else if strings.HasPrefix(cmdLower, "update") {
+		cmdType = "UPDATE"
+	} else if strings.HasPrefix(cmdLower, "delete") {
+		cmdType = "DELETE"
+	} else if strings.HasPrefix(cmdLower, "create") {
+		cmdType = "CREATE"
+	}
+	if cmdType == "SELECT" {
+		// Only log SELECT commands to debug.log to track JOIN triggers
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			// Truncate command for logging (first 200 chars)
+			cmdPreview := command
+			if len(cmdPreview) > 200 {
+				cmdPreview = cmdPreview[:200] + "..."
+			}
+			f.WriteString(fmt.Sprintf(`{"hypothesisId":"CMD","location":"command_director.go:CommandDirector","message":"SELECT command received","data":{"cmdType":"%s","cmdPreview":"%s","clientIP":"%s"},"timestamp":%d}`+"\n", cmdType, strings.ReplaceAll(cmdPreview, "\"", "'"), clientIP, time.Now().UnixMilli()))
+			f.Close()
+		}
+	}
+	// #endregion
+
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
 	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
 
@@ -685,11 +714,10 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
-			// OPTIMIZATION: Use dedicated WHERE filter service for efficient ID extraction
-			// This replaces the previous hacky approach of constructing a SELECT query
-			// and extracting IDs from full document results
+			// OPTIMIZATION: Use GetDocumentsAndIDsByFilter to get both docIDs and docs; pass docs into
+			// DeleteDocumentFromBundle so harvest avoids N×GetDocument (P1: pass docs through for DELETE harvest).
 			whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
-			docIDs, err := whereService.GetDocumentIDsByFilter(bundle, docCommand.WhereClause)
+			docIDs, docs, err := whereService.GetDocumentsAndIDsByFilter(bundle, docCommand.WhereClause)
 			if err != nil {
 				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 					"failed to filter documents by WHERE clause", errors.LayerCommand)
@@ -727,9 +755,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 							"failed to log document delete", errors.LayerWAL)
 					}
 					if deleteLockInfo != nil {
-						return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs, deleteLockInfo)
+						return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs, docs, deleteLockInfo)
 					}
-					return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs)
+					return serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs, docs)
 				})
 
 				// METRICS: Track transaction outcome
@@ -741,7 +769,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			} else {
 				// Fallback to direct execution if WAL is not available
 				logger.Warn("WAL Manager not available, executing without transaction logging")
-				err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs)
+				err = serviceManager.BundleService.DeleteDocumentFromBundle(bundle, docCommand, docIDs, docs)
 			}
 
 			if err != nil {
@@ -1252,23 +1280,23 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	// to avoid performance impact for small queries
 	projectedMemory := memoryTracker.ProjectTotalMemory(cmdResponse.ResultCount)
 	shouldCleanup := cmdResponse.ResultCount > 1000 || projectedMemory > memoryLimit/2
-	
+
 	if shouldCleanup {
 		// Clear large intermediate variables to help GC identify unreachable memory
 		documents = nil
 		flattenedDocs = nil
 		sortedDocs = nil // Clear if it exists
-		
+
 		// Force GC to free heap memory
 		// This marks unreachable objects and makes them available for reallocation
 		runtime.GC()
-		
+
 		// Try to return memory to OS (Linux/Unix: calls madvise MADV_DONTNEED)
 		// This reduces RSS (Resident Set Size) shown by OS monitoring tools
 		// Note: Go runtime may not return all memory immediately due to fragmentation
 		// or because it's holding onto memory for reuse (memory pressure management)
 		debug.FreeOSMemory()
-		
+
 		logger.Debugf("Memory cleanup completed: freed memory after query with %d results (projected memory was %d bytes, limit %d bytes)",
 			cmdResponse.ResultCount, projectedMemory, memoryLimit)
 	}
