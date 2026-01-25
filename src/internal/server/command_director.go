@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
@@ -696,22 +697,75 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs))
 
-			// PHASE 4: Document-level locks for DELETE when in transaction. Hold until COMMIT (strict 2PL).
+			// PHASE 4+: Document-level locks for DELETE (both transaction and autocommit modes)
+			// Extended to autocommit operations for better concurrent delete throughput.
+			// For explicit transactions, locks are held until commit/rollback.
+			// For autocommit, locks are released after the operation completes.
+			const deleteLockEscalationThreshold = 100_000
+			useDocumentLocks := serviceManager.LockManager != nil && len(docIDs) > 0 && len(docIDs) <= deleteLockEscalationThreshold
+
 			var deleteLockInfo *bndle.DocumentLockInfo
-			if session != nil && session.IsInTransaction() && serviceManager.LockManager != nil && len(docIDs) > 0 {
+			var lockTxID, lockSessionID string
+			isAutocommitDelete := false
+
+			if session != nil && session.IsInTransaction() {
+				// Explicit transaction - use existing IDs
+				lockTxID = session.ActiveTransactionID
+				lockSessionID = session.SessionID
+			} else if useDocumentLocks {
+				// Autocommit - generate temporary IDs for document locks
+				lockTxID = helpers.GenerateFastUUID()
+				lockSessionID = "autocommit-" + lockTxID[:8]
+				isAutocommitDelete = true
+			}
+
+			if useDocumentLocks && lockTxID != "" {
+				// Sort document IDs to prevent deadlocks (always acquire in same order)
+				sort.Strings(docIDs)
+
+				// SEQUENTIAL lock acquisition - guarantees global ordering for deadlock prevention
+				lockedDocIDs := make([]string, 0, len(docIDs))
+				var firstErr error
+				var failedDocID string
+
 				for _, docID := range docIDs {
-					if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
-						return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
-							fmt.Sprintf("failed to acquire write lock for document %s", docID),
-							errors.LayerTransaction).WithContext("document_id", docID)
+					if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, lockTxID, lockSessionID); err != nil {
+						firstErr = err
+						failedDocID = docID
+						break
 					}
+					lockedDocIDs = append(lockedDocIDs, docID)
 				}
-				logger.Debugf("Acquired write locks for %d documents in transaction %s", len(docIDs), session.ActiveTransactionID)
+
+				if firstErr != nil {
+					serviceManager.LockManager.ReleaseLocks(lockTxID)
+					return nil, errors.WrapWithMessage(firstErr, errors.ERR_INTERNAL_LOCK,
+						fmt.Sprintf("failed to acquire write lock for document %s", failedDocID),
+						errors.LayerTransaction).WithContext("document_id", failedDocID)
+				}
+
 				deleteLockInfo = &bndle.DocumentLockInfo{
-					LockManager:  serviceManager.LockManager,
-					TxID:         session.ActiveTransactionID,
-					SessionID:    session.SessionID,
-					LockedDocIDs: docIDs,
+					LockManager:    serviceManager.LockManager,
+					TxID:           lockTxID,
+					SessionID:      lockSessionID,
+					LockedDocIDs:   lockedDocIDs,
+					PreFetchedDocs: docs,
+				}
+
+				// Release locks on error or for autocommit after operation completes
+				defer func() {
+					if deleteLockInfo != nil && deleteLockInfo.LockManager != nil && (err != nil || isAutocommitDelete) {
+						serviceManager.LockManager.ReleaseLocks(lockTxID)
+						if isAutocommitDelete {
+							logger.Debugf("Released document locks after autocommit delete")
+						}
+					}
+				}()
+
+				if isAutocommitDelete {
+					logger.Debugf("Acquired document-level write locks for %d documents (autocommit delete txID=%s)", len(lockedDocIDs), lockTxID[:8])
+				} else {
+					logger.Debugf("Acquired write locks for %d documents in transaction %s", len(lockedDocIDs), lockTxID)
 				}
 			}
 
