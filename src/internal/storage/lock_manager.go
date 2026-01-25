@@ -14,7 +14,7 @@ import (
 )
 
 // #region agent log
-const debugLogPath = "/home/dan/Documents/code/SyndrDB/.cursor/debug.log"
+const debugLogPath = "/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log"
 
 func debugLogLockAttempt(bundleName, documentID, txID, sessionID, lockMode, event string) {
 	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "E", "location": "lock_manager.go:AcquireWriteLock", "message": "lock_attempt", "data": map[string]interface{}{"bundle": bundleName, "docID": documentID, "txID": txID[:12], "sessionID": sessionID[:12], "mode": lockMode, "event": event}}
@@ -141,18 +141,37 @@ type lockShard struct {
 	locks map[string]map[string]*DocumentLock // bundleName -> documentID -> DocumentLock
 }
 
+// lockKey identifies a specific document lock
+type lockKey struct {
+	bundleName string
+	documentID string
+}
+
 // LockManager manages document-level locks for transactions
-// P1: Uses 64 shards keyed by hash(bundleName)%64 to reduce global contention
+// P1: Uses 64 shards keyed by hash(bundleName+documentID) to distribute contention
+// P2: Per-transaction lock tracking for O(1) release instead of O(shards*docs)
 type LockManager struct {
 	shards [lockManagerShards]lockShard
+
+	// Per-transaction lock tracking: txID -> set of lockKeys
+	// This allows O(locks_held) release instead of O(all_shards * all_documents)
+	txLocks   map[string]map[lockKey]struct{}
+	txLocksMu sync.RWMutex
 
 	lockTimeout time.Duration
 	logger      *zap.SugaredLogger
 }
 
-func shardIndex(bundleName string) int {
+// shardIndex determines which shard a document's lock belongs to.
+// OPTIMIZATION: Shard by bundle+documentID to distribute contention evenly.
+// Previously sharded only by bundleName, causing all documents in a bundle
+// to funnel through a single shard (severe bottleneck under high concurrency).
+func shardIndex(bundleName string, documentID ...string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(bundleName))
+	if len(documentID) > 0 && documentID[0] != "" {
+		_, _ = h.Write([]byte(documentID[0]))
+	}
 	return int(h.Sum32() % lockManagerShards)
 }
 
@@ -165,11 +184,113 @@ func NewLockManager(logger *zap.SugaredLogger, lockTimeout ...time.Duration) *Lo
 	} else if s := getSettingsFunc(); s != nil {
 		timeout = time.Duration(s.LockTimeoutSeconds) * time.Second
 	}
-	lm := &LockManager{lockTimeout: timeout, logger: logger}
+	lm := &LockManager{
+		lockTimeout: timeout,
+		logger:      logger,
+		txLocks:     make(map[string]map[lockKey]struct{}),
+	}
 	for i := range lm.shards {
 		lm.shards[i].locks = make(map[string]map[string]*DocumentLock)
 	}
 	return lm
+}
+
+// trackLock records that a transaction holds a lock on a document
+func (lm *LockManager) trackLock(txID, bundleName, documentID string) {
+	lm.txLocksMu.Lock()
+	defer lm.txLocksMu.Unlock()
+	if lm.txLocks[txID] == nil {
+		lm.txLocks[txID] = make(map[lockKey]struct{})
+	}
+	lm.txLocks[txID][lockKey{bundleName, documentID}] = struct{}{}
+}
+
+// untrackLock removes the record that a transaction holds a lock
+func (lm *LockManager) untrackLock(txID, bundleName, documentID string) {
+	lm.txLocksMu.Lock()
+	defer lm.txLocksMu.Unlock()
+	if locks, ok := lm.txLocks[txID]; ok {
+		delete(locks, lockKey{bundleName, documentID})
+		if len(locks) == 0 {
+			delete(lm.txLocks, txID)
+		}
+	}
+}
+
+// getTrackedLocks returns all locks held by a transaction
+func (lm *LockManager) getTrackedLocks(txID string) []lockKey {
+	lm.txLocksMu.RLock()
+	defer lm.txLocksMu.RUnlock()
+	locks := lm.txLocks[txID]
+	if locks == nil {
+		return nil
+	}
+	result := make([]lockKey, 0, len(locks))
+	for key := range locks {
+		result = append(result, key)
+	}
+	return result
+}
+
+// releaseSpecificLock releases a single lock by bundle and document ID
+// Returns true if a lock was actually released
+func (lm *LockManager) releaseSpecificLock(txID, bundleName, documentID string) bool {
+	shard := &lm.shards[shardIndex(bundleName, documentID)]
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	docLocks := shard.locks[bundleName]
+	if docLocks == nil {
+		return false
+	}
+
+	docLock := docLocks[documentID]
+	if docLock == nil {
+		return false
+	}
+
+	docLock.mu.Lock()
+	released := false
+	releasedWriteLock := false
+	releasedReadLock := false
+	wasLastReader := false
+
+	if docLock.writeLock != nil && docLock.writeLock.OwnerTxID == txID {
+		docLock.writeLock = nil
+		released = true
+		releasedWriteLock = true
+	}
+	if _, exists := docLock.readLocks[txID]; exists {
+		delete(docLock.readLocks, txID)
+		released = true
+		releasedReadLock = true
+		wasLastReader = (docLock.writeLock == nil && len(docLock.readLocks) == 0)
+	}
+
+	if released {
+		if releasedWriteLock {
+			docLock.cond.Broadcast()
+		} else if releasedReadLock && wasLastReader {
+			docLock.cond.Signal()
+		}
+	}
+	docLock.mu.Unlock()
+
+	if released {
+		lm.logger.Debugf("Released lock for txID=%s on %s.%s", txID, bundleName, documentID)
+		docLock.mu.RLock()
+		isEmpty := docLock.writeLock == nil && len(docLock.readLocks) == 0
+		docLock.mu.RUnlock()
+		if isEmpty {
+			delete(docLocks, documentID)
+		}
+		if len(docLocks) == 0 {
+			delete(shard.locks, bundleName)
+		}
+	}
+
+	return released
 }
 
 // AcquireReadLock acquires a read lock on a document
@@ -177,7 +298,7 @@ func NewLockManager(logger *zap.SugaredLogger, lockTimeout ...time.Duration) *Lo
 // If a write lock exists, waits up to lockTimeout before giving up
 func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID string) error {
 	startTime := time.Now()
-	shard := &lm.shards[shardIndex(bundleName)]
+	shard := &lm.shards[shardIndex(bundleName, documentID)]
 
 	for {
 		shard.mu.Lock()
@@ -222,6 +343,8 @@ func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID s
 		}
 		docLock.mu.Unlock()
 		shard.mu.Unlock()
+		// Track this lock for fast release
+		lm.trackLock(txID, bundleName, documentID)
 		return nil
 	}
 }
@@ -231,7 +354,7 @@ func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID s
 // If another transaction holds any lock, waits up to lockTimeout before giving up
 func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID string) error {
 	startTime := time.Now()
-	shard := &lm.shards[shardIndex(bundleName)]
+	shard := &lm.shards[shardIndex(bundleName, documentID)]
 
 	// #region agent log
 	debugLogLockAttempt(bundleName, documentID, txID, sessionID, "WRITE", "attempt_start")
@@ -321,6 +444,8 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 		acquireTime := time.Since(startTime)
 		docLock.mu.Unlock()
 		shard.mu.Unlock()
+		// Track this lock for fast release
+		lm.trackLock(txID, bundleName, documentID)
 		// #region agent log
 		debugLogLockAcquired(bundleName, documentID, txID, sessionID, "WRITE", acquireTime)
 		// #endregion
@@ -329,7 +454,34 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 }
 
 // ReleaseLocks releases all locks held by a transaction
+// OPTIMIZED: Uses per-transaction lock tracking for O(locks_held) instead of O(all_shards * all_docs)
 func (lm *LockManager) ReleaseLocks(txID string) int {
+	// Get tracked locks for this transaction
+	trackedLocks := lm.getTrackedLocks(txID)
+
+	// If we have tracking info, use the fast path
+	if len(trackedLocks) > 0 {
+		releaseCount := 0
+		for _, key := range trackedLocks {
+			if lm.releaseSpecificLock(txID, key.bundleName, key.documentID) {
+				releaseCount++
+			}
+		}
+		// Clear the tracking
+		lm.txLocksMu.Lock()
+		delete(lm.txLocks, txID)
+		lm.txLocksMu.Unlock()
+
+		if releaseCount > 0 {
+			lm.logger.Debugf("Released %d locks for txID=%s (fast path)", releaseCount, txID)
+			// #region agent log
+			debugLogLockReleased(txID, releaseCount)
+			// #endregion
+		}
+		return releaseCount
+	}
+
+	// Fallback: scan all shards (for locks acquired before tracking was added)
 	releaseCount := 0
 	for i := range lm.shards {
 		shard := &lm.shards[i]
@@ -380,7 +532,7 @@ func (lm *LockManager) ReleaseLocks(txID string) int {
 		shard.mu.Unlock()
 	}
 	if releaseCount > 0 {
-		lm.logger.Debugf("Released %d locks for txID=%s", releaseCount, txID)
+		lm.logger.Debugf("Released %d locks for txID=%s (slow path)", releaseCount, txID)
 		// #region agent log
 		debugLogLockReleased(txID, releaseCount)
 		// #endregion
