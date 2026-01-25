@@ -2,117 +2,26 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
-	_ "net/http/pprof" // pprof for memory/CPU profiling at :6060
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
-	"runtime/pprof"
 	"strings"
-	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/graphQL"
 	"syndrdb/src/internal/graphQL/schema"
 	"syndrdb/src/internal/server"
 	"syndrdb/src/pkg/constants"
 	"syndrdb/src/pkg/errors"
-	"syndrdb/src/pkg/fatal"
 	"syndrdb/src/pkg/settings"
 
 	"syndrdb/src/internal/monitoring"
 	"syscall"
 	"time"
 )
-
-// resolvePprofDir returns an absolute directory for pprof output. Tries TempDir, DataDir, cwd, then /tmp (Unix).
-// Ensures the chosen directory exists (MkdirAll for TempDir/DataDir). Used so profile files can be found even
-// when run in containers or under service managers where cwd/signals may differ.
-func resolvePprofDir(tempDir, dataDir string) string {
-	try := func(d string, mkdir bool) string {
-		if d == "" {
-			return ""
-		}
-		abs, err := filepath.Abs(d)
-		if err != nil {
-			return ""
-		}
-		if mkdir {
-			if err := os.MkdirAll(abs, 0755); err != nil {
-				return ""
-			}
-		}
-		return abs
-	}
-	if p := try(tempDir, true); p != "" {
-		return p
-	}
-	if p := try(dataDir, true); p != "" {
-		return p
-	}
-	if wd, err := os.Getwd(); err == nil && wd != "" {
-		return wd
-	}
-	if runtime.GOOS != "windows" {
-		return "/tmp"
-	}
-	return "."
-}
-
-// writeHeapProfileToFile runs GC then writes a heap profile to dir/pprof_heap_<timestamp>.prof.
-// Returns an absolute path. Use when memory balloons: kill -USR1 <pid> or GET /debug/write-heap
-//
-//	go tool pprof -alloc_space pprof_heap_<ts>.prof
-//	(pprof) top20
-func writeHeapProfileToFile(dir string) (path string, err error) {
-	if dir == "" {
-		dir = "."
-	}
-	path = filepath.Join(dir, fmt.Sprintf("pprof_heap_%s.prof", time.Now().Format("2006-01-02_15-04-05")))
-	f, err := os.Create(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	runtime.GC()
-	if err := pprof.WriteHeapProfile(f); err != nil {
-		return path, err
-	}
-	if abs, e := filepath.Abs(path); e == nil {
-		path = abs
-	}
-	return path, nil
-}
-
-// writeGoroutineProfileToFile writes a goroutine profile to dir/pprof_goroutines_<timestamp>.txt.
-// Returns an absolute path. Use for goroutine leaks: kill -USR2 <pid> or GET /debug/write-goroutines
-func writeGoroutineProfileToFile(dir string) (path string, err error) {
-	if dir == "" {
-		dir = "."
-	}
-	path = filepath.Join(dir, fmt.Sprintf("pprof_goroutines_%s.txt", time.Now().Format("2006-01-02_15-04-05")))
-	f, err := os.Create(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	p := pprof.Lookup("goroutine")
-	if p == nil {
-		return path, fmt.Errorf("pprof.Lookup(\"goroutine\") is nil")
-	}
-	if err := p.WriteTo(f, 2); err != nil {
-		return path, err
-	}
-	if abs, e := filepath.Abs(path); e == nil {
-		path = abs
-	}
-	return path, nil
-}
 
 // printUsage prints helpful usage information
 func printUsage() {
@@ -131,15 +40,6 @@ func main() {
 	// Create a new settings.Arguments instance
 	// Get the global settings instance
 	args := settings.GetSettings()
-
-	// Capture panics to fatal_errors.log before the process exits (main goroutine).
-	// LogFatalAndExit writes the log, prints only the panicking stack to stderr, then os.Exit(1)
-	// so the runtime never prints the full goroutine dump.
-	defer func() {
-		if r := recover(); r != nil {
-			fatal.LogFatalAndExit(r)
-		}
-	}()
 
 	//args := settings.Arguments{}
 
@@ -203,6 +103,9 @@ func main() {
 	// JOIN SIMD Configuration flags
 	flag.BoolVar(&args.JoinSIMDEnabled, "join-simd-enabled", true, "Enable SIMD acceleration for JOIN hash/compare operations")
 	flag.BoolVar(&args.JoinSIMDAutoDetect, "join-simd-autodetect", true, "Auto-detect CPU SIMD support (AVX2/NEON)")
+
+	// JOIN Memory Configuration (PostgreSQL-style work_mem for joins)
+	flag.IntVar(&args.JoinMemoryLimitMB, "join-memory-limit", 64, "Memory limit per join operation in MB (default: 64, auto-scales for >8GB RAM systems)")
 
 	// WHERE SIMD Configuration flags
 	flag.BoolVar(&args.WhereSIMDEnabled, "where-simd-enabled", true, "Enable SIMD acceleration for WHERE clause comparisons")
@@ -297,12 +200,6 @@ func main() {
 	flag.BoolVar(&args.AuthEnabled, "auth", args.AuthEnabled, "Enable authentication")
 	flag.IntVar(&args.SessionTimeoutMinutes, "session-timeout", args.SessionTimeoutMinutes, "Session timeout in minutes")
 	flag.IntVar(&args.MaxSessions, "max-sessions", args.MaxSessions, "Maximum concurrent sessions")
-	flag.IntVar(&args.MaxConnections, "max-connections", args.MaxConnections, "Maximum connection pool size")
-	flag.IntVar(&args.ConnectionIdleTimeoutMinutes, "connection-idle-timeout", args.ConnectionIdleTimeoutMinutes, "Connection idle timeout in minutes")
-	// HIGH-007: Concurrency & Locking Configuration flags (re-register)
-	flag.IntVar(&args.LockTimeoutSeconds, "lock-timeout", args.LockTimeoutSeconds, "Timeout for lock acquisition in seconds")
-	flag.IntVar(&args.MaxWorkerPools, "max-worker-pools", args.MaxWorkerPools, "Maximum number of worker pools")
-	flag.IntVar(&args.WorkerPoolStopTimeoutSeconds, "worker-pool-stop-timeout", args.WorkerPoolStopTimeoutSeconds, "Timeout for stopping worker pools in seconds")
 	flag.StringVar(&args.Version, "version", args.Version, "Version information")
 	flag.BoolVar(&args.EnableGraphQL, "graphql", args.EnableGraphQL, "Enable GraphQL API")
 	flag.StringVar(&args.BundleStorageFormat, "bundle-format", args.BundleStorageFormat, "Bundle storage format")
@@ -326,6 +223,7 @@ func main() {
 	flag.IntVar(&args.SortMaxMemoryMB, "sort-max-memory", args.SortMaxMemoryMB, "Maximum sort memory in MB")
 	flag.BoolVar(&args.JoinSIMDEnabled, "join-simd-enabled", args.JoinSIMDEnabled, "Enable SIMD for JOINs")
 	flag.BoolVar(&args.JoinSIMDAutoDetect, "join-simd-autodetect", args.JoinSIMDAutoDetect, "Auto-detect CPU SIMD for JOINs")
+	flag.IntVar(&args.JoinMemoryLimitMB, "join-memory-limit", args.JoinMemoryLimitMB, "Memory limit per join in MB")
 	flag.BoolVar(&args.WhereSIMDEnabled, "where-simd-enabled", args.WhereSIMDEnabled, "Enable SIMD for WHERE")
 	flag.BoolVar(&args.WhereSIMDAutoDetect, "where-simd-autodetect", args.WhereSIMDAutoDetect, "Auto-detect CPU SIMD for WHERE")
 	flag.BoolVar(&args.WhereBloomEnabled, "where-bloom-enabled", args.WhereBloomEnabled, "Enable Bloom filtering")
@@ -345,38 +243,6 @@ func main() {
 	flag.BoolVar(&args.EnableQueryTimeout, "enable-query-timeout", args.EnableQueryTimeout, "Enable GraphQL query execution timeout (Layer 4)")
 	flag.BoolVar(&args.EnableQueryMonitoring, "enable-query-monitoring", args.EnableQueryMonitoring, "Enable GraphQL query metrics monitoring (Layer 5)")
 	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", args.GraphQLRateAlgorithm, "GraphQL rate limiting algorithm")
-
-	// SyndrQL Query Timeout Flags (re-register)
-	flag.IntVar(&args.QueryTimeoutSeconds, "query-timeout", args.QueryTimeoutSeconds, "Default query execution timeout in seconds (1-3600)")
-	flag.IntVar(&args.AdminQueryTimeoutSeconds, "admin-query-timeout", args.AdminQueryTimeoutSeconds, "Admin query execution timeout in seconds (60-3600)")
-
-	// Per-Query Memory Limit Flags (DoS Protection) - CRITICAL: These were missing!
-	flag.IntVar(&args.QueryMaxMemoryMB, "query-max-memory", args.QueryMaxMemoryMB, "Maximum memory per query in MB (any positive integer)")
-	flag.IntVar(&args.AdminQueryMaxMemoryMB, "admin-query-max-memory", args.AdminQueryMaxMemoryMB, "Maximum memory per admin query in MB (any positive integer)")
-
-	// Page Cache Configuration (Memory Management)
-	flag.IntVar(&args.MaxLoadedDocumentPages, "max-loaded-document-pages", args.MaxLoadedDocumentPages, "Max pages in shared documentPages cache (0 = use default 500)")
-	flag.IntVar(&args.BundleAdapterMaxCachedPages, "bundle-adapter-max-cached-pages", args.BundleAdapterMaxCachedPages, "Max pages per BundleAdapter scanner (0 = use default 500)")
-	flag.IntVar(&args.DocumentPageMapMaxEntriesPerBundle, "document-page-map-max-entries", args.DocumentPageMapMaxEntriesPerBundle, "Max documentID->pageID entries per bundle (0 = use default 100000)")
-	flag.IntVar(&args.FileReadCacheMaxEntries, "file-read-cache-max-entries", args.FileReadCacheMaxEntries, "Max file/segment buffers in read cache (0 = use default 32)")
-
-	// Query Plan Cache Configuration
-	flag.BoolVar(&args.PlanCacheEnabled, "plan-cache-enabled", args.PlanCacheEnabled, "Enable query plan caching")
-	flag.IntVar(&args.PlanCacheCapacity, "plan-cache-capacity", args.PlanCacheCapacity, "Maximum cached plans per shard (default: 1000, 8 shards = 8000 total)")
-	flag.BoolVar(&args.PlanCacheAdaptivePlanning, "plan-cache-adaptive-planning", args.PlanCacheAdaptivePlanning, "Enable PostgreSQL-style adaptive planning")
-	flag.IntVar(&args.PlanCacheCustomThreshold, "plan-cache-custom-threshold", args.PlanCacheCustomThreshold, "Custom executions before generic plan evaluation")
-	flag.IntVar(&args.PlanCacheWriteThreshold, "plan-cache-write-threshold", args.PlanCacheWriteThreshold, "Write count threshold for invalidation")
-	flag.IntVar(&args.PlanCacheStaleServeSeconds, "plan-cache-stale-serve-seconds", args.PlanCacheStaleServeSeconds, "Stale plan serving window in seconds")
-
-	// WHERE Expression Cache Configuration
-	flag.BoolVar(&args.WhereExpressionCacheEnabled, "where-expression-cache-enabled", args.WhereExpressionCacheEnabled, "Enable expression caching and predicate reordering")
-	flag.IntVar(&args.WhereExpressionCacheSize, "where-expression-cache-size", args.WhereExpressionCacheSize, "LRU cache size for compiled expressions (default: 1000)")
-
-	// GROUP BY Configuration
-	flag.IntVar(&args.GroupByHashAggregateRowThreshold, "groupby-hash-aggregate-threshold", args.GroupByHashAggregateRowThreshold, "Rows below this use HashAggregate, above use Sort+GroupAggregate (default: 10000)")
-
-	// JOIN Concurrency Configuration
-	flag.IntVar(&args.JoinConcurrencyLimit, "join-concurrency-limit", args.JoinConcurrencyLimit, "Max concurrent join executions; 0 = no limit (default: 16)")
 
 	// Final parse with CLI taking precedence
 	flag.Parse()
@@ -461,11 +327,6 @@ func main() {
 	}
 	//srv := server.NewServer(args.Host, args.Port, db, args.AuthEnabled)
 
-	// Run index cleanup (temp + schema-based orphans) before starting
-	if err := bundle.RunIndexCleanup(args.DataDir, srv.Databases, srv.GetLogger()); err != nil {
-		log.Printf("Warning: index cleanup failed: %v", err)
-	}
-
 	// Create default users from configuration if authentication is enabled
 	if args.AuthEnabled && len(args.DefaultUsers) > 0 {
 		serviceManager := server.GetServiceManager()
@@ -501,79 +362,6 @@ func main() {
 		if userCount == 0 && len(args.DefaultUsers) == 0 {
 			log.Printf("⚠️  WARNING: Authentication is enabled but no users exist. Create users using 'ADD USER' command or configure default_users in config file.")
 		}
-	}
-
-	// Pprof: resolve output dir (TempDir -> DataDir -> cwd -> /tmp) and ensure it exists
-	pprofDir := resolvePprofDir(args.TempDir, args.DataDir)
-	log.Printf("pprof: profile files will be written to: %s", pprofDir)
-
-	// HTTP: write-heap / write-goroutines write to file and return JSON {path, ok} — no signals needed
-	http.HandleFunc("/debug/write-heap", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		path, err := writeHeapProfileToFile(pprofDir)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"ok": "false", "error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"ok": "true", "path": path})
-	})
-	http.HandleFunc("/debug/write-goroutines", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		path, err := writeGoroutineProfileToFile(pprofDir)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"ok": "false", "error": err.Error()})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"ok": "true", "path": path})
-	})
-
-	// Start pprof server on :6060 (serves /debug/pprof/* and /debug/write-heap, /debug/write-goroutines)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fatal.LogFatalAndExit(r)
-			}
-		}()
-		log.Println("Starting pprof server on :6060 (http://localhost:6060/debug/pprof/ ; /debug/write-heap ; /debug/write-goroutines)")
-		if err := http.ListenAndServe(":6060", nil); err != nil {
-			log.Printf("pprof server error: %v", err)
-		}
-	}()
-
-	// Signal-triggered dumps (Unix): kill -USR1 <pid> (heap), kill -USR2 <pid> (goroutines)
-	if runtime.GOOS != "windows" {
-		usrCh := make(chan os.Signal, 2)
-		signal.Notify(usrCh, syscall.SIGUSR1, syscall.SIGUSR2)
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					fatal.LogFatalAndExit(r)
-				}
-			}()
-			for sig := range usrCh {
-				switch sig {
-				case syscall.SIGUSR1:
-					log.Printf("pprof: received SIGUSR1, writing heap profile to %s ...", pprofDir)
-					p, err := writeHeapProfileToFile(pprofDir)
-					if err != nil {
-						log.Printf("pprof: failed to write heap profile: %v", err)
-					} else {
-						log.Printf("pprof: wrote heap profile to %s (analyze: go tool pprof -alloc_space %s)", p, p)
-					}
-				case syscall.SIGUSR2:
-					log.Printf("pprof: received SIGUSR2, writing goroutine profile to %s ...", pprofDir)
-					p, err := writeGoroutineProfileToFile(pprofDir)
-					if err != nil {
-						log.Printf("pprof: failed to write goroutine profile: %v", err)
-					} else {
-						log.Printf("pprof: wrote goroutine profile to %s", p)
-					}
-				}
-			}
-		}()
-		log.Printf("pprof: signal dumps. Heap: kill -USR1 %d  Goroutines: kill -USR2 %d", os.Getpid(), os.Getpid())
 	}
 
 	// Start the server

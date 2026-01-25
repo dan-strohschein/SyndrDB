@@ -2,6 +2,7 @@ package settings
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,20 @@ import (
 
 // TODO: I will add support for environment variable overrides with ENV > CLI > YAML > defaults precedence
 // TODO: I will implement hot-reload functionality via SIGHUP signal to reload configuration without server restart
+
+// getDefaultJoinMemoryLimitMB returns the default JOIN memory limit based on system RAM
+// Systems with >8GB RAM get 128MB default, otherwise 64MB
+// This mimics PostgreSQL's approach of scaling work_mem with available memory
+func getDefaultJoinMemoryLimitMB() int {
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	// Sys is the total memory obtained from the OS, which approximates available RAM
+	totalMemoryGB := memStats.Sys / (1024 * 1024 * 1024)
+	if totalMemoryGB >= 8 {
+		return 128 // 128MB for systems with 8GB+ RAM
+	}
+	return 64 // 64MB default for smaller systems
+}
 
 // StorageConfig holds storage engine configuration
 type StorageConfig struct {
@@ -59,8 +74,8 @@ type Arguments struct {
 	Storage StorageConfig `yaml:"storage"` // Storage engine configuration
 
 	// Authentication Configuration
-	AuthEnabled  bool          `yaml:"auth_enabled"`   // Enable authentication
-	DefaultUsers []DefaultUser `yaml:"default_users"`  // Default users to create when authentication is enabled (optional)
+	AuthEnabled  bool          `yaml:"auth_enabled"`  // Enable authentication
+	DefaultUsers []DefaultUser `yaml:"default_users"` // Default users to create when authentication is enabled (optional)
 
 	// Session Management Configuration
 	SessionTimeoutMinutes int `yaml:"session_timeout_minutes"` // Session timeout in minutes
@@ -154,6 +169,9 @@ type Arguments struct {
 	// (e.g. 300 connections each doing a join). 0 = no limit.
 	JoinConcurrencyLimit int `yaml:"join_concurrency_limit"` // Max concurrent join executions; 0 = no limit (default: 16)
 
+	// JOIN Memory Configuration (PostgreSQL-style work_mem for joins)
+	JoinMemoryLimitMB int `yaml:"join_memory_limit_mb"` // Memory limit per join in MB (default: 64, auto-detects higher for systems with >8GB RAM)
+
 	// WHERE SIMD Configuration
 	WhereSIMDEnabled            bool `yaml:"where_simd_enabled"`             // Enable SIMD acceleration for WHERE clause comparisons (default: true)
 	WhereSIMDAutoDetect         bool `yaml:"where_simd_auto_detect"`         // Auto-detect CPU SIMD support for WHERE clauses (default: true)
@@ -209,16 +227,16 @@ type Arguments struct {
 	GhostCleanupTombstoneRatio  float64 `yaml:"ghost_cleanup_tombstone_ratio"`  // Tombstone ratio threshold for compaction (default: 0.3)
 
 	// MVCC GC (Automatic Version Cleanup) Configuration
-	MVCCGCEnabled         bool   `yaml:"mvcc_gc_enabled"`          // Enable automatic MVCC version cleanup (default: true)
-	MVCCGCIntervalSeconds int    `yaml:"mvcc_gc_interval_seconds"` // GC cycle interval in seconds (default: 30)
-	MVCCGCBatchSize       int    `yaml:"mvcc_gc_batch_size"`       // Max bundles to process per cycle (default: 10)
-	MVCCGCPauseThreshold  int    `yaml:"mvcc_gc_pause_threshold"`   // Active query pause threshold (default: 500)
-	MVCCGCMaxVersionsThreshold int `yaml:"mvcc_gc_max_versions_threshold"` // Trigger compaction if document has >N versions (default: 5)
-	MVCCGCMinVersionAgeHours    int    `yaml:"mvcc_gc_min_version_age_hours"` // Minimum age in hours before considering version for GC (default: 1)
+	MVCCGCEnabled              bool `yaml:"mvcc_gc_enabled"`                // Enable automatic MVCC version cleanup (default: true)
+	MVCCGCIntervalSeconds      int  `yaml:"mvcc_gc_interval_seconds"`       // GC cycle interval in seconds (default: 30)
+	MVCCGCBatchSize            int  `yaml:"mvcc_gc_batch_size"`             // Max bundles to process per cycle (default: 10)
+	MVCCGCPauseThreshold       int  `yaml:"mvcc_gc_pause_threshold"`        // Active query pause threshold (default: 500)
+	MVCCGCMaxVersionsThreshold int  `yaml:"mvcc_gc_max_versions_threshold"` // Trigger compaction if document has >N versions (default: 5)
+	MVCCGCMinVersionAgeHours   int  `yaml:"mvcc_gc_min_version_age_hours"`  // Minimum age in hours before considering version for GC (default: 1)
 
 	// Concurrency & Locking Configuration (HIGH-007)
-	LockTimeoutSeconds          int `yaml:"lock_timeout_seconds"`          // Timeout for lock acquisition in seconds (default: 30)
-	MaxWorkerPools              int `yaml:"max_worker_pools"`              // Maximum number of worker pools (default: 10)
+	LockTimeoutSeconds           int `yaml:"lock_timeout_seconds"`             // Timeout for lock acquisition in seconds (default: 30)
+	MaxWorkerPools               int `yaml:"max_worker_pools"`                 // Maximum number of worker pools (default: 10)
 	WorkerPoolStopTimeoutSeconds int `yaml:"worker_pool_stop_timeout_seconds"` // Timeout for stopping worker pools in seconds (default: 30)
 
 	// Query Plan Cache Configuration
@@ -232,8 +250,8 @@ type Arguments struct {
 	// TODO: I will add PlanCacheCompressionEnabled for large plan compression when we have plans exceeding 10KB
 
 	// Page cache / memory-leak fix knobs
-	MaxLoadedDocumentPages            int `yaml:"max_loaded_document_pages"`              // Max pages in BundleService.documentPages (shared); 0 = use default 500
-	BundleAdapterMaxCachedPages       int `yaml:"bundle_adapter_max_cached_pages"`        // Max pages in BundleAdapter.cachedPages per scanner; 0 = use default 500
+	MaxLoadedDocumentPages             int `yaml:"max_loaded_document_pages"`                // Max pages in BundleService.documentPages (shared); 0 = use default 500
+	BundleAdapterMaxCachedPages        int `yaml:"bundle_adapter_max_cached_pages"`          // Max pages in BundleAdapter.cachedPages per scanner; 0 = use default 500
 	DocumentPageMapMaxEntriesPerBundle int `yaml:"document_page_map_max_entries_per_bundle"` // Max documentID->pageID entries per bundle in documentPageMap; 0 = use default 100000
 
 	// File/segment read cache: avoids repeated full-file reads when loading many pages (e.g. getAllDocumentsForIndexing).
@@ -374,6 +392,9 @@ func GetSettings() *Arguments {
 			// JOIN Concurrency: 16 by default to avoid O(connections) memory; 0 = no limit
 			JoinConcurrencyLimit: 16,
 
+			// JOIN Memory Configuration (PostgreSQL-style work_mem for joins)
+			JoinMemoryLimitMB: getDefaultJoinMemoryLimitMB(), // Default 64MB, or 128MB if system has >8GB RAM
+
 			// WHERE SIMD Configuration
 			WhereSIMDEnabled:    true, // Enable SIMD for WHERE comparisons
 			WhereSIMDAutoDetect: true, // Auto-detect CPU capabilities
@@ -387,14 +408,14 @@ func GetSettings() *Arguments {
 			WhereBatchMinSize:     100,  // Activate batch SIMD for 100+ documents
 
 			// WHERE Expression Caching Configuration (Priority 4)
-			WhereExpressionCacheEnabled: true,  // Enable expression caching and predicate reordering
-			WhereExpressionCacheSize:    1000,  // Cache 1000 compiled expressions
+			WhereExpressionCacheEnabled:      true,  // Enable expression caching and predicate reordering
+			WhereExpressionCacheSize:         1000,  // Cache 1000 compiled expressions
 			GroupByHashAggregateRowThreshold: 10000, // Use HashAggregate for <10k rows, else Sort+GroupAggregate
-			SortEnableParallel:          false, // DEPRECATED: use SortParallelEnabled
-			SortParallelThreshold:       10000, // DEPRECATED: use SortParallelMinSize
-			SortParallelEnabled:         true,  // Phase 5: Enable parallel sorting
-			SortParallelMinSize:         10000, // Phase 5: 10k+ docs for parallel sort
-			SortMaxMemoryMB:             512,   // 512MB memory limit
+			SortEnableParallel:               false, // DEPRECATED: use SortParallelEnabled
+			SortParallelThreshold:            10000, // DEPRECATED: use SortParallelMinSize
+			SortParallelEnabled:              true,  // Phase 5: Enable parallel sorting
+			SortParallelMinSize:              10000, // Phase 5: 10k+ docs for parallel sort
+			SortMaxMemoryMB:                  512,   // 512MB memory limit
 
 			// Backup & Restore Defaults
 			BackupDir:            "./backups", // Default backup directory
@@ -434,16 +455,16 @@ func GetSettings() *Arguments {
 			GhostCleanupTombstoneRatio:  0.3,   // Compact when 30% tombstones
 
 			// MVCC GC (Automatic Version Cleanup) Defaults
-			MVCCGCEnabled:              true,  // Enable MVCC GC by default
-			MVCCGCIntervalSeconds:      30,    // Run every 30 seconds
-			MVCCGCBatchSize:            10,    // Process up to 10 bundles per cycle
-			MVCCGCPauseThreshold:       500,   // Pause when 500+ queries active
-			MVCCGCMaxVersionsThreshold: 5,     // Trigger compaction if document has >5 versions
-			MVCCGCMinVersionAgeHours:    1,     // Minimum 1 hour age before considering version for GC
+			MVCCGCEnabled:              true, // Enable MVCC GC by default
+			MVCCGCIntervalSeconds:      30,   // Run every 30 seconds
+			MVCCGCBatchSize:            10,   // Process up to 10 bundles per cycle
+			MVCCGCPauseThreshold:       500,  // Pause when 500+ queries active
+			MVCCGCMaxVersionsThreshold: 5,    // Trigger compaction if document has >5 versions
+			MVCCGCMinVersionAgeHours:   1,    // Minimum 1 hour age before considering version for GC
 
 			// Concurrency & Locking Configuration Defaults (HIGH-007)
-			LockTimeoutSeconds:          30,  // 30 seconds timeout for lock acquisition
-			MaxWorkerPools:              10,  // Maximum 10 worker pools
+			LockTimeoutSeconds:           30, // 30 seconds timeout for lock acquisition
+			MaxWorkerPools:               10, // Maximum 10 worker pools
 			WorkerPoolStopTimeoutSeconds: 30, // 30 seconds timeout for stopping worker pools
 
 			// Query Plan Cache Defaults
@@ -455,10 +476,10 @@ func GetSettings() *Arguments {
 			PlanCacheStaleServeSeconds: 60,   // 60 second stale serving window
 
 			// Page cache / memory-leak fix defaults
-			MaxLoadedDocumentPages:             500,     // Max pages in BundleService.documentPages (shared)
-			BundleAdapterMaxCachedPages:        500,     // Max pages in BundleAdapter.cachedPages per scanner
-			DocumentPageMapMaxEntriesPerBundle: 100000,  // Max documentID->pageID entries per bundle
-			FileReadCacheMaxEntries:            32,      // Max file/segment buffers (avoids repeated full-file reads per page)
+			MaxLoadedDocumentPages:             500,    // Max pages in BundleService.documentPages (shared)
+			BundleAdapterMaxCachedPages:        500,    // Max pages in BundleAdapter.cachedPages per scanner
+			DocumentPageMapMaxEntriesPerBundle: 100000, // Max documentID->pageID entries per bundle
+			FileReadCacheMaxEntries:            32,     // Max file/segment buffers (avoids repeated full-file reads per page)
 
 			// Prepared Statement Cache Defaults
 			PreparedStatementCacheEnabled:  true, // Enable prepared statement caching by default
@@ -714,6 +735,13 @@ func (a *Arguments) GetQueryMemoryLimit(isAdmin bool) int64 {
 		limitMB = a.AdminQueryMaxMemoryMB
 	}
 	return int64(limitMB) * constants.MemoryMBToBytes // Convert MB to bytes
+}
+
+// GetJoinMemoryLimit returns the memory limit for JOIN operations in bytes
+// This is a PostgreSQL-style work_mem equivalent for hash join hash tables and merge join buffers
+// Returns memory limit in bytes (converted from MB configuration)
+func (a *Arguments) GetJoinMemoryLimit() int64 {
+	return int64(a.JoinMemoryLimitMB) * constants.MemoryMBToBytes
 }
 
 // GetTransactionIdleTimeout returns the parsed transaction idle timeout duration

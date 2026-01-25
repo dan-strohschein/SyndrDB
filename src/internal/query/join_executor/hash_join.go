@@ -3,7 +3,6 @@ package joinexecutor
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"syndrdb/src/internal/domain/index/hashindexV3"
@@ -22,9 +21,8 @@ const maxJoinedDocsPrealloc = 512 * 1024
 // HashJoinStrategy implements the hash join algorithm optimized for SyndrDB's hybrid document model
 // This is the primary join algorithm for equi-joins across large bundles
 type HashJoinStrategy struct {
-	logger       *zap.SugaredLogger
-	memoryLimit  int64             // Maximum memory to use before spilling to disk
-	spillManager *DiskSpillManager // PHASE 2: Manages disk spillover operations
+	logger      *zap.SugaredLogger
+	memoryLimit int64 // Maximum memory to use before spilling to disk
 
 	// Configuration
 	initialHashTableSize int     // Initial size for hash table
@@ -50,7 +48,6 @@ func NewHashJoinStrategy(logger *zap.SugaredLogger, memoryLimit int64, useSIMD b
 	return &HashJoinStrategy{
 		logger:               logger,
 		memoryLimit:          memoryLimit,
-		spillManager:         NewDiskSpillManager(logger), // PHASE 2: Implementation coming
 		initialHashTableSize: 1000,
 		loadFactor:           0.75,
 		bloomFilterEnabled:   true, // Enable Bloom filter optimization by default
@@ -340,7 +337,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 	if buildIndex != nil {
 		// Use index-assisted build: get documents via index instead of scanning all
 		indexHashTable, indexBloom, indexStats, indexErr := hjs.buildHashTableWithIndex(buildBundle, buildKey, buildIndex, request, hashTable, bloom)
-		
+
 		// CRITICAL: If index-assisted build returns 0 documents but index claims to have data,
 		// fall back to regular build to avoid incorrect results
 		if indexErr == nil && indexStats.DocumentsScanned == 0 {
@@ -469,131 +466,85 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// Step 1: Get all document IDs from the index (ignore page IDs - they may be stale)
-	// CRITICAL FIX: Index page IDs can be stale when documents move pages.
-	// Instead of relying on page IDs, collect all document IDs and search all pages.
+	// Step 1: Get document IDs grouped by page from the index
 	docIDsByPage, err := hashIndex.GetAllDocumentIDs()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get document IDs from index: %w", err)
 	}
 
-	// Collect all document IDs (ignore page grouping since page IDs may be stale)
-	allDocIDs := make(map[string]bool)
+	// Count total documents from index
 	totalDocIDsFromIndex := 0
 	for _, docIDs := range docIDsByPage {
-		for _, docID := range docIDs {
-			allDocIDs[docID] = true
-			totalDocIDsFromIndex++
-		}
+		totalDocIDsFromIndex += len(docIDs)
 	}
 
-	hjs.logger.Infof("Index returned %d total document IDs across %d page groups (page IDs may be stale, will search all pages)", 
+	hjs.logger.Infof("Index returned %d document IDs across %d page groups",
 		totalDocIDsFromIndex, len(docIDsByPage))
 
 	if totalDocIDsFromIndex == 0 {
 		hjs.logger.Debugf("Index returned 0 document IDs - index may be empty or not populated")
-		// Fall back to regular build (not index-assisted)
 		return nil, nil, nil, fmt.Errorf("index is empty, cannot use index-assisted build")
 	}
 
-	// Step 2: Get total pages and search all pages for the document IDs
-	// This is less efficient than page-grouped loading, but correct when page IDs are stale
-	totalPages := buildBundle.GetTotalPages()
-	if totalPages == 0 {
-		hjs.logger.Warnf("Bundle has 0 pages, cannot use index-assisted build")
-		return nil, nil, nil, fmt.Errorf("bundle has no pages")
+	// Step 2: Use staleness-aware loading with Phase 1 (try expected page) + Phase 2 (fallback)
+	// This is more efficient than the previous all-pages-scan approach
+	loadedDocs, loadErr := OptimizedIndexLoad(request.Context, buildBundle, docIDsByPage, hjs.logger)
+	if loadErr != nil {
+		return nil, nil, nil, fmt.Errorf("failed to load documents: %w", loadErr)
 	}
 
-	hjs.logger.Debugf("Searching %d pages for %d document IDs from index", totalPages, totalDocIDsFromIndex)
+	hjs.logger.Infof("Loaded %d documents using staleness-aware loading", len(loadedDocs))
 
-	// Step 3: Load each page and extract documents that match our document ID set
-	foundDocs := 0
-	searchedPages := 0
-	for pageID := uint32(0); pageID < totalPages; pageID++ {
-		// Check for cancellation
-		select {
-		case <-request.Context.Done():
-			return nil, nil, nil, request.Context.Err()
-		default:
+	// Step 3: Build hash table from loaded documents
+	for _, doc := range loadedDocs {
+		// Extract join key value
+		var keyValue interface{}
+		if strings.EqualFold(buildKey, "documentid") {
+			keyValue = doc.DocumentID
+		} else {
+			field, exists := doc.Fields[buildKey]
+			if !exists {
+				hjs.logger.Warnf("Skipping document %s: missing key %s", doc.DocumentID, buildKey)
+				continue
+			}
+			keyValue = field.Value.AsInterface()
 		}
 
-		// Load page (uses shared cache, RLock)
-		page, err := buildBundle.LoadPage(pageID)
-		if err != nil {
-			// Page doesn't exist or error loading - skip
+		if keyValue == nil {
+			hjs.logger.Warnf("Skipping document %s: key %s is nil", doc.DocumentID, buildKey)
 			continue
 		}
-		searchedPages++
 
-		// Check each document in this page to see if it's in our needed set
-		for docID, doc := range page.Documents {
-			if !allDocIDs[docID] {
-				// Not in our needed set, skip
-				continue
-			}
-			foundDocs++
-
-			// Extract join key value
-			var keyValue interface{}
-			if strings.EqualFold(buildKey, "documentid") {
-				keyValue = doc.DocumentID
-			} else {
-				field, exists := doc.Fields[buildKey]
-				if !exists {
-					hjs.logger.Warnf("Skipping document %s: missing key %s", docID, buildKey)
-					continue
-				}
-				keyValue = field.Value.AsInterface()
-			}
-
-			if keyValue == nil {
-				hjs.logger.Warnf("Skipping document %s: key %s is nil", docID, buildKey)
-				continue
-			}
-
-			// Create document pointer for hash table
-			docPtr := new(models.Document)
-			*docPtr = doc
-
-			// Add to hash table
-			putErr := hashTable.Put(keyValue, docPtr)
-			if putErr != nil {
-				return nil, nil, nil, fmt.Errorf("failed to add document to hash table: %w", putErr)
-			}
-
-			// Add to Bloom filter (if enabled)
-			if bloom != nil {
-				bloom.Add(conversion.ValueToString(keyValue))
-			}
-
-			stats.DocumentsScanned++
+		// Add to hash table
+		putErr := hashTable.Put(keyValue, doc)
+		if putErr != nil {
+			return nil, nil, nil, fmt.Errorf("failed to add document to hash table: %w", putErr)
 		}
+
+		// Add to Bloom filter (if enabled)
+		if bloom != nil {
+			bloom.Add(conversion.ValueToString(keyValue))
+		}
+
+		stats.DocumentsScanned++
 	}
-
-	hjs.logger.Debugf("Searched %d pages, found %d/%d documents from index", searchedPages, foundDocs, totalDocIDsFromIndex)
-
-	// Step 4: Handle memtable documents (recent writes not yet in index)
-	// This ensures read-your-own-writes consistency
-	// TODO: Access memtable through bundle service if available
-	// For now, memtable documents will be included in the next index scan
 
 	var bloomStats string
 	if bloom != nil {
-		stats := bloom.GetStats()
-		bloomStats = fmt.Sprintf(", Bloom filter: %d bytes (FPR: %.4f)", stats.MemoryUsedBytes, stats.EstimatedFPR)
+		bstats := bloom.GetStats()
+		bloomStats = fmt.Sprintf(", Bloom filter: %d bytes (FPR: %.4f)", bstats.MemoryUsedBytes, bstats.EstimatedFPR)
 	}
 
 	if stats.DocumentsScanned == 0 && totalDocIDsFromIndex > 0 {
-		hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were found after searching %d pages! This indicates documents may have been deleted or index is severely out of sync.", 
-			totalDocIDsFromIndex, searchedPages)
+		hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were loaded! Index may be severely out of sync.",
+			totalDocIDsFromIndex)
 	} else if int64(stats.DocumentsScanned) < int64(totalDocIDsFromIndex)/2 {
-		// Found less than half - likely many documents are missing
-		hjs.logger.Warnf("Found only %d/%d documents from index (%.1f%%). Some documents may be missing or index is out of sync.", 
+		hjs.logger.Warnf("Found only %d/%d documents from index (%.1f%%). Some documents may be missing.",
 			stats.DocumentsScanned, totalDocIDsFromIndex, float64(stats.DocumentsScanned*100)/float64(totalDocIDsFromIndex))
 	}
 
-	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s (searched %d pages, found %d docs via index)",
-		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats, searchedPages, stats.DocumentsScanned)
+	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s",
+		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats)
 
 	return hashTable, bloom, stats, nil
 }
@@ -909,41 +860,3 @@ type ScanStats struct {
 	DocumentsScanned int64 // Number of documents scanned
 	Comparisons      int64 // Number of key comparisons performed
 }
-
-// PHASE 2: DiskSpillManager will handle disk spillover operations
-type DiskSpillManager struct {
-	logger    *zap.SugaredLogger
-	spillPath string
-	mutex     sync.RWMutex
-
-	// PHASE 2: Implementation details
-	// partitions   map[string]*SpilledPartition
-	// compression  CompressionStrategy
-	// cleanupQueue []string
-}
-
-// NewDiskSpillManager creates a new disk spill manager
-func NewDiskSpillManager(logger *zap.SugaredLogger) *DiskSpillManager {
-	return &DiskSpillManager{
-		logger:    logger,
-		spillPath: "/tmp/syndrdb_spill", // PHASE 2: Make configurable
-	}
-}
-
-// PHASE 2: Methods for disk spillover
-/*
-func (dsm *DiskSpillManager) SpillHashTable(hashTable HashTable, partitionID string) error {
-	// Implementation for spilling hash table to disk
-	return nil
-}
-
-func (dsm *DiskSpillManager) LoadHashTable(partitionID string) (HashTable, error) {
-	// Implementation for loading hash table from disk
-	return nil, nil
-}
-
-func (dsm *DiskSpillManager) CleanupSpilledData() error {
-	// Implementation for cleaning up temporary spill files
-	return nil
-}
-*/

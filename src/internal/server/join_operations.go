@@ -11,6 +11,7 @@ import (
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/query/results"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
@@ -106,9 +107,9 @@ func convertToJoinRequestWithWhereOptimization(joinQuery *queryparser.SelectJoin
 		RightBundle:        rightBundleAdapter,
 		JoinType:           joinType,
 		Conditions:         conditions,
-		ExpectedResultSize: 10000,            // Reasonable default
-		MemoryLimit:        64 * 1024 * 1024, // 64MB default
-		AllowDiskSpillover: true,             // Enable disk spillover for large datasets
+		ExpectedResultSize: 10000,                                       // Reasonable default
+		MemoryLimit:        settings.GetSettings().GetJoinMemoryLimit(), // Configurable join memory limit
+		AllowDiskSpillover: true,                                        // Enable disk spillover for large datasets
 	}
 
 	return joinRequest, whereAnalysis, nil
@@ -232,9 +233,9 @@ func convertToJoinRequest(joinQuery *queryparser.SelectJoinQuery, database *mode
 		RightBundle:        rightBundleAdapter,
 		JoinType:           joinType,
 		Conditions:         conditions,
-		ExpectedResultSize: 10000,            // Reasonable default
-		MemoryLimit:        64 * 1024 * 1024, // 64MB default
-		AllowDiskSpillover: true,             // Enable disk spillover for large datasets
+		ExpectedResultSize: 10000,                                       // Reasonable default
+		MemoryLimit:        settings.GetSettings().GetJoinMemoryLimit(), // Configurable join memory limit
+		AllowDiskSpillover: true,                                        // Enable disk spillover for large datasets
 	}, nil
 }
 

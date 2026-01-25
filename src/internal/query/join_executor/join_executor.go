@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	joinConcurrencyMu   sync.Mutex
-	joinConcurrencySem  chan struct{}
-	joinConcurrencyCap  int
+	joinConcurrencyMu  sync.Mutex
+	joinConcurrencySem chan struct{}
+	joinConcurrencyCap int
 )
 
 // DefaultJoinExecutor implements the JoinExecutor interface
@@ -58,7 +58,8 @@ func NewDefaultJoinExecutor(logger *zap.SugaredLogger, defaultMemoryLimit int64,
 
 	// Register default strategies (pass SIMD flag to strategies)
 	executor.RegisterStrategy(NewHashJoinStrategy(logger, defaultMemoryLimit, useSIMD))
-	executor.RegisterStrategy(NewNestedLoopJoinStrategy(logger, 1000, useSIMD)) // Max 1000 docs in inner loop
+	executor.RegisterStrategy(NewNestedLoopJoinStrategy(logger, 1000, useSIMD))          // Max 1000 docs in inner loop
+	executor.RegisterStrategy(NewMergeJoinStrategy(logger, defaultMemoryLimit, useSIMD)) // Merge join for sorted inputs
 
 	logger.Infof("Created join executor with %d strategies, memory limit: %d bytes, SIMD: %v",
 		len(executor.strategies), defaultMemoryLimit, useSIMD)

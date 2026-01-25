@@ -45,6 +45,7 @@ import (
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: For JOIN executor integration
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL" // For predicate pushdown Expression handling
+	"syndrdb/src/pkg/settings"     // For configurable join memory limit
 	"time"                         // For document timestamps and performance timing
 
 	"go.uber.org/zap"
@@ -108,10 +109,13 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		return nil, fmt.Errorf("query validation failed: %w", err)
 	}
 
-	// NEW: Create JOIN executor with pattern tracking and SIMD support
-	// TODO: Pass SIMD configuration from server settings instead of hardcoding true
-	useSIMD := true                                                                       // Enable SIMD acceleration by default (auto-detects AVX2/NEON support)
-	joinExecutor := joinexecutor.NewDefaultJoinExecutor(jp.Logger, 64*1024*1024, useSIMD) // 64MB memory limit
+	// Get configurable memory limit from settings (PostgreSQL-style work_mem for joins)
+	globalSettings := settings.GetSettings()
+	joinMemoryLimit := globalSettings.GetJoinMemoryLimit()
+
+	// Create JOIN executor with pattern tracking and SIMD support
+	useSIMD := globalSettings.JoinSIMDEnabled
+	joinExecutor := joinexecutor.NewDefaultJoinExecutor(jp.Logger, joinMemoryLimit, useSIMD)
 
 	// Estimate execution cost based on bundle sizes
 	// NOTE: Use TotalDocuments metadata instead of Documents field (which is nil for paginated bundles)
