@@ -244,6 +244,9 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 		ConflictTracker:        conflictTracker,
 	}
 
+	// Wire LockManager to SessionManager for proper lock cleanup on session termination
+	sessionManager.SetLockReleaser(lockManager)
+
 	// Create unique test database (use test name + timestamp to avoid conflicts)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

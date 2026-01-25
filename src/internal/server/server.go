@@ -334,6 +334,12 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 
 	server.SessionManager = NewSessionManager(sugar, server.SessionTimeout, server.MaxSessions)
 
+	// CRITICAL: Wire LockManager to SessionManager for proper lock cleanup on session termination
+	// This fixes the bug where session cleanup only cleared internal maps but didn't release actual locks
+	if server.ServiceManager != nil && server.ServiceManager.LockManager != nil {
+		server.SessionManager.SetLockReleaser(server.ServiceManager.LockManager)
+	}
+
 	// Set session context in ServiceManager for RBAC FORCE operations
 	SetSessionContext(server.SessionManager, server.ActiveConnections)
 

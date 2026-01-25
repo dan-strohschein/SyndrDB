@@ -215,6 +215,13 @@ type Session struct {
 }
 
 // SessionManager manages all active sessions
+// LockReleaser interface allows SessionManager to release locks without importing storage package
+// This avoids circular dependencies while enabling proper lock cleanup on session termination
+type LockReleaser interface {
+	ReleaseLocksForSession(sessionID string) int
+	ReleaseLocks(txID string) int
+}
+
 type SessionManager struct {
 	sessions           map[string]*Session   // sessionID -> Session
 	userSessions       map[string][]*Session // username -> list of sessions (already exists!)
@@ -236,6 +243,9 @@ type SessionManager struct {
 	tempFileCleanupQueue  chan []string
 	tempFileCleanupWG     sync.WaitGroup
 	stopTempFileCleanup   chan struct{}
+
+	// Lock management - set after initialization to avoid circular dependencies
+	lockReleaser LockReleaser
 }
 
 // NewSessionManager creates a new session manager
@@ -257,6 +267,18 @@ func NewSessionManager(logger *zap.SugaredLogger, defaultTimeout time.Duration, 
 	sm.startTempFileCleanupWorker()
 
 	return sm
+}
+
+// SetLockReleaser sets the lock releaser for the session manager
+// This must be called after initialization to allow proper lock cleanup on session termination
+// The LockReleaser is typically the storage.LockManager
+func (sm *SessionManager) SetLockReleaser(lr LockReleaser) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.lockReleaser = lr
+	if sm.logger != nil {
+		sm.logger.Info("SessionManager: LockReleaser set for proper lock cleanup on session termination")
+	}
 }
 
 // generateSecureSessionID generates a cryptographically secure session ID
@@ -730,10 +752,22 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 	}
 	session.BundleLocks = make(map[string]*LockInfo)
 
-	// #region agent log
-	// NOTE: This is a BUG - the code above only clears session's internal tracking maps
-	// but does NOT call LockManager.ReleaseLocksForSession() to actually release locks!
-	debugLogSessionLockRelease(session.SessionID, "internal_maps_only_NOT_lock_manager", 0)
+	// #region agent log - FIXED: Now actually release locks via LockManager
+	// CRITICAL FIX: Call LockManager.ReleaseLocksForSession() to release actual locks held
+	// Previously this code only cleared the session's internal tracking maps without releasing
+	// the locks in the LockManager, causing orphaned locks and severe contention under high concurrency
+	lockCount := 0
+	if sm.lockReleaser != nil {
+		// Release locks by session ID (covers all transactions in this session)
+		lockCount = sm.lockReleaser.ReleaseLocksForSession(session.SessionID)
+		// Also release by active transaction ID if there was one
+		if session.ActiveTransactionID != "" {
+			lockCount += sm.lockReleaser.ReleaseLocks(session.ActiveTransactionID)
+		}
+		debugLogSessionLockRelease(session.SessionID, "lock_manager_release", lockCount)
+	} else {
+		debugLogSessionLockRelease(session.SessionID, "no_lock_releaser_available", 0)
+	}
 	// #endregion
 
 	// Clean up temp files (async, non-blocking)

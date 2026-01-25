@@ -281,6 +281,9 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 		UnifiedPlanner:         unifiedPlanner,
 	}
 
+	// Wire LockManager to SessionManager for proper lock cleanup on session termination
+	sessionManager.SetLockReleaser(lockManager)
+
 	// Create unique test database (use test name + timestamp to avoid conflicts)
 	dbName := fmt.Sprintf("testdb_%s_%d", tb.Name(), time.Now().UnixNano())
 	createDBCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
