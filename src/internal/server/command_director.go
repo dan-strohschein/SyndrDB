@@ -43,6 +43,14 @@ func debugDeleteDiagnostics(lockManagerExists bool, docCount int, useDocLocks bo
 // #endregion
 
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+	// #region agent log - command entry
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "delete") {
+		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.WriteString(fmt.Sprintf(`{"timestamp":%d,"hypothesisId":"DELETE","message":"command_director_entry","data":{"commandPrefix":"%.50s"}}%s`, time.Now().UnixMilli(), command, "\n"))
+			f.Close()
+		}
+	}
+	// #endregion
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
 	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
 
@@ -672,6 +680,12 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			return DeleteBundleCommand(bundleCmd, logger, serviceManager, database)
 		case "documents":
+			// #region agent log - DELETE entry point
+			if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+				f.WriteString(fmt.Sprintf(`{"timestamp":%d,"hypothesisId":"DELETE","message":"delete_entry_point","data":{"command":"%s"}}%s`, time.Now().UnixMilli(), "DELETE_DOCUMENTS_CASE", "\n"))
+				f.Close()
+			}
+			// #endregion
 			// DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>
 			// Parse the document command first to get bundle name and WHERE clause
 			// Use new parser if feature flag is enabled, fallback to legacy on error
