@@ -49,8 +49,30 @@ func putStringBuilder(sb *strings.Builder) {
 // TODO: Make this thread-safe or pass through function parameters
 var lastProcessedPattern string
 
-// PERFORMANCE: WhereGroup cache to avoid re-parsing the same WHERE clause
-// This significantly improves UPDATE performance when filtering documents in chunks
+// =============================================================================
+// DEPRECATED: OLD PARSER CODE BELOW
+// =============================================================================
+// The functions ParseWhereClause, ParseWhereClauseCached, EvaluateWhereClause,
+// tokenizeWhereClause, parseWhereGroup, and evaluateClause are DEPRECATED.
+//
+// DO NOT USE THESE FUNCTIONS FOR NEW CODE.
+//
+// Use SyndrQL instead:
+//   - syndrQL.ParseExpressionCached(whereClause) to parse
+//   - syndrQL.NewExpressionEvaluator(doc) + EvaluateAsBool(expr) to evaluate
+//
+// The WhereClause and WhereGroup types are still used by adapters and the
+// query planner for internal data structures, but the parsing and evaluation
+// should go through SyndrQL.
+//
+// In WHERE clauses:
+//   - Use == for equality (NOT =)
+//   - Use != for inequality
+//   - Use AND/OR for logical operators
+// =============================================================================
+
+// DEPRECATED: whereGroupCache is used by the old ParseWhereClauseCached function.
+// New code should use syndrQL.ParseExpressionCached instead.
 type whereGroupCache struct {
 	sync.RWMutex
 	entries map[string]*WhereGroup
@@ -64,7 +86,9 @@ var globalWhereGroupCache = &whereGroupCache{
 	maxSize: 1000, // Cache up to 1000 parsed WHERE clauses
 }
 
-// ParseWhereClauseCached parses a WHERE clause with caching to avoid re-parsing
+// DEPRECATED: ParseWhereClauseCached is the old parser with caching.
+// DO NOT USE FOR NEW CODE - Use syndrQL.ParseExpressionCached instead.
+// This function is only kept for backward compatibility with existing callers.
 func ParseWhereClauseCached(whereClause string) (*WhereGroup, error) {
 	// Fast path: check cache with read lock
 	globalWhereGroupCache.RLock()
@@ -99,6 +123,7 @@ func ParseWhereClauseCached(whereClause string) (*WhereGroup, error) {
 }
 
 // Magic value constants for NULL handling (matching bundle.NullHandler constants)
+// These constants ARE still used and should not be removed.
 const (
 	SYNDR_NULL    = "::SYNDR_NULL::"
 	SYNDR_MISSING = "::SYNDR_MISSING::"
@@ -106,17 +131,10 @@ const (
 	SYNDR_DEFAULT = "::SYNDR_DEFAULT::"
 )
 
-/*
-	This is the brute force way of parsing and searching the documents from the where clause.
-	This is merely to be used as initial testing for the add and delete commands.
-	For the real deal Phase 1 search, we will have to change a lot. Firstly, we will store the bundle documents
-	in memory using an AVL Tree, and we will implement a binar search to crawl the tree
-
-	For phase 2 search, we will have implemented a full indexing system and full text search that will
-	speed up the binary search and allow for more complex queries.
-
-*/
-// WhereClause represents a single condition in a WHERE clause
+// WhereClause represents a single condition in a WHERE clause.
+// NOTE: This type is still used by the query planner and adapters for internal
+// data structures. However, do NOT use ParseWhereClause to create these -
+// use SyndrQL instead and convert if needed via the expression adapter.
 type WhereClause struct {
 	Field                string
 	Operator             string
@@ -129,14 +147,17 @@ type WhereClause struct {
 	EscapeChar           string      // For LIKE operator: escape character (default: "\")
 }
 
-// WhereGroup represents a group of clauses joined by the same logical operator
+// WhereGroup represents a group of clauses joined by the same logical operator.
+// NOTE: This type is still used by the query planner and adapters for internal
+// data structures. However, do NOT use ParseWhereClause to create these -
+// use SyndrQL instead and convert if needed via the expression adapter.
 type WhereGroup struct {
 	Clauses   []WhereClause
 	SubGroups []WhereGroup
 	Operator  string // Logic connecting this group to others ("AND" or "OR")
 }
 
-// Matches checks if the clause matches a document based on its field value
+// DEPRECATED: Matches is an old parser method. Use SyndrQL's EvaluateAsBool instead.
 func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLogger) bool {
 	// If the field doesn't exist in the document, return false
 
@@ -188,7 +209,8 @@ func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLog
 	}
 }
 
-// tokenizeWhereClause breaks a WHERE clause into tokens while preserving quoted strings
+// DEPRECATED: tokenizeWhereClause is part of the old parser.
+// New code should use SyndrQL's lexer instead.
 func tokenizeWhereClause(whereClause string) []string {
 	// PHASE 3: Use pooled string builder to reduce allocations
 	tokens := make([]string, 0, 20) // Pre-allocate for typical WHERE clause
@@ -246,7 +268,10 @@ func tokenizeWhereClause(whereClause string) []string {
 	return tokens
 }
 
-// ParseWhereClause parses a WHERE clause into a tree of conditions and groups
+// DEPRECATED: ParseWhereClause is the old parser.
+// DO NOT USE FOR NEW CODE - Use syndrQL.ParseExpressionCached instead.
+// This function uses = for equality which conflicts with assignment syntax.
+// SyndrQL correctly uses == for equality comparisons.
 func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 	// Trim any leading WHERE keyword and ensure clean input
 	whereClause = strings.TrimSpace(whereClause)
@@ -271,7 +296,7 @@ func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 	return rootGroup, nil
 }
 
-// parseWhereGroup parses a group of conditions (possibly nested)
+// DEPRECATED: parseWhereGroup is part of the old parser. Use SyndrQL instead.
 // isTopLevel indicates whether this is the initial call from ParseWhereClause.
 // When isTopLevel is true, we should NOT consume leading '(' - let them become subgroups.
 // When isTopLevel is false, we MUST start with '(' and parse until matching ')'.
@@ -569,7 +594,8 @@ func parseWhereGroup(tokens []string, pos int, isTopLevel bool) (*WhereGroup, in
 	return group, pos, nil
 }
 
-// Helper function to check if operator is valid
+// DEPRECATED: isValidOperator is part of the old parser. Use SyndrQL instead.
+// Note: This allows "=" which conflicts with assignment syntax - SyndrQL uses "==" only.
 func isValidOperator(op string) bool {
 	upperOp := strings.ToUpper(op)
 	return op == "==" || op == "=" || op == "!=" || op == ">" || op == "<" || op == ">=" || op == "<=" ||
@@ -577,7 +603,8 @@ func isValidOperator(op string) bool {
 		upperOp == "IS NULL" || upperOp == "IS NOT NULL"
 }
 
-// isNullValue checks if a value is a magic NULL value
+// isNullValue checks if a value is a magic NULL value.
+// This utility function is still used by various components.
 func isNullValue(value interface{}) bool {
 	if value == nil {
 		return true
@@ -769,7 +796,10 @@ func parseValue(valueToken string) (interface{}, error) {
 	return valueToken, nil
 }
 
-// EvaluateWhereClause evaluates a WHERE clause against a document
+// DEPRECATED: EvaluateWhereClause is the old parser evaluator.
+// DO NOT USE FOR NEW CODE - Use SyndrQL instead:
+//   evaluator := syndrQL.NewExpressionEvaluator(doc)
+//   result, err := evaluator.EvaluateAsBool(expr)
 func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logger *zap.SugaredLogger) bool {
 	// If there are no clauses or subgroups, default to true
 	if len(whereGroup.Clauses) == 0 && len(whereGroup.SubGroups) == 0 {
@@ -806,7 +836,8 @@ func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logg
 	return result
 }
 
-// evaluateClause evaluates a single clause against a document
+// DEPRECATED: evaluateClause is the old parser evaluator helper.
+// DO NOT USE FOR NEW CODE - Use SyndrQL instead.
 func evaluateClause(document *models.Document, clause WhereClause, logger *zap.SugaredLogger) bool {
 	// Get field value from document
 	// TODO: I will extend IS NULL/IS NOT NULL support to SELECT field expressions
@@ -1623,6 +1654,9 @@ func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.Suga
 	return result, nil
 }
 
+// FilterDocumentsRaw filters documents using the deprecated old parser.
+// DEPRECATED: This function is being replaced by SyndrQL-based filtering in bundle_service.go
+// TODO: Remove once all callers are migrated to use SyndrQL directly
 func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	var result []*models.Document
 	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1270
@@ -1640,6 +1674,8 @@ func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.Sugar
 	return result, nil
 }
 
+// FilterDocumentsByIndex filters documents using indexes when possible, falling back to full scan.
+// DEPRECATED: This function uses the old parser. Consider using SyndrQL directly in calling code.
 func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, where string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1284
 	// PERFORMANCE: Use cached parsing to avoid re-parsing the same WHERE clause per chunk

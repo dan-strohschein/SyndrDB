@@ -6913,10 +6913,44 @@ func (s *BundleService) mergeDocuments(diskDocs []*models.Document, bufferedDocs
 	return result
 }
 
-// filterBufferedDocuments applies WHERE clause filtering to buffered documents
+// filterBufferedDocuments applies WHERE clause filtering to buffered documents using SyndrQL
 func (s *BundleService) filterBufferedDocuments(docs []*models.Document, whereParts string) ([]*models.Document, error) {
-	// Use queryparser's FilterDocumentsRaw for in-memory filtering
-	return queryparser.FilterDocumentsRaw(docs, whereParts, s.logger)
+	return s.filterDocumentsWithSyndrQL(docs, whereParts)
+}
+
+// filterDocumentsWithSyndrQL filters documents using the SyndrQL expression parser and evaluator.
+// This is the preferred method for filtering documents with WHERE clauses.
+// Uses cached expression parsing for performance.
+func (s *BundleService) filterDocumentsWithSyndrQL(docs []*models.Document, whereClause string) ([]*models.Document, error) {
+	if whereClause == "" {
+		return docs, nil
+	}
+
+	// Use SyndrQL expression parser with caching
+	expr, err := syndrQL.ParseExpressionCached(whereClause, s.logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse WHERE clause: %w", err)
+	}
+
+	if expr == nil {
+		return docs, nil
+	}
+
+	// Create evaluator for filtering
+	evaluator := syndrQL.NewExpressionEvaluator(s.logger)
+
+	var result []*models.Document
+	for _, doc := range docs {
+		matches, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
+		if err != nil {
+			s.logger.Debugf("Expression evaluation failed for doc %s: %v", doc.DocumentID, err)
+			continue
+		}
+		if matches {
+			result = append(result, doc)
+		}
+	}
+	return result, nil
 }
 
 // filterDocumentsWithIndexOptimization performs intelligent document filtering using available indexes
@@ -7014,7 +7048,7 @@ func (s *BundleService) getDocumentsByFilterStreaming(bundle *models.Bundle, whe
 		if len(chunk) == 0 {
 			continue
 		}
-		filtered, err := queryparser.FilterDocumentsRaw(chunk, whereClause, s.logger)
+		filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause)
 		if err != nil {
 			return nil, fmt.Errorf("streaming full scan failed on page %d: %w", pageID, err)
 		}
@@ -7042,7 +7076,7 @@ func (s *BundleService) getDocumentsByFilterStreaming(bundle *models.Bundle, whe
 			memtableOnly = append(memtableOnly, &dc)
 		}
 		if len(memtableOnly) > 0 {
-			filteredMem, err := queryparser.FilterDocumentsRaw(memtableOnly, whereClause, s.logger)
+			filteredMem, err := s.filterDocumentsWithSyndrQL(memtableOnly, whereClause)
 			if err != nil {
 				return nil, fmt.Errorf("streaming full scan memtable filter failed: %w", err)
 			}
@@ -7312,13 +7346,13 @@ func (s *BundleService) tryANDIndexOptimization(bundle *models.Bundle, whereClau
 
 	// Find the best indexed clause (priority: hash equality > btree equality > btree range)
 	type indexedClause struct {
-		clauseIdx int
-		indexName string
-		indexType string // "hash" or "btree"
+		clauseIdx  int
+		indexName  string
+		indexType  string // "hash" or "btree"
 		isEquality bool
-		fieldName string
-		value     interface{}
-		operator  string
+		fieldName  string
+		value      interface{}
+		operator   string
 	}
 
 	var bestClause *indexedClause
@@ -7445,8 +7479,8 @@ func (s *BundleService) tryANDIndexOptimization(bundle *models.Bundle, whereClau
 
 	s.logger.Debugf("AND optimization: filtering %d docs by remaining WHERE: %s", len(indexedDocs), remainingWhere)
 
-	// Filter by remaining clauses (in-memory, fast since we have a small set)
-	filteredDocs, err := queryparser.FilterDocumentsRaw(indexedDocs, remainingWhere, s.logger)
+	// Filter by remaining clauses using SyndrQL (in-memory, fast since we have a small set)
+	filteredDocs, err := s.filterDocumentsWithSyndrQL(indexedDocs, remainingWhere)
 	if err != nil {
 		return nil, false, fmt.Errorf("AND optimization filter failed: %w", err)
 	}

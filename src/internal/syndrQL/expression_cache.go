@@ -38,13 +38,13 @@ type CachedExpression struct {
 
 // ExpressionCache is a thread-safe LRU cache for parsed expressions
 type ExpressionCache struct {
-	cache    map[uint64]*list.Element
-	lru      *list.List
-	mu       sync.RWMutex
-	maxSize  int
-	hits     uint64
-	misses   uint64
-	logger   *zap.SugaredLogger
+	cache   map[uint64]*list.Element
+	lru     *list.List
+	mu      sync.RWMutex
+	maxSize int
+	hits    uint64
+	misses  uint64
+	logger  *zap.SugaredLogger
 }
 
 // lruEntry holds the key and value for LRU eviction

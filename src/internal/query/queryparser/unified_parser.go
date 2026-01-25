@@ -355,8 +355,8 @@ func basicToUnified(basic *BasicSelectQuery, logger *zap.SugaredLogger) *Unified
 
 	// Parse WHERE clause if present
 	if basic.WhereClause != "" {
-		// LEGACY PATH: Old parser doesn't create Expression AST
-		// This path should only be hit when UseNewParser=false
+		// TODO: DEPRECATED - Uses old ParseWhereClause. This path should only be hit
+		// when UseNewParser=false. New code should use syndrQL.ParseExpressionCached().
 		whereGroup, err := ParseWhereClause(basic.WhereClause)
 		if err != nil {
 			logger.Warnf("Failed to parse WHERE clause in basic query: %v", err)
@@ -405,8 +405,8 @@ func groupByToUnified(groupBy *SelectQueryWithGroupBy, logger *zap.SugaredLogger
 
 	// Parse WHERE clause if present
 	if groupBy.WhereClause != "" {
-		// LEGACY PATH: Old parser doesn't create Expression AST
-		// This path should only be hit when UseNewParser=false
+		// TODO: DEPRECATED - Uses old ParseWhereClause. This path should only be hit
+		// when UseNewParser=false. New code should use syndrQL.ParseExpressionCached().
 		whereGroup, err := ParseWhereClause(groupBy.WhereClause)
 		if err != nil {
 			logger.Warnf("Failed to parse WHERE clause in GROUP BY query: %v", err)

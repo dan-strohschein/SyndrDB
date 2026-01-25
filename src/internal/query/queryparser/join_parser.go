@@ -395,9 +395,9 @@ func parseWhereClauseFromQuery(query string, selectQuery *SelectJoinQuery, logge
 	logger.Debugf("Extracted WHERE clause: '%s'", whereClause)
 
 	// DEPRECATED: This uses old string-based WHERE parsing
-	// TODO: Replace with SyndrQL SelectParser that returns Expression AST
+	// TODO: DEPRECATED - Uses old ParseWhereClause. Replace with SyndrQL SelectParser
+	// that returns Expression AST. Use syndrQL.ParseExpressionCached() for new code.
 	// Then set selectQuery.WhereExpression instead of WhereClause
-	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 391
 
 	// Parse the WHERE clause using existing parser
 	whereGroup, err := ParseWhereClause(whereClause)

@@ -509,14 +509,13 @@ func (p *GraphQLParser) parseIntArgument(value interface{}, argName string) (int
 //   - *queryparser.WhereGroup: Parsed WHERE clause
 //   - error: Parsing errors
 //
-// DEPRECATED: This method uses old string-based WHERE parsing
-// TODO: Replace with syndrQL.SelectParser to return Expression AST
-// GraphQL queries should translate GraphQL filters to SyndrQL Expressions
+// TODO: DEPRECATED - This method uses the old queryparser.ParseWhereClause which is deprecated.
+// Migration requires replacing with SyndrQL's expression parser.
+// GraphQL queries should translate GraphQL filters to SyndrQL Expressions.
+// Use syndrQL.ParseExpressionCached() for new implementations.
 func (p *GraphQLParser) parseWhereClause(whereStr string) (*queryparser.WhereGroup, error) {
-	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 513
-
-	// For MVP: Parse WHERE clause using existing SyndrQL WHERE parser
-	// This ensures consistent behavior between GraphQL and SyndrQL
+	// TODO: DEPRECATED - Using old parser, needs migration to SyndrQL.
+	// See syndrQL.ParseExpressionCached() and expression adapter for migration path.
 	whereGroup, err := queryparser.ParseWhereClause(whereStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid WHERE clause: %w", err)
