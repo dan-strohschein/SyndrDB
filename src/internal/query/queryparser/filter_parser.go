@@ -208,12 +208,8 @@ func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 	// Tokenize the where clause
 	tokens := tokenizeWhereClause(whereClause)
 
-	// Track our position in the token stream
-	//pos := 0
-
-	// Parse recursively
-	//var err error
-	rootGroup, pos, err := parseWhereGroup(tokens, 0)
+	// Parse recursively - pass isTopLevel=true for initial call
+	rootGroup, pos, err := parseWhereGroup(tokens, 0, true)
 	if err != nil {
 		return nil, err
 	}
@@ -227,25 +223,38 @@ func ParseWhereClause(whereClause string) (*WhereGroup, error) {
 }
 
 // parseWhereGroup parses a group of conditions (possibly nested)
-func parseWhereGroup(tokens []string, pos int) (*WhereGroup, int, error) {
+// isTopLevel indicates whether this is the initial call from ParseWhereClause.
+// When isTopLevel is true, we should NOT consume leading '(' - let them become subgroups.
+// When isTopLevel is false, we MUST start with '(' and parse until matching ')'.
+func parseWhereGroup(tokens []string, pos int, isTopLevel bool) (*WhereGroup, int, error) {
 	group := &WhereGroup{}
 
-	// Skip opening parenthesis if present
-	if pos < len(tokens) && tokens[pos] == "(" {
-		pos++
+	// Track whether we started with an opening parenthesis
+	// At top level, we never consume the opening paren - subgroups handle it
+	// At non-top-level, we expect to consume an opening paren
+	startedWithParen := false
+	if !isTopLevel {
+		if pos < len(tokens) && tokens[pos] == "(" {
+			startedWithParen = true
+			pos++
+		}
 	}
 
 	for pos < len(tokens) {
-		// Handle closing parenthesis
+		// Handle closing parenthesis - only break if we started with an opening paren
 		if tokens[pos] == ")" {
-			pos++
-			break
+			if startedWithParen {
+				pos++
+				break
+			}
+			// If we're at top level and see ')', that's an error - unmatched closing paren
+			return nil, pos, fmt.Errorf("unexpected closing parenthesis at position %d", pos)
 		}
 
 		// If we encounter an opening parenthesis, it's a nested group
 		if tokens[pos] == "(" {
-			// Parse the nested group
-			subGroup, newPos, err := parseWhereGroup(tokens, pos)
+			// Parse the nested group (NOT top level)
+			subGroup, newPos, err := parseWhereGroup(tokens, pos, false)
 			if err != nil {
 				return nil, pos, err
 			}
@@ -1446,7 +1455,7 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 	// FieldValue.AsInterface() returns the underlying value, but we need to ensure string extraction
 	var aStr, bStr string
 	var aIsString, bIsString bool
-	
+
 	// Try direct string first
 	if str, ok := a.(string); ok {
 		aStr, aIsString = str, true
@@ -1458,7 +1467,7 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 			}
 		}
 	}
-	
+
 	if str, ok := b.(string); ok {
 		bStr, bIsString = str, true
 	} else {
@@ -1469,7 +1478,7 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 			}
 		}
 	}
-	
+
 	if aIsString && bIsString {
 		// Check if either value is a magic value - if so, use direct string comparison
 		// This prevents magic values like "::SYNDR_NULL::" from being parsed as numbers
