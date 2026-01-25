@@ -6969,6 +6969,16 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 		return result, nil
 	}
 
+	// Try AND-aware index optimization for compound conditions like:
+	// ("category" == "Gaming Accessories") AND ("rating" <= 3.5)
+	// This uses the best indexed clause to narrow results, then filters by remaining clauses
+	if result, used, err := s.tryANDIndexOptimization(bundle, whereClause); err != nil {
+		s.logger.Warnf("AND index optimization failed: %v", err)
+	} else if used {
+		s.logger.Debugf("Successfully used AND index optimization, found %d documents", len(result))
+		return result, nil
+	}
+
 	// Fallback to streaming/chunked full scan (no load-all). Required for non-indexed WHERE
 	// to match PostgreSQL-like throughput; adding indexes is not a viable product fix.
 	s.logger.Debugf("No suitable index found, performing streaming full scan")
@@ -7271,6 +7281,178 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 
 	// BTree index optimization not applicable
 	return nil, false, nil
+}
+
+// tryANDIndexOptimization handles compound AND conditions like:
+// ("category" == "Gaming Accessories") AND ("rating" <= 3.5)
+// Strategy: Find the best indexed clause, use it to narrow results, then filter remaining clauses.
+// This avoids full table scans when at least one condition in an AND has an index.
+func (s *BundleService) tryANDIndexOptimization(bundle *models.Bundle, whereClause string) ([]*models.Document, bool, error) {
+	// Parse WHERE clause
+	tokenizer := syndrQL.NewTokenizer(whereClause)
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return nil, false, nil // Not a parse error we can handle
+	}
+
+	parser := syndrQL.NewExpressionParser(tokens, s.logger)
+	expr, err := parser.Parse()
+	if err != nil {
+		return nil, false, nil
+	}
+	expr = syndrQL.UnwrapGrouped(expr)
+
+	// Extract AND clauses - if there's only one, the simpler optimizers already handled it
+	andClauses := syndrQL.ExtractANDClauses(expr)
+	if len(andClauses) <= 1 {
+		return nil, false, nil // Single condition already handled by tryHash/tryBTree
+	}
+
+	s.logger.Debugf("AND optimization: found %d AND clauses", len(andClauses))
+
+	// Find the best indexed clause (priority: hash equality > btree equality > btree range)
+	type indexedClause struct {
+		clauseIdx int
+		indexName string
+		indexType string // "hash" or "btree"
+		isEquality bool
+		fieldName string
+		value     interface{}
+		operator  string
+	}
+
+	var bestClause *indexedClause
+
+	for i, clause := range andClauses {
+		clause = syndrQL.UnwrapGrouped(clause)
+
+		// Check for simple equality
+		if fieldName, value, ok := syndrQL.ExtractSimpleEquality(clause); ok {
+			// Check for hash index on this field (highest priority)
+			for indexName, indexRef := range bundle.Indexes {
+				idxField := s.getIndexFieldName(indexRef)
+				if indexRef.IndexType == "hash" && idxField == fieldName {
+					// Hash index equality - best option
+					bestClause = &indexedClause{
+						clauseIdx:  i,
+						indexName:  indexName,
+						indexType:  "hash",
+						isEquality: true,
+						fieldName:  fieldName,
+						value:      value,
+						operator:   "==",
+					}
+					s.logger.Debugf("AND optimization: found hash index '%s' for field '%s' (clause %d)", indexName, fieldName, i)
+					break // Hash equality is best, no need to look further for this clause
+				}
+				if indexRef.IndexType == "btree" && idxField == fieldName {
+					// BTree equality - good if no hash found
+					if bestClause == nil || bestClause.indexType != "hash" {
+						bestClause = &indexedClause{
+							clauseIdx:  i,
+							indexName:  indexName,
+							indexType:  "btree",
+							isEquality: true,
+							fieldName:  fieldName,
+							value:      value,
+							operator:   "==",
+						}
+						s.logger.Debugf("AND optimization: found btree index '%s' for field '%s' (clause %d)", indexName, fieldName, i)
+					}
+				}
+			}
+		}
+
+		// Check for range condition (only if we don't have a hash index yet)
+		if bestClause == nil || (bestClause.indexType == "btree" && !bestClause.isEquality) {
+			if fieldName, operator, value, ok := syndrQL.ExtractRangeCondition(clause); ok {
+				for indexName, indexRef := range bundle.Indexes {
+					idxField := s.getIndexFieldName(indexRef)
+					if indexRef.IndexType == "btree" && idxField == fieldName {
+						// BTree range - use if nothing better
+						if bestClause == nil || (!bestClause.isEquality && bestClause.indexType != "hash") {
+							bestClause = &indexedClause{
+								clauseIdx:  i,
+								indexName:  indexName,
+								indexType:  "btree",
+								isEquality: false,
+								fieldName:  fieldName,
+								value:      value,
+								operator:   operator,
+							}
+							s.logger.Debugf("AND optimization: found btree index '%s' for field '%s' with operator '%s' (clause %d)", indexName, fieldName, operator, i)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if bestClause == nil {
+		s.logger.Debugf("AND optimization: no indexed clause found among %d AND clauses", len(andClauses))
+		return nil, false, nil
+	}
+
+	s.logger.Infof("AND optimization: using %s index '%s' on field '%s' to narrow results", bestClause.indexType, bestClause.indexName, bestClause.fieldName)
+
+	// Use the indexed clause to get initial document set
+	var indexedDocs []*models.Document
+	var used bool
+
+	// Reconstruct the single clause as a WHERE string for the existing helpers
+	singleClauseWhere := syndrQL.ExpressionToString(andClauses[bestClause.clauseIdx])
+
+	if bestClause.indexType == "hash" {
+		indexedDocs, used, err = s.tryHashIndexOptimization(bundle, singleClauseWhere)
+	} else {
+		indexedDocs, used, err = s.tryBTreeIndexOptimization(bundle, singleClauseWhere)
+	}
+
+	if err != nil || !used {
+		s.logger.Debugf("AND optimization: index lookup failed or not applicable")
+		return nil, false, nil
+	}
+
+	s.logger.Debugf("AND optimization: index returned %d documents, now filtering by remaining clauses", len(indexedDocs))
+
+	if len(indexedDocs) == 0 {
+		return indexedDocs, true, nil // No matches from index, done
+	}
+
+	// Build remaining WHERE clause (all clauses except the indexed one)
+	var remainingClauses []syndrQL.Expression
+	for i, clause := range andClauses {
+		if i != bestClause.clauseIdx {
+			remainingClauses = append(remainingClauses, clause)
+		}
+	}
+
+	if len(remainingClauses) == 0 {
+		return indexedDocs, true, nil // Only one clause and it was indexed
+	}
+
+	// Reconstruct remaining WHERE as string and filter
+	var remainingWhere string
+	if len(remainingClauses) == 1 {
+		remainingWhere = syndrQL.ExpressionToString(remainingClauses[0])
+	} else {
+		// Join with AND
+		remainingWhere = syndrQL.ExpressionToString(remainingClauses[0])
+		for i := 1; i < len(remainingClauses); i++ {
+			remainingWhere = remainingWhere + " AND " + syndrQL.ExpressionToString(remainingClauses[i])
+		}
+	}
+
+	s.logger.Debugf("AND optimization: filtering %d docs by remaining WHERE: %s", len(indexedDocs), remainingWhere)
+
+	// Filter by remaining clauses (in-memory, fast since we have a small set)
+	filteredDocs, err := queryparser.FilterDocumentsRaw(indexedDocs, remainingWhere, s.logger)
+	if err != nil {
+		return nil, false, fmt.Errorf("AND optimization filter failed: %w", err)
+	}
+
+	s.logger.Infof("AND optimization: narrowed from %d to %d documents using index + filter", len(indexedDocs), len(filteredDocs))
+	return filteredDocs, true, nil
 }
 
 // convertDocIDsToDocuments is a helper to convert document IDs to documents

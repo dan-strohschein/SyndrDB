@@ -286,6 +286,14 @@ func (a *ExpressionAdapter) extractLiteralValue(expr Expression) (interface{}, e
 	case *GroupedExpression:
 		// Recurse into grouped expressions
 		return a.extractLiteralValue(expr.Expression)
+	case *CallExpression:
+		// Handle function calls like DATE_SUB(NOW(), INTERVAL 236 DAY)
+		// We store the expression itself for later evaluation during query execution
+		// The evaluator will handle these function calls at runtime
+		return expr, nil
+	case *IntervalExpression:
+		// Handle INTERVAL expressions - return as-is for later evaluation
+		return expr, nil
 	default:
 		return nil, fmt.Errorf("expected literal value, got %T", expr)
 	}

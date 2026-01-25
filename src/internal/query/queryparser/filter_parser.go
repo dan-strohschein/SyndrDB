@@ -49,6 +49,55 @@ func putStringBuilder(sb *strings.Builder) {
 // TODO: Make this thread-safe or pass through function parameters
 var lastProcessedPattern string
 
+// PERFORMANCE: WhereGroup cache to avoid re-parsing the same WHERE clause
+// This significantly improves UPDATE performance when filtering documents in chunks
+type whereGroupCache struct {
+	sync.RWMutex
+	entries map[string]*WhereGroup
+	order   []string // LRU order tracking
+	maxSize int
+}
+
+var globalWhereGroupCache = &whereGroupCache{
+	entries: make(map[string]*WhereGroup),
+	order:   make([]string, 0, 1000),
+	maxSize: 1000, // Cache up to 1000 parsed WHERE clauses
+}
+
+// ParseWhereClauseCached parses a WHERE clause with caching to avoid re-parsing
+func ParseWhereClauseCached(whereClause string) (*WhereGroup, error) {
+	// Fast path: check cache with read lock
+	globalWhereGroupCache.RLock()
+	if cached, ok := globalWhereGroupCache.entries[whereClause]; ok {
+		globalWhereGroupCache.RUnlock()
+		return cached, nil
+	}
+	globalWhereGroupCache.RUnlock()
+
+	// Cache miss: parse the WHERE clause
+	result, err := ParseWhereClause(whereClause)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store in cache with write lock
+	globalWhereGroupCache.Lock()
+	// Double-check in case another goroutine added it
+	if _, ok := globalWhereGroupCache.entries[whereClause]; !ok {
+		// Evict oldest if at capacity
+		if len(globalWhereGroupCache.order) >= globalWhereGroupCache.maxSize {
+			oldest := globalWhereGroupCache.order[0]
+			delete(globalWhereGroupCache.entries, oldest)
+			globalWhereGroupCache.order = globalWhereGroupCache.order[1:]
+		}
+		globalWhereGroupCache.entries[whereClause] = result
+		globalWhereGroupCache.order = append(globalWhereGroupCache.order, whereClause)
+	}
+	globalWhereGroupCache.Unlock()
+
+	return result, nil
+}
+
 // Magic value constants for NULL handling (matching bundle.NullHandler constants)
 const (
 	SYNDR_NULL    = "::SYNDR_NULL::"
@@ -1539,7 +1588,8 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	// Parse the WHERE clause
 	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1242
-	whereGroup, err := ParseWhereClause(whereClause)
+	// PERFORMANCE: Use cached parsing to avoid re-parsing the same WHERE clause
+	whereGroup, err := ParseWhereClauseCached(whereClause)
 	if err != nil {
 		return nil, err
 	}
@@ -1576,7 +1626,8 @@ func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.Suga
 func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	var result []*models.Document
 	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1270
-	whereGroup, err := ParseWhereClause(where)
+	// PERFORMANCE: Use cached parsing to avoid re-parsing the same WHERE clause per chunk
+	whereGroup, err := ParseWhereClauseCached(where)
 	if err != nil {
 		return nil, err
 	}
@@ -1591,7 +1642,8 @@ func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.Sugar
 
 func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, where string, logger *zap.SugaredLogger) ([]*models.Document, error) {
 	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1284
-	whereGroup, err := ParseWhereClause(where)
+	// PERFORMANCE: Use cached parsing to avoid re-parsing the same WHERE clause per chunk
+	whereGroup, err := ParseWhereClauseCached(where)
 	if err != nil {
 		return nil, err
 	}

@@ -204,3 +204,105 @@ func GetQualifiedFieldName(expr Expression) string {
 // TODO: I should add ExtractLIKEPattern() for LIKE operator optimization with indexes
 // TODO: I should add ExtractINList() for IN clause optimization
 // TODO: I should add CanPushDownToIndex() to determine if an expression can use an index
+
+// ExpressionToString converts an Expression back to a WHERE clause string representation.
+// This is used when we need to pass a single extracted clause to functions that expect string input.
+// The output maintains proper quoting and operator formatting.
+func ExpressionToString(expr Expression) string {
+	if expr == nil {
+		return ""
+	}
+
+	switch e := expr.(type) {
+	case *LiteralExpression:
+		return literalToString(e.Value)
+	case *IdentifierExpression:
+		// Always quote identifiers for safety
+		name := strings.Trim(e.Name, "\"")
+		return fmt.Sprintf("\"%s\"", name)
+	case *QualifiedIdentifierExpression:
+		bundle := strings.Trim(e.Bundle, "\"")
+		field := strings.Trim(e.Field, "\"")
+		return fmt.Sprintf("\"%s\".\"%s\"", bundle, field)
+	case *GroupedExpression:
+		return "(" + ExpressionToString(e.Expression) + ")"
+	case *BinaryExpression:
+		left := ExpressionToString(e.Left)
+		right := ExpressionToString(e.Right)
+		op := tokenToOperator(e.Operator)
+		return fmt.Sprintf("%s %s %s", left, op, right)
+	case *UnaryExpression:
+		operand := ExpressionToString(e.Right)
+		op := tokenToOperator(e.Operator)
+		return fmt.Sprintf("%s %s", op, operand)
+	case *CallExpression:
+		args := make([]string, len(e.Arguments))
+		for i, arg := range e.Arguments {
+			args[i] = ExpressionToString(arg)
+		}
+		return fmt.Sprintf("%s(%s)", e.Function, strings.Join(args, ", "))
+	case *IntervalExpression:
+		return fmt.Sprintf("INTERVAL %s %s", e.Value, e.Unit)
+	default:
+		// Fallback for unknown types
+		return fmt.Sprintf("%v", expr)
+	}
+}
+
+// literalToString converts a literal value to its string representation with proper quoting
+func literalToString(value interface{}) string {
+	if value == nil {
+		return "NULL"
+	}
+	switch v := value.(type) {
+	case string:
+		// Escape single quotes in the string
+		escaped := strings.ReplaceAll(v, "'", "''")
+		return fmt.Sprintf("'%s'", escaped)
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// tokenToOperator converts a TokenType to its string operator representation
+func tokenToOperator(tok TokenType) string {
+	switch tok {
+	case TOKEN_EQ:
+		return "=="
+	case TOKEN_NEQ:
+		return "!="
+	case TOKEN_GT:
+		return ">"
+	case TOKEN_GTE:
+		return ">="
+	case TOKEN_LT:
+		return "<"
+	case TOKEN_LTE:
+		return "<="
+	case TOKEN_AND:
+		return "AND"
+	case TOKEN_OR:
+		return "OR"
+	case TOKEN_NOT:
+		return "NOT"
+	case TOKEN_PLUS:
+		return "+"
+	case TOKEN_MINUS:
+		return "-"
+	case TOKEN_MULTIPLY:
+		return "*"
+	case TOKEN_DIVIDE:
+		return "/"
+	case TOKEN_LIKE:
+		return "LIKE"
+	case TOKEN_IN:
+		return "IN"
+	default:
+		return tok.String()
+	}
+}

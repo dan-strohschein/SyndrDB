@@ -1438,7 +1438,17 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	}
 	bundle.DocumentsComplete = false // Mark as incomplete so queries merge with disk
 
-	// Process all documents in batch
+	// PERFORMANCE FIX: Batch all memtable updates under a single lock acquisition
+	// This reduces O(N) lock/unlock operations to O(1), matching PostgreSQL's approach
+	bundle.DocumentsMutex.Lock()
+	for _, document := range documents {
+		if document != nil && document.DocumentID != "" {
+			(*bundle.Documents)[document.DocumentID] = *document
+		}
+	}
+	bundle.DocumentsMutex.Unlock()
+
+	// Process all documents in batch (serialization and disk writes)
 	successCount := 0
 	for _, document := range documents {
 		// Validate each document
@@ -1446,12 +1456,6 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 			b.logger.Warnf("BATCH UPDATE: Skipping invalid document")
 			continue
 		}
-
-		// Update memtable (in-memory cache)
-		// CRITICAL: Acquire write lock to prevent race condition with concurrent reads
-		bundle.DocumentsMutex.Lock()
-		(*bundle.Documents)[document.DocumentID] = *document
-		bundle.DocumentsMutex.Unlock()
 
 		// Serialize document
 		documentBytes, err := b.serializeDocumentDirect(document)
@@ -1637,9 +1641,18 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 	}
 	bundle.DocumentsComplete = false
 
-	// Process all documents
+	// PERFORMANCE FIX: Batch all memtable updates under a single lock acquisition
+	// This reduces O(N) lock/unlock operations to O(1), matching PostgreSQL's approach
+	bundle.DocumentsMutex.Lock()
+	for _, document := range documents {
+		if document != nil && document.DocumentID != "" {
+			(*bundle.Documents)[document.DocumentID] = *document
+		}
+	}
+	bundle.DocumentsMutex.Unlock()
+
+	// Process all documents (serialization and disk writes)
 	// NOTE: Document locks are already held by caller (from LockManager)
-	// Memtable is protected by bundle.DocumentsMutex (fine-grained)
 	// WriteBuffer is protected by its own mutex (thread-safe)
 	successCount := 0
 	for _, document := range documents {
@@ -1647,11 +1660,6 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Skipping invalid document")
 			continue
 		}
-
-		// Update memtable (protected by DocumentsMutex)
-		bundle.DocumentsMutex.Lock()
-		(*bundle.Documents)[document.DocumentID] = *document
-		bundle.DocumentsMutex.Unlock()
 
 		// Serialize document
 		documentBytes, err := b.serializeDocumentDirect(document)

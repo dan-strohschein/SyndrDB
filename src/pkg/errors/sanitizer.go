@@ -221,6 +221,19 @@ func FormatInternalLog(err SyndrDBError) map[string]interface{} {
 	return logData
 }
 
+// isUserError returns true for error codes that represent user errors (validation,
+// constraints, etc.) where stack traces are not useful since these are expected
+// conditions, not bugs.
+func isUserError(code ErrorCode) bool {
+	switch code {
+	case ERR_VALIDATION_SYNTAX, ERR_VALIDATION_FIELD, ERR_VALIDATION_TYPE,
+		ERR_VALIDATION_CONSTRAINT, ERR_VALIDATION_REQUIRED:
+		return true
+	default:
+		return false
+	}
+}
+
 // FormatConsoleOutput formats a SyndrDBError for console output in debug mode
 // Includes full details with formatted output for readability
 func FormatConsoleOutput(err SyndrDBError) string {
@@ -280,8 +293,9 @@ func FormatConsoleOutput(err SyndrDBError) string {
 		parts = append(parts, "")
 	}
 
-	// Stack trace
-	if err.StackTrace() != "" {
+	// Stack trace - skip for validation/constraint errors (user errors, not bugs)
+	// These are expected errors that don't need debugging info
+	if err.StackTrace() != "" && !isUserError(err.Code()) {
 		parts = append(parts, "Stack Trace:")
 		parts = append(parts, err.StackTrace())
 	}
