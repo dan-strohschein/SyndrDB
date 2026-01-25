@@ -14,7 +14,7 @@ import (
 )
 
 // #region agent log
-const debugLogPath = "/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log"
+const debugLogPath = "/home/dan/Documents/code/SyndrDB/.cursor/debug.log"
 
 func debugLogLockAttempt(bundleName, documentID, txID, sessionID, lockMode, event string) {
 	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "E", "location": "lock_manager.go:AcquireWriteLock", "message": "lock_attempt", "data": map[string]interface{}{"bundle": bundleName, "docID": documentID, "txID": txID[:12], "sessionID": sessionID[:12], "mode": lockMode, "event": event}}

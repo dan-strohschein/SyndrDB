@@ -23,7 +23,7 @@ import (
 )
 
 // #region agent log
-const debugLogPathSession = "/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log"
+const debugLogPathSession = "/home/dan/Documents/code/SyndrDB/.cursor/debug.log"
 
 func debugLogSessionCleanup(sessionID string, txStatus TransactionStatus, txID string, docLockCount, bundleLockCount int) {
 	txIDShort := ""
