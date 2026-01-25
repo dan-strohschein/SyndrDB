@@ -22,6 +22,43 @@ import (
 	"go.uber.org/zap"
 )
 
+// #region agent log
+const debugLogPathSession = "/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log"
+
+func debugLogSessionCleanup(sessionID string, txStatus TransactionStatus, txID string, docLockCount, bundleLockCount int) {
+	txIDShort := ""
+	if len(txID) > 12 {
+		txIDShort = txID[:12]
+	}
+	sessIDShort := ""
+	if len(sessionID) > 12 {
+		sessIDShort = sessionID[:12]
+	}
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "A", "location": "session_manager.go:cleanupSession", "message": "session_cleanup_start", "data": map[string]interface{}{"sessionID": sessIDShort, "txStatus": txStatus.String(), "txID": txIDShort, "docLocks": docLockCount, "bundleLocks": bundleLockCount}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPathSession, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+func debugLogSessionLockRelease(sessionID string, method string, lockCount int) {
+	sessIDShort := ""
+	if len(sessionID) > 12 {
+		sessIDShort = sessionID[:12]
+	}
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "A", "location": "session_manager.go:cleanupSession", "message": "session_lock_release", "data": map[string]interface{}{"sessionID": sessIDShort, "method": method, "lockCount": lockCount}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPathSession, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+// #endregion
+
 // TransactionStatus represents the status of a multi-statement transaction
 type TransactionStatus int
 
@@ -666,6 +703,10 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
+	// #region agent log
+	debugLogSessionCleanup(session.SessionID, session.TransactionStatus, session.ActiveTransactionID, len(session.DocumentLocks), len(session.BundleLocks))
+	// #endregion
+
 	session.Logger.Infow("Cleaning up session", "state", session.State.String())
 
 	// Set state to terminated
@@ -688,6 +729,12 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 		session.Logger.Infow("Releasing bundle lock", "lockID", lockID, "resource", lockInfo.ResourceName)
 	}
 	session.BundleLocks = make(map[string]*LockInfo)
+
+	// #region agent log
+	// NOTE: This is a BUG - the code above only clears session's internal tracking maps
+	// but does NOT call LockManager.ReleaseLocksForSession() to actually release locks!
+	debugLogSessionLockRelease(session.SessionID, "internal_maps_only_NOT_lock_manager", 0)
+	// #endregion
 
 	// Clean up temp files (async, non-blocking)
 	// Copy temp files slice to avoid race conditions and allow safe async processing

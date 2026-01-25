@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"sync"
 	"time"
 
@@ -10,6 +12,79 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// #region agent log
+const debugLogPath = "/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log"
+
+func debugLogLockAttempt(bundleName, documentID, txID, sessionID, lockMode, event string) {
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "E", "location": "lock_manager.go:AcquireWriteLock", "message": "lock_attempt", "data": map[string]interface{}{"bundle": bundleName, "docID": documentID, "txID": txID[:12], "sessionID": sessionID[:12], "mode": lockMode, "event": event}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+func debugLogLockWaiting(bundleName, documentID, txID, blockerTxID, blockerSessionID string, blockerHeldSince time.Time, waitDuration time.Duration) {
+	blockerHeldDuration := time.Duration(0)
+	if !blockerHeldSince.IsZero() {
+		blockerHeldDuration = time.Since(blockerHeldSince)
+	}
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "C", "location": "lock_manager.go:AcquireWriteLock", "message": "lock_waiting", "data": map[string]interface{}{"bundle": bundleName, "docID": documentID, "waiterTxID": txID[:12], "blockerTxID": blockerTxID, "blockerSessionID": blockerSessionID, "blockerHeldMs": blockerHeldDuration.Milliseconds(), "waitMs": waitDuration.Milliseconds()}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+func debugLogLockTimeout(bundleName, documentID, txID, sessionID, blockerTxID, blockerSessionID string, blockerHeldSince time.Time, waitDuration time.Duration) {
+	blockerHeldDuration := time.Duration(0)
+	if !blockerHeldSince.IsZero() {
+		blockerHeldDuration = time.Since(blockerHeldSince)
+	}
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "B", "location": "lock_manager.go:AcquireWriteLock", "message": "lock_timeout_deadlock", "data": map[string]interface{}{"bundle": bundleName, "docID": documentID, "txID": txID[:12], "sessionID": sessionID[:12], "blockerTxID": blockerTxID, "blockerSessionID": blockerSessionID, "blockerHeldMs": blockerHeldDuration.Milliseconds(), "waitMs": waitDuration.Milliseconds()}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+func debugLogLockAcquired(bundleName, documentID, txID, sessionID, lockMode string, acquireTime time.Duration) {
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "E", "location": "lock_manager.go:AcquireWriteLock", "message": "lock_acquired", "data": map[string]interface{}{"bundle": bundleName, "docID": documentID, "txID": txID[:12], "sessionID": sessionID[:12], "mode": lockMode, "acquireMs": acquireTime.Milliseconds()}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+func debugLogLockReleased(txID string, releaseCount int) {
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "A", "location": "lock_manager.go:ReleaseLocks", "message": "locks_released", "data": map[string]interface{}{"txID": txID[:12], "count": releaseCount}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+func debugLogOrphanedCleanup(orphanedLocks, orphanedSessions, activeSessionCount int) {
+	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "B", "location": "lock_manager.go:CleanupOrphanedLocks", "message": "orphaned_cleanup_run", "data": map[string]interface{}{"orphanedLocks": orphanedLocks, "orphanedSessions": orphanedSessions, "activeSessions": activeSessionCount}}
+	if b, err := json.Marshal(entry); err == nil {
+		if f, err := os.OpenFile(debugLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+			f.Write(append(b, '\n'))
+			f.Close()
+		}
+	}
+}
+
+// #endregion
 
 const lockManagerShards = 64
 
@@ -158,6 +233,10 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 	startTime := time.Now()
 	shard := &lm.shards[shardIndex(bundleName)]
 
+	// #region agent log
+	debugLogLockAttempt(bundleName, documentID, txID, sessionID, "WRITE", "attempt_start")
+	// #endregion
+
 	for {
 		shard.mu.Lock()
 
@@ -204,17 +283,30 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 
 		if otherReaders > 0 || hasOtherWriteLock {
 			blockingInfo := ""
+			blockerTxID := ""
+			blockerSessionID := ""
+			blockerHeldSince := time.Time{}
 			if hasOtherWriteLock {
 				blockingInfo = fmt.Sprintf("write lock held by txID: %s", docLock.writeLock.OwnerTxID)
+				blockerTxID = docLock.writeLock.OwnerTxID
+				blockerSessionID = docLock.writeLock.OwnerSession
+				blockerHeldSince = docLock.writeLock.AcquiredAt
 			} else {
 				blockingInfo = fmt.Sprintf("%d read lock(s) held by other transactions", otherReaders)
 			}
 			shard.mu.Unlock()
-			if time.Since(startTime) >= lm.lockTimeout {
+			waitDuration := time.Since(startTime)
+			if waitDuration >= lm.lockTimeout {
 				docLock.mu.Unlock()
+				// #region agent log
+				debugLogLockTimeout(bundleName, documentID, txID, sessionID, blockerTxID, blockerSessionID, blockerHeldSince, waitDuration)
+				// #endregion
 				return fmt.Errorf("deadlock detected: timeout waiting for WRITE lock on %s.%s (%s)",
 					bundleName, documentID, blockingInfo)
 			}
+			// #region agent log
+			debugLogLockWaiting(bundleName, documentID, txID, blockerTxID, blockerSessionID, blockerHeldSince, waitDuration)
+			// #endregion
 			docLock.cond.Wait()
 			docLock.mu.Unlock()
 			continue
@@ -226,8 +318,12 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 			OwnerSession: sessionID,
 			AcquiredAt:   time.Now(),
 		}
+		acquireTime := time.Since(startTime)
 		docLock.mu.Unlock()
 		shard.mu.Unlock()
+		// #region agent log
+		debugLogLockAcquired(bundleName, documentID, txID, sessionID, "WRITE", acquireTime)
+		// #endregion
 		return nil
 	}
 }
@@ -285,6 +381,9 @@ func (lm *LockManager) ReleaseLocks(txID string) int {
 	}
 	if releaseCount > 0 {
 		lm.logger.Debugf("Released %d locks for txID=%s", releaseCount, txID)
+		// #region agent log
+		debugLogLockReleased(txID, releaseCount)
+		// #endregion
 	}
 	return releaseCount
 }
@@ -419,6 +518,9 @@ func (lm *LockManager) CleanupOrphanedLocks(activeSessionIDs map[string]bool) (i
 	}
 
 	sessionCount := len(orphanedSessions)
+	// #region agent log
+	debugLogOrphanedCleanup(orphanedLocks, sessionCount, len(activeSessionIDs))
+	// #endregion
 	if orphanedLocks > 0 {
 		lm.logger.Infof("Released %d orphaned locks from %d crashed sessions", orphanedLocks, sessionCount)
 	} else {
