@@ -505,9 +505,13 @@ func updateParseState(char rune, currentState parseState, stack *[]rune, prevSta
 		switch char {
 		case '\'':
 			*prevStateBeforeString = parseStateCommand
+			// Push the quote type onto the stack to track which quote opened the string
+			*stack = append(*stack, char)
 			return parseStateString, charCategoryData
 		case '"':
 			*prevStateBeforeString = parseStateCommand
+			// Push the quote type onto the stack to track which quote opened the string
+			*stack = append(*stack, char)
 			return parseStateString, charCategoryData
 		case '{', '[':
 			*stack = append(*stack, char)
@@ -519,22 +523,33 @@ func updateParseState(char rune, currentState parseState, stack *[]rune, prevSta
 		}
 
 	case parseStateString:
-		switch char {
-		case '\'', '"':
-			// Close the string - return to previous state (could be command or JSON)
-			return *prevStateBeforeString, charCategoryData
-		case '\\':
+		// Only close the string if the quote matches the opening quote
+		if len(*stack) > 0 {
+			openingQuote := (*stack)[len(*stack)-1]
+			if (char == '\'' && openingQuote == '\'') || (char == '"' && openingQuote == '"') {
+				// Pop the quote from the stack and return to previous state
+				*stack = (*stack)[:len(*stack)-1]
+				return *prevStateBeforeString, charCategoryData
+			}
+		}
+		// Any other character (including non-matching quotes) stays in string
+		if char == '\\' {
 			// Escape sequence - stay in string
 			return parseStateString, charCategoryData
-		default:
-			return parseStateString, charCategoryData
 		}
+		return parseStateString, charCategoryData
 
 	case parseStateJSON:
 		switch char {
-		case '\'', '"':
+		case '\'':
 			// Start of string within JSON - remember we were in JSON
 			*prevStateBeforeString = parseStateJSON
+			*stack = append(*stack, char)
+			return parseStateString, charCategoryData
+		case '"':
+			// Start of string within JSON - remember we were in JSON
+			*prevStateBeforeString = parseStateJSON
+			*stack = append(*stack, char)
 			return parseStateString, charCategoryData
 		case '{':
 			*stack = append(*stack, char)

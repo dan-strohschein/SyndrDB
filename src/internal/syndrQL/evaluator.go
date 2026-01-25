@@ -549,7 +549,7 @@ func (e *ExpressionEvaluator) evaluateAtTimeZone(expr *AtTimeZoneExpression, doc
 		} else if v.Type == models.FieldTypeDate {
 			dt = v.DateVal
 		} else {
-			return nil, fmt.Errorf("AT TIME ZONE: FieldValue must be DateTime or Date type, got %s", v.Type)
+			return nil, fmt.Errorf("AT TIME ZONE: FieldValue must be DateTime or Date type, got %v", v.Type)
 		}
 	case string:
 		// Try parsing as ISO 8601 DateTime

@@ -5854,7 +5854,12 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 				filteredDocs = append(filteredDocs, doc)
 			}
 		}
-		s.logger.Debugf("OPTIMIZATION: Used pre-fetched documents (%d docs), no GetDocument-by-ID", len(filteredDocs))
+		s.logger.Debugf("OPTIMIZATION: Used pre-fetched documents with locks (%d docs), no GetDocument-by-ID", len(filteredDocs))
+	} else if hasPreFetched {
+		// OCC path: PreFetchedDocs available but no locks (bundle-level lock used instead)
+		// Use the pre-fetched docs directly to avoid re-running the WHERE clause
+		filteredDocs = lockInfo[0].PreFetchedDocs
+		s.logger.Debugf("OPTIMIZATION: Used pre-fetched documents from OCC (%d docs), no re-filtering", len(filteredDocs))
 	} else if hasLocks && docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
 		// Locked IDs but no PreFetchedDocs (e.g. legacy caller): re-run WHERE via filter path.
 		// Use GetDocumentsByFilter only; do not use query planner (avoids JOIN/aggregation on write-only UPDATE).
