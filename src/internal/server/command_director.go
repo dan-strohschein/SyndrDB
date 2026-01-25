@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -28,6 +29,18 @@ func getKeys(m map[string]interface{}) []string {
 	}
 	return keys
 }
+
+// #region agent log - DELETE diagnostics
+func debugDeleteDiagnostics(lockManagerExists bool, docCount int, useDocLocks bool, bundleName string) {
+	entry := fmt.Sprintf(`{"timestamp":%d,"hypothesisId":"DELETE","location":"command_director.go:DELETE","message":"delete_diagnostics","data":{"lockManagerExists":%t,"docCount":%d,"useDocLocks":%t,"bundleName":"%s"}}`,
+		time.Now().UnixMilli(), lockManagerExists, docCount, useDocLocks, bundleName)
+	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		f.WriteString(entry + "\n")
+		f.Close()
+	}
+}
+
+// #endregion
 
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
@@ -703,6 +716,10 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// For autocommit, locks are released after the operation completes.
 			const deleteLockEscalationThreshold = 100_000
 			useDocumentLocks := serviceManager.LockManager != nil && len(docIDs) > 0 && len(docIDs) <= deleteLockEscalationThreshold
+
+			// #region agent log - DELETE path diagnostics
+			debugDeleteDiagnostics(serviceManager.LockManager != nil, len(docIDs), useDocumentLocks, bundleName)
+			// #endregion
 
 			var deleteLockInfo *bndle.DocumentLockInfo
 			var lockTxID, lockSessionID string
