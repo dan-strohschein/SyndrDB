@@ -1279,12 +1279,10 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 	}
 
 	if parent.IsLeaf {
-		// #region agent log
 		// DIAGNOSTIC: Log detailed info when parent is unexpectedly a leaf
 		idx.logger.Errorf("BTREE CORRUPTION DETECTED: parent page %d is a leaf, expected internal node. "+
 			"Leaf details: KeyCount=%d, ParentPage=%d, NextLeaf=%d, PrevLeaf=%d, Keys=%d",
 			parentPageNum, parent.KeyCount, parent.ParentPage, parent.NextLeaf, parent.PrevLeaf, len(parent.Keys))
-		// #endregion
 		return parentPageNum, fmt.Errorf("parent page %d is not an internal node", parentPageNum)
 	}
 

@@ -36,6 +36,14 @@ type BundleServiceInterface interface {
 	// Returns: (projected docs map, docs copied, pages that were cached, total pages, error)
 	// effectiveLimit: 0 = no limit, >0 = stop after that many docs
 	CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error)
+	// GetDocument retrieves a single document by ID using direct lookup (O(1) via index)
+	// Much more efficient than GetAllDocumentsForIndexing for single document retrieval
+	// Used by JOINs to avoid N+1 query problem
+	GetDocument(bundleName, databaseName, documentID string, snapshotParams ...interface{}) (*models.Document, error)
+	// GetDocumentsByIDs retrieves multiple documents by ID in a single batch operation
+	// Groups documents by page and loads each page once, much more efficient than N individual GetDocument calls
+	// Used by JOINs for batch retrieval to avoid N+1 query problem
+	GetDocumentsByIDs(bundle *models.Bundle, docIDs []string) ([]*models.Document, error)
 }
 
 // ExecutionNode represents a node in the execution tree

@@ -774,7 +774,18 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// Process each key and its matching documents
+	// OPTIMIZATION: Batch load all documents at once instead of N individual GetDocument calls
+	// This eliminates the N+1 query problem by using GetDocumentsByIDs
+	allDocIDs := make([]string, 0, totalMatches)
+	for _, docIDs := range docIDsByKey {
+		allDocIDs = append(allDocIDs, docIDs...)
+	}
+
+	// Batch retrieve all documents in a single call
+	probeDocsMap := probeBundle.GetDocumentsByIDs(allDocIDs)
+	hjs.logger.Debugf("Batch loaded %d/%d probe documents via GetDocumentsByIDs", len(probeDocsMap), len(allDocIDs))
+
+	// Process each key and its matching documents using the pre-loaded map
 	for keyStr, docIDs := range docIDsByKey {
 		// Check for cancellation
 		select {
@@ -783,11 +794,11 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 		default:
 		}
 
-		// Fetch each matching document
+		// Fetch each matching document from the pre-loaded map
 		for _, docID := range docIDs {
-			// Get document from bundle
-			probeDoc := probeBundle.GetDocument(docID)
-			if probeDoc == nil {
+			// Get document from pre-loaded batch (O(1) lookup instead of O(M) per document)
+			probeDoc, exists := probeDocsMap[docID]
+			if !exists || probeDoc == nil {
 				// Document not found or deleted - silently skip
 				continue
 			}

@@ -212,17 +212,18 @@ func probeWithIndex(
 		return []*JoinedDocument{}, nil
 	}
 
-	// Step 5: Retrieve documents by IDs (individual lookups)
-	// TODO: Add batch document retrieval to BundleInterface for better performance
-	probeDocs := make([]*models.Document, 0, len(allDocIDs))
-	for _, docID := range allDocIDs {
-		doc := probeBundle.GetDocument(docID)
+	// Step 5: Batch retrieve documents by IDs using GetDocumentsByIDs
+	// FIX: Replaces N individual GetDocument calls with single batch retrieval
+	// This eliminates the N+1 query problem for indexed probe operations
+	probeDocsMap := probeBundle.GetDocumentsByIDs(allDocIDs)
+	probeDocs := make([]*models.Document, 0, len(probeDocsMap))
+	for _, doc := range probeDocsMap {
 		if doc != nil {
 			probeDocs = append(probeDocs, doc)
 		}
 	}
 
-	hjs.logger.Debugf("Retrieved %d probe documents from bundle", len(probeDocs))
+	hjs.logger.Debugf("Batch retrieved %d/%d probe documents via GetDocumentsByIDs", len(probeDocs), len(allDocIDs))
 
 	// Step 6: Probe hash table with retrieved documents
 	// Pre-allocate result slice

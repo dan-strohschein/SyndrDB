@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"os"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -30,34 +29,6 @@ func getKeys(m map[string]interface{}) []string {
 }
 
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
-	// #region agent log - Track all commands received
-	cmdType := "UNKNOWN"
-	cmdLower := strings.ToLower(strings.TrimSpace(command))
-	if strings.HasPrefix(cmdLower, "select") {
-		cmdType = "SELECT"
-	} else if strings.HasPrefix(cmdLower, "add") {
-		cmdType = "ADD"
-	} else if strings.HasPrefix(cmdLower, "update") {
-		cmdType = "UPDATE"
-	} else if strings.HasPrefix(cmdLower, "delete") {
-		cmdType = "DELETE"
-	} else if strings.HasPrefix(cmdLower, "create") {
-		cmdType = "CREATE"
-	}
-	if cmdType == "SELECT" {
-		// Only log SELECT commands to debug.log to track JOIN triggers
-		if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			// Truncate command for logging (first 200 chars)
-			cmdPreview := command
-			if len(cmdPreview) > 200 {
-				cmdPreview = cmdPreview[:200] + "..."
-			}
-			f.WriteString(fmt.Sprintf(`{"hypothesisId":"CMD","location":"command_director.go:CommandDirector","message":"SELECT command received","data":{"cmdType":"%s","cmdPreview":"%s","clientIP":"%s"},"timestamp":%d}`+"\n", cmdType, strings.ReplaceAll(cmdPreview, "\"", "'"), clientIP, time.Now().UnixMilli()))
-			f.Close()
-		}
-	}
-	// #endregion
-
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
 	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
 

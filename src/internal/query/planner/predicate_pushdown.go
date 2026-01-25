@@ -240,6 +240,25 @@ func (fba *FilteredBundleAdapter) GetDocument(docID string) *models.Document {
 	return allDocs[docID]
 }
 
+// GetDocumentsByIDs implements BundleInterface - batch retrieves documents and filters them
+func (fba *FilteredBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.Document {
+	if len(docIDs) == 0 {
+		return make(map[string]*models.Document)
+	}
+
+	// Get all filtered documents (cached in scanner after first call)
+	allDocs := fba.GetAllDocuments()
+
+	// Return only requested IDs that passed the filter
+	result := make(map[string]*models.Document, len(docIDs))
+	for _, docID := range docIDs {
+		if doc, exists := allDocs[docID]; exists {
+			result[docID] = doc
+		}
+	}
+	return result
+}
+
 // GetDocumentIDs implements BundleInterface - returns IDs of filtered documents
 func (fba *FilteredBundleAdapter) GetDocumentIDs() []string {
 	// Load all filtered documents

@@ -86,6 +86,20 @@ type BundleStorageEngine struct {
 	fileReadCache      map[string]*fileReadCacheEntry
 	fileReadCacheMutex sync.RWMutex
 
+	// PARSED DOCS CACHE: Caches fully parsed documents from segment files.
+	// Key: "bundleName:filePath". This avoids re-parsing the same file content
+	// when loading different pages, which is critical for multi-file storage
+	// where each page load would otherwise re-parse all segment files.
+	// O(F) parsing becomes O(1) after first load.
+	parsedDocsCache      map[string]*parsedDocsCacheEntry
+	parsedDocsCacheMutex sync.RWMutex
+
+	// SINGLEFLIGHT: Prevents thundering herd on cache population.
+	// When cache miss occurs, only one goroutine parses the file while others wait.
+	// Key: cacheKey (bundleName:filePath), Value: channel closed when parsing completes
+	parseInFlight      map[string]chan struct{}
+	parseInFlightMutex sync.Mutex
+
 	// COMPACTION CALLBACK: Invoked when compaction completes for a bundle so
 	// BundleService can invalidate documentPageMap (logical page positions change).
 	onCompactionComplete   func(databaseName, bundleName string)
@@ -95,6 +109,21 @@ type BundleStorageEngine struct {
 // fileReadCacheEntry holds a cached file buffer and lastAccess for LRU eviction.
 type fileReadCacheEntry struct {
 	data       []byte
+	lastAccess int64
+}
+
+// parsedDocsCache caches fully parsed documents from a file to avoid re-parsing
+// for different page loads. Key is filePath, value contains parsed docs and metadata.
+// This is critical for multi-file storage where each page load would otherwise
+// re-parse all segment files.
+type parsedDocsCacheEntry struct {
+	// All documents parsed from this file (doc ID -> doc)
+	documents map[string]models.Document
+	// Deleted document IDs (tombstones)
+	deletedDocIDs map[string]bool
+	// Total unique documents in file (for index calculation)
+	totalDocs uint32
+	// Last access time for LRU eviction
 	lastAccess int64
 }
 
@@ -182,6 +211,8 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		writeVerifier:    NewDocumentWriteVerifier(logger),        // Initialize write verification
 		writeLogger:      NewBundleWriteLogger(logger, 1000),      // Keep last 1000 write operations
 		fileReadCache:    make(map[string]*fileReadCacheEntry),    // FILE READ CACHE: avoids repeated full-file reads per page
+		parsedDocsCache:  make(map[string]*parsedDocsCacheEntry),  // PARSED DOCS CACHE: avoids re-parsing same file for different pages
+		parseInFlight:    make(map[string]chan struct{}),          // SINGLEFLIGHT: prevents thundering herd on cache population
 	}
 
 	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
@@ -280,6 +311,9 @@ func (bse *BundleStorageEngine) loadBundleMetadataFromFile(dataDir, fileName str
 }
 
 // LoadDocumentPage loads a specific page of documents for a bundle
+// OPTIMIZATION: Uses parsedDocsCache to avoid re-parsing files for different page loads.
+// First page load of any page from a set of files parses all files once and caches results.
+// Subsequent page loads extract from cached results: O(F) parsing → O(1) cache lookup.
 func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
 	// MULTI-FILE STORAGE: Load manifest to get all segment files
 	manifestMgr := bse.getOrCreateManifestManager(databaseName, bundleName)
@@ -303,30 +337,77 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 	// Merged documents map with last-write-wins semantics
 	// Later files (higher fileID) overwrite earlier files
 	mergedDocuments := make(map[string]models.Document)
+	deletedDocIDs := make(map[string]bool)
 	var totalDocsAcrossFiles uint32
 
-	// Scan all files in order (fileID ascending)
+	// OPTIMIZATION: Use parsed docs cache to avoid re-parsing files for different pages
+	// This turns O(F * N) into O(1) for subsequent page loads where F = files, N = docs
 	for _, fileInfo := range manifest.Files {
 		bundleDir := GetBundleDirectory(databaseName, bundleName)
 		filePath := filepath.Join(bundleDir, fileInfo.FileName)
+		cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
 
-		// BLOOM FILTER OPTIMIZATION: Skip files that definitely don't contain any documents in this page
-		// This reduces disk I/O by ~99% for point queries
-		if fileInfo.BloomFilterData != "" {
-			bf, err := DeserializeBloomFilter(
-				fileInfo.BloomFilterData,
-				fileInfo.BloomFilterSize,
-				fileInfo.BloomFilterHashes,
-			)
-			if err == nil && bf != nil {
-				// For page queries, we can't use bloom filter effectively
-				// But we track this for future optimization (e.g., range queries)
-				// For now, bloom filters are primarily used during compaction
-				if bse.logger != nil && settings.GetSettings().Debug {
-					bse.logger.Debugf("Bloom filter available for file %s (size: %d bits)",
-						fileInfo.FileName, fileInfo.BloomFilterSize)
-				}
+		// Check parsed docs cache first
+		bse.parsedDocsCacheMutex.RLock()
+		cached, cacheHit := bse.parsedDocsCache[cacheKey]
+		if cacheHit {
+			cached.lastAccess = time.Now().UnixNano()
+		}
+		bse.parsedDocsCacheMutex.RUnlock()
+
+		if cacheHit {
+			// Use cached parsed documents - O(1) instead of O(N) parsing
+			for docID, doc := range cached.documents {
+				mergedDocuments[docID] = doc
 			}
+			for docID := range cached.deletedDocIDs {
+				deletedDocIDs[docID] = true
+			}
+			totalDocsAcrossFiles += cached.totalDocs
+			continue
+		}
+
+		// Cache miss - implement singleflight to prevent thundering herd
+		// Only one goroutine parses the file while others wait
+	singleflightRetry:
+		bse.parseInFlightMutex.Lock()
+		waitCh, isInflight := bse.parseInFlight[cacheKey]
+		if isInflight {
+			bse.parseInFlightMutex.Unlock()
+			// Wait for the in-flight parse to complete
+			<-waitCh
+			// Re-check cache after waiting (it should be populated now)
+			bse.parsedDocsCacheMutex.RLock()
+			cached, cacheHit = bse.parsedDocsCache[cacheKey]
+			if cacheHit {
+				cached.lastAccess = time.Now().UnixNano()
+			}
+			bse.parsedDocsCacheMutex.RUnlock()
+			if cacheHit {
+				for docID, doc := range cached.documents {
+					mergedDocuments[docID] = doc
+				}
+				for docID := range cached.deletedDocIDs {
+					deletedDocIDs[docID] = true
+				}
+				totalDocsAcrossFiles += cached.totalDocs
+				continue
+			}
+			// Cache still empty (rare: parsing failed or was evicted) - retry to become the parser
+			goto singleflightRetry
+		}
+
+		// Register as the parser for this file (mutex is held here)
+		doneCh := make(chan struct{})
+		bse.parseInFlight[cacheKey] = doneCh
+		bse.parseInFlightMutex.Unlock()
+
+		// Helper to clean up in-flight entry (must be called before continue/break)
+		cleanupInFlight := func() {
+			bse.parseInFlightMutex.Lock()
+			delete(bse.parseInFlight, cacheKey)
+			bse.parseInFlightMutex.Unlock()
+			close(doneCh)
 		}
 
 		// Check if file exists (skip if not - may have been compacted)
@@ -334,70 +415,98 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 			if bse.logger != nil && settings.GetSettings().Debug {
 				bse.logger.Debugf("Skipping non-existent file %s (likely compacted)", filePath)
 			}
+			cleanupInFlight()
 			continue
 		}
 
-		// Use file-read cache to avoid repeated full-file reads when loading many pages
+		// Use file-read cache to avoid repeated full-file reads
 		data, err := bse.getOrReadFile(filePath)
 		if err != nil {
 			bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
+			cleanupInFlight()
 			continue
 		}
 
-		// Parse documents from this file in the page range
-		// CRITICAL: Pass empty slice (not nil) to bypass global projection state and always load full documents
-		// This prevents race conditions where concurrent queries set projection and poison the cache with partial pages
-		// Projection is applied in-memory after retrieval, not during disk load
-		fileDocuments, fileTotalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data, []string{})
+		// Parse ALL documents from this file (not just page range) so we can cache them
+		// This is a one-time cost per file; subsequent page loads use the cache
+		fileDocuments, fileDeletedIDs, fileTotalDocs, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &data)
 		if err != nil {
 			bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
+			cleanupInFlight()
 			continue
 		}
 
+		// Cache the parsed results
+		bse.cacheParsedDocs(cacheKey, fileDocuments, fileDeletedIDs, fileTotalDocs)
+		cleanupInFlight()
+
 		// Merge documents with last-write-wins
-		// Documents in later files overwrite documents from earlier files
 		for docID, doc := range fileDocuments {
 			mergedDocuments[docID] = doc
 		}
-
+		for docID := range fileDeletedIDs {
+			deletedDocIDs[docID] = true
+		}
 		totalDocsAcrossFiles += fileTotalDocs
 	}
 
-	// GLOBAL TOMBSTONE FILTERING: Remove documents with empty DocumentID
-	// Tombstone markers (0xDEADDEAD) are already filtered by parseAppendedDocumentsRange
-	// but we also filter empty DocumentID as a safety measure
-	filteredDocuments := make(map[string]models.Document)
+	// TOMBSTONE FILTERING: Remove deleted documents
+	// Apply deletedDocIDs from tombstone markers across all files
+	for docID := range deletedDocIDs {
+		delete(mergedDocuments, docID)
+	}
+
+	// Filter empty DocumentID as safety measure
 	for docID, doc := range mergedDocuments {
-		// Skip documents with empty ID (defensive check)
 		if doc.DocumentID == "" {
-			continue
+			delete(mergedDocuments, docID)
 		}
-		filteredDocuments[docID] = doc
+	}
+
+	// PAGINATION: Extract only documents in the requested page range
+	// Since we now cache all documents, we need to extract the page range
+	// Convert merged docs to a deterministic order for consistent pagination
+	sortedDocIDs := make([]string, 0, len(mergedDocuments))
+	for docID := range mergedDocuments {
+		sortedDocIDs = append(sortedDocIDs, docID)
+	}
+	sort.Strings(sortedDocIDs) // Deterministic ordering
+
+	pageDocuments := make(map[string]models.Document)
+	for idx, docID := range sortedDocIDs {
+		docIndex := uint32(idx)
+		if docIndex >= startIndex && docIndex < endIndex {
+			pageDocuments[docID] = mergedDocuments[docID]
+		}
 	}
 
 	page := &models.DocumentPage{
 		PageID:    pageID,
 		BundleID:  bundleName,
-		Documents: filteredDocuments,
+		Documents: pageDocuments,
 		LoadedAt:  time.Now(),
 		IsDirty:   false,
 	}
 
-	// Set pagination pointers based on actual document count
+	// Set pagination pointers based on total document count
+	totalDocs := uint32(len(mergedDocuments))
 	if pageID > 0 {
 		prevPageID := pageID - 1
 		page.PreviousPageID = &prevPageID
 	}
 
-	totalPages := (totalDocsAcrossFiles + pageSize - 1) / pageSize
+	totalPages := (totalDocs + pageSize - 1) / pageSize
+	if totalPages == 0 {
+		totalPages = 1
+	}
 	if pageID < totalPages-1 {
 		nextPageID := pageID + 1
 		page.NextPageID = &nextPageID
 	}
 
 	if bse.logger != nil && settings.GetSettings().Debug {
-		bse.logger.Debugf("Loaded page %d for bundle %s: merged %d files, %d documents after filtering",
-			pageID, bundleName, len(manifest.Files), len(filteredDocuments))
+		bse.logger.Debugf("Loaded page %d for bundle %s: merged %d files, %d documents in page (total: %d)",
+			pageID, bundleName, len(manifest.Files), len(pageDocuments), totalDocs)
 	}
 
 	return page, nil
@@ -551,6 +660,183 @@ func (bse *BundleStorageEngine) InvalidateFileReadCacheForBundle(databaseName, b
 	}
 	if bse.logger != nil && settings.GetSettings().Debug {
 		bse.logger.Debugf("Invalidated file read cache for bundle %s/%s", databaseName, bundleName)
+	}
+}
+
+// parseAllDocumentsFromFile parses all documents from a file (not just a page range).
+// This is used to populate the parsed docs cache, which then allows O(1) page extraction
+// instead of O(N) re-parsing for each page load.
+// Returns: documents map, deleted doc IDs, total unique docs, error
+func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseName string, fileData *[]byte) (map[string]models.Document, map[string]bool, uint32, error) {
+	// Acquire read lock for the bundle
+	lock := bse.getWriteLock(bundleName)
+	lock.RLock()
+	defer lock.RUnlock()
+
+	documents := make(map[string]models.Document)
+	deletedDocIDs := make(map[string]bool)
+	seenDocIDs := make(map[string]struct{})
+	offset := 0
+
+	// Skip bundle metadata header if present
+	if len(*fileData) >= 8 {
+		magic := binary.LittleEndian.Uint32((*fileData)[0:4])
+		if magic == 0x42444D44 { // "BDMD" = Bundle Metadata
+			metadataSize := binary.LittleEndian.Uint32((*fileData)[4:8])
+			offset = int(8 + metadataSize)
+		}
+	}
+
+	for offset < len(*fileData) {
+		if offset+8 > len(*fileData) {
+			break
+		}
+
+		magic := binary.LittleEndian.Uint32((*fileData)[offset : offset+4])
+		size := binary.LittleEndian.Uint32((*fileData)[offset+4 : offset+8])
+
+		if magic == 0xDEADBEEF {
+			// Document record
+			if offset+8+int(size) > len(*fileData) {
+				break
+			}
+
+			documentData := (*fileData)[offset+8 : offset+8+int(size)]
+			fullDoc, err := helpers.DecodeFastBinaryToDocument(documentData)
+			if err != nil {
+				bse.logger.Warnf("Failed to decode document at offset %d: %v", offset, err)
+				offset += 8 + int(size)
+				continue
+			}
+
+			// Track unique documents and keep latest version
+			if _, seen := seenDocIDs[fullDoc.DocumentID]; !seen {
+				seenDocIDs[fullDoc.DocumentID] = struct{}{}
+			}
+			// Always update to get latest version (last-write-wins)
+			if !deletedDocIDs[fullDoc.DocumentID] {
+				documents[fullDoc.DocumentID] = *fullDoc
+			}
+
+			offset += 8 + int(size)
+		} else if magic == 0xDEADDEAD {
+			// Tombstone marker
+			if offset+8+int(size) > len(*fileData) {
+				break
+			}
+
+			deletionData := (*fileData)[offset+8 : offset+8+int(size)]
+			deletionDoc, err := helpers.DecodeFastBinaryToDocument(deletionData)
+			if err == nil && deletionDoc != nil {
+				deletedDocIDs[deletionDoc.DocumentID] = true
+				delete(documents, deletionDoc.DocumentID) // Remove if already added
+			}
+
+			offset += 8 + int(size)
+		} else if magic == 0x42444D44 {
+			// Metadata header in middle of file (shouldn't happen, but skip it)
+			metadataSize := binary.LittleEndian.Uint32((*fileData)[offset+4 : offset+8])
+			offset += int(8 + metadataSize)
+		} else {
+			// Unknown magic - might be corruption or end of valid data
+			break
+		}
+	}
+
+	return documents, deletedDocIDs, uint32(len(seenDocIDs)), nil
+}
+
+// cacheParsedDocs caches parsed documents for a file with LRU eviction.
+// Key format: "bundleName:filePath"
+func (bse *BundleStorageEngine) cacheParsedDocs(cacheKey string, documents map[string]models.Document, deletedDocIDs map[string]bool, totalDocs uint32) {
+	maxEntries := settings.GetSettings().FileReadCacheMaxEntries
+	if maxEntries <= 0 {
+		maxEntries = 32 // Default matches file read cache
+	}
+
+	bse.parsedDocsCacheMutex.Lock()
+	defer bse.parsedDocsCacheMutex.Unlock()
+
+	// Evict LRU entries if cache is full
+	for len(bse.parsedDocsCache) >= maxEntries {
+		bse.evictParsedDocsCacheLRULocked()
+	}
+
+	bse.parsedDocsCache[cacheKey] = &parsedDocsCacheEntry{
+		documents:     documents,
+		deletedDocIDs: deletedDocIDs,
+		totalDocs:     totalDocs,
+		lastAccess:    time.Now().UnixNano(),
+	}
+
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Cached %d parsed documents for %s", len(documents), cacheKey)
+	}
+}
+
+// evictParsedDocsCacheLRULocked removes the least-recently-accessed entry.
+// Caller must hold bse.parsedDocsCacheMutex (write).
+func (bse *BundleStorageEngine) evictParsedDocsCacheLRULocked() {
+	var evictKey string
+	var minAccess int64
+	first := true
+	for k, e := range bse.parsedDocsCache {
+		if first || e.lastAccess < minAccess {
+			evictKey = k
+			minAccess = e.lastAccess
+			first = false
+		}
+	}
+	if evictKey != "" {
+		delete(bse.parsedDocsCache, evictKey)
+		if bse.logger != nil && settings.GetSettings().Debug {
+			bse.logger.Debugf("Evicted parsed docs cache entry: %s", evictKey)
+		}
+	}
+}
+
+// InvalidateParsedDocsCacheForBundle removes all cached parsed docs for a bundle.
+// Call after writes, compaction, or any operation that changes bundle contents.
+func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForBundle(bundleName string) {
+	bse.parsedDocsCacheMutex.Lock()
+	defer bse.parsedDocsCacheMutex.Unlock()
+
+	prefix := bundleName + ":"
+	for k := range bse.parsedDocsCache {
+		if len(k) > len(prefix) && k[:len(prefix)] == prefix {
+			delete(bse.parsedDocsCache, k)
+		}
+	}
+
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Invalidated parsed docs cache for bundle %s", bundleName)
+	}
+}
+
+// InvalidateParsedDocsCacheForLatestFile invalidates only the cache entry for the latest segment file.
+// This is more efficient than InvalidateParsedDocsCacheForBundle when only the latest file was modified.
+// Writes always append to the latest file, so older segment files remain valid.
+func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForLatestFile(bundleName, databaseName string) {
+	// Get manifest to find the latest file
+	mm := bse.getOrCreateManifestManager(databaseName, bundleName)
+	manifest := mm.GetManifest()
+
+	if len(manifest.Files) == 0 {
+		return // No files to invalidate
+	}
+
+	// Latest file is the last one in the manifest
+	latestFile := manifest.Files[len(manifest.Files)-1]
+	bundleDir := GetBundleDirectory(databaseName, bundleName)
+	filePath := filepath.Join(bundleDir, latestFile.FileName)
+	cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
+
+	bse.parsedDocsCacheMutex.Lock()
+	delete(bse.parsedDocsCache, cacheKey)
+	bse.parsedDocsCacheMutex.Unlock()
+
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Invalidated parsed docs cache for latest file %s in bundle %s", latestFile.FileName, bundleName)
 	}
 }
 
@@ -1235,6 +1521,10 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	// Mark bundle as dirty to trigger metadata persistence
 	bundle.IsDirty = true
 
+	// CACHE INVALIDATION: Only invalidate the latest file's cache since writes append there
+	// This is much more efficient than invalidating all 7+ cached file entries
+	b.InvalidateParsedDocsCacheForLatestFile(bundle.Name, bundle.Database.Name)
+
 	// if b.logger != nil {
 	// 	b.logger.Infow("BATCH UPDATE: Successfully updated documents",
 	// 		"bundle", bundle.Name,
@@ -1415,6 +1705,9 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 	}
 	bundle.IsDirty = true
 
+	// CACHE INVALIDATION: Only invalidate the latest file's cache since writes append there
+	b.InvalidateParsedDocsCacheForLatestFile(bundle.Name, bundle.Database.Name)
+
 	b.logger.Debugf("BATCH UPDATE WITH LOCKS: Successfully updated %d documents with document-level locks", successCount)
 	return nil
 }
@@ -1513,6 +1806,9 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		b.logger.Infof("Successfully deleted document %s from bundle %s (new TotalDocuments: %d, PageCount: %d)",
 			documentID, bundle.Name, bundle.TotalDocuments, bundle.PageCount)
 	}
+
+	// CACHE INVALIDATION: Only invalidate the latest file's cache since deletes append tombstones there
+	b.InvalidateParsedDocsCacheForLatestFile(bundle.Name, bundle.Database.Name)
 
 	// CRITICAL: Lock is released here by defer, ensuring atomic visibility
 	return nil
@@ -1693,6 +1989,9 @@ func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bund
 			"newTotalDocuments", bundle.TotalDocuments,
 			"newPageCount", bundle.PageCount)
 	}
+
+	// CACHE INVALIDATION: Only invalidate the latest file's cache since deletes append tombstones there
+	b.InvalidateParsedDocsCacheForLatestFile(bundle.Name, bundle.Database.Name)
 
 	return nil
 }

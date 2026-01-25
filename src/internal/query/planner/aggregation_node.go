@@ -412,20 +412,42 @@ executeChild:
 				}
 			}
 		} else {
-			// Regular execution path
-			documents, err = n.Child.Execute(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+			// Regular execution path - try to find a DocumentScanner from child nodes
+			// This handles cases where the child is not a direct FullScanNode but may contain one
+			var childScanner documentscanner.DocumentScannerInterface
+			if indexScan, isIndexScan := n.Child.(*IndexScanNode); isIndexScan && indexScan.DocumentScanner != nil {
+				childScanner = indexScan.DocumentScanner
+			} else if filterNode, isFilter := n.Child.(*FilterNode); isFilter && filterNode.DocumentScanner != nil {
+				childScanner = filterNode.DocumentScanner
 			}
-			totalInput = len(documents)
-			n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
-			if totalInput == 0 {
-				isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-				if !isAggregateOnly {
-					return documents, nil
+
+			// Try streaming if we found a scanner
+			if childScanner != nil && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
+				n.Logger.Infof("OPTIMIZATION: Using streaming aggregation for GROUP BY via child scanner")
+				groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, childScanner)
+				if err != nil {
+					// Fall back to regular execution on streaming failure
+					n.Logger.Warnf("Streaming aggregation failed, falling back to regular execution: %v", err)
+					groupResults = nil
 				}
 			}
-			groupResults, err = n.executeHashAggregate(ctx, documents)
+
+			// Fall back to regular execution if streaming wasn't possible or failed
+			if groupResults == nil {
+				documents, err = n.Child.Execute(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+				}
+				totalInput = len(documents)
+				n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+				if totalInput == 0 {
+					isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+					if !isAggregateOnly {
+						return documents, nil
+					}
+				}
+				groupResults, err = n.executeHashAggregate(ctx, documents)
+			}
 		}
 
 	case queryparser.SortGroupAggregate:
@@ -441,19 +463,59 @@ executeChild:
 			}
 		}
 		if groupResults == nil && err == nil {
-			documents, err = n.Child.Execute(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+			// Try to find a DocumentScanner for streaming before falling back to Child.Execute()
+			var childScanner documentscanner.DocumentScannerInterface
+			if fullScan, ok := n.Child.(*FullScanNode); ok && fullScan.DocumentScanner != nil {
+				childScanner = fullScan.DocumentScanner
+			} else if filterNode, ok := n.Child.(*FilterNode); ok {
+				if filterNode.DocumentScanner != nil {
+					childScanner = filterNode.DocumentScanner
+				} else if innerFullScan, innerOk := filterNode.Child.(*FullScanNode); innerOk && innerFullScan.DocumentScanner != nil {
+					childScanner = innerFullScan.DocumentScanner
+				}
+			} else if indexScan, ok := n.Child.(*IndexScanNode); ok && indexScan.DocumentScanner != nil {
+				childScanner = indexScan.DocumentScanner
 			}
-			totalInput = len(documents)
-			n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
-			if totalInput == 0 {
-				isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-				if !isAggregateOnly {
-					return documents, nil
+
+			// Try streaming to collect documents if scanner available
+			if childScanner != nil {
+				n.Logger.Infof("OPTIMIZATION: Using streaming to collect documents for SortGroupAggregate")
+				// Get bundle interface for streaming
+				if smartScanner, ok := childScanner.(interface {
+					GetBundle() documentscanner.BundleInterface
+				}); ok {
+					bundleInterface := smartScanner.GetBundle()
+					if bundleInterface != nil {
+						var streamedDocs []*models.Document
+						streamErr := bundleInterface.ScanDocumentChunks(ctx, 4096, func(chunk []*models.Document) bool {
+							streamedDocs = append(streamedDocs, chunk...)
+							return true
+						})
+						if streamErr == nil && len(streamedDocs) > 0 {
+							totalInput = len(streamedDocs)
+							n.Logger.Debugf("Streamed %d documents for SortGroupAggregate", totalInput)
+							groupResults, err = n.executeSortGroupAggregate(ctx, nil, streamedDocs)
+						}
+					}
 				}
 			}
-			groupResults, err = n.executeSortGroupAggregate(ctx, documents, nil)
+
+			// Fall back to regular execution
+			if groupResults == nil {
+				documents, err = n.Child.Execute(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
+				}
+				totalInput = len(documents)
+				n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+				if totalInput == 0 {
+					isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+					if !isAggregateOnly {
+						return documents, nil
+					}
+				}
+				groupResults, err = n.executeSortGroupAggregate(ctx, documents, nil)
+			}
 		}
 
 	default:

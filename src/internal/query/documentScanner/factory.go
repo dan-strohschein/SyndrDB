@@ -560,6 +560,58 @@ func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
 	return nil // Document not found
 }
 
+// GetDocumentsByIDs retrieves multiple documents by ID in batch
+// More efficient than N individual GetDocument calls for JOINs
+// Groups documents by page to minimize page loads
+func (ba *BundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.Document {
+	if len(docIDs) == 0 {
+		return make(map[string]*models.Document)
+	}
+
+	result := make(map[string]*models.Document, len(docIDs))
+	toFind := make(map[string]bool, len(docIDs))
+	for _, id := range docIDs {
+		toFind[id] = true
+	}
+
+	// MEMTABLE CHECK FIRST - recent writes have priority
+	ba.bundle.DocumentsMutex.RLock()
+	if ba.bundle.Documents != nil {
+		for _, docID := range docIDs {
+			if doc, exists := (*ba.bundle.Documents)[docID]; exists {
+				docCopy := doc
+				result[docID] = &docCopy
+				delete(toFind, docID)
+			}
+		}
+	}
+	ba.bundle.DocumentsMutex.RUnlock()
+
+	// If all found in memtable, return early
+	if len(toFind) == 0 {
+		return result
+	}
+
+	// Stream through pages to find remaining documents on disk
+	pageCount := ba.getSafePageCount()
+	for pageID := uint32(0); pageID < pageCount && len(toFind) > 0; pageID++ {
+		page, err := ba.loadDocumentPage(pageID)
+		if err != nil {
+			continue
+		}
+
+		for docID := range toFind {
+			if doc, exists := page.Documents[docID]; exists {
+				docCopy := doc
+				result[docID] = &docCopy
+				delete(toFind, docID)
+			}
+		}
+	}
+
+	return result
+}
+
 // GetAllDocuments returns all documents - WARNING: Use sparingly for large bundles!
 // This method is kept for compatibility but should be avoided for large datasets
 func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {

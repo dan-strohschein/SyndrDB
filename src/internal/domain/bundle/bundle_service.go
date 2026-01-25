@@ -2475,12 +2475,6 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 					byID[id] = doc
 					s.logger.Debugf("GetDocumentsByIDs: document %s not in page %d, resolved via GetDocument", id, pageID)
 				} else {
-					// #region agent log - Hypothesis C/D: log when document from B-tree not found
-					if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
-						f.WriteString(fmt.Sprintf(`{"hypothesisId":"D","location":"bundle_service.go:GetDocumentsByIDs","message":"Document from B-tree NOT FOUND","data":{"bundle":"%s","docID":"%s","pageID":%d,"error":"%s"},"timestamp":%d}`+"\n", bundleName, id, pageID, getErr.Error(), time.Now().UnixMilli()))
-						f.Close()
-					}
-					// #endregion
 					s.logger.Warnf("GetDocumentsByIDs: document %s not in page %d; GetDocument fallback failed: %v", id, pageID, getErr)
 				}
 			}
@@ -6104,12 +6098,6 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "delete", doc.DocumentID, oldFieldValue, pageID, nil, true)
 			// Schedule insert for new value
 			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", doc.DocumentID, newFieldValue, pageID, nil, true)
-			// #region agent log - Hypothesis D: log deferred B-tree update scheduling
-			if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-				f.WriteString(fmt.Sprintf(`{"hypothesisId":"D","location":"bundle_service.go:UpdateDocumentInBundle","message":"Scheduled deferred B-tree updates","data":{"bundle":"%s","index":"%s","docID":"%s","oldValue":"%v","newValue":"%v"},"timestamp":%d}`+"\n", bundle.Name, indexName, doc.DocumentID, oldFieldValue, newFieldValue, time.Now().UnixMilli()))
-				f.Close()
-			}
-			// #endregion
 			s.logger.Debugf("Scheduled deferred B-tree index updates (delete+insert) for document '%s' on field '%s'", doc.DocumentID, fieldName)
 		}
 
@@ -6581,25 +6569,9 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	// before flush. DELETE's harvest only sees current value (newKey), leaving oldKey entry stale.
 	// DeleteByDocumentIDs scans B-tree and removes ALL entries for the docIDs regardless of key value.
 	// One full scan per B-tree over all docIDs (batched) instead of one scan per docID.
-	// #region agent log - Hypothesis A: verify DeleteByDocumentIDs is called
-	if f, err := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		f.WriteString(fmt.Sprintf(`{"hypothesisId":"A","location":"bundle_service.go:deleteDocumentsInternal","message":"DeleteByDocumentIDs START","data":{"bundle":"%s","docCount":%d,"btreeCount":%d},"timestamp":%d}`+"\n", docCommand.BundleName, len(docIDs), len(btreeIndexes), time.Now().UnixMilli()))
-		f.Close()
-	}
-	// #endregion
-	for indexName, btreeIndex := range btreeIndexes {
+	for _, btreeIndex := range btreeIndexes {
 		if btreeIndex != nil {
 			n, err := btreeIndex.DeleteByDocumentIDs(docIDs)
-			// #region agent log - Hypothesis B: verify DeleteByDocumentIDs result
-			if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
-				errStr := "nil"
-				if err != nil {
-					errStr = err.Error()
-				}
-				f.WriteString(fmt.Sprintf(`{"hypothesisId":"B","location":"bundle_service.go:deleteDocumentsInternal","message":"DeleteByDocumentIDs RESULT","data":{"index":"%s","removed":%d,"error":"%s"},"timestamp":%d}`+"\n", indexName, n, errStr, time.Now().UnixMilli()))
-				f.Close()
-			}
-			// #endregion
 			if err != nil {
 				s.logger.Warnf("B-tree DeleteByDocumentIDs cleanup: %v", err)
 			} else if n > 0 {
@@ -7202,19 +7174,6 @@ func (s *BundleService) tryBTreeIndexOptimization(bundle *models.Bundle, whereCl
 					continue
 				}
 
-				// #region agent log - Hypothesis C/D: log B-tree search results
-				if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
-					docIDsStr := ""
-					if len(docIDs) <= 10 {
-						docIDsStr = fmt.Sprintf("%v", docIDs)
-					} else {
-						docIDsStr = fmt.Sprintf("[%d docIDs, first 5: %v]", len(docIDs), docIDs[:5])
-					}
-					f.WriteString(fmt.Sprintf(`{"hypothesisId":"C","location":"bundle_service.go:tryBTreeIndexOptimization","message":"BTree Search returned docIDs","data":{"bundle":"%s","index":"%s","keyBytes":"%x","docCount":%d,"docIDs":"%s"},"timestamp":%d}`+"\n", bundle.Name, indexName, keyBytes, len(docIDs), docIDsStr, time.Now().UnixMilli()))
-					f.Close()
-				}
-				// #endregion
-
 				return s.convertDocIDsToDocuments(bundle, docIDs, indexName)
 			}
 		}
@@ -7341,12 +7300,6 @@ func (s *BundleService) convertDocIDsToDocuments(bundle *models.Bundle, docIDs [
 		// Remove stale entries from B-tree index asynchronously to not block the query
 		if len(staleDocIDs) > 0 {
 			s.logger.Infof("SELF-HEALING: Found %d stale B-tree entries in index '%s', removing...", len(staleDocIDs), indexName)
-			// #region agent log - Self-healing cleanup
-			if f, err2 := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err2 == nil {
-				f.WriteString(fmt.Sprintf(`{"hypothesisId":"SELFHEAL","location":"bundle_service.go:convertDocIDsToDocuments","message":"Self-healing B-tree cleanup","data":{"bundle":"%s","index":"%s","staleCount":%d,"staleDocIDs":"%v"},"timestamp":%d}`+"\n", bundle.Name, indexName, len(staleDocIDs), staleDocIDs, time.Now().UnixMilli()))
-				f.Close()
-			}
-			// #endregion
 			go func(bundleName, idxName string, staleIDs []string) {
 				// Load B-tree index and remove stale entries
 				if indexRef, exists := bundle.Indexes[idxName]; exists && indexRef.IndexType == "btree" {

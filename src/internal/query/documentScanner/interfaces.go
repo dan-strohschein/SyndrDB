@@ -92,6 +92,12 @@ type BundleInterface interface {
 	// effectiveLimit: 0 = no limit (GROUP BY), >0 = stop after that many docs (simple scan with LIMIT)
 	// cachedPages: number of pages that were in cache, totalPages: total pages in bundle
 	CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*ProjectedDocument, int, int, int, error)
+
+	// GetDocumentsByIDs retrieves multiple documents by ID in a single batch operation
+	// This is much more efficient than N individual GetDocument() calls for JOINs
+	// Groups documents by page and loads each page once to minimize I/O
+	// Returns a map of documentID -> *Document for found documents (missing docs are not in map)
+	GetDocumentsByIDs(docIDs []string) map[string]*models.Document
 }
 
 // ScanMetrics holds performance and usage metrics for the scanner

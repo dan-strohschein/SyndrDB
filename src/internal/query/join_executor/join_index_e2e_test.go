@@ -12,6 +12,7 @@ import (
 
 	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/documentscanner"
 )
 
 /*
@@ -161,6 +162,19 @@ func (m *mockBundleAdapter) GetDocument(docID string) *models.Document {
 	return nil
 }
 
+func (m *mockBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.Document {
+	m.bundle.DocumentsMutex.RLock()
+	defer m.bundle.DocumentsMutex.RUnlock()
+	result := make(map[string]*models.Document, len(docIDs))
+	for _, docID := range docIDs {
+		if doc, ok := (*m.bundle.Documents)[docID]; ok {
+			docCopy := doc
+			result[docID] = &docCopy
+		}
+	}
+	return result
+}
+
 func (m *mockBundleAdapter) GetAllDocuments() map[string]*models.Document {
 	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
 	m.bundle.DocumentsMutex.RLock()
@@ -244,6 +258,51 @@ func (m *mockBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize in
 		}
 	}
 	return nil
+}
+
+func (m *mockBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error) {
+	// Mock: all documents are in page 0
+	if pageID != 0 {
+		return nil, fmt.Errorf("page %d not found in mock", pageID)
+	}
+	m.bundle.DocumentsMutex.RLock()
+	defer m.bundle.DocumentsMutex.RUnlock()
+	docs := make(map[string]models.Document, len(*m.bundle.Documents))
+	for id, doc := range *m.bundle.Documents {
+		docs[id] = doc
+	}
+	return &models.DocumentPage{
+		PageID:    pageID,
+		Documents: docs,
+	}, nil
+}
+
+func (m *mockBundleAdapter) GetTotalPages() uint32 {
+	return 1 // Mock: all documents in single page
+}
+
+func (m *mockBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	m.bundle.DocumentsMutex.RLock()
+	defer m.bundle.DocumentsMutex.RUnlock()
+	result := make(map[string]*documentscanner.ProjectedDocument, len(*m.bundle.Documents))
+	count := 0
+	for docID, doc := range *m.bundle.Documents {
+		if effectiveLimit > 0 && count >= effectiveLimit {
+			break
+		}
+		projected := &documentscanner.ProjectedDocument{
+			DocumentID:    docID,
+			GroupByFields: make(map[string]interface{}),
+		}
+		for _, field := range projectFields {
+			if f, exists := doc.Fields[field]; exists {
+				projected.GroupByFields[field] = f.Value.AsInterface()
+			}
+		}
+		result[docID] = projected
+		count++
+	}
+	return result, count, 1, 1, nil
 }
 
 // ============================================================================
