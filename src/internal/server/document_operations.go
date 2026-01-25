@@ -17,6 +17,11 @@ import (
 
 // UpdateDocument handles UPDATE DOCUMENTS commands
 // Syntax: UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>" (<FIELD_NAME> = <VALUE>) WHERE <WHERE_CLAUSE>;
+//
+// This function uses a Hybrid OCC (Optimistic Concurrency Control) approach:
+// 1. First tries optimistic update (no upfront locks, validate at commit)
+// 2. Falls back to pessimistic locking after repeated conflicts
+// This provides best performance under both low and high contention scenarios.
 func UpdateDocument(commandParts []string, serviceManager ServiceManager, database *models.Database, command string, logger *zap.SugaredLogger, session *Session) (*CommandResponse, error) {
 	// Enhanced bundle name parsing following SyndrDB comprehensive error handling
 	// This replaces the fragile index-based parsing with robust string extraction
@@ -54,12 +59,67 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
-	// TASK 2: Document-level locking - Get document IDs (and optionally full docs) and acquire locks
-	// Pre-fetched docs are passed to UpdateDocumentInBundle so it never re-fetches by GetDocument(docID),
-	// avoiding index→page lookup failures (e.g. after compaction) and ensuring accurate updates.
+	// HYBRID OCC: For autocommit operations (non-transactional), use OCC with pessimistic fallback.
+	// This provides better throughput under contention by avoiding sequential lock acquisition.
+	// For explicit transactions, continue using document-level locks for strict 2PL semantics.
+	useHybridOCC := session == nil || !session.IsInTransaction()
+
+	if useHybridOCC {
+		logger.Debugf("Using hybrid OCC for UPDATE on bundle '%s'", bundleName)
+
+		// Build context for the operation
+		ctx := context.Background()
+
+		// Execute using OCC with automatic fallback to pessimistic
+		globalMetrics := GetGlobalServerMetrics()
+		globalMetrics.TransactionsBegun.Add(1)
+
+		err = executeUpdateWithOCC(ctx, serviceManager, database, bundle, docCommand, session, logger)
+
+		if err != nil {
+			globalMetrics.TransactionsRolledBack.Add(1)
+			return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+		}
+
+		globalMetrics.TransactionsCommitted.Add(1)
+
+		// METRICS: Track document update
+		globalMetrics.DocumentUpdatesTotal.Add(1)
+		dbMetrics := GetDatabaseMetrics(database.Name)
+		dbMetrics.DBDocumentUpdatesTotal.Add(1)
+		bundleMetrics := GetBundleMetrics(database.Name, bundleName)
+		bundleMetrics.BundleDocumentsUpdated.Add(1)
+
+		// Track write for plan cache invalidation (MongoDB-style write-threshold)
+		if serviceManager.UnifiedPlanner != nil {
+			invalidationMgr := serviceManager.UnifiedPlanner.GetInvalidationManager()
+			if invalidationMgr != nil {
+				invalidationMgr.OnWrite(bundleName, 1)
+			}
+		}
+
+		cmdResponse := &CommandResponse{
+			ResultCount: 1,
+			Result:      "Document updated successfully in bundle '" + bundleName + "'.",
+		}
+		return cmdResponse, nil
+	}
+
+	// EXPLICIT TRANSACTION PATH: Use document-level locking for strict 2PL semantics
+	return updateDocumentPessimistic(commandParts, serviceManager, database, bundle, docCommand, session, logger)
+}
+
+// updateDocumentPessimistic handles UPDATE using traditional pessimistic document-level locking.
+// Used for explicit transactions where strict 2PL semantics are required.
+func updateDocumentPessimistic(commandParts []string, serviceManager ServiceManager, database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand, session *Session, logger *zap.SugaredLogger) (*CommandResponse, error) {
+	bundleName := bundle.Name
+
+	// EXPLICIT TRANSACTION: Document-level locking for strict 2PL semantics
+	// Locks are held until transaction commits/rolls back
 	var lockInfo *bndle.DocumentLockInfo
 	var docIDs []string
 	var preFetchedDocs []*models.Document
+	var err error
 
 	preFetchThreshold := int64(200_000)
 	shouldPreFetch := bundle.TotalDocuments <= preFetchThreshold
@@ -71,48 +131,25 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 				"failed to filter documents by WHERE clause", errors.LayerQuery).WithContext("bundle", bundleName)
 		}
-		logger.Debugf("Pre-fetched %d document IDs and docs for potential document-level locking", len(docIDs))
+		logger.Debugf("Pre-fetched %d document IDs and docs for document-level locking in transaction", len(docIDs))
 	} else if !shouldPreFetch {
-		// Large bundle - skip pre-fetch, use bundle-level locking
-		// UpdateDocumentInBundle will do a single scan with bundle lock (more efficient)
 		logger.Debugf("Skipping pre-fetch for large bundle (%d docs > threshold %d), using bundle-level locking",
 			bundle.TotalDocuments, preFetchThreshold)
-		docIDs = []string{} // Empty - signals to use bundle lock path
+		docIDs = []string{}
 	} else {
-		// Empty WHERE clause - will need bundle lock (bulk update)
 		docIDs = []string{}
 	}
 
-	// TASK 2: Acquire document-level locks if we have document IDs
-	// DOCUMENT-LEVEL LOCKING: Extended to autocommit operations for better concurrent write throughput
-	// For explicit transactions, locks are held until commit/rollback
-	// For autocommit, locks are released after the operation completes.
-	// Phase 5: significantly increased (was 1000) so document-level locks used for almost all updates.
+	// Document-level locking for explicit transactions
 	const lockEscalationThreshold = 100_000
 	useDocumentLocks := len(docIDs) > 0 && len(docIDs) <= lockEscalationThreshold
 
-	logger.Debugf("UPDATE document locking decision: docIDs=%d, threshold=%d, useDocumentLocks=%v",
-		len(docIDs), lockEscalationThreshold, useDocumentLocks)
-
-	// Determine txID and sessionID for locking
-	var lockTxID, lockSessionID string
-	isAutocommit := false
-	if session != nil && session.IsInTransaction() {
-		// Explicit transaction - use existing IDs
-		lockTxID = session.ActiveTransactionID
-		lockSessionID = session.SessionID
-	} else if useDocumentLocks {
-		// Autocommit - generate temporary IDs for document locks
-		// These locks will be released after the operation completes
-		lockTxID = helpers.GenerateFastUUID()
-		lockSessionID = "autocommit-" + lockTxID[:8]
-		isAutocommit = true
-	}
+	// For explicit transactions, use session's transaction ID
+	lockTxID := session.ActiveTransactionID
+	lockSessionID := session.SessionID
 
 	if useDocumentLocks && lockTxID != "" {
 		// Sort document IDs to prevent deadlocks (always acquire in same order)
-		// CRITICAL: Must acquire locks SEQUENTIALLY in sorted order to guarantee deadlock prevention.
-		// Parallel acquisition (chunking) breaks this guarantee and causes circular deadlocks.
 		sort.Strings(docIDs)
 
 		// SEQUENTIAL lock acquisition - guarantees global ordering for deadlock prevention
@@ -135,7 +172,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 				fmt.Sprintf("failed to acquire write lock for document %s", failedDocID), errors.LayerTransaction).WithContext("document_id", failedDocID)
 		}
 
-		// Create lock info to pass to UpdateDocumentInBundle (include pre-fetched docs to avoid GetDocument-by-ID)
+		// Create lock info to pass to UpdateDocumentInBundle
 		lockInfo = &bndle.DocumentLockInfo{
 			LockManager:    serviceManager.LockManager,
 			TxID:           lockTxID,
@@ -144,52 +181,34 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			PreFetchedDocs: preFetchedDocs,
 		}
 
-		// TASK 2: Release locks on error or for autocommit
-		// For explicit transactions: locks are held until transaction commits/rolls back (unless error)
-		// For autocommit: always release locks after operation completes
+		// For explicit transactions: release locks only on error (locks held until commit/rollback)
 		defer func() {
-			if lockInfo != nil && lockInfo.LockManager != nil && (err != nil || isAutocommit) {
+			if lockInfo != nil && lockInfo.LockManager != nil && err != nil {
 				serviceManager.LockManager.ReleaseLocks(lockTxID)
-				if isAutocommit {
-					logger.Debugf("Released document locks after autocommit operation")
-				} else {
-					logger.Debugf("Released document locks due to update error")
-				}
+				logger.Debugf("Released document locks due to update error")
 			}
 		}()
 
-		if isAutocommit {
-			logger.Debugf("Acquired document-level write locks for %d documents (autocommit txID=%s)", len(lockedDocIDs), lockTxID[:8])
-		} else {
-			logger.Debugf("Acquired document-level write locks for %d documents in transaction %s", len(lockedDocIDs), lockTxID)
-		}
+		logger.Debugf("Acquired document-level write locks for %d documents in transaction %s", len(lockedDocIDs), lockTxID)
 	}
-	// NOTE: When count > threshold, we don't pass docIDs because without locks, concurrent
-	// transactions could delete/modify those documents, making the IDs stale.
-	// UpdateDocumentInBundle will re-run the WHERE query which is safer.
 
-	// PHASE 1: Build context with MVCC snapshot when session in transaction (reserved; WHERE uses GetDocumentsByFilter)
+	// Build context with MVCC snapshot for transaction
 	ctx := context.Background()
-	if session != nil && session.IsInTransaction() {
-		if snap := session.GetMVCCSnapshot(); snap != nil {
-			snapshotInfo := &planner.SnapshotInfo{
-				SnapshotSequence: snap.SnapshotSequence,
-				TransactionID:    snap.TransactionID,
-				ActiveTxIDs:      snap.ActiveTxIDs,
-			}
-			ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
+	if snap := session.GetMVCCSnapshot(); snap != nil {
+		snapshotInfo := &planner.SnapshotInfo{
+			SnapshotSequence: snap.SnapshotSequence,
+			TransactionID:    snap.TransactionID,
+			ActiveTxIDs:      snap.ActiveTxIDs,
 		}
+		ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
 	}
 
 	// Execute with WAL logging if available
 	if serviceManager.WALManager != nil {
-		globalMetrics := GetGlobalServerMetrics()
-		globalMetrics.TransactionsBegun.Add(1)
-
 		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
-			err := serviceManager.WALManager.LogDocumentUpdate(txID, bundleName, "multiple", nil, docCommand.Fields)
-			if err != nil {
-				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+			walErr := serviceManager.WALManager.LogDocumentUpdate(txID, bundleName, "multiple", nil, docCommand.Fields)
+			if walErr != nil {
+				return errors.WrapWithMessage(walErr, errors.ERR_INTERNAL_WAL,
 					"failed to log document update", errors.LayerWAL).WithContext("bundle", bundleName)
 			}
 			li := lockInfo
@@ -206,12 +225,6 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 			}
 			return serviceManager.BundleService.UpdateDocumentInBundle(ctx, database, bundle, docCommand, li)
 		})
-
-		if err != nil {
-			globalMetrics.TransactionsRolledBack.Add(1)
-		} else {
-			globalMetrics.TransactionsCommitted.Add(1)
-		}
 	} else {
 		logger.Warn("WAL Manager not available, executing without transaction logging")
 		if lockInfo != nil {
@@ -219,7 +232,6 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		} else {
 			err = serviceManager.BundleService.UpdateDocumentInBundle(ctx, database, bundle, docCommand)
 		}
-		// Note: without WAL we have no txID; Phase 2b version fields use 0
 	}
 
 	if err != nil {
@@ -234,7 +246,7 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	bundleMetrics := GetBundleMetrics(database.Name, bundleName)
 	bundleMetrics.BundleDocumentsUpdated.Add(1)
 
-	// Track write for plan cache invalidation (MongoDB-style write-threshold)
+	// Track write for plan cache invalidation
 	if serviceManager.UnifiedPlanner != nil {
 		invalidationMgr := serviceManager.UnifiedPlanner.GetInvalidationManager()
 		if invalidationMgr != nil {

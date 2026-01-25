@@ -24,20 +24,20 @@ const (
 
 // Permission Errors (3xxx)
 const (
-	ERR_PERMISSION_DENIED     ErrorCode = "ERR_PERMISSION_DENIED"     // 3001 - General permission denied
-	ERR_PERMISSION_DATABASE   ErrorCode = "ERR_PERMISSION_DATABASE"   // 3002 - Database access denied
-	ERR_PERMISSION_BUNDLE     ErrorCode = "ERR_PERMISSION_BUNDLE"     // 3003 - Bundle access denied
-	ERR_PERMISSION_OPERATION  ErrorCode = "ERR_PERMISSION_OPERATION"  // 3004 - Operation not permitted
-	ERR_PERMISSION_ROLE       ErrorCode = "ERR_PERMISSION_ROLE"       // 3005 - Insufficient role privileges
+	ERR_PERMISSION_DENIED    ErrorCode = "ERR_PERMISSION_DENIED"    // 3001 - General permission denied
+	ERR_PERMISSION_DATABASE  ErrorCode = "ERR_PERMISSION_DATABASE"  // 3002 - Database access denied
+	ERR_PERMISSION_BUNDLE    ErrorCode = "ERR_PERMISSION_BUNDLE"    // 3003 - Bundle access denied
+	ERR_PERMISSION_OPERATION ErrorCode = "ERR_PERMISSION_OPERATION" // 3004 - Operation not permitted
+	ERR_PERMISSION_ROLE      ErrorCode = "ERR_PERMISSION_ROLE"      // 3005 - Insufficient role privileges
 )
 
 // Authentication Errors (4xxx)
 const (
-	ERR_AUTH_FAILED        ErrorCode = "ERR_AUTH_FAILED"        // 4001 - Authentication failed
-	ERR_AUTH_REQUIRED      ErrorCode = "ERR_AUTH_REQUIRED"      // 4002 - Authentication required
+	ERR_AUTH_FAILED          ErrorCode = "ERR_AUTH_FAILED"          // 4001 - Authentication failed
+	ERR_AUTH_REQUIRED        ErrorCode = "ERR_AUTH_REQUIRED"        // 4002 - Authentication required
 	ERR_AUTH_SESSION_EXPIRED ErrorCode = "ERR_AUTH_SESSION_EXPIRED" // 4003 - Session expired
-	ERR_AUTH_LOCKOUT       ErrorCode = "ERR_AUTH_LOCKOUT"       // 4004 - Account locked
-	ERR_AUTH_RATE_LIMIT    ErrorCode = "ERR_AUTH_RATE_LIMIT"    // 4005 - Too many attempts
+	ERR_AUTH_LOCKOUT         ErrorCode = "ERR_AUTH_LOCKOUT"         // 4004 - Account locked
+	ERR_AUTH_RATE_LIMIT      ErrorCode = "ERR_AUTH_RATE_LIMIT"      // 4005 - Too many attempts
 )
 
 // Resource Errors (5xxx)
@@ -51,30 +51,31 @@ const (
 
 // Internal Errors (6xxx)
 const (
-	ERR_INTERNAL           ErrorCode = "ERR_INTERNAL"           // 6001 - Internal server error (generic)
-	ERR_INTERNAL_STORAGE   ErrorCode = "ERR_INTERNAL_STORAGE"   // 6002 - Storage operation failed
-	ERR_INTERNAL_INDEX     ErrorCode = "ERR_INTERNAL_INDEX"     // 6003 - Index operation failed
-	ERR_INTERNAL_PARSER    ErrorCode = "ERR_INTERNAL_PARSER"    // 6004 - Parser internal error
-	ERR_INTERNAL_QUERY     ErrorCode = "ERR_INTERNAL_QUERY"     // 6005 - Query execution error
+	ERR_INTERNAL             ErrorCode = "ERR_INTERNAL"             // 6001 - Internal server error (generic)
+	ERR_INTERNAL_STORAGE     ErrorCode = "ERR_INTERNAL_STORAGE"     // 6002 - Storage operation failed
+	ERR_INTERNAL_INDEX       ErrorCode = "ERR_INTERNAL_INDEX"       // 6003 - Index operation failed
+	ERR_INTERNAL_PARSER      ErrorCode = "ERR_INTERNAL_PARSER"      // 6004 - Parser internal error
+	ERR_INTERNAL_QUERY       ErrorCode = "ERR_INTERNAL_QUERY"       // 6005 - Query execution error
 	ERR_INTERNAL_TRANSACTION ErrorCode = "ERR_INTERNAL_TRANSACTION" // 6006 - Transaction error
-	ERR_INTERNAL_WAL       ErrorCode = "ERR_INTERNAL_WAL"       // 6007 - WAL operation failed
-	ERR_INTERNAL_LOCK      ErrorCode = "ERR_INTERNAL_LOCK"      // 6008 - Lock operation failed
+	ERR_INTERNAL_WAL         ErrorCode = "ERR_INTERNAL_WAL"         // 6007 - WAL operation failed
+	ERR_INTERNAL_LOCK        ErrorCode = "ERR_INTERNAL_LOCK"        // 6008 - Lock operation failed
 )
 
 // System Errors (7xxx)
 const (
-	ERR_SYSTEM_CONFIG     ErrorCode = "ERR_SYSTEM_CONFIG"     // 7001 - Configuration error
-	ERR_SYSTEM_INIT       ErrorCode = "ERR_SYSTEM_INIT"       // 7002 - Initialization error
-	ERR_SYSTEM_SHUTDOWN   ErrorCode = "ERR_SYSTEM_SHUTDOWN"   // 7003 - Shutdown error
+	ERR_SYSTEM_CONFIG      ErrorCode = "ERR_SYSTEM_CONFIG"      // 7001 - Configuration error
+	ERR_SYSTEM_INIT        ErrorCode = "ERR_SYSTEM_INIT"        // 7002 - Initialization error
+	ERR_SYSTEM_SHUTDOWN    ErrorCode = "ERR_SYSTEM_SHUTDOWN"    // 7003 - Shutdown error
 	ERR_SYSTEM_MAINTENANCE ErrorCode = "ERR_SYSTEM_MAINTENANCE" // 7004 - System in maintenance mode
 )
 
 // Transaction Errors (8xxx)
 const (
-	ERR_TRANSACTION_NOT_STARTED ErrorCode = "ERR_TRANSACTION_NOT_STARTED" // 8001 - No active transaction
-	ERR_TRANSACTION_CONFLICT    ErrorCode = "ERR_TRANSACTION_CONFLICT"    // 8002 - Transaction conflict
-	ERR_TRANSACTION_DEADLOCK    ErrorCode = "ERR_TRANSACTION_DEADLOCK"    // 8003 - Deadlock detected
-	ERR_TRANSACTION_ROLLBACK    ErrorCode = "ERR_TRANSACTION_ROLLBACK"    // 8004 - Transaction rolled back
+	ERR_TRANSACTION_NOT_STARTED      ErrorCode = "ERR_TRANSACTION_NOT_STARTED"      // 8001 - No active transaction
+	ERR_TRANSACTION_CONFLICT         ErrorCode = "ERR_TRANSACTION_CONFLICT"         // 8002 - Transaction conflict
+	ERR_TRANSACTION_DEADLOCK         ErrorCode = "ERR_TRANSACTION_DEADLOCK"         // 8003 - Deadlock detected
+	ERR_TRANSACTION_ROLLBACK         ErrorCode = "ERR_TRANSACTION_ROLLBACK"         // 8004 - Transaction rolled back
+	ERR_TRANSACTION_VERSION_CONFLICT ErrorCode = "ERR_TRANSACTION_VERSION_CONFLICT" // 8005 - OCC version conflict (document modified since read)
 )
 
 // String returns the string representation of the error code
