@@ -31,7 +31,7 @@ func getKeys(m map[string]interface{}) []string {
 }
 
 // #region agent log - DELETE diagnostics
-const debugLogPathDelete = "/home/dan/Documents/code/SyndrDB/.cursor/debug.log"
+const debugLogPathDelete = ".cursor/debug.log"
 
 func debugDeleteDiagnostics(lockManagerExists bool, docCount int, useDocLocks bool, bundleName string) {
 	entry := fmt.Sprintf(`{"timestamp":%d,"hypothesisId":"DELETE","location":"command_director.go:DELETE","message":"delete_diagnostics","data":{"lockManagerExists":%t,"docCount":%d,"useDocLocks":%t,"bundleName":"%s"}}`,
@@ -736,7 +736,15 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// Extended to autocommit operations for better concurrent delete throughput.
 			// For explicit transactions, locks are held until commit/rollback.
 			// For autocommit, locks are released after the operation completes.
-			const deleteLockEscalationThreshold = 100_000
+			//
+			// CRITICAL FIX: Lowered threshold from 100,000 to 100.
+			// Reason: With 8,050 documents and sequential lock acquisition in high-concurrency (150+ connections),
+			// acquiring 8,050 individual write locks caused massive contention and timeouts.
+			// For bulk deletes (>100 docs), bundle-level locking is MORE efficient:
+			// - 1 lock acquisition vs N sequential acquisitions
+			// - No document-level contention between concurrent deletes
+			// - Much faster for large bulk operations
+			const deleteLockEscalationThreshold = 1_000
 			useDocumentLocks := serviceManager.LockManager != nil && len(docIDs) > 0 && len(docIDs) <= deleteLockEscalationThreshold
 
 			// #region agent log - DELETE path diagnostics
