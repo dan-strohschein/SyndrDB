@@ -401,7 +401,7 @@ func (p *ExpressionParser) Parse() (Expression, error) {
 	if p.current.Type != TOKEN_EOF && !p.isStatementTerminator() {
 		// For expression parser, we don't have original command, so create a simple error
 		// The calling parser can enhance it if needed
-		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX, 
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unexpected token after expression: %s", p.current.Type.String()),
 			errors.LayerParser)
 	}
@@ -951,20 +951,25 @@ func (p *ExpressionParser) parseFunctionCall() (Expression, error) {
 }
 
 // parseInterval parses INTERVAL literals
-// Supports: INTERVAL '7' DAY and INTERVAL '7 days' / INTERVAL '1 month 2 days'
+// Supports: INTERVAL '7' DAY, INTERVAL 7 DAY, and INTERVAL '7 days' / INTERVAL '1 month 2 days'
 // TODO: I will add support for INTERVAL arithmetic (INTERVAL + INTERVAL) when implementing complex date operations
 func (p *ExpressionParser) parseInterval() (Expression, error) {
 	p.advance() // consume INTERVAL keyword
 
-	// Expect string literal with interval value
-	if p.current.Type != TOKEN_STRING {
-		return nil, fmt.Errorf("expected string literal after INTERVAL, got %s", p.current.Type.String())
+	// Accept either string literal or number for interval value
+	var intervalValue string
+	if p.current.Type == TOKEN_STRING {
+		intervalValue = p.current.Value
+		p.advance() // consume interval value
+	} else if p.current.Type == TOKEN_NUMBER {
+		// Support bare number format: INTERVAL 66 DAY
+		intervalValue = p.current.Value
+		p.advance() // consume interval value
+	} else {
+		return nil, fmt.Errorf("expected string or number after INTERVAL, got %s", p.current.Type.String())
 	}
 
-	intervalValue := p.current.Value
-	p.advance() // consume interval value
-
-	// Check for numeric format: INTERVAL '7' DAY
+	// Check for numeric format: INTERVAL '7' DAY or INTERVAL 7 DAY
 	if p.current.Type == TOKEN_YEAR || p.current.Type == TOKEN_MONTH ||
 		p.current.Type == TOKEN_DAY || p.current.Type == TOKEN_HOUR ||
 		p.current.Type == TOKEN_MINUTE || p.current.Type == TOKEN_SECOND {
