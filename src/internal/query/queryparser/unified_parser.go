@@ -597,12 +597,12 @@ func ValidateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger
 		for _, field := range unified.SelectFields {
 			// Extract actual field name from qualified identifier (e.g., "products"."DocumentID" -> "DocumentID")
 			selectFieldName := extractFieldNameFromQualified(field)
-			
+
 			found := false
 			for _, groupField := range unified.GroupBy.Fields {
 				// Extract actual field name from GROUP BY field (may also be qualified)
 				groupFieldName := extractFieldNameFromQualified(groupField)
-				
+
 				// Compare the actual field names (case-insensitive)
 				if strings.EqualFold(selectFieldName, groupFieldName) {
 					found = true

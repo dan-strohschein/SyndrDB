@@ -798,8 +798,9 @@ func parseValue(valueToken string) (interface{}, error) {
 
 // DEPRECATED: EvaluateWhereClause is the old parser evaluator.
 // DO NOT USE FOR NEW CODE - Use SyndrQL instead:
-//   evaluator := syndrQL.NewExpressionEvaluator(doc)
-//   result, err := evaluator.EvaluateAsBool(expr)
+//
+//	evaluator := syndrQL.NewExpressionEvaluator(doc)
+//	result, err := evaluator.EvaluateAsBool(expr)
 func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logger *zap.SugaredLogger) bool {
 	// If there are no clauses or subgroups, default to true
 	if len(whereGroup.Clauses) == 0 && len(whereGroup.SubGroups) == 0 {
