@@ -6,6 +6,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/errors"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -210,7 +211,7 @@ func HandleRefreshMaterializedView(command string, logger *zap.SugaredLogger, se
 // HandleShowViews handles SHOW VIEWS command
 // Syntax: SHOW VIEWS [IN DATABASE "database_name"];
 // Returns list of all views in the specified database
-func HandleShowViews(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error) {
+func HandleShowViews(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Handling SHOW VIEWS command")
 
 	// Parse SHOW VIEWS statement
@@ -244,15 +245,16 @@ func HandleShowViews(command string, logger *zap.SugaredLogger, serviceManager S
 	logger.Infof("TODO: Actually list views from database '%s' - placeholder response returned", targetDatabase)
 
 	return &CommandResponse{
-		ResultCount: 0,
-		Result:      []map[string]interface{}{},
+		ResultCount:     0,
+		Result:          []map[string]interface{}{},
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}, nil
 }
 
 // HandleDescribeView handles DESCRIBE VIEW command
 // Syntax: DESCRIBE VIEW "view_name";
 // Returns detailed information about a specific view
-func HandleDescribeView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error) {
+func HandleDescribeView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Handling DESCRIBE VIEW command in database '%s'", database.Name)
 
 	// Parse DESCRIBE VIEW statement
@@ -280,7 +282,8 @@ func HandleDescribeView(command string, logger *zap.SugaredLogger, serviceManage
 	logger.Infof("TODO: Actually retrieve view '%s' details - placeholder response returned", stmt.ViewName)
 
 	return &CommandResponse{
-		ResultCount: 1,
+		ResultCount:     1,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 		Result: map[string]interface{}{
 			"view_name":          stmt.ViewName,
 			"database":           database.Name,
@@ -341,7 +344,7 @@ func isViewCommand(commandParts []string) bool {
 
 // RouteViewCommand routes view commands to appropriate handlers
 // This is called by CommandDirector when a view command is detected
-func RouteViewCommand(command string, commandParts []string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (interface{}, error) {
+func RouteViewCommand(command string, commandParts []string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session, startTime time.Time) (interface{}, error) {
 	if len(commandParts) < 2 {
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("invalid view command: %s", command),
@@ -365,11 +368,11 @@ func RouteViewCommand(command string, commandParts []string, logger *zap.Sugared
 		}
 	case "show":
 		if strings.ToLower(commandParts[1]) == "views" {
-			return HandleShowViews(command, logger, serviceManager, database)
+			return HandleShowViews(command, logger, serviceManager, database, startTime)
 		}
 	case "describe":
 		if strings.ToLower(commandParts[1]) == "view" {
-			return HandleDescribeView(command, logger, serviceManager, database)
+			return HandleDescribeView(command, logger, serviceManager, database, startTime)
 		}
 	}
 

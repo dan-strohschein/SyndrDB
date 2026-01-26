@@ -22,6 +22,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/errors"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -29,7 +30,7 @@ import (
 // ShowVersions displays all versions of a document with MVCC metadata
 // Syntax: SHOW VERSIONS [FOR "documentID"] [IN BUNDLE "bundleName"]
 // PHASE 6: MVCC - Debug command to inspect document version chains
-func ShowVersions(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+func ShowVersions(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW VERSIONS command: %s", command)
 
 	// Parse command to extract documentID and bundleName
@@ -92,8 +93,9 @@ func ShowVersions(command string, database *models.Database, logger *zap.Sugared
 
 	if len(versions) == 0 {
 		return &CommandResponse{
-			Result:      fmt.Sprintf("No versions found for document %s in bundle %s", documentID, bundleName),
-			ResultCount: 0,
+			Result:          fmt.Sprintf("No versions found for document %s in bundle %s", documentID, bundleName),
+			ResultCount:     0,
+			ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 		}, nil
 	}
 
@@ -121,8 +123,9 @@ func ShowVersions(command string, database *models.Database, logger *zap.Sugared
 	}
 
 	response := &CommandResponse{
-		Result:      versionInfo,
-		ResultCount: len(versionInfo),
+		Result:          versionInfo,
+		ResultCount:     len(versionInfo),
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 
 	logger.Infof("SHOW VERSIONS: Found %d versions for document %s in bundle %s", len(versions), documentID, bundleName)
@@ -132,7 +135,7 @@ func ShowVersions(command string, database *models.Database, logger *zap.Sugared
 // ShowActiveSnapshots displays all active transaction snapshots
 // Syntax: SHOW ACTIVE SNAPSHOTS
 // PHASE 6: MVCC - Debug command to inspect active transaction snapshots
-func ShowActiveSnapshots(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+func ShowActiveSnapshots(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW ACTIVE SNAPSHOTS command: %s", command)
 
 	if serviceManager.WALManager == nil {
@@ -162,8 +165,9 @@ func ShowActiveSnapshots(command string, logger *zap.SugaredLogger, serviceManag
 	}
 
 	response := &CommandResponse{
-		Result:      snapshotInfo,
-		ResultCount: 1,
+		Result:          snapshotInfo,
+		ResultCount:     1,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 
 	logger.Infof("SHOW ACTIVE SNAPSHOTS: %d active snapshots, oldest sequence: %d, current sequence: %d",
@@ -174,7 +178,7 @@ func ShowActiveSnapshots(command string, logger *zap.SugaredLogger, serviceManag
 // ShowConflictLog displays conflict detection statistics
 // Syntax: SHOW CONFLICT LOG
 // PHASE 6: MVCC - Debug command to inspect conflict detection history
-func ShowConflictLog(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+func ShowConflictLog(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW CONFLICT LOG command: %s", command)
 
 	if serviceManager.ConflictTracker == nil {
@@ -193,8 +197,9 @@ func ShowConflictLog(command string, logger *zap.SugaredLogger, serviceManager S
 	}
 
 	response := &CommandResponse{
-		Result:      conflictInfo,
-		ResultCount: 1,
+		Result:          conflictInfo,
+		ResultCount:     1,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 
 	logger.Infof("SHOW CONFLICT LOG: %v documents tracked", stats["tracked_documents"])

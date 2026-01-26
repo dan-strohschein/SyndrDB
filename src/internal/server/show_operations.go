@@ -5,6 +5,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/errors"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -27,7 +28,7 @@ func ShowRateLimit(command string, logger *zap.SugaredLogger, serviceManager Ser
 
 // ShowDatabases shows all available databases
 // Syntax: SHOW DATABASES;
-func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW DATABASES command: %s", command)
 
 	// Get the list of databases from the database service (loaded in memory)
@@ -85,8 +86,9 @@ func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager Ser
 	}
 
 	response := &CommandResponse{
-		ResultCount: len(databaseNames),
-		Result:      databaseNames,
+		ResultCount:     len(databaseNames),
+		Result:          databaseNames,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 
 	logger.Infof("Found %d databases", len(databaseNames))
@@ -95,7 +97,7 @@ func ShowDatabases(command string, logger *zap.SugaredLogger, serviceManager Ser
 
 // ShowBundles shows all bundles in a specific database
 // Syntax: SHOW BUNDLES [FOR "<DATABASE_NAME>"]
-func ShowBundles(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+func ShowBundles(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW BUNDLES command: %s", command)
 
 	var targetDatabase *models.Database
@@ -160,8 +162,9 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 	}
 
 	response := &CommandResponse{
-		ResultCount: len(*allBundles),
-		Result:      *allBundles,
+		ResultCount:     len(*allBundles),
+		Result:          *allBundles,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 
 	if targetDatabase != nil {
@@ -173,7 +176,7 @@ func ShowBundles(command string, database *models.Database, logger *zap.SugaredL
 }
 
 // ShowBundle handles the "SHOW BUNDLE "<BUNDLE_NAME>";" command
-func ShowBundle(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+func ShowBundle(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW BUNDLE command: %s", command)
 
 	if database == nil {
@@ -232,8 +235,9 @@ func ShowBundle(command string, database *models.Database, logger *zap.SugaredLo
 	}
 
 	response := &CommandResponse{
-		ResultCount: 1,
-		Result:      bundleInfo,
+		ResultCount:     1,
+		Result:          bundleInfo,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 
 	logger.Infof("Retrieved metadata for bundle '%s' in database %s", bundleName, database.Name)
@@ -242,7 +246,7 @@ func ShowBundle(command string, database *models.Database, logger *zap.SugaredLo
 
 // ShowUsers shows all documents in the Users bundle from the primary database
 // Syntax: SHOW USERS;
-func ShowUsers(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
+func ShowUsers(command string, database *models.Database, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Processing SHOW USERS command: %s", command)
 
 	// Always use the primary database for system catalogs like Users
@@ -282,8 +286,9 @@ func ShowUsers(command string, database *models.Database, logger *zap.SugaredLog
 	}
 
 	response := &CommandResponse{
-		ResultCount: len(users),
-		Result:      users,
+		ResultCount:     len(users),
+		Result:          users,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 
 	logger.Infof("Retrieved %d users from Users bundle", len(users))
