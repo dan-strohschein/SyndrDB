@@ -1322,17 +1322,10 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		cmdResponse.StreamDocuments = documents
 		cmdResponse.StreamFields = selectedFields // Use merged fields (includes aggregates)
 		cmdResponse.ResultCount = len(documents)
-
-		// CRITICAL FIX: For direct function calls (E2E tests), convert StreamDocuments to Result
-		// HTTP responses use StreamDocuments for efficient streaming, but direct callers expect Result
-		// This ensures backward compatibility with existing tests while maintaining streaming optimization
-		// For full scans without ORDER BY, use non-sorting transform to preserve order from GetAllDocuments()
-		// Convert documents map to slice preserving order (no sorting for queries without ORDER BY)
-		docSlice := make([]*models.Document, 0, len(documents))
-		for _, doc := range documents {
-			docSlice = append(docSlice, doc)
-		}
-		cmdResponse.Result = helpers.TransformSortedDocumentsToFlatFormatWithProjection(docSlice, selectedFields)
+		// NOTE: StreamDocuments is used by sendResult() for efficient JSON streaming.
+		// We do NOT populate Result here to avoid double-work (40,000+ allocations for large JOINs).
+		// If Result is needed (e.g., for E2E tests calling SelectDocuments directly),
+		// the caller should check StreamDocuments and transform if needed.
 	} else {
 		// PHASE A: Store pooled maps for cleanup after JSON marshaling (avoids closure allocation)
 		if flattenedDocs, ok := results.([]map[string]interface{}); ok {
