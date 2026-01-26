@@ -52,8 +52,8 @@ type BundleStorageEngine struct {
 
 	// CONCURRENCY CONTROL: Per-bundle write locks to prevent dirty reads
 	// RWMutex allows concurrent reads while blocking during writes
-	writeLocks      map[string]*sync.RWMutex // Per-bundle write locks
-	writeLocksMutex sync.Mutex               // Protects writeLocks map
+	// PERFORMANCE: Sharded across 64 buckets to reduce contention under high concurrency
+	writeLocks *ShardedWriteLockMap // Sharded per-bundle write locks (eliminates global mutex)
 
 	// DOCUMENT-LEVEL LOCKING: Per-document write locks for concurrent updates
 	// Allows concurrent writes to different documents within the same bundle
@@ -63,8 +63,8 @@ type BundleStorageEngine struct {
 
 	// PHASE 1: MVCC - Per-bundle rotation locks for file rotation coordination
 	// Rotation is rare but needs exclusive access to prevent multiple rotations
-	rotationLocks      map[string]*sync.Mutex // Per-bundle rotation locks
-	rotationLocksMutex sync.Mutex             // Protects rotationLocks map
+	// PERFORMANCE: Sharded across 64 buckets to reduce contention
+	rotationLocks *ShardedMutexMap // Sharded per-bundle rotation locks
 
 	// PERFORMANCE OPTIMIZATION: Pre-allocated buffers to avoid memory allocations
 	headerBuffer    [32]byte  // Reusable 32-byte buffer for headers
@@ -208,9 +208,9 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		writeBuffers:     make(map[string]*WriteBuffer),
 		projectionFields: make(map[string][]string),               // PROJECTION PUSHDOWN: Initialize projection fields map
 		manifestManagers: make(map[string]*ManifestManager),       // Initialize manifest managers map
-		writeLocks:       make(map[string]*sync.RWMutex),          // Initialize write locks map
+		writeLocks:       NewShardedWriteLockMap(),                // PERFORMANCE: Sharded write locks (64 shards)
 		documentLocks:    make(map[string]map[string]*sync.Mutex), // DOCUMENT-LEVEL LOCKING: Initialize document locks map
-		rotationLocks:    make(map[string]*sync.Mutex),            // PHASE 1: Initialize rotation locks map
+		rotationLocks:    NewShardedMutexMap(),                    // PERFORMANCE: Sharded rotation locks (64 shards)
 		writeVerifier:    NewDocumentWriteVerifier(logger),        // Initialize write verification
 		writeLogger:      NewBundleWriteLogger(logger, 1000),      // Keep last 1000 write operations
 		fileReadCache:    make(map[string]*fileReadCacheEntry),    // FILE READ CACHE: avoids repeated full-file reads per page
@@ -2486,35 +2486,17 @@ func (b *BundleStorageEngine) evaluateAllBundlesForCompaction() {
 
 // getWriteLock gets or creates a write lock for a specific bundle
 // This ensures thread-safe access to bundle data during concurrent reads and writes
+// PERFORMANCE: Uses sharded lock map (64 shards) to reduce contention under high concurrency
 func (b *BundleStorageEngine) getWriteLock(bundleName string) *sync.RWMutex {
-	b.writeLocksMutex.Lock()
-	defer b.writeLocksMutex.Unlock()
-
-	if lock, exists := b.writeLocks[bundleName]; exists {
-		return lock
-	}
-
-	// Create new lock for this bundle
-	lock := &sync.RWMutex{}
-	b.writeLocks[bundleName] = lock
-	return lock
+	return b.writeLocks.Get(bundleName)
 }
 
 // getRotationLock gets or creates a rotation lock for a specific bundle
 // PHASE 1: MVCC - Protects file rotation decision and execution
 // This ensures only one goroutine can rotate a bundle's file at a time
+// PERFORMANCE: Uses sharded lock map (64 shards) to reduce contention
 func (b *BundleStorageEngine) getRotationLock(bundleName string) *sync.Mutex {
-	b.rotationLocksMutex.Lock()
-	defer b.rotationLocksMutex.Unlock()
-
-	if lock, exists := b.rotationLocks[bundleName]; exists {
-		return lock
-	}
-
-	// Create new rotation lock for this bundle
-	lock := &sync.Mutex{}
-	b.rotationLocks[bundleName] = lock
-	return lock
+	return b.rotationLocks.Get(bundleName)
 }
 
 // getDocumentLock gets or creates a lock for a specific document within a bundle

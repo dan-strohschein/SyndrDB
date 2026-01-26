@@ -440,6 +440,20 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 		Database:         database,            // TIER 1: Database for subquery execution
 	}
 
+	// PERFORMANCE OPTIMIZATION: LIMIT pushdown for non-ORDER BY queries
+	// When LIMIT is present but ORDER BY is not, we can stop filtering after finding enough matches.
+	// This is safe because without ORDER BY, result order is undefined.
+	// NOTE: We also require no GROUP BY since aggregation needs all matching documents.
+	if query.HasLimit() && !query.HasOrderBy() && !query.HasGroupBy() && !query.IsDistinct && !query.IsAggregateOnly {
+		effectiveLimit := query.Limit
+		if query.Offset > 0 {
+			effectiveLimit = query.Offset + query.Limit // Need extra for OFFSET
+		}
+		filterNode.MaxDocuments = effectiveLimit
+		qr.logger.Infof("OPTIMIZATION: LIMIT pushdown to FilterNode: MaxDocuments=%d (LIMIT %d + OFFSET %d)",
+			effectiveLimit, query.Limit, query.Offset)
+	}
+
 	return filterNode, []string{}, nil
 }
 

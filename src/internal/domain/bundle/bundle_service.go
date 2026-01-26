@@ -34,6 +34,9 @@ import (
 	// Service Registry for dependency injection (breaks circular dependencies)
 	"syndrdb/src/internal/registry"
 
+	// JOIN hash table cache invalidation
+	joinexecutor "syndrdb/src/internal/query/join_executor"
+
 	"sync"
 	"sync/atomic"
 
@@ -56,8 +59,8 @@ type SessionInterface interface {
 
 // Global query planner reference for plan cache invalidation
 // Set by server during initialization to avoid circular dependencies
-var globalQueryPlanner QueryPlannerInterface
-var plannerMutex sync.RWMutex
+// PERFORMANCE: Uses atomic.Value for lock-free reads on hot paths
+var globalQueryPlanner atomic.Value // stores QueryPlannerInterface
 
 // UnifiedPlannerInterface defines the interface for creating execution plans
 // This allows BundleService to use the query planner for WHERE clause optimization
@@ -68,23 +71,37 @@ type UnifiedPlannerInterface interface {
 
 // Global unified planner reference for query planning
 // Set by server during initialization to avoid circular dependencies
-var globalUnifiedPlanner UnifiedPlannerInterface
-var unifiedPlannerMutex sync.RWMutex
+// PERFORMANCE: Uses atomic.Value for lock-free reads on hot paths
+var globalUnifiedPlanner atomic.Value // stores UnifiedPlannerInterface
 
 // SetQueryPlanner sets the global query planner reference
 // Called by server during initialization
+// Uses atomic.Store for thread-safe write (rare operation, only at startup)
 func SetQueryPlanner(planner QueryPlannerInterface) {
-	plannerMutex.Lock()
-	defer plannerMutex.Unlock()
-	globalQueryPlanner = planner
+	globalQueryPlanner.Store(planner)
 }
 
 // SetUnifiedPlanner sets the global unified planner reference
 // Called by server during initialization
+// Uses atomic.Store for thread-safe write (rare operation, only at startup)
 func SetUnifiedPlanner(planner UnifiedPlannerInterface) {
-	unifiedPlannerMutex.Lock()
-	defer unifiedPlannerMutex.Unlock()
-	globalUnifiedPlanner = planner
+	globalUnifiedPlanner.Store(planner)
+}
+
+// getQueryPlanner returns the global query planner using lock-free atomic load
+func getQueryPlanner() QueryPlannerInterface {
+	if v := globalQueryPlanner.Load(); v != nil {
+		return v.(QueryPlannerInterface)
+	}
+	return nil
+}
+
+// getUnifiedPlanner returns the global unified planner using lock-free atomic load
+func getUnifiedPlanner() UnifiedPlannerInterface {
+	if v := globalUnifiedPlanner.Load(); v != nil {
+		return v.(UnifiedPlannerInterface)
+	}
+	return nil
 }
 
 // IndexUpdate represents a deferred index update operation
@@ -442,8 +459,8 @@ type BundleService struct {
 	// PERFORMANCE OPTIMIZATION: In-memory index instance cache
 	// IndexInstance field in bundle.Indexes is not persisted (json:"-" tag), so we need
 	// a separate cache to avoid reloading indexes from disk on every operation
-	loadedIndexes   map[string]map[string]interface{} // bundleName -> indexName -> index instance
-	indexCacheMutex sync.RWMutex                      // Protects loadedIndexes map
+	// PERFORMANCE: Sharded across 64 buckets to reduce contention under high concurrency
+	loadedIndexes *bundlestore.ShardedIndexCache // bundleName -> indexName -> index instance (sharded)
 
 	// UNIQUE INDEX MEMORY MANAGEMENT: In-memory B-tree indexes for unique constraints
 	// PostgreSQL-style approach: load unique constraint indexes into memory on database context switch
@@ -525,8 +542,8 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		schemaGenerator: nil, // Initialized below if GraphQL is enabled
 		graphQLEnabled:  globalSettings.EnableGraphQL,
 
-		// PERFORMANCE OPTIMIZATION: Initialize index instance cache
-		loadedIndexes: make(map[string]map[string]interface{}),
+		// PERFORMANCE OPTIMIZATION: Initialize sharded index instance cache (64 shards)
+		loadedIndexes: bundlestore.NewShardedIndexCache(),
 
 		// UNIQUE INDEX MEMORY MANAGEMENT: Initialize memory tracking
 		uniqueIndexMemoryBudgetBytes: int64(globalSettings.UniqueIndexMemoryBudgetMB) * 1024 * 1024, // Convert MB to bytes
@@ -3867,11 +3884,8 @@ func (s *BundleService) applyRemoveField(database *models.Database, bundle *mode
 					break
 				}
 			}
-			s.indexCacheMutex.Lock()
-			if cx, ok := s.loadedIndexes[bundle.Name]; ok {
-				delete(cx, indexName)
-			}
-			s.indexCacheMutex.Unlock()
+			// Remove from sharded index cache (thread-safe)
+			s.loadedIndexes.Delete(bundle.Name, indexName)
 		}
 	}
 
@@ -4438,11 +4452,9 @@ func (s *BundleService) invalidateDocumentPagesForInsert(bundleName string, page
 // invalidatePlanCacheForBundle invalidates all cached query plans for a bundle
 // Called on schema changes (index creation, field modifications) to ensure
 // queries use fresh plans reflecting the updated schema
+// PERFORMANCE: Uses lock-free atomic load for planner access
 func (s *BundleService) invalidatePlanCacheForBundle(bundleName string) {
-	plannerMutex.RLock()
-	planner := globalQueryPlanner
-	plannerMutex.RUnlock()
-
+	planner := getQueryPlanner()
 	if planner == nil {
 		return
 	}
@@ -4452,13 +4464,28 @@ func (s *BundleService) invalidatePlanCacheForBundle(bundleName string) {
 	s.logger.Debugf("Invalidated query plan cache for bundle '%s' (schema change)", bundleName)
 }
 
+// invalidateBundleCaches invalidates all caches for a bundle when data changes.
+// This includes:
+// - Query plan cache (ensures fresh query plans)
+// - JOIN hash table cache (ensures hash tables reflect current data)
+//
+// MUST be called after any INSERT, UPDATE, or DELETE operation on a bundle.
+// PERFORMANCE: This is a fast operation - just clears cache entries without rebuilding.
+func (s *BundleService) invalidateBundleCaches(bundleName string) {
+	// Invalidate query plan cache
+	s.invalidatePlanCacheForBundle(bundleName)
+
+	// Invalidate JOIN hash table cache
+	joinexecutor.GetHashTableCache().Invalidate(bundleName)
+
+	s.logger.Debugf("Invalidated all caches for bundle '%s' (data change)", bundleName)
+}
+
 // removeBundleFromPlanCacheMetadata removes the bundle from plan-cache metadata
 // (bundleInvalidations, staleServesByBundle, collectionVersions). Call when a bundle is dropped.
+// PERFORMANCE: Uses lock-free atomic load for planner access
 func (s *BundleService) removeBundleFromPlanCacheMetadata(bundleName string) {
-	plannerMutex.RLock()
-	planner := globalQueryPlanner
-	plannerMutex.RUnlock()
-
+	planner := getQueryPlanner()
 	if planner == nil {
 		return
 	}
@@ -5322,18 +5349,13 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 	// The IndexInstance field has `json:"-"` tag so it's never persisted to disk
 	// This caused the cache to be empty on every operation, forcing disk loads
 
-	// Check the cache first
-	s.indexCacheMutex.RLock()
-	if bundleCache, exists := s.loadedIndexes[bundle.Name]; exists {
-		if cachedIndex, found := bundleCache[indexName]; found {
-			if hashIndex, ok := cachedIndex.(*hashindex.HashIndexV3); ok {
-				s.indexCacheMutex.RUnlock()
-				s.logger.Debugf("✓ Hash index V3 '%s' CACHE HIT (already in memory)", indexName)
-				return hashIndex, nil
-			}
+	// Check the sharded cache first (fast path with read lock per shard)
+	if cachedIndex, found := s.loadedIndexes.Get(bundle.Name, indexName); found {
+		if hashIndex, ok := cachedIndex.(*hashindex.HashIndexV3); ok {
+			s.logger.Debugf("✓ Hash index V3 '%s' CACHE HIT (already in memory)", indexName)
+			return hashIndex, nil
 		}
 	}
-	s.indexCacheMutex.RUnlock()
 
 	s.logger.Infof("⚠️  Hash index V3 '%s' CACHE MISS - loading from disk for bundle '%s'", indexName, bundle.Name)
 
@@ -5366,13 +5388,8 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 		return nil, fmt.Errorf("failed to load hash index V3 '%s' from disk: %w", indexName, err)
 	}
 
-	// Store the loaded instance in the cache (thread-safe)
-	s.indexCacheMutex.Lock()
-	if _, exists := s.loadedIndexes[bundle.Name]; !exists {
-		s.loadedIndexes[bundle.Name] = make(map[string]interface{})
-	}
-	s.loadedIndexes[bundle.Name][indexName] = hashIndex
-	s.indexCacheMutex.Unlock()
+	// Store the loaded instance in the sharded cache (thread-safe with GetOrSet)
+	s.loadedIndexes.Set(bundle.Name, indexName, hashIndex)
 
 	s.logger.Infof("✅ Successfully loaded and cached hash index V3 '%s' from disk", indexName)
 	return hashIndex, nil
@@ -5393,65 +5410,45 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 	// FIX: Use proper double-checked locking pattern to prevent race condition
 	// where multiple goroutines load separate BTreeIndex instances for the same file,
 	// causing tree corruption (each instance has its own mutex but shares the file)
+	// PERFORMANCE: Uses sharded cache (64 shards) with per-shard locking
 
-	// Fast path: check cache with read lock
-	s.indexCacheMutex.RLock()
-	if bundleCache, exists := s.loadedIndexes[bundle.Name]; exists {
-		if cachedIndex, found := bundleCache[indexName]; found {
-			if btreeIndex, ok := cachedIndex.(*btreeindexV2.BTreeIndex); ok {
-				s.indexCacheMutex.RUnlock()
-				return btreeIndex, nil
-			}
+	// Use GetOrLoad which provides atomic load-or-create semantics per shard
+	// This prevents multiple goroutines from loading the same index simultaneously
+	loaded, err := s.loadedIndexes.GetOrLoad(bundle.Name, indexName, func() (interface{}, error) {
+		s.logger.Debugf("⚠️  BTree index '%s' CACHE MISS - loading from disk for bundle '%s'", indexName, bundle.Name)
+
+		// TODO This is should be in a separate centrailized location so we can alter folders later
+		// Construct proper B-tree index file path
+		// Format: /data_dir/<database>/<bundle>/indexes/btree/<btree-index-file-name>.btidx
+		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+		btreeIndexesPath := filepath.Join(databasePath, bundle.Name, "indexes", "btree")
+		indexFilePath := filepath.Join(btreeIndexesPath, fmt.Sprintf("%s.btidx", indexName))
+
+		// Check if the index file exists before trying to open it
+		if _, err := os.Stat(indexFilePath); os.IsNotExist(err) {
+			// Index file doesn't exist - this can happen if:
+			// 1. Index was just created but file creation failed
+			// 2. Index metadata exists but file was deleted
+			// 3. Race condition during index creation
+			s.logger.Warnf("BTree index file '%s' does not exist for index '%s', skipping updates", indexFilePath, indexName)
+			return nil, fmt.Errorf("index file does not exist: %s (index may still be initializing)", indexFilePath)
 		}
-	}
-	s.indexCacheMutex.RUnlock()
 
-	// Slow path: acquire write lock and re-check before loading
-	s.indexCacheMutex.Lock()
-	defer s.indexCacheMutex.Unlock()
-
-	// Double-check: another goroutine may have loaded it while we waited for the lock
-	if bundleCache, exists := s.loadedIndexes[bundle.Name]; exists {
-		if cachedIndex, found := bundleCache[indexName]; found {
-			if btreeIndex, ok := cachedIndex.(*btreeindexV2.BTreeIndex); ok {
-				return btreeIndex, nil
-			}
+		args := settings.GetSettings()
+		btreeIndex, err := btreeindexV2.OpenBTreeIndex(indexFilePath, args.Debug, s.logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load BTree index '%s' from disk: %w", indexName, err)
 		}
-	}
 
-	s.logger.Debugf("⚠️  BTree index '%s' CACHE MISS - loading from disk for bundle '%s'", indexName, bundle.Name)
+		s.logger.Infof("✅ Successfully loaded and cached BTree index '%s' from disk", indexName)
+		return btreeIndex, nil
+	})
 
-	// TODO This is should be in a separate centrailized location so we can alter folders later
-	// Construct proper B-tree index file path
-	// Format: /data_dir/<database>/<bundle>/indexes/btree/<btree-index-file-name>.btidx
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	btreeIndexesPath := filepath.Join(databasePath, bundle.Name, "indexes", "btree")
-	indexFilePath := filepath.Join(btreeIndexesPath, fmt.Sprintf("%s.btidx", indexName))
-
-	// Check if the index file exists before trying to open it
-	if _, err := os.Stat(indexFilePath); os.IsNotExist(err) {
-		// Index file doesn't exist - this can happen if:
-		// 1. Index was just created but file creation failed
-		// 2. Index metadata exists but file was deleted
-		// 3. Race condition during index creation
-		s.logger.Warnf("BTree index file '%s' does not exist for index '%s', skipping updates", indexFilePath, indexName)
-		return nil, fmt.Errorf("index file does not exist: %s (index may still be initializing)", indexFilePath)
-	}
-
-	args := settings.GetSettings()
-	btreeIndex, err := btreeindexV2.OpenBTreeIndex(indexFilePath, args.Debug, s.logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load BTree index '%s' from disk: %w", indexName, err)
+		return nil, err
 	}
 
-	// Store in persistent cache (already holding write lock)
-	if s.loadedIndexes[bundle.Name] == nil {
-		s.loadedIndexes[bundle.Name] = make(map[string]interface{})
-	}
-	s.loadedIndexes[bundle.Name][indexName] = btreeIndex
-
-	s.logger.Infof("✅ Successfully loaded and cached BTree index '%s' from disk", indexName)
-	return btreeIndex, nil
+	return loaded.(*btreeindexV2.BTreeIndex), nil
 }
 
 // GetOrLoadBTreeIndex is a public wrapper for getOrLoadBTreeIndex to support query planner
@@ -5512,7 +5509,8 @@ func (s *BundleService) LoadDatabaseIndexes(databaseName string) error {
 		s.logger.Infof("📤 Evicting idle database '%s' indexes (idle for %v)", dbName, now.Sub(s.loadedDatabases[dbName]))
 
 		// Find all bundles for this database and unload their unique indexes
-		for bundleName, indexes := range s.loadedIndexes {
+		// Use ForEach to safely iterate over the sharded cache
+		s.loadedIndexes.ForEach(func(bundleName string, indexes map[string]interface{}) bool {
 			// TODO: I need to add database info to bundle name or use catalog to map bundle->database
 			// For now, we'll unload all indexes for the evicted database (conservative approach)
 			for indexName, indexInstance := range indexes {
@@ -5525,12 +5523,14 @@ func (s *BundleService) LoadDatabaseIndexes(databaseName string) error {
 					// Remove from memory tracking
 					meta := btreeIndex.Metadata
 					s.currentIndexMemoryUsage -= meta.EstimatedMemorySizeBytes
-					delete(indexes, indexName)
+					// Delete from sharded cache (ForEach gives us a copy, so we delete separately)
+					s.loadedIndexes.DeleteIndex(bundleName, indexName)
 					s.logger.Debugf("  Unloaded B-tree index '%s' from bundle '%s' (%d MB freed)",
 						indexName, bundleName, meta.EstimatedMemorySizeBytes/(1024*1024))
 				}
 			}
-		}
+			return true // continue iteration
+		})
 
 		delete(s.loadedDatabases, dbName)
 	}
@@ -5577,12 +5577,8 @@ func (s *BundleService) LoadDatabaseIndexes(databaseName string) error {
 					s.logger.Warnf("Failed to close B-tree index '%s': %v", indexName, err)
 				}
 
-				// Remove from cache to force disk-based fallback
-				s.indexCacheMutex.Lock()
-				if bundleIndexes, exists := s.loadedIndexes[bundleName]; exists {
-					delete(bundleIndexes, indexName)
-				}
-				s.indexCacheMutex.Unlock()
+				// Remove from sharded cache to force disk-based fallback
+				s.loadedIndexes.Delete(bundleName, indexName)
 
 				continue
 			}
@@ -5762,6 +5758,10 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// Documents inserted after scanner creation are filtered out during iteration
 	// This avoids cache churn and enables consistent reads without destroying scanners
 	s.logger.Debugf("INSERT completed for bundle '%s' page %d - scanners use snapshot isolation", docCommand.BundleName, pageID)
+
+	// PERFORMANCE: Invalidate JOIN hash table cache for this bundle
+	// This ensures subsequent JOINs rebuild hash tables with the new document
+	s.invalidateBundleCaches(bundle.Name)
 
 	return newDocument.DocumentID, nil
 }
@@ -6515,6 +6515,10 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		s.logger.Debugf("Flushed deferred B-tree index updates for bundle %s", bundle.Name)
 	}
 
+	// PERFORMANCE: Invalidate JOIN hash table cache for this bundle
+	// This ensures subsequent JOINs rebuild hash tables with updated data
+	s.invalidateBundleCaches(bundle.Name)
+
 	// TODO(P5): Memtable-first return — return after memtable+WAL, persist WriteBuffer→disk in background.
 	// Requires explicit durability policy and recovery design. See plan §5 / §8.
 	return nil
@@ -6887,8 +6891,8 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 		}
 	}
 
-	// Invalidate query planner cache (planner caches Bundle objects with full document sets)
-	s.invalidatePlanCacheForBundle(docCommand.BundleName)
+	// PERFORMANCE: Invalidate all caches for this bundle (query planner + JOIN hash tables)
+	s.invalidateBundleCaches(docCommand.BundleName)
 
 	// STEP 7: Update command with deleted document IDs for response
 	docCommand.DeletedDocumentIDs = docIDs //deletedDocumentIDs
@@ -7026,11 +7030,8 @@ func (s *BundleService) getDocumentsByQueryPlanner(ctx context.Context, bundle *
 		ctx = context.Background()
 	}
 
-	// Check if unified planner is available
-	unifiedPlannerMutex.RLock()
-	planner := globalUnifiedPlanner
-	unifiedPlannerMutex.RUnlock()
-
+	// PERFORMANCE: Check if unified planner is available using lock-free atomic load
+	planner := getUnifiedPlanner()
 	if planner == nil {
 		s.logger.Debugf("Unified planner not available, falling back to GetDocumentsByFilter")
 		return s.GetDocumentsByFilter(bundle, whereClause, nil)

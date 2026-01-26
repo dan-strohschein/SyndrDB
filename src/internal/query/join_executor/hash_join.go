@@ -136,7 +136,9 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 	if err != nil {
 		return nil, fmt.Errorf("hash table build failed: %w", err)
 	}
-	defer hashTable.Clear() // Cleanup memory
+	// NOTE: We do NOT clear the hash table here anymore.
+	// If cached, the cache owns it and manages lifecycle.
+	// If not cached, the hash table will be garbage collected after use.
 
 	// Probe phase: Check for index-assisted optimization
 	var joinedDocs []*JoinedDocument
@@ -278,11 +280,38 @@ func (hjs *HashJoinStrategy) getJoinKeys(conditions []JoinCondition, swapped boo
 // buildHashTable creates and populates the hash table from the build side bundle
 // Returns: (hashTable, bloomFilter, stats, error)
 // bloomFilter may be nil if optimization is disabled
+//
+// PERFORMANCE: Uses LRU cache to avoid rebuilding hash tables for repeated JOINs.
+// Cache is invalidated explicitly when bundle data changes.
 func (hjs *HashJoinStrategy) buildHashTable(
 	buildBundle documentscanner.BundleInterface,
 	buildKey string,
 	request *JoinRequest,
 ) (HashTable, *bloomfilter.BloomFilter, *ScanStats, error) {
+
+	bundleName := buildBundle.GetName()
+
+	// PERFORMANCE OPTIMIZATION: Check hash table cache first
+	// Skip cache for filtered bundles (they have different data than base bundle)
+	useCache := !strings.Contains(bundleName, "[expr-filtered]") && !strings.Contains(bundleName, "[filtered]")
+	if useCache {
+		cacheKey := HashTableCacheKey{
+			BundleName: bundleName,
+			JoinKey:    buildKey,
+		}
+
+		cache := GetHashTableCache()
+		if cachedTable, cachedBloom, cachedStats, found := cache.Get(cacheKey); found {
+			hjs.logger.Infof("✓ Hash table CACHE HIT for %s.%s (skipped rebuild)", bundleName, buildKey)
+			// Return a copy of stats to avoid mutation issues
+			statsCopy := &ScanStats{
+				DocumentsScanned: cachedStats.DocumentsScanned,
+				Comparisons:      cachedStats.Comparisons,
+			}
+			return cachedTable, cachedBloom, statsCopy, nil
+		}
+		hjs.logger.Debugf("Hash table cache MISS for %s.%s - building new hash table", bundleName, buildKey)
+	}
 
 	hjs.logger.Debugf("Building hash table from bundle %s on key %s",
 		buildBundle.GetName(), buildKey)
@@ -312,7 +341,6 @@ func (hjs *HashJoinStrategy) buildHashTable(
 	// but the index contains all documents from the base bundle, not just filtered ones.
 	// Using the index would include documents that don't match the filter, causing incorrect results.
 	var buildIndex interface{}
-	bundleName := buildBundle.GetName()
 	if strings.Contains(bundleName, "[expr-filtered]") || strings.Contains(bundleName, "[filtered]") {
 		hjs.logger.Debugf("Skipping index-assisted build for filtered bundle %s (index contains all base bundle documents, not just filtered subset)",
 			bundleName)
@@ -439,6 +467,18 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 	hjs.logger.Debugf("Hash table built: %d unique keys, %d documents, %d bytes memory%s",
 		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats)
+
+	// PERFORMANCE OPTIMIZATION: Cache the hash table for reuse in repeated JOINs
+	// Only cache non-filtered bundles (filtered bundles are query-specific)
+	if useCache {
+		cacheKey := HashTableCacheKey{
+			BundleName: bundleName,
+			JoinKey:    buildKey,
+		}
+		GetHashTableCache().Put(cacheKey, hashTable, bloom, stats)
+		hjs.logger.Infof("✓ Hash table CACHED for %s.%s (%d docs, %d bytes)",
+			bundleName, buildKey, stats.DocumentsScanned, hashTable.GetMemoryUsage())
+	}
 
 	return hashTable, bloom, stats, nil
 }

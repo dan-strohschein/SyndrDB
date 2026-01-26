@@ -816,7 +816,15 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	filtered := make(map[string]*models.Document)
 	memoryTracker := GetMemoryTrackerFromContext(ctx)
 	docCount := 0
+	matchCount := 0 // Track matching documents for early termination
 	for docID, doc := range documents {
+		// PERFORMANCE OPTIMIZATION: Early termination for LIMIT pushdown (no ORDER BY)
+		// When MaxDocuments is set, stop after finding enough matching documents
+		if node.MaxDocuments > 0 && matchCount >= node.MaxDocuments {
+			node.Logger.Debugf("Early termination: reached LIMIT of %d matching documents", node.MaxDocuments)
+			break
+		}
+
 		// Check context every 1000 documents
 		// TODO: I can make this check frequency adaptive based on document processing rate
 		if docCount%1000 == 0 {
@@ -847,11 +855,12 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 
 		if node.matchesConditions(doc, subqueryContext) {
 			filtered[docID] = doc
+			matchCount++ // Track matches for LIMIT pushdown early termination
 		}
 		docCount++
 	}
 
-	node.Logger.Debugf("Filter node reduced %d documents to %d", len(documents), len(filtered))
+	node.Logger.Debugf("Filter node reduced %d documents to %d (scanned: %d)", len(documents), len(filtered), docCount)
 	return filtered, nil
 }
 

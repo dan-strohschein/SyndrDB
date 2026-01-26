@@ -150,6 +150,9 @@ type FilterNode struct {
 	SubqueryExecutor interface{} // *subquery.SubqueryExecutor - use type assertion to avoid circular dependencies
 	// TIER 1 SUBQUERY SUPPORT: Database reference needed for executing inner queries
 	Database *models.Database // Database containing bundles for subquery execution
+	// PERFORMANCE OPTIMIZATION: Early termination limit for LIMIT pushdown (0 = no limit)
+	// When set and query has no ORDER BY, stop filtering after MaxDocuments matches
+	MaxDocuments int
 }
 
 // FilterCondition represents a single filter condition
