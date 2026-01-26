@@ -2415,8 +2415,8 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string,
 }
 
 // GetDocumentsByIDs loads multiple documents by ID in batch (P2b).
-// Groups by page, loads each page once, then extracts requested docs. Reduces N×GetDocument to
-// fewer page loads. Preserves input order; skips missing docs (logs warn) like convertDocIDsToDocuments.
+// OPTIMIZED: Uses parsed docs cache first, avoiding stale pageID lookups.
+// Preserves input order; skips missing docs (logs warn) like convertDocIDsToDocuments.
 func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string) ([]*models.Document, error) {
 	if len(docIDs) == 0 {
 		return nil, nil
@@ -2442,40 +2442,67 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 		toLoad = append(toLoad, docIDs...)
 	}
 
-	// Resolve pageID for each, group by page
-	pageToIDs := make(map[uint32][]string)
-	for _, id := range toLoad {
-		pageID, err := s.findDocumentPage(bundleName, id)
-		if err != nil {
-			s.logger.Warnf("GetDocumentsByIDs: document %s not found: %v", id, err)
-			continue
+	if len(toLoad) == 0 {
+		// All docs found in memtable
+		out := make([]*models.Document, 0, len(docIDs))
+		for _, id := range docIDs {
+			if d := byID[id]; d != nil {
+				out = append(out, d)
+			}
 		}
-		pageToIDs[pageID] = append(pageToIDs[pageID], id)
+		return out, nil
 	}
 
-	// Load each page once and extract docs
-	for pageID, ids := range pageToIDs {
-		page, err := s.GetDocumentPage(bundleName, dbName, pageID)
-		if err != nil {
-			for _, id := range ids {
-				s.logger.Warnf("GetDocumentsByIDs: failed to load page %d for %s: %v", pageID, id, err)
+	// OPTIMIZATION: Try parsed docs cache first (avoids stale pageID lookups)
+	// This is much faster than page-based lookup when indexes have stale pageIDs
+	cachedDocs, notInCache := s.store.GetDocumentsByIDsFromCache(bundleName, dbName, toLoad)
+	for docID, doc := range cachedDocs {
+		cp := doc
+		byID[docID] = &cp
+	}
+
+	// Only do page-based lookup for docs not in parsed cache
+	stillToLoad := make([]string, 0, len(notInCache))
+	for docID := range notInCache {
+		stillToLoad = append(stillToLoad, docID)
+	}
+
+	if len(stillToLoad) > 0 {
+		// Fallback: Resolve pageID for remaining docs
+		pageToIDs := make(map[uint32][]string)
+		for _, id := range stillToLoad {
+			pageID, err := s.findDocumentPage(bundleName, id)
+			if err != nil {
+				s.logger.Warnf("GetDocumentsByIDs: document %s not found: %v", id, err)
+				continue
 			}
-			continue
+			pageToIDs[pageID] = append(pageToIDs[pageID], id)
 		}
-		for _, id := range ids {
-			if d, ok := page.Documents[id]; ok {
-				cp := d
-				byID[id] = &cp
-			} else {
-				// Page-based lookup can miss due to documentPageMap/index vs multi-file layout mismatch.
-				// Invalidate stale entry so we don't keep using the bad pageID; then fallback to GetDocument.
-				s.invalidateDocumentPageMapEntry(bundleName, id)
-				doc, getErr := s.GetDocument(bundleName, dbName, id)
-				if getErr == nil {
-					byID[id] = doc
-					s.logger.Debugf("GetDocumentsByIDs: document %s not in page %d, resolved via GetDocument", id, pageID)
+
+		// Load each page once and extract docs
+		for pageID, ids := range pageToIDs {
+			page, err := s.GetDocumentPage(bundleName, dbName, pageID)
+			if err != nil {
+				for _, id := range ids {
+					s.logger.Warnf("GetDocumentsByIDs: failed to load page %d for %s: %v", pageID, id, err)
+				}
+				continue
+			}
+			for _, id := range ids {
+				if d, ok := page.Documents[id]; ok {
+					cp := d
+					byID[id] = &cp
 				} else {
-					s.logger.Warnf("GetDocumentsByIDs: document %s not in page %d; GetDocument fallback failed: %v", id, pageID, getErr)
+					// Page-based lookup can miss due to documentPageMap/index vs multi-file layout mismatch.
+					// Invalidate stale entry so we don't keep using the bad pageID; then fallback to GetDocument.
+					s.invalidateDocumentPageMapEntry(bundleName, id)
+					doc, getErr := s.GetDocument(bundleName, dbName, id)
+					if getErr == nil {
+						byID[id] = doc
+						s.logger.Debugf("GetDocumentsByIDs: document %s not in page %d, resolved via GetDocument", id, pageID)
+					} else {
+						s.logger.Warnf("GetDocumentsByIDs: document %s not in page %d; GetDocument fallback failed: %v", id, pageID, getErr)
+					}
 				}
 			}
 		}

@@ -180,6 +180,9 @@ type BundleStore interface {
 	IsDocumentBuffered(bundleName string, docID string) bool
 	GetDiscardedDocuments(bundleName string) []string
 	ClearDiscardedDocuments(bundleName string, docIDs []string)
+
+	// Document lookup optimization - bypasses stale pageID issues
+	GetDocumentsByIDsFromCache(bundleName, databaseName string, docIDs []string) (map[string]models.Document, map[string]bool)
 }
 
 func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.SugaredLogger, storageFormat string) (*BundleStorageEngine, error) {
@@ -629,6 +632,61 @@ func (bse *BundleStorageEngine) evictFileReadCacheLRULocked() {
 			bse.logger.Debugf("Evicted file read cache entry: %s", evictKey)
 		}
 	}
+}
+
+// GetDocumentsByIDsFromCache retrieves documents by IDs directly from the parsed docs cache.
+// This is much faster than page-based lookup when we have docIDs from an index search.
+// Uses last-write-wins semantics since parsed cache is built from all segment files.
+// Returns documents found and a set of docIDs not in cache (need fallback).
+func (bse *BundleStorageEngine) GetDocumentsByIDsFromCache(bundleName, databaseName string, docIDs []string) (map[string]models.Document, map[string]bool) {
+	result := make(map[string]models.Document, len(docIDs))
+	notFound := make(map[string]bool)
+
+	// Build docID set for O(1) lookup
+	docIDSet := make(map[string]bool, len(docIDs))
+	for _, id := range docIDs {
+		docIDSet[id] = true
+		notFound[id] = true // Assume not found until we find it
+	}
+
+	// Load manifest to get all segment files
+	manifestMgr := bse.getOrCreateManifestManager(databaseName, bundleName)
+	manifest, err := manifestMgr.LoadOrCreate(databaseName, bundleName)
+	if err != nil {
+		// No manifest - return all as not found for fallback
+		return result, notFound
+	}
+
+	// Check parsed cache for each segment file
+	bundleDir := GetBundleDirectory(databaseName, bundleName)
+	bse.parsedDocsCacheMutex.RLock()
+	for _, fileInfo := range manifest.Files {
+		filePath := filepath.Join(bundleDir, fileInfo.FileName)
+		cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
+
+		if cached, ok := bse.parsedDocsCache[cacheKey]; ok {
+			cached.lastAccess = time.Now().UnixNano()
+			// Check for deleted docs first (tombstones take precedence)
+			for docID := range cached.deletedDocIDs {
+				if docIDSet[docID] {
+					delete(result, docID) // Remove if was found in earlier file
+					delete(notFound, docID)
+				}
+			}
+			// Then look for the docs we need
+			for docID := range docIDSet {
+				if doc, found := cached.documents[docID]; found {
+					if !cached.deletedDocIDs[docID] {
+						result[docID] = doc
+						delete(notFound, docID)
+					}
+				}
+			}
+		}
+	}
+	bse.parsedDocsCacheMutex.RUnlock()
+
+	return result, notFound
 }
 
 // InvalidateFileReadCache removes a single path from the file-read cache.
