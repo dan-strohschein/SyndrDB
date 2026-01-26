@@ -22,7 +22,7 @@ import (
 // 1. First tries optimistic update (no upfront locks, validate at commit)
 // 2. Falls back to pessimistic locking after repeated conflicts
 // This provides best performance under both low and high contention scenarios.
-func UpdateDocument(commandParts []string, serviceManager ServiceManager, database *models.Database, command string, logger *zap.SugaredLogger, session *Session) (*CommandResponse, error) {
+func UpdateDocument(commandParts []string, serviceManager ServiceManager, database *models.Database, command string, logger *zap.SugaredLogger, session *Session, startTime time.Time) (*CommandResponse, error) {
 	// Enhanced bundle name parsing following SyndrDB comprehensive error handling
 	// This replaces the fragile index-based parsing with robust string extraction
 	bundleName, err := parseBundleNameFromCommand(command, "IN")
@@ -99,19 +99,20 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		}
 
 		cmdResponse := &CommandResponse{
-			ResultCount: 1,
-			Result:      "Document updated successfully in bundle '" + bundleName + "'.",
+			ResultCount:     1,
+			Result:          "Document updated successfully in bundle '" + bundleName + "'.",
+			ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 		}
 		return cmdResponse, nil
 	}
 
 	// EXPLICIT TRANSACTION PATH: Use document-level locking for strict 2PL semantics
-	return updateDocumentPessimistic(commandParts, serviceManager, database, bundle, docCommand, session, logger)
+	return updateDocumentPessimistic(commandParts, serviceManager, database, bundle, docCommand, session, logger, startTime)
 }
 
 // updateDocumentPessimistic handles UPDATE using traditional pessimistic document-level locking.
 // Used for explicit transactions where strict 2PL semantics are required.
-func updateDocumentPessimistic(commandParts []string, serviceManager ServiceManager, database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand, session *Session, logger *zap.SugaredLogger) (*CommandResponse, error) {
+func updateDocumentPessimistic(commandParts []string, serviceManager ServiceManager, database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand, session *Session, logger *zap.SugaredLogger, startTime time.Time) (*CommandResponse, error) {
 	bundleName := bundle.Name
 
 	// EXPLICIT TRANSACTION: Document-level locking for strict 2PL semantics
@@ -255,8 +256,9 @@ func updateDocumentPessimistic(commandParts []string, serviceManager ServiceMana
 	}
 
 	cmdResponse := &CommandResponse{
-		ResultCount: 1,
-		Result:      "Document updated successfully in bundle '" + bundleName + "'.",
+		ResultCount:     1,
+		Result:          "Document updated successfully in bundle '" + bundleName + "'.",
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}
 	return cmdResponse, nil
 }
@@ -404,11 +406,12 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	}
 
 	result := fmt.Sprintf("{\"DocumentID\": \"%s\", \"message\": \"Document added successfully to bundle '%s'.\"}", docID, bundleName)
-	cmdResponse := &CommandResponse{
-		ResultCount: 1,
-		Result:      result,
-	}
 	endingTime := time.Since(startingTime)
+	cmdResponse := &CommandResponse{
+		ResultCount:     1,
+		Result:          result,
+		ExecutionTimeMS: float64(endingTime.Nanoseconds()) / 1e6,
+	}
 	logger.Infof("DEBUG DEBUG :: AddDocument total time: %s", endingTime.String())
 	return cmdResponse, nil
 }

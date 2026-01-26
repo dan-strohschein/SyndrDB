@@ -178,7 +178,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// This includes: CREATE VIEW, CREATE MATERIALIZED VIEW, DROP VIEW, DROP MATERIALIZED VIEW,
 	//                REFRESH MATERIALIZED VIEW, SHOW VIEWS, DESCRIBE VIEW
 	if isViewCommand(firstWords) {
-		return RouteViewCommand(command, firstWords, logger, serviceManager, database, session)
+		return RouteViewCommand(command, firstWords, logger, serviceManager, database, session, startTime)
 	}
 
 	// EXPLAIN command - must be checked before SELECT to intercept EXPLAIN SELECT
@@ -214,21 +214,21 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "databases":
-			return ShowDatabases(command, logger, serviceManager)
+			return ShowDatabases(command, logger, serviceManager, startTime)
 		case "bundles":
 
-			return ShowBundles(command, database, logger, serviceManager)
+			return ShowBundles(command, database, logger, serviceManager, startTime)
 		case "bundle":
-			return ShowBundle(command, database, logger, serviceManager)
+			return ShowBundle(command, database, logger, serviceManager, startTime)
 		case "views":
 			// SHOW VIEWS [IN DATABASE "database_name"]
-			return HandleShowViews(command, logger, serviceManager, database)
+			return HandleShowViews(command, logger, serviceManager, database, startTime)
 		case "sessions":
-			return ShowSessions(command, logger, serviceManager)
+			return ShowSessions(command, logger, serviceManager, startTime)
 		case "session":
-			return ShowSession(command, logger, serviceManager)
+			return ShowSession(command, logger, serviceManager, startTime)
 		case "users":
-			return ShowUsers(command, database, logger, serviceManager)
+			return ShowUsers(command, database, logger, serviceManager, startTime)
 		case "migrations":
 			// SHOW MIGRATIONS FOR "database_name"
 			return ShowMigrationsCommand(command, database, logger, serviceManager)
@@ -241,11 +241,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				errors.LayerCommand).WithContext("command", command)
 		case "versions":
 			// PHASE 6: MVCC - SHOW VERSIONS [FOR "documentID"] [IN BUNDLE "bundleName"]
-			return ShowVersions(command, database, logger, serviceManager)
+			return ShowVersions(command, database, logger, serviceManager, startTime)
 		case "active":
 			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "snapshots" {
 				// PHASE 6: MVCC - SHOW ACTIVE SNAPSHOTS
-				return ShowActiveSnapshots(command, logger, serviceManager)
+				return ShowActiveSnapshots(command, logger, serviceManager, startTime)
 			}
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown SHOW ACTIVE command: %s", command),
@@ -253,7 +253,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		case "conflict":
 			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "log" {
 				// PHASE 6: MVCC - SHOW CONFLICT LOG
-				return ShowConflictLog(command, logger, serviceManager)
+				return ShowConflictLog(command, logger, serviceManager, startTime)
 			}
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown SHOW CONFLICT command: %s", command),
@@ -272,7 +272,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "session":
-			return InvalidateSession(command, logger, serviceManager)
+			return InvalidateSession(command, logger, serviceManager, startTime)
 		}
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unknown INVALIDATE command: %s", command),
@@ -506,7 +506,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				(<FIELDNAME> = <VALUE>, <FIELDNAME> = <VALUE>, ... )
 			*/
 
-			result1, err := UpdateDocument(firstWords, serviceManager, database, command, logger, session)
+			result1, err := UpdateDocument(firstWords, serviceManager, database, command, logger, session, startTime)
 
 			return result1, err
 
@@ -867,10 +867,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			// STEP 6: Format success response with deleted document IDs
 			deletedCount := len(docCommand.DeletedDocumentIDs)
+			var deleteResultMsg string
 			if deletedCount == 0 {
-				result = fmt.Sprintf("{\"message\": \"No documents matched the WHERE clause in bundle '%s'\"}", bundleName)
+				deleteResultMsg = fmt.Sprintf("{\"message\": \"No documents matched the WHERE clause in bundle '%s'\"}", bundleName)
 			} else if deletedCount == 1 {
-				result = fmt.Sprintf("{\"message\": \"Successfully deleted 1 document from bundle '%s'\", \"deleted_ids\": [\"%s\"]}",
+				deleteResultMsg = fmt.Sprintf("{\"message\": \"Successfully deleted 1 document from bundle '%s'\", \"deleted_ids\": [\"%s\"]}",
 					bundleName, docCommand.DeletedDocumentIDs[0])
 			} else {
 				// Build JSON array of deleted IDs
@@ -882,9 +883,17 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					idsJSON += fmt.Sprintf("\"%s\"", id)
 				}
 				idsJSON += "]"
-				result = fmt.Sprintf("{\"message\": \"Successfully deleted %d documents from bundle '%s'\", \"deleted_ids\": %s}",
+				deleteResultMsg = fmt.Sprintf("{\"message\": \"Successfully deleted %d documents from bundle '%s'\", \"deleted_ids\": %s}",
 					deletedCount, bundleName, idsJSON)
 			}
+
+			// Return proper CommandResponse with ExecutionTimeMS
+			cmdResponse := &CommandResponse{
+				ResultCount:     deletedCount,
+				Result:          deleteResultMsg,
+				ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+			}
+			return cmdResponse, nil
 		case "user":
 			// DELETE USER "username" [FORCE];
 			return DeleteUser(command, logger, serviceManager)

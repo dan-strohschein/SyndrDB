@@ -32,12 +32,12 @@ type HashTableCacheKey struct {
 
 // CachedHashTable stores a hash table along with its metadata
 type CachedHashTable struct {
-	HashTable   HashTable                 // The cached hash table
-	BloomFilter *bloomfilter.BloomFilter  // Optional bloom filter
-	Stats       *ScanStats                // Statistics from build phase
-	CreatedAt   time.Time                 // When this was cached
-	Hits        int64                     // Number of cache hits
-	ByteSize    int64                     // Estimated memory size
+	HashTable   HashTable                // The cached hash table
+	BloomFilter *bloomfilter.BloomFilter // Optional bloom filter
+	Stats       *ScanStats               // Statistics from build phase
+	CreatedAt   time.Time                // When this was cached
+	Hits        int64                    // Number of cache hits
+	ByteSize    int64                    // Estimated memory size
 }
 
 // hashTableCacheEntry is used for LRU tracking
