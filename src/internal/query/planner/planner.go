@@ -112,13 +112,13 @@ type OrderedChild interface {
 // Implements ExecutionNode and OrderedChild. When Bundle.Documents is not available, ExecuteOrdered
 // returns an error so the consumer can fall back to Execute (map) and a regular sort.
 type BTreeOrderedScanNode struct {
-	Bundle              *models.Bundle
-	IndexName           string
-	OrderedByFieldName  string
-	Logger              *zap.SugaredLogger
-	BundleServiceInt    BundleServiceInterface
-	Cost                float64
-	EstimatedRows       int
+	Bundle             *models.Bundle
+	IndexName          string
+	OrderedByFieldName string
+	Logger             *zap.SugaredLogger
+	BundleServiceInt   BundleServiceInterface
+	Cost               float64
+	EstimatedRows      int
 }
 
 // FullScanNode represents a full bundle scan
@@ -129,7 +129,7 @@ type FullScanNode struct {
 	Logger           *zap.SugaredLogger
 	BundleServiceInt BundleServiceInterface
 	DocumentScanner  documentscanner.DocumentScannerInterface
-	MaxDocuments     int // OPTIMIZATION: Early termination limit (0 = no limit, set when LIMIT-only query)
+	MaxDocuments     int      // OPTIMIZATION: Early termination limit (0 = no limit, set when LIMIT-only query)
 	ProjectionFields []string // PROJECTION PUSHDOWN: Field names to deserialize (e.g., ["name"] for ORDER BY name queries)
 } // FilterNode represents post-scan filtering
 type FilterNode struct {

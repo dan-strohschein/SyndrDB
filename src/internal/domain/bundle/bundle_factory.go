@@ -40,6 +40,8 @@ func (f *BundleFactoryImpl) NewBundle(name string, description string) *models.B
 		TotalDocuments: 0,
 		PageSize:       4096, // Match BundleService defaultPageSize (power of 2)
 		PageCount:      0,
+		// Initialize the sorted index for proper pageID alignment
+		SortedIndex: models.NewShardedSortedIndex(),
 	}
 }
 

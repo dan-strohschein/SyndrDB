@@ -2156,6 +2156,12 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Failed to load bundle metadata '%s'", name), errors.LayerStorage).WithContext("bundle_name", name)
 			}
 
+			// Load the SortedIndex for this bundle (for pageID alignment)
+			if err := InitializeBundleSortedIndex(bundle); err != nil {
+				s.logger.Warnf("Failed to load sorted index for bundle '%s': %v (will use fallback pageID calculation)", name, err)
+				// Continue loading - fallback to legacy pageID calculation if SortedIndex not available
+			}
+
 			// Discover and populate existing index files
 			if len(bundle.Indexes) == 0 {
 				err = s.discoverBundleIndexes(bundle)
@@ -2756,11 +2762,77 @@ func (s *BundleService) invalidateDocumentPageMapEntry(bundleName, documentID st
 
 // InvalidateDocumentPageMapForBundle clears all documentID->pageID entries for a bundle.
 // Called when the whole mapping is stale (e.g. after compaction).
+// Also rebuilds the SortedIndex to ensure correct pageID calculation after compaction.
 func (s *BundleService) InvalidateDocumentPageMapForBundle(bundleName string) {
 	s.pageCacheMutex.Lock()
-	defer s.pageCacheMutex.Unlock()
 	delete(s.documentPageMap, bundleName)
 	delete(s.documentPageMapFIFO, bundleName)
+	s.pageCacheMutex.Unlock()
+
+	// PAGE ID ARCHITECTURE ALIGNMENT: Rebuild SortedIndex after compaction
+	// Compaction removes tombstoned documents and rewrites the bundle file,
+	// which changes document positions. Rebuild the SortedIndex from the
+	// surviving documents to ensure correct pageID calculation.
+	s.rebuildSortedIndexAfterCompaction(bundleName)
+}
+
+// rebuildSortedIndexAfterCompaction rebuilds a bundle's SortedIndex from the
+// DocumentID hash index after compaction completes.
+// This ensures the SortedIndex only contains live (non-tombstoned) documents.
+func (s *BundleService) rebuildSortedIndexAfterCompaction(bundleName string) {
+	bundle, exists := s.bundleMetadata[bundleName]
+	if !exists {
+		s.logger.Warnf("Cannot rebuild SortedIndex: bundle %s not found in metadata", bundleName)
+		return
+	}
+
+	if bundle.SortedIndex == nil {
+		// Create a new SortedIndex if it doesn't exist
+		bundle.SortedIndex = models.NewShardedSortedIndex()
+	}
+
+	// Get the DocumentID hash index to retrieve all live document IDs
+	var docIDs []string
+	if bundle.Indexes != nil {
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == "DocumentID" {
+				hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
+				if err != nil {
+					s.logger.Warnf("Failed to load DocumentID index for SortedIndex rebuild: %v", err)
+					return
+				}
+
+				// Get all document IDs grouped by page
+				docIDsByPage, err := hashIndex.GetAllDocumentIDs()
+				if err != nil {
+					s.logger.Warnf("Failed to get document IDs for SortedIndex rebuild: %v", err)
+					return
+				}
+
+				// Flatten to single slice
+				for _, ids := range docIDsByPage {
+					docIDs = append(docIDs, ids...)
+				}
+				break
+			}
+		}
+	}
+
+	if len(docIDs) == 0 {
+		s.logger.Debugf("No documents found for SortedIndex rebuild of bundle %s", bundleName)
+		return
+	}
+
+	// Rebuild the SortedIndex
+	bundle.SortedIndex.RebuildFromDocuments(docIDs)
+
+	// Persist the rebuilt index
+	if err := PersistBundleSortedIndex(bundle); err != nil {
+		s.logger.Warnf("Failed to persist rebuilt SortedIndex for bundle %s: %v", bundleName, err)
+	}
+
+	s.logger.Infof("Rebuilt SortedIndex for bundle %s with %d documents after compaction",
+		bundleName, len(docIDs))
 }
 
 // findDocumentPage uses the DocumentID hash index to determine which page contains a specific document

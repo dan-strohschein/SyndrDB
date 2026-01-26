@@ -1821,6 +1821,14 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		return fmt.Errorf("failed to append deletion marker: %w", err)
 	}
 
+	// PAGE ID ARCHITECTURE ALIGNMENT: Remove document from SortedIndex
+	// This keeps the SortedIndex in sync with actual live documents.
+	// Note: DELETE causes position shifts for other documents, which introduces staleness.
+	// This staleness is acceptable and will be fixed during the next compaction cycle.
+	if bundle.SortedIndex != nil {
+		bundle.SortedIndex.Delete(documentID)
+	}
+
 	// D7: Keep FlushWriteBuffers — ensures pending ADDs/UPDATEs are on disk before the tombstone.
 	// Without it, a crash could leave a tombstone for a "never existed" doc. Flush is cheap.
 	err = b.FlushWriteBuffers(bundle.Name)
@@ -2270,16 +2278,35 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		return 0, fmt.Errorf("document must have a valid ID")
 	}
 
-	// PHASE 1: MVCC - Use atomic get-and-increment pattern for thread-safe page calculation
-	// Page ID is based on current position: pageID = currentDocCount / pageSize
-	// Use consistent page size with virtual pagination (4096 documents per page, power of 2)
+	// PAGE ID ARCHITECTURE ALIGNMENT: Calculate pageID using alphabetical order
+	// This matches how LoadDocumentPage sorts documents, eliminating stale pageID issues.
+	//
+	// Previously: pageID = (insertion order document count) / pageSize
+	// Now: pageID = (alphabetical position in sorted index) / pageSize
+	//
+	// The SortedIndex maintains 64 shards of sorted DocumentIDs for O(log n) lookup.
+	// Fallback to old behavior if SortedIndex is nil (shouldn't happen in production).
 	pageSize := uint32(4096)
 	if bundle.PageSize > 0 {
 		pageSize = uint32(bundle.PageSize)
 	}
-	// FIXED: Get pre-increment value atomically to ensure atomic read-modify-write
-	currentDocCount := uint32(atomic.AddInt64(&bundle.TotalDocuments, 1) - 1)
-	pageID := currentDocCount / pageSize
+
+	var pageID uint32
+	if bundle.SortedIndex != nil {
+		// Use alphabetical position for pageID calculation
+		pageID = bundle.SortedIndex.Insert(document.DocumentID, pageSize)
+	} else {
+		// Fallback: Use insertion order (legacy behavior - causes staleness)
+		// TODO: Log warning here once logging is available in this context
+		currentDocCount := uint32(atomic.AddInt64(&bundle.TotalDocuments, 1) - 1)
+		pageID = currentDocCount / pageSize
+	}
+
+	// Still increment TotalDocuments for metadata consistency
+	// (SortedIndex.Insert already added the document, but TotalDocuments is used elsewhere)
+	if bundle.SortedIndex != nil {
+		atomic.AddInt64(&bundle.TotalDocuments, 1)
+	}
 
 	// PERFORMANCE FIX: Skip file existence check for known bundles
 	// Trust that bundle files exist if bundle object is valid
