@@ -109,6 +109,20 @@ type MetadataUpdate struct {
 	Timestamp  time.Time
 }
 
+// StalePageIDFallbackCounter tracks how often the cache-scan fallback is triggered
+// due to stale pageID entries in indexes. High values indicate need for index rebuild.
+var StalePageIDFallbackCounter atomic.Uint64
+
+// GetStalePageIDFallbackCount returns the current count of stale pageID fallbacks
+func GetStalePageIDFallbackCount() uint64 {
+	return StalePageIDFallbackCounter.Load()
+}
+
+// ResetStalePageIDFallbackCount resets the counter (for testing or periodic reset)
+func ResetStalePageIDFallbackCount() {
+	StalePageIDFallbackCounter.Store(0)
+}
+
 // btreeRollbackOp records one B-tree index update for rollback if UpdateDocumentsBatch fails.
 // Rollback: Delete(newKey, documentID) then Insert(oldKey, documentID) to restore pre-update state.
 type btreeRollbackOp struct {
@@ -2523,15 +2537,25 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 					cp := d
 					byID[id] = &cp
 				} else {
-					// Page-based lookup can miss due to documentPageMap/index vs multi-file layout mismatch.
-					// Invalidate stale entry so we don't keep using the bad pageID; then fallback to GetDocument.
+					// Page-based lookup can miss due to stale pageID in index.
+					// Invalidate stale entry so we don't keep using the bad pageID.
 					s.invalidateDocumentPageMapEntry(bundleName, id)
-					doc, getErr := s.GetDocument(bundleName, dbName, id)
-					if getErr == nil {
-						byID[id] = doc
-						s.logger.Debugf("GetDocumentsByIDs: document %s not in page %d, resolved via GetDocument", id, pageID)
+					StalePageIDFallbackCounter.Add(1)
+
+					// FIXED: Scan document page cache instead of GetDocument (which also uses stale pageID)
+					foundDoc := s.findDocumentInPageCache(bundleName, id)
+					if foundDoc != nil {
+						byID[id] = foundDoc
+						s.logger.Debugf("GetDocumentsByIDs: document %s not in page %d, found via cache scan", id, pageID)
 					} else {
-						s.logger.Warnf("GetDocumentsByIDs: document %s not in page %d; GetDocument fallback failed: %v", id, pageID, getErr)
+						// Last resort: try GetDocument (may work if doc is in memtable)
+						doc, getErr := s.GetDocument(bundleName, dbName, id)
+						if getErr == nil {
+							byID[id] = doc
+							s.logger.Debugf("GetDocumentsByIDs: document %s found via GetDocument fallback", id)
+						} else {
+							s.logger.Debugf("GetDocumentsByIDs: document %s not found (may be deleted)", id)
+						}
 					}
 				}
 			}
@@ -2602,6 +2626,86 @@ func (s *BundleService) removePageFromLRULocked(pageKey string) {
 		s.pageLRUOrder.Remove(elem)
 		delete(s.pageLRUElements, pageKey)
 	}
+}
+
+// findDocumentInPageCache scans all cached pages to find a document by ID.
+// This is used as a fallback when the pageID from the index is stale.
+// Returns nil if document is not found in any cached page.
+// PERFORMANCE: O(cached_pages × docs_per_page) but only used for fallback cases.
+func (s *BundleService) findDocumentInPageCache(bundleName, documentID string) *models.Document {
+	s.documentPagesMutex.RLock()
+	defer s.documentPagesMutex.RUnlock()
+
+	// Scan all cached pages for this bundle
+	prefix := bundleName + ":"
+	for key, page := range s.documentPages {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if doc, exists := page.Documents[documentID]; exists {
+			cp := doc
+			return &cp
+		}
+	}
+	return nil
+}
+
+// GetDocumentsByIDsFromCacheDirect retrieves documents by IDs directly from cache.
+// Bypasses pageID lookups entirely - used when index pageIDs may be stale.
+// Returns documents found as a slice preserving input order, skipping missing docs.
+func (s *BundleService) GetDocumentsByIDsFromCacheDirect(bundle *models.Bundle, docIDs []string) []*models.Document {
+	if len(docIDs) == 0 {
+		return nil
+	}
+
+	bundleName := bundle.Name
+	dbName := bundle.Database.Name
+
+	// First check memtable
+	byID := make(map[string]*models.Document, len(docIDs))
+	toLoad := make([]string, 0, len(docIDs))
+
+	if bundle.Documents != nil {
+		bundle.DocumentsMutex.RLock()
+		for _, id := range docIDs {
+			if d, ok := (*bundle.Documents)[id]; ok {
+				cp := d
+				byID[id] = &cp
+			} else {
+				toLoad = append(toLoad, id)
+			}
+		}
+		bundle.DocumentsMutex.RUnlock()
+	} else {
+		toLoad = append(toLoad, docIDs...)
+	}
+
+	if len(toLoad) == 0 {
+		// All docs found in memtable
+		out := make([]*models.Document, 0, len(docIDs))
+		for _, id := range docIDs {
+			if d := byID[id]; d != nil {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+
+	// Use storage engine's cache-based lookup (bypasses stale pageID issue)
+	cachedDocs, _ := s.store.GetDocumentsByIDsFromCache(bundleName, dbName, toLoad)
+	for docID, doc := range cachedDocs {
+		cp := doc
+		byID[docID] = &cp
+	}
+
+	// Preserve order of docIDs; skip missing
+	out := make([]*models.Document, 0, len(docIDs))
+	for _, id := range docIDs {
+		if d := byID[id]; d != nil {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // evictDocumentPageMapOneLocked evicts one documentID->pageID entry from the bundle's documentPageMap.

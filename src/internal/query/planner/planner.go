@@ -44,6 +44,10 @@ type BundleServiceInterface interface {
 	// Groups documents by page and loads each page once, much more efficient than N individual GetDocument calls
 	// Used by JOINs for batch retrieval to avoid N+1 query problem
 	GetDocumentsByIDs(bundle *models.Bundle, docIDs []string) ([]*models.Document, error)
+	// GetDocumentsByIDsFromCacheDirect retrieves documents by IDs directly from cache.
+	// Bypasses pageID lookups entirely - used when index pageIDs may be stale.
+	// Returns documents found as a slice preserving input order, skipping missing docs.
+	GetDocumentsByIDsFromCacheDirect(bundle *models.Bundle, docIDs []string) []*models.Document
 }
 
 // ExecutionNode represents a node in the execution tree

@@ -918,21 +918,17 @@ func (pba *PlannerBundleAdapter) GetDocument(docID string) *models.Document {
 }
 
 // GetDocumentsByIDs retrieves multiple documents by ID in a single batch operation
-// FIX: Replaces N individual GetDocument() calls with a single batch retrieval
-// This eliminates the N+1 query problem in JOINs by using BundleService.GetDocumentsByIDs
-// which groups documents by page and loads each page only once
+// FIX: Uses cache-direct lookup to bypass stale pageID issues in indexes.
+// This eliminates the 90% staleness rate problem by not relying on pageID mappings.
 func (pba *PlannerBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.Document {
 	if pba.bundle == nil || len(docIDs) == 0 {
 		return make(map[string]*models.Document)
 	}
 
-	// Use batch retrieval via bundleService if available (much more efficient)
+	// Use cache-direct retrieval via bundleService if available
+	// This bypasses stale pageID lookups that cause 90% staleness rates
 	if pba.bundleService != nil {
-		docs, err := pba.bundleService.GetDocumentsByIDs(pba.bundle, docIDs)
-		if err != nil {
-			pba.logger.Warnf("GetDocumentsByIDs failed for bundle '%s': %v", pba.bundle.Name, err)
-			return make(map[string]*models.Document)
-		}
+		docs := pba.bundleService.GetDocumentsByIDsFromCacheDirect(pba.bundle, docIDs)
 		// Convert []*models.Document to map[string]*models.Document
 		result := make(map[string]*models.Document, len(docs))
 		for _, doc := range docs {
@@ -940,7 +936,7 @@ func (pba *PlannerBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*
 				result[doc.DocumentID] = doc
 			}
 		}
-		pba.logger.Debugf("Batch loaded %d/%d documents for bundle '%s' via GetDocumentsByIDs",
+		pba.logger.Debugf("Cache-direct loaded %d/%d documents for bundle '%s'",
 			len(result), len(docIDs), pba.bundle.Name)
 		return result
 	}
