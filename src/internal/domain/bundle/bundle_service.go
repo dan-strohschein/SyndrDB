@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"os"
@@ -339,6 +340,10 @@ type BundleService struct {
 	bundleMetadata     map[string]*models.Bundle       // Only schema/structure
 	documentPages      map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
 	documentPagesMutex sync.RWMutex                    // Protects documentPages; prevents concurrent map read/write
+
+	// LRU eviction support - O(1) eviction instead of O(n) scan
+	pageLRUOrder    *list.List               // Doubly-linked list for LRU order (front = newest, back = oldest)
+	pageLRUElements map[string]*list.Element // pageKey -> list element for O(1) access/promotion
 	// LOCK ORDERING (to prevent deadlocks):
 	// pageCacheMutex < documentPagesMutex < scannerMutex
 	// Always acquire locks in this order when multiple locks are needed
@@ -459,7 +464,9 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		logger:          logger,
 		bundleMetadata:  make(map[string]*models.Bundle),
 		documentPages:   make(map[string]*models.DocumentPage),
-		defaultPageSize: 4096, // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
+		pageLRUOrder:    list.New(),                     // O(1) LRU eviction order
+		pageLRUElements: make(map[string]*list.Element), // O(1) element lookup for promotion
+		defaultPageSize: 4096,                           // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
 		maxLoadedPages:  maxLoaded,
 		// OPTIMIZATION: Use configurable performance settings
 		indexUpdateBuffer:    make([]IndexUpdate, 0, globalSettings.MetadataBatchSize),
@@ -2171,12 +2178,21 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 // documentPagesMutex is used to prevent concurrent map read/write (evictOldestPage range vs other goroutines' read/write).
 // CRITICAL: Always clears projection fields before loading to ensure full pages are cached, not partial/projected pages.
 // This prevents cache poisoning where a query with projection would cache partial documents that can't serve other queries.
+// OPTIMIZATION: Uses O(1) LRU eviction via doubly-linked list instead of O(n) map scan.
 func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, pageID uint32) (*models.DocumentPage, error) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 
+	// Fast path: check cache with read lock
 	s.documentPagesMutex.RLock()
 	if page, exists := s.documentPages[pageKey]; exists {
+		// Promote to front of LRU (requires write lock, but we optimize for the common case)
 		s.documentPagesMutex.RUnlock()
+		// Promote LRU position under write lock (lightweight operation)
+		s.documentPagesMutex.Lock()
+		if elem, ok := s.pageLRUElements[pageKey]; ok {
+			s.pageLRUOrder.MoveToFront(elem)
+		}
+		s.documentPagesMutex.Unlock()
 		return page, nil
 	}
 	s.documentPagesMutex.RUnlock()
@@ -2200,8 +2216,14 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	// This reduces contention when multiple goroutines load the same page concurrently
 	s.documentPagesMutex.RLock()
 	if p, exists := s.documentPages[pageKey]; exists {
+		// Another goroutine loaded it first - promote LRU position
 		s.documentPagesMutex.RUnlock()
-		return p, nil // Another goroutine loaded it first
+		s.documentPagesMutex.Lock()
+		if elem, ok := s.pageLRUElements[pageKey]; ok {
+			s.pageLRUOrder.MoveToFront(elem)
+		}
+		s.documentPagesMutex.Unlock()
+		return p, nil
 	}
 	s.documentPagesMutex.RUnlock()
 
@@ -2209,13 +2231,21 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	s.documentPagesMutex.Lock()
 	// Double-check again after acquiring write lock (another goroutine may have inserted it)
 	if p, exists := s.documentPages[pageKey]; exists {
+		// Promote LRU position
+		if elem, ok := s.pageLRUElements[pageKey]; ok {
+			s.pageLRUOrder.MoveToFront(elem)
+		}
 		s.documentPagesMutex.Unlock()
 		return p, nil
 	}
+	// O(1) eviction: check capacity and evict from back of LRU list
 	if len(s.documentPages) >= s.maxLoadedPages {
 		s.evictOldestPageLocked()
 	}
+	// Insert new page and add to front of LRU
 	s.documentPages[pageKey] = page
+	elem := s.pageLRUOrder.PushFront(pageKey)
+	s.pageLRUElements[pageKey] = elem
 	s.documentPagesMutex.Unlock()
 	return page, nil
 }
@@ -2538,22 +2568,39 @@ func (s *BundleService) GetDocumentVersions(bundleName, databaseName, documentID
 
 // evictOldestPageLocked removes the least recently used page from memory.
 // Caller must hold s.documentPagesMutex (Lock).
+// OPTIMIZATION: O(1) eviction using LRU doubly-linked list instead of O(n) map scan.
+// This eliminates the bottleneck under high concurrency where 150+ connections
+// were contending on the write lock while the old code scanned 500+ pages.
 func (s *BundleService) evictOldestPageLocked() {
-	var oldestKey string
-	var oldestTime time.Time
-	for key, page := range s.documentPages {
-		if oldestKey == "" || page.LoadedAt.Before(oldestTime) {
-			oldestKey = key
-			oldestTime = page.LoadedAt
-		}
+	// O(1) eviction: remove from back of LRU list (oldest)
+	if s.pageLRUOrder.Len() == 0 {
+		return
 	}
-	if oldestKey != "" {
-		s.logger.Debugf("Evicting document page %s from memory", oldestKey)
-		if s.documentPages[oldestKey].IsDirty {
-			s.logger.Debugf("Page %s is dirty, writing back to disk", oldestKey)
-			// TODO: Implement page write-back
-		}
-		delete(s.documentPages, oldestKey)
+	oldest := s.pageLRUOrder.Back()
+	if oldest == nil {
+		return
+	}
+	oldestKey := oldest.Value.(string)
+
+	s.logger.Debugf("Evicting document page %s from memory (LRU)", oldestKey)
+	if page, exists := s.documentPages[oldestKey]; exists && page.IsDirty {
+		s.logger.Debugf("Page %s is dirty, writing back to disk", oldestKey)
+		// TODO: Implement page write-back
+	}
+
+	// Remove from all tracking structures
+	delete(s.documentPages, oldestKey)
+	delete(s.pageLRUElements, oldestKey)
+	s.pageLRUOrder.Remove(oldest)
+}
+
+// removePageFromLRULocked removes a page from the LRU tracking structures.
+// Caller must hold s.documentPagesMutex (Lock).
+// This is called when deleting pages from cache outside of eviction.
+func (s *BundleService) removePageFromLRULocked(pageKey string) {
+	if elem, exists := s.pageLRUElements[pageKey]; exists {
+		s.pageLRUOrder.Remove(elem)
+		delete(s.pageLRUElements, pageKey)
 	}
 }
 
@@ -3278,6 +3325,7 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 		}
 	}
 	for _, key := range keysToDelete {
+		s.removePageFromLRULocked(key)
 		delete(s.documentPages, key)
 	}
 	s.documentPagesMutex.Unlock()
@@ -4181,6 +4229,7 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 		}
 	}
 	for _, key := range keysToDelete {
+		s.removePageFromLRULocked(key)
 		delete(s.documentPages, key)
 	}
 	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", len(keysToDelete), bundleName)
@@ -4200,6 +4249,7 @@ func (s *BundleService) invalidateDocumentPagesForInsert(bundleName string, page
 	// Invalidate the page where the document was inserted
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 	if _, exists := s.documentPages[pageKey]; exists {
+		s.removePageFromLRULocked(pageKey)
 		delete(s.documentPages, pageKey)
 		s.logger.Debugf("Invalidated page %d in documentPages cache for bundle '%s' after INSERT", pageID, bundleName)
 	}
@@ -6258,6 +6308,7 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 			}
 		}
 		for _, key := range keysToDelete {
+			s.removePageFromLRULocked(key)
 			delete(s.documentPages, key)
 		}
 		s.documentPagesMutex.Unlock()
@@ -6269,6 +6320,7 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		for pageID := range pagesToInvalidate {
 			pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
 			if _, exists := s.documentPages[pageKey]; exists {
+				s.removePageFromLRULocked(pageKey)
 				delete(s.documentPages, pageKey)
 				invalidatedCount++
 			}
@@ -6550,6 +6602,7 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 			s.documentPagesMutex.Lock()
 			for pageID := range pageIDsToInvalidate {
 				pageKey := fmt.Sprintf("%s:%d", docCommand.BundleName, pageID)
+				s.removePageFromLRULocked(pageKey)
 				delete(s.documentPages, pageKey)
 			}
 			s.documentPagesMutex.Unlock()
@@ -8252,6 +8305,7 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 		if pageID, hasPage := bundlePages[documentID]; hasPage {
 			pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 			s.documentPagesMutex.Lock()
+			s.removePageFromLRULocked(pageKey)
 			delete(s.documentPages, pageKey)
 			s.documentPagesMutex.Unlock()
 
@@ -8274,6 +8328,7 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 		}
 	}
 	for _, key := range keysToDelete {
+		s.removePageFromLRULocked(key)
 		delete(s.documentPages, key)
 	}
 	s.documentPagesMutex.Unlock()
