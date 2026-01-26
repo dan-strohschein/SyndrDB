@@ -3,6 +3,7 @@ package helpers
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 	"sync"
@@ -91,6 +92,77 @@ func (d *FastDocumentDeserializer) DeserializeDocument(data []byte) (*models.Doc
 	}, nil
 }
 
+// DeserializeDocumentInto populates a pre-allocated document from binary data.
+// Use this with pooled documents to avoid allocations:
+//
+//	doc := document.GetPooledDocument()
+//	err := deserializer.DeserializeDocumentInto(data, doc)
+//
+// The caller is responsible for clearing/resetting the document before calling.
+func (d *FastDocumentDeserializer) DeserializeDocumentInto(data []byte, doc *models.Document) error {
+	d.data = data
+	d.offset = 0
+
+	// Read document ID
+	documentID, err := d.readString()
+	if err != nil {
+		return fmt.Errorf("failed to read document ID: %w", err)
+	}
+	doc.DocumentID = documentID
+
+	// Read field count
+	fieldCount, err := d.readUint32()
+	if err != nil {
+		return fmt.Errorf("failed to read field count: %w", err)
+	}
+
+	// Ensure Fields map exists and is empty
+	if doc.Fields == nil {
+		doc.Fields = make(map[string]models.Field, int(fieldCount))
+	} else {
+		// Clear existing fields
+		for k := range doc.Fields {
+			delete(doc.Fields, k)
+		}
+	}
+
+	// Read each field into the existing map
+	for i := uint32(0); i < fieldCount; i++ {
+		fieldName, field, err := d.readField()
+		if err != nil {
+			return fmt.Errorf("failed to read field %d: %w", i, err)
+		}
+		doc.Fields[fieldName] = field
+	}
+
+	// Read timestamps
+	createdAtNano, err := d.readInt64()
+	if err != nil {
+		return fmt.Errorf("failed to read CreatedAt: %w", err)
+	}
+	updatedAtNano, err := d.readInt64()
+	if err != nil {
+		return fmt.Errorf("failed to read UpdatedAt: %w", err)
+	}
+	doc.CreatedAt = time.Unix(0, createdAtNano)
+	doc.UpdatedAt = time.Unix(0, updatedAtNano)
+
+	// Read MVCC version metadata
+	if d.offset+32 <= len(d.data) {
+		doc.CreatedByTxID, _ = d.readUint64()
+		doc.DeletedByTxID, _ = d.readUint64()
+		doc.CommitSequence, _ = d.readUint64()
+		doc.VersionSequence, _ = d.readUint64()
+	} else {
+		doc.CreatedByTxID = 0
+		doc.DeletedByTxID = 0
+		doc.CommitSequence = 0
+		doc.VersionSequence = 0
+	}
+
+	return nil
+}
+
 // DeserializeDocumentMap converts binary format back to a map-based document
 // Mirrors SerializeDocumentMap for compatibility with current usage patterns
 func (d *FastDocumentDeserializer) DeserializeDocumentMap(data []byte) (map[string]interface{}, error) {
@@ -155,6 +227,386 @@ func (d *FastDocumentDeserializer) DeserializeDocumentMap(data []byte) (map[stri
 	docEntry["VersionSequence"] = versionSequence
 
 	return docEntry, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V2 Deserializer with field directory support for O(1) field access
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DetectFormatVersion returns the format version of the data.
+// V2 data starts with FormatVersionV2 (0x02), V1 data starts with a uint32 length.
+func DetectFormatVersion(data []byte) byte {
+	if len(data) == 0 {
+		return FormatVersionV1
+	}
+	// V2 format starts with version byte 0x02
+	// V1 format starts with DocumentID length (uint32), first byte is unlikely to be 0x02
+	// since that would mean DocumentID is 2 bytes starting with a small char code
+	if data[0] == FormatVersionV2 {
+		return FormatVersionV2
+	}
+	return FormatVersionV1
+}
+
+// DeserializeDocumentV2 decodes V2 binary format with field directory back to a document.
+// Supports optional projection: only specified fields are fully deserialized.
+// If projection is nil or empty, all fields are deserialized.
+func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, projection []string) (*models.Document, error) {
+	d.data = data
+	d.offset = 0
+
+	// ─────────────────────────────────────────────────────────────
+	// 1. Read header
+	// ─────────────────────────────────────────────────────────────
+	version, err := d.readByte()
+	if err != nil || version != FormatVersionV2 {
+		return nil, fmt.Errorf("invalid V2 format version: %d", version)
+	}
+
+	flags, err := d.readByte()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read flags: %w", err)
+	}
+	hasFieldDirectory := (flags & FlagHasFieldDirectory) != 0
+	if !hasFieldDirectory {
+		return nil, fmt.Errorf("V2 format requires field directory flag")
+	}
+
+	// ─────────────────────────────────────────────────────────────
+	// 2. Read DocumentID
+	// ─────────────────────────────────────────────────────────────
+	documentID, err := d.readString()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read document ID: %w", err)
+	}
+
+	// ─────────────────────────────────────────────────────────────
+	// 3. Read field directory
+	// ─────────────────────────────────────────────────────────────
+	fieldCount, err := d.readUint32()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read field count: %w", err)
+	}
+
+	// Read all directory entries
+	directoryEntries := make([]FieldDirectoryEntry, fieldCount)
+	for i := uint32(0); i < fieldCount; i++ {
+		entry, err := d.readDirectoryEntry()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read directory entry %d: %w", i, err)
+		}
+		directoryEntries[i] = entry
+	}
+
+	// ─────────────────────────────────────────────────────────────
+	// 4. Build projection hash set for O(1) lookup
+	// ─────────────────────────────────────────────────────────────
+	var projectionHashes map[uint64]bool
+	if len(projection) > 0 {
+		projectionHashes = make(map[uint64]bool, len(projection))
+		for _, fieldName := range projection {
+			projectionHashes[HashFieldName64(fieldName)] = true
+		}
+	}
+
+	// ─────────────────────────────────────────────────────────────
+	// 5. Deserialize fields (with optional projection)
+	// ─────────────────────────────────────────────────────────────
+	fields := make(map[string]models.Field, len(directoryEntries))
+	for _, entry := range directoryEntries {
+		// Check projection - skip if not in requested fields
+		if projectionHashes != nil && !projectionHashes[entry.NameHash64] {
+			continue
+		}
+
+		// Read field name from NameOffset
+		if int(entry.NameOffset)+int(entry.NameLen) > len(d.data) {
+			return nil, fmt.Errorf("field name offset out of bounds: %d+%d > %d", entry.NameOffset, entry.NameLen, len(d.data))
+		}
+		fieldName := string(d.data[entry.NameOffset : entry.NameOffset+uint32(entry.NameLen)])
+
+		// Read field value from DataOffset using direct offset access
+		field, err := d.readFieldValueAtOffset(entry)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read field %s: %w", fieldName, err)
+		}
+		field.Name = fieldName
+		fields[fieldName] = field
+	}
+
+	// ─────────────────────────────────────────────────────────────
+	// 6. Read timestamps and MVCC (at end of data, 48 bytes)
+	// ─────────────────────────────────────────────────────────────
+	// Timestamps and MVCC are at the very end
+	if len(d.data) < 48 {
+		return nil, fmt.Errorf("insufficient data for timestamps")
+	}
+	metadataOffset := len(d.data) - 48
+	createdAt := time.Unix(0, int64(binary.LittleEndian.Uint64(d.data[metadataOffset:metadataOffset+8])))
+	updatedAt := time.Unix(0, int64(binary.LittleEndian.Uint64(d.data[metadataOffset+8:metadataOffset+16])))
+	createdByTxID := binary.LittleEndian.Uint64(d.data[metadataOffset+16 : metadataOffset+24])
+	deletedByTxID := binary.LittleEndian.Uint64(d.data[metadataOffset+24 : metadataOffset+32])
+	commitSequence := binary.LittleEndian.Uint64(d.data[metadataOffset+32 : metadataOffset+40])
+	versionSequence := binary.LittleEndian.Uint64(d.data[metadataOffset+40 : metadataOffset+48])
+
+	return &models.Document{
+		DocumentID:      documentID,
+		Fields:          fields,
+		CreatedAt:       createdAt,
+		UpdatedAt:       updatedAt,
+		CreatedByTxID:   createdByTxID,
+		DeletedByTxID:   deletedByTxID,
+		CommitSequence:  commitSequence,
+		VersionSequence: versionSequence,
+	}, nil
+}
+
+// DeserializeDocumentV2Into populates a pre-allocated document from V2 binary data.
+// Use with pooled documents to avoid allocations. Supports projection pushdown.
+//
+// Example with pooling:
+//
+//	doc := document.GetPooledDocument()
+//	err := deserializer.DeserializeDocumentV2Into(data, projection, doc)
+//
+// The caller must ensure doc.Fields is initialized or nil (will be created if nil).
+func (d *FastDocumentDeserializer) DeserializeDocumentV2Into(data []byte, projection []string, doc *models.Document) error {
+	d.data = data
+	d.offset = 0
+
+	// Read and validate header
+	version, err := d.readByte()
+	if err != nil || version != FormatVersionV2 {
+		return fmt.Errorf("invalid V2 format version: %d", version)
+	}
+
+	flags, err := d.readByte()
+	if err != nil {
+		return fmt.Errorf("failed to read flags: %w", err)
+	}
+	if (flags & FlagHasFieldDirectory) == 0 {
+		return fmt.Errorf("V2 format requires field directory flag")
+	}
+
+	// Read DocumentID
+	documentID, err := d.readString()
+	if err != nil {
+		return fmt.Errorf("failed to read document ID: %w", err)
+	}
+	doc.DocumentID = documentID
+
+	// Read field directory
+	fieldCount, err := d.readUint32()
+	if err != nil {
+		return fmt.Errorf("failed to read field count: %w", err)
+	}
+
+	directoryEntries := make([]FieldDirectoryEntry, fieldCount)
+	for i := uint32(0); i < fieldCount; i++ {
+		entry, err := d.readDirectoryEntry()
+		if err != nil {
+			return fmt.Errorf("failed to read directory entry %d: %w", i, err)
+		}
+		directoryEntries[i] = entry
+	}
+
+	// Build projection hash set
+	var projectionHashes map[uint64]bool
+	if len(projection) > 0 {
+		projectionHashes = make(map[uint64]bool, len(projection))
+		for _, fieldName := range projection {
+			projectionHashes[HashFieldName64(fieldName)] = true
+		}
+	}
+
+	// Ensure Fields map exists and is empty
+	if doc.Fields == nil {
+		doc.Fields = make(map[string]models.Field, len(directoryEntries))
+	} else {
+		for k := range doc.Fields {
+			delete(doc.Fields, k)
+		}
+	}
+
+	// Deserialize fields with optional projection
+	for _, entry := range directoryEntries {
+		if projectionHashes != nil && !projectionHashes[entry.NameHash64] {
+			continue
+		}
+
+		if int(entry.NameOffset)+int(entry.NameLen) > len(d.data) {
+			return fmt.Errorf("field name offset out of bounds")
+		}
+		fieldName := string(d.data[entry.NameOffset : entry.NameOffset+uint32(entry.NameLen)])
+
+		field, err := d.readFieldValueAtOffset(entry)
+		if err != nil {
+			return fmt.Errorf("failed to read field %s: %w", fieldName, err)
+		}
+		field.Name = fieldName
+		doc.Fields[fieldName] = field
+	}
+
+	// Read metadata from end of data
+	if len(d.data) < 48 {
+		return fmt.Errorf("insufficient data for timestamps")
+	}
+	metadataOffset := len(d.data) - 48
+	doc.CreatedAt = time.Unix(0, int64(binary.LittleEndian.Uint64(d.data[metadataOffset:metadataOffset+8])))
+	doc.UpdatedAt = time.Unix(0, int64(binary.LittleEndian.Uint64(d.data[metadataOffset+8:metadataOffset+16])))
+	doc.CreatedByTxID = binary.LittleEndian.Uint64(d.data[metadataOffset+16 : metadataOffset+24])
+	doc.DeletedByTxID = binary.LittleEndian.Uint64(d.data[metadataOffset+24 : metadataOffset+32])
+	doc.CommitSequence = binary.LittleEndian.Uint64(d.data[metadataOffset+32 : metadataOffset+40])
+	doc.VersionSequence = binary.LittleEndian.Uint64(d.data[metadataOffset+40 : metadataOffset+48])
+
+	return nil
+}
+
+// readDirectoryEntry reads a single 24-byte field directory entry
+func (d *FastDocumentDeserializer) readDirectoryEntry() (FieldDirectoryEntry, error) {
+	if d.offset+24 > len(d.data) {
+		return FieldDirectoryEntry{}, fmt.Errorf("insufficient data for directory entry at offset %d", d.offset)
+	}
+
+	entry := FieldDirectoryEntry{
+		NameHash64: binary.LittleEndian.Uint64(d.data[d.offset : d.offset+8]),
+		NameOffset: binary.LittleEndian.Uint32(d.data[d.offset+8 : d.offset+12]),
+		NameLen:    binary.LittleEndian.Uint16(d.data[d.offset+12 : d.offset+14]),
+		FieldType:  d.data[d.offset+14],
+		// d.offset+15 is padding
+		DataOffset: binary.LittleEndian.Uint32(d.data[d.offset+16 : d.offset+20]),
+		DataLen:    binary.LittleEndian.Uint32(d.data[d.offset+20 : d.offset+24]),
+	}
+	d.offset += 24
+	return entry, nil
+}
+
+// readFieldValueAtOffset reads a field value from the specified data offset
+func (d *FastDocumentDeserializer) readFieldValueAtOffset(entry FieldDirectoryEntry) (models.Field, error) {
+	if entry.DataLen == 0 {
+		// Null value
+		return models.Field{Value: models.NewInterfaceValue(nil)}, nil
+	}
+
+	// Bounds check
+	if int(entry.DataOffset)+int(entry.DataLen) > len(d.data) {
+		return models.Field{}, fmt.Errorf("data offset out of bounds: %d+%d > %d", entry.DataOffset, entry.DataLen, len(d.data))
+	}
+
+	fieldData := d.data[entry.DataOffset : entry.DataOffset+entry.DataLen]
+
+	switch entry.FieldType {
+	case V2TypeNull:
+		return models.Field{Value: models.NewInterfaceValue(nil)}, nil
+
+	case V2TypeString:
+		if len(fieldData) < 4 {
+			return models.Field{}, fmt.Errorf("insufficient data for string length")
+		}
+		strLen := binary.LittleEndian.Uint32(fieldData[:4])
+		if len(fieldData) < int(4+strLen) {
+			return models.Field{}, fmt.Errorf("insufficient data for string value")
+		}
+		str := string(fieldData[4 : 4+strLen])
+		return models.Field{Value: models.NewStringValue(str)}, nil
+
+	case V2TypeInt64:
+		if len(fieldData) < 8 {
+			return models.Field{}, fmt.Errorf("insufficient data for int64")
+		}
+		val := int64(binary.LittleEndian.Uint64(fieldData[:8]))
+		return models.Field{Value: models.NewIntValue(val)}, nil
+
+	case V2TypeFloat64:
+		if len(fieldData) < 8 {
+			return models.Field{}, fmt.Errorf("insufficient data for float64")
+		}
+		bits := binary.LittleEndian.Uint64(fieldData[:8])
+		val := math.Float64frombits(bits)
+		return models.Field{Value: models.NewFloatValue(val)}, nil
+
+	case V2TypeBool:
+		if len(fieldData) < 1 {
+			return models.Field{}, fmt.Errorf("insufficient data for bool")
+		}
+		return models.Field{Value: models.NewBoolValue(fieldData[0] == 1)}, nil
+
+	case V2TypeDateTime:
+		if len(fieldData) < 8 {
+			return models.Field{}, fmt.Errorf("insufficient data for datetime")
+		}
+		nanos := int64(binary.LittleEndian.Uint64(fieldData[:8]))
+		return models.Field{Value: models.NewDateTimeValue(time.Unix(0, nanos).UTC())}, nil
+
+	case V2TypeDate:
+		if len(fieldData) < 8 {
+			return models.Field{}, fmt.Errorf("insufficient data for date")
+		}
+		nanos := int64(binary.LittleEndian.Uint64(fieldData[:8]))
+		t := time.Unix(0, nanos).UTC()
+		dateOnly := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+		return models.Field{Value: models.NewDateValue(dateOnly)}, nil
+
+	case V2TypeArray, V2TypeObject:
+		// JSON encoded - unmarshal
+		if len(fieldData) < 4 {
+			return models.Field{}, fmt.Errorf("insufficient data for array/object length")
+		}
+		jsonLen := binary.LittleEndian.Uint32(fieldData[:4])
+		if len(fieldData) < int(4+jsonLen) {
+			return models.Field{}, fmt.Errorf("insufficient data for array/object value")
+		}
+		var val interface{}
+		if err := json.Unmarshal(fieldData[4:4+jsonLen], &val); err != nil {
+			return models.Field{}, fmt.Errorf("failed to unmarshal JSON: %w", err)
+		}
+		return models.Field{Value: models.NewInterfaceValue(val)}, nil
+
+	default:
+		return models.Field{}, fmt.Errorf("unknown V2 field type: %d", entry.FieldType)
+	}
+}
+
+// GetFieldByHashV2 performs O(1) field lookup using xxHash64.
+// This is the key optimization: instead of deserializing entire document,
+// just scan the directory for matching hash and deserialize only that field.
+func (d *FastDocumentDeserializer) GetFieldByHashV2(data []byte, fieldNameHash uint64) (*models.Field, error) {
+	d.data = data
+	d.offset = 0
+
+	// Skip header (version + flags)
+	version, _ := d.readByte()
+	if version != FormatVersionV2 {
+		return nil, fmt.Errorf("not V2 format")
+	}
+	d.offset++ // skip flags
+
+	// Skip DocumentID
+	docIDLen, _ := d.readUint32()
+	d.offset += int(docIDLen)
+
+	// Read field count and scan directory
+	fieldCount, _ := d.readUint32()
+	for i := uint32(0); i < fieldCount; i++ {
+		entry, err := d.readDirectoryEntry()
+		if err != nil {
+			return nil, err
+		}
+		if entry.NameHash64 == fieldNameHash {
+			// Found it! Read just this field's data
+			field, err := d.readFieldValueAtOffset(entry)
+			if err != nil {
+				return nil, err
+			}
+			// Read field name
+			if int(entry.NameOffset)+int(entry.NameLen) <= len(d.data) {
+				field.Name = string(d.data[entry.NameOffset : entry.NameOffset+uint32(entry.NameLen)])
+			}
+			return &field, nil
+		}
+	}
+
+	return nil, nil // Field not found
 }
 
 // readField reads a single field from the buffer
@@ -837,12 +1289,18 @@ func DecodeFastBinary(data []byte) (map[string]interface{}, error) {
 // DecodeFastBinaryToDocument deserializes binary data directly to a models.Document.
 // Provides direct deserialization without the map conversion overhead.
 // Safe for concurrent use.
+// Automatically detects V2 format and uses optimized deserialization when available.
 func DecodeFastBinaryToDocument(data []byte) (*models.Document, error) {
 	d := deserializerPool.Get().(*FastDocumentDeserializer)
 	defer func() {
 		d.data, d.offset = nil, 0
 		deserializerPool.Put(d)
 	}()
+
+	// Auto-detect format version and use appropriate deserializer
+	if DetectFormatVersion(data) == FormatVersionV2 {
+		return d.DeserializeDocumentV2(data, nil) // All fields
+	}
 	return d.DeserializeDocument(data)
 }
 
@@ -863,11 +1321,134 @@ func DecodeFastBinaryToDocument(data []byte) (*models.Document, error) {
 //
 //	For ORDER BY name queries, call with fieldsToExtract=["name"]
 //	This reduces deserialization overhead by ~80-90% when documents have many unused fields
+//
+// Performance:
+//   - V1 format: O(fields) scan through all fields
+//   - V2 format: O(projection) using xxHash64 directory lookup
 func DecodeFastBinaryProjected(data []byte, fieldsToExtract []string) (*models.Document, error) {
 	d := deserializerPool.Get().(*FastDocumentDeserializer)
 	defer func() {
 		d.data, d.offset = nil, 0
 		deserializerPool.Put(d)
 	}()
+
+	// PROJECTION PUSHDOWN V2: Auto-detect format and use O(1) lookup for V2 documents
+	if DetectFormatVersion(data) == FormatVersionV2 {
+		return d.DeserializeDocumentV2(data, fieldsToExtract)
+	}
 	return d.DeserializeProjectedFields(data, fieldsToExtract)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V2 Format Global Functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DecodeFastBinaryAuto auto-detects format version and deserializes accordingly.
+// This allows gradual migration: old V1 documents coexist with new V2 documents.
+func DecodeFastBinaryAuto(data []byte) (*models.Document, error) {
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+
+	version := DetectFormatVersion(data)
+	if version == FormatVersionV2 {
+		return d.DeserializeDocumentV2(data, nil) // All fields
+	}
+	return d.DeserializeDocument(data) // V1 format
+}
+
+// DecodeFastBinaryV2Projected deserializes V2 format with projection pushdown.
+// Only specified fields are fully deserialized, providing significant speedup
+// for queries that only need a subset of fields (e.g., SELECT name FROM users).
+func DecodeFastBinaryV2Projected(data []byte, projection []string) (*models.Document, error) {
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+	return d.DeserializeDocumentV2(data, projection)
+}
+
+// LookupFieldByHashV2 performs O(1) single-field lookup in V2 format documents.
+// Uses xxHash64 to find the field in the directory without deserializing the entire document.
+// Returns nil if field not found (not an error - field may not exist).
+func LookupFieldByHashV2(data []byte, fieldName string) (*models.Field, error) {
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+	return d.GetFieldByHashV2(data, HashFieldName64(fieldName))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Projection Hash Cache for Query Executors
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ProjectionHashCache pre-computes xxHash64 hashes for a list of field names.
+// Use this when you need to look up the same fields across many documents.
+//
+// Example usage for batch filtering:
+//
+//	cache := helpers.NewProjectionHashCache([]string{"name", "price", "category"})
+//	for _, docData := range documents {
+//	    field, _ := cache.LookupField(docData, "name")
+//	    // ... use field
+//	}
+type ProjectionHashCache struct {
+	fieldHashes map[string]uint64
+	fieldList   []string
+}
+
+// NewProjectionHashCache creates a cache with pre-computed hashes.
+func NewProjectionHashCache(fields []string) *ProjectionHashCache {
+	cache := &ProjectionHashCache{
+		fieldHashes: make(map[string]uint64, len(fields)),
+		fieldList:   fields,
+	}
+	for _, field := range fields {
+		cache.fieldHashes[field] = HashFieldName64(field)
+	}
+	return cache
+}
+
+// LookupField performs O(1) field lookup using cached hash.
+// Only works with V2 format documents.
+func (c *ProjectionHashCache) LookupField(data []byte, fieldName string) (*models.Field, error) {
+	hash, ok := c.fieldHashes[fieldName]
+	if !ok {
+		// Field not in cache - compute hash on demand
+		hash = HashFieldName64(fieldName)
+	}
+
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+	return d.GetFieldByHashV2(data, hash)
+}
+
+// DeserializeWithCachedProjection deserializes only the cached fields.
+// More efficient than DecodeFastBinaryV2Projected for repeated use.
+func (c *ProjectionHashCache) DeserializeWithCachedProjection(data []byte) (*models.Document, error) {
+	d := deserializerPool.Get().(*FastDocumentDeserializer)
+	defer func() {
+		d.data, d.offset = nil, 0
+		deserializerPool.Put(d)
+	}()
+	return d.DeserializeDocumentV2(data, c.fieldList)
+}
+
+// Fields returns the list of fields in this cache.
+func (c *ProjectionHashCache) Fields() []string {
+	return c.fieldList
+}
+
+// HasField returns whether a field is in the cache.
+func (c *ProjectionHashCache) HasField(fieldName string) bool {
+	_, ok := c.fieldHashes[fieldName]
+	return ok
 }
