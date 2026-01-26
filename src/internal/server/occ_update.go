@@ -13,12 +13,14 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"time"
 
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/planner"
+	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
@@ -185,7 +187,7 @@ func occReadPhase(
 }
 
 // occValidateAndWrite validates that document versions haven't changed, then applies the update.
-// This is the critical section where we hold a brief write lock.
+// Uses document-level locking to allow concurrent updates to different documents.
 func occValidateAndWrite(
 	ctx context.Context,
 	serviceManager ServiceManager,
@@ -198,12 +200,46 @@ func occValidateAndWrite(
 ) error {
 	bundleName := bundle.Name
 
-	// Acquire write lock for validation and write
-	if err := serviceManager.BundleService.AcquireBundleWriteLock(bundleName); err != nil {
-		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
-			"OCC validate phase: failed to acquire write lock", errors.LayerTransaction)
+	// Extract document IDs for document-level locking
+	docIDs := make([]string, 0, len(readResult.Documents))
+	for _, doc := range readResult.Documents {
+		if doc != nil {
+			docIDs = append(docIDs, doc.DocumentID)
+		}
 	}
-	defer serviceManager.BundleService.ReleaseBundleWriteLock(bundleName)
+
+	// Generate a unique transaction ID for this autocommit operation's lock scope
+	lockTxID := helpers.GenerateUUID()
+	lockSessionID := ""
+	if session != nil {
+		lockSessionID = session.SessionID
+	}
+
+	// Acquire document-level locks (sorted to prevent deadlocks)
+	sort.Strings(docIDs)
+	lockedDocIDs := make([]string, 0, len(docIDs))
+
+	if serviceManager.LockManager != nil && len(docIDs) > 0 {
+		for _, docID := range docIDs {
+			if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, lockTxID, lockSessionID); err != nil {
+				// Release any locks we've acquired so far
+				serviceManager.LockManager.ReleaseLocks(lockTxID)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+					fmt.Sprintf("OCC validate phase: failed to acquire document lock for %s", docID),
+					errors.LayerTransaction).WithContext("document_id", docID)
+			}
+			lockedDocIDs = append(lockedDocIDs, docID)
+		}
+		logger.Debugf("OCC: Acquired document-level locks for %d documents in bundle '%s'", len(lockedDocIDs), bundleName)
+	}
+
+	// Ensure locks are released after operation completes
+	defer func() {
+		if serviceManager.LockManager != nil && len(lockedDocIDs) > 0 {
+			serviceManager.LockManager.ReleaseLocks(lockTxID)
+			logger.Debugf("OCC: Released document-level locks for %d documents", len(lockedDocIDs))
+		}
+	}()
 
 	// VALIDATION: Check that no document versions have changed
 	for docID, readVersion := range readResult.Versions {
@@ -239,11 +275,13 @@ func occValidateAndWrite(
 
 	logger.Debugf("OCC validation passed for %d documents in bundle '%s'", len(readResult.Versions), bundleName)
 
-	// WRITE: Apply the update (we already hold the write lock)
-	// Create lock info with pre-fetched docs to skip re-fetching
+	// WRITE: Apply the update with document-level locks
 	lockInfo := &bndle.DocumentLockInfo{
+		LockManager:    serviceManager.LockManager,
+		TxID:           lockTxID,
+		SessionID:      lockSessionID,
+		LockedDocIDs:   lockedDocIDs,
 		PreFetchedDocs: readResult.Documents,
-		// No LockManager - we're using bundle-level lock for the OCC write phase
 	}
 
 	// Build context with MVCC snapshot if in transaction
@@ -285,10 +323,69 @@ func executePessimisticUpdate(
 	session *Session,
 	logger *zap.SugaredLogger,
 ) error {
-	// This delegates to the existing pessimistic update logic
-	// We need to build the lock info and call UpdateDocumentInBundle
-
 	bundleName := bundle.Name
+
+	// First, get the documents we need to update so we can acquire document-level locks
+	var docs []*models.Document
+	var err error
+
+	if docCommand.WhereClause != "" && strings.TrimSpace(docCommand.WhereClause) != "" {
+		docs, err = serviceManager.BundleService.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
+	} else {
+		// Bulk update without WHERE - get all documents
+		docs, err = serviceManager.BundleService.GetDocumentsByFilter(bundle, "", nil)
+	}
+
+	if err != nil {
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"pessimistic update: failed to filter documents", errors.LayerQuery)
+	}
+
+	if len(docs) == 0 {
+		// No documents to update
+		return nil
+	}
+
+	// Extract document IDs for document-level locking
+	docIDs := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		if doc != nil {
+			docIDs = append(docIDs, doc.DocumentID)
+		}
+	}
+
+	// Generate a unique transaction ID for this autocommit operation's lock scope
+	lockTxID := helpers.GenerateUUID()
+	lockSessionID := ""
+	if session != nil {
+		lockSessionID = session.SessionID
+	}
+
+	// Acquire document-level locks (sorted to prevent deadlocks)
+	sort.Strings(docIDs)
+	lockedDocIDs := make([]string, 0, len(docIDs))
+
+	if serviceManager.LockManager != nil && len(docIDs) > 0 {
+		for _, docID := range docIDs {
+			if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, lockTxID, lockSessionID); err != nil {
+				// Release any locks we've acquired so far
+				serviceManager.LockManager.ReleaseLocks(lockTxID)
+				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+					fmt.Sprintf("pessimistic update: failed to acquire document lock for %s", docID),
+					errors.LayerTransaction).WithContext("document_id", docID)
+			}
+			lockedDocIDs = append(lockedDocIDs, docID)
+		}
+		logger.Debugf("Pessimistic: Acquired document-level locks for %d documents in bundle '%s'", len(lockedDocIDs), bundleName)
+	}
+
+	// Ensure locks are released after operation completes
+	defer func() {
+		if serviceManager.LockManager != nil && len(lockedDocIDs) > 0 {
+			serviceManager.LockManager.ReleaseLocks(lockTxID)
+			logger.Debugf("Pessimistic: Released document-level locks for %d documents", len(lockedDocIDs))
+		}
+	}()
 
 	// Build context with MVCC snapshot if in transaction
 	if session != nil && session.IsInTransaction() {
@@ -302,8 +399,14 @@ func executePessimisticUpdate(
 		}
 	}
 
-	// Use bundle-level lock for pessimistic fallback (simpler, no document-level lock convoy)
-	lockInfo := &bndle.DocumentLockInfo{}
+	// Create lock info with document-level locks and pre-fetched docs
+	lockInfo := &bndle.DocumentLockInfo{
+		LockManager:    serviceManager.LockManager,
+		TxID:           lockTxID,
+		SessionID:      lockSessionID,
+		LockedDocIDs:   lockedDocIDs,
+		PreFetchedDocs: docs,
+	}
 
 	// Execute with WAL logging if available
 	if serviceManager.WALManager != nil {
@@ -312,7 +415,6 @@ func executePessimisticUpdate(
 				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
 					"failed to log document update", errors.LayerWAL).WithContext("bundle", bundleName)
 			}
-			lockInfo.TxID = txID
 			lockInfo.VersionTxID = txID
 			return serviceManager.BundleService.UpdateDocumentInBundle(ctx, database, bundle, docCommand, lockInfo)
 		})
