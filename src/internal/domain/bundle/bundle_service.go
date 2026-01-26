@@ -5801,6 +5801,16 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 // TASK 2: Document-level locking support - if lockInfo is provided, uses document locks instead of bundle write lock.
 // PHASE 1: ctx may carry snapshot (e.g. planner.WithSnapshotInfo) for MVCC visibility; use context.Background() if none.
 func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand, lockInfo ...*DocumentLockInfo) (err error) {
+	// PERFORMANCE TIMING: Track where time is spent in UPDATE operations
+	updateStart := time.Now()
+	defer func() {
+		totalTime := time.Since(updateStart)
+		if totalTime > 500*time.Millisecond {
+			s.logger.Warnf("UPDATE SLOW: Total time %v for bundle '%s' WHERE '%s'",
+				totalTime, docCommand.BundleName, docCommand.WhereClause)
+		}
+	}()
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -5836,6 +5846,9 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	// because locks guarantee the IDs are still valid. Without locks, concurrent transactions
 	// could delete/modify documents, making the IDs stale.
 	var filteredDocs []*models.Document
+
+	// TIMING: WHERE clause evaluation
+	whereStart := time.Now()
 
 	// Use pre-fetched docs when available (avoids GetDocument-by-ID and index→page lookup failures)
 	li := len(lockInfo) > 0 && lockInfo[0] != nil
@@ -5883,6 +5896,13 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 			s.ReleaseBundleReadLock(bundle.Name)
 			return fmt.Errorf("failed to filter documents: %w", err)
 		}
+	}
+
+	// TIMING: Log WHERE clause evaluation time
+	whereTime := time.Since(whereStart)
+	if whereTime > 100*time.Millisecond {
+		s.logger.Warnf("UPDATE TIMING: WHERE clause took %v for %d docs, bundle '%s'",
+			whereTime, len(filteredDocs), bundle.Name)
 	}
 
 	if args.Debug {
@@ -6047,6 +6067,8 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	}
 
 	// R1: Per-doc loop: update fields and schedule deferred index updates. Collect updatedDocs; call UpdateDocumentsBatch once after.
+	// TIMING: Per-document processing
+	perDocStart := time.Now()
 	updatedDocs := make([]*models.Document, 0, len(filteredDocs))
 	for _, doc := range filteredDocs {
 		originalDoc := *doc
@@ -6118,6 +6140,13 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		updatedDocs = append(updatedDocs, doc)
 	}
 
+	// TIMING: Log per-document processing time
+	perDocTime := time.Since(perDocStart)
+	if perDocTime > 100*time.Millisecond {
+		s.logger.Warnf("UPDATE TIMING: Per-doc loop took %v for %d docs, bundle '%s'",
+			perDocTime, len(updatedDocs), bundle.Name)
+	}
+
 	// TASK 3: B-tree index updates are now deferred via scheduleIndexUpdate
 	// The indexUpdateBuffer will batch these updates and apply them later via flushIndexUpdates
 	// This reduces per-document index overhead significantly
@@ -6127,6 +6156,9 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		totalBTreeUpdates := len(btreeIndexesToUpdate) * len(updatedDocs) * 2 // 2 = delete + insert per update
 		s.logger.Debugf("Scheduled %d B-tree index updates (delete+insert) for deferred execution (will be batched)", totalBTreeUpdates)
 	}
+
+	// TIMING: UpdateDocumentsBatch
+	batchStart := time.Now()
 
 	// R1: Single UpdateDocumentsBatch for all updated docs (was N calls to UpdateDocumentInBundleFile).
 	// R7 audit: UpdateDocumentInBundle holds AcquireBundleWriteLock (application) before this call, which
@@ -6155,6 +6187,13 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		if err != nil {
 			return fmt.Errorf("failed to update documents in bundle: %w", err)
 		}
+	}
+
+	// TIMING: Log UpdateDocumentsBatch time
+	batchTime := time.Since(batchStart)
+	if batchTime > 100*time.Millisecond {
+		s.logger.Warnf("UPDATE TIMING: UpdateDocumentsBatch took %v for %d docs, bundle '%s'",
+			batchTime, len(updatedDocs), bundle.Name)
 	}
 
 	// Invalidate documentPageMap for each updated docID (pageID is stale after UPDATE).
