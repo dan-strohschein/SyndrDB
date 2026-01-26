@@ -4422,12 +4422,10 @@ func ConvertToStringSlice(arr primitive.A) []string {
 
 // serializeDocumentDirect serializes a document directly without map conversion
 func (b *BundleStorageEngine) serializeDocumentDirect(document *models.Document) ([]byte, error) {
-	return helpers.EncodeFastBinary(map[string]interface{}{
-		"DocumentID": document.DocumentID,
-		"Fields":     document.Fields,
-		"CreatedAt":  document.CreatedAt,
-		"UpdatedAt":  document.UpdatedAt,
-	})
+	// Use V2 format with field directory for O(1) field access and better performance
+	// V2 format includes xxHash64 field directory enabling fast projected reads
+	// Pass document directly to avoid intermediate map allocation
+	return helpers.EncodeFastBinaryV2(document)
 }
 
 // parseDocumentBinary parses a document using the fast binary format
