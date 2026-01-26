@@ -7146,12 +7146,24 @@ func (s *BundleService) filterDocumentsWithIndexOptimization(bundle *models.Bund
 // getDocumentsByFilterStreaming streams pages, filters each chunk, and merges memtable.
 // Avoids loading all documents into memory for non-indexed WHERE (getAllDocumentsForIndexing).
 // Does not call FlushMetadataUpdates in the hot path; PageCount may be briefly stale.
+// OPTIMIZED: Uses parallel page processing for bundles with multiple pages.
 func (s *BundleService) getDocumentsByFilterStreaming(bundle *models.Bundle, whereClause string) ([]*models.Document, error) {
 	pageCount := uint32(bundle.PageCount)
 	if pageCount == 0 {
 		pageCount = 1
 	}
 
+	// For small bundles (1-2 pages), use sequential scan to avoid goroutine overhead
+	if pageCount <= 2 {
+		return s.getDocumentsByFilterStreamingSequential(bundle, whereClause, pageCount)
+	}
+
+	// For larger bundles, parallelize page scanning across available CPUs
+	return s.getDocumentsByFilterStreamingParallel(bundle, whereClause, pageCount)
+}
+
+// getDocumentsByFilterStreamingSequential is the original sequential implementation
+func (s *BundleService) getDocumentsByFilterStreamingSequential(bundle *models.Bundle, whereClause string, pageCount uint32) ([]*models.Document, error) {
 	var result []*models.Document
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
@@ -7174,37 +7186,132 @@ func (s *BundleService) getDocumentsByFilterStreaming(bundle *models.Bundle, whe
 		result = append(result, filtered...)
 	}
 
-	// Merge memtable: add matching docs not already in disk results (last-write-wins)
-	if bundle.Documents != nil && !bundle.DocumentsComplete {
-		diskDocIDs := make(map[string]bool, len(result))
-		for _, d := range result {
-			diskDocIDs[d.DocumentID] = true
-		}
-		bundle.DocumentsMutex.RLock()
-		memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-		for docID, doc := range *bundle.Documents {
-			memtableSnapshot[docID] = doc
-		}
-		bundle.DocumentsMutex.RUnlock()
-		var memtableOnly []*models.Document
-		for docID, doc := range memtableSnapshot {
-			if diskDocIDs[docID] {
-				continue
+	// Merge memtable
+	result = s.mergeMemtableResults(bundle, result, whereClause)
+	s.logger.Debugf("Streaming full scan (sequential) completed, found %d matching documents", len(result))
+	return result, nil
+}
+
+// getDocumentsByFilterStreamingParallel parallelizes page scanning for faster full table scans
+func (s *BundleService) getDocumentsByFilterStreamingParallel(bundle *models.Bundle, whereClause string, pageCount uint32) ([]*models.Document, error) {
+	// Use a worker pool with limited concurrency to avoid overwhelming the system
+	// Cap at 8 workers to balance parallelism vs resource usage
+	numWorkers := int(pageCount)
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
+
+	type pageResult struct {
+		pageID uint32
+		docs   []*models.Document
+		err    error
+	}
+
+	// Channel for page IDs to process
+	pagesChan := make(chan uint32, pageCount)
+	// Channel for results
+	resultsChan := make(chan pageResult, pageCount)
+
+	// Start workers
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for pageID := range pagesChan {
+				page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+				if err != nil {
+					s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
+					resultsChan <- pageResult{pageID: pageID, docs: nil, err: nil} // Don't fail, just skip
+					continue
+				}
+
+				chunk := make([]*models.Document, 0, len(page.Documents))
+				for _, d := range page.Documents {
+					dc := d
+					chunk = append(chunk, &dc)
+				}
+
+				if len(chunk) == 0 {
+					resultsChan <- pageResult{pageID: pageID, docs: nil, err: nil}
+					continue
+				}
+
+				filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause)
+				if err != nil {
+					resultsChan <- pageResult{pageID: pageID, docs: nil, err: fmt.Errorf("page %d: %w", pageID, err)}
+					continue
+				}
+
+				resultsChan <- pageResult{pageID: pageID, docs: filtered, err: nil}
 			}
-			dc := doc
-			memtableOnly = append(memtableOnly, &dc)
+		}()
+	}
+
+	// Send all page IDs to workers
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		pagesChan <- pageID
+	}
+	close(pagesChan)
+
+	// Wait for all workers to complete, then close results channel
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// Collect results
+	var result []*models.Document
+	for pr := range resultsChan {
+		if pr.err != nil {
+			return nil, pr.err
 		}
-		if len(memtableOnly) > 0 {
-			filteredMem, err := s.filterDocumentsWithSyndrQL(memtableOnly, whereClause)
-			if err != nil {
-				return nil, fmt.Errorf("streaming full scan memtable filter failed: %w", err)
-			}
-			result = append(result, filteredMem...)
+		if len(pr.docs) > 0 {
+			result = append(result, pr.docs...)
 		}
 	}
 
-	s.logger.Debugf("Streaming full scan completed, found %d matching documents", len(result))
+	// Merge memtable
+	result = s.mergeMemtableResults(bundle, result, whereClause)
+	s.logger.Debugf("Streaming full scan (parallel, %d workers) completed, found %d matching documents", numWorkers, len(result))
 	return result, nil
+}
+
+// mergeMemtableResults merges memtable documents with disk results
+func (s *BundleService) mergeMemtableResults(bundle *models.Bundle, diskResult []*models.Document, whereClause string) []*models.Document {
+	// Merge memtable: add matching docs not already in disk results (last-write-wins)
+	if bundle.Documents == nil || bundle.DocumentsComplete {
+		return diskResult
+	}
+
+	diskDocIDs := make(map[string]bool, len(diskResult))
+	for _, d := range diskResult {
+		diskDocIDs[d.DocumentID] = true
+	}
+	bundle.DocumentsMutex.RLock()
+	memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
+	for docID, doc := range *bundle.Documents {
+		memtableSnapshot[docID] = doc
+	}
+	bundle.DocumentsMutex.RUnlock()
+	var memtableOnly []*models.Document
+	for docID, doc := range memtableSnapshot {
+		if diskDocIDs[docID] {
+			continue
+		}
+		dc := doc
+		memtableOnly = append(memtableOnly, &dc)
+	}
+	if len(memtableOnly) > 0 {
+		filteredMem, err := s.filterDocumentsWithSyndrQL(memtableOnly, whereClause)
+		if err != nil {
+			s.logger.Warnf("Memtable filter failed: %v", err)
+			return diskResult
+		}
+		diskResult = append(diskResult, filteredMem...)
+	}
+
+	return diskResult
 }
 
 // tryHashIndexOptimization attempts to use hash indexes for query optimization
