@@ -1,0 +1,43 @@
+# GolangCI-Lint Configuration for SyndrDB
+# This file enforces code quality and performance standards
+
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+linters:
+  enable:
+    - gocritic
+    - gofmt
+    - goimports
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+linters-settings:
+  gocritic:
+    enabled-checks:
+      - hugeParam  # Warns when passing large structs by value (>80 bytes)
+      - rangeValCopy  # Warns when range copies large values
+      - appendAssign  # Warns on append without assignment
+    settings:
+      hugeParam:
+        sizeThreshold: 80  # bytes - structs larger than this should be passed by pointer
+
+issues:
+  # Exclude some linters from running on tests files
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gocritic
+
+# Performance note for HVJson usage:
+# When using hvjson.Marshal, ALWAYS pass pointers for zero-allocation marshaling:
+#   ✅ hvjson.Marshal(&myStruct)     // 88 ns/op, 0 allocs
+#   ⚠️  hvjson.Marshal(myStruct)     // 118 ns/op, 2 allocs
+# 
+# Use hvjson.MarshalPooled(&myStruct) for pooled buffer reuse in hot paths.
+# Always call result.Release() after writing the bytes to return buffer to pool.
