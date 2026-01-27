@@ -1,13 +1,14 @@
 package bundlestore
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common"
 	"time"
+
+	"github.com/dan-strohschein/HVJson/hvjson"
 )
 
 // BufferedDocument tracks a document in the write buffer with transaction context
@@ -299,7 +300,8 @@ func (wb *WriteBuffer) parseDocument(bufDoc *BufferedDocument) (*models.Document
 	jsonBytes := bufDoc.Data[8:]
 
 	var doc models.Document
-	if err := json.Unmarshal(jsonBytes, &doc); err != nil {
+	// PERF: hvjson is 27-42% faster than encoding/json
+	if err := hvjson.Unmarshal(jsonBytes, &doc); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal document: %w", err)
 	}
 

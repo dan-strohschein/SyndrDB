@@ -29,7 +29,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/registry"
 
-	jsoniter "github.com/json-iterator/go"
+	"github.com/dan-strohschein/HVJson/hvjson"
 
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
@@ -47,8 +47,23 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// PHASE D: Use json-iterator for faster, lower-allocation JSON encoding
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+// PHASE D: Use HVJson for faster, lower-allocation JSON encoding
+// PERF: Always pass pointers to hvjson.Marshal for zero-alloc marshaling
+// For response serialization, use hvjsonMarshal helper which uses MarshalPooled
+
+// hvjsonMarshal is a helper for hot-path JSON serialization using pooled buffers
+// Returns bytes and releases the pooled buffer after copying (safe for async use)
+func hvjsonMarshal(v interface{}) ([]byte, error) {
+	result, err := hvjson.MarshalPooled(v)
+	if err != nil {
+		return nil, err
+	}
+	// Copy bytes before releasing pool (required for async safety)
+	data := make([]byte, len(result.Data))
+	copy(data, result.Data)
+	result.Release()
+	return data, nil
+}
 
 // Server represents the main TCP server for SyndrDB
 type Server struct {
@@ -1605,7 +1620,7 @@ func (s *Server) sendError(writer *bufio.Writer, err interface{}) {
 		"error":  errorResponse,
 	}
 
-	jsonResponse, _ := json.Marshal(response)
+	jsonResponse, _ := hvjsonMarshal(&response)
 	writer.WriteString(string(jsonResponse) + "\n")
 	writer.Flush()
 }
@@ -1617,7 +1632,7 @@ func sendError(writer *bufio.Writer, message string) {
 		"status":  "error",
 		"message": message,
 	}
-	jsonResponse, _ := json.Marshal(response)
+	jsonResponse, _ := hvjsonMarshal(&response)
 	writer.WriteString(string(jsonResponse) + "\n")
 	writer.Flush()
 }
@@ -1627,7 +1642,7 @@ func sendSuccess(writer *bufio.Writer, message string) {
 		"status":  "success",
 		"message": message,
 	}
-	jsonResponse, _ := json.Marshal(response)
+	jsonResponse, _ := hvjsonMarshal(&response)
 	writer.WriteString(string(jsonResponse) + "\n")
 	writer.Flush()
 }
@@ -1662,7 +1677,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 			if err != nil {
 				logger.Errorf("Failed to stream documents: %v", err)
 				// Fallback to regular marshaling
-				data, _ = json.Marshal(result)
+				data, _ = hvjsonMarshal(result)
 				writer.WriteString(string(data) + "\n")
 				writer.Flush()
 				return
@@ -1675,7 +1690,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 			return
 		}
 		// Not streaming - use regular JSON marshaling
-		data, _ = json.Marshal(result)
+		data, _ = hvjsonMarshal(result)
 		writer.WriteString(string(data) + "\n")
 		writer.Flush()
 	case *string:
@@ -1693,7 +1708,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 	default:
 		// For other types, marshal to JSON
 
-		data, _ = json.Marshal(result)
+		data, _ = hvjsonMarshal(result)
 		//logger.Infof("Sending result: %s", data)
 
 		logger.Sync()

@@ -106,12 +106,12 @@ func ShowVersions(command string, database *models.Database, logger *zap.Sugared
 			"DocumentID":      doc.DocumentID,
 			"VersionSequence": doc.VersionSequence,
 			"CommitSequence":  doc.CommitSequence,
-			"CreatedByTxID":    doc.CreatedByTxID,
+			"CreatedByTxID":   doc.CreatedByTxID,
 			"DeletedByTxID":   doc.DeletedByTxID,
-			"IsDeleted":        doc.DeletedByTxID > 0,
-			"IsCommitted":      doc.CommitSequence > 0,
-			"CreatedAt":        doc.CreatedAt.Format("2006-01-02 15:04:05.000000"),
-			"UpdatedAt":        doc.UpdatedAt.Format("2006-01-02 15:04:05.000000"),
+			"IsDeleted":       doc.DeletedByTxID > 0,
+			"IsCommitted":     doc.CommitSequence > 0,
+			"CreatedAt":       doc.CreatedAt.Format("2006-01-02 15:04:05.000000"),
+			"UpdatedAt":       doc.UpdatedAt.Format("2006-01-02 15:04:05.000000"),
 		}
 
 		// Add field count for summary
@@ -158,10 +158,10 @@ func ShowActiveSnapshots(command string, logger *zap.SugaredLogger, serviceManag
 
 	// Build snapshot information
 	snapshotInfo := map[string]interface{}{
-		"active_snapshot_count": activeCount,
+		"active_snapshot_count":    activeCount,
 		"oldest_snapshot_sequence": oldestSnapshot,
-		"current_global_sequence": currentSequence,
-		"note": "For detailed snapshot information, check server logs with debug mode enabled",
+		"current_global_sequence":  currentSequence,
+		"note":                     "For detailed snapshot information, check server logs with debug mode enabled",
 	}
 
 	response := &CommandResponse{

@@ -12,12 +12,12 @@ before execution, maintaining ACID properties and enabling recovery.
 */
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"syndrdb/src/pkg/settings"
 	"time"
 
+	"github.com/dan-strohschein/HVJson/hvjson"
 	"go.uber.org/zap"
 )
 
@@ -202,7 +202,8 @@ func (wm *WALManager) RollbackTransaction(txID string) error {
 
 // LogDocumentInsert logs a document insertion operation
 func (wm *WALManager) LogDocumentInsert(txID, bundleName, documentID string, documentData interface{}) error {
-	afterData, err := json.Marshal(documentData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	afterData, err := hvjson.Marshal(&documentData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal document data: %w", err)
 	}
@@ -220,12 +221,13 @@ func (wm *WALManager) LogDocumentInsert(txID, bundleName, documentID string, doc
 
 // LogDocumentUpdate logs a document update operation
 func (wm *WALManager) LogDocumentUpdate(txID, bundleName, documentID string, beforeData, afterData interface{}) error {
-	beforeJSON, err := json.Marshal(beforeData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	beforeJSON, err := hvjson.Marshal(&beforeData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal before data: %w", err)
 	}
 
-	afterJSON, err := json.Marshal(afterData)
+	afterJSON, err := hvjson.Marshal(&afterData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal after data: %w", err)
 	}
@@ -243,7 +245,8 @@ func (wm *WALManager) LogDocumentUpdate(txID, bundleName, documentID string, bef
 
 // LogDocumentDelete logs a document deletion operation
 func (wm *WALManager) LogDocumentDelete(txID, bundleName, documentID string, documentData interface{}) error {
-	beforeData, err := json.Marshal(documentData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	beforeData, err := hvjson.Marshal(&documentData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal document data: %w", err)
 	}
@@ -261,7 +264,8 @@ func (wm *WALManager) LogDocumentDelete(txID, bundleName, documentID string, doc
 
 // LogBundleCreate logs a bundle creation operation
 func (wm *WALManager) LogBundleCreate(txID, bundleName string, bundleData interface{}) error {
-	afterData, err := json.Marshal(bundleData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	afterData, err := hvjson.Marshal(&bundleData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal bundle data: %w", err)
 	}
@@ -279,7 +283,8 @@ func (wm *WALManager) LogBundleCreate(txID, bundleName string, bundleData interf
 
 // LogBundleDelete logs a bundle deletion operation
 func (wm *WALManager) LogBundleDelete(txID, bundleName string, bundleData interface{}) error {
-	beforeData, err := json.Marshal(bundleData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	beforeData, err := hvjson.Marshal(&bundleData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal bundle data: %w", err)
 	}
@@ -297,7 +302,8 @@ func (wm *WALManager) LogBundleDelete(txID, bundleName string, bundleData interf
 
 // LogIndexCreate logs an index creation operation
 func (wm *WALManager) LogIndexCreate(txID, bundleName, indexName string, indexData interface{}) error {
-	afterData, err := json.Marshal(indexData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	afterData, err := hvjson.Marshal(&indexData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal index data: %w", err)
 	}
@@ -315,7 +321,8 @@ func (wm *WALManager) LogIndexCreate(txID, bundleName, indexName string, indexDa
 
 // LogIndexDrop logs an index drop operation
 func (wm *WALManager) LogIndexDrop(txID, bundleName, indexName string, indexData interface{}) error {
-	beforeData, err := json.Marshal(indexData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	beforeData, err := hvjson.Marshal(&indexData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal index data: %w", err)
 	}
@@ -341,7 +348,8 @@ func (wm *WALManager) LogIndexDrop(txID, bundleName, indexName string, indexData
 //
 // Returns: error if marshaling fails or WAL logging fails
 func (wm *WALManager) LogDatabaseCreate(txID, databaseName string, databaseData interface{}) error {
-	afterData, err := json.Marshal(databaseData)
+	// PERF: hvjson is 27-42% faster than encoding/json
+	afterData, err := hvjson.Marshal(&databaseData)
 	if err != nil {
 		return fmt.Errorf("failed to marshal database data: %w", err)
 	}
@@ -658,7 +666,7 @@ func (wm *WALManager) RecoverCommitSequenceAssignments() (uint64, error) {
 			// Parse document locations from AfterData (JSON)
 			var documentLocations map[string]interface{}
 			if entry.AfterData != "" {
-				if err := json.Unmarshal([]byte(entry.AfterData), &documentLocations); err != nil {
+				if err := hvjson.Unmarshal([]byte(entry.AfterData), &documentLocations); err != nil {
 					wm.logger.Warnf("Failed to parse document locations from WAL entry LSN=%d: %v", entry.LSN, err)
 					// Continue recovery - document locations parsing failure doesn't block recovery
 				} else {

@@ -2,7 +2,6 @@ package helpers
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"math"
 	"sync"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
+	"github.com/dan-strohschein/HVJson/hvjson"
 )
 
 // Format version constants
@@ -402,7 +402,8 @@ func (s *FastDocumentSerializer) writeFieldValueV2(field models.Field) (uint32, 
 		// InterfaceVal can hold arrays, objects, bytes, or other complex types
 		// Serialize as JSON
 		// TODO: I could implement native array/object serialization for better performance
-		valBytes, err := json.Marshal(field.Value.InterfaceVal)
+		// PERF: hvjson is 27-42% faster than encoding/json
+		valBytes, err := hvjson.Marshal(&field.Value.InterfaceVal)
 		if err != nil {
 			return 0, fmt.Errorf("failed to marshal interface value: %w", err)
 		}
@@ -412,7 +413,8 @@ func (s *FastDocumentSerializer) writeFieldValueV2(field models.Field) (uint32, 
 	default:
 		// Fallback: use AsInterface() and JSON marshal
 		val := field.Value.AsInterface()
-		valBytes, err := json.Marshal(val)
+		// PERF: hvjson is 27-42% faster than encoding/json
+		valBytes, err := hvjson.Marshal(&val)
 		if err != nil {
 			return 0, fmt.Errorf("failed to marshal field value: %w", err)
 		}

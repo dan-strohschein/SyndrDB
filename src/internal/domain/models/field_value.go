@@ -1,11 +1,11 @@
 package models
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
 
+	"github.com/dan-strohschein/HVJson/hvjson"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/bsontype"
 )
@@ -412,8 +412,9 @@ func (fv FieldValue) MarshalJSON() ([]byte, error) {
 		buf = append(buf, '"')
 		return buf, nil
 	case FieldTypeInterface:
-		// Fallback to json.Marshal for complex types (arrays, objects)
-		return json.Marshal(fv.InterfaceVal)
+		// Fallback to hvjson.Marshal for complex types (arrays, objects)
+		// PERF: hvjson is 27-42% faster than encoding/json
+		return hvjson.Marshal(&fv.InterfaceVal)
 	case FieldTypeNil:
 		return jsonNull, nil
 	default:

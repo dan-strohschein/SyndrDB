@@ -19,6 +19,7 @@ import (
 	"syndrdb/src/pkg/settings"
 	"time"
 
+	"github.com/dan-strohschein/HVJson/hvjson"
 	"go.uber.org/zap"
 )
 
@@ -35,7 +36,7 @@ func debugLogSessionCleanup(sessionID string, txStatus TransactionStatus, txID s
 		sessIDShort = sessionID[:12]
 	}
 	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "A", "location": "session_manager.go:cleanupSession", "message": "session_cleanup_start", "data": map[string]interface{}{"sessionID": sessIDShort, "txStatus": txStatus.String(), "txID": txIDShort, "docLocks": docLockCount, "bundleLocks": bundleLockCount}}
-	if b, err := json.Marshal(entry); err == nil {
+	if b, err := hvjson.Marshal(entry); err == nil {
 		if f, err := os.OpenFile(debugLogPathSession, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 			f.Write(append(b, '\n'))
 			f.Close()
@@ -49,7 +50,7 @@ func debugLogSessionLockRelease(sessionID string, method string, lockCount int) 
 		sessIDShort = sessionID[:12]
 	}
 	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "A", "location": "session_manager.go:cleanupSession", "message": "session_lock_release", "data": map[string]interface{}{"sessionID": sessIDShort, "method": method, "lockCount": lockCount}}
-	if b, err := json.Marshal(entry); err == nil {
+	if b, err := hvjson.Marshal(entry); err == nil {
 		if f, err := os.OpenFile(debugLogPathSession, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 			f.Write(append(b, '\n'))
 			f.Close()
@@ -603,7 +604,7 @@ func (sm *SessionManager) TerminateUserSessions(username string, connectionMap m
 					"status":  "error",
 					"message": "The administrator forcefully removed your session from the server",
 				}
-				if jsonResponse, err := json.Marshal(response); err == nil {
+				if jsonResponse, err := hvjson.Marshal(response); err == nil {
 					conn.Writer.WriteString(string(jsonResponse) + "\n")
 					conn.Writer.Flush()
 				}
