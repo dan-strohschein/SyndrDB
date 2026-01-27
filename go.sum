@@ -8,8 +8,12 @@ github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UF
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/dan-strohschein/HVJson v0.0.0-20260127133344-abed25daa262 h1:xNKeSyrJdnO8iHDn3lsVY+NLAmQeOxY3x6R2glsJlfE=
 github.com/dan-strohschein/HVJson v0.0.0-20260127133344-abed25daa262/go.mod h1:mzAaKRHetb3yp0mFZSJAXbqHUcTKsrJVVVEAMLD0aUc=
+github.com/dan-strohschein/HVJson v0.0.1 h1:cPE0dPE5IrWajD+Gos6+0VHbhyC/J6Dxh+avENwPq5I=
+github.com/dan-strohschein/HVJson v0.0.1/go.mod h1:cJBKd4iD5nhej9hMkoTCmeXCm3MLnxvKP9IXOgqLMzA=
 github.com/dan-strohschein/syndrdb-simd v0.0.0-20260127041301-f5a4c82736e3 h1:zxO0uC8DDlimT5eLuVz44ZSLEiA80lvTDhx26ir+n8s=
 github.com/dan-strohschein/syndrdb-simd v0.0.0-20260127041301-f5a4c82736e3/go.mod h1:3kyQj8tYOR+3xCfy+G4TmPRdBwYqYsfztuxEeGyT6eY=
+github.com/dan-strohschein/syndrdb-simd v0.0.2 h1:ALrxta3rgZWHqlpd18GK6gpKSim5lxU2vAs1uZrtVbo=
+github.com/dan-strohschein/syndrdb-simd v0.0.2/go.mod h1:3kyQj8tYOR+3xCfy+G4TmPRdBwYqYsfztuxEeGyT6eY=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

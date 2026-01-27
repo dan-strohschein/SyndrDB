@@ -24,8 +24,8 @@ require (
 )
 
 require (
-	github.com/dan-strohschein/HVJson v0.0.0-20260127133344-abed25daa262
-	github.com/dan-strohschein/syndrdb-simd v0.0.0-20260127041301-f5a4c82736e3
+	github.com/dan-strohschein/HVJson v0.0.1
+	github.com/dan-strohschein/syndrdb-simd v0.0.2
 	github.com/google/uuid v1.6.0
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.18.1
