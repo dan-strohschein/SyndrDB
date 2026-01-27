@@ -139,9 +139,10 @@ func TransformDocumentsToFlatFormatWithProjection(documents map[string]*models.D
 			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(field.Value)
 
 			if shouldInclude {
-				// ✅ ZERO-ALLOCATION: Store FieldValue directly (no boxing)!
-				// JSON marshaling calls FieldValue.MarshalJSON() automatically
-				flatDoc[fieldName] = field.Value
+				// Convert FieldValue to concrete JSON value
+				// This ensures JSON encoders (including HVJson) serialize the actual value
+				// instead of the FieldValue struct wrapper
+				flatDoc[fieldName] = field.Value.ToJSONValue()
 			}
 		}
 
@@ -196,9 +197,10 @@ func TransformSortedDocumentsToFlatFormatWithProjection(documents []*models.Docu
 			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(field.Value)
 
 			if shouldInclude {
-				// ✅ ZERO-ALLOCATION: Store FieldValue directly (no boxing)!
-				// JSON marshaling calls FieldValue.MarshalJSON() automatically
-				flatDoc[fieldName] = field.Value
+				// Convert FieldValue to concrete JSON value
+				// This ensures JSON encoders (including HVJson) serialize the actual value
+				// instead of the FieldValue struct wrapper
+				flatDoc[fieldName] = field.Value.ToJSONValue()
 			}
 		}
 
@@ -290,9 +292,10 @@ func TransformDocumentSliceToFlatFormat(documents []*models.Document, selectedFi
 			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(field.Value)
 
 			if shouldInclude {
-				// ✅ ZERO-ALLOCATION: Store FieldValue directly (no boxing)!
-				// JSON marshaling calls FieldValue.MarshalJSON() automatically
-				flatDoc[fieldName] = field.Value
+				// Convert FieldValue to concrete JSON value
+				// This ensures JSON encoders (including HVJson) serialize the actual value
+				// instead of the FieldValue struct wrapper
+				flatDoc[fieldName] = field.Value.ToJSONValue()
 			}
 		}
 

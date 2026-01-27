@@ -422,6 +422,32 @@ func (fv FieldValue) MarshalJSON() ([]byte, error) {
 	}
 }
 
+// ToJSONValue returns the FieldValue as a concrete Go value suitable for JSON encoding.
+// This is used when FieldValue is stored in map[string]interface{} and the JSON encoder
+// needs the actual value, not the FieldValue struct wrapper.
+func (fv FieldValue) ToJSONValue() interface{} {
+	switch fv.Type {
+	case FieldTypeString:
+		return fv.StringVal
+	case FieldTypeInt:
+		return fv.IntVal
+	case FieldTypeFloat:
+		return fv.FloatVal
+	case FieldTypeBool:
+		return fv.BoolVal
+	case FieldTypeDateTime:
+		return fv.DateTimeVal
+	case FieldTypeDate:
+		return fv.DateVal
+	case FieldTypeInterface:
+		return fv.InterfaceVal
+	case FieldTypeNil:
+		return nil
+	default:
+		return nil
+	}
+}
+
 // ========================
 // ZERO-ALLOCATION COMPARISONS (for WHERE clauses)
 // These work directly on FieldValue without boxing to interface{}

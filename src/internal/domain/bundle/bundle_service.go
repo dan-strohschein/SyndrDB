@@ -2299,6 +2299,16 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 //   - int: Count of unique documents (excluding tombstones)
 //   - error: Any error encountered during counting
 func (s *BundleService) CountDocuments(bundleName, databaseName string) (int, error) {
+	// OPTIMIZATION: Use in-memory SortedIndex if available (always up-to-date)
+	// SortedIndex is updated immediately on INSERT/DELETE, before flush to disk
+	// This ensures COUNT(*) returns accurate results even with buffered writes
+	bundle, exists := s.bundleMetadata[bundleName]
+	if exists && bundle.SortedIndex != nil {
+		// SortedIndex maintains atomic counts across all shards
+		return int(bundle.SortedIndex.TotalDocuments()), nil
+	}
+
+	// Fallback to disk-based counting (for bundles not yet loaded in memory)
 	return s.store.CountDocuments(bundleName, databaseName)
 }
 
