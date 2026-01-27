@@ -30,11 +30,11 @@ func (f *BundleFactoryImpl) NewBundle(name string, description string) *models.B
 		Name:              name,
 		Description:       description,
 		DocumentStructure: models.DocumentStructure{FieldDefinitions: make(map[string]models.FieldDefinition)},
-		Documents:         func() *map[string]models.Document { m := make(map[string]models.Document); return &m }(),
-		Relationships:     make(map[string]models.Relationship),
-		Indexes:           make(map[string]models.IndexReference),
-		IndexNames:        []string{},
-		Constraints:       make(map[string]models.Constraint),
+		// WRITE-THROUGH CACHE: Documents memtable removed - all storage goes through page cache
+		Relationships: make(map[string]models.Relationship),
+		Indexes:       make(map[string]models.IndexReference),
+		IndexNames:    []string{},
+		Constraints:   make(map[string]models.Constraint),
 		// Initialize pagination metadata to prevent divide by zero
 		// Use consistent PageSize with BundleService default (4096)
 		TotalDocuments: 0,

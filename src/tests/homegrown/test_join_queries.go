@@ -214,7 +214,6 @@ func setupJoinTestData(logger *zap.SugaredLogger) (*models.Database, server.Serv
 				"city": {Name: "city", Type: "string", IsRequired: false, IsUnique: false},
 			},
 		},
-		Documents:     &map[string]models.Document{},
 		Indexes:       make(map[string]models.IndexReference),
 		Relationships: make(map[string]models.Relationship),
 		Constraints:   make(map[string]models.Constraint),
@@ -233,7 +232,6 @@ func setupJoinTestData(logger *zap.SugaredLogger) (*models.Database, server.Serv
 				"product":     {Name: "product", Type: "string", IsRequired: true, IsUnique: false},
 			},
 		},
-		Documents:     &map[string]models.Document{},
 		Indexes:       make(map[string]models.IndexReference),
 		Relationships: make(map[string]models.Relationship),
 		Constraints:   make(map[string]models.Constraint),
@@ -307,19 +305,6 @@ func setupJoinTestData(logger *zap.SugaredLogger) (*models.Database, server.Serv
 			},
 		},
 	}
-
-	// Populate documents
-	customerDocs := make(map[string]models.Document)
-	for _, customer := range customers {
-		customerDocs[customer.DocumentID] = customer
-	}
-	customersBundle.Documents = &customerDocs
-
-	orderDocs := make(map[string]models.Document)
-	for _, order := range orders {
-		orderDocs[order.DocumentID] = order
-	}
-	ordersBundle.Documents = &orderDocs
 
 	// Add bundles to database
 	db.Bundles["Customers"] = customersBundle

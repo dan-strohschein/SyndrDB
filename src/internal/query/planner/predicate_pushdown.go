@@ -215,19 +215,19 @@ func (fba *FilteredBundleAdapter) CopyProjectedToSessionCache(ctx context.Contex
 	if fba.bundleService == nil {
 		return nil, 0, 0, 0, fmt.Errorf("bundle service not available")
 	}
-	
+
 	databaseName := ""
 	if fba.bundle != nil && fba.bundle.Database != nil {
 		databaseName = fba.bundle.Database.Name
 	}
-	
+
 	totalPages := fba.GetTotalPages()
 	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := fba.bundleService.CopyProjectedFromCache(
 		fba.bundleName, databaseName, totalPages, projectFields, effectiveLimit)
 	if err != nil {
 		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents: %w", err)
 	}
-	
+
 	// Note: For filtered adapter, we can't filter at cache time since we only have projected fields
 	// Filtering happens during aggregation or scan phase
 	return sessionCache, docsCopied, cachedPages, totalPagesReturned, nil
@@ -311,34 +311,31 @@ func (fba *FilteredBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage,
 		if fba.bundle != nil && fba.bundle.Database != nil {
 			databaseName = fba.bundle.Database.Name
 		}
-		
-		page, err := fba.bundleService.GetDocumentPage(fba.bundleName, databaseName, pageID)
+
+		// THREAD SAFETY: Use SnapshotPageDocuments to avoid concurrent map iteration
+		docs, err := fba.bundleService.SnapshotPageDocuments(fba.bundleName, databaseName, pageID)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		// Filter documents by conditions
 		filteredPage := &models.DocumentPage{
-			PageID:         page.PageID,
-			BundleID:       page.BundleID,
-			Documents:      make(map[string]models.Document),
-			NextPageID:     page.NextPageID,
-			PreviousPageID: page.PreviousPageID,
-			IsDirty:        page.IsDirty,
-			LoadedAt:       page.LoadedAt,
-			DocumentCount:  0,
+			PageID:        pageID,
+			BundleID:      fba.bundleName,
+			Documents:     make(map[string]models.Document),
+			DocumentCount: 0,
 		}
-		
-		for docID, doc := range page.Documents {
+
+		for _, doc := range docs {
 			if evaluateConditions(&doc, fba.conditions, fba.logger) {
-				filteredPage.Documents[docID] = doc
+				filteredPage.Documents[doc.DocumentID] = doc
 				filteredPage.DocumentCount++
 			}
 		}
-		
+
 		return filteredPage, nil
 	}
-	
+
 	// Fallback: can't load page without bundleService
 	return nil, fmt.Errorf("FilteredBundleAdapter: bundleService not available for LoadPage")
 }

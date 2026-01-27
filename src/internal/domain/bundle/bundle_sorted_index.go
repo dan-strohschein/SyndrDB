@@ -251,11 +251,15 @@ func InitializeBundleSortedIndex(bundle *models.Bundle) error {
 		return fmt.Errorf("cannot initialize sorted index for nil bundle")
 	}
 	if bundle.Database == nil {
+		// Set fallback empty index and return error
+		bundle.SortedIndex = models.NewShardedSortedIndex()
 		return fmt.Errorf("cannot initialize sorted index: bundle has no database reference")
 	}
 
 	index, err := LoadSortedIndex(bundle.Database.Name, bundle.Name)
 	if err != nil {
+		// Set fallback empty index and return error
+		bundle.SortedIndex = models.NewShardedSortedIndex()
 		return fmt.Errorf("failed to load sorted index for bundle %s: %w", bundle.Name, err)
 	}
 

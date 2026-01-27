@@ -942,15 +942,16 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 	v.logger.Infof("[DROP-RESTRICT] Sorted %d bundles for deadlock prevention: %v", len(bundlesToScan), bundlesToScan)
 
 	// Step 3: Collect all DocumentIDs from target bundle for validation
+	// WRITE-THROUGH CACHE: Use SortedIndex for document ID enumeration
 	var targetDocumentIDs []string
-	if targetBundle.Documents != nil && targetBundle.DocumentsComplete {
-		for docID := range *targetBundle.Documents {
-			targetDocumentIDs = append(targetDocumentIDs, docID)
-		}
+	if targetBundle.SortedIndex != nil && targetBundle.SortedIndex.TotalDocuments() > 0 {
+		// Use SortedIndex to enumerate document IDs (most efficient)
+		// The SortedIndex maintains a sorted list of all docIDs
+		targetDocumentIDs = targetBundle.SortedIndex.GetAllDocumentIDs()
 	} else {
-		// Load documents via primary key index or full scan
+		// Fallback: Load documents via page scan
 		// TODO: I could optimize this by loading only the DocumentID list without full document data
-		return fmt.Errorf("[DROP-RESTRICT] Cannot validate: bundle '%s' documents not loaded in memory", targetBundle.Name)
+		return fmt.Errorf("[DROP-RESTRICT] Cannot validate: bundle '%s' has no SortedIndex for document enumeration", targetBundle.Name)
 	}
 
 	totalDocs := len(targetDocumentIDs)
@@ -1048,40 +1049,48 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 			}
 
 			if hashIdx == nil {
-				// Fallback to full document scan
-				v.logger.Warnf("[DROP-RESTRICT] Hash index missing on FK field '%s' in bundle '%s', falling back to full scan", fkField, bundleName)
+				// Fallback to full document scan via page cache
+				// WRITE-THROUGH CACHE: All documents are now accessed through page cache
+				v.logger.Warnf("[DROP-RESTRICT] Hash index missing on FK field '%s' in bundle '%s', falling back to page scan", fkField, bundleName)
 
-				if bundle.Documents == nil || !bundle.DocumentsComplete {
-					v.logger.Warnf("[DROP-RESTRICT] Cannot scan bundle '%s' - documents not loaded", bundleName)
-					continue
+				// Use SortedIndex to get document count for progress logging
+				var totalDocsInBundle int64
+				if bundle.SortedIndex != nil {
+					totalDocsInBundle = int64(bundle.SortedIndex.TotalDocuments())
 				}
-
-				docs := *bundle.Documents
-				totalDocsInBundle := len(docs)
 				counter := 0
 
-				for _, doc := range docs {
-					counter++
-
-					// Progress logging every 10k documents
-					if logProgress && counter%10000 == 0 {
-						v.logger.Infof("[DROP-RESTRICT] DROP validation progress: scanned %d of %d documents in '%s', found %d violations so far",
-							counter, totalDocsInBundle, bundleName, violations)
+				// Scan all pages in the bundle
+				for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+					docs, err := v.bundleService.SnapshotPageDocuments(bundleName, bundle.Database.Name, pageID)
+					if err != nil {
+						v.logger.Warnf("[DROP-RESTRICT] Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
+						continue
 					}
 
-					// Check if this document has a FK value matching target bundle
-					for _, field := range doc.Fields {
-						if field.Name == fkField && field.Value.Type == models.FieldTypeString {
-							fkValue := field.Value.StringVal
-							// Check if this FK value exists in target bundle
-							for _, targetDocID := range targetDocumentIDs {
-								if fkValue == targetDocID {
-									violations++
+					for _, doc := range docs {
+						counter++
 
-									if useSampling && violations >= 100 {
-										return fmt.Errorf("Cannot drop bundle '%s' - at least 100 documents reference this bundle (sampling mode detected violations, actual count may be higher). Remove references first or use DROP BUNDLE \"%s\" WITH FORCE", targetBundle.Name, targetBundle.Name)
+						// Progress logging every 10k documents
+						if logProgress && counter%10000 == 0 {
+							v.logger.Infof("[DROP-RESTRICT] DROP validation progress: scanned %d of %d documents in '%s', found %d violations so far",
+								counter, totalDocsInBundle, bundleName, violations)
+						}
+
+						// Check if this document has a FK value matching target bundle
+						for _, field := range doc.Fields {
+							if field.Name == fkField && field.Value.Type == models.FieldTypeString {
+								fkValue := field.Value.StringVal
+								// Check if this FK value exists in target bundle
+								for _, targetDocID := range targetDocumentIDs {
+									if fkValue == targetDocID {
+										violations++
+
+										if useSampling && violations >= 100 {
+											return fmt.Errorf("Cannot drop bundle '%s' - at least 100 documents reference this bundle (sampling mode detected violations, actual count may be higher). Remove references first or use DROP BUNDLE \"%s\" WITH FORCE", targetBundle.Name, targetBundle.Name)
+										}
+										break
 									}
-									break
 								}
 							}
 						}

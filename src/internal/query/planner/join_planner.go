@@ -360,10 +360,16 @@ func (jp *JoinQueryPlanner) createRightSideNode(bundle *models.Bundle, whereClau
 	}
 
 	// Default to full scan
+	bundleDocCount := 0
+	if bundle.SortedIndex != nil {
+		bundleDocCount = int(bundle.SortedIndex.TotalDocuments())
+	} else {
+		bundleDocCount = int(bundle.TotalDocuments)
+	}
 	return &FullScanNode{
 		Bundle:           bundle,
-		Cost:             float64(len(*bundle.Documents)),
-		EstimatedRows:    len(*bundle.Documents),
+		Cost:             float64(bundleDocCount),
+		EstimatedRows:    bundleDocCount,
 		Logger:           jp.Logger,
 		BundleServiceInt: jp.BundleServiceInt,
 	}
@@ -864,20 +870,12 @@ func (pba *PlannerBundleAdapter) GetDocumentIDs() []string {
 		return ids
 	}
 
-	// Fallback to deprecated Documents field (legacy bundles)
-	if pba.bundle.Documents == nil {
-		return []string{}
+	// Fallback to SortedIndex for document IDs (when bundleService is not available)
+	if pba.bundle.SortedIndex != nil {
+		return pba.bundle.SortedIndex.GetAllDocumentIDs()
 	}
 
-	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-	pba.bundle.DocumentsMutex.RLock()
-	ids := make([]string, 0, len(*pba.bundle.Documents))
-	for docID := range *pba.bundle.Documents {
-		ids = append(ids, docID)
-	}
-	pba.bundle.DocumentsMutex.RUnlock()
-
-	return ids
+	return []string{}
 }
 
 // GetDocument retrieves a document by its ID using direct lookup (O(1) via index)
@@ -903,18 +901,10 @@ func (pba *PlannerBundleAdapter) GetDocument(docID string) *models.Document {
 		return doc
 	}
 
-	// Fallback to deprecated Documents field (legacy bundles)
-	if pba.bundle.Documents == nil {
-		return nil
-	}
-
-	documents := *pba.bundle.Documents
-	doc, exists := documents[docID]
-	if !exists {
-		return nil
-	}
-
-	return &doc
+	// Fallback: No bundleService available - cannot load document
+	// This is now an error condition since Documents field no longer exists
+	pba.logger.Warnf("GetDocument called without bundleService for document '%s' in bundle '%s'", docID, pba.bundle.Name)
+	return nil
 }
 
 // GetDocumentsByIDs retrieves multiple documents by ID in a single batch operation
@@ -941,20 +931,10 @@ func (pba *PlannerBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*
 		return result
 	}
 
-	// Fallback to in-memory lookup (legacy bundles)
-	if pba.bundle.Documents == nil {
-		return make(map[string]*models.Document)
-	}
-
-	result := make(map[string]*models.Document, len(docIDs))
-	documents := *pba.bundle.Documents
-	for _, docID := range docIDs {
-		if doc, exists := documents[docID]; exists {
-			docCopy := doc
-			result[docID] = &docCopy
-		}
-	}
-	return result
+	// Fallback: No bundleService available - cannot load documents
+	// This is now an error condition since Documents field no longer exists
+	pba.logger.Warnf("GetDocumentsByIDs called without bundleService for bundle '%s'", pba.bundle.Name)
+	return make(map[string]*models.Document)
 }
 
 // GetAllDocuments returns all documents in the bundle as a map
@@ -986,20 +966,10 @@ func (pba *PlannerBundleAdapter) GetAllDocuments() map[string]*models.Document {
 		return result
 	}
 
-	// Fallback to deprecated Documents field (legacy bundles)
-	if pba.bundle.Documents == nil {
-		return make(map[string]*models.Document)
-	}
-
-	// Convert from map[string]models.Document to map[string]*models.Document
-	result := make(map[string]*models.Document)
-	documents := *pba.bundle.Documents
-	for docID, doc := range documents {
-		docCopy := doc // Create copy to avoid address issues
-		result[docID] = &docCopy
-	}
-
-	return result
+	// Fallback: No bundleService available - cannot load documents
+	// This is now an error condition since Documents field no longer exists
+	pba.logger.Warnf("GetAllDocuments called without bundleService for bundle '%s'", pba.bundle.Name)
+	return make(map[string]*models.Document)
 }
 
 // GetAllDocumentsWithLimit returns documents up to the specified limit with early termination

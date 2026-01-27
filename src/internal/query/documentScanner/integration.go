@@ -13,7 +13,9 @@ type BundleServiceInterface interface {
 	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
 	LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error)
 	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error) // GetDocumentPage uses shared documentPages cache
-	CountDocuments(bundleName, databaseName string) (int, error) // Count all documents using optimized count-only parser
+	CountDocuments(bundleName, databaseName string) (int, error)                                  // Count all documents using optimized count-only parser
+	// SnapshotPageDocuments safely snapshots documents from a page to avoid concurrent map iteration
+	SnapshotPageDocuments(bundleName, databaseName string, pageID uint32) ([]models.Document, error)
 	// CopyProjectedFromCache copies projected documents from documentPages cache under one RLock
 	// OPTIMIZATION: One-time lock acquisition, iterates cached pages, copies only projected fields
 	// Returns: (projected docs map, docs copied, pages that were cached, total pages, error)

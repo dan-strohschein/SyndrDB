@@ -31,7 +31,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"syndrdb/src/internal/auth"
@@ -62,6 +61,34 @@ var (
 	rootUserTestErrors           map[string]error
 	rootUserTestOnce             sync.Once
 )
+
+// getRootUserBundleDocuments is a helper function to get documents from a bundle using the BundleService
+func getRootUserBundleDocuments(bundleName string) ([]*models.Document, error) {
+	bundle, exists := testRootUserDatabase.Bundles[bundleName]
+	if !exists {
+		return nil, fmt.Errorf("%s bundle not found", bundleName)
+	}
+	return testRootUserServiceManager.BundleService.GetDocumentsByFilter(&bundle, "", nil)
+}
+
+// findRootUserID is a helper function to find the Root user's UserID
+func findRootUserID() (string, error) {
+	docs, err := getRootUserBundleDocuments("Users")
+	if err != nil {
+		return "", err
+	}
+	if len(docs) == 0 {
+		return "", fmt.Errorf("Users bundle has no documents")
+	}
+	for _, doc := range docs {
+		if username, ok := doc.Data["Username"].(string); ok && username == "Root" {
+			if userID, ok := doc.Data["UserID"].(string); ok {
+				return userID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("Root user not found in Users bundle")
+}
 
 // setupRootUserTestEnvironment initializes the Root user test environment
 func setupRootUserTestEnvironment() error {
@@ -296,23 +323,20 @@ func cleanupRootUserTestEnvironment() error {
 func testRootUser_CreatedProperly() error {
 	ColorLogger.Info("Testing Root user creation...")
 
-	// Get Users bundle
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
+	// Get users using helper function
+	docs, err := getRootUserBundleDocuments("Users")
+	if err != nil {
+		return err
 	}
-
-	if usersBundle.Documents == nil {
+	if len(docs) == 0 {
 		return fmt.Errorf("Users bundle has no documents")
 	}
 
 	// Find Root user document
 	var rootUser *models.Document
-	docs := *usersBundle.Documents
-	for i := range docs {
-		if username, ok := docs[i].Data["Username"].(string); ok && username == "Root" {
-			doc := docs[i]
-			rootUser = &doc
+	for _, doc := range docs {
+		if username, ok := doc.Data["Username"].(string); ok && username == "Root" {
+			rootUser = doc
 			break
 		}
 	}
@@ -363,23 +387,20 @@ func testRootUser_CanLogin() error {
 func testRootUser_PasswordHashed() error {
 	ColorLogger.Info("Testing Root user password hashing...")
 
-	// Get Users bundle
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
+	// Get users using helper function
+	docs, err := getRootUserBundleDocuments("Users")
+	if err != nil {
+		return err
 	}
-
-	if usersBundle.Documents == nil {
+	if len(docs) == 0 {
 		return fmt.Errorf("Users bundle has no documents")
 	}
 
 	// Find Root user document
 	var rootUser *models.Document
-	docs := *usersBundle.Documents
-	for i := range docs {
-		if username, ok := docs[i].Data["Username"].(string); ok && username == "Root" {
-			doc := docs[i]
-			rootUser = &doc
+	for _, doc := range docs {
+		if username, ok := doc.Data["Username"].(string); ok && username == "Root" {
+			rootUser = doc
 			break
 		}
 	}
@@ -412,48 +433,26 @@ func testRootUser_PasswordHashed() error {
 func testRootUser_HasDboRole() error {
 	ColorLogger.Info("Testing Root user Dbo role assignment...")
 
-	// Get UserRoles bundle
-	userRolesBundle, exists := testRootUserDatabase.Bundles["UserRoles"]
-	if !exists {
-		return fmt.Errorf("UserRoles bundle not found")
+	// Get Root user's UserID using helper
+	rootUserID, err := findRootUserID()
+	if err != nil {
+		return err
 	}
 
-	// Get Users bundle to find Root user's UserID
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
+	// Get UserRoles documents
+	userRoleDocs, err := getRootUserBundleDocuments("UserRoles")
+	if err != nil {
+		return err
 	}
-
-	if usersBundle.Documents == nil {
-		return fmt.Errorf("Users bundle has no documents")
-	}
-
-	var rootUserID string
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && username == "Root" {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				rootUserID = userID
-				break
-			}
-		}
-	}
-
-	if rootUserID == "" {
-		return fmt.Errorf("could not find Root user's UserID")
-	}
-
-	if userRolesBundle.Documents == nil {
+	if len(userRoleDocs) == 0 {
 		return fmt.Errorf("UserRoles bundle has no documents")
 	}
 
 	// Find UserRoles document for Root user
 	var rootUserRole *models.Document
-	userRoleDocs := *userRolesBundle.Documents
-	for i := range userRoleDocs {
-		if userID, ok := userRoleDocs[i].Data["UserID"].(string); ok && userID == rootUserID {
-			doc := userRoleDocs[i]
-			rootUserRole = &doc
+	for _, doc := range userRoleDocs {
+		if userID, ok := doc.Data["UserID"].(string); ok && userID == rootUserID {
+			rootUserRole = doc
 			break
 		}
 	}
@@ -469,21 +468,19 @@ func testRootUser_HasDboRole() error {
 	}
 
 	// Look up the role in the Roles bundle to get the role name
-	rolesBundle, exists := testRootUserDatabase.Bundles["Roles"]
-	if !exists {
-		return fmt.Errorf("Roles bundle not found")
+	roleDocs, err := getRootUserBundleDocuments("Roles")
+	if err != nil {
+		return fmt.Errorf("failed to get Roles documents: %v", err)
 	}
 
-	if rolesBundle.Documents == nil {
+	if len(roleDocs) == 0 {
 		return fmt.Errorf("Roles bundle has no documents")
 	}
 
 	var roleDoc *models.Document
-	roleDocs := *rolesBundle.Documents
-	for i := range roleDocs {
-		if rid, ok := roleDocs[i].Data["RoleID"].(string); ok && rid == roleID {
-			doc := roleDocs[i]
-			roleDoc = &doc
+	for _, doc := range roleDocs {
+		if rid, ok := doc.Data["RoleID"].(string); ok && rid == roleID {
+			roleDoc = doc
 			break
 		}
 	}
@@ -510,29 +507,10 @@ func testRootUser_HasDboRole() error {
 func testRootUser_HasAllPermissions() error {
 	ColorLogger.Info("Testing Root user permissions...")
 
-	// Get Users bundle to find Root user's UserID
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
-	}
-
-	if usersBundle.Documents == nil {
-		return fmt.Errorf("Users bundle has no documents")
-	}
-
-	var rootUserID string
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && username == "Root" {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				rootUserID = userID
-				break
-			}
-		}
-	}
-
-	if rootUserID == "" {
-		return fmt.Errorf("could not find Root user's UserID")
+	// Get Root user's UserID using helper
+	_, err := findRootUserID()
+	if err != nil {
+		return fmt.Errorf("could not find Root user's UserID: %v", err)
 	}
 
 	// Dbo role should grant all 4 permissions
@@ -555,29 +533,10 @@ func testRootUser_HasAllPermissions() error {
 func testRootUser_CanAccessDatabases() error {
 	ColorLogger.Info("Testing Root user database access...")
 
-	// Get Users bundle to find Root user's UserID
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
-	}
-
-	if usersBundle.Documents == nil {
-		return fmt.Errorf("Users bundle has no documents")
-	}
-
-	var rootUserID string
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && username == "Root" {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				rootUserID = userID
-				break
-			}
-		}
-	}
-
-	if rootUserID == "" {
-		return fmt.Errorf("could not find Root user's UserID")
+	// Get Root user's UserID using helper
+	_, err := findRootUserID()
+	if err != nil {
+		return fmt.Errorf("could not find Root user's UserID: %v", err)
 	}
 
 	// Admin permission grants database-level operations
@@ -594,29 +553,10 @@ func testRootUser_CanAccessDatabases() error {
 func testRootUser_CanAccessBundles() error {
 	ColorLogger.Info("Testing Root user bundle access...")
 
-	// Get Users bundle to find Root user's UserID
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
-	}
-
-	if usersBundle.Documents == nil {
-		return fmt.Errorf("Users bundle has no documents")
-	}
-
-	var rootUserID string
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && username == "Root" {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				rootUserID = userID
-				break
-			}
-		}
-	}
-
-	if rootUserID == "" {
-		return fmt.Errorf("could not find Root user's UserID")
+	// Get Root user's UserID using helper
+	_, err := findRootUserID()
+	if err != nil {
+		return fmt.Errorf("could not find Root user's UserID: %v", err)
 	}
 
 	// Test access to all 6 RBAC bundles
@@ -651,29 +591,10 @@ func testRootUser_CanAccessBundles() error {
 func testRootUser_CanAccessDocuments() error {
 	ColorLogger.Info("Testing Root user document access...")
 
-	// Get Users bundle to find Root user's UserID
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
-	}
-
-	if usersBundle.Documents == nil {
-		return fmt.Errorf("Users bundle has no documents")
-	}
-
-	var rootUserID string
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && username == "Root" {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				rootUserID = userID
-				break
-			}
-		}
-	}
-
-	if rootUserID == "" {
-		return fmt.Errorf("could not find Root user's UserID")
+	// Get Root user's UserID using helper
+	_, err := findRootUserID()
+	if err != nil {
+		return fmt.Errorf("could not find Root user's UserID: %v", err)
 	}
 
 	// Read-Write permission grants document-level operations
@@ -683,7 +604,10 @@ func testRootUser_CanAccessDocuments() error {
 	}
 
 	// Test actual document access in Users bundle
-	allDocs := *usersBundle.Documents
+	allDocs, err := getRootUserBundleDocuments("Users")
+	if err != nil {
+		return fmt.Errorf("failed to get Users documents: %v", err)
+	}
 	if len(allDocs) == 0 {
 		return fmt.Errorf("no documents found in Users bundle")
 	}
@@ -697,29 +621,10 @@ func testRootUser_CanAccessDocuments() error {
 func testRootUser_CanAccessIndexes() error {
 	ColorLogger.Info("Testing Root user index access...")
 
-	// Get Users bundle to find Root user's UserID
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("Users bundle not found")
-	}
-
-	if usersBundle.Documents == nil {
-		return fmt.Errorf("Users bundle has no documents")
-	}
-
-	var rootUserID string
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && username == "Root" {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				rootUserID = userID
-				break
-			}
-		}
-	}
-
-	if rootUserID == "" {
-		return fmt.Errorf("could not find Root user's UserID")
+	// Get Root user's UserID using helper
+	_, err := findRootUserID()
+	if err != nil {
+		return fmt.Errorf("could not find Root user's UserID: %v", err)
 	}
 
 	// Admin permission grants index operations
@@ -761,28 +666,9 @@ func testRootUser_FullAccessWorkflow() error {
 	}
 
 	// Step 2: Get Root user ID
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return fmt.Errorf("step 2 failed - Users bundle not found")
-	}
-
-	if usersBundle.Documents == nil {
-		return fmt.Errorf("step 2 failed - Users bundle has no documents")
-	}
-
-	var rootUserID string
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && username == "Root" {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				rootUserID = userID
-				break
-			}
-		}
-	}
-
-	if rootUserID == "" {
-		return fmt.Errorf("step 2 failed - could not find Root user's UserID")
+	_, err = findRootUserID()
+	if err != nil {
+		return fmt.Errorf("step 2 failed - could not find Root user's UserID: %v", err)
 	}
 
 	// Step 3: Verify all permissions
@@ -814,7 +700,10 @@ func testRootUser_FullAccessWorkflow() error {
 
 	// Step 6: Access documents
 	ColorLogger.Info("  Step 5: Access documents...")
-	allDocs := *usersBundle.Documents
+	allDocs, docsErr := getRootUserBundleDocuments("Users")
+	if docsErr != nil {
+		return fmt.Errorf("step 5 failed - failed to get documents: %v", docsErr)
+	}
 	if len(allDocs) == 0 {
 		return fmt.Errorf("step 5 failed - no documents accessible")
 	}
@@ -887,25 +776,7 @@ func testRootUser_CaseInsensitiveUsername() error {
 
 // getRootUserID is a helper function to find Root user's UserID
 func getRootUserID() (string, error) {
-	usersBundle, exists := testRootUserDatabase.Bundles["Users"]
-	if !exists {
-		return "", fmt.Errorf("Users bundle not found")
-	}
-
-	if usersBundle.Documents == nil {
-		return "", fmt.Errorf("Users bundle has no documents")
-	}
-
-	userDocs := *usersBundle.Documents
-	for i := range userDocs {
-		if username, ok := userDocs[i].Data["Username"].(string); ok && strings.EqualFold(username, "Root") {
-			if userID, ok := userDocs[i].Data["UserID"].(string); ok {
-				return userID, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("Root user not found")
+	return findRootUserID()
 }
 
 // RunRootUserTests executes all Root user validation tests

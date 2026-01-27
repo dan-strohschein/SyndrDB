@@ -213,10 +213,10 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 		if fullScan, ok := n.Child.(*FullScanNode); ok {
 			var totalDocs int64
 
-			// Fast path: If documents are complete in memory, count them directly
-			if fullScan.Bundle.Documents != nil && fullScan.Bundle.DocumentsComplete {
-				totalDocs = int64(len(*fullScan.Bundle.Documents))
-				n.Logger.Infof("OPTIMIZATION: Counting in-memory documents for COUNT(*) - Count=%d", totalDocs)
+			// Fast path: Use SortedIndex for document count (from page cache metadata)
+			if fullScan.Bundle.SortedIndex != nil && fullScan.Bundle.SortedIndex.TotalDocuments() > 0 {
+				totalDocs = int64(fullScan.Bundle.SortedIndex.TotalDocuments())
+				n.Logger.Infof("OPTIMIZATION: Using SortedIndex for COUNT(*) - Count=%d", totalDocs)
 			} else if fullScan.BundleServiceInt != nil {
 				// COUNT(*) OPTIMIZATION: Use CountDocuments() directly from BundleService
 				// This uses the count-only parser which extracts only DocumentIDs without parsing full documents

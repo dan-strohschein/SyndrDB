@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/bundle"
@@ -90,7 +91,10 @@ func (ps *PermissionService) isSystemRole(roleName string) error {
 
 	// Find role document by name (case-insensitive)
 	roleNameLower := strings.ToLower(roleName)
-	docs := *rolesBundle.Documents
+	docs, err := ps.bundleService.GetDocumentsByFilter(rolesBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
+	}
 	for _, doc := range docs {
 		if nameField, ok := doc.Fields["Name"]; ok {
 			if nameValue, ok := nameField.Value.AsString(); ok {
@@ -143,15 +147,17 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	// Find user (case-insensitive)
 	var userID string
 	found := false
-	if usersBundle.Documents != nil {
-		for _, doc := range *usersBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-					if idField, ok := doc.Fields["UserID"]; ok {
-						userID, _ = idField.Value.AsString()
-						found = true
-						break
-					}
+	userDocs, err := ps.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
+	}
+	for _, doc := range userDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
+				if idField, ok := doc.Fields["UserID"]; ok {
+					userID, _ = idField.Value.AsString()
+					found = true
+					break
 				}
 			}
 		}
@@ -176,17 +182,19 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	}
 
 	// Check if permission already granted (prevent duplicates)
-	if userPermissionsBundle.Documents != nil {
-		for _, doc := range *userPermissionsBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					str1, ok1 := userIDField.Value.AsString()
-					str2, ok2 := permIDField.Value.AsString()
-					if ok1 && ok2 && str1 == userID && str2 == permissionID {
-						return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
-							fmt.Sprintf("user '%s' already has permission '%s'", username, permissionName),
-							errors.LayerCommand).WithContext("username", username).WithContext("permission", permissionName)
-					}
+	userPermDocs, err := ps.bundleService.GetDocumentsByFilter(userPermissionsBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserPermissions")
+	}
+	for _, doc := range userPermDocs {
+		if userIDField, ok := doc.Fields["UserID"]; ok {
+			if permIDField, ok := doc.Fields["PermissionID"]; ok {
+				str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := permIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == permissionID {
+					return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+						fmt.Sprintf("user '%s' already has permission '%s'", username, permissionName),
+						errors.LayerCommand).WithContext("username", username).WithContext("permission", permissionName)
 				}
 			}
 		}
@@ -268,15 +276,17 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	// Find user (case-insensitive)
 	var userID string
 	found := false
-	if usersBundle.Documents != nil {
-		for _, doc := range *usersBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-					if idField, ok := doc.Fields["UserID"]; ok {
-						userID, _ = idField.Value.AsString()
-						found = true
-						break
-					}
+	userDocs, err := ps.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
+	}
+	for _, doc := range userDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
+				if idField, ok := doc.Fields["UserID"]; ok {
+					userID, _ = idField.Value.AsString()
+					found = true
+					break
 				}
 			}
 		}
@@ -301,17 +311,19 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	}
 
 	// Check if role already granted (prevent duplicates)
-	if userRolesBundle.Documents != nil {
-		for _, doc := range *userRolesBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if roleIDField, ok := doc.Fields["RoleID"]; ok {
-					str1, ok1 := userIDField.Value.AsString()
-					str2, ok2 := roleIDField.Value.AsString()
-					if ok1 && ok2 && str1 == userID && str2 == roleID {
-						return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
-							fmt.Sprintf("user '%s' already has role '%s'", username, roleName),
-							errors.LayerCommand).WithContext("username", username).WithContext("role", roleName)
-					}
+	userRoleDocs, err := ps.bundleService.GetDocumentsByFilter(userRolesBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserRoles")
+	}
+	for _, doc := range userRoleDocs {
+		if userIDField, ok := doc.Fields["UserID"]; ok {
+			if roleIDField, ok := doc.Fields["RoleID"]; ok {
+				str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := roleIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == roleID {
+					return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+						fmt.Sprintf("user '%s' already has role '%s'", username, roleName),
+						errors.LayerCommand).WithContext("username", username).WithContext("role", roleName)
 				}
 			}
 		}
@@ -398,17 +410,24 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 
 	// Find and remove the UserPermission document
 	found := false
-	if userPermissionsBundle.Documents != nil {
-		for docID, doc := range *userPermissionsBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					str1, ok1 := userIDField.Value.AsString()
-					str2, ok2 := permIDField.Value.AsString()
-					if ok1 && ok2 && str1 == userID && str2 == permissionID {
-						delete(*userPermissionsBundle.Documents, docID)
-						found = true
-						break
+	userPermDocs, err := ps.bundleService.GetDocumentsByFilter(userPermissionsBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserPermissions")
+	}
+	for _, doc := range userPermDocs {
+		if userIDField, ok := doc.Fields["UserID"]; ok {
+			if permIDField, ok := doc.Fields["PermissionID"]; ok {
+				str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := permIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == permissionID {
+					deleteCmd := &models.DocumentDeleteCommand{
+						BundleName: "UserPermissions",
 					}
+					if err := ps.bundleService.DeleteDocumentFromBundle(userPermissionsBundle, deleteCmd, []string{doc.DocumentID}, nil); err != nil {
+						return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserPermissions")
+					}
+					found = true
+					break
 				}
 			}
 		}
@@ -472,17 +491,24 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 
 	// Find and remove the UserRole document
 	found := false
-	if userRolesBundle.Documents != nil {
-		for docID, doc := range *userRolesBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if roleIDField, ok := doc.Fields["RoleID"]; ok {
-					str1, ok1 := userIDField.Value.AsString()
-					str2, ok2 := roleIDField.Value.AsString()
-					if ok1 && ok2 && str1 == userID && str2 == roleID {
-						delete(*userRolesBundle.Documents, docID)
-						found = true
-						break
+	userRoleDocs, err := ps.bundleService.GetDocumentsByFilter(userRolesBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserRoles")
+	}
+	for _, doc := range userRoleDocs {
+		if userIDField, ok := doc.Fields["UserID"]; ok {
+			if roleIDField, ok := doc.Fields["RoleID"]; ok {
+				str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := roleIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == roleID {
+					deleteCmd := &models.DocumentDeleteCommand{
+						BundleName: "UserRoles",
 					}
+					if err := ps.bundleService.DeleteDocumentFromBundle(userRolesBundle, deleteCmd, []string{doc.DocumentID}, nil); err != nil {
+						return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserRoles")
+					}
+					found = true
+					break
 				}
 			}
 		}
@@ -541,14 +567,19 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 	}
 
 	// Try to find existing permission
-	if permissionsBundle.Documents != nil {
-		for _, doc := range *permissionsBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && str == permissionName {
-					if idField, ok := doc.Fields["PermissionID"]; ok {
-						str, _ := idField.Value.AsString()
-						return str, nil
-					}
+	permDocs, err := ps.bundleService.GetDocumentsByFilter(permissionsBundle, "", nil)
+	if err != nil {
+		if ps.debugMode {
+			return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, "failed to query permissions", errors.LayerCommand)
+		}
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission query failed", errors.LayerCommand)
+	}
+	for _, doc := range permDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && str == permissionName {
+				if idField, ok := doc.Fields["PermissionID"]; ok {
+					str, _ := idField.Value.AsString()
+					return str, nil
 				}
 			}
 		}
@@ -625,14 +656,17 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 
 	// Check direct permissions in UserPermissions bundle
 	userPermissionsBundle, err := ps.bundleService.GetBundleByName(primaryDB, "UserPermissions")
-	if err == nil && userPermissionsBundle.Documents != nil {
-		for _, doc := range *userPermissionsBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					str1, ok1 := userIDField.Value.AsString()
-					str2, ok2 := permIDField.Value.AsString()
-					if ok1 && ok2 && str1 == userID && str2 == permissionID {
-						return true, nil // Direct permission found
+	if err == nil {
+		userPermDocs, err := ps.bundleService.GetDocumentsByFilter(userPermissionsBundle, "", nil)
+		if err == nil {
+			for _, doc := range userPermDocs {
+				if userIDField, ok := doc.Fields["UserID"]; ok {
+					if permIDField, ok := doc.Fields["PermissionID"]; ok {
+						str1, ok1 := userIDField.Value.AsString()
+						str2, ok2 := permIDField.Value.AsString()
+						if ok1 && ok2 && str1 == userID && str2 == permissionID {
+							return true, nil // Direct permission found
+						}
 					}
 				}
 			}
@@ -648,8 +682,9 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 	}
 
 	var userRoleIDs []string
-	if userRolesBundle.Documents != nil {
-		for _, doc := range *userRolesBundle.Documents {
+	userRoleDocs, err := ps.bundleService.GetDocumentsByFilter(userRolesBundle, "", nil)
+	if err == nil {
+		for _, doc := range userRoleDocs {
 			if userIDField, ok := doc.Fields["UserID"]; ok {
 				if str, ok := userIDField.Value.AsString(); ok && str == userID {
 					if roleIDField, ok := doc.Fields["RoleID"]; ok {
@@ -675,8 +710,9 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 		return false, nil
 	}
 
-	if rolesPermissionsBundle.Documents != nil {
-		for _, doc := range *rolesPermissionsBundle.Documents {
+	rolesPermDocs, err := ps.bundleService.GetDocumentsByFilter(rolesPermissionsBundle, "", nil)
+	if err == nil {
+		for _, doc := range rolesPermDocs {
 			if roleIDField, ok := doc.Fields["RoleID"]; ok {
 				if permIDField, ok := doc.Fields["PermissionID"]; ok {
 					// Check if this role-permission mapping matches
@@ -716,14 +752,19 @@ func (ps *PermissionService) getUserID(username string) (string, error) {
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: user storage not available", errors.LayerCommand)
 	}
 
-	if usersBundle.Documents != nil {
-		for _, doc := range *usersBundle.Documents {
-			if nameField, ok := doc.Fields["Username"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-					if idField, ok := doc.Fields["UserID"]; ok {
-						str, _ := idField.Value.AsString()
-						return str, nil
-					}
+	userDocs, err := ps.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		if ps.debugMode {
+			return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, "failed to query users", errors.LayerCommand)
+		}
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: user query failed", errors.LayerCommand)
+	}
+	for _, doc := range userDocs {
+		if nameField, ok := doc.Fields["Username"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
+				if idField, ok := doc.Fields["UserID"]; ok {
+					str, _ := idField.Value.AsString()
+					return str, nil
 				}
 			}
 		}
@@ -753,14 +794,19 @@ func (ps *PermissionService) getRoleID(roleName string) (string, error) {
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: role storage not available", errors.LayerCommand)
 	}
 
-	if rolesBundle.Documents != nil {
-		for _, doc := range *rolesBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && str == roleName {
-					if idField, ok := doc.Fields["RoleID"]; ok {
-						str, _ := idField.Value.AsString()
-						return str, nil
-					}
+	roleDocs, err := ps.bundleService.GetDocumentsByFilter(rolesBundle, "", nil)
+	if err != nil {
+		if ps.debugMode {
+			return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, "failed to query roles", errors.LayerCommand)
+		}
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: role query failed", errors.LayerCommand)
+	}
+	for _, doc := range roleDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && str == roleName {
+				if idField, ok := doc.Fields["RoleID"]; ok {
+					str, _ := idField.Value.AsString()
+					return str, nil
 				}
 			}
 		}
@@ -789,14 +835,19 @@ func (ps *PermissionService) getPermissionID(permissionName string) (string, err
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission storage not available", errors.LayerCommand)
 	}
 
-	if permissionsBundle.Documents != nil {
-		for _, doc := range *permissionsBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && str == permissionName {
-					if idField, ok := doc.Fields["PermissionID"]; ok {
-						str, _ := idField.Value.AsString()
-						return str, nil
-					}
+	permDocs, err := ps.bundleService.GetDocumentsByFilter(permissionsBundle, "", nil)
+	if err != nil {
+		if ps.debugMode {
+			return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, "failed to query permissions", errors.LayerCommand)
+		}
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission query failed", errors.LayerCommand)
+	}
+	for _, doc := range permDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && str == permissionName {
+				if idField, ok := doc.Fields["PermissionID"]; ok {
+					str, _ := idField.Value.AsString()
+					return str, nil
 				}
 			}
 		}
@@ -841,15 +892,20 @@ func (ps *PermissionService) CreateRole(roleName, description string) (string, e
 	}
 
 	// Check if role already exists (case-insensitive)
-	if rolesBundle.Documents != nil {
-		for _, doc := range *rolesBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, roleName) {
-					if ps.debugMode {
-						return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT, fmt.Sprintf("role '%s' already exists", roleName), errors.LayerCommand).WithContext("role", roleName)
-					}
-					return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT, "role already exists", errors.LayerCommand)
+	roleDocs, err := ps.bundleService.GetDocumentsByFilter(rolesBundle, "", nil)
+	if err != nil {
+		if ps.debugMode {
+			return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, "failed to query roles", errors.LayerCommand)
+		}
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: role query failed", errors.LayerCommand)
+	}
+	for _, doc := range roleDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, roleName) {
+				if ps.debugMode {
+					return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT, fmt.Sprintf("role '%s' already exists", roleName), errors.LayerCommand).WithContext("role", roleName)
 				}
+				return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT, "role already exists", errors.LayerCommand)
 			}
 		}
 	}
@@ -885,11 +941,13 @@ func (ps *PermissionService) CreateRole(roleName, description string) (string, e
 	}
 
 	// Add role document to Roles bundle
-	if rolesBundle.Documents == nil {
-		documentsMap := make(map[string]models.Document)
-		rolesBundle.Documents = &documentsMap
+	err = ps.bundleService.AddDocumentToBundleByStruct(primaryDB, rolesBundle, roleDoc)
+	if err != nil {
+		if ps.debugMode {
+			return "", errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE, "failed to create role", errors.LayerCommand)
+		}
+		return "", errors.New(errors.ERR_INTERNAL, "internal error: role creation failed", errors.LayerCommand)
 	}
-	(*rolesBundle.Documents)[roleDoc.DocumentID] = *roleDoc
 
 	ps.logger.Infof("Role '%s' created successfully with ID: %s", roleName, roleID)
 	return roleID, nil
@@ -929,21 +987,24 @@ func (ps *PermissionService) UpdateRole(roleName string, updates map[string]stri
 
 	// Find role document (case-insensitive)
 	roleNameLower := strings.ToLower(roleName)
-	var targetDocID string
-	docs := *rolesBundle.Documents
+	var targetDoc *models.Document
+	roleDocs, err := ps.bundleService.GetDocumentsByFilter(rolesBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
+	}
 
-	for docID, doc := range docs {
+	for _, doc := range roleDocs {
 		if nameField, ok := doc.Fields["Name"]; ok {
 			if nameValue, ok := nameField.Value.AsString(); ok {
 				if strings.ToLower(nameValue) == roleNameLower {
-					targetDocID = docID
+					targetDoc = doc
 					break
 				}
 			}
 		}
 	}
 
-	if targetDocID == "" {
+	if targetDoc == nil {
 		return errors.New(errors.ERR_NOT_FOUND_INDEX,
 			fmt.Sprintf("role '%s' not found", roleName),
 			errors.LayerCommand).WithContext("role", roleName)
@@ -992,17 +1053,15 @@ func (ps *PermissionService) UpdateRole(roleName string, updates map[string]stri
 		}
 	}
 
-	// Get target document for modification
-	targetDoc := docs[targetDocID]
-
-	// Apply updates
+	// Build KeyValue fields for update
+	var updateFields []models.KeyValue
 	for field, value := range updates {
 		switch strings.ToUpper(field) {
 		case "DESCRIPTION":
-			targetDoc.Fields["Description"] = models.Field{
-				Name:  "Description",
-				Value: models.NewStringValue(value),
-			}
+			updateFields = append(updateFields, models.KeyValue{
+				Key:   "Description",
+				Value: value,
+			})
 		default:
 			if ps.debugMode {
 				ps.logger.Warnf("Ignoring unsupported update field: %s", field)
@@ -1010,8 +1069,18 @@ func (ps *PermissionService) UpdateRole(roleName string, updates map[string]stri
 		}
 	}
 
-	// Save updated document back to bundle
-	(*rolesBundle.Documents)[targetDocID] = targetDoc
+	// Create update command with WHERE clause to target specific role
+	updateCmd := &models.DocumentUpdateCommand{
+		BundleName:  "Roles",
+		Fields:      updateFields,
+		WhereClause: fmt.Sprintf("DocumentID = '%s'", targetDoc.DocumentID),
+	}
+
+	// Save updated document back to bundle via page cache
+	err = ps.bundleService.UpdateDocumentInBundle(context.Background(), primaryDB, rolesBundle, updateCmd)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
+	}
 
 	ps.logger.Infof("Role '%s' updated successfully", roleName)
 	return nil
@@ -1052,9 +1121,12 @@ func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
 	roleNameLower := strings.ToLower(roleName)
 	var roleID string
 	var targetDocID string
-	docs := *rolesBundle.Documents
+	roleDocs, err := ps.bundleService.GetDocumentsByFilter(rolesBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
+	}
 
-	for docID, doc := range docs {
+	for _, doc := range roleDocs {
 		if nameField, ok := doc.Fields["Name"]; ok {
 			if nameValue, ok := nameField.Value.AsString(); ok {
 				if strings.ToLower(nameValue) == roleNameLower {
@@ -1064,7 +1136,7 @@ func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
 							roleID = id
 						}
 					}
-					targetDocID = docID
+					targetDocID = doc.DocumentID
 					break
 				}
 			}
@@ -1131,8 +1203,13 @@ func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
 		}
 	}
 
-	// Remove role document from Roles bundle (delete from map)
-	delete(*rolesBundle.Documents, targetDocID)
+	// Remove role document from Roles bundle
+	deleteCmd := &models.DocumentDeleteCommand{
+		BundleName: "Roles",
+	}
+	if err := ps.bundleService.DeleteDocumentFromBundle(rolesBundle, deleteCmd, []string{targetDocID}, nil); err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
+	}
 
 	ps.logger.Infof("Role '%s' deleted successfully", roleName)
 	return nil
@@ -1166,14 +1243,16 @@ func (ps *PermissionService) getUsersWithRole(roleName string) ([]string, error)
 
 	// Collect all UserIDs with this role
 	userIDs := make([]string, 0)
-	if userRolesBundle.Documents != nil {
-		for _, doc := range *userRolesBundle.Documents {
-			if roleIDField, ok := doc.Fields["RoleID"]; ok {
-				if rid, ok := roleIDField.Value.AsString(); ok && rid == roleID {
-					if userIDField, ok := doc.Fields["UserID"]; ok {
-						if uid, ok := userIDField.Value.AsString(); ok {
-							userIDs = append(userIDs, uid)
-						}
+	userRoleDocs, err := ps.bundleService.GetDocumentsByFilter(userRolesBundle, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, doc := range userRoleDocs {
+		if roleIDField, ok := doc.Fields["RoleID"]; ok {
+			if rid, ok := roleIDField.Value.AsString(); ok && rid == roleID {
+				if userIDField, ok := doc.Fields["UserID"]; ok {
+					if uid, ok := userIDField.Value.AsString(); ok {
+						userIDs = append(userIDs, uid)
 					}
 				}
 			}
@@ -1182,18 +1261,20 @@ func (ps *PermissionService) getUsersWithRole(roleName string) ([]string, error)
 
 	// Map UserIDs to usernames
 	usernames := make([]string, 0, len(userIDs))
-	if usersBundle.Documents != nil {
-		for _, userID := range userIDs {
-			for _, doc := range *usersBundle.Documents {
-				if idField, ok := doc.Fields["UserID"]; ok {
-					if uid, ok := idField.Value.AsString(); ok && uid == userID {
-						if nameField, ok := doc.Fields["Name"]; ok {
-							if username, ok := nameField.Value.AsString(); ok {
-								usernames = append(usernames, username)
-							}
+	userDocs, err := ps.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, userID := range userIDs {
+		for _, doc := range userDocs {
+			if idField, ok := doc.Fields["UserID"]; ok {
+				if uid, ok := idField.Value.AsString(); ok && uid == userID {
+					if nameField, ok := doc.Fields["Name"]; ok {
+						if username, ok := nameField.Value.AsString(); ok {
+							usernames = append(usernames, username)
 						}
-						break
 					}
+					break
 				}
 			}
 		}
@@ -1205,27 +1286,34 @@ func (ps *PermissionService) getUsersWithRole(roleName string) ([]string, error)
 // cleanupRoleJunctionTable removes all records matching a specific field value
 // This is used for cascade deletion of role junction table records
 func (ps *PermissionService) cleanupRoleJunctionTable(junctionBundle *models.Bundle, fieldName, fieldValue, tableName string) {
-	if junctionBundle.Documents == nil {
+	docs, err := ps.bundleService.GetDocumentsByFilter(junctionBundle, "", nil)
+	if err != nil {
+		ps.logger.Warnf("Failed to query %s for cleanup: %v", tableName, err)
 		return
 	}
 
-	docs := *junctionBundle.Documents
 	removedCount := 0
 
 	// Collect docIDs to delete
 	toDelete := make([]string, 0)
-	for docID, doc := range docs {
+	for _, doc := range docs {
 		if field, ok := doc.Fields[fieldName]; ok {
 			if value, ok := field.Value.AsString(); ok && value == fieldValue {
-				toDelete = append(toDelete, docID)
+				toDelete = append(toDelete, doc.DocumentID)
 			}
 		}
 	}
 
 	// Delete collected documents
-	for _, docID := range toDelete {
-		delete(*junctionBundle.Documents, docID)
-		removedCount++
+	if len(toDelete) > 0 {
+		deleteCmd := &models.DocumentDeleteCommand{
+			BundleName: tableName,
+		}
+		if err := ps.bundleService.DeleteDocumentFromBundle(junctionBundle, deleteCmd, toDelete, nil); err != nil {
+			ps.logger.Warnf("Failed to delete documents from %s: %v", tableName, err)
+			return
+		}
+		removedCount = len(toDelete)
 	}
 
 	if removedCount > 0 {

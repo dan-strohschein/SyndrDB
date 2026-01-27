@@ -44,21 +44,24 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	}
 
 	// Find the Users bundle
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	if !exists {
-		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
 			"Users bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	// Check if user already exists
-	if usersBundle.Documents != nil {
-		for _, doc := range *usersBundle.Documents {
-			if usernameField, ok := doc.Fields["Username"]; ok {
-				if str, ok := usernameField.Value.AsString(); ok && str == username {
-					return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
-						fmt.Sprintf("user '%s' already exists", username),
-						errors.LayerCommand).WithContext("username", username)
-				}
+	existingDocs, err := serviceManager.BundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve user documents", errors.LayerCommand)
+	}
+	for _, doc := range existingDocs {
+		if usernameField, ok := doc.Fields["Username"]; ok {
+			if str, ok := usernameField.Value.AsString(); ok && str == username {
+				return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("user '%s' already exists", username),
+					errors.LayerCommand).WithContext("username", username)
 			}
 		}
 	}
@@ -82,15 +85,11 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	}
 
 	// Add the user document to the Users bundle
-	if usersBundle.Documents == nil {
-		documentsMap := make(map[string]models.Document)
-		usersBundle.Documents = &documentsMap
+	err = serviceManager.BundleService.AddDocumentToBundleByStruct(primaryDB, usersBundle, &userDoc)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to add user document to Users bundle", errors.LayerCommand)
 	}
-
-	(*usersBundle.Documents)[userDoc.DocumentID] = userDoc
-
-	// Update the bundle back in the database
-	primaryDB.Bundles["Users"] = usersBundle
 
 	logger.Infof("User '%s' created successfully with ID: %s", username, userID)
 
@@ -174,88 +173,89 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 	}
 
 	// Find the user
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	if !exists {
-		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
 			"Users bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var userID string
-	if usersBundle.Documents != nil {
-		found := false
-		for _, doc := range *usersBundle.Documents {
-			if usernameField, ok := doc.Fields["Username"]; ok {
-				if str, ok := usernameField.Value.AsString(); ok && str == username {
-					if userIDField, ok := doc.Fields["UserID"]; ok {
-						userID, _ = userIDField.Value.AsString()
-						found = true
-						break
-					}
+	userDocs, err := serviceManager.BundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve user documents", errors.LayerCommand)
+	}
+	found := false
+	for _, doc := range userDocs {
+		if usernameField, ok := doc.Fields["Username"]; ok {
+			if str, ok := usernameField.Value.AsString(); ok && str == username {
+				if userIDField, ok := doc.Fields["UserID"]; ok {
+					userID, _ = userIDField.Value.AsString()
+					found = true
+					break
 				}
 			}
 		}
-		if !found {
-			return nil, errors.New(errors.ERR_NOT_FOUND_USER,
-				fmt.Sprintf("user '%s' not found", username),
-				errors.LayerCommand).WithContext("username", username)
-		}
-	} else {
+	}
+	if !found {
 		return nil, errors.New(errors.ERR_NOT_FOUND_USER,
 			fmt.Sprintf("user '%s' not found", username),
 			errors.LayerCommand).WithContext("username", username)
 	}
 
 	// Find the database
-	databasesBundle, exists := primaryDB.Bundles["Databases"]
-	if !exists {
-		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+	databasesBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Databases")
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
 			"Databases bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var databaseID string
-	if databasesBundle.Documents != nil {
-		found := false
-		for _, doc := range *databasesBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && str == databaseName {
-					if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
-						databaseID, _ = dbIDField.Value.AsString()
-						found = true
-						break
-					}
+	dbDocs, err := serviceManager.BundleService.GetDocumentsByFilter(databasesBundle, "", nil)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve database documents", errors.LayerCommand)
+	}
+	dbFound := false
+	for _, doc := range dbDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && str == databaseName {
+				if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
+					databaseID, _ = dbIDField.Value.AsString()
+					dbFound = true
+					break
 				}
 			}
 		}
-		if !found {
-			return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
-				fmt.Sprintf("database '%s' not found", databaseName),
-				errors.LayerCommand).WithContext("database", databaseName)
-		}
-	} else {
+	}
+	if !dbFound {
 		return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
 			fmt.Sprintf("database '%s' not found", databaseName),
 			errors.LayerCommand).WithContext("database", databaseName)
 	}
 
 	// Add the user-database relationship to DatabaseUsers bundle
-	databaseUsersBundle, exists := primaryDB.Bundles["DatabaseUsers"]
-	if !exists {
-		return nil, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+	databaseUsersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "DatabaseUsers")
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
 			"DatabaseUsers bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	// Check if the relationship already exists
-	if databaseUsersBundle.Documents != nil {
-		for _, doc := range *databaseUsersBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
-					str1, ok1 := userIDField.Value.AsString()
-					str2, ok2 := dbIDField.Value.AsString()
-					if ok1 && ok2 && str1 == userID && str2 == databaseID {
-						return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
-							fmt.Sprintf("user '%s' is already attached to database '%s'", username, databaseName),
-							errors.LayerCommand).WithContext("username", username).WithContext("database", databaseName)
-					}
+	dbUserDocs, err := serviceManager.BundleService.GetDocumentsByFilter(databaseUsersBundle, "", nil)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve database user documents", errors.LayerCommand)
+	}
+	for _, doc := range dbUserDocs {
+		if userIDField, ok := doc.Fields["UserID"]; ok {
+			if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
+				str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := dbIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == databaseID {
+					return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+						fmt.Sprintf("user '%s' is already attached to database '%s'", username, databaseName),
+						errors.LayerCommand).WithContext("username", username).WithContext("database", databaseName)
 				}
 			}
 		}
@@ -273,13 +273,11 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		},
 	}
 
-	if databaseUsersBundle.Documents == nil {
-		documentsMap := make(map[string]models.Document)
-		databaseUsersBundle.Documents = &documentsMap
+	err = serviceManager.BundleService.AddDocumentToBundleByStruct(primaryDB, databaseUsersBundle, &relationshipDoc)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to add relationship document to DatabaseUsers bundle", errors.LayerCommand)
 	}
-
-	(*databaseUsersBundle.Documents)[relationshipDoc.DocumentID] = relationshipDoc
-	primaryDB.Bundles["DatabaseUsers"] = databaseUsersBundle
 
 	logger.Infof("User '%s' attached to database '%s'", username, databaseName)
 
@@ -301,81 +299,84 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 	}
 
 	// Find the user
-	usersBundle, exists := primaryDB.Bundles["Users"]
-	if !exists {
-		return false, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	if err != nil {
+		return false, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
 			"Users bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var userID string
-	if usersBundle.Documents != nil {
-		found := false
-		for _, doc := range *usersBundle.Documents {
-			if usernameField, ok := doc.Fields["Username"]; ok {
-				if str, ok := usernameField.Value.AsString(); ok && str == username {
-					if userIDField, ok := doc.Fields["UserID"]; ok {
-						userID, _ = userIDField.Value.AsString()
-						found = true
-						break
-					}
+	userDocs, err := serviceManager.BundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return false, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve user documents", errors.LayerCommand)
+	}
+	found := false
+	for _, doc := range userDocs {
+		if usernameField, ok := doc.Fields["Username"]; ok {
+			if str, ok := usernameField.Value.AsString(); ok && str == username {
+				if userIDField, ok := doc.Fields["UserID"]; ok {
+					userID, _ = userIDField.Value.AsString()
+					found = true
+					break
 				}
 			}
 		}
-		if !found {
-			return false, errors.New(errors.ERR_NOT_FOUND_USER,
-				fmt.Sprintf("user '%s' not found", username),
-				errors.LayerCommand).WithContext("username", username)
-		}
-	} else {
+	}
+	if !found {
 		return false, errors.New(errors.ERR_NOT_FOUND_USER,
 			fmt.Sprintf("user '%s' not found", username),
 			errors.LayerCommand).WithContext("username", username)
 	}
 
 	// Find the permission
-	permissionsBundle, exists := primaryDB.Bundles["Permissions"]
-	if !exists {
-		return false, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+	permissionsBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Permissions")
+	if err != nil {
+		return false, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
 			"Permissions bundle not found in Primary database", errors.LayerCommand)
 	}
 
 	var permissionID string
-	if permissionsBundle.Documents != nil {
-		found := false
-		for _, doc := range *permissionsBundle.Documents {
-			if nameField, ok := doc.Fields["PermissionName"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && str == permission {
-					if idField, ok := doc.Fields["PermissionID"]; ok {
-						permissionID, _ = idField.Value.AsString()
-						found = true
-						break
-					}
+	permDocs, err := serviceManager.BundleService.GetDocumentsByFilter(permissionsBundle, "", nil)
+	if err != nil {
+		return false, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve permission documents", errors.LayerCommand)
+	}
+	permFound := false
+	for _, doc := range permDocs {
+		if nameField, ok := doc.Fields["PermissionName"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && str == permission {
+				if idField, ok := doc.Fields["PermissionID"]; ok {
+					permissionID, _ = idField.Value.AsString()
+					permFound = true
+					break
 				}
 			}
 		}
-		if !found {
-			return false, nil // Permission doesn't exist, user doesn't have it
-		}
-	} else {
-		return false, nil // No permissions exist, user doesn't have it
+	}
+	if !permFound {
+		return false, nil // Permission doesn't exist, user doesn't have it
 	}
 
 	// Check if the user has this permission in UserPermissions bundle
-	userPermissionsBundle, exists := primaryDB.Bundles["UserPermissions"]
-	if !exists {
-		return false, errors.New(errors.ERR_NOT_FOUND_BUNDLE,
+	userPermissionsBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "UserPermissions")
+	if err != nil {
+		return false, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_BUNDLE,
 			"UserPermissions bundle not found in Primary database", errors.LayerCommand)
 	}
 
-	if userPermissionsBundle.Documents != nil {
-		for _, doc := range *userPermissionsBundle.Documents {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if permIDField, ok := doc.Fields["PermissionID"]; ok {
-					str1, ok1 := userIDField.Value.AsString()
-					str2, ok2 := permIDField.Value.AsString()
-					if ok1 && ok2 && str1 == userID && str2 == permissionID {
-						return true, nil
-					}
+	userPermDocs, err := serviceManager.BundleService.GetDocumentsByFilter(userPermissionsBundle, "", nil)
+	if err != nil {
+		return false, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
+			"failed to retrieve user permission documents", errors.LayerCommand)
+	}
+	for _, doc := range userPermDocs {
+		if userIDField, ok := doc.Fields["UserID"]; ok {
+			if permIDField, ok := doc.Fields["PermissionID"]; ok {
+				str1, ok1 := userIDField.Value.AsString()
+				str2, ok2 := permIDField.Value.AsString()
+				if ok1 && ok2 && str1 == userID && str2 == permissionID {
+					return true, nil
 				}
 			}
 		}

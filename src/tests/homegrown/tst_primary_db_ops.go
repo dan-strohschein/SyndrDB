@@ -354,8 +354,14 @@ func validatePermissionsHydration() error {
 		return fmt.Errorf("failed to get Permissions bundle: %w", err)
 	}
 
+	// Get documents using the service
+	permissionDocs, err := testBundleService.GetDocumentsByFilter(permissionsBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get permission documents: %w", err)
+	}
+
 	// Check that the bundle has documents
-	if permissionsBundle.Documents == nil || len(*permissionsBundle.Documents) == 0 {
+	if len(permissionDocs) == 0 {
 		return fmt.Errorf("permissions bundle has no documents")
 	}
 
@@ -364,7 +370,7 @@ func validatePermissionsHydration() error {
 	foundPermissions := make(map[string]bool)
 
 	// Check each document in the permissions bundle
-	for _, doc := range *permissionsBundle.Documents {
+	for _, doc := range permissionDocs {
 		if nameField, exists := doc.Fields["Name"]; exists {
 			if nameValue, ok := nameField.Value.AsString(); ok {
 				foundPermissions[nameValue] = true
@@ -385,7 +391,7 @@ func validatePermissionsHydration() error {
 	}
 
 	// Verify each permission document has the required fields
-	for _, doc := range *permissionsBundle.Documents {
+	for _, doc := range permissionDocs {
 		// Check PermissionID field
 		if permIdField, exists := doc.Fields["PermissionID"]; !exists {
 			return fmt.Errorf("permission document missing PermissionID field")
@@ -449,8 +455,14 @@ func validateRolesHydration() error {
 		return fmt.Errorf("failed to get Roles bundle: %w", err)
 	}
 
+	// Get documents using the service
+	roleDocs, err := testBundleService.GetDocumentsByFilter(rolesBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get role documents: %w", err)
+	}
+
 	// Check that the bundle has documents
-	if rolesBundle.Documents == nil || len(*rolesBundle.Documents) == 0 {
+	if len(roleDocs) == 0 {
 		return fmt.Errorf("roles bundle has no documents")
 	}
 
@@ -459,7 +471,7 @@ func validateRolesHydration() error {
 	foundRoles := make(map[string]bool)
 
 	// Check each document in the roles bundle
-	for _, doc := range *rolesBundle.Documents {
+	for _, doc := range roleDocs {
 		if nameField, exists := doc.Fields["Name"]; exists {
 			if nameValue, ok := nameField.Value.AsString(); ok {
 				foundRoles[nameValue] = true
@@ -480,7 +492,7 @@ func validateRolesHydration() error {
 	}
 
 	// Verify each role document has the required fields
-	for _, doc := range *rolesBundle.Documents {
+	for _, doc := range roleDocs {
 		// Check RoleID field
 		if roleIdField, exists := doc.Fields["RoleID"]; !exists {
 			return fmt.Errorf("role document missing RoleID field")
@@ -535,15 +547,21 @@ func validateUsersHydration() error {
 		return fmt.Errorf("failed to get Users bundle: %v", err)
 	}
 
+	// Get documents using the service
+	userDocs, err := testBundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get user documents: %v", err)
+	}
+
 	// Check that we have the expected number of user documents
 	expectedUsers := []string{"Admin", "Reader", "Writer"}
-	if len(*usersBundle.Documents) != len(expectedUsers) {
-		return fmt.Errorf("expected %d user documents, got %d", len(expectedUsers), len(*usersBundle.Documents))
+	if len(userDocs) != len(expectedUsers) {
+		return fmt.Errorf("expected %d user documents, got %d", len(expectedUsers), len(userDocs))
 	}
 
 	// Verify each expected user exists
 	foundUsers := make(map[string]bool)
-	for _, doc := range *usersBundle.Documents {
+	for _, doc := range userDocs {
 		if nameField, exists := doc.Fields["Name"]; exists {
 			if userName, ok := nameField.Value.AsString(); ok {
 				foundUsers[userName] = true
@@ -558,7 +576,7 @@ func validateUsersHydration() error {
 	}
 
 	// Verify each user document has the required fields
-	for _, doc := range *usersBundle.Documents {
+	for _, doc := range userDocs {
 		// Check UserID field
 		if userIdField, exists := doc.Fields["UserID"]; !exists {
 			return fmt.Errorf("user document missing UserID field")
@@ -625,14 +643,20 @@ func validateUserPermissionsHydration() error {
 		return fmt.Errorf("failed to get UserPermissions bundle: %v", err)
 	}
 
+	// Get documents using the service
+	userPermissionDocs, err := testBundleService.GetDocumentsByFilter(userPermissionsBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get user permission documents: %v", err)
+	}
+
 	// Expected relationships:
 	// Admin -> Read, Write, Admin, Read-Write (4 links)
 	// Reader -> Read (1 link)
 	// Writer -> Write (1 link)
 	// Total: 6 UserPermission documents
 	expectedLinkCount := 6
-	if len(*userPermissionsBundle.Documents) != expectedLinkCount {
-		return fmt.Errorf("expected %d user permission documents, got %d", expectedLinkCount, len(*userPermissionsBundle.Documents))
+	if len(userPermissionDocs) != expectedLinkCount {
+		return fmt.Errorf("expected %d user permission documents, got %d", expectedLinkCount, len(userPermissionDocs))
 	}
 
 	// Get the Users and Permissions bundles for validation
@@ -641,21 +665,33 @@ func validateUserPermissionsHydration() error {
 		return fmt.Errorf("failed to get Users bundle: %v", err)
 	}
 
+	// Get user documents using the service
+	userDocs, err := testBundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get user documents: %v", err)
+	}
+
 	permissionsBundle, err := testBundleService.GetBundleByName(testPrimaryDatabase, "Permissions")
 	if err != nil {
 		return fmt.Errorf("failed to get Permissions bundle: %v", err)
 	}
 
+	// Get permission documents using the service
+	permDocs, err := testBundleService.GetDocumentsByFilter(permissionsBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get permission documents: %v", err)
+	}
+
 	// Create maps for lookup
 	usersByID := make(map[string]string)
-	for _, userDoc := range *usersBundle.Documents {
+	for _, userDoc := range userDocs {
 		userID, _ := userDoc.Fields["UserID"].Value.AsString()
 		userName, _ := userDoc.Fields["Name"].Value.AsString()
 		usersByID[userID] = userName
 	}
 
 	permissionsByID := make(map[string]string)
-	for _, permDoc := range *permissionsBundle.Documents {
+	for _, permDoc := range permDocs {
 		permID, _ := permDoc.Fields["PermissionID"].Value.AsString()
 		permName, _ := permDoc.Fields["Name"].Value.AsString()
 		permissionsByID[permID] = permName
@@ -666,7 +702,7 @@ func validateUserPermissionsHydration() error {
 	userPermissions := make(map[string][]string)
 
 	// Verify each user permission document has the required fields
-	for _, doc := range *userPermissionsBundle.Documents {
+	for _, doc := range userPermissionDocs {
 		// Check UserPermissionID field
 		if userPermIdField, exists := doc.Fields["UserPermissionID"]; !exists {
 			return fmt.Errorf("user permission document missing UserPermissionID field")
@@ -775,11 +811,17 @@ func validateDatabaseUsersHydration() error {
 		return fmt.Errorf("failed to get DatabaseUsers bundle: %v", err)
 	}
 
+	// Get documents using the service
+	dbUserDocs, err := testBundleService.GetDocumentsByFilter(databaseUsersBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get database user documents: %v", err)
+	}
+
 	// Expected: All 3 users (Admin, Reader, Writer) linked to primary database
 	// Total: 3 DatabaseUser documents
 	expectedLinkCount := 3
-	if len(*databaseUsersBundle.Documents) != expectedLinkCount {
-		return fmt.Errorf("expected %d database user documents, got %d", expectedLinkCount, len(*databaseUsersBundle.Documents))
+	if len(dbUserDocs) != expectedLinkCount {
+		return fmt.Errorf("expected %d database user documents, got %d", expectedLinkCount, len(dbUserDocs))
 	}
 
 	// Get the Users bundle for validation
@@ -788,9 +830,15 @@ func validateDatabaseUsersHydration() error {
 		return fmt.Errorf("failed to get Users bundle: %v", err)
 	}
 
+	// Get user documents using the service
+	userDocs, err := testBundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get user documents: %v", err)
+	}
+
 	// Create map for user lookup
 	usersByID := make(map[string]string)
-	for _, userDoc := range *usersBundle.Documents {
+	for _, userDoc := range userDocs {
 		userID, _ := userDoc.Fields["UserID"].Value.AsString()
 		userName, _ := userDoc.Fields["Name"].Value.AsString()
 		usersByID[userID] = userName
@@ -804,7 +852,7 @@ func validateDatabaseUsersHydration() error {
 	linkedUsers := make(map[string]bool)
 
 	// Verify each database user document has the required fields
-	for _, doc := range *databaseUsersBundle.Documents {
+	for _, doc := range dbUserDocs {
 		// Check DatabaseUserID field (note: this field name might be different, let me check)
 		// Looking at the code, it should be "DatabaseUserID"
 		if dbUserIdField, exists := doc.Fields["DatabaseUserID"]; !exists {

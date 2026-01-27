@@ -288,10 +288,10 @@ func (qr *QueryRouter) routeGroupByQuery(
 
 	// Index-ordered scan for single-field GROUP BY when no WHERE: use B-tree full range
 	// to supply rows already ordered by the GROUP BY field, so AggregationNode can skip the sort.
+	// WRITE-THROUGH CACHE: Documents always available through page cache via BundleServiceInt.GetDocument()
 	if !query.HasWhere() && query.GroupBy != nil && len(query.GroupBy.Fields) == 1 {
 		fieldName := extractFieldNameForProjection(query.GroupBy.Fields[0])
-		if idxName, found := findBTreeIndexForGroupByField(bundle, fieldName); found &&
-			bundle.Documents != nil && bundle.DocumentsComplete {
+		if idxName, found := findBTreeIndexForGroupByField(bundle, fieldName); found {
 			rootNode = &BTreeOrderedScanNode{
 				Bundle:             bundle,
 				IndexName:          idxName,

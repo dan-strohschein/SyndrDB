@@ -958,8 +958,8 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 		return nil, fmt.Errorf("bundle file %s does not exist", fileName)
 	}
 
-	// Extract bundle name from filename (remove .bnd extension)
-	bundleName := strings.TrimSuffix(fileName, ".bnd")
+	// Extract bundle name from filename (remove .bnd extension) - used for logging
+	_ = strings.TrimSuffix(fileName, ".bnd")
 
 	// Try to load bundle metadata first
 	bundleMetadata, err := b.loadBundleMetadataFromFile(dataRootDir, fileName)
@@ -967,17 +967,11 @@ func (b *BundleStorageEngine) LoadBundleDataFile(database *models.Database, data
 		return nil, fmt.Errorf("error loading bundle metadata from file %s: %w", fileName, err)
 	}
 
-	// Load documents using the new append-only method
-	documents, err := b.ReadAppendedDocuments(bundleName, database.Name)
-	if err != nil {
-		return nil, fmt.Errorf("error loading documents from bundle file %s: %w", fileName, err)
-	}
-
-	// Update bundle with loaded documents
-	bundleMetadata.Documents = &documents
+	// Documents are now loaded on-demand via page cache, not into memory
+	// The old append-only document loading is no longer used for bundle initialization
 	bundleMetadata.Database = database
 
-	b.logger.Debugf("Loaded bundle data from file %s with %d documents", fileName, len(documents))
+	b.logger.Debugf("Loaded bundle metadata from file %s", fileName)
 
 	return bundleMetadata, nil
 }
@@ -1082,18 +1076,13 @@ func (bs *BundleStorageEngine) LoadBundle(bundleName string) (*models.Bundle, er
 	defer bs.fileManager.ReleasePage(headerBuffer)
 
 	// Parse the header
-	bundle, docCount, err := bs.parseHeaderPage(headerBuffer.Data)
+	bundle, _, err := bs.parseHeaderPage(headerBuffer.Data)
 	if err != nil {
 		return nil, fmt.Errorf("could not parse header page: %w", err)
 	}
 
-	// Read the document pages
-	docs, err := bs.readDocuments(fileID, docCount)
-	if err != nil {
-		return nil, fmt.Errorf("could not read documents: %w", err)
-	}
-
-	bundle.Documents = &docs
+	// Documents are now loaded on-demand via page cache
+	// The old document loading into memory is no longer used
 
 	return bundle, nil
 }
@@ -1135,8 +1124,7 @@ func (bs *BundleStorageEngine) parseHeaderPage(pageData []byte) (*models.Bundle,
 	// For this example, just create an empty bundle
 	bundle.BundleID = string(bundleMetadata[:32])
 	bundle.Name = string(bundleMetadata[32:64])
-	bundle.Documents = new(map[string]models.Document)
-	*bundle.Documents = make(map[string]models.Document)
+	// Documents are now loaded on-demand via page cache
 
 	return bundle, docCount, nil
 }
@@ -1489,22 +1477,8 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 		pageSize = uint32(bundle.PageSize)
 	}
 
-	// Initialize memtable if needed (Cassandra-style approach)
-	if bundle.Documents == nil {
-		bundle.Documents = new(map[string]models.Document)
-		*bundle.Documents = make(map[string]models.Document)
-	}
-	bundle.DocumentsComplete = false // Mark as incomplete so queries merge with disk
-
-	// PERFORMANCE FIX: Batch all memtable updates under a single lock acquisition
-	// This reduces O(N) lock/unlock operations to O(1), matching PostgreSQL's approach
-	bundle.DocumentsMutex.Lock()
-	for _, document := range documents {
-		if document != nil && document.DocumentID != "" {
-			(*bundle.Documents)[document.DocumentID] = *document
-		}
-	}
-	bundle.DocumentsMutex.Unlock()
+	// Writes go directly to page cache (write-through) - no memtable needed
+	// The page cache is updated after successful disk writes
 
 	// Process all documents in batch (serialization and disk writes)
 	successCount := 0
@@ -1692,22 +1666,8 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 		pageSize = uint32(bundle.PageSize)
 	}
 
-	// Initialize memtable if needed
-	if bundle.Documents == nil {
-		bundle.Documents = new(map[string]models.Document)
-		*bundle.Documents = make(map[string]models.Document)
-	}
-	bundle.DocumentsComplete = false
-
-	// PERFORMANCE FIX: Batch all memtable updates under a single lock acquisition
-	// This reduces O(N) lock/unlock operations to O(1), matching PostgreSQL's approach
-	bundle.DocumentsMutex.Lock()
-	for _, document := range documents {
-		if document != nil && document.DocumentID != "" {
-			(*bundle.Documents)[document.DocumentID] = *document
-		}
-	}
-	bundle.DocumentsMutex.Unlock()
+	// Writes go directly to page cache (write-through) - no memtable needed
+	// The page cache is updated after successful disk writes
 
 	// Process all documents (serialization and disk writes)
 	// NOTE: Document locks are already held by caller (from LockManager)
@@ -2110,14 +2070,8 @@ func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bu
 	}
 	bs.logger.Infof("Adding document to bundle %s with file ID %d", bundle.Name, fileID)
 
-	// Add the document to the bundle in memory
-	bundle.DocumentsMutex.Lock()
-	if bundle.Documents == nil {
-		bundle.Documents = new(map[string]models.Document)
-		*bundle.Documents = make(map[string]models.Document)
-	}
-	(*bundle.Documents)[document.DocumentID] = *document
-	bundle.DocumentsMutex.Unlock()
+	// Documents are now stored via page cache (write-through)
+	// No memtable update needed - the page cache handles document storage
 
 	return nil
 }
@@ -2314,17 +2268,8 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	//     return fmt.Errorf("bundle file %s does not exist", fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
 	// }
 
-	// Add document to memtable (write buffer) for fast access to recent writes
-	// Using Cassandra-style approach: Documents map is a memtable, not a complete cache
-	bundle.DocumentsMutex.Lock()
-	if bundle.Documents == nil {
-		bundle.Documents = new(map[string]models.Document)
-		*bundle.Documents = make(map[string]models.Document)
-	}
-	(*bundle.Documents)[document.DocumentID] = *document
-	// Mark as incomplete so queries know to merge with disk data
-	bundle.DocumentsComplete = false
-	bundle.DocumentsMutex.Unlock()
+	// Documents are stored via write-through page cache
+	// No memtable update needed - the page cache handles document storage
 
 	// PERFORMANCE FIX: Direct binary serialization without map conversion
 	// Use Go's native binary encoding for maximum speed
@@ -4017,24 +3962,14 @@ func (b *BundleStorageEngine) RemoveDocumentFromBundleFile(database *models.Data
 
 // WriteBundleToFile encodes a bundle and writes it to a file
 // DEPRECATED: Use AppendDocumentToBundleFile for better performance
+// Note: bundle.Documents memtable has been removed - this function may need refactoring
 func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath string) error {
 	// 1. Convert the bundle to a map for BSON encoding
 	convertedBundle := BundleToMap(bundle)
 
-	// 2. Make sure Documents are included in the map
-	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-	bundle.DocumentsMutex.RLock()
-	docMap := make(map[string]interface{}, len(*bundle.Documents))
-	for docID, doc := range *bundle.Documents {
-		docMap[docID] = map[string]interface{}{
-			"DocumentID": doc.DocumentID,
-			"Fields":     doc.Fields,
-			"CreatedAt":  doc.CreatedAt,
-			"UpdatedAt":  doc.UpdatedAt,
-		}
-	}
-	bundle.DocumentsMutex.RUnlock()
-	convertedBundle["Documents"] = docMap
+	// 2. Documents are now stored via page cache - this function is deprecated
+	// TODO: Refactor this function to load documents from page cache if needed
+	convertedBundle["Documents"] = make(map[string]interface{})
 
 	// docs := make([]interface{}, 0, len(bundle.Documents))
 	// for _, doc := range bundle.Documents {
@@ -4161,9 +4096,9 @@ func BundleToMap(bundle *models.Bundle) map[string]interface{} {
 		//"Database":          bundle.Database,
 		"DocumentStructure": bundle.DocumentStructure,
 		"FieldDefinitions":  bundle.DocumentStructure.FieldDefinitions,
-		"Documents":         bundle.Documents,
-		"IndexNames":        bundle.IndexNames,
-		"Indexes":           bundle.Indexes,
+		// Documents are now stored via page cache, not in memory
+		"IndexNames": bundle.IndexNames,
+		"Indexes":    bundle.Indexes,
 		//"Relationships":     bundle.Relationships,
 		"Constraints": bundle.Constraints,
 	}
@@ -4352,111 +4287,9 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 
 	logger.Infof("Processing bundle %s , going to load documents, with ID %s", bundle.Name, bundle.BundleID)
 
-	// Extract documents
-	if docs, ok := data["Documents"]; ok && docs != nil {
-		bundle.Documents = new(map[string]models.Document)
-		*bundle.Documents = make(map[string]models.Document)
-		//logger.Infof("Found %t for array", docs.([]interface{}))
-		//logger.Infof("Found %t for map", docs.(map[string]interface{}))
-		// Handle array of documents
-		if docArray, ok := docs.([]interface{}); ok {
-			logger.Infof("Processing %d documents array in bundle %s", len(docArray), bundle.Name)
-			for _, doc := range docArray {
-				if docMap, ok := doc.(map[string]interface{}); ok {
-					// Extract document ID
-					docID, ok := docMap["DocumentID"].(string)
-					if !ok {
-						continue // Skip documents without valid ID
-					}
-
-					document := models.Document{
-						DocumentID: docID,
-						Fields:     make(map[string]models.Field),
-					}
-
-					// Extract CreatedAt and UpdatedAt if available
-					if created, ok := docMap["CreatedAt"].(time.Time); ok {
-						document.CreatedAt = created
-					}
-					if updated, ok := docMap["UpdatedAt"].(time.Time); ok {
-						document.UpdatedAt = updated
-					}
-
-					// Extract fields
-
-					if fields, ok := docMap["Fields"].(map[string]interface{}); ok {
-						for fieldName, fieldValue := range fields {
-
-							// Case 1: Field value is a map with Name/Value properties
-							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
-								field := models.Field{
-									Name:  stringValue(fieldMap, "Name", fieldName),
-									Value: models.NewInterfaceValue(fieldMap["Value"]), // ✅ Use NewInterfaceValue
-								}
-
-								document.Fields[fieldName] = field
-							} else {
-								// Case 2: Field value is the direct value (not wrapped in a map)
-
-								field := models.Field{
-									Name:  fieldName,
-									Value: models.NewInterfaceValue(fieldValue), // ✅ Use NewInterfaceValue
-								}
-								document.Fields[fieldName] = field
-							}
-						}
-					}
-
-					(*bundle.Documents)[docID] = document
-				}
-			}
-		} else if docMap, ok := docs.(map[string]interface{}); ok {
-			logger.Infof("Processing %d documents map in bundle %s", len(docMap), bundle.Name)
-			// Handle map of documents
-			for docID, docData := range docMap {
-				if docMapData, ok := docData.(map[string]interface{}); ok {
-					document := models.Document{
-						DocumentID: docID,
-						Fields:     make(map[string]models.Field),
-					}
-
-					// Extract CreatedAt and UpdatedAt if available
-					if created, ok := docMapData["CreatedAt"].(time.Time); ok {
-						document.CreatedAt = created
-					}
-					if updated, ok := docMapData["UpdatedAt"].(time.Time); ok {
-						document.UpdatedAt = updated
-					}
-
-					// Extract fields
-
-					if fields, ok := docMapData["Fields"].(map[string]interface{}); ok {
-						for fieldName, fieldValue := range fields {
-
-							// Case 1: Field value is a map with Name/Value properties
-							if fieldMap, ok := fieldValue.(map[string]interface{}); ok {
-								field := models.Field{
-									Name:  stringValue(fieldMap, "Name", fieldName),
-									Value: models.NewInterfaceValue(fieldMap["value"]), // ✅ Use NewInterfaceValue
-								}
-								document.Fields[fieldName] = field
-							} else {
-								// Case 2: Field value is the direct value (not wrapped in a map)
-								field := models.Field{
-									Name:  fieldName,
-									Value: models.NewInterfaceValue(fieldValue), // ✅ Use NewInterfaceValue
-								}
-
-								document.Fields[fieldName] = field
-							}
-						}
-					}
-
-					(*bundle.Documents)[docID] = document
-				}
-			}
-		}
-	}
+	// Documents are now loaded on-demand via page cache, not from serialized data
+	// Skip legacy document extraction - the page cache handles document storage
+	// TODO: Remove this legacy document extraction code once page cache is fully verified
 
 	return bundle, nil
 }

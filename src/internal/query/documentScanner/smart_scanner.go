@@ -175,27 +175,8 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 	batchCount := 0
 	totalScanned := 0
 
-	// PHASE 4: MVCC - Include memtable documents (uncommitted writes) for read-your-own-writes
-	memtableDocs := make(map[string]*models.Document)
-	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
-		if bundleAdapter.bundle.Documents != nil && !bundleAdapter.bundle.DocumentsComplete {
-			bundleAdapter.bundle.DocumentsMutex.RLock()
-			for docID, doc := range *bundleAdapter.bundle.Documents {
-				if sbs.snapshotSequence > 0 {
-					if doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
-						docCopy := new(models.Document)
-						*docCopy = doc
-						memtableDocs[docID] = docCopy
-					}
-				} else {
-					docCopy := new(models.Document)
-					*docCopy = doc
-					memtableDocs[docID] = docCopy
-				}
-			}
-			bundleAdapter.bundle.DocumentsMutex.RUnlock()
-		}
-	}
+	// All documents are now accessed via write-through page cache
+	// No memtable - reads go directly through page cache
 
 	// Iterate pages directly (sequential access, optimal I/O pattern)
 	// This uses the universal page cache efficiently - no individual GetDocument() calls
@@ -211,10 +192,7 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 
 		// Process documents in this page - apply predicate filter
 		for docID, doc := range page.Documents {
-			// Skip if this document is in memtable (memtable takes precedence)
-			if _, inMemtable := memtableDocs[docID]; inMemtable {
-				continue // Use memtable version instead
-			}
+			// All documents are now accessed via page cache - no memtable
 
 			totalScanned++
 
@@ -243,15 +221,7 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 		}
 	}
 
-	// PHASE 4: MVCC - Add memtable documents to results (after disk scan to avoid duplicates)
-	for docID, doc := range memtableDocs {
-		// Apply predicate to memtable documents too
-		if predicate(doc) {
-			result.Documents = append(result.Documents, doc)
-			result.DocumentIDs = append(result.DocumentIDs, docID)
-		}
-		totalScanned++
-	}
+	// All documents are now accessed via page cache - no memtable documents to add
 
 	// Finalize results
 	result.ScanLatency = time.Since(startTime)
@@ -300,34 +270,8 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 	batchCount := 0
 	totalScanned := 0
 
-	// PHASE 4: MVCC - Include memtable documents (uncommitted writes) for read-your-own-writes
-	// Check if bundle has memtable documents that need to be included
-	memtableDocs := make(map[string]*models.Document)
-	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
-		if bundleAdapter.bundle.Documents != nil && !bundleAdapter.bundle.DocumentsComplete {
-			// Bundle has memtable - include uncommitted documents created by this transaction
-			bundleAdapter.bundle.DocumentsMutex.RLock()
-			for docID, doc := range *bundleAdapter.bundle.Documents {
-				// Only include documents visible to this snapshot (read-your-own-writes)
-				if sbs.snapshotSequence > 0 {
-					if doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
-						docCopy := new(models.Document)
-						*docCopy = doc
-						memtableDocs[docID] = docCopy
-					}
-				} else {
-					// No snapshot - include all memtable documents
-					docCopy := new(models.Document)
-					*docCopy = doc
-					memtableDocs[docID] = docCopy
-				}
-			}
-			bundleAdapter.bundle.DocumentsMutex.RUnlock()
-			if len(memtableDocs) > 0 {
-				sbs.logger.Debugf("Including %d memtable documents in scan for read-your-own-writes", len(memtableDocs))
-			}
-		}
-	}
+	// All documents are now accessed via write-through page cache
+	// No memtable - reads go directly through page cache
 
 	// Iterate pages directly (sequential access, optimal I/O pattern)
 	// This is O(n) where n = pages, much better than O(n*m) with GetDocument() per doc
@@ -349,10 +293,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 
 		// Process documents in this page
 		for docID, doc := range page.Documents {
-			// Skip if this document is in memtable (memtable takes precedence for uncommitted writes)
-			if _, inMemtable := memtableDocs[docID]; inMemtable {
-				continue // Use memtable version instead
-			}
+			// All documents are now accessed via page cache - no memtable
 
 			// Early termination check per document
 			if maxDocuments > 0 && totalScanned >= maxDocuments {
@@ -386,17 +327,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 		}
 	}
 
-	// PHASE 4: MVCC - Add memtable documents to results (after disk scan to avoid duplicates)
-	// Memtable documents take precedence (they're the latest uncommitted versions)
-	for docID, doc := range memtableDocs {
-		// Early termination check
-		if maxDocuments > 0 && len(result.Documents) >= maxDocuments {
-			break
-		}
-		result.Documents = append(result.Documents, doc)
-		result.DocumentIDs = append(result.DocumentIDs, docID)
-		totalScanned++
-	}
+	// All documents are now accessed via page cache - no memtable documents to add
 
 	// Finalize results
 	result.ScanLatency = time.Since(startTime)

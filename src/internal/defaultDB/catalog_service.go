@@ -86,23 +86,28 @@ func (cs *CatalogService) RemoveDatabaseFromCatalog(databaseID string) error {
 		return fmt.Errorf("failed to get primary.Databases bundle: %w", err)
 	}
 
-	// TODO Use the LoadCatalogBundleDocuments function to ensure we have the latest documents
-	// Find the document for this database
+	// TODO I should use the LoadCatalogBundleDocuments function to ensure we have the latest documents
+	// Find the document for this database using page cache
 	var docIDToRemove string
 	var databaseName string
-	if databasesBundle.Documents != nil {
-		for docID, doc := range *databasesBundle.Documents {
-			// Access the DatabaseID field from the Document struct
-			if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
-				if dbID, ok := dbIDField.Value.AsString(); ok && dbID == databaseID {
-					docIDToRemove = docID
-					if nameField, exists := doc.Fields["Name"]; exists {
-						if name, ok := nameField.Value.AsString(); ok {
-							databaseName = name
-						}
+	// TODO: I need to iterate through documents using page cache via BundleService.GetDocumentPage()
+	// For now, we scan through all document IDs and load each document
+	dbDocIDs := databasesBundle.SortedIndex.GetAllDocumentIDs()
+	for _, docID := range dbDocIDs {
+		doc, err := cs.bundleService.GetDocument(databasesBundle.Name, cs.databaseService.Databases["primary"].Name, docID)
+		if err != nil {
+			continue
+		}
+		// Access the DatabaseID field from the Document struct
+		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
+			if dbID, ok := dbIDField.Value.AsString(); ok && dbID == databaseID {
+				docIDToRemove = docID
+				if nameField, exists := doc.Fields["Name"]; exists {
+					if name, ok := nameField.Value.AsString(); ok {
+						databaseName = name
 					}
-					break
 				}
+				break
 			}
 		}
 	}

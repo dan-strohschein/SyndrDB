@@ -96,7 +96,7 @@ func FormatExplainOutput(
 
 	// Create query plan output
 	queryPlan := map[string]interface{}{
-		"QueryType":      string(query.QueryType),
+		"QueryType":      query.QueryType.String(),
 		"PlanType":       planType,
 		"Cost":           plan.Cost,
 		"EstimatedRows":  plan.EstimatedRows,
@@ -220,7 +220,7 @@ func formatExecutionTree(
 		if n.Query != nil {
 			result["FromBundle"] = n.Query.FromBundle
 			if len(n.Query.JoinClauses) > 0 {
-				result["JoinType"] = string(n.Query.JoinClauses[0].JoinType)
+				result["JoinType"] = n.Query.JoinClauses[0].JoinType.String()
 				result["RightBundle"] = n.Query.JoinClauses[0].RightBundle
 			}
 		}
@@ -229,20 +229,20 @@ func formatExecutionTree(
 
 	case *NestedLoopJoinNode:
 		result["NodeType"] = "NestedLoopJoinNode"
-		result["JoinType"] = string(n.JoinType)
+		result["JoinType"] = n.JoinType.String()
 		result["LeftChild"] = formatExecutionTree(n.LeftChild, analyze, nodeMetricsMap)
 		result["RightChild"] = formatExecutionTree(n.RightChild, analyze, nodeMetricsMap)
 
 	case *HashJoinNode:
 		result["NodeType"] = "HashJoinNode"
-		result["JoinType"] = string(n.JoinType)
+		result["JoinType"] = n.JoinType.String()
 		result["BuildSide"] = "Left" // Hash joins typically build on left side
 		result["LeftChild"] = formatExecutionTree(n.LeftChild, analyze, nodeMetricsMap)
 		result["RightChild"] = formatExecutionTree(n.RightChild, analyze, nodeMetricsMap)
 
 	case *MergeJoinNode:
 		result["NodeType"] = "MergeJoinNode"
-		result["JoinType"] = string(n.JoinType)
+		result["JoinType"] = n.JoinType.String()
 		result["LeftChild"] = formatExecutionTree(n.LeftChild, analyze, nodeMetricsMap)
 		result["RightChild"] = formatExecutionTree(n.RightChild, analyze, nodeMetricsMap)
 
@@ -312,7 +312,7 @@ func describePlanType(node ExecutionNode) string {
 		return "Union"
 	case *JoinExecutionNode:
 		if n.Query != nil && len(n.Query.JoinClauses) > 0 {
-			return string(n.Query.JoinClauses[0].JoinType) + " Join"
+			return n.Query.JoinClauses[0].JoinType.String() + " Join"
 		}
 		return "Join"
 	case *NestedLoopJoinNode:

@@ -40,7 +40,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "Databases",
 		DocumentStructure: docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -66,7 +65,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "Bundles",
 		DocumentStructure: bundles_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -96,7 +94,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "Users",
 		DocumentStructure: users_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -120,7 +117,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "Permissions",
 		DocumentStructure: permissions_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -142,7 +138,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "UserPermissions",
 		DocumentStructure: userPermissions_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -166,7 +161,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "DatabaseUsers",
 		DocumentStructure: databaseUsers_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -190,7 +184,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "Roles",
 		DocumentStructure: roles_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -211,7 +204,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "UserRoles",
 		DocumentStructure: usersRoles_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -232,7 +224,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "RolesPermissions",
 		DocumentStructure: rolesPermissions_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -270,7 +261,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "Migrations",
 		DocumentStructure: migrations_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -304,7 +294,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "DatabaseVersions",
 		DocumentStructure: databaseVersions_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -340,7 +329,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "MigrationLocks",
 		DocumentStructure: migrationLocks_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -382,7 +370,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "MigrationValidationReports",
 		DocumentStructure: migrationReports_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -431,7 +418,6 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 		BundleID:          helpers.GenerateUUID(),
 		Name:              "Views",
 		DocumentStructure: views_docStructure,
-		Documents:         &map[string]models.Document{},
 		Indexes:           map[string]models.IndexReference{},
 		IndexNames:        []string{},
 		Relationships:     map[string]models.Relationship{},
@@ -1155,8 +1141,21 @@ func HydrateRolesPermissionsPrimaryCatalogs(databaseService *database.DatabaseSe
 		"Data-Writer": {"Write", "Read-Write"},
 	}
 
-	roleDocs := *rolesBundle.Documents
-	permissionDocs := *permissionsBundle.Documents
+	// Load role documents from page cache
+	roleDocIDs := rolesBundle.SortedIndex.GetAllDocumentIDs()
+	roleDocs, err := bundleService.GetDocumentsByIDs(rolesBundle, roleDocIDs)
+	if err != nil {
+		logger.Warnf("Warning: Failed to get role documents: %v", err)
+		return err
+	}
+
+	// Load permission documents from page cache
+	permissionDocIDs := permissionsBundle.SortedIndex.GetAllDocumentIDs()
+	permissionDocs, err := bundleService.GetDocumentsByIDs(permissionsBundle, permissionDocIDs)
+	if err != nil {
+		logger.Warnf("Warning: Failed to get permission documents: %v", err)
+		return err
+	}
 
 	// TODO: I will add support for dynamic role-permission assignment via SyndrQL commands
 	// TODO: I will add role inheritance (e.g., Admin inherits all permissions from other roles)
@@ -1335,9 +1334,15 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 		}
 
 		// Find the role document by name to get its RoleID
-		roleDocs := *rolesBundle.Documents
+		roleDocIDs := rolesBundle.SortedIndex.GetAllDocumentIDs()
+		rolleDocs, roleErr := bundleService.GetDocumentsByIDs(rolesBundle, roleDocIDs)
+		if roleErr != nil {
+			logger.Warnf("Warning: Failed to get role documents for user %s: %v", user.Username, roleErr)
+			continue
+		}
+
 		var roleID string
-		for _, roleDoc := range roleDocs {
+		for _, roleDoc := range rolleDocs {
 			if roleName, ok := roleDoc.Fields["Name"].Value.AsString(); ok && roleName == user.Role {
 				roleID, _ = roleDoc.Fields["RoleID"].Value.AsString()
 				break
@@ -1418,8 +1423,19 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 	}
 
 	// For simplicity, link Admin to all permissions, Reader to Read, Writer to Write
-	userDocs := *usersBundle.Documents
-	permissionDocs := *permissionsBundle.Documents
+	userDocIDs := usersBundle.SortedIndex.GetAllDocumentIDs()
+	userDocs, err := bundleService.GetDocumentsByIDs(usersBundle, userDocIDs)
+	if err != nil {
+		logger.Warnf("Warning: Failed to get user documents: %v", err)
+		return err
+	}
+
+	permDocIDs := permissionsBundle.SortedIndex.GetAllDocumentIDs()
+	permissionDocs, err := bundleService.GetDocumentsByIDs(permissionsBundle, permDocIDs)
+	if err != nil {
+		logger.Warnf("Warning: Failed to get permission documents: %v", err)
+		return err
+	}
 
 	for _, userDoc := range userDocs {
 		userName, _ := userDoc.Fields["Username"].Value.AsString()
@@ -1509,7 +1525,12 @@ func HydrateDatabaseUsersPrimaryCatalogs(databaseService *database.DatabaseServi
 	}
 
 	// For simplicity, link all users to the primary database
-	userDocs := *usersBundle.Documents
+	userDocIDs := usersBundle.SortedIndex.GetAllDocumentIDs()
+	userDocs, err := bundleService.GetDocumentsByIDs(usersBundle, userDocIDs)
+	if err != nil {
+		logger.Warnf("Warning: Failed to get user documents: %v", err)
+		return err
+	}
 	primaryDBID := databaseService.Databases["primary"].DatabaseID
 
 	for _, userDoc := range userDocs {

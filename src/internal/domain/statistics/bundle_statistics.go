@@ -24,7 +24,6 @@ package statistics
 import (
 	"fmt"
 	"math"
-	"math/rand"
 	"sort"
 	"syndrdb/src/internal/domain/models"
 	"time"
@@ -157,45 +156,11 @@ func (sc *StatisticsCollector) determineSampleStrategy(totalDocuments int64) flo
 }
 
 // sampleDocuments selects documents using reservoir sampling
+// TODO: This function needs to be refactored to use the page cache instead of bundle.Documents
 func (sc *StatisticsCollector) sampleDocuments(bundle *models.Bundle, sampleRate float64) ([]*models.Document, error) {
-	if bundle.Documents == nil {
-		return nil, fmt.Errorf("bundle documents not loaded")
-	}
-
-	docs := *bundle.Documents
-	totalDocs := len(docs)
-	sampleSize := int(float64(totalDocs) * sampleRate)
-
-	if sampleSize >= totalDocs {
-		// Full scan - return all documents
-		result := make([]*models.Document, 0, totalDocs)
-		for _, doc := range docs {
-			docCopy := doc
-			result = append(result, &docCopy)
-		}
-		return result, nil
-	}
-
-	// Reservoir sampling for partial scan
-	reservoir := make([]*models.Document, 0, sampleSize)
-	i := 0
-
-	for _, doc := range docs {
-		if i < sampleSize {
-			docCopy := doc
-			reservoir = append(reservoir, &docCopy)
-		} else {
-			// Replace elements with decreasing probability
-			j := rand.Intn(i + 1)
-			if j < sampleSize {
-				docCopy := doc
-				reservoir[j] = &docCopy
-			}
-		}
-		i++
-	}
-
-	return reservoir, nil
+	// Documents are now accessed via page cache - this function is deprecated
+	// For now, return an error until this is refactored to use page-based access
+	return nil, fmt.Errorf("sampleDocuments needs refactoring: bundle.Documents memtable removed, use page cache")
 }
 
 // analyzeField collects statistics for a single field

@@ -276,17 +276,22 @@ func (bs *BackupService) collectPrimaryDBDocuments(db *models.Database, manifest
 	}
 
 	// Find the document for this database
-	if databasesBundle.Documents != nil {
-		for _, doc := range *databasesBundle.Documents {
-			if nameField, ok := doc.Data["Name"]; ok {
-				if nameField.(string) == db.Name {
-					manifest.PrimaryDBDocuments = append(manifest.PrimaryDBDocuments, PrimaryDBDoc{
-						Bundle:     "Databases",
-						DocumentID: doc.DocumentID,
-						Data:       doc.Data,
-					})
-					break
-				}
+	// TODO: I need to iterate through documents using page cache via BundleService.GetDocumentPage()
+	// For now, we scan through all document IDs and load each document
+	docIDs := databasesBundle.SortedIndex.GetAllDocumentIDs()
+	for _, docID := range docIDs {
+		doc, err := bs.bundleService.GetDocument(databasesBundle.Name, primaryDB.Name, docID)
+		if err != nil {
+			continue
+		}
+		if nameField, ok := doc.Data["Name"]; ok {
+			if nameField.(string) == db.Name {
+				manifest.PrimaryDBDocuments = append(manifest.PrimaryDBDocuments, PrimaryDBDoc{
+					Bundle:     "Databases",
+					DocumentID: doc.DocumentID,
+					Data:       doc.Data,
+				})
+				break
 			}
 		}
 	}
@@ -298,16 +303,21 @@ func (bs *BackupService) collectPrimaryDBDocuments(db *models.Database, manifest
 	}
 
 	// Collect all bundle documents for this database
-	if bundlesBundle.Documents != nil {
-		for _, doc := range *bundlesBundle.Documents {
-			if dbNameField, ok := doc.Data["DatabaseName"]; ok {
-				if dbNameField.(string) == db.Name {
-					manifest.PrimaryDBDocuments = append(manifest.PrimaryDBDocuments, PrimaryDBDoc{
-						Bundle:     "Bundles",
-						DocumentID: doc.DocumentID,
-						Data:       doc.Data,
-					})
-				}
+	// TODO: I need to iterate through documents using page cache via BundleService.GetDocumentPage()
+	// For now, we scan through all document IDs and load each document
+	bundleDocIDs := bundlesBundle.SortedIndex.GetAllDocumentIDs()
+	for _, docID := range bundleDocIDs {
+		doc, err := bs.bundleService.GetDocument(bundlesBundle.Name, primaryDB.Name, docID)
+		if err != nil {
+			continue
+		}
+		if dbNameField, ok := doc.Data["DatabaseName"]; ok {
+			if dbNameField.(string) == db.Name {
+				manifest.PrimaryDBDocuments = append(manifest.PrimaryDBDocuments, PrimaryDBDoc{
+					Bundle:     "Bundles",
+					DocumentID: doc.DocumentID,
+					Data:       doc.Data,
+				})
 			}
 		}
 	}

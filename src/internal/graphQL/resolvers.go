@@ -130,12 +130,19 @@ func (h *GraphQLHandler) resolveBundles(field *ast.Field, variables map[string]i
 
 	var bundles []BundleResponse
 
-	for bundleName, bundle := range h.database.Bundles {
+	for bundleName := range h.database.Bundles {
+		// Get document count through the bundleService (write-through cache)
+		docCount, err := h.serviceManager.BundleService.CountDocuments(bundleName, databaseName)
+		if err != nil {
+			h.logger.Warnf("Failed to get document count for bundle %s: %v", bundleName, err)
+			docCount = 0
+		}
+
 		bundleResponse := BundleResponse{
 			Name:          bundleName,
 			Database:      databaseName,
 			Documents:     []map[string]interface{}{}, // Will be populated if requested
-			DocumentCount: len(*bundle.Documents),
+			DocumentCount: docCount,
 			CreatedAt:     time.Now(),
 		}
 
@@ -177,16 +184,23 @@ func (h *GraphQLHandler) resolveBundle(field *ast.Field, variables map[string]in
 		return nil, nil
 	}
 
-	bundle, exists := h.database.Bundles[bundleName]
+	_, exists := h.database.Bundles[bundleName]
 	if !exists {
 		return nil, nil
+	}
+
+	// Get document count through the bundleService (write-through cache)
+	docCount, err := h.serviceManager.BundleService.CountDocuments(bundleName, databaseName)
+	if err != nil {
+		h.logger.Warnf("Failed to get document count for bundle %s: %v", bundleName, err)
+		docCount = 0
 	}
 
 	bundleResponse := BundleResponse{
 		Name:          bundleName,
 		Database:      databaseName,
 		Documents:     []map[string]interface{}{},
-		DocumentCount: len(*bundle.Documents),
+		DocumentCount: docCount,
 		CreatedAt:     time.Now(),
 	}
 

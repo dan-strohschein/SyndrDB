@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/auth"
@@ -88,9 +89,12 @@ func (us *UserService) isSystemUser(username string) error {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
-	// Find user document by username (case-insensitive)
+	// Find user document by username (case-insensitive) using BundleService
 	usernameLower := strings.ToLower(username)
-	docs := *usersBundle.Documents
+	docs, err := us.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
+	}
 	for _, doc := range docs {
 		if nameField, ok := doc.Fields["Username"]; ok {
 			if nameValue, ok := nameField.Value.AsString(); ok {
@@ -154,15 +158,17 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 		return "", errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
-	// Check if username already exists (case-insensitive)
-	if usersBundle.Documents != nil {
-		for _, doc := range *usersBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-					return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT,
-						fmt.Sprintf("user '%s' already exists", username),
-						errors.LayerCommand).WithContext("username", username)
-				}
+	// Check if username already exists (case-insensitive) using BundleService
+	existingDocs, err := us.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return "", errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
+	}
+	for _, doc := range existingDocs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
+				return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("user '%s' already exists", username),
+					errors.LayerCommand).WithContext("username", username)
 			}
 		}
 	}
@@ -263,14 +269,15 @@ func (us *UserService) GetUserByUsername(username string) (*models.Document, err
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
-	// Search for user (case-insensitive)
-	if usersBundle.Documents != nil {
-		for _, doc := range *usersBundle.Documents {
-			if nameField, ok := doc.Fields["Name"]; ok {
-				if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-					docCopy := doc
-					return &docCopy, nil
-				}
+	// Search for user (case-insensitive) using BundleService
+	docs, err := us.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
+	}
+	for _, doc := range docs {
+		if nameField, ok := doc.Fields["Name"]; ok {
+			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
+				return doc, nil
 			}
 		}
 	}
@@ -301,14 +308,15 @@ func (us *UserService) GetUserByID(userID string) (*models.Document, error) {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
 
-	// Search for user by UserID
-	if usersBundle.Documents != nil {
-		for _, doc := range *usersBundle.Documents {
-			if idField, ok := doc.Fields["UserID"]; ok {
-				if str, ok := idField.Value.AsString(); ok && str == userID {
-					docCopy := doc
-					return &docCopy, nil
-				}
+	// Search for user by UserID using BundleService
+	docs, err := us.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
+	}
+	for _, doc := range docs {
+		if idField, ok := doc.Fields["UserID"]; ok {
+			if str, ok := idField.Value.AsString(); ok && str == userID {
+				return doc, nil
 			}
 		}
 	}
@@ -382,15 +390,19 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 	}
 
 	// Find user document (case-insensitive)
+	// WRITE-THROUGH CACHE: Use GetDocumentsByFilter instead of bundle.Documents
 	usernameLower := strings.ToLower(username)
 	var targetDocID string
-	docs := *usersBundle.Documents
+	docs, err := us.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL, "failed to retrieve users", errors.LayerCommand)
+	}
 
-	for docID, doc := range docs {
+	for _, doc := range docs {
 		if nameField, ok := doc.Fields["Username"]; ok {
 			if nameValue, ok := nameField.Value.AsString(); ok {
 				if strings.ToLower(nameValue) == usernameLower {
-					targetDocID = docID
+					targetDocID = doc.DocumentID
 					break
 				}
 			}
@@ -428,10 +440,22 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 		}
 	}
 
-	// Get target document for modification
-	targetDoc := docs[targetDocID]
+	// Find the target document from the slice
+	var targetDoc *models.Document
+	for _, doc := range docs {
+		if doc.DocumentID == targetDocID {
+			targetDoc = doc
+			break
+		}
+	}
+	if targetDoc == nil {
+		return errors.New(errors.ERR_NOT_FOUND_USER,
+			fmt.Sprintf("user '%s' document not found", username),
+			errors.LayerAuth).WithContext("username", username)
+	}
 
-	// Apply updates
+	// Apply updates - build fields for UpdateDocumentInBundle
+	var updateFields []models.KeyValue
 	for field, value := range updates {
 		switch strings.ToUpper(field) {
 		case "PASSWORD":
@@ -448,11 +472,11 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 						return errors.ConvertError(err, errors.LayerCommand).WithContext("username", username)
 					}
 
-					// Update PasswordHash field in document
-					targetDoc.Fields["PasswordHash"] = models.Field{
-						Name:  "PasswordHash",
-						Value: models.NewStringValue(string(storedUser.PasswordHash.Hash)),
-					}
+					// Add PasswordHash to update fields
+					updateFields = append(updateFields, models.KeyValue{
+						Key:   "PasswordHash",
+						Value: string(storedUser.PasswordHash.Hash),
+					})
 				}
 			}
 		default:
@@ -462,8 +486,16 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 		}
 	}
 
-	// Save updated document back to bundle
-	(*usersBundle.Documents)[targetDocID] = targetDoc
+	// Save updated document back to bundle using UpdateDocumentInBundle
+	updateCmd := &models.DocumentUpdateCommand{
+		BundleName:  "Users",
+		Fields:      updateFields,
+		WhereClause: fmt.Sprintf("DocumentID = '%s'", targetDoc.DocumentID),
+	}
+	updateErr := us.bundleService.UpdateDocumentInBundle(context.Background(), primaryDB, usersBundle, updateCmd)
+	if updateErr != nil {
+		return errors.WrapWithMessage(updateErr, errors.ERR_INTERNAL, "failed to save user update", errors.LayerCommand)
+	}
 
 	us.logger.Infof("User '%s' updated successfully", username)
 	return nil
@@ -508,12 +540,16 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 	}
 
 	// Find user document (case-insensitive)
+	// WRITE-THROUGH CACHE: Use GetDocumentsByFilter instead of bundle.Documents
 	usernameLower := strings.ToLower(username)
 	var userID string
 	var targetDocID string
-	docs := *usersBundle.Documents
+	docs, err := us.bundleService.GetDocumentsByFilter(usersBundle, "", nil)
+	if err != nil {
+		return errors.WrapWithMessage(err, errors.ERR_INTERNAL, "failed to retrieve users", errors.LayerCommand)
+	}
 
-	for docID, doc := range docs {
+	for _, doc := range docs {
 		if nameField, ok := doc.Fields["Username"]; ok {
 			if nameValue, ok := nameField.Value.AsString(); ok {
 				if strings.ToLower(nameValue) == usernameLower {
@@ -523,7 +559,7 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 							userID = id
 						}
 					}
-					targetDocID = docID
+					targetDocID = doc.DocumentID
 					break
 				}
 			}
@@ -574,8 +610,16 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 		}
 	}
 
-	// Remove user document from Users bundle (delete from map)
-	delete(*usersBundle.Documents, targetDocID)
+	// Remove user document from Users bundle using DeleteDocumentFromBundle
+	// WRITE-THROUGH CACHE: Use bundleService.DeleteDocumentFromBundle
+	deleteCmd := &models.DocumentDeleteCommand{
+		BundleName:  "Users",
+		WhereClause: fmt.Sprintf("DocumentID = '%s'", targetDocID),
+	}
+	deleteErr := us.bundleService.DeleteDocumentFromBundle(usersBundle, deleteCmd, []string{targetDocID}, nil)
+	if deleteErr != nil {
+		return errors.WrapWithMessage(deleteErr, errors.ERR_INTERNAL, "failed to delete user document", errors.LayerCommand)
+	}
 
 	us.logger.Infof("User '%s' deleted successfully", username)
 	return nil
@@ -583,28 +627,39 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 
 // cleanupJunctionTable removes all records matching a specific field value
 // This is used for cascade deletion of junction table records
+// WRITE-THROUGH CACHE: Use GetDocumentsByFilter and DeleteDocumentFromBundle
 func (us *UserService) cleanupJunctionTable(junctionBundle *models.Bundle, fieldName, fieldValue, tableName string) {
-	if junctionBundle.Documents == nil {
+	docs, err := us.bundleService.GetDocumentsByFilter(junctionBundle, "", nil)
+	if err != nil {
+		us.logger.Warnf("Failed to get documents from %s: %v", tableName, err)
 		return
 	}
 
-	docs := *junctionBundle.Documents
 	removedCount := 0
 
-	// Collect docIDs to delete
-	toDelete := make([]string, 0)
-	for docID, doc := range docs {
+	// Collect matching document IDs for batch delete
+	var toDeleteIDs []string
+	var toDeleteDocs []*models.Document
+	for _, doc := range docs {
 		if field, ok := doc.Fields[fieldName]; ok {
 			if value, ok := field.Value.AsString(); ok && value == fieldValue {
-				toDelete = append(toDelete, docID)
+				toDeleteIDs = append(toDeleteIDs, doc.DocumentID)
+				toDeleteDocs = append(toDeleteDocs, doc)
 			}
 		}
 	}
 
-	// Delete collected documents
-	for _, docID := range toDelete {
-		delete(*junctionBundle.Documents, docID)
-		removedCount++
+	// Delete matching documents using DeleteDocumentFromBundle
+	if len(toDeleteIDs) > 0 {
+		deleteCmd := &models.DocumentDeleteCommand{
+			BundleName:  tableName,
+			WhereClause: fmt.Sprintf("%s = '%s'", fieldName, fieldValue),
+		}
+		if delErr := us.bundleService.DeleteDocumentFromBundle(junctionBundle, deleteCmd, toDeleteIDs, toDeleteDocs); delErr != nil {
+			us.logger.Warnf("Failed to delete documents from %s: %v", tableName, delErr)
+		} else {
+			removedCount = len(toDeleteIDs)
+		}
 	}
 
 	if removedCount > 0 {

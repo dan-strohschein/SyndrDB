@@ -36,7 +36,7 @@ func BenchmarkDiskLookup_Bucketed(b *testing.B) {
 	for i := 0; i < numEntries; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		keys[i] = key
-		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i))
+		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i), 0, 0)
 		storage.AppendEntry(entry)
 	}
 	storage.Flush()
@@ -79,7 +79,7 @@ func BenchmarkDiskLookup_NonBucketed(b *testing.B) {
 	for i := 0; i < numEntries; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		keys[i] = key
-		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i))
+		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i), 0, 0)
 		storage.AppendEntry(entry)
 	}
 	storage.Flush()
@@ -132,7 +132,7 @@ func BenchmarkBucketLookup_Optimized(b *testing.B) {
 		bucket, _ := ComputeBucketNum(hash, storage.numBuckets)
 		buckets[i] = bucket
 
-		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i))
+		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i), 0, 0)
 		storage.AppendEntry(entry)
 	}
 	storage.Flush()
@@ -178,7 +178,7 @@ func BenchmarkMixedWorkload_80_20(b *testing.B) {
 	for i := 0; i < 4000; i++ {
 		key := fmt.Sprintf("old_%d", i)
 		oldKeys[i] = key
-		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i))
+		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i), 0, 0)
 		storage.AppendEntry(entry)
 	}
 	storage.Flush()
@@ -188,7 +188,7 @@ func BenchmarkMixedWorkload_80_20(b *testing.B) {
 	for i := 0; i < 1000; i++ {
 		key := fmt.Sprintf("recent_%d", i)
 		recentKeys[i] = key
-		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i+4000), uint32(i%1000), uint64(i+4000))
+		entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i+4000), uint32(i%1000), uint64(i+4000), 0, 0)
 		storage.AppendEntry(entry)
 	}
 
@@ -256,7 +256,7 @@ func BenchmarkAppendEntry_Bucketed(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		entry := NewHashIndexEntry(fmt.Sprintf("key_%d", i), fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i))
+		entry := NewHashIndexEntry(fmt.Sprintf("key_%d", i), fmt.Sprintf("doc_%d", i), uint32(i%1000), uint64(i), 0, 0)
 		storage.AppendEntry(entry)
 	}
 
@@ -294,7 +294,7 @@ func BenchmarkScanBucket(b *testing.B) {
 		bucket, _ := ComputeBucketNum(hash, storage.numBuckets)
 
 		if bucket == targetBucket {
-			entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%100), uint64(i))
+			entry := NewHashIndexEntry(key, fmt.Sprintf("doc_%d", i), uint32(i%100), uint64(i), 0, 0)
 			storage.AppendEntry(entry)
 			entriesAdded++
 		}

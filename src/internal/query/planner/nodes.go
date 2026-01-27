@@ -76,16 +76,15 @@ func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string
 
 	node.Logger.Debugf("Hash index returned %d document IDs for key %v", len(documentIDs), node.SearchKey)
 
-	// Retrieve the actual documents from the bundle
+	// Retrieve the actual documents using BundleService (write-through page cache)
 	results := make(map[string]*models.Document)
 
-	if node.Bundle.Documents == nil {
-		node.Logger.Warnf("Bundle %s has no documents loaded", node.Bundle.Name)
+	// WRITE-THROUGH CACHE: All document retrieval goes through page cache
+	if node.BundleServiceInt == nil {
+		node.Logger.Warnf("BundleServiceInt is nil, cannot retrieve documents for bundle %s", node.Bundle.Name)
 		return results, nil
 	}
 
-	node.Bundle.DocumentsMutex.RLock()
-	defer node.Bundle.DocumentsMutex.RUnlock()
 	docCount := 0
 	for _, docID := range documentIDs {
 		// Check context every 1000 documents
@@ -99,15 +98,14 @@ func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string
 				// Continue processing
 			}
 		}
-		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// Copy document to avoid loop variable aliasing
-			docCopy := new(models.Document)
-			*docCopy = doc
-			results[docID] = docCopy
+		// Retrieve document from page cache via BundleService
+		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
+		if err != nil {
+			// Document ID is in index but not found - this could indicate data inconsistency
+			node.Logger.Warnf("Document ID %s found in hash index but not in bundle: %v", docID, err)
+		} else if doc != nil {
+			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
-		} else {
-			// Document ID is in index but not in bundle - this could indicate data inconsistency
-			node.Logger.Warnf("Document ID %s found in hash index but not in bundle documents", docID)
 		}
 		docCount++
 	}
@@ -191,14 +189,15 @@ func (node *IndexScanNode) executeBTreeIndexScan(ctx context.Context) (map[strin
 
 	node.Logger.Debugf("B-tree index returned %d document IDs for key %v", len(documentIDs), node.SearchKey)
 
-	// Retrieve the actual documents from the bundle
+	// Retrieve the actual documents using BundleService (write-through page cache)
 	results := make(map[string]*models.Document)
-	if node.Bundle.Documents == nil {
-		node.Logger.Warnf("Bundle %s has no documents loaded", node.Bundle.Name)
+
+	// WRITE-THROUGH CACHE: All document retrieval goes through page cache
+	if node.BundleServiceInt == nil {
+		node.Logger.Warnf("BundleServiceInt is nil, cannot retrieve documents for bundle %s", node.Bundle.Name)
 		return results, nil
 	}
-	node.Bundle.DocumentsMutex.RLock()
-	defer node.Bundle.DocumentsMutex.RUnlock()
+
 	docCount := 0
 	for _, docID := range documentIDs {
 		// Check context every 1000 documents
@@ -212,15 +211,14 @@ func (node *IndexScanNode) executeBTreeIndexScan(ctx context.Context) (map[strin
 				// Continue processing
 			}
 		}
-		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// Copy document to avoid loop variable aliasing
-			docCopy := new(models.Document)
-			*docCopy = doc
-			results[docID] = docCopy
+		// Retrieve document from page cache via BundleService
+		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
+		if err != nil {
+			// Document ID is in index but not found - this could indicate data inconsistency
+			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle: %v", docID, err)
+		} else if doc != nil {
+			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
-		} else {
-			// Document ID is in index but not in bundle - this could indicate data inconsistency
-			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle documents", docID)
 		}
 		docCount++
 	}
@@ -297,14 +295,15 @@ func (node *IndexScanNode) executeBTreeRangeScan(ctx context.Context) (map[strin
 
 	node.Logger.Debugf("B-tree range scan returned %d document IDs", len(documentIDs))
 
-	// Retrieve the actual documents from the bundle
+	// Retrieve the actual documents using BundleService (write-through page cache)
 	results := make(map[string]*models.Document)
-	if node.Bundle.Documents == nil {
-		node.Logger.Warnf("Bundle %s has no documents loaded", node.Bundle.Name)
+
+	// WRITE-THROUGH CACHE: All document retrieval goes through page cache
+	if node.BundleServiceInt == nil {
+		node.Logger.Warnf("BundleServiceInt is nil, cannot retrieve documents for bundle %s", node.Bundle.Name)
 		return results, nil
 	}
-	node.Bundle.DocumentsMutex.RLock()
-	defer node.Bundle.DocumentsMutex.RUnlock()
+
 	docCount := 0
 	for _, docID := range documentIDs {
 		// Check context every 1000 documents
@@ -318,15 +317,14 @@ func (node *IndexScanNode) executeBTreeRangeScan(ctx context.Context) (map[strin
 				// Continue processing
 			}
 		}
-		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			// Copy document to avoid loop variable aliasing
-			docCopy := new(models.Document)
-			*docCopy = doc
-			results[docID] = docCopy
+		// Retrieve document from page cache via BundleService
+		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
+		if err != nil {
+			// Document ID is in index but not found - this could indicate data inconsistency
+			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle: %v", docID, err)
+		} else if doc != nil {
+			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
-		} else {
-			// Document ID is in index but not in bundle - this could indicate data inconsistency
-			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle documents", docID)
 		}
 		docCount++
 	}
@@ -422,7 +420,7 @@ var (
 )
 
 // executeBTreeOrderedScanFull runs a full B-tree range scan and returns documents in index key order.
-// Requires node.Bundle.Documents to be non-nil (in-memory). Returns error if Documents is nil.
+// Uses BundleServiceInt.GetDocument() to retrieve documents through the write-through page cache.
 func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Context) ([]*models.Document, error) {
 	if node.Bundle.Indexes == nil {
 		return nil, fmt.Errorf("no indexes found in bundle %s", node.Bundle.Name)
@@ -462,12 +460,10 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 		return nil, err
 	}
 
-	if node.Bundle.Documents == nil {
-		return nil, fmt.Errorf("BTreeOrderedScanNode: bundle %s has no in-memory documents (ordered scan requires Documents)", node.Bundle.Name)
+	// WRITE-THROUGH CACHE: All document retrieval goes through page cache
+	if node.BundleServiceInt == nil {
+		return nil, fmt.Errorf("BTreeOrderedScanNode: BundleServiceInt is nil for bundle %s", node.Bundle.Name)
 	}
-
-	node.Bundle.DocumentsMutex.RLock()
-	defer node.Bundle.DocumentsMutex.RUnlock()
 
 	out := make([]*models.Document, 0, len(docIDs))
 	for i, docID := range docIDs {
@@ -478,10 +474,10 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 			default:
 			}
 		}
-		if doc, exists := (*node.Bundle.Documents)[docID]; exists {
-			cp := new(models.Document)
-			*cp = doc
-			out = append(out, cp)
+		// Retrieve document from page cache via BundleService
+		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
+		if err == nil && doc != nil {
+			out = append(out, doc)
 		}
 	}
 	return out, nil
@@ -526,72 +522,7 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		node.Logger.Debugf("MVCC: Using snapshot filtering: seq=%d, txID=%d", snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID)
 	}
 
-	// CRITICAL: Check if documents are complete before using fast path
-	// If DocumentsComplete is false, Documents is a memtable (recent writes only), not a complete cache
-	// MUST use scanner to merge memtable with disk data
-	if node.Bundle.Documents != nil && node.Bundle.DocumentsComplete {
-		node.Logger.Debugf("Using complete in-memory documents for bundle %s", node.Bundle.Name)
-		node.Bundle.DocumentsMutex.RLock()
-		defer node.Bundle.DocumentsMutex.RUnlock()
-		docCount := 0
-		for docID, doc := range *node.Bundle.Documents {
-			// PHASE 4: MVCC - Apply snapshot visibility filtering for in-memory documents
-			if snapshotInfo != nil {
-				if !doc.IsVisibleToSnapshot(snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID, snapshotInfo.ActiveTxIDs) {
-					continue // Skip documents not visible to this snapshot
-				}
-			}
-			// OPTIMIZATION: Early termination if MaxDocuments is set (simple LIMIT-only query)
-			if node.MaxDocuments > 0 && docCount >= node.MaxDocuments {
-				node.Logger.Debugf("Early termination: Reached MaxDocuments limit of %d", node.MaxDocuments)
-				break
-			}
-
-			// Check context every 1000 documents
-			// TODO: I can make this check frequency adaptive based on document processing rate
-			if docCount%1000 == 0 {
-				select {
-				case <-ctx.Done():
-					// Return partial results on timeout
-					return results, ctx.Err()
-				default:
-					// Continue processing
-				}
-			}
-
-			// Memory tracking: Sample every 100th document
-			if memoryTracker != nil && docCount%100 == 0 {
-				docSize := models.EstimateDocumentSize(&doc)
-				if err := memoryTracker.Sample(docSize, docCount); err != nil {
-					return nil, err
-				}
-
-				// Check if projected memory exceeds limit
-				totalDocs := len(*node.Bundle.Documents)
-				if memoryTracker.WillExceedLimit(totalDocs) {
-					errorMsg := memoryTracker.FormatErrorMessage(totalDocs)
-					node.Logger.Warnf("Memory limit exceeded during full scan: %s", errorMsg)
-					// TODO: I could implement graceful degradation by returning partial results with a warning flag
-					return nil, ErrMemoryLimitExceeded
-				}
-			}
-
-			// Copy document to avoid loop variable aliasing (all pointers would otherwise point to the same final iteration's doc)
-			docCopy := new(models.Document)
-			*docCopy = doc
-			results[docID] = docCopy
-			docCount++
-		}
-		return results, nil
-	}
-
-	// If Documents is nil OR DocumentsComplete is false (memtable mode), use scanner
-	// Scanner will merge memtable with disk data for complete results
-	if node.Bundle.Documents != nil && !node.Bundle.DocumentsComplete {
-		node.Logger.Debugf("Bundle %s has memtable with %d documents - using scanner to merge with disk",
-			node.Bundle.Name, len(*node.Bundle.Documents))
-	}
-
+	// WRITE-THROUGH CACHE: All document access goes through page cache via document scanner
 	// Use document scanner for optimized scanning with batching and caching
 	if node.DocumentScanner == nil {
 		return nil, fmt.Errorf("document scanner is required for paginated document scanning")

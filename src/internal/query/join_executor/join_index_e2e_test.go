@@ -51,7 +51,8 @@ func createTestLogger(t *testing.T) *zap.SugaredLogger {
 }
 
 // createTestBundle creates a test bundle with documents and an index
-func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldName string, createIndex bool) (*models.Bundle, *hashindexV3.HashIndexV3) {
+// Returns the bundle, the index (if created), and the documents map for use by mock adapters
+func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldName string, createIndex bool) (*models.Bundle, *hashindexV3.HashIndexV3, map[string]models.Document) {
 	tempDir := t.TempDir()
 	logger := createTestLogger(t)
 
@@ -60,7 +61,6 @@ func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldN
 	bundle := &models.Bundle{
 		Name:           bundleName,
 		TotalDocuments: int64(docCount),
-		Documents:      &docs,
 		Indexes:        make(map[string]models.IndexReference),
 	}
 
@@ -105,16 +105,8 @@ func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldN
 		index, err = hashindexV3.NewHashIndexV3(indexConfig)
 		require.NoError(t, err, "Should create index")
 
-		// Populate index
-		// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-		bundle.DocumentsMutex.RLock()
-		documentsSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-		for docID, doc := range *bundle.Documents {
-			documentsSnapshot[docID] = doc
-		}
-		bundle.DocumentsMutex.RUnlock()
-		// Now iterate over the snapshot safely
-		for docID, doc := range documentsSnapshot {
+		// Populate index from the local docs map
+		for docID, doc := range docs {
 			field := doc.Fields[indexFieldName]
 			keyValue := field.Value.StringVal
 			// Updated Put signature: (keyValue, documentID, pageID, commitSequence, versionSequence)
@@ -133,30 +125,26 @@ func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldN
 		}
 	}
 
-	return bundle, index
+	return bundle, index, docs
 }
 
 // mockBundleAdapter wraps a bundle for the join executor
+// Documents are stored internally in the mock adapter since Bundle no longer has a Documents field
 type mockBundleAdapter struct {
-	bundle *models.Bundle
+	bundle    *models.Bundle
+	documents map[string]models.Document // Internal document storage for testing
 }
 
 func (m *mockBundleAdapter) GetDocumentIDs() []string {
-	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-	m.bundle.DocumentsMutex.RLock()
-	ids := make([]string, 0, len(*m.bundle.Documents))
-	for id := range *m.bundle.Documents {
+	ids := make([]string, 0, len(m.documents))
+	for id := range m.documents {
 		ids = append(ids, id)
 	}
-	m.bundle.DocumentsMutex.RUnlock()
 	return ids
 }
 
 func (m *mockBundleAdapter) GetDocument(docID string) *models.Document {
-	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map access
-	m.bundle.DocumentsMutex.RLock()
-	defer m.bundle.DocumentsMutex.RUnlock()
-	if doc, ok := (*m.bundle.Documents)[docID]; ok {
+	if doc, ok := m.documents[docID]; ok {
 		docCopy := doc
 		return &docCopy
 	}
@@ -164,11 +152,9 @@ func (m *mockBundleAdapter) GetDocument(docID string) *models.Document {
 }
 
 func (m *mockBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.Document {
-	m.bundle.DocumentsMutex.RLock()
-	defer m.bundle.DocumentsMutex.RUnlock()
 	result := make(map[string]*models.Document, len(docIDs))
 	for _, docID := range docIDs {
-		if doc, ok := (*m.bundle.Documents)[docID]; ok {
+		if doc, ok := m.documents[docID]; ok {
 			docCopy := doc
 			result[docID] = &docCopy
 		}
@@ -177,16 +163,8 @@ func (m *mockBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*model
 }
 
 func (m *mockBundleAdapter) GetAllDocuments() map[string]*models.Document {
-	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-	m.bundle.DocumentsMutex.RLock()
-	documentsSnapshot := make(map[string]models.Document, len(*m.bundle.Documents))
-	for id, doc := range *m.bundle.Documents {
-		documentsSnapshot[id] = doc
-	}
-	m.bundle.DocumentsMutex.RUnlock()
-	// Convert map[string]Document to map[string]*Document
-	result := make(map[string]*models.Document, len(documentsSnapshot))
-	for id, doc := range documentsSnapshot {
+	result := make(map[string]*models.Document, len(m.documents))
+	for id, doc := range m.documents {
 		docCopy := doc
 		result[id] = &docCopy
 	}
@@ -266,10 +244,8 @@ func (m *mockBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error
 	if pageID != 0 {
 		return nil, fmt.Errorf("page %d not found in mock", pageID)
 	}
-	m.bundle.DocumentsMutex.RLock()
-	defer m.bundle.DocumentsMutex.RUnlock()
-	docs := make(map[string]models.Document, len(*m.bundle.Documents))
-	for id, doc := range *m.bundle.Documents {
+	docs := make(map[string]models.Document, len(m.documents))
+	for id, doc := range m.documents {
 		docs[id] = doc
 	}
 	return &models.DocumentPage{
@@ -283,11 +259,9 @@ func (m *mockBundleAdapter) GetTotalPages() uint32 {
 }
 
 func (m *mockBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
-	m.bundle.DocumentsMutex.RLock()
-	defer m.bundle.DocumentsMutex.RUnlock()
-	result := make(map[string]*documentscanner.ProjectedDocument, len(*m.bundle.Documents))
+	result := make(map[string]*documentscanner.ProjectedDocument, len(m.documents))
 	count := 0
-	for docID, doc := range *m.bundle.Documents {
+	for docID, doc := range m.documents {
 		if effectiveLimit > 0 && count >= effectiveLimit {
 			break
 		}
@@ -312,15 +286,15 @@ func (m *mockBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, pro
 
 func TestJoinIndex_BasicIndexUsage(t *testing.T) {
 	// Arrange: Create small build bundle (100 docs) and larger probe bundle (1000 docs) with index
-	buildBundle, _ := createTestBundle(t, "build", 100, "join_key", false)
-	probeBundle, probeIndex := createTestBundle(t, "probe", 1000, "join_key", true)
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 100, "join_key", false)
+	probeBundle, probeIndex, probeDocs := createTestBundle(t, "probe", 1000, "join_key", true)
 	defer probeIndex.Close()
 
 	logger := createTestLogger(t)
 	executor := NewDefaultJoinExecutor(logger, 10*1024*1024, false)
 
-	buildAdapter := &mockBundleAdapter{bundle: buildBundle}
-	probeAdapter := &mockBundleAdapter{bundle: probeBundle}
+	buildAdapter := &mockBundleAdapter{bundle: buildBundle, documents: buildDocs}
+	probeAdapter := &mockBundleAdapter{bundle: probeBundle, documents: probeDocs}
 
 	// Act: Execute join
 	request := &JoinRequest{
@@ -358,20 +332,20 @@ func TestJoinIndex_BasicIndexUsage(t *testing.T) {
 
 func TestJoinIndex_PerformanceComparison(t *testing.T) {
 	// Arrange: Create bundles with and without index
-	buildBundle, _ := createTestBundle(t, "build", 200, "join_key", false)
-	probeBundleWithIndex, probeIndex := createTestBundle(t, "probe_indexed", 2000, "join_key", true)
-	probeBundleNoIndex, _ := createTestBundle(t, "probe_no_index", 2000, "join_key", false)
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 200, "join_key", false)
+	probeBundleWithIndex, probeIndex, probeDocsWithIndex := createTestBundle(t, "probe_indexed", 2000, "join_key", true)
+	probeBundleNoIndex, _, probeDocsNoIndex := createTestBundle(t, "probe_no_index", 2000, "join_key", false)
 	defer probeIndex.Close()
 
 	logger := createTestLogger(t)
 	executor := NewDefaultJoinExecutor(logger, 10*1024*1024, false)
-	buildAdapter := &mockBundleAdapter{bundle: buildBundle}
+	buildAdapter := &mockBundleAdapter{bundle: buildBundle, documents: buildDocs}
 
 	// Act 1: Join WITH index
 	startWithIndex := time.Now()
 	requestWithIndex := &JoinRequest{
 		LeftBundle:  buildAdapter,
-		RightBundle: &mockBundleAdapter{bundle: probeBundleWithIndex},
+		RightBundle: &mockBundleAdapter{bundle: probeBundleWithIndex, documents: probeDocsWithIndex},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -387,7 +361,7 @@ func TestJoinIndex_PerformanceComparison(t *testing.T) {
 	startNoIndex := time.Now()
 	requestNoIndex := &JoinRequest{
 		LeftBundle:  buildAdapter,
-		RightBundle: &mockBundleAdapter{bundle: probeBundleNoIndex},
+		RightBundle: &mockBundleAdapter{bundle: probeBundleNoIndex, documents: probeDocsNoIndex},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -434,8 +408,8 @@ func TestJoinIndex_PerformanceComparison(t *testing.T) {
 
 func TestJoinIndex_ProbeStrategySelection(t *testing.T) {
 	// Arrange: Small build, large probe with index
-	buildBundle, _ := createTestBundle(t, "build", 50, "join_key", false)
-	probeBundle, probeIndex := createTestBundle(t, "probe", 1000, "join_key", true)
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 50, "join_key", false)
+	probeBundle, probeIndex, probeDocs := createTestBundle(t, "probe", 1000, "join_key", true)
 	defer probeIndex.Close()
 
 	logger := createTestLogger(t)
@@ -443,8 +417,8 @@ func TestJoinIndex_ProbeStrategySelection(t *testing.T) {
 
 	// Act
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -476,8 +450,8 @@ func TestJoinIndex_ProbeStrategySelection(t *testing.T) {
 
 func TestJoinIndex_BatchGetBehavior(t *testing.T) {
 	// Arrange: Create bundle with many unique keys to test BatchGet
-	buildBundle, _ := createTestBundle(t, "build", 300, "join_key", false)          // 300 docs, 100 unique keys
-	probeBundle, probeIndex := createTestBundle(t, "probe", 3000, "join_key", true) // 3000 docs
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 300, "join_key", false)          // 300 docs, 100 unique keys
+	probeBundle, probeIndex, probeDocs := createTestBundle(t, "probe", 3000, "join_key", true) // 3000 docs
 	defer probeIndex.Close()
 
 	logger := createTestLogger(t)
@@ -485,8 +459,8 @@ func TestJoinIndex_BatchGetBehavior(t *testing.T) {
 
 	// Act
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -516,17 +490,17 @@ func TestJoinIndex_BatchGetBehavior(t *testing.T) {
 
 func TestJoinIndex_DeletedDocumentsHandling(t *testing.T) {
 	// Arrange
-	buildBundle, _ := createTestBundle(t, "build", 100, "join_key", false)
-	probeBundle, probeIndex := createTestBundle(t, "probe", 1000, "join_key", true)
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 100, "join_key", false)
+	probeBundle, probeIndex, probeDocs := createTestBundle(t, "probe", 1000, "join_key", true)
 	defer probeIndex.Close()
 
-	// Delete some documents from probe bundle but leave them in index
+	// Delete some documents from probe docs but leave them in index
 	deletedCount := 0
-	for docID := range *probeBundle.Documents {
+	for docID := range probeDocs {
 		if deletedCount >= 100 {
 			break
 		}
-		delete(*probeBundle.Documents, docID)
+		delete(probeDocs, docID)
 		probeBundle.TotalDocuments--
 		deletedCount++
 	}
@@ -536,8 +510,8 @@ func TestJoinIndex_DeletedDocumentsHandling(t *testing.T) {
 
 	// Act
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -564,8 +538,8 @@ func TestJoinIndex_DeletedDocumentsHandling(t *testing.T) {
 
 func TestJoinIndex_CostEstimationAccuracy(t *testing.T) {
 	// Arrange
-	buildBundle, _ := createTestBundle(t, "build", 150, "join_key", false)
-	probeBundle, probeIndex := createTestBundle(t, "probe", 5000, "join_key", true)
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 150, "join_key", false)
+	probeBundle, probeIndex, probeDocs := createTestBundle(t, "probe", 5000, "join_key", true)
 	defer probeIndex.Close()
 
 	logger := createTestLogger(t)
@@ -573,8 +547,8 @@ func TestJoinIndex_CostEstimationAccuracy(t *testing.T) {
 
 	// Act
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -606,16 +580,16 @@ func TestJoinIndex_CostEstimationAccuracy(t *testing.T) {
 
 func TestJoinIndex_NoIndexFallback(t *testing.T) {
 	// Arrange: Create bundles without index
-	buildBundle, _ := createTestBundle(t, "build", 100, "join_key", false)
-	probeBundle, _ := createTestBundle(t, "probe", 1000, "join_key", false) // NO INDEX
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 100, "join_key", false)
+	probeBundle, _, probeDocs := createTestBundle(t, "probe", 1000, "join_key", false) // NO INDEX
 
 	logger := createTestLogger(t)
 	executor := NewDefaultJoinExecutor(logger, 10*1024*1024, false)
 
 	// Act
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -645,8 +619,8 @@ func TestJoinIndex_NoIndexFallback(t *testing.T) {
 
 func TestJoinIndex_BuildSideIndexNotUsed(t *testing.T) {
 	// Arrange: Index on build side (smaller), not probe side
-	buildBundle, buildIndex := createTestBundle(t, "build", 100, "join_key", true) // Index on build
-	probeBundle, _ := createTestBundle(t, "probe", 1000, "join_key", false)        // No index on probe
+	buildBundle, buildIndex, buildDocs := createTestBundle(t, "build", 100, "join_key", true) // Index on build
+	probeBundle, _, probeDocs := createTestBundle(t, "probe", 1000, "join_key", false)        // No index on probe
 	defer buildIndex.Close()
 
 	logger := createTestLogger(t)
@@ -654,8 +628,8 @@ func TestJoinIndex_BuildSideIndexNotUsed(t *testing.T) {
 
 	// Act
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -680,8 +654,8 @@ func TestJoinIndex_BuildSideIndexNotUsed(t *testing.T) {
 
 func TestJoinIndex_EmptyBuildBundle(t *testing.T) {
 	// Arrange
-	buildBundle, _ := createTestBundle(t, "build", 0, "join_key", false) // Empty build
-	probeBundle, probeIndex := createTestBundle(t, "probe", 1000, "join_key", true)
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 0, "join_key", false) // Empty build
+	probeBundle, probeIndex, probeDocs := createTestBundle(t, "probe", 1000, "join_key", true)
 	defer probeIndex.Close()
 
 	logger := createTestLogger(t)
@@ -689,8 +663,8 @@ func TestJoinIndex_EmptyBuildBundle(t *testing.T) {
 
 	// Act
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},
@@ -719,8 +693,8 @@ func TestJoinIndex_LargeScale(t *testing.T) {
 	}
 
 	// Arrange: Large dataset
-	buildBundle, _ := createTestBundle(t, "build", 1000, "join_key", false)
-	probeBundle, probeIndex := createTestBundle(t, "probe", 10000, "join_key", true)
+	buildBundle, _, buildDocs := createTestBundle(t, "build", 1000, "join_key", false)
+	probeBundle, probeIndex, probeDocs := createTestBundle(t, "probe", 10000, "join_key", true)
 	defer probeIndex.Close()
 
 	logger := createTestLogger(t)
@@ -729,8 +703,8 @@ func TestJoinIndex_LargeScale(t *testing.T) {
 	// Act
 	start := time.Now()
 	request := &JoinRequest{
-		LeftBundle:  &mockBundleAdapter{bundle: buildBundle},
-		RightBundle: &mockBundleAdapter{bundle: probeBundle},
+		LeftBundle:  &mockBundleAdapter{bundle: buildBundle, documents: buildDocs},
+		RightBundle: &mockBundleAdapter{bundle: probeBundle, documents: probeDocs},
 		JoinType:    InnerJoin,
 		Conditions: []JoinCondition{
 			{LeftKey: "join_key", RightKey: "join_key", Operator: "="},

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -152,25 +153,9 @@ func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser
 		side, bundle.Name, originalCount, len(filteredDocs),
 		float64(originalCount-len(filteredDocs))/float64(originalCount)*100)
 
-	// Create a filtered bundle with only the matching documents
-	filteredBundle := &models.Bundle{
-		BundleID:    bundle.BundleID,
-		Name:        bundle.Name,
-		Description: bundle.Description,
-		CreatedAt:   bundle.CreatedAt,
-		UpdatedAt:   bundle.UpdatedAt,
-		Indexes:     bundle.Indexes, // Keep indexes for potential JOIN optimization
-	}
-
-	// Convert filtered documents to map format
-	filteredDocMap := make(map[string]models.Document)
-	for _, doc := range filteredDocs {
-		filteredDocMap[doc.DocumentID] = *doc
-	}
-	filteredBundle.Documents = &filteredDocMap
-
-	// Return adapter for the filtered bundle
-	return documentscanner.NewBundleAdapter(filteredBundle, serviceManager.BundleService, logger), nil
+	// WRITE-THROUGH CACHE: Use PreFilteredBundleAdapter that holds filtered documents in memory
+	// instead of creating a synthetic bundle with Documents field (which no longer exists)
+	return NewPreFilteredBundleAdapter(bundle.Name, filteredDocs, bundle.Indexes, logger), nil
 }
 
 // convertToJoinRequest converts a parsed JOIN query to the format expected by the JOIN executor
@@ -280,76 +265,143 @@ func mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, logger *zap.Sug
 	return mergedDoc
 }
 
-// BundleAdapter adapts a Bundle to implement the BundleInterface required by JOIN executor
-// This adapter bridges the existing Bundle model with the JOIN executor's interface requirements
-type BundleAdapter struct {
-	bundle *models.Bundle
-	logger *zap.SugaredLogger
+// PreFilteredBundleAdapter implements BundleInterface for pre-filtered document sets
+// WRITE-THROUGH CACHE: This adapter holds documents already loaded and filtered in memory,
+// used for JOIN operations where documents have been pre-filtered before the JOIN.
+type PreFilteredBundleAdapter struct {
+	bundleName string
+	documents  map[string]*models.Document // Pre-loaded filtered documents
+	docIDs     []string                    // Cached list of document IDs
+	indexes    map[string]models.IndexReference
+	logger     *zap.SugaredLogger
 }
 
-// GetDocumentIDs returns all document IDs in the bundle
-func (ba *BundleAdapter) GetDocumentIDs() []string {
-	if ba.bundle == nil || ba.bundle.Documents == nil {
-		return []string{}
+// NewPreFilteredBundleAdapter creates a new adapter for pre-filtered documents
+func NewPreFilteredBundleAdapter(bundleName string, docs []*models.Document, indexes map[string]models.IndexReference, logger *zap.SugaredLogger) *PreFilteredBundleAdapter {
+	docMap := make(map[string]*models.Document, len(docs))
+	docIDs := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		docMap[doc.DocumentID] = doc
+		docIDs = append(docIDs, doc.DocumentID)
 	}
-
-	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-	ba.bundle.DocumentsMutex.RLock()
-	ids := make([]string, 0, len(*ba.bundle.Documents))
-	for docID := range *ba.bundle.Documents {
-		ids = append(ids, docID)
+	return &PreFilteredBundleAdapter{
+		bundleName: bundleName,
+		documents:  docMap,
+		docIDs:     docIDs,
+		indexes:    indexes,
+		logger:     logger,
 	}
-	ba.bundle.DocumentsMutex.RUnlock()
+}
 
-	return ids
+// GetDocumentIDs returns all document IDs in the pre-filtered set
+func (pfa *PreFilteredBundleAdapter) GetDocumentIDs() []string {
+	return pfa.docIDs
 }
 
 // GetDocument retrieves a document by its ID
-func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
-	if ba.bundle == nil || ba.bundle.Documents == nil {
-		return nil
-	}
-
-	documents := *ba.bundle.Documents
-	doc, exists := documents[docID]
-	if !exists {
-		return nil
-	}
-
-	return &doc
+func (pfa *PreFilteredBundleAdapter) GetDocument(docID string) *models.Document {
+	return pfa.documents[docID]
 }
 
-// GetAllDocuments returns all documents in the bundle as a map
-func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
-	if ba.bundle == nil || ba.bundle.Documents == nil {
-		return make(map[string]*models.Document)
+// GetDocumentsByIDs retrieves multiple documents by their IDs
+func (pfa *PreFilteredBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.Document {
+	result := make(map[string]*models.Document, len(docIDs))
+	for _, id := range docIDs {
+		if doc, exists := pfa.documents[id]; exists {
+			result[id] = doc
+		}
 	}
-
-	// Convert from map[string]models.Document to map[string]*models.Document
-	result := make(map[string]*models.Document)
-	documents := *ba.bundle.Documents
-	for docID, doc := range documents {
-		docCopy := doc // Create copy to avoid address issues
-		result[docID] = &docCopy
-	}
-
 	return result
 }
 
-// GetName returns the bundle name for logging and metrics
-func (ba *BundleAdapter) GetName() string {
-	if ba.bundle == nil {
-		return "unknown_bundle"
-	}
-	return ba.bundle.Name
+// GetAllDocuments returns all documents in the pre-filtered set
+func (pfa *PreFilteredBundleAdapter) GetAllDocuments() map[string]*models.Document {
+	return pfa.documents
 }
 
-// GetTotalDocuments returns the total number of documents in the bundle
-func (ba *BundleAdapter) GetTotalDocuments() int {
-	if ba.bundle == nil || ba.bundle.Documents == nil {
-		return 0
+// GetAllDocumentsWithLimit returns documents up to the specified limit
+func (pfa *PreFilteredBundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.Document {
+	if limit <= 0 || limit >= len(pfa.documents) {
+		return pfa.documents
 	}
-	return len(*ba.bundle.Documents)
+	result := make(map[string]*models.Document, limit)
+	count := 0
+	for id, doc := range pfa.documents {
+		if count >= limit {
+			break
+		}
+		result[id] = doc
+		count++
+	}
+	return result
+}
+
+// ScanDocumentChunks streams documents in chunks
+func (pfa *PreFilteredBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	chunk := make([]*models.Document, 0, chunkSize)
+	for _, doc := range pfa.documents {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		chunk = append(chunk, doc)
+		if len(chunk) >= chunkSize {
+			if fn(chunk) {
+				return nil
+			}
+			chunk = chunk[:0]
+		}
+	}
+	if len(chunk) > 0 {
+		fn(chunk)
+	}
+	return nil
+}
+
+// GetName returns the bundle name for logging and metrics
+func (pfa *PreFilteredBundleAdapter) GetName() string {
+	return pfa.bundleName
+}
+
+// GetTotalDocuments returns the total number of documents in the pre-filtered set
+func (pfa *PreFilteredBundleAdapter) GetTotalDocuments() int {
+	return len(pfa.documents)
+}
+
+// GetTotalPages returns 0 since pre-filtered data is in memory, not paged
+func (pfa *PreFilteredBundleAdapter) GetTotalPages() uint32 {
+	return 0
+}
+
+// GetHashIndexForField returns the hash index for a field if available
+func (pfa *PreFilteredBundleAdapter) GetHashIndexForField(fieldName string) interface{} {
+	if pfa.indexes == nil {
+		return nil
+	}
+	if idx, exists := pfa.indexes[fieldName]; exists && idx.IndexType == "hash" {
+		return idx
+	}
+	return nil
+}
+
+// HasIndexOnField checks if an index exists for the specified field
+func (pfa *PreFilteredBundleAdapter) HasIndexOnField(fieldName string) bool {
+	if pfa.indexes == nil {
+		return false
+	}
+	_, exists := pfa.indexes[fieldName]
+	return exists
+}
+
+// LoadPage returns an error since pre-filtered data is in memory, not paged
+func (pfa *PreFilteredBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error) {
+	return nil, fmt.Errorf("PreFilteredBundleAdapter: page loading not supported, all documents are in memory")
+}
+
+// CopyProjectedToSessionCache is not supported for pre-filtered data
+func (pfa *PreFilteredBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	return nil, 0, 0, 0, fmt.Errorf("PreFilteredBundleAdapter: CopyProjectedToSessionCache not supported")
 }
 
 // HIERARCHICAL TRANSFORMATION FUNCTIONS

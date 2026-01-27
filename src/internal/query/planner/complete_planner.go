@@ -89,8 +89,8 @@ func (qp *QueryPlanner) findBestAccessPathRecursive(bundle *models.Bundle, where
 	// Fallback to full scan if no conditions
 	return &FullScanNode{
 		Bundle:        bundle,
-		Cost:          float64(len(*bundle.Documents)),
-		EstimatedRows: len(*bundle.Documents),
+		Cost:          qp.getEstimatedCost(bundle),
+		EstimatedRows: qp.getEstimatedRowsAsInt(bundle),
 		Logger:        qp.Logger,
 	}, []string{}
 }
@@ -159,7 +159,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 				if cost < bestCost {
 					estimatedRows := listSize // Assume each value matches ~1 row
 					if condition.Operator == "NOT IN" {
-						estimatedRows = len(*bundle.Documents) - listSize
+						estimatedRows = qp.getEstimatedRowsAsInt(bundle) - listSize
 					}
 
 					bestNode = &IndexScanNode{
@@ -210,7 +210,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 						cost := qp.estimateBTreeIndexCost(bundle)
 						if cost < bestCost {
 							// Estimate rows based on prefix selectivity (rough estimate)
-							estimatedRows := len(*bundle.Documents) / 10 // Assume prefix matches ~10% of records
+							estimatedRows := qp.getEstimatedRowsAsInt(bundle) / 10 // Assume prefix matches ~10% of records
 
 							bestNode = &IndexScanNode{
 								Bundle:           bundle,
@@ -244,9 +244,8 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 			// Warn about contains/suffix patterns requiring full table scan
 			if condition.PatternType == "contains" || condition.PatternType == "suffix" {
 				if queryparser.ShouldWarnAboutPattern(condition.Field, condition.PatternType, condition.CaseInsensitive) {
-					bundleSize := len(*bundle.Documents)
-					qp.Logger.Warnf("LIKE query with %s pattern on field '%s' requires full table scan (%d documents). "+
-						"Consider using equality/prefix matching or filtering on another indexed field first.",
+					bundleSize := qp.getEstimatedRowsAsInt(bundle)
+					qp.Logger.Warnf("LIKE query with %s pattern on field '%s' requires full table scan (%d documents). Consider using equality/prefix matching or filtering on another indexed field first.",
 						condition.PatternType, condition.Field, bundleSize)
 					// TODO: When full-text search is implemented, recommend SEARCH() for word-based matching
 					// TODO: Implement trigram index optimization for contains/suffix patterns
@@ -596,11 +595,11 @@ func (qp *QueryPlanner) findMostSelectiveChild(children []ExecutionNode) Executi
 
 // getBundleDocumentCount safely returns the total document count for a bundle
 func (qp *QueryPlanner) getBundleDocumentCount(bundle *models.Bundle) int64 {
-	if bundle.Documents != nil {
-		// If documents are loaded in memory, use actual count
-		return int64(len(*bundle.Documents))
+	// Use SortedIndex for document count when available (most accurate)
+	if bundle.SortedIndex != nil && bundle.SortedIndex.TotalDocuments() > 0 {
+		return int64(bundle.SortedIndex.TotalDocuments())
 	}
-	// Use metadata count when documents aren't loaded
+	// Use metadata count when SortedIndex isn't available
 	return bundle.TotalDocuments
 }
 

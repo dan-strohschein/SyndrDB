@@ -623,7 +623,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// Validate that there are no documents in the bundle
 			// We will eventually need to add a force option to make this work even with documents
 			// but that will also require a more granular permission setup and careful handling
-			if bundle.Documents != nil && len(*bundle.Documents) > 0 && !bundleCmd.HasForceSwitch {
+			// WRITE-THROUGH CACHE: Use TotalDocuments from bundle metadata instead of memtable
+			if bundle.TotalDocuments > 0 && !bundleCmd.HasForceSwitch {
 				return &result, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 					fmt.Sprintf("bundle '%s' is not empty and cannot be deleted", bundleName),
 					errors.LayerCommand).WithContext("bundle", bundleName)
@@ -683,7 +684,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// Validate that there are no documents in the bundle
 			// We will eventually need to add a force option to make this work even with documents
 			// but that will also require a more granular permission setup and careful handling
-			if bundle.Documents != nil && len(*bundle.Documents) > 0 && !bundleCmd.HasForceSwitch {
+			// WRITE-THROUGH CACHE: Use TotalDocuments from bundle metadata instead of memtable
+			if bundle.TotalDocuments > 0 && !bundleCmd.HasForceSwitch {
 				return &result, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 					fmt.Sprintf("bundle '%s' is not empty and cannot be deleted", bundleName),
 					errors.LayerCommand).WithContext("bundle", bundleName)

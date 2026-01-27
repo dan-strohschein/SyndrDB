@@ -52,7 +52,12 @@ type ShardedSortedIndex struct {
 
 // NewShardedSortedIndex creates a new empty ShardedSortedIndex
 func NewShardedSortedIndex() *ShardedSortedIndex {
-	return &ShardedSortedIndex{}
+	index := &ShardedSortedIndex{}
+	// Initialize each shard with an empty slice to prevent nil pointer dereference
+	for i := 0; i < SortedIndexShards; i++ {
+		index.Shards[i].DocIDs = make([]string, 0)
+	}
+	return index
 }
 
 // shardIndex returns the shard index for a DocumentID using xxhash
@@ -254,13 +259,15 @@ type Bundle struct {
 	DocumentStructure DocumentStructure `bson:"DocumentStructure" json:"DocumentStructure"`
 
 	// Document storage is now page-based for scalability
-	// DEPRECATED: Documents field kept for backward compatibility with legacy storage methods
-	// New code should use DocumentPages via BundleService.GetDocumentPage()
-	Documents *map[string]Document `json:"Documents,omitempty"`
-
-	// Mutex to protect concurrent access to Documents map (prevents race conditions during batch updates)
-	// CRITICAL: Must be held when reading or writing to Documents map
-	DocumentsMutex sync.RWMutex `json:"-"`
+	// DEPRECATED: Documents memtable removed in favor of write-through page cache
+	// All document storage now goes through PageCache with immediate cache updates
+	// Removed: Documents *map[string]Document and DocumentsMutex
+	// Use BundleService.GetDocumentPage() for document access
+	//
+	// WRITE-THROUGH CACHE (Phase 1): Writes update PageCache immediately after WriteBuffer commit
+	// This ensures reads always see recent writes without disk round-trips
+	// Documents *map[string]Document `json:"Documents,omitempty"`
+	// DocumentsMutex sync.RWMutex `json:"-"`
 
 	// Track indexes by name -> reference
 	Indexes    map[string]IndexReference

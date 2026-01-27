@@ -193,12 +193,8 @@ func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterfac
 		// logger.Infof("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
 		// logger.Infof("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
 		// logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
-		// logger.Infof("SAFETY CHECK: Bundle.DocumentsComplete = %v", bundle.DocumentsComplete)
-		if bundle.Documents != nil {
-			logger.Debugf("SAFETY CHECK: Bundle.Documents is not nil, has %d documents", len(*bundle.Documents))
-		} else {
-			logger.Debugf("SAFETY CHECK: Bundle.Documents is nil (expected for page-based loading)")
-		}
+		// Documents are now accessed via page cache - no memtable to check
+		logger.Debugf("SAFETY CHECK: Bundle '%s' using page-based loading (page cache)", bundle.Name)
 
 		// CRITICAL SAFETY: If PageCount is suspiciously high, log error and set reasonable limit
 		if bundle.PageCount > 10000 {
@@ -246,11 +242,24 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 		return nil, fmt.Errorf("bundle service not available")
 	}
 
-	// Use GetDocumentPage to leverage the shared documentPages cache
-	// This ensures all callers (scanner, get-by-id, etc.) share the same cached pages
-	page, err := ba.bundleService.GetDocumentPage(ba.bundle.Name, ba.bundle.Database.Name, pageID)
+	// THREAD SAFETY: Use SnapshotPageDocuments to avoid concurrent map iteration
+	// This gets a safe snapshot of documents that won't be modified by concurrent writes
+	docs, err := ba.bundleService.SnapshotPageDocuments(ba.bundle.Name, ba.bundle.Database.Name, pageID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load page %d: %w", pageID, err)
+	}
+
+	// Convert slice to map for compatibility with existing scanner code
+	docsMap := make(map[string]models.Document, len(docs))
+	for _, doc := range docs {
+		docsMap[doc.DocumentID] = doc
+	}
+
+	// Create a synthetic page with snapshotted documents
+	page := &models.DocumentPage{
+		PageID:    pageID,
+		BundleID:  ba.bundle.Name,
+		Documents: docsMap,
 	}
 
 	// Apply projection in memory if projectionFields is set
@@ -423,10 +432,7 @@ func (ba *BundleAdapter) getSafePageCount() uint32 {
 // which reduce the count dynamically. The count-only parser filters tombstones,
 // so we get accurate counts after bulk deletes.
 func (ba *BundleAdapter) getTotalDocumentsCount() int {
-	// Fast path: If documents are complete in memory, count them directly
-	if ba.bundle.Documents != nil && ba.bundle.DocumentsComplete {
-		return len(*ba.bundle.Documents)
-	}
+	// All documents are now accessed via page cache - use count-only parser
 
 	// OPTIMIZATION: Use count-only parser instead of loading all pages
 	// This is much faster because it extracts only DocumentIDs without parsing full documents
@@ -504,42 +510,16 @@ func (ba *BundleAdapter) GetDocumentIDs() []string {
 
 	ba.logger.Debugf("Loaded %d document IDs from disk", len(ids))
 
-	// CASSANDRA-STYLE MEMTABLE MERGE: Add memtable document IDs
-	// Only merge if Documents exists AND is marked as incomplete (memtable mode)
-	// CRITICAL: Must hold DocumentsMutex to prevent concurrent map iteration/write
-	ba.bundle.DocumentsMutex.RLock()
-	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
-		ba.logger.Debugf("MEMTABLE MERGE: Adding documents from memtable (has %d docs)", len(*ba.bundle.Documents))
-		memtableCount := 0
-		for docID := range *ba.bundle.Documents {
-			if !diskIDSet[docID] {
-				ids = append(ids, docID)
-				memtableCount++
-			}
-		}
-		ba.logger.Debugf("MEMTABLE MERGE: Added %d new documents from memtable", memtableCount)
-	}
-	ba.bundle.DocumentsMutex.RUnlock()
+	// All documents are now accessed via write-through page cache
+	// No memtable merge needed - writes update the page cache immediately
 
-	//ba.logger.Debugf("Returning %d total document IDs (disk + memtable)", len(ids))
+	//ba.logger.Debugf("Returning %d total document IDs", len(ids))
 	return ids
 }
 
 // GetDocument returns a single document by ID using streaming approach
 func (ba *BundleAdapter) GetDocument(docID string) *models.Document {
-	// CASSANDRA-STYLE MEMTABLE CHECK FIRST:
-	// Check memtable before going to disk (recent writes have priority)
-	// CRITICAL: Acquire read lock to prevent race condition with concurrent batch updates
-	ba.bundle.DocumentsMutex.RLock()
-	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
-		if doc, exists := (*ba.bundle.Documents)[docID]; exists {
-			ba.bundle.DocumentsMutex.RUnlock()
-			// ba.logger.Debugf("Document '%s' found in memtable", docID) // PERF: Disabled - causes 2.2M allocs/query
-			// PHASE E: For read-only SELECT, use pointer directly (no copy needed)
-			return &doc
-		}
-	}
-	ba.bundle.DocumentsMutex.RUnlock()
+	// All reads go through the write-through page cache
 
 	// Get safe page count using validated metadata
 	pageCount := ba.getSafePageCount()
@@ -574,23 +554,8 @@ func (ba *BundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.D
 		toFind[id] = true
 	}
 
-	// MEMTABLE CHECK FIRST - recent writes have priority
-	ba.bundle.DocumentsMutex.RLock()
-	if ba.bundle.Documents != nil {
-		for _, docID := range docIDs {
-			if doc, exists := (*ba.bundle.Documents)[docID]; exists {
-				docCopy := doc
-				result[docID] = &docCopy
-				delete(toFind, docID)
-			}
-		}
-	}
-	ba.bundle.DocumentsMutex.RUnlock()
-
-	// If all found in memtable, return early
-	if len(toFind) == 0 {
-		return result
-	}
+	// All reads go through the write-through page cache
+	// No memtable to check - documents are loaded from disk via page cache
 
 	// Stream through pages to find remaining documents on disk
 	pageCount := ba.getSafePageCount()
@@ -617,29 +582,11 @@ func (ba *BundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.D
 func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 	ba.logger.Debugf("GetAllDocuments called for bundle '%s'", ba.bundle.Name)
 
-	// EARLY RETURN OPTIMIZATION: Check DocumentsComplete at the start to skip all disk I/O
-	// If Documents is marked complete, use it directly without loading any pages
-	ba.bundle.DocumentsMutex.RLock()
-	if ba.bundle.Documents != nil && ba.bundle.DocumentsComplete {
-		ba.bundle.DocumentsMutex.RUnlock()
-		ba.logger.Debugf("Using complete Documents cache with %d documents (skipping disk I/O)", len(*ba.bundle.Documents))
-		allDocs := make(map[string]*models.Document, len(*ba.bundle.Documents))
-		for docID, doc := range *ba.bundle.Documents {
-			// Copy document to avoid loop variable aliasing
-			docCopy := new(models.Document)
-			*docCopy = doc
-			allDocs[docID] = docCopy
-		}
-		return allDocs
-	}
-	ba.bundle.DocumentsMutex.RUnlock()
+	// All reads go through the write-through page cache
+	// No memtable - load all documents from disk via pages
 
-	ba.logger.Debugf("GetAllDocuments: PageCount=%d, TotalDocuments=%d, DocumentsComplete=%v, Documents!=nil=%v",
-		ba.bundle.PageCount, ba.bundle.TotalDocuments, ba.bundle.DocumentsComplete, ba.bundle.Documents != nil)
-
-	if ba.bundle.Documents != nil {
-		ba.logger.Debugf("GetAllDocuments: Bundle.Documents has %d entries", len(*ba.bundle.Documents))
-	}
+	ba.logger.Debugf("GetAllDocuments: PageCount=%d, TotalDocuments=%d",
+		ba.bundle.PageCount, ba.bundle.TotalDocuments)
 
 	allDocs := make(map[string]*models.Document)
 
@@ -675,33 +622,10 @@ func (ba *BundleAdapter) GetAllDocuments() map[string]*models.Document {
 		ba.logger.Debugf("Loaded %d documents from disk", len(allDocs))
 	}
 
-	// Merge with memtable (recent writes not yet flushed to new pages)
-	// Only merge if Documents exists AND is marked as incomplete (memtable mode)
-	// CRITICAL: Must hold DocumentsMutex to prevent concurrent map iteration/write
-	ba.bundle.DocumentsMutex.RLock()
-	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
-		ba.logger.Debugf("Merging %d documents from memtable with %d from disk",
-			len(*ba.bundle.Documents), len(allDocs))
+	// All documents are now accessed via write-through page cache
+	// No memtable merge needed
 
-		// Add memtable documents that aren't already in disk results
-		// Disk wins for conflicts (should never happen, but defensive)
-		mergedCount := 0
-		for docID, doc := range *ba.bundle.Documents {
-			if _, exists := allDocs[docID]; !exists {
-				// Copy document to avoid loop variable aliasing
-				docCopy := new(models.Document)
-				*docCopy = doc
-				allDocs[docID] = docCopy
-				mergedCount++
-			}
-		}
-		ba.logger.Debugf("Merged %d new documents from memtable", mergedCount)
-	} else {
-		ba.logger.Debugf("No memtable to merge (Documents=nil or DocumentsComplete=true)")
-	}
-	ba.bundle.DocumentsMutex.RUnlock()
-
-	ba.logger.Debugf("Returning %d total documents (disk + memtable)", len(allDocs))
+	ba.logger.Debugf("Returning %d total documents from page cache", len(allDocs))
 	return allDocs
 }
 
@@ -715,27 +639,7 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 
 	ba.logger.Debugf("GetAllDocumentsWithLimit called for bundle '%s' with limit=%d", ba.bundle.Name, limit)
 
-	// EARLY RETURN OPTIMIZATION: Check DocumentsComplete at the start
-	ba.bundle.DocumentsMutex.RLock()
-	if ba.bundle.Documents != nil && ba.bundle.DocumentsComplete {
-		ba.bundle.DocumentsMutex.RUnlock()
-		ba.logger.Debugf("Using complete Documents cache with %d documents (limit=%d)", len(*ba.bundle.Documents), limit)
-		allDocs := make(map[string]*models.Document, limit)
-		count := 0
-		for docID, doc := range *ba.bundle.Documents {
-			if count >= limit {
-				break // Early termination
-			}
-			// Copy document to avoid loop variable aliasing
-			docCopy := new(models.Document)
-			*docCopy = doc
-			allDocs[docID] = docCopy
-			count++
-		}
-		return allDocs
-	}
-	ba.bundle.DocumentsMutex.RUnlock()
-
+	// All reads go through the write-through page cache
 	allDocs := make(map[string]*models.Document, limit)
 
 	// Get safe page count
@@ -773,31 +677,8 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 		ba.logger.Debugf("Loaded %d documents from disk (limit was %d)", len(allDocs), limit)
 	}
 
-	// Merge with memtable (recent writes not yet flushed to new pages)
-	// Only merge if Documents exists AND is marked as incomplete (memtable mode)
-	ba.bundle.DocumentsMutex.RLock()
-	if ba.bundle.Documents != nil && !ba.bundle.DocumentsComplete {
-		ba.logger.Debugf("Merging documents from memtable with limit=%d (disk has %d)", limit, len(allDocs))
-
-		// Add memtable documents that aren't already in disk results, up to limit
-		mergedCount := 0
-		for docID, doc := range *ba.bundle.Documents {
-			if len(allDocs) >= limit {
-				break // Early termination: reached limit
-			}
-			if _, exists := allDocs[docID]; !exists {
-				// Copy document to avoid loop variable aliasing
-				docCopy := new(models.Document)
-				*docCopy = doc
-				allDocs[docID] = docCopy
-				mergedCount++
-			}
-		}
-		ba.logger.Debugf("Merged %d new documents from memtable (total now: %d, limit: %d)", mergedCount, len(allDocs), limit)
-	} else {
-		ba.logger.Debugf("No memtable to merge (Documents=nil or DocumentsComplete=true)")
-	}
-	ba.bundle.DocumentsMutex.RUnlock()
+	// All documents are now accessed via write-through page cache
+	// No memtable merge needed
 
 	ba.logger.Debugf("Returning %d documents (limit was %d)", len(allDocs), limit)
 	return allDocs
@@ -834,12 +715,17 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 			return ctx.Err()
 		default:
 		}
-		page, err := ba.loadDocumentPage(pageID)
+
+		// CONCURRENT MAP FIX: Use SnapshotPageDocuments to safely get documents
+		// This uses sharded locks to prevent concurrent modification during iteration
+		docs, err := ba.bundleService.SnapshotPageDocuments(ba.bundle.Name, ba.bundle.Database.Name, pageID)
 		if err != nil {
-			ba.logger.Errorf("Failed to load page %d: %v", pageID, err)
+			ba.logger.Errorf("Failed to snapshot page %d: %v", pageID, err)
 			continue
 		}
-		for _, doc := range page.Documents {
+
+		// Iterate over snapshot safely
+		for _, doc := range docs {
 			// CRITICAL: Still need to copy document to avoid loop variable aliasing
 			// But we avoid the second copy in flush()
 			docCopy := doc

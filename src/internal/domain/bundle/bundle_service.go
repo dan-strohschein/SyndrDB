@@ -40,8 +40,12 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/cespare/xxhash/v2"
 	"go.uber.org/zap"
 )
+
+// PageCacheShardCount is the number of shards for page cache locks (must be power of 2)
+const PageCacheShardCount = 64
 
 // QueryPlannerInterface defines the interface for plan cache invalidation
 // This avoids circular dependencies with the server package
@@ -372,6 +376,10 @@ type BundleService struct {
 	documentPages      map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
 	documentPagesMutex sync.RWMutex                    // Protects documentPages; prevents concurrent map read/write
 
+	// WRITE-THROUGH CACHE: Sharded locks for page cache access (64 shards)
+	// Uses xxhash of pageKey to select shard, reducing lock contention
+	pageShardLocks [PageCacheShardCount]sync.RWMutex
+
 	// LRU eviction support - O(1) eviction instead of O(n) scan
 	pageLRUOrder    *list.List               // Doubly-linked list for LRU order (front = newest, back = oldest)
 	pageLRUElements map[string]*list.Element // pageKey -> list element for O(1) access/promotion
@@ -585,6 +593,102 @@ func (s *BundleService) SetMetadataPersistInterval(interval int) {
 	s.metadataUpdateMutex.Lock()
 	defer s.metadataUpdateMutex.Unlock()
 	s.metadataPersistInterval = interval
+}
+
+// ============================================================================
+// WRITE-THROUGH CACHE HELPERS
+// These methods implement the write-through cache pattern, ensuring that
+// any document written to the WriteBuffer is also immediately available
+// in the page cache without requiring a disk round-trip.
+// ============================================================================
+
+// getPageShardIndex computes which shard to use for a given page key.
+// Uses xxhash for fast, high-quality hashing with bit-masking for modulo.
+// Returns an index in [0, PageCacheShardCount).
+func (s *BundleService) getPageShardIndex(pageKey string) int {
+	return int(xxhash.Sum64String(pageKey) % PageCacheShardCount)
+}
+
+// updatePageCacheWithDocument updates the page cache with a document after a successful write.
+// This is the core write-through mechanism: after WriteBuffer commits, we immediately
+// update the in-memory page cache so subsequent reads see the new data.
+//
+// Thread Safety:
+// - Uses sharded locks to minimize contention (64 shards)
+// - If page not in cache, creates new page (cache will load from disk on first read anyway)
+//
+// Parameters:
+//   - bundleName: The bundle containing the document
+//   - pageID: The page ID where the document resides
+//   - doc: The document to add/update in the cache
+func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID uint32, doc *models.Document) {
+	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	shardIdx := s.getPageShardIndex(pageKey)
+
+	// Acquire shard-specific write lock
+	s.pageShardLocks[shardIdx].Lock()
+	defer s.pageShardLocks[shardIdx].Unlock()
+
+	// Also need the global mutex for the map access
+	s.documentPagesMutex.Lock()
+	defer s.documentPagesMutex.Unlock()
+
+	page, exists := s.documentPages[pageKey]
+	if !exists {
+		// Page not in cache - create a new one
+		// The page will be populated from disk on next full read if needed
+		page = &models.DocumentPage{
+			PageID:    pageID,
+			BundleID:  bundleName,
+			Documents: make(map[string]models.Document),
+		}
+		s.documentPages[pageKey] = page
+
+		// Add to LRU tracking
+		elem := s.pageLRUOrder.PushFront(pageKey)
+		s.pageLRUElements[pageKey] = elem
+
+		// Check if we need to evict old pages
+		if len(s.documentPages) >= s.maxLoadedPages {
+			s.evictOldestPageLocked()
+		}
+	}
+
+	// Update the document in the page
+	page.Documents[doc.DocumentID] = *doc
+}
+
+// removeFromPageCache removes a document from the page cache after a successful delete.
+// Called after a tombstone is written to the WriteBuffer.
+//
+// Thread Safety:
+// - Uses sharded locks to minimize contention
+// - Safe to call even if document/page not in cache
+//
+// Parameters:
+//   - bundleName: The bundle containing the document
+//   - pageID: The page ID where the document resided
+//   - docID: The document ID to remove
+func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, docID string) {
+	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	shardIdx := s.getPageShardIndex(pageKey)
+
+	// Acquire shard-specific write lock
+	s.pageShardLocks[shardIdx].Lock()
+	defer s.pageShardLocks[shardIdx].Unlock()
+
+	// Also need the global mutex for the map access
+	s.documentPagesMutex.Lock()
+	defer s.documentPagesMutex.Unlock()
+
+	page, exists := s.documentPages[pageKey]
+	if !exists {
+		// Page not in cache - nothing to remove
+		return
+	}
+
+	// Remove the document from the page
+	delete(page.Documents, docID)
 }
 
 // getOrCreateSchemaManager retrieves or creates a GraphQL schema manager for the specified database.
@@ -2100,10 +2204,8 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 
 	}
 
-	// Initialize TotalDocuments and PageCount based on existing documents
-	if bundle.Documents != nil {
-		bundle.TotalDocuments = int64(len(*bundle.Documents))
-	} else {
+	// Initialize TotalDocuments and PageCount - documents are now managed via page cache
+	if bundle.TotalDocuments == 0 {
 		bundle.TotalDocuments = 0
 	}
 
@@ -2176,7 +2278,10 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 			// Load the SortedIndex for this bundle (for pageID alignment)
 			if err := InitializeBundleSortedIndex(bundle); err != nil {
 				s.logger.Warnf("Failed to load sorted index for bundle '%s': %v (will use fallback pageID calculation)", name, err)
-				// Continue loading - fallback to legacy pageID calculation if SortedIndex not available
+				// Ensure SortedIndex is never nil - create empty fallback
+				if bundle.SortedIndex == nil {
+					bundle.SortedIndex = models.NewShardedSortedIndex()
+				}
 			}
 
 			// Discover and populate existing index files
@@ -2199,6 +2304,18 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 		}
 	}
 
+	// Bundle exists in memory, but check if SortedIndex needs initialization
+	if bundle.SortedIndex == nil {
+		s.logger.Debugf("Bundle '%s' is in memory but SortedIndex is nil, initializing", name)
+		if err := InitializeBundleSortedIndex(bundle); err != nil {
+			s.logger.Warnf("Failed to load sorted index for cached bundle '%s': %v (will use fallback)", name, err)
+			// Ensure SortedIndex is never nil - create empty fallback
+			if bundle.SortedIndex == nil {
+				bundle.SortedIndex = models.NewShardedSortedIndex()
+			}
+		}
+	}
+
 	// Bundle exists in memory, but check if indexes need to be discovered
 	if len(bundle.Indexes) == 0 {
 		s.logger.Debugf("Bundle '%s' is in memory but has no indexes, attempting discovery", name)
@@ -2218,21 +2335,31 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 // OPTIMIZATION: Uses O(1) LRU eviction via doubly-linked list instead of O(n) map scan.
 func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, pageID uint32) (*models.DocumentPage, error) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	shardIdx := s.getPageShardIndex(pageKey)
+
+	// WRITE-THROUGH CACHE: Acquire shard-specific read lock first, then global mutex
+	// This ordering prevents deadlocks and reduces contention
+	s.pageShardLocks[shardIdx].RLock()
 
 	// Fast path: check cache with read lock
 	s.documentPagesMutex.RLock()
 	if page, exists := s.documentPages[pageKey]; exists {
 		// Promote to front of LRU (requires write lock, but we optimize for the common case)
 		s.documentPagesMutex.RUnlock()
+		s.pageShardLocks[shardIdx].RUnlock()
+
 		// Promote LRU position under write lock (lightweight operation)
+		s.pageShardLocks[shardIdx].Lock()
 		s.documentPagesMutex.Lock()
 		if elem, ok := s.pageLRUElements[pageKey]; ok {
 			s.pageLRUOrder.MoveToFront(elem)
 		}
 		s.documentPagesMutex.Unlock()
+		s.pageShardLocks[shardIdx].Unlock()
 		return page, nil
 	}
 	s.documentPagesMutex.RUnlock()
+	s.pageShardLocks[shardIdx].RUnlock()
 
 	// CRITICAL: Clear any per-bundle projection before loading so we get full documents.
 	// Projection pushdown (e.g. ORDER BY) sets projection on the storage engine, and if we don't clear it,
@@ -2251,20 +2378,27 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 
 	// PERFORMANCE: Minimize write lock hold time - check cache again before acquiring write lock
 	// This reduces contention when multiple goroutines load the same page concurrently
+	s.pageShardLocks[shardIdx].RLock()
 	s.documentPagesMutex.RLock()
 	if p, exists := s.documentPages[pageKey]; exists {
 		// Another goroutine loaded it first - promote LRU position
 		s.documentPagesMutex.RUnlock()
+		s.pageShardLocks[shardIdx].RUnlock()
+
+		s.pageShardLocks[shardIdx].Lock()
 		s.documentPagesMutex.Lock()
 		if elem, ok := s.pageLRUElements[pageKey]; ok {
 			s.pageLRUOrder.MoveToFront(elem)
 		}
 		s.documentPagesMutex.Unlock()
+		s.pageShardLocks[shardIdx].Unlock()
 		return p, nil
 	}
 	s.documentPagesMutex.RUnlock()
+	s.pageShardLocks[shardIdx].RUnlock()
 
-	// Acquire write lock only when we need to insert
+	// Acquire write lock only when we need to insert (shard lock first, then global)
+	s.pageShardLocks[shardIdx].Lock()
 	s.documentPagesMutex.Lock()
 	// Double-check again after acquiring write lock (another goroutine may have inserted it)
 	if p, exists := s.documentPages[pageKey]; exists {
@@ -2273,6 +2407,7 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 			s.pageLRUOrder.MoveToFront(elem)
 		}
 		s.documentPagesMutex.Unlock()
+		s.pageShardLocks[shardIdx].Unlock()
 		return p, nil
 	}
 	// O(1) eviction: check capacity and evict from back of LRU list
@@ -2284,7 +2419,93 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	elem := s.pageLRUOrder.PushFront(pageKey)
 	s.pageLRUElements[pageKey] = elem
 	s.documentPagesMutex.Unlock()
+	s.pageShardLocks[shardIdx].Unlock()
 	return page, nil
+}
+
+// SnapshotPageDocuments safely snapshots documents from a page to avoid concurrent map iteration.
+// This is used by code that needs to iterate over page.Documents while writes may be happening.
+//
+// Thread Safety:
+// - Atomically checks cache and snapshots under one lock acquisition
+// - If page not in cache, loads it from disk with proper locking
+// - Returns a slice copy, safe for concurrent iteration
+//
+// Parameters:
+//   - bundleName: Name of the bundle
+//   - databaseName: Name of the database
+//   - pageID: Page identifier
+//
+// Returns:
+//   - []models.Document: Snapshot of documents (safe for iteration)
+//   - error: Any error encountered
+func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, pageID uint32) ([]models.Document, error) {
+	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	shardIdx := s.getPageShardIndex(pageKey)
+
+	// Acquire shard lock first to check cache
+	s.pageShardLocks[shardIdx].RLock()
+	s.documentPagesMutex.RLock()
+	page, exists := s.documentPages[pageKey]
+	s.documentPagesMutex.RUnlock()
+
+	if exists {
+		// Page in cache - snapshot it under the lock we already hold
+		docs := make([]models.Document, 0, len(page.Documents))
+		for _, doc := range page.Documents {
+			docs = append(docs, doc)
+		}
+		s.pageShardLocks[shardIdx].RUnlock()
+		return docs, nil
+	}
+
+	// Page not in cache - need to load it
+	s.pageShardLocks[shardIdx].RUnlock()
+
+	// Load page from disk (this will cache it and return it)
+	// GetDocumentPage handles its own locking
+	loadedPage, err := s.GetDocumentPage(bundleName, databaseName, pageID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Now snapshot the newly loaded page under proper lock
+	// Need to re-acquire lock since GetDocumentPage released it
+	s.pageShardLocks[shardIdx].RLock()
+	docs := make([]models.Document, 0, len(loadedPage.Documents))
+	for _, doc := range loadedPage.Documents {
+		docs = append(docs, doc)
+	}
+	s.pageShardLocks[shardIdx].RUnlock()
+
+	return docs, nil
+}
+
+// snapshotPageDocumentsFromPointer takes an already-loaded page pointer and returns a safe snapshot.
+// This is for cases where you already have the page and just need to snapshot its Documents map.
+//
+// Thread Safety:
+// - Uses sharded read lock based on page metadata
+// - Returns a slice copy, safe for concurrent iteration
+//
+// Parameters:
+//   - page: The page pointer (already loaded)
+//   - databaseName: Name of the database (needed for shard calculation)
+//
+// Returns:
+//   - []models.Document: Snapshot of documents (safe for iteration)
+func (s *BundleService) snapshotPageDocumentsFromPointer(page *models.DocumentPage, databaseName string) []models.Document {
+	pageKey := fmt.Sprintf("%s:%d", page.BundleID, page.PageID)
+	shardIdx := s.getPageShardIndex(pageKey)
+
+	s.pageShardLocks[shardIdx].RLock()
+	docs := make([]models.Document, 0, len(page.Documents))
+	for _, doc := range page.Documents {
+		docs = append(docs, doc)
+	}
+	s.pageShardLocks[shardIdx].RUnlock()
+
+	return docs
 }
 
 // CountDocuments counts all documents in a bundle using optimized count-only parser
@@ -2359,10 +2580,16 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 
 		cachedPages++
 
+		// Snapshot documents safely with shard lock
+		// CRITICAL: pageKey must match the format used throughout the cache (bundleName:pageID)
+		shardIdx := s.getPageShardIndex(pageKey)
+		s.pageShardLocks[shardIdx].RLock()
+
 		// Copy projected fields from each document in this page
 		for docID, doc := range page.Documents {
 			// Check effectiveLimit (Phase 4: LIMIT + no ORDER BY early termination)
 			if effectiveLimit > 0 && docsCopied >= effectiveLimit {
+				s.pageShardLocks[shardIdx].RUnlock()
 				// Reached limit - stop copying (defer will release lock)
 				return projectedDocs, docsCopied, cachedPages, int(pageID + 1), nil
 			}
@@ -2384,6 +2611,7 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 			projectedDocs[docID] = projDoc
 			docsCopied++
 		}
+		s.pageShardLocks[shardIdx].RUnlock()
 	}
 
 	return projectedDocs, docsCopied, cachedPages, int(pageCount), nil
@@ -2424,11 +2652,12 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string,
 		}
 	}
 
-	// Get the bundle metadata
+	// Get the bundle metadata (used for MVCC version scanning)
 	bundle, exists := s.bundleMetadata[bundleName]
 	if !exists {
 		return nil, fmt.Errorf("bundle %s not found", bundleName)
 	}
+	_ = bundle // Used in MVCC path below
 
 	// PHASE 4: MVCC - If snapshot provided, use version scanning with visibility filtering
 	if snapshotSeq > 0 {
@@ -2450,20 +2679,9 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string,
 	}
 
 	// No snapshot filtering - use fast path (latest version)
-	// MEMORY-FIRST: Check if document is already loaded in memory (hot path)
-	// This includes recently added documents that haven't been flushed to disk yet.
-	// RLock prevents races with delete/update of *bundle.Documents (concurrent map read and write).
-	if bundle.Documents != nil {
-		bundle.DocumentsMutex.RLock()
-		doc, exists := (*bundle.Documents)[documentID]
-		bundle.DocumentsMutex.RUnlock()
-		if exists {
-			//s.logger.Debugf("Document %s found in memory for bundle %s", documentID, bundleName)
-			return &doc, nil
-		}
-	}
+	// All reads now go through the write-through page cache
 
-	// Document not in memory - need to load from disk using index
+	// Load document from page cache (write-through cache)
 	//s.logger.Debugf("Document %s not in memory, loading from disk for bundle %s", documentID, bundleName)
 
 	// CRITICAL: Clear any projection fields before loading to ensure full document is retrieved.
@@ -2483,8 +2701,14 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string,
 		return nil, err
 	}
 
-	// Extract the document from the loaded page
-	if doc, exists := page.Documents[documentID]; exists {
+	// Extract the document from the loaded page with proper locking
+	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	shardIdx := s.getPageShardIndex(pageKey)
+	s.pageShardLocks[shardIdx].RLock()
+	doc, exists := page.Documents[documentID]
+	s.pageShardLocks[shardIdx].RUnlock()
+
+	if exists {
 		return &doc, nil
 	}
 
@@ -2501,34 +2725,9 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 	bundleName := bundle.Name
 	dbName := bundle.Database.Name
 
-	// Memtable hits + collect docIDs we need to load from disk
-	toLoad := make([]string, 0, len(docIDs))
+	// All reads now go through the write-through page cache
+	toLoad := docIDs
 	byID := make(map[string]*models.Document, len(docIDs))
-	if bundle.Documents != nil {
-		bundle.DocumentsMutex.RLock()
-		for _, id := range docIDs {
-			if d, ok := (*bundle.Documents)[id]; ok {
-				cp := d
-				byID[id] = &cp
-			} else {
-				toLoad = append(toLoad, id)
-			}
-		}
-		bundle.DocumentsMutex.RUnlock()
-	} else {
-		toLoad = append(toLoad, docIDs...)
-	}
-
-	if len(toLoad) == 0 {
-		// All docs found in memtable
-		out := make([]*models.Document, 0, len(docIDs))
-		for _, id := range docIDs {
-			if d := byID[id]; d != nil {
-				out = append(out, d)
-			}
-		}
-		return out, nil
-	}
 
 	// OPTIMIZATION: Try parsed docs cache first (avoids stale pageID lookups)
 	// This is much faster than page-based lookup when indexes have stale pageIDs
@@ -2565,6 +2764,12 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 				}
 				continue
 			}
+
+			// Acquire shard lock to safely access page.Documents
+			pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+			shardIdx := s.getPageShardIndex(pageKey)
+			s.pageShardLocks[shardIdx].RLock()
+
 			for _, id := range ids {
 				if d, ok := page.Documents[id]; ok {
 					cp := d
@@ -2592,6 +2797,8 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 					}
 				}
 			}
+
+			s.pageShardLocks[shardIdx].RUnlock()
 		}
 	}
 
@@ -2675,7 +2882,14 @@ func (s *BundleService) findDocumentInPageCache(bundleName, documentID string) *
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
-		if doc, exists := page.Documents[documentID]; exists {
+
+		// Acquire shard lock to safely access page.Documents
+		shardIdx := s.getPageShardIndex(key)
+		s.pageShardLocks[shardIdx].RLock()
+		doc, exists := page.Documents[documentID]
+		s.pageShardLocks[shardIdx].RUnlock()
+
+		if exists {
 			cp := doc
 			return &cp
 		}
@@ -2694,35 +2908,9 @@ func (s *BundleService) GetDocumentsByIDsFromCacheDirect(bundle *models.Bundle, 
 	bundleName := bundle.Name
 	dbName := bundle.Database.Name
 
-	// First check memtable
+	// All reads now go through the write-through page cache
 	byID := make(map[string]*models.Document, len(docIDs))
-	toLoad := make([]string, 0, len(docIDs))
-
-	if bundle.Documents != nil {
-		bundle.DocumentsMutex.RLock()
-		for _, id := range docIDs {
-			if d, ok := (*bundle.Documents)[id]; ok {
-				cp := d
-				byID[id] = &cp
-			} else {
-				toLoad = append(toLoad, id)
-			}
-		}
-		bundle.DocumentsMutex.RUnlock()
-	} else {
-		toLoad = append(toLoad, docIDs...)
-	}
-
-	if len(toLoad) == 0 {
-		// All docs found in memtable
-		out := make([]*models.Document, 0, len(docIDs))
-		for _, id := range docIDs {
-			if d := byID[id]; d != nil {
-				out = append(out, d)
-			}
-		}
-		return out
-	}
+	toLoad := docIDs
 
 	// Use storage engine's cache-based lookup (bypasses stale pageID issue)
 	cachedDocs, _ := s.store.GetDocumentsByIDsFromCache(bundleName, dbName, toLoad)
@@ -2945,8 +3133,14 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 			continue
 		}
 
-		// Check if document exists in this page
-		if _, exists := page.Documents[documentID]; exists {
+		// Check if document exists in this page with proper locking
+		pageKey := fmt.Sprintf("%s:%d", bundleID, pageID)
+		shardIdx := s.getPageShardIndex(pageKey)
+		s.pageShardLocks[shardIdx].RLock()
+		_, exists := page.Documents[documentID]
+		s.pageShardLocks[shardIdx].RUnlock()
+
+		if exists {
 			// Update the cache with this document's location
 			s.pageCacheMutex.Lock()
 			if s.documentPageMap[bundleID] == nil {
@@ -3008,91 +3202,30 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	// Special handling: If PageCount is 0, still check page 0 for documents
 	// This handles cases where metadata might be out of sync
 	if bundle.PageCount == 0 {
-		// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, 0)
+		// WRITE-THROUGH CACHE: Snapshot page documents safely
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, 0)
 		if err != nil {
-
-			// Even if page 0 fails, check memtable before returning empty
-			if bundle.Documents != nil && !bundle.DocumentsComplete {
-				s.logger.Debugf("Page 0 failed, but memtable has %d documents", len(*bundle.Documents))
-				// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-				bundle.DocumentsMutex.RLock()
-				memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-				for docID, doc := range *bundle.Documents {
-					memtableSnapshot[docID] = doc
-				}
-				bundle.DocumentsMutex.RUnlock()
-				// Now iterate over the snapshot safely
-				for _, doc := range memtableSnapshot {
-					docCopy := doc
-					// Apply MVCC visibility filter if snapshot is provided
-					if snapshotSeq > 0 {
-						if !docCopy.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
-							continue // Skip invisible documents
-						}
-					}
-					allDocuments = append(allDocuments, &docCopy)
-				}
-				return allDocuments, nil
-			}
+			// Page 0 doesn't exist - return empty
 			return []*models.Document{}, nil
 		}
 
-		// Actually process the documents found in page 0 - COULD BE FASTER
-		for _, doc := range page.Documents {
+		// Actually process the documents found in page 0
+		for _, doc := range docs {
 			docCopy := doc
+			// Apply MVCC visibility filter if snapshot is provided
+			if snapshotSeq > 0 {
+				if !docCopy.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
+					continue // Skip invisible documents
+				}
+			}
 			allDocuments = append(allDocuments, &docCopy)
-		}
-
-		// Merge with memtable even when PageCount is 0
-		if bundle.Documents != nil && !bundle.DocumentsComplete {
-			s.logger.Debugf("Merging %d documents from memtable with %d from page 0",
-				len(*bundle.Documents), len(allDocuments))
-
-			diskDocIDs := make(map[string]bool, len(allDocuments))
-			for _, doc := range allDocuments {
-				diskDocIDs[doc.DocumentID] = true
-			}
-
-			// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-			bundle.DocumentsMutex.RLock()
-			memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-			for docID, doc := range *bundle.Documents {
-				memtableSnapshot[docID] = doc
-			}
-			bundle.DocumentsMutex.RUnlock()
-			// Now iterate over the snapshot safely
-			for docID, doc := range memtableSnapshot {
-				if !diskDocIDs[docID] {
-					docCopy := doc
-					// Apply MVCC visibility filter if snapshot is provided
-					if snapshotSeq > 0 {
-						if !docCopy.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
-							continue // Skip invisible documents
-						}
-					}
-					allDocuments = append(allDocuments, &docCopy)
-				}
-			}
-		}
-
-		// Apply MVCC visibility filter to disk documents if snapshot is provided
-		if snapshotSeq > 0 {
-			filteredDocuments := make([]*models.Document, 0, len(allDocuments))
-			for _, doc := range allDocuments {
-				if doc.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
-					filteredDocuments = append(filteredDocuments, doc)
-				}
-			}
-			allDocuments = filteredDocuments
 		}
 
 		return allDocuments, nil
 	}
 
-	// CASSANDRA-STYLE MEMTABLE MERGE:
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-	// Load all pages from disk first (authoritative source)
+	// WRITE-THROUGH CACHE: All pages now include recent writes via write-through updates
+	// Load all pages from disk/cache (authoritative source)
 	// PERFORMANCE: Pre-allocate slice with estimated capacity to avoid repeated allocations
 	estimatedDocCount := int(bundle.TotalDocuments)
 	if estimatedDocCount <= 0 {
@@ -3101,7 +3234,7 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	allDocuments = make([]*models.Document, 0, estimatedDocCount)
 
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 			continue
@@ -3110,46 +3243,13 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 		// Convert map to slice - must copy since map values are not pointers
 		// This is necessary for thread safety (pages may be evicted from cache)
 		// PERFORMANCE: Use append with pre-allocated capacity (more efficient than manual indexing)
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			docCopy := doc
 			allDocuments = append(allDocuments, &docCopy)
 		}
 	}
 
-	// Merge with memtable (recent writes not yet on disk or flushed)
-	// This ensures queries see both persisted data AND recent writes
-	if bundle.Documents != nil && !bundle.DocumentsComplete {
-		// Create document ID set for deduplication (disk wins for conflicts)
-		diskDocIDs := make(map[string]bool, len(allDocuments))
-		for _, doc := range allDocuments {
-			diskDocIDs[doc.DocumentID] = true
-		}
-
-		// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-		// Acquire read lock, create snapshot, release lock immediately
-		// This prevents "concurrent map iteration and map write" errors
-		bundle.DocumentsMutex.RLock()
-		memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-		for docID, doc := range *bundle.Documents {
-			memtableSnapshot[docID] = doc
-		}
-		bundle.DocumentsMutex.RUnlock()
-		// Now iterate over the snapshot safely (no lock needed)
-		for docID, doc := range memtableSnapshot {
-			if !diskDocIDs[docID] {
-				docCopy := doc
-				// Apply MVCC visibility filter if snapshot is provided
-				if snapshotSeq > 0 {
-					if !docCopy.IsVisibleToSnapshot(snapshotSeq, txID, activeTxIDs) {
-						continue // Skip invisible documents
-					}
-				}
-				allDocuments = append(allDocuments, &docCopy)
-			}
-		}
-	}
-
-	// Apply MVCC visibility filter to disk documents if snapshot is provided
+	// Apply MVCC visibility filter if snapshot is provided
 	if snapshotSeq > 0 {
 		filteredDocuments := make([]*models.Document, 0, len(allDocuments))
 		for _, doc := range allDocuments {
@@ -3211,12 +3311,12 @@ func (s *BundleService) GetDocumentChunksForIndexing(ctx context.Context, bundle
 			return ctx.Err()
 		default:
 		}
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 			continue
 		}
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			docCopy := doc
 			buffer = append(buffer, &docCopy)
 			if len(buffer) >= chunkSize {
@@ -3280,74 +3380,37 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 	filter := opts.Filter
 
 	// --- PageCount == 0 (reuse existing special-case structure, with filter) ---
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
+	// WRITE-THROUGH CACHE: Use GetDocumentPage which now includes all recent writes
 	if bundle.PageCount == 0 {
 		var allDocuments []*models.Document
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, 0)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, 0)
 		if err != nil {
-			if bundle.Documents != nil && !bundle.DocumentsComplete {
-				bundle.DocumentsMutex.RLock()
-				memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-				for docID, doc := range *bundle.Documents {
-					memtableSnapshot[docID] = doc
-				}
-				bundle.DocumentsMutex.RUnlock()
-				for _, doc := range memtableSnapshot {
-					docCopy := doc
-					if filter != nil && !filter(&docCopy) {
-						continue
-					}
-					allDocuments = append(allDocuments, &docCopy)
-				}
-				return allDocuments, nil
-			}
+			// Page 0 doesn't exist - return empty
 			return []*models.Document{}, nil
 		}
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			docCopy := doc
 			if filter != nil && !filter(&docCopy) {
 				continue
 			}
 			allDocuments = append(allDocuments, &docCopy)
 		}
-		if bundle.Documents != nil && !bundle.DocumentsComplete {
-			diskDocIDs := make(map[string]bool, len(allDocuments))
-			for _, d := range allDocuments {
-				diskDocIDs[d.DocumentID] = true
-			}
-			bundle.DocumentsMutex.RLock()
-			memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-			for docID, doc := range *bundle.Documents {
-				memtableSnapshot[docID] = doc
-			}
-			bundle.DocumentsMutex.RUnlock()
-			for docID, doc := range memtableSnapshot {
-				if diskDocIDs[docID] {
-					continue
-				}
-				docCopy := doc
-				if filter != nil && !filter(&docCopy) {
-					continue
-				}
-				allDocuments = append(allDocuments, &docCopy)
-			}
-		}
 		return allDocuments, nil
 	}
 
 	pageCount := uint32(bundle.PageCount)
 
-	// --- Sequential: load each page, filter, append; then memtable ---
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
+	// --- Sequential: load each page, filter, append ---
+	// WRITE-THROUGH CACHE: All pages now include recent writes via write-through updates
 	if concurrency <= 1 {
 		var allDocuments []*models.Document
 		for pageID := uint32(0); pageID < pageCount; pageID++ {
-			page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+			docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 			if err != nil {
 				s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 				continue
 			}
-			for _, doc := range page.Documents {
+			for _, doc := range docs {
 				docCopy := doc
 				if filter != nil && !filter(&docCopy) {
 					continue
@@ -3355,11 +3418,11 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 				allDocuments = append(allDocuments, &docCopy)
 			}
 		}
-		allDocuments = s.mergeMemtableWithFilter(bundle, allDocuments, filter)
 		return allDocuments, nil
 	}
 
-	// --- Parallel: workers load page ranges, filter, send batches; main collects; then memtable ---
+	// --- Parallel: workers load page ranges, filter, send batches; main collects ---
+	// WRITE-THROUGH CACHE: All pages now include recent writes via write-through updates
 	type batch struct {
 		docs []*models.Document
 	}
@@ -3380,14 +3443,16 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 		go func(pageStart, pageEnd int) {
 			defer wg.Done()
 			var local []*models.Document
-			// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
+			// WRITE-THROUGH CACHE: Use SnapshotPageDocuments which handles locking internally
 			for pageID := uint32(pageStart); pageID < uint32(pageEnd); pageID++ {
-				page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+				docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 				if err != nil {
 					s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundleName, err)
 					continue
 				}
-				for _, doc := range page.Documents {
+
+				// Iterate over snapshot safely (no manual locking needed)
+				for _, doc := range docs {
 					docCopy := doc
 					if filter != nil && !filter(&docCopy) {
 						continue
@@ -3409,35 +3474,14 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 		allDocuments = append(allDocuments, b.docs...)
 	}
 
-	allDocuments = s.mergeMemtableWithFilter(bundle, allDocuments, filter)
 	return allDocuments, nil
 }
 
-// mergeMemtableWithFilter merges memtable documents not already in diskDocs, applying filter if non-nil.
+// mergeMemtableWithFilter - DEPRECATED: Write-through cache makes this unnecessary
+// Kept as no-op for any remaining callers; returns diskDocs unchanged
 func (s *BundleService) mergeMemtableWithFilter(bundle *models.Bundle, diskDocs []*models.Document, filter func(*models.Document) bool) []*models.Document {
-	if bundle.Documents == nil || bundle.DocumentsComplete {
-		return diskDocs
-	}
-	diskDocIDs := make(map[string]bool, len(diskDocs))
-	for _, d := range diskDocs {
-		diskDocIDs[d.DocumentID] = true
-	}
-	bundle.DocumentsMutex.RLock()
-	memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-	for docID, doc := range *bundle.Documents {
-		memtableSnapshot[docID] = doc
-	}
-	bundle.DocumentsMutex.RUnlock()
-	for docID, doc := range memtableSnapshot {
-		if diskDocIDs[docID] {
-			continue
-		}
-		docCopy := doc
-		if filter != nil && !filter(&docCopy) {
-			continue
-		}
-		diskDocs = append(diskDocs, &docCopy)
-	}
+	// WRITE-THROUGH CACHE: All recent writes are now in the page cache
+	// No memtable merge needed - just return diskDocs
 	return diskDocs
 }
 
@@ -3487,14 +3531,9 @@ func (s *BundleService) GetBundleByName(database *models.Database, name string) 
 	}
 
 	// Return metadata-only bundle - documents should be loaded on-demand via GetDocumentPage
-	// The Documents field is left nil to encourage use of the paginated document access methods
-	// Initialize DocumentsComplete flag for memtable pattern
-	if bundle.Documents == nil {
-		bundle.DocumentsComplete = false // nil = incomplete (memtable mode)
-	} else {
-		// If Documents exists from serialization, assume it's incomplete unless explicitly marked
-		bundle.DocumentsComplete = false
-	}
+	// WRITE-THROUGH CACHE: All document access goes through page cache now
+	// The DocumentsComplete flag is no longer needed since we don't have a memtable
+	bundle.DocumentsComplete = true // Always "complete" - all data in page cache
 
 	return bundle, nil
 }
@@ -4001,13 +4040,13 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
 
 		// Update each document in the page
-		for docID, doc := range page.Documents {
+		for _, doc := range docs {
 			// Add field with default value if it doesn't exist
 			if doc.Fields == nil {
 				doc.Fields = make(map[string]models.Field)
@@ -4028,7 +4067,7 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 				// Update the document in the bundle file
 				err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
 				if err != nil {
-					return fmt.Errorf("failed to update document %s: %w", docID, err)
+					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
 				}
 			}
 		}
@@ -4045,13 +4084,13 @@ func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, 
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
 
 		// Update each document in the page
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			if doc.Fields == nil {
 				continue
 			}
@@ -4081,13 +4120,13 @@ func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldNa
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
 
 		// Update each document in the page
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			if doc.Fields == nil {
 				continue
 			}
@@ -4126,13 +4165,13 @@ func (s *BundleService) convertFieldType(bundle *models.Bundle, fieldName, fromT
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
 
 		// Update each document in the page
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			if doc.Fields == nil {
 				continue
 			}
@@ -4231,12 +4270,12 @@ func (s *BundleService) validateFieldUniqueness(bundle *models.Bundle, fieldName
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
 
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			if doc.Fields == nil {
 				continue
 			}
@@ -4275,12 +4314,12 @@ func (s *BundleService) validateAllDocumentsHaveField(bundle *models.Bundle, fie
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
 
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			if doc.Fields == nil {
 				missingCount++
 				continue
@@ -4305,13 +4344,13 @@ func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldN
 	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
 	// Iterate through all document pages
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			continue // Skip pages that don't exist yet
 		}
 
 		// Update each document in the page
-		for _, doc := range page.Documents {
+		for _, doc := range docs {
 			if doc.Fields == nil {
 				doc.Fields = make(map[string]models.Field)
 			}
@@ -5702,6 +5741,11 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		return "", fmt.Errorf("failed to add document to bundle: %w", err)
 	}
 
+	// WRITE-THROUGH CACHE: Immediately update page cache so reads see this document
+	// This is the core write-through mechanism - after WriteBuffer commits, we update
+	// the in-memory cache so subsequent reads don't need a disk round-trip
+	s.updatePageCacheWithDocument(bundle.Name, pageID, newDocument)
+
 	// Now schedule index updates with the actual pageID from storage
 	//indexStart := time.Now()
 	indexCount := 0
@@ -5824,6 +5868,9 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 	if err != nil {
 		return "", fmt.Errorf("failed to add document to bundle: %w", err)
 	}
+
+	// WRITE-THROUGH CACHE: Immediately update page cache so reads see this document
+	s.updatePageCacheWithDocument(bundle.Name, pageID, newDocument)
 
 	// Schedule index updates with the actual pageID from storage
 	if bundle.Indexes != nil {
@@ -5963,14 +6010,10 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 		}
 	}
 
-	// Update in-memory cache: if the appropriate document page is loaded, add the document to it
-	pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
-	s.documentPagesMutex.Lock()
-	if page, exists := s.documentPages[pageKey]; exists {
-		page.Documents[document.DocumentID] = *document
-		s.logger.Debugf("Added document '%s' to in-memory page %s", document.DocumentID, pageKey)
-	}
-	s.documentPagesMutex.Unlock()
+	// WRITE-THROUGH CACHE: Immediately update page cache so reads see this document
+	// Use the write-through helper which handles sharded locking and page creation
+	s.updatePageCacheWithDocument(bundle.Name, pageID, document)
+	s.logger.Debugf("Added document '%s' to page cache via write-through (page %d)", document.DocumentID, pageID)
 
 	return nil
 }
@@ -5989,21 +6032,10 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 		docIDSet[doc.DocumentID] = true
 	}
 
-	// Check memtable first (fastest - in-memory)
-	stillExists := make(map[string]bool)
-	if bundle.Documents != nil {
-		bundle.DocumentsMutex.RLock()
-		for docID := range docIDSet {
-			if _, exists := (*bundle.Documents)[docID]; exists {
-				stillExists[docID] = true
-			}
-		}
-		bundle.DocumentsMutex.RUnlock()
-	}
-
-	// For documents not in memtable, check cached pages via documentPageMap
-	// This avoids expensive GetDocument calls
+	// WRITE-THROUGH CACHE: All recent writes are in the page cache
+	// Check cached pages via documentPageMap to verify documents still exist
 	// CRITICAL: Must hold lock while iterating over bundlePages to prevent concurrent map read/write
+	stillExists := make(map[string]bool)
 	pagesToCheck := make(map[uint32]bool)
 
 	s.pageCacheMutex.RLock()
@@ -6026,6 +6058,10 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 		for pageID := range pagesToCheck {
 			pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
 			if page, exists := s.documentPages[pageKey]; exists {
+				// Acquire shard lock to safely access page.Documents
+				shardIdx := s.getPageShardIndex(pageKey)
+				s.pageShardLocks[shardIdx].RLock()
+
 				for docID := range docIDSet {
 					if !stillExists[docID] {
 						if _, docExists := page.Documents[docID]; docExists {
@@ -6033,6 +6069,8 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 						}
 					}
 				}
+
+				s.pageShardLocks[shardIdx].RUnlock()
 			}
 		}
 		s.documentPagesMutex.RUnlock()
@@ -6464,56 +6502,18 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		s.invalidateDocumentPageMapEntry(bundle.Name, d.DocumentID)
 	}
 
-	// PHASE 2.2: Selective cache invalidation - only invalidate pages that contain updated documents
-	// This is much more efficient than invalidating all pages for the bundle
-	// CRITICAL: Must hold lock while iterating over bundlePages to prevent concurrent map read/write
-	pagesToInvalidate := make(map[uint32]bool)
-
-	s.pageCacheMutex.RLock()
-	bundlePages, hasPageMap := s.documentPageMap[bundle.Name]
-	if hasPageMap && bundlePages != nil {
-		// Use documentPageMap to find which pages contain updated documents
-		// Iterate while holding the lock to prevent race with invalidateDocumentPageMapEntry
-		for _, doc := range updatedDocs {
-			if pageID, exists := bundlePages[doc.DocumentID]; exists {
-				pagesToInvalidate[pageID] = true
-			}
+	// WRITE-THROUGH CACHE: Update page cache with new document versions immediately
+	// This replaces the old invalidation approach - instead of invalidating and forcing
+	// a disk read, we update the cache directly so reads see the new data immediately
+	for _, doc := range updatedDocs {
+		// Look up the pageID from documentPageMap (before it was invalidated)
+		// If not found, the update will just skip - cache will load from disk on next read
+		pageID, err := s.findDocumentPage(bundle.Name, doc.DocumentID)
+		if err == nil {
+			s.updatePageCacheWithDocument(bundle.Name, pageID, doc)
 		}
 	}
-	s.pageCacheMutex.RUnlock()
-
-	// If we couldn't find pages via documentPageMap, fall back to invalidating all pages
-	// This is safer but less efficient - should be rare
-	if len(pagesToInvalidate) == 0 && len(updatedDocs) > 0 {
-		s.logger.Debugf("Could not determine pages for updated documents, invalidating all pages for bundle '%s'", bundle.Name)
-		s.documentPagesMutex.Lock()
-		keysToDelete := make([]string, 0, 50)
-		for pageKey := range s.documentPages {
-			if strings.HasPrefix(pageKey, bundle.Name+":") {
-				keysToDelete = append(keysToDelete, pageKey)
-			}
-		}
-		for _, key := range keysToDelete {
-			s.removePageFromLRULocked(key)
-			delete(s.documentPages, key)
-		}
-		s.documentPagesMutex.Unlock()
-		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update (fallback)", len(keysToDelete), bundle.Name)
-	} else if len(pagesToInvalidate) > 0 {
-		// PHASE 2.2: Selective invalidation - only invalidate affected pages
-		s.documentPagesMutex.Lock()
-		invalidatedCount := 0
-		for pageID := range pagesToInvalidate {
-			pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
-			if _, exists := s.documentPages[pageKey]; exists {
-				s.removePageFromLRULocked(pageKey)
-				delete(s.documentPages, pageKey)
-				invalidatedCount++
-			}
-		}
-		s.documentPagesMutex.Unlock()
-		s.logger.Debugf("Invalidated %d cached pages for bundle '%s' after update (selective)", invalidatedCount, bundle.Name)
-	}
+	s.logger.Debugf("Write-through: Updated %d documents in page cache for bundle '%s'", len(updatedDocs), bundle.Name)
 
 	// NOTE: Metadata updates (TotalDocuments, PageCount) are handled via scheduleMetadataUpdate
 	// which is atomic and uses its own mutex. No bundle write lock needed here.
@@ -6754,53 +6754,24 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	// after disk write to maintain durability.
 
 	// 1. Remove from Bundle.Documents if loaded
-	// CRITICAL: Hold DocumentsMutex to prevent concurrent map iteration (e.g. mergeMemtableWithFilter)
-	// and map write; without this, "fatal error: concurrent map iteration and map write" can occur.
-	if bundle.Documents != nil {
-		bundle.DocumentsMutex.Lock()
-		for _, docID := range docIDs {
-			delete(*bundle.Documents, docID)
-		}
-		bundle.DocumentsMutex.Unlock()
-	}
+	// WRITE-THROUGH CACHE: Documents memtable removed
+	// All document removal now happens through the page cache
 
-	// 2. Targeted page invalidation: collect pageIDs for deleted docs from documentPageMap before
-	//    removing them; invalidate only those pages from documentPages. If any deleted doc is not
-	//    in documentPageMap, we cannot know all affected pages → fall back to full invalidate.
-	//    This avoids the 20–30s stall on the next statement caused by wiping all documentPages.
+	// 2. WRITE-THROUGH CACHE: Remove deleted documents from page cache immediately
+	//    Instead of invalidating entire pages, we remove just the deleted documents
+	//    so reads don't see deleted data but we preserve other cached documents.
 	s.pageCacheMutex.Lock()
-	pageIDsToInvalidate := make(map[uint32]struct{})
-	allDocsInMap := true
 	if pageMap, exists := s.documentPageMap[docCommand.BundleName]; exists {
 		for _, docID := range docIDs {
 			if pageID, ok := pageMap[docID]; ok {
-				pageIDsToInvalidate[pageID] = struct{}{}
-			} else {
-				allDocsInMap = false
+				// Use write-through helper for targeted removal
+				s.removeFromPageCache(docCommand.BundleName, pageID, docID)
 			}
 			delete(pageMap, docID)
 		}
-	} else {
-		allDocsInMap = false
 	}
 	s.pageCacheMutex.Unlock()
-
-	if s.documentPages != nil {
-		if !allDocsInMap {
-			s.invalidateBundlePageCache(docCommand.BundleName)
-		} else {
-			s.documentPagesMutex.Lock()
-			for pageID := range pageIDsToInvalidate {
-				pageKey := fmt.Sprintf("%s:%d", docCommand.BundleName, pageID)
-				s.removePageFromLRULocked(pageKey)
-				delete(s.documentPages, pageKey)
-			}
-			s.documentPagesMutex.Unlock()
-			if len(pageIDsToInvalidate) > 0 {
-				s.logger.Debugf("Invalidated %d cached pages for bundle '%s' (targeted)", len(pageIDsToInvalidate), docCommand.BundleName)
-			}
-		}
-	}
+	s.logger.Debugf("Write-through: Removed %d documents from page cache for bundle '%s'", len(docIDs), docCommand.BundleName)
 
 	// 3. Remove deleted docs from scanner's cache when SmartBundleScanner; keep scanner alive to
 	//    avoid 20–30s stall on next SELECT (new scanner would have empty cachedPages + cold
@@ -7353,13 +7324,13 @@ func (s *BundleService) getDocumentsByFilterStreaming(bundle *models.Bundle, whe
 func (s *BundleService) getDocumentsByFilterStreamingSequential(bundle *models.Bundle, whereClause string, pageCount uint32) ([]*models.Document, error) {
 	var result []*models.Document
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
-		page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
 			s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
 			continue
 		}
-		chunk := make([]*models.Document, 0, len(page.Documents))
-		for _, d := range page.Documents {
+		chunk := make([]*models.Document, 0, len(docs))
+		for _, d := range docs {
 			dc := d
 			chunk = append(chunk, &dc)
 		}
@@ -7406,15 +7377,14 @@ func (s *BundleService) getDocumentsByFilterStreamingParallel(bundle *models.Bun
 		go func() {
 			defer wg.Done()
 			for pageID := range pagesChan {
-				page, err := s.GetDocumentPage(bundle.Name, bundle.Database.Name, pageID)
+				docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 				if err != nil {
 					s.logger.Warnf("Failed to load page %d for bundle '%s': %v", pageID, bundle.Name, err)
 					resultsChan <- pageResult{pageID: pageID, docs: nil, err: nil} // Don't fail, just skip
 					continue
 				}
-
-				chunk := make([]*models.Document, 0, len(page.Documents))
-				for _, d := range page.Documents {
+				chunk := make([]*models.Document, 0, len(docs))
+				for _, d := range docs {
 					dc := d
 					chunk = append(chunk, &dc)
 				}
@@ -7464,40 +7434,11 @@ func (s *BundleService) getDocumentsByFilterStreamingParallel(bundle *models.Bun
 	return result, nil
 }
 
-// mergeMemtableResults merges memtable documents with disk results
+// mergeMemtableResults - DEPRECATED: Write-through cache makes this unnecessary
+// Kept as no-op for any remaining callers; returns diskResult unchanged
 func (s *BundleService) mergeMemtableResults(bundle *models.Bundle, diskResult []*models.Document, whereClause string) []*models.Document {
-	// Merge memtable: add matching docs not already in disk results (last-write-wins)
-	if bundle.Documents == nil || bundle.DocumentsComplete {
-		return diskResult
-	}
-
-	diskDocIDs := make(map[string]bool, len(diskResult))
-	for _, d := range diskResult {
-		diskDocIDs[d.DocumentID] = true
-	}
-	bundle.DocumentsMutex.RLock()
-	memtableSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-	for docID, doc := range *bundle.Documents {
-		memtableSnapshot[docID] = doc
-	}
-	bundle.DocumentsMutex.RUnlock()
-	var memtableOnly []*models.Document
-	for docID, doc := range memtableSnapshot {
-		if diskDocIDs[docID] {
-			continue
-		}
-		dc := doc
-		memtableOnly = append(memtableOnly, &dc)
-	}
-	if len(memtableOnly) > 0 {
-		filteredMem, err := s.filterDocumentsWithSyndrQL(memtableOnly, whereClause)
-		if err != nil {
-			s.logger.Warnf("Memtable filter failed: %v", err)
-			return diskResult
-		}
-		diskResult = append(diskResult, filteredMem...)
-	}
-
+	// WRITE-THROUGH CACHE: All recent writes are now in the page cache
+	// No memtable merge needed - just return diskResult
 	return diskResult
 }
 

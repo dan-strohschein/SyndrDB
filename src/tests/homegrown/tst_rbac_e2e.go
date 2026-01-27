@@ -117,15 +117,9 @@ func cleanupRBACE2ETest() error {
 
 	// Clear all RBAC bundles to reset state
 	if testRBACE2EDatabase != nil {
-		bundlesToClear := []string{"Users", "UserPermissions", "UserRoles", "Roles", "Permissions", "RolesPermissions"}
-		for _, bundleName := range bundlesToClear {
-			if bundle, exists := testRBACE2EDatabase.Bundles[bundleName]; exists && bundle.Documents != nil {
-				// Clear the documents map
-				emptyDocs := make(map[string]models.Document)
-				bundle.Documents = &emptyDocs
-				testRBACE2EDatabase.Bundles[bundleName] = bundle
-			}
-		}
+		// Documents are now managed via page cache, no direct cleanup needed here
+		// The test teardown will handle cleanup
+		_ = testRBACE2EDatabase // acknowledge variable
 	}
 
 	if ColorLogger != nil {
@@ -164,11 +158,15 @@ func verifyUserInBundle(username string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("Users bundle not found")
 	}
 
-	if bundle.Documents == nil {
+	// Get documents using the service
+	docs, err := testRBACE2EServiceManager.BundleService.GetDocumentsByFilter(&bundle, "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user documents: %v", err)
+	}
+	if len(docs) == 0 {
 		return nil, fmt.Errorf("Users bundle has no documents")
 	}
 
-	docs := *bundle.Documents
 	for _, doc := range docs {
 		if uname, ok := doc.Data["Username"].(string); ok && strings.EqualFold(uname, username) {
 			return doc.Data, nil
@@ -195,11 +193,15 @@ func verifyPermissionGrantInBundle(username, permission string) (bool, error) {
 		return false, fmt.Errorf("user document missing UserID")
 	}
 
-	if bundle.Documents == nil {
+	// Get documents using the service
+	docs, err := testRBACE2EServiceManager.BundleService.GetDocumentsByFilter(&bundle, "", nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to get user permission documents: %v", err)
+	}
+	if len(docs) == 0 {
 		return false, nil
 	}
 
-	docs := *bundle.Documents
 	for _, doc := range docs {
 		if uid, ok := doc.Data["UserID"].(string); ok && uid == userID {
 			if perm, ok := doc.Data["Permission"].(string); ok && perm == permission {
@@ -228,11 +230,15 @@ func verifyRoleGrantInBundle(username, role string) (bool, error) {
 		return false, fmt.Errorf("user document missing UserID")
 	}
 
-	if bundle.Documents == nil {
+	// Get documents using the service
+	docs, err := testRBACE2EServiceManager.BundleService.GetDocumentsByFilter(&bundle, "", nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to get user role documents: %v", err)
+	}
+	if len(docs) == 0 {
 		return false, nil
 	}
 
-	docs := *bundle.Documents
 	for _, doc := range docs {
 		if uid, ok := doc.Data["UserID"].(string); ok && uid == userID {
 			if r, ok := doc.Data["Role"].(string); ok && r == role {
@@ -352,13 +358,18 @@ func testRBACE2E_PermissionGrantWorkflow() error {
 	if !exists {
 		return fmt.Errorf("Permissions bundle not found")
 	}
-	if permBundle.Documents == nil {
+
+	// Get documents using the service
+	permDocs, err := testRBACE2EServiceManager.BundleService.GetDocumentsByFilter(&permBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get permission documents: %v", err)
+	}
+	if len(permDocs) == 0 {
 		return fmt.Errorf("Permissions bundle has no documents")
 	}
 
-	docs := *permBundle.Documents
 	permFound := false
-	for _, doc := range docs {
+	for _, doc := range permDocs {
 		if perm, ok := doc.Data["Permission"].(string); ok && perm == permission {
 			permFound = true
 			break
@@ -438,13 +449,18 @@ func testRBACE2E_RoleGrantWorkflow() error {
 	if !exists {
 		return fmt.Errorf("Roles bundle not found")
 	}
-	if roleBundle.Documents == nil {
+
+	// Get documents using the service
+	roleDocs, err := testRBACE2EServiceManager.BundleService.GetDocumentsByFilter(&roleBundle, "", nil)
+	if err != nil {
+		return fmt.Errorf("failed to get role documents: %v", err)
+	}
+	if len(roleDocs) == 0 {
 		return fmt.Errorf("Roles bundle has no documents")
 	}
 
-	docs := *roleBundle.Documents
 	roleFound := false
-	for _, doc := range docs {
+	for _, doc := range roleDocs {
 		if r, ok := doc.Data["Role"].(string); ok && r == role {
 			roleFound = true
 			break

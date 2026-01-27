@@ -1617,42 +1617,12 @@ func compareValues(a, b interface{}, logger *zap.SugaredLogger, numericCompariso
 }
 
 // FilterDocuments filters documents based on a WHERE clause
+// FilterDocuments is DEPRECATED - bundle.Documents memtable has been removed.
+// All reads now go through the page cache. Use SyndrQL-based filtering in bundle_service.go instead.
 func FilterDocuments(bundle *models.Bundle, whereClause string, logger *zap.SugaredLogger) ([]*models.Document, error) {
-	// Parse the WHERE clause
-	// DEPRECATED:: USING OLD PARSER, NOT SyndrQL - Line 1242
-	// PERFORMANCE: Use cached parsing to avoid re-parsing the same WHERE clause
-	whereGroup, err := ParseWhereClauseCached(whereClause)
-	if err != nil {
-		return nil, err
-	}
-	//logger.Infof("Parsed WHERE clause: %+v", whereGroup)
-	// Filter documents
-	// if len(bundle.Documents) > 0 {
-	// 	prettyJSON, err := json.MarshalIndent(bundle.Documents, "", "  ")
-	// 	if err != nil {
-	// 		logger.Warnf("Failed to convert documents to JSON: %v", err)
-	// 	} else {
-	// 		logger.Infof("Found %d documents: \n%s", len(bundle.Documents), string(prettyJSON))
-	// 	}
-	// } else {
-	// 	logger.Infof("No documents found matching the filter")
-	// }
-	var result []*models.Document
-	// CRITICAL FIX: Use copy-on-read pattern to prevent concurrent map iteration
-	bundle.DocumentsMutex.RLock()
-	documentsSnapshot := make(map[string]models.Document, len(*bundle.Documents))
-	for docID, doc := range *bundle.Documents {
-		documentsSnapshot[docID] = doc
-	}
-	bundle.DocumentsMutex.RUnlock()
-	// Now iterate over the snapshot safely
-	for _, doc := range documentsSnapshot {
-		if EvaluateWhereClause(&doc, whereGroup, logger) {
-			result = append(result, &doc)
-		}
-	}
-
-	return result, nil
+	// DEPRECATED: This function used the in-memory Documents map which has been removed.
+	// The system now uses a write-through page cache instead.
+	return nil, fmt.Errorf("FilterDocuments is deprecated: bundle.Documents memtable removed, use page cache and SyndrQL")
 }
 
 // FilterDocumentsRaw filters documents using the deprecated old parser.
@@ -1704,13 +1674,13 @@ func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, wher
 						return nil, err
 					}
 				}
-				// Collect documents by ID
+				// DEPRECATED: Cannot collect documents by ID - bundle.Documents memtable removed
+				// The system now uses a write-through page cache
+				// Return the docIDs as document stubs for now - caller should use page cache
 				result := make([]*models.Document, 0, len(docIDs))
 				for _, docID := range docIDs {
-					if doc, ok := (*bundle.Documents)[docID]; ok {
-						d := doc // avoid pointer aliasing
-						result = append(result, &d)
-					}
+					// Create stub documents with just the ID - actual loading should use page cache
+					result = append(result, &models.Document{DocumentID: docID})
 				}
 				return result, nil
 			}

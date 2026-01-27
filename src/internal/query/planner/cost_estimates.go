@@ -15,7 +15,7 @@ func (qp *QueryPlanner) estimateHashIndexCost() float64 {
 
 func (qp *QueryPlanner) estimateBTreeIndexCost(bundle *models.Bundle) float64 {
 	// B-tree lookup is typically O(log n)
-	bundleSize := float64(len(*bundle.Documents))
+	bundleSize := qp.getEstimatedCost(bundle)
 	if bundleSize <= 1 {
 		return 1.0
 	}
@@ -32,7 +32,7 @@ func (qp *QueryPlanner) estimateBTreeIndexCost(bundle *models.Bundle) float64 {
 }
 
 func (qp *QueryPlanner) estimateBTreeRows(bundle *models.Bundle, condition queryparser.WhereClause) int {
-	bundleSize := len(*bundle.Documents)
+	bundleSize := qp.getEstimatedRowsAsInt(bundle)
 
 	switch condition.Operator {
 	case "=":
