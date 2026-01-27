@@ -28,17 +28,17 @@ type BufferedDocument struct {
 // under lock, then write back buffer to file without holding lock. Reduces
 // contention when buffer is full or timeout hits.
 type WriteBuffer struct {
-	file         *os.File
-	buffer       []byte
-	backBuffer   []byte // P0c: second buffer for flush; I/O done outside mutex
-	bufferSize   int
-	flushSize    int
-	lastFlush    time.Time
-	flushTimeout time.Duration
-	mutex        sync.Mutex
-	flushCond    *sync.Cond  // signaled when flushInProgress becomes false
-	flushInProgress bool     // true while doFlushToFile runs (outside mutex)
-	flushErr     error       // sticky error from background flush
+	file            *os.File
+	buffer          []byte
+	backBuffer      []byte // P0c: second buffer for flush; I/O done outside mutex
+	bufferSize      int
+	flushSize       int
+	lastFlush       time.Time
+	flushTimeout    time.Duration
+	mutex           sync.Mutex
+	flushCond       *sync.Cond // signaled when flushInProgress becomes false
+	flushInProgress bool       // true while doFlushToFile runs (outside mutex)
+	flushErr        error      // sticky error from background flush
 
 	// Transaction-aware tracking
 	bufferedDocs  map[string]*BufferedDocument // documentID -> BufferedDocument

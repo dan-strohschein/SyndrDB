@@ -241,9 +241,9 @@ type SessionManager struct {
 	cleanupWG   sync.WaitGroup
 
 	// Temp file cleanup queue (async, non-blocking)
-	tempFileCleanupQueue  chan []string
-	tempFileCleanupWG     sync.WaitGroup
-	stopTempFileCleanup   chan struct{}
+	tempFileCleanupQueue chan []string
+	tempFileCleanupWG    sync.WaitGroup
+	stopTempFileCleanup  chan struct{}
 
 	// Lock management - set after initialization to avoid circular dependencies
 	lockReleaser LockReleaser
@@ -252,15 +252,15 @@ type SessionManager struct {
 // NewSessionManager creates a new session manager
 func NewSessionManager(logger *zap.SugaredLogger, defaultTimeout time.Duration, maxSessions int) *SessionManager {
 	sm := &SessionManager{
-		sessions:            make(map[string]*Session),
-		userSessions:        make(map[string][]*Session),
-		sessionsByUser:      make(map[string][]*Session),
-		connectionSessions:  make(map[string]*Session),
-		logger:              logger,
-		defaultTimeout:      defaultTimeout,
-		maxSessions:         maxSessions,
-		cleanupInterval:     time.Minute * 5, // Cleanup every 5 minutes
-		stopCleanup:         make(chan struct{}),
+		sessions:             make(map[string]*Session),
+		userSessions:         make(map[string][]*Session),
+		sessionsByUser:       make(map[string][]*Session),
+		connectionSessions:   make(map[string]*Session),
+		logger:               logger,
+		defaultTimeout:       defaultTimeout,
+		maxSessions:          maxSessions,
+		cleanupInterval:      time.Minute * 5, // Cleanup every 5 minutes
+		stopCleanup:          make(chan struct{}),
 		tempFileCleanupQueue: make(chan []string, 100), // Buffered channel for async cleanup
 		stopTempFileCleanup:  make(chan struct{}),
 	} // Start cleanup routine
@@ -795,7 +795,7 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 	// Clean up buffer pool if exists
 	if session.BufferPool != nil {
 		session.Logger.Info("Releasing buffer pool resources")
-		
+
 		// Flush any dirty buffers to ensure data integrity
 		if err := session.BufferPool.FlushAllDirty(); err != nil {
 			session.Logger.Warnw("Failed to flush dirty buffers during session cleanup",
