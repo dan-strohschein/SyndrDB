@@ -172,9 +172,22 @@ func (wb *WriteBuffer) doFlushToFile(data []byte, doSync bool) error {
 
 // swapAndFlush swaps buffer <-> backBuffer, runs I/O outside lock, then clears backBuffer.
 // Caller must hold mutex. Returns with mutex held. Sets flushErr on failure.
+// CRITICAL FIX: Added timeout to prevent indefinite blocking if a previous flush hangs
 func (wb *WriteBuffer) swapAndFlush(doSync bool) error {
+	// CRITICAL FIX: Use polling with timeout instead of indefinite cond.Wait()
+	// This prevents blocking forever if a previous flush operation hangs or the
+	// goroutine performing the flush panics
+	deadline := time.Now().Add(30 * time.Second)
 	for wb.flushInProgress {
-		wb.flushCond.Wait()
+		if time.Now().After(deadline) {
+			// Timeout - previous flush is stuck
+			// Return error instead of blocking forever; caller can retry or fail gracefully
+			return fmt.Errorf("timeout waiting for previous flush to complete (possible stuck I/O)")
+		}
+		// Release lock briefly to allow other goroutine to complete
+		wb.mutex.Unlock()
+		time.Sleep(5 * time.Millisecond)
+		wb.mutex.Lock()
 	}
 	if wb.flushErr != nil {
 		return wb.flushErr

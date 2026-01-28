@@ -773,13 +773,12 @@ func (s *Server) Start() error {
 				if !s.Running {
 					return
 				}
-				// Get active sessions for lock cleanup
-				// Convert transaction map to session ID set expected by CleanupOrphanedLocks
-				txMap := s.SessionManager.GetActiveSessionsByTxID()
-				activeSessionIDs := make(map[string]bool, len(txMap))
-				for _, sessionID := range txMap {
-					activeSessionIDs[sessionID] = true
-				}
+				// Get ALL active sessions for lock cleanup, not just those with explicit transactions
+				// CRITICAL FIX: Previously we only checked sessions with active transactions,
+				// but sessions running queries in auto-commit mode (no explicit BEGIN/COMMIT)
+				// were being incorrectly treated as orphaned, causing their locks to be released
+				// while queries were still executing. This caused query processing to halt.
+				activeSessionIDs := s.SessionManager.GetAllActiveSessionIDs()
 
 				// Call cleanup with active session IDs
 				if s.ServiceManager.LockManager != nil {

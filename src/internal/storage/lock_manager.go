@@ -221,11 +221,18 @@ func (lm *LockManager) releaseSpecificLock(txID, bundleName, documentID string) 
 // AcquireReadLock acquires a read lock on a document
 // Multiple transactions can hold read locks simultaneously
 // If a write lock exists, waits up to lockTimeout before giving up
+// DEADLOCK FIX: Uses polling with short sleeps instead of indefinite cond.Wait()
 func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID string) error {
 	startTime := time.Now()
 	shard := &lm.shards[shardIndex(bundleName, documentID)]
 
 	for {
+		// Check timeout at the start of each iteration
+		if time.Since(startTime) >= lm.lockTimeout {
+			return fmt.Errorf("timeout waiting for READ lock on %s.%s after %v",
+				bundleName, documentID, lm.lockTimeout)
+		}
+
 		shard.mu.Lock()
 
 		if shard.locks[bundleName] == nil {
@@ -241,25 +248,27 @@ func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID s
 
 		docLock.mu.Lock()
 
+		// Fast path: already have this read lock
 		if _, exists := docLock.readLocks[txID]; exists {
 			docLock.mu.Unlock()
 			shard.mu.Unlock()
 			return nil
 		}
 
+		// Check if blocked by a write lock from another transaction
 		if docLock.writeLock != nil && docLock.writeLock.OwnerTxID != txID {
 			writeOwnerTxID := docLock.writeLock.OwnerTxID
-			shard.mu.Unlock()
-			if time.Since(startTime) >= lm.lockTimeout {
-				docLock.mu.Unlock()
-				return fmt.Errorf("deadlock detected: timeout waiting for READ lock on %s.%s (held by txID: %s)",
-					bundleName, documentID, writeOwnerTxID)
-			}
-			docLock.cond.Wait()
 			docLock.mu.Unlock()
+			shard.mu.Unlock()
+
+			// DEADLOCK FIX: Instead of blocking indefinitely with cond.Wait(),
+			// use short sleep and retry. This ensures we always respect the timeout.
+			lm.logger.Debugf("Waiting for WRITE lock release on %s.%s (held by txID: %s)", bundleName, documentID, writeOwnerTxID)
+			time.Sleep(5 * time.Millisecond)
 			continue
 		}
 
+		// Acquire the read lock
 		docLock.readLocks[txID] = &Lock{
 			Mode:         LockModeRead,
 			OwnerTxID:    txID,
@@ -277,11 +286,18 @@ func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID s
 // AcquireWriteLock acquires a write lock on a document
 // Automatically upgrades from read lock if the same transaction holds a read lock
 // If another transaction holds any lock, waits up to lockTimeout before giving up
+// DEADLOCK FIX: Uses polling with short sleeps instead of indefinite cond.Wait()
 func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID string) error {
 	startTime := time.Now()
 	shard := &lm.shards[shardIndex(bundleName, documentID)]
 
 	for {
+		// Check timeout at the start of each iteration
+		if time.Since(startTime) >= lm.lockTimeout {
+			return fmt.Errorf("timeout waiting for WRITE lock on %s.%s after %v",
+				bundleName, documentID, lm.lockTimeout)
+		}
+
 		shard.mu.Lock()
 
 		if shard.locks[bundleName] == nil {
@@ -297,12 +313,14 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 
 		docLock.mu.Lock()
 
+		// Fast path: already have this write lock
 		if docLock.writeLock != nil && docLock.writeLock.OwnerTxID == txID {
 			docLock.mu.Unlock()
 			shard.mu.Unlock()
 			return nil
 		}
 
+		// Upgrade path: we have a read lock, upgrade to write
 		if _, hasReadLock := docLock.readLocks[txID]; hasReadLock {
 			delete(docLock.readLocks, txID)
 			docLock.writeLock = &Lock{
@@ -317,6 +335,7 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 			return nil
 		}
 
+		// Check for blocking conditions
 		otherReaders := 0
 		for readerTxID := range docLock.readLocks {
 			if readerTxID != txID {
@@ -332,18 +351,17 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 			} else {
 				blockingInfo = fmt.Sprintf("%d read lock(s) held by other transactions", otherReaders)
 			}
-			shard.mu.Unlock()
-			waitDuration := time.Since(startTime)
-			if waitDuration >= lm.lockTimeout {
-				docLock.mu.Unlock()
-				return fmt.Errorf("deadlock detected: timeout waiting for WRITE lock on %s.%s (%s)",
-					bundleName, documentID, blockingInfo)
-			}
-			docLock.cond.Wait()
 			docLock.mu.Unlock()
+			shard.mu.Unlock()
+
+			// DEADLOCK FIX: Instead of blocking indefinitely with cond.Wait(),
+			// use short sleep and retry. This ensures we always respect the timeout.
+			lm.logger.Debugf("Waiting for lock release on %s.%s (%s)", bundleName, documentID, blockingInfo)
+			time.Sleep(5 * time.Millisecond)
 			continue
 		}
 
+		// Acquire the write lock
 		docLock.writeLock = &Lock{
 			Mode:         LockModeWrite,
 			OwnerTxID:    txID,
@@ -505,9 +523,19 @@ func (lm *LockManager) ReleaseLocksForSession(sessionID string) int {
 // CleanupOrphanedLocks scans for and releases locks from non-existent sessions
 // This runs asynchronously at server startup to clean up locks from crashed sessions
 // activeSessionIDs is a map of currently active session IDs for fast lookup
+// CRITICAL: Skips locks with "autocommit-" prefix - these are short-lived auto-commit
+// operations that are not tracked in the session manager and should not be cleaned up
 func (lm *LockManager) CleanupOrphanedLocks(activeSessionIDs map[string]bool) (int, int) {
 	orphanedLocks := 0
 	orphanedSessions := make(map[string]bool)
+
+	// isAutocommitSession checks if a session ID is from an auto-commit operation
+	// Auto-commit sessions use synthetic IDs like "autocommit-abc12345" and are
+	// not tracked in the session manager. These locks are released by defer when
+	// the operation completes, so they should never be considered orphaned.
+	isAutocommitSession := func(sessionID string) bool {
+		return len(sessionID) >= 11 && sessionID[:11] == "autocommit-"
+	}
 
 	for i := range lm.shards {
 		shard := &lm.shards[i]
@@ -522,16 +550,22 @@ func (lm *LockManager) CleanupOrphanedLocks(activeSessionIDs map[string]bool) (i
 				sessionID := ""
 				readLocksBeforeRelease := len(docLock.readLocks)
 
-				if docLock.writeLock != nil && !activeSessionIDs[docLock.writeLock.OwnerSession] {
-					sessionID = docLock.writeLock.OwnerSession
-					docLock.writeLock = nil
-					released = true
-					releasedWriteLock = true
-					orphanedSessions[sessionID] = true
+				// Check write lock - skip auto-commit sessions
+				if docLock.writeLock != nil {
+					ownerSession := docLock.writeLock.OwnerSession
+					if !isAutocommitSession(ownerSession) && !activeSessionIDs[ownerSession] {
+						sessionID = ownerSession
+						docLock.writeLock = nil
+						released = true
+						releasedWriteLock = true
+						orphanedSessions[sessionID] = true
+					}
 				}
+				// Check read locks - skip auto-commit sessions
 				for readerTxID, lock := range docLock.readLocks {
-					if !activeSessionIDs[lock.OwnerSession] {
-						sessionID = lock.OwnerSession
+					ownerSession := lock.OwnerSession
+					if !isAutocommitSession(ownerSession) && !activeSessionIDs[ownerSession] {
+						sessionID = ownerSession
 						delete(docLock.readLocks, readerTxID)
 						released = true
 						releasedReadLocks = true

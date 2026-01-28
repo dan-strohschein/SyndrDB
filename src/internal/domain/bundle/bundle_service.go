@@ -47,6 +47,42 @@ import (
 // PageCacheShardCount is the number of shards for page cache locks (must be power of 2)
 const PageCacheShardCount = 64
 
+// pageCacheShard represents a single shard of the page cache.
+// Each shard has its own lock, map, and LRU tracking to eliminate global lock contention.
+// DEADLOCK FIX: Previously a global documentPagesMutex caused RWMutex starvation under high concurrency.
+// By sharding, writers in shard N don't block readers in shard M.
+type pageCacheShard struct {
+	mu          sync.RWMutex                    // Protects this shard only
+	pages       map[string]*models.DocumentPage // pageKey -> page (for this shard only)
+	lruOrder    *list.List                      // LRU order for this shard
+	lruElements map[string]*list.Element        // pageKey -> list element for O(1) promotion
+	maxPages    int                             // Max pages per shard (total max / shard count)
+}
+
+// newPageCacheShard creates a new page cache shard
+func newPageCacheShard(maxPagesPerShard int) *pageCacheShard {
+	return &pageCacheShard{
+		pages:       make(map[string]*models.DocumentPage),
+		lruOrder:    list.New(),
+		lruElements: make(map[string]*list.Element),
+		maxPages:    maxPagesPerShard,
+	}
+}
+
+// evictOldestLocked evicts the oldest page from this shard. Caller must hold mu.Lock().
+func (s *pageCacheShard) evictOldestLocked() {
+	if s.lruOrder.Len() == 0 {
+		return
+	}
+	oldest := s.lruOrder.Back()
+	if oldest != nil {
+		pageKey := oldest.Value.(string)
+		s.lruOrder.Remove(oldest)
+		delete(s.lruElements, pageKey)
+		delete(s.pages, pageKey)
+	}
+}
+
 // QueryPlannerInterface defines the interface for plan cache invalidation
 // This avoids circular dependencies with the server package
 type QueryPlannerInterface interface {
@@ -372,26 +408,18 @@ type BundleService struct {
 	settings        *settings.Arguments
 
 	// Changed: Store only bundle metadata, not full bundles with documents
-	bundleMetadata     map[string]*models.Bundle       // Only schema/structure
-	documentPages      map[string]*models.DocumentPage // Page-based document storage (bundleID:pageID -> page)
-	documentPagesMutex sync.RWMutex                    // Protects documentPages; prevents concurrent map read/write
+	bundleMetadata map[string]*models.Bundle // Only schema/structure
 
-	// WRITE-THROUGH CACHE: Sharded locks for page cache access (64 shards)
-	// Uses xxhash of pageKey to select shard, reducing lock contention
-	pageShardLocks [PageCacheShardCount]sync.RWMutex
-
-	// LRU eviction support - O(1) eviction instead of O(n) scan
-	pageLRUOrder    *list.List               // Doubly-linked list for LRU order (front = newest, back = oldest)
-	pageLRUElements map[string]*list.Element // pageKey -> list element for O(1) access/promotion
-	// LOCK ORDERING (to prevent deadlocks):
-	// pageCacheMutex < documentPagesMutex < scannerMutex
-	// Always acquire locks in this order when multiple locks are needed
+	// DEADLOCK FIX: Fully sharded page cache - each shard has its own map, lock, and LRU
+	// Previously: single documentPages map + documentPagesMutex caused RWMutex starvation
+	// Now: 64 independent shards, so writers in shard N don't block readers in shard M
+	pageShards [PageCacheShardCount]*pageCacheShard
 
 	logger *zap.SugaredLogger
 
 	// Configuration for page management
 	defaultPageSize int // Default number of documents per page
-	maxLoadedPages  int // Maximum number of pages to keep in memory
+	maxLoadedPages  int // Maximum number of pages to keep in memory (total across all shards)
 
 	// Performance optimization: Deferred index updates
 	indexUpdateBuffer    []IndexUpdate // Buffer for pending index updates
@@ -495,6 +523,12 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		maxLoaded = 500
 	}
 
+	// Calculate max pages per shard (distribute evenly)
+	maxPagesPerShard := (maxLoaded + PageCacheShardCount - 1) / PageCacheShardCount
+	if maxPagesPerShard < 1 {
+		maxPagesPerShard = 1
+	}
+
 	service := &BundleService{
 		store:           store,
 		factory:         factory,
@@ -502,10 +536,8 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		settings:        args,
 		logger:          logger,
 		bundleMetadata:  make(map[string]*models.Bundle),
-		documentPages:   make(map[string]*models.DocumentPage),
-		pageLRUOrder:    list.New(),                     // O(1) LRU eviction order
-		pageLRUElements: make(map[string]*list.Element), // O(1) element lookup for promotion
-		defaultPageSize: 4096,                           // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
+		// pageShards will be initialized below
+		defaultPageSize: 4096, // Default: 4096 documents per page (power of 2 for fast bit-shift calculations)
 		maxLoadedPages:  maxLoaded,
 		// OPTIMIZATION: Use configurable performance settings
 		indexUpdateBuffer:    make([]IndexUpdate, 0, globalSettings.MetadataBatchSize),
@@ -557,6 +589,11 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 		uniqueIndexMemoryBudgetBytes: int64(globalSettings.UniqueIndexMemoryBudgetMB) * 1024 * 1024, // Convert MB to bytes
 		currentIndexMemoryUsage:      0,
 		loadedDatabases:              make(map[string]time.Time),
+	}
+
+	// DEADLOCK FIX: Initialize sharded page cache (each shard is independent)
+	for i := 0; i < PageCacheShardCount; i++ {
+		service.pageShards[i] = newPageCacheShard(maxPagesPerShard)
 	}
 
 	// Initialize schema generator if GraphQL is enabled
@@ -624,16 +661,13 @@ func (s *BundleService) getPageShardIndex(pageKey string) int {
 func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID uint32, doc *models.Document) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
 
-	// Acquire shard-specific write lock
-	s.pageShardLocks[shardIdx].Lock()
-	defer s.pageShardLocks[shardIdx].Unlock()
+	// DEADLOCK FIX: Only acquire shard-local lock (no global lock)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	// Also need the global mutex for the map access
-	s.documentPagesMutex.Lock()
-	defer s.documentPagesMutex.Unlock()
-
-	page, exists := s.documentPages[pageKey]
+	page, exists := shard.pages[pageKey]
 	if !exists {
 		// Page not in cache - create a new one
 		// The page will be populated from disk on next full read if needed
@@ -642,15 +676,15 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 			BundleID:  bundleName,
 			Documents: make(map[string]models.Document),
 		}
-		s.documentPages[pageKey] = page
+		shard.pages[pageKey] = page
 
-		// Add to LRU tracking
-		elem := s.pageLRUOrder.PushFront(pageKey)
-		s.pageLRUElements[pageKey] = elem
+		// Add to LRU tracking (shard-local)
+		elem := shard.lruOrder.PushFront(pageKey)
+		shard.lruElements[pageKey] = elem
 
-		// Check if we need to evict old pages
-		if len(s.documentPages) >= s.maxLoadedPages {
-			s.evictOldestPageLocked()
+		// Check if we need to evict old pages from this shard
+		if len(shard.pages) > shard.maxPages {
+			shard.evictOldestLocked()
 		}
 	}
 
@@ -672,16 +706,13 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, docID string) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
 
-	// Acquire shard-specific write lock
-	s.pageShardLocks[shardIdx].Lock()
-	defer s.pageShardLocks[shardIdx].Unlock()
+	// DEADLOCK FIX: Only acquire shard-local lock (no global lock)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	// Also need the global mutex for the map access
-	s.documentPagesMutex.Lock()
-	defer s.documentPagesMutex.Unlock()
-
-	page, exists := s.documentPages[pageKey]
+	page, exists := shard.pages[pageKey]
 	if !exists {
 		// Page not in cache - nothing to remove
 		return
@@ -2333,33 +2364,34 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 // CRITICAL: Always clears projection fields before loading to ensure full pages are cached, not partial/projected pages.
 // This prevents cache poisoning where a query with projection would cache partial documents that can't serve other queries.
 // OPTIMIZATION: Uses O(1) LRU eviction via doubly-linked list instead of O(n) map scan.
+//
+// DEADLOCK FIX: Removed write lock for LRU promotion on cache hits. Under high read concurrency,
+// taking a write lock on every cache hit caused RWMutex starvation:
+// - Multiple readers waiting for RLock
+// - Writer waiting to promote LRU position
+// - New readers blocked behind writer
+// - Result: deadlock
+//
+// Solution: Skip LRU promotion on cache hits. LRU is only updated on cache misses (insertions).
+// This is acceptable because:
+// 1. Frequently accessed pages will be re-inserted on eviction, naturally staying in cache
+// 2. The eviction policy is approximate anyway - slightly suboptimal eviction is fine
+// 3. Correctness is maintained - we just sacrifice some LRU accuracy for concurrency
 func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, pageID uint32) (*models.DocumentPage, error) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
 
-	// WRITE-THROUGH CACHE: Acquire shard-specific read lock first, then global mutex
-	// This ordering prevents deadlocks and reduces contention
-	s.pageShardLocks[shardIdx].RLock()
-
+	// DEADLOCK FIX: Only use shard-local locking (no global lock)
 	// Fast path: check cache with read lock
-	s.documentPagesMutex.RLock()
-	if page, exists := s.documentPages[pageKey]; exists {
-		// Promote to front of LRU (requires write lock, but we optimize for the common case)
-		s.documentPagesMutex.RUnlock()
-		s.pageShardLocks[shardIdx].RUnlock()
-
-		// Promote LRU position under write lock (lightweight operation)
-		s.pageShardLocks[shardIdx].Lock()
-		s.documentPagesMutex.Lock()
-		if elem, ok := s.pageLRUElements[pageKey]; ok {
-			s.pageLRUOrder.MoveToFront(elem)
-		}
-		s.documentPagesMutex.Unlock()
-		s.pageShardLocks[shardIdx].Unlock()
+	shard.mu.RLock()
+	if page, exists := shard.pages[pageKey]; exists {
+		// DEADLOCK FIX: Return immediately without LRU promotion
+		// Taking write lock here caused RWMutex starvation under high read concurrency
+		shard.mu.RUnlock()
 		return page, nil
 	}
-	s.documentPagesMutex.RUnlock()
-	s.pageShardLocks[shardIdx].RUnlock()
+	shard.mu.RUnlock()
 
 	// CRITICAL: Clear any per-bundle projection before loading so we get full documents.
 	// Projection pushdown (e.g. ORDER BY) sets projection on the storage engine, and if we don't clear it,
@@ -2376,50 +2408,23 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 		return nil, fmt.Errorf("failed to load document page %s: %w", pageKey, err)
 	}
 
-	// PERFORMANCE: Minimize write lock hold time - check cache again before acquiring write lock
-	// This reduces contention when multiple goroutines load the same page concurrently
-	s.pageShardLocks[shardIdx].RLock()
-	s.documentPagesMutex.RLock()
-	if p, exists := s.documentPages[pageKey]; exists {
-		// Another goroutine loaded it first - promote LRU position
-		s.documentPagesMutex.RUnlock()
-		s.pageShardLocks[shardIdx].RUnlock()
-
-		s.pageShardLocks[shardIdx].Lock()
-		s.documentPagesMutex.Lock()
-		if elem, ok := s.pageLRUElements[pageKey]; ok {
-			s.pageLRUOrder.MoveToFront(elem)
-		}
-		s.documentPagesMutex.Unlock()
-		s.pageShardLocks[shardIdx].Unlock()
-		return p, nil
-	}
-	s.documentPagesMutex.RUnlock()
-	s.pageShardLocks[shardIdx].RUnlock()
-
-	// Acquire write lock only when we need to insert (shard lock first, then global)
-	s.pageShardLocks[shardIdx].Lock()
-	s.documentPagesMutex.Lock()
-	// Double-check again after acquiring write lock (another goroutine may have inserted it)
-	if p, exists := s.documentPages[pageKey]; exists {
-		// Promote LRU position
-		if elem, ok := s.pageLRUElements[pageKey]; ok {
-			s.pageLRUOrder.MoveToFront(elem)
-		}
-		s.documentPagesMutex.Unlock()
-		s.pageShardLocks[shardIdx].Unlock()
+	// Acquire write lock to insert into cache
+	shard.mu.Lock()
+	// Double-check after acquiring write lock (another goroutine may have inserted it)
+	if p, exists := shard.pages[pageKey]; exists {
+		// Another goroutine inserted it - just return (LRU was updated by inserter)
+		shard.mu.Unlock()
 		return p, nil
 	}
 	// O(1) eviction: check capacity and evict from back of LRU list
-	if len(s.documentPages) >= s.maxLoadedPages {
-		s.evictOldestPageLocked()
+	if len(shard.pages) >= shard.maxPages {
+		shard.evictOldestLocked()
 	}
 	// Insert new page and add to front of LRU
-	s.documentPages[pageKey] = page
-	elem := s.pageLRUOrder.PushFront(pageKey)
-	s.pageLRUElements[pageKey] = elem
-	s.documentPagesMutex.Unlock()
-	s.pageShardLocks[shardIdx].Unlock()
+	shard.pages[pageKey] = page
+	elem := shard.lruOrder.PushFront(pageKey)
+	shard.lruElements[pageKey] = elem
+	shard.mu.Unlock()
 	return page, nil
 }
 
@@ -2428,8 +2433,21 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 //
 // Thread Safety:
 // - Atomically checks cache and snapshots under one lock acquisition
-// - If page not in cache, loads it from disk with proper locking
+// - If page not in cache, loads it directly from disk WITHOUT caching to avoid write lock contention
 // - Returns a slice copy, safe for concurrent iteration
+//
+// DEADLOCK FIX: Previously this called GetDocumentPage() when page wasn't cached, which requires
+// a write lock. Under high concurrency with parallel page reads, this caused RWMutex starvation:
+// - Multiple readers hold RLock iterating pages
+// - One reader needs to load uncached page, releases RLock, requests write Lock
+// - Write Lock blocked waiting for readers to finish
+// - But readers are spawned in batches and new RLock requests queue behind the waiting writer
+// - Result: deadlock where nothing can progress
+//
+// Solution: Load directly from disk without caching. This is safe because:
+// 1. The write-through cache ensures any recent writes are already on disk
+// 2. For bulk read operations (joins, scans), not caching is acceptable
+// 3. Avoids the read-to-write lock upgrade pattern that causes deadlocks
 //
 // Parameters:
 //   - bundleName: Name of the bundle
@@ -2442,12 +2460,11 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, pageID uint32) ([]models.Document, error) {
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
 
-	// Acquire shard lock first to check cache
-	s.pageShardLocks[shardIdx].RLock()
-	s.documentPagesMutex.RLock()
-	page, exists := s.documentPages[pageKey]
-	s.documentPagesMutex.RUnlock()
+	// DEADLOCK FIX: Only use shard-local locking (no global lock)
+	shard.mu.RLock()
+	page, exists := shard.pages[pageKey]
 
 	if exists {
 		// Page in cache - snapshot it under the lock we already hold
@@ -2455,28 +2472,28 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 		for _, doc := range page.Documents {
 			docs = append(docs, doc)
 		}
-		s.pageShardLocks[shardIdx].RUnlock()
+		shard.mu.RUnlock()
 		return docs, nil
 	}
 
-	// Page not in cache - need to load it
-	s.pageShardLocks[shardIdx].RUnlock()
+	// Page not in cache - release lock and load directly from disk
+	// DEADLOCK FIX: Do NOT call GetDocumentPage() here as it requires write lock
+	// which can cause RWMutex starvation under high concurrency
+	shard.mu.RUnlock()
 
-	// Load page from disk (this will cache it and return it)
-	// GetDocumentPage handles its own locking
-	loadedPage, err := s.GetDocumentPage(bundleName, databaseName, pageID)
+	// Load page directly from disk without caching
+	// This avoids the write lock entirely for read-only snapshot operations
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+	loadedPage, err := s.store.LoadDocumentPage(bundleName, databaseName, pageID, databasePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load document page %d for snapshot: %w", pageID, err)
 	}
 
-	// Now snapshot the newly loaded page under proper lock
-	// Need to re-acquire lock since GetDocumentPage released it
-	s.pageShardLocks[shardIdx].RLock()
+	// Snapshot the loaded page - no locking needed since we have our own copy
 	docs := make([]models.Document, 0, len(loadedPage.Documents))
 	for _, doc := range loadedPage.Documents {
 		docs = append(docs, doc)
 	}
-	s.pageShardLocks[shardIdx].RUnlock()
 
 	return docs, nil
 }
@@ -2497,13 +2514,14 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 func (s *BundleService) snapshotPageDocumentsFromPointer(page *models.DocumentPage, databaseName string) []models.Document {
 	pageKey := fmt.Sprintf("%s:%d", page.BundleID, page.PageID)
 	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
 
-	s.pageShardLocks[shardIdx].RLock()
+	shard.mu.RLock()
 	docs := make([]models.Document, 0, len(page.Documents))
 	for _, doc := range page.Documents {
 		docs = append(docs, doc)
 	}
-	s.pageShardLocks[shardIdx].RUnlock()
+	shard.mu.RUnlock()
 
 	return docs
 }
@@ -2563,34 +2581,32 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 	docsCopied := 0
 	cachedPages := 0
 
-	// Acquire RLock once for the entire operation
-	s.documentPagesMutex.RLock()
-	defer s.documentPagesMutex.RUnlock()
-
-	// Iterate through all pages
+	// DEADLOCK FIX: Use per-shard locking instead of global mutex
+	// Iterate through all pages, acquiring shard locks as needed
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+		shardIdx := s.getPageShardIndex(pageKey)
+		shard := s.pageShards[shardIdx]
+
+		// Acquire shard-specific lock
+		shard.mu.RLock()
 
 		// Check if page is in cache
-		page, exists := s.documentPages[pageKey]
+		page, exists := shard.pages[pageKey]
 		if !exists {
 			// Page not cached - skip it (caller will fall back to streaming if needed)
+			shard.mu.RUnlock()
 			continue
 		}
 
 		cachedPages++
 
-		// Snapshot documents safely with shard lock
-		// CRITICAL: pageKey must match the format used throughout the cache (bundleName:pageID)
-		shardIdx := s.getPageShardIndex(pageKey)
-		s.pageShardLocks[shardIdx].RLock()
-
 		// Copy projected fields from each document in this page
 		for docID, doc := range page.Documents {
 			// Check effectiveLimit (Phase 4: LIMIT + no ORDER BY early termination)
 			if effectiveLimit > 0 && docsCopied >= effectiveLimit {
-				s.pageShardLocks[shardIdx].RUnlock()
-				// Reached limit - stop copying (defer will release lock)
+				shard.mu.RUnlock()
+				// Reached limit - stop copying
 				return projectedDocs, docsCopied, cachedPages, int(pageID + 1), nil
 			}
 
@@ -2611,7 +2627,7 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 			projectedDocs[docID] = projDoc
 			docsCopied++
 		}
-		s.pageShardLocks[shardIdx].RUnlock()
+		shard.mu.RUnlock()
 	}
 
 	return projectedDocs, docsCopied, cachedPages, int(pageCount), nil
@@ -2704,9 +2720,10 @@ func (s *BundleService) GetDocument(bundleName, databaseName, documentID string,
 	// Extract the document from the loaded page with proper locking
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 	shardIdx := s.getPageShardIndex(pageKey)
-	s.pageShardLocks[shardIdx].RLock()
+	shard := s.pageShards[shardIdx]
+	shard.mu.RLock()
 	doc, exists := page.Documents[documentID]
-	s.pageShardLocks[shardIdx].RUnlock()
+	shard.mu.RUnlock()
 
 	if exists {
 		return &doc, nil
@@ -2768,7 +2785,8 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 			// Acquire shard lock to safely access page.Documents
 			pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
 			shardIdx := s.getPageShardIndex(pageKey)
-			s.pageShardLocks[shardIdx].RLock()
+			shard := s.pageShards[shardIdx]
+			shard.mu.RLock()
 
 			for _, id := range ids {
 				if d, ok := page.Documents[id]; ok {
@@ -2798,7 +2816,7 @@ func (s *BundleService) GetDocumentsByIDs(bundle *models.Bundle, docIDs []string
 				}
 			}
 
-			s.pageShardLocks[shardIdx].RUnlock()
+			shard.mu.RUnlock()
 		}
 	}
 
@@ -2830,69 +2848,30 @@ func (s *BundleService) GetDocumentVersions(bundleName, databaseName, documentID
 	return s.store.GetDocumentVersions(bundleName, databaseName, documentID)
 }
 
-// evictOldestPageLocked removes the least recently used page from memory.
-// Caller must hold s.documentPagesMutex (Lock).
-// OPTIMIZATION: O(1) eviction using LRU doubly-linked list instead of O(n) map scan.
-// This eliminates the bottleneck under high concurrency where 150+ connections
-// were contending on the write lock while the old code scanned 500+ pages.
-func (s *BundleService) evictOldestPageLocked() {
-	// O(1) eviction: remove from back of LRU list (oldest)
-	if s.pageLRUOrder.Len() == 0 {
-		return
-	}
-	oldest := s.pageLRUOrder.Back()
-	if oldest == nil {
-		return
-	}
-	oldestKey := oldest.Value.(string)
-
-	s.logger.Debugf("Evicting document page %s from memory (LRU)", oldestKey)
-	if page, exists := s.documentPages[oldestKey]; exists && page.IsDirty {
-		s.logger.Debugf("Page %s is dirty, writing back to disk", oldestKey)
-		// TODO: Implement page write-back
-	}
-
-	// Remove from all tracking structures
-	delete(s.documentPages, oldestKey)
-	delete(s.pageLRUElements, oldestKey)
-	s.pageLRUOrder.Remove(oldest)
-}
-
-// removePageFromLRULocked removes a page from the LRU tracking structures.
-// Caller must hold s.documentPagesMutex (Lock).
-// This is called when deleting pages from cache outside of eviction.
-func (s *BundleService) removePageFromLRULocked(pageKey string) {
-	if elem, exists := s.pageLRUElements[pageKey]; exists {
-		s.pageLRUOrder.Remove(elem)
-		delete(s.pageLRUElements, pageKey)
-	}
-}
-
 // findDocumentInPageCache scans all cached pages to find a document by ID.
 // This is used as a fallback when the pageID from the index is stale.
 // Returns nil if document is not found in any cached page.
-// PERFORMANCE: O(cached_pages × docs_per_page) but only used for fallback cases.
+// PERFORMANCE: O(shards × docs_per_shard) but only used for fallback cases.
+// DEADLOCK FIX: Uses per-shard locking instead of global mutex.
 func (s *BundleService) findDocumentInPageCache(bundleName, documentID string) *models.Document {
-	s.documentPagesMutex.RLock()
-	defer s.documentPagesMutex.RUnlock()
-
-	// Scan all cached pages for this bundle
+	// Scan all shards for this bundle
 	prefix := bundleName + ":"
-	for key, page := range s.documentPages {
-		if !strings.HasPrefix(key, prefix) {
-			continue
-		}
 
-		// Acquire shard lock to safely access page.Documents
-		shardIdx := s.getPageShardIndex(key)
-		s.pageShardLocks[shardIdx].RLock()
-		doc, exists := page.Documents[documentID]
-		s.pageShardLocks[shardIdx].RUnlock()
-
-		if exists {
-			cp := doc
-			return &cp
+	for i := 0; i < PageCacheShardCount; i++ {
+		shard := s.pageShards[i]
+		shard.mu.RLock()
+		for key, page := range shard.pages {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			doc, exists := page.Documents[documentID]
+			if exists {
+				cp := doc
+				shard.mu.RUnlock()
+				return &cp
+			}
 		}
+		shard.mu.RUnlock()
 	}
 	return nil
 }
@@ -3136,9 +3115,10 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 		// Check if document exists in this page with proper locking
 		pageKey := fmt.Sprintf("%s:%d", bundleID, pageID)
 		shardIdx := s.getPageShardIndex(pageKey)
-		s.pageShardLocks[shardIdx].RLock()
+		shard := s.pageShards[shardIdx]
+		shard.mu.RLock()
 		_, exists := page.Documents[documentID]
-		s.pageShardLocks[shardIdx].RUnlock()
+		shard.mu.RUnlock()
 
 		if exists {
 			// Update the cache with this document's location
@@ -3558,19 +3538,27 @@ func (s *BundleService) RemoveBundle(db *models.Database, name string) error {
 	// Remove from metadata
 	delete(s.bundleMetadata, name)
 
-	// Remove any loaded document pages for this bundle
-	s.documentPagesMutex.Lock()
-	keysToDelete := make([]string, 0, 50)
-	for pageKey := range s.documentPages {
-		if strings.HasPrefix(pageKey, name+":") {
-			keysToDelete = append(keysToDelete, pageKey)
+	// Remove any loaded document pages for this bundle from all shards
+	prefix := name + ":"
+	for i := 0; i < PageCacheShardCount; i++ {
+		shard := s.pageShards[i]
+		shard.mu.Lock()
+		keysToDelete := make([]string, 0, 8)
+		for pageKey := range shard.pages {
+			if strings.HasPrefix(pageKey, prefix) {
+				keysToDelete = append(keysToDelete, pageKey)
+			}
 		}
+		for _, key := range keysToDelete {
+			// Remove from LRU tracking
+			if elem, exists := shard.lruElements[key]; exists {
+				shard.lruOrder.Remove(elem)
+				delete(shard.lruElements, key)
+			}
+			delete(shard.pages, key)
+		}
+		shard.mu.Unlock()
 	}
-	for _, key := range keysToDelete {
-		s.removePageFromLRULocked(key)
-		delete(s.documentPages, key)
-	}
-	s.documentPagesMutex.Unlock()
 
 	return nil
 }
@@ -4456,22 +4444,29 @@ func (s *BundleService) rebuildFieldIndex(bundle *models.Bundle, fieldName strin
 
 // invalidateBundlePageCache invalidates all cached pages for a bundle
 func (s *BundleService) invalidateBundlePageCache(bundleName string) {
-	s.documentPagesMutex.Lock()
-	defer s.documentPagesMutex.Unlock()
-	if s.documentPages == nil {
-		return
-	}
-	keysToDelete := make([]string, 0, 50)
-	for pageKey := range s.documentPages {
-		if strings.HasPrefix(pageKey, bundleName+":") {
-			keysToDelete = append(keysToDelete, pageKey)
+	prefix := bundleName + ":"
+	totalDeleted := 0
+	for i := 0; i < PageCacheShardCount; i++ {
+		shard := s.pageShards[i]
+		shard.mu.Lock()
+		keysToDelete := make([]string, 0, 8)
+		for pageKey := range shard.pages {
+			if strings.HasPrefix(pageKey, prefix) {
+				keysToDelete = append(keysToDelete, pageKey)
+			}
 		}
+		for _, key := range keysToDelete {
+			// Remove from LRU tracking
+			if elem, exists := shard.lruElements[key]; exists {
+				shard.lruOrder.Remove(elem)
+				delete(shard.lruElements, key)
+			}
+			delete(shard.pages, key)
+		}
+		totalDeleted += len(keysToDelete)
+		shard.mu.Unlock()
 	}
-	for _, key := range keysToDelete {
-		s.removePageFromLRULocked(key)
-		delete(s.documentPages, key)
-	}
-	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", len(keysToDelete), bundleName)
+	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", totalDeleted, bundleName)
 }
 
 // invalidateDocumentPagesForInsert invalidates only the affected page(s) after an INSERT
@@ -4479,19 +4474,22 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 // the new document was inserted (and optionally the last few pages to handle edge cases).
 // This preserves cache for other pages and avoids cold scanner on every INSERT.
 func (s *BundleService) invalidateDocumentPagesForInsert(bundleName string, pageID uint32) {
-	s.documentPagesMutex.Lock()
-	defer s.documentPagesMutex.Unlock()
-	if s.documentPages == nil {
-		return
-	}
-
 	// Invalidate the page where the document was inserted
 	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
-	if _, exists := s.documentPages[pageKey]; exists {
-		s.removePageFromLRULocked(pageKey)
-		delete(s.documentPages, pageKey)
+	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
+
+	shard.mu.Lock()
+	if _, exists := shard.pages[pageKey]; exists {
+		// Remove from LRU tracking
+		if elem, exists := shard.lruElements[pageKey]; exists {
+			shard.lruOrder.Remove(elem)
+			delete(shard.lruElements, pageKey)
+		}
+		delete(shard.pages, pageKey)
 		s.logger.Debugf("Invalidated page %d in documentPages cache for bundle '%s' after INSERT", pageID, bundleName)
 	}
+	shard.mu.Unlock()
 
 	// Note: We only invalidate the specific page where the document was inserted.
 	// This is conservative and preserves cache for all other pages.
@@ -6054,14 +6052,14 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 
 	if len(pagesToCheck) > 0 {
 		// Check cached pages (no I/O - just memory lookup)
-		s.documentPagesMutex.RLock()
+		// DEADLOCK FIX: Use per-shard locking instead of global mutex
 		for pageID := range pagesToCheck {
 			pageKey := fmt.Sprintf("%s:%d", bundle.Name, pageID)
-			if page, exists := s.documentPages[pageKey]; exists {
-				// Acquire shard lock to safely access page.Documents
-				shardIdx := s.getPageShardIndex(pageKey)
-				s.pageShardLocks[shardIdx].RLock()
+			shardIdx := s.getPageShardIndex(pageKey)
+			shard := s.pageShards[shardIdx]
 
+			shard.mu.RLock()
+			if page, exists := shard.pages[pageKey]; exists {
 				for docID := range docIDSet {
 					if !stillExists[docID] {
 						if _, docExists := page.Documents[docID]; docExists {
@@ -6069,11 +6067,9 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 						}
 					}
 				}
-
-				s.pageShardLocks[shardIdx].RUnlock()
 			}
+			shard.mu.RUnlock()
 		}
-		s.documentPagesMutex.RUnlock()
 	}
 
 	// Filter documents to only those that still exist
@@ -8433,6 +8429,12 @@ func (s *BundleService) Shutdown() error {
 	// Force flush any pending index updates
 	s.forceFlushIndexUpdates()
 
+	// CRITICAL: Flush all loaded indexes to disk before closing
+	// This ensures memtable entries and write buffers are persisted
+	if err := s.FlushAllIndexesToDisk(); err != nil {
+		s.logger.Warnf("Error flushing indexes during shutdown: %v", err)
+	}
+
 	// Also flush and close write buffers
 	s.store.CloseWriteBuffers()
 
@@ -8443,14 +8445,36 @@ func (s *BundleService) Shutdown() error {
 		s.ForceMetadataPersistence()
 	}
 
-	// Close all loaded indexes properly
+	// Persist SortedIndex and close all loaded indexes properly
 	for bundleName, bundle := range s.bundleMetadata {
+		// CRITICAL: Persist SortedIndex to disk - this maintains TotalDocuments count
+		if bundle.SortedIndex != nil {
+			if err := PersistBundleSortedIndex(bundle); err != nil {
+				s.logger.Warnf("Failed to persist SortedIndex for bundle '%s': %v", bundleName, err)
+			} else {
+				s.logger.Debugf("Persisted SortedIndex for bundle '%s' (%d documents)", bundleName, bundle.SortedIndex.TotalDocuments())
+			}
+		}
+
+		// Close all loaded indexes properly
 		if bundle.Indexes != nil {
 			for indexName, indexRef := range bundle.Indexes {
 				if indexRef.IndexInstance != nil {
 					s.logger.Debugf("Closing index '%s' for bundle '%s'", indexName, bundleName)
-					// TODO Proper index closing would go here based on index type
-					// For now, just log the action
+
+					// Close hash index V3 (LSM-style)
+					if hashIndex, ok := indexRef.IndexInstance.(*hashindex.HashIndexV3); ok {
+						if err := hashIndex.Close(); err != nil {
+							s.logger.Warnf("Failed to close hash index '%s' for bundle '%s': %v", indexName, bundleName, err)
+						}
+					}
+
+					// Close BTree index if it has a Close method
+					if btreeIndex, ok := indexRef.IndexInstance.(interface{ Close() error }); ok {
+						if err := btreeIndex.Close(); err != nil {
+							s.logger.Warnf("Failed to close BTree index '%s' for bundle '%s': %v", indexName, bundleName, err)
+						}
+					}
 				}
 			}
 		}
@@ -8531,7 +8555,7 @@ func (s *BundleService) CloseAllScanners() {
 
 // invalidateDocumentPage invalidates the page cache for a specific document
 // Uses the documentPageMap for O(1) lookup when available, otherwise invalidates all pages.
-// Lock order: pageCacheMutex before documentPagesMutex.
+// DEADLOCK FIX: Uses per-shard locking instead of global mutex.
 func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	s.pageCacheMutex.Lock()
 	defer s.pageCacheMutex.Unlock()
@@ -8539,10 +8563,17 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	if bundlePages, exists := s.documentPageMap[bundleName]; exists {
 		if pageID, hasPage := bundlePages[documentID]; hasPage {
 			pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
-			s.documentPagesMutex.Lock()
-			s.removePageFromLRULocked(pageKey)
-			delete(s.documentPages, pageKey)
-			s.documentPagesMutex.Unlock()
+			shardIdx := s.getPageShardIndex(pageKey)
+			shard := s.pageShards[shardIdx]
+
+			shard.mu.Lock()
+			// Remove from LRU tracking
+			if elem, exists := shard.lruElements[pageKey]; exists {
+				shard.lruOrder.Remove(elem)
+				delete(shard.lruElements, pageKey)
+			}
+			delete(shard.pages, pageKey)
+			shard.mu.Unlock()
 
 			delete(bundlePages, documentID)
 			if len(bundlePages) == 0 {
@@ -8555,22 +8586,32 @@ func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	}
 
 	// Fall back to invalidating all pages for this bundle
-	s.documentPagesMutex.Lock()
-	keysToDelete := make([]string, 0, 50)
-	for pageKey := range s.documentPages {
-		if strings.HasPrefix(pageKey, bundleName+":") {
-			keysToDelete = append(keysToDelete, pageKey)
+	prefix := bundleName + ":"
+	totalDeleted := 0
+	for i := 0; i < PageCacheShardCount; i++ {
+		shard := s.pageShards[i]
+		shard.mu.Lock()
+		keysToDelete := make([]string, 0, 8)
+		for pageKey := range shard.pages {
+			if strings.HasPrefix(pageKey, prefix) {
+				keysToDelete = append(keysToDelete, pageKey)
+			}
 		}
+		for _, key := range keysToDelete {
+			// Remove from LRU tracking
+			if elem, exists := shard.lruElements[key]; exists {
+				shard.lruOrder.Remove(elem)
+				delete(shard.lruElements, key)
+			}
+			delete(shard.pages, key)
+		}
+		totalDeleted += len(keysToDelete)
+		shard.mu.Unlock()
 	}
-	for _, key := range keysToDelete {
-		s.removePageFromLRULocked(key)
-		delete(s.documentPages, key)
-	}
-	s.documentPagesMutex.Unlock()
 
 	delete(s.documentPageMap, bundleName)
 	delete(s.documentPageMapFIFO, bundleName)
-	s.logger.Debugf("Invalidated all pages for bundle %s (document %s not in page map)", bundleName, documentID)
+	s.logger.Debugf("Invalidated %d pages for bundle %s (document %s not in page map)", totalDeleted, bundleName, documentID)
 }
 
 // flushHashIndexToDisk persists hash index changes to disk for durability

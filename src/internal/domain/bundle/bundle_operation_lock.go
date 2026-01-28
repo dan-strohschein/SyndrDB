@@ -201,30 +201,22 @@ func (bol *BundleOperationLock) ReleaseWriteLock() {
 //
 // The timeout prevents indefinite waits in case of stuck operations.
 // A timeout of 0 means wait indefinitely (not recommended).
+// CRITICAL FIX: Uses polling instead of goroutine+cond.Wait to prevent goroutine leaks
 func (bol *BundleOperationLock) WaitForActiveOperations(timeout time.Duration) error {
 	// Mark that a rename is in progress to block new operations
 	bol.renameInProgress.Store(true)
 
-	// Create a channel for timeout
-	done := make(chan bool, 1)
-	
-	go func() {
-		bol.mutex.Lock()
-		defer bol.mutex.Unlock()
+	// CRITICAL FIX: Use polling with short sleeps instead of spawning a goroutine
+	// The previous implementation spawned a goroutine that would:
+	// 1. Block on cond.Wait() holding the mutex
+	// 2. If timeout occurred, the goroutine would leak AND hold the mutex forever
+	// This polling approach avoids both issues
+	startTime := time.Now()
+	pollInterval := 5 * time.Millisecond
 
-		// Wait until both readers and writers reach zero
-		for atomic.LoadInt64(&bol.activeReaders) > 0 || atomic.LoadInt64(&bol.activeWriters) > 0 {
-			bol.cond.Wait()
-		}
-		done <- true
-	}()
-
-	// Wait with timeout if specified
-	if timeout > 0 {
-		select {
-		case <-done:
-			return nil
-		case <-time.After(timeout):
+	for {
+		// Check timeout first
+		if timeout > 0 && time.Since(startTime) >= timeout {
 			// Timeout occurred - clear the rename flag so operations can resume
 			bol.renameInProgress.Store(false)
 			readers := atomic.LoadInt64(&bol.activeReaders)
@@ -234,11 +226,17 @@ func (bol *BundleOperationLock) WaitForActiveOperations(timeout time.Duration) e
 				bol.bundleName, readers, writers,
 			)
 		}
-	}
 
-	// No timeout - wait indefinitely
-	<-done
-	return nil
+		// Check if all operations are complete
+		readers := atomic.LoadInt64(&bol.activeReaders)
+		writers := atomic.LoadInt64(&bol.activeWriters)
+		if readers == 0 && writers == 0 {
+			return nil // Success - all operations completed
+		}
+
+		// Sleep briefly before checking again
+		time.Sleep(pollInterval)
+	}
 }
 
 // CompleteAdministrativeOperation should be called after an administrative

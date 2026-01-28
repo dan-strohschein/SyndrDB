@@ -372,13 +372,32 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 
 		// Cache miss - implement singleflight to prevent thundering herd
 		// Only one goroutine parses the file while others wait
+		// CRITICAL FIX: Added timeout to prevent indefinite blocking if parser goroutine fails
 	singleflightRetry:
 		bse.parseInFlightMutex.Lock()
 		waitCh, isInflight := bse.parseInFlight[cacheKey]
 		if isInflight {
 			bse.parseInFlightMutex.Unlock()
-			// Wait for the in-flight parse to complete
-			<-waitCh
+			// CRITICAL FIX: Wait for the in-flight parse to complete WITH TIMEOUT
+			// If the parsing goroutine panics or hangs, this prevents indefinite blocking
+			select {
+			case <-waitCh:
+				// Success - parsing complete
+			case <-time.After(30 * time.Second):
+				// Timeout - parsing goroutine may be stuck
+				// Force cleanup of stale entry and retry as the parser
+				if bse.logger != nil {
+					bse.logger.Warnf("Timeout waiting for in-flight parse of %s, cleaning up stale entry", cacheKey)
+				}
+				bse.parseInFlightMutex.Lock()
+				if ch, exists := bse.parseInFlight[cacheKey]; exists && ch == waitCh {
+					delete(bse.parseInFlight, cacheKey)
+					// Note: We don't close the channel here as the original goroutine may still reference it
+					// The channel will be garbage collected when all references are gone
+				}
+				bse.parseInFlightMutex.Unlock()
+				goto singleflightRetry
+			}
 			// Re-check cache after waiting (it should be populated now)
 			bse.parsedDocsCacheMutex.RLock()
 			cached, cacheHit = bse.parsedDocsCache[cacheKey]
@@ -405,43 +424,55 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 		bse.parseInFlight[cacheKey] = doneCh
 		bse.parseInFlightMutex.Unlock()
 
-		// Helper to clean up in-flight entry (must be called before continue/break)
-		cleanupInFlight := func() {
-			bse.parseInFlightMutex.Lock()
-			delete(bse.parseInFlight, cacheKey)
-			bse.parseInFlightMutex.Unlock()
-			close(doneCh)
-		}
+		// CRITICAL FIX: Use a separate function with deferred cleanup to ensure cleanup runs on panic
+		// This prevents other goroutines from blocking forever if we panic during parsing
+		fileDocuments, fileDeletedIDs, fileTotalDocs, parseErr := func() (map[string]models.Document, map[string]bool, uint32, error) {
+			// Deferred cleanup ensures channel is closed even on panic
+			cleanedUp := false
+			defer func() {
+				if !cleanedUp {
+					bse.parseInFlightMutex.Lock()
+					delete(bse.parseInFlight, cacheKey)
+					bse.parseInFlightMutex.Unlock()
+					close(doneCh)
+				}
+			}()
 
-		// Check if file exists (skip if not - may have been compacted)
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			if bse.logger != nil && settings.GetSettings().Debug {
-				bse.logger.Debugf("Skipping non-existent file %s (likely compacted)", filePath)
+			// Check if file exists (skip if not - may have been compacted)
+			if _, err := os.Stat(filePath); os.IsNotExist(err) {
+				if bse.logger != nil && settings.GetSettings().Debug {
+					bse.logger.Debugf("Skipping non-existent file %s (likely compacted)", filePath)
+				}
+				return nil, nil, 0, nil // Not an error, just skip
 			}
-			cleanupInFlight()
+
+			// Use file-read cache to avoid repeated full-file reads
+			data, err := bse.getOrReadFile(filePath)
+			if err != nil {
+				bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
+				return nil, nil, 0, nil // Not fatal, just skip this file
+			}
+
+			// Parse ALL documents from this file (not just page range) so we can cache them
+			// This is a one-time cost per file; subsequent page loads use the cache
+			docs, deleted, total, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &data)
+			if err != nil {
+				bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
+				return nil, nil, 0, nil // Not fatal, just skip this file
+			}
+
+			// Cache the parsed results
+			bse.cacheParsedDocs(cacheKey, docs, deleted, total)
+
+			// Mark as successfully cleaned up (defer will close channel)
+			cleanedUp = false // Let defer handle cleanup
+			return docs, deleted, total, nil
+		}()
+
+		// Skip this file if parsing failed or file didn't exist
+		if parseErr != nil || fileDocuments == nil {
 			continue
 		}
-
-		// Use file-read cache to avoid repeated full-file reads
-		data, err := bse.getOrReadFile(filePath)
-		if err != nil {
-			bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
-			cleanupInFlight()
-			continue
-		}
-
-		// Parse ALL documents from this file (not just page range) so we can cache them
-		// This is a one-time cost per file; subsequent page loads use the cache
-		fileDocuments, fileDeletedIDs, fileTotalDocs, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &data)
-		if err != nil {
-			bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
-			cleanupInFlight()
-			continue
-		}
-
-		// Cache the parsed results
-		bse.cacheParsedDocs(cacheKey, fileDocuments, fileDeletedIDs, fileTotalDocs)
-		cleanupInFlight()
 
 		// Merge documents with last-write-wins
 		for docID, doc := range fileDocuments {

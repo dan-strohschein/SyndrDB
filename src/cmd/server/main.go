@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof" // Import for side effects - registers pprof handlers
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -378,6 +380,17 @@ func main() {
 	if err := srv.Start(); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+
+	// Start pprof debug server on port 6060 for profiling and debugging
+	// Access goroutine dump at: http://localhost:6060/debug/pprof/goroutine?debug=2
+	go func() {
+		pprofAddr := "localhost:6060"
+		log.Printf("🔍 pprof debug server starting on http://%s/debug/pprof/", pprofAddr)
+		log.Printf("   Goroutine dump: curl http://%s/debug/pprof/goroutine?debug=2 > goroutine_dump.txt", pprofAddr)
+		if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			log.Printf("pprof server error: %v", err)
+		}
+	}()
 
 	// Log WHERE clause SIMD configuration (Phase 1 optimization)
 	if args.WhereSIMDEnabled {

@@ -306,12 +306,15 @@ func generateIPValidationHash(sessionID, clientIP, userAgent string) string {
 }
 
 // validateSessionBinding validates IP and user agent binding for session security
+// RACE FIX: This function now requires the caller to hold session.mu.RLock or session.mu.Lock
+// to avoid race conditions when reading session fields
 func validateSessionBinding(session *Session, clientIP, userAgent string) error {
 	if session == nil {
 		return errors.New(errors.ERR_VALIDATION_FIELD,
 			"session is nil", errors.LayerAPI)
 	}
 
+	// CRITICAL: Caller must hold session.mu lock to safely read these fields
 	// Check IP address binding
 	if session.ClientIP != clientIP {
 		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
@@ -524,6 +527,34 @@ func (sm *SessionManager) GetActiveSessionsByTxID() map[string]string {
 	return activeTxMap
 }
 
+// GetAllActiveSessionIDs returns all session IDs that are currently active
+// This includes sessions processing regular queries (auto-commit mode), not just
+// those with explicit transactions. Used by lock cleanup to avoid incorrectly
+// releasing locks from sessions that are actively processing queries.
+// CRITICAL: Without this, sessions running queries outside explicit transactions
+// would have their locks released by CleanupOrphanedLocks, causing data corruption
+// or query failures.
+func (sm *SessionManager) GetAllActiveSessionIDs() map[string]bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	activeIDs := make(map[string]bool, len(sm.sessions))
+
+	// Include ALL sessions - they may be processing queries even without explicit transactions
+	for sessionID, session := range sm.sessions {
+		// Only include sessions that are not expired or terminated
+		session.mu.RLock()
+		state := session.State
+		session.mu.RUnlock()
+
+		if state != SessionStateExpired && state != SessionStateTerminated {
+			activeIDs[sessionID] = true
+		}
+	}
+
+	return activeIDs
+}
+
 // InvalidateSession invalidates a specific session
 func (sm *SessionManager) InvalidateSession(sessionID string) error {
 	sm.mu.Lock()
@@ -636,6 +667,7 @@ func (sm *SessionManager) TerminateUserSessions(username string, connectionMap m
 }
 
 // UpdateActivity updates the last activity time for a session with security validation
+// DEADLOCK FIX: Acquire session.mu first, then validate, to avoid races and ensure atomicity
 func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) error {
 	sm.mu.RLock()
 	session, exists := sm.sessions[sessionID]
@@ -647,7 +679,11 @@ func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) 
 			errors.LayerAuth).WithContext("session_id", sessionID)
 	}
 
-	// Validate session binding before updating activity
+	// RACE FIX: Acquire session lock BEFORE validating to avoid race conditions
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	// Validate session binding with lock held (required by validateSessionBinding)
 	if err := validateSessionBinding(session, clientIP, userAgent); err != nil {
 		session.Logger.Warnw("Session security validation failed during activity update",
 			"error", err,
@@ -662,9 +698,6 @@ func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) 
 		return errors.WrapWithMessage(err, errors.ERR_VALIDATION_FIELD,
 			"session security validation failed", errors.LayerAuth)
 	}
-
-	session.mu.Lock()
-	defer session.mu.Unlock()
 
 	session.LastActivity = time.Now()
 	session.ExpiresAt = time.Now().Add(session.Timeout)
@@ -707,6 +740,7 @@ func (sm *SessionManager) SetDatabaseContext(sessionID string, databaseName stri
 }
 
 // ValidateSessionSecurity validates session security binding
+// RACE FIX: Acquire session lock before validation to avoid race conditions
 func (sm *SessionManager) ValidateSessionSecurity(sessionID, clientIP, userAgent string) error {
 	sm.mu.RLock()
 	session, exists := sm.sessions[sessionID]
@@ -717,6 +751,10 @@ func (sm *SessionManager) ValidateSessionSecurity(sessionID, clientIP, userAgent
 			fmt.Sprintf("session %s not found", sessionID),
 			errors.LayerAuth).WithContext("session_id", sessionID)
 	}
+
+	// RACE FIX: Acquire session lock BEFORE validating (required by validateSessionBinding)
+	session.mu.RLock()
+	defer session.mu.RUnlock()
 
 	return validateSessionBinding(session, clientIP, userAgent)
 }
@@ -956,31 +994,50 @@ func (sm *SessionManager) deleteTempFileWithRetry(filePath string, maxRetries in
 }
 
 // cleanupExpiredSessions removes expired sessions
+// DEADLOCK FIX: Check expiration with proper locking, collect session IDs only,
+// then cleanup outside the sm.mu lock to avoid lock ordering violations
 func (sm *SessionManager) cleanupExpiredSessions() {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	now := time.Now()
-	expiredSessions := make([]*Session, 0, 20)
 
+	// PHASE 1: Find expired sessions (with proper locking)
+	// Only hold sm.mu.RLock briefly to collect session references
+	sm.mu.RLock()
+	expiredSessions := make([]*Session, 0, 20)
 	for _, session := range sm.sessions {
-		if now.After(session.ExpiresAt) {
-			session.mu.Lock()
-			session.State = SessionStateExpired
-			session.mu.Unlock()
+		// Check expiration with session lock held to avoid races
+		session.mu.RLock()
+		isExpired := now.After(session.ExpiresAt)
+		session.mu.RUnlock()
+
+		if isExpired {
 			expiredSessions = append(expiredSessions, session)
 		}
 	}
+	sm.mu.RUnlock()
 
-	for _, session := range expiredSessions {
-		sm.logger.Infow("Cleaning up expired session",
-			"sessionID", session.SessionID,
-			"username", session.Username,
-			"expiredAt", session.ExpiresAt)
-		sm.cleanupSession(session)
-	}
-
+	// PHASE 2: Cleanup expired sessions (with sm.mu write lock)
+	// Now acquire locks in the correct order for each session
 	if len(expiredSessions) > 0 {
+		for _, session := range expiredSessions {
+			// Mark as expired with proper locking
+			session.mu.Lock()
+			session.State = SessionStateExpired
+			expiresAt := session.ExpiresAt
+			sessionID := session.SessionID
+			username := session.Username
+			session.mu.Unlock()
+
+			sm.logger.Infow("Cleaning up expired session",
+				"sessionID", sessionID,
+				"username", username,
+				"expiredAt", expiresAt)
+
+			// Cleanup with sm.mu held (cleanupSession expects this)
+			sm.mu.Lock()
+			sm.cleanupSession(session)
+			sm.mu.Unlock()
+		}
+
 		sm.logger.Infow("Cleaned up expired sessions", "count", len(expiredSessions))
 	}
 }

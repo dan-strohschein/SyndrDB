@@ -82,71 +82,84 @@ func NewOrderedQueue(maxSize int) *OrderedQueue {
 }
 
 // Enqueue adds an operation to the queue, blocking if queue is full
+// CRITICAL FIX: Uses polling instead of indefinite sync.Cond.Wait() to prevent blocking forever
 func (oq *OrderedQueue) Enqueue(op AsyncOperation) error {
-	oq.mu.Lock()
-	defer oq.mu.Unlock()
-
-	if oq.closed {
-		return fmt.Errorf("queue is closed")
-	}
-
-	// Wait for space if queue is full
 	waitStart := time.Now()
-	for oq.heap.Len() >= oq.maxSize {
-		oq.backpressure.backpressureActive = true
+	pollInterval := 5 * time.Millisecond
 
-		// Check if we've waited too long
+	for {
+		oq.mu.Lock()
+
+		if oq.closed {
+			oq.mu.Unlock()
+			return fmt.Errorf("queue is closed")
+		}
+
+		// Check if there's space in the queue
+		if oq.heap.Len() < oq.maxSize {
+			oq.backpressure.backpressureActive = false
+
+			// Add operation to heap
+			heap.Push(oq.heap, op)
+
+			// Signal waiting dequeuers
+			oq.notEmpty.Signal()
+
+			oq.mu.Unlock()
+			return nil
+		}
+
+		// Queue is full - check timeout
+		oq.backpressure.backpressureActive = true
 		if time.Since(waitStart) > oq.backpressure.maxWaitTime {
 			oq.backpressure.rejectedCount++
+			oq.mu.Unlock()
 			return fmt.Errorf("queue full: rejected after waiting %v", oq.backpressure.maxWaitTime)
 		}
 
-		oq.notFull.Wait()
-
-		if oq.closed {
-			return fmt.Errorf("queue closed while waiting")
-		}
+		// Release lock and poll after short sleep
+		oq.mu.Unlock()
+		time.Sleep(pollInterval)
 	}
-
-	oq.backpressure.backpressureActive = false
-
-	// Add operation to heap
-	heap.Push(oq.heap, op)
-
-	// Signal waiting dequeuers
-	oq.notEmpty.Signal()
-
-	return nil
 }
 
 // Dequeue removes and returns the next operation in sequence order
+// CRITICAL FIX: Uses polling instead of indefinite sync.Cond.Wait() to prevent blocking forever
 func (oq *OrderedQueue) Dequeue(ctx context.Context) (AsyncOperation, error) {
-	oq.mu.Lock()
-	defer oq.mu.Unlock()
+	pollInterval := 5 * time.Millisecond
 
-	// Wait for operations to be available
-	for oq.heap.Len() == 0 {
-		if oq.closed {
-			return nil, fmt.Errorf("queue is closed")
-		}
-
-		// Check if context is cancelled
+	for {
+		// Check context first (outside of lock for responsiveness)
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
 
-		oq.notEmpty.Wait()
+		oq.mu.Lock()
+
+		// Check if queue is closed
+		if oq.closed && oq.heap.Len() == 0 {
+			oq.mu.Unlock()
+			return nil, fmt.Errorf("queue is closed")
+		}
+
+		// Check if there are operations available
+		if oq.heap.Len() > 0 {
+			// Get operation with lowest sequence number
+			op := heap.Pop(oq.heap).(AsyncOperation)
+
+			// Signal waiting enqueuers
+			oq.notFull.Signal()
+
+			oq.mu.Unlock()
+			return op, nil
+		}
+
+		// No operations available - release lock and poll
+		oq.mu.Unlock()
+		time.Sleep(pollInterval)
 	}
-
-	// Get operation with lowest sequence number
-	op := heap.Pop(oq.heap).(AsyncOperation)
-
-	// Signal waiting enqueuers
-	oq.notFull.Signal()
-
-	return op, nil
 }
 
 // Size returns the current number of operations in the queue
