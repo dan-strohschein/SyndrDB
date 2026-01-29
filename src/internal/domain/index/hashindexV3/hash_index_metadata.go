@@ -306,8 +306,8 @@ func (idx *HashIndexV3) RestoreGlobalSequence() error {
 	return nil
 }
 
-// scanLatestFileForMaxSequence scans only the most recent entry file
-// This is much faster than scanning all files (O(1 file) vs O(N files))
+// scanLatestFileForMaxSequence scans file headers to find max sequence
+// Optimized to read headers only (not full entry data) for fast startup
 func (idx *HashIndexV3) scanLatestFileForMaxSequence() (uint64, error) {
 	// Get list of entry files
 	files, err := idx.storage.GetEntryFiles()
@@ -320,14 +320,45 @@ func (idx *HashIndexV3) scanLatestFileForMaxSequence() (uint64, error) {
 		return 0, nil
 	}
 
-	// Get the most recent file (last in sorted list)
-	latestFile := files[len(files)-1]
-
-	// Scan it for max sequence
-	maxSeq, err := idx.storage.ScanFileForMaxSequence(latestFile)
-	if err != nil {
-		return 0, fmt.Errorf("failed to scan file %s: %w", latestFile, err)
+	// For bucket-based storage, entries are distributed across multiple bucket files
+	// Read headers from ALL files to find the true maximum sequence number
+	// This is fast because we only read small headers, not full entry data
+	var maxSeq uint64
+	successCount := 0
+	for _, filename := range files {
+		filePath := filepath.Join(idx.config.DataDir, filename)
+		
+		// Read just the header (much faster than scanning entries)
+		header, _, err := idx.storage.headerManager.ReadHeader(filePath)
+		if err != nil {
+			// If header read fails, fall back to entry scanning for this file
+			idx.logger.Debugw("Header read failed, falling back to entry scan",
+				"file", filename,
+				"error", err)
+			fileMaxSeq, scanErr := idx.storage.ScanFileForMaxSequence(filename)
+			if scanErr != nil {
+				idx.logger.Warnw("Failed to scan file for max sequence, skipping",
+					"file", filename,
+					"error", scanErr)
+				continue
+			}
+			if fileMaxSeq > maxSeq {
+				maxSeq = fileMaxSeq
+			}
+			successCount++
+		} else if header != nil {
+			// Fast path: use header's GlobalSequence
+			if header.GlobalSequence > maxSeq {
+				maxSeq = header.GlobalSequence
+			}
+			successCount++
+		}
 	}
+
+	idx.logger.Debugw("Read headers from index files for max sequence",
+		"totalFiles", len(files),
+		"successfulReads", successCount,
+		"maxSequence", maxSeq)
 
 	return maxSeq, nil
 }

@@ -131,6 +131,11 @@ type Arguments struct {
 	// Hash Index Configuration
 	IndexSequenceSafetyMargin int `yaml:"index_sequence_safety_margin"` // Safety margin for sequence recovery (default: 100)
 
+	// RCU (Read-Copy-Update) Write Mode Configuration
+	// Enables lock-free concurrent writes using PostgreSQL-inspired MVCC patterns
+	EnableRCUWrites  bool `yaml:"enable_rcu_writes"`   // Enable RCU-based lock-free updates (default: true)
+	RCUGracePeriodMs int  `yaml:"rcu_grace_period_ms"` // Grace period in milliseconds before cleanup (default: 100)
+
 	// B-Tree Index Persistence Configuration
 	// TODO: Add B-Tree index persistence configuration settings (BTreeSyncMode, BTreeBatchSize, BTreeFlushInterval, BTreeMaxDirtyPages, BTreeEnableWAL, BTreeCheckpointInterval, BTreeWALRetentionSeconds, BTreeGroupCommitDelay)
 	BTreeSyncMode            string `yaml:"btree_sync_mode"`             // Sync mode: "immediate", "batched", "scheduled" (default: "batched")
@@ -167,10 +172,20 @@ type Arguments struct {
 
 	// JOIN Concurrency: limits how many joins run full build+probe at once to avoid memory spikes
 	// (e.g. 300 connections each doing a join). 0 = no limit.
-	JoinConcurrencyLimit int `yaml:"join_concurrency_limit"` // Max concurrent join executions; 0 = no limit (default: 16)
+	JoinConcurrencyLimit int `yaml:"join_concurrency_limit"` // Max concurrent join executions; 0 = no limit (default: 128)
 
 	// JOIN Memory Configuration (PostgreSQL-style work_mem for joins)
 	JoinMemoryLimitMB int `yaml:"join_memory_limit_mb"` // Memory limit per join in MB (default: 64, auto-detects higher for systems with >8GB RAM)
+
+	// JOIN Memory Pool: Total memory budget (MB) for weighted semaphore - large JOINs (>10MB estimated)
+	// acquire weighted slots from this pool to prevent OOM under high concurrency
+	JoinMemoryPoolMB int `yaml:"join_memory_pool_mb"` // Total memory pool for large JOINs in MB (default: 2048)
+
+	// JOIN Cache: Feature flag to enable sharded hash table cache (vs deprecated single-lock cache)
+	UseShardedHashTableCache bool `yaml:"use_sharded_hash_table_cache"` // Use sharded cache for better concurrency (default: true)
+
+	// TryLock Failure Monitoring: Log warning when TryLock failure rate exceeds this threshold (0.0-1.0)
+	TryLockFailureWarningThreshold float64 `yaml:"trylock_failure_warning_threshold"` // Threshold for TryLock failure warnings (default: 0.50)
 
 	// WHERE SIMD Configuration
 	WhereSIMDEnabled            bool `yaml:"where_simd_enabled"`             // Enable SIMD acceleration for WHERE clause comparisons (default: true)
@@ -184,6 +199,12 @@ type Arguments struct {
 
 	// GROUP BY Strategy Configuration
 	GroupByHashAggregateRowThreshold int `yaml:"groupby_hash_aggregate_row_threshold"` // Rows below this use HashAggregate, above use Sort+GroupAggregate (default: 10000)
+
+	// GROUP BY Performance Optimization Configuration (Phases 1-3)
+	GroupByParallelPageWorkers int  `yaml:"groupby_parallel_page_workers"` // Workers for parallel page loading (default: max(8, numCPU))
+	GroupByCacheWarmingEnabled bool `yaml:"groupby_cache_warming_enabled"` // Enable cache warming on startup (default: true)
+	GroupByCacheWarmingMaxMB   int  `yaml:"groupby_cache_warming_max_mb"`  // Memory budget for warmed cache in MB (default: 512)
+	GroupBySnapshotStalenessMs int  `yaml:"groupby_snapshot_staleness_ms"` // Max staleness for COW snapshots in ms (default: 10)
 
 	// Backup & Restore Configuration
 	BackupDir            string `yaml:"backup_dir"`             // Directory for backup files (default: "./backups")
@@ -233,6 +254,16 @@ type Arguments struct {
 	MVCCGCPauseThreshold       int  `yaml:"mvcc_gc_pause_threshold"`        // Active query pause threshold (default: 500)
 	MVCCGCMaxVersionsThreshold int  `yaml:"mvcc_gc_max_versions_threshold"` // Trigger compaction if document has >N versions (default: 5)
 	MVCCGCMinVersionAgeHours   int  `yaml:"mvcc_gc_min_version_age_hours"`  // Minimum age in hours before considering version for GC (default: 1)
+
+	// Index Maintenance (Automatic Index Rebuild) Configuration
+	IndexMaintenanceEnabled              bool    `yaml:"index_maintenance_enabled"`                // Enable automatic index rebuilding (default: true)
+	IndexMaintenanceIntervalSeconds      int     `yaml:"index_maintenance_interval_seconds"`       // Evaluation interval in seconds (default: 300 = 5 minutes)
+	IndexMaintenanceBatchSize            int     `yaml:"index_maintenance_batch_size"`             // Max indexes to rebuild per cycle (default: 3)
+	IndexMaintenanceStalenessThreshold   float64 `yaml:"index_maintenance_staleness_threshold"`    // Staleness % to trigger rebuild (default: 0.20 = 20%)
+	IndexMaintenanceMinRebuildInterval   int     `yaml:"index_maintenance_min_rebuild_interval"`   // Min seconds between rebuilds of same index (default: 3600 = 1 hour)
+	IndexMaintenanceWorkerCount          int     `yaml:"index_maintenance_worker_count"`           // Concurrent rebuild workers (default: 2)
+	IndexMaintenancePauseThreshold       int     `yaml:"index_maintenance_pause_threshold"`        // Pause if active queries >= this (default: 500)
+	IndexMaintenanceQueryFrequencyWeight float64 `yaml:"index_maintenance_query_frequency_weight"` // Weight for query frequency in priority (default: 1.0)
 
 	// Concurrency & Locking Configuration (HIGH-007)
 	LockTimeoutSeconds           int `yaml:"lock_timeout_seconds"`             // Timeout for lock acquisition in seconds (default: 30)
@@ -389,11 +420,20 @@ func GetSettings() *Arguments {
 			JoinSIMDEnabled:    true, // Enable SIMD for JOIN operations
 			JoinSIMDAutoDetect: true, // Auto-detect CPU capabilities
 
-			// JOIN Concurrency: 16 by default to avoid O(connections) memory; 0 = no limit
-			JoinConcurrencyLimit: 16,
+			// JOIN Concurrency: 128 by default to allow high parallelism; large joins use weighted semaphore
+			JoinConcurrencyLimit: 128,
 
 			// JOIN Memory Configuration (PostgreSQL-style work_mem for joins)
 			JoinMemoryLimitMB: getDefaultJoinMemoryLimitMB(), // Default 64MB, or 128MB if system has >8GB RAM
+
+			// JOIN Memory Pool: 2GB default for weighted semaphore to prevent OOM under extreme load
+			JoinMemoryPoolMB: 2048,
+
+			// JOIN Cache: Use sharded cache by default for better concurrency
+			UseShardedHashTableCache: true,
+
+			// TryLock Failure Monitoring: Warn when 50% of TryLock attempts fail
+			TryLockFailureWarningThreshold: 0.50,
 
 			// WHERE SIMD Configuration
 			WhereSIMDEnabled:    true, // Enable SIMD for WHERE comparisons
@@ -408,14 +448,27 @@ func GetSettings() *Arguments {
 			WhereBatchMinSize:     100,  // Activate batch SIMD for 100+ documents
 
 			// WHERE Expression Caching Configuration (Priority 4)
-			WhereExpressionCacheEnabled:      true,  // Enable expression caching and predicate reordering
-			WhereExpressionCacheSize:         1000,  // Cache 1000 compiled expressions
-			GroupByHashAggregateRowThreshold: 10000, // Use HashAggregate for <10k rows, else Sort+GroupAggregate
-			SortEnableParallel:               false, // DEPRECATED: use SortParallelEnabled
-			SortParallelThreshold:            10000, // DEPRECATED: use SortParallelMinSize
-			SortParallelEnabled:              true,  // Phase 5: Enable parallel sorting
-			SortParallelMinSize:              10000, // Phase 5: 10k+ docs for parallel sort
-			SortMaxMemoryMB:                  512,   // 512MB memory limit
+			WhereExpressionCacheEnabled:      true,    // Enable expression caching and predicate reordering
+			WhereExpressionCacheSize:         1000,    // Cache 1000 compiled expressions
+			GroupByHashAggregateRowThreshold: 1000000, // Use HashAggregate for <1,000,000 rows, else Sort+GroupAggregate
+
+			// GROUP BY Performance Optimization Defaults (Phases 1-3)
+			GroupByParallelPageWorkers: func() int {
+				workers := runtime.NumCPU()
+				if workers < 8 {
+					return 8 // Minimum 8 workers
+				}
+				return workers // Use all CPU cores
+			}(),
+			GroupByCacheWarmingEnabled: true, // Opt-out: enabled by default
+			GroupByCacheWarmingMaxMB:   512,  // 512MB default cache budget
+			GroupBySnapshotStalenessMs: 10,   // 10ms staleness acceptable
+
+			SortEnableParallel:    false, // DEPRECATED: use SortParallelEnabled
+			SortParallelThreshold: 10000, // DEPRECATED: use SortParallelMinSize
+			SortParallelEnabled:   true,  // Phase 5: Enable parallel sorting
+			SortParallelMinSize:   10000, // Phase 5: 10k+ docs for parallel sort
+			SortMaxMemoryMB:       512,   // 512MB memory limit
 
 			// Backup & Restore Defaults
 			BackupDir:            "./backups", // Default backup directory
@@ -461,6 +514,11 @@ func GetSettings() *Arguments {
 			MVCCGCPauseThreshold:       500,  // Pause when 500+ queries active
 			MVCCGCMaxVersionsThreshold: 5,    // Trigger compaction if document has >5 versions
 			MVCCGCMinVersionAgeHours:   1,    // Minimum 1 hour age before considering version for GC
+
+			// RCU (Read-Copy-Update) Write Mode Defaults
+			// Lock-free concurrent writes using PostgreSQL-inspired patterns
+			EnableRCUWrites:  true, // Enable RCU-based lock-free updates by default
+			RCUGracePeriodMs: 100,  // 100ms grace period for in-flight reads
 
 			// Concurrency & Locking Configuration Defaults (HIGH-007)
 			LockTimeoutSeconds:           30, // 30 seconds timeout for lock acquisition

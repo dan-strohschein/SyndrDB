@@ -155,6 +155,61 @@ func (pb *PlanBuilder) BuildPlan(
 	// Add sorting for deterministic ordering, but skip for aggregate-only queries
 	// (no GROUP BY) when there's no explicit ORDER BY, as there's nothing to sort
 	if !query.IsAggregateOnly || query.HasOrderBy() {
+		// OPTIMIZATION: Skip SortNode if base tree is BTreeOrderedScanNode with matching ORDER BY
+		// BTreeOrderedScanNode already returns documents in sorted order (ASC or DESC)
+		if btreeNode, ok := currentTree.(*BTreeOrderedScanNode); ok && query.HasOrderBy() && query.OrderBy != nil {
+			if len(query.OrderBy.Fields) == 1 {
+				orderField := query.OrderBy.Fields[0]
+				fieldName := strings.Trim(orderField.FieldName, `"'`)
+				if dotIdx := strings.LastIndex(fieldName, "."); dotIdx >= 0 {
+					fieldName = fieldName[dotIdx+1:]
+				}
+				fieldName = strings.Trim(fieldName, `"'`)
+
+				isDescending := orderField.Direction == queryparser.SortDesc
+				directionStr := "ASC"
+				if isDescending {
+					directionStr = "DESC"
+				}
+
+				// Check if BTreeOrderedScanNode matches the ORDER BY requirements
+				if btreeNode.OrderedByFieldName == fieldName && btreeNode.Descending == isDescending {
+					pb.logger.Infof("SKIP SortNode: BTreeOrderedScanNode already provides ORDER BY %s %s", fieldName, directionStr)
+
+					// Also skip LimitNode if BTreeOrderedScanNode already applied the limit
+					if btreeNode.Limit > 0 && (query.HasLimit() || query.Offset > 0) {
+						pb.logger.Infof("SKIP LimitNode: BTreeOrderedScanNode already applied limit=%d", btreeNode.Limit)
+
+						// Handle OFFSET by wrapping with LimitNode that only applies OFFSET
+						if query.Offset > 0 {
+							// Need LimitNode to skip OFFSET documents from the pre-limited result
+							limitNode := NewLimitNode(
+								currentTree,
+								query.GetEffectiveLimit(),
+								query.Offset,
+								pb.logger,
+							)
+							currentTree = limitNode
+							pb.logger.Debug("Added LimitNode for OFFSET handling only")
+						}
+
+						// Skip to hierarchical transform
+						goto addHierarchicalTransform
+					}
+
+					// No limit was applied by BTreeOrderedScanNode, continue to add LimitNode if needed
+					goto addLimitNode
+				}
+			}
+		}
+
+		// OPTIMIZATION: Skip SortNode if JoinExecutionNode uses streaming Top-N (already sorted)
+		// JoinExecutionNode with OrderBy + Limit uses heap-based merge producing sorted output
+		if pb.checkJoinProvidesSortedOutput(currentTree, query) {
+			pb.logger.Infof("SKIP SortNode: JoinExecutionNode already provides sorted output via streaming Top-N")
+			goto addLimitNode
+		}
+
 		// PROJECTION PUSHDOWN: Extract ORDER BY field names and pass to FullScanNode for optimization
 		// This allows the storage layer to deserialize only the sort fields (e.g., "name") instead of all fields
 		// For query: SELECT DocumentID, name FROM products ORDER BY name
@@ -198,6 +253,7 @@ func (pb *PlanBuilder) BuildPlan(
 		pb.logger.Debug("Skipping SortNode for aggregate-only query without ORDER BY (nothing to sort)")
 	}
 
+addLimitNode:
 	// Add limiting if TOP/LIMIT/OFFSET present
 	if query.HasLimit() || query.Offset > 0 {
 		limitNode, err := pb.addLimitNode(currentTree, query)
@@ -208,6 +264,7 @@ func (pb *PlanBuilder) BuildPlan(
 		pb.logger.Debug("Added LimitNode to tree")
 	}
 
+addHierarchicalTransform:
 	// Add hierarchical transform if WITH RELATIONSHIP present
 	if query.RelationshipName != "" {
 		transformNode, err := pb.addHierarchicalTransformNode(currentTree, query, database)
@@ -359,4 +416,52 @@ func (pb *PlanBuilder) addHierarchicalTransformNode(
 	)
 
 	return transformNode, nil
+}
+
+// checkJoinProvidesSortedOutput checks if JoinExecutionNode uses streaming Top-N optimization
+// Returns true if the JOIN node will produce sorted output, allowing SortNode to be skipped
+func (pb *PlanBuilder) checkJoinProvidesSortedOutput(
+	tree ExecutionNode,
+	query *queryparser.UnifiedSelectQuery,
+) bool {
+	// Check if query has ORDER BY and LIMIT (required for streaming Top-N)
+	if !query.HasOrderBy() || !query.HasLimit() {
+		return false
+	}
+
+	// Try to find JoinExecutionNode (may be wrapped in FilterNode)
+	var joinNode *JoinExecutionNode
+
+	// Direct JoinExecutionNode
+	if jen, ok := tree.(*JoinExecutionNode); ok {
+		joinNode = jen
+	}
+
+	// FilterNode wrapping JoinExecutionNode
+	if filterNode, ok := tree.(*FilterNode); ok {
+		if jen, ok := filterNode.Child.(*JoinExecutionNode); ok {
+			joinNode = jen
+		}
+	}
+
+	if joinNode == nil {
+		return false
+	}
+
+	// Check if JoinExecutionNode has ORDER BY and LIMIT configured for streaming Top-N
+	if joinNode.OrderBy == nil || len(joinNode.OrderBy.Fields) == 0 {
+		return false
+	}
+
+	if joinNode.Limit <= 0 {
+		return false
+	}
+
+	// Streaming Top-N threshold: result set must be > 10x limit
+	// Since we don't know the result set size at planning time, rely on the node's configured limit
+	// The actual decision happens at runtime in JoinExecutionNode.Execute()
+	pb.logger.Debugf("JoinExecutionNode configured for streaming Top-N: OrderBy=%d fields, Limit=%d",
+		len(joinNode.OrderBy.Fields), joinNode.Limit)
+
+	return true
 }

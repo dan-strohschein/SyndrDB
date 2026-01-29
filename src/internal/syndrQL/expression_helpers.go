@@ -269,6 +269,82 @@ func literalToString(value interface{}) string {
 	}
 }
 
+// ExtractFieldNames recursively extracts all field names referenced in an expression
+// This is used for projection pushdown - only deserialize fields needed for WHERE evaluation
+//
+// Examples:
+//   - age > 18 → ["age"]
+//   - (category == "A") AND (stock > 0) → ["category", "stock"]
+//   - "Users"."email" == "test@example.com" → ["email"]
+//   - price * 1.1 > 100 → ["price"]
+func ExtractFieldNames(expr Expression) []string {
+	seen := make(map[string]bool)
+	var result []string
+
+	extractFieldNamesRecursive(expr, seen, &result)
+	return result
+}
+
+// extractFieldNamesRecursive is the recursive helper for ExtractFieldNames
+func extractFieldNamesRecursive(expr Expression, seen map[string]bool, result *[]string) {
+	if expr == nil {
+		return
+	}
+
+	switch e := expr.(type) {
+	case *IdentifierExpression:
+		fieldName := strings.Trim(e.Name, "\"")
+		if !seen[fieldName] {
+			seen[fieldName] = true
+			*result = append(*result, fieldName)
+		}
+
+	case *QualifiedIdentifierExpression:
+		// For qualified names like "Bundle"."field", extract just the field name
+		fieldName := strings.Trim(e.Field, "\"")
+		if !seen[fieldName] {
+			seen[fieldName] = true
+			*result = append(*result, fieldName)
+		}
+
+	case *BinaryExpression:
+		extractFieldNamesRecursive(e.Left, seen, result)
+		extractFieldNamesRecursive(e.Right, seen, result)
+
+	case *UnaryExpression:
+		extractFieldNamesRecursive(e.Right, seen, result)
+
+	case *GroupedExpression:
+		extractFieldNamesRecursive(e.Expression, seen, result)
+
+	case *CallExpression:
+		// Extract fields from function arguments (e.g., SUM(price))
+		for _, arg := range e.Arguments {
+			extractFieldNamesRecursive(arg, seen, result)
+		}
+
+	case *ArrayExpression:
+		// Extract fields from array elements
+		for _, elem := range e.Elements {
+			extractFieldNamesRecursive(elem, seen, result)
+		}
+
+	case *SubqueryExpression:
+		// Subqueries don't reference fields from outer scope in simple cases
+		// More complex cases would need deeper analysis
+		// Skip for now
+
+	case *IntervalExpression:
+		// Interval literals don't contain field references
+		// Skip
+
+	case *AtTimeZoneExpression:
+		extractFieldNamesRecursive(e.Expression, seen, result)
+
+	// LiteralExpression, ParameterExpression, etc. don't contain field names
+	}
+}
+
 // tokenToOperator converts a TokenType to its string operator representation
 func tokenToOperator(tok TokenType) string {
 	switch tok {

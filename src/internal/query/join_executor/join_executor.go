@@ -10,13 +10,31 @@ import (
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
 )
 
+// Join concurrency control - Two-tier system:
+// Tier 1: Counting semaphore for basic concurrency limit (fast path, no estimation)
+// Tier 2: Weighted semaphore for large JOINs to prevent OOM under extreme load
 var (
 	joinConcurrencyMu  sync.Mutex
 	joinConcurrencySem chan struct{}
 	joinConcurrencyCap int
+
+	// Weighted semaphore for large JOINs - acquires based on estimated memory
+	joinMemorySemaphore     *semaphore.Weighted
+	joinMemorySemaphorePool int64 // Total memory pool in bytes
 )
+
+// smallJoinThresholdBytes is the threshold below which joins skip weighted semaphore (10MB)
+const smallJoinThresholdBytes = 10 * 1024 * 1024
+
+// bytesPerDocumentEstimate is the estimated memory per document in hash table
+// TODO: Add document sampling for more accurate estimation if needed
+const bytesPerDocumentEstimate = 500
+
+// hashTableOverheadMultiplier accounts for hash table bucket overhead
+const hashTableOverheadMultiplier = 1.3
 
 // DefaultJoinExecutor implements the JoinExecutor interface
 // It coordinates strategy selection and execution with cost-based optimization
@@ -80,8 +98,13 @@ func (dje *DefaultJoinExecutor) Execute(request *JoinRequest) (*JoinResult, erro
 		return nil, fmt.Errorf("invalid join request: %w", err)
 	}
 
-	// Optional concurrency cap: limit how many joins run full build+probe at once (0 = disabled)
-	if cap := settings.GetSettings().JoinConcurrencyLimit; cap > 0 {
+	// Two-tier concurrency control:
+	// Tier 1: Counting semaphore - limits total concurrent JOINs (fast path)
+	// Tier 2: Weighted semaphore - limits large JOINs by estimated memory
+	globalSettings := settings.GetSettings()
+
+	// Tier 1: Basic concurrency limit (0 = disabled)
+	if cap := globalSettings.JoinConcurrencyLimit; cap > 0 {
 		joinConcurrencyMu.Lock()
 		if joinConcurrencySem == nil || joinConcurrencyCap != cap {
 			joinConcurrencySem = make(chan struct{}, cap)
@@ -93,9 +116,40 @@ func (dje *DefaultJoinExecutor) Execute(request *JoinRequest) (*JoinResult, erro
 		defer func() { <-sem }()
 	}
 
-	dje.logger.Infof("Executing join: %s ⋈ %s (type: %v, conditions: %d)",
+	// Tier 2: Weighted semaphore for large JOINs (prevents OOM under extreme load)
+	estimatedMemory := calculateJoinMemoryWeight(request)
+	var acquiredWeight int64
+	if estimatedMemory > smallJoinThresholdBytes {
+		poolMB := globalSettings.JoinMemoryPoolMB
+		if poolMB > 0 {
+			poolBytes := int64(poolMB) * 1024 * 1024
+			joinConcurrencyMu.Lock()
+			if joinMemorySemaphore == nil || joinMemorySemaphorePool != poolBytes {
+				joinMemorySemaphore = semaphore.NewWeighted(poolBytes)
+				joinMemorySemaphorePool = poolBytes
+			}
+			memSem := joinMemorySemaphore
+			joinConcurrencyMu.Unlock()
+
+			// Acquire weighted slot - blocks if pool is exhausted
+			// Use context from request for cancellation support
+			ctx := request.Context
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			if err := memSem.Acquire(ctx, estimatedMemory); err != nil {
+				return nil, fmt.Errorf("failed to acquire memory semaphore: %w", err)
+			}
+			acquiredWeight = estimatedMemory
+			defer memSem.Release(acquiredWeight)
+
+			dje.logger.Debugf("Acquired %d MB from memory pool for large JOIN", estimatedMemory/(1024*1024))
+		}
+	}
+
+	dje.logger.Infof("Executing join: %s ⋈ %s (type: %v, conditions: %d, estimated memory: %d MB)",
 		request.LeftBundle.GetName(), request.RightBundle.GetName(),
-		request.JoinType, len(request.Conditions))
+		request.JoinType, len(request.Conditions), estimatedMemory/(1024*1024))
 
 	// Apply defaults to request
 	dje.applyDefaults(request)
@@ -483,3 +537,33 @@ func (dje *DefaultJoinExecutor) executeWithCaching(request *JoinRequest) (*JoinR
 	return result, err
 }
 */
+
+// calculateJoinMemoryWeight estimates the memory usage for a join operation.
+// Used by the weighted semaphore to prevent OOM under high concurrency.
+// Returns estimated memory in bytes.
+//
+// Formula: min(leftDocs, rightDocs) * bytesPerDoc * overhead
+// - We use the smaller bundle size because that's the build side for hash join
+// - bytesPerDoc is a conservative estimate (~500 bytes)
+// - overhead accounts for hash table bucket structures (~1.3x)
+//
+// TODO: Add document sampling for more accurate estimation if needed
+func calculateJoinMemoryWeight(request *JoinRequest) int64 {
+	if request == nil || request.LeftBundle == nil || request.RightBundle == nil {
+		return 0
+	}
+
+	leftDocs := int64(request.LeftBundle.GetTotalDocuments())
+	rightDocs := int64(request.RightBundle.GetTotalDocuments())
+
+	// Build side is the smaller bundle
+	buildDocs := leftDocs
+	if rightDocs < leftDocs {
+		buildDocs = rightDocs
+	}
+
+	// Estimate: buildDocs * ~500 bytes * 1.3 overhead
+	estimatedBytes := int64(float64(buildDocs) * float64(bytesPerDocumentEstimate) * hashTableOverheadMultiplier)
+
+	return estimatedBytes
+}

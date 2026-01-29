@@ -3,6 +3,7 @@ package joinexecutor
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/conversion"
@@ -18,7 +19,8 @@ type InMemoryHashTable struct {
 	capacity   int          // Current capacity (number of buckets)
 	loadFactor float64      // Target load factor before resizing
 	memoryUsed int64        // Estimated memory usage in bytes
-	mutex      sync.RWMutex // Protects concurrent access
+	mutex      sync.RWMutex // Protects concurrent access during build phase
+	frozen     atomic.Bool  // Once true, hash table is read-only and Get() is lock-free
 
 	// PHASE 2: Disk spillover support
 	// spillManager *DiskSpillManager
@@ -59,7 +61,11 @@ func NewInMemoryHashTable(initialCapacity int, loadFactor float64) HashTable {
 }
 
 // Put stores a key-value pair in the hash table
+// Panics if called on a frozen hash table (hash tables must be frozen after build phase)
 func (ht *InMemoryHashTable) Put(key interface{}, value *models.Document) error {
+	if ht.frozen.Load() {
+		panic("Put called on frozen hash table - hash tables are immutable after Freeze()")
+	}
 	if key == nil || value == nil {
 		return fmt.Errorf("key and value cannot be nil")
 	}
@@ -102,11 +108,19 @@ func (ht *InMemoryHashTable) Put(key interface{}, value *models.Document) error 
 }
 
 // Get retrieves all documents associated with a key
+// When frozen, this is lock-free and returns the original slice (zero-copy).
+// When not frozen, acquires RLock and returns a defensive copy.
 func (ht *InMemoryHashTable) Get(key interface{}) ([]*models.Document, bool) {
 	if key == nil {
 		return nil, false
 	}
 
+	// Fast path: frozen hash table - lock-free, zero-copy access
+	if ht.frozen.Load() {
+		return ht.getUnsafe(key)
+	}
+
+	// Slow path: mutable hash table - need lock and defensive copy
 	ht.mutex.RLock()
 	defer ht.mutex.RUnlock()
 
@@ -126,6 +140,68 @@ func (ht *InMemoryHashTable) Get(key interface{}) ([]*models.Document, bool) {
 	}
 
 	return nil, false
+}
+
+// getUnsafe performs lock-free lookup. Only safe when hash table is frozen.
+// Returns the original slice directly (zero-copy) for maximum performance.
+func (ht *InMemoryHashTable) getUnsafe(key interface{}) ([]*models.Document, bool) {
+	// Calculate hash and bucket index
+	keyHash := ht.hashKey(key)
+	bucketIndex := int(keyHash % uint64(ht.capacity))
+	bucket := &ht.buckets[bucketIndex]
+
+	// Search for entry with this key
+	for _, entry := range bucket.entries {
+		if entry.keyHash == keyHash && ht.keysEqual(entry.key, key) {
+			// Return original slice directly - safe because hash table is frozen
+			return entry.documents, true
+		}
+	}
+
+	return nil, false
+}
+
+// TryGet attempts to retrieve documents without blocking.
+// Returns (documents, found, acquired). If acquired is false, the read lock was
+// contended and the caller should retry or use Get with blocking.
+// When frozen, always succeeds immediately with lock-free access.
+func (ht *InMemoryHashTable) TryGet(key interface{}) ([]*models.Document, bool, bool) {
+	if key == nil {
+		return nil, false, true
+	}
+
+	// Fast path: frozen hash table - always succeeds, lock-free
+	if ht.frozen.Load() {
+		docs, found := ht.getUnsafe(key)
+		return docs, found, true
+	}
+
+	// Slow path: mutable hash table - try to acquire lock
+	metrics := GetLockMetrics()
+	if !ht.mutex.TryRLock() {
+		// Lock contended - record failure and return without blocking
+		metrics.RecordHashTableAttempt(true)
+		return nil, false, false
+	}
+	defer ht.mutex.RUnlock()
+	metrics.RecordHashTableAttempt(false)
+
+	// Calculate hash and bucket index
+	keyHash := ht.hashKey(key)
+	bucketIndex := int(keyHash % uint64(ht.capacity))
+	bucket := &ht.buckets[bucketIndex]
+
+	// Search for entry with this key
+	for _, entry := range bucket.entries {
+		if entry.keyHash == keyHash && ht.keysEqual(entry.key, key) {
+			// Return copy of documents slice to prevent external modification
+			docs := make([]*models.Document, len(entry.documents))
+			copy(docs, entry.documents)
+			return docs, true, true
+		}
+	}
+
+	return nil, false, true
 }
 
 // Contains checks if a key exists in the hash table
@@ -148,8 +224,12 @@ func (ht *InMemoryHashTable) GetMemoryUsage() int64 {
 	return ht.memoryUsed
 }
 
-// Clear removes all entries from the hash table
+// Clear removes all entries from the hash table and resets frozen state.
+// After Clear(), the hash table can be rebuilt and frozen again.
 func (ht *InMemoryHashTable) Clear() {
+	// Reset frozen flag first so we can acquire lock
+	ht.frozen.Store(false)
+
 	ht.mutex.Lock()
 	defer ht.mutex.Unlock()
 
@@ -160,6 +240,20 @@ func (ht *InMemoryHashTable) Clear() {
 
 	ht.size = 0
 	ht.memoryUsed = int64(ht.capacity * 64) // Reset to base memory usage
+}
+
+// Freeze marks the hash table as read-only after build phase completes.
+// Once frozen, Get() becomes lock-free and returns the original slice (zero-copy).
+// Put() will panic if called after Freeze().
+// This eliminates RWMutex contention during concurrent probe phase reads.
+func (ht *InMemoryHashTable) Freeze() {
+	ht.frozen.Store(true)
+}
+
+// IsFrozen returns true if the hash table has been frozen.
+// Frozen hash tables provide lock-free, zero-copy reads.
+func (ht *InMemoryHashTable) IsFrozen() bool {
+	return ht.frozen.Load()
 }
 
 // resize increases the capacity of the hash table and rehashes all entries

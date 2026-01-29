@@ -565,29 +565,51 @@ func (w *MVCCGCWorker) sampleDocumentVersions(ctx context.Context, bundleName, d
 }
 
 // shouldCompactByAge checks if versions are old enough for GC
+// RCU Model: Uses grace period (100ms) to ensure in-flight reads complete
 func (w *MVCCGCWorker) shouldCompactByAge(oldestSnapshotSeq uint64, versions []*models.Document) bool {
 	if len(versions) == 0 {
 		return false
 	}
 
-	// Find oldest version's commit sequence
-	var oldestCommitSeq uint64 = 0
+	// Count versions that are safe to cleanup using RCU grace period
+	safeToCleanup := 0
 	for _, version := range versions {
-		if version.CommitSequence > 0 && (oldestCommitSeq == 0 || version.CommitSequence < oldestCommitSeq) {
-			oldestCommitSeq = version.CommitSequence
+		// RCU check: Use IsSafeToCleanup which checks grace period (100ms)
+		if version.IsSafeToCleanup() {
+			safeToCleanup++
+			continue
+		}
+
+		// Legacy MVCC check for documents without SupersededAt set
+		if version.CommitSequence > 0 && oldestSnapshotSeq > 0 && version.CommitSequence < oldestSnapshotSeq {
+			safeToCleanup++
 		}
 	}
 
-	if oldestCommitSeq == 0 {
-		return false // No committed versions
+	// Trigger compaction if we have versions safe to cleanup
+	// Require at least 2 versions (1 current + 1 superseded) to avoid unnecessary work
+	return safeToCleanup > 0 && len(versions) >= 2
+}
+
+// canCleanupDocument checks if a specific document version can be removed
+// RCU Model: Respects grace period for in-flight reads
+func (w *MVCCGCWorker) canCleanupDocument(doc *models.Document, oldestSnapshotSeq uint64) bool {
+	if doc == nil {
+		return false
 	}
 
-	// Check if oldest version is significantly older than oldest snapshot
-	// Consider minVersionAge threshold
-	if oldestSnapshotSeq > 0 && oldestCommitSeq < oldestSnapshotSeq {
-		// Versions are older than oldest snapshot, safe to compact
-		// Additional age check: ensure versions are at least minVersionAge old
-		// (This would require timestamp comparison, simplified here)
+	// RCU check: Current versions are never cleaned up
+	if doc.IsCurrentVersion() {
+		return false
+	}
+
+	// RCU check: Grace period must have passed
+	if doc.IsSafeToCleanup() {
+		return true
+	}
+
+	// Legacy MVCC check for backward compatibility
+	if doc.CommitSequence > 0 && oldestSnapshotSeq > 0 && doc.CommitSequence < oldestSnapshotSeq {
 		return true
 	}
 

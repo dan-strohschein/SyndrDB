@@ -99,6 +99,52 @@ func (h *TopNHeap) Pop() interface{} {
 	return item
 }
 
+// PushDoc adds a document to the bounded heap, maintaining only the top N elements.
+// This is a streaming-friendly API for use during JOIN merge operations.
+// Time complexity: O(log k) where k = heap capacity (limit)
+func (h *TopNHeap) PushDoc(doc *models.Document) {
+	if doc == nil {
+		return
+	}
+
+	if len(h.data) < h.capacity {
+		// Heap not full yet - just add
+		heap.Push(h, doc)
+		return
+	}
+
+	// Heap is full - check if new doc is better than worst (root)
+	// Temporarily append for comparison (createComparisonFunc uses last element)
+	h.data = append(h.data, doc)
+	if h.compareDocuments(doc, h.data[0]) {
+		// New doc is better - remove root and add new doc
+		h.data = h.data[:len(h.data)-1] // Remove temp append
+		heap.Pop(h)
+		heap.Push(h, doc)
+	} else {
+		// New doc is worse - discard it
+		h.data = h.data[:len(h.data)-1]
+	}
+}
+
+// PopAll extracts all documents from the heap in sorted order.
+// After calling this method, the heap is empty.
+// Time complexity: O(k log k) where k = heap size
+func (h *TopNHeap) PopAll() []*models.Document {
+	n := len(h.data)
+	if n == 0 {
+		return []*models.Document{}
+	}
+
+	// Pop all elements into slice (heap gives them in reverse order)
+	result := make([]*models.Document, n)
+	for i := n - 1; i >= 0; i-- {
+		result[i] = heap.Pop(h).(*models.Document)
+	}
+
+	return result
+}
+
 // ShouldReplace checks if a new document should replace the worst element in the heap
 // Returns true if new document is better than current worst
 func (h *TopNHeap) ShouldReplace(doc *models.Document) bool {

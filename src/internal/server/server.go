@@ -794,12 +794,22 @@ func (s *Server) Start() error {
 
 	go s.acceptConnections()
 
+	// Check for unhealthy indexes and print warnings
+	go func() {
+		// Give server a moment to fully initialize before checking
+		time.Sleep(2 * time.Second)
+		s.CheckUnhealthyIndexes()
+	}()
+
 	return nil
 }
 
 // Stop gracefully shuts down the server
 func (s *Server) Stop() error {
 	s.Running = false
+
+	// Print unhealthy index warnings before shutdown
+	s.PrintUnhealthyIndexesOnShutdown()
 
 	// Trigger immediate GC on shutdown before stopping workers
 	if s.MVCCGCWorker != nil {

@@ -96,15 +96,16 @@ type JoinClause struct {
 
 // SelectJoinQuery represents a complete SELECT query with JOIN
 type SelectJoinQuery struct {
-	SelectFields     []string     // Fields to select (empty for all)
-	FromBundle       string       // Primary bundle
-	JoinClauses      []JoinClause // JOIN operations
-	WhereClause      *WhereGroup  // WHERE conditions (legacy - keep for backward compatibility)
-	WhereExpression  interface{}  // syndrQL.Expression from unified parser (preferred)
-	OrderBy          []string     // ORDER BY fields (future)
-	Limit            int          // LIMIT value (0 for no limit)
-	Offset           int          // OFFSET value (0 for no offset)
-	RelationshipName string       // Name of the relationship for hierarchical results (WITH RELATIONSHIP clause)
+	SelectFields     []string        // Fields to select (empty for all)
+	FromBundle       string          // Primary bundle
+	JoinClauses      []JoinClause    // JOIN operations
+	WhereClause      *WhereGroup     // WHERE conditions (legacy - keep for backward compatibility)
+	WhereExpression  interface{}     // syndrQL.Expression from unified parser (preferred)
+	OrderBy          []string        // ORDER BY fields (future)
+	OrderByClause    *OrderByClause  // Full ORDER BY clause with directions (for streaming Top-N optimization)
+	Limit            int             // LIMIT value (0 for no limit)
+	Offset           int             // OFFSET value (0 for no offset)
+	RelationshipName string          // Name of the relationship for hierarchical results (WITH RELATIONSHIP clause)
 }
 
 // ParseSelectJoinQuery parses a SELECT query with optional JOIN clauses

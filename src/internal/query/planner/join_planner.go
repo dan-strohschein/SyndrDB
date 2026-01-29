@@ -43,6 +43,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: For JOIN executor integration
+	"syndrdb/src/internal/query/planner/sorting"            // For streaming Top-N optimization
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL" // For predicate pushdown Expression handling
 	"syndrdb/src/pkg/settings"     // For configurable join memory limit
@@ -232,10 +233,14 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		LeftPredicate:        leftPredicate,        // Predicate to push to left bundle
 		RightPredicate:       rightPredicate,       // Predicate to push to right bundle
 		MergeRequiredFields:  mergeRequired,
+		// STREAMING TOP-N: Pass ORDER BY and LIMIT for heap-based merge optimization
+		OrderBy:              query.OrderByClause,
+		Limit:                query.Limit,
+		Offset:               query.Offset,
 	}
 
-	jp.Logger.Infof("Created JOIN execution plan: cost=%.2f, estimated_rows=%d, algorithm=hash_join",
-		estimatedCost, estimatedRows)
+	jp.Logger.Infof("Created JOIN execution plan: cost=%.2f, estimated_rows=%d, algorithm=hash_join, limit=%d",
+		estimatedCost, estimatedRows, query.Limit)
 
 	// Wrap with FilterNode only if there are remaining WHERE conditions
 	var rootNode ExecutionNode = joinNode
@@ -508,6 +513,16 @@ type JoinExecutionNode struct {
 	RightPredicate       syndrQL.Expression              // Predicate to push to right bundle (may be nil)
 	// MergeRequiredFields: when non-nil and non-empty, mergeJoinedDocument copies only these fields (opt #3)
 	MergeRequiredFields map[string]bool
+	// OrderBy: ORDER BY clause for streaming Top-N optimization during merge
+	// When set with Limit > 0, Execute() uses a heap instead of materializing all results
+	OrderBy *queryparser.OrderByClause
+	// Limit: LIMIT value for streaming Top-N optimization (0 = no limit)
+	// Effective limit includes OFFSET: actual limit = Limit + Offset
+	Limit int
+	// Offset: OFFSET value for result pagination
+	Offset int
+	// sortedDocuments: stores documents in sorted order for downstream LimitNode
+	sortedDocuments []*models.Document
 }
 
 // Execute implements ExecutionNode interface using the new JOIN executor
@@ -557,7 +572,23 @@ func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.D
 	// PHASE 3: Store JoinedDocument results for hierarchical transformation
 	jen.joinedResults = result.Documents
 
-	// Convert JOIN results back to document map
+	// STREAMING TOP-N OPTIMIZATION: When ORDER BY + LIMIT is present, use a heap during merge
+	// This converts O(n log n) full sort to O(n log k) where k = limit
+	// Only applies when: (1) OrderBy is set, (2) Limit > 0, (3) result set > 10x limit
+	effectiveLimit := jen.Limit
+	if jen.Offset > 0 {
+		effectiveLimit = jen.Limit + jen.Offset
+	}
+	useStreamingTopN := jen.OrderBy != nil && len(jen.OrderBy.Fields) > 0 && effectiveLimit > 0 &&
+		len(result.Documents) > effectiveLimit*10
+
+	if useStreamingTopN {
+		jen.Logger.Infof("STREAMING TOP-N: Using heap-based merge for %d JOIN results with LIMIT %d (10x threshold met)",
+			len(result.Documents), effectiveLimit)
+		return jen.executeWithStreamingTopN(result.Documents, effectiveLimit)
+	}
+
+	// Standard path: Convert JOIN results back to document map
 	documents := make(map[string]*models.Document)
 	for i, joinedDoc := range result.Documents {
 		// Create merged document from JOIN result
@@ -569,6 +600,46 @@ func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.D
 		len(documents), result.Algorithm, result.MemoryUsed)
 
 	return documents, nil
+}
+
+// executeWithStreamingTopN uses a Top-N heap during document merge for ORDER BY + LIMIT queries.
+// This avoids materializing all documents before sorting.
+// Time complexity: O(n log k) where n = join results, k = limit (vs O(n log n) for full sort)
+func (jen *JoinExecutionNode) executeWithStreamingTopN(joinedDocs []*joinexecutor.JoinedDocument, limit int) (map[string]*models.Document, error) {
+	// Create Top-N heap with the ORDER BY configuration
+	topNHeap := sorting.NewTopNHeap(limit, jen.OrderBy, jen.Logger)
+
+	// Stream through all joined documents, merging and pushing to heap
+	for i, joinedDoc := range joinedDocs {
+		// Merge the joined document into a single document
+		mergedDoc := jen.mergeJoinedDocument(joinedDoc, i)
+
+		// Push to heap (heap maintains only top N elements)
+		topNHeap.PushDoc(mergedDoc)
+	}
+
+	// Extract sorted documents from heap
+	sortedDocs := topNHeap.PopAll()
+
+	// Store sorted documents for GetSortedDocuments() access by downstream nodes
+	jen.sortedDocuments = sortedDocs
+
+	// Convert to map for interface compatibility
+	documents := make(map[string]*models.Document, len(sortedDocs))
+	for _, doc := range sortedDocs {
+		documents[doc.DocumentID] = doc
+	}
+
+	jen.Logger.Infof("STREAMING TOP-N completed: %d results from %d JOIN matches (heap size: %d)",
+		len(documents), len(joinedDocs), limit)
+
+	return documents, nil
+}
+
+// GetSortedDocuments returns documents in sorted order for downstream SortNode/LimitNode
+// This enables skipping redundant sorting when JoinExecutionNode already sorted via streaming Top-N
+func (jen *JoinExecutionNode) GetSortedDocuments() []*models.Document {
+	return jen.sortedDocuments
 }
 
 // GetCost implements ExecutionNode interface

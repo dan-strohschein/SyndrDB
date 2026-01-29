@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"syndrdb/src/internal/domain/models"
 	"time"
@@ -299,13 +300,28 @@ func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, projection
 	}
 
 	// ─────────────────────────────────────────────────────────────
-	// 4. Build projection hash set for O(1) lookup
+	// 4. Build projection hash set for O(1) lookup (case-insensitive)
+	// Include hashes for both original case and lowercase to match
+	// stored field names regardless of case (SQL identifiers are case-insensitive)
 	// ─────────────────────────────────────────────────────────────
 	var projectionHashes map[uint64]bool
 	if len(projection) > 0 {
-		projectionHashes = make(map[uint64]bool, len(projection))
+		projectionHashes = make(map[uint64]bool, len(projection)*2)
 		for _, fieldName := range projection {
+			// Add hash for original case
 			projectionHashes[HashFieldName64(fieldName)] = true
+			// Add hash for lowercase to support case-insensitive matching
+			lowerFieldName := strings.ToLower(fieldName)
+			if lowerFieldName != fieldName {
+				projectionHashes[HashFieldName64(lowerFieldName)] = true
+			}
+			// Add hash for Title Case (e.g., "Category" when query uses "category")
+			if len(fieldName) > 0 {
+				titleFieldName := strings.ToUpper(fieldName[:1]) + strings.ToLower(fieldName[1:])
+				if titleFieldName != fieldName && titleFieldName != lowerFieldName {
+					projectionHashes[HashFieldName64(titleFieldName)] = true
+				}
+			}
 		}
 	}
 
@@ -410,12 +426,27 @@ func (d *FastDocumentDeserializer) DeserializeDocumentV2Into(data []byte, projec
 		directoryEntries[i] = entry
 	}
 
-	// Build projection hash set
+	// Build projection hash set (case-insensitive)
+	// Include hashes for both original case and lowercase to match
+	// stored field names regardless of case (SQL identifiers are case-insensitive)
 	var projectionHashes map[uint64]bool
 	if len(projection) > 0 {
-		projectionHashes = make(map[uint64]bool, len(projection))
+		projectionHashes = make(map[uint64]bool, len(projection)*2)
 		for _, fieldName := range projection {
+			// Add hash for original case
 			projectionHashes[HashFieldName64(fieldName)] = true
+			// Add hash for lowercase to support case-insensitive matching
+			lowerFieldName := strings.ToLower(fieldName)
+			if lowerFieldName != fieldName {
+				projectionHashes[HashFieldName64(lowerFieldName)] = true
+			}
+			// Add hash for Title Case (e.g., "Category" when query uses "category")
+			if len(fieldName) > 0 {
+				titleFieldName := strings.ToUpper(fieldName[:1]) + strings.ToLower(fieldName[1:])
+				if titleFieldName != fieldName && titleFieldName != lowerFieldName {
+					projectionHashes[HashFieldName64(titleFieldName)] = true
+				}
+			}
 		}
 	}
 
@@ -930,10 +961,11 @@ func (d *FastDocumentDeserializer) DeserializeProjectedFields(data []byte, field
 	d.data = data
 	d.offset = 0
 
-	// Create map for fast field name lookup
+	// Create map for fast field name lookup (case-insensitive)
+	// SQL identifiers are case-insensitive, so "category" should match "Category"
 	fieldsMap := make(map[string]bool, len(fieldsToExtract))
 	for _, fieldName := range fieldsToExtract {
-		fieldsMap[fieldName] = true
+		fieldsMap[strings.ToLower(fieldName)] = true
 	}
 
 	// Read document ID (always needed)
@@ -957,8 +989,8 @@ func (d *FastDocumentDeserializer) DeserializeProjectedFields(data []byte, field
 			return nil, fmt.Errorf("failed to read field name for field %d: %w", i, err)
 		}
 
-		// Check if this field is needed
-		if fieldsMap[fieldName] {
+		// Check if this field is needed (case-insensitive)
+		if fieldsMap[strings.ToLower(fieldName)] {
 			// Deserialize this field normally
 			// Note: readField() assumes name is already read, so we need to read type + value
 			// We'll manually read type + value here to avoid re-reading the name

@@ -144,6 +144,13 @@ type FilteredBundleAdapter struct {
 	totalDocuments int64
 }
 
+// IsFilteredBundle returns true to indicate this is a filtered bundle adapter
+// This marker method helps downstream code (like hash joins) detect when bundles
+// have WHERE clause predicates applied, which affects document counts
+func (fba *FilteredBundleAdapter) IsFilteredBundle() bool {
+	return true
+}
+
 // NewFilteredBundleAdapter creates a bundle adapter that filters documents based on WHERE conditions
 func NewFilteredBundleAdapter(
 	bundle *models.Bundle,

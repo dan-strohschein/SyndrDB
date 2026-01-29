@@ -368,7 +368,7 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 		return nil
 	}
 
-	// Legacy fallback: Check if buffer is getting large
+	// Legacy fallback for non-performance modes: Check if buffer is getting large
 	if wal.buffer.Buffered() > 8192 { // 8KB buffer
 		if err := wal.flushUnsafe(); err != nil {
 			return err

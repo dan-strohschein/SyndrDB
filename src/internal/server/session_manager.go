@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/storage/buffer"
@@ -224,12 +225,24 @@ type LockReleaser interface {
 }
 
 type SessionManager struct {
-	sessions           map[string]*Session   // sessionID -> Session
-	userSessions       map[string][]*Session // username -> list of sessions (already exists!)
-	sessionsByUser     map[string][]*Session // username -> list of sessions (alias for consistency)
-	connectionSessions map[string]*Session   // connectionID -> Session
-	mu                 sync.RWMutex
-	logger             *zap.SugaredLogger
+	// PHASE 7: Sharded session storage for reduced lock contention
+	// Each shard has its own mutex, reducing contention by ~64x
+	sessions *ShardedSessionMap // sessionID -> Session (64 shards)
+
+	// PHASE 7: Lock-free secondary indexes using sync.Map
+	userSessions       *UserSessionIndex       // username -> list of sessions
+	connectionSessions *ConnectionSessionIndex // connectionID -> Session
+
+	// Legacy field for backward compatibility (redirects to userSessions)
+	// sessionsByUser is deprecated - use userSessions instead
+
+	// Light mutex only for non-session state (config, stats counters)
+	// Session operations use the sharded session map's per-shard locks
+	mu     sync.RWMutex
+	logger *zap.SugaredLogger
+
+	// Session count for maxSessions check (atomic for lock-free reads)
+	sessionCount atomic.Int64
 
 	// Configuration
 	defaultTimeout  time.Duration
@@ -252,10 +265,9 @@ type SessionManager struct {
 // NewSessionManager creates a new session manager
 func NewSessionManager(logger *zap.SugaredLogger, defaultTimeout time.Duration, maxSessions int) *SessionManager {
 	sm := &SessionManager{
-		sessions:             make(map[string]*Session),
-		userSessions:         make(map[string][]*Session),
-		sessionsByUser:       make(map[string][]*Session),
-		connectionSessions:   make(map[string]*Session),
+		sessions:             NewShardedSessionMap(),
+		userSessions:         NewUserSessionIndex(),
+		connectionSessions:   NewConnectionSessionIndex(),
 		logger:               logger,
 		defaultTimeout:       defaultTimeout,
 		maxSessions:          maxSessions,
@@ -377,11 +389,9 @@ func isUserAgentSimilar(original, current string) bool {
 
 // CreateSession creates a new session for a user with IP binding and user-agent fingerprinting
 func (sm *SessionManager) CreateSession(username, userID, databaseName string, database *models.Database, connectionID string, timeout time.Duration, clientIP, userAgent string) (*Session, error) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	// Check if we've hit the max sessions limit
-	if len(sm.sessions) >= sm.maxSessions {
+	// PHASE 7: Use atomic counter for lock-free session count check
+	currentCount := sm.sessionCount.Load()
+	if currentCount >= int64(sm.maxSessions) {
 		return nil, errors.New(errors.ERR_RESOURCE_EXHAUSTED,
 			fmt.Sprintf("maximum number of sessions (%d) reached", sm.maxSessions),
 			errors.LayerAPI).WithContext("max_sessions", fmt.Sprintf("%d", sm.maxSessions))
@@ -442,20 +452,16 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		PermissionService: nil,             // Will be set by server initialization
 	}
 
-	// Store session
-	sm.sessions[sessionID] = session
-	sm.connectionSessions[connectionID] = session
+	// PHASE 7: Store session using sharded map and lock-free indexes
+	sm.sessions.Set(sessionID, session)
+	sm.connectionSessions.Set(connectionID, session)
+	sm.userSessions.Add(username, session)
+	sm.sessionCount.Add(1)
 
 	// METRICS: Track session creation
 	metrics := GetGlobalServerMetrics()
 	metrics.SessionsCreated.Add(1)
 	metrics.SessionsActive.Add(1)
-
-	// Add to user sessions
-	if sm.userSessions[username] == nil {
-		sm.userSessions[username] = make([]*Session, 0, 5)
-	}
-	sm.userSessions[username] = append(sm.userSessions[username], session)
 
 	session.Logger.Infow("Session created with IP binding",
 		"sessionID", sessionID,
@@ -475,54 +481,40 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 }
 
 // GetSession retrieves a session by ID
+// PHASE 7: Lock-free lookup using sharded session map (only touches 1 of 64 shards)
 func (sm *SessionManager) GetSession(sessionID string) (*Session, bool) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	session, exists := sm.sessions[sessionID]
-	return session, exists
+	return sm.sessions.Get(sessionID)
 }
 
 // GetSessionByConnection retrieves a session by connection ID
+// PHASE 7: Lock-free lookup using sync.Map
 func (sm *SessionManager) GetSessionByConnection(connectionID string) (*Session, bool) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	session, exists := sm.connectionSessions[connectionID]
-	return session, exists
+	return sm.connectionSessions.Get(connectionID)
 }
 
 // GetUserSessions retrieves all sessions for a user
+// PHASE 7: Lock-free lookup using sync.Map with internal mutex for session list
 func (sm *SessionManager) GetUserSessions(username string) []*Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	sessions := sm.userSessions[username]
+	sessions := sm.userSessions.Get(username)
 	if sessions == nil {
 		return []*Session{}
 	}
-
-	// Return a copy to avoid race conditions
-	result := make([]*Session, len(sessions))
-	copy(result, sessions)
-	return result
+	return sessions
 }
 
 // GetActiveSessionsByTxID returns a map of active transaction IDs to session IDs
 // This is used by the lock manager's CleanupOrphanedLocks to determine which
 // transactions are still active and should not have their locks released
 func (sm *SessionManager) GetActiveSessionsByTxID() map[string]string {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
 	activeTxMap := make(map[string]string)
 
-	// Iterate through all sessions and collect active transactions
-	for _, session := range sm.sessions {
+	// PHASE 7: Iterate through sharded sessions
+	sm.sessions.Range(func(sessionID string, session *Session) bool {
 		if session.IsInTransaction() {
 			activeTxMap[session.ActiveTransactionID] = session.SessionID
 		}
-	}
+		return true // continue iteration
+	})
 
 	return activeTxMap
 }
@@ -534,14 +526,12 @@ func (sm *SessionManager) GetActiveSessionsByTxID() map[string]string {
 // CRITICAL: Without this, sessions running queries outside explicit transactions
 // would have their locks released by CleanupOrphanedLocks, causing data corruption
 // or query failures.
+// PHASE 7: Uses sharded session iteration for reduced lock contention
 func (sm *SessionManager) GetAllActiveSessionIDs() map[string]bool {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
+	activeIDs := make(map[string]bool)
 
-	activeIDs := make(map[string]bool, len(sm.sessions))
-
-	// Include ALL sessions - they may be processing queries even without explicit transactions
-	for sessionID, session := range sm.sessions {
+	// PHASE 7: Iterate through sharded sessions
+	sm.sessions.Range(func(sessionID string, session *Session) bool {
 		// Only include sessions that are not expired or terminated
 		session.mu.RLock()
 		state := session.State
@@ -550,17 +540,16 @@ func (sm *SessionManager) GetAllActiveSessionIDs() map[string]bool {
 		if state != SessionStateExpired && state != SessionStateTerminated {
 			activeIDs[sessionID] = true
 		}
-	}
+		return true // continue iteration
+	})
 
 	return activeIDs
 }
 
 // InvalidateSession invalidates a specific session
+// PHASE 7: Uses sharded session lookup
 func (sm *SessionManager) InvalidateSession(sessionID string) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	session, exists := sm.sessions[sessionID]
+	session, exists := sm.sessions.Get(sessionID)
 	if !exists {
 		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
 			fmt.Sprintf("session %s not found", sessionID),
@@ -576,11 +565,9 @@ func (sm *SessionManager) InvalidateSession(sessionID string) error {
 }
 
 // InvalidateUserSessions invalidates all sessions for a user
+// PHASE 7: Uses lock-free user session lookup
 func (sm *SessionManager) InvalidateUserSessions(username string) error {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	sessions := sm.userSessions[username]
+	sessions := sm.userSessions.Get(username)
 	if sessions == nil {
 		return nil
 	}
@@ -608,11 +595,9 @@ func (sm *SessionManager) InvalidateUserSessions(username string) error {
 //
 // TODO: I can add session termination event broadcast for monitoring systems
 // TODO: I can add configurable termination grace period before forced disconnect
+// PHASE 7: Uses lock-free user session lookup
 func (sm *SessionManager) TerminateUserSessions(username string, connectionMap map[string]*Connection) (int, error) {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	sessions := sm.userSessions[username]
+	sessions := sm.userSessions.Get(username)
 	if sessions == nil {
 		return 0, nil
 	}
@@ -668,10 +653,9 @@ func (sm *SessionManager) TerminateUserSessions(username string, connectionMap m
 
 // UpdateActivity updates the last activity time for a session with security validation
 // DEADLOCK FIX: Acquire session.mu first, then validate, to avoid races and ensure atomicity
+// PHASE 7: Uses lock-free sharded session lookup
 func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) error {
-	sm.mu.RLock()
-	session, exists := sm.sessions[sessionID]
-	sm.mu.RUnlock()
+	session, exists := sm.sessions.Get(sessionID)
 
 	if !exists {
 		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
@@ -706,10 +690,9 @@ func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) 
 }
 
 // SetDatabaseContext changes the database context for an existing session
+// PHASE 7: Uses lock-free sharded session lookup
 func (sm *SessionManager) SetDatabaseContext(sessionID string, databaseName string, database *models.Database) error {
-	sm.mu.RLock()
-	session, exists := sm.sessions[sessionID]
-	sm.mu.RUnlock()
+	session, exists := sm.sessions.Get(sessionID)
 
 	if !exists {
 		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
@@ -741,10 +724,9 @@ func (sm *SessionManager) SetDatabaseContext(sessionID string, databaseName stri
 
 // ValidateSessionSecurity validates session security binding
 // RACE FIX: Acquire session lock before validation to avoid race conditions
+// PHASE 7: Uses lock-free sharded session lookup
 func (sm *SessionManager) ValidateSessionSecurity(sessionID, clientIP, userAgent string) error {
-	sm.mu.RLock()
-	session, exists := sm.sessions[sessionID]
-	sm.mu.RUnlock()
+	session, exists := sm.sessions.Get(sessionID)
 
 	if !exists {
 		return errors.New(errors.ERR_AUTH_SESSION_EXPIRED,
@@ -759,7 +741,8 @@ func (sm *SessionManager) ValidateSessionSecurity(sessionID, clientIP, userAgent
 	return validateSessionBinding(session, clientIP, userAgent)
 }
 
-// cleanupSession performs cleanup for a session (must be called with sm.mu held)
+// cleanupSession performs cleanup for a session
+// PHASE 7: Uses sharded session map and lock-free indexes for removal
 func (sm *SessionManager) cleanupSession(session *Session) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
@@ -852,23 +835,11 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 		session.BufferPool = nil
 	}
 
-	// Remove from session manager maps
-	delete(sm.sessions, session.SessionID)
-	delete(sm.connectionSessions, session.ConnectionID)
-
-	// Remove from user sessions
-	userSessions := sm.userSessions[session.Username]
-	for i, s := range userSessions {
-		if s.SessionID == session.SessionID {
-			sm.userSessions[session.Username] = append(userSessions[:i], userSessions[i+1:]...)
-			break
-		}
-	}
-
-	// Clean up empty user session list
-	if len(sm.userSessions[session.Username]) == 0 {
-		delete(sm.userSessions, session.Username)
-	}
+	// PHASE 7: Remove from session manager using sharded structures
+	sm.sessions.Delete(session.SessionID)
+	sm.connectionSessions.Delete(session.ConnectionID)
+	sm.userSessions.Remove(session.Username, session.SessionID)
+	sm.sessionCount.Add(-1)
 
 	session.Logger.Info("Session cleanup completed")
 	return nil
@@ -994,29 +965,19 @@ func (sm *SessionManager) deleteTempFileWithRetry(filePath string, maxRetries in
 }
 
 // cleanupExpiredSessions removes expired sessions
-// DEADLOCK FIX: Check expiration with proper locking, collect session IDs only,
-// then cleanup outside the sm.mu lock to avoid lock ordering violations
+// PHASE 7: Uses sharded session iteration and lock-free cleanup
 func (sm *SessionManager) cleanupExpiredSessions() {
 	now := time.Now()
 
-	// PHASE 1: Find expired sessions (with proper locking)
-	// Only hold sm.mu.RLock briefly to collect session references
-	sm.mu.RLock()
-	expiredSessions := make([]*Session, 0, 20)
-	for _, session := range sm.sessions {
-		// Check expiration with session lock held to avoid races
+	// PHASE 1: Find expired sessions using sharded iteration
+	expiredSessions := sm.sessions.CollectExpired(func(session *Session) bool {
 		session.mu.RLock()
 		isExpired := now.After(session.ExpiresAt)
 		session.mu.RUnlock()
+		return isExpired
+	})
 
-		if isExpired {
-			expiredSessions = append(expiredSessions, session)
-		}
-	}
-	sm.mu.RUnlock()
-
-	// PHASE 2: Cleanup expired sessions (with sm.mu write lock)
-	// Now acquire locks in the correct order for each session
+	// PHASE 2: Cleanup expired sessions
 	if len(expiredSessions) > 0 {
 		for _, session := range expiredSessions {
 			// Mark as expired with proper locking
@@ -1032,10 +993,8 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 				"username", username,
 				"expiredAt", expiresAt)
 
-			// Cleanup with sm.mu held (cleanupSession expects this)
-			sm.mu.Lock()
+			// PHASE 7: cleanupSession no longer requires sm.mu to be held
 			sm.cleanupSession(session)
-			sm.mu.Unlock()
 		}
 
 		sm.logger.Infow("Cleaned up expired sessions", "count", len(expiredSessions))
@@ -1052,36 +1011,57 @@ func (sm *SessionManager) Stop() {
 	sm.cleanupWG.Wait()
 	sm.tempFileCleanupWG.Wait()
 
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	// PHASE 7: Collect all sessions first, then clean them up
+	// This avoids deadlock from holding read lock while cleanup tries to write lock
+	var sessionsToCleanup []*Session
+	sm.sessions.Range(func(sessionID string, session *Session) bool {
+		sessionsToCleanup = append(sessionsToCleanup, session)
+		return true
+	})
 
-	// Clean up all remaining sessions
-	for _, session := range sm.sessions {
+	// Now cleanup each session outside of Range iteration
+	for _, session := range sessionsToCleanup {
 		sm.cleanupSession(session)
 	}
 }
 
 // GetSessionStats returns statistics about sessions
+// PHASE 7: Uses sharded session iteration
 func (sm *SessionManager) GetSessionStats() map[string]interface{} {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
 	// PHASE 3: Use pooled map to reduce allocations
 	stats := GetResponseMap()
-	stats["total_sessions"] = len(sm.sessions)
-	stats["active_users"] = len(sm.userSessions)
+	
+	// Get stats from sharded map
+	shardStats := sm.sessions.GetStats()
+	stats["total_sessions"] = shardStats["total_sessions"]
+	stats["shard_count"] = shardStats["shard_count"]
+	stats["min_shard_size"] = shardStats["min_shard_size"]
+	stats["max_shard_size"] = shardStats["max_shard_size"]
+	stats["avg_shard_size"] = shardStats["avg_shard_size"]
+	
+	// Count active users
+	activeUsers := 0
+	sm.userSessions.Range(func(username string, sessions []*Session) bool {
+		if len(sessions) > 0 {
+			activeUsers++
+		}
+		return true
+	})
+	stats["active_users"] = activeUsers
+	
 	stats["max_sessions"] = sm.maxSessions
 	stats["default_timeout"] = sm.defaultTimeout.String()
 	stats["cleanup_interval"] = sm.cleanupInterval.String()
 
 	// Count sessions by state
 	stateCounts := make(map[string]int)
-	for _, session := range sm.sessions {
+	sm.sessions.Range(func(sessionID string, session *Session) bool {
 		session.mu.RLock()
 		state := session.State.String()
 		session.mu.RUnlock()
 		stateCounts[state]++
-	}
+		return true
+	})
 	stats["sessions_by_state"] = stateCounts
 
 	return stats
@@ -1466,18 +1446,14 @@ func (s *Session) InvalidateRoleCache() {
 }
 
 // GetSessionsByUser returns all active sessions for a given username
+// PHASE 7: Uses lock-free user session index
 func (sm *SessionManager) GetSessionsByUser(username string) []*Session {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-
-	// Return sessions from userSessions map (which is already maintained)
-	sessions := sm.userSessions[username]
-
-	// Return a copy to prevent external modification
-	result := make([]*Session, len(sessions))
-	copy(result, sessions)
-
-	return result
+	// userSessions.Get() already returns a copy
+	sessions := sm.userSessions.Get(username)
+	if sessions == nil {
+		return []*Session{}
+	}
+	return sessions
 }
 
 // Transaction Management Methods for Session

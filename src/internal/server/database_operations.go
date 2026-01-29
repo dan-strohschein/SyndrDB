@@ -153,14 +153,13 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	// Check for active sessions using this database
 	var activeSessions []*Session
 	if serviceManager.SessionManager != nil {
-		// Iterate through all sessions to find ones using this database
-		serviceManager.SessionManager.mu.RLock()
-		for _, s := range serviceManager.SessionManager.sessions {
+		// PHASE 7: Use sharded session Range for lock-free iteration
+		serviceManager.SessionManager.sessions.Range(func(sessionID string, s *Session) bool {
 			if strings.EqualFold(s.DatabaseName, oldName) {
 				activeSessions = append(activeSessions, s)
 			}
-		}
-		serviceManager.SessionManager.mu.RUnlock()
+			return true // continue iteration
+		})
 	}
 
 	sessionsTerminated := 0
@@ -238,15 +237,15 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 
 	// Update any remaining active sessions to use the new database name
 	// This handles sessions that weren't terminated (when FORCE wasn't used)
+	// PHASE 7: Use sharded session RangeWithLock for lock-free iteration with modifications
 	if serviceManager.SessionManager != nil && renamedDB != nil {
-		serviceManager.SessionManager.mu.Lock()
-		for _, s := range serviceManager.SessionManager.sessions {
+		serviceManager.SessionManager.sessions.RangeWithLock(func(sessionID string, s *Session) bool {
 			if strings.EqualFold(s.DatabaseName, oldName) {
 				s.DatabaseName = newName
 				logger.Debugf("Updated session %s to use database '%s'", s.SessionID, newName)
 			}
-		}
-		serviceManager.SessionManager.mu.Unlock()
+			return true // continue iteration
+		})
 	}
 
 	// Update system catalog
@@ -532,14 +531,13 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 	sessionsTerminated := 0
 
 	if serviceManager.SessionManager != nil {
-		// Find all sessions using this database
-		serviceManager.SessionManager.mu.RLock()
-		for _, s := range serviceManager.SessionManager.sessions {
+		// PHASE 7: Find all sessions using this database with sharded Range
+		serviceManager.SessionManager.sessions.Range(func(sessionID string, s *Session) bool {
 			if strings.EqualFold(s.DatabaseName, dbName) {
 				activeSessions = append(activeSessions, s)
 			}
-		}
-		serviceManager.SessionManager.mu.RUnlock()
+			return true // continue iteration
+		})
 
 		// Terminate sessions with descriptive error message
 		if len(activeSessions) > 0 {

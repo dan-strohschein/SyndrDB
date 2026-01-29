@@ -102,7 +102,7 @@ func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string
 		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
 		if err != nil {
 			// Document ID is in index but not found - this could indicate data inconsistency
-			node.Logger.Warnf("Document ID %s found in hash index but not in bundle: %v", docID, err)
+			node.Logger.Debugf("Document ID %s found in hash index but not in bundle: %v", docID, err)
 		} else if doc != nil {
 			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
@@ -420,6 +420,7 @@ var (
 )
 
 // executeBTreeOrderedScanFull runs a full B-tree range scan and returns documents in index key order.
+// Supports both ASC (default) and DESC order, with optional LIMIT early termination.
 // Uses BundleServiceInt.GetDocument() to retrieve documents through the write-through page cache.
 func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Context) ([]*models.Document, error) {
 	if node.Bundle.Indexes == nil {
@@ -455,9 +456,25 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 		}
 	}
 
-	docIDs, err := btreeIndex.RangeSearchWithBounds(btreeOrderedScanStart, btreeOrderedScanEnd, false, false)
+	// OPTIMIZATION: Use limit-aware and direction-aware range search
+	// This avoids loading all document IDs when we only need LIMIT documents
+	var docIDs []string
+	var err error
+
+	if node.Descending {
+		// DESC order: Use reverse range search for optimal ORDER BY DESC LIMIT performance
+		node.Logger.Debugf("BTreeOrderedScanNode: Using reverse range search (DESC) with limit=%d", node.Limit)
+		docIDs, err = btreeIndex.ReverseRangeSearchWithLimit(btreeOrderedScanStart, btreeOrderedScanEnd, node.Limit)
+	} else if node.Limit > 0 {
+		// ASC order with LIMIT: Use forward range search with early termination
+		node.Logger.Debugf("BTreeOrderedScanNode: Using forward range search (ASC) with limit=%d", node.Limit)
+		docIDs, err = btreeIndex.RangeSearchWithLimit(btreeOrderedScanStart, btreeOrderedScanEnd, node.Limit)
+	} else {
+		// Full range search (no limit, ASC order)
+		docIDs, err = btreeIndex.RangeSearchWithBounds(btreeOrderedScanStart, btreeOrderedScanEnd, false, false)
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("BTreeOrderedScanNode: range search failed: %w", err)
 	}
 
 	// WRITE-THROUGH CACHE: All document retrieval goes through page cache
@@ -465,6 +482,7 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 		return nil, fmt.Errorf("BTreeOrderedScanNode: BundleServiceInt is nil for bundle %s", node.Bundle.Name)
 	}
 
+	// Pre-allocate based on actual docIDs count (may be limited)
 	out := make([]*models.Document, 0, len(docIDs))
 	for i, docID := range docIDs {
 		if i > 0 && i%1000 == 0 {
@@ -480,6 +498,8 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 			out = append(out, doc)
 		}
 	}
+
+	node.Logger.Debugf("BTreeOrderedScanNode: returned %d documents (limit=%d, desc=%v)", len(out), node.Limit, node.Descending)
 	return out, nil
 }
 

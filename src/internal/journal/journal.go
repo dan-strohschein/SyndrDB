@@ -126,6 +126,9 @@ type WriteAheadLog struct {
 	// HIGH-008: Error tracking for async operations
 	// Use pointer to error since atomic.Value cannot store nil directly
 	lastFlushError atomic.Value // Stores *error from async flush goroutine (type: *error)
+
+	// Phase 2: Group commit with double-buffering for reduced lock contention
+	groupCommitMgr *GroupCommitManager // Manages double-buffering and group commit
 }
 
 // WALConfig holds configuration for the WAL
@@ -200,6 +203,13 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 		pendingOps:         0,
 		durabilityMode:     durabilityMode,
 		coordinator:        nil, // Set later via SetCoordinator()
+		groupCommitMgr:     NewGroupCommitManager(GroupCommitConfig{
+			Enabled:          true,
+			MaxWaitTime:      walMaxFlushDelay,
+			MaxGroupSize:     walBatchSize,
+			BufferSizeBytes:  64 * 1024, // 64KB initial buffer
+			CompletionBuffer: 1000,      // Support 1000 concurrent waiters
+		}),
 	}
 
 	// Initialize WAL file
@@ -518,6 +528,13 @@ func (wal *WriteAheadLog) Close() error {
 		close(wal.flushStopChan)
 	}
 
+	// Flush any remaining data in group commit buffer (using Unsafe since we hold the lock)
+	if wal.groupCommitMgr != nil {
+		if err := wal.groupCommitMgr.FlushActiveBufferDirectUnsafe(wal); err != nil {
+			wal.logger.Warnf("Failed to flush group commit buffer on shutdown: %v", err)
+		}
+	}
+
 	// Final flush
 	if err := wal.closeCurrentFile(); err != nil {
 		wal.logger.Errorf("Error closing WAL file: %v", err)
@@ -800,4 +817,18 @@ func (wal *WriteAheadLog) GetLastFlushError() error {
 		}
 	}
 	return nil
+}
+
+// GetGroupCommitStats returns statistics about group commit performance
+// Phase 2: Useful for monitoring group commit efficiency
+func (wal *WriteAheadLog) GetGroupCommitStats() map[string]interface{} {
+	if wal.groupCommitMgr == nil {
+		return map[string]interface{}{
+			"enabled": false,
+		}
+	}
+	stats := wal.groupCommitMgr.GetStats()
+	stats["enabled"] = true
+	stats["durability_mode"] = wal.durabilityMode
+	return stats
 }

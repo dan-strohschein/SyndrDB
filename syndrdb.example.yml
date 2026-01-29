@@ -270,6 +270,34 @@ where_expression_cache_enabled: true
 where_expression_cache_size: 1000
 
 # ==============================================================================
+# GROUP BY PERFORMANCE OPTIMIZATION CONFIGURATION (Phases 1-3)
+# ==============================================================================
+
+# Rows below this use HashAggregate, above use Sort+GroupAggregate (default: 10000)
+groupby_hash_aggregate_row_threshold: 10000
+
+# Workers for parallel page loading during GROUP BY operations (default: max(8, numCPU))
+# Minimum 8 workers, scales with CPU cores for optimal GROUP BY performance
+# Set higher for GROUP BY queries on large bundles with many pages
+groupby_parallel_page_workers: 8
+
+# Enable cache warming on bundle open (default: true)
+# Pre-parses segment files into cache to reduce cold-start latency
+# Opt-out: set to false for memory-constrained environments
+groupby_cache_warming_enabled: true
+
+# Memory budget for cache warming in MB (default: 512)
+# Limits how much memory is used for pre-warming parsed document cache
+# Warming stops when this limit is reached
+groupby_cache_warming_max_mb: 512
+
+# Maximum staleness for copy-on-write snapshots in milliseconds (default: 10)
+# GROUP BY queries can use cached page snapshots up to this age
+# Lower values = fresher data but more lock contention
+# Higher values = less contention but potentially stale reads
+groupby_snapshot_staleness_ms: 10
+
+# ==============================================================================
 # BACKUP & RESTORE CONFIGURATION
 # ==============================================================================
 

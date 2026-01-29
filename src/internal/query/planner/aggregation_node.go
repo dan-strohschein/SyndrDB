@@ -659,93 +659,93 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 }
 
 // executeHashAggregateStreaming implements hash-based aggregation using streaming documents
-// OPTIMIZATION: Uses ScanDocumentChunks to avoid GetAllDocuments() lock contention
+// OPTIMIZATION: Uses ScanAllDocumentsWithLimit to leverage parallel page loading (PHASE 1)
 // This is critical for GROUP BY queries under high concurrency (300+ connections)
+// PHASE 2A: Direct inline aggregation without session cache copying
 func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, scanner documentscanner.DocumentScannerInterface) (map[groupKey]*groupResult, int, error) {
-	n.Logger.Debugf("Executing Hash Aggregate strategy with streaming (avoids GetAllDocuments() lock contention)")
+	n.Logger.Debugf("Executing Hash Aggregate strategy with streaming (parallel page loading enabled)")
 
 	groupMap := make(map[groupKey]*groupResult)
 	totalInput := 0
 
-	// Get bundle interface to use ScanDocumentChunks
-	var bundleInterface documentscanner.BundleInterface
-	if smartScanner, ok := scanner.(interface {
-		GetBundle() documentscanner.BundleInterface
-	}); ok {
-		bundleInterface = smartScanner.GetBundle()
+	// PHASE 2A: Use ScanAllDocumentsWithLimit which triggers parallel page loading
+	// Type assert to access SmartBundleScanner's parallel loading method
+	var scanResult *documentscanner.ScanResult
+	var err error
+
+	// Try to use SmartBundleScanner for parallel page loading
+	if smartScanner, ok := scanner.(*documentscanner.SmartBundleScanner); ok {
+		n.Logger.Debugf("Using parallel page loading from SmartBundleScanner")
+		scanResult, err = smartScanner.ScanAllDocumentsWithLimit(0) // 0 = no limit
+		if err != nil {
+			return nil, 0, fmt.Errorf("parallel page scan failed: %w", err)
+		}
 	} else {
-		return nil, 0, fmt.Errorf("scanner does not provide BundleInterface for streaming")
+		// Fallback to standard ScanAllDocuments for other scanner types
+		n.Logger.Debugf("Falling back to standard ScanAllDocuments (scanner type: %T)", scanner)
+		scanResult, err = scanner.ScanAllDocuments()
+		if err != nil {
+			return nil, 0, fmt.Errorf("document scan failed: %w", err)
+		}
 	}
 
 	// Memory tracking: Get tracker from context
 	memoryTracker := GetMemoryTrackerFromContext(ctx)
-	docCount := 0
 
-	// Stream documents in chunks to avoid loading all at once
-	chunkSize := 4096
-	err := bundleInterface.ScanDocumentChunks(ctx, chunkSize, func(chunk []*models.Document) bool {
-		// Process each document in the chunk
-		for _, doc := range chunk {
-			// Check for cancellation
-			select {
-			case <-ctx.Done():
-				return false
-			default:
-			}
+	// Process documents directly from scan result
+	for i, doc := range scanResult.Documents {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return nil, totalInput, ctx.Err()
+		default:
+		}
 
-			// Skip nil documents
-			if doc == nil {
-				continue
-			}
+		// Skip nil documents
+		if doc == nil {
+			continue
+		}
 
-			docCount++
-			totalInput++
+		totalInput++
 
-			// Memory tracking: Sample every 100th document
-			if memoryTracker != nil && docCount%100 == 0 {
-				docSize := models.EstimateDocumentSize(doc)
-				if err := memoryTracker.Sample(docSize, docCount); err != nil {
-					n.Logger.Warnf("Memory tracking error: %v", err)
-					// Continue processing but log warning
-				}
-			}
-
-			// Create group key from GROUP BY fields
-			gKey, groupFields, err := n.createGroupKey(doc)
-			if err != nil {
-				n.Logger.Warnf("Error creating group key for document %s: %v", doc.DocumentID, err)
-				continue
-			}
-
-			// Get or create group result
-			gResult, exists := groupMap[gKey]
-			if !exists {
-				gResult = &groupResult{
-					GroupFields:     groupFields,
-					AggregateValues: make(map[string]*aggregateValue),
-				}
-				// Initialize aggregate values
-				for _, aggFunc := range n.AggregateFields {
-					gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
-				}
-				groupMap[gKey] = gResult
-			}
-
-			// Update aggregates
-			err = n.updateAggregates(gResult, doc)
-			if err != nil {
-				n.Logger.Warnf("Error updating aggregates for document %s: %v", doc.DocumentID, err)
+		// Memory tracking: Sample every 100th document
+		if memoryTracker != nil && i%100 == 0 {
+			docSize := models.EstimateDocumentSize(doc)
+			if err := memoryTracker.Sample(docSize, i); err != nil {
+				n.Logger.Warnf("Memory tracking error: %v", err)
+				// Continue processing but log warning
 			}
 		}
 
-		return true // Continue to next chunk
-	})
+		// Create group key from GROUP BY fields
+		gKey, groupFields, err := n.createGroupKey(doc)
+		if err != nil {
+			n.Logger.Warnf("Error creating group key for document %s: %v", doc.DocumentID, err)
+			continue
+		}
 
-	if err != nil {
-		return nil, totalInput, fmt.Errorf("streaming aggregation failed: %w", err)
+		// Get or create group result
+		gResult, exists := groupMap[gKey]
+		if !exists {
+			gResult = &groupResult{
+				GroupFields:     groupFields,
+				AggregateValues: make(map[string]*aggregateValue),
+			}
+			// Initialize aggregate values
+			for _, aggFunc := range n.AggregateFields {
+				gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+			}
+			groupMap[gKey] = gResult
+		}
+
+		// Update aggregates
+		err = n.updateAggregates(gResult, doc)
+		if err != nil {
+			n.Logger.Warnf("Error updating aggregates for document %s: %v", doc.DocumentID, err)
+		}
 	}
 
-	n.Logger.Debugf("Streaming hash aggregate created %d groups from %d documents", len(groupMap), totalInput)
+	n.Logger.Debugf("Streaming hash aggregate created %d groups from %d documents using parallel loading", len(groupMap), totalInput)
 
 	return groupMap, totalInput, nil
 }

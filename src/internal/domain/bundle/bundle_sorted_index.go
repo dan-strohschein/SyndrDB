@@ -80,9 +80,14 @@ func SaveSortedIndex(index *models.ShardedSortedIndex, databaseName, bundleName 
 	if err != nil {
 		return fmt.Errorf("failed to create sorted index temp file: %w", err)
 	}
+	
+	// Track whether we've successfully completed (to avoid cleanup on success)
+	var success bool
 	defer func() {
-		file.Close()
-		os.Remove(tempPath) // Clean up on error
+		if !success {
+			file.Close()
+			os.Remove(tempPath) // Clean up on error
+		}
 	}()
 
 	writer := bufio.NewWriter(file)
@@ -136,13 +141,18 @@ func SaveSortedIndex(index *models.ShardedSortedIndex, databaseName, bundleName 
 		return fmt.Errorf("failed to sync sorted index: %w", err)
 	}
 
-	file.Close()
+	// Close file and check for errors
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("failed to close sorted index file: %w", err)
+	}
 
 	// Atomic rename
 	if err := os.Rename(tempPath, filePath); err != nil {
 		return fmt.Errorf("failed to rename sorted index temp file: %w", err)
 	}
 
+	// Mark success to prevent defer cleanup
+	success = true
 	return nil
 }
 

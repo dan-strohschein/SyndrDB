@@ -114,15 +114,28 @@ func (bol *BundleOperationLock) captureStackTrace() string {
 // AcquireReadLock attempts to acquire a read lock on the bundle.
 // Returns an error if a rename operation is in progress.
 // Multiple readers can hold the lock simultaneously.
+//
+// LOCK-FREE OPTIMIZATION (Phase 1): Removed mutex serialization for concurrent readers.
+// Previously all readers serialized through mutex.Lock() just to check renameInProgress.
+// Now uses pure atomic operations: check rename flag, increment readers, re-check for race.
+// This eliminates the primary contention point for concurrent SELECT queries.
 func (bol *BundleOperationLock) AcquireReadLock() error {
-	bol.mutex.Lock()
-	defer bol.mutex.Unlock()
-
+	// LOCK-FREE: Check rename flag without holding mutex
 	if bol.renameInProgress.Load() {
 		return fmt.Errorf("bundle '%s' is being renamed, operation blocked", bol.bundleName)
 	}
 
+	// LOCK-FREE: Atomically increment reader count
 	atomic.AddInt64(&bol.activeReaders, 1)
+
+	// RACE MITIGATION: Re-check rename flag after incrementing readers.
+	// If a rename started between our first check and the increment,
+	// we must decrement and return error to avoid operating on a renaming bundle.
+	if bol.renameInProgress.Load() {
+		atomic.AddInt64(&bol.activeReaders, -1)
+		return fmt.Errorf("bundle '%s' is being renamed, operation blocked", bol.bundleName)
+	}
+
 	return nil
 }
 

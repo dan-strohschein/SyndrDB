@@ -177,6 +177,57 @@ func (qr *QueryRouter) routeSimpleQuery(
 		return qr.routeGroupByQuery(query, database, bundle, docScanner)
 	}
 
+	// OPTIMIZATION: ORDER BY with B-tree index optimization
+	// For queries like: SELECT ... FROM bundle ORDER BY field [ASC|DESC] [LIMIT n]
+	// If a B-tree index exists on the ORDER BY field, use BTreeOrderedScanNode
+	// to avoid loading all documents and sorting. The index provides pre-sorted iteration.
+	if !query.HasWhere() && query.HasOrderBy() && query.OrderBy != nil && len(query.OrderBy.Fields) == 1 {
+		orderField := query.OrderBy.Fields[0]
+		fieldName := extractFieldNameForProjection(orderField.FieldName)
+		if idxName, found := findBTreeIndexForGroupByField(bundle, fieldName); found {
+			// Calculate effective limit (LIMIT + OFFSET)
+			limit := 0
+			if query.HasLimit() {
+				limit = query.GetEffectiveLimit()
+				if query.Offset > 0 {
+					limit = query.Offset + query.GetEffectiveLimit()
+				}
+			}
+
+			isDescending := orderField.Direction == queryparser.SortDesc
+			directionStr := "ASC"
+			if isDescending {
+				directionStr = "DESC"
+			}
+
+			qr.logger.Infof("ORDER BY INDEX OPTIMIZATION: Using BTreeOrderedScanNode on index '%s' for ORDER BY %s %s (limit=%d)",
+				idxName, fieldName, directionStr, limit)
+
+			// Return BTreeOrderedScanNode - this returns documents already sorted
+			// The PlanBuilder will still add SortNode, but it will be a no-op since data is already sorted
+			// TODO: Consider adding a flag to skip SortNode entirely when using BTreeOrderedScanNode
+			orderedNode := &BTreeOrderedScanNode{
+				Bundle:             bundle,
+				IndexName:          idxName,
+				OrderedByFieldName: fieldName,
+				Logger:             qr.logger,
+				BundleServiceInt:   qr.bundleService,
+				Cost:               float64(limit) * 0.01, // Much cheaper: only fetches limit docs from index
+				EstimatedRows:      limit,
+				Descending:         isDescending,
+				Limit:              limit,
+			}
+
+			if limit == 0 {
+				// No limit - still cheaper than full scan + sort
+				orderedNode.Cost = float64(bundle.TotalDocuments) * 0.3
+				orderedNode.EstimatedRows = int(bundle.TotalDocuments)
+			}
+
+			return orderedNode, []string{idxName}, nil
+		}
+	}
+
 	// If there's no WHERE clause, create a simple full scan
 	if !query.HasWhere() {
 		fullScan := &FullScanNode{
@@ -269,7 +320,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 	docScanner documentscanner.DocumentScannerInterface,
 ) (ExecutionNode, []string, error) {
 
-	qr.logger.Debugf("Routing GROUP BY query for bundle '%s'", query.FromBundle)
+	qr.logger.Infof("Routing GROUP BY query for bundle '%s'", query.FromBundle)
 
 	var rootNode ExecutionNode
 	var indexesUsed []string
@@ -282,30 +333,30 @@ func (qr *QueryRouter) routeGroupByQuery(
 		if err != nil {
 			return nil, nil, err
 		}
-		qr.logger.Debugf("Created base execution tree for GROUP BY using createExpressionBasedPlan (indexes: %v)", indexesUsed)
+		qr.logger.Infof("Created base execution tree for GROUP BY using createExpressionBasedPlan (indexes: %v)", indexesUsed)
 		return rootNode, indexesUsed, nil
 	}
 
 	// Index-ordered scan for single-field GROUP BY when no WHERE: use B-tree full range
 	// to supply rows already ordered by the GROUP BY field, so AggregationNode can skip the sort.
 	// WRITE-THROUGH CACHE: Documents always available through page cache via BundleServiceInt.GetDocument()
-	if !query.HasWhere() && query.GroupBy != nil && len(query.GroupBy.Fields) == 1 {
-		fieldName := extractFieldNameForProjection(query.GroupBy.Fields[0])
-		if idxName, found := findBTreeIndexForGroupByField(bundle, fieldName); found {
-			rootNode = &BTreeOrderedScanNode{
-				Bundle:             bundle,
-				IndexName:          idxName,
-				OrderedByFieldName: fieldName,
-				Logger:             qr.logger,
-				BundleServiceInt:   qr.bundleService,
-				Cost:               float64(bundle.TotalDocuments) * 0.5, // cheaper than full scan + sort
-				EstimatedRows:      int(bundle.TotalDocuments),
-			}
-			indexesUsed = []string{idxName}
-			qr.logger.Infof("Using BTreeOrderedScanNode on index %s for GROUP BY %s (skip sort)", idxName, fieldName)
-			return rootNode, indexesUsed, nil
-		}
-	}
+	// if !query.HasWhere() && query.GroupBy != nil && len(query.GroupBy.Fields) == 1 {
+	// 	fieldName := extractFieldNameForProjection(query.GroupBy.Fields[0])
+	// 	if idxName, found := findBTreeIndexForGroupByField(bundle, fieldName); found {
+	// 		rootNode = &BTreeOrderedScanNode{
+	// 			Bundle:             bundle,
+	// 			IndexName:          idxName,
+	// 			OrderedByFieldName: fieldName,
+	// 			Logger:             qr.logger,
+	// 			BundleServiceInt:   qr.bundleService,
+	// 			Cost:               float64(bundle.TotalDocuments) * 0.5, // cheaper than full scan + sort
+	// 			EstimatedRows:      int(bundle.TotalDocuments),
+	// 		}
+	// 		indexesUsed = []string{idxName}
+	// 		qr.logger.Infof("Using BTreeOrderedScanNode on index %s for GROUP BY %s (skip sort)", idxName, fieldName)
+	// 		return rootNode, indexesUsed, nil
+	// 	}
+	// }
 
 	// No WHERE, or legacy WHERE (WhereExpression is nil): create full scan as the base
 	scanNode := &FullScanNode{
@@ -316,12 +367,14 @@ func (qr *QueryRouter) routeGroupByQuery(
 		BundleServiceInt: qr.bundleService,
 		DocumentScanner:  docScanner,
 	}
-	// NOTE: Projection pushdown for GROUP BY is intentionally NOT applied here.
-	// DecodeFastBinaryProjected uses exact field-name matching; stored names can differ in case
-	// or the projection list can omit a needed field due to qualifier/alias handling, causing
-	// "GROUP BY field 'X' not found in document". Full deserialization is used until the
-	// deserializer supports case-insensitive projection and we validate qualifier stripping.
-	// getProjectionFieldsForGroupBy and extractFieldNameForProjection remain for future use.
+
+	// PROJECTION PUSHDOWN FOR GROUP BY: Only deserialize fields needed for aggregation
+	// This dramatically improves performance for GROUP BY queries on bundles with many fields
+	// The deserializer now supports case-insensitive field matching, so this is safe to enable
+	if projectionFields := getProjectionFieldsForGroupBy(query); len(projectionFields) > 0 {
+		scanNode.ProjectionFields = projectionFields
+		qr.logger.Infof("PROJECTION PUSHDOWN: Set ProjectionFields=%v on FullScanNode for GROUP BY optimization", projectionFields)
+	}
 
 	rootNode = scanNode
 
@@ -346,7 +399,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 		rootNode = filterNode
 	}
 
-	qr.logger.Debugf("Created base execution tree for GROUP BY")
+	qr.logger.Infof("Created base execution tree for GROUP BY")
 
 	return rootNode, indexesUsed, nil
 }
@@ -369,10 +422,17 @@ func (qr *QueryRouter) convertToJoinQuery(query *queryparser.UnifiedSelectQuery)
 		JoinClauses:      query.JoinClauses,
 		WhereClause:      whereClause,
 		WhereExpression:  query.WhereExpression, // Pass Expression for new executor
-		OrderBy:          []string{},            // ORDER BY handled by PlanBuilder
+		OrderBy:          []string{},            // ORDER BY handled by PlanBuilder (fields stored separately)
 		Limit:            query.Limit,
 		Offset:           query.Offset,
 		RelationshipName: query.RelationshipName,
+	}
+
+	// Store ORDER BY clause in the query for streaming Top-N optimization
+	// The PlanBuilder will also wrap with SortNode, but JoinExecutionNode can use this
+	// to perform streaming Top-N during merge when LIMIT is present
+	if query.OrderBy != nil {
+		joinQuery.OrderByClause = query.OrderBy
 	}
 
 	return joinQuery
@@ -467,26 +527,36 @@ func (qr *QueryRouter) tryIndexOptimization(
 
 	// Try hash index optimization for simple equality
 	if field, value, ok := syndrQL.ExtractSimpleEquality(expr); ok {
-		qr.logger.Debugf("Found simple equality: %s == %v", field, value)
+		qr.logger.Infof("INDEX OPTIMIZATION: Found simple equality: %s == %v", field, value)
 
 		// Check if hash index exists for this field
 		for indexName, indexRef := range bundle.Indexes {
-			if indexRef.IndexType == "hash" && len(indexRef.Fields) == 1 && indexRef.Fields[0].Name == field {
-				qr.logger.Debugf("Found hash index '%s' on field '%s'", indexName, field)
+			if indexRef.IndexType == "hash" {
+				// Hash indexes use HashIndexField.FieldName, not Fields array
+				hashFieldName := indexRef.HashIndexField.FieldName
+				qr.logger.Infof("INDEX CHECK: index='%s' type='hash' hashField='%s' matchesField=%v",
+					indexName, hashFieldName, hashFieldName == field)
 
-				return &IndexScanNode{
-					Bundle:           bundle,
-					IndexName:        indexName,
-					ScanType:         HashIndexScan,
-					SearchKey:        value,
-					Cost:             1.0, // Hash lookup is O(1)
-					EstimatedRows:    1,   // Exact match
-					Logger:           qr.logger,
-					BundleServiceInt: qr.bundleService,
-					DocumentScanner:  docScanner,
-				}, indexName
+				if hashFieldName == field {
+					qr.logger.Infof("INDEX SELECTED: Using hash index '%s' on field '%s'", indexName, field)
+
+					return &IndexScanNode{
+						Bundle:           bundle,
+						IndexName:        indexName,
+						ScanType:         HashIndexScan,
+						SearchKey:        value,
+						Cost:             1.0, // Hash lookup is O(1)
+						EstimatedRows:    1,   // Exact match
+						Logger:           qr.logger,
+						BundleServiceInt: qr.bundleService,
+						DocumentScanner:  docScanner,
+					}, indexName
+				}
 			}
 		}
+		qr.logger.Infof("INDEX OPTIMIZATION: No hash index found for field '%s'", field)
+	} else {
+		qr.logger.Infof("INDEX OPTIMIZATION: ExtractSimpleEquality failed - not a simple equality expression")
 	}
 
 	// Try BTree index optimization for range conditions

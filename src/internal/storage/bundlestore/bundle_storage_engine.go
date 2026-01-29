@@ -29,6 +29,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/zap"
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/sys/unix"
 )
 
@@ -37,12 +38,14 @@ type BundleStorageEngine struct {
 	DataDirectory string
 	logger        *zap.SugaredLogger
 	serializer    format.BundleSerializer // Configurable serialization format
-	writeBuffers  map[string]*WriteBuffer // Per-file write buffers for batched I/O (keyed by file path)
-	bufferMutex   sync.RWMutex            // Protects writeBuffers map
+
+	// PHASE 3: SHARDED CACHES - Replaces global mutex + map pairs with 64-shard caches
+	// This eliminates serialization bottlenecks where all operations contested on global mutexes
+	writeBufferCache *ShardedBufferCache // Per-file write buffers (replaces writeBuffers + bufferMutex)
 
 	// MULTI-FILE STORAGE: Manifest managers per bundle to track segment files
-	manifestManagers      map[string]*ManifestManager // Per-bundle manifest managers (keyed by bundle name)
-	manifestManagersMutex sync.Mutex                  // Protects manifestManagers map
+	// PHASE 3: Sharded for concurrent bundle access
+	manifestCache *ShardedManifestCache // Per-bundle manifest managers (replaces manifestManagers + manifestManagersMutex)
 
 	// COMPACTION: Background compaction scheduler with parallel workers
 	compactor           *BundleCompactor
@@ -75,30 +78,25 @@ type BundleStorageEngine struct {
 	writeLogger   *BundleWriteLogger     // Detailed write operation logging for debugging
 
 	// PROJECTION PUSHDOWN: Temporary storage for projection fields per bundle
-	// This allows BundleAdapter to pass projection through to readDocumentRange
-	// Keyed by bundle name, cleared after page loading
-	projectionFields map[string][]string // Per-bundle projection fields
-	projectionMutex  sync.RWMutex        // Protects projectionFields map
+	// PHASE 3: Sharded for concurrent bundle access
+	projectionCache *ShardedProjectionCache // Per-bundle projection fields (replaces projectionFields + projectionMutex)
 
 	// FILE READ CACHE: Bounded cache of file/segment contents to avoid repeated
 	// full-file reads when LoadDocumentPage is called many times (e.g. getAllDocumentsForIndexing).
-	// Key: file path. LRU eviction when at FileReadCacheMaxEntries.
-	fileReadCache      map[string]*fileReadCacheEntry
-	fileReadCacheMutex sync.RWMutex
+	// PHASE 3: Sharded for concurrent file access
+	fileReadCache *ShardedFileReadCache // File content cache (replaces fileReadCache + fileReadCacheMutex)
 
 	// PARSED DOCS CACHE: Caches fully parsed documents from segment files.
 	// Key: "bundleName:filePath". This avoids re-parsing the same file content
 	// when loading different pages, which is critical for multi-file storage
 	// where each page load would otherwise re-parse all segment files.
-	// O(F) parsing becomes O(1) after first load.
-	parsedDocsCache      map[string]*parsedDocsCacheEntry
-	parsedDocsCacheMutex sync.RWMutex
+	// PHASE 3: Sharded for concurrent cache access
+	parsedDocsCache *ShardedParsedDocsCache // Parsed docs cache (replaces parsedDocsCache + parsedDocsCacheMutex)
 
-	// SINGLEFLIGHT: Prevents thundering herd on cache population.
+	// PHASE 8: Using golang.org/x/sync/singleflight to prevent thundering herd on cache population.
 	// When cache miss occurs, only one goroutine parses the file while others wait.
-	// Key: cacheKey (bundleName:filePath), Value: channel closed when parsing completes
-	parseInFlight      map[string]chan struct{}
-	parseInFlightMutex sync.Mutex
+	// This replaces the hand-rolled parseInFlight map + mutex pattern.
+	parseSingleflight singleflight.Group
 
 	// COMPACTION CALLBACK: Invoked when compaction completes for a bundle so
 	// BundleService can invalidate documentPageMap (logical page positions change).
@@ -200,22 +198,23 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 	//logger.Infof("Bundle storage using %s format", serializer.GetFormatName())
 
 	// Create a new bundle store
+	// PHASE 3: Using sharded caches (64 shards each) to eliminate global mutex contention
 	store := &BundleStorageEngine{
 		DataDirectory:    dataDir,
 		fileManager:      fileManager,
 		logger:           logger,
 		serializer:       serializer,
-		writeBuffers:     make(map[string]*WriteBuffer),
-		projectionFields: make(map[string][]string),               // PROJECTION PUSHDOWN: Initialize projection fields map
-		manifestManagers: make(map[string]*ManifestManager),       // Initialize manifest managers map
+		writeBufferCache: NewShardedBufferCache(),                 // PHASE 3: Sharded write buffer cache (replaces map + mutex)
+		projectionCache:  NewShardedProjectionCache(),             // PHASE 3: Sharded projection fields cache (replaces map + mutex)
+		manifestCache:    NewShardedManifestCache(),               // PHASE 3: Sharded manifest cache (replaces map + mutex)
 		writeLocks:       NewShardedWriteLockMap(),                // PERFORMANCE: Sharded write locks (64 shards)
 		documentLocks:    make(map[string]map[string]*sync.Mutex), // DOCUMENT-LEVEL LOCKING: Initialize document locks map
 		rotationLocks:    NewShardedMutexMap(),                    // PERFORMANCE: Sharded rotation locks (64 shards)
 		writeVerifier:    NewDocumentWriteVerifier(logger),        // Initialize write verification
 		writeLogger:      NewBundleWriteLogger(logger, 1000),      // Keep last 1000 write operations
-		fileReadCache:    make(map[string]*fileReadCacheEntry),    // FILE READ CACHE: avoids repeated full-file reads per page
-		parsedDocsCache:  make(map[string]*parsedDocsCacheEntry),  // PARSED DOCS CACHE: avoids re-parsing same file for different pages
-		parseInFlight:    make(map[string]chan struct{}),          // SINGLEFLIGHT: prevents thundering herd on cache population
+		fileReadCache:   NewShardedFileReadCache(),   // PHASE 3: Sharded file read cache (replaces map + mutex)
+		parsedDocsCache: NewShardedParsedDocsCache(), // PHASE 3: Sharded parsed docs cache (replaces map + mutex)
+		// PHASE 8: parseSingleflight requires no initialization (zero value is ready to use)
 	}
 
 	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
@@ -234,7 +233,158 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		return nil, fmt.Errorf("failed to create data directory %s: %w", store.DataDirectory, err)
 	}
 
+	// PHASE 2B: Cache warming - pre-parse files for GROUP BY optimization
+	// This runs async and doesn't block startup
+	if settings.GetSettings().GroupByCacheWarmingEnabled {
+		go store.warmParsedDocsCache(ctx)
+	}
+
 	return store, nil
+}
+
+// warmParsedDocsCache pre-parses bundle files to warm the parsed docs cache for GROUP BY optimization
+// PHASE 2B: Background cache warming - non-blocking, respects memory budget
+// Runs async on startup to improve first GROUP BY query performance
+func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
+	maxMB := settings.GetSettings().GroupByCacheWarmingMaxMB
+	maxBytes := int64(maxMB) * 1024 * 1024
+	
+	bse.logger.Infof("Starting cache warming for GROUP BY optimization (max %d MB)", maxMB)
+	
+	// Sleep briefly to let server finish startup
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(5 * time.Second):
+	}
+	
+	// Track memory usage
+	var totalBytes atomic.Int64
+	
+	// Walk data directory to find all .manifest and .dat files
+	err := filepath.Walk(bse.DataDirectory, func(path string, info os.FileInfo, err error) error {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cache warming cancelled")
+		default:
+		}
+		
+		if err != nil {
+			bse.logger.Warnf("Cache warming: skipping path %s: %v", path, err)
+			return nil
+		}
+		
+		// Skip if not a file
+		if info.IsDir() {
+			return nil
+		}
+		
+		// Check if we've reached memory limit
+		if totalBytes.Load() >= maxBytes {
+			bse.logger.Infof("Cache warming complete: reached memory limit of %d MB", maxMB)
+			return filepath.SkipAll
+		}
+		
+		// Only process .manifest files (they reference all segment files)
+		if !strings.HasSuffix(path, ".manifest") {
+			return nil
+		}
+		
+		// Load manifest to get segment files
+		manifestData, err := os.ReadFile(path)
+		if err != nil {
+			bse.logger.Debugf("Cache warming: failed to read manifest %s: %v", path, err)
+			return nil
+		}
+		
+		// Extract database and bundle names from manifest path
+		// Path format: /data/database/bundleName/bundleName.manifest
+		parts := strings.Split(filepath.Dir(path), string(filepath.Separator))
+		if len(parts) < 2 {
+			return nil
+		}
+		bundleName := parts[len(parts)-1]
+		databaseName := parts[len(parts)-2]
+		
+		// Simple parsing: each line is "filename offset size"
+		lines := strings.Split(string(manifestData), "\n")
+		for _, line := range lines {
+			// Check for cancellation and memory limit
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("cache warming cancelled")
+			default:
+			}
+			
+			if totalBytes.Load() >= maxBytes {
+				return filepath.SkipAll
+			}
+			
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			
+			parts := strings.Fields(line)
+			if len(parts) < 3 {
+				continue
+			}
+			
+			segmentFile := filepath.Join(filepath.Dir(path), parts[0])
+			cacheKey := fmt.Sprintf("%s:%s", bundleName, segmentFile)
+			
+			// Check if already in cache
+			if bse.parsedDocsCache.Get(cacheKey) != nil {
+				continue
+			}
+			
+			// Check if file exists
+			if _, err := os.Stat(segmentFile); os.IsNotExist(err) {
+				continue
+			}
+			
+			// Pre-parse the file to warm cache
+			fileData, err := os.ReadFile(segmentFile)
+			if err != nil {
+				bse.logger.Debugf("Cache warming: failed to read segment %s: %v", segmentFile, err)
+				continue
+			}
+			
+			// Parse documents from file
+			docs, deletedIDs, totalDocs, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &fileData)
+			if err != nil {
+				bse.logger.Debugf("Cache warming: failed to parse segment %s: %v", segmentFile, err)
+				continue
+			}
+			
+			// Store in cache
+			entry := &parsedDocsCacheEntry{
+				documents:     docs,
+				deletedDocIDs: deletedIDs,
+				totalDocs:     totalDocs,
+				lastAccess:    time.Now().Unix(),
+			}
+			
+			bse.parsedDocsCache.Set(cacheKey, entry)
+			
+			// Track memory usage (approximate)
+			entrySize := int64(len(fileData))
+			totalBytes.Add(entrySize)
+			
+			bse.logger.Debugf("Cache warming: pre-parsed %s (%d docs, %.2f MB total)", 
+				filepath.Base(segmentFile), totalDocs, float64(totalBytes.Load())/(1024*1024))
+		}
+		
+		return nil
+	})
+	
+	if err != nil && !strings.Contains(err.Error(), "cancelled") {
+		bse.logger.Warnf("Cache warming completed with errors: %v", err)
+	} else {
+		bse.logger.Infof("Cache warming complete: pre-parsed %.2f MB of data", 
+			float64(totalBytes.Load())/(1024*1024))
+	}
 }
 
 // LoadAllBundleMetadata loads only the bundle structure/metadata without documents
@@ -345,18 +495,15 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 
 	// OPTIMIZATION: Use parsed docs cache to avoid re-parsing files for different pages
 	// This turns O(F * N) into O(1) for subsequent page loads where F = files, N = docs
+	// PHASE 3: Using ShardedParsedDocsCache for concurrent access without global mutex
 	for _, fileInfo := range manifest.Files {
 		bundleDir := GetBundleDirectory(databaseName, bundleName)
 		filePath := filepath.Join(bundleDir, fileInfo.FileName)
 		cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
 
 		// Check parsed docs cache first
-		bse.parsedDocsCacheMutex.RLock()
-		cached, cacheHit := bse.parsedDocsCache[cacheKey]
-		if cacheHit {
-			cached.lastAccess = time.Now().UnixNano()
-		}
-		bse.parsedDocsCacheMutex.RUnlock()
+		cached := bse.parsedDocsCache.GetAndTouch(cacheKey)
+		cacheHit := cached != nil
 
 		if cacheHit {
 			// Use cached parsed documents - O(1) instead of O(N) parsing
@@ -370,87 +517,30 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 			continue
 		}
 
-		// Cache miss - implement singleflight to prevent thundering herd
-		// Only one goroutine parses the file while others wait
-		// CRITICAL FIX: Added timeout to prevent indefinite blocking if parser goroutine fails
-	singleflightRetry:
-		bse.parseInFlightMutex.Lock()
-		waitCh, isInflight := bse.parseInFlight[cacheKey]
-		if isInflight {
-			bse.parseInFlightMutex.Unlock()
-			// CRITICAL FIX: Wait for the in-flight parse to complete WITH TIMEOUT
-			// If the parsing goroutine panics or hangs, this prevents indefinite blocking
-			select {
-			case <-waitCh:
-				// Success - parsing complete
-			case <-time.After(30 * time.Second):
-				// Timeout - parsing goroutine may be stuck
-				// Force cleanup of stale entry and retry as the parser
-				if bse.logger != nil {
-					bse.logger.Warnf("Timeout waiting for in-flight parse of %s, cleaning up stale entry", cacheKey)
-				}
-				bse.parseInFlightMutex.Lock()
-				if ch, exists := bse.parseInFlight[cacheKey]; exists && ch == waitCh {
-					delete(bse.parseInFlight, cacheKey)
-					// Note: We don't close the channel here as the original goroutine may still reference it
-					// The channel will be garbage collected when all references are gone
-				}
-				bse.parseInFlightMutex.Unlock()
-				goto singleflightRetry
-			}
-			// Re-check cache after waiting (it should be populated now)
-			bse.parsedDocsCacheMutex.RLock()
-			cached, cacheHit = bse.parsedDocsCache[cacheKey]
-			if cacheHit {
-				cached.lastAccess = time.Now().UnixNano()
-			}
-			bse.parsedDocsCacheMutex.RUnlock()
-			if cacheHit {
-				for docID, doc := range cached.documents {
-					mergedDocuments[docID] = doc
-				}
-				for docID := range cached.deletedDocIDs {
-					deletedDocIDs[docID] = true
-				}
-				totalDocsAcrossFiles += cached.totalDocs
-				continue
-			}
-			// Cache still empty (rare: parsing failed or was evicted) - retry to become the parser
-			goto singleflightRetry
+		// Cache miss - PHASE 8: Use singleflight.Do() to prevent thundering herd
+		// Only one goroutine parses the file while others wait for its result
+		// singleflight automatically handles panic recovery and result sharing
+		type parseResult struct {
+			documents   map[string]models.Document
+			deletedIDs  map[string]bool
+			totalDocs   uint32
+			fileSkipped bool
 		}
 
-		// Register as the parser for this file (mutex is held here)
-		doneCh := make(chan struct{})
-		bse.parseInFlight[cacheKey] = doneCh
-		bse.parseInFlightMutex.Unlock()
-
-		// CRITICAL FIX: Use a separate function with deferred cleanup to ensure cleanup runs on panic
-		// This prevents other goroutines from blocking forever if we panic during parsing
-		fileDocuments, fileDeletedIDs, fileTotalDocs, parseErr := func() (map[string]models.Document, map[string]bool, uint32, error) {
-			// Deferred cleanup ensures channel is closed even on panic
-			cleanedUp := false
-			defer func() {
-				if !cleanedUp {
-					bse.parseInFlightMutex.Lock()
-					delete(bse.parseInFlight, cacheKey)
-					bse.parseInFlightMutex.Unlock()
-					close(doneCh)
-				}
-			}()
-
+		result, err, _ := bse.parseSingleflight.Do(cacheKey, func() (interface{}, error) {
 			// Check if file exists (skip if not - may have been compacted)
 			if _, err := os.Stat(filePath); os.IsNotExist(err) {
 				if bse.logger != nil && settings.GetSettings().Debug {
 					bse.logger.Debugf("Skipping non-existent file %s (likely compacted)", filePath)
 				}
-				return nil, nil, 0, nil // Not an error, just skip
+				return &parseResult{fileSkipped: true}, nil
 			}
 
 			// Use file-read cache to avoid repeated full-file reads
 			data, err := bse.getOrReadFile(filePath)
 			if err != nil {
 				bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
-				return nil, nil, 0, nil // Not fatal, just skip this file
+				return &parseResult{fileSkipped: true}, nil // Not fatal, just skip this file
 			}
 
 			// Parse ALL documents from this file (not just page range) so we can cache them
@@ -458,30 +548,41 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 			docs, deleted, total, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &data)
 			if err != nil {
 				bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
-				return nil, nil, 0, nil // Not fatal, just skip this file
+				return &parseResult{fileSkipped: true}, nil // Not fatal, just skip this file
 			}
 
-			// Cache the parsed results
+			// Cache the parsed results for subsequent requests
 			bse.cacheParsedDocs(cacheKey, docs, deleted, total)
 
-			// Mark as successfully cleaned up (defer will close channel)
-			cleanedUp = false // Let defer handle cleanup
-			return docs, deleted, total, nil
-		}()
+			return &parseResult{
+				documents:  docs,
+				deletedIDs: deleted,
+				totalDocs:  total,
+			}, nil
+		})
 
-		// Skip this file if parsing failed or file didn't exist
-		if parseErr != nil || fileDocuments == nil {
+		// Handle singleflight result
+		if err != nil {
+			// Unexpected error from singleflight
+			if bse.logger != nil {
+				bse.logger.Warnf("Singleflight error for %s: %v", cacheKey, err)
+			}
+			continue
+		}
+
+		parsed := result.(*parseResult)
+		if parsed.fileSkipped || parsed.documents == nil {
 			continue
 		}
 
 		// Merge documents with last-write-wins
-		for docID, doc := range fileDocuments {
+		for docID, doc := range parsed.documents {
 			mergedDocuments[docID] = doc
 		}
-		for docID := range fileDeletedIDs {
+		for docID := range parsed.deletedIDs {
 			deletedDocIDs[docID] = true
 		}
-		totalDocsAcrossFiles += fileTotalDocs
+		totalDocsAcrossFiles += parsed.totalDocs
 	}
 
 	// TOMBSTONE FILTERING: Remove deleted documents
@@ -604,65 +705,22 @@ func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databa
 // getOrReadFile returns the file content from the file-read cache, or reads from disk and caches it.
 // Callers must not modify the returned slice. Used by LoadDocumentPage to avoid repeated full-file
 // reads when iterating all pages (e.g. getAllDocumentsForIndexing).
+// PHASE 3: Using ShardedFileReadCache for concurrent access without global mutex
 func (bse *BundleStorageEngine) getOrReadFile(filePath string) ([]byte, error) {
 	maxEntries := settings.GetSettings().FileReadCacheMaxEntries
 	if maxEntries <= 0 {
 		maxEntries = 32
 	}
 
-	bse.fileReadCacheMutex.RLock()
-	if e := bse.fileReadCache[filePath]; e != nil {
-		e.lastAccess = time.Now().UnixNano()
-		data := e.data
-		bse.fileReadCacheMutex.RUnlock()
-		return data, nil
-	}
-	bse.fileReadCacheMutex.RUnlock()
-
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
+	// Per-shard max entries (64 shards, so divide by 64 but ensure at least 1)
+	maxEntriesPerShard := maxEntries / CacheShardCount
+	if maxEntriesPerShard < 1 {
+		maxEntriesPerShard = 1
 	}
 
-	bse.fileReadCacheMutex.Lock()
-	defer bse.fileReadCacheMutex.Unlock()
-
-	// Double-check: another goroutine may have populated while we were reading
-	if e := bse.fileReadCache[filePath]; e != nil {
-		return e.data, nil
-	}
-
-	// Evict LRU entries until we have room
-	for len(bse.fileReadCache) >= maxEntries {
-		bse.evictFileReadCacheLRULocked()
-	}
-
-	bse.fileReadCache[filePath] = &fileReadCacheEntry{
-		data:       data,
-		lastAccess: time.Now().UnixNano(),
-	}
-	return data, nil
-}
-
-// evictFileReadCacheLRULocked removes the least-recently-accessed entry.
-// Caller must hold bse.fileReadCacheMutex (write).
-func (bse *BundleStorageEngine) evictFileReadCacheLRULocked() {
-	var evictKey string
-	var minAccess int64
-	first := true
-	for k, e := range bse.fileReadCache {
-		if first || e.lastAccess < minAccess {
-			evictKey = k
-			minAccess = e.lastAccess
-			first = false
-		}
-	}
-	if evictKey != "" {
-		delete(bse.fileReadCache, evictKey)
-		if bse.logger != nil && settings.GetSettings().Debug {
-			bse.logger.Debugf("Evicted file read cache entry: %s", evictKey)
-		}
-	}
+	return bse.fileReadCache.GetOrCreate(filePath, maxEntriesPerShard, func() ([]byte, error) {
+		return os.ReadFile(filePath)
+	})
 }
 
 // GetDocumentsByIDsFromCache retrieves documents by IDs directly from the parsed docs cache.
@@ -689,14 +747,14 @@ func (bse *BundleStorageEngine) GetDocumentsByIDsFromCache(bundleName, databaseN
 	}
 
 	// Check parsed cache for each segment file
+	// PHASE 3: Using ShardedParsedDocsCache for concurrent access without global mutex
 	bundleDir := GetBundleDirectory(databaseName, bundleName)
-	bse.parsedDocsCacheMutex.RLock()
 	for _, fileInfo := range manifest.Files {
 		filePath := filepath.Join(bundleDir, fileInfo.FileName)
 		cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
 
-		if cached, ok := bse.parsedDocsCache[cacheKey]; ok {
-			cached.lastAccess = time.Now().UnixNano()
+		cached := bse.parsedDocsCache.GetAndTouch(cacheKey)
+		if cached != nil {
 			// Check for deleted docs first (tombstones take precedence)
 			for docID := range cached.deletedDocIDs {
 				if docIDSet[docID] {
@@ -715,17 +773,15 @@ func (bse *BundleStorageEngine) GetDocumentsByIDsFromCache(bundleName, databaseN
 			}
 		}
 	}
-	bse.parsedDocsCacheMutex.RUnlock()
 
 	return result, notFound
 }
 
 // InvalidateFileReadCache removes a single path from the file-read cache.
 // Call after compact or replace of that file so subsequent reads see fresh data.
+// PHASE 3: Using ShardedFileReadCache for concurrent access without global mutex
 func (bse *BundleStorageEngine) InvalidateFileReadCache(filePath string) {
-	bse.fileReadCacheMutex.Lock()
-	defer bse.fileReadCacheMutex.Unlock()
-	delete(bse.fileReadCache, filePath)
+	bse.fileReadCache.Delete(filePath)
 	if bse.logger != nil && settings.GetSettings().Debug {
 		bse.logger.Debugf("Invalidated file read cache: %s", filePath)
 	}
@@ -734,19 +790,15 @@ func (bse *BundleStorageEngine) InvalidateFileReadCache(filePath string) {
 // InvalidateFileReadCacheForBundle removes all cached buffers for a bundle (legacy file and
 // all segment files in the bundle dir). Call on bundle drop or after compaction that
 // replaces segments.
+// PHASE 3: Using ShardedFileReadCache.DeleteMatching for concurrent-safe iteration
 func (bse *BundleStorageEngine) InvalidateFileReadCacheForBundle(databaseName, bundleName string) {
-	bse.fileReadCacheMutex.Lock()
-	defer bse.fileReadCacheMutex.Unlock()
-
 	legacyPath := filepath.Join(helpers.GetDatabaseFolderPath(databaseName), fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
-	delete(bse.fileReadCache, legacyPath)
-
 	bundleDir := GetBundleDirectory(databaseName, bundleName)
-	for k := range bse.fileReadCache {
-		if filepath.Dir(k) == bundleDir {
-			delete(bse.fileReadCache, k)
-		}
-	}
+
+	bse.fileReadCache.DeleteMatching(func(k string) bool {
+		return k == legacyPath || filepath.Dir(k) == bundleDir
+	})
+
 	if bse.logger != nil && settings.GetSettings().Debug {
 		bse.logger.Debugf("Invalidated file read cache for bundle %s/%s", databaseName, bundleName)
 	}
@@ -837,65 +889,37 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 
 // cacheParsedDocs caches parsed documents for a file with LRU eviction.
 // Key format: "bundleName:filePath"
+// PHASE 3: Using ShardedParsedDocsCache for concurrent access without global mutex
 func (bse *BundleStorageEngine) cacheParsedDocs(cacheKey string, documents map[string]models.Document, deletedDocIDs map[string]bool, totalDocs uint32) {
 	maxEntries := settings.GetSettings().FileReadCacheMaxEntries
 	if maxEntries <= 0 {
 		maxEntries = 32 // Default matches file read cache
 	}
 
-	bse.parsedDocsCacheMutex.Lock()
-	defer bse.parsedDocsCacheMutex.Unlock()
-
-	// Evict LRU entries if cache is full
-	for len(bse.parsedDocsCache) >= maxEntries {
-		bse.evictParsedDocsCacheLRULocked()
+	// Per-shard max entries (64 shards, so divide by 64 but ensure at least 1)
+	maxEntriesPerShard := maxEntries / CacheShardCount
+	if maxEntriesPerShard < 1 {
+		maxEntriesPerShard = 1
 	}
 
-	bse.parsedDocsCache[cacheKey] = &parsedDocsCacheEntry{
+	bse.parsedDocsCache.SetWithLRU(cacheKey, &parsedDocsCacheEntry{
 		documents:     documents,
 		deletedDocIDs: deletedDocIDs,
 		totalDocs:     totalDocs,
 		lastAccess:    time.Now().UnixNano(),
-	}
+	}, maxEntriesPerShard)
 
 	if bse.logger != nil && settings.GetSettings().Debug {
 		bse.logger.Debugf("Cached %d parsed documents for %s", len(documents), cacheKey)
 	}
 }
 
-// evictParsedDocsCacheLRULocked removes the least-recently-accessed entry.
-// Caller must hold bse.parsedDocsCacheMutex (write).
-func (bse *BundleStorageEngine) evictParsedDocsCacheLRULocked() {
-	var evictKey string
-	var minAccess int64
-	first := true
-	for k, e := range bse.parsedDocsCache {
-		if first || e.lastAccess < minAccess {
-			evictKey = k
-			minAccess = e.lastAccess
-			first = false
-		}
-	}
-	if evictKey != "" {
-		delete(bse.parsedDocsCache, evictKey)
-		if bse.logger != nil && settings.GetSettings().Debug {
-			bse.logger.Debugf("Evicted parsed docs cache entry: %s", evictKey)
-		}
-	}
-}
-
 // InvalidateParsedDocsCacheForBundle removes all cached parsed docs for a bundle.
 // Call after writes, compaction, or any operation that changes bundle contents.
+// PHASE 3: Using ShardedParsedDocsCache.DeleteByPrefix for concurrent-safe iteration
 func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForBundle(bundleName string) {
-	bse.parsedDocsCacheMutex.Lock()
-	defer bse.parsedDocsCacheMutex.Unlock()
-
 	prefix := bundleName + ":"
-	for k := range bse.parsedDocsCache {
-		if len(k) > len(prefix) && k[:len(prefix)] == prefix {
-			delete(bse.parsedDocsCache, k)
-		}
-	}
+	bse.parsedDocsCache.DeleteByPrefix(prefix)
 
 	if bse.logger != nil && settings.GetSettings().Debug {
 		bse.logger.Debugf("Invalidated parsed docs cache for bundle %s", bundleName)
@@ -905,6 +929,7 @@ func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForBundle(bundleName st
 // InvalidateParsedDocsCacheForLatestFile invalidates only the cache entry for the latest segment file.
 // This is more efficient than InvalidateParsedDocsCacheForBundle when only the latest file was modified.
 // Writes always append to the latest file, so older segment files remain valid.
+// PHASE 3: Using ShardedParsedDocsCache.Delete for concurrent-safe invalidation
 func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForLatestFile(bundleName, databaseName string) {
 	// Get manifest to find the latest file
 	mm := bse.getOrCreateManifestManager(databaseName, bundleName)
@@ -920,9 +945,7 @@ func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForLatestFile(bundleNam
 	filePath := filepath.Join(bundleDir, latestFile.FileName)
 	cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
 
-	bse.parsedDocsCacheMutex.Lock()
-	delete(bse.parsedDocsCache, cacheKey)
-	bse.parsedDocsCacheMutex.Unlock()
+	bse.parsedDocsCache.Delete(cacheKey)
 
 	if bse.logger != nil && settings.GetSettings().Debug {
 		bse.logger.Debugf("Invalidated parsed docs cache for latest file %s in bundle %s", latestFile.FileName, bundleName)
@@ -1829,13 +1852,17 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 
 	// D7: Make only writeBuffer.Sync() conditional on DurabilityMode. Tombstone is in appendDeletionMarker's
 	// file; Sync here orders buffered writes. D3: "strict" sync, else skip.
-	b.bufferMutex.RLock()
-	writeBuffer, exists := b.writeBuffers[bundle.Name]
-	b.bufferMutex.RUnlock()
-	if exists && settings.GetSettings().DurabilityMode == "strict" {
-		if err := writeBuffer.Sync(); err != nil {
-			b.logger.Warnf("Failed to sync write buffer to disk: %v (continuing anyway)", err)
-		}
+	// PHASE 3: Using ShardedBufferCache.Range to sync all buffers for this bundle
+	if settings.GetSettings().DurabilityMode == "strict" {
+		bundlePattern := "/" + bundle.Name + "/"
+		b.writeBufferCache.Range(func(bufferKey string, writeBuffer *WriteBuffer) bool {
+			if strings.Contains(bufferKey, bundlePattern) {
+				if err := writeBuffer.Sync(); err != nil {
+					b.logger.Warnf("Failed to sync write buffer to disk: %v (continuing anyway)", err)
+				}
+			}
+			return true // continue iteration
+		})
 	}
 
 	// CRITICAL FIX: Do NOT decrement TotalDocuments on deletion
@@ -1973,8 +2000,39 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 // appendDeletionMarkersBatchCore performs the actual tombstone append and metadata update.
 // Caller must hold getWriteLock(bundle.Name) unless using document-level locks (WithLocks path).
 func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bundle, documentIDs []string) error {
-	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
-	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+	// Determine file path using the same logic as document inserts
+	// First try to load manifest for multi-file storage
+	manifestMgr := b.getOrCreateManifestManager(bundle.Database.Name, bundle.Name)
+	manifest, err := manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
+	var filePath string
+	if err != nil {
+		// Fallback to legacy single file when manifest cannot be loaded/created
+		databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+		filePath = filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+	} else {
+		// Multi-file storage: append tombstones to the active file
+		currentFileID := uint32(1)
+		if manifest.ActiveFileID > 0 {
+			currentFileID = uint32(manifest.ActiveFileID)
+		}
+		bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
+		filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+		
+		// Ensure file is in manifest
+		fileExistsInManifest := false
+		for _, f := range manifest.Files {
+			if f.FileID == int(currentFileID) {
+				fileExistsInManifest = true
+				break
+			}
+		}
+		if !fileExistsInManifest {
+			fileName := fmt.Sprintf("%06d.bnd", currentFileID)
+			if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+				return fmt.Errorf("failed to add file to manifest for deletion: %w", err)
+			}
+		}
+	}
 
 	// Open file once for all markers
 	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0644)
@@ -2057,6 +2115,11 @@ func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bund
 
 	// CACHE INVALIDATION: Only invalidate the latest file's cache since deletes append tombstones there
 	b.InvalidateParsedDocsCacheForLatestFile(bundle.Name, bundle.Database.Name)
+
+	// CRITICAL: Invalidate fileReadCache so subsequent page loads see the new tombstones
+	// Without this, getOrReadFile() returns stale cached file data that doesn't include tombstones
+	// PHASE 3: Using ShardedFileReadCache.Delete for concurrent-safe invalidation
+	b.fileReadCache.Delete(filePath)
 
 	return nil
 }
@@ -2433,30 +2496,28 @@ func (b *BundleStorageEngine) periodicCompactionEvaluator(ctx context.Context) {
 
 // evaluateAllBundlesForCompaction evaluates all active bundles for compaction
 // This is called by the periodic evaluator to ensure compaction runs even without writes
+// PHASE 3: Using ShardedManifestCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) evaluateAllBundlesForCompaction() {
-	// Take snapshot of manifest managers to avoid holding lock during evaluation
-	b.manifestManagersMutex.Lock()
-	managerKeys := make([]string, 0, len(b.manifestManagers))
-	for key := range b.manifestManagers {
-		managerKeys = append(managerKeys, key)
-	}
-	b.manifestManagersMutex.Unlock()
+	// Collect keys and evaluate asynchronously to avoid holding locks during evaluation
+	var bundlesToEvaluate []struct{ db, bundle string }
 
-	// Evaluate each bundle asynchronously
-	for _, key := range managerKeys {
+	b.manifestCache.Range(func(key string, _ *ManifestManager) bool {
 		// Parse manager key: "<database>:<bundle>"
 		parts := strings.SplitN(key, ":", 2)
-		if len(parts) != 2 {
-			continue
+		if len(parts) == 2 {
+			bundlesToEvaluate = append(bundlesToEvaluate, struct{ db, bundle string }{parts[0], parts[1]})
 		}
-		dbName, bundleName := parts[0], parts[1]
+		return true
+	})
 
+	// Evaluate each bundle asynchronously
+	for _, item := range bundlesToEvaluate {
 		// Async evaluation - don't block ticker
 		go func(db, bundle string) {
 			if b.compactionScheduler != nil {
 				b.compactionScheduler.EvaluateBundle(db, bundle)
 			}
-		}(dbName, bundleName)
+		}(item.db, item.bundle)
 	}
 }
 
@@ -2534,17 +2595,16 @@ func (b *BundleStorageEngine) extractDocumentIDOnly(data []byte) (string, error)
 		return "", fmt.Errorf("insufficient data for DocumentID extraction")
 	}
 
-	// Use DecodeFastBinary but only extract DocumentID from the map
-	// This is still much faster than building full Document objects
-	// Even though we decode the whole thing, we only use DocumentID
-	docMap, err := helpers.DecodeFastBinary(data)
+	// Use DecodeFastBinaryAuto to auto-detect V1/V2 format
+	// This ensures we can read documents regardless of binary format version
+	doc, err := helpers.DecodeFastBinaryAuto(data)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode DocumentID: %w", err)
 	}
 
-	// Extract only DocumentID (first field in the map)
-	if docID, ok := docMap["DocumentID"].(string); ok {
-		return docID, nil
+	// Extract only DocumentID from the Document
+	if doc.DocumentID != "" {
+		return doc.DocumentID, nil
 	}
 
 	return "", fmt.Errorf("DocumentID not found in decoded data")
@@ -2569,6 +2629,12 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 	deletedDocuments map[string]bool,
 ) error {
 	offset := 0
+	documentsFound := 0
+	tombstonesFound := 0
+
+	if b.logger != nil {
+		b.logger.Infof("countDocumentsInFileOnly: Starting parse of %d bytes", len(data))
+	}
 
 	// Skip bundle metadata header if present (0x42444D44 = "BDMD")
 	if len(data) >= 8 {
@@ -2576,12 +2642,18 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 		if magic == 0x42444D44 { // "BDMD" = Bundle Metadata
 			metadataSize := binary.LittleEndian.Uint32(data[4:8])
 			offset = int(8 + metadataSize)
+			if b.logger != nil {
+				b.logger.Infof("countDocumentsInFileOnly: Skipped BDMD header, starting at offset %d", offset)
+			}
 		}
 	}
 
 	for offset < len(data) {
 		// Need at least 8 bytes for magic number + size header
 		if offset+8 > len(data) {
+			if b.logger != nil {
+				b.logger.Infof("countDocumentsInFileOnly: Stopping at offset %d (not enough bytes for header)", offset)
+			}
 			break
 		}
 
@@ -2589,8 +2661,18 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 		magic := binary.LittleEndian.Uint32(data[offset : offset+4])
 		size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
 
+		// Log first few records and any non-standard magic numbers
+		if offset < 1000 || (magic != 0xDEADBEEF && magic != 0xDEADDEAD) {
+			if b.logger != nil {
+				b.logger.Infof("countDocumentsInFileOnly: offset=%d magic=0x%X size=%d", offset, magic, size)
+			}
+		}
+
 		// Validate size before proceeding
 		if offset+8+int(size) > len(data) {
+			if b.logger != nil {
+				b.logger.Warnf("countDocumentsInFileOnly: Invalid size %d at offset %d (would exceed file length)", size, offset)
+			}
 			break
 		}
 
@@ -2602,17 +2684,22 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 			if err != nil {
 				// Log warning but continue processing (don't fail entire count)
 				if b.logger != nil {
-					b.logger.Debugf("Failed to extract DocumentID at offset %d: %v (skipping)", offset, err)
+					b.logger.Warnf("Failed to extract DocumentID at offset %d: %v (skipping)", offset, err)
 				}
 				offset += 8 + int(size)
 				continue
 			}
 
 			if docID != "" {
+				documentsFound++
 				// Last-write-wins: later occurrence overwrites earlier
 				seenDocuments[docID] = true
 				// If was deleted, re-add it (update after delete)
 				delete(deletedDocuments, docID)
+			} else {
+				if b.logger != nil && documentsFound < 5 {
+					b.logger.Warnf("Extracted empty DocumentID at offset %d (size=%d)", offset, size)
+				}
 			}
 		} else if magic == 0xDEADDEAD {
 			// Tombstone - extract only DocumentID
@@ -2627,6 +2714,7 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 			}
 
 			if docID != "" {
+				tombstonesFound++
 				// Mark as deleted and remove from seen documents
 				deletedDocuments[docID] = true
 				delete(seenDocuments, docID)
@@ -2634,6 +2722,11 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 		}
 
 		offset += 8 + int(size)
+	}
+
+	if b.logger != nil {
+		b.logger.Infof("countDocumentsInFileOnly: Parsed %d bytes, found %d documents and %d tombstones, final offset=%d", 
+			len(data), documentsFound, tombstonesFound, offset)
 	}
 
 	return nil
@@ -2671,7 +2764,15 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 	// Use manifest metadata directly without scanning files
 	if manifest.TotalTombstones == 0 &&
 		time.Since(manifest.LastUpdated) < 5*time.Minute {
+		if b.logger != nil {
+			b.logger.Infof("CountDocuments: Using manifest fast-path for bundle '%s' (TotalDocuments=%d)", bundleName, manifest.TotalDocuments)
+		}
 		return int(manifest.TotalDocuments), nil
+	}
+
+	if b.logger != nil {
+		b.logger.Infof("CountDocuments: Scanning files for bundle '%s' (tombstones=%d, lastUpdated=%v)", 
+			bundleName, manifest.TotalTombstones, manifest.LastUpdated)
 	}
 
 	// LOCAL maps - no concurrent access (this goroutine only)
@@ -2681,16 +2782,26 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 	// Get file list snapshot (oldest first for last-write-wins)
 	files := manifestMgr.GetFileList(false) // false = oldest first
 
+	if b.logger != nil {
+		b.logger.Infof("CountDocuments: Processing %d files for bundle '%s'", len(files), bundleName)
+	}
+
 	for _, fileInfo := range files {
 		bundleDir := GetBundleDirectory(databaseName, bundleName)
 		filePath := filepath.Join(bundleDir, fileInfo.FileName)
 
 		// Check if file exists (may have been compacted)
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		stat, err := os.Stat(filePath)
+		if os.IsNotExist(err) {
 			if b.logger != nil && settings.GetSettings().Debug {
 				b.logger.Debugf("Skipping non-existent file %s (likely compacted)", filePath)
 			}
 			continue
+		}
+
+		if b.logger != nil {
+			b.logger.Infof("CountDocuments: Reading file %s (size=%d bytes, manifest claims %d docs)", 
+				filePath, stat.Size(), fileInfo.DocCount)
 		}
 
 		// File read is safe: protected by read lock (no concurrent writes)
@@ -2702,6 +2813,10 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 			continue
 		}
 
+		if b.logger != nil {
+			b.logger.Infof("CountDocuments: Read %d bytes from %s, parsing documents...", len(data), filePath)
+		}
+
 		// Count in this file (updates local maps in-place)
 		err = b.countDocumentsInFileOnly(data, seenDocuments, deletedDocuments)
 		if err != nil {
@@ -2710,10 +2825,20 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 			}
 			continue
 		}
+
+		if b.logger != nil {
+			b.logger.Infof("CountDocuments: After processing %s: seen=%d, deleted=%d", 
+				fileInfo.FileName, len(seenDocuments), len(deletedDocuments))
+		}
 	}
 
 	// Final count: unique documents that aren't deleted
-	return len(seenDocuments), nil
+	finalCount := len(seenDocuments)
+	if b.logger != nil {
+		b.logger.Infof("CountDocuments: Final count for bundle '%s' = %d (seen=%d, deleted=%d)", 
+			bundleName, finalCount, len(seenDocuments)+len(deletedDocuments), len(deletedDocuments))
+	}
+	return finalCount, nil
 }
 
 // countDocumentsLegacy counts documents in a legacy single-file bundle
@@ -2771,96 +2896,88 @@ func (b *BundleStorageEngine) CountDocuments(bundleName, databaseName string) (i
 	manifest, err := manifestMgr.LoadOrCreate(databaseName, bundleName)
 	if err == nil && len(manifest.Files) > 0 {
 		// Multi-file format - use optimized count
+		if b.logger != nil {
+			b.logger.Infof("CountDocuments: Using multi-file format for bundle '%s' (%d files)", bundleName, len(manifest.Files))
+		}
 		return b.countDocumentsMultiFile(manifestMgr, databaseName, bundleName)
 	}
 
 	// Fall back to legacy single-file format
+	if b.logger != nil {
+		b.logger.Infof("CountDocuments: Using legacy single-file format for bundle '%s' (manifest err=%v, files=%d)", 
+			bundleName, err, len(manifest.Files))
+	}
 	return b.countDocumentsLegacy(bundleName, databaseName)
 }
 
 // getOrCreateManifestManager gets or creates a manifest manager for a specific bundle
 // Manifest managers are cached per bundle for performance
+// PHASE 3: Using ShardedManifestCache for concurrent access without global mutex
 func (b *BundleStorageEngine) getOrCreateManifestManager(databaseName, bundleName string) *ManifestManager {
 	// Use bundleName as key (unique per database context)
 	managerKey := databaseName + ":" + bundleName
 
-	b.manifestManagersMutex.Lock()
-	defer b.manifestManagersMutex.Unlock()
-
-	if manager, exists := b.manifestManagers[managerKey]; exists {
-		return manager
-	}
-
-	// Create new manifest manager for this bundle
-	manager := NewManifestManager(b.DataDirectory, databaseName, bundleName, b.logger)
-	b.manifestManagers[managerKey] = manager
-	return manager
+	return b.manifestCache.GetOrCreateSimple(managerKey, func() *ManifestManager {
+		return NewManifestManager(b.DataDirectory, databaseName, bundleName, b.logger)
+	})
 }
 
 // getOrCreateWriteBuffer gets or creates a write buffer for the specified file
 // MULTI-FILE STORAGE: Write buffers are now keyed by filePath instead of bundleName
 // This allows multiple active write buffers per bundle (one per file segment)
+// PHASE 3: Using ShardedBufferCache for concurrent access without global mutex
 func (b *BundleStorageEngine) getOrCreateWriteBuffer(bundleName, filePath string) (*WriteBuffer, error) {
 	// Use file path as key to support multiple files per bundle
 	bufferKey := filePath
 
-	b.bufferMutex.RLock()
-	buffer, exists := b.writeBuffers[bufferKey]
-	b.bufferMutex.RUnlock()
+	return b.writeBufferCache.GetOrCreate(bufferKey, func() (*WriteBuffer, error) {
+		// Ensure the bundle directory exists
+		// Use the directory from filePath directly instead of reconstructing
+		dir := filepath.Dir(filePath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create bundle directory: %w", err)
+		}
 
-	if exists {
-		return buffer, nil
-	}
+		// Open file in append mode with O_CREATE to handle first-time creation
+		// CRITICAL: O_CREATE ensures file exists, O_APPEND guarantees atomic append operations
+		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open bundle file for buffering: %w", err)
+		}
 
-	// Create new write buffer
-	b.bufferMutex.Lock()
-	defer b.bufferMutex.Unlock()
-
-	// Double-check after acquiring write lock
-	if buffer, exists := b.writeBuffers[bufferKey]; exists {
-		return buffer, nil
-	}
-
-	// Ensure the bundle directory exists
-	// Use the directory from filePath directly instead of reconstructing
-	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create bundle directory: %w", err)
-	}
-
-	// Open file in append mode with O_CREATE to handle first-time creation
-	// CRITICAL: O_CREATE ensures file exists, O_APPEND guarantees atomic append operations
-	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open bundle file for buffering: %w", err)
-	}
-
-	// Create write buffer with 64KB buffer size for optimal performance
-	buffer = NewWriteBuffer(file, 65536)
-	b.writeBuffers[bufferKey] = buffer
-
-	return buffer, nil
+		// Create write buffer with 64KB buffer size for optimal performance
+		return NewWriteBuffer(file, 65536), nil
+	})
 }
 
 // FlushWriteBuffers flushes all write buffers for a specific bundle
 // MULTI-FILE STORAGE: Flushes all file buffers associated with the bundle
+// PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) FlushWriteBuffers(bundleName string) error {
-	b.bufferMutex.RLock()
-	defer b.bufferMutex.RUnlock()
-
 	var errors []error
 	bundlePattern := "/" + bundleName + "/"
+	var foundDatabaseName string
 
-	for bufferKey, buffer := range b.writeBuffers {
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
 		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
+			return true // continue to next
 		}
 
 		if err := buffer.Flush(); err != nil {
 			b.logger.Warnf("Failed to flush buffer for %s: %v", bufferKey, err)
 			errors = append(errors, err)
 		}
-	}
+
+		// Extract database name for compaction evaluation (first match only)
+		if foundDatabaseName == "" {
+			parts := strings.Split(bufferKey, "/")
+			if len(parts) >= 3 {
+				foundDatabaseName = parts[len(parts)-3]
+			}
+		}
+
+		return true // continue iteration
+	})
 
 	if len(errors) > 0 {
 		return fmt.Errorf("failed to flush %d write buffers for bundle %s", len(errors), bundleName)
@@ -2868,19 +2985,8 @@ func (b *BundleStorageEngine) FlushWriteBuffers(bundleName string) error {
 
 	// Evaluate compaction triggers after successful flush
 	// This is similar to PostgreSQL's autovacuum triggering after significant write activity
-	if b.compactionScheduler != nil {
-		// Extract database name from buffer keys
-		for bufferKey := range b.writeBuffers {
-			if strings.Contains(bufferKey, bundlePattern) {
-				// Parse database name from path (data_files/<database>/<bundle>)
-				parts := strings.Split(bufferKey, "/")
-				if len(parts) >= 3 {
-					databaseName := parts[len(parts)-3]
-					b.compactionScheduler.EvaluateBundle(databaseName, bundleName)
-					break // Only evaluate once per bundle
-				}
-			}
-		}
+	if b.compactionScheduler != nil && foundDatabaseName != "" {
+		b.compactionScheduler.EvaluateBundle(foundDatabaseName, bundleName)
 	}
 
 	return nil
@@ -2888,14 +2994,12 @@ func (b *BundleStorageEngine) FlushWriteBuffers(bundleName string) error {
 
 // FlushAllWriteBuffers flushes all write buffers for all bundles
 // MULTI-FILE STORAGE: Now flushes all file buffers (multiple files per bundle)
+// PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
-	b.bufferMutex.RLock()
-	defer b.bufferMutex.RUnlock()
-
 	var errors []string
 	flushedCount := 0
 
-	for bufferKey, buffer := range b.writeBuffers {
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
 		if err := buffer.Flush(); err != nil {
 			errorMsg := fmt.Sprintf("failed to flush buffer for file '%s': %v", bufferKey, err)
 			b.logger.Warnf(errorMsg)
@@ -2906,10 +3010,13 @@ func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 				b.logger.Debugf("Successfully flushed write buffer for file '%s'", bufferKey)
 			}
 		}
-	}
+		return true // continue iteration
+	})
+
+	totalBuffers := b.writeBufferCache.Len()
 
 	if len(errors) > 0 {
-		return fmt.Errorf("failed to flush %d of %d write buffers: %v", len(errors), len(b.writeBuffers), errors)
+		return fmt.Errorf("failed to flush %d of %d write buffers: %v", len(errors), totalBuffers, errors)
 	}
 
 	if b.logger != nil && settings.GetSettings().Debug {
@@ -2923,29 +3030,23 @@ func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 // MULTI-FILE STORAGE: Now closes all file buffers associated with the bundle
 // This is CRITICAL after operations that change file size (like appending tombstones or file rotation)
 // to ensure subsequent file opens get fresh metadata (correct file size).
+// PHASE 3: Using ShardedBufferCache.DeleteMatching for concurrent-safe close and delete
 func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
-	b.bufferMutex.Lock()
-	defer b.bufferMutex.Unlock()
-
-	// Find all buffers for this bundle (buffers are keyed by file path)
-	// Close all buffers that belong to this bundle
-	var errors []error
 	bundlePattern := "/" + bundleName + "/"
 
-	for bufferKey, buffer := range b.writeBuffers {
-		// Check if this buffer belongs to the specified bundle
-		// Buffer keys are file paths like: data_files/dbname/bundlename/000001.bnd
-		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
-		}
-
-		if err := buffer.Close(); err != nil {
-			b.logger.Warnf("Failed to close write buffer for %s: %v", bufferKey, err)
-			errors = append(errors, err)
-		}
-		// Remove from map so next write creates a fresh buffer
-		delete(b.writeBuffers, bufferKey)
-	}
+	// Close and delete all buffers matching the bundle pattern
+	_, errors := b.writeBufferCache.DeleteMatching(
+		func(key string) bool {
+			return strings.Contains(key, bundlePattern)
+		},
+		func(bufferKey string, buffer *WriteBuffer) error {
+			if err := buffer.Close(); err != nil {
+				b.logger.Warnf("Failed to close write buffer for %s: %v", bufferKey, err)
+				return err
+			}
+			return nil
+		},
+	)
 
 	if len(errors) > 0 {
 		return fmt.Errorf("failed to close %d write buffers for bundle %s", len(errors), bundleName)
@@ -2957,27 +3058,23 @@ func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 // DiscardWriteBuffer discards all write buffers for a specific bundle WITHOUT flushing
 // MULTI-FILE STORAGE: Now discards all file buffers associated with the bundle
 // This is used during transaction rollback to abandon buffered writes
+// PHASE 3: Using ShardedBufferCache.DeleteMatching for concurrent-safe iteration
 func (b *BundleStorageEngine) DiscardWriteBuffer(bundleName string) error {
-	b.bufferMutex.Lock()
-	defer b.bufferMutex.Unlock()
-
-	var errors []error
 	bundlePattern := "/" + bundleName + "/"
 
-	for bufferKey, buffer := range b.writeBuffers {
-		// Check if this buffer belongs to the specified bundle
-		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
-		}
-
-		if err := buffer.Discard(); err != nil {
-			b.logger.Warnf("Failed to discard write buffer for %s: %v", bufferKey, err)
-			errors = append(errors, err)
-		}
-		// Remove from map so next write creates a fresh buffer
-		delete(b.writeBuffers, bufferKey)
-		b.logger.Debugf("Discarded write buffer for '%s' without flushing", bufferKey)
-	}
+	_, errors := b.writeBufferCache.DeleteMatching(
+		func(key string) bool {
+			return strings.Contains(key, bundlePattern)
+		},
+		func(bufferKey string, buffer *WriteBuffer) error {
+			if err := buffer.Discard(); err != nil {
+				b.logger.Warnf("Failed to discard write buffer for %s: %v", bufferKey, err)
+				return err
+			}
+			b.logger.Debugf("Discarded write buffer for '%s' without flushing", bufferKey)
+			return nil
+		},
+	)
 
 	if len(errors) > 0 {
 		return fmt.Errorf("failed to discard %d write buffers for bundle %s", len(errors), bundleName)
@@ -2988,23 +3085,28 @@ func (b *BundleStorageEngine) DiscardWriteBuffer(bundleName string) error {
 
 // GetBufferedDocumentsForTransaction returns all buffered documents for a specific transaction
 // MULTI-FILE STORAGE: Aggregates documents from all file buffers for this bundle
+// PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) GetBufferedDocumentsForTransaction(bundleName string, txID string) ([]*models.Document, error) {
-	b.bufferMutex.RLock()
-	defer b.bufferMutex.RUnlock()
-
 	var allDocs []*models.Document
+	var firstErr error
 	bundlePattern := "/" + bundleName + "/"
 
-	for bufferKey, buffer := range b.writeBuffers {
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
 		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
+			return true // continue
 		}
 
 		docs, err := buffer.GetDocumentsForTransaction(txID)
 		if err != nil {
-			return nil, err
+			firstErr = err
+			return false // stop iteration
 		}
 		allDocs = append(allDocs, docs...)
+		return true
+	})
+
+	if firstErr != nil {
+		return nil, firstErr
 	}
 
 	return allDocs, nil
@@ -3012,96 +3114,101 @@ func (b *BundleStorageEngine) GetBufferedDocumentsForTransaction(bundleName stri
 
 // MarkDocumentDiscarded marks a document as discarded (for rollback)
 // MULTI-FILE STORAGE: Marks document in whichever buffer contains it
+// PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) MarkDocumentDiscarded(bundleName string, docID string) error {
-	b.bufferMutex.RLock()
-	defer b.bufferMutex.RUnlock()
-
 	bundlePattern := "/" + bundleName + "/"
 
-	for bufferKey, buffer := range b.writeBuffers {
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
 		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
+			return true // continue
 		}
 
 		// Mark in this buffer (no-op if document not in this buffer)
 		buffer.MarkDiscarded(docID)
-	}
+		return true
+	})
 
 	return nil
 }
 
 // IsDocumentBuffered checks if a document is currently in any write buffer for this bundle
 // MULTI-FILE STORAGE: Checks all file buffers for this bundle
+// PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) IsDocumentBuffered(bundleName string, docID string) bool {
-	b.bufferMutex.RLock()
-	defer b.bufferMutex.RUnlock()
-
 	bundlePattern := "/" + bundleName + "/"
+	found := false
 
-	for bufferKey, buffer := range b.writeBuffers {
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
 		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
+			return true // continue
 		}
 
 		if buffer.IsDocumentAvailable(docID) {
-			return true
+			found = true
+			return false // stop iteration
 		}
-	}
+		return true
+	})
 
-	return false
+	return found
 }
 
 // GetDiscardedDocuments returns document IDs that were discarded in a bundle's buffers
 // MULTI-FILE STORAGE: Aggregates discarded documents from all file buffers
+// PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) GetDiscardedDocuments(bundleName string) []string {
-	b.bufferMutex.RLock()
-	defer b.bufferMutex.RUnlock()
-
 	var allDiscarded []string
 	bundlePattern := "/" + bundleName + "/"
 
-	for bufferKey, buffer := range b.writeBuffers {
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
 		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
+			return true // continue
 		}
 
 		discarded := buffer.GetDiscardedDocuments()
 		allDiscarded = append(allDiscarded, discarded...)
-	}
+		return true
+	})
 
 	return allDiscarded
 }
 
 // ClearDiscardedDocuments removes the specified document IDs from the discarded set
 // MULTI-FILE STORAGE: Clears from all file buffers for this bundle
+// PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
 func (b *BundleStorageEngine) ClearDiscardedDocuments(bundleName string, docIDs []string) {
-	b.bufferMutex.RLock()
-	defer b.bufferMutex.RUnlock()
-
 	bundlePattern := "/" + bundleName + "/"
 
-	for bufferKey, buffer := range b.writeBuffers {
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
 		if !strings.Contains(bufferKey, bundlePattern) {
-			continue
+			return true // continue
 		}
 
 		buffer.ClearDiscardedDocuments(docIDs)
-	}
+		return true
+	})
 }
 
 // CloseWriteBuffers closes and flushes all write buffers
+// PHASE 3: Using ShardedBufferCache.DeleteMatching for concurrent-safe close and clear
 func (b *BundleStorageEngine) CloseWriteBuffers() error {
-	b.bufferMutex.Lock()
-	defer b.bufferMutex.Unlock()
+	_, errors := b.writeBufferCache.DeleteMatching(
+		func(key string) bool {
+			return true // match all buffers
+		},
+		func(bundleName string, buffer *WriteBuffer) error {
+			if err := buffer.Close(); err != nil {
+				b.logger.Warnf("Failed to close write buffer for bundle %s: %v", bundleName, err)
+				return err
+			}
+			return nil
+		},
+	)
 
-	for bundleName, buffer := range b.writeBuffers {
-		if err := buffer.Close(); err != nil {
-			b.logger.Warnf("Failed to close write buffer for bundle %s: %v", bundleName, err)
-		}
+	if len(errors) > 0 {
+		b.logger.Warnf("CloseWriteBuffers: %d buffers failed to close", len(errors))
 	}
 
-	// Clear the map
-	b.writeBuffers = make(map[string]*WriteBuffer)
 	return nil
 }
 
@@ -3131,38 +3238,30 @@ func (b *BundleStorageEngine) Shutdown() error {
 // SetProjectionFieldsForBundle sets projection fields temporarily for a bundle
 // PROJECTION PUSHDOWN: This allows BundleAdapter to pass projection through to readDocumentRange
 // Called from BundleAdapter before loading pages for ORDER BY queries
+// PHASE 3: Using ShardedProjectionCache for concurrent access without global mutex
 func (b *BundleStorageEngine) SetProjectionFieldsForBundle(bundleName string, fields []string) {
 	// PERFORMANCE: Optimize for nil fields (clearing projection) - common case in GetDocumentsByFilter
 	// Check if we actually need to modify anything before acquiring write lock
 	if len(fields) == 0 {
 		// Clearing projection - check if it's already cleared to avoid write lock
-		b.projectionMutex.RLock()
-		_, exists := b.projectionFields[bundleName]
-		b.projectionMutex.RUnlock()
-		if !exists {
-			// Already cleared - no need to acquire write lock
+		if !b.projectionCache.Has(bundleName) {
+			// Already cleared - no need to modify
 			return
 		}
-	}
-
-	b.projectionMutex.Lock()
-	defer b.projectionMutex.Unlock()
-	if len(fields) > 0 {
-		b.projectionFields[bundleName] = fields
+		b.projectionCache.Delete(bundleName)
+	} else {
+		b.projectionCache.Set(bundleName, fields)
 		if b.logger != nil {
 			b.logger.Debugf("PROJECTION PUSHDOWN: Set projection fields %v for bundle '%s'", fields, bundleName)
 		}
-	} else {
-		delete(b.projectionFields, bundleName)
 	}
 }
 
 // getProjectionFieldsForBundle gets projection fields for a bundle if set
 // PROJECTION PUSHDOWN: Returns projection fields if set, nil otherwise
+// PHASE 3: Using ShardedProjectionCache for concurrent access without global mutex
 func (b *BundleStorageEngine) getProjectionFieldsForBundle(bundleName string) []string {
-	b.projectionMutex.RLock()
-	defer b.projectionMutex.RUnlock()
-	return b.projectionFields[bundleName]
+	return b.projectionCache.Get(bundleName)
 }
 
 // readDocumentRange efficiently reads a specific range of documents for pagination

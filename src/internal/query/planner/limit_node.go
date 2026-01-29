@@ -195,6 +195,35 @@ func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, e
 			}
 			return resultMap, nil
 		}
+	} else if joinNode := n.tryGetJoinNodeWithSortedOutput(n.Child); joinNode != nil {
+		// OPTIMIZATION: JoinExecutionNode with streaming Top-N provides pre-sorted output
+		n.Logger.Debugf("LimitNode: child is JoinExecutionNode with streaming Top-N, using pre-sorted documents")
+
+		// Execute the child to get documents
+		var err error
+		documents, err = n.Child.Execute(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("LimitNode: child execution failed: %w", err)
+		}
+
+		// Get the sorted documents from JoinExecutionNode
+		docSlice = joinNode.GetSortedDocuments()
+		if len(docSlice) > 0 {
+			n.sortedDocuments = docSlice
+			n.Logger.Debugf("LimitNode: using %d pre-sorted documents from JoinExecutionNode (streaming Top-N)", len(docSlice))
+		} else {
+			// Fall back to converting map (no pre-sorted output available)
+			docSlice = make([]*models.Document, 0, len(documents))
+			for _, doc := range documents {
+				docSlice = append(docSlice, doc)
+			}
+		}
+
+		// Handle empty result set
+		if len(documents) == 0 {
+			n.Logger.Debug("LimitNode: no documents to limit, returning empty result")
+			return documents, nil
+		}
 	} else {
 		// Child is NOT a SortNode - use standard execution path
 		var err error
@@ -307,6 +336,30 @@ func (n *LimitNode) GetEffectiveLimit() int {
 // This is used by result formatters to preserve ORDER BY sort order
 func (n *LimitNode) GetSortedDocuments() []*models.Document {
 	return n.sortedDocuments
+}
+
+// tryGetJoinNodeWithSortedOutput attempts to find a JoinExecutionNode with pre-sorted output
+// Returns the JoinExecutionNode if found and it has sorted documents, nil otherwise
+// Supports JoinExecutionNode directly or wrapped in FilterNode
+func (n *LimitNode) tryGetJoinNodeWithSortedOutput(node ExecutionNode) *JoinExecutionNode {
+	// Direct JoinExecutionNode
+	if joinNode, ok := node.(*JoinExecutionNode); ok {
+		// Check if JOIN node has ORDER BY configured (streaming Top-N)
+		if joinNode.OrderBy != nil && len(joinNode.OrderBy.Fields) > 0 && joinNode.Limit > 0 {
+			return joinNode
+		}
+	}
+
+	// FilterNode wrapping JoinExecutionNode
+	if filterNode, ok := node.(*FilterNode); ok {
+		if joinNode, ok := filterNode.Child.(*JoinExecutionNode); ok {
+			if joinNode.OrderBy != nil && len(joinNode.OrderBy.Fields) > 0 && joinNode.Limit > 0 {
+				return joinNode
+			}
+		}
+	}
+
+	return nil
 }
 
 // buildDocSliceByDocumentID creates a document slice sorted by DocumentID

@@ -111,6 +111,7 @@ type OrderedChild interface {
 
 // BTreeOrderedScanNode performs a full B-tree index scan and returns documents in index key order.
 // Used for single-field GROUP BY when that field has a B-tree index: avoids in-memory sort.
+// Also used for ORDER BY optimization when a B-tree index exists on the sort field.
 // Implements ExecutionNode and OrderedChild. When Bundle.Documents is not available, ExecuteOrdered
 // returns an error so the consumer can fall back to Execute (map) and a regular sort.
 type BTreeOrderedScanNode struct {
@@ -121,6 +122,9 @@ type BTreeOrderedScanNode struct {
 	BundleServiceInt   BundleServiceInterface
 	Cost               float64
 	EstimatedRows      int
+	// ORDER BY optimization fields
+	Descending bool // If true, iterate in descending order (for ORDER BY ... DESC)
+	Limit      int  // If > 0, stop after this many documents (for LIMIT optimization)
 }
 
 // FullScanNode represents a full bundle scan

@@ -1274,6 +1274,137 @@ func (idx *BTreeIndex) RangeSearchWithBounds(startKey, endKey []byte, excludeSta
 	return results, nil
 }
 
+// RangeSearchWithLimit performs a forward (ASC) range search with early termination at limit.
+// This is optimized for ORDER BY ... LIMIT queries where we only need the first N documents.
+//
+// Parameters:
+//   - startKey: The starting key for the range
+//   - endKey: The ending key for the range
+//   - limit: Maximum number of document IDs to return (0 = no limit)
+//
+// Returns:
+//   - []string: List of document IDs in ascending key order, capped at limit
+//   - error: Any error that occurred during range search
+func (idx *BTreeIndex) RangeSearchWithLimit(startKey, endKey []byte, limit int) ([]string, error) {
+	if !idx.isOpen {
+		return nil, fmt.Errorf("index is not open")
+	}
+
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+
+	idx.logger.Debugf("Range search with limit: start='%s', end='%s', limit=%d",
+		string(startKey), string(endKey), limit)
+
+	// Use the iterator for efficient traversal with early termination
+	iterator := NewBTreeRangeIterator(idx, idx.logger, startKey, endKey, false, false)
+	if err := iterator.SeekFirst(); err != nil {
+		return nil, fmt.Errorf("failed to seek to first key: %w", err)
+	}
+
+	var results []string
+	if limit > 0 {
+		results = make([]string, 0, limit)
+	} else {
+		results = make([]string, 0, 1000) // Pre-allocate reasonable capacity
+	}
+
+	for {
+		entry := iterator.Current()
+		if entry == nil {
+			break
+		}
+
+		// Append all document IDs for this key
+		for _, docID := range entry.DocumentIDs {
+			results = append(results, docID)
+			if limit > 0 && len(results) >= limit {
+				idx.logger.Debugf("Range search hit limit: %d documents", limit)
+				idx.Metadata.UpdateStatistics("search")
+				return results, nil
+			}
+		}
+
+		if !iterator.HasNext() {
+			break
+		}
+		// Next() returns the next entry - advance the iterator
+		_ = iterator.Next()
+	}
+
+	idx.Metadata.UpdateStatistics("search")
+	idx.logger.Debugf("Range search with limit completed: found %d results", len(results))
+
+	return results, nil
+}
+
+// ReverseRangeSearchWithLimit performs a backward (DESC) range search with early termination at limit.
+// This is optimized for ORDER BY ... DESC LIMIT queries where we only need the last N documents
+// in descending order.
+//
+// Parameters:
+//   - startKey: The starting key for the range (logically the "larger" key for DESC)
+//   - endKey: The ending key for the range (logically the "smaller" key for DESC)
+//   - limit: Maximum number of document IDs to return (0 = no limit)
+//
+// Returns:
+//   - []string: List of document IDs in descending key order, capped at limit
+//   - error: Any error that occurred during range search
+func (idx *BTreeIndex) ReverseRangeSearchWithLimit(startKey, endKey []byte, limit int) ([]string, error) {
+	if !idx.isOpen {
+		return nil, fmt.Errorf("index is not open")
+	}
+
+	idx.mutex.RLock()
+	defer idx.mutex.RUnlock()
+
+	idx.logger.Debugf("Reverse range search with limit: start='%s', end='%s', limit=%d",
+		string(startKey), string(endKey), limit)
+
+	// Use the iterator for efficient backward traversal with early termination
+	// For DESC, we seek to the end (largest key) and iterate backward
+	iterator := NewBTreeRangeIterator(idx, idx.logger, endKey, startKey, false, false)
+	if err := iterator.SeekLast(); err != nil {
+		return nil, fmt.Errorf("failed to seek to last key: %w", err)
+	}
+
+	var results []string
+	if limit > 0 {
+		results = make([]string, 0, limit)
+	} else {
+		results = make([]string, 0, 1000) // Pre-allocate reasonable capacity
+	}
+
+	for {
+		entry := iterator.Current()
+		if entry == nil {
+			break
+		}
+
+		// Append all document IDs for this key (in reverse order for DESC)
+		// Note: We reverse the document IDs within a key since iterator returns them in insertion order
+		for i := len(entry.DocumentIDs) - 1; i >= 0; i-- {
+			results = append(results, entry.DocumentIDs[i])
+			if limit > 0 && len(results) >= limit {
+				idx.logger.Debugf("Reverse range search hit limit: %d documents", limit)
+				idx.Metadata.UpdateStatistics("search")
+				return results, nil
+			}
+		}
+
+		if !iterator.HasPrev() {
+			break
+		}
+		// Prev() returns the previous entry - advance the iterator backward
+		_ = iterator.Prev()
+	}
+
+	idx.Metadata.UpdateStatistics("search")
+	idx.logger.Debugf("Reverse range search with limit completed: found %d results", len(results))
+
+	return results, nil
+}
+
 // UpdateSearchMetrics updates search performance metrics
 // This method tracks detailed search statistics for performance analysis
 // Parameters:

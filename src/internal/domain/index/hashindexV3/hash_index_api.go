@@ -490,10 +490,21 @@ func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]stri
 
 		// Check if this is a tombstone (deleted)
 		if entry.Deleted {
+			idx.logger.Debugw("Get: Found tombstone in MemTable",
+				"key", keyValue,
+				"sequence", entry.Sequence,
+				"elapsed", time.Since(startTime))
 			// Track lookup with zero results
 			idx.queryOptStats.RecordLookup(0, time.Since(startTime))
 			return []string{}, []uint32{}, nil
 		}
+		idx.logger.Debugw("Get: Found NON-deleted entry in MemTable",
+			"key", keyValue,
+			"deleted", entry.Deleted,
+			"sequence", entry.Sequence,
+			"documentID", entry.DocumentID,
+			"pageID", entry.PageID,
+			"elapsed", time.Since(startTime))
 
 		// PHASE 4: MVCC - If snapshot provided, check visibility
 		if snapshotSeq > 0 {
@@ -514,6 +525,9 @@ func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]stri
 
 	// Step 2: MemTable miss or snapshot filtering needed - use bucket-optimized disk scan
 	idx.updateCacheMiss()
+	idx.logger.Debugw("Get: MemTable miss, scanning disk",
+		"key", keyValue,
+		"elapsed", time.Since(startTime))
 
 	// PHASE 4: MVCC - Collect all versions if snapshot filtering is needed
 	var allEntries []*HashIndexEntry
@@ -587,6 +601,30 @@ func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]stri
 	// entry and we could return stale data. Re-check and use MemTable's value
 	// when it is newer; on Put "attempted to insert older" use the in-memory
 	// entry as the authoritative result (no WARN—expected under concurrency).
+	
+	// CRITICAL: Before caching, ensure GlobalSequence is at least as high as this entry
+	// This handles the case where RestoreGlobalSequence() didn't find all entries
+	// (e.g., headers not yet updated) and we're loading an older high-sequence entry from disk
+	if latestEntry.Sequence > 0 {
+		for {
+			currentGlobal := atomic.LoadUint64(&idx.GlobalSequence)
+			if latestEntry.Sequence < currentGlobal {
+				break // GlobalSequence is already higher
+			}
+			// Need to update GlobalSequence to at least latestEntry.Sequence + safety margin
+			newGlobal := latestEntry.Sequence + 100
+			if atomic.CompareAndSwapUint64(&idx.GlobalSequence, currentGlobal, newGlobal) {
+				idx.logger.Debugw("Updated GlobalSequence after loading high-sequence entry from disk",
+					"keyValue", keyValue,
+					"entrySequence", latestEntry.Sequence,
+					"oldGlobalSequence", currentGlobal,
+					"newGlobalSequence", newGlobal)
+				break
+			}
+			// CAS failed, retry
+		}
+	}
+	
 	entryNow, foundNow := idx.MemTable.Get(keyValue)
 	if foundNow && entryNow.IsNewer(latestEntry) {
 		latestEntry = entryNow
@@ -771,16 +809,12 @@ func (idx *HashIndexV3) Delete(keyValue string, commitSequence uint64) (bool, er
 		return false, fmt.Errorf("key value cannot be empty")
 	}
 
-	// Check if key exists
-	results, _, err := idx.Get(keyValue)
-	if err != nil {
-		return false, err
-	}
-
-	if len(results) == 0 {
-		// Key doesn't exist
-		return false, nil
-	}
+	// IMPORTANT: Always write tombstone even if Get() returns no results
+	// This handles race conditions where:
+	// 1. Entry exists on disk but not in MemTable (cache miss)
+	// 2. Concurrent readers might have cached the entry
+	// 3. Ensures all future Get() calls see the deletion
+	// The tombstone will be a no-op during compaction if key never existed
 
 	// Get next sequence number
 	sequence := atomic.AddUint64(&idx.GlobalSequence, 1)
@@ -802,7 +836,7 @@ func (idx *HashIndexV3) Delete(keyValue string, commitSequence uint64) (bool, er
 	// 3. Tombstone will be removed during compaction
 
 	// Step 1: Append tombstone to disk
-	err = idx.storage.AppendEntry(tombstone)
+	err := idx.storage.AppendEntry(tombstone)
 	if err != nil {
 		return false, fmt.Errorf("failed to append tombstone: %w", err)
 	}
@@ -810,13 +844,31 @@ func (idx *HashIndexV3) Delete(keyValue string, commitSequence uint64) (bool, er
 	// Step 2: Update MemTable
 	err = idx.MemTable.Put(tombstone)
 	if err != nil {
-		idx.logger.Warnw("Failed to update MemTable with tombstone",
+		// If MemTable rejects tombstone (e.g., older sequence), force delete directly
+		idx.logger.Warnw("MemTable rejected tombstone, forcing direct deletion",
 			"key", keyValue,
+			"tombstoneSeq", tombstone.Sequence,
 			"error", err)
+		// Use MemTable.Delete which doesn't check sequences
+		if delErr := idx.MemTable.Delete(keyValue, tombstone.Sequence, commitSequence); delErr != nil {
+			idx.logger.Warnw("Failed to force delete in MemTable",
+				"key", keyValue,
+				"error", delErr)
+		} else {
+			idx.logger.Infow("Delete: Tombstone created via MemTable.Delete fallback",
+				"key", keyValue,
+				"sequence", tombstone.Sequence)
+		}
+	} else {
+		idx.logger.Infow("Delete: Tombstone created successfully",
+			"key", keyValue,
+			"sequence", tombstone.Sequence)
 	}
 
 	idx.updateDeleteStats()
 
+	// Return true to indicate tombstone was written (even if key didn't exist before)
+	// This matches LSM semantics: delete is idempotent
 	return true, nil
 }
 
@@ -1214,4 +1266,106 @@ func (idx *HashIndexV3) SetCompactor(cm CompactionManager) {
 // This allows tests to inspect file state and trigger operations
 func (idx *HashIndexV3) GetStorage() *EntryStorage {
 	return idx.storage
+}
+
+// ============================================================================
+// RCU (Read-Copy-Update) Support Methods
+// These methods enable lock-free concurrent writes using atomic pointer swaps
+// ============================================================================
+
+// UpdatePageLocation atomically updates the page location for a document
+// This is the key primitive for RCU-style updates:
+// 1. New document version is appended to storage (no lock needed)
+// 2. This method atomically swaps the index pointer to the new location
+// 3. Old location remains valid until grace period passes
+//
+// Parameters:
+//   - keyValue: The indexed value (e.g., DocumentID)
+//   - documentID: The document UUID
+//   - newPageID: The new page location where the updated document resides
+//   - commitSequence: The commit sequence for this update
+//
+// Returns error if key not found or operation fails
+// Thread-safe: Uses internal locking to ensure atomic update
+func (idx *HashIndexV3) UpdatePageLocation(keyValue, documentID string, newPageID uint32, commitSequence uint64) error {
+	if idx.closed {
+		return fmt.Errorf("index is closed")
+	}
+
+	if keyValue == "" {
+		return fmt.Errorf("key value cannot be empty")
+	}
+
+	// Get next sequence number for this update
+	sequence := atomic.AddUint64(&idx.GlobalSequence, 1)
+
+	// Create new entry with updated location
+	// VersionSequence is incremented to indicate this is a newer version
+	entry := NewHashIndexEntry(keyValue, documentID, newPageID, sequence, commitSequence, 0)
+
+	// Populate bucket number
+	bucketNum, err := ComputeBucketNum(entry.HashValue, idx.config.NumBuckets)
+	if err != nil {
+		return fmt.Errorf("bucket calculation failed: %w", err)
+	}
+	entry.BucketNum = bucketNum
+
+	// ATOMIC UPDATE PATH:
+	// 1. Append new entry to disk (for durability)
+	// 2. Update MemTable atomically
+	// The key insight: readers see either old or new location, never partial state
+
+	// Step 1: Append to disk storage
+	err = idx.storage.AppendEntry(entry)
+	if err != nil {
+		return fmt.Errorf("failed to append location update to storage: %w", err)
+	}
+
+	// Step 2: Atomic update in MemTable
+	// MemTable.Put handles sequence ordering - newer entries win
+	err = idx.MemTable.Put(entry)
+	if err != nil {
+		// Entry is on disk but MemTable rejected (shouldn't happen with higher sequence)
+		idx.logger.Warnw("MemTable rejected location update (entry is on disk)",
+			"key", keyValue,
+			"newPageID", newPageID,
+			"error", err)
+	}
+
+	idx.logger.Debugw("Updated page location atomically",
+		"key", keyValue,
+		"documentID", documentID,
+		"newPageID", newPageID,
+		"sequence", sequence)
+
+	return nil
+}
+
+// GetCurrentPageID returns the current page location for a key
+// Used to find the old document location before RCU update
+//
+// Parameters:
+//   - keyValue: The indexed value to look up
+//
+// Returns pageID and found boolean
+func (idx *HashIndexV3) GetCurrentPageID(keyValue string) (uint32, bool) {
+	if idx.closed {
+		return 0, false
+	}
+
+	// Check MemTable first (most recent)
+	entry, found := idx.MemTable.Get(keyValue)
+	if found && !entry.Deleted {
+		return entry.PageID, true
+	}
+
+	// Fall back to disk scan if not in MemTable
+	docIDs, pageIDs, err := idx.Get(keyValue)
+	if err != nil || len(pageIDs) == 0 {
+		return 0, false
+	}
+
+	// Return first result (should be only one for unique keys like DocumentID)
+	_ = docIDs // Suppress unused warning
+	return pageIDs[0], true
 }

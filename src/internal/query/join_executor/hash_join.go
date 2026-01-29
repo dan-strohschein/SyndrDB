@@ -300,7 +300,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 			JoinKey:    buildKey,
 		}
 
-		cache := GetHashTableCache()
+		cache := GetHashTableCacheInterface()
 		if cachedTable, cachedBloom, cachedStats, found := cache.Get(cacheKey); found {
 			hjs.logger.Infof("✓ Hash table CACHE HIT for %s.%s (skipped rebuild)", bundleName, buildKey)
 			// Return a copy of stats to avoid mutation issues
@@ -381,6 +381,12 @@ func (hjs *HashJoinStrategy) buildHashTable(
 						// Index has data but we found 0 documents - this is a bug, fall back to regular build
 						hjs.logger.Warnf("Index-assisted build found 0 documents but index has %d document IDs across %d pages. Falling back to regular build to avoid incorrect results.",
 							totalDocIDs, len(docIDsByPage))
+						// CRITICAL: Create fresh hash table for fallback path - the original may be frozen
+						hashTable = NewInMemoryHashTable(initialCap, hjs.loadFactor)
+						if hjs.bloomFilterEnabled {
+							estimatedItems := buildBundle.GetTotalDocuments()
+							bloom = bloomfilter.NewBloomFilter(estimatedItems, 0.01)
+						}
 						// Continue to regular build path below
 					} else {
 						// Index is empty, use the empty result
@@ -397,6 +403,12 @@ func (hjs *HashJoinStrategy) buildHashTable(
 		} else if indexErr != nil {
 			// Index build failed, fall back to regular build
 			hjs.logger.Debugf("Index-assisted build failed: %v. Falling back to regular build.", indexErr)
+			// CRITICAL: Create fresh hash table for fallback path - the original may be frozen or partially populated
+			hashTable = NewInMemoryHashTable(initialCap, hjs.loadFactor)
+			if hjs.bloomFilterEnabled {
+				estimatedItems := buildBundle.GetTotalDocuments()
+				bloom = bloomfilter.NewBloomFilter(estimatedItems, 0.01)
+			}
 			// Continue to regular build path below
 		} else {
 			// Index build succeeded with documents, use it
@@ -468,6 +480,12 @@ func (hjs *HashJoinStrategy) buildHashTable(
 	hjs.logger.Debugf("Hash table built: %d unique keys, %d documents, %d bytes memory%s",
 		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats)
 
+	// CRITICAL: Freeze the hash table after build phase completes.
+	// This enables lock-free, zero-copy reads during the probe phase,
+	// eliminating RWMutex contention under concurrent load.
+	hashTable.Freeze()
+	hjs.logger.Debugf("Hash table frozen for lock-free probe access")
+
 	// PERFORMANCE OPTIMIZATION: Cache the hash table for reuse in repeated JOINs
 	// Only cache non-filtered bundles (filtered bundles are query-specific)
 	if useCache {
@@ -475,7 +493,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 			BundleName: bundleName,
 			JoinKey:    buildKey,
 		}
-		GetHashTableCache().Put(cacheKey, hashTable, bloom, stats)
+		GetHashTableCacheInterface().Put(cacheKey, hashTable, bloom, stats)
 		hjs.logger.Infof("✓ Hash table CACHED for %s.%s (%d docs, %d bytes)",
 			bundleName, buildKey, stats.DocumentsScanned, hashTable.GetMemoryUsage())
 	}
@@ -528,7 +546,8 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 	// Step 2: Use staleness-aware loading with Phase 1 (try expected page) + Phase 2 (fallback)
 	// This is more efficient than the previous all-pages-scan approach
-	loadedDocs, loadErr := OptimizedIndexLoad(request.Context, buildBundle, docIDsByPage, hjs.logger)
+	// TODO: Wire in actual IndexReference and IndexMaintenanceScheduler from request context
+	loadedDocs, loadErr := OptimizedIndexLoad(request.Context, buildBundle, docIDsByPage, "", nil, nil, hjs.logger)
 	if loadErr != nil {
 		return nil, nil, nil, fmt.Errorf("failed to load documents: %w", loadErr)
 	}
@@ -575,16 +594,39 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		bloomStats = fmt.Sprintf(", Bloom filter: %d bytes (FPR: %.4f)", bstats.MemoryUsedBytes, bstats.EstimatedFPR)
 	}
 
+	// Check if this is a filtered bundle (has WHERE clause predicates applied)
+	// Filtered bundles will naturally have fewer documents than the index reports
+	isFilteredBundle := false
+	if fb, ok := buildBundle.(interface{ IsFilteredBundle() bool }); ok {
+		isFilteredBundle = fb.IsFilteredBundle()
+	}
+
 	if stats.DocumentsScanned == 0 && totalDocIDsFromIndex > 0 {
-		hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were loaded! Index may be severely out of sync.",
-			totalDocIDsFromIndex)
+		if isFilteredBundle {
+			hjs.logger.Infof("Filtered bundle returned 0/%d documents from index - all documents filtered out by WHERE clause",
+				totalDocIDsFromIndex)
+		} else {
+			hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were loaded! Index may be severely out of sync.",
+				totalDocIDsFromIndex)
+		}
 	} else if int64(stats.DocumentsScanned) < int64(totalDocIDsFromIndex)/2 {
-		hjs.logger.Warnf("Found only %d/%d documents from index (%.1f%%). Some documents may be missing.",
-			stats.DocumentsScanned, totalDocIDsFromIndex, float64(stats.DocumentsScanned*100)/float64(totalDocIDsFromIndex))
+		if isFilteredBundle {
+			hjs.logger.Infof("Found %d/%d documents from index (%.1f%%) - reduced by WHERE clause predicate pushdown",
+				stats.DocumentsScanned, totalDocIDsFromIndex, float64(stats.DocumentsScanned*100)/float64(totalDocIDsFromIndex))
+		} else {
+			hjs.logger.Warnf("Found only %d/%d documents from index (%.1f%%). Some documents may be missing.",
+				stats.DocumentsScanned, totalDocIDsFromIndex, float64(stats.DocumentsScanned*100)/float64(totalDocIDsFromIndex))
+		}
 	}
 
 	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s",
 		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats)
+
+	// CRITICAL: Freeze the hash table after build phase completes.
+	// This enables lock-free, zero-copy reads during the probe phase,
+	// eliminating RWMutex contention under concurrent load.
+	hashTable.Freeze()
+	hjs.logger.Debugf("Hash table frozen for lock-free probe access")
 
 	return hashTable, bloom, stats, nil
 }

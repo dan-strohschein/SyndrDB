@@ -30,12 +30,29 @@ package joinexecutor
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 
 	"go.uber.org/zap"
 )
+
+// IndexMaintenanceScheduler is an interface for scheduling index rebuilds
+// This avoids circular imports while allowing staleness handler to trigger rebuilds
+type IndexMaintenanceScheduler interface {
+	ScheduleRebuild(req IndexMaintenanceRequest) error
+}
+
+// IndexMaintenanceRequest represents a request to rebuild an index
+type IndexMaintenanceRequest struct {
+	DatabaseName  string
+	BundleName    string
+	IndexName     string
+	IndexType     string
+	StalenessRate float64
+	QueryCount    int64
+}
 
 // PageStalenessHandler manages efficient document retrieval with stale page ID handling
 type PageStalenessHandler struct {
@@ -185,6 +202,9 @@ func OptimizedIndexLoad(
 	ctx context.Context,
 	bundle documentscanner.BundleInterface,
 	docIDsByPage map[uint32][]string,
+	databaseName string,
+	indexRef *models.IndexReference,
+	scheduler IndexMaintenanceScheduler,
 	logger *zap.SugaredLogger,
 ) (map[string]*models.Document, error) {
 
@@ -195,6 +215,21 @@ func OptimizedIndexLoad(
 		return nil, err
 	}
 
+	// Initialize maintenance metadata if needed
+	if indexRef != nil && indexRef.Maintenance == nil {
+		indexRef.Maintenance = &models.IndexMaintenanceMetadata{
+			IsHealthy:     true,
+			QueryCount:    0,
+			LastQueryTime: time.Now(),
+		}
+	}
+
+	// Track query for maintenance scheduling
+	if indexRef != nil && indexRef.Maintenance != nil {
+		atomic.AddInt64(&indexRef.Maintenance.QueryCount, 1)
+		indexRef.Maintenance.LastQueryTime = time.Now()
+	}
+
 	// Log staleness metrics if significant
 	totalExpected := 0
 	for _, docs := range docIDsByPage {
@@ -202,13 +237,40 @@ func OptimizedIndexLoad(
 	}
 
 	if stats.StaleMisses > 0 {
-		stalenessRate := float64(stats.StaleMisses) / float64(totalExpected) * 100
+		stalenessRate := float64(stats.StaleMisses) / float64(totalExpected)
+		stalenessPercent := stalenessRate * 100
+		
 		logger.Infof("Index load complete: %d docs found (direct: %d, fallback: %d), staleness rate: %.1f%%",
-			len(result), stats.DirectHits, stats.FallbackHits, stalenessRate)
+			len(result), stats.DirectHits, stats.FallbackHits, stalenessPercent)
 
-		if stalenessRate > 20.0 {
-			logger.Warnf("High staleness rate (%.1f%%) detected - consider reindexing or checking compaction",
-				stalenessRate)
+		// Update staleness tracking
+		if indexRef != nil && indexRef.Maintenance != nil {
+			indexRef.Maintenance.LastStalenessRate = stalenessRate
+			indexRef.Maintenance.LastStalenessCheck = time.Now()
+		}
+
+		// Schedule rebuild if staleness threshold exceeded
+		if stalenessRate > 0.20 && indexRef != nil && indexRef.Maintenance != nil && indexRef.Maintenance.IsHealthy {
+			logger.Warnf("High staleness rate (%.1f%%) detected - scheduling index rebuild",
+				stalenessPercent)
+			
+			// Check minimum rebuild interval
+			if time.Since(indexRef.Maintenance.LastRebuildTime) >= 1*time.Hour {
+				if scheduler != nil {
+					bundleName := bundle.GetName()
+					
+					_ = scheduler.ScheduleRebuild(IndexMaintenanceRequest{
+						DatabaseName:  databaseName,
+						BundleName:    bundleName,
+						IndexName:     indexRef.IndexName,
+						IndexType:     indexRef.IndexType,
+						StalenessRate: stalenessRate,
+						QueryCount:    atomic.LoadInt64(&indexRef.Maintenance.QueryCount),
+					})
+				}
+			} else {
+				logger.Debugf("Index rebuild recently completed, skipping reschedule")
+			}
 		}
 	}
 
@@ -217,11 +279,18 @@ func OptimizedIndexLoad(
 
 // EstimateOptimalLoadStrategy decides whether to use index-assisted loading
 // Returns true if index-assisted loading is likely more efficient
+// Checks index health and falls back to false if index is unhealthy
 func EstimateOptimalLoadStrategy(
 	indexedDocsCount int,
 	bundleTotalDocs int,
 	expectedStalenessRate float64,
+	indexRef *models.IndexReference,
 ) bool {
+	// Check index health first - unhealthy indexes should trigger full scans
+	if indexRef != nil && indexRef.Maintenance != nil && !indexRef.Maintenance.IsHealthy {
+		return false // Fall back to full table scan for unhealthy indexes
+	}
+
 	if bundleTotalDocs == 0 {
 		return false
 	}

@@ -150,6 +150,11 @@ type HashTable interface {
 	// Get retrieves all documents associated with a key
 	Get(key interface{}) ([]*models.Document, bool)
 
+	// TryGet attempts to retrieve documents without blocking.
+	// Returns (documents, found, acquired). If acquired is false, the lock was
+	// contended and the caller should retry or use Get with blocking.
+	TryGet(key interface{}) ([]*models.Document, bool, bool)
+
 	// Contains checks if a key exists in the hash table
 	Contains(key interface{}) bool
 
@@ -166,6 +171,16 @@ type HashTable interface {
 	// This is used for index-assisted probing where we need to query the index
 	// with all keys from the hash table
 	GetAllKeys() []interface{}
+
+	// Freeze marks the hash table as read-only after build phase completes.
+	// Once frozen, Get() becomes lock-free and returns the original slice (zero-copy).
+	// Put() will panic if called on a frozen hash table.
+	// This eliminates RWMutex contention during concurrent probe phase reads.
+	Freeze()
+
+	// IsFrozen returns true if the hash table has been frozen.
+	// Frozen hash tables provide lock-free, zero-copy reads.
+	IsFrozen() bool
 
 	// PHASE 2: Add disk spillover support
 	// SpillToDisk() error

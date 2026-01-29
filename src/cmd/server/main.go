@@ -242,6 +242,13 @@ func main() {
 	flag.IntVar(&args.WhereBloomMinDocuments, "where-bloom-min-docs", args.WhereBloomMinDocuments, "Min docs for Bloom filter")
 	flag.BoolVar(&args.WhereBatchSIMDEnabled, "where-batch-simd", args.WhereBatchSIMDEnabled, "Enable batch SIMD for WHERE")
 	flag.IntVar(&args.WhereBatchMinSize, "where-batch-min-size", args.WhereBatchMinSize, "Min size for batch SIMD")
+
+	// GROUP BY Optimization Flags (Phases 1-3)
+	flag.IntVar(&args.GroupByParallelPageWorkers, "groupby-parallel-workers", args.GroupByParallelPageWorkers, "Workers for GROUP BY parallel page loading")
+	flag.BoolVar(&args.GroupByCacheWarmingEnabled, "groupby-cache-warming", args.GroupByCacheWarmingEnabled, "Enable GROUP BY cache warming")
+	flag.IntVar(&args.GroupByCacheWarmingMaxMB, "groupby-cache-warming-max-mb", args.GroupByCacheWarmingMaxMB, "GROUP BY cache warming memory budget (MB)")
+	flag.IntVar(&args.GroupBySnapshotStalenessMs, "groupby-snapshot-staleness-ms", args.GroupBySnapshotStalenessMs, "GROUP BY COW snapshot staleness (ms)")
+
 	flag.IntVar(&args.MaxMigrationCommands, "max-migration-commands", args.MaxMigrationCommands, "Max commands per migration")
 	flag.Float64Var(&args.MigrationPerformanceThreshold, "migration-perf-threshold", args.MigrationPerformanceThreshold, "Performance warning threshold (seconds)")
 	flag.Int64Var(&args.MaxValidationReportSize, "max-validation-report-size", args.MaxValidationReportSize, "Max validation report size")

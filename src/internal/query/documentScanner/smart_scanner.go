@@ -5,11 +5,12 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"syndrdb/src/internal/domain/models"
-
 	"syndrdb/src/pkg/common/conversion"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -270,64 +271,180 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 	batchCount := 0
 	totalScanned := 0
 
-	// All documents are now accessed via write-through page cache
-	// No memtable - reads go directly through page cache
+	// PHASE 1: PARALLEL PAGE LOADING - Get worker count from settings
+	// Minimum 8 workers, scales with CPU cores for optimal GROUP BY performance
+	workers := settings.GetSettings().GroupByParallelPageWorkers
+	if workers < 1 {
+		workers = runtime.NumCPU()
+		if workers < 8 {
+			workers = 8 // Minimum 8 workers
+		}
+	}
+	if int(pageCount) < workers {
+		workers = int(pageCount) // Don't create more workers than pages
+	}
+	if workers < 1 {
+		workers = 1 // At least 1 worker
+	}
 
-	// Iterate pages directly (sequential access, optimal I/O pattern)
-	// This is O(n) where n = pages, much better than O(n*m) with GetDocument() per doc
-	for pageID := uint32(0); pageID < pageCount; pageID++ {
-		// Early termination if limit specified
-		if maxDocuments > 0 && totalScanned >= maxDocuments {
-			sbs.logger.Debugf("Early termination: reached limit of %d documents", maxDocuments)
-			break
+	// PHASE 1: Use parallel loading if multiple workers configured
+	if workers > 1 && pageCount > 1 {
+		sbs.logger.Debugf("Using parallel page loading with %d workers for %d pages", workers, pageCount)
+
+		// Parallel loading: workers process page ranges concurrently
+		type pageBatch struct {
+			documents   []*models.Document
+			documentIDs []string
+			scanned     int
 		}
 
-		// Load page from cache (uses shared documentPages cache)
-		page, err := sbs.loadPage(pageID)
-		if err != nil {
-			sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
-			continue
+		resultChan := make(chan pageBatch, workers)
+		var wg sync.WaitGroup
+
+		// Calculate page range per worker
+		pagesPerWorker := (int(pageCount) + workers - 1) / workers
+
+		for w := 0; w < workers; w++ {
+			startPage := w * pagesPerWorker
+			endPage := startPage + pagesPerWorker
+			if startPage >= int(pageCount) {
+				break
+			}
+			if endPage > int(pageCount) {
+				endPage = int(pageCount)
+			}
+
+			wg.Add(1)
+			go func(workerID, start, end int) {
+				defer wg.Done()
+
+				localDocs := make([]*models.Document, 0)
+				localIDs := make([]string, 0)
+				localScanned := 0
+
+				// Worker processes assigned page range
+				for pageID := uint32(start); pageID < uint32(end); pageID++ {
+					// Early termination if limit specified
+					if maxDocuments > 0 && localScanned >= maxDocuments {
+						break
+					}
+
+					// Load page from cache
+					page, err := sbs.loadPage(pageID)
+					if err != nil {
+						sbs.logger.Warnf("[Worker %d] Failed to load page %d: %v", workerID, pageID, err)
+						continue
+					}
+
+					// Process documents in this page
+					for docID, doc := range page.Documents {
+						// Early termination check per document
+						if maxDocuments > 0 && localScanned >= maxDocuments {
+							break
+						}
+
+						localScanned++
+
+						// Apply MVCC snapshot filtering
+						if sbs.snapshotSequence > 0 {
+							if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+								continue
+							}
+						}
+
+						// Copy document for result set
+						docCopy := new(models.Document)
+						*docCopy = doc
+						localDocs = append(localDocs, docCopy)
+						localIDs = append(localIDs, docID)
+					}
+				}
+
+				// Send batch to result channel
+				resultChan <- pageBatch{
+					documents:   localDocs,
+					documentIDs: localIDs,
+					scanned:     localScanned,
+				}
+			}(w, startPage, endPage)
 		}
 
-		batchCount++
+		// Close channel when all workers done
+		go func() {
+			wg.Wait()
+			close(resultChan)
+		}()
 
-		// Process documents in this page
-		for docID, doc := range page.Documents {
-			// All documents are now accessed via page cache - no memtable
+		// Collect results from workers
+		for batch := range resultChan {
+			result.Documents = append(result.Documents, batch.documents...)
+			result.DocumentIDs = append(result.DocumentIDs, batch.documentIDs...)
+			totalScanned += batch.scanned
+			batchCount++
 
-			// Early termination check per document
+			// Memory pressure management
+			if len(result.Documents) > sbs.config.MemoryThreshold {
+				sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
+					sbs.config.MemoryThreshold)
+				runtime.GC()
+				sbs.metrics.MemoryPressureGCs++
+			}
+		}
+	} else {
+		// Sequential loading fallback (single worker or single page)
+		sbs.logger.Debugf("Using sequential page loading (workers=%d, pages=%d)", workers, pageCount)
+
+		// Iterate pages directly (sequential access, optimal I/O pattern)
+		for pageID := uint32(0); pageID < pageCount; pageID++ {
+			// Early termination if limit specified
 			if maxDocuments > 0 && totalScanned >= maxDocuments {
+				sbs.logger.Debugf("Early termination: reached limit of %d documents", maxDocuments)
 				break
 			}
 
-			totalScanned++
-
-			// Apply MVCC snapshot filtering if scanner has snapshot context
-			if sbs.snapshotSequence > 0 {
-				if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
-					continue // Skip documents not visible to this snapshot
-				}
+			// Load page from cache (uses shared documentPages cache)
+			page, err := sbs.loadPage(pageID)
+			if err != nil {
+				sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
+				continue
 			}
 
-			// CRITICAL: Create a copy only for documents that make it into the result set
-			// This is much more memory-efficient than copying ALL documents upfront like GetAllDocuments()
-			// We only copy documents that pass filtering and are actually returned
-			docCopy := new(models.Document)
-			*docCopy = doc
-			result.Documents = append(result.Documents, docCopy)
-			result.DocumentIDs = append(result.DocumentIDs, docID)
-		}
+			batchCount++
 
-		// Memory pressure management
-		if len(result.Documents) > sbs.config.MemoryThreshold {
-			sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
-				sbs.config.MemoryThreshold)
-			runtime.GC()
-			sbs.metrics.MemoryPressureGCs++
+			// Process documents in this page
+			for docID, doc := range page.Documents {
+				// Early termination check per document
+				if maxDocuments > 0 && totalScanned >= maxDocuments {
+					break
+				}
+
+				totalScanned++
+
+				// Apply MVCC snapshot filtering if scanner has snapshot context
+				if sbs.snapshotSequence > 0 {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+						continue // Skip documents not visible to this snapshot
+					}
+				}
+
+				// CRITICAL: Create a copy only for documents that make it into the result set
+				// This is much more memory-efficient than copying ALL documents upfront like GetAllDocuments()
+				// We only copy documents that pass filtering and are actually returned
+				docCopy := new(models.Document)
+				*docCopy = doc
+				result.Documents = append(result.Documents, docCopy)
+				result.DocumentIDs = append(result.DocumentIDs, docID)
+			}
+
+			// Memory pressure management
+			if len(result.Documents) > sbs.config.MemoryThreshold {
+				sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
+					sbs.config.MemoryThreshold)
+				runtime.GC()
+				sbs.metrics.MemoryPressureGCs++
+			}
 		}
 	}
-
-	// All documents are now accessed via page cache - no memtable documents to add
 
 	// Finalize results
 	result.ScanLatency = time.Since(startTime)
