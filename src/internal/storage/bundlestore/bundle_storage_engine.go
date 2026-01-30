@@ -2621,12 +2621,6 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 
 	rotationLock.Unlock()
 
-	// Track write offset for corruption debugging
-	writeOffset := currentFileSize
-	if needsRotation {
-		writeOffset = 0
-	}
-
 	// PAGE ID: Use alphabetical order via SortedIndex (matches LoadDocumentPage)
 	// For version updates, the document already exists so we query its position
 	pageSize := uint32(4096)
@@ -2657,14 +2651,12 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF)
 	binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
 
-	// Log write operation start
+	// Calculate total write size
 	totalWriteSize := 8 + len(documentBytes)
-	b.writeLogger.LogWriteStart(bundle.Name, writeOffset, totalWriteSize)
 
 	// Get or create write buffer (lock-free via atomic offset)
 	writeBuffer, err := b.getOrCreateWriteBuffer(bundle.Name, filePath)
 	if err != nil {
-		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, 0, fmt.Errorf("failed to get write buffer: %w", err))
 		return 0, fmt.Errorf("failed to get write buffer: %w", err)
 	}
 
@@ -2677,12 +2669,15 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	// This eliminates the WriteBuffer mutex bottleneck that was serializing 150 concurrent updates
 	// WriteDirectAtomic uses atomic.AddInt64 for offset reservation and pwrite for concurrent I/O
 	actualOffset, err := writeBuffer.WriteDirectAtomic(combinedData[:len(headerBytes)+len(documentBytes)])
+	
+	// Log write operation with actual offset (after atomic reservation)
+	b.writeLogger.LogWriteStart(bundle.Name, actualOffset, totalWriteSize)
+	
 	if err != nil {
 		b.returnCombinedBuffer(combinedData)
-		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, 0, fmt.Errorf("failed to write document version: %w", err))
+		b.writeLogger.LogWriteEnd(bundle.Name, actualOffset, 0, fmt.Errorf("failed to write document version: %w", err))
 		return 0, fmt.Errorf("failed to write document version: %w", err)
 	}
-	_ = actualOffset // Offset is tracked atomically, no need to use return value
 
 	b.returnCombinedBuffer(combinedData)
 
@@ -2690,8 +2685,8 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	newFileSize := currentFileSize + int64(totalWriteSize)
 	manifestMgr.UpdateFileStatsDeferred(int(currentFileID), 0, 0, 0, 0, newFileSize)
 
-	// Log successful write
-	b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, totalWriteSize, nil)
+	// Log successful write (use actualOffset, not pre-reserved writeOffset)
+	b.writeLogger.LogWriteEnd(bundle.Name, actualOffset, totalWriteSize, nil)
 
 	// Mark bundle as dirty
 	bundle.IsDirty = true
