@@ -277,7 +277,7 @@ func (hi *HashIndex) addToOverflowChain(startPageNum uint32, record *IndexRecord
 				return fmt.Errorf("failed to write recovery overflow page %d: %w", newPageNum, err)
 			}
 
-			hi.logger.Infof("RECOVERY: Successfully created new overflow page %d and added record %s",
+			hi.logger.Debugf("RECOVERY: Successfully created new overflow page %d and added record %s",
 				newPageNum, record.DocumentID)
 			return nil
 		}
@@ -501,7 +501,7 @@ func (hi *HashIndex) allocateNewPage() (uint32, error) {
 		hi.logger.Errorf("CORRUPTION DETECTED: NextPageNum %d is less than expected minimum %d (BucketCount=%d)",
 			hi.metadata.NextPageNum, expectedMinimum, hi.metadata.BucketCount)
 		hi.metadata.NextPageNum = expectedMinimum
-		hi.logger.Infof("RECOVERY: Reset NextPageNum from %d to %d", hi.metadata.NextPageNum, expectedMinimum)
+		hi.logger.Debugf("RECOVERY: Reset NextPageNum from %d to %d", hi.metadata.NextPageNum, expectedMinimum)
 	}
 
 	// CORRUPTION PREVENTION: Scan for conflicts before allocation
@@ -541,7 +541,7 @@ func (hi *HashIndex) allocateNewPage() (uint32, error) {
 	}
 
 	if safetyCheckCount > 0 {
-		hi.logger.Infof("RECOVERY: Required %d safety checks to find safe page number %d",
+		hi.logger.Debugf("RECOVERY: Required %d safety checks to find safe page number %d",
 			safetyCheckCount, hi.metadata.NextPageNum)
 	}
 
@@ -645,7 +645,7 @@ func (hi *HashIndex) VerifyIndex() (*VerificationResult, error) {
 		Warnings:     make([]string, 0),
 	}
 
-	hi.logger.Infof("Starting index verification for bundle '%s'", hi.bundleName)
+	hi.logger.Debugf("Starting index verification for bundle '%s'", hi.bundleName)
 
 	// Verify each bucket
 	for bucketNum := uint32(0); bucketNum < hi.metadata.BucketCount; bucketNum++ {
@@ -688,7 +688,7 @@ func (hi *HashIndex) VerifyIndex() (*VerificationResult, error) {
 	result.Duration = result.EndTime.Sub(result.StartTime)
 	result.IsValid = len(result.Errors) == 0
 
-	hi.logger.Infof("Index verification completed in %v. Valid: %t, Errors: %d, Warnings: %d",
+	hi.logger.Debugf("Index verification completed in %v. Valid: %t, Errors: %d, Warnings: %d",
 		result.Duration, result.IsValid, len(result.Errors), len(result.Warnings))
 
 	return result, nil

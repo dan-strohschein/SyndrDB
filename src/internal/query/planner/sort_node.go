@@ -155,7 +155,7 @@ func NewSortNode(child ExecutionNode, orderBy *queryparser.OrderByClause, logger
 //   - map[string]*models.Document: Sorted documents
 //   - error: Any error during execution
 func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	n.Logger.Infof("Executing SortNode with %d ORDER BY fields", len(n.OrderBy.Fields))
+	n.Logger.Debugf("Executing SortNode with %d ORDER BY fields", len(n.OrderBy.Fields))
 
 	// OPTIMIZATION: For ORDER BY queries, try streaming to avoid GetAllDocuments() lock contention
 	// Check if child is FullScanNode and we can stream documents
@@ -164,7 +164,7 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 	if fullScan, ok := n.Child.(*FullScanNode); ok {
 		if fullScan.DocumentScanner != nil {
 			// Use streaming to collect documents into a slice, then convert to map
-			n.Logger.Infof("OPTIMIZATION: Using streaming collection for ORDER BY to avoid GetAllDocuments() lock contention")
+			n.Logger.Debugf("OPTIMIZATION: Using streaming collection for ORDER BY to avoid GetAllDocuments() lock contention")
 			docSlice, streamErr := n.collectDocumentsStreaming(ctx, fullScan.DocumentScanner)
 			if streamErr != nil {
 				return nil, fmt.Errorf("SortNode: streaming collection failed: %w", streamErr)
@@ -242,7 +242,7 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 		sortedMap[doc.DocumentID] = doc
 	}
 
-	n.Logger.Infof("SortNode completed: sorted %d documents by %d fields",
+	n.Logger.Debugf("SortNode completed: sorted %d documents by %d fields",
 		len(sortedMap), len(n.OrderBy.Fields))
 
 	return sortedMap, nil
@@ -325,7 +325,7 @@ func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner docume
 //   - []*models.Document: Top N documents in sorted order
 //   - error: Any error during execution
 func (n *SortNode) ExecuteWithLimit(ctx context.Context, limit int) ([]*models.Document, error) {
-	n.Logger.Infof("Executing SortNode with LIMIT %d optimization", limit)
+	n.Logger.Debugf("Executing SortNode with LIMIT %d optimization", limit)
 
 	// OPTIMIZATION: For ORDER BY queries with LIMIT, try streaming to avoid GetAllDocuments() lock contention
 	var documents map[string]*models.Document
@@ -333,7 +333,7 @@ func (n *SortNode) ExecuteWithLimit(ctx context.Context, limit int) ([]*models.D
 	if fullScan, ok := n.Child.(*FullScanNode); ok {
 		if fullScan.DocumentScanner != nil {
 			// Use streaming to collect documents into a slice
-			n.Logger.Infof("OPTIMIZATION: Using streaming collection for ORDER BY with LIMIT to avoid GetAllDocuments() lock contention")
+			n.Logger.Debugf("OPTIMIZATION: Using streaming collection for ORDER BY with LIMIT to avoid GetAllDocuments() lock contention")
 			docSlice, streamErr := n.collectDocumentsStreaming(ctx, fullScan.DocumentScanner)
 			if streamErr != nil {
 				return nil, fmt.Errorf("SortNode: streaming collection failed: %w", streamErr)
@@ -494,7 +494,7 @@ func (n *SortNode) tryRadixSort(documents map[string]*models.Document, limit int
 			// Use all available CPU cores for parallelism
 			numWorkers := 0 // 0 means use runtime.NumCPU() in parallel algorithm
 
-			n.Logger.Infof("Using PARALLEL radix sort for integer field '%s': %d documents, LIMIT %d (ASC: %v)",
+			n.Logger.Debugf("Using PARALLEL radix sort for integer field '%s': %d documents, LIMIT %d (ASC: %v)",
 				primaryField.FieldName, len(documents), limit, ascending)
 
 			sortedDocs, err := sorting.ParallelRadixSort(documents, primaryField.FieldName, ascending, numWorkers, n.Logger)
@@ -508,7 +508,7 @@ func (n *SortNode) tryRadixSort(documents map[string]*models.Document, limit int
 		}
 
 		// Use sequential radix sort
-		n.Logger.Infof("Using radix sort for integer field '%s': %d documents, LIMIT %d (ASC: %v)",
+		n.Logger.Debugf("Using radix sort for integer field '%s': %d documents, LIMIT %d (ASC: %v)",
 			primaryField.FieldName, len(documents), limit, ascending)
 
 		sortedDocs, err := sorting.RadixSort(documents, primaryField.FieldName, ascending, n.Logger)

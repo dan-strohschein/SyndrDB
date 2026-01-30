@@ -550,6 +550,11 @@ type BundleService struct {
 
 	// INDEX MAINTENANCE: Automatic index rebuilding on staleness threshold
 	indexMaintenanceScheduler IndexMaintenanceSchedulerInterface // Scheduler for automatic index rebuilds
+
+	// PERFORMANCE FIX: Background COW snapshot cleaner context
+	// Used to gracefully shut down the background goroutine on server shutdown
+	cowCleanerCtx    context.Context    // Context for background cleaner goroutine
+	cowCleanerCancel context.CancelFunc // Cancel function to stop background cleaner
 }
 
 // IndexMaintenanceSchedulerInterface defines the interface for scheduling index rebuilds
@@ -657,7 +662,7 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	// Generator is stateless and can be created once, shared by all databases
 	if service.graphQLEnabled {
 		service.schemaGenerator = graphQLSchema.NewSchemaGenerator()
-		logger.Infof("GraphQL schema generator initialized (managers will be created per database on-demand)")
+		logger.Debugf("GraphQL schema generator initialized (managers will be created per database on-demand)")
 	} else {
 		logger.Debugf("GraphQL support disabled - schema generation will be skipped")
 	}
@@ -665,6 +670,11 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	// Don't load bundle metadata at startup - bundles should be loaded on-demand
 	// Only primary database catalog bundles will be loaded during server initialization
 	logger.Debugf("Bundle service initialized - bundles will be loaded on-demand")
+
+	// PERFORMANCE FIX: Start background COW snapshot cleaner to prevent hot-path overhead
+	// Sweeps stale snapshots every 5 seconds to avoid per-query staleness checks
+	service.cowCleanerCtx, service.cowCleanerCancel = context.WithCancel(context.Background())
+	service.startCOWSnapshotCleaner(service.cowCleanerCtx)
 
 	return service
 }
@@ -695,6 +705,76 @@ func (s *BundleService) SetMetadataPersistInterval(interval int) {
 	s.metadataUpdateMutex.Lock()
 	defer s.metadataUpdateMutex.Unlock()
 	s.metadataPersistInterval = interval
+}
+
+// startCOWSnapshotCleaner starts a background goroutine that periodically sweeps
+// and removes stale COW snapshots from all page cache shards.
+// This prevents stale snapshot accumulation and eliminates hot-path cleanup overhead.
+//
+// PERFORMANCE FIX: Root cause of 60K→40K query degradation
+// - First run: Empty COW cache, fast lookups
+// - Second run: Stale entries cause Load→Delete overhead on EVERY page access
+// - Solution: Background sweep every 5 seconds removes stale entries off hot path
+func (s *BundleService) startCOWSnapshotCleaner(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second) // Sweep every 5 seconds
+	s.logger.Debug("Background COW snapshot cleaner started (5s interval)")
+
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Debug("Background COW snapshot cleaner stopped")
+				return
+			case <-ticker.C:
+				s.cleanStaleCOWSnapshots()
+			}
+		}
+	}()
+}
+
+// cleanStaleCOWSnapshots sweeps all page cache shards and removes stale COW snapshots.
+// This is called by the background cleaner goroutine every 5 seconds.
+//
+// Algorithm:
+//  1. Get staleness threshold from settings (default: 5000ms)
+//  2. For each shard, Range over cowSnapshot sync.Map
+//  3. Collect keys of stale entries (age > threshold)
+//  4. Batch delete stale keys outside Range() to avoid concurrent modification
+//
+// OPTIMIZATION: Uses sync.Map.Range which is optimized for concurrent reads
+func (s *BundleService) cleanStaleCOWSnapshots() {
+	stalenessMs := settings.GetSettings().GroupBySnapshotStalenessMs
+	now := time.Now().UnixMilli()
+	totalDeleted := 0
+
+	// Reusable slice for collecting stale keys (avoids per-shard allocations)
+	deleteKeys := make([]string, 0, 100)
+
+	for _, shard := range s.pageShards {
+		// Collect stale keys from this shard
+		shard.cowSnapshot.Range(func(key, value interface{}) bool {
+			snapshot := value.(*cowSnapshotEntry)
+			age := now - snapshot.timestamp
+			if age > int64(stalenessMs) {
+				deleteKeys = append(deleteKeys, key.(string))
+			}
+			return true
+		})
+
+		// Batch delete outside Range to avoid concurrent modification issues
+		if len(deleteKeys) > 0 {
+			for _, key := range deleteKeys {
+				shard.cowSnapshot.Delete(key)
+			}
+			totalDeleted += len(deleteKeys)
+			deleteKeys = deleteKeys[:0] // Reuse slice for next shard
+		}
+	}
+
+	if totalDeleted > 0 {
+		s.logger.Debugf("COW snapshot cleaner: removed %d stale entries (threshold: %dms)", totalDeleted, stalenessMs)
+	}
 }
 
 // ============================================================================
@@ -823,7 +903,7 @@ func (s *BundleService) getOrCreateSchemaManager(db *models.Database) (*graphQLS
 			return nil, err
 		}
 
-		s.logger.Infof("GraphQL schema manager initialized for database '%s' at: %s", db.Name, schemaFilePath)
+		s.logger.Debugf("GraphQL schema manager initialized for database '%s' at: %s", db.Name, schemaFilePath)
 		return manager, nil
 	})
 }
@@ -930,7 +1010,7 @@ func (s *BundleService) regenerateGraphQLSchema(bundle *models.Bundle) error {
 
 	// Log success with version information
 	newVersion, _ := schemaManager.GetLatestVersionForBundle(bundle.Name)
-	s.logger.Infof("[GraphQL] Schema updated for bundle '%s' (version %d, %d fields, %d breaking changes)",
+	s.logger.Debugf("[GraphQL] Schema updated for bundle '%s' (version %d, %d fields, %d breaking changes)",
 		bundle.Name, newVersion, len(newSchemaDef.Fields), len(breakingChanges))
 
 	return nil
@@ -1617,13 +1697,13 @@ func (s *BundleService) trackOperationForBulkDetection() bool {
 		if opsPerSecond >= float64(s.bulkThresholdOpsPerSec) {
 			if !s.bulkModeEnabled {
 				s.bulkModeEnabled = true
-				s.logger.Infof("Entering bulk mode - detected %.1f ops/sec (threshold: %d)",
+				s.logger.Debugf("Entering bulk mode - detected %.1f ops/sec (threshold: %d)",
 					opsPerSecond, s.bulkThresholdOpsPerSec)
 			}
 		} else {
 			if s.bulkModeEnabled {
 				s.bulkModeEnabled = false
-				s.logger.Infof("Exiting bulk mode - detected %.1f ops/sec (threshold: %d)",
+				s.logger.Debugf("Exiting bulk mode - detected %.1f ops/sec (threshold: %d)",
 					opsPerSecond, s.bulkThresholdOpsPerSec)
 
 				// CRITICAL: Flush all buffers when exiting bulk mode
@@ -1631,7 +1711,7 @@ func (s *BundleService) trackOperationForBulkDetection() bool {
 				if err := s.FlushAllBuffers(); err != nil {
 					s.logger.Errorf("BULK END: Failed to flush buffers: %v", err)
 				} else {
-					s.logger.Infof("BULK END: Successfully flushed all pending operations")
+					s.logger.Debugf("BULK END: Successfully flushed all pending operations")
 				}
 			}
 		}
@@ -1731,7 +1811,7 @@ func (s *BundleService) FlushAllIndexesToDisk() error {
 	}
 
 	if flushedCount > 0 {
-		s.logger.Infof("Successfully flushed %d indexes to disk", flushedCount)
+		s.logger.Debugf("Successfully flushed %d indexes to disk", flushedCount)
 	}
 
 	return nil
@@ -2154,7 +2234,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 			DefaultValue: fieldDef.DefaultValue,
 		}
 		if args.Debug {
-			s.logger.Infof("Added field '%s' to bundle '%s'", fieldDef.Name, bundleCommand.BundleName)
+			s.logger.Debugf("Added field '%s' to bundle '%s'", fieldDef.Name, bundleCommand.BundleName)
 		}
 
 	}
@@ -2235,7 +2315,7 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 				if err != nil {
 					s.logger.Errorf("[GraphQL] Failed to store schema for bundle '%s': %v", bundle.Name, err)
 				} else {
-					s.logger.Infof("[GraphQL] Schema created for bundle '%s' (version 1, %d fields)", bundle.Name, len(schemaDef.Fields))
+					s.logger.Debugf("[GraphQL] Schema created for bundle '%s' (version 1, %d fields)", bundle.Name, len(schemaDef.Fields))
 				}
 			}
 		}
@@ -2315,7 +2395,7 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 		if fileExists {
 			// If the bundle exists in the store but not in memory, load metadata only
 			// if args.Debug {
-			// 	s.logger.Infof("Bundle metadata '%s' not found in memory, loading from store", name)
+			// 	s.logger.Debugf("Bundle metadata '%s' not found in memory, loading from store", name)
 			// }
 
 			databasePath := helpers.GetDatabaseFolderPath(database.Name)
@@ -2344,7 +2424,7 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 			}
 
 			// if args.Debug {
-			// 	s.logger.Infof("Loaded bundle metadata '%s' from store", name)
+			// 	s.logger.Debugf("Loaded bundle metadata '%s' from store", name)
 			// }
 
 			s.bundleMetadata[name] = bundle
@@ -2499,16 +2579,11 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 	shard := s.pageShards[shardIdx]
 
 	// PHASE 3: Check COW snapshot cache first (avoids RLock entirely)
-	stalenessMs := settings.GetSettings().GroupBySnapshotStalenessMs
+	// PERFORMANCE FIX: No staleness check on hot path - background cleaner handles cleanup
 	if cached, ok := shard.cowSnapshot.Load(pageKey); ok {
 		snapshot := cached.(*cowSnapshotEntry)
-		age := time.Now().UnixMilli() - snapshot.timestamp
-		if age < int64(stalenessMs) {
-			// Snapshot is fresh enough - return cached copy
-			return snapshot.documents, nil
-		}
-		// Snapshot is stale - delete and recreate below
-		shard.cowSnapshot.Delete(pageKey)
+		// Return cached snapshot immediately - background cleaner removes stale entries
+		return snapshot.documents, nil
 	}
 
 	// POSTGRESQL-INSPIRED: Lock-free cache lookup using sync.Map (same as GetDocumentPage)
@@ -3110,7 +3185,7 @@ func (s *BundleService) rebuildSortedIndexAfterCompaction(bundleName string) {
 		s.logger.Warnf("Failed to persist rebuilt SortedIndex for bundle %s: %v", bundleName, err)
 	}
 
-	s.logger.Infof("Rebuilt SortedIndex for bundle %s with %d documents after compaction",
+	s.logger.Debugf("Rebuilt SortedIndex for bundle %s with %d documents after compaction",
 		bundleName, len(docIDs))
 
 	// Schedule async rebuilds for all user-created indexes (hash and btree)
@@ -3132,7 +3207,7 @@ func (s *BundleService) rebuildSortedIndexAfterCompaction(bundleName string) {
 			}
 
 			// Schedule rebuild with high priority (post-compaction is urgent)
-			s.logger.Infof("Scheduling post-compaction rebuild for index %s (type: %s)", indexName, indexRef.IndexType)
+			s.logger.Debugf("Scheduling post-compaction rebuild for index %s (type: %s)", indexName, indexRef.IndexType)
 
 			// Use high priority (staleness=1.0) for post-compaction rebuilds
 			_ = s.indexMaintenanceScheduler.ScheduleRebuild(IndexMaintenanceRequest{
@@ -3256,13 +3331,13 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	// and SELECT TOP needs accurate PageCount to work correctly
 
 	if len(s.metadataUpdateBuffer) > 0 {
-		s.logger.Infof("DEBUG DEBUG DEBUG :: Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
+		//s.logger.Debugf("DEBUG DEBUG DEBUG :: Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
 		s.FlushMetadataUpdates()
 	}
-	//s.logger.Infof("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",
+	//s.logger.Debugf("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",
 	//	bundleName, bundle.Documents != nil, bundle.DocumentsComplete)
 	// if bundle.Documents != nil {
-	// 	s.logger.Infof("Bundle %s memtable contains %d documents", bundleName, len(*bundle.Documents))
+	// 	s.logger.Debugf("Bundle %s memtable contains %d documents", bundleName, len(*bundle.Documents))
 	// }
 
 	var allDocuments []*models.Document
@@ -3752,7 +3827,7 @@ func (s *BundleService) RenameBundle(database *models.Database, bundle *models.B
 		// Don't fail the operation - the bundle is already renamed on disk
 	}
 
-	s.logger.Infof("Successfully renamed bundle '%s' to '%s'", oldName, newBundleName)
+	s.logger.Debugf("Successfully renamed bundle '%s' to '%s'", oldName, newBundleName)
 	return nil
 }
 
@@ -3815,7 +3890,7 @@ func (s *BundleService) updateBundleInSystemCatalog(database *models.Database, o
 		return fmt.Errorf("failed to update bundle in system catalog: %w", err)
 	}
 
-	s.logger.Infof("Updated system catalog for bundle rename: '%s' -> '%s'", oldName, newName)
+	s.logger.Debugf("Updated system catalog for bundle rename: '%s' -> '%s'", oldName, newName)
 
 	// GRAPHQL INTEGRATION: Regenerate GraphQL schema after bundle rename
 	// Bundle rename changes the GraphQL TypeName (e.g., "users" -> "User", "blog_posts" -> "BlogPost")
@@ -3892,7 +3967,7 @@ func (s *BundleService) ApplyFieldChanges(database *models.Database, bundle *mod
 
 	// Rebuild affected indexes
 	if len(indexesToRebuild) > 0 {
-		//s.logger.Infof("Rebuilding %d indexes for bundle '%s'", len(indexesToRebuild), bundle.Name)
+		//s.logger.Debugf("Rebuilding %d indexes for bundle '%s'", len(indexesToRebuild), bundle.Name)
 		for fieldName := range indexesToRebuild {
 			if err := s.rebuildFieldIndex(bundle, fieldName); err != nil {
 				s.logger.Warnf("Failed to rebuild index for field '%s': %v", fieldName, err)
@@ -3923,7 +3998,7 @@ func (s *BundleService) ApplyFieldChanges(database *models.Database, bundle *mod
 			bundle.Name, err)
 	}
 
-	s.logger.Infof("Successfully applied all field changes to bundle '%s'", bundle.Name)
+	s.logger.Debugf("Successfully applied all field changes to bundle '%s'", bundle.Name)
 	return nil
 }
 
@@ -3949,7 +4024,7 @@ func (s *BundleService) applyAddField(bundle *models.Bundle, change *models.Fiel
 
 	// Apply default value to all existing documents if field is required
 	if change.NewField.IsRequired && change.NewField.DefaultValue != nil {
-		//s.logger.Infof("Applying default value to all existing documents in bundle '%s'", bundle.Name)
+		//s.logger.Debugf("Applying default value to all existing documents in bundle '%s'", bundle.Name)
 		if err := s.applyDefaultToExistingDocuments(bundle, fieldName, change.NewField.DefaultValue); err != nil {
 			return fmt.Errorf("failed to apply default value to existing documents: %w", err)
 		}
@@ -4018,7 +4093,7 @@ func (s *BundleService) applyRemoveField(database *models.Database, bundle *mode
 	delete(bundle.DocumentStructure.FieldDefinitions, fieldName)
 
 	// Remove field from all existing documents
-	//s.logger.Infof("Removing field '%s' from all documents in bundle '%s'", fieldName, bundle.Name)
+	//s.logger.Debugf("Removing field '%s' from all documents in bundle '%s'", fieldName, bundle.Name)
 	if err := s.removeFieldFromExistingDocuments(bundle, fieldName); err != nil {
 		return fmt.Errorf("failed to remove field from existing documents: %w", err)
 	}
@@ -4230,7 +4305,7 @@ func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldNa
 	// Invalidate cached pages to force reload
 	s.invalidateBundlePageCache(bundle.Name)
 
-	s.logger.Infof("Successfully renamed field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
+	s.logger.Debugf("Successfully renamed field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
 	return nil
 }
 
@@ -4519,7 +4594,7 @@ func (s *BundleService) isFieldIndexed(bundle *models.Bundle, fieldName string) 
 // management is refactored to be more modular.
 func (s *BundleService) rebuildFieldIndex(bundle *models.Bundle, fieldName string) error {
 	s.logger.Warnf("Index rebuilding for field '%s' in bundle '%s' not yet fully implemented", fieldName, bundle.Name)
-	s.logger.Infof("Indexes will be rebuilt on next server restart or when accessed")
+	s.logger.Debugf("Indexes will be rebuilt on next server restart or when accessed")
 
 	// TODO: Implement full index rebuilding
 	// For now, we log a warning. Indexes will be rebuilt when:
@@ -4682,7 +4757,7 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 	}
 	bundle.Relationships[relationship.Name] = relationship
 
-	s.logger.Infof("Validating relationship %s: %s.%s (%s) -> %s.%s",
+	s.logger.Debugf("Validating relationship %s: %s.%s (%s) -> %s.%s",
 		relationship.Name,
 		relationship.SourceBundle,
 		relationship.SourceField,
@@ -4735,7 +4810,7 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 			DefaultValue: nil,
 		}
 
-		s.logger.Infof("Added reverse field '%s' (type %s) to source bundle '%s' for ManyToMany relationship",
+		s.logger.Debugf("Added reverse field '%s' (type %s) to source bundle '%s' for ManyToMany relationship",
 			reverseFieldName, destSourceFieldDef.Type, bundle.Name)
 
 	default:
@@ -4777,7 +4852,7 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 		}
 	}
 
-	s.logger.Infof("Successfully added relationship '%s' to bundle '%s'", relationshipName, bundle.Name)
+	s.logger.Debugf("Successfully added relationship '%s' to bundle '%s'", relationshipName, bundle.Name)
 	return nil
 }
 
@@ -4805,7 +4880,7 @@ func (s *BundleService) RemoveRelationshipFromBundle(bundle *models.Bundle, rela
 		return fmt.Errorf("relationship '%s' not found on bundle '%s'", relationshipName, bundle.Name)
 	}
 
-	s.logger.Infof("Removing relationship '%s' (type: %s) from bundle '%s' to bundle '%s'",
+	s.logger.Debugf("Removing relationship '%s' (type: %s) from bundle '%s' to bundle '%s'",
 		relationshipName, relationship.RelationshipType, bundle.Name, relationship.DestinationBundle)
 
 	// Remove relationship from bundle metadata (metadata-only operation)
@@ -4827,7 +4902,7 @@ func (s *BundleService) RemoveRelationshipFromBundle(bundle *models.Bundle, rela
 		// Continue despite GraphQL error - schema regeneration is non-critical
 	}
 
-	s.logger.Infof("Successfully removed relationship '%s' from bundle '%s'", relationshipName, bundle.Name)
+	s.logger.Debugf("Successfully removed relationship '%s' from bundle '%s'", relationshipName, bundle.Name)
 	return nil
 }
 
@@ -4877,7 +4952,7 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 		DefaultValue: nil,
 	}
 
-	s.logger.Infof("Creating FK field '%s' with preserved type '%s' (from %s.%s)",
+	s.logger.Debugf("Creating FK field '%s' with preserved type '%s' (from %s.%s)",
 		fieldName, sourceFieldDef.Type, sourceBundle.Name, relationship.SourceField)
 
 	// Update the destination bundle in the store
@@ -4886,7 +4961,7 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 		return fmt.Errorf("failed to update destination bundle '%s' in store: %w", destinationBundle.Name, err)
 	}
 
-	// s.logger.Infof("Added relationship field '%s' to destination bundle '%s' (required=%t, unique=%t)",
+	// s.logger.Debugf("Added relationship field '%s' to destination bundle '%s' (required=%t, unique=%t)",
 	// 	fieldName, destinationBundle.Name, isRequired, isUnique)
 
 	// Automatically create hash index on the foreign key field for referential integrity
@@ -4896,7 +4971,7 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 
 	// Check if index already exists
 	if _, exists := destinationBundle.Indexes[indexName]; !exists {
-		s.logger.Infof("Automatically creating hash index '%s' on foreign key field '%s' in bundle '%s'",
+		s.logger.Debugf("Automatically creating hash index '%s' on foreign key field '%s' in bundle '%s'",
 			indexName, fieldName, destinationBundle.Name)
 
 		// Create index command using FieldDefinition type
@@ -4921,10 +4996,10 @@ func (s *BundleService) addFieldToDestinationBundle(sourceBundle *models.Bundle,
 			s.logger.Warnf("Failed to automatically create index on foreign key field '%s': %v. "+
 				"Referential integrity validation will require manual index creation.", fieldName, err)
 		} else {
-			s.logger.Infof("Successfully created hash index '%s' for referential integrity validation", indexName)
+			s.logger.Debugf("Successfully created hash index '%s' for referential integrity validation", indexName)
 		}
 	} else {
-		s.logger.Infof("Hash index '%s' already exists on foreign key field '%s', skipping automatic creation",
+		s.logger.Debugf("Hash index '%s' already exists on foreign key field '%s', skipping automatic creation",
 			indexName, fieldName)
 	}
 
@@ -5053,7 +5128,7 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		return fmt.Errorf("failed to update bundle file after creating index: %w", err)
 	}
 
-	s.logger.Infof("Successfully created V3 hash index '%s' on field '%s' for bundle '%s'",
+	s.logger.Debugf("Successfully created V3 hash index '%s' on field '%s' for bundle '%s'",
 		indexCommand.IndexName, indexCommand.Fields[0].Name, bundle.Name)
 	return nil
 }
@@ -5145,7 +5220,7 @@ func createHashIndexInternal(s *BundleService, bundle *models.Bundle, name strin
 	// Update the cache with the modified bundle
 	s.bundleMetadata[bundle.Name] = bundle
 
-	s.logger.Infof("Successfully created hash index '%s' on field '%s' for bundle '%s'", name, name, bundle.Name)
+	s.logger.Debugf("Successfully created hash index '%s' on field '%s' for bundle '%s'", name, name, bundle.Name)
 	return nil
 }
 
@@ -5179,7 +5254,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		return fmt.Errorf("field '%s' does not exist in bundle '%s'", fieldDef.Name, bundle.Name)
 	}
 
-	s.logger.Infof("Creating BTree index '%s' on field '%s' for bundle '%s'",
+	s.logger.Debugf("Creating BTree index '%s' on field '%s' for bundle '%s'",
 		indexCommand.IndexName, fieldDef.Name, bundle.Name)
 
 	// Then in the CreateBTreeIndex function:
@@ -5206,7 +5281,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 	serviceRegistry := registry.GetRegistry()
 	if serviceRegistry.IsWALAvailable() {
 		config.WALManager = serviceRegistry.GetWALManager()
-		s.logger.Infof("WAL enabled for B-tree index '%s' on field '%s'", indexCommand.IndexName, fieldDef.Name)
+		s.logger.Debugf("WAL enabled for B-tree index '%s' on field '%s'", indexCommand.IndexName, fieldDef.Name)
 	} else {
 		s.logger.Debugf("WAL not available for B-tree index '%s' (proceeding without durability)", indexCommand.IndexName)
 	}
@@ -5290,7 +5365,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 			insertedCount++
 		}
 
-		s.logger.Infof("BTree index population complete: inserted %d documents, skipped %d duplicates", insertedCount, skippedCount)
+		s.logger.Debugf("BTree index population complete: inserted %d documents, skipped %d duplicates", insertedCount, skippedCount)
 
 		if err := btreeIndex.PersistMetadata(); err != nil {
 			s.logger.Warnf("Failed to persist B-tree index metadata after population: %v", err)
@@ -5333,7 +5408,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		return fmt.Errorf("failed to update bundle file after creating BTree index: %w", err)
 	}
 
-	s.logger.Infof("Successfully created BTree index '%s' on field '%s' for bundle '%s'",
+	s.logger.Debugf("Successfully created BTree index '%s' on field '%s' for bundle '%s'",
 		indexCommand.IndexName, fieldDef.Name, bundle.Name)
 
 	return nil
@@ -5492,7 +5567,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 		}
 	}
 
-	s.logger.Infof("⚠️  Hash index V3 '%s' CACHE MISS - loading from disk for bundle '%s'", indexName, bundle.Name)
+	s.logger.Debugf("⚠️  Hash index V3 '%s' CACHE MISS - loading from disk for bundle '%s'", indexName, bundle.Name)
 
 	// === OLD V2 IMPLEMENTATION (Commented out) ===
 	// args := settings.GetSettings()
@@ -5526,7 +5601,7 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 	// Store the loaded instance in the sharded cache (thread-safe with GetOrSet)
 	s.loadedIndexes.Set(bundle.Name, indexName, hashIndex)
 
-	s.logger.Infof("✅ Successfully loaded and cached hash index V3 '%s' from disk", indexName)
+	s.logger.Debugf("✅ Successfully loaded and cached hash index V3 '%s' from disk", indexName)
 	return hashIndex, nil
 }
 
@@ -5575,7 +5650,7 @@ func (s *BundleService) getOrLoadBTreeIndex(bundle *models.Bundle, indexName str
 			return nil, fmt.Errorf("failed to load BTree index '%s' from disk: %w", indexName, err)
 		}
 
-		s.logger.Infof("✅ Successfully loaded and cached BTree index '%s' from disk", indexName)
+		s.logger.Debugf("✅ Successfully loaded and cached BTree index '%s' from disk", indexName)
 		return btreeIndex, nil
 	})
 
@@ -5626,7 +5701,7 @@ func (s *BundleService) LoadDatabaseIndexes(databaseName string) error {
 	// Evict idle databases and free their memory
 	for _, dbName := range evictedDatabases {
 		lastAccess, _ := s.loadedDatabases.Get(dbName)
-		s.logger.Infof("📤 Evicting idle database '%s' indexes (idle for %v)", dbName, time.Since(lastAccess))
+		s.logger.Debugf("📤 Evicting idle database '%s' indexes (idle for %v)", dbName, time.Since(lastAccess))
 
 		// Find all bundles for this database and unload their unique indexes
 		// Use ForEach to safely iterate over the sharded cache
@@ -5719,13 +5794,13 @@ func (s *BundleService) LoadDatabaseIndexes(databaseName string) error {
 
 	// Log summary at INFO level for visibility
 	if skippedIndexes > 0 {
-		s.logger.Infof("📊 Loaded %d unique indexes for database '%s', using %d MB / %d MB budget (%d indexes skipped due to budget)",
+		s.logger.Debugf("📊 Loaded %d unique indexes for database '%s', using %d MB / %d MB budget (%d indexes skipped due to budget)",
 			totalIndexes, databaseName,
 			totalMemory/(1024*1024),
 			s.uniqueIndexMemoryBudgetBytes/(1024*1024),
 			skippedIndexes)
 	} else {
-		s.logger.Infof("📊 Loaded %d unique indexes for database '%s', using %d MB / %d MB budget",
+		s.logger.Debugf("📊 Loaded %d unique indexes for database '%s', using %d MB / %d MB budget",
 			totalIndexes, databaseName,
 			totalMemory/(1024*1024),
 			s.uniqueIndexMemoryBudgetBytes/(1024*1024))
@@ -5794,10 +5869,10 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 
 	// DIAGNOSTIC: Log bundle index status (only if verbose logging enabled)
 	if s.verboseLogging {
-		s.logger.Infof("DIAGNOSTIC: Bundle '%s' has Indexes map: %v, count: %d", bundle.Name, bundle.Indexes != nil, len(bundle.Indexes))
+		s.logger.Debugf("DIAGNOSTIC: Bundle '%s' has Indexes map: %v, count: %d", bundle.Name, bundle.Indexes != nil, len(bundle.Indexes))
 		if len(bundle.Indexes) > 0 {
 			for idxName := range bundle.Indexes {
-				s.logger.Infof("DIAGNOSTIC: Found index: %s", idxName)
+				s.logger.Debugf("DIAGNOSTIC: Found index: %s", idxName)
 			}
 		}
 	}
@@ -6166,7 +6241,7 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 
 	// INFO level summary: Useful for monitoring contention patterns
 	if skippedCount > 0 {
-		s.logger.Infof("Filtered out %d deleted document(s) between read and write phases (expected under high concurrency)", skippedCount)
+		s.logger.Debugf("Filtered out %d deleted document(s) between read and write phases (expected under high concurrency)", skippedCount)
 	}
 
 	return filtered
@@ -6233,7 +6308,7 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 				"Use a WHERE clause to update specific documents without CONFIRMED keyword",
 				docCommand.BundleName)
 		}
-		s.logger.Infof("Bulk update CONFIRMED for bundle '%s' - proceeding to update all documents", bundle.Name)
+		s.logger.Debugf("Bulk update CONFIRMED for bundle '%s' - proceeding to update all documents", bundle.Name)
 	}
 
 	// PHASE 1.1: READ PHASE - Perform read operations under read lock
@@ -6309,7 +6384,7 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	}
 
 	if args.Debug {
-		s.logger.Infof("Updating %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
+		s.logger.Debugf("Updating %d documents from bundle '%s' with filter '%s'", len(filteredDocs), docCommand.BundleName, docCommand.WhereClause)
 	}
 
 	// Validate document update fields against bundle field definitions
@@ -6324,7 +6399,7 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	// Check if any fields being updated are foreign keys and validate the new values
 	// Note: Must check BOTH outgoing relationships (stored in bundle.Relationships)
 	//       AND incoming relationships (stored in other bundles pointing to this one)
-	s.logger.Infof("[REFINT-UPDATE] Starting FK validation for bundle '%s', database=%v, bundle.Relationships=%d",
+	s.logger.Debugf("[REFINT-UPDATE] Starting FK validation for bundle '%s', database=%v, bundle.Relationships=%d",
 		bundle.Name, database != nil, len(bundle.Relationships))
 
 	var docIDs []string
@@ -6343,11 +6418,11 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 				updateFields[kv.Key] = strValue
 			}
 		}
-		s.logger.Infof("[REFINT-UPDATE] Update fields: %v", updateFields)
+		s.logger.Debugf("[REFINT-UPDATE] Update fields: %v", updateFields)
 
 		// Identify which fields are foreign keys (checks BOTH directions)
 		foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, updateFields, bundleCache)
-		s.logger.Infof("[REFINT-UPDATE] Identified %d FK fields being updated", len(foreignKeyUpdates))
+		s.logger.Debugf("[REFINT-UPDATE] Identified %d FK fields being updated", len(foreignKeyUpdates))
 
 		if len(foreignKeyUpdates) > 0 {
 			// Extract document IDs being updated
@@ -6355,7 +6430,7 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 			for i, doc := range filteredDocs {
 				docIDs[i] = doc.DocumentID
 			}
-			s.logger.Infof("[REFINT-UPDATE] Validating %d document(s): %v", len(docIDs), docIDs)
+			s.logger.Debugf("[REFINT-UPDATE] Validating %d document(s): %v", len(docIDs), docIDs)
 
 			// Perform batch validation with caching (under read lock - only reads data)
 			violation := validator.batchValidateForeignKeys(bundle, docIDs, foreignKeyUpdates, validationCache)
@@ -6901,7 +6976,7 @@ func (s *BundleService) DeleteDocumentFromBundleRCU(bundle *models.Bundle, docCo
 	args := settings.GetSettings()
 
 	if args.Debug {
-		s.logger.Infof("RCU DELETE: Starting lock-free deletion from bundle '%s' with WHERE clause: %s",
+		s.logger.Debugf("RCU DELETE: Starting lock-free deletion from bundle '%s' with WHERE clause: %s",
 			docCommand.BundleName, docCommand.WhereClause)
 	}
 
@@ -6918,7 +6993,7 @@ func (s *BundleService) DeleteDocumentFromBundleRCU(bundle *models.Bundle, docCo
 		}
 
 		if len(allDocs) == 0 {
-			s.logger.Infof("RCU DELETE: Bundle '%s' is already empty", bundle.Name)
+			s.logger.Debugf("RCU DELETE: Bundle '%s' is already empty", bundle.Name)
 			docCommand.DeletedDocumentIDs = []string{}
 			return nil
 		}
@@ -7187,7 +7262,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 	}
 
 	if args.Debug {
-		s.logger.Infof("Starting document deletion from bundle '%s' with WHERE clause: %s",
+		s.logger.Debugf("Starting document deletion from bundle '%s' with WHERE clause: %s",
 			docCommand.BundleName, docCommand.WhereClause)
 	}
 
@@ -7212,7 +7287,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 		}
 
 		if len(allDocs) == 0 {
-			s.logger.Infof("Bundle '%s' is already empty, nothing to delete", bundle.Name)
+			s.logger.Debugf("Bundle '%s' is already empty, nothing to delete", bundle.Name)
 			docCommand.DeletedDocumentIDs = []string{}
 			return nil
 		}
@@ -7223,7 +7298,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			bulkDocIDs = append(bulkDocIDs, doc.DocumentID)
 		}
 
-		s.logger.Infof("Bulk delete will validate and delete %d documents from bundle '%s'", len(bulkDocIDs), bundle.Name)
+		s.logger.Debugf("Bulk delete will validate and delete %d documents from bundle '%s'", len(bulkDocIDs), bundle.Name)
 
 		// Perform batch referential integrity validation
 		validator := NewReferentialIntegrityValidator(s, s.logger)
@@ -7249,7 +7324,7 @@ func (s *BundleService) DeleteDocumentFromBundle(bundle *models.Bundle, docComma
 			s.logger.Warnf("Failed to flush buffers after bulk delete: %v", err)
 		}
 
-		s.logger.Infof("Successfully deleted %d documents from bundle '%s'", len(bulkDocIDs), bundle.Name)
+		s.logger.Debugf("Successfully deleted %d documents from bundle '%s'", len(bulkDocIDs), bundle.Name)
 		return nil
 	}
 
@@ -7539,7 +7614,7 @@ func (s *BundleService) DeleteAllDocumentsFromBundle(
 ) error {
 	args := settings.GetSettings()
 	if args.Debug {
-		s.logger.Infof("Starting bulk delete of all documents from bundle '%s'", docCommand.BundleName)
+		s.logger.Debugf("Starting bulk delete of all documents from bundle '%s'", docCommand.BundleName)
 	}
 
 	// Acquire write lock for the bundle
@@ -7555,7 +7630,7 @@ func (s *BundleService) DeleteAllDocumentsFromBundle(
 	}
 
 	if len(allDocs) == 0 {
-		s.logger.Infof("Bundle '%s' is already empty, nothing to delete", bundle.Name)
+		s.logger.Debugf("Bundle '%s' is already empty, nothing to delete", bundle.Name)
 		docCommand.DeletedDocumentIDs = []string{}
 		return nil
 	}
@@ -7566,7 +7641,7 @@ func (s *BundleService) DeleteAllDocumentsFromBundle(
 		docIDs = append(docIDs, doc.DocumentID)
 	}
 
-	s.logger.Infof("Bulk delete will validate and delete %d documents from bundle '%s'", len(docIDs), bundle.Name)
+	s.logger.Debugf("Bulk delete will validate and delete %d documents from bundle '%s'", len(docIDs), bundle.Name)
 
 	// Perform batch referential integrity validation
 	validator := NewReferentialIntegrityValidator(s, s.logger)
@@ -7592,7 +7667,7 @@ func (s *BundleService) DeleteAllDocumentsFromBundle(
 		s.logger.Warnf("Failed to flush buffers after bulk delete: %v", err)
 	}
 
-	s.logger.Infof("Successfully deleted %d documents from bundle '%s'", len(docIDs), bundle.Name)
+	s.logger.Debugf("Successfully deleted %d documents from bundle '%s'", len(docIDs), bundle.Name)
 	return nil
 }
 
@@ -7889,18 +7964,18 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 
 	// If no WHERE clause, return all documents (disk + buffered)
 	if whereParts == "" {
-		//s.logger.Infof("DEBUG: GetDocumentsByFilter - empty filter, calling getAllDocumentsForIndexing")
+		//s.logger.Debugf("DEBUG: GetDocumentsByFilter - empty filter, calling getAllDocumentsForIndexing")
 		diskDocs, err := s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
 		if err != nil {
 			return nil, err
 		}
-		//s.logger.Infof("DEBUG: GetDocumentsByFilter - getAllDocumentsForIndexing returned %d documents, error: %v", len(result), err)
+		//s.logger.Debugf("DEBUG: GetDocumentsByFilter - getAllDocumentsForIndexing returned %d documents, error: %v", len(result), err)
 		return s.mergeDocuments(diskDocs, bufferedDocs), nil
 	}
 
 	// CRITICAL: Use index-optimized filtering following SyndrDB performance optimization
 	// This replaces the direct queryparser.FilterDocuments call with index-aware filtering
-	//s.logger.Infof("DEBUG: GetDocumentsByFilter - non-empty filter, calling filterDocumentsWithIndexOptimization")
+	//s.logger.Debugf("DEBUG: GetDocumentsByFilter - non-empty filter, calling filterDocumentsWithIndexOptimization")
 	diskDocs, err := s.filterDocumentsWithIndexOptimization(bundle, nil, whereParts)
 	if err != nil {
 		return nil, err
@@ -7917,7 +7992,7 @@ func (s *BundleService) GetDocumentsByFilter(bundle *models.Bundle, whereParts s
 		return s.mergeDocuments(diskDocs, filteredBuffered), nil
 	}
 
-	//s.logger.Infof("DEBUG: GetDocumentsByFilter - filterDocumentsWithIndexOptimization returned %d documents, error: %v", len(result), err)
+	//s.logger.Debugf("DEBUG: GetDocumentsByFilter - filterDocumentsWithIndexOptimization returned %d documents, error: %v", len(result), err)
 	return diskDocs, nil
 }
 
@@ -8721,7 +8796,7 @@ func (s *BundleService) tryANDIndexOptimization(bundle *models.Bundle, whereClau
 		return nil, false, nil
 	}
 
-	s.logger.Infof("AND optimization: using %s index '%s' on field '%s' to narrow results", bestClause.indexType, bestClause.indexName, bestClause.fieldName)
+	s.logger.Debugf("AND optimization: using %s index '%s' on field '%s' to narrow results", bestClause.indexType, bestClause.indexName, bestClause.fieldName)
 
 	// Use the indexed clause to get initial document set
 	var indexedDocs []*models.Document
@@ -8779,7 +8854,7 @@ func (s *BundleService) tryANDIndexOptimization(bundle *models.Bundle, whereClau
 		return nil, false, fmt.Errorf("AND optimization filter failed: %w", err)
 	}
 
-	s.logger.Infof("AND optimization: narrowed from %d to %d documents using index + filter", len(indexedDocs), len(filteredDocs))
+	s.logger.Debugf("AND optimization: narrowed from %d to %d documents using index + filter", len(indexedDocs), len(filteredDocs))
 	return filteredDocs, true, nil
 }
 
@@ -8814,7 +8889,7 @@ func (s *BundleService) convertDocIDsToDocuments(bundle *models.Bundle, docIDs [
 
 		// Remove stale entries from B-tree index asynchronously to not block the query
 		if len(staleDocIDs) > 0 {
-			s.logger.Infof("SELF-HEALING: Found %d stale B-tree entries in index '%s', removing...", len(staleDocIDs), indexName)
+			s.logger.Debugf("SELF-HEALING: Found %d stale B-tree entries in index '%s', removing...", len(staleDocIDs), indexName)
 			go func(bundleName, idxName string, staleIDs []string) {
 				// Load B-tree index and remove stale entries
 				if indexRef, exists := bundle.Indexes[idxName]; exists && indexRef.IndexType == "btree" {
@@ -8824,7 +8899,7 @@ func (s *BundleService) convertDocIDsToDocuments(bundle *models.Bundle, docIDs [
 						if delErr != nil {
 							s.logger.Warnf("SELF-HEALING: Failed to remove stale B-tree entries: %v", delErr)
 						} else if n > 0 {
-							s.logger.Infof("SELF-HEALING: Removed %d stale entries from B-tree index '%s'", n, idxName)
+							s.logger.Debugf("SELF-HEALING: Removed %d stale entries from B-tree index '%s'", n, idxName)
 						}
 					}
 				}
@@ -8890,11 +8965,11 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
 	}
 
-	//s.logger.Infof("[VALIDATION] Bundle '%s' has %d field definition(s)", bundle.Name, len(bundle.DocumentStructure.FieldDefinitions))
+	//s.logger.Debugf("[VALIDATION] Bundle '%s' has %d field definition(s)", bundle.Name, len(bundle.DocumentStructure.FieldDefinitions))
 
 	// Log all field definitions for debugging
 	// for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
-	// 	s.logger.Infof("[VALIDATION] Field '%s': Type=%s, Required=%v, Unique=%v",
+	// 	s.logger.Debugf("[VALIDATION] Field '%s': Type=%s, Required=%v, Unique=%v",
 	// 		fieldName, fieldDef.Type, fieldDef.IsRequired, fieldDef.IsUnique)
 	// }
 
@@ -8934,7 +9009,7 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		}
 	}
 
-	//s.logger.Infof("[VALIDATION] Provided %d field(s) in document command", len(providedFields))
+	//s.logger.Debugf("[VALIDATION] Provided %d field(s) in document command", len(providedFields))
 
 	// Check that all required fields are provided
 	missingFields := make([]string, 0, 5)
@@ -8958,7 +9033,7 @@ func (s *BundleService) validateDocumentFields(bundle *models.Bundle, docCommand
 		return fmt.Errorf("required fields are missing from document: %v", missingFields)
 	}
 
-	//s.logger.Infof("[VALIDATION] All required fields validated successfully")
+	//s.logger.Debugf("[VALIDATION] All required fields validated successfully")
 	return nil
 }
 
@@ -9365,7 +9440,13 @@ func (s *BundleService) discoverBundleIndexes(bundle *models.Bundle) error {
 // Shutdown ensures all pending operations are completed before service termination
 // This method should be called during graceful shutdown to maintain data consistency
 func (s *BundleService) Shutdown() error {
-	s.logger.Infof("Shutting down BundleService, flushing pending operations...")
+	s.logger.Debugf("Shutting down BundleService, flushing pending operations...")
+
+	// Stop background COW snapshot cleaner
+	if s.cowCleanerCancel != nil {
+		s.logger.Debug("Stopping background COW snapshot cleaner")
+		s.cowCleanerCancel()
+	}
 
 	// Close scanners before other cleanup
 	s.CloseAllScanners()
@@ -9424,7 +9505,7 @@ func (s *BundleService) Shutdown() error {
 		}
 	}
 
-	s.logger.Infof("BundleService shutdown completed")
+	s.logger.Debugf("BundleService shutdown completed")
 	return nil
 }
 
@@ -9471,14 +9552,14 @@ func (s *BundleService) RemoveDocumentScanner(bundleName string) {
 	s.scannerMutex.Lock()
 	defer s.scannerMutex.Unlock()
 
-	//s.logger.Infof("DEBUG: RemoveDocumentScanner called for bundle '%s'", bundleName)
+	//s.logger.Debugf("DEBUG: RemoveDocumentScanner called for bundle '%s'", bundleName)
 	if scanner, exists := s.bundleScanners[bundleName]; exists {
-		//s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner EXISTS in map, closing it...")
+		//s.logger.Debugf("DEBUG: RemoveDocumentScanner - Scanner EXISTS in map, closing it...")
 		scanner.Close()
 		delete(s.bundleScanners, bundleName)
-		//s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner REMOVED from map for bundle '%s'", bundleName)
+		//s.logger.Debugf("DEBUG: RemoveDocumentScanner - Scanner REMOVED from map for bundle '%s'", bundleName)
 	} else {
-		//s.logger.Infof("DEBUG: RemoveDocumentScanner - Scanner NOT FOUND in map for bundle '%s'", bundleName)
+		//s.logger.Debugf("DEBUG: RemoveDocumentScanner - Scanner NOT FOUND in map for bundle '%s'", bundleName)
 	}
 }
 
@@ -9608,7 +9689,7 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 		sampleSize := settings.GetSettings().RestrictValidationSampleSize
 		logProgress := settings.GetSettings().RestrictValidationLogProgress
 
-		s.logger.Infof("[DROP-RESTRICT] Starting document-level validation for bundle '%s' (thorough=%v, sampleSize=%d, logProgress=%v)",
+		s.logger.Debugf("[DROP-RESTRICT] Starting document-level validation for bundle '%s' (thorough=%v, sampleSize=%d, logProgress=%v)",
 			bundle.Name, thorough, sampleSize, logProgress)
 
 		if err := validator.ValidateDropBundleDocumentReferences(database, bundle, bundleCache, thorough, sampleSize, logProgress); err != nil {
@@ -9616,7 +9697,7 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 			return err
 		}
 
-		s.logger.Infof("[DROP-RESTRICT] All validations passed for bundle '%s' - no violations found", bundle.Name)
+		s.logger.Debugf("[DROP-RESTRICT] All validations passed for bundle '%s' - no violations found", bundle.Name)
 	} else {
 		s.logger.Warnf("[DROP-RESTRICT] FORCE flag specified - skipping referential integrity validation for bundle '%s'", bundle.Name)
 	}

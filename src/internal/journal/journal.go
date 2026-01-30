@@ -228,9 +228,9 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 		wal.startAutoFlush()
 	}
 
-	logger.Infof("Write Ahead Log initialized at %s with LSN starting at %d", config.LogDir, wal.currentLSN)
+	logger.Debugf("Write Ahead Log initialized at %s with LSN starting at %d", config.LogDir, wal.currentLSN)
 
-	wal.logger.Infof("WAL Configuration: durabilityMode=%s, batchSize=%d, maxFlushDelay=%v, fsyncOnCommit=%v",
+	wal.logger.Debugf("WAL Configuration: durabilityMode=%s, batchSize=%d, maxFlushDelay=%v, fsyncOnCommit=%v",
 		durabilityMode, walBatchSize, walMaxFlushDelay, config.FsyncOnCommit)
 
 	return wal, nil
@@ -271,7 +271,7 @@ func (wal *WriteAheadLog) ensureCorrectFileOpen() error {
 	wal.buffer = bufio.NewWriter(file)
 	wal.currentDate = today
 
-	wal.logger.Infof("Opened new WAL file: %s", fileName)
+	wal.logger.Debugf("Opened new WAL file: %s", fileName)
 	return nil
 }
 
@@ -345,7 +345,7 @@ func (wal *WriteAheadLog) loadLastLSN() error {
 	}
 
 	wal.currentLSN = lastLSN
-	wal.logger.Infof("Loaded last LSN %d from file %s", lastLSN, latestFile)
+	wal.logger.Debugf("Loaded last LSN %d from file %s", lastLSN, latestFile)
 	return nil
 }
 
@@ -434,7 +434,7 @@ func (wal *WriteAheadLog) checkFileRotation() error {
 	}
 
 	if stat.Size() >= wal.maxFileSize {
-		wal.logger.Infof("WAL file size %d exceeds max size %d, rotating", stat.Size(), wal.maxFileSize)
+		wal.logger.Debugf("WAL file size %d exceeds max size %d, rotating", stat.Size(), wal.maxFileSize)
 
 		// Close current file and open a new one with timestamp
 		if err := wal.closeCurrentFile(); err != nil {
@@ -452,7 +452,7 @@ func (wal *WriteAheadLog) checkFileRotation() error {
 
 		wal.file = file
 		wal.buffer = bufio.NewWriter(file)
-		wal.logger.Infof("Rotated to new WAL file: %s", fileName)
+		wal.logger.Debugf("Rotated to new WAL file: %s", fileName)
 	}
 
 	return nil
@@ -552,14 +552,14 @@ func (wal *WriteAheadLog) Close() error {
 func (wal *WriteAheadLog) ReplayOperations(fromLSN uint64, replayFunc func(WALEntry) error) error {
 	// The WAL files are in the baseFilePath directory itself, not its parent
 	dir := wal.baseFilePath
-	wal.logger.Infof("REPLAY: Looking for WAL files in directory: %s", dir)
+	wal.logger.Debugf("REPLAY: Looking for WAL files in directory: %s", dir)
 
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("failed to read WAL directory: %w", err)
 	}
 
-	wal.logger.Infof("REPLAY: Found %d files in directory", len(files))
+	wal.logger.Debugf("REPLAY: Found %d files in directory", len(files))
 
 	// Match WAL files: YYYY-MM-DD.wal or YYYY-MM-DD_HH-MM-SS.wal (for rotated files)
 	walPattern := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(_\d{2}-\d{2}-\d{2})?\.wal$`)
@@ -569,13 +569,13 @@ func (wal *WriteAheadLog) ReplayOperations(fromLSN uint64, replayFunc func(WALEn
 		if file.IsDir() {
 			continue
 		}
-		wal.logger.Infof("REPLAY: Checking file: %s, matches=%v", file.Name(), walPattern.MatchString(file.Name()))
+		wal.logger.Debugf("REPLAY: Checking file: %s, matches=%v", file.Name(), walPattern.MatchString(file.Name()))
 		if walPattern.MatchString(file.Name()) {
 			walFiles = append(walFiles, filepath.Join(dir, file.Name()))
 		}
 	}
 
-	wal.logger.Infof("REPLAY: Found %d WAL files matching pattern", len(walFiles))
+	wal.logger.Debugf("REPLAY: Found %d WAL files matching pattern", len(walFiles))
 
 	// Sort files by modification time
 	// TODO: Implement proper sorting
@@ -754,7 +754,7 @@ func (wal *WriteAheadLog) CleanupOldFiles() error {
 				if err := os.Remove(fullPath); err != nil {
 					wal.logger.Warnf("Failed to remove old WAL file %s: %v", fullPath, err)
 				} else {
-					wal.logger.Infof("Removed old WAL file: %s", fullPath)
+					wal.logger.Debugf("Removed old WAL file: %s", fullPath)
 				}
 			}
 		}

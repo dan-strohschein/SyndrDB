@@ -147,7 +147,7 @@ func (mjs *MergeJoinStrategy) EstimateCost(request *JoinRequest) (cost float64, 
 func (mjs *MergeJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) {
 	startTime := time.Now()
 
-	mjs.logger.Infof("Executing merge join: %s ⋈ %s",
+	mjs.logger.Debugf("Executing merge join: %s ⋈ %s",
 		request.LeftBundle.GetName(), request.RightBundle.GetName())
 
 	// Extract join keys
@@ -165,7 +165,7 @@ func (mjs *MergeJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error)
 		return nil, fmt.Errorf("failed to get right sorted iterator: %w", err)
 	}
 
-	mjs.logger.Infof("Merge join: leftSorted=%v (size=%d), rightSorted=%v (size=%d)",
+	mjs.logger.Debugf("Merge join: leftSorted=%v (size=%d), rightSorted=%v (size=%d)",
 		leftSorted != nil, len(leftIter), rightSorted != nil, len(rightIter))
 
 	// Execute merge
@@ -195,7 +195,7 @@ func (mjs *MergeJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error)
 		Comparisons:   stats.Comparisons,
 	}
 
-	mjs.logger.Infof("Merge join completed: %d results in %v (comparisons: %d)",
+	mjs.logger.Debugf("Merge join completed: %d results in %v (comparisons: %d)",
 		len(joinedDocs), result.ExecutionTime, stats.Comparisons)
 
 	return result, nil

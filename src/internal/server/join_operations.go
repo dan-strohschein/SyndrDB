@@ -46,7 +46,7 @@ func convertToJoinRequestWithWhereOptimization(joinQuery *queryparser.SelectJoin
 	var whereAnalysis *WhereAnalysis
 	if joinQuery.WhereClause != nil {
 		whereAnalysis = analyzeWhereClauseForJoin(joinQuery.WhereClause, leftBundleName, rightBundleName, logger)
-		logger.Infof("WHERE clause optimization: Found %d left-bundle, %d right-bundle, %d cross-bundle conditions",
+		logger.Debugf("WHERE clause optimization: Found %d left-bundle, %d right-bundle, %d cross-bundle conditions",
 			len(whereAnalysis.LeftBundleConditions),
 			len(whereAnalysis.RightBundleConditions),
 			len(whereAnalysis.CrossBundleConditions)+len(whereAnalysis.RemainingConditions))
@@ -121,13 +121,13 @@ func convertToJoinRequestWithWhereOptimization(joinQuery *queryparser.SelectJoin
 func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser.WhereClause, serviceManager ServiceManager, logger *zap.SugaredLogger, side string) (documentscanner.BundleInterface, error) {
 	if len(conditions) == 0 {
 		// No conditions to push down - return regular adapter
-		logger.Infof("No conditions to push down to %s bundle '%s'", side, bundle.Name)
+		logger.Debugf("No conditions to push down to %s bundle '%s'", side, bundle.Name)
 		return documentscanner.NewBundleAdapter(bundle, serviceManager.BundleService, logger), nil
 	}
 
 	// Build WHERE clause for this bundle (remove bundle prefixes)
 	whereClause := buildWhereClauseFromConditions(conditions, true)
-	logger.Infof("Pushing down WHERE clause to %s bundle '%s': %s", side, bundle.Name, whereClause)
+	logger.Debugf("Pushing down WHERE clause to %s bundle '%s': %s", side, bundle.Name, whereClause)
 
 	// Use modern page-based document filtering with architectural fix
 	// TODO Phase 1.3 URGENT BEFORE PRODUCTION: Pass session when available so GetDocumentsByFilter can use MVCC snapshot for visibility
@@ -149,7 +149,7 @@ func createFilteredBundleAdapter(bundle *models.Bundle, conditions []queryparser
 		}
 	}
 
-	logger.Infof("Pre-filter optimization: %s bundle '%s' reduced from %d to %d documents (%.1f%% reduction)",
+	logger.Debugf("Pre-filter optimization: %s bundle '%s' reduced from %d to %d documents (%.1f%% reduction)",
 		side, bundle.Name, originalCount, len(filteredDocs),
 		float64(originalCount-len(filteredDocs))/float64(originalCount)*100)
 
@@ -415,7 +415,7 @@ func transformToHierarchicalResults(joinResults []*joinexecutor.JoinedDocument, 
 
 	// Import the results package for hierarchical transformation
 	// Note: We need to add this import at the top of the file
-	logger.Infof("Starting hierarchical transformation for %d JOIN results", len(joinResults))
+	logger.Debugf("Starting hierarchical transformation for %d JOIN results", len(joinResults))
 
 	// Get bundles for relationship analysis
 	leftBundle, err := serviceManager.BundleService.GetBundleByName(database, joinQuery.FromBundle)
@@ -478,7 +478,7 @@ func transformToHierarchicalResults(joinResults []*joinexecutor.JoinedDocument, 
 			"hierarchical transformation failed", errors.LayerQuery)
 	}
 
-	logger.Infof("Hierarchical transformation completed: %d parent documents with %d total child documents in %v",
+	logger.Debugf("Hierarchical transformation completed: %d parent documents with %d total child documents in %v",
 		transformResult.ParentCount, transformResult.TotalChildDocuments, transformResult.TransformationTime)
 
 	return transformResult.Documents, nil
@@ -539,7 +539,7 @@ func analyzeWhereClauseForJoin(whereGroup *queryparser.WhereGroup, leftBundle, r
 		analysis.RemainingConditions = append(analysis.RemainingConditions, subAnalysis.RemainingConditions...)
 	}
 
-	logger.Infof("WHERE clause analysis: Left=%d, Right=%d, Cross=%d, Remaining=%d conditions",
+	logger.Debugf("WHERE clause analysis: Left=%d, Right=%d, Cross=%d, Remaining=%d conditions",
 		len(analysis.LeftBundleConditions), len(analysis.RightBundleConditions),
 		len(analysis.CrossBundleConditions), len(analysis.RemainingConditions))
 
@@ -644,11 +644,11 @@ func applyPostJoinFiltering(joinedDocs []*joinexecutor.JoinedDocument, whereAnal
 	postJoinConditions := append(whereAnalysis.CrossBundleConditions, whereAnalysis.RemainingConditions...)
 
 	if len(postJoinConditions) == 0 {
-		logger.Infof("No post-JOIN filtering needed")
+		logger.Debugf("No post-JOIN filtering needed")
 		return joinedDocs, nil
 	}
 
-	logger.Infof("Applying post-JOIN filtering with %d conditions", len(postJoinConditions))
+	logger.Debugf("Applying post-JOIN filtering with %d conditions", len(postJoinConditions))
 
 	var filteredDocs []*joinexecutor.JoinedDocument
 	for _, joinedDoc := range joinedDocs {
@@ -658,7 +658,7 @@ func applyPostJoinFiltering(joinedDocs []*joinexecutor.JoinedDocument, whereAnal
 		}
 	}
 
-	logger.Infof("Post-JOIN filtering: %d documents reduced to %d documents (%.1f%% reduction)",
+	logger.Debugf("Post-JOIN filtering: %d documents reduced to %d documents (%.1f%% reduction)",
 		len(joinedDocs), len(filteredDocs),
 		float64(len(joinedDocs)-len(filteredDocs))/float64(len(joinedDocs))*100)
 

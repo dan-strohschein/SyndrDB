@@ -60,7 +60,7 @@ func (s *BundleService) InvalidateBTreeIndexesOnBundleChange(
 		return nil // No indexes to invalidate
 	}
 
-	s.logger.Infof("Checking for B-tree indexes to invalidate on bundle '%s'", bundle.Name)
+	s.logger.Debugf("Checking for B-tree indexes to invalidate on bundle '%s'", bundle.Name)
 
 	invalidatedCount := 0
 
@@ -120,7 +120,7 @@ func (s *BundleService) OnBundleDeleteCleanupIndexes(bundle *models.Bundle) erro
 	}
 
 	indexesPath := filepath.Join(bundle.Database.DataDirectory, bundle.Database.Name, bundle.Name, "indexes")
-	s.logger.Infof("Cleaning up index files for deleted bundle '%s'", bundle.Name)
+	s.logger.Debugf("Cleaning up index files for deleted bundle '%s'", bundle.Name)
 
 	for indexName, indexRef := range bundle.Indexes {
 		_ = DeleteIndexFiles(indexesPath, indexName, indexRef.IndexType, s.logger)
@@ -156,7 +156,7 @@ func (s *BundleService) RebuildBTreeIndexFromBundle(
 		return nil, fmt.Errorf("bundle cannot be nil")
 	}
 
-	s.logger.Infof("Rebuilding B-tree index '%s' for bundle '%s'", indexName, bundle.Name)
+	s.logger.Debugf("Rebuilding B-tree index '%s' for bundle '%s'", indexName, bundle.Name)
 
 	// STEP 1: Verify index exists
 	indexRef, exists := bundle.Indexes[indexName]
@@ -191,7 +191,7 @@ func (s *BundleService) RebuildBTreeIndexFromBundle(
 		return result, fmt.Errorf("index rebuild failed: %w", err)
 	}
 
-	s.logger.Infof("Successfully rebuilt B-tree index '%s': %d pages processed, %d pages reclaimed, %d bytes saved",
+	s.logger.Debugf("Successfully rebuilt B-tree index '%s': %d pages processed, %d pages reclaimed, %d bytes saved",
 		indexName, result.PagesProcessed, result.PagesReclaimed, result.SpaceSaved)
 
 	return result, nil
@@ -215,7 +215,7 @@ func (s *BundleService) CompactBTreeIndexFromBundle(
 		return nil, fmt.Errorf("bundle cannot be nil")
 	}
 
-	s.logger.Infof("Compacting B-tree index '%s' for bundle '%s'", indexName, bundle.Name)
+	s.logger.Debugf("Compacting B-tree index '%s' for bundle '%s'", indexName, bundle.Name)
 
 	// STEP 1: Verify index exists
 	indexRef, exists := bundle.Indexes[indexName]
@@ -249,7 +249,7 @@ func (s *BundleService) CompactBTreeIndexFromBundle(
 		return result, fmt.Errorf("compaction failed: %w", err)
 	}
 
-	s.logger.Infof("Successfully compacted index '%s': %d pages processed, %d bytes saved",
+	s.logger.Debugf("Successfully compacted index '%s': %d pages processed, %d bytes saved",
 		indexName, result.PagesProcessed, result.SpaceSaved)
 
 	return result, nil
@@ -273,7 +273,7 @@ func (s *BundleService) ValidateBTreeIndexFromBundle(
 		return nil, fmt.Errorf("bundle cannot be nil")
 	}
 
-	s.logger.Infof("Validating B-tree index '%s' for bundle '%s'", indexName, bundle.Name)
+	s.logger.Debugf("Validating B-tree index '%s' for bundle '%s'", indexName, bundle.Name)
 
 	// STEP 1: Verify index exists
 	indexRef, exists := bundle.Indexes[indexName]
@@ -295,7 +295,7 @@ func (s *BundleService) ValidateBTreeIndexFromBundle(
 	result := btreeindexV2.ValidateTreeStructure(btreeIndex)
 
 	if result.IsValid {
-		s.logger.Infof("Index '%s' validation passed: %d nodes checked", indexName, result.NodesChecked)
+		s.logger.Debugf("Index '%s' validation passed: %d nodes checked", indexName, result.NodesChecked)
 	} else {
 		s.logger.Warnf("Index '%s' validation found %d errors and %d warnings",
 			indexName, len(result.Errors), len(result.Warnings))

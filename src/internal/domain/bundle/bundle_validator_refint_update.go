@@ -796,9 +796,9 @@ func (v *ReferentialIntegrityValidator) IdentifyForeignKeyFields(
 	//    The DestinationField is the FK field in THIS bundle
 	if database != nil {
 		incomingRelationships := v.getAllBundlesWithRelationshipsTo(database, bundle.Name, bundleCache)
-		v.logger.Infof("[REFINT-FK-ID] Found %d incoming relationships to bundle '%s'", len(incomingRelationships), bundle.Name)
+		v.logger.Debugf("[REFINT-FK-ID] Found %d incoming relationships to bundle '%s'", len(incomingRelationships), bundle.Name)
 		for _, relInfo := range incomingRelationships {
-			v.logger.Infof("[REFINT-FK-ID] Processing incoming relationship '%s' from bundle '%s'", relInfo.RelationshipName, relInfo.SourceBundle)
+			v.logger.Debugf("[REFINT-FK-ID] Processing incoming relationship '%s' from bundle '%s'", relInfo.RelationshipName, relInfo.SourceBundle)
 			// For incoming relationships, we need to find the DestinationField
 			// by loading the source bundle and checking the relationship details
 			sourceBundle, found := bundleCache[relInfo.SourceBundle]
@@ -815,7 +815,7 @@ func (v *ReferentialIntegrityValidator) IdentifyForeignKeyFields(
 			// Get the relationship details to find DestinationField
 			if relationship, exists := sourceBundle.Relationships[relInfo.RelationshipName]; exists {
 				fieldName := relationship.DestinationField
-				v.logger.Infof("[REFINT-FK-ID] Relationship '%s': DestinationField='%s', isBeingUpdated=%v",
+				v.logger.Debugf("[REFINT-FK-ID] Relationship '%s': DestinationField='%s', isBeingUpdated=%v",
 					relInfo.RelationshipName, fieldName, updateFields[fieldName] != "")
 				if newValue, isBeingUpdated := updateFields[fieldName]; isBeingUpdated {
 					foreignKeyUpdates = append(foreignKeyUpdates, ForeignKeyUpdate{
@@ -823,7 +823,7 @@ func (v *ReferentialIntegrityValidator) IdentifyForeignKeyFields(
 						NewValue:     newValue,
 						Relationship: relationship,
 					})
-					v.logger.Infof("[REFINT-FK-ID] Added FK field '%s' with new value '%s' to validation list", fieldName, newValue)
+					v.logger.Debugf("[REFINT-FK-ID] Added FK field '%s' with new value '%s' to validation list", fieldName, newValue)
 				}
 			}
 		}
@@ -905,7 +905,7 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 		return nil // No validation needed
 	}
 
-	v.logger.Infof("[DROP-RESTRICT] Starting document-level validation for bundle '%s' (thorough=%v, sampleSize=%d)", targetBundle.Name, thorough, sampleSize)
+	v.logger.Debugf("[DROP-RESTRICT] Starting document-level validation for bundle '%s' (thorough=%v, sampleSize=%d)", targetBundle.Name, thorough, sampleSize)
 
 	// Step 1: Find all bundles with relationships pointing to target bundle
 	// This includes both direct relationships and bidirectional (ManyToMany)
@@ -925,13 +925,13 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 				(relationship.SourceBundle == targetBundle.Name && relationship.RelationshipType == "ManyToMany") {
 				bundlesToScan = append(bundlesToScan, bundleName)
 				relationshipMap[bundleName] = append(relationshipMap[bundleName], relationship)
-				v.logger.Infof("[DROP-RESTRICT] Bundle '%s' has relationship '%s' pointing to '%s' via field '%s'", bundleName, relationship.Name, targetBundle.Name, relationship.SourceField)
+				v.logger.Debugf("[DROP-RESTRICT] Bundle '%s' has relationship '%s' pointing to '%s' via field '%s'", bundleName, relationship.Name, targetBundle.Name, relationship.SourceField)
 			}
 		}
 	}
 
 	if len(bundlesToScan) == 0 {
-		v.logger.Infof("[DROP-RESTRICT] No bundles with relationships to '%s' found - validation passed", targetBundle.Name)
+		v.logger.Debugf("[DROP-RESTRICT] No bundles with relationships to '%s' found - validation passed", targetBundle.Name)
 		return nil // No bundles reference this target
 	}
 
@@ -939,7 +939,7 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 	// This ensures that if two concurrent DROP operations need to lock the same bundles,
 	// they will acquire locks in the same order, preventing circular wait conditions
 	sort.Strings(bundlesToScan)
-	v.logger.Infof("[DROP-RESTRICT] Sorted %d bundles for deadlock prevention: %v", len(bundlesToScan), bundlesToScan)
+	v.logger.Debugf("[DROP-RESTRICT] Sorted %d bundles for deadlock prevention: %v", len(bundlesToScan), bundlesToScan)
 
 	// Step 3: Collect all DocumentIDs from target bundle for validation
 	// WRITE-THROUGH CACHE: Use SortedIndex for document ID enumeration
@@ -955,13 +955,13 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 	}
 
 	totalDocs := len(targetDocumentIDs)
-	v.logger.Infof("[DROP-RESTRICT] Target bundle '%s' has %d documents to validate", targetBundle.Name, totalDocs)
+	v.logger.Debugf("[DROP-RESTRICT] Target bundle '%s' has %d documents to validate", targetBundle.Name, totalDocs)
 
 	// Step 4: Determine if we should use sampling mode
 	useSampling := !thorough && totalDocs > 10000
 	if useSampling {
 		probability := float64(sampleSize) / float64(totalDocs)
-		v.logger.Infof("[DROP-RESTRICT] Using sampling mode: probabilistic sampling of ~%d DocumentIDs from %d total in '%s' (probability=%.4f)",
+		v.logger.Debugf("[DROP-RESTRICT] Using sampling mode: probabilistic sampling of ~%d DocumentIDs from %d total in '%s' (probability=%.4f)",
 			sampleSize, totalDocs, targetBundle.Name, probability)
 	}
 
@@ -1073,7 +1073,7 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 
 						// Progress logging every 10k documents
 						if logProgress && counter%10000 == 0 {
-							v.logger.Infof("[DROP-RESTRICT] DROP validation progress: scanned %d of %d documents in '%s', found %d violations so far",
+							v.logger.Debugf("[DROP-RESTRICT] DROP validation progress: scanned %d of %d documents in '%s', found %d violations so far",
 								counter, totalDocsInBundle, bundleName, violations)
 						}
 
@@ -1098,7 +1098,7 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 				}
 
 				if logProgress {
-					v.logger.Infof("[DROP-RESTRICT] DROP validation complete: scanned all %d documents in '%s', found %d total violations",
+					v.logger.Debugf("[DROP-RESTRICT] DROP validation complete: scanned all %d documents in '%s', found %d total violations",
 						totalDocsInBundle, bundleName, violations)
 				}
 			}
@@ -1146,6 +1146,6 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 		return fmt.Errorf("%s", errorMsg)
 	}
 
-	v.logger.Infof("[DROP-RESTRICT] Document-level validation passed for bundle '%s' - no FK violations found", targetBundle.Name)
+	v.logger.Debugf("[DROP-RESTRICT] Document-level validation passed for bundle '%s' - no FK violations found", targetBundle.Name)
 	return nil
 }

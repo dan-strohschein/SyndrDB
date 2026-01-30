@@ -196,7 +196,7 @@ func (bm *BucketManager) GetBucket(bucketNum uint32) (*BucketPage, error) {
 
 		// If the corrupted page was an overflow page, try to salvage any valid records
 		if overflowPage, isOverflow := pageData.(*OverflowPage); isOverflow {
-			bm.logger.Infof("RECOVERY: Found overflow page data on bucket page %d, attempting to salvage %d records",
+			bm.logger.Debugf("RECOVERY: Found overflow page data on bucket page %d, attempting to salvage %d records",
 				pageNum, len(overflowPage.Records))
 
 			// Try to add any valid records to the new bucket page
@@ -211,7 +211,7 @@ func (bm *BucketManager) GetBucket(bucketNum uint32) (*BucketPage, error) {
 					}
 				}
 			}
-			bm.logger.Infof("RECOVERY: Salvaged %d valid records from corrupted bucket page %d",
+			bm.logger.Debugf("RECOVERY: Salvaged %d valid records from corrupted bucket page %d",
 				salvageCount, pageNum)
 		}
 
@@ -224,7 +224,7 @@ func (bm *BucketManager) GetBucket(bucketNum uint32) (*BucketPage, error) {
 		// Update the page manager cache
 		bm.pageManager.PutPage(pageNum, newBucketPage, true)
 
-		bm.logger.Infof("RECOVERY SUCCESS: Rebuilt bucket %d on page %d", bucketNum, pageNum)
+		bm.logger.Debugf("RECOVERY SUCCESS: Rebuilt bucket %d on page %d", bucketNum, pageNum)
 		return newBucketPage, nil
 	}
 
@@ -480,7 +480,7 @@ func (bs *BucketStats) String() string {
 // Returns:
 //   - error: Any error that occurred during validation
 func (bm *BucketManager) ValidateAllBucketFreeSpace() error {
-	bm.logger.Infof("Validating free space for all %d buckets", bm.metadata.BucketCount)
+	bm.logger.Debugf("Validating free space for all %d buckets", bm.metadata.BucketCount)
 
 	fixedBuckets := 0
 	for bucketNum := uint32(0); bucketNum < bm.metadata.BucketCount; bucketNum++ {
@@ -494,7 +494,7 @@ func (bm *BucketManager) ValidateAllBucketFreeSpace() error {
 		bm.recalculateFreeSpace(bucketPage)
 
 		if originalFreeSpace != bucketPage.FreeSpace {
-			bm.logger.Infof("Fixed free space for bucket %d: %d -> %d",
+			bm.logger.Debugf("Fixed free space for bucket %d: %d -> %d",
 				bucketNum, originalFreeSpace, bucketPage.FreeSpace)
 
 			// Update the bucket to persist the fix
@@ -506,6 +506,6 @@ func (bm *BucketManager) ValidateAllBucketFreeSpace() error {
 		}
 	}
 
-	bm.logger.Infof("Free space validation completed: fixed %d buckets", fixedBuckets)
+	bm.logger.Debugf("Free space validation completed: fixed %d buckets", fixedBuckets)
 	return nil
 }

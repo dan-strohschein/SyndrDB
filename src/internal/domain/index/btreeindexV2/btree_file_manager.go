@@ -164,7 +164,7 @@ func (fm *BTreeFileManager) SetSyncMode(mode string) {
 	if mode == "batched" && fm.pendingPages == nil {
 		fm.pendingPages = make(map[string]bool)
 	}
-	fm.logger.Infof("BTree sync mode set to: %s", mode)
+	fm.logger.Debugf("BTree sync mode set to: %s", mode)
 }
 
 // SetCoordinator sets the write coordinator reference for dirty page tracking
@@ -200,7 +200,7 @@ type FileHeader struct {
 //   - *BTreeFileManager: The created file manager instance
 //   - error: Any error that occurred during creation
 func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logger *zap.SugaredLogger) (*BTreeFileManager, error) {
-	//logger.Infof("DEBUG: NewBTreeFileManager called with filePath=%s, pageSize=%d, debugMode=%t", filePath, pageSize, debugMode)
+	//logger.Debugf("DEBUG: NewBTreeFileManager called with filePath=%s, pageSize=%d, debugMode=%t", filePath, pageSize, debugMode)
 
 	if filePath == "" {
 		return nil, fmt.Errorf("file path cannot be empty")
@@ -230,10 +230,10 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 	}
 
 	// Check if file exists
-	//logger.Infof("DEBUG: Checking if file exists: %s", filePath)
+	//logger.Debugf("DEBUG: Checking if file exists: %s", filePath)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		// Create new file
-		//logger.Infof("DEBUG: File does not exist, creating new file")
+		//logger.Debugf("DEBUG: File does not exist, creating new file")
 		if pageSize == 0 {
 			return nil, fmt.Errorf("page size must be specified for new files")
 		}
@@ -241,10 +241,10 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 		if err := fm.createNewFile(); err != nil {
 			return nil, fmt.Errorf("failed to create new file: %w", err)
 		}
-		//logger.Infof("DEBUG: New file created successfully")
+		//logger.Debugf("DEBUG: New file created successfully")
 	} else {
 		// Open existing file
-		//logger.Infof("DEBUG: File exists, opening existing file")
+		//logger.Debugf("DEBUG: File exists, opening existing file")
 		if err := fm.openExistingFile(); err != nil {
 			return nil, fmt.Errorf("failed to open existing file: %w", err)
 		}
@@ -253,10 +253,10 @@ func NewBTreeFileManager(filePath string, pageSize uint32, debugMode bool, logge
 		if pageSize == 0 {
 			fm.pageSize = fm.fileHeader.PageSize
 		}
-		//logger.Infof("DEBUG: Existing file opened successfully")
+		//logger.Debugf("DEBUG: Existing file opened successfully")
 	}
 
-	logger.Infof("Successfully created BTree file manager for: %s (pageSize: %d, debugMode: %t)",
+	logger.Debugf("Successfully created BTree file manager for: %s (pageSize: %d, debugMode: %t)",
 		filePath, fm.pageSize, debugMode)
 
 	return fm, nil
@@ -321,7 +321,7 @@ func (fm *BTreeFileManager) WritePage(pageNum uint32, pageData interface{}) erro
 
 	// INTENSIVE DEBUG: Log what we're writing
 	// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-	// 	fm.logger.Infof("WritePage CALLED: page %d internal node with %d keys (ptr=%p)",
+	// 	fm.logger.Debugf("WritePage CALLED: page %d internal node with %d keys (ptr=%p)",
 	// 		pageNum, node.KeyCount, pageData)
 	// } else {
 	// 	fm.logger.Debugf("Writing page %d to file", pageNum)
@@ -542,7 +542,7 @@ func (fm *BTreeFileManager) Close() error {
 	}
 
 	fm.isOpen = false
-	fm.logger.Infof("Successfully closed BTree file manager")
+	fm.logger.Debugf("Successfully closed BTree file manager")
 
 	return nil
 }
@@ -949,7 +949,7 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 	var node *BTreeNode
 	var metadata *BTreeMetadata
 
-	fm.logger.Infof("Starting ASCII page deserialization, data length: %d", len(data))
+	fm.logger.Debugf("Starting ASCII page deserialization, data length: %d", len(data))
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -959,13 +959,13 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 			continue
 		}
 
-		fm.logger.Infof("Processing line: '%s'", line)
+		fm.logger.Debugf("Processing line: '%s'", line)
 
 		// Check for section headers with unique patterns
 		if line == "## METADATA HEADER" {
 			currentSection = "metadata"
 			metadata = &BTreeMetadata{}
-			fm.logger.Infof("Found metadata section header")
+			fm.logger.Debugf("Found metadata section header")
 			continue
 		} else if line == "## BTREE NODE" {
 			currentSection = "node"
@@ -974,17 +974,17 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 				Children: make([]uint32, 0),
 				Values:   make([][]string, 0),
 			}
-			fm.logger.Infof("Found node section header")
+			fm.logger.Debugf("Found node section header")
 			continue
 		}
 
 		// Check for section endings with unique patterns
 		if line == "|| END METADATA HEADER" {
-			fm.logger.Infof("Found metadata section ending")
+			fm.logger.Debugf("Found metadata section ending")
 			currentSection = ""
 			continue
 		} else if line == "|| END BTREE NODE" {
-			fm.logger.Infof("Found node section ending")
+			fm.logger.Debugf("Found node section ending")
 			currentSection = ""
 			continue
 		}
@@ -1000,7 +1000,7 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 			} else {
 				// Log successful metadata field parsing for debugging
 				if strings.Contains(line, "RootPage") {
-					fm.logger.Infof("Successfully parsed RootPage: %d", metadata.RootPageNum)
+					fm.logger.Debugf("Successfully parsed RootPage: %d", metadata.RootPageNum)
 				}
 			}
 		}
@@ -1012,7 +1012,7 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 
 	// Return the parsed structure with validation
 	if node != nil {
-		fm.logger.Infof("Successfully parsed BTree node: PageNum=%d, Keys=%d, Children=%d",
+		fm.logger.Debugf("Successfully parsed BTree node: PageNum=%d, Keys=%d, Children=%d",
 			node.PageNum, len(node.Keys), len(node.Children))
 		return node, nil
 	} else if metadata != nil {
@@ -1022,7 +1022,7 @@ func (fm *BTreeFileManager) deserializePageASCII(data []byte) (interface{}, erro
 			return nil, fmt.Errorf("invalid metadata: RootPageNum cannot be 0")
 		}
 
-		fm.logger.Infof("Successfully parsed BTree metadata: Order=%d, RootPage=%d, TotalPages=%d",
+		fm.logger.Debugf("Successfully parsed BTree metadata: Order=%d, RootPage=%d, TotalPages=%d",
 			metadata.Order, metadata.RootPageNum, metadata.TotalPages)
 		return metadata, nil
 	}
@@ -1150,7 +1150,7 @@ func (fm *BTreeFileManager) parseMetadataField(line string, metadata *BTreeMetad
 			return fmt.Errorf("invalid RootPage: %w", err)
 		} else {
 			metadata.RootPageNum = uint32(val)
-			fm.logger.Infof("Set RootPageNum to: %d", metadata.RootPageNum)
+			fm.logger.Debugf("Set RootPageNum to: %d", metadata.RootPageNum)
 		}
 	case "TotalPages":
 		if val, err := strconv.ParseUint(value, 10, 32); err != nil {

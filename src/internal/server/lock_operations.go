@@ -48,7 +48,7 @@ func LockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceManag
 			"failed to parse LOCK command", errors.LayerCommand)
 	}
 
-	logger.Infof("Locking database: database=%s, reason=%s, comment=%s", dbName, reason, comment)
+	logger.Debugf("Locking database: database=%s, reason=%s, comment=%s", dbName, reason, comment)
 
 	// TODO: Check user permissions - only admins can lock databases
 	// This requires session/authentication context to be passed through
@@ -59,7 +59,7 @@ func LockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceManag
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
-	logger.Infof("Database locked successfully: database=%s", dbName)
+	logger.Debugf("Database locked successfully: database=%s", dbName)
 
 	// Return success response
 	response := &CommandResponse{
@@ -83,7 +83,7 @@ func UnlockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceMan
 			"failed to parse UNLOCK command", errors.LayerCommand)
 	}
 
-	logger.Infof("Unlocking database: database=%s", dbName)
+	logger.Debugf("Unlocking database: database=%s", dbName)
 
 	// TODO: Check user permissions - only admins can unlock databases
 	// This requires session/authentication context to be passed through
@@ -94,7 +94,7 @@ func UnlockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceMan
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
 	}
 
-	logger.Infof("Database unlocked successfully: database=%s", dbName)
+	logger.Debugf("Database unlocked successfully: database=%s", dbName)
 
 	// Return success response
 	response := &CommandResponse{

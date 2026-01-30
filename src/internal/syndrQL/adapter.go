@@ -106,19 +106,19 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 	// Extract aggregate functions from SelectFields whenever they exist
 	// This handles both GROUP BY queries and aggregate-only queries (SELECT COUNT(*))
 	if stmt.HasAggregates() {
-		a.logger.Infof("Extracting %d aggregate functions from SELECT clause", stmt.CountAggregates())
+		a.logger.Debugf("Extracting %d aggregate functions from SELECT clause", stmt.CountAggregates())
 		query.AggregateFields = a.extractAggregateFields(stmt)
 
 		// For GROUP BY queries, separate aggregate and non-aggregate fields
 		if len(stmt.GroupBy) > 0 {
 			query.SelectFields = a.extractNonAggregateFields(stmt)
-			a.logger.Infof("GROUP BY query: %d aggregates, %d non-aggregate fields",
+			a.logger.Debugf("GROUP BY query: %d aggregates, %d non-aggregate fields",
 				len(query.AggregateFields), len(query.SelectFields))
 		} else if stmt.IsAggregateOnly() {
 			// Aggregate-only query (e.g., SELECT COUNT(*) FROM table)
 			// Clear SelectFields since all fields are aggregates
 			query.SelectFields = []string{}
-			a.logger.Infof("Aggregate-only query: %d aggregates, 0 regular fields",
+			a.logger.Debugf("Aggregate-only query: %d aggregates, 0 regular fields",
 				len(query.AggregateFields))
 
 			// CRITICAL FIX: Set IsCountOnly flag for COUNT(*) queries without GROUP BY
@@ -128,7 +128,7 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 				query.AggregateFields[0].Function == "COUNT" &&
 				query.AggregateFields[0].Field == "*" {
 				query.IsCountOnly = true
-				a.logger.Infof("Detected COUNT(*) only query - setting IsCountOnly=true")
+				a.logger.Debugf("Detected COUNT(*) only query - setting IsCountOnly=true")
 			}
 		}
 	}

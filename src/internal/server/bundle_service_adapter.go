@@ -94,11 +94,11 @@ func (a *BundleServiceAdapter) InsertDocument(dbName, bundleName string, doc map
 
 		// DEBUG: Log array fields before storage
 		// if key == "UpCommands" || key == "DownCommands" {
-		// 	//a.logger.Infof("[STORAGE DEBUG] Storing %s: type=%T, value=%v", key, value, value)
+		// 	//a.logger.Debugf("[STORAGE DEBUG] Storing %s: type=%T, value=%v", key, value, value)
 		// 	if arr, ok := value.([]string); ok {
-		// 	//	a.logger.Infof("[STORAGE DEBUG] %s is []string with %d elements", key, len(arr))
+		// 	//	a.logger.Debugf("[STORAGE DEBUG] %s is []string with %d elements", key, len(arr))
 		// 		for i, cmd := range arr {
-		// 			a.logger.Infof("[STORAGE DEBUG] %s[%d]: length=%d, preview=%s", key, i, len(cmd), truncate(cmd, 100))
+		// 			a.logger.Debugf("[STORAGE DEBUG] %s[%d]: length=%d, preview=%s", key, i, len(cmd), truncate(cmd, 100))
 		// 		}
 		// 	}
 		// }
@@ -409,7 +409,7 @@ func (a *BundleServiceAdapter) CreateBundle(dbName, bundleName string, fields []
 		a.logger.Warnf("Warning: CatalogService is nil, bundle '%s' not registered in catalog", bundleName)
 	}
 
-	a.logger.Infof("Created bundle '%s' in database '%s'", bundleName, dbName)
+	a.logger.Debugf("Created bundle '%s' in database '%s'", bundleName, dbName)
 	return nil
 }
 
@@ -448,7 +448,7 @@ func (a *BundleServiceAdapter) DeleteBundle(dbName, bundleName string, force boo
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
-	a.logger.Infof("Deleted bundle '%s' from database '%s'", bundleName, dbName)
+	a.logger.Debugf("Deleted bundle '%s' from database '%s'", bundleName, dbName)
 	return nil
 }
 
@@ -472,7 +472,7 @@ func (a *BundleServiceAdapter) RenameBundle(dbName, oldName, newName string) err
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", oldName).WithContext("new_bundle", newName).WithContext("database", dbName)
 	}
 
-	a.logger.Infof("Renamed bundle from '%s' to '%s' in database '%s'", oldName, newName, dbName)
+	a.logger.Debugf("Renamed bundle from '%s' to '%s' in database '%s'", oldName, newName, dbName)
 	return nil
 }
 
@@ -501,7 +501,7 @@ func (a *BundleServiceAdapter) AddField(dbName, bundleName string, field models.
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("field", field.Name).WithContext("database", dbName)
 	}
 
-	a.logger.Infof("Added field '%s' to bundle '%s' in database '%s'", field.Name, bundleName, dbName)
+	a.logger.Debugf("Added field '%s' to bundle '%s' in database '%s'", field.Name, bundleName, dbName)
 	return nil
 }
 
@@ -530,7 +530,7 @@ func (a *BundleServiceAdapter) DropField(dbName, bundleName, fieldName string) e
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("field", fieldName).WithContext("database", dbName)
 	}
 
-	a.logger.Infof("Dropped field '%s' from bundle '%s' in database '%s'", fieldName, bundleName, dbName)
+	a.logger.Debugf("Dropped field '%s' from bundle '%s' in database '%s'", fieldName, bundleName, dbName)
 	return nil
 }
 
@@ -572,7 +572,7 @@ func (a *BundleServiceAdapter) RenameField(dbName, bundleName, oldFieldName, new
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("old_field", oldFieldName).WithContext("new_field", newFieldName).WithContext("database", dbName)
 	}
 
-	a.logger.Infof("Renamed field from '%s' to '%s' in bundle '%s' (database '%s')", oldFieldName, newFieldName, bundleName, dbName)
+	a.logger.Debugf("Renamed field from '%s' to '%s' in bundle '%s' (database '%s')", oldFieldName, newFieldName, bundleName, dbName)
 	return nil
 }
 
@@ -591,7 +591,7 @@ func (a *BundleServiceAdapter) AddRelationship(dbName, bundleName string, relati
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName).WithContext("database", dbName)
 	}
 
-	a.logger.Infof("Successfully added relationship to bundle '%s' in database '%s'", bundleName, dbName)
+	a.logger.Debugf("Successfully added relationship to bundle '%s' in database '%s'", bundleName, dbName)
 	return nil
 }
 

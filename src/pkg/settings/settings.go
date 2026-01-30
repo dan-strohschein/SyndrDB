@@ -461,15 +461,11 @@ func GetSettings() *Arguments {
 				}
 				return workers // Use all CPU cores
 			}(),
-			GroupByCacheWarmingEnabled: true, // Opt-out: enabled by default
-			GroupByCacheWarmingMaxMB:   512,  // 512MB default cache budget
-			GroupBySnapshotStalenessMs: 10,   // 10ms staleness acceptable
-
-			SortEnableParallel:    false, // DEPRECATED: use SortParallelEnabled
-			SortParallelThreshold: 10000, // DEPRECATED: use SortParallelMinSize
-			SortParallelEnabled:   true,  // Phase 5: Enable parallel sorting
-			SortParallelMinSize:   10000, // Phase 5: 10k+ docs for parallel sort
-			SortMaxMemoryMB:       512,   // 512MB memory limit
+			GroupByCacheWarmingEnabled: true,  // Opt-out: enabled by default
+			GroupByCacheWarmingMaxMB:   512,   // 512MB default cache budget
+			GroupBySnapshotStalenessMs: 5000,  // 5 seconds staleness (background cleaner handles cleanup)
+			SortParallelMinSize:        10000, // Phase 5: 10k+ docs for parallel sort
+			SortMaxMemoryMB:            512,   // 512MB memory limit
 
 			// Backup & Restore Defaults
 			BackupDir:            "./backups", // Default backup directory

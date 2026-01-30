@@ -87,18 +87,18 @@ func (pb *PlanBuilder) BuildPlan(
 	pb.logger.Debug("Building execution plan from base tree")
 
 	// DEBUG: Log query analysis
-	pb.logger.Infof("PlanBuilder.BuildPlan ANALYSIS:")
-	pb.logger.Infof("  - HasGroupBy(): %v", query.HasGroupBy())
-	pb.logger.Infof("  - IsAggregateQuery(): %v", query.IsAggregateQuery())
-	pb.logger.Infof("  - IsAggregateOnly: %v", query.IsAggregateOnly)
-	pb.logger.Infof("  - AggregateFields count: %d", len(query.AggregateFields))
+	pb.logger.Debugf("PlanBuilder.BuildPlan ANALYSIS:")
+	pb.logger.Debugf("  - HasGroupBy(): %v", query.HasGroupBy())
+	pb.logger.Debugf("  - IsAggregateQuery(): %v", query.IsAggregateQuery())
+	pb.logger.Debugf("  - IsAggregateOnly: %v", query.IsAggregateOnly)
+	pb.logger.Debugf("  - AggregateFields count: %d", len(query.AggregateFields))
 	if len(query.AggregateFields) > 0 {
 		for i, aggField := range query.AggregateFields {
-			pb.logger.Infof("    [%d] Function=%s, Field=%s, Alias=%s",
+			pb.logger.Debugf("    [%d] Function=%s, Field=%s, Alias=%s",
 				i, aggField.Function, aggField.Field, aggField.Alias)
 		}
 	}
-	pb.logger.Infof("  - GroupBy clause: %v", query.GroupBy)
+	pb.logger.Debugf("  - GroupBy clause: %v", query.GroupBy)
 
 	currentTree := baseTree
 
@@ -138,7 +138,7 @@ func (pb *PlanBuilder) BuildPlan(
 				effectiveLimit = query.Offset + query.Limit
 			}
 			fullScan.MaxDocuments = effectiveLimit
-			pb.logger.Infof("OPTIMIZATION: Simple LIMIT-only query detected. Setting MaxDocuments=%d on FullScanNode (skipping SortNode)", effectiveLimit)
+			pb.logger.Debugf("OPTIMIZATION: Simple LIMIT-only query detected. Setting MaxDocuments=%d on FullScanNode (skipping SortNode)", effectiveLimit)
 
 			// If there's OFFSET, we still need LimitNode to skip OFFSET documents
 			// Otherwise, return early (skip both SortNode and LimitNode)
@@ -174,11 +174,11 @@ func (pb *PlanBuilder) BuildPlan(
 
 				// Check if BTreeOrderedScanNode matches the ORDER BY requirements
 				if btreeNode.OrderedByFieldName == fieldName && btreeNode.Descending == isDescending {
-					pb.logger.Infof("SKIP SortNode: BTreeOrderedScanNode already provides ORDER BY %s %s", fieldName, directionStr)
+					pb.logger.Debugf("SKIP SortNode: BTreeOrderedScanNode already provides ORDER BY %s %s", fieldName, directionStr)
 
 					// Also skip LimitNode if BTreeOrderedScanNode already applied the limit
 					if btreeNode.Limit > 0 && (query.HasLimit() || query.Offset > 0) {
-						pb.logger.Infof("SKIP LimitNode: BTreeOrderedScanNode already applied limit=%d", btreeNode.Limit)
+						pb.logger.Debugf("SKIP LimitNode: BTreeOrderedScanNode already applied limit=%d", btreeNode.Limit)
 
 						// Handle OFFSET by wrapping with LimitNode that only applies OFFSET
 						if query.Offset > 0 {
@@ -206,7 +206,7 @@ func (pb *PlanBuilder) BuildPlan(
 		// OPTIMIZATION: Skip SortNode if JoinExecutionNode uses streaming Top-N (already sorted)
 		// JoinExecutionNode with OrderBy + Limit uses heap-based merge producing sorted output
 		if pb.checkJoinProvidesSortedOutput(currentTree, query) {
-			pb.logger.Infof("SKIP SortNode: JoinExecutionNode already provides sorted output via streaming Top-N")
+			pb.logger.Debugf("SKIP SortNode: JoinExecutionNode already provides sorted output via streaming Top-N")
 			goto addLimitNode
 		}
 
@@ -231,7 +231,7 @@ func (pb *PlanBuilder) BuildPlan(
 			}
 			if len(projectionFields) > 0 {
 				fullScan.ProjectionFields = projectionFields
-				pb.logger.Infof("PROJECTION PUSHDOWN: Set ProjectionFields=%v on FullScanNode for ORDER BY optimization", projectionFields)
+				pb.logger.Debugf("PROJECTION PUSHDOWN: Set ProjectionFields=%v on FullScanNode for ORDER BY optimization", projectionFields)
 			}
 		}
 
@@ -288,17 +288,17 @@ func (pb *PlanBuilder) addAggregationNode(
 ) (ExecutionNode, error) {
 
 	// DEBUG: Log aggregate fields being passed
-	pb.logger.Infof("addAggregationNode: Creating aggregation with %d aggregate fields", len(query.AggregateFields))
+	pb.logger.Debugf("addAggregationNode: Creating aggregation with %d aggregate fields", len(query.AggregateFields))
 	for i, aggField := range query.AggregateFields {
-		pb.logger.Infof("  Aggregate[%d]: Function=%s, Field=%s, Alias=%s",
+		pb.logger.Debugf("  Aggregate[%d]: Function=%s, Field=%s, Alias=%s",
 			i, aggField.Function, aggField.Field, aggField.Alias)
 	}
 
 	// DEBUG: Log HAVING expression presence and type
 	if query.HavingExpression == nil {
-		pb.logger.Infof("addAggregationNode: No HAVING expression")
+		pb.logger.Debugf("addAggregationNode: No HAVING expression")
 	} else {
-		pb.logger.Infof("addAggregationNode: HAVING expression present (type: %T)", query.HavingExpression)
+		pb.logger.Debugf("addAggregationNode: HAVING expression present (type: %T)", query.HavingExpression)
 	}
 
 	// Calculate limit for early termination (only safe when no HAVING/ORDER BY/OFFSET)
@@ -308,7 +308,7 @@ func (pb *PlanBuilder) addAggregationNode(
 		!query.HasOrderBy() && // No ORDER BY clause
 		query.Offset == 0 { // No OFFSET
 		limitForEarlyTermination = query.Limit
-		pb.logger.Infof("Enabling early termination for aggregation with limit=%d", limitForEarlyTermination)
+		pb.logger.Debugf("Enabling early termination for aggregation with limit=%d", limitForEarlyTermination)
 	}
 
 	// Create aggregation node with GROUP BY clause

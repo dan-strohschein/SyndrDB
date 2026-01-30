@@ -20,11 +20,11 @@ import (
 // SNAPSHOT ISOLATION: Scanner captures a snapshot sequence at creation time and filters documents
 // committed after that sequence, enabling consistent reads without cache invalidation on INSERTs.
 type SmartBundleScanner struct {
-	bundle        BundleInterface    // The bundle to scan
-	config        *ScannerConfig     // Configuration parameters
-	hotKeyTracker *HotKeyTracker     // Tracks hot keys and query patterns
-	cache         CacheInterface     // Cache for frequently accessed data
-	logger        *zap.SugaredLogger // Logger for debugging and monitoring
+	bundle        BundleInterface       // The bundle to scan
+	config        *ScannerConfig        // Configuration parameters
+	hotKeyTracker *ShardedHotKeyTracker // Tracks hot keys and query patterns
+	cache         CacheInterface        // Cache for frequently accessed data
+	logger        *zap.SugaredLogger    // Logger for debugging and monitoring
 
 	// Performance metrics
 	metrics   *ScanMetrics // Current scanner metrics
@@ -63,7 +63,7 @@ func NewSmartBundleScanner(
 		config:           config,
 		cache:            cache,
 		logger:           logger,
-		hotKeyTracker:    NewHotKeyTracker(logger, config.HotThreshold, config.OptimizeAfter),
+		hotKeyTracker:    NewShardedHotKeyTracker(logger, config.HotThreshold, config.OptimizeAfter),
 		metrics:          &ScanMetrics{},
 		startTime:        time.Now(),
 		snapshotSequence: 0, // 0 = current (will filter uncommitted from other transactions)
@@ -71,7 +71,7 @@ func NewSmartBundleScanner(
 		activeTxIDs:      nil,
 	}
 
-	// logger.Infof("Created SmartBundleScanner for bundle '%s' with batch size %d",
+	// logger.Debugf("Created SmartBundleScanner for bundle '%s' with batch size %d",
 	// 	bundle.GetName(), config.BatchSize)
 
 	return scanner
@@ -538,7 +538,7 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 	// TODO: For >1000 values, consider using bloom filter to reduce memory
 	// This would provide probabilistic membership testing with much lower memory footprint
 	if len(values) > 1000 {
-		sbs.logger.Infof("Large IN query detected (%d values). Consider implementing bloom filter optimization.", len(values))
+		sbs.logger.Debugf("Large IN query detected (%d values). Consider implementing bloom filter optimization.", len(values))
 		// TODO: Implement: bloomFilter := createBloomFilter(values)
 	}
 
@@ -561,7 +561,7 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 	// TODO: For >5000 values, implement parallel processing with worker pools
 	// This would split the document scan across multiple goroutines
 	if len(values) > 5000 {
-		sbs.logger.Infof("Very large IN query (%d values). Parallel processing recommended.", len(values))
+		sbs.logger.Debugf("Very large IN query (%d values). Parallel processing recommended.", len(values))
 		// TODO: Implement: return sbs.parallelInScan(field, valueSet, caseInsensitive, negate)
 	}
 
@@ -1039,13 +1039,13 @@ func (sbs *SmartBundleScanner) GetBundle() BundleInterface {
 }
 
 func (sbs *SmartBundleScanner) Close() error {
-	sbs.logger.Infof("Closing SmartBundleScanner for bundle '%s'", sbs.bundle.GetName())
+	sbs.logger.Debugf("Closing SmartBundleScanner for bundle '%s'", sbs.bundle.GetName())
 
 	// Log final statistics
 	uptime := time.Since(sbs.startTime)
 	hotKeys := sbs.hotKeyTracker.GetHotKeys()
 
-	sbs.logger.Infof("Scanner stats: %d scans, %d hot keys, %.2f%% cache hit rate, uptime %v",
+	sbs.logger.Debugf("Scanner stats: %d scans, %d hot keys, %.2f%% cache hit rate, uptime %v",
 		sbs.metrics.TotalScans,
 		len(hotKeys),
 		sbs.metrics.CacheHitRate*100,

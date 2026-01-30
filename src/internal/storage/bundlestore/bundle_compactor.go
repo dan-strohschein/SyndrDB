@@ -134,7 +134,7 @@ func (bc *BundleCompactor) ShouldCompact(databaseName, bundleName string) (bool,
 	if manifest.TotalDocuments+manifest.TotalTombstones > 0 {
 		tombstoneRatio := float64(manifest.TotalTombstones) / float64(manifest.TotalDocuments+manifest.TotalTombstones)
 		if tombstoneRatio > bc.tombstoneRatioThreshold {
-			bc.logger.Infof("Compaction triggered for %s:%s - tombstone ratio %.2f%% exceeds threshold %.2f%%",
+			bc.logger.Debugf("Compaction triggered for %s:%s - tombstone ratio %.2f%% exceeds threshold %.2f%%",
 				databaseName, bundleName, tombstoneRatio*100, bc.tombstoneRatioThreshold*100)
 			return true, TriggerTombstoneRatio, nil
 		}
@@ -142,7 +142,7 @@ func (bc *BundleCompactor) ShouldCompact(databaseName, bundleName string) (bool,
 
 	// TRIGGER B: File count exceeds threshold (10 files)
 	if len(manifest.Files) > bc.fileCountThreshold {
-		bc.logger.Infof("Compaction triggered for %s:%s - file count %d exceeds threshold %d",
+		bc.logger.Debugf("Compaction triggered for %s:%s - file count %d exceeds threshold %d",
 			databaseName, bundleName, len(manifest.Files), bc.fileCountThreshold)
 		return true, TriggerFileCount, nil
 	}
@@ -157,7 +157,7 @@ func (bc *BundleCompactor) ShouldCompact(databaseName, bundleName string) (bool,
 		}
 	}
 	if smallFileCount >= 3 { // Merge if 3+ small old files
-		bc.logger.Infof("Compaction triggered for %s:%s - %d small old files need merging",
+		bc.logger.Debugf("Compaction triggered for %s:%s - %d small old files need merging",
 			databaseName, bundleName, smallFileCount)
 		return true, TriggerSmallFileMerge, nil
 	}
@@ -175,7 +175,7 @@ func (bc *BundleCompactor) ShouldCompact(databaseName, bundleName string) (bool,
 			fragmentation = float64(manifest.TotalTombstones+int64(smallFileCount*1000)) / float64(manifest.TotalDocuments)
 		}
 		if fragmentation > bc.fragmentationThreshold {
-			bc.logger.Infof("Compaction triggered for %s:%s - large bundle fragmentation %.2f%% exceeds threshold %.2f%%",
+			bc.logger.Debugf("Compaction triggered for %s:%s - large bundle fragmentation %.2f%% exceeds threshold %.2f%%",
 				databaseName, bundleName, fragmentation*100, bc.fragmentationThreshold*100)
 			return true, TriggerFragmentation, nil
 		}
@@ -277,7 +277,7 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 		liveDocuments[docID] = doc
 	}
 
-	bc.logger.Infof("Compaction merge complete: %d live documents, %d tombstones removed",
+	bc.logger.Debugf("Compaction merge complete: %d live documents, %d tombstones removed",
 		len(liveDocuments), tombstoneCount)
 
 	// STEP 3: Build bloom filter for the compacted documents

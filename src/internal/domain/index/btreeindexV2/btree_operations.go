@@ -1067,7 +1067,7 @@ func splitLeafNode(idx *BTreeIndex, leaf *BTreeNode) (uint32, bool, int, error) 
 
 		nodesCreated++ // We also created a new root
 
-		idx.logger.Infof("Created new root %d after leaf split, tree height increased",
+		idx.logger.Debugf("Created new root %d after leaf split, tree height increased",
 			newRootPageNum)
 
 		return newRootPageNum, true, nodesCreated, nil
@@ -1262,7 +1262,7 @@ func createNewRoot(idx *BTreeIndex, leftChildPageNum, rightChildPageNum uint32, 
 // Returns:
 //   - error: Any error that occurred during insertion
 func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightChildPageNum uint32) (uint32, error) {
-	// idx.logger.Infof("insertIntoParent called: parentPageNum=%d, key='%s', rightChildPageNum=%d",
+	// idx.logger.Debugf("insertIntoParent called: parentPageNum=%d, key='%s', rightChildPageNum=%d",
 	// 	parentPageNum, string(key), rightChildPageNum)
 
 	// Load parent node
@@ -1286,7 +1286,7 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 		return parentPageNum, fmt.Errorf("parent page %d is not an internal node", parentPageNum)
 	}
 
-	// idx.logger.Infof("insertIntoParent: parent %d has %d keys before insertion",
+	// idx.logger.Debugf("insertIntoParent: parent %d has %d keys before insertion",
 	// 	parentPageNum, parent.KeyCount)
 
 	// Pin parent page during modification
@@ -1320,7 +1320,7 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 	// Update key count
 	parent.KeyCount++
 
-	// idx.logger.Infof("insertIntoParent MODIFIED: parent %d now has %d keys after inserting '%s' at pos %d (ptr=%p)",
+	// idx.logger.Debugf("insertIntoParent MODIFIED: parent %d now has %d keys after inserting '%s' at pos %d (ptr=%p)",
 	// 	parentPageNum, parent.KeyCount, string(key), insertPos, parent)
 
 	// Check if parent node is now full and needs splitting
@@ -1346,7 +1346,7 @@ func insertIntoParent(idx *BTreeIndex, parentPageNum uint32, key []byte, rightCh
 	// Save updated parent
 	idx.PageManager.PutPage(parentPageNum, parent, true)
 
-	// idx.logger.Infof("insertIntoParent SAVED: parent %d with %d keys marked dirty (ptr=%p)",
+	// idx.logger.Debugf("insertIntoParent SAVED: parent %d with %d keys marked dirty (ptr=%p)",
 	// 	parentPageNum, parent.KeyCount, parent)
 
 	idx.logger.Debugf("Inserted key '%s' and child %d into parent %d at position %d",

@@ -203,7 +203,7 @@ func CreateHashIndex(config *IndexConfig, logger *zap.SugaredLogger) (*HashIndex
 		return nil, fmt.Errorf("failed to initialize index: %w", err)
 	}
 
-	logger.Infof("Successfully created hash index '%s' for bundle '%s'", config.FieldName, config.BundleName)
+	logger.Debugf("Successfully created hash index '%s' for bundle '%s'", config.FieldName, config.BundleName)
 	return hashIndex, nil
 }
 
@@ -217,7 +217,7 @@ func CreateHashIndex(config *IndexConfig, logger *zap.SugaredLogger) (*HashIndex
 //   - *HashIndex: The opened hash index instance
 //   - error: Any error that occurred during opening
 func OpenHashIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) (*HashIndex, error) {
-	logger.Infof("Opening hash index: %s", filePath)
+	logger.Debugf("Opening hash index: %s", filePath)
 
 	// Check if file exists
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -305,11 +305,11 @@ func OpenHashIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) (
 	// CRITICAL FIX: Ensure metadata masks are properly initialized
 	// This fixes the performance regression where HighMask/LowMask were 0
 	if metadata.HighMask == 0 || metadata.MaxBucket == 0 {
-		logger.Infof("Initializing hash index metadata masks: BucketCount=%d", metadata.BucketCount)
+		logger.Debugf("Initializing hash index metadata masks: BucketCount=%d", metadata.BucketCount)
 		metadata.HighMask = metadata.BucketCount - 1
 		metadata.LowMask = (metadata.BucketCount >> 1) - 1
 		metadata.MaxBucket = metadata.BucketCount - 1
-		logger.Infof("Initialized masks: HighMask=%d, LowMask=%d, MaxBucket=%d",
+		logger.Debugf("Initialized masks: HighMask=%d, LowMask=%d, MaxBucket=%d",
 			metadata.HighMask, metadata.LowMask, metadata.MaxBucket)
 	}
 
@@ -318,7 +318,7 @@ func OpenHashIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) (
 		return fileManager.WritePage(pageNum, pageData)
 	})
 
-	logger.Infof("Successfully opened hash index with %d buckets", hashIndex.metadata.BucketCount)
+	logger.Debugf("Successfully opened hash index with %d buckets", hashIndex.metadata.BucketCount)
 	return hashIndex, nil
 }
 
@@ -377,7 +377,7 @@ func (hi *HashIndex) Insert(key, value string) error {
 		if shouldSplit, err := hi.shouldSplitFast(); err != nil {
 			hi.logger.Errorf("Failed to check if bucket should split: %v", err)
 		} else if shouldSplit {
-			hi.logger.Infof("Load factor exceeded, splitting bucket...")
+			hi.logger.Debugf("Load factor exceeded, splitting bucket...")
 			if err := hi.splitBucket(); err != nil {
 				hi.logger.Errorf("Failed to split bucket: %v", err)
 			}
@@ -424,7 +424,7 @@ func (hi *HashIndex) InsertDocument(documentID string) error {
 		if shouldSplit, err := hi.shouldSplitFast(); err != nil {
 			hi.logger.Errorf("Failed to check if bucket should split: %v", err)
 		} else if shouldSplit {
-			hi.logger.Infof("Load factor exceeded, splitting bucket...")
+			hi.logger.Debugf("Load factor exceeded, splitting bucket...")
 			if err := hi.splitBucket(); err != nil {
 				hi.logger.Errorf("Failed to split bucket: %v", err)
 			}

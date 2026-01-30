@@ -75,7 +75,7 @@ func NewJoinQueryPlanner(logger *zap.SugaredLogger, bundleServiceInt BundleServi
 // CreateJoinExecutionPlan creates an execution plan for a JOIN query
 // NEW: Now uses the Phase 1 JOIN executor for improved performance and extensibility
 func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoinQuery, database *models.Database) (*ExecutionPlan, error) {
-	jp.Logger.Infof("Creating execution plan using new JOIN executor: FROM %s with %d joins",
+	jp.Logger.Debugf("Creating execution plan using new JOIN executor: FROM %s with %d joins",
 		query.FromBundle, len(query.JoinClauses))
 
 	// Validate that all referenced bundles exist
@@ -161,7 +161,7 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 			)
 
 			// Log pushdown analysis results
-			jp.Logger.Infof("Predicate pushdown analysis: left=%d, right=%d, remaining=%d predicates",
+			jp.Logger.Debugf("Predicate pushdown analysis: left=%d, right=%d, remaining=%d predicates",
 				len(pushdownResult.LeftPredicates),
 				len(pushdownResult.RightPredicates),
 				len(pushdownResult.RemainingPredicates))
@@ -171,10 +171,10 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 
 			// Log pushdown analysis
 			if pushdownResult.CombinedLeftPredicate != nil {
-				jp.Logger.Infof("LEFT predicate pushdown enabled: %s", pushdownResult.CombinedLeftPredicate.String())
+				jp.Logger.Debugf("LEFT predicate pushdown enabled: %s", pushdownResult.CombinedLeftPredicate.String())
 			}
 			if pushdownResult.CombinedRightPredicate != nil {
-				jp.Logger.Infof("RIGHT predicate pushdown enabled: %s", pushdownResult.CombinedRightPredicate.String())
+				jp.Logger.Debugf("RIGHT predicate pushdown enabled: %s", pushdownResult.CombinedRightPredicate.String())
 			}
 		} else {
 			jp.Logger.Info("WHERE expression detected but not syndrQL.Expression - will apply post-JOIN filtering")
@@ -239,7 +239,7 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		Offset:  query.Offset,
 	}
 
-	jp.Logger.Infof("Created JOIN execution plan: cost=%.2f, estimated_rows=%d, algorithm=hash_join, limit=%d",
+	jp.Logger.Debugf("Created JOIN execution plan: cost=%.2f, estimated_rows=%d, algorithm=hash_join, limit=%d",
 		estimatedCost, estimatedRows, query.Limit)
 
 	// Wrap with FilterNode only if there are remaining WHERE conditions
@@ -261,7 +261,7 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		rootNode = filterNode
 		finalCost = filterNode.Cost
 		finalEstimatedRows = filterNode.EstimatedRows
-		jp.Logger.Infof("Wrapped JOIN with FilterNode for remaining predicates: %s", remainingPredicate.String())
+		jp.Logger.Debugf("Wrapped JOIN with FilterNode for remaining predicates: %s", remainingPredicate.String())
 	} else if hasWhereExpression && (leftPredicate != nil || rightPredicate != nil) {
 		jp.Logger.Info("All WHERE conditions pushed down - no post-JOIN filtering needed")
 	} else if hasWhereExpression {
@@ -289,7 +289,7 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		Logger:        jp.Logger,
 	}
 
-	jp.Logger.Infof("Created new JOIN execution plan with cost %.2f, estimated rows: %d",
+	jp.Logger.Debugf("Created new JOIN execution plan with cost %.2f, estimated rows: %d",
 		plan.Cost, plan.EstimatedRows)
 
 	return plan, nil
@@ -528,7 +528,7 @@ type JoinExecutionNode struct {
 // Execute implements ExecutionNode interface using the new JOIN executor
 func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	// NOTE: Uncomment only if troubleshooting join issues
-	// jen.Logger.Infof("Executing JOIN using Phase 1 JOIN executor - stack trace:\n%s", debug.Stack())
+	// jen.Logger.Debugf("Executing JOIN using Phase 1 JOIN executor - stack trace:\n%s", debug.Stack())
 
 	// Opt #1: set projection for join bundles to reduce I/O and deserialization
 	var bundleService BundleServiceInterface
@@ -583,7 +583,7 @@ func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.D
 		len(result.Documents) > effectiveLimit*10
 
 	if useStreamingTopN {
-		jen.Logger.Infof("STREAMING TOP-N: Using heap-based merge for %d JOIN results with LIMIT %d (10x threshold met)",
+		jen.Logger.Debugf("STREAMING TOP-N: Using heap-based merge for %d JOIN results with LIMIT %d (10x threshold met)",
 			len(result.Documents), effectiveLimit)
 		return jen.executeWithStreamingTopN(result.Documents, effectiveLimit)
 	}
@@ -596,7 +596,7 @@ func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.D
 		documents[mergedDoc.DocumentID] = mergedDoc
 	}
 
-	jen.Logger.Infof("JOIN execution completed: %d results, algorithm=%s, memory=%d bytes",
+	jen.Logger.Debugf("JOIN execution completed: %d results, algorithm=%s, memory=%d bytes",
 		len(documents), result.Algorithm, result.MemoryUsed)
 
 	return documents, nil
@@ -630,7 +630,7 @@ func (jen *JoinExecutionNode) executeWithStreamingTopN(joinedDocs []*joinexecuto
 		documents[doc.DocumentID] = doc
 	}
 
-	jen.Logger.Infof("STREAMING TOP-N completed: %d results from %d JOIN matches (heap size: %d)",
+	jen.Logger.Debugf("STREAMING TOP-N completed: %d results from %d JOIN matches (heap size: %d)",
 		len(documents), len(joinedDocs), limit)
 
 	return documents, nil
@@ -706,7 +706,7 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 	if jen.LeftBundleInterface != nil {
 		// Use pre-created filtered adapter
 		leftAdapter = jen.LeftBundleInterface
-		jen.Logger.Infof("Using pre-created predicate-filtered LEFT bundle adapter")
+		jen.Logger.Debugf("Using pre-created predicate-filtered LEFT bundle adapter")
 	} else if jen.LeftPredicate != nil {
 		// Create filtered adapter with pushdown predicate; pass streaming opts when bundleService available
 		var leftStreamOpts *ExprFilterAdapterOpts
@@ -714,7 +714,7 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 			leftStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: leftBundle.Name}
 		}
 		leftAdapter = NewExpressionFilteredBundleAdapter(baseLeftAdapter, jen.LeftPredicate, jen.Logger, leftStreamOpts)
-		jen.Logger.Infof("Created ExpressionFilteredBundleAdapter for LEFT bundle with predicate: %s", jen.LeftPredicate.String())
+		jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for LEFT bundle with predicate: %s", jen.LeftPredicate.String())
 	} else {
 		// Use standard adapter
 		leftAdapter = baseLeftAdapter
@@ -723,7 +723,7 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 	if jen.RightBundleInterface != nil {
 		// Use pre-created filtered adapter
 		rightAdapter = jen.RightBundleInterface
-		jen.Logger.Infof("Using pre-created predicate-filtered RIGHT bundle adapter")
+		jen.Logger.Debugf("Using pre-created predicate-filtered RIGHT bundle adapter")
 	} else if jen.RightPredicate != nil {
 		// Create filtered adapter with pushdown predicate; pass streaming opts when bundleService available
 		var rightStreamOpts *ExprFilterAdapterOpts
@@ -731,7 +731,7 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 			rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name}
 		}
 		rightAdapter = NewExpressionFilteredBundleAdapter(baseRightAdapter, jen.RightPredicate, jen.Logger, rightStreamOpts)
-		jen.Logger.Infof("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
+		jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
 	} else {
 		// Use standard adapter
 		rightAdapter = baseRightAdapter
@@ -1599,7 +1599,7 @@ func (f *ExpressionFilteredBundleAdapter) GetAllDocuments() map[string]*models.D
 			for _, d := range docs {
 				m[d.DocumentID] = d
 			}
-			f.logger.Infof("ExpressionFilteredBundleAdapter: streaming+parallel returned %d documents in %v",
+			f.logger.Debugf("ExpressionFilteredBundleAdapter: streaming+parallel returned %d documents in %v",
 				len(m), time.Since(startTime))
 			return m
 		}
@@ -1607,7 +1607,7 @@ func (f *ExpressionFilteredBundleAdapter) GetAllDocuments() map[string]*models.D
 
 	// Fallback: load all from inner, then filter (parallel or sequential)
 	all := f.inner.GetAllDocuments()
-	f.logger.Infof("ExpressionFilteredBundleAdapter.GetAllDocuments: loaded %d documents, parallelThreshold=%d",
+	f.logger.Debugf("ExpressionFilteredBundleAdapter.GetAllDocuments: loaded %d documents, parallelThreshold=%d",
 		len(all), parallelFilterThreshold)
 
 	if len(all) >= parallelFilterThreshold {
@@ -1623,7 +1623,7 @@ func (f *ExpressionFilteredBundleAdapter) GetAllDocuments() map[string]*models.D
 		}
 	}
 
-	f.logger.Infof("ExpressionFilteredBundleAdapter: %d/%d documents matched predicate in %v (sequential)",
+	f.logger.Debugf("ExpressionFilteredBundleAdapter: %d/%d documents matched predicate in %v (sequential)",
 		matchCount, len(all), time.Since(startTime))
 
 	return filtered
@@ -1699,7 +1699,7 @@ func (f *ExpressionFilteredBundleAdapter) getAllDocumentsParallel(all map[string
 		filtered[result.docID] = result.doc
 	}
 
-	f.logger.Infof("ExpressionFilteredBundleAdapter: %d/%d documents matched predicate in %v (parallel, %d workers)",
+	f.logger.Debugf("ExpressionFilteredBundleAdapter: %d/%d documents matched predicate in %v (parallel, %d workers)",
 		len(filtered), len(all), time.Since(startTime), numWorkers)
 
 	return filtered

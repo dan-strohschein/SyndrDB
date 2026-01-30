@@ -34,12 +34,12 @@ func FileExists(filename string, logger zap.SugaredLogger) bool {
 	if err != nil {
 		if os.IsNotExist(err) {
 			if args.Debug && args.Verbose {
-				logger.Infof("File does not exist: %s\n", filename)
+				logger.Debugf("File does not exist: %s\n", filename)
 			}
 			return false // File does not exist
 		}
 
-		logger.Infof("Error checking file %s for existence: %s\n", filename, err)
+		logger.Debugf("Error checking file %s for existence: %s\n", filename, err)
 		return false // Some other error occurred
 	}
 

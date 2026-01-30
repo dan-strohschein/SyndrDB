@@ -59,7 +59,7 @@ import (
 //   - error: Any error that occurred during creation
 func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeIndex, error) {
 	args := settings.GetSettings()
-	//logger.Infof("DEBUG: CreateBTreeIndex V2 started with config: %+v", config)
+	//logger.Debugf("DEBUG: CreateBTreeIndex V2 started with config: %+v", config)
 
 	if config == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -70,7 +70,7 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 	}
 
 	// Validate configuration
-	//logger.Infof("DEBUG: Validating configuration")
+	//logger.Debugf("DEBUG: Validating configuration")
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -79,7 +79,7 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 
 	// Create file manager
 	indexFilePath := config.GetIndexFilePath()
-	//logger.Infof("DEBUG: Creating file manager for path: %s", indexFilePath)
+	//logger.Debugf("DEBUG: Creating file manager for path: %s", indexFilePath)
 	fileManager, err := NewBTreeFileManager(indexFilePath, config.PageSize, args.Debug, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file manager: %w", err)
@@ -88,15 +88,15 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 	// Set to batched mode for better performance - rely on WAL for durability
 	// This prevents individual fsync calls on each page write during batch flushes
 	fileManager.SetSyncMode("batched")
-	//logger.Infof("DEBUG: File manager created successfully")
+	//logger.Debugf("DEBUG: File manager created successfully")
 
 	// Create page manager
-	//logger.Infof("DEBUG: Creating page manager")
+	//logger.Debugf("DEBUG: Creating page manager")
 	pageManager, err := NewBTreePageManager(config.PageSize, config.CacheSize, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create page manager: %w", err)
 	}
-	//logger.Infof("DEBUG: Page manager created successfully")
+	//logger.Debugf("DEBUG: Page manager created successfully")
 
 	// Create metadata
 	metadata := NewBTreeMetadata(config)
@@ -124,7 +124,7 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 		}
 		index.walManager = btreeWALManager
 		index.walEnabled = true
-		logger.Infof("WAL enabled for B-tree index '%s'", config.FieldName)
+		logger.Debugf("WAL enabled for B-tree index '%s'", config.FieldName)
 	} else {
 		index.walEnabled = false
 		logger.Debugf("WAL not configured for B-tree index '%s'", config.FieldName)
@@ -152,7 +152,7 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 		return nil, fmt.Errorf("invalid root page number after initialization: %d", index.rootPageNum)
 	}
 
-	logger.Infof("Successfully created BTree index '%s' for bundle '%s' field '%s'",
+	logger.Debugf("Successfully created BTree index '%s' for bundle '%s' field '%s'",
 		config.GetIndexFilePath(), config.BundleName, config.FieldName)
 
 	return index, nil
@@ -230,7 +230,7 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 	// CRASH RECOVERY: Validate index integrity and repair if needed
 	// Following PostgreSQL's hybrid approach: auto-repair minor issues, fail-fast on major corruption
 	// Single Responsibility: Each validation function checks one aspect of integrity
-	logger.Infof("Performing crash recovery validation for index '%s'", filePath)
+	logger.Debugf("Performing crash recovery validation for index '%s'", filePath)
 
 	if err := index.performCrashRecovery(); err != nil {
 		return nil, fmt.Errorf("crash recovery failed: %w", err)
@@ -239,7 +239,7 @@ func OpenBTreeIndex(filePath string, debugMode bool, logger *zap.SugaredLogger) 
 	// Mark validation timestamp after successful recovery
 	index.lastValidated = time.Now()
 
-	logger.Infof("Successfully opened BTree index '%s' for bundle '%s' field '%s'",
+	logger.Debugf("Successfully opened BTree index '%s' for bundle '%s' field '%s'",
 		filePath, metadata.BundleName, metadata.FieldName)
 
 	return index, nil
@@ -273,7 +273,7 @@ func (idx *BTreeIndex) performCrashRecovery() error {
 		return nil
 	}
 
-	idx.logger.Infof("Starting crash recovery for index '%s'", idx.Metadata.IndexName)
+	idx.logger.Debugf("Starting crash recovery for index '%s'", idx.Metadata.IndexName)
 
 	// Step 1: Validate file header magic number
 	if err := idx.validateFileHeader(); err != nil {
@@ -297,11 +297,11 @@ func (idx *BTreeIndex) performCrashRecovery() error {
 		}
 
 		// AUTO-REPAIR: Minor corruption, attempt recovery
-		idx.logger.Infof("Minor corruption detected (%d pages < 5), attempting auto-repair", len(corruptPages))
+		idx.logger.Debugf("Minor corruption detected (%d pages < 5), attempting auto-repair", len(corruptPages))
 		if err := idx.repairCorruptPages(corruptPages); err != nil {
 			return fmt.Errorf("auto-repair failed: %w", err)
 		}
-		idx.logger.Infof("Successfully repaired %d corrupt pages", len(corruptPages))
+		idx.logger.Debugf("Successfully repaired %d corrupt pages", len(corruptPages))
 	}
 
 	// Step 4: Validate tree structural integrity
@@ -312,13 +312,13 @@ func (idx *BTreeIndex) performCrashRecovery() error {
 		if err := idx.rebuildTreeStructure(); err != nil {
 			return fmt.Errorf("tree rebuild failed: %w", err)
 		}
-		idx.logger.Infof("Successfully rebuilt tree structure")
+		idx.logger.Debugf("Successfully rebuilt tree structure")
 	}
 
 	// Step 5: Replay WAL entries if WAL manager is available
 	// This recovers any uncommitted operations from before the crash
 	if idx.walManager != nil {
-		idx.logger.Infof("WAL manager available, replaying uncommitted entries")
+		idx.logger.Debugf("WAL manager available, replaying uncommitted entries")
 		if err := idx.replayWALEntries(); err != nil {
 			return fmt.Errorf("WAL replay failed: %w", err)
 		}
@@ -326,7 +326,7 @@ func (idx *BTreeIndex) performCrashRecovery() error {
 		idx.logger.Debugf("No WAL manager available, skipping WAL replay")
 	}
 
-	idx.logger.Infof("Crash recovery completed successfully")
+	idx.logger.Debugf("Crash recovery completed successfully")
 	return nil
 }
 
@@ -414,7 +414,7 @@ func (idx *BTreeIndex) verifyPageChecksums() ([]uint32, error) {
 	}
 
 	if len(corruptPages) == 0 {
-		idx.logger.Infof("All page checksums valid (%d pages verified)", totalPages-1)
+		idx.logger.Debugf("All page checksums valid (%d pages verified)", totalPages-1)
 	}
 
 	return corruptPages, nil
@@ -483,7 +483,7 @@ func (idx *BTreeIndex) computePageChecksum(node interface{}) uint64 {
 //
 // TODO: I could add page reconstruction from sibling pages for leaf nodes
 func (idx *BTreeIndex) repairCorruptPages(corruptPages []uint32) error {
-	idx.logger.Infof("Attempting to repair %d corrupt pages", len(corruptPages))
+	idx.logger.Debugf("Attempting to repair %d corrupt pages", len(corruptPages))
 
 	repairedCount := 0
 	failedPages := []uint32{}
@@ -512,7 +512,7 @@ func (idx *BTreeIndex) repairCorruptPages(corruptPages []uint32) error {
 		idx.logger.Warnf("Failed to repair %d pages: %v", len(failedPages), failedPages)
 	}
 
-	idx.logger.Infof("Repaired %d/%d corrupt pages", repairedCount, len(corruptPages))
+	idx.logger.Debugf("Repaired %d/%d corrupt pages", repairedCount, len(corruptPages))
 	return nil
 }
 
@@ -614,7 +614,7 @@ func (idx *BTreeIndex) validateNodeRecursive(pageNum uint32, level uint32, visit
 // Returns:
 //   - error: If rebuild is not possible
 func (idx *BTreeIndex) rebuildTreeStructure() error {
-	idx.logger.Infof("Starting tree rebuild for index '%s'", idx.Metadata.IndexName)
+	idx.logger.Debugf("Starting tree rebuild for index '%s'", idx.Metadata.IndexName)
 
 	// Step 1: Extract all key-value pairs from valid leaf nodes
 	// We scan all pages directly (not traversing the tree) to avoid cycles
@@ -624,7 +624,7 @@ func (idx *BTreeIndex) rebuildTreeStructure() error {
 	}
 	var allPairs []keyValuePair
 
-	idx.logger.Infof("Scanning %d pages to extract key-value pairs", idx.Metadata.TotalPages)
+	idx.logger.Debugf("Scanning %d pages to extract key-value pairs", idx.Metadata.TotalPages)
 	validLeafCount := 0
 
 	// Scan all pages (skip page 0 which is metadata)
@@ -673,7 +673,7 @@ func (idx *BTreeIndex) rebuildTreeStructure() error {
 		}
 	}
 
-	idx.logger.Infof("Extracted %d key-value pairs from %d valid leaf nodes", len(allPairs), validLeafCount)
+	idx.logger.Debugf("Extracted %d key-value pairs from %d valid leaf nodes", len(allPairs), validLeafCount)
 
 	if len(allPairs) == 0 {
 		idx.logger.Warnf("No valid key-value pairs found - creating empty tree")
@@ -722,7 +722,7 @@ func (idx *BTreeIndex) rebuildTreeStructure() error {
 	idx.Metadata.LeafNodes = 1
 	idx.Metadata.TreeHeight = 1
 
-	idx.logger.Infof("Created new empty root node at page %d", newRootPageNum)
+	idx.logger.Debugf("Created new empty root node at page %d", newRootPageNum)
 
 	// Step 4: Re-insert all extracted key-value pairs
 	// Temporarily disable WAL during rebuild to avoid logging rebuild operations
@@ -744,7 +744,7 @@ func (idx *BTreeIndex) rebuildTreeStructure() error {
 	// Re-enable WAL
 	idx.walEnabled = walEnabled
 
-	idx.logger.Infof("Re-inserted %d/%d key-value pairs", insertedCount, len(allPairs))
+	idx.logger.Debugf("Re-inserted %d/%d key-value pairs", insertedCount, len(allPairs))
 
 	// Step 5: Persist metadata
 	if err := idx.FileManager.WriteMetadata(idx.Metadata); err != nil {
@@ -757,7 +757,7 @@ func (idx *BTreeIndex) rebuildTreeStructure() error {
 		// Don't fail the rebuild if flush fails
 	}
 
-	idx.logger.Infof("Tree rebuild completed successfully: %d pairs re-inserted, new root at page %d",
+	idx.logger.Debugf("Tree rebuild completed successfully: %d pairs re-inserted, new root at page %d",
 		insertedCount, idx.rootPageNum)
 
 	return nil
@@ -783,7 +783,7 @@ func (idx *BTreeIndex) replayWALEntries() error {
 		return fmt.Errorf("WAL manager not available for replay")
 	}
 
-	idx.logger.Infof("Replaying WAL entries for index '%s'", idx.Metadata.IndexName)
+	idx.logger.Debugf("Replaying WAL entries for index '%s'", idx.Metadata.IndexName)
 
 	// TODO: I need to implement GetUncommittedEntries method on BTreeWALManager
 	// For now, log that WAL replay is not yet implemented
@@ -835,14 +835,14 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 		idx.logger.Debugf("Logged insert to WAL: LSN=%d, key=%s, docID=%s", lsn, string(key), documentID)
 	}
 
-	//idx.logger.Infof("DEBUG: Insert called with rootPageNum=%d, metadata.RootPageNum=%d", idx.rootPageNum, idx.Metadata.RootPageNum)
+	//idx.logger.Debugf("DEBUG: Insert called with rootPageNum=%d, metadata.RootPageNum=%d", idx.rootPageNum, idx.Metadata.RootPageNum)
 
 	// Validate root page number before proceeding
 	if idx.rootPageNum == 0 {
 		idx.logger.Errorf("Invalid root page number: %d, attempting to recover from metadata", idx.rootPageNum)
 		if idx.Metadata.RootPageNum > 0 {
 			idx.rootPageNum = idx.Metadata.RootPageNum
-			idx.logger.Infof("Recovered root page number from metadata: %d", idx.rootPageNum)
+			idx.logger.Debugf("Recovered root page number from metadata: %d", idx.rootPageNum)
 		} else {
 			return fmt.Errorf("invalid root page number: metadata also indicates root page 0")
 		}
@@ -876,18 +876,18 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 	}
 
 	// Perform the insertion
-	//idx.logger.Infof("DEBUG: About to call insertInternal with rootPageNum=%d", idx.rootPageNum)
+	//idx.logger.Debugf("DEBUG: About to call insertInternal with rootPageNum=%d", idx.rootPageNum)
 	newRootPageNum, affectsParentNode, nodesCreated, err := idx.insertInternal(key, documentID, idx.rootPageNum)
 	if err != nil {
 		return fmt.Errorf("failed to insert key: %w", err)
 	}
 
-	//idx.logger.Infof("DEBUG: insertInternal returned: newRootPageNum=%d, affectsParentNode=%v, oldRootPageNum=%d",
+	//idx.logger.Debugf("DEBUG: insertInternal returned: newRootPageNum=%d, affectsParentNode=%v, oldRootPageNum=%d",
 	//	newRootPageNum, affectsParentNode, idx.rootPageNum)
 
 	// Handle root page changes if insertion caused tree restructuring
 	if newRootPageNum != idx.rootPageNum {
-		idx.logger.Infof("Root page changed from %d to %d due to insertion (tree height increased - normal B-tree growth)",
+		idx.logger.Debugf("Root page changed from %d to %d due to insertion (tree height increased - normal B-tree growth)",
 			idx.rootPageNum, newRootPageNum)
 		idx.rootPageNum = newRootPageNum
 		idx.Metadata.RootPageNum = newRootPageNum
@@ -1122,7 +1122,7 @@ func (idx *BTreeIndex) checkMaintenanceNeeded() {
 
 	// Check if fragmentation is too high
 	if idx.Metadata.FragmentationPct > 25.0 {
-		idx.logger.Infof("High fragmentation detected (%.2f%%), maintenance recommended",
+		idx.logger.Debugf("High fragmentation detected (%.2f%%), maintenance recommended",
 			idx.Metadata.FragmentationPct)
 		idx.Metadata.MaintenanceNeeded = true
 	}
@@ -1136,7 +1136,7 @@ func (idx *BTreeIndex) checkMaintenanceNeeded() {
 	}
 
 	if fillFactor < 0.5 {
-		idx.logger.Infof("Low fill factor detected (%.2f%%), compaction recommended", fillFactor)
+		idx.logger.Debugf("Low fill factor detected (%.2f%%), compaction recommended", fillFactor)
 		idx.Metadata.CompactionNeeded = true
 	}
 }
@@ -1462,7 +1462,7 @@ func (idx *BTreeIndex) Close() error {
 	}
 
 	idx.isOpen = false
-	idx.logger.Infof("Successfully closed BTree index '%s'", idx.FilePath)
+	idx.logger.Debugf("Successfully closed BTree index '%s'", idx.FilePath)
 
 	return nil
 }
@@ -1591,7 +1591,7 @@ func (idx *BTreeIndex) Compact() error {
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
 
-	idx.logger.Infof("Starting BTree index compaction")
+	idx.logger.Debugf("Starting BTree index compaction")
 
 	// Perform compaction using existing compact() method
 	if err := idx.compact(); err != nil {
@@ -1612,7 +1612,7 @@ func (idx *BTreeIndex) Compact() error {
 		return fmt.Errorf("failed to update metadata after compaction: %w", err)
 	}
 
-	idx.logger.Infof("BTree index compaction completed successfully")
+	idx.logger.Debugf("BTree index compaction completed successfully")
 
 	return nil
 }
@@ -1628,7 +1628,7 @@ func (idx *BTreeIndex) initializeIndex() error {
 
 		if existingMetadata.RootPageNum > 0 {
 			// Index file exists with valid metadata - use existing data (recovery scenario)
-			idx.logger.Infof("Index file exists with valid metadata, recovering from existing data (root page: %d, records: %d)",
+			idx.logger.Debugf("Index file exists with valid metadata, recovering from existing data (root page: %d, records: %d)",
 				existingMetadata.RootPageNum, existingMetadata.TotalRecords)
 			idx.Metadata = existingMetadata
 			idx.rootPageNum = existingMetadata.RootPageNum

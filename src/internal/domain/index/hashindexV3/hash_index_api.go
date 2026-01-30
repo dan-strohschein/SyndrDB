@@ -860,7 +860,7 @@ func (idx *HashIndexV3) Delete(keyValue string, commitSequence uint64) (bool, er
 				"sequence", tombstone.Sequence)
 		}
 	} else {
-		idx.logger.Infow("Delete: Tombstone created successfully",
+		idx.logger.Debugw("Delete: Tombstone created successfully",
 			"key", keyValue,
 			"sequence", tombstone.Sequence)
 	}

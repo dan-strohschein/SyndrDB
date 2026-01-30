@@ -200,7 +200,7 @@ func (qr *QueryRouter) routeSimpleQuery(
 				directionStr = "DESC"
 			}
 
-			qr.logger.Infof("ORDER BY INDEX OPTIMIZATION: Using BTreeOrderedScanNode on index '%s' for ORDER BY %s %s (limit=%d)",
+			qr.logger.Debugf("ORDER BY INDEX OPTIMIZATION: Using BTreeOrderedScanNode on index '%s' for ORDER BY %s %s (limit=%d)",
 				idxName, fieldName, directionStr, limit)
 
 			// Return BTreeOrderedScanNode - this returns documents already sorted
@@ -320,7 +320,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 	docScanner documentscanner.DocumentScannerInterface,
 ) (ExecutionNode, []string, error) {
 
-	qr.logger.Infof("Routing GROUP BY query for bundle '%s'", query.FromBundle)
+	qr.logger.Debugf("Routing GROUP BY query for bundle '%s'", query.FromBundle)
 
 	var rootNode ExecutionNode
 	var indexesUsed []string
@@ -333,7 +333,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 		if err != nil {
 			return nil, nil, err
 		}
-		qr.logger.Infof("Created base execution tree for GROUP BY using createExpressionBasedPlan (indexes: %v)", indexesUsed)
+		qr.logger.Debugf("Created base execution tree for GROUP BY using createExpressionBasedPlan (indexes: %v)", indexesUsed)
 		return rootNode, indexesUsed, nil
 	}
 
@@ -353,7 +353,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 	// 			EstimatedRows:      int(bundle.TotalDocuments),
 	// 		}
 	// 		indexesUsed = []string{idxName}
-	// 		qr.logger.Infof("Using BTreeOrderedScanNode on index %s for GROUP BY %s (skip sort)", idxName, fieldName)
+	// 		qr.logger.Debugf("Using BTreeOrderedScanNode on index %s for GROUP BY %s (skip sort)", idxName, fieldName)
 	// 		return rootNode, indexesUsed, nil
 	// 	}
 	// }
@@ -373,7 +373,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 	// The deserializer now supports case-insensitive field matching, so this is safe to enable
 	if projectionFields := getProjectionFieldsForGroupBy(query); len(projectionFields) > 0 {
 		scanNode.ProjectionFields = projectionFields
-		qr.logger.Infof("PROJECTION PUSHDOWN: Set ProjectionFields=%v on FullScanNode for GROUP BY optimization", projectionFields)
+		qr.logger.Debugf("PROJECTION PUSHDOWN: Set ProjectionFields=%v on FullScanNode for GROUP BY optimization", projectionFields)
 	}
 
 	rootNode = scanNode
@@ -399,7 +399,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 		rootNode = filterNode
 	}
 
-	qr.logger.Infof("Created base execution tree for GROUP BY")
+	qr.logger.Debugf("Created base execution tree for GROUP BY")
 
 	return rootNode, indexesUsed, nil
 }
@@ -469,7 +469,7 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 	// Try to optimize with indexes using expression helpers
 	indexNode, indexName := qr.tryIndexOptimization(bundle, expr, docScanner)
 	if indexNode != nil {
-		qr.logger.Infof("Using index '%s' for WHERE clause optimization", indexName)
+		qr.logger.Debugf("Using index '%s' for WHERE clause optimization", indexName)
 		// No FilterNode needed - index scan already filters
 		return indexNode, []string{indexName}, nil
 	}
@@ -510,7 +510,7 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 			effectiveLimit = query.Offset + query.Limit // Need extra for OFFSET
 		}
 		filterNode.MaxDocuments = effectiveLimit
-		qr.logger.Infof("OPTIMIZATION: LIMIT pushdown to FilterNode: MaxDocuments=%d (LIMIT %d + OFFSET %d)",
+		qr.logger.Debugf("OPTIMIZATION: LIMIT pushdown to FilterNode: MaxDocuments=%d (LIMIT %d + OFFSET %d)",
 			effectiveLimit, query.Limit, query.Offset)
 	}
 
@@ -527,18 +527,18 @@ func (qr *QueryRouter) tryIndexOptimization(
 
 	// Try hash index optimization for simple equality
 	if field, value, ok := syndrQL.ExtractSimpleEquality(expr); ok {
-		qr.logger.Infof("INDEX OPTIMIZATION: Found simple equality: %s == %v", field, value)
+		qr.logger.Debugf("INDEX OPTIMIZATION: Found simple equality: %s == %v", field, value)
 
 		// Check if hash index exists for this field
 		for indexName, indexRef := range bundle.Indexes {
 			if indexRef.IndexType == "hash" {
 				// Hash indexes use HashIndexField.FieldName, not Fields array
 				hashFieldName := indexRef.HashIndexField.FieldName
-				qr.logger.Infof("INDEX CHECK: index='%s' type='hash' hashField='%s' matchesField=%v",
+				qr.logger.Debugf("INDEX CHECK: index='%s' type='hash' hashField='%s' matchesField=%v",
 					indexName, hashFieldName, hashFieldName == field)
 
 				if hashFieldName == field {
-					qr.logger.Infof("INDEX SELECTED: Using hash index '%s' on field '%s'", indexName, field)
+					qr.logger.Debugf("INDEX SELECTED: Using hash index '%s' on field '%s'", indexName, field)
 
 					return &IndexScanNode{
 						Bundle:           bundle,
@@ -554,9 +554,9 @@ func (qr *QueryRouter) tryIndexOptimization(
 				}
 			}
 		}
-		qr.logger.Infof("INDEX OPTIMIZATION: No hash index found for field '%s'", field)
+		qr.logger.Debugf("INDEX OPTIMIZATION: No hash index found for field '%s'", field)
 	} else {
-		qr.logger.Infof("INDEX OPTIMIZATION: ExtractSimpleEquality failed - not a simple equality expression")
+		qr.logger.Debugf("INDEX OPTIMIZATION: ExtractSimpleEquality failed - not a simple equality expression")
 	}
 
 	// Try BTree index optimization for range conditions

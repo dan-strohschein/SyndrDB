@@ -205,7 +205,7 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 		groupByFieldCount = len(n.GroupBy.Fields)
 	}
 
-	n.Logger.Infof("Executing AggregationNode with %d GROUP BY fields, %d aggregates, strategy=%s",
+	n.Logger.Debugf("Executing AggregationNode with %d GROUP BY fields, %d aggregates, strategy=%s",
 		groupByFieldCount, len(n.AggregateFields), n.executionStrategy.String())
 
 	// OPTIMIZATION: For COUNT(*) queries without GROUP BY, without WHERE, and without HAVING,
@@ -223,7 +223,7 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 			// Fast path: Use SortedIndex for document count (from page cache metadata)
 			if fullScan.Bundle.SortedIndex != nil && fullScan.Bundle.SortedIndex.TotalDocuments() > 0 {
 				totalDocs = int64(fullScan.Bundle.SortedIndex.TotalDocuments())
-				n.Logger.Infof("OPTIMIZATION: Using SortedIndex for COUNT(*) - Count=%d", totalDocs)
+				n.Logger.Debugf("OPTIMIZATION: Using SortedIndex for COUNT(*) - Count=%d", totalDocs)
 			} else if fullScan.BundleServiceInt != nil {
 				// COUNT(*) OPTIMIZATION: Use CountDocuments() directly from BundleService
 				// This uses the count-only parser which extracts only DocumentIDs without parsing full documents
@@ -235,7 +235,7 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 				count, err := fullScan.BundleServiceInt.CountDocuments(fullScan.Bundle.Name, databaseName)
 				if err == nil {
 					totalDocs = int64(count)
-					n.Logger.Infof("OPTIMIZATION: Using count-only parser for COUNT(*) - Count=%d (no pages cached)", totalDocs)
+					n.Logger.Debugf("OPTIMIZATION: Using count-only parser for COUNT(*) - Count=%d (no pages cached)", totalDocs)
 				} else {
 					n.Logger.Warnf("COUNT(*) optimization: CountDocuments() failed (%v), falling back to GetTotalDocuments()", err)
 					// Fallback to GetTotalDocuments() if CountDocuments() fails
@@ -243,7 +243,7 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 						bundleInterface, ok := fullScan.DocumentScanner.(documentscanner.BundleInterface)
 						if ok {
 							totalDocs = int64(bundleInterface.GetTotalDocuments())
-							n.Logger.Infof("OPTIMIZATION: Using GetTotalDocuments() for COUNT(*) - Count=%d", totalDocs)
+							n.Logger.Debugf("OPTIMIZATION: Using GetTotalDocuments() for COUNT(*) - Count=%d", totalDocs)
 						} else {
 							n.Logger.Debug("COUNT(*) optimization: DocumentScanner is not BundleInterface, falling back to document scan")
 							goto executeChild
@@ -259,7 +259,7 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 				bundleInterface, ok := fullScan.DocumentScanner.(documentscanner.BundleInterface)
 				if ok {
 					totalDocs = int64(bundleInterface.GetTotalDocuments())
-					n.Logger.Infof("OPTIMIZATION: Using GetTotalDocuments() for COUNT(*) - Count=%d", totalDocs)
+					n.Logger.Debugf("OPTIMIZATION: Using GetTotalDocuments() for COUNT(*) - Count=%d", totalDocs)
 				} else {
 					n.Logger.Debug("COUNT(*) optimization: DocumentScanner is not BundleInterface, falling back to document scan")
 					goto executeChild
@@ -288,7 +288,7 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 				"synthetic_0": doc,
 			}
 
-			n.Logger.Infof("COUNT(*) optimization completed: returning count=%d", totalDocs)
+			n.Logger.Debugf("COUNT(*) optimization completed: returning count=%d", totalDocs)
 			return result, nil
 		}
 	}
@@ -356,7 +356,7 @@ executeChild:
 							cacheHitRate := float64(cachedPages) / float64(totalPages)
 							if cacheHitRate >= 0.5 || cachedPages == totalPages {
 								// High cache hit rate - use session cache
-								n.Logger.Infof("OPTIMIZATION: Using session cache for GROUP BY (cache hit rate: %.1f%%, %d/%d pages cached, %d docs)",
+								n.Logger.Debugf("OPTIMIZATION: Using session cache for GROUP BY (cache hit rate: %.1f%%, %d/%d pages cached, %d docs)",
 									cacheHitRate*100, cachedPages, totalPages, docsCopied)
 								groupResults, totalInput, err = n.executeHashAggregateWithSessionCache(ctx, sessionCache)
 								if err == nil {
@@ -370,7 +370,7 @@ executeChild:
 								}
 							} else {
 								// Very low cache hit rate - fall back to streaming
-								n.Logger.Infof("Cache hit rate too low (%.1f%%, %d/%d pages), falling back to streaming", cacheHitRate*100, cachedPages, totalPages)
+								n.Logger.Debugf("Cache hit rate too low (%.1f%%, %d/%d pages), falling back to streaming", cacheHitRate*100, cachedPages, totalPages)
 								groupResults = nil // Clear so streaming path runs
 							}
 						} else {
@@ -396,7 +396,7 @@ executeChild:
 			// Fall back to streaming aggregation if session cache didn't succeed
 			if groupResults == nil {
 				if fullScan.DocumentScanner != nil {
-					n.Logger.Infof("OPTIMIZATION: Using streaming aggregation for GROUP BY to avoid GetAllDocuments() lock contention")
+					n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for GROUP BY to avoid GetAllDocuments() lock contention")
 					groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
 					if err != nil {
 						return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
@@ -430,7 +430,7 @@ executeChild:
 
 			// Try streaming if we found a scanner
 			if childScanner != nil && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
-				n.Logger.Infof("OPTIMIZATION: Using streaming aggregation for GROUP BY via child scanner")
+				n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for GROUP BY via child scanner")
 				groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, childScanner)
 				if err != nil {
 					// Fall back to regular execution on streaming failure
@@ -486,7 +486,7 @@ executeChild:
 
 			// Try streaming to collect documents if scanner available
 			if childScanner != nil {
-				n.Logger.Infof("OPTIMIZATION: Using streaming to collect documents for SortGroupAggregate")
+				n.Logger.Debugf("OPTIMIZATION: Using streaming to collect documents for SortGroupAggregate")
 				// Get bundle interface for streaming
 				if smartScanner, ok := childScanner.(interface {
 					GetBundle() documentscanner.BundleInterface
@@ -551,7 +551,7 @@ executeChild:
 		}
 	}
 
-	n.Logger.Infof("AggregationNode completed: produced %d groups from %d documents",
+	n.Logger.Debugf("AggregationNode completed: produced %d groups from %d documents",
 		len(resultDocs), totalInput)
 
 	return resultDocs, nil
@@ -654,7 +654,7 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 
 			// Early termination: stop if we've found enough distinct groups
 			if n.Limit > 0 && len(groupMap) >= n.Limit {
-				n.Logger.Infof("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
+				n.Logger.Debugf("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
 				return groupMap, nil
 			}
 		}
@@ -752,7 +752,7 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 
 			// Early termination: stop if we've found enough distinct groups
 			if n.Limit > 0 && len(groupMap) >= n.Limit {
-				n.Logger.Infof("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
+				n.Logger.Debugf("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
 				return groupMap, totalInput, nil
 			}
 		}
@@ -824,7 +824,7 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 
 			// Early termination: stop if we've found enough distinct groups
 			if n.Limit > 0 && len(groupMap) >= n.Limit {
-				n.Logger.Infof("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
+				n.Logger.Debugf("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
 				return groupMap, docCount, nil
 			}
 		}
@@ -1398,7 +1398,7 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 			Value: models.NewInterfaceValue(finalValue),
 		}
 
-		n.Logger.Infof("Added synthetic field %s with value %v (from %s(%s))",
+		n.Logger.Debugf("Added synthetic field %s with value %v (from %s(%s))",
 			columnName, finalValue, aggFunc.Function, aggFunc.Field)
 
 		columnIndex++
@@ -1409,7 +1409,7 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 	doc.DocumentID = "synthetic_0"
 	doc.Fields = fields
 
-	n.Logger.Infof("Created synthetic document for aggregate-only query with %d fields", len(fields))
+	n.Logger.Debugf("Created synthetic document for aggregate-only query with %d fields", len(fields))
 
 	return map[string]*models.Document{
 		"synthetic_0": doc,

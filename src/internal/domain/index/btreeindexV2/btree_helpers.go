@@ -171,7 +171,7 @@ func ValidateTreeStructure(idx *BTreeIndex) *ValidationResult {
 	result.TimeElapsed = time.Since(startTime)
 
 	if result.IsValid {
-		idx.logger.Infof("Tree structure validation completed successfully (%d nodes checked in %v)",
+		idx.logger.Debugf("Tree structure validation completed successfully (%d nodes checked in %v)",
 			result.NodesChecked, result.TimeElapsed)
 	} else {
 		idx.logger.Warnf("Tree structure validation found %d errors and %d warnings",
@@ -235,7 +235,7 @@ func CalculateTreeStatistics(idx *BTreeIndex) (*TreeStatistics, error) {
 		stats.MinKeyLength = 0
 	}
 
-	idx.logger.Infof("Tree statistics calculated: %d nodes (%d leaf, %d internal), %d keys, height %d",
+	idx.logger.Debugf("Tree statistics calculated: %d nodes (%d leaf, %d internal), %d keys, height %d",
 		stats.TotalNodes, stats.LeafNodes, stats.InternalNodes, stats.TotalKeys, stats.TreeHeight)
 
 	return stats, nil
@@ -1343,7 +1343,7 @@ func (idx *BTreeIndex) compact() error {
 		return nil
 	}
 
-	idx.logger.Infof("Starting index compaction for '%s'", idx.FilePath)
+	idx.logger.Debugf("Starting index compaction for '%s'", idx.FilePath)
 
 	// Create maintenance result to track compaction metrics
 	result := &MaintenanceResult{
@@ -1430,7 +1430,7 @@ func (idx *BTreeIndex) compact() error {
 			fragmentationImprovement := preCompactionStats.FragmentationPct - postCompactionStats.FragmentationPct
 			fillFactorImprovement := postCompactionStats.FillFactor - preCompactionStats.FillFactor
 
-			idx.logger.Infof("Compaction results: fragmentation reduced by %.2f%%, fill factor improved by %.2f%%",
+			idx.logger.Debugf("Compaction results: fragmentation reduced by %.2f%%, fill factor improved by %.2f%%",
 				fragmentationImprovement, fillFactorImprovement*100)
 		}
 
@@ -1460,7 +1460,7 @@ func (idx *BTreeIndex) compact() error {
 	result.EndTime = time.Now()
 	duration := result.EndTime.Sub(result.StartTime)
 
-	idx.logger.Infof("Index compaction completed successfully in %v: processed %d entries, reclaimed %d pages",
+	idx.logger.Debugf("Index compaction completed successfully in %v: processed %d entries, reclaimed %d pages",
 		duration, len(allEntries), result.PagesReclaimed)
 
 	return nil

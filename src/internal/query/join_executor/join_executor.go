@@ -67,7 +67,7 @@ type DefaultJoinExecutor struct {
 func NewDefaultJoinExecutor(logger *zap.SugaredLogger, defaultMemoryLimit int64, useSIMD bool) JoinExecutor {
 	executor := &DefaultJoinExecutor{
 		strategies:            make([]JoinStrategy, 0),
-		patternTracker:        NewJoinPatternTracker(logger, 5, 10), // Hot after 5, optimize after 10
+		patternTracker:        NewShardedJoinPatternTracker(logger, 5, 10), // Hot after 5, optimize after 10
 		logger:                logger,
 		defaultMemoryLimit:    defaultMemoryLimit,
 		enablePatternTracking: true,
@@ -79,7 +79,7 @@ func NewDefaultJoinExecutor(logger *zap.SugaredLogger, defaultMemoryLimit int64,
 	executor.RegisterStrategy(NewNestedLoopJoinStrategy(logger, 1000, useSIMD))          // Max 1000 docs in inner loop
 	executor.RegisterStrategy(NewMergeJoinStrategy(logger, defaultMemoryLimit, useSIMD)) // Merge join for sorted inputs
 
-	logger.Infof("Created join executor with %d strategies, memory limit: %d bytes, SIMD: %v",
+	logger.Debugf("Created join executor with %d strategies, memory limit: %d bytes, SIMD: %v",
 		len(executor.strategies), defaultMemoryLimit, useSIMD)
 
 	return executor
@@ -147,7 +147,7 @@ func (dje *DefaultJoinExecutor) Execute(request *JoinRequest) (*JoinResult, erro
 		}
 	}
 
-	dje.logger.Infof("Executing join: %s ⋈ %s (type: %v, conditions: %d, estimated memory: %d MB)",
+	dje.logger.Debugf("Executing join: %s ⋈ %s (type: %v, conditions: %d, estimated memory: %d MB)",
 		request.LeftBundle.GetName(), request.RightBundle.GetName(),
 		request.JoinType, len(request.Conditions), estimatedMemory/(1024*1024))
 
@@ -185,7 +185,7 @@ func (dje *DefaultJoinExecutor) Execute(request *JoinRequest) (*JoinResult, erro
 		)
 	}
 
-	dje.logger.Infof("Join completed: %d results in %v using %s",
+	dje.logger.Debugf("Join completed: %d results in %v using %s",
 		len(result.Documents), result.ExecutionTime, result.Algorithm)
 
 	return result, nil
@@ -310,7 +310,7 @@ func (dje *DefaultJoinExecutor) selectBestStrategy(request *JoinRequest) (JoinSt
 				estimatedHashTableSize,
 				buildBundle.GetTotalDocuments(),
 				probeBundle.GetTotalDocuments())
-			dje.logger.Infof("Index optimization: %s", explanation)
+			dje.logger.Debugf("Index optimization: %s", explanation)
 		} else {
 			dje.logger.Debugf("No beneficial index found for join keys %s/%s", buildKey, probeKey)
 		}
@@ -412,7 +412,7 @@ func (dje *DefaultJoinExecutor) tryFallbackStrategy(request *JoinRequest, failed
 			if strategy.SupportsJoinType(request.JoinType) {
 				_, canHandle := strategy.EstimateCost(request)
 				if canHandle {
-					dje.logger.Infof("Using fallback strategy: %s", strategy.GetName())
+					dje.logger.Debugf("Using fallback strategy: %s", strategy.GetName())
 					return strategy.Execute(request)
 				}
 			}
@@ -447,7 +447,7 @@ type JoinExecutorStatistics struct {
 /*
 func (dje *DefaultJoinExecutor) SetMaxConcurrentJoins(max int) {
 	dje.maxConcurrentJoins = max
-	dje.logger.Infof("Set maximum concurrent joins to %d", max)
+	dje.logger.Debugf("Set maximum concurrent joins to %d", max)
 }
 
 func (dje *DefaultJoinExecutor) GetJoinQueue() JoinQueue {
@@ -474,7 +474,7 @@ type JoinJobStatus struct {
 /*
 func (dje *DefaultJoinExecutor) UpdateRelationshipMetadata(metadata RelationshipMetadata) {
 	dje.relationshipMetadata = metadata
-	dje.logger.Infof("Updated relationship metadata")
+	dje.logger.Debugf("Updated relationship metadata")
 }
 
 func (dje *DefaultJoinExecutor) GetJoinRecommendations(bundles []string) []JoinRecommendation {
@@ -509,13 +509,13 @@ func (dje *DefaultJoinExecutor) EnableResultCaching(enabled bool) {
 	if enabled && dje.resultCache == nil {
 		dje.resultCache = NewJoinCache(dje.logger)
 	}
-	dje.logger.Infof("Result caching %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
+	dje.logger.Debugf("Result caching %s", map[bool]string{true: "enabled", false: "disabled"}[enabled])
 }
 
 func (dje *DefaultJoinExecutor) ClearJoinCache() {
 	if dje.resultCache != nil {
 		dje.resultCache.Clear()
-		dje.logger.Infof("Join result cache cleared")
+		dje.logger.Debugf("Join result cache cleared")
 	}
 }
 

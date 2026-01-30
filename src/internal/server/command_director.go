@@ -363,7 +363,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			serviceManager.DatabaseService.UpdateDatabase(*dbCommand)
 		case "bundle":
 			normalizedCommand := helpers.NormalizeCommand(command) // Normalize once
-			//logger.Infof("DEBUG COMMAND IS :: %s", normalizedCommand)
+			//logger.Debugf("DEBUG COMMAND IS :: %s", normalizedCommand)
 
 			// Check if this is a DROP RELATIONSHIP command - handle it separately without going through new parser
 			if strings.Contains(strings.ToUpper(normalizedCommand), "DROP RELATIONSHIP") {
@@ -441,12 +441,12 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			// Rename bundle if new name is provided
 			if bndleCommand.NewBundleName != "" {
-				logger.Infof("Renaming bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
+				logger.Debugf("Renaming bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
 				err := serviceManager.BundleService.RenameBundle(database, bundle, bndleCommand.NewBundleName)
 				if err != nil {
 					return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bndleCommand.BundleName).WithContext("new_bundle", bndleCommand.NewBundleName)
 				}
-				logger.Infof("Successfully renamed bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
+				logger.Debugf("Successfully renamed bundle '%s' to '%s'", bndleCommand.BundleName, bndleCommand.NewBundleName)
 
 				// Update the bundle reference after rename
 				bundle, err = serviceManager.BundleService.GetBundleByName(database, bndleCommand.NewBundleName)
@@ -458,12 +458,12 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			// Apply field changes if present
 			if len(bndleCommand.Changes) > 0 {
-				logger.Infof("Applying %d field changes to bundle '%s'", len(bndleCommand.Changes), bundle.Name)
+				logger.Debugf("Applying %d field changes to bundle '%s'", len(bndleCommand.Changes), bundle.Name)
 				err := serviceManager.BundleService.ApplyFieldChanges(database, bundle, bndleCommand.Changes)
 				if err != nil {
 					return &result, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bndleCommand.BundleName)
 				}
-				logger.Infof("Successfully applied field changes to bundle '%s'", bundle.Name)
+				logger.Debugf("Successfully applied field changes to bundle '%s'", bundle.Name)
 
 				if len(result) > 0 {
 					result = fmt.Sprintf("%s Bundle '%s' updated successfully.", result, bundle.Name)
@@ -732,7 +732,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					"failed to filter documents by WHERE clause", errors.LayerCommand)
 			}
 
-			logger.Infof("WHERE clause filter matched %d documents for deletion", len(docIDs))
+			logger.Debugf("WHERE clause filter matched %d documents for deletion", len(docIDs))
 
 			// PHASE 4+: Document-level locks for DELETE (both transaction and autocommit modes)
 			// Extended to autocommit operations for better concurrent delete throughput.
@@ -992,7 +992,7 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 		filteredDocuments[docID] = filteredDoc
 	}
 
-	logger.Infof("Filtered %d documents to include only fields: %v", len(filteredDocuments), selectedFields)
+	logger.Debugf("Filtered %d documents to include only fields: %v", len(filteredDocuments), selectedFields)
 	return filteredDocuments
 }
 
@@ -1161,7 +1161,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		}
 	}
 
-	logger.Infof("Query executed successfully: Retrieved %d documents", len(documents))
+	logger.Debugf("Query executed successfully: Retrieved %d documents", len(documents))
 
 	// TRANSACTION SUPPORT: Acquire read locks for documents accessed in a transaction
 	// This ensures repeatable read isolation - prevents other transactions from modifying
@@ -1183,10 +1183,10 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	// These return a single synthetic document with expression results in Data map
 	// Skip document metadata (DocumentID, CreatedAt, UpdatedAt) and return only expression values
 	if query.FromBundle == "" && len(documents) == 1 {
-		logger.Infof("EXPRESSION-ONLY SELECT detected: FromBundle='%s', document count=%d", query.FromBundle, len(documents))
+		logger.Debugf("EXPRESSION-ONLY SELECT detected: FromBundle='%s', document count=%d", query.FromBundle, len(documents))
 		for docID, doc := range documents {
 			// Expression results are in doc.Data map - return directly
-			logger.Infof("Expression result document ID: %s, Data keys: %v, Data values: %+v", docID, getKeys(doc.Data), doc.Data)
+			logger.Debugf("Expression result document ID: %s, Data keys: %v, Data values: %+v", docID, getKeys(doc.Data), doc.Data)
 			results := make([]map[string]interface{}, 1)
 			results[0] = doc.Data
 

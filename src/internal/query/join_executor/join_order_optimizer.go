@@ -135,7 +135,7 @@ func (opt *JoinOrderOptimizer) OptimizeJoinOrder(
 		}
 	}
 
-	opt.logger.Infof("Optimizing join order for %d relations, %d join edges",
+	opt.logger.Debugf("Optimizing join order for %d relations, %d join edges",
 		len(relations), len(edges))
 
 	// Choose algorithm based on relation count
@@ -210,7 +210,7 @@ func (opt *JoinOrderOptimizer) optimizeWithDP(
 	// Convert path to plan
 	plan := opt.pathToPlan(bestPath, relations, edgeMap)
 
-	opt.logger.Infof("DP optimization complete: order=%v, cost=%.2f",
+	opt.logger.Debugf("DP optimization complete: order=%v, cost=%.2f",
 		plan.Order, plan.TotalCost)
 
 	return plan, nil
@@ -485,7 +485,7 @@ func (opt *JoinOrderOptimizer) optimizeWithGreedy(
 		Steps:     steps,
 	}
 
-	opt.logger.Infof("Greedy optimization complete: order=%v, cost=%.2f",
+	opt.logger.Debugf("Greedy optimization complete: order=%v, cost=%.2f",
 		plan.Order, plan.TotalCost)
 
 	return plan, nil

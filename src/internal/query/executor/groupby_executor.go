@@ -113,7 +113,7 @@ func NewGroupByExecutor(query *queryparser.SelectQueryWithGroupBy, logger *zap.S
 
 // Execute executes the GROUP BY query using the optimal strategy
 func (e *GroupByExecutor) Execute(documents map[string]*models.Document) (map[string]*models.Document, error) {
-	e.logger.Infof("Executing GROUP BY query with %s strategy", e.query.ExecutionStrategy.String())
+	e.logger.Debugf("Executing GROUP BY query with %s strategy", e.query.ExecutionStrategy.String())
 
 	// Filter documents if WHERE clause exists
 	filteredDocs := documents
@@ -129,10 +129,10 @@ func (e *GroupByExecutor) Execute(documents map[string]*models.Document) (map[st
 	// Execute based on chosen strategy
 	switch e.query.ExecutionStrategy {
 	case queryparser.HashAggregate:
-		e.logger.Infof("DEBUG DEBUG taking the FAST ride into EXECUTE SORT NODE")
+		//e.logger.Debugf("DEBUG DEBUG taking the FAST ride into EXECUTE SORT NODE")
 		groupResults, err = e.executeHashAggregate(filteredDocs)
 	case queryparser.SortGroupAggregate:
-		e.logger.Infof("DEBUG DEBUG taking the slow ride into EXECUTE SORT NODE")
+		//e.logger.Debugf("DEBUG DEBUG taking the slow ride into EXECUTE SORT NODE")
 		groupResults, err = e.executeSortGroupAggregate(filteredDocs)
 	default:
 		return nil, fmt.Errorf("unsupported execution strategy: %s", e.query.ExecutionStrategy.String())
@@ -164,13 +164,13 @@ func (e *GroupByExecutor) Execute(documents map[string]*models.Document) (map[st
 		}
 	}
 
-	e.logger.Infof("GROUP BY query completed successfully, returned %d groups", len(resultDocs))
+	e.logger.Debugf("GROUP BY query completed successfully, returned %d groups", len(resultDocs))
 	return resultDocs, nil
 }
 
 // executeHashAggregate implements hash-based aggregation
 func (e *GroupByExecutor) executeHashAggregate(documents map[string]*models.Document) (map[GroupKey]*GroupResult, error) {
-	e.logger.Infof("Executing Hash Aggregate strategy")
+	e.logger.Debugf("Executing Hash Aggregate strategy")
 
 	groupMap := make(map[GroupKey]*GroupResult)
 

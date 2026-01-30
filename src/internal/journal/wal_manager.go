@@ -486,7 +486,7 @@ func (wm *WALManager) UndoToLSN(targetLSN uint64, txID string, undoFunc func(WAL
 		return nil
 	}
 
-	wm.logger.Infof("Starting undo from LSN %d to LSN %d for txID=%s", currentLSN, targetLSN, txID)
+	wm.logger.Debugf("Starting undo from LSN %d to LSN %d for txID=%s", currentLSN, targetLSN, txID)
 
 	// Collect entries to undo (we need to read forward then apply backward)
 	entriesToUndo := make([]WALEntry, 0)
@@ -499,30 +499,30 @@ func (wm *WALManager) UndoToLSN(targetLSN uint64, txID string, undoFunc func(WAL
 	// Read entries from target LSN to current LSN
 	err := wm.wal.ReplayOperations(targetLSN, func(entry WALEntry) error {
 		totalEntriesSeen++
-		wm.logger.Infof("REPLAY: LSN=%d, TxID=%s, Op=%d, targetLSN=%d, checkTxID=%s",
+		wm.logger.Debugf("REPLAY: LSN=%d, TxID=%s, Op=%d, targetLSN=%d, checkTxID=%s",
 			entry.LSN, entry.TxID, entry.Operation, targetLSN, txID)
 
 		// Check if txID matches
 		if entry.TxID == txID {
 			matchingTxID++
-			wm.logger.Infof("REPLAY: TxID matches!")
+			wm.logger.Debugf("REPLAY: TxID matches!")
 
 			// Check if LSN is after target
 			if entry.LSN > targetLSN {
 				matchingLSN++
 				entriesToUndo = append(entriesToUndo, entry)
-				wm.logger.Infof("REPLAY: Entry added to undo list! Total: %d", len(entriesToUndo))
+				wm.logger.Debugf("REPLAY: Entry added to undo list! Total: %d", len(entriesToUndo))
 			} else {
-				wm.logger.Infof("REPLAY: LSN %d <= targetLSN %d, skipping", entry.LSN, targetLSN)
+				wm.logger.Debugf("REPLAY: LSN %d <= targetLSN %d, skipping", entry.LSN, targetLSN)
 			}
 		} else {
-			wm.logger.Infof("REPLAY: TxID mismatch (entry=%s, target=%s)", entry.TxID, txID)
+			wm.logger.Debugf("REPLAY: TxID mismatch (entry=%s, target=%s)", entry.TxID, txID)
 		}
 
 		return nil
 	})
 
-	wm.logger.Infof("REPLAY SUMMARY: totalSeen=%d, matchingTxID=%d, matchingLSN=%d, toUndo=%d",
+	wm.logger.Debugf("REPLAY SUMMARY: totalSeen=%d, matchingTxID=%d, matchingLSN=%d, toUndo=%d",
 		totalEntriesSeen, matchingTxID, matchingLSN, len(entriesToUndo))
 
 	if err != nil {
@@ -563,7 +563,7 @@ func (wm *WALManager) UndoToLSN(targetLSN uint64, txID string, undoFunc func(WAL
 		}
 	}
 
-	wm.logger.Infof("Undo complete: %d operations reversed for txID=%s", undoCount, txID)
+	wm.logger.Debugf("Undo complete: %d operations reversed for txID=%s", undoCount, txID)
 	return nil
 }
 
@@ -576,7 +576,7 @@ func (wm *WALManager) GetTransactionCounter() *TransactionCounter {
 // Should be called after loading persisted counter value or scanning WAL
 func (wm *WALManager) InitializeTransactionCounter(value uint64) {
 	wm.transactionCounter.SetValue(value)
-	wm.logger.Infof("Initialized transaction counter to %d", value)
+	wm.logger.Debugf("Initialized transaction counter to %d", value)
 }
 
 // BeginTransactionUint64 starts a new transaction and returns the transaction ID as uint64
@@ -689,7 +689,7 @@ func (wm *WALManager) RecoverCommitSequenceAssignments() (uint64, error) {
 	if highestCommitSeq > 0 {
 		// Initialize snapshot manager with recovered commit sequence
 		wm.snapshotManager.SetGlobalSequence(highestCommitSeq)
-		wm.logger.Infof("Recovered %d COMMIT_SEQUENCE_ASSIGN entries, highest commit sequence: %d",
+		wm.logger.Debugf("Recovered %d COMMIT_SEQUENCE_ASSIGN entries, highest commit sequence: %d",
 			recoveredCount, highestCommitSeq)
 	}
 

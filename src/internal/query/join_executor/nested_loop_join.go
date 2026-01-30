@@ -102,7 +102,7 @@ func (nljs *NestedLoopJoinStrategy) EstimateCost(request *JoinRequest) (cost flo
 func (nljs *NestedLoopJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) {
 	startTime := time.Now()
 
-	nljs.logger.Infof("Executing nested loop join: %s ⋈ %s",
+	nljs.logger.Debugf("Executing nested loop join: %s ⋈ %s",
 		request.LeftBundle.GetName(), request.RightBundle.GetName())
 
 	// Choose outer and inner loops based on size (smaller becomes inner)
@@ -110,16 +110,16 @@ func (nljs *NestedLoopJoinStrategy) Execute(request *JoinRequest) (*JoinResult, 
 	outerKey, innerKey := nljs.getJoinKeys(request.Conditions, swapped)
 
 	// DEBUG: Log join configuration
-	//nljs.logger.Infof("JOIN DEBUG: Outer bundle: %s, Inner bundle: %s, Swapped: %t",
+	//nljs.logger.Debugf("JOIN DEBUG: Outer bundle: %s, Inner bundle: %s, Swapped: %t",
 	//	outerBundle.GetName(), innerBundle.GetName(), swapped)
-	//nljs.logger.Infof("JOIN DEBUG: Outer key: '%s', Inner key: '%s'", outerKey, innerKey)
-	//nljs.logger.Infof("JOIN DEBUG: Original join condition: %s %s %s",
+	//nljs.logger.Debugf("JOIN DEBUG: Outer key: '%s', Inner key: '%s'", outerKey, innerKey)
+	//nljs.logger.Debugf("JOIN DEBUG: Original join condition: %s %s %s",
 	//	request.Conditions[0].LeftKey, request.Conditions[0].Operator,
 	//	request.Conditions[0].RightKey)
 
 	// Pre-load inner loop documents for repeated access
 	innerDocs := innerBundle.GetAllDocuments()
-	nljs.logger.Infof("Loaded %d documents for inner loop from bundle %s",
+	nljs.logger.Debugf("Loaded %d documents for inner loop from bundle %s",
 		len(innerDocs), innerBundle.GetName())
 
 	// Execute nested loop join
@@ -141,7 +141,7 @@ func (nljs *NestedLoopJoinStrategy) Execute(request *JoinRequest) (*JoinResult, 
 		Comparisons:   stats.Comparisons,
 	}
 
-	nljs.logger.Infof("Nested loop join completed: %d results in %v",
+	nljs.logger.Debugf("Nested loop join completed: %d results in %v",
 		len(joinedDocs), result.ExecutionTime)
 
 	return result, nil

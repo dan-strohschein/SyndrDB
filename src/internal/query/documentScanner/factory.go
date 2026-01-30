@@ -89,7 +89,7 @@ func (sf *ScannerFactory) CreateScannerWithCache(
 
 	scanner := NewSmartBundleScanner(bundle, config, cache, sf.logger)
 
-	sf.logger.Infof("Created scanner for bundle '%s' with custom cache", bundle.GetName())
+	sf.logger.Debugf("Created scanner for bundle '%s' with custom cache", bundle.GetName())
 
 	return scanner, nil
 }
@@ -189,10 +189,10 @@ type BundleAdapter struct {
 func NewBundleAdapter(bundle *models.Bundle, bundleService BundleServiceInterface, logger *zap.SugaredLogger) *BundleAdapter {
 	// SAFETY: Log bundle metadata immediately to diagnose potential infinite loop causes
 	if bundle != nil {
-		//logger.Infof("DEBUG: Creating NEW BundleAdapter for bundle '%s' (instance %p)", bundle.Name, bundle)
-		// logger.Infof("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
-		// logger.Infof("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
-		// logger.Infof("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
+		//logger.Debugf("DEBUG: Creating NEW BundleAdapter for bundle '%s' (instance %p)", bundle.Name, bundle)
+		// logger.Debugf("SAFETY CHECK: Creating BundleAdapter for bundle '%s'", bundle.Name)
+		// logger.Debugf("SAFETY CHECK: Bundle.PageCount = %d", bundle.PageCount)
+		// logger.Debugf("SAFETY CHECK: Bundle.TotalDocuments = %d", bundle.TotalDocuments)
 		// Documents are now accessed via page cache - no memtable to check
 		logger.Debugf("SAFETY CHECK: Bundle '%s' using page-based loading (page cache)", bundle.Name)
 
@@ -475,7 +475,7 @@ func (ba *BundleAdapter) getTotalDocumentsCount() int {
 // GetDocumentIDs returns all document IDs lazily without loading full documents
 func (ba *BundleAdapter) GetDocumentIDs() []string {
 	// CRITICAL DEBUG: Log entry point
-	//ba.logger.Infof("🔍 GetDocumentIDs CALLED - Bundle: %s, TotalDocuments: %d, PageCount: %d, DocumentsComplete: %v, Documents map size: %d",
+	//ba.logger.Debugf("🔍 GetDocumentIDs CALLED - Bundle: %s, TotalDocuments: %d, PageCount: %d, DocumentsComplete: %v, Documents map size: %d",
 	//ba.bundle.Name, ba.bundle.TotalDocuments, ba.bundle.PageCount, ba.bundle.DocumentsComplete,
 	// func() int {
 	// 	if ba.bundle.Documents != nil {

@@ -118,7 +118,7 @@ func CreateDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 // 8. Updates the system catalog
 // 9. Logs the operation to WAL
 func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, session *Session) (*CommandResponse, error) {
-	logger.Infof("Processing RENAME DATABASE command: %s", command)
+	logger.Debugf("Processing RENAME DATABASE command: %s", command)
 
 	// Parse the rename command
 	dbCommand, err := db.ParseRenameDatabaseCommand(command)
@@ -188,13 +188,13 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 				logger.Warnf("Failed to invalidate sessions for user '%s': %v", username, err)
 			} else {
 				sessionsTerminated += userSessionCounts[username]
-				logger.Infof("Invalidated %d session(s) for user '%s'", userSessionCounts[username], username)
+				logger.Debugf("Invalidated %d session(s) for user '%s'", userSessionCounts[username], username)
 			}
 		}
 	}
 
 	// Flush all buffers before rename to ensure data integrity
-	logger.Infof("Flushing all buffers before renaming database '%s'", oldName)
+	logger.Debugf("Flushing all buffers before renaming database '%s'", oldName)
 	if serviceManager.BundleService != nil {
 		serviceManager.BundleService.FlushAllBuffers()
 	}
@@ -222,7 +222,7 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 
 			// TODO: Add specific WAL log method for database rename
 			// For now, using generic logging
-			logger.Infof("WAL: Database renamed - txID: %s, data: %+v", txID, walData)
+			logger.Debugf("WAL: Database renamed - txID: %s, data: %+v", txID, walData)
 
 			return nil
 		})
@@ -268,13 +268,13 @@ func RenameDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		Result:      result,
 	}
 
-	logger.Infof("Successfully renamed database '%s' to '%s'", oldName, newName)
+	logger.Debugf("Successfully renamed database '%s' to '%s'", oldName, newName)
 	return cmdResponse, nil
 }
 
 // UseDatabase handles the USE "<DATABASE_NAME>"; command to switch the current database context
 func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
-	logger.Infof("Processing USE command: %s", command)
+	logger.Debugf("Processing USE command: %s", command)
 
 	// Parse the database name from the USE command
 	databaseName, err := parseDatabaseNameFromUse(command)
@@ -327,7 +327,7 @@ func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager Servi
 
 // AttachDatabase handles the ATTACH DATABASE "<file_path>" "<database_name>" command
 func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager) (*CommandResponse, error) {
-	logger.Infof("Processing ATTACH DATABASE command: %s", command)
+	logger.Debugf("Processing ATTACH DATABASE command: %s", command)
 
 	// Parse the file path and database name from the command
 	// Expected format: ATTACH DATABASE "<file_path>" "<database_name>";
@@ -381,7 +381,7 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		if err != nil {
 			logger.Warnf("Warning: Failed to add database to catalog (continuing with in-memory only): %v", err)
 		} else {
-			logger.Infof("Successfully added database '%s' to catalog", databaseName)
+			logger.Debugf("Successfully added database '%s' to catalog", databaseName)
 		}
 	}
 
@@ -444,11 +444,11 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 					if bundleErr != nil {
 						logger.Warnf("Warning: Failed to add bundle '%s' to catalog (continuing with in-memory only): %v", bundleName, bundleErr)
 					} else {
-						logger.Infof("Added bundle '%s' to catalog", bundleName)
+						logger.Debugf("Added bundle '%s' to catalog", bundleName)
 					}
 				}
 				bundlesAdded++
-				logger.Infof("Registered bundle '%s' from file '%s'", bundleName, bundleFile)
+				logger.Debugf("Registered bundle '%s' from file '%s'", bundleName, bundleFile)
 			}
 		}
 	}
@@ -466,7 +466,7 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		Result:      resultMap,
 	}
 
-	logger.Infof("Successfully attached database '%s' from file '%s' with %d bundles", databaseName, filePath, bundlesAdded)
+	logger.Debugf("Successfully attached database '%s' from file '%s' with %d bundles", databaseName, filePath, bundlesAdded)
 	return response, nil
 }
 
@@ -482,7 +482,7 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 // 8. Catalog cleanup (remove all bundles and database record)
 // 9. Filesystem deletion (schema file, database directory)
 func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, session *Session) (*CommandResponse, error) {
-	logger.Infof("Processing DROP DATABASE command: %s", command)
+	logger.Debugf("Processing DROP DATABASE command: %s", command)
 
 	// Parse the drop command
 	dbCommand, err := db.ParseDropDatabaseCommand(command)
@@ -557,7 +557,7 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 					logger.Warnf("Failed to invalidate sessions for user '%s': %v", username, err)
 				} else {
 					sessionsTerminated += userSessionCounts[username]
-					logger.Infof("Terminated %d session(s) for user '%s' due to database drop", userSessionCounts[username], username)
+					logger.Debugf("Terminated %d session(s) for user '%s' due to database drop", userSessionCounts[username], username)
 				}
 			}
 		}
@@ -573,7 +573,7 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 		if err != nil {
 			logger.Warnf("Failed to lock database '%s': %v (continuing with drop)", dbName, err)
 		} else {
-			logger.Infof("Database '%s' locked for drop operation", dbName)
+			logger.Debugf("Database '%s' locked for drop operation", dbName)
 			// Ensure we unlock if something fails later (though the database will be deleted anyway)
 			defer func() {
 				if serviceManager.LockService.IsLocked(dbName) {
@@ -586,21 +586,21 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 	// Step 6: In-memory cleanup - Close and remove GraphQL schema manager
 	if serviceManager.BundleService != nil {
 		// TODO: I will add public methods to BundleService for schema manager cleanup when refactoring schema management
-		logger.Infof("Clearing GraphQL schema manager for database '%s'", dbName)
+		logger.Debugf("Clearing GraphQL schema manager for database '%s'", dbName)
 
 		// Clear bundle metadata caches, document page caches, and index caches
 		// TODO: I will add explicit cache clearing methods for bundles when refactoring cache management
-		logger.Infof("Clearing in-memory caches for database '%s'", dbName)
+		logger.Debugf("Clearing in-memory caches for database '%s'", dbName)
 
 		// Flush all buffers before deletion
 		serviceManager.BundleService.FlushAllBuffers()
-		logger.Infof("Flushed all buffers for database '%s'", dbName)
+		logger.Debugf("Flushed all buffers for database '%s'", dbName)
 	}
 
 	// Step 7: Remove database from in-memory map
 	if serviceManager.DatabaseService != nil {
 		delete(serviceManager.DatabaseService.Databases, dbName)
-		logger.Infof("Removed database '%s' from in-memory service", dbName)
+		logger.Debugf("Removed database '%s' from in-memory service", dbName)
 	}
 
 	// Step 8: WAL logging and catalog cleanup
@@ -621,13 +621,13 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 				walData["admin_user"] = session.Username
 			}
 
-			logger.Infof("WAL: Logging database drop - txID: %s, database: %s", txID, dbName)
+			logger.Debugf("WAL: Logging database drop - txID: %s, database: %s", txID, dbName)
 
 			// Step 9: Remove all bundles from catalog
 			if serviceManager.InternalCatalogService != nil {
 				// Get all bundles for this database
 				for _, bundle := range database.Bundles {
-					logger.Infof("Removing bundle '%s' (ID: %s) from catalog", bundle.Name, bundle.BundleID)
+					logger.Debugf("Removing bundle '%s' (ID: %s) from catalog", bundle.Name, bundle.BundleID)
 					err := serviceManager.InternalCatalogService.RemoveBundleFromCatalog(bundle.BundleID)
 					if err != nil {
 						logger.Warnf("Failed to remove bundle '%s' from catalog: %v (continuing)", bundle.Name, err)
@@ -635,7 +635,7 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 				}
 
 				// Remove database record from catalog
-				logger.Infof("Removing database '%s' from catalog", dbName)
+				logger.Debugf("Removing database '%s' from catalog", dbName)
 				err := serviceManager.InternalCatalogService.RemoveDatabaseFromCatalog(database.DatabaseID)
 				if err != nil {
 					logger.Errorf("Failed to remove database '%s' from catalog: %v", dbName, err)
@@ -652,7 +652,7 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 			// Don't return yet - try to clean up filesystem and log to audit
 		} else {
 			dropSuccess = true
-			logger.Infof("WAL transaction completed successfully for database '%s'", dbName)
+			logger.Debugf("WAL transaction completed successfully for database '%s'", dbName)
 		}
 	} else {
 		// No WAL manager - execute catalog cleanup directly
@@ -684,7 +684,7 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 		if err != nil {
 			logger.Warnf("Failed to delete GraphQL schema file '%s': %v", schemaFilePath, err)
 		} else {
-			logger.Infof("Deleted GraphQL schema file '%s'", schemaFilePath)
+			logger.Debugf("Deleted GraphQL schema file '%s'", schemaFilePath)
 		}
 	}
 
@@ -697,12 +697,12 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 			logger.Errorf("Please manually delete directory: %s", databasePath)
 		} else {
 			filesystemSuccess = true
-			logger.Infof("Successfully deleted database directory '%s'", databasePath)
+			logger.Debugf("Successfully deleted database directory '%s'", databasePath)
 		}
 	} else {
 		// Directory doesn't exist - consider it success
 		filesystemSuccess = true
-		logger.Infof("Database directory '%s' does not exist (already deleted or never created)", databasePath)
+		logger.Debugf("Database directory '%s' does not exist (already deleted or never created)", databasePath)
 	}
 
 	// Step 11: Security audit logging (WHO, WHEN, WHAT, SUCCESS/FAILURE)
@@ -710,7 +710,7 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 	overallSuccess := dropSuccess && filesystemSuccess
 	if session != nil {
 		if overallSuccess {
-			logger.Infof("AUDIT: User '%s' successfully dropped database '%s' at %v", session.Username, dbName, time.Now())
+			logger.Debugf("AUDIT: User '%s' successfully dropped database '%s' at %v", session.Username, dbName, time.Now())
 		} else {
 			logger.Errorf("AUDIT: User '%s' attempted to drop database '%s' at %v but operation partially failed (catalog: %v, filesystem: %v)",
 				session.Username, dbName, time.Now(), dropSuccess, filesystemSuccess)
@@ -741,6 +741,6 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 		Result:      result,
 	}
 
-	logger.Infof("Successfully dropped database '%s'", dbName)
+	logger.Debugf("Successfully dropped database '%s'", dbName)
 	return cmdResponse, nil
 }

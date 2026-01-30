@@ -93,7 +93,7 @@ func NewAutoAnalyzeTracker(config AutoAnalyzeConfig, statsStorage *StatisticsSto
 			tracker.wg.Add(1)
 			go tracker.analysisWorker(i)
 		}
-		logger.Infof("Auto-analyze tracker started with %d workers (threshold: %d changes or %.1f%% ratio)",
+		logger.Debugf("Auto-analyze tracker started with %d workers (threshold: %d changes or %.1f%% ratio)",
 			config.WorkerCount, config.AbsoluteThreshold, config.RatioThreshold*100)
 	} else {
 		logger.Info("Auto-analyze tracker created but disabled")
@@ -142,7 +142,7 @@ func (aat *AutoAnalyzeTracker) RegisterBundle(bundleName string, totalDocuments 
 
 	// Queue immediate analysis if version mismatch or no stats
 	if needsReAnalyze {
-		aat.logger.Infof("Queueing immediate analysis for %s (version mismatch or missing stats)", bundleName)
+		aat.logger.Debugf("Queueing immediate analysis for %s (version mismatch or missing stats)", bundleName)
 		select {
 		case aat.analysisQueue <- bundleName:
 		default:
@@ -187,7 +187,7 @@ func (aat *AutoAnalyzeTracker) trackChanges(bundleName string, netDocumentChange
 
 	// Check if analysis threshold reached
 	if needsReAnalyze || aat.shouldAnalyze(totalDocs, changesSince) {
-		aat.logger.Infof("Auto-analyze threshold reached for %s: %d changes (%d total docs, threshold: %d)",
+		aat.logger.Debugf("Auto-analyze threshold reached for %s: %d changes (%d total docs, threshold: %d)",
 			bundleName, changesSince, totalDocs, aat.calculateThreshold(totalDocs))
 
 		// Queue for analysis
@@ -231,7 +231,7 @@ func (aat *AutoAnalyzeTracker) MarkAnalyzed(bundleName string) {
 	tracker.NeedsReAnalyze = false
 	tracker.mu.Unlock()
 
-	aat.logger.Infof("Reset change counter for %s after successful analysis", bundleName)
+	aat.logger.Debugf("Reset change counter for %s after successful analysis", bundleName)
 }
 
 // GetTrackerStats returns current tracking statistics
@@ -268,7 +268,7 @@ func (aat *AutoAnalyzeTracker) ForceAnalysis(bundleName string) error {
 	// Queue for immediate analysis
 	select {
 	case aat.analysisQueue <- bundleName:
-		aat.logger.Infof("Forced analysis queued for %s", bundleName)
+		aat.logger.Debugf("Forced analysis queued for %s", bundleName)
 		return nil
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("timeout queuing analysis for %s", bundleName)
@@ -278,22 +278,22 @@ func (aat *AutoAnalyzeTracker) ForceAnalysis(bundleName string) error {
 // analysisWorker processes analysis queue
 func (aat *AutoAnalyzeTracker) analysisWorker(workerID int) {
 	defer aat.wg.Done()
-	aat.logger.Infof("Auto-analyze worker %d started", workerID)
+	aat.logger.Debugf("Auto-analyze worker %d started", workerID)
 
 	for {
 		select {
 		case bundleName := <-aat.analysisQueue:
-			aat.logger.Infof("Worker %d: analyzing bundle %s", workerID, bundleName)
+			aat.logger.Debugf("Worker %d: analyzing bundle %s", workerID, bundleName)
 
 			// TODO: I will integrate with actual bundle loading and StatisticsCollector
 			// For now, just log the analysis request
-			aat.logger.Infof("Worker %d: analysis placeholder for %s (integration pending)", workerID, bundleName)
+			aat.logger.Debugf("Worker %d: analysis placeholder for %s (integration pending)", workerID, bundleName)
 
 			// Mark as analyzed (in real implementation, this would be after successful analysis)
 			// aat.MarkAnalyzed(bundleName)
 
 		case <-aat.stopCh:
-			aat.logger.Infof("Auto-analyze worker %d stopping", workerID)
+			aat.logger.Debugf("Auto-analyze worker %d stopping", workerID)
 			return
 		}
 	}

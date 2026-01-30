@@ -174,7 +174,7 @@ func probeWithIndex(
 	hjs *HashJoinStrategy,
 ) ([]*JoinedDocument, error) {
 
-	hjs.logger.Infof("Using index-assisted probe for %s on field %s",
+	hjs.logger.Debugf("Using index-assisted probe for %s on field %s",
 		probeBundle.GetName(), probeKey)
 
 	// Step 1: Extract all keys from hash table
@@ -257,7 +257,7 @@ func probeWithIndex(
 		}
 	}
 
-	hjs.logger.Infof("Index-assisted probe complete: %d joined documents from %d probe docs (%.1f%% reduction)",
+	hjs.logger.Debugf("Index-assisted probe complete: %d joined documents from %d probe docs (%.1f%% reduction)",
 		len(joinedDocs), len(probeDocs), (1-float64(len(probeDocs))/float64(probeBundle.GetTotalDocuments()))*100)
 
 	return joinedDocs, nil

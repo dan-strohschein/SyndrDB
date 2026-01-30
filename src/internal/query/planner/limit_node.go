@@ -150,7 +150,7 @@ func NewLimitNode(child ExecutionNode, limit, offset int, logger *zap.SugaredLog
 //   - map[string]*models.Document: Limited documents
 //   - error: Any error during execution
 func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	n.Logger.Infof("Executing LimitNode: Limit=%d, Offset=%d", n.Limit, n.Offset)
+	n.Logger.Debugf("Executing LimitNode: Limit=%d, Offset=%d", n.Limit, n.Offset)
 
 	// CRITICAL FIX: Check if child is SortNode BEFORE executing
 	// This prevents double execution of the child chain (e.g., JOIN executed twice)
@@ -260,7 +260,7 @@ func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, e
 	}
 	if startIndex >= len(docSlice) {
 		// Offset is beyond result set, return empty
-		n.Logger.Infof("LimitNode: offset %d >= document count %d, returning empty result",
+		n.Logger.Debugf("LimitNode: offset %d >= document count %d, returning empty result",
 			n.Offset, len(docSlice))
 		return make(map[string]*models.Document), nil
 	}
@@ -290,7 +290,7 @@ func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, e
 		resultMap[doc.DocumentID] = doc
 	}
 
-	n.Logger.Infof("LimitNode completed: returned %d documents (offset=%d, limit=%d from %d total)",
+	n.Logger.Debugf("LimitNode completed: returned %d documents (offset=%d, limit=%d from %d total)",
 		len(resultMap), n.Offset, n.Limit, len(documents))
 
 	return resultMap, nil

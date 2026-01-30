@@ -46,7 +46,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 		return nil, fmt.Errorf("bundle cannot be nil")
 	}
 
-	s.logger.Infof("Rebuilding hash index '%s' for bundle '%s'", indexName, bundle.Name)
+	s.logger.Debugf("Rebuilding hash index '%s' for bundle '%s'", indexName, bundle.Name)
 
 	startTime := time.Now()
 	result := &HashIndexMaintenanceResult{
@@ -104,7 +104,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 	}
 	result.EntriesProcessed = len(allDocIDs)
 
-	s.logger.Infof("Extracted %d entries from old index", result.EntriesProcessed)
+	s.logger.Debugf("Extracted %d entries from old index", result.EntriesProcessed)
 
 	// STEP 3: Create new index instance with temporary name
 	databasePath := helpers.GetDatabaseFolderPath(databaseName)
@@ -223,7 +223,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 	result.Duration = time.Since(startTime)
 	result.EntriesInserted = result.EntriesProcessed - failedInserts
 
-	s.logger.Infof("Successfully rebuilt hash index '%s': %d entries processed, %d inserted, %d failed in %v",
+	s.logger.Debugf("Successfully rebuilt hash index '%s': %d entries processed, %d inserted, %d failed in %v",
 		indexName, result.EntriesProcessed, result.EntriesInserted, failedInserts, result.Duration)
 
 	return result, nil

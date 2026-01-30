@@ -107,7 +107,7 @@ func (v *UniqueConstraintValidator) ValidateUniqueConstraints(bundle *models.Bun
 			continue
 		}
 
-		v.logger.Infof("[UNIQUE] Validating uniqueness for field '%s' with value '%v'", fieldName, fieldValue)
+		v.logger.Debugf("[UNIQUE] Validating uniqueness for field '%s' with value '%v'", fieldName, fieldValue)
 
 		// Validate uniqueness for this field
 		fieldStart := time.Now()
@@ -224,7 +224,7 @@ func (v *UniqueConstraintValidator) checkHashIndexForDuplicates(
 	}
 
 	// Perform O(1) hash lookup to check if value already exists
-	v.logger.Infof("[UNIQUE] Searching unique index '%s' for value '%s'", indexName, valueStr)
+	v.logger.Debugf("[UNIQUE] Searching unique index '%s' for value '%s'", indexName, valueStr)
 	searchStart := time.Now()
 	results, err := hashIndex.Search(valueStr)
 	searchDuration := time.Since(searchStart)
@@ -253,7 +253,7 @@ func (v *UniqueConstraintValidator) checkHashIndexForDuplicates(
 		return violation, nil
 	}
 
-	v.logger.Infof("[UNIQUE] No duplicates found for field '%s' value '%s'", fieldName, valueStr)
+	v.logger.Debugf("[UNIQUE] No duplicates found for field '%s' value '%s'", fieldName, valueStr)
 	return "", nil
 }
 
@@ -353,7 +353,7 @@ func (v *UniqueConstraintValidator) CreateUniqueIndexesForBundle(bundle *models.
 		return nil
 	}
 
-	v.logger.Infof("[UNIQUE] Creating unique indexes for %d field(s) in bundle '%s'", len(uniqueFields), bundle.Name)
+	v.logger.Debugf("[UNIQUE] Creating unique indexes for %d field(s) in bundle '%s'", len(uniqueFields), bundle.Name)
 
 	// Create hash index for each unique field
 	for _, fieldDef := range uniqueFields {
@@ -373,7 +373,7 @@ func (v *UniqueConstraintValidator) CreateUniqueIndexesForBundle(bundle *models.
 
 		// POSTGRESQL-STYLE: Create B-tree index for unique field (stored in memory)
 		// Hash indexes are disk-based with lazy loading, B-trees can be loaded into memory
-		v.logger.Infof("[UNIQUE] Creating unique B-tree index '%s' for field '%s'", indexName, fieldDef.Name)
+		v.logger.Debugf("[UNIQUE] Creating unique B-tree index '%s' for field '%s'", indexName, fieldDef.Name)
 		err := createBTreeIndexForUniqueField(v.bundleService, bundle, indexName, fieldDef)
 		if err != nil {
 			return fmt.Errorf("failed to create unique B-tree index '%s' for field '%s': %w", indexName, fieldDef.Name, err)
@@ -382,7 +382,7 @@ func (v *UniqueConstraintValidator) CreateUniqueIndexesForBundle(bundle *models.
 		// OLD HASH INDEX APPROACH (kept commented for potential disk-based fallback)
 		// err := createHashIndexInternal(v.bundleService, bundle, indexName)
 
-		v.logger.Infof("[UNIQUE] Successfully created unique B-tree index '%s' for field '%s'", indexName, fieldDef.Name)
+		v.logger.Debugf("[UNIQUE] Successfully created unique B-tree index '%s' for field '%s'", indexName, fieldDef.Name)
 	}
 
 	return nil
@@ -439,7 +439,7 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 		return fmt.Errorf("field '%s' is not marked as unique, cannot create unique B-tree index", fieldDef.Name)
 	}
 
-	s.logger.Infof("Creating unique B-tree index '%s' on field '%s' for bundle '%s'",
+	s.logger.Debugf("Creating unique B-tree index '%s' on field '%s' for bundle '%s'",
 		indexName, fieldDef.Name, bundle.Name)
 
 	// Get proper database path structure (same as hash index)
@@ -545,12 +545,12 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 			insertedCount++
 		}
 
-		s.logger.Infof("Unique B-tree index population complete: inserted %d documents, skipped %d duplicates", insertedCount, skippedCount)
+		s.logger.Debugf("Unique B-tree index population complete: inserted %d documents, skipped %d duplicates", insertedCount, skippedCount)
 
 		if err := btreeIndex.PersistMetadata(); err != nil {
 			s.logger.Warnf("Failed to persist unique B-tree index metadata after population: %v", err)
 		}
-		s.logger.Infof("Successfully populated unique B-tree index with %d documents", len(allDocuments))
+		s.logger.Debugf("Successfully populated unique B-tree index with %d documents", len(allDocuments))
 	} else {
 		s.logger.Debugf("No existing documents to populate unique B-tree index")
 	}
@@ -591,7 +591,7 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 	// Update metadata size estimate
 	btreeIndex.Metadata.UpdateMemorySize()
 
-	s.logger.Infof("Successfully created unique B-tree index '%s' for field '%s' (%d MB estimated memory)",
+	s.logger.Debugf("Successfully created unique B-tree index '%s' for field '%s' (%d MB estimated memory)",
 		indexName, fieldDef.Name, btreeIndex.Metadata.EstimatedMemorySizeBytes/(1024*1024))
 
 	return nil

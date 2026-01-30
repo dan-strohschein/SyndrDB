@@ -412,6 +412,6 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		Result:          result,
 		ExecutionTimeMS: float64(endingTime.Nanoseconds()) / 1e6,
 	}
-	logger.Infof("DEBUG DEBUG :: AddDocument total time: %s", endingTime.String())
+	logger.Debugf("DEBUG :: AddDocument total time: %s", endingTime.String())
 	return cmdResponse, nil
 }

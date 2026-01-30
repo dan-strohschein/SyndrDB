@@ -119,10 +119,10 @@ func NewUnifiedQueryPlanner(
 			int64(args.PlanCacheWriteThreshold),
 			logger,
 		)
-		logger.Infof("Query plan cache enabled: capacity=%d per shard (%d total), adaptive=%t",
+		logger.Debugf("Query plan cache enabled: capacity=%d per shard (%d total), adaptive=%t",
 			args.PlanCacheCapacity, args.PlanCacheCapacity*8, args.PlanCacheAdaptivePlanning)
 	} else {
-		logger.Infof("Query plan cache disabled")
+		logger.Debugf("Query plan cache disabled")
 	}
 
 	// Create the unified planner first (needed for circular dependency resolution)
@@ -159,10 +159,10 @@ func NewUnifiedQueryPlanner(
 		// Inject subquery executor into router so it can pass to FilterNode
 		router.SetSubqueryExecutor(executor)
 
-		logger.Infof("Subquery support enabled: small_threshold=%d, hash_threshold=%d, max_depth=%d",
+		logger.Debugf("Subquery support enabled: small_threshold=%d, hash_threshold=%d, max_depth=%d",
 			args.SubquerySmallThreshold, args.SubqueryHashThreshold, args.SubqueryMaxDepth)
 	} else {
-		logger.Infof("Subquery support disabled")
+		logger.Debugf("Subquery support disabled")
 	}
 
 	return planner

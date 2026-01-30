@@ -62,7 +62,7 @@ func (qp *QueryPlanner) CreateExecutionPlan(bundle *models.Bundle, whereClause s
 		Logger:        qp.Logger,
 	}
 
-	qp.Logger.Infof("Created execution plan: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
+	qp.Logger.Debugf("Created execution plan: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 
 	return plan, nil
@@ -72,7 +72,7 @@ func (qp *QueryPlanner) CreateExecutionPlan(bundle *models.Bundle, whereClause s
 func (qp *QueryPlanner) findBestAccessPathRecursive(bundle *models.Bundle, whereGroup *queryparser.WhereGroup) (ExecutionNode, []string) {
 	// Handle the case where we have direct clauses
 	if len(whereGroup.Clauses) > 0 && len(whereGroup.SubGroups) == 0 {
-		qp.Logger.Infof("Finding best access path for clauses: %v", whereGroup.Clauses)
+		qp.Logger.Debugf("Finding best access path for clauses: %v", whereGroup.Clauses)
 		return qp.findBestAccessPathForClauses(bundle, whereGroup.Clauses, whereGroup.Operator)
 	}
 
@@ -125,7 +125,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 	bestCost := float64(1000000) // TODO this is a placeholder for a very high cost, should be configurable
 
 	// prettyJSON, _ := json.MarshalIndent(bundle, "", "  ")
-	// qp.Logger.Infof("bundle data from file: \n%s", string(prettyJSON))
+	// qp.Logger.Debugf("bundle data from file: \n%s", string(prettyJSON))
 
 	// Find the most selective index condition
 	for i, condition := range clauses {
@@ -133,7 +133,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 		// TODO: Add query throttling for large IN lists (>1000 values) to prevent resource exhaustion
 		if condition.Operator == "IN" || condition.Operator == "NOT IN" {
 			if doesIndexExist(bundle, condition.Field) {
-				qp.Logger.Infof("Found hash index for IN query on field %s", condition.Field)
+				qp.Logger.Debugf("Found hash index for IN query on field %s", condition.Field)
 
 				// Calculate cardinality-based cost for IN queries
 				// Cost increases with list size but benefits from index
@@ -177,7 +177,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 					indexesUsed = []string{fmt.Sprintf("%s_%s_hidx", helpers.CleanFileName(bundle.Name), condition.Field)}
 					usedClause = &clauses[i]
 
-					qp.Logger.Infof("Selected hash index for IN query on '%s' with %d values, cost %.2f",
+					qp.Logger.Debugf("Selected hash index for IN query on '%s' with %d values, cost %.2f",
 						condition.Field, listSize, cost)
 				}
 			}
@@ -194,7 +194,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 
 			// Handle match_all patterns - no filtering needed
 			if condition.PatternType == "match_all" {
-				qp.Logger.Infof("LIKE query with match_all pattern detected on field '%s' - matches all records", condition.Field)
+				qp.Logger.Debugf("LIKE query with match_all pattern detected on field '%s' - matches all records", condition.Field)
 				// Cost is zero since no filtering is done
 				// Skip this condition - it doesn't restrict results
 				continue
@@ -205,7 +205,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 				// Check for B-tree index
 				for indexName, indexRef := range bundle.Indexes {
 					if indexRef.IndexType == "btree" && indexRef.BTreeIndexField.FieldName == condition.Field {
-						qp.Logger.Infof("Found B-tree index '%s' for LIKE prefix pattern on field '%s'", indexName, condition.Field)
+						qp.Logger.Debugf("Found B-tree index '%s' for LIKE prefix pattern on field '%s'", indexName, condition.Field)
 
 						cost := qp.estimateBTreeIndexCost(bundle)
 						if cost < bestCost {
@@ -227,7 +227,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 							indexesUsed = []string{indexName}
 							usedClause = &clauses[i]
 
-							qp.Logger.Infof("Selected B-tree index '%s' for LIKE prefix pattern with cost %.2f", indexName, cost)
+							qp.Logger.Debugf("Selected B-tree index '%s' for LIKE prefix pattern with cost %.2f", indexName, cost)
 						}
 						break
 					}
@@ -255,11 +255,11 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 
 		// Check for hash index opportunities (equality conditions)
 		if condition.Operator == "==" {
-			qp.Logger.Infof("Loading Indexes %v with size %d", bundle.IndexNames, len(bundle.IndexNames))
-			qp.Logger.Infof("Checking hash index for field |%s|", condition.Field)
-			qp.Logger.Infof("CONDITION: %s %s |%s|", condition.Field, condition.Operator, condition.Value)
+			qp.Logger.Debugf("Loading Indexes %v with size %d", bundle.IndexNames, len(bundle.IndexNames))
+			qp.Logger.Debugf("Checking hash index for field |%s|", condition.Field)
+			qp.Logger.Debugf("CONDITION: %s %s |%s|", condition.Field, condition.Operator, condition.Value)
 			if doesIndexExist(bundle, condition.Field) {
-				qp.Logger.Infof("Found hash index for field %s", condition.Field)
+				qp.Logger.Debugf("Found hash index for field %s", condition.Field)
 				cost := qp.estimateHashIndexCost()
 				if cost < bestCost {
 					bestNode = &IndexScanNode{
@@ -285,7 +285,7 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 			// Look for any B-Tree index that covers this field
 			for indexName, indexRef := range bundle.Indexes {
 				if indexRef.IndexType == "btree" && indexRef.BTreeIndexField.FieldName == condition.Field {
-					qp.Logger.Infof("Found B-tree index '%s' for field '%s'", indexName, condition.Field)
+					qp.Logger.Debugf("Found B-tree index '%s' for field '%s'", indexName, condition.Field)
 
 					// For now, only support equality searches until range scans are fully implemented
 					if condition.Operator == "==" {
@@ -306,11 +306,11 @@ func (qp *QueryPlanner) optimizeANDConditions(bundle *models.Bundle, clauses []q
 							bestCost = cost
 							indexesUsed = []string{indexName}
 							usedClause = &clauses[i]
-							qp.Logger.Infof("Selected B-tree index '%s' with cost %.2f for condition %s %s %v",
+							qp.Logger.Debugf("Selected B-tree index '%s' with cost %.2f for condition %s %s %v",
 								indexName, cost, condition.Field, condition.Operator, condition.Value)
 						}
 					} else {
-						qp.Logger.Infof("B-tree range operations (>, <, >=, <=) not yet fully implemented, skipping index '%s'", indexName)
+						qp.Logger.Debugf("B-tree range operations (>, <, >=, <=) not yet fully implemented, skipping index '%s'", indexName)
 					}
 					break // Found suitable index for this field, no need to check others
 				}

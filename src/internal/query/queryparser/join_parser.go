@@ -121,7 +121,7 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 	query = strings.TrimSpace(query)
 	query = strings.TrimSuffix(query, ";") // Remove trailing semicolon
 
-	//logger.Infof("Parsing SELECT JOIN query: %s", query)
+	//logger.Debugf("Parsing SELECT JOIN query: %s", query)
 
 	// Initialize the query structure
 	selectQuery := &SelectJoinQuery{
@@ -131,7 +131,7 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 
 	// Normalize the query for easier parsing
 	normalizedQuery := normalizeQuery(query)
-	//logger.Infof("DEBUG: Normalized query: %s", normalizedQuery)
+	//logger.Debugf("DEBUG: Normalized query: %s", normalizedQuery)
 
 	// Parse SELECT clause
 	if err := parseSelectClause(normalizedQuery, selectQuery, logger); err != nil {
@@ -158,7 +158,7 @@ func ParseSelectJoinQuery(query string, logger *zap.SugaredLogger) (*SelectJoinQ
 		return nil, fmt.Errorf("failed to parse WITH RELATIONSHIP clause: %w", err)
 	}
 
-	logger.Infof("Successfully parsed query: FromBundle=%s, JoinClauses=%d, WhereClause=%v, RelationshipName='%s'",
+	logger.Debugf("Successfully parsed query: FromBundle=%s, JoinClauses=%d, WhereClause=%v, RelationshipName='%s'",
 		selectQuery.FromBundle, len(selectQuery.JoinClauses), selectQuery.WhereClause != nil, selectQuery.RelationshipName)
 
 	return selectQuery, nil
@@ -296,7 +296,7 @@ func parseJoinClauses(query string, selectQuery *SelectJoinQuery, logger *zap.Su
 	joinRegex := helpers.MustCompileCached(`(?i)(LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+OUTER\s+JOIN|JOIN)\s+"([^"]+)"\s+ON\s+(.+?)(?:\s+WITH\s+RELATIONSHIP\s+|\s+WHERE\s+|$)`)
 	matches := joinRegex.FindAllStringSubmatch(query, -1)
 
-	//logger.Infof("DEBUG: JOIN regex found %d matches in query: %s", len(matches), query)
+	//logger.Debugf("DEBUG: JOIN regex found %d matches in query: %s", len(matches), query)
 
 	for _, match := range matches {
 		if len(match) < 4 {
@@ -491,11 +491,11 @@ func parseWithRelationshipClause(query string, selectQuery *SelectJoinQuery, log
 	withIndex := strings.Index(upperQuery, " WITH RELATIONSHIP ")
 	if withIndex == -1 {
 		// No WITH RELATIONSHIP clause found - this is optional
-		logger.Infof("No WITH RELATIONSHIP clause found in query")
+		logger.Debugf("No WITH RELATIONSHIP clause found in query")
 		return nil
 	}
 
-	logger.Infof("Found WITH RELATIONSHIP clause at position %d", withIndex)
+	logger.Debugf("Found WITH RELATIONSHIP clause at position %d", withIndex)
 
 	// Extract the part after WITH RELATIONSHIP
 	afterWith := query[withIndex+len(" WITH RELATIONSHIP "):]
@@ -517,7 +517,7 @@ func parseWithRelationshipClause(query string, selectQuery *SelectJoinQuery, log
 
 	selectQuery.RelationshipName = relationshipName
 
-	logger.Infof("Parsed relationship name: '%s'", relationshipName)
+	logger.Debugf("Parsed relationship name: '%s'", relationshipName)
 	return nil
 }
 

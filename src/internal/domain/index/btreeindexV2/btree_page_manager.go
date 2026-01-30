@@ -108,7 +108,7 @@ func (pm *BTreePageManager) ClearCache() {
 	pm.currentSize = 0
 	atomic.StoreUint64(&pm.stats.memoryUsage, 0)
 
-	pm.logger.Infof("Cleared all pages from cache")
+	pm.logger.Debugf("Cleared all pages from cache")
 }
 
 // cacheEntry represents a single entry in the LRU cache
@@ -194,7 +194,7 @@ func NewBTreePageManager(pageSize uint32, cacheSize int, logger *zap.SugaredLogg
 		flushTriggerChan: make(chan struct{}, 1), // Buffered size 1 for non-blocking sends
 	}
 
-	logger.Infof("Successfully created BTree page manager (maxSize: %d, pageSize: %d)",
+	logger.Debugf("Successfully created BTree page manager (maxSize: %d, pageSize: %d)",
 		cacheSize, pageSize)
 
 	return pm, nil
@@ -253,7 +253,7 @@ func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interfa
 
 		// INTENSIVE DEBUG: Log details for internal nodes
 		// if node, ok := entry.pageData.(*BTreeNode); ok && !node.IsLeaf {
-		// 	pm.logger.Infof("GetPage CACHE HIT: page %d is internal node with %d keys (ptr=%p)",
+		// 	pm.logger.Debugf("GetPage CACHE HIT: page %d is internal node with %d keys (ptr=%p)",
 		// 		pageNum, node.KeyCount, entry.pageData)
 		// } else {
 		// 	pm.logger.Debugf("Cache hit for page %d", pageNum)
@@ -273,7 +273,7 @@ func (pm *BTreePageManager) GetPage(pageNum uint32, loader func(uint32) (interfa
 
 	// INTENSIVE DEBUG: Log details for loaded internal nodes
 	// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-	// 	pm.logger.Infof("GetPage LOADED FROM DISK: page %d is internal node with %d keys (ptr=%p)",
+	// 	pm.logger.Debugf("GetPage LOADED FROM DISK: page %d is internal node with %d keys (ptr=%p)",
 	// 		pageNum, node.KeyCount, pageData)
 	// }
 
@@ -310,7 +310,7 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 
 	// INTENSIVE DEBUG: Log details for internal nodes
 	// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-	// 	pm.logger.Infof("PutPage CALLED: page %d is internal node with %d keys, dirty=%t (ptr=%p)",
+	// 	pm.logger.Debugf("PutPage CALLED: page %d is internal node with %d keys, dirty=%t (ptr=%p)",
 	// 		pageNum, node.KeyCount, dirty, pageData)
 	// } else {
 	// 	pm.logger.Debugf("Putting page %d in cache (dirty: %t)", pageNum, dirty)
@@ -335,7 +335,7 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 			entry.pageData = pageData
 		} else {
 			// if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-			// 	pm.logger.Infof("PutPage SAME POINTER: page %d already cached with same object (ptr=%p), just updating dirty flag",
+			// 	pm.logger.Debugf("PutPage SAME POINTER: page %d already cached with same object (ptr=%p), just updating dirty flag",
 			// 		pageNum, pageData)
 			// }
 		}
@@ -364,7 +364,7 @@ func (pm *BTreePageManager) PutPage(pageNum uint32, pageData interface{}, dirty 
 
 	// Add new entry to cache
 	if node, ok := pageData.(*BTreeNode); ok && !node.IsLeaf {
-		pm.logger.Infof("PutPage ADDING NEW: page %d internal node with %d keys (ptr=%p)",
+		pm.logger.Debugf("PutPage ADDING NEW: page %d internal node with %d keys (ptr=%p)",
 			pageNum, node.KeyCount, pageData)
 	}
 	pm.addToCache(pageNum, pageData, dirty)
@@ -469,7 +469,7 @@ func (pm *BTreePageManager) Flush(writer func(uint32, interface{}) error) error 
 
 	atomic.AddUint64(&pm.stats.flushes, 1)
 
-	pm.logger.Infof("Flushed %d dirty pages to storage", dirtyCount)
+	pm.logger.Debugf("Flushed %d dirty pages to storage", dirtyCount)
 
 	// Return first error if any occurred
 	if len(flushErrors) > 0 {
@@ -642,7 +642,7 @@ func (pm *BTreePageManager) Clear() {
 	pm.currentSize = 0
 	atomic.StoreUint64(&pm.stats.memoryUsage, 0)
 
-	pm.logger.Infof("Cleared all pages from cache")
+	pm.logger.Debugf("Cleared all pages from cache")
 }
 
 // Private helper methods

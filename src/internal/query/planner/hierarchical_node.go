@@ -158,7 +158,7 @@ func NewHierarchicalTransformNode(
 //   - map[string]*models.Document: Hierarchically structured documents (or flat results if not yet integrated with JOIN)
 //   - error: Any error during execution
 func (n *HierarchicalTransformNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	n.Logger.Infof("Executing HierarchicalTransformNode with relationship '%s'", n.RelationshipName)
+	n.Logger.Debugf("Executing HierarchicalTransformNode with relationship '%s'", n.RelationshipName)
 
 	// Execute child node to get documents
 	documents, err := n.Child.Execute(ctx)
@@ -190,7 +190,7 @@ func (n *HierarchicalTransformNode) Execute(ctx context.Context) (map[string]*mo
 			// only transform the JOIN results that correspond to the filtered documents
 			filteredJoinResults := n.filterJoinResultsByDocumentIDs(joinedResults, documents)
 
-			n.Logger.Infof("HierarchicalTransformNode: Activating transformation for %d filtered JOIN results (from %d total)",
+			n.Logger.Debugf("HierarchicalTransformNode: Activating transformation for %d filtered JOIN results (from %d total)",
 				len(filteredJoinResults), len(joinedResults))
 
 			// Build relationship metadata
@@ -214,7 +214,7 @@ func (n *HierarchicalTransformNode) Execute(ctx context.Context) (map[string]*mo
 				return nil, fmt.Errorf("hierarchical transformation failed: %w", err)
 			}
 
-			n.Logger.Infof("HierarchicalTransformNode: Transformation completed - %d parent documents with %d total children",
+			n.Logger.Debugf("HierarchicalTransformNode: Transformation completed - %d parent documents with %d total children",
 				transformResult.ParentCount, transformResult.TotalChildDocuments)
 
 			return transformResult.Documents, nil
@@ -222,7 +222,7 @@ func (n *HierarchicalTransformNode) Execute(ctx context.Context) (map[string]*mo
 	}
 
 	// Fallback: Pass-through mode if JoinExecutionNode not found
-	n.Logger.Infof("HierarchicalTransformNode: Pass-through mode - JoinExecutionNode not found or has no results")
+	n.Logger.Debugf("HierarchicalTransformNode: Pass-through mode - JoinExecutionNode not found or has no results")
 	return documents, nil
 }
 
@@ -316,7 +316,7 @@ func (n *HierarchicalTransformNode) filterJoinResultsByDocumentIDs(
 		}
 	}
 
-	n.Logger.Infof("Filtering JOIN results by LEFT side: %d parent document IDs from %d filtered docs",
+	n.Logger.Debugf("Filtering JOIN results by LEFT side: %d parent document IDs from %d filtered docs",
 		len(leftDocIDs), len(filteredDocs))
 
 	// Log the IDs for debugging
@@ -337,7 +337,7 @@ func (n *HierarchicalTransformNode) filterJoinResultsByDocumentIDs(
 		}
 	}
 
-	n.Logger.Infof("Filtered JOIN results: %d results for %d parent documents (from %d total JOIN results, %d matches)",
+	n.Logger.Debugf("Filtered JOIN results: %d results for %d parent documents (from %d total JOIN results, %d matches)",
 		len(filtered), len(leftDocIDs), len(joinResults), matchCount)
 
 	return filtered

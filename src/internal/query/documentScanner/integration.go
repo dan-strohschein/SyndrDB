@@ -67,7 +67,7 @@ func (si *ScannerIntegration) CreateScannerForBundle(bundle *models.Bundle, bund
 	// Register with metrics manager
 	si.metricsManager.RegisterScanner(bundle.Name, scanner)
 
-	si.logger.Infof("Created and registered scanner for bundle '%s'", bundle.Name)
+	si.logger.Debugf("Created and registered scanner for bundle '%s'", bundle.Name)
 
 	return scanner, nil
 }
@@ -116,18 +116,18 @@ func ExampleUsage(logger *zap.SugaredLogger, bundle *models.Bundle, bundleServic
 		return
 	}
 
-	logger.Infof("Scan completed: found %d documents in %v",
+	logger.Debugf("Scan completed: found %d documents in %v",
 		len(result.Documents), result.ScanLatency)
 
 	// Check metrics
 	metrics := scanner.GetMetrics()
-	logger.Infof("Scanner metrics: %d total scans, %.2f%% cache hit rate",
+	logger.Debugf("Scanner metrics: %d total scans, %.2f%% cache hit rate",
 		metrics.TotalScans, metrics.CacheHitRate*100)
 
 	// Get optimization recommendations
 	recommendations := integration.GetMetricsManager().GetOptimizationRecommendations()
 	for _, rec := range recommendations {
-		logger.Infof("Optimization recommendation: %s for %s (Priority: %s)",
+		logger.Debugf("Optimization recommendation: %s for %s (Priority: %s)",
 			rec.Type, rec.BundleName, rec.Priority)
 	}
 }

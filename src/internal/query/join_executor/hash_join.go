@@ -116,7 +116,7 @@ func (hjs *HashJoinStrategy) EstimateCost(request *JoinRequest) (cost float64, c
 func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) {
 	startTime := time.Now()
 
-	hjs.logger.Infof("Executing hash join: %s ⋈ %s",
+	hjs.logger.Debugf("Executing hash join: %s ⋈ %s",
 		request.LeftBundle.GetName(), request.RightBundle.GetName())
 
 	// Choose build and probe sides based on size
@@ -124,11 +124,11 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 	buildKey, probeKey := hjs.getJoinKeys(request.Conditions, swapped)
 
 	// CRITICAL DEBUG: Log join keys and index strategy
-	hjs.logger.Infof("Hash join: build=%s (key=%s), probe=%s (key=%s), indexStrategy=%v",
+	hjs.logger.Debugf("Hash join: build=%s (key=%s), probe=%s (key=%s), indexStrategy=%v",
 		buildBundle.GetName(), buildKey, probeBundle.GetName(), probeKey,
 		request.IndexStrategy != nil)
 	if request.IndexStrategy != nil {
-		hjs.logger.Infof("Index strategy: %s, applicable=%v", request.IndexStrategy.GetName(), request.IndexStrategy.IsApplicable())
+		hjs.logger.Debugf("Index strategy: %s, applicable=%v", request.IndexStrategy.GetName(), request.IndexStrategy.IsApplicable())
 	}
 
 	// Build phase: Create hash table from smaller bundle (with optional Bloom filter)
@@ -153,11 +153,11 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 			// not apply the predicate, and HashIndex returns only 1 doc per key, which produces wrong
 			// counts and extra GetDocument I/O. Use full probe instead.
 			if strings.Contains(probeBundle.GetName(), " [expr-filtered]") {
-				hjs.logger.Infof("Skipping index-assisted probe: probe has expression filter (index does not apply predicate)")
+				hjs.logger.Debugf("Skipping index-assisted probe: probe has expression filter (index does not apply predicate)")
 				joinedDocs, probeStats, err = hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
 				indexUsed = false
 			} else {
-				hjs.logger.Infof("Using index-assisted probe strategy on %s", probeBundle.GetName())
+				hjs.logger.Debugf("Using index-assisted probe strategy on %s", probeBundle.GetName())
 
 				// Calculate estimated speedup for feedback loop
 				hashTableSize := hashTable.Size()
@@ -199,7 +199,7 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 		// Calculate estimation accuracy
 		estimationError := ((actualSpeedup - estimatedSpeedup) / estimatedSpeedup) * 100
 
-		hjs.logger.Infof("Index optimization feedback: estimated %.2fx speedup, actual %.2fx speedup (%.1f%% estimation accuracy)",
+		hjs.logger.Debugf("Index optimization feedback: estimated %.2fx speedup, actual %.2fx speedup (%.1f%% estimation accuracy)",
 			estimatedSpeedup, actualSpeedup, 100-estimationError)
 
 		// Log detailed comparison for learning
@@ -210,13 +210,13 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 				actualScanned, float64(actualScanned*100)/float64(probeSize))
 		} else if actualSpeedup > estimatedSpeedup*1.2 {
 			// Actual performance is better than expected
-			hjs.logger.Infof("Index outperformed: scanned %d docs vs %d expected (%.1fx better than estimate)",
+			hjs.logger.Debugf("Index outperformed: scanned %d docs vs %d expected (%.1fx better than estimate)",
 				actualScanned, int(float64(probeSize)/estimatedSpeedup), actualSpeedup/estimatedSpeedup)
 		}
 
 		// Log scan reduction statistics
 		scanReduction := float64(probeSize-actualScanned) / float64(probeSize) * 100
-		hjs.logger.Infof("Scan reduction: %d → %d documents (%.1f%% reduction)",
+		hjs.logger.Debugf("Scan reduction: %d → %d documents (%.1f%% reduction)",
 			probeSize, actualScanned, scanReduction)
 	}
 
@@ -232,7 +232,7 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 		Comparisons:   probeStats.Comparisons,
 	}
 
-	hjs.logger.Infof("Hash join completed: %d results in %v (memory: %d bytes)",
+	hjs.logger.Debugf("Hash join completed: %d results in %v (memory: %d bytes)",
 		len(joinedDocs), result.ExecutionTime, result.MemoryUsed)
 
 	return result, nil
@@ -302,7 +302,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 		cache := GetHashTableCacheInterface()
 		if cachedTable, cachedBloom, cachedStats, found := cache.Get(cacheKey); found {
-			hjs.logger.Infof("✓ Hash table CACHE HIT for %s.%s (skipped rebuild)", bundleName, buildKey)
+			hjs.logger.Debugf("✓ Hash table CACHE HIT for %s.%s (skipped rebuild)", bundleName, buildKey)
 			// Return a copy of stats to avoid mutation issues
 			statsCopy := &ScanStats{
 				DocumentsScanned: cachedStats.DocumentsScanned,
@@ -494,7 +494,7 @@ func (hjs *HashJoinStrategy) buildHashTable(
 			JoinKey:    buildKey,
 		}
 		GetHashTableCacheInterface().Put(cacheKey, hashTable, bloom, stats)
-		hjs.logger.Infof("✓ Hash table CACHED for %s.%s (%d docs, %d bytes)",
+		hjs.logger.Debugf("✓ Hash table CACHED for %s.%s (%d docs, %d bytes)",
 			bundleName, buildKey, stats.DocumentsScanned, hashTable.GetMemoryUsage())
 	}
 
@@ -513,7 +513,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	bloom *bloomfilter.BloomFilter,
 ) (HashTable, *bloomfilter.BloomFilter, *ScanStats, error) {
 
-	hjs.logger.Infof("Using PostgreSQL-style index-assisted build for %s on indexed field %s (using index to get document IDs, loading by page)",
+	hjs.logger.Debugf("Using PostgreSQL-style index-assisted build for %s on indexed field %s (using index to get document IDs, loading by page)",
 		buildBundle.GetName(), buildKey)
 
 	// Type assert to HashIndexV3
@@ -536,7 +536,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		totalDocIDsFromIndex += len(docIDs)
 	}
 
-	hjs.logger.Infof("Index returned %d document IDs across %d page groups",
+	hjs.logger.Debugf("Index returned %d document IDs across %d page groups",
 		totalDocIDsFromIndex, len(docIDsByPage))
 
 	if totalDocIDsFromIndex == 0 {
@@ -552,7 +552,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		return nil, nil, nil, fmt.Errorf("failed to load documents: %w", loadErr)
 	}
 
-	hjs.logger.Infof("Loaded %d documents using staleness-aware loading", len(loadedDocs))
+	hjs.logger.Debugf("Loaded %d documents using staleness-aware loading", len(loadedDocs))
 
 	// Step 3: Build hash table from loaded documents
 	for _, doc := range loadedDocs {
@@ -603,7 +603,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 	if stats.DocumentsScanned == 0 && totalDocIDsFromIndex > 0 {
 		if isFilteredBundle {
-			hjs.logger.Infof("Filtered bundle returned 0/%d documents from index - all documents filtered out by WHERE clause",
+			hjs.logger.Debugf("Filtered bundle returned 0/%d documents from index - all documents filtered out by WHERE clause",
 				totalDocIDsFromIndex)
 		} else {
 			hjs.logger.Warnf("CRITICAL: Index returned %d document IDs but 0 documents were loaded! Index may be severely out of sync.",
@@ -611,7 +611,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		}
 	} else if int64(stats.DocumentsScanned) < int64(totalDocIDsFromIndex)/2 {
 		if isFilteredBundle {
-			hjs.logger.Infof("Found %d/%d documents from index (%.1f%%) - reduced by WHERE clause predicate pushdown",
+			hjs.logger.Debugf("Found %d/%d documents from index (%.1f%%) - reduced by WHERE clause predicate pushdown",
 				stats.DocumentsScanned, totalDocIDsFromIndex, float64(stats.DocumentsScanned*100)/float64(totalDocIDsFromIndex))
 		} else {
 			hjs.logger.Warnf("Found only %d/%d documents from index (%.1f%%). Some documents may be missing.",
@@ -619,7 +619,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 		}
 	}
 
-	hjs.logger.Infof("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s",
+	hjs.logger.Debugf("PostgreSQL-style index-assisted build complete: %d unique keys, %d documents, %d bytes memory%s",
 		hashTable.Size(), stats.DocumentsScanned, hashTable.GetMemoryUsage(), bloomStats)
 
 	// CRITICAL: Freeze the hash table after build phase completes.
@@ -731,7 +731,7 @@ func (hjs *HashJoinStrategy) probeHashTable(
 
 	if bloom != nil && stats.DocumentsScanned > 0 {
 		skipRate := float64(bloomFilterSkips) / float64(stats.DocumentsScanned) * 100
-		hjs.logger.Infof("Probe completed: %d documents scanned, %d comparisons, %d results, Bloom filter skipped %d lookups (%.1f%%)",
+		hjs.logger.Debugf("Probe completed: %d documents scanned, %d comparisons, %d results, Bloom filter skipped %d lookups (%.1f%%)",
 			stats.DocumentsScanned, stats.Comparisons, len(joinedDocs), bloomFilterSkips, skipRate)
 	} else {
 		hjs.logger.Debugf("Probe completed: %d documents scanned, %d comparisons, %d results",
@@ -760,7 +760,7 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 	swapped bool,
 ) ([]*JoinedDocument, *ScanStats, error) {
 
-	hjs.logger.Infof("Index-assisted probe: extracting %d unique keys from hash table",
+	hjs.logger.Debugf("Index-assisted probe: extracting %d unique keys from hash table",
 		hashTable.Size())
 
 	// Step 1: Extract all unique keys from hash table
@@ -795,7 +795,7 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 		totalMatches += len(docIDs)
 	}
 
-	hjs.logger.Infof("Index returned %d matching documents for %d keys (avg %.1f docs/key)",
+	hjs.logger.Debugf("Index returned %d matching documents for %d keys (avg %.1f docs/key)",
 		totalMatches, len(docIDsByKey), float64(totalMatches)/float64(len(docIDsByKey)))
 
 	// Step 3: Fetch the matching documents from the bundle
@@ -881,7 +881,7 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 		}
 	}
 
-	hjs.logger.Infof("Index-assisted probe completed: %d documents scanned (vs %d full scan), %d results",
+	hjs.logger.Debugf("Index-assisted probe completed: %d documents scanned (vs %d full scan), %d results",
 		stats.DocumentsScanned, probeBundle.GetTotalDocuments(), len(joinedDocs))
 
 	return joinedDocs, stats, nil

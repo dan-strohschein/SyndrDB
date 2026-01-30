@@ -205,7 +205,7 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 	if err != nil {
 		return nil, fmt.Errorf("failed to create serializer: %w", err)
 	}
-	//logger.Infof("Bundle storage using %s format", serializer.GetFormatName())
+	//logger.Debugf("Bundle storage using %s format", serializer.GetFormatName())
 
 	// Create a new bundle store
 	// PHASE 3: Using sharded caches (64 shards each) to eliminate global mutex contention
@@ -259,7 +259,7 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 	maxMB := settings.GetSettings().GroupByCacheWarmingMaxMB
 	maxBytes := int64(maxMB) * 1024 * 1024
 
-	bse.logger.Infof("Starting cache warming for GROUP BY optimization (max %d MB)", maxMB)
+	bse.logger.Debugf("Starting cache warming for GROUP BY optimization (max %d MB)", maxMB)
 
 	// Sleep briefly to let server finish startup
 	select {
@@ -292,7 +292,7 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 
 		// Check if we've reached memory limit
 		if totalBytes.Load() >= maxBytes {
-			bse.logger.Infof("Cache warming complete: reached memory limit of %d MB", maxMB)
+			bse.logger.Debugf("Cache warming complete: reached memory limit of %d MB", maxMB)
 			return filepath.SkipAll
 		}
 
@@ -392,7 +392,7 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 	if err != nil && !strings.Contains(err.Error(), "cancelled") {
 		bse.logger.Warnf("Cache warming completed with errors: %v", err)
 	} else {
-		bse.logger.Infof("Cache warming complete: pre-parsed %.2f MB of data",
+		bse.logger.Debugf("Cache warming complete: pre-parsed %.2f MB of data",
 			float64(totalBytes.Load())/(1024*1024))
 	}
 }
@@ -427,7 +427,7 @@ func (bse *BundleStorageEngine) LoadAllBundleMetadata(dataDir string) (map[strin
 		bse.logger.Debugf("Loaded bundle metadata for '%s'", bundleName)
 	}
 
-	bse.logger.Infof("Loaded metadata for %d bundles from '%s'", len(bundles), dataDir)
+	bse.logger.Debugf("Loaded metadata for %d bundles from '%s'", len(bundles), dataDir)
 	return bundles, nil
 }
 
@@ -1836,7 +1836,7 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 	}
 
 	if args.Debug {
-		b.logger.Infof("Deleting document %s from bundle %s", documentID, bundle.Name)
+		b.logger.Debugf("Deleting document %s from bundle %s", documentID, bundle.Name)
 	}
 
 	// Append deletion tombstone using write buffer for optimal performance
@@ -1905,7 +1905,7 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 	bundle.IsDirty = true
 
 	if args.Debug {
-		b.logger.Infof("Successfully deleted document %s from bundle %s (new TotalDocuments: %d, PageCount: %d)",
+		b.logger.Debugf("Successfully deleted document %s from bundle %s (new TotalDocuments: %d, PageCount: %d)",
 			documentID, bundle.Name, bundle.TotalDocuments, bundle.PageCount)
 	}
 
@@ -2172,7 +2172,7 @@ func (bs *BundleStorageEngine) AddDocumentToBundleFile2(bundle models.Bundle, bu
 	if err != nil {
 		return err
 	}
-	bs.logger.Infof("Adding document to bundle %s with file ID %d", bundle.Name, fileID)
+	bs.logger.Debugf("Adding document to bundle %s with file ID %d", bundle.Name, fileID)
 
 	// Documents are now stored via page cache (write-through)
 	// No memtable update needed - the page cache handles document storage
@@ -2197,7 +2197,7 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 // This eliminates the need to rewrite the entire bundle file on every document insert
 // Returns the physical page ID where the document was stored (0-based)
 func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.Bundle, document *models.Document, txID string) (uint32, error) {
-	//b.logger.Infof("Starting time: %s", time.Now().Format(time.RFC3339Nano))
+	//b.logger.Debugf("Starting time: %s", time.Now().Format(time.RFC3339Nano))
 	//testingStart := time.Now()
 	// PHASE 1: MVCC - Removed bundle-wide write lock to allow concurrent writes
 	// Fine-grained locking: rotation lock protects file rotation, atomic operations protect metadata
@@ -2468,9 +2468,9 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 			"newTotalDocuments", bundle.TotalDocuments,
 			"newPageCount", bundle.PageCount)
 	}
-	//b.logger.Infof("Ending time: %s", time.Now().Format(time.RFC3339Nano))
+	//b.logger.Debugf("Ending time: %s", time.Now().Format(time.RFC3339Nano))
 	//endingTesting := time.Since(testingStart)
-	//b.logger.Infof("DEBUG DEBUG DEBUG AppendDocumentToBundleFileWithTxID took %s", endingTesting.String())
+	//b.logger.Debugf("DEBUG DEBUG DEBUG AppendDocumentToBundleFileWithTxID took %s", endingTesting.String())
 	// COMPACTION INTEGRATION: Trigger compaction evaluation after write
 	// Don't block the write path - evaluate asynchronously
 	// PostgreSQL autovacuum-inspired: check triggers after mutations
@@ -2867,7 +2867,7 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 	tombstonesFound := 0
 
 	if b.logger != nil {
-		b.logger.Infof("countDocumentsInFileOnly: Starting parse of %d bytes", len(data))
+		b.logger.Debugf("countDocumentsInFileOnly: Starting parse of %d bytes", len(data))
 	}
 
 	// Skip bundle metadata header if present (0x42444D44 = "BDMD")
@@ -2877,7 +2877,7 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 			metadataSize := binary.LittleEndian.Uint32(data[4:8])
 			offset = int(8 + metadataSize)
 			if b.logger != nil {
-				b.logger.Infof("countDocumentsInFileOnly: Skipped BDMD header, starting at offset %d", offset)
+				b.logger.Debugf("countDocumentsInFileOnly: Skipped BDMD header, starting at offset %d", offset)
 			}
 		}
 	}
@@ -2886,7 +2886,7 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 		// Need at least 8 bytes for magic number + size header
 		if offset+8 > len(data) {
 			if b.logger != nil {
-				b.logger.Infof("countDocumentsInFileOnly: Stopping at offset %d (not enough bytes for header)", offset)
+				b.logger.Debugf("countDocumentsInFileOnly: Stopping at offset %d (not enough bytes for header)", offset)
 			}
 			break
 		}
@@ -2898,7 +2898,7 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 		// Log first few records and any non-standard magic numbers
 		if offset < 1000 || (magic != 0xDEADBEEF && magic != 0xDEADDEAD) {
 			if b.logger != nil {
-				b.logger.Infof("countDocumentsInFileOnly: offset=%d magic=0x%X size=%d", offset, magic, size)
+				b.logger.Debugf("countDocumentsInFileOnly: offset=%d magic=0x%X size=%d", offset, magic, size)
 			}
 		}
 
@@ -2959,7 +2959,7 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 	}
 
 	if b.logger != nil {
-		b.logger.Infof("countDocumentsInFileOnly: Parsed %d bytes, found %d documents and %d tombstones, final offset=%d",
+		b.logger.Debugf("countDocumentsInFileOnly: Parsed %d bytes, found %d documents and %d tombstones, final offset=%d",
 			len(data), documentsFound, tombstonesFound, offset)
 	}
 
@@ -2999,13 +2999,13 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 	if manifest.TotalTombstones == 0 &&
 		time.Since(manifest.LastUpdated) < 5*time.Minute {
 		if b.logger != nil {
-			b.logger.Infof("CountDocuments: Using manifest fast-path for bundle '%s' (TotalDocuments=%d)", bundleName, manifest.TotalDocuments)
+			b.logger.Debugf("CountDocuments: Using manifest fast-path for bundle '%s' (TotalDocuments=%d)", bundleName, manifest.TotalDocuments)
 		}
 		return int(manifest.TotalDocuments), nil
 	}
 
 	if b.logger != nil {
-		b.logger.Infof("CountDocuments: Scanning files for bundle '%s' (tombstones=%d, lastUpdated=%v)",
+		b.logger.Debugf("CountDocuments: Scanning files for bundle '%s' (tombstones=%d, lastUpdated=%v)",
 			bundleName, manifest.TotalTombstones, manifest.LastUpdated)
 	}
 
@@ -3017,7 +3017,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 	files := manifestMgr.GetFileList(false) // false = oldest first
 
 	if b.logger != nil {
-		b.logger.Infof("CountDocuments: Processing %d files for bundle '%s'", len(files), bundleName)
+		b.logger.Debugf("CountDocuments: Processing %d files for bundle '%s'", len(files), bundleName)
 	}
 
 	for _, fileInfo := range files {
@@ -3034,7 +3034,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 		}
 
 		if b.logger != nil {
-			b.logger.Infof("CountDocuments: Reading file %s (size=%d bytes, manifest claims %d docs)",
+			b.logger.Debugf("CountDocuments: Reading file %s (size=%d bytes, manifest claims %d docs)",
 				filePath, stat.Size(), fileInfo.DocCount)
 		}
 
@@ -3048,7 +3048,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 		}
 
 		if b.logger != nil {
-			b.logger.Infof("CountDocuments: Read %d bytes from %s, parsing documents...", len(data), filePath)
+			b.logger.Debugf("CountDocuments: Read %d bytes from %s, parsing documents...", len(data), filePath)
 		}
 
 		// Count in this file (updates local maps in-place)
@@ -3061,7 +3061,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 		}
 
 		if b.logger != nil {
-			b.logger.Infof("CountDocuments: After processing %s: seen=%d, deleted=%d",
+			b.logger.Debugf("CountDocuments: After processing %s: seen=%d, deleted=%d",
 				fileInfo.FileName, len(seenDocuments), len(deletedDocuments))
 		}
 	}
@@ -3069,7 +3069,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 	// Final count: unique documents that aren't deleted
 	finalCount := len(seenDocuments)
 	if b.logger != nil {
-		b.logger.Infof("CountDocuments: Final count for bundle '%s' = %d (seen=%d, deleted=%d)",
+		b.logger.Debugf("CountDocuments: Final count for bundle '%s' = %d (seen=%d, deleted=%d)",
 			bundleName, finalCount, len(seenDocuments)+len(deletedDocuments), len(deletedDocuments))
 	}
 	return finalCount, nil
@@ -3131,14 +3131,14 @@ func (b *BundleStorageEngine) CountDocuments(bundleName, databaseName string) (i
 	if err == nil && len(manifest.Files) > 0 {
 		// Multi-file format - use optimized count
 		if b.logger != nil {
-			b.logger.Infof("CountDocuments: Using multi-file format for bundle '%s' (%d files)", bundleName, len(manifest.Files))
+			b.logger.Debugf("CountDocuments: Using multi-file format for bundle '%s' (%d files)", bundleName, len(manifest.Files))
 		}
 		return b.countDocumentsMultiFile(manifestMgr, databaseName, bundleName)
 	}
 
 	// Fall back to legacy single-file format
 	if b.logger != nil {
-		b.logger.Infof("CountDocuments: Using legacy single-file format for bundle '%s' (manifest err=%v, files=%d)",
+		b.logger.Debugf("CountDocuments: Using legacy single-file format for bundle '%s' (manifest err=%v, files=%d)",
 			bundleName, err, len(manifest.Files))
 	}
 	return b.countDocumentsLegacy(bundleName, databaseName)
@@ -3256,7 +3256,7 @@ func (b *BundleStorageEngine) FlushAllWriteBuffers() error {
 	}
 
 	if b.logger != nil && settings.GetSettings().Debug {
-		b.logger.Infof("Successfully flushed all %d write buffers", flushedCount)
+		b.logger.Debugf("Successfully flushed all %d write buffers", flushedCount)
 	}
 
 	return nil
@@ -3536,7 +3536,7 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 	// 	return nil, 0, fmt.Errorf("failed to get file info: %w", err)
 	// }
 
-	// //b.logger.Infof("DEBUG: readDocumentRange - file '%s' size: %d bytes", filePath, fileInfo.Size())
+	// //b.logger.Debugf("DEBUG: readDocumentRange - file '%s' size: %d bytes", filePath, fileInfo.Size())
 
 	// fileData := make([]byte, fileInfo.Size())
 	// _, err = file.Read(fileData)
@@ -3544,7 +3544,7 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 	// 	return nil, 0, fmt.Errorf("failed to read file: %w", err)
 	// }
 
-	//b.logger.Infof("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
+	//b.logger.Debugf("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
 
 	// Parse documents with range limiting
 	// PROJECTION PUSHDOWN: Pass projection fields to deserialize only specified fields (e.g., "name" for ORDER BY queries)
@@ -3785,7 +3785,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 
 	// DEBUG: Log parsing start
 	if b.logger != nil {
-		//b.logger.Infof("DEBUG: parseAppendedDocumentsRange called with data size %d bytes, range [%d, %d)", len(data), startIndex, endIndex)
+		//b.logger.Debugf("DEBUG: parseAppendedDocumentsRange called with data size %d bytes, range [%d, %d)", len(data), startIndex, endIndex)
 	}
 
 	// CRITICAL FIX: Skip bundle metadata header if present
@@ -3797,7 +3797,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 			metadataSize := binary.LittleEndian.Uint32((*data)[4:8])
 			offset = int(8 + metadataSize) // Skip 8-byte header + BSON data
 			if b.logger != nil {
-				//b.logger.Infof("DEBUG: Skipping bundle metadata header: magic=0x%X, size=%d, new offset=%d", magic, metadataSize, offset)
+				//b.logger.Debugf("DEBUG: Skipping bundle metadata header: magic=0x%X, size=%d, new offset=%d", magic, metadataSize, offset)
 			}
 		}
 	}
@@ -3806,7 +3806,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 		// Need at least 8 bytes for header
 		if offset+8 > len(*data) {
 			if b.logger != nil {
-				//b.logger.Infof("DEBUG: Stopping parse at offset %d (not enough bytes for header)", offset)
+				//b.logger.Debugf("DEBUG: Stopping parse at offset %d (not enough bytes for header)", offset)
 			}
 			break
 		}
@@ -3818,12 +3818,12 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 		// DEBUG: Log what we found
 		if b.logger != nil {
 			//if magic == 0xDEADBEEF {
-			//	b.logger.Infof("DEBUG: Found DOCUMENT at offset %d, size %d", offset, size)
+			//	b.logger.Debugf("DEBUG: Found DOCUMENT at offset %d, size %d", offset, size)
 			//} else if magic == 0xDEADDEAD {
-			//	b.logger.Infof("DEBUG: Found TOMBSTONE at offset %d, size %d", offset, size)
+			//	b.logger.Debugf("DEBUG: Found TOMBSTONE at offset %d, size %d", offset, size)
 			//} else {
 			//	// Log unknown magic numbers too
-			//	b.logger.Infof("DEBUG: Found UNKNOWN magic 0x%X at offset %d, size %d", magic, offset, size)
+			//	b.logger.Debugf("DEBUG: Found UNKNOWN magic 0x%X at offset %d, size %d", magic, offset, size)
 			//}
 		}
 
@@ -4020,7 +4020,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 
 			// DEBUG: Always log deletion marker processing
 			if b.logger != nil {
-				//b.logger.Infof("DEBUG: Found deletion marker at offset %d, size %d bytes", offset, size)
+				//b.logger.Debugf("DEBUG: Found deletion marker at offset %d, size %d bytes", offset, size)
 			}
 
 			// Decode deletion marker using fast binary format
@@ -4033,7 +4033,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 			}
 
 			if b.logger != nil {
-				//b.logger.Infof("DEBUG: Decoded deletion marker: %+v", deletionMap)
+				//b.logger.Debugf("DEBUG: Decoded deletion marker: %+v", deletionMap)
 			}
 
 			if documentID, ok := deletionMap["DocumentID"].(string); ok && documentID != "" {
@@ -4043,7 +4043,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 				delete(pageDocuments, documentID)
 
 				if b.logger != nil {
-					//b.logger.Infof("DEBUG: Marked document %s as deleted (total deleted: %d)", documentID, len(deletedDocuments))
+					//b.logger.Debugf("DEBUG: Marked document %s as deleted (total deleted: %d)", documentID, len(deletedDocuments))
 				}
 			} else {
 				if b.logger != nil {
@@ -4397,7 +4397,7 @@ func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundle
 	// Check if the bundle directory or file exists
 	if !helpers.DirExists(filePath) {
 		if b.logger != nil {
-			b.logger.Infof("Bundle %s does not exist, skipping removal", filePath)
+			b.logger.Debugf("Bundle %s does not exist, skipping removal", filePath)
 		}
 		return fmt.Errorf("bundle %s does not exist", bundleName)
 	}
@@ -4418,14 +4418,14 @@ func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundle
 		}
 	} else {
 		if b.logger != nil {
-			b.logger.Infof("Bundle file %s does not exist, skipping removal", fileName)
+			b.logger.Debugf("Bundle file %s does not exist, skipping removal", fileName)
 		}
 	}
 
 	// Invalidate file-read cache so we don't retain buffers for removed paths
 	b.InvalidateFileReadCacheForBundle(database.Name, bundleName)
 
-	b.logger.Infof("Successfully removed bundle '%s' and all its data files", bundleName)
+	b.logger.Debugf("Successfully removed bundle '%s' and all its data files", bundleName)
 
 	return nil
 }
@@ -4539,10 +4539,10 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 		if indexNames, ok := data["IndexNames"].(primitive.A); ok {
 			bundle.IndexNames = ConvertToStringSlice(indexNames)
 		} else {
-			logger.Infof("Bundle %v IS MISSING THE []STRING datatype", data["IndexNames"])
+			logger.Debugf("Bundle %v IS MISSING THE []STRING datatype", data["IndexNames"])
 		}
 	} else {
-		logger.Infof("Bundle %s has no index names defined", bundle.Name)
+		logger.Debugf("Bundle %s has no index names defined", bundle.Name)
 		bundle.IndexNames = make([]string, 0)
 	}
 
@@ -4651,7 +4651,7 @@ func MapToBundle(data map[string]interface{}, logger zap.SugaredLogger) (*models
 		bundle.DocumentStructure.FieldDefinitions = make(map[string]models.FieldDefinition)
 	}
 
-	logger.Infof("Processing bundle %s , going to load documents, with ID %s", bundle.Name, bundle.BundleID)
+	logger.Debugf("Processing bundle %s , going to load documents, with ID %s", bundle.Name, bundle.BundleID)
 
 	// Documents are now loaded on-demand via page cache, not from serialized data
 	// Skip legacy document extraction - the page cache handles document storage

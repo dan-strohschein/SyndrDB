@@ -69,7 +69,7 @@ func (h *GraphQLHandler) resolveDatabases() (interface{}, error) {
 		databases[0].Bundles = append(databases[0].Bundles, bundleName)
 	}
 
-	h.logger.Infof("Resolved %d databases", len(databases))
+	h.logger.Debugf("Resolved %d databases", len(databases))
 	return databases, nil
 }
 
@@ -86,7 +86,7 @@ func (h *GraphQLHandler) resolveDatabase(field *ast.Field, variables map[string]
 		return nil, fmt.Errorf("database name must be a string")
 	}
 
-	h.logger.Infof("Resolving database query for: %s", databaseName)
+	h.logger.Debugf("Resolving database query for: %s", databaseName)
 
 	// Check if the requested database matches our current database
 	if h.database.Name != databaseName {
@@ -104,7 +104,7 @@ func (h *GraphQLHandler) resolveDatabase(field *ast.Field, variables map[string]
 		CreatedAt: time.Now(),
 	}
 
-	h.logger.Infof("Resolved database: %s", databaseName)
+	h.logger.Debugf("Resolved database: %s", databaseName)
 	return database, nil
 }
 
@@ -121,7 +121,7 @@ func (h *GraphQLHandler) resolveBundles(field *ast.Field, variables map[string]i
 		return nil, fmt.Errorf("database name must be a string")
 	}
 
-	h.logger.Infof("Resolving bundles query for database: %s", databaseName)
+	h.logger.Debugf("Resolving bundles query for database: %s", databaseName)
 
 	// Check if the requested database matches our current database
 	if h.database.Name != databaseName {
@@ -149,7 +149,7 @@ func (h *GraphQLHandler) resolveBundles(field *ast.Field, variables map[string]i
 		bundles = append(bundles, bundleResponse)
 	}
 
-	h.logger.Infof("Resolved %d bundles for database: %s", len(bundles), databaseName)
+	h.logger.Debugf("Resolved %d bundles for database: %s", len(bundles), databaseName)
 	return bundles, nil
 }
 
@@ -177,7 +177,7 @@ func (h *GraphQLHandler) resolveBundle(field *ast.Field, variables map[string]in
 		return nil, fmt.Errorf("database name must be a string")
 	}
 
-	h.logger.Infof("Resolving bundle query for: %s.%s", databaseName, bundleName)
+	h.logger.Debugf("Resolving bundle query for: %s.%s", databaseName, bundleName)
 
 	// Check if the requested database matches our current database
 	if h.database.Name != databaseName {
@@ -204,7 +204,7 @@ func (h *GraphQLHandler) resolveBundle(field *ast.Field, variables map[string]in
 		CreatedAt:     time.Now(),
 	}
 
-	h.logger.Infof("Resolved bundle: %s.%s", databaseName, bundleName)
+	h.logger.Debugf("Resolved bundle: %s.%s", databaseName, bundleName)
 	return bundleResponse, nil
 }
 
@@ -221,7 +221,7 @@ func (h *GraphQLHandler) resolveDocuments(field *ast.Field, variables map[string
 		return nil, fmt.Errorf("bundle name must be a string")
 	}
 
-	h.logger.Infof("Resolving documents query for bundle: %s", bundleName)
+	h.logger.Debugf("Resolving documents query for bundle: %s", bundleName)
 
 	// Get optional arguments
 	var whereClause string
@@ -289,7 +289,7 @@ func (h *GraphQLHandler) resolveDocuments(field *ast.Field, variables map[string
 		}
 	}
 
-	h.logger.Infof("Resolved %d documents for bundle: %s", len(documents), bundleName)
+	h.logger.Debugf("Resolved %d documents for bundle: %s", len(documents), bundleName)
 	return documents, nil
 }
 
@@ -317,7 +317,7 @@ func (h *GraphQLHandler) resolveDocument(field *ast.Field, variables map[string]
 		return nil, fmt.Errorf("bundle name must be a string")
 	}
 
-	h.logger.Infof("Resolving document query for: %s.%s", bundleName, documentID)
+	h.logger.Debugf("Resolving document query for: %s.%s", bundleName, documentID)
 
 	// Build the SyndrDB query
 	query := fmt.Sprintf("SELECT * FROM %s WHERE id = '%s'", bundleName, documentID)
@@ -341,7 +341,7 @@ func (h *GraphQLHandler) resolveDocument(field *ast.Field, variables map[string]
 					UpdatedAt: time.Now(),
 				}
 
-				h.logger.Infof("Resolved document: %s.%s", bundleName, documentID)
+				h.logger.Debugf("Resolved document: %s.%s", bundleName, documentID)
 				return documentResponse, nil
 			}
 		}
@@ -364,7 +364,7 @@ func (h *GraphQLHandler) mutateCreateDatabase(field *ast.Field, variables map[st
 		return nil, fmt.Errorf("database name must be a string")
 	}
 
-	h.logger.Infof("Creating database: %s", databaseName)
+	h.logger.Debugf("Creating database: %s", databaseName)
 
 	// Build the SyndrDB command
 	command := fmt.Sprintf("CREATE DATABASE %s", databaseName)
@@ -386,7 +386,7 @@ func (h *GraphQLHandler) mutateCreateDatabase(field *ast.Field, variables map[st
 		CreatedAt: time.Now(),
 	}
 
-	h.logger.Infof("Created database: %s", databaseName)
+	h.logger.Debugf("Created database: %s", databaseName)
 	return database, nil
 }
 
@@ -425,7 +425,7 @@ func (h *GraphQLHandler) mutateCreateBundle(field *ast.Field, variables map[stri
 		return nil, fmt.Errorf("fields must be a string")
 	}
 
-	h.logger.Infof("Creating bundle: %s.%s", databaseName, bundleName)
+	h.logger.Debugf("Creating bundle: %s.%s", databaseName, bundleName)
 
 	// Build the SyndrDB command
 	command := fmt.Sprintf("CREATE BUNDLE %s %s", bundleName, fieldsStr)
@@ -449,7 +449,7 @@ func (h *GraphQLHandler) mutateCreateBundle(field *ast.Field, variables map[stri
 		CreatedAt:     time.Now(),
 	}
 
-	h.logger.Infof("Created bundle: %s.%s", databaseName, bundleName)
+	h.logger.Debugf("Created bundle: %s.%s", databaseName, bundleName)
 	return bundle, nil
 }
 
@@ -487,7 +487,7 @@ func (h *GraphQLHandler) mutateCreateDocument(field *ast.Field, variables map[st
 		return nil, fmt.Errorf("fields must be a string")
 	}
 
-	h.logger.Infof("Creating document in bundle: %s", bundleName)
+	h.logger.Debugf("Creating document in bundle: %s", bundleName)
 
 	// Parse the fields JSON
 	var fields map[string]interface{}
@@ -520,7 +520,7 @@ func (h *GraphQLHandler) mutateCreateDocument(field *ast.Field, variables map[st
 		UpdatedAt: time.Now(),
 	}
 
-	h.logger.Infof("Created document in bundle: %s", bundleName)
+	h.logger.Debugf("Created document in bundle: %s", bundleName)
 	return document, nil
 }
 
@@ -570,7 +570,7 @@ func (h *GraphQLHandler) mutateUpdateDocument(field *ast.Field, variables map[st
 		return nil, fmt.Errorf("fields must be a string")
 	}
 
-	h.logger.Infof("Updating document: %s.%s", bundleName, documentID)
+	h.logger.Debugf("Updating document: %s.%s", bundleName, documentID)
 
 	// Parse the fields JSON
 	var fields map[string]interface{}
@@ -600,7 +600,7 @@ func (h *GraphQLHandler) mutateUpdateDocument(field *ast.Field, variables map[st
 		UpdatedAt: time.Now(),
 	}
 
-	h.logger.Infof("Updated document: %s.%s", bundleName, documentID)
+	h.logger.Debugf("Updated document: %s.%s", bundleName, documentID)
 	return document, nil
 }
 
@@ -639,7 +639,7 @@ func (h *GraphQLHandler) mutateDeleteDocument(field *ast.Field, variables map[st
 		return nil, fmt.Errorf("where clause must be a string")
 	}
 
-	h.logger.Infof("Deleting documents from bundle: %s where %s", bundleName, whereClause)
+	h.logger.Debugf("Deleting documents from bundle: %s where %s", bundleName, whereClause)
 
 	// Build the SyndrDB command
 	command := fmt.Sprintf("DELETE FROM %s WHERE %s", bundleName, whereClause)
@@ -658,6 +658,6 @@ func (h *GraphQLHandler) mutateDeleteDocument(field *ast.Field, variables map[st
 	// Return the number of deleted documents
 	deletedCount := 1 // In a real implementation, this would come from the response
 
-	h.logger.Infof("Deleted %d documents from bundle: %s", deletedCount, bundleName)
+	h.logger.Debugf("Deleted %d documents from bundle: %s", deletedCount, bundleName)
 	return deletedCount, nil
 }

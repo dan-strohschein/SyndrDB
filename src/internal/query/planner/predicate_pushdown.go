@@ -73,7 +73,7 @@ func AnalyzeWhereClauseForJoin(whereGroup *queryparser.WhereGroup, leftBundle, r
 		analysis.RemainingConditions = append(analysis.RemainingConditions, subAnalysis.RemainingConditions...)
 	}
 
-	logger.Infof("WHERE clause analysis: Left=%d, Right=%d, Cross=%d, Remaining=%d conditions",
+	logger.Debugf("WHERE clause analysis: Left=%d, Right=%d, Cross=%d, Remaining=%d conditions",
 		len(analysis.LeftBundleConditions), len(analysis.RightBundleConditions),
 		len(analysis.CrossBundleConditions), len(analysis.RemainingConditions))
 
@@ -180,7 +180,7 @@ func NewFilteredBundleAdapter(
 		adapter.conditions[i].Field = removeBundlePrefix(adapter.conditions[i].Field)
 	}
 
-	logger.Infof("Created filtered bundle adapter for '%s' with %d conditions", bundle.Name, len(conditions))
+	logger.Debugf("Created filtered bundle adapter for '%s' with %d conditions", bundle.Name, len(conditions))
 
 	return adapter, nil
 }
@@ -280,7 +280,7 @@ func (fba *FilteredBundleAdapter) GetDocumentIDs() []string {
 // GetAllDocuments implements BundleInterface with predicate pushdown
 // This is where the actual filtering happens during document loading
 func (fba *FilteredBundleAdapter) GetAllDocuments() map[string]*models.Document {
-	fba.logger.Infof("Loading documents from bundle '%s' with %d filter conditions (predicate pushdown)",
+	fba.logger.Debugf("Loading documents from bundle '%s' with %d filter conditions (predicate pushdown)",
 		fba.bundleName, len(fba.conditions))
 
 	// Create predicate function that evaluates all conditions
@@ -302,7 +302,7 @@ func (fba *FilteredBundleAdapter) GetAllDocuments() map[string]*models.Document 
 		documents[docID] = doc
 	}
 
-	fba.logger.Infof("Predicate pushdown filtered bundle '%s' from %d to %d documents (%.1f%% reduction)",
+	fba.logger.Debugf("Predicate pushdown filtered bundle '%s' from %d to %d documents (%.1f%% reduction)",
 		fba.bundleName, fba.totalDocuments, len(documents),
 		100.0*(1.0-float64(len(documents))/float64(fba.totalDocuments)))
 

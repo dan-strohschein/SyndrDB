@@ -101,11 +101,11 @@ func (v *ReferentialIntegrityValidator) ValidateDelete(bundle *models.Bundle, do
 
 		if !isSource {
 			// This relationship doesn't apply - bundle is the target, not source
-			v.logger.Infof("[REFINT] Skipping relationship '%s' - bundle '%s' is target, not source", relationshipName, bundle.Name)
+			v.logger.Debugf("[REFINT] Skipping relationship '%s' - bundle '%s' is target, not source", relationshipName, bundle.Name)
 			continue
 		}
 
-		v.logger.Infof("[REFINT] Checking relationship '%s' (source: %s, dest: %s, field: %s)",
+		v.logger.Debugf("[REFINT] Checking relationship '%s' (source: %s, dest: %s, field: %s)",
 			relationshipName, relationship.SourceBundle, relationship.DestinationBundle, relationship.DestinationField)
 
 		// Validate this specific relationship
@@ -213,16 +213,16 @@ func (v *ReferentialIntegrityValidator) checkHashIndexForReferences(
 	}
 
 	// Perform O(1) hash lookup to check for references
-	v.logger.Infof("[REFINT] Searching hash index '%s' for documentID '%s' (checking if any %s.%s == '%s')",
+	v.logger.Debugf("[REFINT] Searching hash index '%s' for documentID '%s' (checking if any %s.%s == '%s')",
 		indexName, documentID, targetBundle.Name, foreignKeyField, documentID)
 	results, err := hashIndex.Search(documentID)
 	if err != nil {
 		return "", fmt.Errorf("failed to search hash index '%s': %w", indexName, err)
 	}
 
-	v.logger.Infof("[REFINT] Hash index search returned %d results", len(results))
+	v.logger.Debugf("[REFINT] Hash index search returned %d results", len(results))
 	if len(results) > 0 {
-		v.logger.Infof("[REFINT] Sample results: %v", results[:min(3, len(results))])
+		v.logger.Debugf("[REFINT] Sample results: %v", results[:min(3, len(results))])
 	}
 
 	// If any documents reference this ID, report violation
@@ -233,7 +233,7 @@ func (v *ReferentialIntegrityValidator) checkHashIndexForReferences(
 		return violation, nil
 	}
 
-	v.logger.Infof("[REFINT] No references found in '%s' for document '%s' via field '%s'", targetBundle.Name, documentID, foreignKeyField)
+	v.logger.Debugf("[REFINT] No references found in '%s' for document '%s' via field '%s'", targetBundle.Name, documentID, foreignKeyField)
 	return "", nil
 }
 
@@ -245,24 +245,24 @@ func (v *ReferentialIntegrityValidator) checkHashIndexForReferences(
 //   - found: True if index exists
 func (v *ReferentialIntegrityValidator) findIndexForField(bundle *models.Bundle, fieldName string) (string, models.IndexReference, bool) {
 	if bundle.Indexes == nil {
-		v.logger.Infof("[REFINT] No indexes found in bundle '%s'", bundle.Name)
+		v.logger.Debugf("[REFINT] No indexes found in bundle '%s'", bundle.Name)
 		return "", models.IndexReference{}, false
 	}
 
-	v.logger.Infof("[REFINT] Searching for index on field '%s' in bundle '%s' (total indexes: %d)", fieldName, bundle.Name, len(bundle.Indexes))
+	v.logger.Debugf("[REFINT] Searching for index on field '%s' in bundle '%s' (total indexes: %d)", fieldName, bundle.Name, len(bundle.Indexes))
 
 	for indexName, indexRef := range bundle.Indexes {
-		v.logger.Infof("[REFINT] Checking index '%s': type=%s, hashField='%s', btreeField='%s'",
+		v.logger.Debugf("[REFINT] Checking index '%s': type=%s, hashField='%s', btreeField='%s'",
 			indexName, indexRef.IndexType, indexRef.HashIndexField.FieldName, indexRef.BTreeIndexField.FieldName)
 
 		// Check hash index field
 		if indexRef.IndexType == "hash" && indexRef.HashIndexField.FieldName == fieldName {
-			v.logger.Infof("[REFINT] Found matching hash index: '%s' for field '%s'", indexName, fieldName)
+			v.logger.Debugf("[REFINT] Found matching hash index: '%s' for field '%s'", indexName, fieldName)
 			return indexName, indexRef, true
 		}
 		// Check BTree index field
 		if indexRef.IndexType == "btree" && indexRef.BTreeIndexField.FieldName == fieldName {
-			v.logger.Infof("[REFINT] Found matching btree index: '%s' for field '%s'", indexName, fieldName)
+			v.logger.Debugf("[REFINT] Found matching btree index: '%s' for field '%s'", indexName, fieldName)
 			return indexName, indexRef, true
 		}
 	}
@@ -329,11 +329,11 @@ func (v *ReferentialIntegrityValidator) ValidateBulkDeleteOptimized(
 
 	// OPTIMIZATION: Early exit if bundle has no relationships
 	if len(bundle.Relationships) == 0 {
-		v.logger.Infof("[REFINT] Bundle '%s' has no relationships - skipping bulk validation", bundle.Name)
+		v.logger.Debugf("[REFINT] Bundle '%s' has no relationships - skipping bulk validation", bundle.Name)
 		return nil
 	}
 
-	v.logger.Infof("[REFINT] Validating bulk delete of %d documents from bundle '%s' (%d relationships)",
+	v.logger.Debugf("[REFINT] Validating bulk delete of %d documents from bundle '%s' (%d relationships)",
 		len(documentIDs), bundle.Name, len(bundle.Relationships))
 
 	// Track violations by relationship for aggregated error reporting
@@ -434,7 +434,7 @@ func (v *ReferentialIntegrityValidator) ValidateBulkDeleteOptimized(
 		return v.formatBulkViolationError(bundle.Name, len(documentIDs), violationCounts)
 	}
 
-	v.logger.Infof("[REFINT] Bulk validation passed for %d documents in bundle '%s'", len(documentIDs), bundle.Name)
+	v.logger.Debugf("[REFINT] Bulk validation passed for %d documents in bundle '%s'", len(documentIDs), bundle.Name)
 	return nil
 }
 
@@ -540,7 +540,7 @@ func (v *ReferentialIntegrityValidator) ValidateDeleteWithCascade(bundle *models
 		return nil, fmt.Errorf("documentID cannot be empty")
 	}
 
-	v.logger.Infof("[CASCADE] Starting cascade delete analysis for document '%s' in bundle '%s'", documentID, bundle.Name)
+	v.logger.Debugf("[CASCADE] Starting cascade delete analysis for document '%s' in bundle '%s'", documentID, bundle.Name)
 
 	// Initialize the cascade plan
 	plan := &CascadeDeletePlan{
@@ -564,7 +564,7 @@ func (v *ReferentialIntegrityValidator) ValidateDeleteWithCascade(bundle *models
 		return nil, fmt.Errorf("failed to analyze cascade dependencies: %w", err)
 	}
 
-	v.logger.Infof("[CASCADE] Cascade analysis complete: %d total deletes across %d bundles (max depth: %d)",
+	v.logger.Debugf("[CASCADE] Cascade analysis complete: %d total deletes across %d bundles (max depth: %d)",
 		plan.TotalDeletes, len(plan.AffectedBundles), plan.MaxDepth)
 
 	return plan, nil
@@ -740,7 +740,7 @@ func (v *ReferentialIntegrityValidator) ExecuteCascadeDelete(plan *CascadeDelete
 		return fmt.Errorf("cascade plan cannot be nil")
 	}
 
-	v.logger.Infof("[CASCADE] Executing cascade delete: %d total documents across %d bundles",
+	v.logger.Debugf("[CASCADE] Executing cascade delete: %d total documents across %d bundles",
 		plan.TotalDeletes, len(plan.AffectedBundles))
 
 	// TODO: I will add transaction wrapper at server layer (where WALManager is available)
@@ -756,7 +756,7 @@ func (v *ReferentialIntegrityValidator) ExecuteCascadeDelete(plan *CascadeDelete
 	for i := len(sortedDeps) - 1; i >= 0; i-- {
 		dep := sortedDeps[i]
 
-		v.logger.Infof("[CASCADE] Deleting dependent document '%s' from bundle '%s' (level %d)",
+		v.logger.Debugf("[CASCADE] Deleting dependent document '%s' from bundle '%s' (level %d)",
 			dep.DocumentID, dep.BundleName, dep.Level)
 
 		// Load the bundle (need database reference from root bundle)
@@ -785,7 +785,7 @@ func (v *ReferentialIntegrityValidator) ExecuteCascadeDelete(plan *CascadeDelete
 	}
 
 	// Finally, delete the root document
-	v.logger.Infof("[CASCADE] Deleting root document '%s' from bundle '%s'",
+	v.logger.Debugf("[CASCADE] Deleting root document '%s' from bundle '%s'",
 		plan.RootDocumentID, plan.RootBundle)
 
 	// Root bundle was already loaded at the start of the loop, reuse it
@@ -805,7 +805,7 @@ func (v *ReferentialIntegrityValidator) ExecuteCascadeDelete(plan *CascadeDelete
 		return fmt.Errorf("failed to delete root document '%s': %w", plan.RootDocumentID, err)
 	}
 
-	v.logger.Infof("[CASCADE] Cascade delete completed successfully: %d documents deleted", plan.TotalDeletes)
+	v.logger.Debugf("[CASCADE] Cascade delete completed successfully: %d documents deleted", plan.TotalDeletes)
 	return nil
 }
 

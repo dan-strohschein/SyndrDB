@@ -515,7 +515,7 @@ func (lm *LockManager) ReleaseLocksForSession(sessionID string) int {
 		shard.mu.Unlock()
 	}
 	if releaseCount > 0 {
-		lm.logger.Infof("Released %d locks for sessionID=%s", releaseCount, sessionID)
+		lm.logger.Debugf("Released %d locks for sessionID=%s", releaseCount, sessionID)
 	}
 	return releaseCount
 }
@@ -604,9 +604,9 @@ func (lm *LockManager) CleanupOrphanedLocks(activeSessionIDs map[string]bool) (i
 
 	sessionCount := len(orphanedSessions)
 	if orphanedLocks > 0 {
-		lm.logger.Infof("Released %d orphaned locks from %d crashed sessions", orphanedLocks, sessionCount)
+		lm.logger.Debugf("Released %d orphaned locks from %d crashed sessions", orphanedLocks, sessionCount)
 	} else {
-		lm.logger.Infof("No orphaned locks found during cleanup")
+		lm.logger.Debugf("No orphaned locks found during cleanup")
 	}
 	return orphanedLocks, sessionCount
 }

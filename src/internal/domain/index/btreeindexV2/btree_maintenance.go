@@ -135,7 +135,7 @@ func CompactIndex(idx *BTreeIndex, options *CompactionOptions) (*MaintenanceResu
 
 	startTime := time.Now()
 
-	idx.logger.Infof("Starting index compaction with options: maxPages=%d, minFillFactor=%.2f, forceRebuild=%t",
+	idx.logger.Debugf("Starting index compaction with options: maxPages=%d, minFillFactor=%.2f, forceRebuild=%t",
 		options.MaxPagesToProcess, options.MinFillFactorTarget, options.ForceRebuild)
 
 	result := &MaintenanceResult{
@@ -171,7 +171,7 @@ func CompactIndex(idx *BTreeIndex, options *CompactionOptions) (*MaintenanceResu
 		result.Recommendations = append(result.Recommendations,
 			"Index is already well-compacted, no action needed")
 
-		idx.logger.Infof("Index compaction completed: no compaction needed (fill factor: %.2f%%)",
+		idx.logger.Debugf("Index compaction completed: no compaction needed (fill factor: %.2f%%)",
 			stats.AverageFillFactor*100)
 		return result, nil
 	}
@@ -195,7 +195,7 @@ func CompactIndex(idx *BTreeIndex, options *CompactionOptions) (*MaintenanceResu
 	result.Success = true
 	result.TimeElapsed = time.Since(startTime)
 
-	idx.logger.Infof("Index compaction completed successfully: processed %d pages, reclaimed %d pages, saved %d bytes in %v",
+	idx.logger.Debugf("Index compaction completed successfully: processed %d pages, reclaimed %d pages, saved %d bytes in %v",
 		result.PagesProcessed, result.PagesReclaimed, result.SpaceSaved, result.TimeElapsed)
 
 	return result, nil
@@ -222,7 +222,7 @@ func DefragmentIndex(idx *BTreeIndex, options *DefragmentationOptions) (*Mainten
 
 	startTime := time.Now()
 
-	idx.logger.Infof("Starting index defragmentation with options: reorderLeaf=%t, optimizeRange=%t, consolidate=%t",
+	idx.logger.Debugf("Starting index defragmentation with options: reorderLeaf=%t, optimizeRange=%t, consolidate=%t",
 		options.ReorderLeafNodes, options.OptimizeRangeQueries, options.ConsolidateNodes)
 
 	result := &MaintenanceResult{
@@ -255,7 +255,7 @@ func DefragmentIndex(idx *BTreeIndex, options *DefragmentationOptions) (*Mainten
 		result.Recommendations = append(result.Recommendations,
 			"Index fragmentation is within acceptable limits, no defragmentation needed")
 
-		idx.logger.Infof("Index defragmentation completed: fragmentation level acceptable (%.2f%%)",
+		idx.logger.Debugf("Index defragmentation completed: fragmentation level acceptable (%.2f%%)",
 			fragmentationLevel*100)
 		return result, nil
 	}
@@ -291,7 +291,7 @@ func DefragmentIndex(idx *BTreeIndex, options *DefragmentationOptions) (*Mainten
 	result.Success = true
 	result.TimeElapsed = time.Since(startTime)
 
-	idx.logger.Infof("Index defragmentation completed successfully: processed %d pages, saved %d bytes in %v",
+	idx.logger.Debugf("Index defragmentation completed successfully: processed %d pages, saved %d bytes in %v",
 		result.PagesProcessed, result.SpaceSaved, result.TimeElapsed)
 
 	return result, nil
@@ -318,7 +318,7 @@ func RebuildIndex(idx *BTreeIndex, options *RebuildOptions) (*MaintenanceResult,
 
 	startTime := time.Now()
 
-	idx.logger.Infof("Starting index rebuild with options: fillFactor=%.2f, bulkLoad=%t, sortKeys=%t",
+	idx.logger.Debugf("Starting index rebuild with options: fillFactor=%.2f, bulkLoad=%t, sortKeys=%t",
 		options.OptimalFillFactor, options.EnableBulkLoading, options.SortKeys)
 
 	result := &MaintenanceResult{
@@ -388,7 +388,7 @@ func RebuildIndex(idx *BTreeIndex, options *RebuildOptions) (*MaintenanceResult,
 	result.Success = true
 	result.TimeElapsed = time.Since(startTime)
 
-	idx.logger.Infof("Index rebuild completed successfully: processed %d pages, reclaimed %d pages, saved %d bytes in %v",
+	idx.logger.Debugf("Index rebuild completed successfully: processed %d pages, reclaimed %d pages, saved %d bytes in %v",
 		result.PagesProcessed, result.PagesReclaimed, result.SpaceSaved, result.TimeElapsed)
 
 	return result, nil
@@ -414,7 +414,7 @@ func OptimizeIndex(idx *BTreeIndex) (*MaintenanceResult, error) {
 
 	startTime := time.Now()
 
-	idx.logger.Infof("Starting comprehensive index optimization")
+	idx.logger.Debugf("Starting comprehensive index optimization")
 
 	result := &MaintenanceResult{
 		Operation:         "OptimizeIndex",
@@ -522,7 +522,7 @@ func OptimizeIndex(idx *BTreeIndex) (*MaintenanceResult, error) {
 	result.TimeElapsed = time.Since(startTime)
 
 	if result.Success {
-		idx.logger.Infof("Index optimization completed successfully in %v", result.TimeElapsed)
+		idx.logger.Debugf("Index optimization completed successfully in %v", result.TimeElapsed)
 	} else {
 		idx.logger.Warnf("Index optimization completed with %d errors in %v",
 			len(result.ErrorsEncountered), result.TimeElapsed)
@@ -578,7 +578,7 @@ func performCompactionOperations(idx *BTreeIndex, options *CompactionOptions, re
 	result.PagesReclaimed = int(startPages - idx.Metadata.TotalPages)
 	result.SpaceSaved = uint64(result.PagesReclaimed) * uint64(idx.Metadata.PageSize)
 
-	idx.logger.Infof("Compaction complete: processed %d pages, reclaimed %d pages, removed %d tombstones",
+	idx.logger.Debugf("Compaction complete: processed %d pages, reclaimed %d pages, removed %d tombstones",
 		result.PagesProcessed, result.PagesReclaimed, startTombstones)
 
 	return nil
@@ -898,7 +898,7 @@ func replaceIndexStructure(idx *BTreeIndex, newIndex *BTreeIndex, result *Mainte
 		return fmt.Errorf("maintenance result cannot be nil")
 	}
 
-	idx.logger.Infof("Starting atomic replacement of index structure")
+	idx.logger.Debugf("Starting atomic replacement of index structure")
 
 	// Step 1: Validate the new index structure before replacement
 	if err := validateNewIndexStructure(newIndex); err != nil {
@@ -946,7 +946,7 @@ func replaceIndexStructure(idx *BTreeIndex, newIndex *BTreeIndex, result *Mainte
 		// Not critical for core functionality
 	}
 
-	idx.logger.Infof("Index structure replacement completed successfully")
+	idx.logger.Debugf("Index structure replacement completed successfully")
 
 	return nil
 }
@@ -1184,7 +1184,7 @@ func finalizeIndexReplacement(idx *BTreeIndex, result *MaintenanceResult) error 
 		return fmt.Errorf("failed to update final statistics: %w", err)
 	}
 
-	idx.logger.Infof("Index replacement finalized successfully")
+	idx.logger.Debugf("Index replacement finalized successfully")
 
 	return nil
 }
