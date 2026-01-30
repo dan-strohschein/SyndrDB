@@ -175,7 +175,8 @@ func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*Bucket
 			// Reuse the last file for appending if it's not full. This avoids creating
 			// a new header-only file on every server restart (which caused hundreds
 			// of near-empty files per index).
-			file, openErr := os.OpenFile(lastPath, os.O_WRONLY|os.O_APPEND, 0644)
+			// NOTE: O_APPEND removed because WriteAt is used with atomic offset tracking
+			file, openErr := os.OpenFile(lastPath, os.O_WRONLY, 0644)
 			if openErr == nil {
 				stat, statErr := file.Stat()
 				if statErr == nil && stat.Size() < bfm.bucketMaxSize {
@@ -212,7 +213,8 @@ func (bfm *BucketFileManager) openBucketFile(handle *BucketFileHandle) error {
 		handle.CurrentFileNum,
 	)
 
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// NOTE: O_APPEND removed because WriteAt is used with atomic offset tracking
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open file %s: %w", filePath, err)
 	}

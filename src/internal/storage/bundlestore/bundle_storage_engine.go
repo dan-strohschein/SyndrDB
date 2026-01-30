@@ -3178,8 +3178,10 @@ func (b *BundleStorageEngine) getOrCreateWriteBuffer(bundleName, filePath string
 		}
 
 		// Open file in append mode with O_CREATE to handle first-time creation
-		// CRITICAL: O_CREATE ensures file exists, O_APPEND guarantees atomic append operations
-		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		// CRITICAL: O_CREATE ensures file exists
+		// NOTE: O_APPEND is NOT used here because WriteDirectAtomic uses WriteAt() which is
+		// incompatible with O_APPEND. Instead, we use atomic offset tracking for thread-safe appends.
+		file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open bundle file for buffering: %w", err)
 		}
