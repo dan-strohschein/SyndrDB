@@ -59,7 +59,8 @@ func (d *Document) GetVersionSequence() uint64 {
 // snapshotSeq: The snapshot sequence boundary
 // txID: The transaction ID for this snapshot
 // activeTxIDs: Map of transaction IDs that were active at snapshot time
-func (d *Document) IsVisibleToSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool) bool {
+// gracePeriodMs: RCU grace period - superseded docs remain visible during this window (0 = no grace)
+func (d *Document) IsVisibleToSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool, gracePeriodMs ...int) bool {
 	if d == nil {
 		return false
 	}
@@ -89,6 +90,25 @@ func (d *Document) IsVisibleToSnapshot(snapshotSeq uint64, txID uint64, activeTx
 
 	// Rule 4: Not deleted before snapshot
 	if d.DeletedByTxID > 0 && d.DeletedByTxID <= snapshotSeq {
+		return false
+	}
+
+	// Rule 5 (RCU Grace Period): Superseded documents remain visible during grace window
+	// This ensures in-flight reads using an older snapshot can complete before the old
+	// version becomes invisible. Without this, concurrent reads could see partial updates.
+	if !d.SupersededAt.IsZero() {
+		// Document has been superseded by a newer version
+		gracePeriod := 0
+		if len(gracePeriodMs) > 0 && gracePeriodMs[0] > 0 {
+			gracePeriod = gracePeriodMs[0]
+		}
+		if gracePeriod > 0 {
+			// Still within grace window - visible to allow in-flight reads to complete
+			if time.Since(d.SupersededAt) < time.Duration(gracePeriod)*time.Millisecond {
+				return true
+			}
+		}
+		// Grace period expired or not configured - superseded version is no longer visible
 		return false
 	}
 

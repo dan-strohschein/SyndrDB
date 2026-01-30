@@ -34,6 +34,7 @@ type SmartBundleScanner struct {
 	snapshotSequence uint64          // Commit sequence boundary (sees all commits <= this, 0 = current)
 	txID             uint64          // Transaction ID for this scanner (0 = autocommit)
 	activeTxIDs      map[uint64]bool // Active transaction IDs at snapshot time (for visibility rules)
+	gracePeriodMs    int             // RCU grace period for superseded document visibility
 }
 
 // NewSmartBundleScanner creates a new smart bundle scanner
@@ -78,7 +79,8 @@ func NewSmartBundleScanner(
 
 // SetSnapshot sets the MVCC snapshot for this scanner
 // Called when scanner is used within a transaction to enable proper snapshot isolation
-func (sbs *SmartBundleScanner) SetSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool) {
+// gracePeriodMs is optional - pass 0 or omit to disable grace period visibility
+func (sbs *SmartBundleScanner) SetSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool, gracePeriodMs ...int) {
 	sbs.snapshotSequence = snapshotSeq
 	sbs.txID = txID
 	if activeTxIDs != nil {
@@ -86,6 +88,10 @@ func (sbs *SmartBundleScanner) SetSnapshot(snapshotSeq uint64, txID uint64, acti
 		for k, v := range activeTxIDs {
 			sbs.activeTxIDs[k] = v
 		}
+	}
+	// Set grace period if provided
+	if len(gracePeriodMs) > 0 {
+		sbs.gracePeriodMs = gracePeriodMs[0]
 	}
 }
 
@@ -199,7 +205,7 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 
 			// Apply MVCC snapshot filtering if scanner has snapshot context
 			if sbs.snapshotSequence > 0 {
-				if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+				if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 					continue // Skip documents not visible to this snapshot
 				}
 			}
@@ -347,7 +353,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 
 						// Apply MVCC snapshot filtering
 						if sbs.snapshotSequence > 0 {
-							if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+							if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 								continue
 							}
 						}
@@ -422,7 +428,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 
 				// Apply MVCC snapshot filtering if scanner has snapshot context
 				if sbs.snapshotSequence > 0 {
-					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs) {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 						continue // Skip documents not visible to this snapshot
 					}
 				}

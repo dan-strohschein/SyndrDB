@@ -52,8 +52,8 @@ func DefaultGroupCommitConfig() GroupCommitConfig {
 		Enabled:          true,
 		MaxWaitTime:      1 * time.Millisecond,
 		MaxGroupSize:     100,
-		BufferSizeBytes:  64 * 1024,   // 64KB initial buffer
-		CompletionBuffer: 1000,        // Support 1000 concurrent waiters
+		BufferSizeBytes:  64 * 1024, // 64KB initial buffer
+		CompletionBuffer: 1000,      // Support 1000 concurrent waiters
 	}
 }
 
@@ -88,8 +88,8 @@ func (b *WALBuffer) reset() {
 
 // GroupCommitWaiter represents a transaction waiting for its writes to be durable
 type GroupCommitWaiter struct {
-	LSN          uint64        // The LSN this waiter needs to be durable
-	CompleteChan chan error    // Channel to signal completion (buffered, size 1)
+	LSN          uint64     // The LSN this waiter needs to be durable
+	CompleteChan chan error // Channel to signal completion (buffered, size 1)
 }
 
 // GroupCommitManager manages the double-buffering and group commit logic
@@ -104,13 +104,13 @@ type GroupCommitManager struct {
 	config GroupCommitConfig
 
 	// Flush state
-	flushInProgress atomic.Bool    // True when a flush is in progress
-	lastFlushTime   time.Time      // When the last flush completed
-	lastFlushedLSN  atomic.Uint64  // Highest LSN that has been durably flushed
+	flushInProgress atomic.Bool   // True when a flush is in progress
+	lastFlushTime   time.Time     // When the last flush completed
+	lastFlushedLSN  atomic.Uint64 // Highest LSN that has been durably flushed
 
 	// Waiters for group commit
-	waiters    []*GroupCommitWaiter // Transactions waiting for durability
-	waitersMu  sync.Mutex           // Separate mutex for waiters list
+	waiters   []*GroupCommitWaiter // Transactions waiting for durability
+	waitersMu sync.Mutex           // Separate mutex for waiters list
 
 	// Statistics
 	flushCount       atomic.Uint64 // Total number of flushes
@@ -188,7 +188,7 @@ func (gcm *GroupCommitManager) SwapBuffers() (dataToFlush []byte, firstLSN, last
 // CompleteFlush marks the flush as complete and notifies waiters
 func (gcm *GroupCommitManager) CompleteFlush(flushedLSN uint64, flushErr error) {
 	gcm.mu.Lock()
-	
+
 	// Update last flushed LSN
 	if flushErr == nil && flushedLSN > gcm.lastFlushedLSN.Load() {
 		gcm.lastFlushedLSN.Store(flushedLSN)
@@ -199,11 +199,11 @@ func (gcm *GroupCommitManager) CompleteFlush(flushedLSN uint64, flushErr error) 
 		gcm.flushBuffer.reset()
 		gcm.flushBuffer = nil
 	}
-	
+
 	gcm.flushInProgress.Store(false)
 	gcm.lastFlushTime = time.Now()
 	gcm.flushCount.Add(1)
-	
+
 	gcm.mu.Unlock()
 
 	// Notify all waiters whose LSN has been flushed
@@ -449,7 +449,7 @@ func LogOperationWithGroupCommit(wal *WriteAheadLog, txID string, operation Oper
 	// Step 5: Determine if we need to wait for durability
 	isCommitOp := operation == OpCommitTx || operation == OpCheckpointBegin || operation == OpCheckpointComplete
 	needsSync := false
-	
+
 	switch wal.durabilityMode {
 	case "strict":
 		// Strict mode: always sync immediately

@@ -239,7 +239,7 @@ func OptimizedIndexLoad(
 	if stats.StaleMisses > 0 {
 		stalenessRate := float64(stats.StaleMisses) / float64(totalExpected)
 		stalenessPercent := stalenessRate * 100
-		
+
 		logger.Infof("Index load complete: %d docs found (direct: %d, fallback: %d), staleness rate: %.1f%%",
 			len(result), stats.DirectHits, stats.FallbackHits, stalenessPercent)
 
@@ -253,12 +253,12 @@ func OptimizedIndexLoad(
 		if stalenessRate > 0.20 && indexRef != nil && indexRef.Maintenance != nil && indexRef.Maintenance.IsHealthy {
 			logger.Warnf("High staleness rate (%.1f%%) detected - scheduling index rebuild",
 				stalenessPercent)
-			
+
 			// Check minimum rebuild interval
 			if time.Since(indexRef.Maintenance.LastRebuildTime) >= 1*time.Hour {
 				if scheduler != nil {
 					bundleName := bundle.GetName()
-					
+
 					_ = scheduler.ScheduleRebuild(IndexMaintenanceRequest{
 						DatabaseName:  databaseName,
 						BundleName:    bundleName,

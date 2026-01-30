@@ -116,6 +116,30 @@ bundle_storage_format: "binary"
 bundle_buffer_size: 0
 
 # ==============================================================================
+# RCU (Read-Copy-Update) CONFIGURATION
+# ==============================================================================
+# RCU enables lock-free UPDATE and DELETE operations using append-only versioning.
+# This dramatically improves concurrency by eliminating lock contention on writes.
+# With RCU enabled, writes create new document versions instead of modifying in-place.
+# Readers see consistent snapshots without blocking writers.
+
+# Enable RCU-based lock-free updates (default: true)
+# When true, UPDATE and DELETE use the append-only path without acquiring bundle locks.
+# Disable only if you require strict serializable isolation (rare use case).
+enable_rcu_writes: true
+
+# Grace period in milliseconds for superseded document visibility (default: 100)
+# After a document is updated, the old version remains visible for this duration
+# to allow in-flight reads to complete. Lower values = faster garbage collection,
+# higher values = more safety for long-running queries.
+rcu_grace_period_ms: 100
+
+# Maximum OCC retry attempts for write-write conflicts (default: 3)
+# When two concurrent transactions update the same document, the later one
+# retries with a fresh snapshot up to this many times before returning an error.
+max_occ_retries: 3
+
+# ==============================================================================
 # STORAGE ENGINE CONFIGURATION
 # ==============================================================================
 storage:

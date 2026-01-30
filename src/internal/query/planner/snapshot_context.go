@@ -3,33 +3,32 @@ package planner
 /*
 SNAPSHOT CONTEXT - MVCC SNAPSHOT ISOLATION SUPPORT
 
-This file provides context-based snapshot information for MVCC query execution.
-Snapshots are passed through the query execution context to enable visibility filtering.
+This file re-exports snapshot context functions from models package for
+backward compatibility. The actual implementation is in models to avoid
+import cycles (since both bundle and planner need access to SnapshotInfo).
+
+DEPRECATED: New code should use models.SnapshotInfo, models.WithSnapshotInfo,
+and models.GetSnapshotInfoFromContext directly.
 */
 
 import (
 	"context"
+
+	"syndrdb/src/internal/domain/models"
 )
 
-// SnapshotInfo contains MVCC snapshot information for query execution
-type SnapshotInfo struct {
-	SnapshotSequence uint64        // Commit sequence boundary
-	TransactionID    uint64        // Transaction ID for read-your-own-writes
-	ActiveTxIDs      map[uint64]bool // Active transactions at snapshot time
-}
+// SnapshotInfo is an alias to models.SnapshotInfo for backward compatibility
+// DEPRECATED: Use models.SnapshotInfo directly
+type SnapshotInfo = models.SnapshotInfo
 
-type snapshotContextKey struct{}
-
-// WithSnapshotInfo adds snapshot information to the context
+// WithSnapshotInfo re-exports models.WithSnapshotInfo for backward compatibility
+// DEPRECATED: Use models.WithSnapshotInfo directly
 func WithSnapshotInfo(ctx context.Context, snapshot *SnapshotInfo) context.Context {
-	return context.WithValue(ctx, snapshotContextKey{}, snapshot)
+	return models.WithSnapshotInfo(ctx, snapshot)
 }
 
-// GetSnapshotInfoFromContext retrieves snapshot information from context
-// Returns nil if no snapshot is set (non-transactional query)
+// GetSnapshotInfoFromContext re-exports models.GetSnapshotInfoFromContext for backward compatibility
+// DEPRECATED: Use models.GetSnapshotInfoFromContext directly
 func GetSnapshotInfoFromContext(ctx context.Context) *SnapshotInfo {
-	if snapshot, ok := ctx.Value(snapshotContextKey{}).(*SnapshotInfo); ok {
-		return snapshot
-	}
-	return nil
+	return models.GetSnapshotInfoFromContext(ctx)
 }

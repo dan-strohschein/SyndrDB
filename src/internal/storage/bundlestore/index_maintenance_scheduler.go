@@ -72,14 +72,14 @@ type BundleServiceInterface interface {
 
 // IndexMaintenanceRequest represents a request to rebuild an index
 type IndexMaintenanceRequest struct {
-	DatabaseName string
-	BundleName   string
-	IndexName    string
-	IndexType    string // "hash" or "btree"
-	Priority     float64
+	DatabaseName  string
+	BundleName    string
+	IndexName     string
+	IndexType     string // "hash" or "btree"
+	Priority      float64
 	StalenessRate float64
-	QueryCount   int64
-	RequestTime  time.Time
+	QueryCount    int64
+	RequestTime   time.Time
 }
 
 // IndexMaintenanceQueue implements heap.Interface for priority queue

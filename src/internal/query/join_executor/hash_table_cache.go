@@ -27,9 +27,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"syndrdb/src/internal/query/bloomfilter"
 	"syndrdb/src/pkg/settings"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 // HashTableCacheKey uniquely identifies a cached hash table

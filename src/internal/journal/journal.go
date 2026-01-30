@@ -71,8 +71,8 @@ const (
 	OpCommitTx
 	OpRollbackTx
 	OpCommitSequenceAssign // PHASE 2: MVCC - Batch commit sequence assignment for documents
-	OpCheckpointBegin       // Marks the start of a checkpoint (for crash recovery)
-	OpCheckpointComplete    // Marks successful checkpoint completion (recovery point)
+	OpCheckpointBegin      // Marks the start of a checkpoint (for crash recovery)
+	OpCheckpointComplete   // Marks successful checkpoint completion (recovery point)
 )
 
 // WALEntry represents a single entry in the Write Ahead Log
@@ -203,7 +203,7 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 		pendingOps:         0,
 		durabilityMode:     durabilityMode,
 		coordinator:        nil, // Set later via SetCoordinator()
-		groupCommitMgr:     NewGroupCommitManager(GroupCommitConfig{
+		groupCommitMgr: NewGroupCommitManager(GroupCommitConfig{
 			Enabled:          true,
 			MaxWaitTime:      walMaxFlushDelay,
 			MaxGroupSize:     walBatchSize,
@@ -383,7 +383,7 @@ func (wal *WriteAheadLog) readLastLSNFromFile(filePath string) (uint64, error) {
 // HIGH-008: Errors from async flush are now stored and can be retrieved via GetLastFlushError()
 func (wal *WriteAheadLog) startAutoFlush() {
 	wal.flushTicker = time.NewTicker(wal.flushInterval)
-	
+
 	// Initialize error storage with nil pointer
 	var nilErr error
 	wal.lastFlushError.Store(&nilErr)
@@ -597,10 +597,10 @@ func (wal *WriteAheadLog) ReplayOperations(fromLSN uint64, replayFunc func(WALEn
 // RecoveryError represents an error during WAL recovery with entry context
 // HIGH-008: Provides detailed error information for recovery failures
 type RecoveryError struct {
-	LSN     uint64 // Log Sequence Number of the problematic entry
-	File    string // WAL file path
-	Reason  string // Reason for error (unmarshal, checksum, replay)
-	Err     error  // Underlying error
+	LSN    uint64 // Log Sequence Number of the problematic entry
+	File   string // WAL file path
+	Reason string // Reason for error (unmarshal, checksum, replay)
+	Err    error  // Underlying error
 }
 
 func (re *RecoveryError) Error() string {
@@ -650,14 +650,14 @@ func (wal *WriteAheadLog) replayFromFileASCII(filePath string, fromLSN uint64, r
 		if line == "" {
 			continue
 		}
-		
+
 		// Check if line looks like binary data (starts with non-printable or control characters)
 		if len(line) > 0 && (line[0] < 32 && line[0] != '\t' && line[0] != '\n' && line[0] != '\r') {
 			// This is likely binary data, skip it
 			wal.logger.Debugf("Skipping binary WAL entry at line %d (first byte: 0x%02x)", lineNum, line[0])
 			continue
 		}
-		
+
 		var entry WALEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			// HIGH-008: Track unmarshal errors instead of silently skipping

@@ -1030,7 +1030,7 @@ func (sm *SessionManager) Stop() {
 func (sm *SessionManager) GetSessionStats() map[string]interface{} {
 	// PHASE 3: Use pooled map to reduce allocations
 	stats := GetResponseMap()
-	
+
 	// Get stats from sharded map
 	shardStats := sm.sessions.GetStats()
 	stats["total_sessions"] = shardStats["total_sessions"]
@@ -1038,7 +1038,7 @@ func (sm *SessionManager) GetSessionStats() map[string]interface{} {
 	stats["min_shard_size"] = shardStats["min_shard_size"]
 	stats["max_shard_size"] = shardStats["max_shard_size"]
 	stats["avg_shard_size"] = shardStats["avg_shard_size"]
-	
+
 	// Count active users
 	activeUsers := 0
 	sm.userSessions.Range(func(username string, sessions []*Session) bool {
@@ -1048,7 +1048,7 @@ func (sm *SessionManager) GetSessionStats() map[string]interface{} {
 		return true
 	})
 	stats["active_users"] = activeUsers
-	
+
 	stats["max_sessions"] = sm.maxSessions
 	stats["default_timeout"] = sm.defaultTimeout.String()
 	stats["cleanup_interval"] = sm.cleanupInterval.String()

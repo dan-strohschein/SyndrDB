@@ -327,7 +327,7 @@ func (idx *HashIndexV3) scanLatestFileForMaxSequence() (uint64, error) {
 	successCount := 0
 	for _, filename := range files {
 		filePath := filepath.Join(idx.config.DataDir, filename)
-		
+
 		// Read just the header (much faster than scanning entries)
 		header, _, err := idx.storage.headerManager.ReadHeader(filePath)
 		if err != nil {

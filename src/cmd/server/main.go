@@ -263,6 +263,8 @@ func main() {
 	flag.BoolVar(&args.EnableQueryMonitoring, "enable-query-monitoring", args.EnableQueryMonitoring, "Enable GraphQL query metrics monitoring (Layer 5)")
 	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", args.GraphQLRateAlgorithm, "GraphQL rate limiting algorithm")
 
+	flag.BoolVar(&args.EnableRCUWrites, "enable-rcu-writes", args.EnableRCUWrites, "Enable RCU Writes ")
+
 	// Final parse with CLI taking precedence
 	flag.Parse()
 

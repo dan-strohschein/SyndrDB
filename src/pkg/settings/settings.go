@@ -135,6 +135,7 @@ type Arguments struct {
 	// Enables lock-free concurrent writes using PostgreSQL-inspired MVCC patterns
 	EnableRCUWrites  bool `yaml:"enable_rcu_writes"`   // Enable RCU-based lock-free updates (default: true)
 	RCUGracePeriodMs int  `yaml:"rcu_grace_period_ms"` // Grace period in milliseconds before cleanup (default: 100)
+	MaxOCCRetries    int  `yaml:"max_occ_retries"`     // Maximum OCC retry attempts on write-write conflict (default: 3)
 
 	// B-Tree Index Persistence Configuration
 	// TODO: Add B-Tree index persistence configuration settings (BTreeSyncMode, BTreeBatchSize, BTreeFlushInterval, BTreeMaxDirtyPages, BTreeEnableWAL, BTreeCheckpointInterval, BTreeWALRetentionSeconds, BTreeGroupCommitDelay)
@@ -519,6 +520,7 @@ func GetSettings() *Arguments {
 			// Lock-free concurrent writes using PostgreSQL-inspired patterns
 			EnableRCUWrites:  true, // Enable RCU-based lock-free updates by default
 			RCUGracePeriodMs: 100,  // 100ms grace period for in-flight reads
+			MaxOCCRetries:    3,    // Retry up to 3 times on write-write conflict
 
 			// Concurrency & Locking Configuration Defaults (HIGH-007)
 			LockTimeoutSeconds:           30, // 30 seconds timeout for lock acquisition

@@ -139,7 +139,7 @@ func (pb *PlanBuilder) BuildPlan(
 			}
 			fullScan.MaxDocuments = effectiveLimit
 			pb.logger.Infof("OPTIMIZATION: Simple LIMIT-only query detected. Setting MaxDocuments=%d on FullScanNode (skipping SortNode)", effectiveLimit)
-			
+
 			// If there's OFFSET, we still need LimitNode to skip OFFSET documents
 			// Otherwise, return early (skip both SortNode and LimitNode)
 			if query.Offset > 0 {

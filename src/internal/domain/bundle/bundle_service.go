@@ -3,6 +3,7 @@ package bundle
 import (
 	"container/list"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,7 +60,7 @@ type pageCacheShard struct {
 	lruOrder    *list.List                      // LRU order for this shard
 	lruElements map[string]*list.Element        // pageKey -> list element for O(1) promotion
 	maxPages    int                             // Max pages per shard (total max / shard count)
-	
+
 	// PHASE 3: COW (Copy-On-Write) snapshot cache for GROUP BY optimization
 	// Caches document snapshots to avoid RLock contention during parallel page loading
 	// Key: pageKey, Value: cowSnapshotEntry with documents and timestamp
@@ -70,9 +71,9 @@ type pageCacheShard struct {
 // cowSnapshotEntry holds a cached document snapshot with timestamp for staleness checking
 // PHASE 3: Copy-on-write snapshot to avoid RLock contention in GROUP BY parallel loading
 type cowSnapshotEntry struct {
-	documents  []models.Document // Snapshot of page documents
-	timestamp  int64             // Unix timestamp (milliseconds) when snapshot was created
-	pageKey    string            // Page key for invalidation
+	documents []models.Document // Snapshot of page documents
+	timestamp int64             // Unix timestamp (milliseconds) when snapshot was created
+	pageKey   string            // Page key for invalidation
 }
 
 // newPageCacheShard creates a new page cache shard
@@ -521,9 +522,9 @@ type BundleService struct {
 	// The schema system is optional and only initializes if GraphQL support is enabled.
 	// This allows the database to run without GraphQL overhead if not needed.
 	// PHASE 5: Sharded across 64 buckets to reduce contention (replaces schemaManagerMutex)
-	schemaManagers  *ShardedSchemaManagerMap          // databaseName -> schema manager (sharded)
-	schemaGenerator *graphQLSchema.SchemaGenerator    // Shared generator for all databases
-	graphQLEnabled  bool                              // Global toggle from settings
+	schemaManagers  *ShardedSchemaManagerMap       // databaseName -> schema manager (sharded)
+	schemaGenerator *graphQLSchema.SchemaGenerator // Shared generator for all databases
+	graphQLEnabled  bool                           // Global toggle from settings
 
 	// PERFORMANCE OPTIMIZATION: Runtime-toggleable diagnostic logging (Priority 1)
 	verboseLogging bool // Default: false - disable hot path diagnostic logs for performance
@@ -539,9 +540,9 @@ type BundleService struct {
 	// with LRU eviction based on idle timeout and memory budget enforcement
 	// PHASE 5: currentIndexMemoryUsage uses atomic.Int64 for lock-free updates
 	//          loadedDatabases uses ShardedLoadedDatabasesMap for concurrent access
-	uniqueIndexMemoryBudgetBytes int64                       // Memory budget for in-memory unique indexes (from settings)
-	currentIndexMemoryUsage      atomic.Int64                // Current memory usage by loaded unique indexes (atomic for lock-free updates)
-	loadedDatabases              *ShardedLoadedDatabasesMap  // databaseName -> lastAccessTime for LRU eviction (sharded)
+	uniqueIndexMemoryBudgetBytes int64                      // Memory budget for in-memory unique indexes (from settings)
+	currentIndexMemoryUsage      atomic.Int64               // Current memory usage by loaded unique indexes (atomic for lock-free updates)
+	loadedDatabases              *ShardedLoadedDatabasesMap // databaseName -> lastAccessTime for LRU eviction (sharded)
 
 	// TODO: Implement bundle-level shared WAL for B-Tree indexes - single WAL per bundle reduces file handles and enables coordinated checkpoints. Add btreeWAL field, initialize in NewBundleService, log format: BTREE:idx_name:INSERT|DELETE|UPDATE:pageNum:key
 	// IMPORTANT NOTE: B-Tree indexes share bundle-level WAL to minimize file handles and enable coordinated checkpoint/recovery
@@ -2526,7 +2527,7 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 					docs = append(docs, doc)
 				}
 			}
-			
+
 			// PHASE 3: Store snapshot in COW cache for subsequent parallel GROUP BY reads
 			snapshot := &cowSnapshotEntry{
 				documents: docs,
@@ -2534,7 +2535,7 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 				pageKey:   pageKey,
 			}
 			shard.cowSnapshot.Store(pageKey, snapshot)
-			
+
 			return docs, nil
 		}
 	}
@@ -2613,11 +2614,11 @@ func (s *BundleService) snapshotPageDocumentsFromPointer(page *models.DocumentPa
 	pageKey := fmt.Sprintf("%s:%d", page.BundleID, page.PageID)
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
-	
+
 	shard.mu.RLock()
 	safePage := s.createSafePageCopy(page)
 	shard.mu.RUnlock()
-	
+
 	docs := make([]models.Document, 0, len(safePage.Documents))
 	for _, doc := range safePage.Documents {
 		docs = append(docs, doc)
@@ -2979,7 +2980,7 @@ func (s *BundleService) findDocumentInPageCache(bundleName, documentID string) *
 			// We must copy the Documents map while protected by the lock, then release
 			safePage := s.createSafePageCopy(page)
 			shard.mu.RUnlock()
-			
+
 			doc, exists := safePage.Documents[documentID]
 			if exists {
 				cp := doc
@@ -3132,7 +3133,7 @@ func (s *BundleService) rebuildSortedIndexAfterCompaction(bundleName string) {
 
 			// Schedule rebuild with high priority (post-compaction is urgent)
 			s.logger.Infof("Scheduling post-compaction rebuild for index %s (type: %s)", indexName, indexRef.IndexType)
-			
+
 			// Use high priority (staleness=1.0) for post-compaction rebuilds
 			_ = s.indexMaintenanceScheduler.ScheduleRebuild(IndexMaintenanceRequest{
 				DatabaseName:  bundle.Database.Name,
@@ -6193,10 +6194,29 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 
 	// RCU MODE: Use lock-free updates when enabled and no document-level locks provided
 	// Document-level locks indicate transaction mode which needs the old lock-based path
-	useRCU := args.EnableRCUWrites && len(lockInfo) == 0
+	useRCU := args.EnableRCUWrites //&& len(lockInfo) == 0
 	if useRCU {
 		s.logger.Debugf("Using RCU (lock-free) update path for bundle '%s'", bundle.Name)
-		return s.UpdateDocumentInBundleRCU(ctx, database, bundle, docCommand)
+		// OCC Retry Loop: If we detect a write-write conflict, retry with a fresh snapshot
+		maxRetries := args.MaxOCCRetries
+		if maxRetries <= 0 {
+			maxRetries = 3 // Default fallback
+		}
+		var lastErr error
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			lastErr = s.UpdateDocumentInBundleRCU(ctx, database, bundle, docCommand)
+			if lastErr == nil {
+				return nil // Success
+			}
+			if !stderrors.Is(lastErr, ErrWriteConflict) {
+				// Non-conflict error, don't retry
+				return lastErr
+			}
+			s.logger.Debugf("OCC: Write conflict on attempt %d/%d for bundle '%s', retrying with fresh snapshot",
+				attempt, maxRetries, bundle.Name)
+		}
+		// All retries exhausted
+		return fmt.Errorf("update failed after %d OCC retries: %w", maxRetries, lastErr)
 	}
 	// Check if the bundle exists
 	if bundle == nil {
@@ -6610,6 +6630,41 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 }
 
 // ============================================================================
+// OCC (Optimistic Concurrency Control) Write-Write Conflict Detection
+// ============================================================================
+
+// ErrWriteConflict is returned when a document was modified by another transaction
+// after our snapshot was taken. The caller should retry with a fresh snapshot.
+var ErrWriteConflict = fmt.Errorf("write-write conflict: document modified by concurrent transaction")
+
+// ValidateNoConflict checks that none of the documents to be updated have been
+// modified since the snapshot was taken. This is the "validate" phase of OCC.
+//
+// For each document, we verify that doc.CommitSequence <= snapshotSequence.
+// If any document has a higher CommitSequence, it means another transaction
+// committed a new version after our snapshot, causing a write-write conflict.
+//
+// Parameters:
+//   - documents: Documents that passed the WHERE filter and will be updated
+//   - snapshotSequence: The commit sequence boundary from our snapshot
+//
+// Returns:
+//   - nil if no conflicts detected (safe to proceed with update)
+//   - ErrWriteConflict if any document was modified after snapshot
+func (s *BundleService) ValidateNoConflict(documents []*models.Document, snapshotSequence uint64) error {
+	for _, doc := range documents {
+		// Check if document was modified after our snapshot
+		// CommitSequence > snapshotSequence means a newer version was committed
+		if doc.CommitSequence > snapshotSequence {
+			s.logger.Debugf("OCC conflict detected: document %s has CommitSequence %d > snapshot %d",
+				doc.DocumentID, doc.CommitSequence, snapshotSequence)
+			return ErrWriteConflict
+		}
+	}
+	return nil
+}
+
+// ============================================================================
 // RCU (Read-Copy-Update) UPDATE - Lock-Free Concurrent Writes
 // ============================================================================
 //
@@ -6632,7 +6687,6 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 // - Brief staleness window (~100ms grace period)
 // - Old versions consume space until VACUUM
 // - Last-writer-wins conflict resolution
-//
 func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database *models.Database, bundle *models.Bundle, docCommand *models.DocumentUpdateCommand) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -6647,9 +6701,34 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 		return fmt.Errorf("bulk update requires CONFIRMED keyword for safety")
 	}
 
-	// STEP 1: READ - Find documents matching WHERE clause
-	// No lock needed for read-committed isolation
-	filteredDocs, err := s.GetDocumentsByFilter(bundle, docCommand.WhereClause, nil)
+	// SNAPSHOT ISOLATION: Create snapshot for autocommit operation
+	// This enables lock-free WHERE evaluation with consistent visibility
+	serviceRegistry := registry.GetRegistry()
+	var snapshotSequence uint64
+	var activeTxIDs map[uint64]bool
+
+	if walManager := serviceRegistry.GetWALManager(); walManager != nil {
+		if snapshotMgrFull := walManager.GetSnapshotManager(); snapshotMgrFull != nil {
+			// Get current sequence as snapshot boundary (autocommit uses txID=0)
+			snapshotSequence = snapshotMgrFull.GetCurrentSequence()
+			// For autocommit, no active transactions to exclude
+			activeTxIDs = make(map[uint64]bool)
+		}
+	}
+
+	// Create snapshot info and add to context for lock-free visibility filtering
+	args := settings.GetSettings()
+	snapshotInfo := &models.SnapshotInfo{
+		SnapshotSequence: snapshotSequence,
+		TransactionID:    0, // txID=0 for autocommit
+		ActiveTxIDs:      activeTxIDs,
+		GracePeriodMs:    args.RCUGracePeriodMs,
+	}
+	ctx = models.WithSnapshotInfo(ctx, snapshotInfo)
+
+	// STEP 1: READ - Find documents matching WHERE clause using snapshot isolation
+	// Lock-free read with MVCC visibility filtering
+	filteredDocs, err := s.GetDocumentsByFilterWithContext(ctx, bundle, docCommand.WhereClause, nil)
 	if err != nil {
 		return fmt.Errorf("failed to filter documents: %w", err)
 	}
@@ -6676,8 +6755,27 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 
 	// STEP 2-5: For each document, create new version and swap atomically
 	successCount := 0
+
+	// Get SnapshotManager for CommitSequence allocation
+	// Reuse the registry lookup from above
+	var snapshotMgr interface {
+		GetNextCommitSequence() uint64
+	}
+	if walManager := serviceRegistry.GetWALManager(); walManager != nil {
+		snapshotMgr = walManager.GetSnapshotManager()
+	}
+
+	// OCC VALIDATION: Check for write-write conflicts before modifying any documents
+	// This is the "validate" phase of Optimistic Concurrency Control.
+	// If any document was modified after our snapshot, return ErrWriteConflict
+	// so the caller can retry with a fresh snapshot.
+	if err := s.ValidateNoConflict(filteredDocs, snapshotSequence); err != nil {
+		return err // ErrWriteConflict - caller should retry
+	}
+
 	for _, oldDoc := range filteredDocs {
-		// Skip if document was deleted between read and update (read-committed)
+		// Documents already filtered by IsVisibleToSnapshot in GetDocumentsByFilterWithContext
+		// Double-check with read-committed for any in-flight changes
 		if !oldDoc.IsVisibleReadCommitted() {
 			s.logger.Debugf("RCU UPDATE: Skipping document %s - no longer visible", oldDoc.DocumentID)
 			continue
@@ -6686,8 +6784,18 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 		// STEP 2: COPY - Create new document with updated fields
 		newDoc := s.createUpdatedDocumentRCU(oldDoc, docCommand.Fields)
 
-		// STEP 3: UPDATE - Append new version to storage (no lock needed)
-		pageID, err := s.store.AppendDocumentToBundleFile(bundle, newDoc)
+		// Get next commit sequence for this version (atomic, globally ordered)
+		var commitSequence uint64
+		if snapshotMgr != nil {
+			commitSequence = snapshotMgr.GetNextCommitSequence()
+		} else {
+			// Fallback: Use nanosecond timestamp (less ideal but functional)
+			commitSequence = uint64(time.Now().UnixNano())
+		}
+
+		// STEP 3: UPDATE - Append new version to storage using RCU path (no lock needed)
+		// AppendVersionToBundleFile handles: VersionSequence increment, CommitSequence assignment
+		pageID, err := s.store.AppendVersionToBundleFile(bundle, newDoc, oldDoc, commitSequence)
 		if err != nil {
 			s.logger.Warnf("RCU UPDATE: Failed to append new version for %s: %v", newDoc.DocumentID, err)
 			continue
@@ -6741,14 +6849,14 @@ func (s *BundleService) createUpdatedDocumentRCU(oldDoc *models.Document, update
 		UpdatedAt:    time.Now(),
 		PooledFields: false, // New allocation, not pooled
 
-		// RCU fields
-		CommitSequence: 0,         // Will be set on commit (for now, immediate commit)
+		// RCU fields - CommitSequence and VersionSequence are set by AppendVersionToBundleFile
+		CommitSequence: 0,           // Set by AppendVersionToBundleFile from SnapshotManager
 		SupersededAt:   time.Time{}, // Zero = current version
 
 		// Legacy fields for compatibility
 		CreatedByTxID:   0,
 		DeletedByTxID:   0,
-		VersionSequence: oldDoc.VersionSequence + 1,
+		VersionSequence: 0, // Set by AppendVersionToBundleFile (oldDoc.VersionSequence + 1)
 	}
 
 	// Copy fields from old document
@@ -6765,9 +6873,8 @@ func (s *BundleService) createUpdatedDocumentRCU(oldDoc *models.Document, update
 		newDoc.Fields[kv.Key] = field
 	}
 
-	// For immediate commit mode (autocommit), set CommitSequence now
-	// In transaction mode, this would be set at COMMIT time
-	newDoc.CommitSequence = uint64(time.Now().UnixNano())
+	// CommitSequence is now set by AppendVersionToBundleFile using SnapshotManager.GetNextCommitSequence()
+	// This ensures globally ordered, atomic commit sequence allocation
 
 	return newDoc
 }
@@ -6790,7 +6897,6 @@ func (s *BundleService) createUpdatedDocumentRCU(oldDoc *models.Document, update
 // Performance: ~60x faster than lock-based approach at high concurrency
 // - Old: 30ms @ 150 concurrent deletes (serialized)
 // - New: ~0.5ms @ 150 concurrent deletes (parallel)
-//
 func (s *BundleService) DeleteDocumentFromBundleRCU(bundle *models.Bundle, docCommand *models.DocumentDeleteCommand, docIDs []string, preFetchedDocs []*models.Document) error {
 	args := settings.GetSettings()
 
@@ -7601,6 +7707,110 @@ func (s *BundleService) getDocumentsByQueryPlanner(ctx context.Context, bundle *
 
 	s.logger.Debugf("Query planner returned %d documents for WHERE clause: %s", len(documents), whereClause)
 	return documents, nil
+}
+
+// GetDocumentsByFilterWithContext retrieves documents using MVCC snapshot isolation.
+// This is the lock-free version that uses snapshot visibility instead of bundle read locks.
+//
+// SNAPSHOT ISOLATION: When a snapshot is present in the context, documents are filtered
+// using IsVisibleToSnapshot() which provides full MVCC visibility semantics:
+// - Read-your-own-writes for the current transaction
+// - Only see documents committed before snapshot boundary
+// - Invisible to concurrent transactions that were active at snapshot time
+//
+// LOCK-FREE: This function does NOT acquire bundle read locks. Visibility is guaranteed
+// by the snapshot's commit sequence boundary. This enables true lock-free reads for RCU.
+//
+// Parameters:
+//   - ctx: Context containing optional SnapshotInfo for MVCC visibility
+//   - bundle: The bundle to filter documents from
+//   - whereParts: The WHERE clause string for filtering
+//   - session: Optional session for transaction context (nil for non-transactional reads)
+//
+// Returns:
+//   - []*models.Document: Array of documents matching the filter criteria and visible to snapshot
+//   - error: Any error that occurred during filtering
+func (s *BundleService) GetDocumentsByFilterWithContext(ctx context.Context, bundle *models.Bundle, whereParts string, session SessionInterface) ([]*models.Document, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Validate input parameters
+	if bundle == nil {
+		s.logger.Errorf("Bundle is nil, cannot filter documents")
+		return nil, fmt.Errorf("bundle is nil, cannot filter documents")
+	}
+
+	// Get snapshot info from context for MVCC visibility filtering
+	snapshotInfo := models.GetSnapshotInfoFromContext(ctx)
+
+	// LOCK-FREE: When snapshot is present, we use MVCC visibility instead of locks.
+	// When no snapshot AND session has active transaction, fall back to old lock behavior
+	// for write buffer coordination.
+	needsBundleLock := snapshotInfo == nil && session != nil && session.IsInTransaction()
+	if needsBundleLock {
+		if err := s.AcquireBundleReadLock(bundle.Name); err != nil {
+			return nil, fmt.Errorf("failed to acquire read lock: %w", err)
+		}
+		defer s.ReleaseBundleReadLock(bundle.Name)
+	}
+
+	// PERFORMANCE: Only flush metadata if buffer is non-empty
+	s.metadataUpdateMutex.RLock()
+	needsFlush := len(s.metadataUpdateBuffer) > 0
+	s.metadataUpdateMutex.RUnlock()
+	if needsFlush {
+		s.FlushMetadataUpdates()
+	}
+
+	// Clear projection for full document loading
+	s.SetProjectionFieldsForBundle(bundle.Name, nil)
+
+	// Get buffered documents if in transaction
+	var bufferedDocs []*models.Document
+	if session != nil && session.IsInTransaction() {
+		var err error
+		bufferedDocs, err = s.store.GetBufferedDocumentsForTransaction(
+			bundle.Name,
+			session.GetActiveTransactionID(),
+		)
+		if err != nil {
+			s.logger.Warnf("Failed to get buffered documents for transaction %s: %v",
+				session.GetActiveTransactionID(), err)
+		} else if len(bufferedDocs) > 0 {
+			s.logger.Debugf("Found %d buffered documents for transaction %s in bundle %s",
+				len(bufferedDocs), session.GetActiveTransactionID(), bundle.Name)
+		}
+	}
+
+	// Get disk documents
+	var diskDocs []*models.Document
+	var err error
+	if whereParts == "" {
+		diskDocs, err = s.getAllDocumentsForIndexing(bundle.Name, 0, 0, nil)
+	} else {
+		diskDocs, err = s.filterDocumentsWithIndexOptimization(bundle, nil, whereParts)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Merge buffered docs
+	allDocs := s.mergeDocuments(diskDocs, bufferedDocs)
+
+	// MVCC VISIBILITY FILTERING: When snapshot is present, filter by visibility
+	if snapshotInfo != nil {
+		visibleDocs := make([]*models.Document, 0, len(allDocs))
+		for _, doc := range allDocs {
+			if doc.IsVisibleToSnapshot(snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID, snapshotInfo.ActiveTxIDs, snapshotInfo.GracePeriodMs) {
+				visibleDocs = append(visibleDocs, doc)
+			}
+		}
+		return visibleDocs, nil
+	}
+
+	// No snapshot - return all documents (legacy read-committed behavior)
+	return allDocs, nil
 }
 
 // GetDocumentsByFilter retrieves documents from a bundle based on filter criteria

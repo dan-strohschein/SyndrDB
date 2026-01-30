@@ -194,10 +194,10 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 
 	// STEP 6: Atomic pointer swap - update the cache and bundle reference
 	s.logger.Debugf("Performing atomic index swap")
-	
+
 	// Update the in-memory cache
 	s.loadedIndexes.Set(bundle.Name, indexName, newIndex)
-	
+
 	// Update the bundle's index reference (for query router)
 	indexRef.IndexInstance = newIndex
 	bundle.Indexes[indexName] = indexRef

@@ -58,6 +58,10 @@ type BundleManifest struct {
 }
 
 // ManifestFileInfo contains metadata about a single bundle file
+// TODO: I should consider adding a VersionEntries field (map[documentID][]VersionEntry{Seq, Offset})
+// for fast version lookups without full file scans. This would enable O(1) version chain retrieval
+// instead of scanning all segment files. Tradeoff: manifest size vs query performance.
+// Need to discuss: full tracking vs bloom filter hint vs lazy population on first version query.
 type ManifestFileInfo struct {
 	FileID      int       `json:"fileID"`
 	FileName    string    `json:"fileName"`

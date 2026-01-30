@@ -54,7 +54,7 @@ func TestPhase2_GroupCommitManager_BasicFunctionality(t *testing.T) {
 		data := []byte(fmt.Sprintf("test entry %d", i))
 		lsn := uint64(i + 1)
 		shouldFlush := gcm.AppendEntry(data, lsn)
-		
+
 		// Should not trigger flush before max group size
 		if i < config.MaxGroupSize-1 && shouldFlush {
 			t.Errorf("Unexpected flush trigger at entry %d", i)
@@ -94,7 +94,7 @@ func TestPhase2_GroupCommitManager_BufferSwap(t *testing.T) {
 
 	// Swap buffers
 	dataToFlush, firstLSN, lastLSN, entryCount := gcm.SwapBuffers()
-	
+
 	if dataToFlush == nil {
 		t.Fatal("Expected data to flush, got nil")
 	}
@@ -206,7 +206,7 @@ func TestPhase2_GroupCommitManager_ConcurrentWriters(t *testing.T) {
 	config := journal.GroupCommitConfig{
 		Enabled:          true,
 		MaxWaitTime:      10 * time.Millisecond,
-		MaxGroupSize:     1000, // Large to avoid flush during test
+		MaxGroupSize:     1000,        // Large to avoid flush during test
 		BufferSizeBytes:  1024 * 1024, // 1MB
 		CompletionBuffer: 10000,
 	}
@@ -260,13 +260,13 @@ func TestPhase2_WAL_GroupCommitIntegration(t *testing.T) {
 
 	// Create WAL with balanced durability mode
 	config := journal.WALConfig{
-		LogDir:         filepath.Join(tmpDir, "wal"),
-		MaxFileSize:    10 * 1024 * 1024, // 10MB
-		FlushInterval:  100 * time.Millisecond,
-		RetentionDays:  1,
-		FsyncOnCommit:  true,
-		DurabilityMode: "balanced",
-		WALBatchSize:   50,
+		LogDir:           filepath.Join(tmpDir, "wal"),
+		MaxFileSize:      10 * 1024 * 1024, // 10MB
+		FlushInterval:    100 * time.Millisecond,
+		RetentionDays:    1,
+		FsyncOnCommit:    true,
+		DurabilityMode:   "balanced",
+		WALBatchSize:     50,
 		WALMaxFlushDelay: 50 * time.Millisecond,
 	}
 
@@ -316,7 +316,7 @@ func TestPhase2_WAL_DurabilityModes(t *testing.T) {
 	t.Parallel()
 
 	modes := []string{"strict", "balanced", "performance"}
-	
+
 	for _, mode := range modes {
 		mode := mode // capture
 		t.Run(mode, func(t *testing.T) {

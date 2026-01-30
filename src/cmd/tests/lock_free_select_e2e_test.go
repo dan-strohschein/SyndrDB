@@ -34,7 +34,7 @@ import (
 // Now they use pure atomic operations.
 func TestLockFreeAcquireReadLock_NoMutexSerialization(t *testing.T) {
 	EnsureTestIsolation(t)
-	
+
 	lock := bundle.NewBundleOperationLock("test_lock_free_bundle")
 
 	const numReaders = 100
@@ -43,7 +43,7 @@ func TestLockFreeAcquireReadLock_NoMutexSerialization(t *testing.T) {
 	var wg sync.WaitGroup
 	var successfulAcquires int64
 	var acquireErrors int64
-	
+
 	startTime := time.Now()
 	startBarrier := make(chan struct{})
 
@@ -52,31 +52,31 @@ func TestLockFreeAcquireReadLock_NoMutexSerialization(t *testing.T) {
 		wg.Add(1)
 		go func(readerID int) {
 			defer wg.Done()
-			
+
 			// Wait for all goroutines to be ready
 			<-startBarrier
-			
+
 			// Try to acquire read lock
 			if err := lock.AcquireReadLock(); err != nil {
 				atomic.AddInt64(&acquireErrors, 1)
 				return
 			}
-			
+
 			atomic.AddInt64(&successfulAcquires, 1)
-			
+
 			// Hold lock briefly to simulate read operation
 			time.Sleep(holdDuration)
-			
+
 			lock.ReleaseReadLock()
 		}(i)
 	}
 
 	// Release all goroutines at once
 	close(startBarrier)
-	
+
 	// Wait for all to complete
 	wg.Wait()
-	
+
 	elapsed := time.Since(startTime)
 
 	// All readers should have acquired locks successfully
@@ -100,13 +100,13 @@ func TestLockFreeAcquireReadLock_NoMutexSerialization(t *testing.T) {
 // then re-checks to handle the race window.
 func TestLockFreeReadLock_RaceWithRename(t *testing.T) {
 	EnsureTestIsolation(t)
-	
+
 	lock := bundle.NewBundleOperationLock("test_race_bundle")
 
 	// Start a goroutine that will set renameInProgress
 	renameStarted := make(chan struct{})
 	renameDone := make(chan struct{})
-	
+
 	go func() {
 		close(renameStarted)
 		// WaitForActiveOperations sets renameInProgress = true
@@ -175,7 +175,7 @@ func TestMVCCVisibility_IsVisibleReadCommitted(t *testing.T) {
 			name: "Uncommitted document is not visible",
 			doc: models.Document{
 				DocumentID:     "doc3",
-				CommitSequence: 0, // Uncommitted
+				CommitSequence: 0,   // Uncommitted
 				CreatedByTxID:  123, // Has active transaction
 				SupersededAt:   time.Time{},
 				DeletedByTxID:  0,
@@ -217,7 +217,7 @@ func TestMVCCVisibility_IsVisibleReadCommitted(t *testing.T) {
 // can all complete their operations without blocking each other.
 func TestConcurrentReaders_AllComplete(t *testing.T) {
 	EnsureTestIsolation(t)
-	
+
 	lock := bundle.NewBundleOperationLock("concurrent_readers_bundle")
 
 	const numReaders = 50
@@ -232,19 +232,19 @@ func TestConcurrentReaders_AllComplete(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			
+
 			for j := 0; j < iterations; j++ {
 				if err := lock.AcquireReadLock(); err != nil {
 					atomic.AddInt64(&errors, 1)
 					continue
 				}
-				
+
 				// Verify we have the lock
 				readers, _ := lock.GetActiveOperationCounts()
 				if readers < 1 {
 					atomic.AddInt64(&errors, 1)
 				}
-				
+
 				atomic.AddInt64(&totalOps, 1)
 				lock.ReleaseReadLock()
 			}
@@ -272,7 +272,7 @@ func TestConcurrentReaders_AllComplete(t *testing.T) {
 // is accurate under high concurrency.
 func TestLockFreeReadLock_ReaderCounterAccuracy(t *testing.T) {
 	EnsureTestIsolation(t)
-	
+
 	lock := bundle.NewBundleOperationLock("counter_accuracy_bundle")
 
 	const numReaders = 30
@@ -286,21 +286,21 @@ func TestLockFreeReadLock_ReaderCounterAccuracy(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			
+
 			if err := lock.AcquireReadLock(); err != nil {
 				t.Errorf("Failed to acquire read lock: %v", err)
 				return
 			}
-			
+
 			// Signal that we've acquired
 			select {
 			case <-allAcquired:
 			default:
 			}
-			
+
 			// Wait for release signal
 			<-releaseSignal
-			
+
 			lock.ReleaseReadLock()
 		}()
 	}

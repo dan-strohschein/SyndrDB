@@ -234,9 +234,9 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		RightPredicate:       rightPredicate,       // Predicate to push to right bundle
 		MergeRequiredFields:  mergeRequired,
 		// STREAMING TOP-N: Pass ORDER BY and LIMIT for heap-based merge optimization
-		OrderBy:              query.OrderByClause,
-		Limit:                query.Limit,
-		Offset:               query.Offset,
+		OrderBy: query.OrderByClause,
+		Limit:   query.Limit,
+		Offset:  query.Offset,
 	}
 
 	jp.Logger.Infof("Created JOIN execution plan: cost=%.2f, estimated_rows=%d, algorithm=hash_join, limit=%d",

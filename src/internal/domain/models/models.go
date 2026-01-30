@@ -4,6 +4,7 @@ import (
 	//btreeindex "syndrdb/src/btree_index"
 	//hashindex "syndrdb/src/hash_index"
 
+	"context"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,43 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 )
+
+// ============================================================================
+// SNAPSHOT INFO - MVCC Snapshot Isolation Context
+// ============================================================================
+//
+// SnapshotInfo contains MVCC snapshot information for query execution.
+// Snapshots are passed through the query execution context to enable
+// lock-free visibility filtering during read operations.
+//
+// This is placed in models (not planner) to avoid import cycles since
+// both bundle and planner packages need access to this type.
+// ============================================================================
+
+// SnapshotInfo contains MVCC snapshot information for query execution
+type SnapshotInfo struct {
+	SnapshotSequence uint64          // Commit sequence boundary (sees all commits <= this)
+	TransactionID    uint64          // Transaction ID for read-your-own-writes (0 for autocommit)
+	ActiveTxIDs      map[uint64]bool // Active transactions at snapshot time (invisible)
+	GracePeriodMs    int             // RCU grace period in milliseconds for visibility
+}
+
+// snapshotContextKey is the context key for SnapshotInfo
+type snapshotContextKey struct{}
+
+// WithSnapshotInfo adds snapshot information to the context
+func WithSnapshotInfo(ctx context.Context, snapshot *SnapshotInfo) context.Context {
+	return context.WithValue(ctx, snapshotContextKey{}, snapshot)
+}
+
+// GetSnapshotInfoFromContext retrieves snapshot information from context
+// Returns nil if no snapshot is set (non-transactional query)
+func GetSnapshotInfoFromContext(ctx context.Context) *SnapshotInfo {
+	if snapshot, ok := ctx.Value(snapshotContextKey{}).(*SnapshotInfo); ok {
+		return snapshot
+	}
+	return nil
+}
 
 // ============================================================================
 // SHARDED SORTED INDEX - PageID Architecture Alignment
@@ -418,7 +456,7 @@ type IndexReference struct {
 	IndexInstance   interface{} `json:"-"` // Skip serialization - this is the primary useful field
 	HashIndexField  IndexField  // TODO: Consider removing - metadata in headers
 	BTreeIndexField IndexField  // TODO: Consider removing - metadata in headers
-	
+
 	// Index maintenance metadata (for automatic rebuild on staleness)
 	Maintenance *IndexMaintenanceMetadata `json:"maintenance,omitempty"`
 }
@@ -428,20 +466,20 @@ type IndexMaintenanceMetadata struct {
 	// Rebuild tracking (persisted to disk)
 	LastRebuildTime time.Time `json:"last_rebuild_time"`
 	TotalRebuilds   uint64    `json:"total_rebuilds"`
-	
+
 	// Health status (persisted to disk)
 	IsHealthy         bool      `json:"is_healthy"`
 	LastFailureReason string    `json:"last_failure_reason,omitempty"`
 	LastFailureTime   time.Time `json:"last_failure_time,omitempty"`
-	
+
 	// Staleness tracking (persisted to disk)
-	LastStalenessRate   float64   `json:"last_staleness_rate"`
-	LastStalenessCheck  time.Time `json:"last_staleness_check"`
-	
+	LastStalenessRate  float64   `json:"last_staleness_rate"`
+	LastStalenessCheck time.Time `json:"last_staleness_check"`
+
 	// Query frequency (ephemeral - tracked in-memory, reset on restart)
-	QueryCount      int64 `json:"-"` // Atomic counter, not serialized
-	LastQueryTime   time.Time `json:"-"`
-	QueriesPerMinute float64 `json:"-"` // Rolling average
+	QueryCount       int64     `json:"-"` // Atomic counter, not serialized
+	LastQueryTime    time.Time `json:"-"`
+	QueriesPerMinute float64   `json:"-"` // Rolling average
 }
 
 type IndexField struct {

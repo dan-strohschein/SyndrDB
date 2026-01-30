@@ -64,11 +64,11 @@ func (ssm *ShardedSessionMap) shardIndex(sessionID string) uint64 {
 func (ssm *ShardedSessionMap) Get(sessionID string) (*Session, bool) {
 	idx := ssm.shardIndex(sessionID)
 	shard := &ssm.shards[idx]
-	
+
 	shard.mu.RLock()
 	session, exists := shard.sessions[sessionID]
 	shard.mu.RUnlock()
-	
+
 	return session, exists
 }
 
@@ -76,7 +76,7 @@ func (ssm *ShardedSessionMap) Get(sessionID string) (*Session, bool) {
 func (ssm *ShardedSessionMap) Set(sessionID string, session *Session) {
 	idx := ssm.shardIndex(sessionID)
 	shard := &ssm.shards[idx]
-	
+
 	shard.mu.Lock()
 	shard.sessions[sessionID] = session
 	shard.mu.Unlock()
@@ -87,14 +87,14 @@ func (ssm *ShardedSessionMap) Set(sessionID string, session *Session) {
 func (ssm *ShardedSessionMap) Delete(sessionID string) (*Session, bool) {
 	idx := ssm.shardIndex(sessionID)
 	shard := &ssm.shards[idx]
-	
+
 	shard.mu.Lock()
 	session, exists := shard.sessions[sessionID]
 	if exists {
 		delete(shard.sessions, sessionID)
 	}
 	shard.mu.Unlock()
-	
+
 	return session, exists
 }
 
@@ -147,7 +147,7 @@ func (ssm *ShardedSessionMap) RangeWithLock(fn func(sessionID string, session *S
 // This is used for cleanup of expired sessions
 func (ssm *ShardedSessionMap) CollectExpired(predicate func(*Session) bool) []*Session {
 	var expired []*Session
-	
+
 	for i := 0; i < SessionShardCount; i++ {
 		shard := &ssm.shards[i]
 		shard.mu.RLock()
@@ -158,7 +158,7 @@ func (ssm *ShardedSessionMap) CollectExpired(predicate func(*Session) bool) []*S
 		}
 		shard.mu.RUnlock()
 	}
-	
+
 	return expired
 }
 
@@ -171,7 +171,7 @@ func (ssm *ShardedSessionMap) DeleteMultiple(sessionIDs []string) {
 		idx := ssm.shardIndex(id)
 		shardGroups[idx] = append(shardGroups[idx], id)
 	}
-	
+
 	// Delete from each shard
 	for idx, ids := range shardGroups {
 		shard := &ssm.shards[idx]
@@ -189,12 +189,12 @@ func (ssm *ShardedSessionMap) GetStats() map[string]interface{} {
 	minShard := 0
 	maxShard := 0
 	shardCounts := make([]int, SessionShardCount)
-	
+
 	for i := 0; i < SessionShardCount; i++ {
 		ssm.shards[i].mu.RLock()
 		count := len(ssm.shards[i].sessions)
 		ssm.shards[i].mu.RUnlock()
-		
+
 		shardCounts[i] = count
 		totalSessions += count
 		if count > shardCounts[maxShard] {
@@ -204,13 +204,13 @@ func (ssm *ShardedSessionMap) GetStats() map[string]interface{} {
 			minShard = i
 		}
 	}
-	
+
 	return map[string]interface{}{
-		"total_sessions":    totalSessions,
-		"shard_count":       SessionShardCount,
-		"min_shard_size":    shardCounts[minShard],
-		"max_shard_size":    shardCounts[maxShard],
-		"avg_shard_size":    float64(totalSessions) / float64(SessionShardCount),
+		"total_sessions": totalSessions,
+		"shard_count":    SessionShardCount,
+		"min_shard_size": shardCounts[minShard],
+		"max_shard_size": shardCounts[maxShard],
+		"avg_shard_size": float64(totalSessions) / float64(SessionShardCount),
 	}
 }
 
@@ -239,7 +239,7 @@ func (usi *UserSessionIndex) Add(username string, session *Session) {
 		sessions: make([]*Session, 0, 4),
 	})
 	entry := entryI.(*userSessionEntry)
-	
+
 	entry.mu.Lock()
 	entry.sessions = append(entry.sessions, session)
 	entry.mu.Unlock()
@@ -252,7 +252,7 @@ func (usi *UserSessionIndex) Remove(username string, sessionID string) {
 		return
 	}
 	entry := entryI.(*userSessionEntry)
-	
+
 	entry.mu.Lock()
 	for i, s := range entry.sessions {
 		if s.SessionID == sessionID {
@@ -273,12 +273,12 @@ func (usi *UserSessionIndex) Get(username string) []*Session {
 		return nil
 	}
 	entry := entryI.(*userSessionEntry)
-	
+
 	entry.mu.RLock()
 	result := make([]*Session, len(entry.sessions))
 	copy(result, entry.sessions)
 	entry.mu.RUnlock()
-	
+
 	return result
 }
 
@@ -287,12 +287,12 @@ func (usi *UserSessionIndex) Range(fn func(username string, sessions []*Session)
 	usi.index.Range(func(key, value interface{}) bool {
 		username := key.(string)
 		entry := value.(*userSessionEntry)
-		
+
 		entry.mu.RLock()
 		sessions := make([]*Session, len(entry.sessions))
 		copy(sessions, entry.sessions)
 		entry.mu.RUnlock()
-		
+
 		return fn(username, sessions)
 	})
 }

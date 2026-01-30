@@ -80,7 +80,7 @@ func SaveSortedIndex(index *models.ShardedSortedIndex, databaseName, bundleName 
 	if err != nil {
 		return fmt.Errorf("failed to create sorted index temp file: %w", err)
 	}
-	
+
 	// Track whether we've successfully completed (to avoid cleanup on success)
 	var success bool
 	defer func() {

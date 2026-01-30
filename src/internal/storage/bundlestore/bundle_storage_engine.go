@@ -163,6 +163,16 @@ type BundleStore interface {
 	AppendDocumentToBundleFile(bundle *models.Bundle, document *models.Document) (uint32, error)
 	AppendDocumentToBundleFileWithTxID(bundle *models.Bundle, document *models.Document, txID string) (uint32, error)
 
+	// RCU (Read-Copy-Update) Version Append: Creates new document version without bundle locks
+	// Used by UpdateDocumentInBundleRCU for lock-free concurrent updates
+	// Parameters:
+	//   - bundle: Target bundle
+	//   - newDoc: New document version with updated fields
+	//   - oldDoc: Previous document version (used to increment VersionSequence)
+	//   - commitSequence: Global commit sequence from SnapshotManager.GetNextCommitSequence()
+	// Returns: Page ID where new version was stored
+	AppendVersionToBundleFile(bundle *models.Bundle, newDoc *models.Document, oldDoc *models.Document, commitSequence uint64) (uint32, error)
+
 	RemoveDocumentFromBundleFile(database *models.Database, bundle *models.Bundle, documentID string, mmapData []byte) error
 	BundleFileExists(bundleName string, databaseName string) bool
 	RemoveBundleFile(database *models.Database, bundleName string) error
@@ -212,8 +222,8 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		rotationLocks:    NewShardedMutexMap(),                    // PERFORMANCE: Sharded rotation locks (64 shards)
 		writeVerifier:    NewDocumentWriteVerifier(logger),        // Initialize write verification
 		writeLogger:      NewBundleWriteLogger(logger, 1000),      // Keep last 1000 write operations
-		fileReadCache:   NewShardedFileReadCache(),   // PHASE 3: Sharded file read cache (replaces map + mutex)
-		parsedDocsCache: NewShardedParsedDocsCache(), // PHASE 3: Sharded parsed docs cache (replaces map + mutex)
+		fileReadCache:    NewShardedFileReadCache(),               // PHASE 3: Sharded file read cache (replaces map + mutex)
+		parsedDocsCache:  NewShardedParsedDocsCache(),             // PHASE 3: Sharded parsed docs cache (replaces map + mutex)
 		// PHASE 8: parseSingleflight requires no initialization (zero value is ready to use)
 	}
 
@@ -248,19 +258,19 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 	maxMB := settings.GetSettings().GroupByCacheWarmingMaxMB
 	maxBytes := int64(maxMB) * 1024 * 1024
-	
+
 	bse.logger.Infof("Starting cache warming for GROUP BY optimization (max %d MB)", maxMB)
-	
+
 	// Sleep briefly to let server finish startup
 	select {
 	case <-ctx.Done():
 		return
 	case <-time.After(5 * time.Second):
 	}
-	
+
 	// Track memory usage
 	var totalBytes atomic.Int64
-	
+
 	// Walk data directory to find all .manifest and .dat files
 	err := filepath.Walk(bse.DataDirectory, func(path string, info os.FileInfo, err error) error {
 		// Check for cancellation
@@ -269,35 +279,35 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 			return fmt.Errorf("cache warming cancelled")
 		default:
 		}
-		
+
 		if err != nil {
 			bse.logger.Warnf("Cache warming: skipping path %s: %v", path, err)
 			return nil
 		}
-		
+
 		// Skip if not a file
 		if info.IsDir() {
 			return nil
 		}
-		
+
 		// Check if we've reached memory limit
 		if totalBytes.Load() >= maxBytes {
 			bse.logger.Infof("Cache warming complete: reached memory limit of %d MB", maxMB)
 			return filepath.SkipAll
 		}
-		
+
 		// Only process .manifest files (they reference all segment files)
 		if !strings.HasSuffix(path, ".manifest") {
 			return nil
 		}
-		
+
 		// Load manifest to get segment files
 		manifestData, err := os.ReadFile(path)
 		if err != nil {
 			bse.logger.Debugf("Cache warming: failed to read manifest %s: %v", path, err)
 			return nil
 		}
-		
+
 		// Extract database and bundle names from manifest path
 		// Path format: /data/database/bundleName/bundleName.manifest
 		parts := strings.Split(filepath.Dir(path), string(filepath.Separator))
@@ -306,7 +316,7 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 		}
 		bundleName := parts[len(parts)-1]
 		databaseName := parts[len(parts)-2]
-		
+
 		// Simple parsing: each line is "filename offset size"
 		lines := strings.Split(string(manifestData), "\n")
 		for _, line := range lines {
@@ -316,48 +326,48 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 				return fmt.Errorf("cache warming cancelled")
 			default:
 			}
-			
+
 			if totalBytes.Load() >= maxBytes {
 				return filepath.SkipAll
 			}
-			
+
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}
-			
+
 			parts := strings.Fields(line)
 			if len(parts) < 3 {
 				continue
 			}
-			
+
 			segmentFile := filepath.Join(filepath.Dir(path), parts[0])
 			cacheKey := fmt.Sprintf("%s:%s", bundleName, segmentFile)
-			
+
 			// Check if already in cache
 			if bse.parsedDocsCache.Get(cacheKey) != nil {
 				continue
 			}
-			
+
 			// Check if file exists
 			if _, err := os.Stat(segmentFile); os.IsNotExist(err) {
 				continue
 			}
-			
+
 			// Pre-parse the file to warm cache
 			fileData, err := os.ReadFile(segmentFile)
 			if err != nil {
 				bse.logger.Debugf("Cache warming: failed to read segment %s: %v", segmentFile, err)
 				continue
 			}
-			
+
 			// Parse documents from file
 			docs, deletedIDs, totalDocs, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &fileData)
 			if err != nil {
 				bse.logger.Debugf("Cache warming: failed to parse segment %s: %v", segmentFile, err)
 				continue
 			}
-			
+
 			// Store in cache
 			entry := &parsedDocsCacheEntry{
 				documents:     docs,
@@ -365,24 +375,24 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 				totalDocs:     totalDocs,
 				lastAccess:    time.Now().Unix(),
 			}
-			
+
 			bse.parsedDocsCache.Set(cacheKey, entry)
-			
+
 			// Track memory usage (approximate)
 			entrySize := int64(len(fileData))
 			totalBytes.Add(entrySize)
-			
-			bse.logger.Debugf("Cache warming: pre-parsed %s (%d docs, %.2f MB total)", 
+
+			bse.logger.Debugf("Cache warming: pre-parsed %s (%d docs, %.2f MB total)",
 				filepath.Base(segmentFile), totalDocs, float64(totalBytes.Load())/(1024*1024))
 		}
-		
+
 		return nil
 	})
-	
+
 	if err != nil && !strings.Contains(err.Error(), "cancelled") {
 		bse.logger.Warnf("Cache warming completed with errors: %v", err)
 	} else {
-		bse.logger.Infof("Cache warming complete: pre-parsed %.2f MB of data", 
+		bse.logger.Infof("Cache warming complete: pre-parsed %.2f MB of data",
 			float64(totalBytes.Load())/(1024*1024))
 	}
 }
@@ -2017,7 +2027,7 @@ func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bund
 		}
 		bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
 		filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
-		
+
 		// Ensure file is in manifest
 		fileExistsInManifest := false
 		for _, f := range manifest.Files {
@@ -2477,6 +2487,231 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	return pageID, nil
 }
 
+// AppendVersionToBundleFile creates a new document version for RCU (Read-Copy-Update) updates.
+// This is the storage layer for lock-free concurrent updates.
+//
+// Unlike AppendDocumentToBundleFileWithTxID, this method:
+// 1. Sets CommitSequence from the provided value (caller gets from SnapshotManager.GetNextCommitSequence())
+// 2. Increments VersionSequence based on oldDoc
+// 3. Marks the old document's SupersededAt timestamp (via caller)
+//
+// The append is inherently safe for concurrent writes because:
+// - WriteBuffer uses atomic offset tracking
+// - No bundle-level write lock is needed
+// - Each version is a new append-only entry
+//
+// Parameters:
+//   - bundle: Target bundle
+//   - newDoc: New document version with updated fields (will have CommitSequence/VersionSequence set)
+//   - oldDoc: Previous document version (used to increment VersionSequence)
+//   - commitSequence: Global commit sequence from SnapshotManager.GetNextCommitSequence()
+//
+// Returns: Page ID where new version was stored
+func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, newDoc *models.Document, oldDoc *models.Document, commitSequence uint64) (uint32, error) {
+	// Validate inputs
+	if bundle == nil {
+		return 0, fmt.Errorf("bundle cannot be nil")
+	}
+	if newDoc == nil {
+		return 0, fmt.Errorf("new document cannot be nil")
+	}
+	if oldDoc == nil {
+		return 0, fmt.Errorf("old document cannot be nil for version append")
+	}
+	if newDoc.DocumentID == "" {
+		return 0, fmt.Errorf("document must have a valid ID")
+	}
+	if newDoc.DocumentID != oldDoc.DocumentID {
+		return 0, fmt.Errorf("new and old document IDs must match: got %s vs %s", newDoc.DocumentID, oldDoc.DocumentID)
+	}
+
+	// Set RCU version metadata
+	newDoc.CommitSequence = commitSequence
+	newDoc.VersionSequence = oldDoc.VersionSequence + 1
+	newDoc.CreatedByTxID = 0 // Autocommit mode (no transaction)
+	newDoc.DeletedByTxID = 0 // Not deleted
+
+	// MULTI-FILE STORAGE: Determine current active file and check if rotation is needed
+	manifestMgr := b.getOrCreateManifestManager(bundle.Database.Name, bundle.Name)
+	manifest, err := manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
+	if err != nil {
+		return 0, fmt.Errorf("failed to load bundle manifest: %w", err)
+	}
+
+	// Get the current active (writable) file
+	var currentFileID uint32 = 1
+	if manifest.ActiveFileID > 0 {
+		currentFileID = uint32(manifest.ActiveFileID)
+	}
+
+	// Construct the current file path
+	bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
+	filePath := filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+
+	// Ensure current file exists in manifest
+	fileExistsInManifest := false
+	for _, f := range manifest.Files {
+		if f.FileID == int(currentFileID) {
+			fileExistsInManifest = true
+			break
+		}
+	}
+	if !fileExistsInManifest {
+		fileName := fmt.Sprintf("%06d.bnd", currentFileID)
+		if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+			return 0, fmt.Errorf("failed to add initial file to manifest: %w", err)
+		}
+	}
+
+	// Acquire rotation lock before checking file size
+	rotationLock := b.getRotationLock(bundle.Name)
+	rotationLock.Lock()
+
+	// Check if file rotation is needed
+	maxSizeBytes := int64(settings.GetSettings().Storage.BundleFileMaxSizeMB) * 1024 * 1024
+	rotationThreshold := int64(float64(maxSizeBytes) * 1.1)
+
+	fileInfo, statErr := os.Stat(filePath)
+	needsRotation := false
+	var currentFileSize int64 = 0
+
+	if statErr == nil {
+		currentFileSize = fileInfo.Size()
+		needsRotation = currentFileSize >= rotationThreshold
+	}
+
+	// Handle file rotation if needed
+	if needsRotation {
+		if b.logger != nil {
+			b.logger.Infow("RCU: Rotating bundle file - size threshold reached",
+				"bundle", bundle.Name,
+				"currentFileID", currentFileID,
+				"fileSize", currentFileSize,
+				"threshold", rotationThreshold)
+		}
+
+		if err := b.CloseWriteBuffer(bundle.Name); err != nil {
+			rotationLock.Unlock()
+			return 0, fmt.Errorf("failed to close write buffer before rotation: %w", err)
+		}
+
+		if manifest.ActiveFileID > 0 {
+			if err := manifestMgr.FreezeFile(int(currentFileID)); err != nil {
+				rotationLock.Unlock()
+				return 0, fmt.Errorf("failed to freeze file in manifest: %w", err)
+			}
+		}
+
+		currentFileID++
+		filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+
+		fileName := fmt.Sprintf("%06d.bnd", currentFileID)
+		if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+			rotationLock.Unlock()
+			return 0, fmt.Errorf("failed to add new file to manifest: %w", err)
+		}
+
+		if b.logger != nil {
+			b.logger.Infow("RCU: Created new bundle file segment",
+				"bundle", bundle.Name,
+				"newFileID", currentFileID,
+				"filePath", filePath)
+		}
+	}
+
+	rotationLock.Unlock()
+
+	// Track write offset for corruption debugging
+	writeOffset := currentFileSize
+	if needsRotation {
+		writeOffset = 0
+	}
+
+	// PAGE ID: Use alphabetical order via SortedIndex (matches LoadDocumentPage)
+	// For version updates, the document already exists so we query its position
+	pageSize := uint32(4096)
+	if bundle.PageSize > 0 {
+		pageSize = uint32(bundle.PageSize)
+	}
+
+	var pageID uint32
+	if bundle.SortedIndex != nil {
+		// Document already exists - get its current position
+		// Insert returns existing position if already present
+		pageID = bundle.SortedIndex.Insert(newDoc.DocumentID, pageSize)
+	} else {
+		// Fallback: Use TotalDocuments (legacy behavior)
+		currentDocCount := uint32(atomic.LoadInt64(&bundle.TotalDocuments))
+		pageID = currentDocCount / pageSize
+	}
+
+	// Serialize the new document version
+	documentBytes, err := b.serializeDocumentDirect(newDoc)
+	if err != nil {
+		return 0, fmt.Errorf("failed to encode document version: %w", err)
+	}
+
+	// Build header with magic number and size
+	headerSize := uint32(len(documentBytes))
+	headerBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF)
+	binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
+
+	// Log write operation start
+	totalWriteSize := 8 + len(documentBytes)
+	b.writeLogger.LogWriteStart(bundle.Name, writeOffset, totalWriteSize)
+
+	// Get or create write buffer (lock-free via atomic offset)
+	writeBuffer, err := b.getOrCreateWriteBuffer(bundle.Name, filePath)
+	if err != nil {
+		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, 0, fmt.Errorf("failed to get write buffer: %w", err))
+		return 0, fmt.Errorf("failed to get write buffer: %w", err)
+	}
+
+	// Combine header and document data
+	combinedData := b.getCombinedBuffer(len(headerBytes) + len(documentBytes))
+	copy(combinedData[:8], headerBytes)
+	copy(combinedData[8:], documentBytes)
+
+	// Write using empty txID (autocommit mode for RCU)
+	if err := writeBuffer.WriteWithTxID(combinedData[:len(headerBytes)+len(documentBytes)], newDoc.DocumentID, ""); err != nil {
+		b.returnCombinedBuffer(combinedData)
+		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, 0, fmt.Errorf("failed to write document version: %w", err))
+		return 0, fmt.Errorf("failed to write document version: %w", err)
+	}
+
+	b.returnCombinedBuffer(combinedData)
+
+	// Update manifest stats (deferred, no fsync on every write)
+	newFileSize := currentFileSize + int64(totalWriteSize)
+	manifestMgr.UpdateFileStatsDeferred(int(currentFileID), 0, 0, 0, 0, newFileSize)
+
+	// Log successful write
+	b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, totalWriteSize, nil)
+
+	// Mark bundle as dirty
+	bundle.IsDirty = true
+
+	if b.logger != nil && settings.GetSettings().Debug {
+		b.logger.Infow("RCU: Successfully appended document version",
+			"bundle", bundle.Name,
+			"documentID", newDoc.DocumentID,
+			"pageID", pageID,
+			"fileID", currentFileID,
+			"versionSequence", newDoc.VersionSequence,
+			"commitSequence", newDoc.CommitSequence)
+	}
+
+	// Trigger async compaction evaluation
+	go func() {
+		if b.compactionScheduler != nil {
+			b.compactionScheduler.EvaluateBundle(bundle.Database.Name, bundle.Name)
+		}
+	}()
+
+	return pageID, nil
+}
+
 // periodicCompactionEvaluator runs background compaction checks
 // PostgreSQL autovacuum-inspired: periodically check all bundles for compaction triggers
 // This ensures compaction runs even when writes stop
@@ -2725,7 +2960,7 @@ func (b *BundleStorageEngine) countDocumentsInFileOnly(
 	}
 
 	if b.logger != nil {
-		b.logger.Infof("countDocumentsInFileOnly: Parsed %d bytes, found %d documents and %d tombstones, final offset=%d", 
+		b.logger.Infof("countDocumentsInFileOnly: Parsed %d bytes, found %d documents and %d tombstones, final offset=%d",
 			len(data), documentsFound, tombstonesFound, offset)
 	}
 
@@ -2771,7 +3006,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 	}
 
 	if b.logger != nil {
-		b.logger.Infof("CountDocuments: Scanning files for bundle '%s' (tombstones=%d, lastUpdated=%v)", 
+		b.logger.Infof("CountDocuments: Scanning files for bundle '%s' (tombstones=%d, lastUpdated=%v)",
 			bundleName, manifest.TotalTombstones, manifest.LastUpdated)
 	}
 
@@ -2800,7 +3035,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 		}
 
 		if b.logger != nil {
-			b.logger.Infof("CountDocuments: Reading file %s (size=%d bytes, manifest claims %d docs)", 
+			b.logger.Infof("CountDocuments: Reading file %s (size=%d bytes, manifest claims %d docs)",
 				filePath, stat.Size(), fileInfo.DocCount)
 		}
 
@@ -2827,7 +3062,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 		}
 
 		if b.logger != nil {
-			b.logger.Infof("CountDocuments: After processing %s: seen=%d, deleted=%d", 
+			b.logger.Infof("CountDocuments: After processing %s: seen=%d, deleted=%d",
 				fileInfo.FileName, len(seenDocuments), len(deletedDocuments))
 		}
 	}
@@ -2835,7 +3070,7 @@ func (b *BundleStorageEngine) countDocumentsMultiFile(
 	// Final count: unique documents that aren't deleted
 	finalCount := len(seenDocuments)
 	if b.logger != nil {
-		b.logger.Infof("CountDocuments: Final count for bundle '%s' = %d (seen=%d, deleted=%d)", 
+		b.logger.Infof("CountDocuments: Final count for bundle '%s' = %d (seen=%d, deleted=%d)",
 			bundleName, finalCount, len(seenDocuments)+len(deletedDocuments), len(deletedDocuments))
 	}
 	return finalCount, nil
@@ -2904,7 +3139,7 @@ func (b *BundleStorageEngine) CountDocuments(bundleName, databaseName string) (i
 
 	// Fall back to legacy single-file format
 	if b.logger != nil {
-		b.logger.Infof("CountDocuments: Using legacy single-file format for bundle '%s' (manifest err=%v, files=%d)", 
+		b.logger.Infof("CountDocuments: Using legacy single-file format for bundle '%s' (manifest err=%v, files=%d)",
 			bundleName, err, len(manifest.Files))
 	}
 	return b.countDocumentsLegacy(bundleName, databaseName)

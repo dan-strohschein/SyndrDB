@@ -601,7 +601,7 @@ func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]stri
 	// entry and we could return stale data. Re-check and use MemTable's value
 	// when it is newer; on Put "attempted to insert older" use the in-memory
 	// entry as the authoritative result (no WARN—expected under concurrency).
-	
+
 	// CRITICAL: Before caching, ensure GlobalSequence is at least as high as this entry
 	// This handles the case where RestoreGlobalSequence() didn't find all entries
 	// (e.g., headers not yet updated) and we're loading an older high-sequence entry from disk
@@ -624,7 +624,7 @@ func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]stri
 			// CAS failed, retry
 		}
 	}
-	
+
 	entryNow, foundNow := idx.MemTable.Get(keyValue)
 	if foundNow && entryNow.IsNewer(latestEntry) {
 		latestEntry = entryNow

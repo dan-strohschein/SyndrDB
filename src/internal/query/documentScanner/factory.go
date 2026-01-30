@@ -984,7 +984,7 @@ func (iter *BundleDocumentIterator) Next() (*models.Document, error) {
 				}
 			} else {
 				// Transaction with snapshot: use full MVCC visibility rules
-				if !doc.IsVisibleToSnapshot(smartScanner.snapshotSequence, smartScanner.txID, smartScanner.activeTxIDs) {
+				if !doc.IsVisibleToSnapshot(smartScanner.snapshotSequence, smartScanner.txID, smartScanner.activeTxIDs, smartScanner.gracePeriodMs) {
 					// Skip invisible document, continue to next
 					if iter.pageIndex >= len(iter.pageIDs) {
 						iter.currentPage++
