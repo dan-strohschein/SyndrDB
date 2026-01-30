@@ -157,8 +157,9 @@ func SaveSortedIndex(index *models.ShardedSortedIndex, databaseName, bundleName 
 }
 
 // LoadSortedIndex loads a ShardedSortedIndex from disk.
-// Returns a new empty index if the file doesn't exist.
-// Returns an error if the file exists but is corrupt.
+// Returns a new empty index if the file doesn't exist or is corrupt.
+// Corrupt files are automatically deleted to prevent repeated errors.
+// This function never returns an error - it always returns a valid index.
 func LoadSortedIndex(databaseName, bundleName string) (*models.ShardedSortedIndex, error) {
 	filePath := GetSortedIndexPath(databaseName, bundleName)
 
@@ -177,22 +178,34 @@ func LoadSortedIndex(databaseName, bundleName string) (*models.ShardedSortedInde
 	// Read header
 	header := make([]byte, 16)
 	if _, err := reader.Read(header); err != nil {
-		return nil, fmt.Errorf("failed to read sorted index header: %w", err)
+		// Corrupt or incomplete file - delete and return empty index
+		file.Close()
+		os.Remove(filePath)
+		return models.NewShardedSortedIndex(), nil
 	}
 
 	magic := binary.LittleEndian.Uint32(header[0:4])
 	if magic != SortedIndexMagic {
-		return nil, fmt.Errorf("invalid sorted index magic: got 0x%X, expected 0x%X", magic, SortedIndexMagic)
+		// Invalid magic - delete corrupt file and return empty index
+		file.Close()
+		os.Remove(filePath)
+		return models.NewShardedSortedIndex(), nil
 	}
 
 	version := binary.LittleEndian.Uint32(header[4:8])
 	if version != SortedIndexVersion {
-		return nil, fmt.Errorf("unsupported sorted index version: %d", version)
+		// Unsupported version - delete and return empty index
+		file.Close()
+		os.Remove(filePath)
+		return models.NewShardedSortedIndex(), nil
 	}
 
 	shardCount := binary.LittleEndian.Uint32(header[8:12])
 	if shardCount != uint32(models.SortedIndexShards) {
-		return nil, fmt.Errorf("shard count mismatch: file has %d, expected %d", shardCount, models.SortedIndexShards)
+		// Shard count mismatch - delete and return empty index
+		file.Close()
+		os.Remove(filePath)
+		return models.NewShardedSortedIndex(), nil
 	}
 
 	expectedTotal := binary.LittleEndian.Uint32(header[12:16])
@@ -207,7 +220,10 @@ func LoadSortedIndex(databaseName, bundleName string) (*models.ShardedSortedInde
 	for i := 0; i < models.SortedIndexShards; i++ {
 		// Read shard document count
 		if _, err := reader.Read(countBuf); err != nil {
-			return nil, fmt.Errorf("failed to read shard %d count: %w", i, err)
+			// Incomplete shard data - delete corrupt file and return empty index
+			file.Close()
+			os.Remove(filePath)
+			return models.NewShardedSortedIndex(), nil
 		}
 		docCount := binary.LittleEndian.Uint32(countBuf)
 
@@ -218,13 +234,19 @@ func LoadSortedIndex(databaseName, bundleName string) (*models.ShardedSortedInde
 		// Read each DocumentID
 		for j := uint32(0); j < docCount; j++ {
 			if _, err := reader.Read(lenBuf); err != nil {
-				return nil, fmt.Errorf("failed to read docID length in shard %d: %w", i, err)
+				// Incomplete docID length - delete corrupt file and return empty index
+				file.Close()
+				os.Remove(filePath)
+				return models.NewShardedSortedIndex(), nil
 			}
 			docIDLen := binary.LittleEndian.Uint16(lenBuf)
 
 			docIDBytes := make([]byte, docIDLen)
 			if _, err := reader.Read(docIDBytes); err != nil {
-				return nil, fmt.Errorf("failed to read docID in shard %d: %w", i, err)
+				// Incomplete docID data - delete corrupt file and return empty index
+				file.Close()
+				os.Remove(filePath)
+				return models.NewShardedSortedIndex(), nil
 			}
 			shard.DocIDs[j] = string(docIDBytes)
 		}
@@ -236,7 +258,10 @@ func LoadSortedIndex(databaseName, bundleName string) (*models.ShardedSortedInde
 
 	// Validate total count
 	if actualTotal != expectedTotal {
-		return nil, fmt.Errorf("document count mismatch: read %d, expected %d", actualTotal, expectedTotal)
+		// Count mismatch - delete corrupt file and return empty index
+		file.Close()
+		os.Remove(filePath)
+		return models.NewShardedSortedIndex(), nil
 	}
 
 	return index, nil
@@ -255,7 +280,7 @@ func DeleteSortedIndex(databaseName, bundleName string) error {
 
 // InitializeBundleSortedIndex ensures a bundle has a SortedIndex.
 // Loads from disk if available, otherwise creates empty index.
-// This should be called when a bundle is loaded or created.
+// Corrupt or incomplete index files are automatically deleted and replaced with empty indexes.
 func InitializeBundleSortedIndex(bundle *models.Bundle) error {
 	if bundle == nil {
 		return fmt.Errorf("cannot initialize sorted index for nil bundle")
@@ -266,13 +291,9 @@ func InitializeBundleSortedIndex(bundle *models.Bundle) error {
 		return fmt.Errorf("cannot initialize sorted index: bundle has no database reference")
 	}
 
-	index, err := LoadSortedIndex(bundle.Database.Name, bundle.Name)
-	if err != nil {
-		// Set fallback empty index and return error
-		bundle.SortedIndex = models.NewShardedSortedIndex()
-		return fmt.Errorf("failed to load sorted index for bundle %s: %w", bundle.Name, err)
-	}
-
+	// LoadSortedIndex never returns an error - it handles all corruption cases
+	// by deleting the corrupt file and returning an empty index
+	index, _ := LoadSortedIndex(bundle.Database.Name, bundle.Name)
 	bundle.SortedIndex = index
 	return nil
 }

@@ -2673,12 +2673,16 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	copy(combinedData[:8], headerBytes)
 	copy(combinedData[8:], documentBytes)
 
-	// Write using empty txID (autocommit mode for RCU)
-	if err := writeBuffer.WriteWithTxID(combinedData[:len(headerBytes)+len(documentBytes)], newDoc.DocumentID, ""); err != nil {
+	// RCU LOCK-FREE WRITE: Use atomic offset reservation instead of mutex-locked WriteWithTxID
+	// This eliminates the WriteBuffer mutex bottleneck that was serializing 150 concurrent updates
+	// WriteDirectAtomic uses atomic.AddInt64 for offset reservation and pwrite for concurrent I/O
+	actualOffset, err := writeBuffer.WriteDirectAtomic(combinedData[:len(headerBytes)+len(documentBytes)])
+	if err != nil {
 		b.returnCombinedBuffer(combinedData)
 		b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, 0, fmt.Errorf("failed to write document version: %w", err))
 		return 0, fmt.Errorf("failed to write document version: %w", err)
 	}
+	_ = actualOffset // Offset is tracked atomically, no need to use return value
 
 	b.returnCombinedBuffer(combinedData)
 

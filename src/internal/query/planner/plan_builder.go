@@ -301,6 +301,16 @@ func (pb *PlanBuilder) addAggregationNode(
 		pb.logger.Infof("addAggregationNode: HAVING expression present (type: %T)", query.HavingExpression)
 	}
 
+	// Calculate limit for early termination (only safe when no HAVING/ORDER BY/OFFSET)
+	limitForEarlyTermination := 0
+	if query.HasLimit() &&
+		query.HavingExpression == nil && // No HAVING clause
+		!query.HasOrderBy() && // No ORDER BY clause
+		query.Offset == 0 { // No OFFSET
+		limitForEarlyTermination = query.Limit
+		pb.logger.Infof("Enabling early termination for aggregation with limit=%d", limitForEarlyTermination)
+	}
+
 	// Create aggregation node with GROUP BY clause
 	// Note: ORDER BY is handled separately by SortNode (added after aggregation)
 	aggNode := NewAggregationNode(
@@ -309,6 +319,7 @@ func (pb *PlanBuilder) addAggregationNode(
 		query.AggregateFields,
 		query.HavingExpression,
 		nil, // OrderBy handled by SortNode
+		limitForEarlyTermination,
 		pb.logger,
 	)
 

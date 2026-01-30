@@ -76,10 +76,16 @@ type BucketFileHandle struct {
 	BucketNum      uint32        // Bucket number (0 to NumBuckets-1)
 	CurrentFile    *os.File      // Currently active file for writes
 	CurrentFileNum int           // Current file number within bucket
-	CurrentSize    int64         // Current size of active file
-	WriteBuffer    *bufio.Writer // Buffered writer for performance
+	CurrentSize    int64         // Current size of active file (legacy, for rotation check)
+	WriteBuffer    *bufio.Writer // Buffered writer for performance (legacy path)
 	AllFiles       []string      // List of all files for this bucket (oldest to newest)
-	Mutex          sync.RWMutex  // Protects file operations for this bucket
+	Mutex          sync.RWMutex  // Protects file operations for this bucket (legacy path)
+
+	// RCU Lock-Free Write Support
+	// atomicOffset tracks current file end for lock-free concurrent writes
+	// Writers use atomic.AddInt64 to reserve space, then WriteAt at their offset
+	AtomicOffset int64      // Current file end position (atomic)
+	PwriteMutex  sync.Mutex // Minimal mutex for pwrite syscall (OS limitation)
 }
 
 // BucketFileManager manages per-bucket file handles for optimized writes
@@ -175,6 +181,7 @@ func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*Bucket
 				if statErr == nil && stat.Size() < bfm.bucketMaxSize {
 					handle.CurrentFile = file
 					handle.CurrentSize = stat.Size()
+					handle.AtomicOffset = stat.Size() // RCU: Initialize atomic offset from file size
 					handle.CurrentFileNum = parsed.FileNumber
 					handle.WriteBuffer = bufio.NewWriterSize(file, bfm.writeBufferSize)
 					bfm.buckets[bucketNum] = handle
@@ -258,6 +265,7 @@ func (bfm *BucketFileManager) openBucketFile(handle *BucketFileHandle) error {
 
 	handle.CurrentFile = file
 	handle.CurrentSize = stat.Size()
+	handle.AtomicOffset = stat.Size() // RCU: Initialize atomic offset from file size
 	handle.WriteBuffer = bufio.NewWriterSize(file, bfm.writeBufferSize)
 	handle.AllFiles = append(handle.AllFiles, filePath)
 
@@ -265,6 +273,7 @@ func (bfm *BucketFileManager) openBucketFile(handle *BucketFileHandle) error {
 }
 
 // rotateBucketFile rotates to a new file for a bucket
+// IMPORTANT: Caller must hold handle.Mutex when calling this function
 func (bfm *BucketFileManager) rotateBucketFile(handle *BucketFileHandle) error {
 	// Flush and close current file
 	if handle.WriteBuffer != nil {
@@ -279,9 +288,10 @@ func (bfm *BucketFileManager) rotateBucketFile(handle *BucketFileHandle) error {
 		}
 	}
 
-	// Increment file number and open new file
+	// Increment file number and reset sizes
 	handle.CurrentFileNum++
 	handle.CurrentSize = 0
+	atomic.StoreInt64(&handle.AtomicOffset, 0) // RCU: Reset atomic offset for new file
 
 	if err := bfm.openBucketFile(handle); err != nil {
 		return fmt.Errorf("failed to open new bucket file: %w", err)
@@ -585,6 +595,10 @@ func (es *EntryStorage) AppendEntry(entry *HashIndexEntry) error {
 // appendEntryToBucket appends entry to bucket-specific file
 // Uses BucketNum field from entry to route to correct bucket
 //
+// RCU LOCK-FREE: Uses atomic offset reservation for concurrent writes.
+// Multiple writers to the same bucket can proceed in parallel using atomic.AddInt64
+// to reserve space, then WriteAt to write at their reserved offset.
+//
 // Parameters:
 //   - entry: The entry to append (must have BucketNum set)
 //
@@ -596,44 +610,52 @@ func (es *EntryStorage) appendEntryToBucket(entry *HashIndexEntry) error {
 		return fmt.Errorf("failed to get bucket handle: %w", err)
 	}
 
-	// Lock this bucket for writing
-	handle.Mutex.Lock()
-	defer handle.Mutex.Unlock()
-
-	// Serialize entry
+	// Serialize entry (can be done without any lock)
 	data, err := entry.Serialize()
 	if err != nil {
 		return fmt.Errorf("failed to serialize entry: %w", err)
 	}
 
-	// Check if we need to rotate bucket file
-	if handle.CurrentSize+int64(len(data)) > es.bucketFileMaxSize {
-		if err := es.bucketFileManager.rotateBucketFile(handle); err != nil {
-			return fmt.Errorf("failed to rotate bucket file: %w", err)
+	dataLen := int64(len(data))
+
+	// Check if rotation is needed (needs brief lock to coordinate)
+	// We check atomicOffset which is updated atomically
+	currentOffset := atomic.LoadInt64(&handle.AtomicOffset)
+	if currentOffset+dataLen > es.bucketFileMaxSize {
+		// Rotation needed - acquire full lock for this rare operation
+		handle.Mutex.Lock()
+		// Double-check after acquiring lock (another writer may have rotated)
+		if atomic.LoadInt64(&handle.AtomicOffset)+dataLen > es.bucketFileMaxSize {
+			if err := es.bucketFileManager.rotateBucketFile(handle); err != nil {
+				handle.Mutex.Unlock()
+				return fmt.Errorf("failed to rotate bucket file: %w", err)
+			}
 		}
+		handle.Mutex.Unlock()
 	}
 
-	// Write to bucket's buffer
-	n, err := handle.WriteBuffer.Write(data)
-	if err != nil {
-		return fmt.Errorf("failed to write to bucket: %w", err)
-	}
+	// RCU LOCK-FREE WRITE: Atomically reserve space at end of file
+	// This is the key optimization - multiple goroutines can reserve concurrently
+	writeOffset := atomic.AddInt64(&handle.AtomicOffset, dataLen) - dataLen
 
-	if n != len(data) {
-		return fmt.Errorf("partial write: wrote %d bytes, expected %d bytes", n, len(data))
+	// Write at reserved offset using pwrite (doesn't change file position)
+	// PwriteMutex is per-bucket, so contention is already 256x lower than global
+	// This mutex is only needed because some OS implementations serialize pwrite internally
+	handle.PwriteMutex.Lock()
+	written := 0
+	for written < len(data) {
+		n, err := handle.CurrentFile.WriteAt(data[written:], writeOffset+int64(written))
+		if err != nil {
+			handle.PwriteMutex.Unlock()
+			return fmt.Errorf("pwrite to bucket %d failed at offset %d: %w", entry.BucketNum, writeOffset+int64(written), err)
+		}
+		written += n
 	}
-
-	// Flush immediately for durability
-	if err := handle.WriteBuffer.Flush(); err != nil {
-		return fmt.Errorf("failed to flush bucket write: %w", err)
-	}
-
-	// Update bucket statistics
-	handle.CurrentSize += int64(n)
+	handle.PwriteMutex.Unlock()
 
 	// Update global statistics (atomic for thread safety)
 	atomic.AddUint64(&es.totalEntries, 1)
-	atomic.AddUint64(&es.totalBytes, uint64(n))
+	atomic.AddUint64(&es.totalBytes, uint64(len(data)))
 
 	return nil
 }

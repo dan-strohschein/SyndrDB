@@ -100,6 +100,10 @@ type AggregationNode struct {
 
 	// executionStrategy determines aggregation algorithm
 	executionStrategy queryparser.GroupByStrategy
+
+	// Limit specifies maximum groups to collect (0 = no limit)
+	// Used for early termination when LIMIT is present without HAVING/ORDER BY/OFFSET
+	Limit int
 }
 
 // NewAggregationNode creates a new aggregation execution node
@@ -111,6 +115,7 @@ type AggregationNode struct {
 //   - aggregateFields: Aggregate functions to compute
 //   - havingClause: HAVING clause for group filtering (can be nil)
 //   - orderBy: ORDER BY clause for result sorting (can be nil)
+//   - limit: Maximum groups to collect (0 = no limit); enables early termination
 //   - logger: Logger for debugging
 //
 // Returns:
@@ -121,6 +126,7 @@ func NewAggregationNode(
 	aggregateFields []queryparser.AggregateFunction,
 	havingExpression interface{}, // syndrQL.Expression or legacy HavingClause
 	orderBy *queryparser.OrderByClause,
+	limit int,
 	logger *zap.SugaredLogger,
 ) *AggregationNode {
 
@@ -160,6 +166,7 @@ func NewAggregationNode(
 	node := &AggregationNode{
 		Child:             child,
 		GroupBy:           groupBy,
+		Limit:             limit,
 		AggregateFields:   aggregateFields,
 		HavingExpression:  havingExpression,
 		OrderBy:           orderBy,
@@ -644,6 +651,12 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 				gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
 			}
 			groupMap[gKey] = gResult
+
+			// Early termination: stop if we've found enough distinct groups
+			if n.Limit > 0 && len(groupMap) >= n.Limit {
+				n.Logger.Infof("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
+				return groupMap, nil
+			}
 		}
 
 		// Update aggregates
@@ -736,6 +749,12 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 				gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
 			}
 			groupMap[gKey] = gResult
+
+			// Early termination: stop if we've found enough distinct groups
+			if n.Limit > 0 && len(groupMap) >= n.Limit {
+				n.Logger.Infof("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
+				return groupMap, totalInput, nil
+			}
 		}
 
 		// Update aggregates
@@ -802,6 +821,12 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 				gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
 			}
 			groupMap[gKey] = gResult
+
+			// Early termination: stop if we've found enough distinct groups
+			if n.Limit > 0 && len(groupMap) >= n.Limit {
+				n.Logger.Infof("Early termination - found %d distinct groups (limit: %d)", len(groupMap), n.Limit)
+				return groupMap, docCount, nil
+			}
 		}
 
 		// Update aggregates (for COUNT(*), we just increment - no need for full document)
