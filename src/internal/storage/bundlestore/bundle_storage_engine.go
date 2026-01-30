@@ -2669,10 +2669,10 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	// This eliminates the WriteBuffer mutex bottleneck that was serializing 150 concurrent updates
 	// WriteDirectAtomic uses atomic.AddInt64 for offset reservation and pwrite for concurrent I/O
 	actualOffset, err := writeBuffer.WriteDirectAtomic(combinedData[:len(headerBytes)+len(documentBytes)])
-	
+
 	// Log write operation with actual offset (after atomic reservation)
 	b.writeLogger.LogWriteStart(bundle.Name, actualOffset, totalWriteSize)
-	
+
 	if err != nil {
 		b.returnCombinedBuffer(combinedData)
 		b.writeLogger.LogWriteEnd(bundle.Name, actualOffset, 0, fmt.Errorf("failed to write document version: %w", err))
