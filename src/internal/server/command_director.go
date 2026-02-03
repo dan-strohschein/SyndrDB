@@ -93,6 +93,13 @@ func CommandDirectorWithParams(ctx context.Context, database *models.Database, s
 
 // executeCommand contains the main command execution logic
 func executeCommand(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+	// IDLE DETECTION FIX: Record activity for all commands (read and write)
+	// This ensures the idle cache flusher correctly detects server activity
+	// during read-only workloads, preventing false "server idle" triggers.
+	if serviceManager.BundleService != nil {
+		serviceManager.BundleService.RecordActivity()
+	}
+
 	if database == nil {
 		// Get the database from the session.
 	}

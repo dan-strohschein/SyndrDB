@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -182,6 +184,15 @@ type BundleStore interface {
 	CloseWriteBuffer(bundleName string) error
 	CloseWriteBuffers() error
 
+	// Cache compaction - reclaims memory from deleted map entries
+	CompactAllCaches() int
+
+	// Cache flushing - completely clears all document-holding caches for fresh start
+	FlushAllDocumentCaches()
+
+	// Diagnostics
+	GetAllWriteBufferStats() []WriteBufferStats
+
 	// Transaction-aware buffer methods
 	GetBufferedDocumentsForTransaction(bundleName string, txID string) ([]*models.Document, error)
 	MarkDocumentDiscarded(bundleName string, docID string) error
@@ -221,7 +232,7 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		documentLocks:    make(map[string]map[string]*sync.Mutex), // DOCUMENT-LEVEL LOCKING: Initialize document locks map
 		rotationLocks:    NewShardedMutexMap(),                    // PERFORMANCE: Sharded rotation locks (64 shards)
 		writeVerifier:    NewDocumentWriteVerifier(logger),        // Initialize write verification
-		writeLogger:      NewBundleWriteLogger(logger, 1000),      // Keep last 1000 write operations
+		writeLogger:      NewBundleWriteLogger(logger, 10000),     // Keep last 10000 write operations (increased to reduce wrapping)
 		fileReadCache:    NewShardedFileReadCache(),               // PHASE 3: Sharded file read cache (replaces map + mutex)
 		parsedDocsCache:  NewShardedParsedDocsCache(),             // PHASE 3: Sharded parsed docs cache (replaces map + mutex)
 		// PHASE 8: parseSingleflight requires no initialization (zero value is ready to use)
@@ -716,7 +727,24 @@ func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databa
 // Callers must not modify the returned slice. Used by LoadDocumentPage to avoid repeated full-file
 // reads when iterating all pages (e.g. getAllDocumentsForIndexing).
 // PHASE 3: Using ShardedFileReadCache for concurrent access without global mutex
+//
+// CRITICAL: This function is aware of active WriteBuffers to prevent torn reads.
+// If there's an active WriteBuffer for this file, we:
+// 1. BYPASS THE CACHE entirely (active files change frequently, caching is counterproductive)
+// 2. Wait for in-flight writes to complete
+// 3. Read only up to atomicOffset bytes (the known valid data)
+// This prevents reading partially-written data and stale cached data.
 func (bse *BundleStorageEngine) getOrReadFile(filePath string) ([]byte, error) {
+	// CRITICAL: Check for active WriteBuffer BEFORE checking cache
+	// If there's an active buffer, we must bypass the cache to get fresh data
+	writeBuffer := bse.writeBufferCache.Get(filePath)
+
+	if writeBuffer != nil && !writeBuffer.IsFrozen() {
+		// Active buffer exists - bypass cache and read directly with safety measures
+		return bse.readFileSafeForActiveBuffer(filePath, writeBuffer)
+	}
+
+	// No active buffer or buffer is frozen - safe to use cache
 	maxEntries := settings.GetSettings().FileReadCacheMaxEntries
 	if maxEntries <= 0 {
 		maxEntries = 32
@@ -729,8 +757,78 @@ func (bse *BundleStorageEngine) getOrReadFile(filePath string) ([]byte, error) {
 	}
 
 	return bse.fileReadCache.GetOrCreate(filePath, maxEntriesPerShard, func() ([]byte, error) {
+		// Double-check: WriteBuffer may have been created between our check and cache miss
+		wb := bse.writeBufferCache.Get(filePath)
+		if wb != nil && !wb.IsFrozen() {
+			return bse.readFileSafeForActiveBuffer(filePath, wb)
+		}
+		// No active buffer - safe to read entire file
 		return os.ReadFile(filePath)
 	})
+}
+
+// readFileSafeForActiveBuffer reads a file while being aware of concurrent WriteDirectAtomic writes.
+// If there's an active WriteBuffer for this file, we wait for in-flight writes and read only
+// committed data to prevent torn reads.
+//
+// Race condition this prevents:
+// 1. Writer reserves offset N with atomic.AddInt64 (file logically grows)
+// 2. Reader calls os.ReadFile which reads up to file size (may include reserved-but-unwritten offset N)
+// 3. Writer does pwrite at offset N
+// 4. Reader has garbage/partial data at offset N
+//
+// Solution:
+// 1. Wait for inflightWrites to reach 0 (all writes complete)
+// 2. Get atomicOffset (the boundary of valid data)
+// 3. Read only atomicOffset bytes from the file
+//
+// NOTE: Results from this function should NOT be cached because the file is actively being written to.
+func (bse *BundleStorageEngine) readFileSafeForActiveBuffer(filePath string, writeBuffer *WriteBuffer) ([]byte, error) {
+	// Active buffer exists - we need to be careful about in-flight writes
+	// Wait for any in-flight writes to complete by spinning until counter is 0
+	// We do NOT freeze the buffer - we just wait for current in-flight writes
+	backoff := time.Microsecond
+	maxBackoff := time.Millisecond * 10
+	maxWaitTime := time.Second * 5
+	startTime := time.Now()
+
+	for atomic.LoadInt64(&writeBuffer.inflightWrites) > 0 {
+		if time.Since(startTime) > maxWaitTime {
+			// Timeout - log warning and proceed with best-effort read
+			if bse.logger != nil {
+				bse.logger.Warnf("Timeout waiting for in-flight writes to complete for %s, proceeding with read", filePath)
+			}
+			break
+		}
+		time.Sleep(backoff)
+		if backoff < maxBackoff {
+			backoff *= 2
+		}
+	}
+
+	// Now get the safe read boundary - this is the highest offset that has been written
+	safeOffset := writeBuffer.GetAtomicOffset()
+
+	// Open file and read only up to safeOffset
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Read exactly safeOffset bytes (or less if file is smaller)
+	data := make([]byte, safeOffset)
+	n, err := io.ReadFull(file, data)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		// File is smaller than safeOffset - this can happen if file was just created
+		// Return what we got
+		return data[:n], nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return data[:n], nil
 }
 
 // GetDocumentsByIDsFromCache retrieves documents by IDs directly from the parsed docs cache.
@@ -1943,7 +2041,7 @@ func (b *BundleStorageEngine) verifyDocumentExistsStreaming(bundleName, database
 
 	// Use the same parser that SELECT operations use
 	// This ensures consistency in how we interpret the file format
-	documents, err := b.parseAppendedDocuments(fileData)
+	documents, err := b.parseAppendedDocuments(bundleName, fileData)
 	if err != nil {
 		return false, fmt.Errorf("failed to parse bundle file: %w", err)
 	}
@@ -2205,6 +2303,12 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	// MULTI-FILE STORAGE: Determine current active file and check if rotation is needed
 	// Get or create manifest manager for this bundle
 	manifestMgr := b.getOrCreateManifestManager(bundle.Database.Name, bundle.Name)
+
+	// Construct bundle directory (constant)
+	bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
+
+	// OPTIMISTIC READ: Read manifest without lock for fast path (common case: no rotation needed)
+	// This allows concurrent reads while only serializing on actual rotation
 	manifest, err := manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
 	if err != nil {
 		return 0, fmt.Errorf("failed to load bundle manifest: %w", err)
@@ -2215,9 +2319,9 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	if manifest.ActiveFileID > 0 {
 		currentFileID = uint32(manifest.ActiveFileID)
 	}
+	initialFileID := currentFileID // Save for validation after lock
 
 	// Construct the current file path
-	bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
 	filePath := filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
 
 	// CRITICAL FIX: Ensure the current file exists in manifest
@@ -2249,18 +2353,34 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	rotationLock := b.getRotationLock(bundle.Name)
 	rotationLock.Lock()
 
+	// DOUBLE-CHECK: Validate that activeFileID hasn't changed while we were waiting
+	// If another goroutine rotated the file, we need to use the new file ID
+	currentActiveID := manifestMgr.GetActiveFileID()
+	if currentActiveID > 0 && uint32(currentActiveID) != initialFileID {
+		// File was rotated by another goroutine - use the new active file
+		currentFileID = uint32(currentActiveID)
+		filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+	}
+
 	// Check if file rotation is needed (file size exceeds threshold)
-	// TODO: add configuration override per bundle when per-bundle tuning becomes necessary
+	// PERFORMANCE FIX: Use WriteBuffer's atomic offset instead of os.Stat syscall
+	// This avoids expensive filesystem calls on every write under contention
 	maxSizeBytes := int64(settings.GetSettings().Storage.BundleFileMaxSizeMB) * 1024 * 1024
 	rotationThreshold := int64(float64(maxSizeBytes) * 1.1) // ±10% variance tolerance
 
-	fileInfo, statErr := os.Stat(filePath)
-	needsRotation := false
 	var currentFileSize int64 = 0
+	needsRotation := false
 
-	if statErr == nil {
-		currentFileSize = fileInfo.Size()
+	// Try to get file size from existing WriteBuffer (fast path - no syscall)
+	if existingBuffer := b.writeBufferCache.Get(filePath); existingBuffer != nil {
+		currentFileSize = existingBuffer.GetAtomicOffset()
 		needsRotation = currentFileSize >= rotationThreshold
+	} else {
+		// Fallback to os.Stat only when buffer doesn't exist yet (first write to file)
+		if fileInfo, statErr := os.Stat(filePath); statErr == nil {
+			currentFileSize = fileInfo.Size()
+			needsRotation = currentFileSize >= rotationThreshold
+		}
 	}
 
 	// PERFORMANCE FIX: Remove excessive logging in hot path
@@ -2288,12 +2408,14 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 
 		// Close current write buffer and flush pending data
 		if err := b.CloseWriteBuffer(bundle.Name); err != nil {
+			rotationLock.Unlock()
 			return 0, fmt.Errorf("failed to close write buffer before rotation: %w", err)
 		}
 
 		// Update manifest: freeze current file and mark as immutable
-		if manifest.ActiveFileID > 0 {
+		if manifestMgr.GetActiveFileID() > 0 {
 			if err := manifestMgr.FreezeFile(int(currentFileID)); err != nil {
+				rotationLock.Unlock()
 				return 0, fmt.Errorf("failed to freeze file in manifest: %w", err)
 			}
 		}
@@ -2305,6 +2427,7 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		// Add new active file to manifest
 		fileName := fmt.Sprintf("%06d.bnd", currentFileID)
 		if err := manifestMgr.AddFile(int(currentFileID), fileName); err != nil {
+			rotationLock.Unlock()
 			return 0, fmt.Errorf("failed to add new file to manifest: %w", err)
 		}
 
@@ -2442,6 +2565,26 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	// Log successful write operation
 	b.writeLogger.LogWriteEnd(bundle.Name, writeOffset, totalWriteSize, nil)
 
+	// CRITICAL DURABILITY FIX: Ensure data reaches disk to prevent corruption
+	// WriteBuffer.WriteWithTxID buffers data but doesn't fsync immediately.
+	// Auto-flush happens every 100ms or when buffer is full.
+	//
+	// Problem: On crash before flush:
+	// 1. Buffered data is lost
+	// 2. Manifest/indexes already updated
+	// 3. Compaction reads garbage → corruption
+	//
+	// Solution: Conditional fsync based on durability mode
+	// - "strict": Group commit fsync (batches writes, ~20ms window)
+	// - default: Skip fsync, rely on 100ms auto-flush (fast but risky)
+	if settings.GetSettings().DurabilityMode == "strict" {
+		// Use group commit to batch multiple writes into single fsync
+		// Blocks for up to 20ms waiting for other writes to join the batch
+		if err := writeBuffer.SyncGroupCommit(); err != nil {
+			b.logger.Warnf("Failed to sync data to disk: %v (continuing anyway)", err)
+		}
+	}
+
 	// PHASE 1: MVCC - TotalDocuments already incremented atomically above
 	// Calculate PageCount atomically from current TotalDocuments
 	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
@@ -2471,17 +2614,19 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	//b.logger.Debugf("Ending time: %s", time.Now().Format(time.RFC3339Nano))
 	//endingTesting := time.Since(testingStart)
 	//b.logger.Debugf("DEBUG DEBUG DEBUG AppendDocumentToBundleFileWithTxID took %s", endingTesting.String())
-	// COMPACTION INTEGRATION: Trigger compaction evaluation after write
-	// Don't block the write path - evaluate asynchronously
-	// PostgreSQL autovacuum-inspired: check triggers after mutations
-	go func() {
-		if b.compactionScheduler != nil {
-			b.compactionScheduler.EvaluateBundle(
-				bundle.Database.Name,
-				bundle.Name,
-			)
-		}
-	}()
+
+	// COMPACTION INTEGRATION: Removed per-write goroutine spawning.
+	// GOROUTINE LEAK FIX: Previously spawned a goroutine on every write to call
+	// EvaluateBundle(). Under high write load (30 connections, 10 minutes),
+	// this created 1.4+ million goroutines that piled up waiting for locks
+	// in ShouldCompact() and LoadOrCreate(). This caused severe scheduler pressure
+	// and latency degradation (20ms → 71ms on subsequent runs).
+	//
+	// Compaction is now handled by:
+	// 1. periodicCompactionEvaluator (every 60s) - background evaluation of all bundles
+	// 2. File rotation triggers - evaluated when files exceed size threshold
+	//
+	// This maintains PostgreSQL autovacuum-inspired behavior without the per-write overhead.
 
 	// Return the page ID where this document was stored
 	return pageID, nil
@@ -2533,6 +2678,11 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 
 	// MULTI-FILE STORAGE: Determine current active file and check if rotation is needed
 	manifestMgr := b.getOrCreateManifestManager(bundle.Database.Name, bundle.Name)
+
+	// Construct bundle directory (constant)
+	bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
+
+	// OPTIMISTIC READ: Read manifest without lock for fast path (common case: no rotation needed)
 	manifest, err := manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
 	if err != nil {
 		return 0, fmt.Errorf("failed to load bundle manifest: %w", err)
@@ -2543,9 +2693,9 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	if manifest.ActiveFileID > 0 {
 		currentFileID = uint32(manifest.ActiveFileID)
 	}
+	initialFileID := currentFileID // Save for validation after lock
 
 	// Construct the current file path
-	bundleDir := GetBundleDirectory(bundle.Database.Name, bundle.Name)
 	filePath := filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
 
 	// Ensure current file exists in manifest
@@ -2567,17 +2717,32 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	rotationLock := b.getRotationLock(bundle.Name)
 	rotationLock.Lock()
 
+	// DOUBLE-CHECK: Validate that activeFileID hasn't changed while we were waiting
+	currentActiveID := manifestMgr.GetActiveFileID()
+	if currentActiveID > 0 && uint32(currentActiveID) != initialFileID {
+		// File was rotated by another goroutine - use the new active file
+		currentFileID = uint32(currentActiveID)
+		filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+	}
+
 	// Check if file rotation is needed
+	// PERFORMANCE FIX: Use WriteBuffer's atomic offset instead of os.Stat syscall
 	maxSizeBytes := int64(settings.GetSettings().Storage.BundleFileMaxSizeMB) * 1024 * 1024
 	rotationThreshold := int64(float64(maxSizeBytes) * 1.1)
 
-	fileInfo, statErr := os.Stat(filePath)
-	needsRotation := false
 	var currentFileSize int64 = 0
+	needsRotation := false
 
-	if statErr == nil {
-		currentFileSize = fileInfo.Size()
+	// Try to get file size from existing WriteBuffer (fast path - no syscall)
+	if existingBuffer := b.writeBufferCache.Get(filePath); existingBuffer != nil {
+		currentFileSize = existingBuffer.GetAtomicOffset()
 		needsRotation = currentFileSize >= rotationThreshold
+	} else {
+		// Fallback to os.Stat only when buffer doesn't exist yet
+		if fileInfo, statErr := os.Stat(filePath); statErr == nil {
+			currentFileSize = fileInfo.Size()
+			needsRotation = currentFileSize >= rotationThreshold
+		}
 	}
 
 	// Handle file rotation if needed
@@ -2595,7 +2760,7 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 			return 0, fmt.Errorf("failed to close write buffer before rotation: %w", err)
 		}
 
-		if manifest.ActiveFileID > 0 {
+		if manifestMgr.GetActiveFileID() > 0 {
 			if err := manifestMgr.FreezeFile(int(currentFileID)); err != nil {
 				rotationLock.Unlock()
 				return 0, fmt.Errorf("failed to freeze file in manifest: %w", err)
@@ -2654,30 +2819,63 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 	// Calculate total write size
 	totalWriteSize := 8 + len(documentBytes)
 
-	// Get or create write buffer (lock-free via atomic offset)
-	writeBuffer, err := b.getOrCreateWriteBuffer(bundle.Name, filePath)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get write buffer: %w", err)
-	}
-
 	// Combine header and document data
 	combinedData := b.getCombinedBuffer(len(headerBytes) + len(documentBytes))
 	copy(combinedData[:8], headerBytes)
 	copy(combinedData[8:], documentBytes)
 
-	// RCU LOCK-FREE WRITE: Use atomic offset reservation instead of mutex-locked WriteWithTxID
-	// This eliminates the WriteBuffer mutex bottleneck that was serializing 150 concurrent updates
-	// WriteDirectAtomic uses atomic.AddInt64 for offset reservation and pwrite for concurrent I/O
-	actualOffset, err := writeBuffer.WriteDirectAtomic(combinedData[:len(headerBytes)+len(documentBytes)])
+	// RCU LOCK-FREE WRITE with FROZEN BUFFER RETRY
+	// When file rotation happens, the old WriteBuffer is frozen to prevent corruption.
+	// Writers holding stale buffer references will get ErrBufferFrozen and must retry
+	// with a fresh buffer from the new active file.
+	var actualOffset int64
+	var writeBuffer *WriteBuffer
+	maxRetries := 3
+	for retry := 0; retry < maxRetries; retry++ {
+		// Get or create write buffer (lock-free via atomic offset)
+		writeBuffer, err = b.getOrCreateWriteBuffer(bundle.Name, filePath)
+		if err != nil {
+			b.returnCombinedBuffer(combinedData)
+			return 0, fmt.Errorf("failed to get write buffer: %w", err)
+		}
 
-	// Log write operation with actual offset (after atomic reservation)
-	b.writeLogger.LogWriteStart(bundle.Name, actualOffset, totalWriteSize)
+		// WriteDirectAtomic uses atomic.AddInt64 for offset reservation and pwrite for concurrent I/O
+		actualOffset, err = writeBuffer.WriteDirectAtomic(combinedData[:len(headerBytes)+len(documentBytes)])
 
-	if err != nil {
+		if err == nil {
+			break // Success
+		}
+
+		// Check if buffer was frozen (file rotated)
+		if errors.Is(err, ErrBufferFrozen) {
+			// CRITICAL FIX: Delete the frozen buffer from cache to prevent accumulation
+			// Race condition: A writer may call getOrCreateWriteBuffer for the OLD file
+			// right after CloseWriteBuffer deletes it, creating an orphan frozen buffer.
+			// Without this delete, orphan buffers accumulate and degrade performance.
+			b.writeBufferCache.Delete(filePath)
+
+			// File was rotated - get the new active file path and retry
+			manifest, _ = manifestMgr.LoadOrCreate(bundle.Database.Name, bundle.Name)
+			if manifest.ActiveFileID > 0 {
+				currentFileID = uint32(manifest.ActiveFileID)
+			}
+			filePath = filepath.Join(bundleDir, fmt.Sprintf("%06d.bnd", currentFileID))
+
+			if b.logger != nil {
+				b.logger.Debugf("RCU: Buffer frozen during write, retrying with new active file %d (attempt %d/%d)",
+					currentFileID, retry+1, maxRetries)
+			}
+			continue // Retry with fresh buffer
+		}
+
+		// Other error - fail immediately
 		b.returnCombinedBuffer(combinedData)
 		b.writeLogger.LogWriteEnd(bundle.Name, actualOffset, 0, fmt.Errorf("failed to write document version: %w", err))
 		return 0, fmt.Errorf("failed to write document version: %w", err)
 	}
+
+	// Log write operation with actual offset (after atomic reservation)
+	b.writeLogger.LogWriteStart(bundle.Name, actualOffset, totalWriteSize)
 
 	b.returnCombinedBuffer(combinedData)
 
@@ -2687,6 +2885,25 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 
 	// Log successful write (use actualOffset, not pre-reserved writeOffset)
 	b.writeLogger.LogWriteEnd(bundle.Name, actualOffset, totalWriteSize, nil)
+
+	// CRITICAL DURABILITY FIX: Ensure data reaches disk to prevent corruption
+	// RCU uses WriteDirectAtomic which bypasses buffering but needs fsync for durability.
+	//
+	// Problem: Without fsync, data sits in OS buffer cache. On crash:
+	// 1. Data is lost (not on disk)
+	// 2. Manifest/indexes already updated
+	// 3. Compaction reads garbage → corruption
+	//
+	// Solution: Conditional fsync based on durability mode
+	// - "strict": Group commit fsync (batches writes, ~20ms window)
+	// - default: Skip fsync (fast but risky on crash)
+	if settings.GetSettings().DurabilityMode == "strict" {
+		// Use group commit to batch multiple writes into single fsync
+		// This reduces fsync overhead from ~5ms per write to ~5ms per batch
+		if err := writeBuffer.SyncGroupCommit(); err != nil {
+			b.logger.Warnf("RCU: Failed to sync data to disk: %v (continuing anyway)", err)
+		}
+	}
 
 	// Mark bundle as dirty
 	bundle.IsDirty = true
@@ -2701,12 +2918,9 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 			"commitSequence", newDoc.CommitSequence)
 	}
 
-	// Trigger async compaction evaluation
-	go func() {
-		if b.compactionScheduler != nil {
-			b.compactionScheduler.EvaluateBundle(bundle.Database.Name, bundle.Name)
-		}
-	}()
+	// COMPACTION INTEGRATION: Removed per-write goroutine spawning.
+	// GOROUTINE LEAK FIX: See comment in AppendDocumentToBundleFileWithTxID.
+	// Compaction evaluation is now handled by periodicCompactionEvaluator (60s interval).
 
 	return pageID, nil
 }
@@ -2723,7 +2937,13 @@ func (b *BundleStorageEngine) periodicCompactionEvaluator(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Evaluate compaction needs
 			b.evaluateAllBundlesForCompaction()
+
+			// DURABILITY FIX: Persist deferred manifest updates periodically
+			// This ensures manifests are consistent with disk data even if server
+			// runs for days without file rotation or shutdown
+			b.persistDirtyManifests()
 		}
 	}
 }
@@ -2752,6 +2972,37 @@ func (b *BundleStorageEngine) evaluateAllBundlesForCompaction() {
 				b.compactionScheduler.EvaluateBundle(db, bundle)
 			}
 		}(item.db, item.bundle)
+	}
+}
+
+// persistDirtyManifests persists all manifests that have deferred updates
+// Called periodically (every 60s) to ensure manifest/data consistency without
+// requiring file rotation or shutdown
+func (b *BundleStorageEngine) persistDirtyManifests() {
+	persistCount := 0
+	errorCount := 0
+
+	b.manifestCache.Range(func(key string, manifestMgr *ManifestManager) bool {
+		// Check if manifest has pending updates (LastUpdated > zero time)
+		// We don't load the manifest if not needed - it's already in memory
+		manifest := manifestMgr.GetManifestUnsafe()
+		if manifest == nil || manifest.LastUpdated.IsZero() {
+			return true // Skip - no updates pending
+		}
+
+		// Persist the manifest to disk
+		if err := manifestMgr.PersistManifest(); err != nil {
+			b.logger.Warnf("Failed to persist manifest for %s: %v", key, err)
+			errorCount++
+		} else {
+			persistCount++
+		}
+		return true // continue iteration
+	})
+
+	// Log summary if any manifests were persisted (debug mode only)
+	if persistCount > 0 && settings.GetSettings().Debug {
+		b.logger.Debugf("Periodic manifest persistence: %d persisted, %d errors", persistCount, errorCount)
 	}
 }
 
@@ -3228,6 +3479,45 @@ func (b *BundleStorageEngine) FlushWriteBuffers(bundleName string) error {
 	return nil
 }
 
+// SyncWriteBuffers forces fsync on all write buffers for a bundle to ensure data is on disk
+// This is critical before compaction to prevent reading incomplete data from OS cache
+func (b *BundleStorageEngine) SyncWriteBuffers(bundleName string) error {
+	var errors []error
+	bundlePattern := "/" + bundleName + "/"
+
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
+		if !strings.Contains(bufferKey, bundlePattern) {
+			return true // continue to next
+		}
+
+		if err := buffer.Sync(); err != nil {
+			b.logger.Warnf("Failed to sync buffer for %s: %v", bufferKey, err)
+			errors = append(errors, err)
+		}
+
+		return true // continue iteration
+	})
+
+	if len(errors) > 0 {
+		return fmt.Errorf("failed to sync %d write buffers for bundle %s", len(errors), bundleName)
+	}
+
+	return nil
+}
+
+// getWriteBuffer retrieves an existing write buffer for a specific file (non-creating)
+// Returns nil if buffer doesn't exist yet
+// CRITICAL FIX: Must use same file naming format as getOrCreateWriteBuffer (%06d.bnd)
+// Previously used "bundle_%d.dat" which never matched, causing compaction corruption
+func (b *BundleStorageEngine) getWriteBuffer(databaseName, bundleName string, fileID int) *WriteBuffer {
+	bundleDir := GetBundleDirectory(databaseName, bundleName)
+	fileName := fmt.Sprintf("%06d.bnd", fileID) // Must match format used in getOrCreateWriteBuffer
+	filePath := filepath.Join(bundleDir, fileName)
+
+	buffer := b.writeBufferCache.Get(filePath)
+	return buffer
+}
+
 // FlushAllWriteBuffers flushes all write buffers for all bundles
 // MULTI-FILE STORAGE: Now flushes all file buffers (multiple files per bundle)
 // PHASE 3: Using ShardedBufferCache.Range for concurrent-safe iteration
@@ -3271,7 +3561,7 @@ func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 	bundlePattern := "/" + bundleName + "/"
 
 	// Close and delete all buffers matching the bundle pattern
-	_, errors := b.writeBufferCache.DeleteMatching(
+	deleted, errors := b.writeBufferCache.DeleteMatching(
 		func(key string) bool {
 			return strings.Contains(key, bundlePattern)
 		},
@@ -3283,6 +3573,12 @@ func (b *BundleStorageEngine) CloseWriteBuffer(bundleName string) error {
 			return nil
 		},
 	)
+
+	// Log cleanup results (useful for debugging buffer accumulation)
+	if b.logger != nil && settings.GetSettings().Debug && deleted > 0 {
+		b.logger.Debugf("CloseWriteBuffer: bundle=%s, deleted=%d, remainingCacheSize=%d",
+			bundleName, deleted, b.writeBufferCache.Len())
+	}
 
 	if len(errors) > 0 {
 		return fmt.Errorf("failed to close %d write buffers for bundle %s", len(errors), bundleName)
@@ -3425,6 +3721,19 @@ func (b *BundleStorageEngine) ClearDiscardedDocuments(bundleName string, docIDs 
 	})
 }
 
+// GetAllWriteBufferStats returns diagnostic statistics for all active write buffers.
+// Used for debugging latency degradation by tracking file sizes.
+func (b *BundleStorageEngine) GetAllWriteBufferStats() []WriteBufferStats {
+	var stats []WriteBufferStats
+
+	b.writeBufferCache.Range(func(bufferKey string, buffer *WriteBuffer) bool {
+		stats = append(stats, buffer.GetStats())
+		return true
+	})
+
+	return stats
+}
+
 // CloseWriteBuffers closes and flushes all write buffers
 // PHASE 3: Using ShardedBufferCache.DeleteMatching for concurrent-safe close and clear
 func (b *BundleStorageEngine) CloseWriteBuffers() error {
@@ -3448,6 +3757,56 @@ func (b *BundleStorageEngine) CloseWriteBuffers() error {
 	return nil
 }
 
+// CompactAllCaches compacts all sharded caches to reclaim memory from deleted entries.
+// PERFORMANCE FIX: Go's map delete() doesn't shrink the bucket array. After many
+// operations, the shard maps accumulate empty bucket slots that degrade iteration
+// and memory performance. This method recreates each shard's map with only current
+// entries, reclaiming memory and restoring lookup speed.
+// Returns total entries across all caches after compaction.
+func (b *BundleStorageEngine) CompactAllCaches() int {
+	total := 0
+	total += b.writeBufferCache.Compact()
+	total += b.manifestCache.Compact()
+	total += b.projectionCache.Compact()
+	total += b.fileReadCache.Compact()
+	total += b.parsedDocsCache.Compact()
+	return total
+}
+
+// FlushAllDocumentCaches completely clears all document-holding caches.
+// This is more aggressive than CompactAllCaches - it removes all cached data rather
+// than just compacting map structures.
+//
+// PERFORMANCE FIX: When all clients disconnect between test runs, document objects
+// accumulate in caches (file read cache, parsed docs cache). While map compaction
+// reclaims bucket memory, the actual document data remains. This method provides
+// a "fresh start" equivalent to server restart, preventing latency degradation
+// across consecutive test runs.
+//
+// Note: This does NOT flush write buffers - those must be flushed separately with
+// FlushAllWriteBuffers to ensure data durability.
+func (b *BundleStorageEngine) FlushAllDocumentCaches() {
+	b.logger.Info("Flushing all storage engine document caches")
+
+	// DIAGNOSTIC: Log cache sizes before flushing
+	writeBufferCount := b.writeBufferCache.Len()
+	b.logger.Infof("Storage engine state before flush: writeBuffers=%d", writeBufferCount)
+
+	// Clear file read cache - holds raw file bytes that get parsed into documents
+	b.fileReadCache.Flush()
+
+	// Clear parsed docs cache - holds parsed document objects
+	b.parsedDocsCache.Flush()
+
+	// Clear projection cache - holds projection field sets (not document data, but can grow)
+	b.projectionCache.Flush()
+
+	// Note: writeBufferCache and manifestCache are NOT flushed as they contain
+	// pending writes and metadata that must be preserved for data integrity
+
+	b.logger.Info("Storage engine document caches flushed")
+}
+
 // Shutdown gracefully stops the compaction scheduler and closes all resources
 func (b *BundleStorageEngine) Shutdown() error {
 	b.logger.Info("Shutting down bundle storage engine...")
@@ -3466,6 +3825,39 @@ func (b *BundleStorageEngine) Shutdown() error {
 	if err := b.CloseWriteBuffers(); err != nil {
 		b.logger.Warnf("Error closing write buffers during shutdown: %v", err)
 	}
+
+	// CRITICAL DURABILITY FIX: Persist all manifest updates before shutdown
+	// The manifests track file stats (UpdateFileStatsDeferred) but are only persisted
+	// during file rotation. On shutdown, we need to persist all deferred updates to avoid
+	// manifest/data inconsistency on restart.
+	//
+	// Without this, the scenario is:
+	// 1. Documents are written and buffered (then flushed above via CloseWriteBuffers)
+	// 2. Manifest stats are updated in memory (UpdateFileStatsDeferred)
+	// 3. Shutdown happens - data is flushed but manifest is NOT persisted
+	// 4. On restart: manifest has stale counts, but files have more documents
+	// 5. Compaction reads past end of expected data → corruption errors
+	//
+	// TODO: Consider adding a periodic manifest flush (every 30s) to reduce shutdown time
+	b.manifestCache.Range(func(key string, manifestMgr *ManifestManager) bool {
+		// Load current manifest to check if it needs persistence
+		// (manifests are loaded on-demand, so not all may be in memory)
+		manifest, err := manifestMgr.LoadOrCreate("", "") // Empty params - already loaded
+		if err != nil {
+			b.logger.Warnf("Failed to load manifest for %s during shutdown: %v", key, err)
+			return true // continue
+		}
+
+		// Only persist if manifest has been modified
+		if manifest.LastUpdated.After(time.Time{}) {
+			if err := manifestMgr.PersistManifest(); err != nil {
+				b.logger.Warnf("Failed to persist manifest for %s during shutdown: %v", key, err)
+			} else if settings.GetSettings().Debug {
+				b.logger.Debugf("Persisted manifest for %s during shutdown", key)
+			}
+		}
+		return true // continue iteration
+	})
 
 	b.logger.Info("Bundle storage engine shutdown complete")
 	return nil
@@ -3549,7 +3941,7 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 	// Parse documents with range limiting
 	// PROJECTION PUSHDOWN: Pass projection fields to deserialize only specified fields (e.g., "name" for ORDER BY queries)
 	// If projectionFields is nil or empty, deserializes all fields (backward compatible)
-	pageDocuments, totalCount, err := b.parseAppendedDocumentsRange(fileData, startIndex, endIndex, projectionFields)
+	pageDocuments, totalCount, err := b.parseAppendedDocumentsRange(bundleName, fileData, startIndex, endIndex, projectionFields)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to parse document range: %w", err)
 	}
@@ -3585,7 +3977,7 @@ func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName, databaseName str
 	}
 
 	// Try to parse as append-only format first
-	documents, appendErr := b.parseAppendedDocuments(fileData)
+	documents, appendErr := b.parseAppendedDocuments(bundleName, fileData)
 	if appendErr != nil {
 		return nil, fmt.Errorf("failed to parse bundle file: %w", appendErr)
 	}
@@ -3776,7 +4168,7 @@ func (b *BundleStorageEngine) scanFileBackwardForDocument(data *[]byte, document
 //   - map[string]models.Document: Parsed documents
 //   - uint32: Total document count
 //   - error: Any parsing error
-func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startIndex, endIndex uint32, projectionFields []string) (map[string]models.Document, uint32, error) {
+func (b *BundleStorageEngine) parseAppendedDocumentsRange(bundleName string, data *[]byte, startIndex, endIndex uint32, projectionFields []string) (map[string]models.Document, uint32, error) {
 	pageDocuments := make(map[string]models.Document)
 	deletedDocuments := make(map[string]bool) // Track deleted documents
 	seenDocIDs := make(map[string]struct{})   // Track unique DocumentIDs for counting (avoids storing full docs; was allDocuments)
@@ -3872,14 +4264,14 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 						offset, size, documentData[:min(64, len(documentData))])
 
 					// Dump diagnostics and halt server
-					b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), "unknown_bundle")
+					b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), bundleName)
 				}
 
 				// Generic corruption - still halt
 				corruptionReason := fmt.Sprintf("Failed to decode document at offset %d: %v. "+
 					"Size: %d bytes. Data preview (first 64 bytes): %x",
 					offset, err, size, documentData[:min(64, len(documentData))])
-				b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), "unknown_bundle")
+				b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), bundleName)
 
 				// This line will never be reached, but keep for safety
 				offset += 8 + int(size)
@@ -4063,7 +4455,7 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(data *[]byte, startInd
 }
 
 // parseAppendedDocuments parses documents in the append-only format
-func (b *BundleStorageEngine) parseAppendedDocuments(data []byte) (map[string]models.Document, error) {
+func (b *BundleStorageEngine) parseAppendedDocuments(bundleName string, data []byte) (map[string]models.Document, error) {
 	documents := make(map[string]models.Document)
 	deletedDocuments := make(map[string]bool) // Track deleted documents
 	offset := 0
@@ -4140,14 +4532,14 @@ func (b *BundleStorageEngine) parseAppendedDocuments(data []byte) (map[string]mo
 						offset, size, documentData[:min(64, len(documentData))])
 
 					// Dump diagnostics and halt server
-					b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), "unknown_bundle")
+					b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), bundleName)
 				}
 
 				// Generic corruption - still halt
 				corruptionReason := fmt.Sprintf("Failed to decode document at offset %d: %v. "+
 					"Size: %d bytes. Data preview (first 64 bytes): %x",
 					offset, err, size, documentData[:min(64, len(documentData))])
-				b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), "unknown_bundle")
+				b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), bundleName)
 
 				// This line will never be reached, but keep for safety
 				offset += 8 + int(size)

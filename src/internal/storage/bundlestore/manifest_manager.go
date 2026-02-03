@@ -86,6 +86,12 @@ type ManifestManager struct {
 	mutex        sync.RWMutex
 	manifest     *BundleManifest
 	logger       *zap.SugaredLogger
+
+	// PERFORMANCE FIX: O(1) file lookup by ID
+	// Previously, UpdateFileStatsDeferred did O(n) scan through Files slice on every write.
+	// With 19 files and 50K writes, that's 1.9M iterations per test run.
+	// This map provides O(1) lookup, eliminating the bottleneck.
+	filesByID map[int]*ManifestFileInfo
 }
 
 // NewManifestManager creates a new manifest manager for a bundle
@@ -101,11 +107,17 @@ func NewManifestManager(dataDir, databaseName, bundleName string, logger *zap.Su
 }
 
 // LoadOrCreate loads an existing manifest or creates a new one
+// PERFORMANCE FIX: Returns cached manifest if already loaded to avoid disk I/O on every call
 func (mm *ManifestManager) LoadOrCreate(databaseName, bundleName string) (*BundleManifest, error) {
 	mm.mutex.Lock()
 	defer mm.mutex.Unlock()
 
-	// Try to load existing manifest
+	// FAST PATH: Return cached manifest if already loaded
+	if mm.manifest != nil {
+		return mm.manifest, nil
+	}
+
+	// Try to load existing manifest from disk
 	if _, err := os.Stat(mm.manifestPath); err == nil {
 		manifest, err := mm.loadManifestUnsafe()
 		if err != nil {
@@ -145,6 +157,12 @@ func (mm *ManifestManager) GetManifest() *BundleManifest {
 	}
 
 	return &manifestCopy
+}
+
+// GetManifestUnsafe returns the manifest without locking (caller must ensure thread safety)
+// Used by periodic persistence checker to avoid unnecessary lock contention
+func (mm *ManifestManager) GetManifestUnsafe() *BundleManifest {
+	return mm.manifest
 }
 
 // GetFileList returns the list of files sorted by fileID (descending = newest first)
@@ -194,6 +212,12 @@ func (mm *ManifestManager) AddFile(fileID int, fileName string) error {
 	mm.manifest.ActiveFileID = fileID
 	mm.manifest.LastUpdated = time.Now()
 
+	// PERFORMANCE FIX: Add to filesByID map for O(1) lookup
+	if mm.filesByID == nil {
+		mm.filesByID = make(map[int]*ManifestFileInfo)
+	}
+	mm.filesByID[fileID] = newFile
+
 	return mm.persistManifestUnsafe()
 }
 
@@ -206,15 +230,8 @@ func (mm *ManifestManager) UpdateFileStats(fileID int, docCount, tombstones int6
 		return fmt.Errorf("manifest not initialized")
 	}
 
-	// Find the file
-	var targetFile *ManifestFileInfo
-	for _, file := range mm.manifest.Files {
-		if file.FileID == fileID {
-			targetFile = file
-			break
-		}
-	}
-
+	// PERFORMANCE FIX: O(1) lookup via filesByID map
+	targetFile := mm.filesByID[fileID]
 	if targetFile == nil {
 		return fmt.Errorf("file ID %d not found in manifest", fileID)
 	}
@@ -236,6 +253,9 @@ func (mm *ManifestManager) UpdateFileStats(fileID int, docCount, tombstones int6
 // UpdateFileStatsDeferred updates statistics in-memory without persistence
 // This avoids fsync on every write, improving performance significantly
 // Persistence will happen on explicit Flush() or periodic background flush
+//
+// PERFORMANCE FIX: Uses O(1) map lookup instead of O(n) slice scan.
+// Also skips recalculateTotalsUnsafe when only file size changes (RCU writes).
 func (mm *ManifestManager) UpdateFileStatsDeferred(fileID int, docCount, tombstones int64, minSeq, maxSeq uint64, fileSize int64) {
 	mm.mutex.Lock()
 	defer mm.mutex.Unlock()
@@ -244,27 +264,26 @@ func (mm *ManifestManager) UpdateFileStatsDeferred(fileID int, docCount, tombsto
 		return
 	}
 
-	// Find the file
-	var targetFile *ManifestFileInfo
-	for _, file := range mm.manifest.Files {
-		if file.FileID == fileID {
-			targetFile = file
-			break
-		}
-	}
-
+	// PERFORMANCE FIX: O(1) lookup via filesByID map instead of O(n) scan
+	targetFile := mm.filesByID[fileID]
 	if targetFile == nil {
 		return
 	}
 
 	// Update file stats (in-memory only, no persistence)
 	targetFile.FileSize = fileSize
+
+	// Track if we need to recalculate totals (only when doc count or tombstones change)
+	needsRecalculate := false
+
 	// Only update other stats if provided (non-zero values)
 	if docCount > 0 {
 		targetFile.DocCount = docCount
+		needsRecalculate = true
 	}
 	if tombstones > 0 {
 		targetFile.Tombstones = tombstones
+		needsRecalculate = true
 	}
 	if minSeq > 0 {
 		targetFile.MinSeq = minSeq
@@ -273,8 +292,11 @@ func (mm *ManifestManager) UpdateFileStatsDeferred(fileID int, docCount, tombsto
 		targetFile.MaxSeq = maxSeq
 	}
 
-	// Recalculate totals
-	mm.recalculateTotalsUnsafe()
+	// PERFORMANCE FIX: Only recalculate totals when doc count or tombstones change
+	// RCU writes only update fileSize, so we skip the O(n) recalculation
+	if needsRecalculate {
+		mm.recalculateTotalsUnsafe()
+	}
 	mm.manifest.LastUpdated = time.Now()
 	// NOTE: No persistManifestUnsafe() call - deferred for performance
 }
@@ -288,15 +310,28 @@ func (mm *ManifestManager) FreezeFile(fileID int) error {
 		return fmt.Errorf("manifest not initialized")
 	}
 
-	for _, file := range mm.manifest.Files {
-		if file.FileID == fileID {
-			file.IsImmutable = true
-			mm.manifest.LastUpdated = time.Now()
-			return mm.persistManifestUnsafe()
-		}
+	// PERFORMANCE FIX: O(1) lookup via filesByID map
+	file := mm.filesByID[fileID]
+	if file == nil {
+		return fmt.Errorf("file ID %d not found in manifest", fileID)
 	}
 
-	return fmt.Errorf("file ID %d not found in manifest", fileID)
+	file.IsImmutable = true
+	mm.manifest.LastUpdated = time.Now()
+	return mm.persistManifestUnsafe()
+}
+
+// PersistManifest forces persistence of the manifest to disk
+// This is called during shutdown to ensure all deferred updates are written
+func (mm *ManifestManager) PersistManifest() error {
+	mm.mutex.Lock()
+	defer mm.mutex.Unlock()
+
+	if mm.manifest == nil {
+		return fmt.Errorf("manifest not initialized")
+	}
+
+	return mm.persistManifestUnsafe()
 }
 
 // RemoveFiles removes files from the manifest (after compaction)
@@ -323,6 +358,12 @@ func (mm *ManifestManager) RemoveFiles(fileIDs []int) error {
 	}
 
 	mm.manifest.Files = newFiles
+
+	// PERFORMANCE FIX: Remove from filesByID map
+	for _, id := range fileIDs {
+		delete(mm.filesByID, id)
+	}
+
 	mm.recalculateTotalsUnsafe()
 	mm.manifest.LastUpdated = time.Now()
 
@@ -384,11 +425,20 @@ func (mm *ManifestManager) loadManifestUnsafe() (*BundleManifest, error) {
 		return nil, fmt.Errorf("failed to parse manifest JSON: %w", err)
 	}
 
+	// PERFORMANCE FIX: Build filesByID map for O(1) lookups
+	mm.filesByID = make(map[int]*ManifestFileInfo, len(manifest.Files))
+	for _, file := range manifest.Files {
+		mm.filesByID[file.FileID] = file
+	}
+
 	return &manifest, nil
 }
 
 // createNewManifestUnsafe creates a new empty manifest (caller must hold lock)
 func (mm *ManifestManager) createNewManifestUnsafe(databaseName, bundleName string) *BundleManifest {
+	// PERFORMANCE FIX: Initialize empty filesByID map
+	mm.filesByID = make(map[int]*ManifestFileInfo)
+
 	return &BundleManifest{
 		BundleName:      bundleName,
 		DatabaseName:    databaseName,
@@ -469,19 +519,18 @@ func (mm *ManifestManager) UpdateBloomFilter(fileID int, bloomData string, bloom
 	mm.mutex.Lock()
 	defer mm.mutex.Unlock()
 
-	// Find the file
-	for _, file := range mm.manifest.Files {
-		if file.FileID == fileID {
-			file.BloomFilterData = bloomData
-			file.BloomFilterSize = bloomSize
-			file.BloomFilterHashes = bloomHashes
-
-			mm.manifest.LastUpdated = time.Now()
-			return mm.persistManifestUnsafe()
-		}
+	// PERFORMANCE FIX: O(1) lookup via filesByID map
+	file := mm.filesByID[fileID]
+	if file == nil {
+		return fmt.Errorf("file %d not found in manifest", fileID)
 	}
 
-	return fmt.Errorf("file %d not found in manifest", fileID)
+	file.BloomFilterData = bloomData
+	file.BloomFilterSize = bloomSize
+	file.BloomFilterHashes = bloomHashes
+
+	mm.manifest.LastUpdated = time.Now()
+	return mm.persistManifestUnsafe()
 }
 
 // GetBloomFilter retrieves the bloom filter for a specific file
@@ -490,14 +539,14 @@ func (mm *ManifestManager) GetBloomFilter(fileID int) (string, uint64, uint32, b
 	mm.mutex.RLock()
 	defer mm.mutex.RUnlock()
 
-	for _, file := range mm.manifest.Files {
-		if file.FileID == fileID {
-			if file.BloomFilterData != "" {
-				return file.BloomFilterData, file.BloomFilterSize, file.BloomFilterHashes, true
-			}
-			return "", 0, 0, false
-		}
+	// PERFORMANCE FIX: O(1) lookup via filesByID map
+	file := mm.filesByID[fileID]
+	if file == nil {
+		return "", 0, 0, false
 	}
 
+	if file.BloomFilterData != "" {
+		return file.BloomFilterData, file.BloomFilterSize, file.BloomFilterHashes, true
+	}
 	return "", 0, 0, false
 }

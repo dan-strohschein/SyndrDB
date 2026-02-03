@@ -222,13 +222,32 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 		bc.logger.Warnf("Failed to flush write buffers before compaction: %v", err)
 	}
 
+	// CRITICAL: Sync buffers to disk (fsync) to ensure data is physically written
+	// Without this, compaction reads incomplete data from OS cache → corruption
+	if err := bc.storageEngine.SyncWriteBuffers(bundleName); err != nil {
+		bc.logger.Warnf("Failed to sync write buffers before compaction: %v", err)
+	}
+
 	// STEP 1: Read and merge all files with last-write-wins
 	mergedDocuments := make(map[string]models.Document)
 	var totalBytesRead int64
 
+	// Get active file ID to skip during compaction
+	// CRITICAL: The active file is receiving concurrent writes via WriteDirectAtomic
+	// which bypasses bundle locks. Reading it during compaction causes data corruption.
+	activeFileID := manifestMgr.GetActiveFileID()
+
 	for _, fileInfo := range manifest.Files {
 		// Skip immutable files if trigger is small file merge (only merge small mutable files)
 		if trigger == TriggerSmallFileMerge && fileInfo.IsImmutable {
+			continue
+		}
+
+		// CRITICAL: Skip the active file - it's receiving concurrent lock-free writes
+		// WriteDirectAtomic uses atomic offset reservation and pwrite, bypassing all locks.
+		// Reading the active file while writes are happening causes torn reads and corruption.
+		if fileInfo.FileID == activeFileID {
+			bc.logger.Debugf("Skipping active file %d during compaction (concurrent writes in progress)", activeFileID)
 			continue
 		}
 
@@ -241,8 +260,30 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 			continue
 		}
 
-		// Read file
+		// CRITICAL FIX: Freeze buffer and wait for in-flight WriteDirectAtomic calls
+		// WriteDirectAtomic is lock-free and bypasses writeLock entirely.
+		// The writeLock.RLock() below does NOT prevent concurrent atomic writes!
+		// We must:
+		// 1. Freeze the buffer (prevents NEW atomic writes)
+		// 2. Wait for in-flight atomic writes to complete (via pwriteMutex)
+		// 3. Sync to ensure data is on disk
+		// 4. Then safely read the file
+		//
+		// Without this, high-concurrency writes cause torn reads → corruption
+		buffer := bc.storageEngine.getWriteBuffer(databaseName, bundleName, fileInfo.FileID)
+		if buffer != nil {
+			// Freeze and wait for any in-flight WriteDirectAtomic to complete
+			buffer.FreezeAndWaitForInflight()
+
+			// Now sync to ensure all data is physically on disk
+			if err := buffer.Sync(); err != nil {
+				bc.logger.Warnf("Failed to sync buffer for file %s before read: %v", filePath, err)
+			}
+		}
+
+		// Now safe to read - no in-flight writes possible
 		fileData, err := os.ReadFile(filePath)
+
 		if err != nil {
 			bc.logger.Warnf("Failed to read file %s: %v", filePath, err)
 			continue
@@ -254,7 +295,7 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 
 		// Parse all documents from this file (no range filtering)
 		// PROJECTION PUSHDOWN: Pass nil projection fields (full deserialization) for compaction
-		fileDocuments, _, err := bc.storageEngine.parseAppendedDocumentsRange(&fileData, 0, ^uint32(0), nil)
+		fileDocuments, _, err := bc.storageEngine.parseAppendedDocumentsRange(bundleName, &fileData, 0, ^uint32(0), nil)
 		if err != nil {
 			bc.logger.Warnf("Failed to parse documents from file %s: %v", filePath, err)
 			continue

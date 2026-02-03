@@ -54,15 +54,41 @@ type WriteBuffer struct {
 	atomicOffset int64      // Current file end position (atomic)
 	pwriteMutex  sync.Mutex // Protects pwrite syscall (required by OS)
 	directWrites int64      // Counter for direct writes (atomic, for metrics)
+
+	// In-flight write tracking for safe buffer closure
+	// Tracks writes that have reserved offset space but not yet completed
+	// FreezeAndWaitForInflight waits until this counter reaches 0
+	inflightWrites int64 // Number of in-flight WriteDirectAtomic calls (atomic)
+
+	// Frozen flag for safe file rotation
+	// When a file is rotated, the old WriteBuffer is marked as frozen to prevent
+	// stale writers from corrupting the file during compaction reads.
+	// WriteDirectAtomic checks this flag and returns ErrBufferFrozen if set.
+	isFrozen int32 // 1 = frozen, 0 = active (atomic)
 }
 
+// ErrBufferFrozen is returned when WriteDirectAtomic is called on a frozen buffer
+// Callers should retry with a fresh buffer from getOrCreateWriteBuffer
+var ErrBufferFrozen = fmt.Errorf("write buffer is frozen (file rotated)")
+
 // NewWriteBuffer creates a new write buffer for the specified file
+// CRITICAL: Seeks to end of file to prevent overwriting existing data
 func NewWriteBuffer(file *os.File, bufferSize int) *WriteBuffer {
 	// Get current file size for atomic offset initialization
 	var initialOffset int64 = 0
 	if file != nil {
 		if stat, err := file.Stat(); err == nil {
 			initialOffset = stat.Size()
+		}
+		// CRITICAL FIX: Seek to end of file for buffered writes
+		// Without this, doFlushToFile() uses file.Write() which writes at position 0,
+		// overwriting existing data! This caused corruption where new data would
+		// overwrite the beginning of the file.
+		//
+		// The atomicOffset tracks the logical end for WriteDirectAtomic (uses WriteAt),
+		// but the OS file position is separate and must be set explicitly for Write().
+		if initialOffset > 0 {
+			file.Seek(0, 2) // Seek to end (whence=2 means SEEK_END)
 		}
 	}
 
@@ -150,20 +176,37 @@ func (wb *WriteBuffer) WriteWithTxID(data []byte, docID string, txID string) err
 // - Bypasses buffering (more syscalls, but no contention)
 // - No transaction tracking (RCU is autocommit-only)
 // - pwrite requires a minimal mutex due to OS limitations on some platforms
+//
+// SAFETY: Returns ErrBufferFrozen if the buffer has been frozen (file rotated).
+// Callers should retry with a fresh buffer from getOrCreateWriteBuffer.
 func (wb *WriteBuffer) WriteDirectAtomic(data []byte) (int64, error) {
+	// STEP 0: Increment in-flight counter BEFORE checking frozen
+	// This ensures FreezeAndWaitForInflight() will wait for us
+	atomic.AddInt64(&wb.inflightWrites, 1)
+
+	// STEP 1: Check frozen flag - if frozen, decrement counter and return
+	// This prevents writes to files that are being read by compaction
+	if atomic.LoadInt32(&wb.isFrozen) == 1 {
+		atomic.AddInt64(&wb.inflightWrites, -1)
+		return 0, ErrBufferFrozen
+	}
+
 	if wb.file == nil {
+		atomic.AddInt64(&wb.inflightWrites, -1)
 		return 0, fmt.Errorf("write buffer file is nil")
 	}
 	if len(data) == 0 {
+		atomic.AddInt64(&wb.inflightWrites, -1)
 		return 0, nil
 	}
 
-	// STEP 1: Atomically reserve space at the end of the file
+	// STEP 2: Atomically reserve space at the end of the file
 	// This is lock-free - multiple goroutines can reserve concurrently
+	// CRITICAL: We're now committed to this offset - we MUST write to it
 	dataLen := int64(len(data))
 	writeOffset := atomic.AddInt64(&wb.atomicOffset, dataLen) - dataLen
 
-	// STEP 2: Write data at the reserved offset using pwrite
+	// STEP 3: Write data at the reserved offset using pwrite
 	// pwrite writes at a specific offset without changing file position
 	// This allows concurrent writes to different offsets
 	//
@@ -177,14 +220,16 @@ func (wb *WriteBuffer) WriteDirectAtomic(data []byte) (int64, error) {
 		n, err := wb.file.WriteAt(data[written:], writeOffset+int64(written))
 		if err != nil {
 			wb.pwriteMutex.Unlock()
+			atomic.AddInt64(&wb.inflightWrites, -1)
 			return writeOffset, fmt.Errorf("pwrite failed at offset %d: %w", writeOffset+int64(written), err)
 		}
 		written += n
 	}
 	wb.pwriteMutex.Unlock()
 
-	// Track metrics
+	// STEP 4: Track metrics and decrement in-flight counter
 	atomic.AddInt64(&wb.directWrites, 1)
+	atomic.AddInt64(&wb.inflightWrites, -1)
 
 	return writeOffset, nil
 }
@@ -197,6 +242,40 @@ func (wb *WriteBuffer) GetDirectWriteCount() int64 {
 // GetAtomicOffset returns the current atomic file offset
 func (wb *WriteBuffer) GetAtomicOffset() int64 {
 	return atomic.LoadInt64(&wb.atomicOffset)
+}
+
+// WriteBufferStats contains diagnostic information about a WriteBuffer
+type WriteBufferStats struct {
+	FilePath       string `json:"filePath"`
+	FileSize       int64  `json:"fileSize"`       // atomicOffset = approximate file size
+	BufferLen      int    `json:"bufferLen"`      // Current buffer content length
+	BackBufferLen  int    `json:"backBufferLen"`  // Back buffer content length
+	BufferedDocs   int    `json:"bufferedDocs"`   // Number of buffered documents
+	DirectWrites   int64  `json:"directWrites"`   // Number of direct writes (RCU)
+	InflightWrites int64  `json:"inflightWrites"` // Number of in-flight writes
+	IsFrozen       bool   `json:"isFrozen"`       // Whether buffer is frozen
+}
+
+// GetStats returns diagnostic statistics about this WriteBuffer
+func (wb *WriteBuffer) GetStats() WriteBufferStats {
+	wb.mutex.Lock()
+	defer wb.mutex.Unlock()
+
+	filePath := ""
+	if wb.file != nil {
+		filePath = wb.file.Name()
+	}
+
+	return WriteBufferStats{
+		FilePath:       filePath,
+		FileSize:       atomic.LoadInt64(&wb.atomicOffset),
+		BufferLen:      len(wb.buffer),
+		BackBufferLen:  len(wb.backBuffer),
+		BufferedDocs:   len(wb.bufferedDocs),
+		DirectWrites:   atomic.LoadInt64(&wb.directWrites),
+		InflightWrites: atomic.LoadInt64(&wb.inflightWrites),
+		IsFrozen:       atomic.LoadInt32(&wb.isFrozen) == 1,
+	}
 }
 
 // Flush forces all buffered data to be written to disk
@@ -286,6 +365,7 @@ func (wb *WriteBuffer) swapAndFlush(doSync bool) error {
 	wb.lastFlush = time.Now()
 	wb.flushInProgress = true
 	data := wb.backBuffer
+	dataLen := int64(len(data)) // Capture length before releasing lock
 	wb.mutex.Unlock()
 	err := wb.doFlushToFile(data, doSync)
 	wb.mutex.Lock()
@@ -296,6 +376,13 @@ func (wb *WriteBuffer) swapAndFlush(doSync bool) error {
 		wb.flushErr = err
 		return err
 	}
+	// CRITICAL FIX: Update atomicOffset after successful buffered write
+	// This keeps atomicOffset in sync with the actual file position so that
+	// WriteDirectAtomic (which uses atomicOffset for pwrite) doesn't conflict
+	// with buffered writes (which use sequential Write()).
+	// Without this, WriteDirectAtomic could write at an offset that's already
+	// been written by a buffered flush.
+	atomic.AddInt64(&wb.atomicOffset, dataLen)
 	wb.flushErr = nil // clear sticky error on success
 	return nil
 }
@@ -326,8 +413,60 @@ func (wb *WriteBuffer) GetDiscardedDocuments() []string {
 	return discarded
 }
 
+// Freeze marks the buffer as frozen to prevent new WriteDirectAtomic calls.
+// This is called during file rotation to ensure stale writer references
+// cannot corrupt a file that compaction may read.
+// Returns immediately - does not wait for in-flight writes to complete.
+func (wb *WriteBuffer) Freeze() {
+	atomic.StoreInt32(&wb.isFrozen, 1)
+}
+
+// FreezeAndWaitForInflight freezes the buffer and waits for any in-flight
+// WriteDirectAtomic operations to complete. This is essential for safe reads
+// during compaction - the frozen flag prevents NEW writes, but we must also
+// wait for writes that started before the freeze.
+//
+// How it works:
+// 1. Set frozen flag (atomic) - new WriteDirectAtomic calls will see frozen and abort early
+// 2. Spin-wait until inflightWrites counter reaches 0
+// 3. Once counter is 0, all writers have either:
+//   - Completed their write successfully
+//   - Aborted before reserving an offset (saw frozen flag)
+//
+// CRITICAL: Writers increment inflightWrites BEFORE checking frozen, so:
+// - If a writer sees frozen=true, it decrements and aborts (no offset reserved)
+// - If a writer sees frozen=false, it will complete the write before decrementing
+// This guarantees no "holes" in the offset space after this function returns.
+//
+// After this returns, it's safe to read the file without torn reads.
+func (wb *WriteBuffer) FreezeAndWaitForInflight() {
+	// Step 1: Prevent new writes from proceeding past the frozen check
+	atomic.StoreInt32(&wb.isFrozen, 1)
+
+	// Step 2: Wait for all in-flight writes to complete
+	// Spin-wait with exponential backoff for efficiency
+	backoff := time.Microsecond
+	maxBackoff := time.Millisecond * 10
+	for atomic.LoadInt64(&wb.inflightWrites) > 0 {
+		time.Sleep(backoff)
+		if backoff < maxBackoff {
+			backoff *= 2
+		}
+	}
+}
+
+// IsFrozen returns true if the buffer has been frozen
+func (wb *WriteBuffer) IsFrozen() bool {
+	return atomic.LoadInt32(&wb.isFrozen) == 1
+}
+
 // Close flushes any remaining data and closes the underlying file
+// CRITICAL: Freezes the buffer and waits for in-flight writes before closing
 func (wb *WriteBuffer) Close() error {
+	// CRITICAL: Freeze and wait for in-flight WriteDirectAtomic calls
+	// This ensures no writes are in progress when we flush and close
+	wb.FreezeAndWaitForInflight()
+
 	if err := wb.Flush(); err != nil {
 		return err
 	}

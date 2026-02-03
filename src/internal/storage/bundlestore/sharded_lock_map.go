@@ -368,3 +368,59 @@ func (c *ShardedIndexCache) ForEach(callback func(bundleName string, indexes map
 func (c *ShardedIndexCache) DeleteIndex(bundleName, indexName string) {
 	c.Delete(bundleName, indexName)
 }
+
+// Flush completely clears all cached indexes from all shards.
+// This is used for aggressive cache cleanup when all clients disconnect,
+// preventing accumulated data from degrading performance on reconnect.
+// Note: This will cause indexes to be reloaded from disk on next access.
+// WARNING: This does NOT close the indexes - use FlushWithClose to properly
+// release file handles and resources.
+func (c *ShardedIndexCache) Flush() {
+	for i := range c.shards {
+		shard := &c.shards[i]
+		shard.mu.Lock()
+		shard.cache = make(map[string]map[string]interface{})
+		shard.mu.Unlock()
+	}
+}
+
+// IndexCloser is implemented by index types that need cleanup
+type IndexCloser interface {
+	Close() error
+}
+
+// FlushWithClose closes all cached indexes and then clears the cache.
+// This properly releases file handles and resources before removing indexes.
+// Use this when all clients disconnect to ensure clean state.
+// Returns the count of indexes closed and any errors encountered.
+func (c *ShardedIndexCache) FlushWithClose() (int, []error) {
+	var errors []error
+	count := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+		shard.mu.Lock()
+
+		// Close all indexes in this shard
+		for bundleName, indexes := range shard.cache {
+			for indexName, index := range indexes {
+				if closer, ok := index.(IndexCloser); ok {
+					if err := closer.Close(); err != nil {
+						errors = append(errors, err)
+					} else {
+						count++
+					}
+				}
+				// Remove from map even if close failed
+				delete(indexes, indexName)
+			}
+			delete(shard.cache, bundleName)
+		}
+
+		// Replace with empty map
+		shard.cache = make(map[string]map[string]interface{})
+		shard.mu.Unlock()
+	}
+
+	return count, errors
+}

@@ -499,3 +499,15 @@ func (m *ShardedPageCacheMap) Size() int {
 	}
 	return total
 }
+
+// Flush completely clears all document-to-page mappings from all shards.
+// This is used for aggressive cache cleanup when all clients disconnect,
+// preventing accumulated data from degrading performance on reconnect.
+func (m *ShardedPageCacheMap) Flush() {
+	for i := range m.shards {
+		shard := &m.shards[i]
+		shard.mu.Lock()
+		shard.bundles = make(map[string]*documentPageCacheEntry)
+		shard.mu.Unlock()
+	}
+}

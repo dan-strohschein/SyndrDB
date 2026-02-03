@@ -532,6 +532,40 @@ func (c *ShardedHashTableCache) Stats() (entries int, memoryUsed int64, hits int
 	return entries, memoryUsed, c.hits.Load(), c.misses.Load()
 }
 
+// Compact recreates the internal maps in all shards to reclaim bucket memory.
+//
+// PERFORMANCE FIX: Go's regular maps never shrink their bucket arrays.
+// When entries are deleted (via invalidation), buckets remain allocated but empty.
+// During high-churn workloads with many bundle invalidations, maps accumulate
+// empty buckets that cause:
+// 1. Slower iterations during Invalidate() calls
+// 2. Memory fragmentation
+// 3. Cache inefficiency
+//
+// Solution: Periodically recreate maps with only current entries.
+// Returns total entries compacted across all shards.
+func (c *ShardedHashTableCache) Compact() int {
+	totalEntries := 0
+	for i := 0; i < hashTableCacheShardCount; i++ {
+		shard := c.shards[i]
+		shard.mu.Lock()
+
+		entryCount := len(shard.cache)
+		if entryCount > 0 {
+			// Recreate cache map with exact size
+			newCache := make(map[HashTableCacheKey]*CachedHashTable, entryCount)
+			for k, v := range shard.cache {
+				newCache[k] = v
+			}
+			shard.cache = newCache
+			totalEntries += entryCount
+		}
+
+		shard.mu.Unlock()
+	}
+	return totalEntries
+}
+
 // moveToEnd moves a key to the end of the LRU list (most recently used).
 // Caller must hold the shard lock.
 func (s *hashTableCacheShard) moveToEnd(key HashTableCacheKey) {

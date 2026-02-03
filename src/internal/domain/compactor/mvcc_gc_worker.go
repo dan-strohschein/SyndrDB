@@ -499,6 +499,11 @@ func (w *MVCCGCWorker) getServiceManager() interface{} {
 // analyzeBundleVersions analyzes a bundle to detect version accumulation.
 // Uses GetDocumentChunksForIndexing to sample doc IDs, then GetDocumentVersions per doc.
 // Returns: shouldCompact, versionCount (avg), error.
+//
+// PERFORMANCE FIX: Now properly stops after collecting sampleSize documents.
+// Previously the callback always returned false (continue), causing it to scan ALL documents
+// in the bundle even though only 100 samples were needed. This caused MVCC GC to take 30+ seconds
+// on bundles with many documents.
 func (w *MVCCGCWorker) analyzeBundleVersions(ctx context.Context, bundleName, databaseName string, bundleService *bundle.BundleService) (bool, int, error) {
 	const sampleSize = 100
 	maxVersionsFound := 0
@@ -509,11 +514,21 @@ func (w *MVCCGCWorker) analyzeBundleVersions(ctx context.Context, bundleName, da
 	err := bundleService.GetDocumentChunksForIndexing(ctx, bundleName, sampleSize, func(chunk []*models.Document) (stop bool) {
 		for _, d := range chunk {
 			docIDs = append(docIDs, d.DocumentID)
+			// PERFORMANCE FIX: Stop once we have enough samples
+			if len(docIDs) >= sampleSize {
+				return true // stop = true means "stop iterating"
+			}
 		}
-		return false
+		// Continue if we don't have enough samples yet
+		return len(docIDs) >= sampleSize
 	})
 	if err != nil {
 		return false, 0, err
+	}
+
+	// Limit to sampleSize in case we got slightly more
+	if len(docIDs) > sampleSize {
+		docIDs = docIDs[:sampleSize]
 	}
 
 	for _, docID := range docIDs {
@@ -540,17 +555,31 @@ func (w *MVCCGCWorker) analyzeBundleVersions(ctx context.Context, bundleName, da
 
 // sampleDocumentVersions samples document versions for age analysis.
 // Uses GetDocumentChunksForIndexing to get a chunk of docs, then GetDocumentVersions for each.
+//
+// PERFORMANCE FIX: Now properly stops after collecting chunkSize documents.
+// Previously the callback always returned false (continue), causing it to scan ALL documents
+// in the bundle even though only 50 samples were needed.
 func (w *MVCCGCWorker) sampleDocumentVersions(ctx context.Context, bundleName, databaseName string, bundleService *bundle.BundleService) ([]*models.Document, error) {
 	const chunkSize = 50
 	var docIDs []string
 	err := bundleService.GetDocumentChunksForIndexing(ctx, bundleName, chunkSize, func(chunk []*models.Document) (stop bool) {
 		for _, d := range chunk {
 			docIDs = append(docIDs, d.DocumentID)
+			// PERFORMANCE FIX: Stop once we have enough samples
+			if len(docIDs) >= chunkSize {
+				return true // stop = true means "stop iterating"
+			}
 		}
-		return false
+		// Continue if we don't have enough samples yet
+		return len(docIDs) >= chunkSize
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// Limit to chunkSize in case we got slightly more
+	if len(docIDs) > chunkSize {
+		docIDs = docIDs[:chunkSize]
 	}
 
 	var all []*models.Document

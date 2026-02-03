@@ -214,6 +214,32 @@ func (ssm *ShardedSessionMap) GetStats() map[string]interface{} {
 	}
 }
 
+// Compact recreates the underlying maps for all shards with only current entries.
+// PERFORMANCE FIX: Go's map delete() doesn't shrink the bucket array. After many
+// connect/disconnect cycles, the shard maps accumulate empty bucket slots that
+// degrade iteration and memory performance. This method recreates each shard's
+// map with only current sessions, reclaiming memory and restoring lookup speed.
+// Returns the total number of sessions after compaction.
+func (ssm *ShardedSessionMap) Compact() int {
+	totalSessions := 0
+
+	for i := 0; i < SessionShardCount; i++ {
+		shard := &ssm.shards[i]
+
+		shard.mu.Lock()
+		// Create new map sized exactly for current sessions
+		newMap := make(map[string]*Session, len(shard.sessions))
+		for sessionID, session := range shard.sessions {
+			newMap[sessionID] = session
+		}
+		shard.sessions = newMap
+		totalSessions += len(newMap)
+		shard.mu.Unlock()
+	}
+
+	return totalSessions
+}
+
 // UserSessionIndex provides lock-free access to user -> sessions mapping
 // Uses sync.Map for concurrent read/write access
 type UserSessionIndex struct {
@@ -297,6 +323,35 @@ func (usi *UserSessionIndex) Range(fn func(username string, sessions []*Session)
 	})
 }
 
+// Compact recreates the sync.Map with only current entries (users with active sessions).
+// PERFORMANCE FIX: Go's sync.Map.Delete() doesn't free memory - it marks entries as
+// "expunged" but they remain in internal structures. After many user disconnects, the
+// sync.Map accumulates cruft that degrades Load() performance.
+// Also removes entries with empty session lists to save memory.
+// Returns the number of entries in the compacted map.
+func (usi *UserSessionIndex) Compact() int {
+	var newMap sync.Map
+	count := 0
+
+	usi.index.Range(func(key, value interface{}) bool {
+		entry := value.(*userSessionEntry)
+
+		entry.mu.RLock()
+		hasActiveSessions := len(entry.sessions) > 0
+		entry.mu.RUnlock()
+
+		// Only keep entries with active sessions
+		if hasActiveSessions {
+			newMap.Store(key, value)
+			count++
+		}
+		return true
+	})
+
+	usi.index = newMap
+	return count
+}
+
 // ConnectionSessionIndex provides lock-free access to connectionID -> session mapping
 type ConnectionSessionIndex struct {
 	// connectionID -> *Session
@@ -332,4 +387,23 @@ func (csi *ConnectionSessionIndex) Range(fn func(connectionID string, session *S
 	csi.index.Range(func(key, value interface{}) bool {
 		return fn(key.(string), value.(*Session))
 	})
+}
+
+// Compact recreates the sync.Map with only current entries.
+// PERFORMANCE FIX: Go's sync.Map.Delete() doesn't free memory - it marks entries as
+// "expunged" but they remain in internal structures. After many disconnects, the
+// sync.Map accumulates cruft that degrades Load() performance.
+// Returns the number of entries in the compacted map.
+func (csi *ConnectionSessionIndex) Compact() int {
+	var newMap sync.Map
+	count := 0
+
+	csi.index.Range(func(key, value interface{}) bool {
+		newMap.Store(key, value)
+		count++
+		return true
+	})
+
+	csi.index = newMap
+	return count
 }

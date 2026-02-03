@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	joinexecutor "syndrdb/src/internal/query/join_executor"
 	"syndrdb/src/internal/registry"
 
 	"github.com/dan-strohschein/HVJson/hvjson"
@@ -259,6 +261,13 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, config)
 	bundleStore.RegisterCompactionComplete(func(db, b string) { bundleService.InvalidateDocumentPageMapForBundle(b) })
 
+	// Register cache flush callback to clear JOIN hash table cache when idle flush triggers
+	bundleService.SetOnCacheFlush(func() {
+		htCache := joinexecutor.GetHashTableCacheInterface()
+		htCache.Clear()
+		sugar.Info("JOIN hash table cache cleared during idle cache flush")
+	})
+
 	// Create the internal catalog service
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
 
@@ -354,6 +363,27 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 	if server.ServiceManager != nil && server.ServiceManager.LockManager != nil {
 		server.SessionManager.SetLockReleaser(server.ServiceManager.LockManager)
 	}
+
+	// PERFORMANCE FIX: Register cache cleanup callback for when all sessions disconnect
+	// This provides immediate cleanup after test runs, while the idle timer (30s) serves as backup.
+	// Both mechanisms call the same FlushAllDocumentCaches method.
+	server.SessionManager.SetOnAllSessionsDisconnected(func() {
+		// DIAGNOSTIC: Log goroutine count to detect leaks across test runs
+		sugar.Infof("=== GOROUTINE DIAGNOSTIC === Total goroutines: %d",
+			runtime.NumGoroutine())
+
+		// DIAGNOSTIC: Log mmap metrics file state to detect accumulation issues
+		mmapPath := "/tmp/syndrdb_metrics.mmap"
+		if info, err := os.Stat(mmapPath); err == nil {
+			sugar.Infof("=== METRICS FILE DIAGNOSTIC === sizeBytes: %d, modTime: %v",
+				info.Size(), info.ModTime())
+		} else {
+			sugar.Infof("=== METRICS FILE DIAGNOSTIC === file not found or error: %v", err)
+		}
+
+		sugar.Info("All sessions disconnected - triggering immediate cache flush")
+		bundleService.FlushAllDocumentCaches()
+	})
 
 	// Set session context in ServiceManager for RBAC FORCE operations
 	SetSessionContext(server.SessionManager, server.ActiveConnections)
@@ -794,6 +824,51 @@ func (s *Server) Start() error {
 
 	go s.acceptConnections()
 
+	// PERFORMANCE FIX: Start sync.Map compactors to prevent degradation
+	// Several sync.Maps accumulate "expunged" entries after deletes, which degrades
+	// Load() performance over time. Compacting every 60 seconds recreates the maps
+	// with only current entries.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fatal.LogFatalAndExit(r)
+			}
+		}()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if !s.Running {
+					return
+				}
+				// Compact ConflictTracker sync.Map
+				if s.ServiceManager != nil && s.ServiceManager.ConflictTracker != nil {
+					count := s.ServiceManager.ConflictTracker.Compact()
+					s.logger.Debugf("ConflictTracker compacted: %d entries", count)
+				}
+				// Compact session indexes sync.Maps and sharded session map
+				if s.SessionManager != nil {
+					connCount, userCount := s.SessionManager.CompactIndexes()
+					s.logger.Debugf("Session indexes compacted: %d connections, %d users", connCount, userCount)
+				}
+				// Compact hash table cache regular maps to reclaim bucket memory
+				htCache := joinexecutor.GetHashTableCacheInterface()
+				if shardedCache, ok := htCache.(*joinexecutor.ShardedHashTableCache); ok {
+					htEntries := shardedCache.Compact()
+					s.logger.Debugf("HashTableCache compacted: %d entries across shards", htEntries)
+				}
+				// Compact BundleService and underlying storage caches
+				if s.ServiceManager != nil && s.ServiceManager.BundleService != nil {
+					bundleEntries := s.ServiceManager.BundleService.CompactAllCaches()
+					s.logger.Debugf("BundleService caches compacted: %d entries", bundleEntries)
+				}
+			}
+		}
+	}()
+	s.logger.Info("sync.Map compactors started (60s interval) - ConflictTracker, SessionIndexes, HashTableCache, BundleCaches")
+
 	// Check for unhealthy indexes and print warnings
 	go func() {
 		// Give server a moment to fully initialize before checking
@@ -1115,8 +1190,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	// Channel for received data
 	dataCh := make(chan string)
-	// Channel for errors
-	errCh := make(chan error)
+	// Channel for errors - buffered to prevent reader goroutine from blocking
+	// when main loop exits via return instead of cleanup
+	errCh := make(chan error, 1)
 	// Done channel to signal termination
 	doneCh := make(chan struct{})
 
@@ -1232,9 +1308,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 					s.sendError(writer, errors.Wrap(err, errors.ERR_VALIDATION_SYNTAX, errors.LayerAPI).WithContext("input", line))
 					// Give TCP stack time to send the data
 					time.Sleep(100 * time.Millisecond)
-
-					close(doneCh)
-					return
+					goto cleanup
 				}
 
 				connLogger.Infof("Client %s Connected", connection.ID)
@@ -1258,11 +1332,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 				db, err := s.databaseService.GetDatabaseByName(connStr.Database)
 				if err != nil {
 					s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", connStr.Database), errors.LayerAPI))
-					return
+					goto cleanup
 				}
 				if db == nil {
 					s.sendError(writer, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' does not exist", connStr.Database), errors.LayerAPI))
-					return
+					goto cleanup
 				}
 				connection.Database = db
 				//}
@@ -1291,7 +1365,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 						} else {
 							s.sendError(writer, errors.New(errors.ERR_AUTH_FAILED, "Authentication failed", errors.LayerAuth))
 						}
-						return
+						goto cleanup
 					}
 				}
 
@@ -1310,7 +1384,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				)
 				if err != nil {
 					s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_INTERNAL, "Failed to create session", errors.LayerAPI))
-					return
+					goto cleanup
 				}
 
 				connection.Authorized = true
@@ -1345,8 +1419,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 				connLogger.Sync()
 				goto cleanup
 			}
-			//connLogger.Errorw("Error reading from client", "error", err)
-			return
+			// Error received - go to cleanup to properly close doneCh
+			connLogger.Debugw("Connection error", "error", err)
+			goto cleanup
 
 		case <-time.After(300 * time.Second):
 			// Check for idle timeout (5-minute checks, but enforce configured timeout)
@@ -1359,7 +1434,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 				// Best effort: send warning message to client
 				fmt.Fprintf(writer, "Connection closed due to inactivity\n")
 				writer.Flush()
-				return // Triggers defer cleanup which handles RateLimiter.ReleaseConnection
+				goto cleanup // Properly close doneCh to terminate reader goroutine
 			}
 			// Still within timeout - log activity check
 			connLogger.Debugw("Connection idle check",

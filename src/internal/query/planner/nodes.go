@@ -529,7 +529,7 @@ func (node *BTreeOrderedScanNode) GetEstimatedRows() int      { return node.Esti
 func (node *BTreeOrderedScanNode) EstimateMemoryUsage() int64 { return 0 }
 
 func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	node.Logger.Infof("Executing optimized full bundle scan on %s using document scanner", node.Bundle.Name)
+	node.Logger.Debugf("Executing optimized full bundle scan on %s using document scanner", node.Bundle.Name)
 
 	results := make(map[string]*models.Document)
 
@@ -587,7 +587,7 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 	var scanResult *documentscanner.ScanResult
 	var err error
 	if node.MaxDocuments > 0 {
-		node.Logger.Infof("Using early termination optimization: MaxDocuments=%d", node.MaxDocuments)
+		node.Logger.Debugf("Using early termination optimization: MaxDocuments=%d", node.MaxDocuments)
 		// Use limit-aware scanner method for early termination
 		if scannerWithLimit, ok := node.DocumentScanner.(interface {
 			ScanAllDocumentsWithLimit(int) (*documentscanner.ScanResult, error)

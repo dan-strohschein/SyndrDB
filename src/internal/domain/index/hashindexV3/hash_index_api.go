@@ -962,12 +962,105 @@ func (idx *HashIndexV3) Flush() error {
 		return err
 	}
 
+	// Clear WAL buffer after successful flush to prevent unbounded memory growth
+	idx.MemTable.ClearWALBuffer()
+
 	// Save metadata if dirty
 	if idx.isDirty {
 		return idx.SaveMetadata()
 	}
 
 	return nil
+}
+
+// CompactMemTableSafe performs a concurrent-safe compaction of the index's MemTable.
+// This method can be called during high-concurrency writes without blocking writers
+// for extended periods or causing crashes.
+//
+// DESIGN:
+// Unlike Flush(), which persists data to disk, CompactMemTableSafe only reclaims
+// memory by clearing the walBuffer and optionally rebuilding the entries map.
+// The entries map is preserved for read performance (it's a cache, not WAL data).
+//
+// WHEN TO USE:
+// - During sustained high-throughput write workloads
+// - When memory usage is growing due to walBuffer accumulation
+// - Periodically in a background goroutine (every 30-60 seconds)
+//
+// THREAD SAFETY:
+// - Writers blocked only for microseconds during atomic swap
+// - Reads continue normally during and after compaction
+// - No risk of data loss - disk writes happen separately via normal Put() path
+//
+// Parameters:
+//   - compactEntries: If true, also rebuild entries map to reclaim internal map memory
+//
+// Returns:
+//   - walEntriesCleared: Number of WAL buffer entries that were cleared
+//   - entriesCount: Current number of entries in the cache after compaction
+//   - error: Any error during compaction
+func (idx *HashIndexV3) CompactMemTableSafe(compactEntries bool) (int, int, error) {
+	if idx.closed {
+		return 0, 0, fmt.Errorf("index is closed")
+	}
+
+	// Use the MemTable's safe compaction method
+	// threshold=0 means always compact entries if compactEntries=true
+	oldWAL, entriesCount, err := idx.MemTable.CompactSafe(compactEntries, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("memtable compaction failed: %w", err)
+	}
+
+	walEntriesCleared := len(oldWAL)
+
+	// Log if significant compaction occurred
+	if walEntriesCleared > 1000 {
+		idx.logger.Debugw("MemTable compaction completed",
+			"indexName", idx.config.IndexName,
+			"walEntriesCleared", walEntriesCleared,
+			"entriesCount", entriesCount,
+			"compactedEntriesMap", compactEntries)
+	}
+
+	return walEntriesCleared, entriesCount, nil
+}
+
+// TrimMemTableWAL clears only the WAL buffer if it exceeds a threshold.
+// This is a lighter-weight alternative to full compaction when only the
+// walBuffer is causing memory pressure.
+//
+// Parameters:
+//   - threshold: Only trim if buffer has more than this many entries
+//
+// Returns:
+//   - trimmed: True if buffer was actually trimmed
+//   - oldSize: Size of buffer before trim operation
+func (idx *HashIndexV3) TrimMemTableWAL(threshold int) (bool, int) {
+	if idx.closed {
+		return false, 0
+	}
+
+	return idx.MemTable.TrimWALBuffer(threshold)
+}
+
+// NeedsEntriesCompaction checks if the entries map should be compacted
+// based on time interval (60s) or idle timeout (30s).
+//
+// Thread-safe wrapper around MemTable.NeedsEntriesCompaction.
+//
+// Parameters:
+//   - intervalSeconds: Force compaction after this many seconds since last compaction
+//   - idleSeconds: Compact if no activity for this many seconds
+//
+// Returns:
+//   - needsCompaction: True if compaction should be triggered
+//   - reason: Description of why compaction is needed (for logging)
+func (idx *HashIndexV3) NeedsEntriesCompaction(intervalSeconds, idleSeconds int) (bool, string) {
+	if idx.closed {
+		return false, ""
+	}
+
+	return idx.MemTable.NeedsEntriesCompaction(intervalSeconds, idleSeconds)
 }
 
 // Close closes the index and releases resources
@@ -985,6 +1078,9 @@ func (idx *HashIndexV3) Close() error {
 	// Flush any remaining data with header update
 	if err := idx.storage.FlushWithHeaderUpdate(currentSequence); err != nil {
 		idx.logger.Warnw("Failed to flush storage on close", "error", err)
+	} else {
+		// Clear WAL buffer after successful flush to prevent unbounded memory growth
+		idx.MemTable.ClearWALBuffer()
 	}
 
 	// Save metadata before closing

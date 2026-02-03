@@ -219,6 +219,32 @@ func (c *ShardedBufferCache) DeleteMatching(match func(key string) bool, cleanup
 	return deleted, errors
 }
 
+// Compact recreates the underlying maps for all shards with only current entries.
+// PERFORMANCE FIX: Go's map delete() doesn't shrink the bucket array. After many
+// file operations, the shard maps accumulate empty bucket slots that degrade
+// iteration and memory performance. This method recreates each shard's map with
+// only current entries, reclaiming memory and restoring lookup speed.
+// Returns the total number of buffers after compaction.
+func (c *ShardedBufferCache) Compact() int {
+	totalBuffers := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Create new map sized exactly for current buffers
+		newMap := make(map[string]*WriteBuffer, len(shard.buffers))
+		for key, buffer := range shard.buffers {
+			newMap[key] = buffer
+		}
+		shard.buffers = newMap
+		totalBuffers += len(newMap)
+		shard.mu.Unlock()
+	}
+
+	return totalBuffers
+}
+
 // ============================================================================
 // ShardedManifestCache - Replaces manifestManagersMutex + manifestManagers map
 // ============================================================================
@@ -355,6 +381,32 @@ func (c *ShardedManifestCache) GetOrCreateSimple(bundleName string, factory func
 	return manager
 }
 
+// Compact recreates the underlying maps for all shards with only current entries.
+// PERFORMANCE FIX: Go's map delete() doesn't shrink the bucket array. After many
+// bundle create/delete cycles, the shard maps accumulate empty bucket slots that degrade
+// iteration and memory performance. This method recreates each shard's map with
+// only current entries, reclaiming memory and restoring lookup speed.
+// Returns the total number of entries after compaction.
+func (c *ShardedManifestCache) Compact() int {
+	totalManagers := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Create new map sized exactly for current managers
+		newMap := make(map[string]*ManifestManager, len(shard.managers))
+		for key, manager := range shard.managers {
+			newMap[key] = manager
+		}
+		shard.managers = newMap
+		totalManagers += len(newMap)
+		shard.mu.Unlock()
+	}
+
+	return totalManagers
+}
+
 // ============================================================================
 // ShardedProjectionCache - Replaces projectionMutex + projectionFields map
 // ============================================================================
@@ -430,6 +482,45 @@ func (c *ShardedProjectionCache) Has(bundleName string) bool {
 	_, exists := shard.fields[bundleName]
 	shard.mu.RUnlock()
 	return exists
+}
+
+// Compact recreates the underlying maps for all shards with only current entries.
+// PERFORMANCE FIX: Go's map delete() doesn't shrink the bucket array. After many
+// projection create/delete cycles, the shard maps accumulate empty bucket slots that degrade
+// iteration and memory performance. This method recreates each shard's map with
+// only current entries, reclaiming memory and restoring lookup speed.
+// Returns the total number of entries after compaction.
+func (c *ShardedProjectionCache) Compact() int {
+	totalEntries := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Create new map sized exactly for current entries
+		newMap := make(map[string][]string, len(shard.fields))
+		for key, fields := range shard.fields {
+			newMap[key] = fields
+		}
+		shard.fields = newMap
+		totalEntries += len(newMap)
+		shard.mu.Unlock()
+	}
+
+	return totalEntries
+}
+
+// Flush completely clears all entries from all shards.
+// This is more aggressive than Compact - it removes all cached data to free memory.
+func (c *ShardedProjectionCache) Flush() {
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Replace with empty map
+		shard.fields = make(map[string][]string)
+		shard.mu.Unlock()
+	}
 }
 
 // ============================================================================
@@ -650,6 +741,45 @@ func (c *ShardedFileReadCache) DeleteMatching(match func(filePath string) bool) 
 	return deleted
 }
 
+// Compact recreates the underlying maps for all shards with only current entries.
+// PERFORMANCE FIX: Go's map delete() doesn't shrink the bucket array. After many
+// file read/evict cycles, the shard maps accumulate empty bucket slots that degrade
+// iteration and memory performance. This method recreates each shard's map with
+// only current entries, reclaiming memory and restoring lookup speed.
+// Returns the total number of entries after compaction.
+func (c *ShardedFileReadCache) Compact() int {
+	totalEntries := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Create new map sized exactly for current entries
+		newMap := make(map[string]*fileReadCacheEntry, len(shard.cache))
+		for key, entry := range shard.cache {
+			newMap[key] = entry
+		}
+		shard.cache = newMap
+		totalEntries += len(newMap)
+		shard.mu.Unlock()
+	}
+
+	return totalEntries
+}
+
+// Flush completely clears all entries from all shards.
+// This is more aggressive than Compact - it removes all cached data to free memory.
+func (c *ShardedFileReadCache) Flush() {
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Replace with empty map
+		shard.cache = make(map[string]*fileReadCacheEntry)
+		shard.mu.Unlock()
+	}
+}
+
 // ============================================================================
 // ShardedParsedDocsCache - Replaces parsedDocsCacheMutex + parsedDocsCache map
 // ============================================================================
@@ -816,5 +946,44 @@ func (c *ShardedParsedDocsCache) Range(fn func(key string, entry *parsedDocsCach
 			}
 		}
 		shard.mu.RUnlock()
+	}
+}
+
+// Compact recreates the underlying maps for all shards with only current entries.
+// PERFORMANCE FIX: Go's map delete() doesn't shrink the bucket array. After many
+// document parse/evict cycles, the shard maps accumulate empty bucket slots that degrade
+// iteration and memory performance. This method recreates each shard's map with
+// only current entries, reclaiming memory and restoring lookup speed.
+// Returns the total number of entries after compaction.
+func (c *ShardedParsedDocsCache) Compact() int {
+	totalEntries := 0
+
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Create new map sized exactly for current entries
+		newMap := make(map[string]*parsedDocsCacheEntry, len(shard.cache))
+		for key, entry := range shard.cache {
+			newMap[key] = entry
+		}
+		shard.cache = newMap
+		totalEntries += len(newMap)
+		shard.mu.Unlock()
+	}
+
+	return totalEntries
+}
+
+// Flush completely clears all entries from all shards.
+// This is more aggressive than Compact - it removes all cached data to free memory.
+func (c *ShardedParsedDocsCache) Flush() {
+	for i := range c.shards {
+		shard := &c.shards[i]
+
+		shard.mu.Lock()
+		// Replace with empty map
+		shard.cache = make(map[string]*parsedDocsCacheEntry)
+		shard.mu.Unlock()
 	}
 }
