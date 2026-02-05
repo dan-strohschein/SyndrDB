@@ -327,11 +327,12 @@ func (n *DistinctNode) executeHashBased(ctx context.Context, documents map[strin
 	for docID, doc := range documents {
 		docCount++
 
-		// Query-level memory tracking: Sample every 100th document
+		// Query-level memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && docCount%100 == 0 {
 			docSize := models.EstimateDocumentSize(doc)
-			memoryTracker.Sample(docSize, docCount)
-
+			if err := memoryTracker.Sample(docSize, docCount); err != nil {
+				return nil, err
+			}
 			if memoryTracker.WillExceedLimit(len(documents)) {
 				return nil, ErrMemoryLimitExceeded
 			}
@@ -370,10 +371,9 @@ func (n *DistinctNode) executeHashBased(ctx context.Context, documents map[strin
 
 				// Check memory limit
 				if memoryUsed > n.MemoryLimit {
-					n.Logger.Warnf("DistinctNode: Memory limit exceeded (%d > %d), switching to sort-based",
+					n.Logger.Warnf("DistinctNode: Memory limit exceeded (%d > %d), switching to sort-based on full input",
 						memoryUsed, n.MemoryLimit)
-					// Merge current results back into documents for sort-based
-					return n.executeSortBased(resultDocs)
+					return n.executeSortBased(documents)
 				}
 
 				continue
@@ -415,9 +415,9 @@ func (n *DistinctNode) executeHashBased(ctx context.Context, documents map[strin
 
 		// Check memory limit
 		if memoryUsed > n.MemoryLimit {
-			n.Logger.Warnf("DistinctNode: Memory limit exceeded (%d > %d), switching to sort-based",
+			n.Logger.Warnf("DistinctNode: Memory limit exceeded (%d > %d), switching to sort-based on full input",
 				memoryUsed, n.MemoryLimit)
-			return n.executeSortBased(resultDocs)
+			return n.executeSortBased(documents)
 		}
 
 		// Add to bloom filter if not already there

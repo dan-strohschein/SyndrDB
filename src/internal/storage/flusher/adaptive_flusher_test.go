@@ -254,6 +254,30 @@ func TestAdaptiveFlusherStats(t *testing.T) {
 	}
 }
 
+// TestAdaptiveFlusherRequestFlushAfterStop verifies that RequestFlush after Stop
+// does not panic (no send on closed channel) — Issue 7.
+func TestAdaptiveFlusherRequestFlushAfterStop(t *testing.T) {
+	flushFunc := func(bundleName string) error { return nil }
+	af := NewAdaptiveFlusher(DefaultAdaptiveConfig, flushFunc, testLogger())
+	af.Start()
+	af.Stop()
+
+	// RequestFlush after stop must not panic
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			af.RequestFlush("bundle")
+		}
+	}()
+	select {
+	case <-done:
+		// completed without panic
+	case <-time.After(2 * time.Second):
+		t.Fatal("RequestFlush after Stop timed out or blocked")
+	}
+}
+
 // BenchmarkAdaptiveFlusherRecordDocuments measures recording overhead.
 func BenchmarkAdaptiveFlusherRecordDocuments(b *testing.B) {
 	flushFunc := func(bundleName string) error {

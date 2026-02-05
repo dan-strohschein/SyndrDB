@@ -361,3 +361,39 @@ func TestDeleteRoleParser_ErrorCases(t *testing.T) {
 		})
 	}
 }
+
+// TestRoleParsers_TokenizationError ensures Create/Update/Delete role parsers
+// return tokenization errors (e.g. unterminated quote) instead of panicking.
+func TestRoleParsers_TokenizationError(t *testing.T) {
+	invalidInput := `CREATE ROLE "unterminated`
+	t.Run("CreateRole", func(t *testing.T) {
+		parser := syndrQL.NewCreateRoleParser(invalidInput)
+		stmt, err := parser.Parse()
+		if err == nil {
+			t.Errorf("expected tokenization error, got nil")
+		}
+		if stmt != nil {
+			t.Errorf("expected nil statement on tokenization error, got %+v", stmt)
+		}
+	})
+	t.Run("UpdateRole", func(t *testing.T) {
+		parser := syndrQL.NewUpdateRoleParser(`UPDATE ROLE "x SET DESCRIPTION = "y";`)
+		stmt, err := parser.Parse()
+		if err == nil {
+			t.Errorf("expected tokenization error, got nil")
+		}
+		if stmt != nil {
+			t.Errorf("expected nil statement on tokenization error, got %+v", stmt)
+		}
+	})
+	t.Run("DeleteRole", func(t *testing.T) {
+		parser := syndrQL.NewDeleteRoleParser(`DELETE ROLE "unterminated`)
+		stmt, err := parser.Parse()
+		if err == nil {
+			t.Errorf("expected tokenization error, got nil")
+		}
+		if stmt != nil {
+			t.Errorf("expected nil statement on tokenization error, got %+v", stmt)
+		}
+	})
+}

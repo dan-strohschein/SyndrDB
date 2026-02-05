@@ -303,3 +303,16 @@ func TestRevokeStatement_Validation(t *testing.T) {
 		})
 	}
 }
+
+// TestRevokeParser_TokenizationError ensures Revoke parser returns tokenization
+// errors (e.g. unterminated quote) instead of panicking.
+func TestRevokeParser_TokenizationError(t *testing.T) {
+	parser := syndrQL.NewRevokeParser(`REVOKE "perm FROM USER "u";`)
+	stmt, err := parser.Parse()
+	if err == nil {
+		t.Errorf("expected tokenization error, got nil")
+	}
+	if stmt != nil {
+		t.Errorf("expected nil statement on tokenization error, got %+v", stmt)
+	}
+}

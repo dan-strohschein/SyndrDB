@@ -50,13 +50,20 @@ func (dp *DirtyPage) Reset() {
 	dp.DirtyTime = time.Time{}
 }
 
+// pageKey uniquely identifies a (bundle, page) pair for use as a map key.
+// Using a struct avoids hash collisions that could occur with a 64-bit hash.
+type pageKey struct {
+	Bundle string
+	PageID uint32
+}
+
 // DirtyPageTracker coordinates concurrent writers with page-level granularity.
 // It maintains a map of dirty pages and distributes flush work across workers.
 type DirtyPageTracker struct {
 	mu sync.RWMutex
 
 	// Primary dirty page tracking
-	dirtyPages map[uint64]*DirtyPage // bundleHash:pageID -> dirty state
+	dirtyPages map[pageKey]*DirtyPage
 
 	// Per-bundle tracking for efficient bundle-level queries
 	bundlePages map[string]map[uint32]bool // bundleName -> set of dirty pageIDs
@@ -108,7 +115,7 @@ func NewDirtyPageTracker(config DirtyPageTrackerConfig) *DirtyPageTracker {
 	}
 
 	tracker := &DirtyPageTracker{
-		dirtyPages:      make(map[uint64]*DirtyPage),
+		dirtyPages:      make(map[pageKey]*DirtyPage),
 		bundlePages:     make(map[string]map[uint32]bool),
 		workerCount:     config.WorkerCount,
 		pageQueues:      make([]chan *DirtyPage, config.WorkerCount),
@@ -125,24 +132,14 @@ func NewDirtyPageTracker(config DirtyPageTrackerConfig) *DirtyPageTracker {
 	return tracker
 }
 
-// makePageKey creates a unique key for bundle+page combination.
-func makePageKey(bundleName string, pageID uint32) uint64 {
-	// Simple hash combining bundle name hash and page ID
-	h := uint64(0)
-	for i := 0; i < len(bundleName); i++ {
-		h = h*31 + uint64(bundleName[i])
-	}
-	return (h << 32) | uint64(pageID)
-}
-
 // MarkDirty adds a document update to the dirty tracker.
 // Returns true if the page should be flushed immediately (threshold exceeded).
 func (dt *DirtyPageTracker) MarkDirty(bundleName string, pageID uint32, doc *models.Document, estimatedBytes int64) bool {
-	pageKey := makePageKey(bundleName, pageID)
+	key := pageKey{Bundle: bundleName, PageID: pageID}
 
 	dt.mu.Lock()
 
-	page, exists := dt.dirtyPages[pageKey]
+	page, exists := dt.dirtyPages[key]
 	if !exists {
 		page = &DirtyPage{
 			PageID:     pageID,
@@ -150,7 +147,7 @@ func (dt *DirtyPageTracker) MarkDirty(bundleName string, pageID uint32, doc *mod
 			Documents:  make([]*models.Document, 0, dt.maxDocsPerPage),
 			DirtyTime:  time.Now(),
 		}
-		dt.dirtyPages[pageKey] = page
+		dt.dirtyPages[key] = page
 		dt.totalDirtyPages.Add(1)
 
 		// Track in bundle map
@@ -177,10 +174,10 @@ func (dt *DirtyPageTracker) MarkDirty(bundleName string, pageID uint32, doc *mod
 
 // MarkIndexDirty adds an index update to a dirty page.
 func (dt *DirtyPageTracker) MarkIndexDirty(bundleName string, pageID uint32, update IndexUpdate) {
-	pageKey := makePageKey(bundleName, pageID)
+	key := pageKey{Bundle: bundleName, PageID: pageID}
 
 	dt.mu.Lock()
-	page, exists := dt.dirtyPages[pageKey]
+	page, exists := dt.dirtyPages[key]
 	if !exists {
 		page = &DirtyPage{
 			PageID:       pageID,
@@ -188,7 +185,7 @@ func (dt *DirtyPageTracker) MarkIndexDirty(bundleName string, pageID uint32, upd
 			IndexUpdates: make([]IndexUpdate, 0, 10),
 			DirtyTime:    time.Now(),
 		}
-		dt.dirtyPages[pageKey] = page
+		dt.dirtyPages[key] = page
 		dt.totalDirtyPages.Add(1)
 
 		if dt.bundlePages[bundleName] == nil {
@@ -203,16 +200,22 @@ func (dt *DirtyPageTracker) MarkIndexDirty(bundleName string, pageID uint32, upd
 	page.mu.Unlock()
 }
 
-// GetDirtyPage retrieves a dirty page for reading.
-// The caller must not modify the returned page.
-func (dt *DirtyPageTracker) GetDirtyPage(bundleName string, pageID uint32) *DirtyPage {
-	pageKey := makePageKey(bundleName, pageID)
+// GetDirtyPageAndDo runs fn under locks for the dirty page (bundleName, pageID).
+// If the page exists, fn is called with the page; the caller must not modify the page.
+// Lock ordering: dt.mu.RLock -> page.mu.Lock -> release dt.mu -> fn -> release page.mu.
+func (dt *DirtyPageTracker) GetDirtyPageAndDo(bundleName string, pageID uint32, fn func(*DirtyPage)) {
+	key := pageKey{Bundle: bundleName, PageID: pageID}
 
 	dt.mu.RLock()
-	page := dt.dirtyPages[pageKey]
+	page := dt.dirtyPages[key]
+	if page == nil {
+		dt.mu.RUnlock()
+		return
+	}
+	page.mu.Lock()
 	dt.mu.RUnlock()
-
-	return page
+	fn(page)
+	page.mu.Unlock()
 }
 
 // GetDirtyPagesForBundle returns all dirty page IDs for a bundle.
@@ -242,18 +245,21 @@ func (dt *DirtyPageTracker) GetPagesForWorker(workerID int) <-chan *DirtyPage {
 
 // EnqueueForFlush adds a page to the appropriate worker's queue.
 // Uses page ID modulo worker count for consistent assignment.
+// Holds page.mu before removing from maps so a concurrent MarkDirty cannot create
+// a new page for the same key until we have either sent the page or re-inserted it.
 func (dt *DirtyPageTracker) EnqueueForFlush(bundleName string, pageID uint32) bool {
-	pageKey := makePageKey(bundleName, pageID)
+	key := pageKey{Bundle: bundleName, PageID: pageID}
 
 	dt.mu.Lock()
-	page, exists := dt.dirtyPages[pageKey]
+	page, exists := dt.dirtyPages[key]
 	if !exists {
 		dt.mu.Unlock()
 		return false
 	}
-
-	// Remove from tracking (will be re-added if more writes come)
-	delete(dt.dirtyPages, pageKey)
+	// Lock page before removing so concurrent MarkDirty cannot create a new entry
+	// for this key in the window between delete and send.
+	page.mu.Lock()
+	delete(dt.dirtyPages, key)
 	if bundleMap := dt.bundlePages[bundleName]; bundleMap != nil {
 		delete(bundleMap, pageID)
 		if len(bundleMap) == 0 {
@@ -262,20 +268,22 @@ func (dt *DirtyPageTracker) EnqueueForFlush(bundleName string, pageID uint32) bo
 	}
 	dt.mu.Unlock()
 
-	// Assign to worker based on page ID for consistent ordering
 	workerID := int(pageID) % dt.workerCount
 	select {
 	case dt.pageQueues[workerID] <- page:
+		dt.totalDirtyPages.Add(^uint64(0)) // decrement by one
+		page.mu.Unlock()
 		return true
 	default:
-		// Queue full, put page back
+		// Queue full: re-insert page so updates are not lost
 		dt.mu.Lock()
-		dt.dirtyPages[pageKey] = page
+		dt.dirtyPages[key] = page
 		if dt.bundlePages[bundleName] == nil {
 			dt.bundlePages[bundleName] = make(map[uint32]bool)
 		}
 		dt.bundlePages[bundleName][pageID] = true
 		dt.mu.Unlock()
+		page.mu.Unlock()
 		return false
 	}
 }
@@ -293,6 +301,12 @@ func (dt *DirtyPageTracker) FlushAllForBundle(bundleName string) int {
 	return count
 }
 
+// atomicAddUint64Sub subtracts delta from the atomic value (v.Add(^(delta-1))).
+// Used for totalDocsPending in ClearPage to avoid obscure two's-complement code.
+func atomicAddUint64Sub(v *atomic.Uint64, delta uint64) {
+	v.Add(^uint64(delta - 1))
+}
+
 // ClearPage removes a page from dirty tracking after successful flush.
 // Called by flush workers after writing to disk.
 func (dt *DirtyPageTracker) ClearPage(page *DirtyPage) {
@@ -301,7 +315,7 @@ func (dt *DirtyPageTracker) ClearPage(page *DirtyPage) {
 	page.Reset()
 	page.mu.Unlock()
 
-	dt.totalDocsPending.Add(^uint64(docCount - 1)) // Subtract docCount
+	atomicAddUint64Sub(&dt.totalDocsPending, uint64(docCount))
 	dt.totalFlushes.Add(1)
 }
 

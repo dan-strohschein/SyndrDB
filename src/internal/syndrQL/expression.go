@@ -653,7 +653,7 @@ func (p *ExpressionParser) parseInExpression(left Expression) (Expression, error
 		}
 
 		// Parse SELECT statement using SelectParser
-		selectParser := NewSelectParser(subqueryTokens)
+		selectParser := NewSelectParser(subqueryTokens, p.logger)
 
 		innerQuery, err := selectParser.Parse(p.logger)
 		if err != nil {
@@ -777,7 +777,7 @@ func (p *ExpressionParser) parseExistsExpression() (Expression, error) {
 	}
 
 	// Parse SELECT statement using SelectParser
-	selectParser := NewSelectParser(subqueryTokens)
+	selectParser := NewSelectParser(subqueryTokens, p.logger)
 
 	innerQuery, err := selectParser.Parse(p.logger)
 	if err != nil {

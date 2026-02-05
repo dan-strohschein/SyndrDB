@@ -12,6 +12,7 @@ import (
 	"syndrdb/src/internal/registry"
 
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -293,19 +294,27 @@ func (v *UniqueConstraintValidator) checkBTreeIndexForDuplicates(
 	return "", nil
 }
 
-// formatViolationError creates a user-friendly error message for unique constraint violations
-func (v *UniqueConstraintValidator) formatViolationError(bundleName string, violations []string) error {
+// formatViolationError creates a user-friendly SyndrDBError for unique constraint violations
+// Returns ERR_VALIDATION_CONSTRAINT which is recognized as a user error (no stack trace logged)
+func (v *UniqueConstraintValidator) formatViolationError(bundleName string, violations []string) errors.SyndrDBError {
+	var errorMsg string
 	if len(violations) == 1 {
-		return fmt.Errorf("%s", violations[0])
+		errorMsg = violations[0]
+	} else {
+		// Multiple violations - format as list
+		errorMsg = fmt.Sprintf("Cannot insert document into bundle '%s' - %d unique constraint violation(s):\n", bundleName, len(violations))
+		for i, violation := range violations {
+			errorMsg += fmt.Sprintf("  %d. %s\n", i+1, violation)
+		}
 	}
 
-	// Multiple violations - format as list
-	errorMsg := fmt.Sprintf("Cannot insert document into bundle '%s' - %d unique constraint violation(s):\n", bundleName, len(violations))
-	for i, violation := range violations {
-		errorMsg += fmt.Sprintf("  %d. %s\n", i+1, violation)
-	}
-
-	return fmt.Errorf("%s", errorMsg)
+	// Return SyndrDBError with ERR_VALIDATION_CONSTRAINT code
+	// This ensures no stack trace is logged for user validation errors
+	return errors.New(
+		errors.ERR_VALIDATION_CONSTRAINT,
+		errorMsg,
+		errors.LayerDomain,
+	).WithContext("bundle", bundleName)
 }
 
 // CreateUniqueIndexesForBundle automatically creates hash indexes for all fields marked IsUnique

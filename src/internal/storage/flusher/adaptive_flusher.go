@@ -76,8 +76,9 @@ var DefaultAdaptiveConfig = AdaptiveConfig{
 type FlushRequest struct {
 	BundleName  string
 	BufferSize  int64
-	DocumentIDs []string
-	Priority    int // Higher = more urgent
+	DocCount    int       // Document count for threshold; avoids allocating DocumentIDs slice.
+	DocumentIDs []string  // Optional; for logging if needed.
+	Priority    int       // Higher = more urgent
 	RequestedAt time.Time
 }
 
@@ -102,8 +103,8 @@ type AdaptiveFlusher struct {
 	logger *zap.SugaredLogger
 
 	// Rate tracking for adaptive intervals
-	metrics         RateMetrics
-	currentInterval time.Duration
+	metrics    RateMetrics
+	intervalNs atomic.Uint64 // Current interval in nanoseconds (source of truth; avoids data race)
 
 	// Pending flush queue
 	pendingFlushes map[string]*FlushRequest // bundleName -> pending request
@@ -127,16 +128,15 @@ func NewAdaptiveFlusher(config AdaptiveConfig, flushFunc FlushFunc, logger *zap.
 	ctx, cancel := context.WithCancel(context.Background())
 
 	af := &AdaptiveFlusher{
-		config:          config,
-		logger:          logger,
-		currentInterval: config.BaseInterval,
-		pendingFlushes:  make(map[string]*FlushRequest),
-		flushFunc:       flushFunc,
-		flushQueue:      make(chan string, 1000), // Buffer for burst handling
-		ctx:             ctx,
-		cancel:          cancel,
+		config:         config,
+		logger:         logger,
+		pendingFlushes: make(map[string]*FlushRequest),
+		flushFunc:      flushFunc,
+		flushQueue:     make(chan string, 1000), // Buffer for burst handling
+		ctx:            ctx,
+		cancel:         cancel,
 	}
-
+	af.intervalNs.Store(uint64(config.BaseInterval.Nanoseconds()))
 	af.metrics.windowStart = time.Now()
 
 	return af
@@ -195,9 +195,8 @@ func (af *AdaptiveFlusher) RecordDocuments(bundleName string, count int) {
 		}
 		af.pendingFlushes[bundleName] = req
 	}
-	req.DocumentIDs = append(req.DocumentIDs, make([]string, count)...) // Placeholder tracking
-
-	shouldFlush := len(req.DocumentIDs) >= af.config.FlushThreshold
+	req.DocCount += count
+	shouldFlush := req.DocCount >= af.config.FlushThreshold
 	af.flushMu.Unlock()
 
 	if shouldFlush {
@@ -229,7 +228,11 @@ func (af *AdaptiveFlusher) RecordBytes(bundleName string, bytes int64) {
 
 // RequestFlush adds a bundle to the flush queue for processing.
 // Non-blocking; if the queue is full, the request is noted for the next timer tick.
+// No-op after Stop() to avoid sending on a closed channel.
 func (af *AdaptiveFlusher) RequestFlush(bundleName string) {
+	if af.stopped.Load() {
+		return
+	}
 	select {
 	case af.flushQueue <- bundleName:
 		// Queued successfully
@@ -241,7 +244,7 @@ func (af *AdaptiveFlusher) RequestFlush(bundleName string) {
 
 // GetCurrentInterval returns the current adaptive flush interval.
 func (af *AdaptiveFlusher) GetCurrentInterval() time.Duration {
-	return af.currentInterval
+	return time.Duration(af.intervalNs.Load())
 }
 
 // GetCurrentRate returns the current smoothed documents per second rate.
@@ -308,14 +311,15 @@ func (af *AdaptiveFlusher) adjustInterval() {
 			"interval", newInterval)
 	}
 
-	af.currentInterval = newInterval
+	af.intervalNs.Store(uint64(newInterval.Nanoseconds()))
 }
 
 // adaptiveTimer runs the main timer loop that triggers periodic flushes.
 func (af *AdaptiveFlusher) adaptiveTimer() {
 	defer af.workerWg.Done()
 
-	ticker := time.NewTicker(af.currentInterval)
+	interval := time.Duration(af.intervalNs.Load())
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -327,7 +331,7 @@ func (af *AdaptiveFlusher) adaptiveTimer() {
 		case <-ticker.C:
 			// Adjust interval based on recent write rate
 			af.adjustInterval()
-			ticker.Reset(af.currentInterval)
+			ticker.Reset(time.Duration(af.intervalNs.Load()))
 
 			// Flush any stale pending requests
 			af.flushStaleRequests()
@@ -341,9 +345,10 @@ func (af *AdaptiveFlusher) flushStaleRequests() {
 	now := time.Now()
 	staleBundles := make([]string, 0)
 
+	interval := time.Duration(af.intervalNs.Load())
 	for bundleName, req := range af.pendingFlushes {
 		// Flush if request is older than current interval
-		if now.Sub(req.RequestedAt) >= af.currentInterval {
+		if now.Sub(req.RequestedAt) >= interval {
 			staleBundles = append(staleBundles, bundleName)
 		}
 	}
@@ -408,7 +413,7 @@ func (af *AdaptiveFlusher) GetStats() FlusherStats {
 	af.flushMu.Unlock()
 
 	return FlusherStats{
-		CurrentInterval:   af.currentInterval,
+		CurrentInterval:   time.Duration(af.intervalNs.Load()),
 		CurrentRate:       af.GetCurrentRate(),
 		PendingFlushes:    pendingCount,
 		TotalDocsRecorded: atomic.LoadUint64(&af.metrics.docsThisWindow),

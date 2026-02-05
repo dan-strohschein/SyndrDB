@@ -369,19 +369,11 @@ func (c *ShardedIndexCache) DeleteIndex(bundleName, indexName string) {
 	c.Delete(bundleName, indexName)
 }
 
-// Flush completely clears all cached indexes from all shards.
-// This is used for aggressive cache cleanup when all clients disconnect,
-// preventing accumulated data from degrading performance on reconnect.
-// Note: This will cause indexes to be reloaded from disk on next access.
-// WARNING: This does NOT close the indexes - use FlushWithClose to properly
-// release file handles and resources.
+// Flush closes all cached indexes and clears the cache from all shards.
+// This properly releases file handles and resources. Use when all clients
+// disconnect to ensure clean state; indexes will be reloaded from disk on next access.
 func (c *ShardedIndexCache) Flush() {
-	for i := range c.shards {
-		shard := &c.shards[i]
-		shard.mu.Lock()
-		shard.cache = make(map[string]map[string]interface{})
-		shard.mu.Unlock()
-	}
+	c.FlushWithClose()
 }
 
 // IndexCloser is implemented by index types that need cleanup

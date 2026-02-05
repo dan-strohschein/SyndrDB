@@ -70,12 +70,16 @@ func (wo *WALOperation) GetType() string {
 	return fmt.Sprintf("WAL_%s", wo.operation)
 }
 
-// WaitForCompletion waits for the WAL operation to complete with a timeout
+// WaitForCompletion waits for the WAL operation to complete with a timeout.
+// Uses context.WithTimeout instead of time.After to avoid timer leaks when
+// completion usually arrives before the timeout.
 func (wo *WALOperation) WaitForCompletion(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	select {
 	case err := <-wo.completion:
 		return err
-	case <-time.After(timeout):
+	case <-ctx.Done():
 		return fmt.Errorf("WAL operation timed out after %v", timeout)
 	}
 }
@@ -157,7 +161,10 @@ func (aw *AsyncWALWriter) Stop(timeout time.Duration) error {
 
 // WriteAsync submits a WAL entry for asynchronous writing
 func (aw *AsyncWALWriter) WriteAsync(walEntry []byte, bundleName, operation string) (*WALOperation, error) {
-	sequence := aw.sequenceGen.Next()
+	sequence, err := aw.sequenceGen.Next()
+	if err != nil {
+		return nil, fmt.Errorf("sequence generator: %w", err)
+	}
 	walOp := NewWALOperation(sequence, walEntry, bundleName, operation)
 
 	// Track pending operation
@@ -166,7 +173,7 @@ func (aw *AsyncWALWriter) WriteAsync(walEntry []byte, bundleName, operation stri
 	aw.pendingMu.Unlock()
 
 	// Submit to worker pool
-	err := aw.workerPool.Submit(walOp)
+	err = aw.workerPool.Submit(walOp)
 	if err != nil {
 		// Remove from pending if submission failed
 		aw.pendingMu.Lock()

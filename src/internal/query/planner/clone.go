@@ -14,6 +14,8 @@ and clears execution-state (sortedDocuments, joinedResults, cachedResult, etc.).
 
 package planner
 
+import "fmt"
+
 // CloneExecutionNode returns a deep clone of the execution node tree.
 // Execution state (sortedDocuments, joinedResults, cachedResult, leftDocs, etc.)
 // is cleared in the clone. Reference-type config (Logger, Bundle, OrderBy, etc.)
@@ -101,9 +103,9 @@ func CloneExecutionNode(node ExecutionNode) ExecutionNode {
 		n2 := *n
 		return &n2
 	default:
-		// Shallow copy for any unhandled node type.
-		// Prefer adding an explicit case above for nodes with Child/Children or execution state.
-		return node
+		// Do not return the original node - unhandled types would be shared and cause data races.
+		// Panic so new ExecutionNode implementations are caught at development time.
+		panic(fmt.Sprintf("CloneExecutionNode: unhandled node type %T - add explicit case", node))
 	}
 }
 
@@ -126,5 +128,7 @@ func (ep *ExecutionPlan) Clone() *ExecutionPlan {
 		IndexesUsed:          append([]string(nil), ep.IndexesUsed...),
 		Logger:               ep.Logger,
 		estimatedMemoryBytes: ep.estimatedMemoryBytes,
+		CacheKey:             ep.CacheKey,
+		IsGeneric:            ep.IsGeneric,
 	}
 }

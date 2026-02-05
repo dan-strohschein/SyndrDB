@@ -2,31 +2,24 @@ package buffer
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 )
 
-// DBPageBuffer represents a single buffer in the buffer pool
+// DBPageBuffer represents a single buffer in the buffer pool.
+// RefCount, State, and Tag are held only in BufferDescriptor (single source of truth);
+// Tag is kept in sync on the buffer for convenience in writeBufferToDisk and FSM.
+// Use pool.Descriptors[buffer.ID] for RefCount and State.
 type DBPageBuffer struct {
-	// Buffer state and lock management
 	Mu         sync.RWMutex
-	State      int
-	RefCount   int
 	UsageCount int
-
-	// Buffer identification
-	Tag BufferTag
-	ID  int
-
-	// Buffer Data
-	Data []byte
-
-	// For dirty buffer management
-	IsDirty      bool
+	ID         int
+	Tag        BufferTag // Kept in sync with Descriptors[id].Tag when page is assigned
+	Data       []byte
+	IsDirty    bool
 	LastModified time.Time
-
-	// For clock sweep algorithm
 	Referenced bool
 }
 
@@ -60,12 +53,12 @@ type BufferPool struct {
 	PageSize   int
 	MaxBuffers int
 
-	// Stats
-	Hits         uint64
-	Misses       uint64
-	Evictions    uint64
-	WriteCount   uint64 // Track total writes
-	SyncInterval int    // How often to sync (every N writes)
+	// Stats (atomic to avoid data races under concurrent GetPage)
+	Hits       atomic.Uint64
+	Misses     atomic.Uint64
+	Evictions  uint64  // Updated only under MU in findFreeBuffer
+	WriteCount atomic.Uint64 // Track total writes
+	SyncInterval int   // How often to sync (every N writes)
 
 	// File management
 	FileRegistry *FileRegistry

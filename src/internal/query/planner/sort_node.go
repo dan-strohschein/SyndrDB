@@ -217,8 +217,9 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 			// Sample every 100th document
 			if docCount%100 == 0 {
 				docSize := models.EstimateDocumentSize(doc)
-				memoryTracker.Sample(docSize, docCount)
-
+				if err := memoryTracker.Sample(docSize, docCount); err != nil {
+					return nil, err
+				}
 				if memoryTracker.WillExceedLimit(len(documents)) {
 					return nil, ErrMemoryLimitExceeded
 				}
@@ -272,6 +273,7 @@ func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner docume
 
 	// Stream documents in chunks to avoid loading all at once
 	chunkSize := 4096
+	var sampleErr error
 	err := bundleInterface.ScanDocumentChunks(ctx, chunkSize, func(chunk []*models.Document) bool {
 		// Process each document in the chunk
 		for _, doc := range chunk {
@@ -289,12 +291,11 @@ func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner docume
 
 			docCount++
 
-			// Memory tracking: Sample every 100th document
+			// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 			if memoryTracker != nil && docCount%100 == 0 {
 				docSize := models.EstimateDocumentSize(doc)
-				if err := memoryTracker.Sample(docSize, docCount); err != nil {
-					n.Logger.Warnf("Memory tracking error: %v", err)
-					// Continue processing but log warning
+				if sampleErr = memoryTracker.Sample(docSize, docCount); sampleErr != nil {
+					return false
 				}
 			}
 
@@ -307,6 +308,9 @@ func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner docume
 
 	if err != nil {
 		return nil, fmt.Errorf("streaming document collection failed: %w", err)
+	}
+	if sampleErr != nil {
+		return nil, sampleErr
 	}
 
 	n.Logger.Debugf("Streaming collection gathered %d documents", len(docSlice))

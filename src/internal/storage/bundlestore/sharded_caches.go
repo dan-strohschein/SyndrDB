@@ -437,7 +437,9 @@ func (c *ShardedProjectionCache) shardIndex(bundleName string) uint64 {
 	return xxhash.Sum64String(bundleName) & (CacheShardCount - 1)
 }
 
-// Get retrieves projection fields by bundle name, returns nil if not found
+// Get retrieves projection fields by bundle name. Returns nil if not found.
+// Returns the cached slice; callers must not mutate it (read-only). The cache
+// stores a copy on Set so the returned slice is safe to read concurrently.
 func (c *ShardedProjectionCache) Get(bundleName string) []string {
 	idx := c.shardIndex(bundleName)
 	shard := &c.shards[idx]
@@ -448,7 +450,8 @@ func (c *ShardedProjectionCache) Get(bundleName string) []string {
 	return fields
 }
 
-// Set stores projection fields for a bundle name.
+// Set stores projection fields for a bundle name. Stores a copy so the cache
+// is not affected by caller mutations and Get can return without copying.
 // Pass nil to clear projection for this bundle.
 func (c *ShardedProjectionCache) Set(bundleName string, fields []string) {
 	idx := c.shardIndex(bundleName)
@@ -458,7 +461,9 @@ func (c *ShardedProjectionCache) Set(bundleName string, fields []string) {
 	if fields == nil {
 		delete(shard.fields, bundleName)
 	} else {
-		shard.fields[bundleName] = fields
+		stored := make([]string, len(fields))
+		copy(stored, fields)
+		shard.fields[bundleName] = stored
 	}
 	shard.mu.Unlock()
 }
@@ -638,8 +643,9 @@ func (c *ShardedFileReadCache) EvictLRUFromShard(shardIdx uint64) bool {
 	var oldestKey string
 	var oldestTime int64 = 1<<63 - 1 // Max int64
 	for k, v := range shard.cache {
-		if v.lastAccess < oldestTime {
-			oldestTime = v.lastAccess
+		t := v.lastAccess.Load()
+		if t < oldestTime {
+			oldestTime = t
 			oldestKey = k
 		}
 	}
@@ -661,8 +667,9 @@ func (c *ShardedFileReadCache) evictLRUFromShardLocked(shard *fileReadCacheShard
 	var oldestKey string
 	var oldestTime int64 = 1<<63 - 1
 	for k, v := range shard.cache {
-		if v.lastAccess < oldestTime {
-			oldestTime = v.lastAccess
+		t := v.lastAccess.Load()
+		if t < oldestTime {
+			oldestTime = t
 			oldestKey = k
 		}
 	}
@@ -684,7 +691,7 @@ func (c *ShardedFileReadCache) GetOrCreate(filePath string, maxEntriesPerShard i
 	// Fast path: read lock for existing entry
 	shard.mu.RLock()
 	if entry, ok := shard.cache[filePath]; ok {
-		entry.lastAccess = time.Now().UnixNano()
+		entry.lastAccess.Store(time.Now().UnixNano())
 		data := entry.data
 		shard.mu.RUnlock()
 		return data, nil
@@ -711,10 +718,9 @@ func (c *ShardedFileReadCache) GetOrCreate(filePath string, maxEntriesPerShard i
 		c.evictLRUFromShardLocked(shard)
 	}
 
-	shard.cache[filePath] = &fileReadCacheEntry{
-		data:       data,
-		lastAccess: time.Now().UnixNano(),
-	}
+	e := &fileReadCacheEntry{data: data}
+	e.lastAccess.Store(time.Now().UnixNano())
+	shard.cache[filePath] = e
 	return data, nil
 }
 
@@ -830,7 +836,7 @@ func (c *ShardedParsedDocsCache) GetAndTouch(cacheKey string) *parsedDocsCacheEn
 	shard.mu.RLock()
 	entry := shard.cache[cacheKey]
 	if entry != nil {
-		entry.lastAccess = time.Now().UnixNano()
+		entry.lastAccess.Store(time.Now().UnixNano())
 	}
 	shard.mu.RUnlock()
 	return entry
@@ -903,8 +909,9 @@ func (c *ShardedParsedDocsCache) evictLRUFromShardLocked(shard *parsedDocsCacheS
 	var oldestKey string
 	var oldestTime int64 = 1<<63 - 1
 	for k, v := range shard.cache {
-		if v.lastAccess < oldestTime {
-			oldestTime = v.lastAccess
+		t := v.lastAccess.Load()
+		if t < oldestTime {
+			oldestTime = t
 			oldestKey = k
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/settings"
 )
 
 /*
@@ -60,12 +61,12 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 	indexRef, exists := bundle.Indexes[indexName]
 	if !exists {
 		result.ErrorMessage = fmt.Sprintf("index '%s' does not exist in bundle '%s'", indexName, bundle.Name)
-		return result, fmt.Errorf(result.ErrorMessage)
+		return result, fmt.Errorf("%s", result.ErrorMessage)
 	}
 
 	if indexRef.IndexType != "hash" {
 		result.ErrorMessage = fmt.Sprintf("index '%s' is not a hash index (type: %s)", indexName, indexRef.IndexType)
-		return result, fmt.Errorf(result.ErrorMessage)
+		return result, fmt.Errorf("%s", result.ErrorMessage)
 	}
 
 	// Initialize maintenance metadata if needed
@@ -83,7 +84,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 		indexRef.Maintenance.IsHealthy = false
 		indexRef.Maintenance.LastFailureReason = result.ErrorMessage
 		indexRef.Maintenance.LastFailureTime = time.Now()
-		return result, fmt.Errorf(result.ErrorMessage)
+		return result, fmt.Errorf("%s", result.ErrorMessage)
 	}
 
 	// STEP 2: Extract all entries from old index
@@ -94,7 +95,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 		indexRef.Maintenance.IsHealthy = false
 		indexRef.Maintenance.LastFailureReason = result.ErrorMessage
 		indexRef.Maintenance.LastFailureTime = time.Now()
-		return result, fmt.Errorf(result.ErrorMessage)
+		return result, fmt.Errorf("%s", result.ErrorMessage)
 	}
 
 	// Flatten to get total count
@@ -111,15 +112,20 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
 	tempIndexName := fmt.Sprintf("%s_rebuild_%d", indexName, time.Now().Unix())
 
+	walBufferMax := settings.GetSettings().Storage.MemTableWALBufferMaxSize
+	if walBufferMax <= 0 {
+		walBufferMax = 50000
+	}
 	newIndexConfig := hashindexV3.IndexConfig{
-		IndexName:          tempIndexName,
-		DataDir:            indexesPath,
-		BundleName:         bundle.Name,
-		FieldName:          indexRef.HashIndexField.FieldName,
-		IsUnique:           indexRef.HashIndexField.IsUnique,
-		MemTableMaxSize:    100000, // Same as original
-		CompactionMaxFiles: 10,
-		Logger:             s.logger,
+		IndexName:                tempIndexName,
+		DataDir:                  indexesPath,
+		BundleName:               bundle.Name,
+		FieldName:                indexRef.HashIndexField.FieldName,
+		IsUnique:                 indexRef.HashIndexField.IsUnique,
+		MemTableMaxSize:          100000, // Same as original
+		MemTableWALBufferMaxSize: walBufferMax,
+		CompactionMaxFiles:       10,
+		Logger:                   s.logger,
 	}
 
 	s.logger.Debugf("Creating new index instance: %s", tempIndexName)
@@ -129,7 +135,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 		indexRef.Maintenance.IsHealthy = false
 		indexRef.Maintenance.LastFailureReason = result.ErrorMessage
 		indexRef.Maintenance.LastFailureTime = time.Now()
-		return result, fmt.Errorf(result.ErrorMessage)
+		return result, fmt.Errorf("%s", result.ErrorMessage)
 	}
 
 	// STEP 4: Re-insert all entries with fresh pageIDs from SortedIndex
@@ -189,7 +195,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 		indexRef.Maintenance.LastFailureReason = result.ErrorMessage
 		indexRef.Maintenance.LastFailureTime = time.Now()
 		newIndex.Close()
-		return result, fmt.Errorf(result.ErrorMessage)
+		return result, fmt.Errorf("%s", result.ErrorMessage)
 	}
 
 	// STEP 6: Atomic pointer swap - update the cache and bundle reference

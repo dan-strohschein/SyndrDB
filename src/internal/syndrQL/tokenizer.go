@@ -7,6 +7,14 @@ import (
 	"unicode"
 )
 
+// MaxParameterIndex is the maximum allowed parameter placeholder index ($1 .. $65535).
+// Parameter indices beyond this are rejected to avoid overflow and resource abuse.
+const MaxParameterIndex = 65535
+
+// MaxParseInputLength is the maximum input size in bytes for tokenization (1 MiB).
+// Larger inputs are rejected to prevent DoS from unbounded allocation and CPU.
+const MaxParseInputLength = 1 << 20
+
 // Tokenizer converts SyndrQL input into a stream of tokens
 // Optimized for DML-heavy workloads with minimal allocations
 type Tokenizer struct {
@@ -36,6 +44,9 @@ func NewTokenizer(input string) *Tokenizer {
 // Tokenize converts the input string into a slice of tokens
 // This is the main entry point for tokenization
 func (t *Tokenizer) Tokenize() ([]Token, error) {
+	if len(t.input) > MaxParseInputLength {
+		return nil, fmt.Errorf("input exceeds maximum length of %d bytes", MaxParseInputLength)
+	}
 	t.tokens = t.tokens[:0] // Reset slice while keeping capacity
 
 	for {
@@ -67,8 +78,10 @@ func (t *Tokenizer) nextToken() Token {
 
 	t.skipWhitespace()
 
+	startPos := t.pos
 	tok.Line = t.line
 	tok.Column = t.column
+	tok.StartOffset = startPos
 
 	switch t.ch {
 	case 0:
@@ -78,67 +91,68 @@ func (t *Tokenizer) nextToken() Token {
 		if t.peekChar() == '=' {
 			ch := t.ch
 			t.readChar()
-			tok = t.newToken(TOKEN_EQ, string(ch)+string(t.ch))
+			tok = t.newToken(TOKEN_EQ, string(ch)+string(t.ch), startPos)
 		} else {
 			// Single = is TOKEN_ASSIGN for field assignments in ADD DOCUMENT
-			tok = t.newToken(TOKEN_ASSIGN, string(t.ch))
+			tok = t.newToken(TOKEN_ASSIGN, string(t.ch), startPos)
 		}
 	case '!':
 		if t.peekChar() == '=' {
 			ch := t.ch
 			t.readChar()
-			tok = t.newToken(TOKEN_NEQ, string(ch)+string(t.ch))
+			tok = t.newToken(TOKEN_NEQ, string(ch)+string(t.ch), startPos)
 		} else {
-			tok = t.newToken(TOKEN_ILLEGAL, string(t.ch))
+			tok = t.newToken(TOKEN_ILLEGAL, string(t.ch), startPos)
 		}
 	case '<':
 		if t.peekChar() == '=' {
 			ch := t.ch
 			t.readChar()
-			tok = t.newToken(TOKEN_LTE, string(ch)+string(t.ch))
+			tok = t.newToken(TOKEN_LTE, string(ch)+string(t.ch), startPos)
 		} else {
-			tok = t.newToken(TOKEN_LT, string(t.ch))
+			tok = t.newToken(TOKEN_LT, string(t.ch), startPos)
 		}
 	case '>':
 		if t.peekChar() == '=' {
 			ch := t.ch
 			t.readChar()
-			tok = t.newToken(TOKEN_GTE, string(ch)+string(t.ch))
+			tok = t.newToken(TOKEN_GTE, string(ch)+string(t.ch), startPos)
 		} else {
-			tok = t.newToken(TOKEN_GT, string(t.ch))
+			tok = t.newToken(TOKEN_GT, string(t.ch), startPos)
 		}
 	case '+':
-		tok = t.newToken(TOKEN_PLUS, string(t.ch))
+		tok = t.newToken(TOKEN_PLUS, string(t.ch), startPos)
 	case '-':
-		tok = t.newToken(TOKEN_MINUS, string(t.ch))
+		tok = t.newToken(TOKEN_MINUS, string(t.ch), startPos)
 	case '*':
-		tok = t.newToken(TOKEN_MULTIPLY, string(t.ch))
+		tok = t.newToken(TOKEN_MULTIPLY, string(t.ch), startPos)
 	case '/':
-		tok = t.newToken(TOKEN_DIVIDE, string(t.ch))
+		tok = t.newToken(TOKEN_DIVIDE, string(t.ch), startPos)
 	case '%':
-		tok = t.newToken(TOKEN_MODULO, string(t.ch))
+		tok = t.newToken(TOKEN_MODULO, string(t.ch), startPos)
 	case ',':
-		tok = t.newToken(TOKEN_COMMA, string(t.ch))
+		tok = t.newToken(TOKEN_COMMA, string(t.ch), startPos)
 	case ';':
-		tok = t.newToken(TOKEN_SEMICOLON, string(t.ch))
+		tok = t.newToken(TOKEN_SEMICOLON, string(t.ch), startPos)
 	case ':':
-		tok = t.newToken(TOKEN_COLON, string(t.ch))
+		tok = t.newToken(TOKEN_COLON, string(t.ch), startPos)
 	case '.':
-		tok = t.newToken(TOKEN_DOT, string(t.ch))
+		tok = t.newToken(TOKEN_DOT, string(t.ch), startPos)
 	case '(':
-		tok = t.newToken(TOKEN_LPAREN, string(t.ch))
+		tok = t.newToken(TOKEN_LPAREN, string(t.ch), startPos)
 	case ')':
-		tok = t.newToken(TOKEN_RPAREN, string(t.ch))
+		tok = t.newToken(TOKEN_RPAREN, string(t.ch), startPos)
 	case '{':
-		tok = t.newToken(TOKEN_LBRACE, string(t.ch))
+		tok = t.newToken(TOKEN_LBRACE, string(t.ch), startPos)
 	case '}':
-		tok = t.newToken(TOKEN_RBRACE, string(t.ch))
+		tok = t.newToken(TOKEN_RBRACE, string(t.ch), startPos)
 	case '[':
-		tok = t.newToken(TOKEN_LBRACKET, string(t.ch))
+		tok = t.newToken(TOKEN_LBRACKET, string(t.ch), startPos)
 	case ']':
-		tok = t.newToken(TOKEN_RBRACKET, string(t.ch))
+		tok = t.newToken(TOKEN_RBRACKET, string(t.ch), startPos)
 	case '"', '\'':
 		tok = t.readString(t.ch)
+		tok.StartOffset = startPos
 	case '$':
 		return t.readParameter()
 	default:
@@ -150,7 +164,7 @@ func (t *Tokenizer) nextToken() Token {
 		} else if isDigit(t.ch) {
 			return t.readNumber()
 		} else {
-			tok = t.newToken(TOKEN_ILLEGAL, string(t.ch))
+			tok = t.newToken(TOKEN_ILLEGAL, string(t.ch), startPos)
 		}
 	}
 
@@ -240,10 +254,11 @@ func (t *Tokenizer) readIdentifier() Token {
 					if thirdUpperLiteral == "NULL" {
 						// Merge IS NOT NULL into single token
 						return Token{
-							Type:   TOKEN_IS_NOT_NULL,
-							Value:  literal + " " + nextLiteral + " " + thirdLiteral,
-							Line:   startLine,
-							Column: startColumn,
+							Type:        TOKEN_IS_NOT_NULL,
+							Value:       literal + " " + nextLiteral + " " + thirdLiteral,
+							Line:        startLine,
+							Column:      startColumn,
+							StartOffset: startPos,
 						}
 					}
 
@@ -263,10 +278,11 @@ func (t *Tokenizer) readIdentifier() Token {
 			} else if nextUpperLiteral == "NULL" {
 				// Merge IS NULL into single token
 				return Token{
-					Type:   TOKEN_IS_NULL,
-					Value:  literal + " " + nextLiteral,
-					Line:   startLine,
-					Column: startColumn,
+					Type:        TOKEN_IS_NULL,
+					Value:       literal + " " + nextLiteral,
+					Line:        startLine,
+					Column:      startColumn,
+					StartOffset: startPos,
 				}
 			} else {
 				// IS followed by something else - restore position
@@ -306,10 +322,11 @@ func (t *Tokenizer) readIdentifier() Token {
 			if nextUpperLiteral == "IN" {
 				// Merge NOT IN into single token
 				return Token{
-					Type:   TOKEN_NOTIN,
-					Value:  literal + " " + nextLiteral,
-					Line:   startLine,
-					Column: startColumn,
+					Type:        TOKEN_NOTIN,
+					Value:       literal + " " + nextLiteral,
+					Line:        startLine,
+					Column:      startColumn,
+					StartOffset: startPos,
 				}
 			}
 
@@ -328,10 +345,11 @@ func (t *Tokenizer) readIdentifier() Token {
 	}
 
 	tok := Token{
-		Type:   tokenType,
-		Value:  literal,
-		Line:   startLine,
-		Column: startColumn,
+		Type:        tokenType,
+		Value:       literal,
+		Line:        startLine,
+		Column:      startColumn,
+		StartOffset: startPos,
 	}
 
 	// Set literal value for boolean keywords
@@ -349,6 +367,7 @@ func (t *Tokenizer) readIdentifier() Token {
 // readFunctionCall reads F:FUNCTION_NAME() style function calls
 // TODO: I will optimize this method to avoid repeated uppercase conversions when profiling shows >1% CPU time
 func (t *Tokenizer) readFunctionCall() Token {
+	startPos := t.pos
 	startLine := t.line
 	startColumn := t.column
 
@@ -366,10 +385,11 @@ func (t *Tokenizer) readFunctionCall() Token {
 	funcName := t.input[funcNameStart:t.pos]
 	if funcName == "" {
 		return Token{
-			Type:   TOKEN_ILLEGAL,
-			Value:  "F: prefix with no function name",
-			Line:   startLine,
-			Column: startColumn,
+			Type:        TOKEN_ILLEGAL,
+			Value:       "F: prefix with no function name",
+			Line:        startLine,
+			Column:      startColumn,
+			StartOffset: startPos,
 		}
 	}
 
@@ -399,10 +419,11 @@ func (t *Tokenizer) readFunctionCall() Token {
 	}
 
 	return Token{
-		Type:   tokenType,
-		Value:  "F:" + upperFuncName, // Store uppercased for consistency
-		Line:   startLine,
-		Column: startColumn,
+		Type:        tokenType,
+		Value:       "F:" + upperFuncName, // Store uppercased for consistency
+		Line:        startLine,
+		Column:      startColumn,
+		StartOffset: startPos,
 	}
 }
 
@@ -433,10 +454,11 @@ func (t *Tokenizer) readNumber() Token {
 	literal := t.input[startPos:t.pos]
 
 	tok := Token{
-		Type:   TOKEN_NUMBER,
-		Value:  literal,
-		Line:   startLine,
-		Column: startColumn,
+		Type:        TOKEN_NUMBER,
+		Value:       literal,
+		Line:        startLine,
+		Column:      startColumn,
+		StartOffset: startPos,
 	}
 
 	// Parse the literal value
@@ -456,6 +478,7 @@ func (t *Tokenizer) readNumber() Token {
 // readString reads a quoted string literal
 // Supports both single and double quotes
 func (t *Tokenizer) readString(quote byte) Token {
+	startPos := t.pos
 	startLine := t.line
 	startColumn := t.column
 
@@ -499,21 +522,23 @@ func (t *Tokenizer) readString(quote byte) Token {
 	if t.ch != quote {
 		// Unterminated string
 		return Token{
-			Type:   TOKEN_ILLEGAL,
-			Value:  "unterminated string",
-			Line:   startLine,
-			Column: startColumn,
+			Type:        TOKEN_ILLEGAL,
+			Value:       "unterminated string",
+			Line:        startLine,
+			Column:      startColumn,
+			StartOffset: startPos,
 		}
 	}
 
 	value := builder.String()
 
 	return Token{
-		Type:    TOKEN_STRING,
-		Value:   value,
-		Literal: value,
-		Line:    startLine,
-		Column:  startColumn,
+		Type:        TOKEN_STRING,
+		Value:       value,
+		Literal:     value,
+		Line:        startLine,
+		Column:      startColumn,
+		StartOffset: startPos,
 	}
 }
 
@@ -529,10 +554,11 @@ func (t *Tokenizer) readParameter() Token {
 	// Parameter must be followed by digits
 	if !isDigit(t.ch) {
 		return Token{
-			Type:   TOKEN_ILLEGAL,
-			Value:  "$",
-			Line:   startLine,
-			Column: startColumn,
+			Type:        TOKEN_ILLEGAL,
+			Value:       "$",
+			Line:        startLine,
+			Column:      startColumn,
+			StartOffset: startPos,
 		}
 	}
 
@@ -549,19 +575,30 @@ func (t *Tokenizer) readParameter() Token {
 	paramNum, err := strconv.Atoi(paramNumStr)
 	if err != nil || paramNum <= 0 {
 		return Token{
-			Type:   TOKEN_ILLEGAL,
-			Value:  literal,
-			Line:   startLine,
-			Column: startColumn,
+			Type:        TOKEN_ILLEGAL,
+			Value:       literal,
+			Line:        startLine,
+			Column:      startColumn,
+			StartOffset: startPos,
+		}
+	}
+	if paramNum > MaxParameterIndex {
+		return Token{
+			Type:        TOKEN_ILLEGAL,
+			Value:       "parameter index exceeds maximum (" + strconv.Itoa(MaxParameterIndex) + ")",
+			Line:        startLine,
+			Column:      startColumn,
+			StartOffset: startPos,
 		}
 	}
 
 	return Token{
-		Type:    TOKEN_PARAMETER,
-		Value:   literal,
-		Literal: paramNum, // Store as int for easy access
-		Line:    startLine,
-		Column:  startColumn,
+		Type:        TOKEN_PARAMETER,
+		Value:       literal,
+		Literal:     paramNum, // Store as int for easy access
+		Line:        startLine,
+		Column:      startColumn,
+		StartOffset: startPos,
 	}
 }
 
@@ -573,12 +610,13 @@ func (t *Tokenizer) skipWhitespace() {
 }
 
 // newToken creates a new token with the given type and value
-func (t *Tokenizer) newToken(tokenType TokenType, value string) Token {
+func (t *Tokenizer) newToken(tokenType TokenType, value string, startOffset int) Token {
 	return Token{
-		Type:   tokenType,
-		Value:  value,
-		Line:   t.line,
-		Column: t.column,
+		Type:        tokenType,
+		Value:       value,
+		Line:        t.line,
+		Column:      t.column,
+		StartOffset: startOffset,
 	}
 }
 

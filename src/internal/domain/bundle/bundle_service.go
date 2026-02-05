@@ -21,6 +21,7 @@ import (
 	syndrQL "syndrdb/src/internal/syndrQL"
 	"syndrdb/src/internal/utils"
 	"syndrdb/src/pkg/common/conversion"
+	"syndrdb/src/pkg/constants"
 	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
@@ -48,6 +49,9 @@ import (
 // PageCacheShardCount is the number of shards for page cache locks (must be power of 2)
 const PageCacheShardCount = 64
 
+// findDocumentPageScanLimit caps the fallback page scan when DocumentID index is missing (Issue 8).
+const findDocumentPageScanLimit = 100
+
 // pageCacheShard represents a single shard of the page cache.
 // Each shard has its own lock, map, and LRU tracking to eliminate global lock contention.
 // DEADLOCK FIX: Previously a global documentPagesMutex caused RWMutex starvation under high concurrency.
@@ -66,6 +70,11 @@ type pageCacheShard struct {
 	// Key: pageKey, Value: cowSnapshotEntry with documents and timestamp
 	// TODO: Expand to other SELECT paths beyond GROUP BY (per user requirement)
 	cowSnapshot sync.Map // pageKey -> *cowSnapshotEntry
+
+	// READER VIEW: Immutable snapshot per page for lock-free reads (READ_WRITE_CONTENTION_ANALYSIS).
+	// Key: pageKey, Value: *models.DocumentPage (immutable; never mutated after store).
+	// Readers load this without holding mu; writers update authoritative then store new snapshot.
+	readerView sync.Map // pageKey -> *DocumentPage
 }
 
 // cowSnapshotEntry holds a cached document snapshot with timestamp for staleness checking
@@ -96,10 +105,12 @@ func (s *pageCacheShard) insertLocked(pageKey string, page *models.DocumentPage)
 }
 
 // deleteLocked deletes a page from both the authoritative map and lock-free lookup cache.
+// Also removes the reader view so evictions do not leave stale snapshots.
 // Caller must hold mu.Lock().
 func (s *pageCacheShard) deleteLocked(pageKey string) {
 	delete(s.pages, pageKey)
 	s.fastLookup.Delete(pageKey)
+	s.readerView.Delete(pageKey)
 	// Clean up LRU tracking to prevent memory leaks
 	if elem, exists := s.lruElements[pageKey]; exists {
 		s.lruOrder.Remove(elem)
@@ -307,6 +318,10 @@ type IndexUpdate struct {
 	OldValue    interface{} // For updates
 	Timestamp   time.Time
 	AppliedSync bool // True if already applied synchronously (for read-your-own-writes)
+
+	// HashEntry: when set (single-write path), processHashIndexBatch writes this entry to disk only.
+	// MemTable was already updated in scheduleIndexUpdate; same sequence is used once.
+	HashEntry *hashindex.HashIndexEntry
 }
 
 // MetadataUpdate represents a deferred metadata update operation
@@ -1597,9 +1612,14 @@ func (s *BundleService) getPageShardIndex(pageKey string) int {
 // This is the core write-through mechanism: after WriteBuffer commits, we immediately
 // update the in-memory page cache so subsequent reads see the new data.
 //
+// READER VIEW: Prefer "copy outside lock, swap under brief Lock" — load current reader
+// view (no lock), build new snapshot with this doc (no lock), then Lock only to update
+// authoritative and store the new reader view. If no reader view exists yet, fall back to
+// building under Lock (e.g. new page or legacy entry).
+//
 // Thread Safety:
 // - Uses sharded locks to minimize contention (64 shards)
-// - If page not in cache, creates new page (cache will load from disk on first read anyway)
+// - Under Lock we only touch shard state; no storage or other locks (deadlock-safe).
 //
 // Parameters:
 //   - bundleName: The bundle containing the document
@@ -1610,37 +1630,61 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
-	// DEADLOCK FIX: Only acquire shard-local lock (no global lock)
+	// Phase 2 fast path: build new snapshot from current reader view outside the lock.
+	if v, ok := shard.readerView.Load(pageKey); ok {
+		if oldSnapshot, ok := v.(*models.DocumentPage); ok {
+			newSnapshot := &models.DocumentPage{
+				PageID:    pageID,
+				BundleID:  bundleName,
+				Documents: make(map[string]models.Document, len(oldSnapshot.Documents)+1),
+			}
+			for docID, d := range oldSnapshot.Documents {
+				newSnapshot.Documents[docID] = d
+			}
+			newSnapshot.Documents[doc.DocumentID] = *doc
+
+			shard.mu.Lock()
+			page, exists := shard.pages[pageKey]
+			if exists {
+				page.Documents[doc.DocumentID] = *doc
+				shard.readerView.Store(pageKey, newSnapshot)
+			}
+			shard.mu.Unlock()
+			if exists {
+				return
+			}
+			// Page was evicted between Load and Lock; fall through to Phase 1 path.
+		}
+	}
+
+	// Phase 1 path: no reader view yet or page missing (create + set reader view under Lock).
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
 	page, exists := shard.pages[pageKey]
 	if !exists {
-		// Page not in cache - create a new one
-		// The page will be populated from disk on next full read if needed
 		page = &models.DocumentPage{
 			PageID:    pageID,
 			BundleID:  bundleName,
 			Documents: make(map[string]models.Document),
 		}
 		shard.insertLocked(pageKey, page)
-
-		// Add to LRU tracking (shard-local)
 		elem := shard.lruOrder.PushFront(pageKey)
 		shard.lruElements[pageKey] = elem
-
-		// Check if we need to evict old pages from this shard
 		if len(shard.pages) > shard.maxPages {
 			shard.evictOldestLocked()
 		}
 	}
 
-	// Update the document in the page
 	page.Documents[doc.DocumentID] = *doc
+	shard.readerView.Store(pageKey, s.createSafePageCopy(page))
 }
 
 // removeFromPageCache removes a document from the page cache after a successful delete.
 // Called after a tombstone is written to the WriteBuffer.
+//
+// Prefer copy-outside-lock: load current reader view, build new snapshot without docID,
+// then Lock only to update authoritative and store new reader view.
 //
 // Thread Safety:
 // - Uses sharded locks to minimize contention
@@ -1655,19 +1699,41 @@ func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, do
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
-	// DEADLOCK FIX: Only acquire shard-local lock (no global lock)
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
-
-	page, exists := shard.pages[pageKey]
-	if !exists {
-		// Page not in cache - nothing to remove
-		return
+	// Copy outside lock: build new snapshot without docID from current reader view.
+	if v, ok := shard.readerView.Load(pageKey); ok {
+		if oldSnapshot, ok := v.(*models.DocumentPage); ok {
+			newSnapshot := &models.DocumentPage{
+				PageID:    pageID,
+				BundleID:  bundleName,
+				Documents: make(map[string]models.Document, len(oldSnapshot.Documents)),
+			}
+			for id, d := range oldSnapshot.Documents {
+				if id != docID {
+					newSnapshot.Documents[id] = d
+				}
+			}
+			shard.mu.Lock()
+			page, exists := shard.pages[pageKey]
+			if exists {
+				delete(page.Documents, docID)
+				shard.readerView.Store(pageKey, newSnapshot)
+			}
+			shard.mu.Unlock()
+			if exists {
+				return
+			}
+		}
 	}
 
-	// Remove the document from the page
+	// Fallback: no reader view or page missing; update under Lock.
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	page, exists := shard.pages[pageKey]
+	if !exists {
+		return
+	}
 	delete(page.Documents, docID)
-	// Note: We keep the page in cache even if empty - it will be evicted by LRU if needed
+	shard.readerView.Store(pageKey, s.createSafePageCopy(page))
 }
 
 // getOrCreateSchemaManager retrieves or creates a GraphQL schema manager for the specified database.
@@ -1957,24 +2023,30 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 						keyValue = documentID // Fallback for DocumentID indexes
 					}
 
-					// Get next sequence number (atomic for thread safety)
-					sequence := atomic.AddUint64(&hashIndex.GlobalSequence, 1)
+					// Single-write path: assign sequence once; same entry goes to MemTable and disk
+					currentSequence := atomic.LoadUint64(&hashIndex.GlobalSequence)
+					if err := constants.CheckUint64Increment(currentSequence, "GlobalSequence"); err != nil {
+						s.logger.Warnw("GlobalSequence overflow, skipping hash index update",
+							zap.String("bundle", bundleName),
+							zap.String("index", indexName),
+							zap.Error(err))
+					} else {
+						sequence := atomic.AddUint64(&hashIndex.GlobalSequence, 1)
 
-					// PHASE 4: MVCC - Get document's version metadata
-					// When caller passes docMetadata (commitSeq, versionSeq), use those to avoid GetDocument.
-					var commitSeq, versionSeq uint64
-					if len(docMetadata) >= 2 {
-						commitSeq, versionSeq = docMetadata[0], docMetadata[1]
-					} else if doc, err := s.GetDocument(bundleName, bundle.Database.Name, documentID); err == nil {
-						commitSeq = doc.CommitSequence
-						versionSeq = doc.VersionSequence
-					}
+						// PHASE 4: MVCC - Get document's version metadata
+						var commitSeq, versionSeq uint64
+						if len(docMetadata) >= 2 {
+							commitSeq, versionSeq = docMetadata[0], docMetadata[1]
+						} else if doc, err := s.GetDocument(bundleName, bundle.Database.Name, documentID); err == nil {
+							commitSeq = doc.CommitSequence
+							versionSeq = doc.VersionSequence
+						}
 
-					// Create entry and add to MemTable
-					entry := hashindex.NewHashIndexEntry(keyValue, documentID, pageID, sequence, commitSeq, versionSeq)
+						entry := hashindex.NewHashIndexEntry(keyValue, documentID, pageID, sequence, commitSeq, versionSeq)
+						if operation == "delete" {
+							entry.Deleted = true
+						}
 
-					switch operation {
-					case "insert":
 						err = hashIndex.MemTable.Put(entry)
 						if err != nil {
 							s.logger.Warnw("Failed to update MemTable immediately",
@@ -1982,38 +2054,20 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 								zap.String("index", indexName),
 								zap.Error(err))
 						} else {
-							s.logger.Debugw("Immediately updated MemTable for key",
-								zap.String("key", keyValue),
-								zap.String("index", indexName))
+							update.HashEntry = entry // processHashIndexBatch will write this to disk only
+							if operation == "insert" {
+								s.logger.Debugw("Immediately updated MemTable for key",
+									zap.String("key", keyValue),
+									zap.String("index", indexName))
+							} else {
+								s.logger.Debugw("Immediately updated MemTable with tombstone",
+									zap.String("key", keyValue),
+									zap.String("index", indexName))
+							}
 						}
 
-						// PERFORMANCE FIX: Trigger aggressive compaction if walBuffer exceeds threshold
-						// This prevents unbounded memory growth during sustained high-throughput writes
-						// Threshold of 10000 entries balances memory reclamation vs compaction overhead
 						if trimmed, oldSize := hashIndex.TrimMemTableWAL(10000); trimmed {
 							s.logger.Debugf("Aggressive MemTable trim: cleared %d WAL entries for %s.%s",
-								oldSize, bundleName, indexName)
-						}
-					case "delete":
-						// Mark as deleted in MemTable
-						entry.Deleted = true
-						err = hashIndex.MemTable.Put(entry)
-						if err != nil {
-							s.logger.Warnw("Failed to update MemTable with tombstone",
-								zap.String("bundle", bundleName),
-								zap.String("index", indexName),
-								zap.Error(err))
-						} else {
-							s.logger.Debugw("Immediately updated MemTable with tombstone",
-								zap.String("key", keyValue),
-								zap.String("index", indexName))
-						}
-
-						// PERFORMANCE FIX: Trigger aggressive compaction if walBuffer exceeds threshold
-						// This was missing for delete operations, causing unbounded memory growth
-						// during sustained write workloads that include deletes or updates
-						if trimmed, oldSize := hashIndex.TrimMemTableWAL(10000); trimmed {
-							s.logger.Debugf("Aggressive MemTable trim (delete): cleared %d WAL entries for %s.%s",
 								oldSize, bundleName, indexName)
 						}
 					}
@@ -2734,9 +2788,9 @@ func (s *BundleService) processIndexUpdateBatch(bundle *models.Bundle, indexName
 	}
 }
 
-// processHashIndexBatch optimizes hash index updates by batching operations
-// NOTE: MemTable updates are already done synchronously in scheduleIndexUpdate()
-// This function only handles disk persistence for durability
+// processHashIndexBatch optimizes hash index updates by batching operations.
+// Single-write path: when update.HashEntry is set, we write that entry to disk only (no second MemTable/sequence).
+// Otherwise we fall back to Put/Delete for backward compatibility.
 func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName string, indexRef models.IndexReference, updates []IndexUpdate) error {
 	hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
 	if err != nil {
@@ -2764,15 +2818,27 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 	errorCount := 0
 
 	for _, update := range deduplicatedUpdates {
+		if update.HashEntry != nil {
+			// Single-write path: same entry already applied to MemTable; write to disk only
+			err := hashIndex.WriteEntryToDiskOnly(update.HashEntry)
+			if err != nil {
+				errorCount++
+				s.logger.Warnf("Failed to persist entry to disk (doc '%s') in index V3 '%s': %v",
+					update.DocumentID, indexName, err)
+			} else {
+				successCount++
+			}
+			continue
+		}
+
+		// Fallback: no pre-built entry (e.g. legacy or overflow skip)
 		keyValue := fmt.Sprintf("%v", update.FieldValue)
 		if keyValue == "" || keyValue == "<nil>" {
-			keyValue = update.DocumentID // Fallback for DocumentID indexes
+			keyValue = update.DocumentID
 		}
 
 		switch update.Operation {
 		case "insert":
-			// Put handles both MemTable (already done, idempotent) and disk persistence
-			// PHASE 4: MVCC - Get document version metadata
 			var commitSeq, versionSeq uint64
 			if bundle.Database != nil {
 				if doc, err := s.GetDocument(update.BundleName, bundle.Database.Name, update.DocumentID); err == nil {
@@ -2790,8 +2856,6 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 			}
 
 		case "delete":
-			// Delete handles both MemTable (already done, idempotent) and disk persistence
-			// PHASE 4: MVCC - Get document commit sequence for deletion
 			var commitSeq uint64
 			if bundle.Database != nil {
 				if doc, err := s.GetDocument(update.BundleName, bundle.Database.Name, update.DocumentID); err == nil {
@@ -3302,12 +3366,17 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
-	// POSTGRESQL-INSPIRED: Lock-free fast path using sync.Map (buffer manager pattern)
-	// Cache hits require zero locks for lookup - just atomic load from fastLookup
+	// READER VIEW: Lock-free read path (no shard mutex). Readers never block writers.
+	if v, ok := shard.readerView.Load(pageKey); ok {
+		if snapshot, ok := v.(*models.DocumentPage); ok {
+			return s.createSafePageCopy(snapshot), nil
+		}
+	}
+
+	// Fallback: authoritative page in fastLookup (requires RLock to copy)
 	// CONCURRENCY FIX: Must take RLock before copying Documents map to prevent concurrent iteration/write
 	if cached, ok := shard.fastLookup.Load(pageKey); ok {
 		if page, ok := cached.(*models.DocumentPage); ok {
-			// Lock-free lookup succeeded, but Documents map needs protection during copy
 			shard.mu.RLock()
 			safeCopy := s.createSafePageCopy(page)
 			shard.mu.RUnlock()
@@ -3338,9 +3407,10 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	if shard.mu.TryLock() {
 		// Double-check after acquiring write lock (another goroutine may have inserted it)
 		if p, exists := shard.pages[pageKey]; exists {
-			// Another goroutine inserted it - just return (LRU was updated by inserter)
+			// Return safe copy so caller cannot mutate the cached page (Issue 1).
+			safeCopy := s.createSafePageCopy(p)
 			shard.mu.Unlock()
-			return p, nil
+			return safeCopy, nil
 		}
 		// O(1) eviction: check capacity and evict from back of LRU list
 		if len(shard.pages) >= shard.maxPages {
@@ -3350,15 +3420,37 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 		shard.insertLocked(pageKey, page)
 		elem := shard.lruOrder.PushFront(pageKey)
 		shard.lruElements[pageKey] = elem
+		// Reader view: store immutable snapshot so future reads are lock-free.
+		snapshot := s.createSafePageCopy(page)
+		shard.readerView.Store(pageKey, snapshot)
+		safeCopy := s.createSafePageCopy(snapshot)
 		shard.mu.Unlock()
-		return page, nil
+		return safeCopy, nil
 	}
 
-	// TryLock failed - CONCURRENCY FIX: Return isolated copy to prevent concurrent map access
-	// If we return the original page object, another goroutine might cache it via TryLock success,
-	// making it shared. Writers can then modify page.Documents while readers access it unsafely.
-	// Solution: Create independent copy with snapshotted Documents map (reuses snapshot pattern)
-	return s.createSafePageCopy(page), nil
+	// TryLock failed (Issue 4): Optional backoff then blocking Lock so at least one goroutine
+	// can cache the page. Backoff is configurable (page_cache_trylock_backoff_ms); 0 = no sleep for low latency.
+	if backoffMs := settings.GetSettings().PageCacheTryLockBackoffMs; backoffMs > 0 {
+		time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+	}
+	shard.mu.Lock()
+	if p, exists := shard.pages[pageKey]; exists {
+		safeCopy := s.createSafePageCopy(p)
+		shard.mu.Unlock()
+		return safeCopy, nil
+	}
+	if len(shard.pages) >= shard.maxPages {
+		shard.evictOldestLocked()
+	}
+	shard.insertLocked(pageKey, page)
+	elem := shard.lruOrder.PushFront(pageKey)
+	shard.lruElements[pageKey] = elem
+	// Reader view: store immutable snapshot so future reads are lock-free.
+	snapshot := s.createSafePageCopy(page)
+	shard.readerView.Store(pageKey, snapshot)
+	safeCopy := s.createSafePageCopy(snapshot)
+	shard.mu.Unlock()
+	return safeCopy, nil
 }
 
 // SnapshotPageDocuments safely snapshots documents from a page to avoid concurrent map iteration.
@@ -3401,37 +3493,52 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 
 	// PHASE 3: Check COW snapshot cache first (avoids RLock entirely)
 	// PERFORMANCE FIX: No staleness check on hot path - background cleaner handles cleanup
+	// Issue 2: Return a copy of the slice so callers cannot mutate the COW cache.
 	if cached, ok := shard.cowSnapshot.Load(pageKey); ok {
 		snapshot := cached.(*cowSnapshotEntry)
-		// Return cached snapshot immediately - background cleaner removes stale entries
-		return snapshot.documents, nil
+		docsCopy := make([]models.Document, 0, len(snapshot.documents))
+		docsCopy = append(docsCopy, snapshot.documents...)
+		return docsCopy, nil
 	}
 
-	// POSTGRESQL-INSPIRED: Lock-free cache lookup using sync.Map (same as GetDocumentPage)
-	// DEADLOCK FIX: Previously used shard.mu.RLock() causing RWMutex starvation
-	// CONCURRENCY FIX: Lock-free lookup, but must RLock before copying Documents map
+	// READER VIEW: Lock-free read path (no shard mutex). Readers never block writers.
+	if v, ok := shard.readerView.Load(pageKey); ok {
+		if snapshot, ok := v.(*models.DocumentPage); ok {
+			docs := make([]models.Document, 0, len(snapshot.Documents))
+			for _, doc := range snapshot.Documents {
+				if doc.IsVisibleReadCommitted() {
+					docs = append(docs, doc)
+				}
+			}
+			// PHASE 3: Store in COW cache for subsequent parallel GROUP BY reads
+			snapshotEntry := &cowSnapshotEntry{
+				documents: docs,
+				timestamp: time.Now().UnixMilli(),
+				pageKey:   pageKey,
+			}
+			shard.cowSnapshot.Store(pageKey, snapshotEntry)
+			return docs, nil
+		}
+	}
+
+	// Fallback: authoritative page in fastLookup (requires RLock to copy)
 	if cached, ok := shard.fastLookup.Load(pageKey); ok {
 		if page, ok := cached.(*models.DocumentPage); ok {
-			// Protect Documents map iteration during copy
 			shard.mu.RLock()
 			safePage := s.createSafePageCopy(page)
 			shard.mu.RUnlock()
 			docs := make([]models.Document, 0, len(safePage.Documents))
 			for _, doc := range safePage.Documents {
-				// MVCC (Phase 1): Filter out superseded/uncommitted versions
 				if doc.IsVisibleReadCommitted() {
 					docs = append(docs, doc)
 				}
 			}
-
-			// PHASE 3: Store snapshot in COW cache for subsequent parallel GROUP BY reads
-			snapshot := &cowSnapshotEntry{
+			snapshotEntry := &cowSnapshotEntry{
 				documents: docs,
 				timestamp: time.Now().UnixMilli(),
 				pageKey:   pageKey,
 			}
-			shard.cowSnapshot.Store(pageKey, snapshot)
-
+			shard.cowSnapshot.Store(pageKey, snapshotEntry)
 			return docs, nil
 		}
 	}
@@ -3455,6 +3562,20 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 		}
 	}
 
+	// Issue 10: Best-effort insert into authoritative cache so GetDocumentPage can hit it later.
+	if shard.mu.TryLock() {
+		if _, exists := shard.pages[pageKey]; !exists {
+			if len(shard.pages) >= shard.maxPages {
+				shard.evictOldestLocked()
+			}
+			shard.insertLocked(pageKey, loadedPage)
+			elem := shard.lruOrder.PushFront(pageKey)
+			shard.lruElements[pageKey] = elem
+			shard.readerView.Store(pageKey, s.createSafePageCopy(loadedPage))
+		}
+		shard.mu.Unlock()
+	}
+
 	// PHASE 3: Cache snapshot (even for disk-loaded pages)
 	snapshot := &cowSnapshotEntry{
 		documents: docs,
@@ -3473,11 +3594,16 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 // - Creates new map and copies all documents (value copy, not reference)
 // - Returned page is safe for concurrent read access without locks
 //
+// Shallow copy (Issue 3): Document structs are copied by value, but each Document's
+// Fields and Data maps are reference types and are shared with the original. Callers
+// must not mutate any document's Fields or Data maps; mutation would affect the
+// cached page. For true isolation, a deep copy (e.g. Document.Clone()) would be needed.
+//
 // Parameters:
 //   - page: The source page to copy
 //
 // Returns:
-//   - *models.DocumentPage: Isolated copy safe for concurrent access
+//   - *models.DocumentPage: Isolated copy safe for concurrent access (shallow; do not mutate document Fields/Data)
 func (s *BundleService) createSafePageCopy(page *models.DocumentPage) *models.DocumentPage {
 	safePage := &models.DocumentPage{
 		PageID:    page.PageID,
@@ -3595,24 +3721,32 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 		shardIdx := s.getPageShardIndex(pageKey)
 		shard := s.pageShards[shardIdx]
 
-		// POSTGRESQL-INSPIRED: Lock-free cache lookup
-		cached, exists := shard.fastLookup.Load(pageKey)
-		if !exists {
-			// Page not cached - skip it (caller will fall back to streaming if needed)
+		var safePage *models.DocumentPage
+		// READER VIEW: Lock-free lookup first (no shard mutex)
+		if v, ok := shard.readerView.Load(pageKey); ok {
+			if p, ok := v.(*models.DocumentPage); ok {
+				safePage = p
+				cachedPages++
+			}
+		}
+		if safePage == nil {
+			// Fallback: authoritative page under RLock
+			cached, exists := shard.fastLookup.Load(pageKey)
+			if !exists {
+				continue
+			}
+			page, ok := cached.(*models.DocumentPage)
+			if !ok {
+				continue
+			}
+			cachedPages++
+			shard.mu.RLock()
+			safePage = s.createSafePageCopy(page)
+			shard.mu.RUnlock()
+		}
+		if safePage == nil {
 			continue
 		}
-
-		page, ok := cached.(*models.DocumentPage)
-		if !ok {
-			continue
-		}
-
-		cachedPages++
-
-		// CONCURRENCY FIX: Protect Documents map iteration during copy
-		shard.mu.RLock()
-		safePage := s.createSafePageCopy(page)
-		shard.mu.RUnlock()
 
 		// Copy projected fields from each document in this page
 		for docID, doc := range safePage.Documents {
@@ -4097,15 +4231,21 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 	}
 
 	// FALLBACK: Only used if index lookup fails or PageID is 0 (placeholder)
-	// TODO: This fallback can be removed once all indexes properly track page IDs
+	// Issue 8: Limit scan to avoid O(N) timeouts; operators should fix DocumentID index.
 	s.logger.Debugf("FALLBACK: Scanning pages to find document %s in bundle %s", documentID, bundleID)
 
 	if bundle.PageCount == 0 {
 		return 0, fmt.Errorf("bundle %s has no pages", bundleID)
 	}
 
+	maxToScan := bundle.PageCount
+	if maxToScan > findDocumentPageScanLimit {
+		maxToScan = findDocumentPageScanLimit
+		s.logger.Warnf("findDocumentPage fallback: scanning at most %d pages for document %s in bundle %s; fix DocumentID index to avoid scan", findDocumentPageScanLimit, documentID, bundleID)
+	}
+
 	// UNIVERSAL CACHE: Use GetDocumentPage instead of store.LoadDocumentPage to populate shared cache
-	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+	for pageID := uint32(0); pageID < uint32(maxToScan); pageID++ {
 		page, err := s.GetDocumentPage(bundleID, bundle.Database.Name, pageID)
 		if err != nil {
 			s.logger.Warnf("Failed to load page %d while searching for document %s: %v", pageID, documentID, err)
@@ -4125,6 +4265,9 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 		}
 	}
 
+	if bundle.PageCount > findDocumentPageScanLimit {
+		return 0, fmt.Errorf("document %s not found in first %d pages of bundle %s (scan limit; fix DocumentID index)", documentID, findDocumentPageScanLimit, bundleID)
+	}
 	return 0, fmt.Errorf("document %s not found in any page of bundle %s", documentID, bundleID)
 }
 
@@ -6400,18 +6543,23 @@ func (s *BundleService) GetOrLoadHashIndex(bundle *models.Bundle, indexName stri
 	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
 	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes")
 
+	walBufferMax := s.settings.Storage.MemTableWALBufferMaxSize
+	if walBufferMax <= 0 {
+		walBufferMax = 50000 // default to bound memory
+	}
 	config := hashindex.IndexConfig{
-		IndexName:          indexName,
-		BundleName:         bundle.Name,
-		DatabaseName:       bundle.Database.Name,
-		FieldName:          indexRef.HashIndexField.FieldName,
-		DataDir:            indexesPath,
-		MaxFileSize:        128 * 1024 * 1024,
-		WriteBufferSize:    64 * 1024,
-		MemTableMaxSize:    100000,
-		CompactionEnabled:  true,
-		CompactionMaxFiles: 10,
-		Logger:             s.logger,
+		IndexName:                indexName,
+		BundleName:               bundle.Name,
+		DatabaseName:             bundle.Database.Name,
+		FieldName:                indexRef.HashIndexField.FieldName,
+		DataDir:                  indexesPath,
+		MaxFileSize:              128 * 1024 * 1024,
+		WriteBufferSize:          64 * 1024,
+		MemTableMaxSize:          100000,
+		MemTableWALBufferMaxSize: walBufferMax,
+		CompactionEnabled:        true,
+		CompactionMaxFiles:       10,
+		Logger:                   s.logger,
 	}
 
 	hashIndex, err := hashindex.OpenHashIndexV3(config)
@@ -6682,7 +6830,9 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		s.logger.Debugf("  ✓ ValidateUniqueConstraints took %v", uniqueDuration)
 	}
 	if err != nil {
-		return "", fmt.Errorf("failed to process NULL values: %w", err)
+		// Return the error directly - it's already a properly typed SyndrDBError
+		// with ERR_VALIDATION_CONSTRAINT code that won't log stack traces
+		return "", err
 	}
 
 	// Add the document to the bundle
@@ -6818,7 +6968,9 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
 	err = uniqueValidator.ValidateUniqueConstraints(bundle, docCommand)
 	if err != nil {
-		return "", fmt.Errorf("failed to process NULL values: %w", err)
+		// Return the error directly - it's already a properly typed SyndrDBError
+		// with ERR_VALIDATION_CONSTRAINT code that won't log stack traces
+		return "", err
 	}
 
 	var newDocument *models.Document
@@ -7027,10 +7179,22 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 			shardIdx := s.getPageShardIndex(pageKey)
 			shard := s.pageShards[shardIdx]
 
-			// POSTGRESQL-INSPIRED: Lock-free cache lookup
+			// READER VIEW: Lock-free lookup first (no shard mutex)
+			if v, ok := shard.readerView.Load(pageKey); ok {
+				if safePage, ok := v.(*models.DocumentPage); ok {
+					for docID := range docIDSet {
+						if !stillExists[docID] {
+							if _, docExists := safePage.Documents[docID]; docExists {
+								stillExists[docID] = true
+							}
+						}
+					}
+					continue
+				}
+			}
+			// Fallback: authoritative page under RLock
 			if cached, ok := shard.fastLookup.Load(pageKey); ok {
 				if page, ok := cached.(*models.DocumentPage); ok {
-					// CONCURRENCY FIX: Protect Documents map iteration during copy
 					shard.mu.RLock()
 					safePage := s.createSafePageCopy(page)
 					shard.mu.RUnlock()
@@ -7078,7 +7242,7 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	defer func() {
 		totalTime := time.Since(updateStart)
 		if totalTime > 500*time.Millisecond {
-			s.logger.Warnf("UPDATE SLOW: Total time %v for bundle '%s' WHERE '%s'",
+			s.logger.Infof("⚠️⚠️⚠️UPDATE SLOW: Total time %v for bundle '%s' WHERE '%s'",
 				totalTime, docCommand.BundleName, docCommand.WhereClause)
 		}
 	}()
@@ -8581,6 +8745,15 @@ func (s *BundleService) getDocumentsByQueryPlanner(ctx context.Context, bundle *
 		s.logger.Warnf("Plan type %T does not implement Execute method, falling back to GetDocumentsByFilter", planInterface)
 		return s.GetDocumentsByFilter(bundle, whereClause, nil)
 	}
+
+	// Join cleanup: same key as planner.JoinCleanupContextKey ("join_cleanup"); avoid planner import (cycle).
+	joinCleanupFns := []func(){}
+	ctx = context.WithValue(ctx, "join_cleanup", &joinCleanupFns)
+	defer func() {
+		for _, fn := range joinCleanupFns {
+			fn()
+		}
+	}()
 
 	result, err := plan.Execute(ctx)
 	if err != nil {

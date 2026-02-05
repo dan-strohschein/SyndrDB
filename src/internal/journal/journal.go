@@ -39,11 +39,14 @@ Main functionality includes:
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +55,10 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// walFilePattern matches WAL filenames: YYYY-MM-DD.wal or YYYY-MM-DD_HH-MM-SS.wal (rotated).
+// Used by loadLastLSN, CleanupOldFiles, and ReplayOperations for consistent discovery.
+var walFilePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(_\d{2}-\d{2}-\d{2})?\.wal$`)
 
 // OperationType represents the type of database operation
 type OperationType int
@@ -89,6 +96,9 @@ type WALEntry struct {
 	Checksum   uint32        `json:"checksum"`    // Entry integrity checksum
 }
 
+// errHolder holds an error for atomic storage; heap-allocated so async flush goroutine does not store pointer to stack.
+type errHolder struct{ err error }
+
 // WriteAheadLog manages the WAL for SyndrDB
 type WriteAheadLog struct {
 	mutex          sync.RWMutex
@@ -123,12 +133,12 @@ type WriteAheadLog struct {
 	// Write coordinator integration
 	coordinator *WriteCoordinator // Reference to write coordinator for checkpoint coordination
 
-	// HIGH-008: Error tracking for async operations
-	// Use pointer to error since atomic.Value cannot store nil directly
-	lastFlushError atomic.Value // Stores *error from async flush goroutine (type: *error)
+	// HIGH-008: Error tracking for async operations (heap-allocated holder to avoid use-after-free)
+	lastFlushError atomic.Value // type: *errHolder
 
 	// Phase 2: Group commit with double-buffering for reduced lock contention
 	groupCommitMgr *GroupCommitManager // Manages double-buffering and group commit
+	useGroupCommit bool                // When true, LogOperation uses group-commit path; default false
 }
 
 // WALConfig holds configuration for the WAL
@@ -144,6 +154,7 @@ type WALConfig struct {
 	WALBatchSize       int           // Batch size for flush operations (default: 100)
 	WALMaxFlushDelay   time.Duration // Max delay before forcing flush (default: 100ms)
 	DurabilityMode     string        // Durability mode: "strict", "balanced", "performance"
+	UseGroupCommit     bool          // When true, use group-commit path for LogOperation (default: false)
 }
 
 // NewWriteAheadLog creates a new WAL instance with proper configuration
@@ -210,6 +221,7 @@ func NewWriteAheadLog(config WALConfig, logger *zap.SugaredLogger) (*WriteAheadL
 			BufferSizeBytes:  64 * 1024, // 64KB initial buffer
 			CompletionBuffer: 1000,      // Support 1000 concurrent waiters
 		}),
+		useGroupCommit: config.UseGroupCommit,
 	}
 
 	// Initialize WAL file
@@ -294,9 +306,10 @@ func (wal *WriteAheadLog) closeCurrentFile() error {
 	return nil
 }
 
-// loadLastLSN loads the last LSN from existing WAL files to ensure continuity
+// loadLastLSN loads the last LSN from existing WAL files to ensure continuity.
+// Uses baseFilePath (WAL directory) and walFilePattern for consistent discovery.
 func (wal *WriteAheadLog) loadLastLSN() error {
-	dir := filepath.Dir(wal.baseFilePath)
+	dir := wal.baseFilePath
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -306,28 +319,24 @@ func (wal *WriteAheadLog) loadLastLSN() error {
 		return fmt.Errorf("failed to read WAL directory: %w", err)
 	}
 
-	// Find the most recent WAL file
 	var latestFile string
 	var latestTime time.Time
-
-	walPattern := regexp.MustCompile(`wal_\d{4}-\d{2}-\d{2}\.wal$`)
 
 	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
-
-		if walPattern.MatchString(file.Name()) {
-			fullPath := filepath.Join(dir, file.Name())
-			info, err := os.Stat(fullPath)
-			if err != nil {
-				continue
-			}
-
-			if info.ModTime().After(latestTime) {
-				latestTime = info.ModTime()
-				latestFile = fullPath
-			}
+		if !walFilePattern.MatchString(file.Name()) {
+			continue
+		}
+		fullPath := filepath.Join(dir, file.Name())
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			latestFile = fullPath
 		}
 	}
 
@@ -336,7 +345,6 @@ func (wal *WriteAheadLog) loadLastLSN() error {
 		return nil
 	}
 
-	// Read the last LSN from the most recent file
 	lastLSN, err := wal.readLastLSNFromFile(latestFile)
 	if err != nil {
 		wal.logger.Warnf("Failed to read last LSN from %s: %v", latestFile, err)
@@ -349,8 +357,59 @@ func (wal *WriteAheadLog) loadLastLSN() error {
 	return nil
 }
 
-// readLastLSNFromFile reads the last LSN from a specific WAL file
+// readLastLSNFromFile reads the last LSN from a WAL file. Tries binary format first
+// (entry length + payload; LSN at offset 8 in each payload), then falls back to ASCII/JSON.
 func (wal *WriteAheadLog) readLastLSNFromFile(filePath string) (uint64, error) {
+	// Try binary format first (current production format)
+	if lsn, err := wal.readLastLSNFromFileBinary(filePath); err == nil && lsn > 0 {
+		return lsn, nil
+	}
+	// Fall back to ASCII/JSON for legacy files
+	return wal.readLastLSNFromFileASCII(filePath)
+}
+
+// readLastLSNFromFileBinary scans a binary WAL file and returns the highest LSN.
+// Format: [4-byte entry length][payload] repeated. LSN is at offset 8 in payload (after magic, version).
+func (wal *WriteAheadLog) readLastLSNFromFileBinary(filePath string) (uint64, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+	var lastLSN uint64
+
+	for {
+		var entryLen uint32
+		if err := binary.Read(reader, binary.LittleEndian, &entryLen); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return 0, err
+		}
+		if entryLen == 0 || entryLen > 1024*1024*10 {
+			return lastLSN, nil // Invalid or EOF; return what we have
+		}
+		payload := make([]byte, entryLen)
+		if _, err := io.ReadFull(reader, payload); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return lastLSN, nil
+		}
+		if len(payload) >= 16 {
+			lsn := binary.LittleEndian.Uint64(payload[8:16])
+			if lsn > lastLSN {
+				lastLSN = lsn
+			}
+		}
+	}
+	return lastLSN, nil
+}
+
+// readLastLSNFromFileASCII reads the last LSN from an ASCII/JSON WAL file (legacy).
+func (wal *WriteAheadLog) readLastLSNFromFileASCII(filePath string) (uint64, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return 0, err
@@ -365,45 +424,36 @@ func (wal *WriteAheadLog) readLastLSNFromFile(filePath string) (uint64, error) {
 		if line == "" {
 			continue
 		}
-
 		var entry WALEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue // Skip malformed entries
+			continue
 		}
-
 		if entry.LSN > lastLSN {
 			lastLSN = entry.LSN
 		}
 	}
-
 	return lastLSN, scanner.Err()
 }
 
 // startAutoFlush starts the auto-flush goroutine
-// HIGH-008: Errors from async flush are now stored and can be retrieved via GetLastFlushError()
+// HIGH-008: Errors from async flush are stored in a heap-allocated errHolder (no pointer to stack).
 func (wal *WriteAheadLog) startAutoFlush() {
 	wal.flushTicker = time.NewTicker(wal.flushInterval)
-
-	// Initialize error storage with nil pointer
-	var nilErr error
-	wal.lastFlushError.Store(&nilErr)
+	wal.lastFlushError.Store(&errHolder{err: nil})
 
 	go func() {
 		for {
 			select {
 			case <-wal.flushTicker.C:
 				if !wal.isShuttingDown {
-					// HIGH-008: Store flush errors for retrieval
 					if err := wal.Flush(); err != nil {
-						wal.lastFlushError.Store(&err)
+						wal.lastFlushError.Store(&errHolder{err: err})
 						wal.logger.Errorw("WAL auto-flush failed",
 							"error", err,
 							"durabilityMode", wal.durabilityMode,
 							"description", "Async flush error - use GetLastFlushError() to retrieve")
 					} else {
-						// Clear error on successful flush
-						var nilErr error
-						wal.lastFlushError.Store(&nilErr)
+						wal.lastFlushError.Store(&errHolder{err: nil})
 					}
 				}
 			case <-wal.flushStopChan:
@@ -413,16 +463,19 @@ func (wal *WriteAheadLog) startAutoFlush() {
 	}()
 }
 
-// LogOperation logs a database operation to the WAL
-// DEPRECATED: This function now uses binary format internally for performance.
-// The ASCII JSON format has been replaced with efficient binary serialization.
-// Use LogOperationBinary directly for new code, or keep using this for compatibility.
+// LogOperation logs a database operation to the WAL.
+// When UseGroupCommit is enabled, uses the group-commit path for reduced contention;
+// otherwise uses the standard binary path. Flush and the write coordinator flush
+// both the main buffer and the group-commit buffer when group commit is enabled.
 func (wal *WriteAheadLog) LogOperation(txID string, operation OperationType, bundleName, documentID, beforeData, afterData, metadata string) error {
-	// Redirect to high-performance binary implementation
+	if wal.useGroupCommit {
+		return LogOperationWithGroupCommit(wal, txID, operation, bundleName, documentID, beforeData, afterData, metadata)
+	}
 	return wal.LogOperationBinary(txID, operation, bundleName, documentID, beforeData, afterData, metadata)
 }
 
-// checkFileRotation checks if the current file needs to be rotated
+// checkFileRotation checks if the current file needs to be rotated.
+// Rotated files are created inside baseFilePath with name YYYY-MM-DD_HH-MM-SS.wal.
 func (wal *WriteAheadLog) checkFileRotation() error {
 	if wal.file == nil {
 		return nil
@@ -436,14 +489,14 @@ func (wal *WriteAheadLog) checkFileRotation() error {
 	if stat.Size() >= wal.maxFileSize {
 		wal.logger.Debugf("WAL file size %d exceeds max size %d, rotating", stat.Size(), wal.maxFileSize)
 
-		// Close current file and open a new one with timestamp
 		if err := wal.closeCurrentFile(); err != nil {
 			return fmt.Errorf("failed to close current file for rotation: %w", err)
 		}
 
-		// Create new file with timestamp
-		timestamp := time.Now().Format("2006-01-02_15-04-05")
-		fileName := fmt.Sprintf("%s_%s.wal", wal.baseFilePath, timestamp)
+		dateStr := time.Now().Format("2006-01-02")
+		timeStr := time.Now().Format("15-04-05")
+		rotatedName := dateStr + "_" + timeStr + ".wal"
+		fileName := filepath.Join(wal.baseFilePath, rotatedName)
 
 		file, err := os.OpenFile(fileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -476,11 +529,12 @@ func (wal *WriteAheadLog) calculateChecksum(entry WALEntry) uint32 {
 	return checksum
 }
 
-// Flush forces all buffered data to be written to disk
+// Flush forces all buffered data to be written to disk, including the group-commit
+// buffer when group commit is enabled.
 func (wal *WriteAheadLog) Flush() error {
 	wal.mutex.Lock()
 	defer wal.mutex.Unlock()
-	return wal.flushUnsafe()
+	return wal.flushIncludingGroupCommitUnsafe()
 }
 
 // flushUnsafe performs the actual flush without acquiring locks (internal use only)
@@ -512,6 +566,19 @@ func (wal *WriteAheadLog) flushUnsafe() error {
 
 	wal.logger.Debugf("WAL synced to disk (strict/balanced mode)")
 	wal.lastFlush = time.Now()
+	return nil
+}
+
+// flushIncludingGroupCommitUnsafe flushes both the main WAL buffer and the group-commit
+// active buffer when group commit is enabled. Must be called with wal.mutex held.
+// Used by the write coordinator so periodic and shutdown flushes include group-commit data.
+func (wal *WriteAheadLog) flushIncludingGroupCommitUnsafe() error {
+	if err := wal.flushUnsafe(); err != nil {
+		return err
+	}
+	if wal.groupCommitMgr != nil {
+		return wal.groupCommitMgr.FlushActiveBufferDirectUnsafe(wal)
+	}
 	return nil
 }
 
@@ -561,24 +628,18 @@ func (wal *WriteAheadLog) ReplayOperations(fromLSN uint64, replayFunc func(WALEn
 
 	wal.logger.Debugf("REPLAY: Found %d files in directory", len(files))
 
-	// Match WAL files: YYYY-MM-DD.wal or YYYY-MM-DD_HH-MM-SS.wal (for rotated files)
-	walPattern := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(_\d{2}-\d{2}-\d{2})?\.wal$`)
 	var walFiles []string
-
 	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
-		wal.logger.Debugf("REPLAY: Checking file: %s, matches=%v", file.Name(), walPattern.MatchString(file.Name()))
-		if walPattern.MatchString(file.Name()) {
+		if walFilePattern.MatchString(file.Name()) {
 			walFiles = append(walFiles, filepath.Join(dir, file.Name()))
 		}
 	}
 
-	wal.logger.Debugf("REPLAY: Found %d WAL files matching pattern", len(walFiles))
-
-	// Sort files by modification time
-	// TODO: Implement proper sorting
+	// Sort files by name so replay order is deterministic (YYYY-MM-DD.wal then YYYY-MM-DD_HH-MM-SS.wal)
+	sort.Slice(walFiles, func(i, j int) bool { return walFiles[i] < walFiles[j] })
 
 	for _, filePath := range walFiles {
 		// Try binary format first (new format)
@@ -723,43 +784,39 @@ func (wal *WriteAheadLog) replayFromFileASCII(filePath string, fromLSN uint64, r
 	return nil
 }
 
-// CleanupOldFiles removes WAL files older than the retention period
+// CleanupOldFiles removes WAL files older than the retention period.
+// Uses baseFilePath and walFilePattern (same as loadLastLSN and ReplayOperations).
 func (wal *WriteAheadLog) CleanupOldFiles() error {
 	wal.mutex.Lock()
 	defer wal.mutex.Unlock()
 
 	cutoff := time.Now().AddDate(0, 0, -wal.retentionDays)
-
-	dir := filepath.Dir(wal.baseFilePath)
+	dir := wal.baseFilePath
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("failed to read WAL directory: %w", err)
 	}
 
-	walPattern := regexp.MustCompile(`wal_\d{4}-\d{2}-\d{2}.*\.wal$`)
-
 	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
-
-		if walPattern.MatchString(file.Name()) {
-			fullPath := filepath.Join(dir, file.Name())
-			info, err := os.Stat(fullPath)
-			if err != nil {
-				continue
-			}
-
-			if info.ModTime().Before(cutoff) {
-				if err := os.Remove(fullPath); err != nil {
-					wal.logger.Warnf("Failed to remove old WAL file %s: %v", fullPath, err)
-				} else {
-					wal.logger.Debugf("Removed old WAL file: %s", fullPath)
-				}
+		if !walFilePattern.MatchString(file.Name()) {
+			continue
+		}
+		fullPath := filepath.Join(dir, file.Name())
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(fullPath); err != nil {
+				wal.logger.Warnf("Failed to remove old WAL file %s: %v", fullPath, err)
+			} else {
+				wal.logger.Debugf("Removed old WAL file: %s", fullPath)
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -808,12 +865,10 @@ func (wal *WriteAheadLog) SetCoordinator(coordinator *WriteCoordinator) {
 }
 
 // GetLastFlushError returns the last error from the async flush goroutine, if any
-// HIGH-008: Allows callers to detect and handle flush errors from background operations
-// Returns nil if no error has occurred or if the last flush was successful
 func (wal *WriteAheadLog) GetLastFlushError() error {
 	if val := wal.lastFlushError.Load(); val != nil {
-		if errPtr, ok := val.(*error); ok && errPtr != nil && *errPtr != nil {
-			return *errPtr
+		if h, ok := val.(*errHolder); ok && h != nil {
+			return h.err
 		}
 	}
 	return nil

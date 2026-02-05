@@ -290,8 +290,9 @@ func (n *LimitNode) Execute(ctx context.Context) (map[string]*models.Document, e
 		resultMap[doc.DocumentID] = doc
 	}
 
+	// Use len(docSlice) for total: when child is SortNode, documents is never set (Issue 6)
 	n.Logger.Debugf("LimitNode completed: returned %d documents (offset=%d, limit=%d from %d total)",
-		len(resultMap), n.Offset, n.Limit, len(documents))
+		len(resultMap), n.Offset, n.Limit, len(docSlice))
 
 	return resultMap, nil
 }

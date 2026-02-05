@@ -97,13 +97,11 @@ func NewBufferPool(bufferCount int, pageSize int, fileRegistry *FileRegistry, Lo
 		Logger:       Logger,
 	}
 
-	// Initialize all Buffers
+	// Initialize all Buffers (State/RefCount/Tag live in Descriptor only)
 	for i := 0; i < bufferCount; i++ {
 		pool.Buffers[i] = &DBPageBuffer{
-			State:    BufferStateInvalid,
-			ID:       i,
-			Data:     make([]byte, pageSize),
-			RefCount: 0,
+			ID:   i,
+			Data: make([]byte, pageSize),
 		}
 
 		pool.Descriptors[i] = BufferDescriptor{
@@ -126,16 +124,16 @@ func (bp *BufferPool) GetPage(fileID uint32, blockNum uint32) (*DBPageBuffer, er
 	// First, try to find the page in the buffer pool
 	buffer, found := bp.lookupBuffer(tag)
 	if found {
-		bp.Hits++
+		bp.Hits.Add(1)
 		buffer.Referenced = true
 		buffer.UsageCount++
 		return buffer, nil
 	}
 
-	bp.Misses++
+	bp.Misses.Add(1)
 
-	// Page not found in the buffer pool, need to read it from disk
-	// First, find a buffer to use (either free or by eviction)
+	// Page not found in the buffer pool, need to read it from disk.
+	// Find a buffer (either free or by eviction), then pin it so no other goroutine can evict it.
 	bufferID, err := bp.findFreeBuffer()
 	if err != nil {
 		return nil, fmt.Errorf("could not find free buffer: %w", err)
@@ -143,52 +141,53 @@ func (bp *BufferPool) GetPage(fileID uint32, blockNum uint32) (*DBPageBuffer, er
 
 	buffer = bp.Buffers[bufferID]
 
-	// Mark it as in use to prevent concurrent eviction
-	buffer.Mu.Lock()
-	defer buffer.Mu.Unlock()
+	// Pin the buffer under pool mutex so findFreeBuffer will not hand it out again.
+	bp.MU.Lock()
+	bp.Descriptors[bufferID].RefCount = 1
+	bp.MU.Unlock()
 
-	// If the buffer contains dirty data, write it back to disk
+	// Do I/O without holding pool mutex and without adding new tag to HashTable,
+	// so no concurrent lookup can return this buffer until it is fully loaded.
+	// writeBufferToDisk takes buffer.Mu internally; we do not hold it here.
 	if buffer.IsDirty {
-		err := bp.writeBufferToDisk(buffer)
-		if err != nil {
+		if err := bp.writeBufferToDisk(buffer); err != nil {
+			bp.unpinBuffer(bufferID)
 			return nil, fmt.Errorf("could not write dirty buffer to disk: %w", err)
 		}
 	}
 
-	// Update the buffer's tag
-	oldTag := buffer.Tag
-	buffer.Tag = tag
+	oldTag := bp.Descriptors[bufferID].Tag
+	// Do not add tag to HashTable or set descriptor.Tag/buffer.Tag until after read completes.
 
-	// Update the hash table
-	if buffer.State != BufferStateInvalid {
-		delete(bp.HashTable, oldTag)
-	}
-	bp.HashTable[tag] = bufferID
-
-	// Read the page from disk
-	err = bp.readPageFromDisk(fileID, blockNum, buffer)
-	if err != nil {
-		// Revert the hash table changes on failure
-		delete(bp.HashTable, tag)
-		if buffer.State != BufferStateInvalid {
-			bp.HashTable[oldTag] = bufferID
-		}
+	if err := bp.readPageFromDisk(fileID, blockNum, buffer); err != nil {
+		bp.unpinBuffer(bufferID)
 		return nil, fmt.Errorf("could not read page from disk: %w", err)
 	}
 
-	// Update buffer state
-	buffer.State = BufferStateValid
-	buffer.RefCount = 1
+	// Now update hash table and state under pool mutex so the buffer is visible for the new tag.
+	bp.MU.Lock()
+	bp.Descriptors[bufferID].Tag = tag
+	buffer.Tag = tag
+	if bp.Descriptors[bufferID].State != BufferStateInvalid {
+		delete(bp.HashTable, oldTag)
+	}
+	bp.HashTable[tag] = bufferID
+	bp.Descriptors[bufferID].State = BufferStateValid
+	bp.Descriptors[bufferID].RefCount = 1
 	buffer.UsageCount = 1
 	buffer.Referenced = true
 	buffer.IsDirty = false
-
-	// Update descriptor
-	bp.Descriptors[bufferID].Tag = tag
-	bp.Descriptors[bufferID].State = BufferStateValid
-	bp.Descriptors[bufferID].RefCount = 1
+	bp.MU.Unlock()
 
 	return buffer, nil
+}
+
+// unpinBuffer releases the pin set on a buffer during the GetPage miss path (so it can be evicted again).
+// Call on miss-path failure after we pinned with RefCount=1 but before adding the tag to HashTable.
+func (bp *BufferPool) unpinBuffer(bufferID int) {
+	bp.MU.Lock()
+	bp.Descriptors[bufferID].RefCount = 0
+	bp.MU.Unlock()
 }
 
 // lookupBuffer checks if a page is already in the buffer pool
@@ -204,14 +203,12 @@ func (bp *BufferPool) lookupBuffer(tag BufferTag) (*DBPageBuffer, bool) {
 	buffer := bp.Buffers[bufferID]
 
 	// Make sure the buffer still contains this page (double-check)
-	if buffer.Tag != tag || buffer.State == BufferStateInvalid {
-		// This shouldn't happen with proper locking, but let's be defensive
+	if bp.Descriptors[bufferID].Tag != tag || bp.Descriptors[bufferID].State == BufferStateInvalid {
 		delete(bp.HashTable, tag)
 		return nil, false
 	}
 
 	// Increment the reference count
-	buffer.RefCount++
 	bp.Descriptors[bufferID].RefCount++
 
 	return buffer, true
@@ -224,7 +221,7 @@ func (bp *BufferPool) findFreeBuffer() (int, error) {
 
 	// First pass: look for an invalid (unused) buffer
 	for i := 0; i < bp.MaxBuffers; i++ {
-		if bp.Buffers[i].State == BufferStateInvalid {
+		if bp.Descriptors[i].State == BufferStateInvalid {
 			return i, nil
 		}
 	}
@@ -232,16 +229,21 @@ func (bp *BufferPool) findFreeBuffer() (int, error) {
 	// Second pass: use clock sweep to find a victim
 	startHand := bp.ClockHand
 
-	for {
+	for first := true; ; first = false {
 		bufferID := bp.ClockHand
 
-		// Move the clock hand
+		// Detect full circle without finding any victim (only after first iteration)
+		if !first && bufferID == startHand {
+			return 0, errors.New("all Buffers are in use, cannot evict any")
+		}
+
+		// Advance the clock hand
 		bp.ClockHand = (bp.ClockHand + 1) % bp.MaxBuffers
 
 		buffer := bp.Buffers[bufferID]
 
-		// Skip Buffers that are currently in use
-		if buffer.RefCount > 0 {
+		// Skip buffers that are currently in use
+		if bp.Descriptors[bufferID].RefCount > 0 {
 			continue
 		}
 
@@ -251,41 +253,39 @@ func (bp *BufferPool) findFreeBuffer() (int, error) {
 			continue
 		}
 
-		// Found a victim
+		// Found a victim; return immediately (do not check full circle after finding one)
 		bp.Evictions++
-
-		// If we've gone through all Buffers and found none to evict
-		if bp.ClockHand == startHand {
-			return 0, errors.New("all Buffers are in use, cannot evict any")
-		}
-
 		return bufferID, nil
 	}
 }
 
-// writeBufferToDisk writes a dirty buffer back to its file
+// writeBufferToDisk writes a dirty buffer back to its file.
+// It holds buffer.Mu for the duration of the write so a consistent snapshot is written
+// (avoids torn or stale writes if the buffer is in use). Callers must not hold buffer.Mu.
 func (bp *BufferPool) writeBufferToDisk(buffer *DBPageBuffer) error {
-	bp.Logger.Debugf("Writing buffer %d (file %d, block %d) to disk",
-		buffer.ID, buffer.Tag.FileID, buffer.Tag.BlockNumber)
+	buffer.Mu.Lock()
+	defer buffer.Mu.Unlock()
 
-	// Get the file handle from the file registry
-	file, err := bp.FileRegistry.GetFile(buffer.Tag.FileID)
+	tag := bp.Descriptors[buffer.ID].Tag
+	bp.Logger.Debugf("Writing buffer %d (file %d, block %d) to disk",
+		buffer.ID, tag.FileID, tag.BlockNumber)
+
+	// Get the file handle from the file registry (increments refCount)
+	file, err := bp.FileRegistry.GetFile(tag.FileID)
 	if err != nil {
-		return fmt.Errorf("failed to get file handle for fileID %d: %w",
-			buffer.Tag.FileID, err)
+		return fmt.Errorf("failed to get file handle for fileID %d: %w", tag.FileID, err)
 	}
-	// We don't need to close the file as it's managed by the registry
+	defer bp.FileRegistry.CloseFile(tag.FileID)
 
 	// Acquire a write lock on the file
 	file.Lock()
 	defer file.Unlock()
 
 	// Seek to the correct position
-	offset := int64(buffer.Tag.BlockNumber) * int64(bp.PageSize)
+	offset := int64(tag.BlockNumber) * int64(bp.PageSize)
 	_, err = file.Seek(offset, 0)
 	if err != nil {
-		return fmt.Errorf("failed to seek to block %d: %w",
-			buffer.Tag.BlockNumber, err)
+		return fmt.Errorf("failed to seek to block %d: %w", tag.BlockNumber, err)
 	}
 
 	// Write the buffer data
@@ -304,7 +304,7 @@ func (bp *BufferPool) writeBufferToDisk(buffer *DBPageBuffer) error {
 	buffer.LastModified = time.Now()
 
 	// Update write statistics
-	bp.WriteCount++
+	bp.WriteCount.Add(1)
 
 	// Sync based on policy
 	if bp.FileRegistry.ShouldSyncWrites() {
@@ -312,11 +312,10 @@ func (bp *BufferPool) writeBufferToDisk(buffer *DBPageBuffer) error {
 		if err := file.Sync(); err != nil {
 			return fmt.Errorf("failed to sync file: %w", err)
 		}
-	} else if bp.SyncInterval > 0 && bp.WriteCount%uint64(bp.SyncInterval) == 0 {
+		} else if bp.SyncInterval > 0 && bp.WriteCount.Load()%uint64(bp.SyncInterval) == 0 {
 		// Sync every N writes
 		if err := file.Sync(); err != nil {
-			bp.Logger.Warnf("Failed to perform interval sync on fileID %d: %v",
-				buffer.Tag.FileID, err)
+			bp.Logger.Warnf("Failed to perform interval sync on fileID %d: %v", tag.FileID, err)
 		}
 	}
 
@@ -326,11 +325,12 @@ func (bp *BufferPool) writeBufferToDisk(buffer *DBPageBuffer) error {
 
 // readPageFromDisk reads a page from disk into a buffer
 func (bp *BufferPool) readPageFromDisk(fileID uint32, blockNum uint32, buffer *DBPageBuffer) error {
-	// Get the file handle from the file registry
+	// Get the file handle from the file registry (increments refCount)
 	managed_file, err := bp.FileRegistry.GetFile(fileID)
 	if err != nil {
 		return fmt.Errorf("failed to get file handle for fileID %d: %w", fileID, err)
 	}
+	defer bp.FileRegistry.CloseFile(fileID)
 
 	// Acquire a read lock on the file
 	managed_file.RLock()
@@ -368,8 +368,7 @@ func (bp *BufferPool) ReleaseBuffer(buffer *DBPageBuffer) {
 	bp.MU.Lock()
 	defer bp.MU.Unlock()
 
-	if buffer.RefCount > 0 {
-		buffer.RefCount--
+	if bp.Descriptors[buffer.ID].RefCount > 0 {
 		bp.Descriptors[buffer.ID].RefCount--
 	}
 }
@@ -383,22 +382,24 @@ func (bp *BufferPool) MarkBufferDirty(buffer *DBPageBuffer) {
 	buffer.LastModified = time.Now()
 }
 
-// FlushAllDirty writes all dirty Buffers to disk
+// FlushAllDirty writes all dirty buffers to disk without holding the pool mutex across I/O,
+// so GetPage/ReleaseBuffer remain responsive. Each write holds only the buffer's lock.
 func (bp *BufferPool) FlushAllDirty() error {
 	bp.MU.Lock()
-	defer bp.MU.Unlock()
-
+	var toFlush []int
 	for i := 0; i < bp.MaxBuffers; i++ {
-		buffer := bp.Buffers[i]
-
-		if buffer.State != BufferStateInvalid && buffer.IsDirty {
-			err := bp.writeBufferToDisk(buffer)
-			if err != nil {
-				return fmt.Errorf("error flushing buffer %d: %w", i, err)
-			}
+		b := bp.Buffers[i]
+		if bp.Descriptors[i].State != BufferStateInvalid && b.IsDirty {
+			toFlush = append(toFlush, i)
 		}
 	}
+	bp.MU.Unlock()
 
+	for _, i := range toFlush {
+		if err := bp.writeBufferToDisk(bp.Buffers[i]); err != nil {
+			return fmt.Errorf("error flushing buffer %d: %w", i, err)
+		}
+	}
 	return nil
 }
 
@@ -422,13 +423,13 @@ func (bp *BufferPool) GetStats() BufferStats {
 		TotalBuffers: bp.MaxBuffers,
 		UsedBuffers:  0,
 		DirtyBuffers: 0,
-		Hits:         bp.Hits,
-		Misses:       bp.Misses,
+		Hits:         bp.Hits.Load(),
+		Misses:       bp.Misses.Load(),
 		Evictions:    bp.Evictions,
 	}
 
 	for i := 0; i < bp.MaxBuffers; i++ {
-		if bp.Buffers[i].State != BufferStateInvalid {
+		if bp.Descriptors[i].State != BufferStateInvalid {
 			stats.UsedBuffers++
 			if bp.Buffers[i].IsDirty {
 				stats.DirtyBuffers++
@@ -452,9 +453,9 @@ func (bp *BufferPool) ClearBuffer(bufferID int) error {
 	buffer := bp.Buffers[bufferID]
 
 	// Check if buffer is currently in use
-	if buffer.RefCount > 0 {
+	if bp.Descriptors[bufferID].RefCount > 0 {
 		return fmt.Errorf("cannot clear buffer %d: still in use (refCount: %d)",
-			bufferID, buffer.RefCount)
+			bufferID, bp.Descriptors[bufferID].RefCount)
 	}
 
 	// If buffer is dirty, write it to disk first
@@ -465,18 +466,14 @@ func (bp *BufferPool) ClearBuffer(bufferID int) error {
 	}
 
 	// Remove from hash table
-	if buffer.State != BufferStateInvalid {
-		delete(bp.HashTable, buffer.Tag)
+	if bp.Descriptors[bufferID].State != BufferStateInvalid {
+		delete(bp.HashTable, bp.Descriptors[bufferID].Tag)
 	}
 
-	// Reset buffer to invalid state
-	buffer.State = BufferStateInvalid
-	buffer.RefCount = 0
+	// Reset buffer and descriptor to invalid state
 	buffer.UsageCount = 0
 	buffer.Referenced = false
 	buffer.IsDirty = false
-
-	// Update descriptor
 	bp.Descriptors[bufferID].State = BufferStateInvalid
 	bp.Descriptors[bufferID].RefCount = 0
 	bp.Descriptors[bufferID].Tag = BufferTag{} // Zero value
@@ -504,7 +501,7 @@ func (bp *BufferPool) ClearBufferPool() error {
 	// Check for in-use Buffers
 	inUseCount := 0
 	for i := 0; i < bp.MaxBuffers; i++ {
-		if bp.Buffers[i].RefCount > 0 {
+		if bp.Descriptors[i].RefCount > 0 {
 			inUseCount++
 		}
 	}
@@ -519,18 +516,14 @@ func (bp *BufferPool) ClearBufferPool() error {
 	for i := 0; i < bp.MaxBuffers; i++ {
 		buffer := bp.Buffers[i]
 
-		// Reset buffer state
-		buffer.State = BufferStateInvalid
-		buffer.RefCount = 0
+		// Reset buffer and descriptor
 		buffer.UsageCount = 0
 		buffer.Referenced = false
 		buffer.IsDirty = false
-		buffer.Tag = BufferTag{} // Zero value
-
-		// Reset descriptor
+		buffer.Tag = BufferTag{}
 		bp.Descriptors[i].State = BufferStateInvalid
 		bp.Descriptors[i].RefCount = 0
-		bp.Descriptors[i].Tag = BufferTag{} // Zero value
+		bp.Descriptors[i].Tag = BufferTag{}
 
 		// Clear data (optional)
 		for j := range buffer.Data {
@@ -552,7 +545,7 @@ func (bp *BufferPool) ShutDown() error {
 	// Log final statistics
 	stats := bp.GetStats()
 	bp.Logger.Infof("Buffer pool stats at shutdown: hits=%d, misses=%d, ratio=%.2f, evictions=%d, writes=%d",
-		stats.Hits, stats.Misses, stats.HitRatio, stats.Evictions, bp.WriteCount)
+		stats.Hits, stats.Misses, stats.HitRatio, stats.Evictions, bp.WriteCount.Load())
 
 	// Flush all dirty Buffers
 	if err := bp.FlushAllDirty(); err != nil {
@@ -572,10 +565,10 @@ func (bp *BufferPool) ShutDown() error {
 
 	inUseCount := 0
 	for i := 0; i < bp.MaxBuffers; i++ {
-		if bp.Buffers[i].RefCount > 0 {
+		if bp.Descriptors[i].RefCount > 0 {
 			inUseCount++
 			bp.Logger.Warnf("Buffer %d still has refCount %d during shutdown",
-				i, bp.Buffers[i].RefCount)
+				i, bp.Descriptors[i].RefCount)
 		}
 	}
 

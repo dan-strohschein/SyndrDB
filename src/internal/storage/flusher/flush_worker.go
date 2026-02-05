@@ -24,9 +24,13 @@ import (
 
 // PageWriter is the interface for writing page data to storage.
 // This abstraction allows FlushWorker to work with different storage backends.
+// Implementers may no-op WriteIndexUpdates if index updates are applied elsewhere.
 type PageWriter interface {
 	// WritePageBatch writes a batch of encoded documents to a page.
 	WritePageBatch(bundleName string, pageID uint32, data []byte) error
+	// WriteIndexUpdates writes pending index updates for a page.
+	// Called after WritePageBatch when the page has index updates.
+	WriteIndexUpdates(bundleName string, pageID uint32, updates []IndexUpdate) error
 }
 
 // FlushWorker processes dirty pages and writes them to disk.
@@ -125,7 +129,9 @@ func (fw *FlushWorker) flushPage(page *DirtyPage) {
 
 	page.mu.Lock()
 	docCount := len(page.Documents)
-	if docCount == 0 && len(page.IndexUpdates) == 0 {
+	indexUpdates := make([]IndexUpdate, len(page.IndexUpdates))
+	copy(indexUpdates, page.IndexUpdates)
+	if docCount == 0 && len(indexUpdates) == 0 {
 		page.mu.Unlock()
 		return // Nothing to flush
 	}
@@ -164,8 +170,9 @@ func (fw *FlushWorker) flushPage(page *DirtyPage) {
 	data := encoder.Bytes()
 	byteCount := len(data)
 
-	// Clear page documents (we've captured them)
+	// Clear page documents and index updates (we've captured them)
 	page.Documents = page.Documents[:0]
+	page.IndexUpdates = page.IndexUpdates[:0]
 	page.WriteCount = 0
 	page.ByteSize = 0
 	page.mu.Unlock()
@@ -198,6 +205,17 @@ func (fw *FlushWorker) flushPage(page *DirtyPage) {
 				newAvg := (oldAvg*9 + writeTimeNs) / 10
 				fw.avgWriteTimeNs.Store(newAvg)
 			}
+		}
+	}
+
+	if len(indexUpdates) > 0 {
+		if err := fw.writer.WriteIndexUpdates(page.BundleName, page.PageID, indexUpdates); err != nil {
+			fw.logger.Error("Failed to write index updates",
+				"worker", fw.id,
+				"bundle", page.BundleName,
+				"page", page.PageID,
+				"error", err)
+			fw.writeErrors.Add(1)
 		}
 	}
 

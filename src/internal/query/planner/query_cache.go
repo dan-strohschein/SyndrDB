@@ -41,9 +41,12 @@ type CompiledExpression struct {
 	AST         syndrQL.Expression // Compiled abstract syntax tree
 	FieldRefs   []string           // Fields referenced in expression
 	Hash        string             // Cache key (SHA256 of original expression)
-	Selectivity float64            // Estimated selectivity (0.0 = highly selective, 1.0 = matches all)
-	CreatedAt   time.Time          // Cache entry creation time
-	Optimized   bool               // Whether predicate reordering was applied
+	// ExpressionString is the canonical expression string used for hashing (Issue 7).
+	// Stored so Get can verify the requested expression matches on hash collision.
+	ExpressionString string
+	Selectivity      float64   // Estimated selectivity (0.0 = highly selective, 1.0 = matches all)
+	CreatedAt        time.Time // Cache entry creation time
+	Optimized        bool      // Whether predicate reordering was applied
 }
 
 // NewQueryCache creates a new query cache with LRU eviction
@@ -61,12 +64,20 @@ func NewQueryCache(maxSize int, logger *zap.SugaredLogger) *QueryCache {
 func (qc *QueryCache) GetOrCompileExpression(expr syndrQL.Expression) (*CompiledExpression, error) {
 	// Generate cache key from expression
 	hash := qc.hashExpression(expr)
+	exprStr := expr.String()
 
-	// Check cache
+	// Check cache (Issue 7: verify expression string on hit to handle hash collision)
 	if cached, ok := qc.expressionCache.Get(hash); ok {
-		atomic.AddUint64(&qc.hits, 1)
-		qc.logger.Debugf("Expression cache HIT: %s", hash[:12])
-		return cached.(*CompiledExpression), nil
+		ce := cached.(*CompiledExpression)
+		if ce.ExpressionString != exprStr {
+			// Hash collision: different expression, treat as miss and recompile (Issue 7)
+			qc.logger.Debugf("Expression cache collision: hash=%s, recompiling", hash[:12])
+			// Fall through to compile and Put (overwrites collision entry); miss counted below
+		} else {
+			atomic.AddUint64(&qc.hits, 1)
+			qc.logger.Debugf("Expression cache HIT: %s", hash[:12])
+			return ce, nil
+		}
 	}
 
 	// Cache miss - compile and optimize
@@ -74,10 +85,11 @@ func (qc *QueryCache) GetOrCompileExpression(expr syndrQL.Expression) (*Compiled
 	qc.logger.Debugf("Expression cache MISS: %s", hash[:12])
 
 	compiled := &CompiledExpression{
-		AST:       expr,
-		Hash:      hash,
-		CreatedAt: time.Now(),
-		Optimized: false,
+		AST:              expr,
+		Hash:             hash,
+		ExpressionString:  exprStr,
+		CreatedAt:        time.Now(),
+		Optimized:        false,
 	}
 
 	// Extract field references
@@ -93,7 +105,6 @@ func (qc *QueryCache) GetOrCompileExpression(expr syndrQL.Expression) (*Compiled
 
 	// Store in cache
 	qc.expressionCache.Put(hash, compiled)
-
 	return compiled, nil
 }
 

@@ -413,42 +413,33 @@ func (a *SelectStatementAdapter) convertJoinClauses(joinClauses []JoinClause) []
 	return result
 }
 
-// parseQualifiedFieldName parses qualified field names like "Bundle"."Field" or Bundle.Field
-// Returns the bundle name and field name as separate strings
-// If no bundle qualifier is present, returns empty string for bundle
+// parseQualifiedFieldName parses qualified field names into (bundle, field).
+// Contract: one part → ("", trimmed name); two parts → (parts[0], parts[1]);
+// more than two → (parts[0], strings.Join(parts[1:], ".")). So "A"."B"."C" or A.B.C
+// yields bundle "A", field "B.C". Leading/trailing quotes are trimmed from segments.
 func (a *SelectStatementAdapter) parseQualifiedFieldName(qualifiedName string) (bundle string, field string) {
-	// Split on dot to separate bundle from field
-	parts := strings.Split(qualifiedName, ".")
+	trimmed := strings.Trim(qualifiedName, "\"")
+	parts := strings.Split(trimmed, ".")
 
-	if len(parts) == 2 {
-		// Qualified name: "Bundle"."Field"
-		bundle = strings.Trim(parts[0], "\"")
-		field = strings.Trim(parts[1], "\"")
-	} else {
-		// Unqualified name: just "Field"
-		bundle = ""
-		field = strings.Trim(qualifiedName, "\"")
+	switch len(parts) {
+	case 1:
+		return "", trimmed
+	case 2:
+		return strings.Trim(parts[0], "\""), strings.Trim(parts[1], "\"")
+	default:
+		fieldParts := make([]string, len(parts)-1)
+		for i, p := range parts[1:] {
+			fieldParts[i] = strings.Trim(p, "\"")
+		}
+		return strings.Trim(parts[0], "\""), strings.Join(fieldParts, ".")
 	}
-
-	return bundle, field
 }
 
-// AdaptWithFallback attempts to convert SelectStatement, falling back to string parsing on error
-// This is useful during the migration period to ensure zero downtime
-func (a *SelectStatementAdapter) AdaptWithFallback(stmt *SelectStatement, originalQuery string) (*queryparser.UnifiedSelectQuery, error) {
-	// Try to convert using the adapter
-	query, err := a.ToUnifiedSelectQuery(stmt)
-	if err != nil {
-		// Log the conversion failure
-		a.logger.Warnf("Failed to convert SelectStatement to UnifiedSelectQuery: %v. Falling back to string parser.", err)
-
-		// Fall back to the original string-based parser
-		// TODO: I need to import and use the original ParseUnifiedSelectQuery here
-		// For now, return the error
-		return nil, fmt.Errorf("adapter conversion failed and fallback not yet implemented: %w", err)
-	}
-
-	return query, nil
+// Adapt converts a SelectStatement to a UnifiedSelectQuery. It returns an error on
+// failure; there is no string fallback. Prefer ToUnifiedSelectQuery for the same
+// behavior; this method exists for API compatibility.
+func (a *SelectStatementAdapter) Adapt(stmt *SelectStatement, originalQuery string) (*queryparser.UnifiedSelectQuery, error) {
+	return a.ToUnifiedSelectQuery(stmt)
 }
 
 // ValidateConversion validates that the converted query is semantically equivalent
@@ -603,7 +594,7 @@ func (a *UpdateStatementAdapter) ToDocumentUpdateCommand(stmt *UpdateStatement) 
 		// Serialize WHERE clause back to string format
 		// TODO: I should consider keeping the structured WhereGroup in DocumentUpdateCommand
 		// for better performance instead of round-tripping through string serialization
-		whereClauseStr = a.serializeWhereGroup(whereGroup)
+		whereClauseStr = serializeWhereGroupToClauseString(whereGroup)
 	}
 
 	return &models.DocumentUpdateCommand{
@@ -614,20 +605,19 @@ func (a *UpdateStatementAdapter) ToDocumentUpdateCommand(stmt *UpdateStatement) 
 	}, nil
 }
 
-// serializeWhereGroup converts a WhereGroup back to a WHERE clause string
-// This is necessary for compatibility with the existing bundle service interface
-func (a *UpdateStatementAdapter) serializeWhereGroup(whereGroup *queryparser.WhereGroup) string {
+// serializeWhereGroupToClauseString converts a WhereGroup back to a WHERE clause
+// string. Field names are double-quoted for parseability (reserved words, spaces).
+// Used by both Update and Delete statement adapters for compatibility with the
+// bundle service interface.
+func serializeWhereGroupToClauseString(whereGroup *queryparser.WhereGroup) string {
 	if whereGroup == nil {
 		return ""
 	}
 
 	var parts []string
 
-	// Serialize clauses
 	for _, clause := range whereGroup.Clauses {
-		// Format: Field Operator Value
 		valueStr := fmt.Sprintf("%v", clause.Value)
-		// Quote string values with DOUBLE quotes (parser expects double quotes, not single)
 		if _, ok := clause.Value.(string); ok {
 			valueStr = fmt.Sprintf("\"%s\"", clause.Value)
 		}
@@ -635,16 +625,13 @@ func (a *UpdateStatementAdapter) serializeWhereGroup(whereGroup *queryparser.Whe
 		parts = append(parts, conditionStr)
 	}
 
-	// Serialize nested subgroups recursively
-	// TODO: I will add support for complex nested WHERE clauses when needed
 	for _, subGroup := range whereGroup.SubGroups {
-		groupStr := a.serializeWhereGroup(&subGroup)
+		groupStr := serializeWhereGroupToClauseString(&subGroup)
 		if groupStr != "" {
 			parts = append(parts, "("+groupStr+")")
 		}
 	}
 
-	// Join with the logical operator (AND/OR)
 	if len(parts) == 0 {
 		return ""
 	}
@@ -695,7 +682,7 @@ func (a *DeleteStatementAdapter) ToDocumentDeleteCommand(stmt *DeleteStatement) 
 		// Serialize WHERE clause back to string format
 		// TODO: I should consider keeping the structured WhereGroup in DocumentDeleteCommand
 		// for better performance instead of round-tripping through string serialization
-		whereClauseStr = a.serializeWhereGroup(whereGroup)
+		whereClauseStr = serializeWhereGroupToClauseString(whereGroup)
 	}
 
 	return &models.DocumentDeleteCommand{
@@ -706,50 +693,6 @@ func (a *DeleteStatementAdapter) ToDocumentDeleteCommand(stmt *DeleteStatement) 
 		DeletedDocumentIDs: nil, // Will be populated by the bundle service
 		RawCommand:         "",  // TODO: I could store the original command for debugging
 	}, nil
-}
-
-// serializeWhereGroup converts a WhereGroup back to a WHERE clause string
-// This is necessary for compatibility with the existing bundle service interface
-// Reused from UpdateStatementAdapter
-func (a *DeleteStatementAdapter) serializeWhereGroup(whereGroup *queryparser.WhereGroup) string {
-	if whereGroup == nil {
-		return ""
-	}
-
-	var parts []string
-
-	// Serialize clauses
-	for _, clause := range whereGroup.Clauses {
-		// Format: Field Operator Value
-		valueStr := fmt.Sprintf("%v", clause.Value)
-		// Quote string values
-		if _, ok := clause.Value.(string); ok {
-			valueStr = fmt.Sprintf("\"%s\"", clause.Value)
-		}
-		conditionStr := fmt.Sprintf("%s %s %s", clause.Field, clause.Operator, valueStr)
-		parts = append(parts, conditionStr)
-	}
-
-	// Serialize nested subgroups recursively
-	// TODO: I will add support for complex nested WHERE clauses when needed
-	for _, subGroup := range whereGroup.SubGroups {
-		groupStr := a.serializeWhereGroup(&subGroup)
-		if groupStr != "" {
-			parts = append(parts, "("+groupStr+")")
-		}
-	}
-
-	// Join with the logical operator (AND/OR)
-	if len(parts) == 0 {
-		return ""
-	}
-
-	operator := " AND "
-	if whereGroup.Operator == "OR" {
-		operator = " OR "
-	}
-
-	return strings.Join(parts, operator)
 }
 
 // CreateBundleStatementAdapter adapts CreateBundleStatement to BundleCommand

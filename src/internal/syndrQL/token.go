@@ -2,11 +2,12 @@ package syndrQL
 
 // Token represents a lexical token in SyndrQL
 type Token struct {
-	Type    TokenType
-	Value   string
-	Literal interface{} // Parsed value for literals (int, float, bool, string)
-	Line    int         // Line number for error reporting
-	Column  int         // Column number for error reporting
+	Type       TokenType
+	Value      string
+	Literal    interface{} // Parsed value for literals (int, float, bool, string)
+	Line       int         // Line number for error reporting
+	Column     int         // Column number for error reporting
+	StartOffset int        // Byte offset in the original input (0 if unknown); used for exact substring extraction
 }
 
 // TokenType represents the type of token

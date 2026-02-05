@@ -137,7 +137,7 @@ func (tr *TraceRegion) EndWithData(data map[string]interface{}) {
 	}
 
 	if duration > 10*time.Millisecond {
-		tr.logger.Warnf("⚠️  SLOW: %s took %v | %s", tr.name, duration, dataStr)
+		tr.logger.Infof("⚠️  SLOW: %s took %v | %s", tr.name, duration, dataStr)
 	} else if duration > 1*time.Millisecond {
 		tr.logger.Infof("📊 %s took %v | %s", tr.name, duration, dataStr)
 	} else {

@@ -1,6 +1,7 @@
 package bundlestore
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -49,12 +50,14 @@ func (c *syncCoalescer) RequestSync(f *os.File) error {
 	done := c.run.done
 	c.mu.Unlock()
 
-	// CRITICAL FIX: Wait with timeout instead of blocking indefinitely
-	// If the coalescer loop panics or gets stuck, this prevents caller from blocking forever
+	// CRITICAL FIX: Wait with timeout instead of blocking indefinitely.
+	// Use context.WithTimeout instead of time.After to avoid timer leak (time.After is not GC'd until it fires).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	select {
 	case <-done:
 		return nil
-	case <-time.After(30 * time.Second):
+	case <-ctx.Done():
 		return fmt.Errorf("timeout waiting for sync coalescer (possible stuck fsync or loop panic)")
 	}
 }

@@ -256,7 +256,10 @@ func (awa *AsyncWALAdapter) WriteEntry(entry WALEntry) error {
 	awa.mu.RUnlock()
 
 	// Get sequence number for ordering
-	sequence := awa.sequenceGen.Next()
+	sequence, err := awa.sequenceGen.Next()
+	if err != nil {
+		return fmt.Errorf("sequence generator: %w", err)
+	}
 
 	// Create result channel for synchronous waiting
 	resultChan := make(chan error, 1)
@@ -272,8 +275,7 @@ func (awa *AsyncWALAdapter) WriteEntry(entry WALEntry) error {
 	}
 
 	// Submit to worker pool
-	err := awa.workerPool.Submit(operation)
-	if err != nil {
+	if err = awa.workerPool.Submit(operation); err != nil {
 		return fmt.Errorf("failed to submit WAL entry: %w", err)
 	}
 
@@ -307,7 +309,10 @@ func (awa *AsyncWALAdapter) WriteEntries(entries []WALEntry) error {
 	awa.mu.RUnlock()
 
 	// Get sequence number for batch ordering
-	sequence := awa.sequenceGen.Next()
+	sequence, err := awa.sequenceGen.Next()
+	if err != nil {
+		return fmt.Errorf("sequence generator: %w", err)
+	}
 
 	// Create result channel for synchronous waiting
 	resultChan := make(chan error, 1)
@@ -322,8 +327,7 @@ func (awa *AsyncWALAdapter) WriteEntries(entries []WALEntry) error {
 	}
 
 	// Submit batch to worker pool
-	err := awa.workerPool.Submit(batchOp)
-	if err != nil {
+	if err = awa.workerPool.Submit(batchOp); err != nil {
 		return fmt.Errorf("failed to submit WAL batch: %w", err)
 	}
 
@@ -353,7 +357,10 @@ func (awa *AsyncWALAdapter) Flush() error {
 	awa.mu.RUnlock()
 
 	// Get sequence number for flush ordering
-	sequence := awa.sequenceGen.Next()
+	sequence, err := awa.sequenceGen.Next()
+	if err != nil {
+		return fmt.Errorf("sequence generator: %w", err)
+	}
 
 	// Create result channel for synchronous waiting
 	resultChan := make(chan error, 1)
@@ -366,8 +373,7 @@ func (awa *AsyncWALAdapter) Flush() error {
 	}
 
 	// Submit flush to worker pool
-	err := awa.workerPool.Submit(flushOp)
-	if err != nil {
+	if err = awa.workerPool.Submit(flushOp); err != nil {
 		return fmt.Errorf("failed to submit WAL flush: %w", err)
 	}
 
@@ -391,6 +397,13 @@ func (awa *AsyncWALAdapter) IsAsync() bool {
 // GetMode implements WALModeInterface
 func (awa *AsyncWALAdapter) GetMode() string {
 	return awa.mode
+}
+
+// GetSequenceGenerator returns the adapter's sequence generator for ordering.
+// Used after WAL recovery to call SetMinimum(wal.GetCurrentLSN()+1) so new operations
+// get sequences above any replayed state.
+func (awa *AsyncWALAdapter) GetSequenceGenerator() *async.SequenceGenerator {
+	return awa.sequenceGen
 }
 
 // Close implements WALModeInterface for async WAL

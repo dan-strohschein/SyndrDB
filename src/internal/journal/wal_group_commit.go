@@ -31,6 +31,7 @@ This design reduces contention by up to 10x for commit-heavy workloads.
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"syndrdb/src/pkg/common"
@@ -276,15 +277,18 @@ func (gcm *GroupCommitManager) NeedsFlush() bool {
 		time.Since(gcm.activeBuffer.createdAt) >= gcm.config.MaxWaitTime
 }
 
-// GetStats returns group commit statistics
+// GetStats returns group commit statistics (pending_waiters read under lock to avoid data race)
 func (gcm *GroupCommitManager) GetStats() map[string]interface{} {
+	gcm.waitersMu.Lock()
+	pendingWaiters := len(gcm.waiters)
+	gcm.waitersMu.Unlock()
 	return map[string]interface{}{
 		"flush_count":        gcm.flushCount.Load(),
 		"total_entries":      gcm.totalEntriesSent.Load(),
 		"group_commit_saves": gcm.groupCommitSaves.Load(),
 		"last_flushed_lsn":   gcm.lastFlushedLSN.Load(),
 		"flush_in_progress":  gcm.flushInProgress.Load(),
-		"pending_waiters":    len(gcm.waiters),
+		"pending_waiters":    pendingWaiters,
 	}
 }
 
@@ -436,12 +440,15 @@ func LogOperationWithGroupCommit(wal *WriteAheadLog, txID string, operation Oper
 	assignedLSN := wal.currentLSN
 	wal.mutex.Unlock()
 
-	// Step 3: Calculate checksum and serialize (no lock)
-	entry.Checksum = wal.calculateChecksum(entry)
+	// Step 3: Serialize with Checksum=0, then compute CRC32 over binary payload
+	entry.Checksum = 0
 	binaryData, err := wal.SerializeWALEntryBinary(entry)
 	if err != nil {
 		return err
 	}
+	sum := checksumBinaryPayload(binaryData)
+	binary.LittleEndian.PutUint32(binaryData[WAL_BINARY_CHECKSUM_OFFSET:WAL_BINARY_CHECKSUM_OFFSET+4], sum)
+	entry.Checksum = sum
 
 	// Step 4: Append to active buffer (brief internal lock in group commit manager)
 	shouldFlush := wal.groupCommitMgr.AppendEntry(binaryData, assignedLSN)
@@ -485,8 +492,9 @@ func LogOperationWithGroupCommit(wal *WriteAheadLog, txID string, operation Oper
 		case flushErr := <-waitChan:
 			return flushErr
 		case <-time.After(5 * time.Second):
-			// Timeout - should not happen in normal operation
-			return nil // Proceed anyway, data is likely durable
+			// Timeout: in balanced mode commit can fail if durability wait times out.
+			// Callers should retry or surface the error.
+			return fmt.Errorf("timeout waiting for WAL durability confirmation (LSN %d)", assignedLSN)
 		}
 	}
 

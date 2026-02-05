@@ -405,6 +405,8 @@ func (m *ShardedPageCacheMap) SetPageID(bundleName, documentID string, pageID ui
 
 // evictOneLocked evicts one document from the cache using FIFO order.
 // Caller must hold write lock on the shard.
+// Issue 6: When FIFO is empty but pageMap is not, rebuild FIFO from pageMap so the
+// invariant "fifo contains exactly the keys in pageMap" is restored before evicting.
 func (m *ShardedPageCacheMap) evictOneLocked(bundleName string, entry *documentPageCacheEntry) {
 	if len(entry.fifo) > 0 {
 		docID := entry.fifo[0]
@@ -415,17 +417,25 @@ func (m *ShardedPageCacheMap) evictOneLocked(bundleName string, entry *documentP
 		}
 		return
 	}
-	// Fallback: remove arbitrary entry if FIFO is empty somehow
-	for docID := range entry.pageMap {
+	// Fallback: FIFO empty but pageMap not (e.g. after prior fallback). Rebuild FIFO from pageMap.
+	if len(entry.pageMap) > 0 {
+		entry.fifo = entry.fifo[:0]
+		for docID := range entry.pageMap {
+			entry.fifo = append(entry.fifo, docID)
+		}
+		// Now evict from front as usual
+		docID := entry.fifo[0]
+		entry.fifo = entry.fifo[1:]
 		delete(entry.pageMap, docID)
 		if m.logger != nil {
-			m.logger.Debugf("Evicted document %s from page cache for bundle %s (fallback)", docID, bundleName)
+			m.logger.Debugf("Evicted document %s from page cache for bundle %s (fallback after FIFO rebuild)", docID, bundleName)
 		}
-		return
 	}
 }
 
 // InvalidateDocument removes a specific document from the cache.
+// Complexity is O(n) in the size of the bundle's cache (FIFO scan and slice removal).
+// For large caches under heavy delete load, consider profiling; see Issue 5 (reverse index or skip FIFO remove).
 func (m *ShardedPageCacheMap) InvalidateDocument(bundleName, documentID string) {
 	idx := m.shardIndex(bundleName)
 	shard := &m.shards[idx]

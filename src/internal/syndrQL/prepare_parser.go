@@ -80,7 +80,6 @@ func ParsePrepareStatement(tokens []Token, logger *zap.SugaredLogger, command ..
 	}
 
 	// Remaining tokens: query_text
-	// Reconstruct the query text from the remaining tokens
 	queryTokens := tokens[3:]
 	if len(queryTokens) == 0 {
 		return nil, CreateParserErrorWithToken(
@@ -91,17 +90,22 @@ func ParsePrepareStatement(tokens []Token, logger *zap.SugaredLogger, command ..
 		)
 	}
 
-	// Rebuild query text from tokens
-	// This preserves the original query structure with parameters
-	var queryBuilder strings.Builder
-	for i, tok := range queryTokens {
-		if i > 0 && needsSpaceBefore(tok) {
-			queryBuilder.WriteString(" ")
+	// When original command is available, extract query text by byte offset so we preserve
+	// exact formatting and avoid mis-splitting on " AS " inside string literals.
+	var queryText string
+	if originalCommand != "" && queryTokens[0].StartOffset > 0 {
+		queryText = strings.TrimSpace(originalCommand[queryTokens[0].StartOffset:])
+	} else {
+		// Fallback: rebuild from token values (approximate; may differ from original)
+		var queryBuilder strings.Builder
+		for i, tok := range queryTokens {
+			if i > 0 && needsSpaceBefore(tok) {
+				queryBuilder.WriteString(" ")
+			}
+			queryBuilder.WriteString(tok.Value)
 		}
-		queryBuilder.WriteString(tok.Value)
+		queryText = queryBuilder.String()
 	}
-
-	queryText := queryBuilder.String()
 
 	logger.Debugf("Parsed PREPARE statement: name=%s, query=%s", statementName, queryText)
 

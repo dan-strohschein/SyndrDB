@@ -43,26 +43,29 @@ type CreateUserStatement struct {
 
 // CreateUserParser handles parsing of CREATE USER statements
 type CreateUserParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer   *Tokenizer
+	current     int
+	tokens      []Token
+	tokenizeErr error
 }
 
-// NewCreateUserParser creates a new CREATE USER parser for the given input
+// NewCreateUserParser creates a new CREATE USER parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewCreateUserParser(input string) *CreateUserParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &CreateUserParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &CreateUserParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &CreateUserParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses a CREATE USER statement
 // Syntax: CREATE USER "username" WITH PASSWORD 'password';
 func (p *CreateUserParser) Parse() (*CreateUserStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect: CREATE
 	if err := p.expectKeyword(TOKEN_CREATE, "CREATE"); err != nil {
 		return nil, err

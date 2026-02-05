@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"syscall"
@@ -16,6 +17,23 @@ const WAL_BINARY_MAGIC = 0x57414C42 // "WALB" in binary
 
 // WAL_BINARY_VERSION is the current binary format version
 const WAL_BINARY_VERSION = uint32(1)
+
+// WAL_BINARY_CHECKSUM_OFFSET is the offset of the 4-byte checksum field in the serialized binary entry.
+// Checksum is computed over the serialized payload with this field zeroed (CRC32).
+const WAL_BINARY_CHECKSUM_OFFSET = 45
+
+// checksumBinaryPayload computes CRC32 over the serialized WAL entry with the checksum field zeroed.
+// Used for both writing (compute after serializing with Checksum=0) and replay verification.
+// Does not mutate data; uses a copy for the zeroed region.
+func checksumBinaryPayload(data []byte) uint32 {
+	if len(data) < WAL_BINARY_CHECKSUM_OFFSET+4 {
+		return 0
+	}
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	binary.LittleEndian.PutUint32(buf[WAL_BINARY_CHECKSUM_OFFSET:WAL_BINARY_CHECKSUM_OFFSET+4], 0)
+	return crc32.ChecksumIEEE(buf)
+}
 
 // SerializeWALEntryBinary converts a WALEntry to compact binary format
 // This replaces the JSON marshaling for significantly better performance
@@ -272,7 +290,7 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	// Increment LSN
 	wal.currentLSN++
 
-	// Create WAL entry
+	// Create WAL entry (checksum computed over serialized binary below)
 	entry := WALEntry{
 		LSN:        wal.currentLSN,
 		Timestamp:  time.Now(),
@@ -283,16 +301,17 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 		BeforeData: beforeData,
 		AfterData:  afterData,
 		Metadata:   metadata,
+		Checksum:   0,
 	}
 
-	// Calculate checksum for integrity
-	entry.Checksum = wal.calculateChecksum(entry)
-
-	// Serialize entry to binary format
+	// Serialize with Checksum=0, then compute CRC32 over payload and patch buffer
 	binaryData, err := wal.SerializeWALEntryBinary(entry)
 	if err != nil {
 		return fmt.Errorf("failed to serialize WAL entry to binary: %w", err)
 	}
+	sum := checksumBinaryPayload(binaryData)
+	binary.LittleEndian.PutUint32(binaryData[WAL_BINARY_CHECKSUM_OFFSET:WAL_BINARY_CHECKSUM_OFFSET+4], sum)
+	entry.Checksum = sum
 
 	// Write entry length header (4 bytes) followed by binary data
 	// This allows for easy reading of variable-length entries
@@ -541,17 +560,18 @@ func (wal *WriteAheadLog) ReplayOperationsBinary(filePath string, fromLSN uint64
 			continue
 		}
 
-		// Verify checksum
-		expectedChecksum := wal.calculateChecksum(*entry)
-		if entry.Checksum != expectedChecksum {
+		// Verify checksum (CRC32 over serialized payload with checksum field zeroed)
+		expectedChecksum := checksumBinaryPayload(entryData)
+		storedChecksum := binary.LittleEndian.Uint32(entryData[WAL_BINARY_CHECKSUM_OFFSET : WAL_BINARY_CHECKSUM_OFFSET+4])
+		if storedChecksum != expectedChecksum {
 			// HIGH-008: Track checksum errors but continue processing
 			recoveryErrors = append(recoveryErrors, &RecoveryError{
 				LSN:    entry.LSN,
 				File:   filePath,
 				Reason: "checksum_mismatch",
-				Err:    fmt.Errorf("expected %d, got %d", expectedChecksum, entry.Checksum),
+				Err:    fmt.Errorf("expected %d, got %d", expectedChecksum, storedChecksum),
 			})
-			wal.logger.Warnf("Checksum mismatch for LSN %d: expected %d, got %d", entry.LSN, expectedChecksum, entry.Checksum)
+			wal.logger.Warnf("Checksum mismatch for LSN %d: expected %d, got %d", entry.LSN, expectedChecksum, storedChecksum)
 			entryCount++
 			continue
 		}
@@ -639,9 +659,10 @@ func (wal *WriteAheadLog) ValidateBinaryWALFile(filePath string) error {
 			return fmt.Errorf("failed to deserialize entry %d: %w", entryCount, err)
 		}
 
-		// Verify checksum
-		expectedChecksum := wal.calculateChecksum(*entry)
-		if entry.Checksum != expectedChecksum {
+		// Verify checksum (CRC32 over serialized payload)
+		expectedChecksum := checksumBinaryPayload(entryData)
+		storedChecksum := binary.LittleEndian.Uint32(entryData[WAL_BINARY_CHECKSUM_OFFSET : WAL_BINARY_CHECKSUM_OFFSET+4])
+		if storedChecksum != expectedChecksum {
 			return fmt.Errorf("checksum mismatch at entry %d (LSN %d)", entryCount, entry.LSN)
 		}
 

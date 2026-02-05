@@ -288,6 +288,9 @@ func (jp *JoinQueryPlanner) CreateJoinExecutionPlan(query *queryparser.SelectJoi
 		IndexesUsed:   []string{}, // Phase 1: Basic implementation, Phase 2 will add index usage tracking
 		Logger:        jp.Logger,
 	}
+	if rootNode != nil {
+		plan.estimatedMemoryBytes = rootNode.EstimateMemoryUsage()
+	}
 
 	jp.Logger.Debugf("Created new JOIN execution plan with cost %.2f, estimated rows: %d",
 		plan.Cost, plan.EstimatedRows)
@@ -564,13 +567,25 @@ func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.D
 		return nil, fmt.Errorf("JOIN execution failed: %w", err)
 	}
 
-	// OPTIMIZATION: Ensure pooled JoinedDocuments are returned after merge completes
-	// This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup
-	// The JoinedDocuments are only used during the merge process below, then can be recycled
-	defer joinexecutor.FreeJoinedDocuments(result.Documents)
-
-	// PHASE 3: Store JoinedDocument results for hierarchical transformation
-	jen.joinedResults = result.Documents
+	// When the server attached a join cleanup slice to context, register cleanup and
+	// use the pooled slice directly (no copy). Otherwise copy for downstream and defer free.
+	if cleanup := GetJoinCleanup(ctx); cleanup != nil {
+		docs := result.Documents
+		*cleanup = append(*cleanup, func() { joinexecutor.FreeJoinedDocuments(docs) })
+		jen.joinedResults = docs
+	} else {
+		// Issue 12 fallback: no cleanup in context (e.g. tests) — copy and defer free.
+		copySlice := make([]*joinexecutor.JoinedDocument, len(result.Documents))
+		for i, jd := range result.Documents {
+			copySlice[i] = &joinexecutor.JoinedDocument{
+				LeftDocument:  jd.LeftDocument,
+				RightDocument: jd.RightDocument,
+				JoinKey:       jd.JoinKey,
+			}
+		}
+		jen.joinedResults = copySlice
+		defer joinexecutor.FreeJoinedDocuments(result.Documents)
+	}
 
 	// STREAMING TOP-N OPTIMIZATION: When ORDER BY + LIMIT is present, use a heap during merge
 	// This converts O(n log n) full sort to O(n log k) where k = limit

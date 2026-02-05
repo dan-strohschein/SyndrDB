@@ -141,12 +141,14 @@ type SelectParser struct {
 	originalCommand string
 }
 
-// NewSelectParser creates a new SELECT parser
-func NewSelectParser(tokens []Token) *SelectParser {
+// NewSelectParser creates a new SELECT parser. logger may be nil; if set, it is
+// used for error paths before Parse is called and can be overridden in Parse.
+func NewSelectParser(tokens []Token, logger *zap.SugaredLogger) *SelectParser {
 	p := &SelectParser{
 		tokens:          tokens,
 		pos:             0,
 		patternDetector: NewSelectPatternDetector(),
+		logger:          logger,
 	}
 
 	if len(tokens) > 0 {
@@ -156,12 +158,14 @@ func NewSelectParser(tokens []Token) *SelectParser {
 	return p
 }
 
-// Parse parses a SELECT statement
-// command is the original command string for error reporting (optional, will reconstruct if not provided)
+// Parse parses a SELECT statement.
+// logger may be nil; if non-nil it overrides the constructor logger for this parse.
+// command is the original command string for error reporting (optional, will reconstruct if not provided).
 func (p *SelectParser) Parse(logger *zap.SugaredLogger, command ...string) (*SelectStatement, error) {
-	// Store logger for use by child parsers (ExpressionParser, nested SelectParsers)
-	p.logger = logger
-	
+	if logger != nil {
+		p.logger = logger
+	}
+
 	// Store original command if provided
 	if len(command) > 0 && command[0] != "" {
 		p.originalCommand = command[0]
@@ -1016,7 +1020,7 @@ func ParseSelect(input string, logger *zap.SugaredLogger) (*SelectStatement, err
 		return nil, fmt.Errorf("tokenization error: %w", err)
 	}
 
-	parser := NewSelectParser(tokens)
+	parser := NewSelectParser(tokens, logger)
 	return parser.Parse(logger)
 }
 

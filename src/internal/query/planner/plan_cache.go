@@ -129,13 +129,23 @@ type CacheEntry struct {
 	estimatedMemoryBytes int64
 }
 
-// CacheStats tracks global cache statistics
+// CacheStats tracks global cache statistics (internal, with atomics)
 type CacheStats struct {
 	hits          atomic.Uint64
 	misses        atomic.Uint64
 	evictions     atomic.Uint64
 	invalidations atomic.Uint64
 	staleServes   atomic.Uint64
+}
+
+// CacheStatsSnapshot is a point-in-time snapshot of cache statistics for callers.
+// Use Stats() to obtain current values; atomics are not exposed.
+type CacheStatsSnapshot struct {
+	Hits          uint64
+	Misses        uint64
+	Evictions     uint64
+	Invalidations uint64
+	StaleServes   uint64
 }
 
 // ShardStats tracks per-shard statistics
@@ -210,8 +220,11 @@ func (spc *ShardedPlanCache) Get(
 	}
 
 	// Try to get from cache
-	plan := shard.get(ctx, query, key, useGeneric)
+	plan, staleServed := shard.get(ctx, query, key, useGeneric)
 	if plan != nil {
+		if staleServed {
+			spc.stats.staleServes.Add(1)
+		}
 		spc.stats.hits.Add(1)
 		shard.stats.hits.Add(1)
 		spc.logger.Debugf("Plan cache HIT: shard=%d bundle=%s key=%016x execCount=%d",
@@ -236,18 +249,19 @@ func (spc *ShardedPlanCache) Get(
 	return newPlan, nil
 }
 
-// get retrieves a plan from the shard, handling stale plan serving
+// get retrieves a plan from the shard, handling stale plan serving.
+// Returns (plan, true) when serving a stale plan (caller must increment staleServes).
 func (shard *PlanCacheShard) get(
 	ctx context.Context,
 	query *queryparser.UnifiedSelectQuery,
 	key uint64,
 	useGeneric bool,
-) *ExecutionPlan {
+) (*ExecutionPlan, bool) {
 	shard.mu.RLock()
 	elem, ok := shard.cache[key]
 	if !ok {
 		shard.mu.RUnlock()
-		return nil
+		return nil, false
 	}
 
 	entry := elem.Value.(*CacheEntry)
@@ -264,7 +278,10 @@ func (shard *PlanCacheShard) get(
 		entry.lastUsed = time.Now()
 		entry.execCount++
 		shard.mu.RUnlock()
-		return entry.plan.Clone()
+		p := entry.plan.Clone()
+		p.CacheKey = key
+		p.IsGeneric = entry.isGeneric
+		return p, false
 	}
 
 	// Plan is stale - check if we can serve it anyway (SELECT queries only)
@@ -284,7 +301,7 @@ func (shard *PlanCacheShard) get(
 		}
 		shard.logger.Warnf("Blocked stale serve for non-SELECT: queryType=%v bundle=%s debug=%v",
 			query.QueryType, bundleName, settings.Debug)
-		return nil
+		return nil, false
 	}
 
 	// Check stale serve window
@@ -294,7 +311,7 @@ func (shard *PlanCacheShard) get(
 	// Re-check entry still exists after lock upgrade
 	elem, ok = shard.cache[key]
 	if !ok {
-		return nil
+		return nil, false
 	}
 	entry = elem.Value.(*CacheEntry)
 
@@ -302,8 +319,11 @@ func (shard *PlanCacheShard) get(
 	maxStale := time.Duration(settings.GetSettings().PlanCacheStaleServeSeconds) * time.Second
 
 	if entry.isStale && staleDuration < maxStale {
-		// Still within stale serve window - return clone of stale plan
-		return entry.plan.Clone()
+		// Still within stale serve window - return clone of stale plan (Issue 6: count as stale serve)
+		p := entry.plan.Clone()
+		p.CacheKey = key
+		p.IsGeneric = entry.isGeneric
+		return p, true
 	}
 
 	// Either first time stale or window expired - mark stale and trigger rebuild
@@ -314,7 +334,11 @@ func (shard *PlanCacheShard) get(
 	// I'll implement a proper async rebuild mechanism here someday
 	// TODO: Implement async rebuild with proper context handling and WaitGroup tracking
 
-	return entry.plan.Clone()
+	// First-time stale serve (Issue 6: count as stale serve)
+	p := entry.plan.Clone()
+	p.CacheKey = key
+	p.IsGeneric = entry.isGeneric
+	return p, true
 }
 
 // insert adds a plan to the cache with LRU eviction
@@ -411,15 +435,15 @@ func (spc *ShardedPlanCache) computeKey(query *queryparser.UnifiedSelectQuery, u
 		h.Write([]byte{0})
 	}
 
-	// Write WHERE expression structure (not values) - recursive serialization
-	// For now, we serialize the string representation of the Expression
-	// This ensures queries with different WHERE clauses get different cache keys
+	// Write WHERE expression structure (not values) - canonical serialization (Issue 9)
+	// Use Expression.String() when available for deterministic cache key (avoids fmt "%v" map iteration).
 	if query.WhereExpression != nil {
 		h.Write([]byte("WHERE:"))
-		// Use string representation of expression for now
-		// This is not ideal but ensures different WHERE clauses produce different keys
-		whereStr := fmt.Sprintf("%v", query.WhereExpression)
-		h.Write([]byte(whereStr))
+		if stringer, ok := query.WhereExpression.(interface{ String() string }); ok {
+			h.Write([]byte(stringer.String()))
+		} else {
+			h.Write([]byte(fmt.Sprintf("%v", query.WhereExpression)))
+		}
 		h.Write([]byte{0})
 	} else {
 		h.Write([]byte("NO_WHERE"))
@@ -435,6 +459,20 @@ func (spc *ShardedPlanCache) computeKey(query *queryparser.UnifiedSelectQuery, u
 			h.Write([]byte(field))
 			h.Write([]byte{0})
 		}
+	}
+
+	// Write HAVING expression so queries that differ only in HAVING get different keys
+	if query.HavingExpression != nil {
+		h.Write([]byte("HAVING:"))
+		if stringer, ok := query.HavingExpression.(interface{ String() string }); ok {
+			h.Write([]byte(stringer.String()))
+		} else {
+			h.Write([]byte(fmt.Sprintf("%v", query.HavingExpression)))
+		}
+		h.Write([]byte{0})
+	} else {
+		h.Write([]byte("NO_HAVING"))
+		h.Write([]byte{0})
 	}
 
 	// Write ORDER BY fields (sorted with direction)
@@ -598,17 +636,18 @@ func (spc *ShardedPlanCache) Shutdown() {
 	spc.logger.Info("Plan cache shutdown complete")
 }
 
-// Stats returns global cache statistics
-func (spc *ShardedPlanCache) Stats() CacheStats {
+// Stats returns a snapshot of global cache statistics (hits, misses, evictions, etc.).
+// Callers see current values from the live atomics.
+func (spc *ShardedPlanCache) Stats() CacheStatsSnapshot {
 	if spc == nil {
-		return CacheStats{}
+		return CacheStatsSnapshot{}
 	}
-	return CacheStats{
-		hits:          atomic.Uint64{},
-		misses:        atomic.Uint64{},
-		evictions:     atomic.Uint64{},
-		invalidations: atomic.Uint64{},
-		staleServes:   atomic.Uint64{},
+	return CacheStatsSnapshot{
+		Hits:          spc.stats.hits.Load(),
+		Misses:        spc.stats.misses.Load(),
+		Evictions:     spc.stats.evictions.Load(),
+		Invalidations: spc.stats.invalidations.Load(),
+		StaleServes:   spc.stats.staleServes.Load(),
 	}
 }
 

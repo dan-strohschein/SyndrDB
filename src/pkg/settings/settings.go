@@ -29,7 +29,8 @@ func getDefaultJoinMemoryLimitMB() int {
 
 // StorageConfig holds storage engine configuration
 type StorageConfig struct {
-	BundleFileMaxSizeMB int `yaml:"bundle_file_max_size_mb"` // Maximum bundle file size in MB before rotation (default: 32)
+	BundleFileMaxSizeMB       int `yaml:"bundle_file_max_size_mb"`        // Maximum bundle file size in MB before rotation (default: 32)
+	MemTableWALBufferMaxSize int `yaml:"memtable_wal_buffer_max_size"`   // Max MemTable WAL buffer entries before swap/trim (default: 50000, 0 = use default)
 }
 
 // DefaultUser represents a default user to be created from configuration
@@ -111,6 +112,7 @@ type Arguments struct {
 
 	// Durability Configuration (PostgreSQL-style fsync optimizations)
 	DurabilityMode             string  `yaml:"durability_mode"`               // Durability mode: "strict", "balanced", "performance" (default: "performance")
+	UseGroupCommit             bool    `yaml:"use_group_commit"`               // Use group-commit path for WAL writes; reduces contention (default: true)
 	WALBatchSize               int     `yaml:"wal_batch_size"`                // Operations before WAL flush in balanced mode (default: 100)
 	WALMaxFlushDelay           int     `yaml:"wal_max_flush_delay"`           // Max milliseconds before forcing WAL flush (default: 100)
 	FsyncOnCommit              bool    `yaml:"fsync_on_commit"`               // Force immediate fsync on transaction commit (default: false for group commits)
@@ -290,6 +292,10 @@ type Arguments struct {
 	// Bounded by max entries; LRU eviction. Keyed by file path.
 	FileReadCacheMaxEntries int `yaml:"file_read_cache_max_entries"` // Max file/segment buffers in cache; 0 = use default 32
 
+	// Page cache GetDocumentPage: backoff (ms) when TryLock fails on cache miss before blocking Lock.
+	// 0 = no sleep (low latency); 1–2 = better cache fill under contention (code-review Issue 4).
+	PageCacheTryLockBackoffMs int `yaml:"page_cache_trylock_backoff_ms"` // Default 0
+
 	// Prepared Statement Cache Configuration (for parameterized queries)
 	PreparedStatementCacheEnabled  bool `yaml:"prepared_statement_cache_enabled"`  // Enable prepared statement caching (default: true)
 	PreparedStatementCacheCapacity int  `yaml:"prepared_statement_cache_capacity"` // Maximum cached statements per shard (default: 1000, 8 shards = 8000 total)
@@ -377,6 +383,7 @@ func GetSettings() *Arguments {
 
 			// Durability Configuration Defaults (PostgreSQL-style)
 			DurabilityMode:             "performance", // Performance mode: group commits with async fsync
+			UseGroupCommit:             true,          // Group commit by default for lower WAL contention
 			WALBatchSize:               100,           // Batch 100 operations before flush
 			WALMaxFlushDelay:           100,           // Force flush after 100ms max
 			FsyncOnCommit:              false,         // Disable immediate fsync to enable group commits
@@ -536,6 +543,7 @@ func GetSettings() *Arguments {
 			BundleAdapterMaxCachedPages:        500,    // Max pages in BundleAdapter.cachedPages per scanner
 			DocumentPageMapMaxEntriesPerBundle: 100000, // Max documentID->pageID entries per bundle
 			FileReadCacheMaxEntries:            32,     // Max file/segment buffers (avoids repeated full-file reads per page)
+			PageCacheTryLockBackoffMs:          0,     // Backoff (ms) when GetDocumentPage TryLock fails; 0 = no sleep (low latency), 2 = better cache fill under contention
 
 			// Prepared Statement Cache Defaults
 			PreparedStatementCacheEnabled:  true, // Enable prepared statement caching by default

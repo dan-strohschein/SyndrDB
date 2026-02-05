@@ -3,6 +3,8 @@ package async
 import (
 	"sync/atomic"
 	"time"
+
+	"syndrdb/src/pkg/constants"
 )
 
 // SequenceGenerator provides monotonic sequence numbers for ordering operations
@@ -22,10 +24,16 @@ func NewSequenceGenerator() *SequenceGenerator {
 	}
 }
 
-// Next returns the next sequence number in a thread-safe manner
-// Sequence numbers are guaranteed to be monotonically increasing
-func (sg *SequenceGenerator) Next() uint64 {
-	return atomic.AddUint64(&sg.counter, 1)
+// Next returns the next sequence number in a thread-safe manner.
+// Sequence numbers are guaranteed to be monotonically increasing.
+// Returns an error if increment would overflow (caller should handle or surface).
+func (sg *SequenceGenerator) Next() (uint64, error) {
+	current := atomic.LoadUint64(&sg.counter)
+	if err := constants.CheckUint64Increment(current, "SequenceGenerator"); err != nil {
+		return 0, err
+	}
+	next := atomic.AddUint64(&sg.counter, 1)
+	return next, nil
 }
 
 // Current returns the current sequence number without incrementing

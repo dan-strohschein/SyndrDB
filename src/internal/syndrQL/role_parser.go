@@ -61,26 +61,29 @@ type DeleteRoleStatement struct {
 
 // CreateRoleParser handles parsing of CREATE ROLE statements
 type CreateRoleParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer   *Tokenizer
+	current     int
+	tokens      []Token
+	tokenizeErr error // set when Tokenize() failed; returned from Parse()
 }
 
-// NewCreateRoleParser creates a new CREATE ROLE parser for the given input
+// NewCreateRoleParser creates a new CREATE ROLE parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewCreateRoleParser(input string) *CreateRoleParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &CreateRoleParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &CreateRoleParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &CreateRoleParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses a CREATE ROLE statement
 // Syntax: CREATE ROLE "role_name" [WITH DESCRIPTION "description"];
 func (p *CreateRoleParser) Parse() (*CreateRoleStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect: CREATE
 	if err := p.expectKeyword(TOKEN_CREATE, "CREATE"); err != nil {
 		return nil, err
@@ -189,21 +192,21 @@ func (crs *CreateRoleStatement) Validate() error {
 
 // UpdateRoleParser handles parsing of UPDATE/ALTER ROLE statements
 type UpdateRoleParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer   *Tokenizer
+	current     int
+	tokens      []Token
+	tokenizeErr error
 }
 
-// NewUpdateRoleParser creates a new UPDATE/ALTER ROLE parser for the given input
+// NewUpdateRoleParser creates a new UPDATE/ALTER ROLE parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewUpdateRoleParser(input string) *UpdateRoleParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &UpdateRoleParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &UpdateRoleParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &UpdateRoleParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses an UPDATE/ALTER ROLE statement
@@ -211,6 +214,9 @@ func NewUpdateRoleParser(input string) *UpdateRoleParser {
 //
 //	ALTER ROLE "role_name" SET DESCRIPTION = "new_description" [FORCE];
 func (p *UpdateRoleParser) Parse() (*UpdateRoleStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect: UPDATE or ALTER
 	firstToken := p.peek()
 	if firstToken.Type != TOKEN_UPDATE && firstToken.Type != TOKEN_ALTER {
@@ -357,21 +363,21 @@ func (urs *UpdateRoleStatement) Validate() error {
 
 // DeleteRoleParser handles parsing of DELETE/DROP ROLE statements
 type DeleteRoleParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer   *Tokenizer
+	current     int
+	tokens      []Token
+	tokenizeErr error
 }
 
-// NewDeleteRoleParser creates a new DELETE/DROP ROLE parser for the given input
+// NewDeleteRoleParser creates a new DELETE/DROP ROLE parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewDeleteRoleParser(input string) *DeleteRoleParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &DeleteRoleParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &DeleteRoleParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &DeleteRoleParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses a DELETE/DROP ROLE statement
@@ -379,6 +385,9 @@ func NewDeleteRoleParser(input string) *DeleteRoleParser {
 //
 //	DROP ROLE "role_name" [FORCE];
 func (p *DeleteRoleParser) Parse() (*DeleteRoleStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect: DELETE or DROP
 	firstToken := p.peek()
 	if firstToken.Type != TOKEN_DELETE && firstToken.Type != TOKEN_DROP {

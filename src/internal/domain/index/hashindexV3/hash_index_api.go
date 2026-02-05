@@ -133,7 +133,8 @@ type IndexConfig struct {
 	BucketConcurrency int    // Number of parallel bucket operations (default: 4)
 
 	// MemTable configuration
-	MemTableMaxSize int // Maximum entries in MemTable before flush recommended
+	MemTableMaxSize         int // Maximum entries in MemTable before flush recommended
+	MemTableWALBufferMaxSize int // Maximum WAL buffer entries before swap (0 = use default 50000)
 
 	// Sequence recovery configuration
 	SequenceSafetyMargin int // Safety margin for sequence recovery (default: 100)
@@ -221,6 +222,9 @@ func NewHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 	if config.MemTableMaxSize == 0 {
 		config.MemTableMaxSize = 100000 // 100K entries default
 	}
+	if config.MemTableWALBufferMaxSize == 0 {
+		config.MemTableWALBufferMaxSize = 50000 // 50K default to bound memory
+	}
 	if config.CompactionMaxFiles == 0 {
 		config.CompactionMaxFiles = 10
 	}
@@ -238,8 +242,8 @@ func NewHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 		config.Logger = logger.Sugar()
 	}
 
-	// Create MemTable
-	memTable := NewHashMemTable(config.MemTableMaxSize)
+	// Create MemTable (with WAL buffer cap to prevent unbounded growth)
+	memTable := NewHashMemTable(config.MemTableMaxSize, config.MemTableWALBufferMaxSize)
 
 	// Create EntryStorage
 	storageConfig := EntryStorageConfig{
@@ -434,9 +438,9 @@ func (idx *HashIndexV3) Put(keyValue, documentID string, pageID uint32, commitSe
 	// Update statistics
 	idx.updatePutStats()
 
-	// Periodically check if compaction is needed
-	// Check every 1000 writes to avoid overhead
-	if atomic.LoadUint64(&idx.GlobalSequence)%1000 == 0 {
+	// Periodically check if compaction is needed (only when compactor is set)
+	// Check every 1000 writes to avoid overhead; skip goroutine when compactor is nil
+	if idx.compactor != nil && atomic.LoadUint64(&idx.GlobalSequence)%1000 == 0 {
 		// Run in background to avoid blocking writes
 		go idx.triggerCompaction()
 	}
@@ -816,7 +820,11 @@ func (idx *HashIndexV3) Delete(keyValue string, commitSequence uint64) (bool, er
 	// 3. Ensures all future Get() calls see the deletion
 	// The tombstone will be a no-op during compaction if key never existed
 
-	// Get next sequence number
+	// Get next sequence number (with overflow check, same as Put)
+	currentSequence := atomic.LoadUint64(&idx.GlobalSequence)
+	if err := constants.CheckUint64Increment(currentSequence, "GlobalSequence"); err != nil {
+		return false, err
+	}
 	sequence := atomic.AddUint64(&idx.GlobalSequence, 1)
 
 	// Update max sequence in stats and mark dirty
@@ -891,17 +899,12 @@ func (idx *HashIndexV3) GetAllDocumentIDs() (map[uint32][]string, error) {
 	docIDsByPage := make(map[uint32][]string)
 	seenDocs := make(map[string]bool) // Deduplicate: docID -> pageID mapping
 
-	// First, collect from MemTable (newest entries, takes precedence)
-	idx.MemTable.mutex.RLock()
+	// First, collect from MemTable via iterator (encapsulation; no direct mutex/entries access)
 	memTableDocs := make(map[string]*HashIndexEntry)
-	for key, entry := range idx.MemTable.entries {
-		if !entry.Deleted {
-			// Use key (which is the indexed value, e.g., DocumentID) to track
-			// For DocumentID index, key == DocumentID
-			memTableDocs[key] = entry
-		}
-	}
-	idx.MemTable.mutex.RUnlock()
+	idx.MemTable.IterateNonDeleted(func(key string, entry *HashIndexEntry) bool {
+		memTableDocs[key] = entry
+		return true
+	})
 
 	// Add MemTable entries first (they're the latest)
 	for _, entry := range memTableDocs {
@@ -946,6 +949,20 @@ func (idx *HashIndexV3) GetAllDocumentIDs() (map[uint32][]string, error) {
 func (idx *HashIndexV3) Search(keyValue string) ([]string, error) {
 	docIDs, _, err := idx.Get(keyValue)
 	return docIDs, err
+}
+
+// WriteEntryToDiskOnly appends the given entry to disk without updating MemTable or GlobalSequence.
+// Used by the single-write path: scheduleIndexUpdate applies to MemTable and enqueues this entry;
+// processHashIndexBatch calls this so the same entry/sequence is persisted once.
+// Caller must ensure the entry has the correct sequence already assigned.
+func (idx *HashIndexV3) WriteEntryToDiskOnly(entry *HashIndexEntry) error {
+	if idx.closed {
+		return fmt.Errorf("index is closed")
+	}
+	if entry == nil {
+		return fmt.Errorf("entry cannot be nil")
+	}
+	return idx.storage.AppendEntry(entry)
 }
 
 // Flush ensures all buffered data is written to disk

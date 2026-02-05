@@ -1354,10 +1354,16 @@ func (h *GraphQLHandler) executeUnifiedQuery(query *queryparser.UnifiedSelectQue
 	h.logger.Debugf("[GraphQL Native Query] Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 
-	// Step 3: Execute the plan
-	// This executes the root node of the execution tree, which recursively
-	// executes all child nodes (scans, filters, joins, sorts, limits, etc.)
-	documents, err := plan.RootNode.Execute(context.Background())
+	// Step 3: Execute the plan (attach join cleanup so JoinExecutionNode can avoid copying pooled slices)
+	execCtx := context.Background()
+	joinCleanupFns := []func(){}
+	execCtx = context.WithValue(execCtx, planner.JoinCleanupContextKey, &joinCleanupFns)
+	defer func() {
+		for _, fn := range joinCleanupFns {
+			fn()
+		}
+	}()
+	documents, err := plan.RootNode.Execute(execCtx)
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}

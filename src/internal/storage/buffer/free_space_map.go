@@ -126,15 +126,14 @@ func (fsm *FreeSpaceMap) RemovePage(fileID, pageNum uint32) {
 	}
 }
 
-// UpdateFromBuffer updates free space info by reading the page header
+// UpdateFromBuffer updates free space info by reading the page header.
+// It holds buffer.Mu for the duration so the buffer is not modified concurrently (avoids torn reads).
 func (fsm *FreeSpaceMap) UpdateFromBuffer(buffer *DBPageBuffer) error {
-	// Read the header from the buffer
+	buffer.Mu.Lock()
+	defer buffer.Mu.Unlock()
+
 	header := ReadPageHeader(buffer.Data)
-
-	// Calculate free space
 	freeSpace := GetFreeSpace(header)
-
-	// Update the map
 	fsm.UpdateFreeSpace(buffer.Tag.FileID, buffer.Tag.BlockNumber, int(freeSpace))
 
 	return nil

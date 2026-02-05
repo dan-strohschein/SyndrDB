@@ -36,6 +36,8 @@ package planner
 import (
 	"context"
 	"fmt"
+	"time"
+
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/domain/view"
 	"syndrdb/src/internal/query/planner/subquery"
@@ -333,9 +335,16 @@ func (uqp *UnifiedQueryPlanner) createExpressionOnlyPlan(
 		// though result is always identical for single-row expression evaluation.
 	}
 
+	// Parse select fields once at plan build time (Issue 11: avoid re-parse every Execute)
+	parsedFields, err := ParseSelectFields(query.SelectFields, uqp.logger)
+	if err != nil {
+		return nil, fmt.Errorf("expression-only plan: %w", err)
+	}
+
 	// Create expression evaluation node
 	evalNode := &ExpressionEvaluationNode{
 		SelectFields: query.SelectFields,
+		ParsedFields: parsedFields,
 		Logger:       uqp.logger,
 	}
 
@@ -364,11 +373,29 @@ func (uqp *UnifiedQueryPlanner) InvalidateBundleCache(bundleName string) {
 }
 
 // RemoveBundleMetadata removes the bundle from plan-cache metadata (bundleInvalidations,
-// staleServesByBundle, collectionVersions). Call when a bundle is dropped.
+// staleServesByBundle, collectionVersions) and from the invalidation manager's write
+// trackers. Call when a bundle is dropped (Issue 10).
 func (uqp *UnifiedQueryPlanner) RemoveBundleMetadata(bundleName string) {
 	if uqp.planCache != nil {
 		uqp.planCache.RemoveBundleMetadata(bundleName)
 	}
+	if uqp.invalidationMgr != nil {
+		uqp.invalidationMgr.RemoveBundle(bundleName)
+	}
+}
+
+// RecordPlanStats records execution duration for a plan that was served from the cache.
+// Call after Execute() so adaptive planning can compare custom vs generic plan performance.
+// If plan was not from cache (CacheKey == 0), this is a no-op.
+func (uqp *UnifiedQueryPlanner) RecordPlanStats(plan interface{}, duration time.Duration) {
+	if uqp.planCache == nil {
+		return
+	}
+	ep, ok := plan.(*ExecutionPlan)
+	if !ok || ep.CacheKey == 0 {
+		return
+	}
+	uqp.planCache.UpdatePlanStats(ep.CacheKey, duration, ep.IsGeneric)
 }
 
 // InvalidateViewCache invalidates all cached plans that reference a specific view

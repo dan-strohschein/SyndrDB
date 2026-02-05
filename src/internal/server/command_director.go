@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"os"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -30,35 +29,7 @@ func getKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-// #region agent log - DELETE diagnostics
-const debugLogPathDelete = ".cursor/debug.log"
-
-func debugDeleteDiagnostics(lockManagerExists bool, docCount int, useDocLocks bool, bundleName string) {
-	entry := fmt.Sprintf(`{"timestamp":%d,"hypothesisId":"DELETE","location":"command_director.go:DELETE","message":"delete_diagnostics","data":{"lockManagerExists":%t,"docCount":%d,"useDocLocks":%t,"bundleName":"%s"}}`,
-		time.Now().UnixMilli(), lockManagerExists, docCount, useDocLocks, bundleName)
-	if f, err := os.OpenFile(debugLogPathDelete, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		f.WriteString(entry + "\n")
-		f.Close()
-	}
-}
-
-func debugDeleteEntry(message string) {
-	entry := fmt.Sprintf(`{"timestamp":%d,"hypothesisId":"DELETE","location":"command_director.go:DELETE","message":"%s"}`,
-		time.Now().UnixMilli(), message)
-	if f, err := os.OpenFile(debugLogPathDelete, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-		f.WriteString(entry + "\n")
-		f.Close()
-	}
-}
-
-// #endregion
-
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
-	// #region agent log - command entry
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "delete") {
-		debugDeleteEntry("command_director_delete_entry")
-	}
-	// #endregion
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
 	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
 
@@ -649,9 +620,6 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 	// Parse DELETE  command
 	if strings.HasPrefix(commandLower, "delete") {
-		// #region agent log - DELETE handler entry
-		debugDeleteEntry("delete_handler_entry")
-		// #endregion
 		if len(firstWords) < 2 {
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				"incomplete DELETE command", errors.LayerCommand)
@@ -700,9 +668,6 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			return DeleteBundleCommand(bundleCmd, logger, serviceManager, database)
 		case "documents":
-			// #region agent log - DELETE entry point
-			debugDeleteEntry("delete_documents_case")
-			// #endregion
 			// DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <WHERE_CLAUSE>
 			// Parse the document command first to get bundle name and WHERE clause
 			// Use new parser if feature flag is enabled, fallback to legacy on error
@@ -755,10 +720,6 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			// - Much faster for large bulk operations
 			const deleteLockEscalationThreshold = 1_000
 			useDocumentLocks := serviceManager.LockManager != nil && len(docIDs) > 0 && len(docIDs) <= deleteLockEscalationThreshold
-
-			// #region agent log - DELETE path diagnostics
-			debugDeleteDiagnostics(serviceManager.LockManager != nil, len(docIDs), useDocumentLocks, bundleName)
-			// #endregion
 
 			var deleteLockInfo *bndle.DocumentLockInfo
 			var lockTxID, lockSessionID string
@@ -1062,6 +1023,15 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	memoryTracker := NewMemoryTracker(memoryLimit)
 	ctx = WithMemoryTracker(ctx, memoryTracker)
 
+	// Join cleanup: allow JoinExecutionNode to register pooled slice cleanup; run after result consumed.
+	joinCleanupFns := []func(){}
+	ctx = context.WithValue(ctx, planner.JoinCleanupContextKey, &joinCleanupFns)
+	defer func() {
+		for _, fn := range joinCleanupFns {
+			fn()
+		}
+	}()
+
 	// PHASE 1/4: MVCC - Add snapshot to context when in transaction (use session-stored snapshot)
 	if session != nil && session.IsInTransaction() {
 		snapshot := session.GetMVCCSnapshot()
@@ -1123,7 +1093,12 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	}
 
 	// Execute the plan with context
+	execStart := time.Now()
 	documents, err := plan.RootNode.Execute(ctx)
+	execDuration := time.Since(execStart)
+	if serviceManager.UnifiedPlanner != nil {
+		serviceManager.UnifiedPlanner.RecordPlanStats(plan, execDuration)
+	}
 	if err != nil {
 		// Check if error is due to timeout
 		if ctx.Err() == context.DeadlineExceeded {
@@ -1530,6 +1505,15 @@ func ExecutePreparedQuery(
 	memoryTracker := NewMemoryTracker(memoryLimit)
 	ctx = WithMemoryTracker(ctx, memoryTracker)
 
+	// Join cleanup: allow JoinExecutionNode to register pooled slice cleanup; run after result consumed.
+	joinCleanupFns := []func(){}
+	ctx = context.WithValue(ctx, planner.JoinCleanupContextKey, &joinCleanupFns)
+	defer func() {
+		for _, fn := range joinCleanupFns {
+			fn()
+		}
+	}()
+
 	// Set up query timeout with 80% warning threshold
 	timeout := args.GetQueryTimeout(isAdmin)
 	var cancel context.CancelFunc
@@ -1562,7 +1546,12 @@ func ExecutePreparedQuery(
 	}
 
 	// Execute the plan with parameter context
+	execStart := time.Now()
 	documents, err := plan.RootNode.Execute(ctx)
+	execDuration := time.Since(execStart)
+	if serviceManager.UnifiedPlanner != nil {
+		serviceManager.UnifiedPlanner.RecordPlanStats(plan, execDuration)
+	}
 	if err != nil {
 		// Check for timeout or memory limit errors
 		if ctx.Err() == context.DeadlineExceeded {

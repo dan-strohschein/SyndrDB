@@ -45,6 +45,11 @@ func (m *mockPageWriter) WritePageBatch(bundleName string, pageID uint32, data [
 	return nil
 }
 
+func (m *mockPageWriter) WriteIndexUpdates(bundleName string, pageID uint32, updates []IndexUpdate) error {
+	// No-op for tests; index updates can be recorded here if needed.
+	return nil
+}
+
 func (m *mockPageWriter) getWrites() []mockWrite {
 	m.mu.Lock()
 	defer m.mu.Unlock()

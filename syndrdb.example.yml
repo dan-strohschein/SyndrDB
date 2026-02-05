@@ -621,3 +621,4 @@ view_stale_warning_hours: 48
 # - Unknown fields are silently ignored
 # 
 # For more information, see the SyndrDB documentation
+DurabilityMode: "strict"

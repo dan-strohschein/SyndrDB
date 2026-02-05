@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"syndrdb/src/internal/domain/models"
+
 	"go.uber.org/zap"
 )
 
@@ -210,16 +212,20 @@ func (cf *ConcurrentFlusher) MarkDirty(bundleName string, pageID uint32, doc int
 
 // MarkPageDirty records a document write with page-level tracking.
 // This is the full tracking path for concurrent page writes.
+// doc may be nil if the caller only cares about triggering flush; otherwise
+// pass *models.Document so the tracker can include it in the page batch for flush.
 func (cf *ConcurrentFlusher) MarkPageDirty(bundleName string, pageID uint32, doc interface{}, estimatedBytes int64) bool {
 	// Track at bundle level
 	cf.MarkDirty(bundleName, pageID, doc, estimatedBytes)
 
-	// Track at page level via DirtyPageTracker
-	// Note: We can't use models.Document directly here due to import cycle concerns
-	// The actual document will be in the page's document list
-	// For now, we increment page-level counters
+	var docPtr *models.Document
+	if doc != nil {
+		if d, ok := doc.(*models.Document); ok {
+			docPtr = d
+		}
+	}
 
-	shouldFlush := cf.tracker.MarkDirty(bundleName, pageID, nil, estimatedBytes)
+	shouldFlush := cf.tracker.MarkDirty(bundleName, pageID, docPtr, estimatedBytes)
 
 	if shouldFlush {
 		cf.tracker.EnqueueForFlush(bundleName, pageID)

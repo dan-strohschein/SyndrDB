@@ -5,8 +5,8 @@ import (
 )
 
 const (
-	// PageHeaderSize is the size in bytes of the page header
-	PageHeaderSize = 24
+	// PageHeaderSize is the size in bytes of the page header (layout: LSN 0-8, Checksum 8-10, Flags 10-12, Lower 12-14, Upper 14-16, Special 16-18, PageSizeVersion 18-22, PruneXID 22-26)
+	PageHeaderSize = 26
 
 	// DefaultSpecialSize is the default size of special space (for indexes)
 	DefaultSpecialSize = 0

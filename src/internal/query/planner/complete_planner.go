@@ -61,6 +61,10 @@ func (qp *QueryPlanner) CreateExecutionPlan(bundle *models.Bundle, whereClause s
 		IndexesUsed:   indexesUsed,
 		Logger:        qp.Logger,
 	}
+	// Issue 8: Set memory estimate for cache sizing (consistent with buildPlanInternal)
+	if plan.RootNode != nil {
+		plan.estimatedMemoryBytes = plan.RootNode.EstimateMemoryUsage()
+	}
 
 	qp.Logger.Debugf("Created execution plan: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		plan.Cost, plan.EstimatedRows, plan.IndexesUsed)

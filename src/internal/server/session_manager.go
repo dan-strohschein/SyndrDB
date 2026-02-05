@@ -24,43 +24,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// #region agent log
-const debugLogPathSession = ".cursor/debug.log"
-
-func debugLogSessionCleanup(sessionID string, txStatus TransactionStatus, txID string, docLockCount, bundleLockCount int) {
-	txIDShort := ""
-	if len(txID) > 12 {
-		txIDShort = txID[:12]
-	}
-	sessIDShort := ""
-	if len(sessionID) > 12 {
-		sessIDShort = sessionID[:12]
-	}
-	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "A", "location": "session_manager.go:cleanupSession", "message": "session_cleanup_start", "data": map[string]interface{}{"sessionID": sessIDShort, "txStatus": txStatus.String(), "txID": txIDShort, "docLocks": docLockCount, "bundleLocks": bundleLockCount}}
-	if b, err := hvjson.Marshal(entry); err == nil {
-		if f, err := os.OpenFile(debugLogPathSession, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			f.Write(append(b, '\n'))
-			f.Close()
-		}
-	}
-}
-
-func debugLogSessionLockRelease(sessionID string, method string, lockCount int) {
-	sessIDShort := ""
-	if len(sessionID) > 12 {
-		sessIDShort = sessionID[:12]
-	}
-	entry := map[string]interface{}{"timestamp": time.Now().UnixMilli(), "hypothesisId": "A", "location": "session_manager.go:cleanupSession", "message": "session_lock_release", "data": map[string]interface{}{"sessionID": sessIDShort, "method": method, "lockCount": lockCount}}
-	if b, err := hvjson.Marshal(entry); err == nil {
-		if f, err := os.OpenFile(debugLogPathSession, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
-			f.Write(append(b, '\n'))
-			f.Close()
-		}
-	}
-}
-
-// #endregion
-
 // TransactionStatus represents the status of a multi-statement transaction
 type TransactionStatus int
 
@@ -785,10 +748,6 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
-	// #region agent log
-	debugLogSessionCleanup(session.SessionID, session.TransactionStatus, session.ActiveTransactionID, len(session.DocumentLocks), len(session.BundleLocks))
-	// #endregion
-
 	session.Logger.Infow("Cleaning up session", "state", session.State.String())
 
 	// Set state to terminated
@@ -812,23 +771,15 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 	}
 	session.BundleLocks = make(map[string]*LockInfo)
 
-	// #region agent log - FIXED: Now actually release locks via LockManager
-	// CRITICAL FIX: Call LockManager.ReleaseLocksForSession() to release actual locks held
+	// CRITICAL: Call LockManager.ReleaseLocksForSession() to release actual locks held.
 	// Previously this code only cleared the session's internal tracking maps without releasing
-	// the locks in the LockManager, causing orphaned locks and severe contention under high concurrency
-	lockCount := 0
+	// the locks in the LockManager, causing orphaned locks and severe contention under high concurrency.
 	if sm.lockReleaser != nil {
-		// Release locks by session ID (covers all transactions in this session)
-		lockCount = sm.lockReleaser.ReleaseLocksForSession(session.SessionID)
-		// Also release by active transaction ID if there was one
+		sm.lockReleaser.ReleaseLocksForSession(session.SessionID)
 		if session.ActiveTransactionID != "" {
-			lockCount += sm.lockReleaser.ReleaseLocks(session.ActiveTransactionID)
+			sm.lockReleaser.ReleaseLocks(session.ActiveTransactionID)
 		}
-		debugLogSessionLockRelease(session.SessionID, "lock_manager_release", lockCount)
-	} else {
-		debugLogSessionLockRelease(session.SessionID, "no_lock_releaser_available", 0)
 	}
-	// #endregion
 
 	// Clean up temp files (async, non-blocking)
 	// Copy temp files slice to avoid race conditions and allow safe async processing
@@ -1278,10 +1229,22 @@ func (s *Session) FailQuery(err error) {
 	s.LastActivity = now
 	s.ExpiresAt = now.Add(s.Timeout)
 
-	s.Logger.Errorw("Query execution failed",
-		"queryID", queryID,
-		"error", err,
-		"consecutiveErrors", s.ConsecutiveErrors)
+	// Log the error - use Warnw for user validation errors (no stack trace),
+	// Errorw for internal/system errors (includes stack trace for debugging)
+	if sdbErr, ok := err.(errors.SyndrDBError); ok && sdbErr.Code().IsValidationError() {
+		// User validation error - log as warning without stack trace
+		s.Logger.Warnw("Query validation failed",
+			"queryID", queryID,
+			"error", err.Error(),
+			"errorCode", sdbErr.Code().String(),
+			"consecutiveErrors", s.ConsecutiveErrors)
+	} else {
+		// Internal/system error - log as error with full details
+		s.Logger.Errorw("Query execution failed",
+			"queryID", queryID,
+			"error", err,
+			"consecutiveErrors", s.ConsecutiveErrors)
+	}
 }
 
 // addToHistory adds a query to the history (must be called with lock held)

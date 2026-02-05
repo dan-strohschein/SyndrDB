@@ -47,26 +47,29 @@ type DeleteUserStatement struct {
 
 // DeleteUserParser handles parsing of DELETE USER and DROP USER statements
 type DeleteUserParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer   *Tokenizer
+	current     int
+	tokens      []Token
+	tokenizeErr error
 }
 
-// NewDeleteUserParser creates a new DELETE USER parser for the given input
+// NewDeleteUserParser creates a new DELETE USER parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewDeleteUserParser(input string) *DeleteUserParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &DeleteUserParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &DeleteUserParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &DeleteUserParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses a DELETE USER or DROP USER statement
 // Syntax: DELETE USER "username" [FORCE]; or DROP USER "username" [FORCE];
 func (p *DeleteUserParser) Parse() (*DeleteUserStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect: DELETE or DROP
 	firstToken := p.peek()
 	if firstToken.Type != TOKEN_DELETE && firstToken.Type != TOKEN_DROP {

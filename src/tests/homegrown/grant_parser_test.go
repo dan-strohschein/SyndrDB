@@ -537,3 +537,12 @@ func TestGrantParser_DistinguishPermissionVsRole(t *testing.T) {
 	assert.NotEmpty(t, roleStmt.RoleName)
 	assert.Empty(t, roleStmt.PermissionName)
 }
+
+// TestGrantParser_TokenizationError ensures Grant parser returns tokenization
+// errors (e.g. unterminated quote) instead of panicking.
+func TestGrantParser_TokenizationError(t *testing.T) {
+	parser := syndrQL.NewGrantParser(`GRANT "perm TO USER "alice";`)
+	stmt, err := parser.Parse()
+	assert.Error(t, err, "expected tokenization error")
+	assert.Nil(t, stmt, "expected nil statement on tokenization error")
+}

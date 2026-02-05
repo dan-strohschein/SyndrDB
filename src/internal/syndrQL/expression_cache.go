@@ -47,10 +47,12 @@ type ExpressionCache struct {
 	logger  *zap.SugaredLogger
 }
 
-// lruEntry holds the key and value for LRU eviction
+// lruEntry holds the key and value for LRU eviction.
+// whereClause is stored so Get can detect FNV hash collisions and return a miss.
 type lruEntry struct {
-	key   uint64
-	value *CachedExpression
+	key         uint64
+	whereClause string
+	value       *CachedExpression
 }
 
 // NewExpressionCache creates a new expression cache with the given max size
@@ -65,10 +67,17 @@ func NewExpressionCache(maxSize int, logger *zap.SugaredLogger) *ExpressionCache
 
 // hashWhereClause returns a fast hash of the WHERE clause string
 func hashWhereClause(whereClause string) uint64 {
+	if testHashKeyOverride != nil {
+		return testHashKeyOverride(whereClause)
+	}
 	h := fnv.New64a()
 	h.Write([]byte(whereClause))
 	return h.Sum64()
 }
+
+// testHashKeyOverride, when non-nil, is used by hashWhereClause so tests can
+// simulate FNV hash collisions. Must be set only from tests.
+var testHashKeyOverride func(string) uint64
 
 // Get retrieves a cached expression by WHERE clause string
 // Returns (expression, tokens, found)
@@ -88,12 +97,18 @@ func (c *ExpressionCache) Get(whereClause string) (Expression, []Token, bool) {
 		return nil, nil, false
 	}
 
+	entry := elem.Value.(*lruEntry)
+	// Detect FNV hash collision: same hash but different WHERE string
+	if entry.whereClause != whereClause {
+		atomic.AddUint64(&c.misses, 1)
+		return nil, nil, false
+	}
+
 	// Move to front (most recently used)
 	c.mu.Lock()
 	c.lru.MoveToFront(elem)
 	c.mu.Unlock()
 
-	entry := elem.Value.(*lruEntry)
 	atomic.AddUint64(&entry.value.HitCount, 1)
 	atomic.AddUint64(&c.hits, 1)
 
@@ -113,11 +128,18 @@ func (c *ExpressionCache) Put(whereClause string, expr Expression, tokens []Toke
 
 	// Check if already exists
 	if elem, exists := c.cache[key]; exists {
-		c.lru.MoveToFront(elem)
 		entry := elem.Value.(*lruEntry)
-		entry.value.Expression = expr
-		entry.value.Tokens = tokens
-		return
+		if entry.whereClause != whereClause {
+			// Hash collision: evict this entry and insert the new one below
+			c.lru.Remove(elem)
+			delete(c.cache, key)
+		} else {
+			c.lru.MoveToFront(elem)
+			entry.value.Expression = expr
+			entry.value.Tokens = tokens
+			entry.whereClause = whereClause
+			return
+		}
 	}
 
 	// Evict oldest if at capacity
@@ -131,7 +153,8 @@ func (c *ExpressionCache) Put(whereClause string, expr Expression, tokens []Toke
 
 	// Add new entry
 	entry := &lruEntry{
-		key: key,
+		key:         key,
+		whereClause: whereClause,
 		value: &CachedExpression{
 			Expression: expr,
 			Tokens:     tokens,

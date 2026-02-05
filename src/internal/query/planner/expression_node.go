@@ -12,11 +12,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// parsedExpressionField holds a pre-parsed expression and its output column name (Issue 11).
+// Parsed at plan build time so Execute only evaluates, avoiding re-tokenize/re-parse every call.
+type parsedExpressionField struct {
+	ColumnName string
+	Expr       syndrQL.Expression
+}
+
 // ExpressionEvaluationNode executes expression-only SELECT queries (no FROM clause)
 // Example: SELECT 1, F:NOW(), "hello" AS greeting;
 // Returns a single synthetic document with expression results as fields
 type ExpressionEvaluationNode struct {
-	SelectFields []string // Raw field expressions from UnifiedSelectQuery
+	SelectFields []string // Raw field expressions from UnifiedSelectQuery (kept for Describe/clone)
+	// ParsedFields: when non-nil, Execute uses these instead of re-parsing SelectFields (Issue 11)
+	ParsedFields []parsedExpressionField
 	Logger       *zap.SugaredLogger
 	startTime    time.Time // For performance metrics
 }
@@ -41,69 +50,47 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 		Data:       make(map[string]interface{}),
 	}
 
-	// Track column names to detect collisions
-	usedColumnNames := make(map[string]bool)
-
-	// TODO: Consider adding hard limit on total columns (e.g., 1000) to prevent pathological
-	// queries like SELECT 1,2,3,...,10000 from consuming excessive memory.
-
-	// Evaluate each select field as an expression
-	for i, fieldExpr := range n.SelectFields {
-		// Parse field expression to check for alias
-		var columnName string
-		var exprToEval string
-
-		// Check if this field has an AS alias
-		// Field format can be: "expression" or "expression AS alias"
-		parts := strings.Split(fieldExpr, " AS ")
-		if len(parts) == 2 {
-			// Has alias: use alias as column name
-			exprToEval = strings.TrimSpace(parts[0])
-			columnName = strings.Trim(strings.TrimSpace(parts[1]), "\"")
-		} else {
-			// No alias: generate ordinal column name
-			exprToEval = fieldExpr
-			columnName = fmt.Sprintf("column%d", i+1)
-
-			// Check for collision with aliases and auto-rename if needed
-			attempt := 0
-			originalName := columnName
-			for usedColumnNames[columnName] && attempt < 100 {
-				attempt++
-				columnName = fmt.Sprintf("%s_%d", originalName, attempt)
+	// Use pre-parsed fields when available (Issue 11: parse once at plan build)
+	evaluator := syndrQL.NewExpressionEvaluator(n.Logger)
+	if len(n.ParsedFields) > 0 {
+		for _, pf := range n.ParsedFields {
+			result, err := evaluator.Evaluate(pf.Expr, emptyDoc, nil, nil, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to evaluate expression for column %s: %w", pf.ColumnName, err)
 			}
-
-			if attempt >= 100 {
+			fieldValue := models.NewInterfaceValue(result)
+			resultDoc.Fields[pf.ColumnName] = models.Field{Value: fieldValue}
+			resultDoc.Data[pf.ColumnName] = result
+		}
+	} else {
+		// Fallback: parse each SelectField at execution (e.g. when node not built via planner)
+		usedColumnNames := make(map[string]bool)
+		for i, fieldExpr := range n.SelectFields {
+			columnName, exprToEval := n.columnNameAndExpr(fieldExpr, i, usedColumnNames)
+			if columnName == "" {
 				return nil, fmt.Errorf("Unable to generate unique column name after 100 attempts - too many column name collisions")
 			}
+			usedColumnNames[columnName] = true
+
+			tokenizer := syndrQL.NewTokenizer(exprToEval)
+			tokens, err := tokenizer.Tokenize()
+			if err != nil {
+				return nil, fmt.Errorf("failed to tokenize expression '%s': %w", exprToEval, err)
+			}
+			exprParser := syndrQL.NewExpressionParser(tokens, n.Logger)
+			expr, err := exprParser.Parse()
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse expression '%s': %w", exprToEval, err)
+			}
+
+			result, err := evaluator.Evaluate(expr, emptyDoc, nil, nil, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to evaluate expression '%s': %w", exprToEval, err)
+			}
+			fieldValue := models.NewInterfaceValue(result)
+			resultDoc.Fields[columnName] = models.Field{Value: fieldValue}
+			resultDoc.Data[columnName] = result
 		}
-
-		usedColumnNames[columnName] = true
-
-		// Parse the expression
-		tokenizer := syndrQL.NewTokenizer(exprToEval)
-		tokens, err := tokenizer.Tokenize()
-		if err != nil {
-			return nil, fmt.Errorf("failed to tokenize expression '%s': %w", exprToEval, err)
-		}
-
-		exprParser := syndrQL.NewExpressionParser(tokens, n.Logger)
-		expr, err := exprParser.Parse()
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse expression '%s': %w", exprToEval, err)
-		}
-
-		// Evaluate expression with empty document context
-		evaluator := syndrQL.NewExpressionEvaluator(n.Logger)
-		result, err := evaluator.Evaluate(expr, emptyDoc, nil, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to evaluate expression '%s': %w", exprToEval, err)
-		}
-
-		// Store result with column name as field
-		fieldValue := models.NewInterfaceValue(result)
-		resultDoc.Fields[columnName] = models.Field{Value: fieldValue}
-		resultDoc.Data[columnName] = result
 	}
 
 	// Log performance metrics
@@ -116,6 +103,69 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 	return map[string]*models.Document{
 		"expression_result": resultDoc,
 	}, nil
+}
+
+// ParseSelectFields parses each raw select field string into parsedExpressionField (Issue 11).
+// Call at plan build time so Execute can use pre-parsed ASTs. Returns nil, error on parse failure.
+func ParseSelectFields(selectFields []string, logger *zap.SugaredLogger) ([]parsedExpressionField, error) {
+	if len(selectFields) == 0 {
+		return nil, nil
+	}
+	out := make([]parsedExpressionField, 0, len(selectFields))
+	used := make(map[string]bool)
+	for i, fieldExpr := range selectFields {
+		parts := strings.Split(fieldExpr, " AS ")
+		var columnName, exprToEval string
+		if len(parts) == 2 {
+			exprToEval = strings.TrimSpace(parts[0])
+			columnName = strings.Trim(strings.TrimSpace(parts[1]), "\"")
+		} else {
+			exprToEval = fieldExpr
+			columnName = fmt.Sprintf("column%d", i+1)
+			orig := columnName
+			for attempt := 0; used[columnName]; attempt++ {
+				if attempt >= 100 {
+					return nil, fmt.Errorf("too many column name collisions")
+				}
+				columnName = fmt.Sprintf("%s_%d", orig, attempt+1)
+			}
+		}
+		used[columnName] = true
+
+		tokenizer := syndrQL.NewTokenizer(exprToEval)
+		tokens, err := tokenizer.Tokenize()
+		if err != nil {
+			return nil, fmt.Errorf("failed to tokenize expression %q: %w", exprToEval, err)
+		}
+		exprParser := syndrQL.NewExpressionParser(tokens, logger)
+		expr, err := exprParser.Parse()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse expression %q: %w", exprToEval, err)
+		}
+		out = append(out, parsedExpressionField{ColumnName: columnName, Expr: expr})
+	}
+	return out, nil
+}
+
+// columnNameAndExpr extracts column name and expression string from a raw field (e.g. "expr AS alias").
+// Used by fallback path when ParsedFields is not set. Returns empty columnName if collision resolution fails.
+func (n *ExpressionEvaluationNode) columnNameAndExpr(fieldExpr string, index int, usedColumnNames map[string]bool) (columnName, exprToEval string) {
+	parts := strings.Split(fieldExpr, " AS ")
+	if len(parts) == 2 {
+		exprToEval = strings.TrimSpace(parts[0])
+		columnName = strings.Trim(strings.TrimSpace(parts[1]), "\"")
+		return columnName, exprToEval
+	}
+	exprToEval = fieldExpr
+	originalName := fmt.Sprintf("column%d", index+1)
+	columnName = originalName
+	for attempt := 0; attempt < 100; attempt++ {
+		if !usedColumnNames[columnName] {
+			return columnName, exprToEval
+		}
+		columnName = fmt.Sprintf("%s_%d", originalName, attempt+1)
+	}
+	return "", exprToEval
 }
 
 // GetCost returns minimal cost for expression evaluation

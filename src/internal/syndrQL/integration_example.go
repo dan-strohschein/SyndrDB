@@ -28,7 +28,7 @@ func ExampleSelectStatementConversion(query string, logger *zap.SugaredLogger) (
 	}
 
 	// Step 2: Parse the SELECT statement
-	parser := NewSelectParser(tokens)
+	parser := NewSelectParser(tokens, logger)
 	stmt, err := parser.Parse(logger)
 	if err != nil {
 		return nil, fmt.Errorf("parsing failed: %w", err)
@@ -121,7 +121,7 @@ func ExampleIndexHintExtraction(query string, logger *zap.SugaredLogger) ([]stri
 		return nil, err
 	}
 
-	parser := NewSelectParser(tokens)
+	parser := NewSelectParser(tokens, logger)
 	stmt, err := parser.Parse(logger)
 	if err != nil {
 		return nil, err
@@ -144,7 +144,7 @@ func ExampleComplexityAnalysis(query string, logger *zap.SugaredLogger) (int, er
 		return 0, err
 	}
 
-	parser := NewSelectParser(tokens)
+	parser := NewSelectParser(tokens, logger)
 	stmt, err := parser.Parse(logger)
 	if err != nil {
 		return 0, err
@@ -197,7 +197,7 @@ func ExampleEndToEndIntegration(query string, logger *zap.SugaredLogger) (*query
 	}
 
 	// Parse (pass original query for error reporting)
-	parser := NewSelectParser(tokens)
+	parser := NewSelectParser(tokens, logger)
 	stmt, err := parser.Parse(logger, query)
 	if err != nil {
 		logger.Warnf("Parsing failed: %v. Falling back to legacy parser.", err)

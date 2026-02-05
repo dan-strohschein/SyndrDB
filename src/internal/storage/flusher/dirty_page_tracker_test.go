@@ -26,17 +26,23 @@ func TestDirtyPageTrackerBasic(t *testing.T) {
 	}
 
 	// Verify page was tracked
-	page := tracker.GetDirtyPage("test-bundle", 1)
-	if page == nil {
+	var pageDocCount int
+	var pageBundle string
+	tracker.GetDirtyPageAndDo("test-bundle", 1, func(page *DirtyPage) {
+		if page == nil {
+			return
+		}
+		pageDocCount = len(page.Documents)
+		pageBundle = page.BundleName
+	})
+	if pageDocCount == 0 && pageBundle == "" {
 		t.Fatal("Expected dirty page to be tracked")
 	}
-
-	if len(page.Documents) != 1 {
-		t.Errorf("Expected 1 document, got %d", len(page.Documents))
+	if pageDocCount != 1 {
+		t.Errorf("Expected 1 document, got %d", pageDocCount)
 	}
-
-	if page.BundleName != "test-bundle" {
-		t.Errorf("Expected bundle name 'test-bundle', got '%s'", page.BundleName)
+	if pageBundle != "test-bundle" {
+		t.Errorf("Expected bundle name 'test-bundle', got '%s'", pageBundle)
 	}
 
 	// Verify bundle tracking
@@ -100,6 +106,51 @@ func TestDirtyPageTrackerBytesThreshold(t *testing.T) {
 	}
 }
 
+// TestDirtyPageTrackerPageKeyNoCollision verifies that different (bundle, pageID) pairs
+// are stored and retrieved as distinct pages (no hash collision from struct key).
+func TestDirtyPageTrackerPageKeyNoCollision(t *testing.T) {
+	tracker := NewDirtyPageTracker(DefaultDirtyPageTrackerConfig)
+	defer tracker.Close()
+
+	const samePageID = 42
+	docA := &models.Document{DocumentID: "doc-bundle-a"}
+	docB := &models.Document{DocumentID: "doc-bundle-b"}
+
+	tracker.MarkDirty("bundle-a", samePageID, docA, 100)
+	tracker.MarkDirty("bundle-b", samePageID, docB, 100)
+
+	var nameA, nameB string
+	var docIDA, docIDB string
+	var foundA, foundB bool
+	tracker.GetDirtyPageAndDo("bundle-a", samePageID, func(p *DirtyPage) {
+		if p != nil {
+			foundA = true
+			nameA = p.BundleName
+			if len(p.Documents) > 0 {
+				docIDA = p.Documents[0].DocumentID
+			}
+		}
+	})
+	tracker.GetDirtyPageAndDo("bundle-b", samePageID, func(p *DirtyPage) {
+		if p != nil {
+			foundB = true
+			nameB = p.BundleName
+			if len(p.Documents) > 0 {
+				docIDB = p.Documents[0].DocumentID
+			}
+		}
+	})
+	if !foundA || !foundB {
+		t.Fatalf("both pages must exist: foundA=%v foundB=%v", foundA, foundB)
+	}
+	if nameA != "bundle-a" || docIDA != "doc-bundle-a" {
+		t.Errorf("bundle-a page: BundleName=%s docID=%s", nameA, docIDA)
+	}
+	if nameB != "bundle-b" || docIDB != "doc-bundle-b" {
+		t.Errorf("bundle-b page: BundleName=%s docID=%s", nameB, docIDB)
+	}
+}
+
 // TestDirtyPageTrackerMultipleBundles verifies tracking across bundles.
 func TestDirtyPageTrackerMultipleBundles(t *testing.T) {
 	tracker := NewDirtyPageTracker(DefaultDirtyPageTrackerConfig)
@@ -151,8 +202,9 @@ func TestDirtyPageTrackerEnqueueFlush(t *testing.T) {
 	}
 
 	// Page should be removed from tracker
-	page := tracker.GetDirtyPage("test-bundle", 5)
-	if page != nil {
+	var found bool
+	tracker.GetDirtyPageAndDo("test-bundle", 5, func(p *DirtyPage) { found = true })
+	if found {
 		t.Error("Page should be removed from tracker after enqueue")
 	}
 
@@ -216,17 +268,111 @@ func TestDirtyPageTrackerIndexUpdates(t *testing.T) {
 
 	tracker.MarkIndexDirty("test-bundle", 10, update)
 
-	page := tracker.GetDirtyPage("test-bundle", 10)
+	var updateCount int
+	var firstKey string
+	tracker.GetDirtyPageAndDo("test-bundle", 10, func(page *DirtyPage) {
+		if page != nil {
+			updateCount = len(page.IndexUpdates)
+			if len(page.IndexUpdates) > 0 {
+				firstKey = page.IndexUpdates[0].Key
+			}
+		}
+	})
+	if updateCount == 0 {
+		t.Fatal("Expected dirty page with index updates")
+	}
+	if updateCount != 1 {
+		t.Errorf("Expected 1 index update, got %d", updateCount)
+	}
+	if firstKey != "john" {
+		t.Errorf("Expected key 'john', got '%s'", firstKey)
+	}
+}
+
+// TestDirtyPageTrackerEnqueueDecrementsCount verifies totalDirtyPages is decremented
+// when pages are successfully enqueued for flush (Issue 1).
+func TestDirtyPageTrackerEnqueueDecrementsCount(t *testing.T) {
+	config := DirtyPageTrackerConfig{
+		WorkerCount:     1,
+		MaxDocsPerPage:   100,
+		MaxBytesPerPage:  1024 * 1024,
+		QueueSize:        10,
+	}
+	tracker := NewDirtyPageTracker(config)
+	defer tracker.Close()
+
+	doc := &models.Document{DocumentID: "doc"}
+	for i := uint32(0); i < 5; i++ {
+		tracker.MarkDirty("bundle", i, doc, 100)
+	}
+	if n := tracker.GetStats().DirtyPageCount; n != 5 {
+		t.Errorf("expected 5 dirty pages, got %d", n)
+	}
+	for i := uint32(0); i < 5; i++ {
+		tracker.EnqueueForFlush("bundle", i)
+	}
+	if n := tracker.GetStats().DirtyPageCount; n != 0 {
+		t.Errorf("after enqueue all, expected 0 dirty pages, got %d", n)
+	}
+}
+
+// TestDirtyPageTrackerConcurrentMarkAndEnqueue verifies that concurrent MarkDirty
+// and EnqueueForFlush for the same page do not lose updates or race (Issue 4).
+// Run with -race to detect data races.
+func TestDirtyPageTrackerConcurrentMarkAndEnqueue(t *testing.T) {
+	config := DirtyPageTrackerConfig{
+		WorkerCount:     1,
+		MaxDocsPerPage:  100,
+		MaxBytesPerPage: 1024 * 1024,
+		QueueSize:       100,
+	}
+	tracker := NewDirtyPageTracker(config)
+	defer tracker.Close()
+
+	const numRounds = 20
+	var wg sync.WaitGroup
+	for r := 0; r < numRounds; r++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				doc := &models.Document{DocumentID: "doc"}
+				tracker.MarkDirty("bundle", 1, doc, 100)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				tracker.EnqueueForFlush("bundle", 1)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestDirtyPageTrackerClearPageTotalDocsPending verifies totalDocsPending after
+// MarkDirty and ClearPage matches expected (Issue 10 helper).
+func TestDirtyPageTrackerClearPageTotalDocsPending(t *testing.T) {
+	config := DirtyPageTrackerConfig{
+		WorkerCount: 1, MaxDocsPerPage: 100, MaxBytesPerPage: 1024 * 1024, QueueSize: 10,
+	}
+	tracker := NewDirtyPageTracker(config)
+	defer tracker.Close()
+
+	for i := 0; i < 3; i++ {
+		tracker.MarkDirty("bundle", 1, &models.Document{DocumentID: "doc"}, 100)
+	}
+	if n := tracker.GetStats().PendingDocs; n != 3 {
+		t.Errorf("expected 3 pending docs, got %d", n)
+	}
+	tracker.EnqueueForFlush("bundle", 1)
+	page := <-tracker.GetPagesForWorker(0) // single worker, page 1 % 1 = 0
 	if page == nil {
-		t.Fatal("Expected dirty page")
+		t.Fatal("expected page from queue")
 	}
-
-	if len(page.IndexUpdates) != 1 {
-		t.Errorf("Expected 1 index update, got %d", len(page.IndexUpdates))
-	}
-
-	if page.IndexUpdates[0].Key != "john" {
-		t.Errorf("Expected key 'john', got '%s'", page.IndexUpdates[0].Key)
+	tracker.ClearPage(page)
+	if n := tracker.GetStats().PendingDocs; n != 0 {
+		t.Errorf("after ClearPage(3 docs), expected 0 pending docs, got %d", n)
 	}
 }
 

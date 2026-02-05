@@ -71,6 +71,13 @@ type ExecutionPlan struct {
 	// Cached memory estimation (computed once at plan creation)
 	// NOTE: ExecutionPlan is immutable after creation - if plan mutation support added, must recompute
 	estimatedMemoryBytes int64
+
+	// CacheKey is set when the plan was returned from the plan cache (hit or stale serve).
+	// 0 means the plan was built on miss. Used by RecordPlanStats for adaptive planning.
+	CacheKey uint64
+	// IsGeneric is true when the plan is a generic (parameter-independent) plan.
+	// Set when serving from cache; used by RecordPlanStats.
+	IsGeneric bool
 }
 
 // ScanType represents different types of scans

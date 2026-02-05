@@ -34,9 +34,9 @@ func parseQueryWithNewParser(query string, logger *zap.SugaredLogger) (*querypar
 			"tokenization failed", errors.LayerParser)
 	}
 
-	// Parse (pass original query for error reporting)
-	parser := syndrQL.NewSelectParser(tokens)
-	stmt, err := parser.Parse(logger, normalizedQuery)
+	// Parse (pass original query for error reporting so SubmittedInput shows user input)
+	parser := syndrQL.NewSelectParser(tokens, logger)
+	stmt, err := parser.Parse(logger, query)
 	if err != nil {
 		// Error is already SyndrDBError from parser if it was a parser error
 		// Otherwise wrap it

@@ -344,9 +344,10 @@ func (wb *WriteBuffer) swapAndFlush(doSync bool) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for wb.flushInProgress {
 		if time.Now().After(deadline) {
-			// Timeout - previous flush is stuck
-			// Return error instead of blocking forever; caller can retry or fail gracefully
-			return fmt.Errorf("timeout waiting for previous flush to complete (possible stuck I/O)")
+			// Timeout - previous flush is stuck; set sticky error so next caller sees it
+			err := fmt.Errorf("timeout waiting for previous flush to complete (possible stuck I/O)")
+			wb.flushErr = err
+			return err
 		}
 		// Release lock briefly to allow other goroutine to complete
 		wb.mutex.Unlock()
@@ -367,6 +368,16 @@ func (wb *WriteBuffer) swapAndFlush(doSync bool) error {
 	data := wb.backBuffer
 	dataLen := int64(len(data)) // Capture length before releasing lock
 	wb.mutex.Unlock()
+	defer func() {
+		if p := recover(); p != nil {
+			wb.mutex.Lock()
+			wb.flushInProgress = false
+			wb.flushErr = fmt.Errorf("flush panic: %v", p)
+			wb.flushCond.Broadcast()
+			wb.mutex.Unlock()
+			panic(p)
+		}
+	}()
 	err := wb.doFlushToFile(data, doSync)
 	wb.mutex.Lock()
 	wb.backBuffer = wb.backBuffer[:0]

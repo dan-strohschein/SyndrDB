@@ -33,6 +33,7 @@ package planner
 import (
 	"context"
 	"fmt"
+
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/planner/subquery"
 	"syndrdb/src/internal/syndrQL"
@@ -101,24 +102,19 @@ func NewSubqueryNode(
 	return node
 }
 
-// Execute runs the subquery and caches the materialized result
-// Note: SubqueryNode doesn't return documents directly - it's used for
-// side effects (caching subquery result) during WHERE clause evaluation
+// Execute runs the subquery and stores the result for this execution only.
+// Result is stored on the node so the parent (e.g. FilterNode) can read it via GetCachedResult()
+// during the same execution. We do not cache across Execute calls (Issue 9: per-execution semantics).
 func (n *SubqueryNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	// Execute subquery if not already cached
-	if n.cachedResult == nil {
-		result, err := n.Executor.Execute(ctx, n.InnerQuery, n.Database)
-		if err != nil {
-			return nil, fmt.Errorf("subquery execution failed: %w", err)
-		}
-
-		n.cachedResult = result
-		n.Logger.Debugf("Subquery executed: Type=%s, Strategy=%s, RowCount=%d, MemoryBytes=%d, ContainsNull=%v",
-			n.SubqueryType, result.Strategy, result.RowCount, result.MemoryBytes, result.ContainsNull)
+	result, err := n.Executor.Execute(ctx, n.InnerQuery, n.Database)
+	if err != nil {
+		return nil, fmt.Errorf("subquery execution failed: %w", err)
 	}
+	n.cachedResult = result
+	n.Logger.Debugf("Subquery executed: Type=%s, Strategy=%s, RowCount=%d, MemoryBytes=%d, ContainsNull=%v",
+		n.SubqueryType, result.Strategy, result.RowCount, result.MemoryBytes, result.ContainsNull)
 
 	// SubqueryNode doesn't produce documents itself - it's evaluated during WHERE filtering
-	// Return empty map to satisfy ExecutionNode interface
 	return make(map[string]*models.Document), nil
 }
 

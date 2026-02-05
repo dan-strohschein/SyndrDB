@@ -7,8 +7,10 @@ import (
 	"syndrdb/src/pkg/errors"
 )
 
-// ConvertParserError converts a parser error to a detailed SyndrDBError
-// Uses token information (line/column) if available for detailed validation messages
+// ConvertParserError converts a parser error to a detailed SyndrDBError.
+// Uses token information (line/column) if available for detailed validation messages.
+// command should be the original user input when available; otherwise use
+// reconstructCommandFromTokens(tokens) (approximate).
 func ConvertParserError(parseErr error, tokens []Token, currentTokenIndex int, command string) errors.SyndrDBError {
 	if parseErr == nil {
 		return nil
@@ -163,8 +165,10 @@ func reconstructCommandFromTokens(tokens []Token) string {
 	return strings.Join(parts, " ")
 }
 
-// CreateParserErrorWithToken creates a detailed parser error with token context
-// This is the preferred way to create parser errors with line/column information
+// CreateParserErrorWithToken creates a detailed parser error with token context.
+// This is the preferred way to create parser errors with line/column information.
+// command should be the original user input when available; otherwise use
+// reconstructCommandFromTokens (approximate).
 func CreateParserErrorWithToken(
 	msg string,
 	token Token,

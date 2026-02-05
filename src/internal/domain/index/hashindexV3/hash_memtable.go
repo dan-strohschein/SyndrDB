@@ -40,7 +40,9 @@ import (
 	"container/list"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 // HashMemTable maintains in-memory latest values for hash index entries
@@ -60,15 +62,19 @@ type HashMemTable struct {
 	maxSize     int // Maximum number of entries before eviction starts
 	currentSize int // Current number of entries
 
+	// WAL buffer cap (0 = no cap; when exceeded, buffer is swapped to bound memory)
+	walBufferMaxSize int
+
 	// Durability tracking
 	// Note: In LSM-style, entries are written to disk immediately,
 	// so walBuffer is only for crash recovery optimization
 	walBuffer []HashIndexEntry // Unflushed entries (future WAL support)
 
-	// Statistics
-	hits      uint64 // Number of cache hits
-	misses    uint64 // Number of cache misses
-	evictions uint64 // Number of entries evicted
+	// Statistics (hits/misses updated concurrently by readers; use atomics to avoid data race)
+	hits      atomic.Uint64 // Number of cache hits
+	misses    atomic.Uint64 // Number of cache misses
+	evictions uint64        // Number of entries evicted (only under Lock in evictOldestLocked)
+	tombstoneCount int      // Number of tombstone entries (O(1) for GetStats; maintained under Lock)
 
 	// Lifecycle
 	created time.Time
@@ -78,19 +84,25 @@ type HashMemTable struct {
 	lastEntriesCompact time.Time // Last time entries map was compacted
 }
 
-// NewHashMemTable creates a new in-memory table with LRU eviction
+// NewHashMemTable creates a new in-memory table with LRU eviction.
 // Parameters:
 //   - maxSize: Maximum number of entries before eviction starts
+//   - walBufferMaxSize: optional; max WAL buffer length before swap (0 = no cap). When provided and > 0, Put/Delete will swap the buffer when exceeded to bound memory.
 //
 // Returns initialized MemTable
-func NewHashMemTable(maxSize int) *HashMemTable {
+func NewHashMemTable(maxSize int, walBufferMaxSize ...int) *HashMemTable {
 	now := time.Now()
+	cap := 0
+	if len(walBufferMaxSize) > 0 && walBufferMaxSize[0] > 0 {
+		cap = walBufferMaxSize[0]
+	}
 	return &HashMemTable{
 		entries:            make(map[string]*HashIndexEntry),
 		lruOrder:           list.New(),
 		lruElements:        make(map[string]*list.Element),
 		maxSize:            maxSize,
 		currentSize:        0,
+		walBufferMaxSize:   cap,
 		walBuffer:          make([]HashIndexEntry, 0, 1000), // Pre-allocate for WAL
 		created:            now,
 		lastActivity:       now,
@@ -128,6 +140,12 @@ func (mt *HashMemTable) Put(entry *HashIndexEntry) error {
 			return fmt.Errorf("attempted to insert older entry: seq=%d vs existing=%d",
 				entry.Sequence, existingEntry.Sequence)
 		}
+		// Update tombstone count: replacing existing with new entry
+		if existingEntry.Deleted && !entry.Deleted {
+			mt.tombstoneCount--
+		} else if !existingEntry.Deleted && entry.Deleted {
+			mt.tombstoneCount++
+		}
 		// Replace with newer entry (no size change)
 		mt.entries[entry.KeyValue] = entry
 		// Move to front of LRU (most recently used)
@@ -147,6 +165,9 @@ func (mt *HashMemTable) Put(entry *HashIndexEntry) error {
 
 		// New key, add to entries and LRU
 		mt.entries[entry.KeyValue] = entry
+		if entry.Deleted {
+			mt.tombstoneCount++
+		}
 		elem := mt.lruOrder.PushFront(entry.KeyValue)
 		mt.lruElements[entry.KeyValue] = elem
 		mt.currentSize++
@@ -154,6 +175,10 @@ func (mt *HashMemTable) Put(entry *HashIndexEntry) error {
 
 	// Add to WAL buffer for durability (future feature)
 	mt.walBuffer = append(mt.walBuffer, *entry)
+	// Bound WAL buffer growth: swap with fresh slice when over cap (Issue 5)
+	if mt.walBufferMaxSize > 0 && len(mt.walBuffer) > mt.walBufferMaxSize {
+		mt.walBuffer = make([]HashIndexEntry, 0, 1000)
+	}
 
 	return nil
 }
@@ -169,6 +194,9 @@ func (mt *HashMemTable) evictOldestLocked(count int) {
 			break
 		}
 		key := oldest.Value.(string)
+		if entry, ok := mt.entries[key]; ok && entry.Deleted {
+			mt.tombstoneCount--
+		}
 
 		// Remove from all data structures
 		delete(mt.entries, key)
@@ -188,15 +216,14 @@ func (mt *HashMemTable) evictOldestLocked(count int) {
 // Returns entry and boolean indicating if found
 func (mt *HashMemTable) Get(key string) (*HashIndexEntry, bool) {
 	mt.mutex.RLock()
-	defer mt.mutex.RUnlock()
-
 	entry, found := mt.entries[key]
+	mt.mutex.RUnlock()
 
-	// Update statistics
+	// Update statistics outside lock using atomics to avoid data race with concurrent readers
 	if found {
-		mt.hits++
+		mt.hits.Add(1)
 	} else {
-		mt.misses++
+		mt.misses.Add(1)
 	}
 
 	return entry, found
@@ -223,10 +250,16 @@ func (mt *HashMemTable) Delete(key string, sequence uint64, commitSequence uint6
 	tombstone := NewTombstoneEntry(key, sequence, commitSequence)
 
 	// Check if key already exists to update LRU correctly
-	_, exists := mt.entries[key]
+	existingEntry, exists := mt.entries[key]
 
 	// Store tombstone in MemTable
 	mt.entries[key] = tombstone
+	// Update tombstone count: we added a tombstone; if it was new or replaced a non-tombstone, count++
+	if !exists {
+		mt.tombstoneCount++
+	} else if !existingEntry.Deleted {
+		mt.tombstoneCount++
+	}
 
 	if exists {
 		// Move to front of LRU (most recently used)
@@ -251,8 +284,27 @@ func (mt *HashMemTable) Delete(key string, sequence uint64, commitSequence uint6
 
 	// Add to WAL buffer
 	mt.walBuffer = append(mt.walBuffer, *tombstone)
+	// Bound WAL buffer growth: swap with fresh slice when over cap (Issue 5)
+	if mt.walBufferMaxSize > 0 && len(mt.walBuffer) > mt.walBufferMaxSize {
+		mt.walBuffer = make([]HashIndexEntry, 0, 1000)
+	}
 
 	return nil
+}
+
+// IterateNonDeleted calls f for each non-deleted entry; iteration stops if f returns false.
+// Caller must not hold the MemTable lock. Used by GetAllDocumentIDs and other index APIs.
+func (mt *HashMemTable) IterateNonDeleted(f func(key string, entry *HashIndexEntry) bool) {
+	mt.mutex.RLock()
+	defer mt.mutex.RUnlock()
+	for key, entry := range mt.entries {
+		if entry.Deleted {
+			continue
+		}
+		if !f(key, entry) {
+			return
+		}
+	}
 }
 
 // Contains checks if a key exists in the MemTable
@@ -321,41 +373,51 @@ func (mt *HashMemTable) Clear() int {
 	mt.lruElements = make(map[string]*list.Element)
 	mt.walBuffer = make([]HashIndexEntry, 0, 1000)
 	mt.currentSize = 0
+	mt.tombstoneCount = 0
 
 	return count
 }
 
-// Snapshot returns a copy of all entries in the MemTable
-// This is used for flushing to disk or during compaction
+// Snapshot returns a copy of all entries in the MemTable.
+// This is used for flushing to disk or during compaction.
+// Short critical section: copy keys under RLock, then build entry copies under a second RLock to minimize lock hold.
 //
 // Returns slice of all entries (not in any particular order)
 func (mt *HashMemTable) Snapshot() []*HashIndexEntry {
+	// Phase 1: copy keys only (minimal allocation under lock)
 	mt.mutex.RLock()
-	defer mt.mutex.RUnlock()
-
-	entries := make([]*HashIndexEntry, 0, mt.currentSize)
-	for _, entry := range mt.entries {
-		// Make a copy to prevent external modification
-		entryCopy := *entry
-		entries = append(entries, &entryCopy)
+	size := mt.currentSize
+	keys := make([]string, 0, size+8) // +8 to avoid realloc if size is slightly off
+	for k := range mt.entries {
+		keys = append(keys, k)
 	}
+	mt.mutex.RUnlock()
 
-	return entries
+	// Phase 2: build result; one more RLock to read entries by key
+	result := make([]*HashIndexEntry, 0, len(keys))
+	mt.mutex.RLock()
+	for _, k := range keys {
+		if entry := mt.entries[k]; entry != nil {
+			entryCopy := *entry
+			result = append(result, &entryCopy)
+		}
+	}
+	mt.mutex.RUnlock()
+	return result
 }
 
-// GetUnflushedEntries returns entries that haven't been persisted
-// This is used for WAL and crash recovery
+// GetUnflushedEntries returns entries that haven't been persisted.
+// This is used for WAL and crash recovery.
+// Uses swap under Lock so the critical section is O(1); caller receives ownership of the returned slice.
 //
-// Returns slice of unflushed entries in write order
+// Returns slice of unflushed entries in write order. Caller must not modify the returned slice.
 func (mt *HashMemTable) GetUnflushedEntries() []HashIndexEntry {
-	mt.mutex.RLock()
-	defer mt.mutex.RUnlock()
-
-	// Return copy to prevent external modification
-	buffer := make([]HashIndexEntry, len(mt.walBuffer))
-	copy(buffer, mt.walBuffer)
-
-	return buffer
+	mt.mutex.Lock()
+	// Swap with fresh buffer so we hold the lock only for O(1)
+	old := mt.walBuffer
+	mt.walBuffer = make([]HashIndexEntry, 0, 1000)
+	mt.mutex.Unlock()
+	return old
 }
 
 // ClearWALBuffer clears the unflushed entries buffer
@@ -511,46 +573,47 @@ type MemTableStats struct {
 // GetStats returns current statistics
 func (mt *HashMemTable) GetStats() MemTableStats {
 	mt.mutex.RLock()
-	defer mt.mutex.RUnlock()
+	// Read atomic stats and O(1) tombstone count (no full iteration)
+	hits := mt.hits.Load()
+	misses := mt.misses.Load()
+	tombstones := mt.tombstoneCount
+	currentSize := mt.currentSize
+	maxSize := mt.maxSize
+	evictions := mt.evictions
+	created := mt.created
+	walBufferLen := len(mt.walBuffer)
+	mt.mutex.RUnlock()
 
-	// Calculate hit rate
-	total := mt.hits + mt.misses
+	// Calculate hit rate and memory outside lock
+	total := hits + misses
 	hitRate := 0.0
 	if total > 0 {
-		hitRate = (float64(mt.hits) / float64(total)) * 100.0
+		hitRate = (float64(hits) / float64(total)) * 100.0
 	}
-
-	// Count tombstones
-	tombstones := 0
-	for _, entry := range mt.entries {
-		if entry.Deleted {
-			tombstones++
-		}
-	}
-
-	// Estimate memory usage (rough approximation)
-	// Each map entry: ~48 bytes overhead + key string + entry struct (~150 bytes)
-	// LRU overhead: ~64 bytes per entry (list element + map entry)
 	avgKeySize := 32 // Average key size estimate
-	memUsage := int64(mt.currentSize * (48 + avgKeySize + 150 + 64))
+	memUsage := int64(currentSize * (48 + avgKeySize + 150 + 64))
 
 	return MemTableStats{
-		Size:           mt.currentSize,
-		MaxSize:        mt.maxSize,
-		Hits:           mt.hits,
-		Misses:         mt.misses,
-		Evictions:      mt.evictions,
+		Size:           currentSize,
+		MaxSize:        maxSize,
+		Hits:           hits,
+		Misses:         misses,
+		Evictions:      evictions,
 		HitRate:        hitRate,
-		Created:        mt.created,
+		Created:        created,
 		MemoryUsage:    memUsage,
 		TombstoneCount: tombstones,
-		WALBufferSize:  len(mt.walBuffer),
+		WALBufferSize:  walBufferLen,
 	}
 }
 
-// Merge combines another MemTable into this one
-// Used during compaction or recovery operations
-// Only keeps newer entries based on sequence numbers
+// Merge combines another MemTable into this one.
+// Used during compaction or recovery operations.
+// Only keeps newer entries based on sequence numbers.
+//
+// LOCK ORDERING (canonical by address to avoid deadlock): The MemTable with the
+// smaller pointer address is locked first (Lock), then the other (RLock).
+// Callers (e.g. compaction) must use the same order when calling Merge(A, B).
 //
 // Parameters:
 //   - other: Another MemTable to merge from
@@ -561,11 +624,23 @@ func (mt *HashMemTable) Merge(other *HashMemTable) int {
 		return 0
 	}
 
-	mt.mutex.Lock()
-	defer mt.mutex.Unlock()
-
-	other.mutex.RLock()
-	defer other.mutex.RUnlock()
+	// Canonical lock order by address to prevent deadlock when A.Merge(B) and B.Merge(A) run concurrently
+	mtAddr := uintptr(unsafe.Pointer(mt))
+	otherAddr := uintptr(unsafe.Pointer(other))
+	if mtAddr == otherAddr {
+		return 0
+	}
+	if mtAddr < otherAddr {
+		mt.mutex.Lock()
+		defer mt.mutex.Unlock()
+		other.mutex.RLock()
+		defer other.mutex.RUnlock()
+	} else {
+		other.mutex.RLock()
+		defer other.mutex.RUnlock()
+		mt.mutex.Lock()
+		defer mt.mutex.Unlock()
+	}
 
 	merged := 0
 
@@ -573,13 +648,26 @@ func (mt *HashMemTable) Merge(other *HashMemTable) int {
 		existingEntry, exists := mt.entries[key]
 
 		if !exists {
-			// New key, add it
+			// New key: add to entries and to LRU so it can be evicted later
 			mt.entries[key] = otherEntry
+			if otherEntry.Deleted {
+				mt.tombstoneCount++
+			}
+			elem := mt.lruOrder.PushFront(key)
+			mt.lruElements[key] = elem
 			mt.currentSize++
 			merged++
 		} else if otherEntry.IsNewer(existingEntry) {
-			// Other entry is newer, replace
+			// Other entry is newer: replace and promote in LRU
+			if existingEntry.Deleted && !otherEntry.Deleted {
+				mt.tombstoneCount--
+			} else if !existingEntry.Deleted && otherEntry.Deleted {
+				mt.tombstoneCount++
+			}
 			mt.entries[key] = otherEntry
+			if elem, ok := mt.lruElements[key]; ok {
+				mt.lruOrder.MoveToFront(elem)
+			}
 			merged++
 		}
 		// If existing entry is newer, keep it (do nothing)

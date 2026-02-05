@@ -11,6 +11,7 @@ package server
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -22,6 +23,7 @@ import (
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
 )
@@ -98,6 +100,66 @@ func executeUpdateWithOCC(
 	// OCC failed after all retries, escalate to pessimistic locking
 	logger.Debugf("OCC failed after %d attempts for bundle '%s', escalating to pessimistic locking", occRetryLimit, bundleName)
 	return executePessimisticUpdate(ctx, serviceManager, database, bundle, docCommand, session, logger)
+}
+
+// executeUpdateRCUDirect runs an autocommit UPDATE via UpdateDocumentInBundleRCU only,
+// without the OCC read/validate phase. Used when enable_rcu_writes is true to avoid
+// bundle read lock, document lock acquisition, N GetDocumentByID, and duplicate WHERE.
+// Retries on ErrWriteConflict up to MaxOCCRetries with exponential backoff.
+func executeUpdateRCUDirect(
+	ctx context.Context,
+	serviceManager ServiceManager,
+	database *models.Database,
+	bundle *models.Bundle,
+	docCommand *models.DocumentUpdateCommand,
+	session *Session,
+	logger *zap.SugaredLogger,
+) error {
+	bundleName := bundle.Name
+	args := settings.GetSettings()
+	maxRetries := args.MaxOCCRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if serviceManager.WALManager == nil {
+			lastErr = serviceManager.BundleService.UpdateDocumentInBundleRCU(ctx, database, bundle, docCommand)
+		} else {
+			lastErr = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+				if err := serviceManager.WALManager.LogDocumentUpdate(txID, bundleName, "multiple", nil, docCommand.Fields); err != nil {
+					return errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+						"failed to log document update", errors.LayerWAL).WithContext("bundle", bundleName)
+				}
+				return serviceManager.BundleService.UpdateDocumentInBundleRCU(ctx, database, bundle, docCommand)
+			})
+		}
+		if lastErr == nil {
+			if attempt > 1 {
+				logger.Debugf("RCU-direct update succeeded on attempt %d for bundle '%s'", attempt, bundleName)
+			}
+			return nil
+		}
+		if !isRCUWriteConflict(lastErr) {
+			return lastErr
+		}
+		logger.Debugf("RCU write conflict on attempt %d/%d for bundle '%s', retrying", attempt, maxRetries, bundleName)
+		if attempt < maxRetries {
+			backoff := occBackoffBase * time.Duration(1<<(attempt-1))
+			if backoff > occBackoffMax {
+				backoff = occBackoffMax
+			}
+			jitter := time.Duration(rand.Int63n(int64(backoff / 2)))
+			time.Sleep(backoff + jitter)
+		}
+	}
+	return fmt.Errorf("update failed after %d RCU retries: %w", maxRetries, lastErr)
+}
+
+// isRCUWriteConflict returns true if the error is ErrWriteConflict from the RCU path (retryable).
+func isRCUWriteConflict(err error) bool {
+	return stderrors.Is(err, bndle.ErrWriteConflict)
 }
 
 // executeOptimisticUpdate performs an update using optimistic concurrency control.

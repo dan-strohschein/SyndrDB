@@ -97,6 +97,8 @@ func getLogWriter(path string) zapcore.WriteSyncer {
 
 // LogError logs an error to both internal and external logs
 // If debug mode is enabled, also outputs to console
+// User validation errors are logged at Warn level (no stack trace) while
+// internal/system errors are logged at Error level (with stack trace)
 func (el *ErrorLogger) LogError(err SyndrDBError) {
 	if err == nil {
 		return
@@ -105,22 +107,38 @@ func (el *ErrorLogger) LogError(err SyndrDBError) {
 	el.mu.RLock()
 	defer el.mu.RUnlock()
 
-	// Log to internal log (full details)
-	internalFields := formatInternalLogFields(err)
-	el.internalLogger.Error(err.InternalMessage(), internalFields...)
+	// Check if this is a user validation error (no stack trace needed)
+	isUserValidationError := isUserError(err.Code())
 
-	// Log to external log (sanitized)
+	// Log to internal log (full details for system errors, reduced for user errors)
+	internalFields := formatInternalLogFields(err, isUserValidationError)
+	if isUserValidationError {
+		// User validation errors logged at Warn level (no stack trace)
+		el.internalLogger.Warn(err.InternalMessage(), internalFields...)
+	} else {
+		// System/internal errors logged at Error level (with stack trace)
+		el.internalLogger.Error(err.InternalMessage(), internalFields...)
+	}
+
+	// Log to external log (sanitized) - always at Error level for external visibility
 	externalFields := formatExternalLogFields(err)
 	el.externalLogger.Error(err.UserMessage(), externalFields...)
 
 	// Output to console in debug mode
 	if el.consoleLogger != nil {
-		el.consoleLogger.Error("\n" + FormatConsoleOutput(err))
+		if isUserValidationError {
+			// User validation errors logged at Warn level (no stack trace from zap)
+			el.consoleLogger.Warn("\n" + FormatConsoleOutput(err))
+		} else {
+			// System errors logged at Error level (includes stack trace from zap)
+			el.consoleLogger.Error("\n" + FormatConsoleOutput(err))
+		}
 	}
 }
 
 // formatInternalLogFields formats error fields for internal logging
-func formatInternalLogFields(err SyndrDBError) []zap.Field {
+// skipStackTrace should be true for user validation errors where stack traces are not helpful
+func formatInternalLogFields(err SyndrDBError, skipStackTrace bool) []zap.Field {
 	fields := []zap.Field{
 		zap.String("error_code", err.Code().String()),
 		zap.String("layer", err.Layer().String()),
@@ -129,8 +147,8 @@ func formatInternalLogFields(err SyndrDBError) []zap.Field {
 		zap.String("internal_message", err.InternalMessage()),
 	}
 
-	// Add stack trace if available
-	if err.StackTrace() != "" && err.Severity() >= SeverityError {
+	// Add stack trace only for internal/system errors, skip for user validation errors
+	if err.StackTrace() != "" && err.Severity() >= SeverityError && !skipStackTrace {
 		fields = append(fields, zap.String("stack_trace", err.StackTrace()))
 	}
 

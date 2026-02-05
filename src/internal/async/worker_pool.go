@@ -3,6 +3,7 @@ package async
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -55,13 +56,11 @@ type WorkerPoolConfig struct {
 func NewWorkerPool(config WorkerPoolConfig) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Default error handler just logs the error
+	// Default error handler logs so errors are not dropped silently
 	errorHandler := config.ErrorHandler
 	if errorHandler == nil {
 		errorHandler = func(err error, op AsyncOperation) {
-			// TODO: I need to add proper logging here once I integrate with the main logger
-			//fmt.Printf("Worker pool error: %v (operation: %s, sequence: %d)\n",
-			//	err, op.GetType(), op.GetSequence())
+			log.Printf("worker pool error: %v (operation: %s, sequence: %d)", err, op.GetType(), op.GetSequence())
 		}
 	}
 

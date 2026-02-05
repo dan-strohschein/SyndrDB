@@ -623,11 +623,12 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 
 		docCount++
 
-		// Memory tracking: Sample every 100th document
+		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && docCount%100 == 0 {
 			docSize := models.EstimateDocumentSize(doc)
-			memoryTracker.Sample(docSize, docCount)
-
+			if err := memoryTracker.Sample(docSize, docCount); err != nil {
+				return nil, err
+			}
 			if memoryTracker.WillExceedLimit(len(documents)) {
 				return nil, ErrMemoryLimitExceeded
 			}
@@ -721,12 +722,11 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 
 		totalInput++
 
-		// Memory tracking: Sample every 100th document
+		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && i%100 == 0 {
 			docSize := models.EstimateDocumentSize(doc)
 			if err := memoryTracker.Sample(docSize, i); err != nil {
-				n.Logger.Warnf("Memory tracking error: %v", err)
-				// Continue processing but log warning
+				return nil, totalInput, err
 			}
 		}
 
@@ -793,12 +793,12 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 
 		docCount++
 
-		// Memory tracking: Sample every 100th document
+		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && docCount%100 == 0 {
 			// Estimate size of projected document (much smaller than full document)
 			estimatedSize := int64(50) // ~50 bytes for projected doc (DocumentID + one field)
 			if err := memoryTracker.Sample(estimatedSize, docCount); err != nil {
-				n.Logger.Warnf("Memory tracking error: %v", err)
+				return nil, docCount, err
 			}
 		}
 
@@ -1000,11 +1000,12 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 
 		docCount++
 
-		// Memory tracking: Sample every 100th document
+		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && docCount%100 == 0 {
 			docSize := models.EstimateDocumentSize(doc)
-			memoryTracker.Sample(docSize, docCount)
-
+			if err := memoryTracker.Sample(docSize, docCount); err != nil {
+				return nil, err
+			}
 			if memoryTracker.WillExceedLimit(len(docSlice)) {
 				return nil, ErrMemoryLimitExceeded
 			}
@@ -1617,7 +1618,8 @@ func (n *AggregationNode) applyHavingClause(documents map[string]*models.Documen
 	return filteredDocs, nil
 }
 
-// transformHavingExpression recursively transforms aggregate function calls to field lookups
+// transformHavingExpression recursively transforms aggregate function calls to field lookups.
+// Returns a new expression tree; does not mutate the input (Issue 8: safe for plan reuse/concurrent execution).
 // Example: MIN(start_time) → IdentifierExpression{Name: "min_start_time"}
 func (n *AggregationNode) transformHavingExpression(expr syndrQL.Expression) syndrQL.Expression {
 	switch e := expr.(type) {
@@ -1644,20 +1646,25 @@ func (n *AggregationNode) transformHavingExpression(expr syndrQL.Expression) syn
 		return e
 
 	case *syndrQL.BinaryExpression:
-		// Recursively transform left and right sides
-		e.Left = n.transformHavingExpression(e.Left)
-		e.Right = n.transformHavingExpression(e.Right)
-		return e
+		// Build new node with transformed children; do not mutate e (Issue 8)
+		return &syndrQL.BinaryExpression{
+			Left:     n.transformHavingExpression(e.Left),
+			Operator: e.Operator,
+			Right:    n.transformHavingExpression(e.Right),
+		}
 
 	case *syndrQL.UnaryExpression:
-		// Recursively transform the operand
-		e.Right = n.transformHavingExpression(e.Right)
-		return e
+		// Build new node with transformed operand; do not mutate e (Issue 8)
+		return &syndrQL.UnaryExpression{
+			Operator: e.Operator,
+			Right:    n.transformHavingExpression(e.Right),
+		}
 
 	case *syndrQL.GroupedExpression:
-		// Recursively transform the inner expression
-		e.Expression = n.transformHavingExpression(e.Expression)
-		return e
+		// Build new node with transformed inner expression; do not mutate e (Issue 8)
+		return &syndrQL.GroupedExpression{
+			Expression: n.transformHavingExpression(e.Expression),
+		}
 
 	default:
 		// For other expression types (literals, identifiers, etc.), return as-is

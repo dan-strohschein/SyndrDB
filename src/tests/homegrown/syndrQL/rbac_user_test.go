@@ -394,3 +394,38 @@ func TestDeleteUserParser_ErrorCases(t *testing.T) {
 		})
 	}
 }
+
+// TestUserParsers_TokenizationError ensures Create/Update/Delete user parsers
+// return tokenization errors (e.g. unterminated quote) instead of panicking.
+func TestUserParsers_TokenizationError(t *testing.T) {
+	t.Run("CreateUser", func(t *testing.T) {
+		parser := syndrQL.NewCreateUserParser(`CREATE USER "unterminated`)
+		stmt, err := parser.Parse()
+		if err == nil {
+			t.Errorf("expected tokenization error, got nil")
+		}
+		if stmt != nil {
+			t.Errorf("expected nil statement on tokenization error, got %+v", stmt)
+		}
+	})
+	t.Run("UpdateUser", func(t *testing.T) {
+		parser := syndrQL.NewUpdateUserParser(`UPDATE USER "x SET PASSWORD = "y";`)
+		stmt, err := parser.Parse()
+		if err == nil {
+			t.Errorf("expected tokenization error, got nil")
+		}
+		if stmt != nil {
+			t.Errorf("expected nil statement on tokenization error, got %+v", stmt)
+		}
+	})
+	t.Run("DeleteUser", func(t *testing.T) {
+		parser := syndrQL.NewDeleteUserParser(`DELETE USER "unterminated`)
+		stmt, err := parser.Parse()
+		if err == nil {
+			t.Errorf("expected tokenization error, got nil")
+		}
+		if stmt != nil {
+			t.Errorf("expected nil statement on tokenization error, got %+v", stmt)
+		}
+	})
+}

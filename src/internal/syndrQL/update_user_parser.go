@@ -45,26 +45,29 @@ type UpdateUserStatement struct {
 
 // UpdateUserParser handles parsing of UPDATE USER statements
 type UpdateUserParser struct {
-	tokenizer *Tokenizer
-	current   int
-	tokens    []Token
+	tokenizer   *Tokenizer
+	current     int
+	tokens      []Token
+	tokenizeErr error
 }
 
-// NewUpdateUserParser creates a new UPDATE USER parser for the given input
+// NewUpdateUserParser creates a new UPDATE USER parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewUpdateUserParser(input string) *UpdateUserParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &UpdateUserParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &UpdateUserParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &UpdateUserParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses an UPDATE USER statement
 // Syntax: UPDATE USER "username" SET PASSWORD = "new_password" [FORCE];
 func (p *UpdateUserParser) Parse() (*UpdateUserStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect: UPDATE
 	if err := p.expectKeyword(TOKEN_UPDATE, "UPDATE"); err != nil {
 		return nil, err

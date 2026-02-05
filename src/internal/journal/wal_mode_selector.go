@@ -52,6 +52,17 @@ func (wms *WALModeSelector) GetCurrentMode() WALModeInterface {
 	return wms.currentMode
 }
 
+// SetSequenceMinimumAfterRecovery sets the async adapter's sequence generator minimum
+// to at least (currentLSN + 1) so new operations get sequences above recovered WAL state.
+// Call this after WAL replay during startup when using async mode.
+func (wms *WALModeSelector) SetSequenceMinimumAfterRecovery(walManager *WALManager) {
+	if wms.asyncAdapter == nil {
+		return
+	}
+	lsn := walManager.GetCurrentLSN()
+	wms.asyncAdapter.GetSequenceGenerator().SetMinimum(lsn + 1)
+}
+
 // SwitchMode switches between sync and async WAL modes
 // This provides runtime switching capability for safety
 func (wms *WALModeSelector) SwitchMode(mode string) error {

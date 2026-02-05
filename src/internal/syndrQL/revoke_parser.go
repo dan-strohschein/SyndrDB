@@ -59,21 +59,21 @@ type RevokeStatement struct {
 
 // RevokeParser parses REVOKE statements in SyndrQL
 type RevokeParser struct {
-	tokenizer *Tokenizer
-	tokens    []Token
-	current   int
+	tokenizer   *Tokenizer
+	tokens      []Token
+	current     int
+	tokenizeErr error
 }
 
-// NewRevokeParser creates a new REVOKE parser for the given input
+// NewRevokeParser creates a new REVOKE parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewRevokeParser(input string) *RevokeParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &RevokeParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &RevokeParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &RevokeParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses the REVOKE statement and returns a RevokeStatement
@@ -83,6 +83,9 @@ func NewRevokeParser(input string) *RevokeParser {
 //   - REVOKE ROLE "role" FROM USER "username";
 //   - REVOKE ROLE "role" FROM USER "username" FORCE;
 func (p *RevokeParser) Parse() (*RevokeStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect REVOKE keyword
 	if err := p.expectKeyword(TOKEN_REVOKE, "REVOKE"); err != nil {
 		return nil, err

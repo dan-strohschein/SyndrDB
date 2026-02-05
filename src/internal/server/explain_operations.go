@@ -124,6 +124,15 @@ func HandleExplainCommand(
 		// Instrument the execution tree with node IDs and timing
 		instrumentExecutionTree(plan.RootNode, nodeMetricsMap, logger)
 
+		// Join cleanup so JoinExecutionNode can avoid copying pooled slices
+		joinCleanupFns := []func(){}
+		ctx = context.WithValue(ctx, planner.JoinCleanupContextKey, &joinCleanupFns)
+		defer func() {
+			for _, fn := range joinCleanupFns {
+				fn()
+			}
+		}()
+
 		// Execute the plan and track timing
 		executeStart := time.Now()
 		_, err := plan.RootNode.Execute(ctx)

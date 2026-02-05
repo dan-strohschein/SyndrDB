@@ -120,17 +120,45 @@ func (im *InvalidationManager) OnWrite(bundleName string, docCount int) {
 			bundleName, tracker.batchWindowWrites, tracker.count, windowAge.Milliseconds())
 	}
 
-	// Check threshold
-	if tracker.count >= im.writeThreshold {
-		im.logger.Infof("Invalidating bundle %s: writeCount=%d threshold=%d",
-			bundleName, tracker.count, im.writeThreshold)
+	// Check threshold: include current window writes so a burst within one window
+	// still triggers invalidation (Issue 3)
+	total := tracker.count + tracker.batchWindowWrites
+	if total >= im.writeThreshold {
+		im.logger.Infof("Invalidating bundle %s: totalWrites=%d (count=%d + window=%d) threshold=%d",
+			bundleName, total, tracker.count, tracker.batchWindowWrites, im.writeThreshold)
 
 		// Invalidate the bundle
 		im.cache.InvalidateBundle(bundleName)
 
-		// Reset counter
+		// Reset counters and window so next window starts clean
 		tracker.count = 0
+		tracker.batchWindowWrites = 0
+		tracker.batchWindowStart = time.Time{}
 	}
+}
+
+// RemoveBundle removes the write tracker for a dropped bundle to prevent unbounded
+// memory growth when bundles are dropped or renamed (Issue 10).
+// Call when a bundle is dropped (e.g. from RemoveBundleMetadata).
+func (im *InvalidationManager) RemoveBundle(bundleName string) {
+	if im == nil {
+		return
+	}
+	im.writeTrackers.Delete(bundleName)
+}
+
+// WriteTrackerCount returns the number of bundles with active write trackers.
+// Used for tests and diagnostics to verify RemoveBundle prunes entries.
+func (im *InvalidationManager) WriteTrackerCount() int {
+	if im == nil {
+		return 0
+	}
+	n := 0
+	im.writeTrackers.Range(func(_, _ interface{}) bool {
+		n++
+		return true
+	})
+	return n
 }
 
 // InvalidateBundle immediately invalidates all plans for a bundle

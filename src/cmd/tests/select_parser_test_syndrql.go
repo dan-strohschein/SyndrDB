@@ -597,7 +597,10 @@ func TestSelectParser_IndexHints(t *testing.T) {
 func TestSelectPatternDetector_DetectAllPattern(t *testing.T) {
 	input := "SELECT * FROM Authors"
 	tokenizer := syndrQL.NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	detector := syndrQL.NewSelectPatternDetector()
 	pattern := detector.DetectPattern(tokens)
@@ -610,7 +613,10 @@ func TestSelectPatternDetector_DetectAllPattern(t *testing.T) {
 func TestSelectPatternDetector_DetectFieldsPattern(t *testing.T) {
 	input := "SELECT AuthorName, Age FROM Authors"
 	tokenizer := syndrQL.NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	detector := syndrQL.NewSelectPatternDetector()
 	pattern := detector.DetectPattern(tokens)
@@ -623,7 +629,10 @@ func TestSelectPatternDetector_DetectFieldsPattern(t *testing.T) {
 func TestSelectPatternDetector_DetectAggregatePattern(t *testing.T) {
 	input := "SELECT COUNT(*) FROM Authors"
 	tokenizer := syndrQL.NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	detector := syndrQL.NewSelectPatternDetector()
 	pattern := detector.DetectPattern(tokens)
@@ -636,7 +645,10 @@ func TestSelectPatternDetector_DetectAggregatePattern(t *testing.T) {
 func TestSelectPatternDetector_DetectGroupByPattern(t *testing.T) {
 	input := "SELECT Country FROM Authors GROUP BY Country"
 	tokenizer := syndrQL.NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	detector := syndrQL.NewSelectPatternDetector()
 	pattern := detector.DetectPattern(tokens)
@@ -747,7 +759,10 @@ func BenchmarkSelectParser_VeryComplexQuery(b *testing.B) {
 func BenchmarkSelectPatternDetector_Detect(b *testing.B) {
 	input := "SELECT * FROM Authors WHERE Age > 25"
 	tokenizer := syndrQL.NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		b.Fatal(err)
+	}
 	detector := syndrQL.NewSelectPatternDetector()
 
 	b.ResetTimer()

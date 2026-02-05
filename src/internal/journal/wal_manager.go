@@ -33,9 +33,8 @@ type WALManager struct {
 
 // Transaction represents an active database transaction
 type Transaction struct {
-	ID         string
-	StartTime  time.Time
-	Operations []WALEntry
+	ID        string
+	StartTime time.Time
 }
 
 // NewWALManager creates a new WAL manager instance
@@ -58,6 +57,7 @@ func NewWALManager(logger *zap.SugaredLogger) (*WALManager, error) {
 		EncryptionEnabled:  false,
 		AutoFlush:          true,
 		DurabilityMode:     settings.DurabilityMode,
+		UseGroupCommit:     settings.UseGroupCommit,
 		WALBatchSize:       settings.WALBatchSize,
 		WALMaxFlushDelay:   time.Duration(settings.WALMaxFlushDelay) * time.Millisecond,
 	}
@@ -90,31 +90,34 @@ func NewWALManager(logger *zap.SugaredLogger) (*WALManager, error) {
 }
 
 // generateTxID generates a unique transaction ID using monotonic counter
-// Returns string for backward compatibility, but internally uses uint64
-func (wm *WALManager) generateTxID() string {
-	txID := wm.transactionCounter.Next()
-	// Convert uint64 to hex string for backward compatibility
-	return fmt.Sprintf("%016x", txID)
+func (wm *WALManager) generateTxID() (string, error) {
+	txID, err := wm.transactionCounter.Next()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%016x", txID), nil
 }
 
 // generateTxIDUint64 generates a transaction ID as uint64 (for MVCC)
-func (wm *WALManager) generateTxIDUint64() uint64 {
+func (wm *WALManager) generateTxIDUint64() (uint64, error) {
 	return wm.transactionCounter.Next()
 }
 
 // BeginTransaction starts a new transaction and returns the transaction ID
 func (wm *WALManager) BeginTransaction() (string, error) {
-	txID := wm.generateTxID()
+	txID, err := wm.generateTxID()
+	if err != nil {
+		return "", fmt.Errorf("transaction counter: %w", err)
+	}
 
 	tx := &Transaction{
-		ID:         txID,
-		StartTime:  time.Now(),
-		Operations: make([]WALEntry, 0),
+		ID:        txID,
+		StartTime: time.Now(),
 	}
 
 	wm.activeTxsMu.Lock()
 	wm.activeTxs[txID] = tx
-	err := wm.wal.LogOperation(txID, OpBeginTx, "", "", "", "", "")
+	err = wm.wal.LogOperation(txID, OpBeginTx, "", "", "", "", "")
 	if err != nil {
 		delete(wm.activeTxs, txID)
 		wm.activeTxsMu.Unlock()
@@ -162,8 +165,8 @@ func (wm *WALManager) CommitTransaction(txID string, preallocatedCommitSeq *uint
 	}
 
 	duration := time.Since(tx.StartTime)
-	wm.logger.Debugf("Committed transaction: %s (duration: %v, operations: %d, commitSeq: %d)",
-		txID, duration, len(tx.Operations), commitSequence)
+	wm.logger.Debugf("Committed transaction: %s (duration: %v, commitSeq: %d)",
+		txID, duration, commitSequence)
 	return nil
 }
 
@@ -195,8 +198,7 @@ func (wm *WALManager) RollbackTransaction(txID string) error {
 	}
 
 	duration := time.Since(tx.StartTime)
-	wm.logger.Debugf("Rolled back transaction: %s (duration: %v, operations: %d)",
-		txID, duration, len(tx.Operations))
+	wm.logger.Debugf("Rolled back transaction: %s (duration: %v)", txID, duration)
 	return nil
 }
 
@@ -582,13 +584,15 @@ func (wm *WALManager) InitializeTransactionCounter(value uint64) {
 // BeginTransactionUint64 starts a new transaction and returns the transaction ID as uint64
 // This is the MVCC-compatible version that returns numeric IDs
 func (wm *WALManager) BeginTransactionUint64() (uint64, error) {
-	txID := wm.generateTxIDUint64()
+	txID, err := wm.generateTxIDUint64()
+	if err != nil {
+		return 0, fmt.Errorf("transaction counter: %w", err)
+	}
 	txIDStr := fmt.Sprintf("%016x", txID)
 
 	tx := &Transaction{
-		ID:         txIDStr,
-		StartTime:  time.Now(),
-		Operations: make([]WALEntry, 0),
+		ID:        txIDStr,
+		StartTime: time.Now(),
 	}
 
 	wm.activeTxsMu.Lock()

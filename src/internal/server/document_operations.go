@@ -10,6 +10,7 @@ import (
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
@@ -65,16 +66,18 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	useHybridOCC := session == nil || !session.IsInTransaction()
 
 	if useHybridOCC {
-		logger.Debugf("Using hybrid OCC for UPDATE on bundle '%s'", bundleName)
-
-		// Build context for the operation
 		ctx := context.Background()
-
-		// Execute using OCC with automatic fallback to pessimistic
 		globalMetrics := GetGlobalServerMetrics()
 		globalMetrics.TransactionsBegun.Add(1)
 
-		err = executeUpdateWithOCC(ctx, serviceManager, database, bundle, docCommand, session, logger)
+		args := settings.GetSettings()
+		if args.EnableRCUWrites {
+			logger.Debugf("Using RCU-direct UPDATE on bundle '%s'", bundleName)
+			err = executeUpdateRCUDirect(ctx, serviceManager, database, bundle, docCommand, session, logger)
+		} else {
+			logger.Debugf("Using hybrid OCC for UPDATE on bundle '%s'", bundleName)
+			err = executeUpdateWithOCC(ctx, serviceManager, database, bundle, docCommand, session, logger)
+		}
 
 		if err != nil {
 			globalMetrics.TransactionsRolledBack.Add(1)

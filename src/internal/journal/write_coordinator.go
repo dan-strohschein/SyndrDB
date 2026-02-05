@@ -193,11 +193,11 @@ func (wc *WriteCoordinator) walWriterLoop() {
 	for {
 		select {
 		case <-wc.ctx.Done():
-			// Final flush before shutdown
+			// Final flush before shutdown (main buffer + group-commit buffer when enabled)
 			wc.logger.Debug("WAL Writer: performing final flush before shutdown")
 			if wc.wal != nil {
 				wc.wal.mutex.Lock()
-				if err := wc.wal.flushUnsafe(); err != nil {
+				if err := wc.wal.flushIncludingGroupCommitUnsafe(); err != nil {
 					wc.logger.Errorf("WAL Writer: final flush failed: %v", err)
 				}
 				wc.wal.mutex.Unlock()
@@ -206,11 +206,11 @@ func (wc *WriteCoordinator) walWriterLoop() {
 			return
 
 		case <-ticker.C:
-			// Periodic flush of straggler operations
+			// Periodic flush of straggler operations (main buffer + group-commit when enabled)
 			if wc.wal != nil {
 				wc.wal.mutex.Lock()
 				if wc.wal.pendingOps > 0 {
-					if err := wc.wal.flushUnsafe(); err != nil {
+					if err := wc.wal.flushIncludingGroupCommitUnsafe(); err != nil {
 						wc.logger.Warnf("WAL Writer: flush failed: %v", err)
 					}
 				}

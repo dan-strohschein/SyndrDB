@@ -158,37 +158,27 @@ func (fm *FileManager) Close() error {
 	return nil
 }
 
-// AllocatePage allocates a new page in the file
+// AllocatePage allocates a new page in the file.
+// Holds fm.mu only for the page-count update so buffer pool and I/O do not run under the file manager lock.
 func (fm *FileManager) AllocatePage(fileID uint32) (uint32, error) {
 	fm.mu.Lock()
-	defer fm.mu.Unlock()
-
-	// Get the current page count
 	pageCount, exists := fm.tablePageCounts[fileID]
 	if !exists {
 		pageCount = 0
 	}
-
-	// Allocate the new page
 	newPageNum := pageCount
 	fm.tablePageCounts[fileID] = pageCount + 1
+	fm.mu.Unlock()
 
-	// Get the buffer for the new page
+	// Buffer pool and FSM operations without holding fm.mu
 	bufferPage, err := fm.bufferPool.GetPage(fileID, newPageNum)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get buffer for new page: %w", err)
 	}
 
-	// Initialize the page
 	bufferPage.InitializePage()
-
-	// Mark it as dirty so it will be written
 	fm.bufferPool.MarkBufferDirty(bufferPage)
-
-	// Register in FSM
 	fm.freeSpaceMap.RegisterNewPage(fileID, newPageNum)
-
-	// Release the buffer
 	fm.bufferPool.ReleaseBuffer(bufferPage)
 
 	return newPageNum, nil

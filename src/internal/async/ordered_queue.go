@@ -81,85 +81,78 @@ func NewOrderedQueue(maxSize int) *OrderedQueue {
 	return oq
 }
 
-// Enqueue adds an operation to the queue, blocking if queue is full
-// CRITICAL FIX: Uses polling instead of indefinite sync.Cond.Wait() to prevent blocking forever
+// Enqueue adds an operation to the queue, blocking if queue is full.
+// Uses Cond.Wait() with a timeout (maxWaitTime) so we wake as soon as there is space
+// or when the wait time is exceeded, avoiding indefinite block and avoiding polling.
 func (oq *OrderedQueue) Enqueue(op AsyncOperation) error {
 	waitStart := time.Now()
-	pollInterval := 5 * time.Millisecond
+
+	oq.mu.Lock()
+	defer oq.mu.Unlock()
 
 	for {
-		oq.mu.Lock()
-
 		if oq.closed {
-			oq.mu.Unlock()
 			return fmt.Errorf("queue is closed")
 		}
 
-		// Check if there's space in the queue
 		if oq.heap.Len() < oq.maxSize {
 			oq.backpressure.backpressureActive = false
-
-			// Add operation to heap
 			heap.Push(oq.heap, op)
-
-			// Signal waiting dequeuers
 			oq.notEmpty.Signal()
-
-			oq.mu.Unlock()
 			return nil
 		}
 
-		// Queue is full - check timeout
 		oq.backpressure.backpressureActive = true
-		if time.Since(waitStart) > oq.backpressure.maxWaitTime {
+		remaining := oq.backpressure.maxWaitTime - time.Since(waitStart)
+		if remaining <= 0 {
 			oq.backpressure.rejectedCount++
-			oq.mu.Unlock()
 			return fmt.Errorf("queue full: rejected after waiting %v", oq.backpressure.maxWaitTime)
 		}
 
-		// Release lock and poll after short sleep
-		oq.mu.Unlock()
-		time.Sleep(pollInterval)
+		// Wake waiters after remaining time so we don't block forever
+		timer := time.AfterFunc(remaining, func() {
+			oq.mu.Lock()
+			oq.notFull.Broadcast()
+			oq.mu.Unlock()
+		})
+		oq.notFull.Wait()
+		timer.Stop()
+
+		// Re-check after Wait(); loop will re-evaluate condition and timeout
 	}
 }
 
-// Dequeue removes and returns the next operation in sequence order
-// CRITICAL FIX: Uses polling instead of indefinite sync.Cond.Wait() to prevent blocking forever
+// dequeueWakeInterval is how long Dequeue waits on notEmpty before re-checking context.
+// Keeps workers responsive to context cancel without busy polling.
+const dequeueWakeInterval = 100 * time.Millisecond
+
+// Dequeue removes and returns the next operation in sequence order.
+// Uses Cond.Wait() with a periodic wake (dequeueWakeInterval) so we re-check context
+// and don't block forever, while waking immediately when an item is enqueued.
 func (oq *OrderedQueue) Dequeue(ctx context.Context) (AsyncOperation, error) {
-	pollInterval := 5 * time.Millisecond
+	oq.mu.Lock()
+	defer oq.mu.Unlock()
 
-	for {
-		// Check context first (outside of lock for responsiveness)
-		select {
-		case <-ctx.Done():
+	for oq.heap.Len() == 0 && !oq.closed {
+		if ctx.Err() != nil {
 			return nil, ctx.Err()
-		default:
 		}
-
-		oq.mu.Lock()
-
-		// Check if queue is closed
-		if oq.closed && oq.heap.Len() == 0 {
+		timer := time.AfterFunc(dequeueWakeInterval, func() {
+			oq.mu.Lock()
+			oq.notEmpty.Broadcast()
 			oq.mu.Unlock()
-			return nil, fmt.Errorf("queue is closed")
-		}
-
-		// Check if there are operations available
-		if oq.heap.Len() > 0 {
-			// Get operation with lowest sequence number
-			op := heap.Pop(oq.heap).(AsyncOperation)
-
-			// Signal waiting enqueuers
-			oq.notFull.Signal()
-
-			oq.mu.Unlock()
-			return op, nil
-		}
-
-		// No operations available - release lock and poll
-		oq.mu.Unlock()
-		time.Sleep(pollInterval)
+		})
+		oq.notEmpty.Wait()
+		timer.Stop()
 	}
+
+	if oq.closed && oq.heap.Len() == 0 {
+		return nil, fmt.Errorf("queue is closed")
+	}
+
+	op := heap.Pop(oq.heap).(AsyncOperation)
+	oq.notFull.Signal()
+	return op, nil
 }
 
 // Size returns the current number of operations in the queue

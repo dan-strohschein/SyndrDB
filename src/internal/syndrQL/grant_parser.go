@@ -54,21 +54,21 @@ type GrantStatement struct {
 
 // GrantParser parses GRANT statements in SyndrQL
 type GrantParser struct {
-	tokenizer *Tokenizer
-	tokens    []Token
-	current   int
+	tokenizer   *Tokenizer
+	tokens      []Token
+	current     int
+	tokenizeErr error
 }
 
-// NewGrantParser creates a new GRANT parser for the given input
+// NewGrantParser creates a new GRANT parser for the given input.
+// If tokenization fails, Parse() will return that error.
 func NewGrantParser(input string) *GrantParser {
 	tokenizer := NewTokenizer(input)
-	tokens, _ := tokenizer.Tokenize()
-
-	return &GrantParser{
-		tokenizer: tokenizer,
-		tokens:    tokens,
-		current:   0,
+	tokens, err := tokenizer.Tokenize()
+	if err != nil {
+		return &GrantParser{tokenizer: tokenizer, tokens: []Token{}, current: 0, tokenizeErr: err}
 	}
+	return &GrantParser{tokenizer: tokenizer, tokens: tokens, current: 0}
 }
 
 // Parse parses the GRANT statement and returns a GrantStatement
@@ -76,6 +76,9 @@ func NewGrantParser(input string) *GrantParser {
 //   - GRANT "permission" TO USER "username";
 //   - GRANT ROLE "role" TO USER "username";
 func (p *GrantParser) Parse() (*GrantStatement, error) {
+	if p.tokenizeErr != nil {
+		return nil, p.tokenizeErr
+	}
 	// Expect GRANT keyword
 	if err := p.expectKeyword(TOKEN_GRANT, "GRANT"); err != nil {
 		return nil, err

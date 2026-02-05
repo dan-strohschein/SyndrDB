@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	"syndrdb/src/pkg/constants"
 )
 
 // TransactionCounter provides monotonic transaction ID allocation
@@ -42,10 +44,14 @@ func NewTransactionCounter() *TransactionCounter {
 	}
 }
 
-// Next returns the next transaction ID and increments the counter
-// Thread-safe using atomic operations
-func (tc *TransactionCounter) Next() uint64 {
-	return tc.counter.Add(1)
+// Next returns the next transaction ID and increments the counter.
+// Returns an error if the counter would overflow (max uint64).
+func (tc *TransactionCounter) Next() (uint64, error) {
+	current := tc.counter.Load()
+	if err := constants.CheckUint64Increment(current, "TransactionCounter"); err != nil {
+		return 0, err
+	}
+	return tc.counter.Add(1), nil
 }
 
 // GetCurrent returns the current counter value without incrementing

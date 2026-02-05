@@ -101,9 +101,10 @@ func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string
 		// Retrieve document from page cache via BundleService
 		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
 		if err != nil {
-			// Document ID is in index but not found - this could indicate data inconsistency
-			node.Logger.Debugf("Document ID %s found in hash index but not in bundle: %v", docID, err)
-		} else if doc != nil {
+			// Issue 4: Fail fast — do not return partial results when GetDocument fails
+			return nil, fmt.Errorf("hash index: GetDocument failed for document ID %s: %w", docID, err)
+		}
+		if doc != nil {
 			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		}
@@ -214,9 +215,10 @@ func (node *IndexScanNode) executeBTreeIndexScan(ctx context.Context) (map[strin
 		// Retrieve document from page cache via BundleService
 		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
 		if err != nil {
-			// Document ID is in index but not found - this could indicate data inconsistency
-			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle: %v", docID, err)
-		} else if doc != nil {
+			// Issue 4: Fail fast — do not return partial results when GetDocument fails
+			return nil, fmt.Errorf("B-tree index scan: GetDocument failed for document ID %s: %w", docID, err)
+		}
+		if doc != nil {
 			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		}
@@ -320,9 +322,10 @@ func (node *IndexScanNode) executeBTreeRangeScan(ctx context.Context) (map[strin
 		// Retrieve document from page cache via BundleService
 		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
 		if err != nil {
-			// Document ID is in index but not found - this could indicate data inconsistency
-			node.Logger.Warnf("Document ID %s found in B-tree index but not in bundle: %v", docID, err)
-		} else if doc != nil {
+			// Issue 4: Fail fast — do not return partial results when GetDocument fails
+			return nil, fmt.Errorf("B-tree range scan: GetDocument failed for document ID %s: %w", docID, err)
+		}
+		if doc != nil {
 			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		}
@@ -494,7 +497,11 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 		}
 		// Retrieve document from page cache via BundleService
 		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
-		if err == nil && doc != nil {
+		if err != nil {
+			// Issue 4: Fail fast — do not return partial results when GetDocument fails
+			return nil, fmt.Errorf("BTreeOrderedScan: GetDocument failed for document ID %s: %w", docID, err)
+		}
+		if doc != nil {
 			out = append(out, doc)
 		}
 	}
@@ -506,8 +513,7 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 func (node *BTreeOrderedScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	slice, err := node.executeBTreeOrderedScanFull(ctx)
 	if err != nil {
-		// Return empty map on error so callers that only need a map can still proceed (e.g. no docs)
-		return make(map[string]*models.Document), nil
+		return nil, err
 	}
 	m := make(map[string]*models.Document, len(slice))
 	for _, d := range slice {
@@ -627,7 +633,9 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 				return nil, err
 			}
 
-			// Check if projected memory exceeds limit
+			// Check if projected memory exceeds limit.
+			// When ScanAllDocumentsWithLimit was used, scanResult.Documents is already capped;
+			// totalDocs is the count we will process for this execution (Issue 5).
 			totalDocs := len(scanResult.Documents)
 			if memoryTracker.WillExceedLimit(totalDocs) {
 				errorMsg := memoryTracker.FormatErrorMessage(totalDocs)
@@ -712,37 +720,38 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	}
 
 	// PRIORITY 4: Expression caching and predicate reordering (applied before evaluation)
-	var optimizedExpr syndrQL.Expression
-	if args.WhereExpressionCacheEnabled && node.QueryCache != nil && node.WhereExpression != nil {
+	// exprToUse is the expression for this execution only; we never mutate node.WhereExpression
+	// so that the same plan can be run twice or by concurrent clones without shared mutation (Issue 2).
+	var exprToUse syndrQL.Expression
+	if node.WhereExpression != nil {
 		if expr, ok := node.WhereExpression.(syndrQL.Expression); ok {
-			// Get or compile expression with predicate reordering
-			compiled, err := node.QueryCache.GetOrCompileExpression(expr)
-			if err != nil {
-				node.Logger.Warnf("Query cache compilation failed, using original expression: %v", err)
-				optimizedExpr = expr
-			} else {
-				optimizedExpr = compiled.AST
-				if compiled.Optimized {
-					node.Logger.Debugf("Using reordered predicates (selectivity: %.4f, fields: %v)",
-						compiled.Selectivity, compiled.FieldRefs)
-				}
+			exprToUse = expr
+		}
+	}
+	if args.WhereExpressionCacheEnabled && node.QueryCache != nil && exprToUse != nil {
+		compiled, err := node.QueryCache.GetOrCompileExpression(exprToUse)
+		if err != nil {
+			node.Logger.Warnf("Query cache compilation failed, using original expression: %v", err)
+		} else {
+			exprToUse = compiled.AST
+			if compiled.Optimized {
+				node.Logger.Debugf("Using reordered predicates (selectivity: %.4f, fields: %v)",
+					compiled.Selectivity, compiled.FieldRefs)
 			}
-			// Temporarily replace WhereExpression with optimized version
-			node.WhereExpression = optimizedExpr
 		}
 	}
 
 	// PRIORITY 2: Bloom filter pre-filtering for multi-condition AND queries (cheapest, run first)
-	if args.WhereBloomEnabled && len(documents) >= args.WhereBloomMinDocuments && node.WhereExpression != nil {
+	if args.WhereBloomEnabled && len(documents) >= args.WhereBloomMinDocuments && exprToUse != nil {
 		// Create Bloom optimizer
 		bloomOpt := NewWhereBloomOptimizer(args.WhereBloomMinDocuments, 0.01, node.Logger)
 
 		// Check if this query benefits from Bloom pre-filtering
-		if bloomOpt.ShouldUseBloom(len(documents), node.WhereExpression) {
+		if bloomOpt.ShouldUseBloom(len(documents), exprToUse) {
 			// Build Bloom filter for most selective condition
 			bloom, selectivePred, err := bloomOpt.BuildBloomForMostSelective(
 				documents,
-				node.WhereExpression,
+				exprToUse,
 				node.BundleContext,
 			)
 
@@ -804,7 +813,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 			}
 		}
 
-		if node.matchesConditions(doc, subqueryContext) {
+		if node.matchesConditions(doc, subqueryContext, exprToUse) {
 			filtered[docID] = doc
 			matchCount++ // Track matches for LIMIT pushdown early termination
 		}
@@ -815,30 +824,26 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	return filtered, nil
 }
 
-func (node *FilterNode) matchesConditions(doc *models.Document, subqueryContext syndrQL.SubqueryExecutionContext) bool {
-	// Require Expression-based evaluation
-	if node.WhereExpression == nil {
-		// No filter conditions - match all documents
+// matchesConditions evaluates the given expression against the document.
+// expr is the expression to use for this evaluation (e.g. cache-optimized); when nil, all documents match.
+// Callers must not mutate node.WhereExpression; pass a local exprToUse so the same plan is safe for reuse (Issue 2).
+func (node *FilterNode) matchesConditions(doc *models.Document, subqueryContext syndrQL.SubqueryExecutionContext, expr syndrQL.Expression) bool {
+	if expr == nil {
 		return true
-	}
-
-	expr, ok := node.WhereExpression.(syndrQL.Expression)
-	if !ok {
-		node.Logger.Errorf("WhereExpression is not a syndrQL.Expression: %T", node.WhereExpression)
-		return false
 	}
 
 	// Get BundleContext if available (for qualified field resolution)
 	var bundleCtx *syndrQL.BundleContext
 	if node.BundleContext != nil {
-		bundleCtx, ok = node.BundleContext.(*syndrQL.BundleContext)
-		if !ok {
+		if bc, ok := node.BundleContext.(*syndrQL.BundleContext); ok {
+			bundleCtx = bc
+		} else {
 			node.Logger.Errorf("BundleContext is not a *syndrQL.BundleContext: %T", node.BundleContext)
 			return false
 		}
 	}
 
-	// NEW: Create evaluator with SIMD configuration from settings (Phase 1 WHERE optimization)
+	// Create evaluator with SIMD configuration from settings (Phase 1 WHERE optimization)
 	args := settings.GetSettings()
 	evaluator := syndrQL.NewExpressionEvaluatorWithSIMD(node.Logger, args.WhereSIMDEnabled)
 	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, subqueryContext, nil)
