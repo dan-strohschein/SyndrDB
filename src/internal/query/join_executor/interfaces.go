@@ -45,6 +45,7 @@ type JoinRequest struct {
 	ExpectedResultSize int64 // Estimated number of result documents
 	MemoryLimit        int64 // Maximum memory to use (bytes)
 	AllowDiskSpillover bool  // Whether to use disk when memory is exhausted
+	Limit              int   // Maximum joined documents to produce (0 = no limit); enables early termination in probe
 
 	// Index-assisted join optimization (PHASE 1)
 	IndexStrategy IndexExecutionStrategy // Selected index strategy for optimization (nil = no index)

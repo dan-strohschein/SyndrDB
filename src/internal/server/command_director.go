@@ -69,6 +69,10 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// during read-only workloads, preventing false "server idle" triggers.
 	if serviceManager.BundleService != nil {
 		serviceManager.BundleService.RecordActivity()
+		// Flush pending hash index updates after every command so index entries reach disk
+		// before we return. Otherwise with batch size 500 and 10s interval, inserts < 500
+		// never flush; after restart the index is empty and lookups miss.
+		defer serviceManager.BundleService.ForceFlushIndexUpdates()
 	}
 
 	if database == nil {
@@ -1063,6 +1067,20 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			}
 		}
 	}
+
+	// For non-transactional queries, set a "read-committed" snapshot
+	// using the current global sequence so index-level MVCC filtering works
+	if planner.GetSnapshotInfoFromContext(ctx) == nil && serviceManager.WALManager != nil {
+		if snapshotMgr := serviceManager.WALManager.GetSnapshotManager(); snapshotMgr != nil {
+			currentSeq := snapshotMgr.GetCurrentSequence()
+			if currentSeq > 0 {
+				ctx = planner.WithSnapshotInfo(ctx, &planner.SnapshotInfo{
+					SnapshotSequence: currentSeq,
+				})
+			}
+		}
+	}
+
 	if timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()

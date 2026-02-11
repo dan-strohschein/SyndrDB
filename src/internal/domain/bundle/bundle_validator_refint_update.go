@@ -331,7 +331,7 @@ func (v *ReferentialIntegrityValidator) ValidateUpdateForeignKey(
 		}
 
 		// Check if the parent document exists
-		results, err := hashIndex.Search(newValue)
+		results, _, err := hashIndex.Search(newValue)
 		if err != nil || len(results) == 0 {
 			v.logger.Warnf("[REFINT-UPDATE] Parent document '%s' not found in bundle '%s'",
 				newValue, parentBundleName)

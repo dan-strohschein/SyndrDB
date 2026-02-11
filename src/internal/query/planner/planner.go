@@ -60,6 +60,13 @@ type ExecutionNode interface {
 	EstimateMemoryUsage() int64 // Memory estimation for cache sizing
 }
 
+// SliceExecutionNode is an optional interface that execution nodes can implement
+// to return results as a slice instead of a map. This avoids the O(n) map insertion
+// overhead for scan-heavy queries where random access by docID is not needed.
+type SliceExecutionNode interface {
+	ExecuteSlice(ctx context.Context) ([]*models.Document, []string, error)
+}
+
 // ExecutionPlan represents the complete execution plan
 type ExecutionPlan struct {
 	RootNode      ExecutionNode
@@ -144,6 +151,9 @@ type FullScanNode struct {
 	DocumentScanner  documentscanner.DocumentScannerInterface
 	MaxDocuments     int      // OPTIMIZATION: Early termination limit (0 = no limit, set when LIMIT-only query)
 	ProjectionFields []string // PROJECTION PUSHDOWN: Field names to deserialize (e.g., ["name"] for ORDER BY name queries)
+	// PREDICATE PUSHDOWN: When set, uses ScanWithPredicate to filter during page iteration
+	// instead of loading all documents and filtering afterward. Reduces copies for high-selectivity queries.
+	Predicate func(*models.Document) bool
 } // FilterNode represents post-scan filtering
 type FilterNode struct {
 	Child      ExecutionNode

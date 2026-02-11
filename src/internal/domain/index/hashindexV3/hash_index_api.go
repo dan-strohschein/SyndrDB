@@ -547,6 +547,15 @@ func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]stri
 			return nil, nil, fmt.Errorf("bucket calculation failed: %w", err)
 		}
 
+		// DIAG: Log the bucket lookup path for read-side tracing
+		idx.logger.Warnw("[BUCKET-DIAG] Get: disk lookup",
+			"key", keyValue,
+			"hashValue", hashValue,
+			"bucketNum", bucketNum,
+			"numBuckets", idx.config.NumBuckets,
+			"snapshotSeq", snapshotSeq,
+			"useBuckets", idx.storage.useBuckets)
+
 		if snapshotSeq > 0 {
 			// PHASE 4: MVCC - Collect all versions for visibility filtering
 			allEntries, err = idx.getAllEntriesFromBucket(keyValue, bucketNum)
@@ -561,6 +570,30 @@ func (idx *HashIndexV3) Get(keyValue string, snapshotSequence ...uint64) ([]stri
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to scan bucket: %w", err)
 			}
+		}
+
+		// Backward compatibility: entries written before BucketNum fix all landed in bucket 0.
+		// If the correct bucket returned nothing and it is not bucket 0, try bucket 0.
+		if latestEntry == nil && bucketNum != 0 {
+			// DIAG: Log fallback attempt to bucket 0
+			idx.logger.Warnw("[BUCKET-DIAG] Get: primary bucket empty, trying bucket 0 fallback",
+				"key", keyValue,
+				"primaryBucket", bucketNum)
+
+			if snapshotSeq > 0 {
+				var fallbackEntries []*HashIndexEntry
+				fallbackEntries, _ = idx.getAllEntriesFromBucket(keyValue, 0)
+				if len(fallbackEntries) > 0 {
+					latestEntry = idx.getLatestVisibleEntry(fallbackEntries, snapshotSeq)
+				}
+			} else {
+				latestEntry, _ = idx.storage.GetLatestEntryFromBucket(keyValue, 0)
+			}
+
+			// DIAG: Log fallback result
+			idx.logger.Warnw("[BUCKET-DIAG] Get: bucket 0 fallback result",
+				"key", keyValue,
+				"found", latestEntry != nil)
 		}
 	} else {
 		// LEGACY PATH: Scan all files (backward compatibility)
@@ -945,16 +978,24 @@ func (idx *HashIndexV3) GetAllDocumentIDs() (map[uint32][]string, error) {
 }
 
 // Search is an alias for Get to maintain compatibility with hashindexV2
-// Returns document IDs only (discards page IDs) for backward compatibility
-func (idx *HashIndexV3) Search(keyValue string) ([]string, error) {
-	docIDs, _, err := idx.Get(keyValue)
-	return docIDs, err
+// Returns document IDs and page IDs; forwards optional snapshot sequence to Get()
+func (idx *HashIndexV3) Search(keyValue string, snapshotSequence ...uint64) ([]string, []uint32, error) {
+	docIDs, pageIDs, err := idx.Get(keyValue, snapshotSequence...)
+	return docIDs, pageIDs, err
+}
+
+// NumBuckets returns the index's bucket count (for bucket-based file layout).
+// Used by callers that build HashIndexEntry outside the API (e.g. single-write path)
+// so they can set entry.BucketNum correctly before WriteEntryToDiskOnly.
+func (idx *HashIndexV3) NumBuckets() uint32 {
+	return idx.config.NumBuckets
 }
 
 // WriteEntryToDiskOnly appends the given entry to disk without updating MemTable or GlobalSequence.
 // Used by the single-write path: scheduleIndexUpdate applies to MemTable and enqueues this entry;
 // processHashIndexBatch calls this so the same entry/sequence is persisted once.
-// Caller must ensure the entry has the correct sequence already assigned.
+// Caller must ensure the entry has the correct sequence and BucketNum already assigned when
+// the index uses bucket-based storage (so lookups find the entry in the right bucket).
 func (idx *HashIndexV3) WriteEntryToDiskOnly(entry *HashIndexEntry) error {
 	if idx.closed {
 		return fmt.Errorf("index is closed")

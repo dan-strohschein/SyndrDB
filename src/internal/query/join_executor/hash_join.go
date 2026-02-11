@@ -661,6 +661,7 @@ func (hjs *HashJoinStrategy) probeHashTable(
 	bloomFilterSkips := int64(0)
 
 	chunkSize := 4096
+	probeLimit := request.Limit // J1: 0 = no limit
 	var extractErr error
 	err := probeBundle.ScanDocumentChunks(request.Context, chunkSize, func(chunk []*models.Document) bool {
 		if len(chunk) == 0 {
@@ -706,17 +707,27 @@ func (hjs *HashJoinStrategy) probeHashTable(
 					joinedDoc := hjs.createJoinedDocument(buildDoc, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
 					if joinedDoc != nil {
 						joinedDocs = append(joinedDocs, joinedDoc)
+						// J1: Early termination when we have enough results
+						if probeLimit > 0 && len(joinedDocs) >= probeLimit {
+							return false
+						}
 					}
 				}
 			} else if request.JoinType == LeftJoin && !swapped {
 				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
 				if joinedDoc != nil {
 					joinedDocs = append(joinedDocs, joinedDoc)
+					if probeLimit > 0 && len(joinedDocs) >= probeLimit {
+						return false
+					}
 				}
 			} else if request.JoinType == RightJoin && swapped {
 				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, conversion.ValueToString(keyValue), swapped, request.JoinType)
 				if joinedDoc != nil {
 					joinedDocs = append(joinedDocs, joinedDoc)
+					if probeLimit > 0 && len(joinedDocs) >= probeLimit {
+						return false
+					}
 				}
 			}
 		}

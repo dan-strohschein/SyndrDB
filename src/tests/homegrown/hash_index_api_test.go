@@ -390,7 +390,7 @@ func TestSearch_Alias(t *testing.T) {
 	require.NoError(t, err)
 
 	// Search should work same as Get
-	results, err := idx.Search("key1")
+	results, _, err := idx.Search("key1")
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Equal(t, "doc1", results[0])

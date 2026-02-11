@@ -1626,7 +1626,7 @@ func (s *BundleService) getPageShardIndex(pageKey string) int {
 //   - pageID: The page ID where the document resides
 //   - doc: The document to add/update in the cache
 func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID uint32, doc *models.Document) {
-	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
@@ -1695,7 +1695,7 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 //   - pageID: The page ID where the document resided
 //   - docID: The document ID to remove
 func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, docID string) {
-	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
@@ -2018,7 +2018,8 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 				hashIndex, err := s.GetOrLoadHashIndex(bundle, indexName, indexRef)
 				if err == nil {
 					// Update MemTable synchronously (in-memory operation, very fast)
-					keyValue := conversion.ValueToString(fieldValue)
+					// Use fieldValueToIndexKeyString so document FieldValue unwraps to same string as query lookups
+					keyValue := fieldValueToIndexKeyString(fieldValue)
 					if keyValue == "" || keyValue == "<nil>" {
 						keyValue = documentID // Fallback for DocumentID indexes
 					}
@@ -2046,6 +2047,14 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 						if operation == "delete" {
 							entry.Deleted = true
 						}
+						// Set BucketNum so WriteEntryToDiskOnly (processHashIndexBatch) routes to the correct
+						// bucket file; otherwise entry.BucketNum stays 0 and all entries land in bucket 0,
+						// causing lookups for other buckets to miss (index appears empty for those keys).
+						numBkts := hashIndex.NumBuckets()
+						bucketNum, bucketErr := hashindex.ComputeBucketNum(entry.HashValue, numBkts)
+						if bucketErr == nil {
+							entry.BucketNum = bucketNum
+						}
 
 						err = hashIndex.MemTable.Put(entry)
 						if err != nil {
@@ -2054,6 +2063,14 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 								zap.String("index", indexName),
 								zap.Error(err))
 						} else {
+							// DIAG: Log scheduled index update with bucket assignment
+							s.logger.Warnw("[BUCKET-DIAG] scheduleIndexUpdate: entry queued",
+								"key", keyValue,
+								"docID", documentID,
+								"bucketNum", entry.BucketNum,
+								"hashValue", entry.HashValue,
+								"index", indexName,
+								"operation", operation)
 							update.HashEntry = entry // processHashIndexBatch will write this to disk only
 							if operation == "insert" {
 								s.logger.Debugw("Immediately updated MemTable for key",
@@ -2832,7 +2849,8 @@ func (s *BundleService) processHashIndexBatch(bundle *models.Bundle, indexName s
 		}
 
 		// Fallback: no pre-built entry (e.g. legacy or overflow skip)
-		keyValue := fmt.Sprintf("%v", update.FieldValue)
+		// Use fieldValueToIndexKeyString so document FieldValue unwraps to same string as query lookups
+		keyValue := fieldValueToIndexKeyString(update.FieldValue)
 		if keyValue == "" || keyValue == "<nil>" {
 			keyValue = update.DocumentID
 		}
@@ -3055,6 +3073,13 @@ func (s *BundleService) processBTreeIndexBatch(bundle *models.Bundle, indexName 
 	}
 
 	return nil
+}
+
+// ForceFlushIndexUpdates is the exported entrypoint so the server can flush index updates
+// after each command. Ensures hash index entries reach disk before response (avoids empty
+// index after restart when batch size/interval would otherwise delay flush).
+func (s *BundleService) ForceFlushIndexUpdates() {
+	s.forceFlushIndexUpdates()
 }
 
 // forceFlushIndexUpdates ensures all pending updates are processed immediately
@@ -3362,7 +3387,7 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 // 2. The eviction policy is approximate anyway - slightly suboptimal eviction is fine
 // 3. Correctness is maintained - we just sacrifice some LRU accuracy for concurrency
 func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, pageID uint32) (*models.DocumentPage, error) {
-	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
@@ -3487,7 +3512,7 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 // and uncommitted document versions. This ensures lock-free reads only return
 // committed, current documents without requiring bundle-level read locks.
 func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, pageID uint32) ([]models.Document, error) {
-	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
@@ -3717,7 +3742,7 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 	// DEADLOCK FIX: Use per-shard locking instead of global mutex
 	// Iterate through all pages, acquiring shard locks as needed
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
-		pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+		pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 		shardIdx := s.getPageShardIndex(pageKey)
 		shard := s.pageShards[shardIdx]
 
@@ -4217,15 +4242,31 @@ func (s *BundleService) findDocumentPage(bundleID, documentID string) (uint32, e
 					pageID := pageIDs[0]
 					s.logger.Debugf("Index lookup: Found document %s in bundle %s at page %d", documentID, bundleID, pageID)
 
-					// PHASE 5: Cache the result using sharded cache (handles eviction internally)
-					s.documentPageCache.SetPageID(bundleID, documentID, pageID)
+					// Verify the document actually exists on the claimed page.
+					// The index PageID can be stale (e.g., 0 as default/placeholder, or
+					// outdated after page-boundary shifts from new inserts). If stale,
+					// fall through to the page scan so we still find the document.
+					verifyPage, verifyErr := s.GetDocumentPage(bundleID, bundle.Database.Name, pageID)
+					if verifyErr == nil && verifyPage != nil {
+						safePage := s.createSafePageCopy(verifyPage)
+						if _, exists := safePage.Documents[documentID]; exists {
+							// PHASE 5: Cache the verified result
+							s.documentPageCache.SetPageID(bundleID, documentID, pageID)
+							return pageID, nil
+						}
+					}
 
-					return pageID, nil
+					// Stale pageID — fall through to page scan below
+					s.logger.Warnf("findDocumentPage: DocumentID index has stale pageID %d for document %s in bundle %s, falling through to page scan",
+						pageID, documentID, bundleID)
+				} else {
+					// Hash index returned empty — document may still exist on disk but
+					// not yet be in the index. Fall through to page scan instead of
+					// returning an error, so we still find the document.
+
+					s.logger.Warnf("findDocumentPage: DocumentID index returned empty for %s in bundle %s, falling through to page scan",
+						documentID, bundleID)
 				}
-				// Hash index returned empty - document doesn't exist (deleted or never existed)
-				// Return error immediately instead of falling back to expensive page scan
-				s.logger.Debugf("Index lookup: Document %s not found in hash index (deleted or doesn't exist)", documentID)
-				return 0, fmt.Errorf("document %s not found in bundle %s", documentID, bundleID)
 			}
 		}
 	}
@@ -5602,7 +5643,7 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 // This preserves cache for other pages and avoids cold scanner on every INSERT.
 func (s *BundleService) invalidateDocumentPagesForInsert(bundleName string, pageID uint32) {
 	// Invalidate the page where the document was inserted
-	pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
 
@@ -6064,9 +6105,79 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		return fmt.Errorf("failed to create hash index: %w", err)
 	}
 
+	// Backfill: Populate the hash index with existing documents from the bundle.
+	// Without this, indexes created AFTER documents are inserted would remain empty,
+	// causing all hash index lookups to miss (returning 0 results).
+	// This mirrors the backfill logic in CreateBTreeIndex.
+	//
+	// We iterate page-by-page so we can record the correct pageID per document,
+	// which the query planner uses to skip directly to the right storage page.
+	fieldName := indexCommand.Fields[0].Name
+	if bundle.PageCount > 0 || bundle.TotalDocuments > 0 {
+		s.logger.Infof("Backfilling hash index '%s' on field '%s' for bundle '%s' (%d pages)",
+			indexCommand.IndexName, fieldName, bundle.Name, bundle.PageCount)
+
+		insertedCount := 0
+		skippedCount := 0
+
+		// Ensure metadata is current so PageCount is accurate
+		if len(s.metadataUpdateBuffer) > 0 {
+			s.FlushMetadataUpdates()
+		}
+
+		pageCount := uint32(bundle.PageCount)
+		// Handle edge case: PageCount=0 but documents may exist on page 0
+		if pageCount == 0 {
+			pageCount = 1
+		}
+
+		for pageID := uint32(0); pageID < pageCount; pageID++ {
+			docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
+			if err != nil {
+				// Page doesn't exist or can't be loaded; skip
+				continue
+			}
+
+			for _, doc := range docs {
+				// Extract the field value for hashing
+				fieldValue, err := extractFieldValueForIndex(doc, fieldName)
+				if err != nil {
+					// Field may not exist on every document (sparse fields); skip gracefully.
+					skippedCount++
+					continue
+				}
+
+				// Convert field value to the same key string used by query lookups
+				keyValue := fieldValueToIndexKeyString(fieldValue)
+				if keyValue == "" || keyValue == "<nil>" {
+					skippedCount++
+					continue
+				}
+
+				// Insert into the hash index using Put(), which correctly sets BucketNum
+				err = hashIndex.Put(keyValue, doc.DocumentID, pageID, doc.CommitSequence, doc.VersionSequence)
+				if err != nil {
+					s.logger.Warnf("Failed to backfill hash index entry for doc '%s' key '%s': %v",
+						doc.DocumentID, keyValue, err)
+					skippedCount++
+					continue
+				}
+				insertedCount++
+			}
+		}
+
+		s.logger.Infof("Hash index '%s' backfill complete: %d inserted, %d skipped",
+			indexCommand.IndexName, insertedCount, skippedCount)
+
+		// Flush to ensure all backfilled entries are persisted to disk
+		if flushErr := hashIndex.Flush(); flushErr != nil {
+			s.logger.Warnf("Failed to flush hash index '%s' after backfill: %v", indexCommand.IndexName, flushErr)
+		}
+	}
+
 	// Create the index field structure for compatibility
 	indexField := models.IndexField{
-		FieldName: indexCommand.Fields[0].Name,
+		FieldName: fieldName,
 		IsUnique:  indexCommand.Fields[0].IsUnique,
 		Collation: "",
 	}
@@ -6093,7 +6204,7 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 	}
 
 	s.logger.Debugf("Successfully created V3 hash index '%s' on field '%s' for bundle '%s'",
-		indexCommand.IndexName, indexCommand.Fields[0].Name, bundle.Name)
+		indexCommand.IndexName, fieldName, bundle.Name)
 	return nil
 }
 
@@ -6399,6 +6510,22 @@ func extractFieldValueForIndex(document models.Document, fieldName string) (inte
 	}
 
 	return field.Value, nil
+}
+
+// fieldValueToIndexKeyString converts a value (possibly models.FieldValue from a document field)
+// to the same string representation used by query lookups. Query literals are converted with
+// conversion.ValueToString(int64(6775)) -> "6775". Document fields are models.FieldValue; passing
+// that directly to ValueToString would hit the default case and produce a struct dump (e.g.
+// "{Type:2 IntVal:6775}"), so lookups for "6775" would miss. This helper unwraps FieldValue via
+// AsInterface() so the key matches query lookups.
+func fieldValueToIndexKeyString(v interface{}) string {
+	if v == nil {
+		return "<nil>"
+	}
+	if fv, ok := v.(models.FieldValue); ok {
+		return conversion.ValueToString(fv.AsInterface())
+	}
+	return conversion.ValueToString(v)
 }
 
 // convertValueToBytes converts a field value to bytes for BTree key storage
@@ -6885,9 +7012,8 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 					// Extract the foreign key or other field value
 					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName)
 					if err != nil {
-						if s.verboseLogging {
-							s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, newDocument.DocumentID, err)
-						}
+						s.logger.Warnf("[HASH-IDX] Skipped indexing document %s for index %s: field %q not in document (%v); check field name case (e.g. ID vs id)",
+							newDocument.DocumentID, indexName, fieldName, err)
 						continue
 					}
 					fieldValue = extractedValue
@@ -7006,9 +7132,8 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 				} else {
 					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName)
 					if err != nil {
-						if s.verboseLogging {
-							s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, newDocument.DocumentID, err)
-						}
+						s.logger.Warnf("[HASH-IDX] Skipped indexing document %s for index %s: field %q not in document (%v)",
+							newDocument.DocumentID, indexName, fieldName, err)
 						continue
 					}
 					fieldValue = extractedValue
@@ -7102,7 +7227,8 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 					// Extract the foreign key or other field value
 					extractedValue, err := extractFieldValueForIndex(*document, fieldName)
 					if err != nil {
-						s.logger.Warnf("Failed to extract field value '%s' for document '%s': %v", fieldName, document.DocumentID, err)
+						s.logger.Warnf("[HASH-IDX] Skipped indexing document %s for index %s: field %q not in document (%v)",
+							document.DocumentID, indexName, fieldName, err)
 						continue
 					}
 					fieldValue = extractedValue
@@ -8679,7 +8805,7 @@ func (s *BundleService) GetDocumentByID(bundle *models.Bundle, documentID string
 					break
 				}
 
-				results, err := hashIndex.Search(documentID)
+				results, _, err := hashIndex.Search(documentID)
 				if err != nil {
 					s.logger.Warnf("Failed to search hash index '%s' for DocumentID '%s': %v",
 						indexName, documentID, err)
@@ -9502,7 +9628,7 @@ func (s *BundleService) tryHashIndexOptimization(bundle *models.Bundle, whereCla
 
 				s.logger.Debugf("Hash index searching for key '%s' (original value: %v)", searchKey, value)
 
-				docIDs, err := hashIndex.Search(searchKey)
+				docIDs, _, err := hashIndex.Search(searchKey)
 				if err != nil {
 					s.logger.Warnf("Hash index search failed for '%s': %v", searchKey, err)
 					continue
@@ -10608,7 +10734,7 @@ func (s *BundleService) CloseAllScanners() {
 func (s *BundleService) invalidateDocumentPage(bundleName, documentID string) {
 	// PHASE 5: Check sharded cache for page ID
 	if pageID, found := s.documentPageCache.GetPageID(bundleName, documentID); found {
-		pageKey := fmt.Sprintf("%s:%d", bundleName, pageID)
+		pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 		shardIdx := s.getPageShardIndex(pageKey)
 		shard := s.pageShards[shardIdx]
 

@@ -27,6 +27,7 @@ package planner
 import (
 	"fmt"
 	"strings"
+
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/queryparser"
@@ -486,6 +487,15 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 		DocumentScanner:  docScanner,
 	}
 
+	// PREDICATE PUSHDOWN: Try to compile the WHERE expression into a scanner predicate.
+	// When successful, the FullScanNode uses ScanWithPredicate to filter during page iteration,
+	// avoiding copying non-matching documents. FilterNode still applies the full expression
+	// for correctness (handles edge cases the simple predicate compiler may miss).
+	if predicate := compileExpressionToPredicate(expr, bundleCtx, qr.logger); predicate != nil {
+		fullScan.Predicate = predicate
+		qr.logger.Debugf("PREDICATE PUSHDOWN: Compiled WHERE expression to scanner predicate")
+	}
+
 	// Create FilterNode with Expression
 	filterNode := &FilterNode{
 		Child:            fullScan,
@@ -698,5 +708,207 @@ func (qr *QueryRouter) formatWhereValue(value interface{}) string {
 	default:
 		// Fallback: convert to string and quote it
 		return fmt.Sprintf("\"%v\"", v)
+	}
+}
+
+// compileExpressionToPredicate attempts to compile a simple WHERE expression into a
+// func(*Document) bool predicate for scanner-level pushdown. Only handles simple
+// binary comparisons (field op literal) and AND combinations thereof.
+// Returns nil if the expression is too complex to compile.
+func compileExpressionToPredicate(expr syndrQL.Expression, bundleCtx interface{}, logger *zap.SugaredLogger) func(*models.Document) bool {
+	if expr == nil {
+		return nil
+	}
+
+	// Unwrap GroupedExpression
+	if grouped, ok := expr.(*syndrQL.GroupedExpression); ok {
+		return compileExpressionToPredicate(grouped.Expression, bundleCtx, logger)
+	}
+
+	// Handle AND: compile both sides and combine
+	if binary, ok := expr.(*syndrQL.BinaryExpression); ok && binary.Operator == syndrQL.TOKEN_AND {
+		left := compileExpressionToPredicate(binary.Left, bundleCtx, logger)
+		right := compileExpressionToPredicate(binary.Right, bundleCtx, logger)
+		if left != nil && right != nil {
+			return func(doc *models.Document) bool {
+				return left(doc) && right(doc)
+			}
+		}
+		// If one side compiles, use it (partial pushdown is still beneficial)
+		if left != nil {
+			return left
+		}
+		if right != nil {
+			return right
+		}
+		return nil
+	}
+
+	// Handle simple binary comparison: field op literal
+	binary, ok := expr.(*syndrQL.BinaryExpression)
+	if !ok {
+		return nil
+	}
+
+	// Extract field name and literal value
+	fieldName, literalValue, isFieldOpLiteral := extractFieldAndLiteral(binary)
+	if !isFieldOpLiteral {
+		return nil
+	}
+
+	// Strip quotes from field name
+	fieldName = strings.Trim(fieldName, "\"'")
+	// Handle qualified names: "BundleName"."FieldName"
+	parts := strings.Split(fieldName, ".")
+	if len(parts) > 1 {
+		fieldName = strings.Trim(parts[len(parts)-1], "\"'")
+	}
+
+	// Compile comparison based on operator
+	switch binary.Operator {
+	case syndrQL.TOKEN_EQ:
+		return makeEqPredicate(fieldName, literalValue)
+	case syndrQL.TOKEN_NEQ:
+		eq := makeEqPredicate(fieldName, literalValue)
+		if eq == nil {
+			return nil
+		}
+		return func(doc *models.Document) bool { return !eq(doc) }
+	case syndrQL.TOKEN_GT:
+		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a > b })
+	case syndrQL.TOKEN_GTE:
+		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a >= b })
+	case syndrQL.TOKEN_LT:
+		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a < b })
+	case syndrQL.TOKEN_LTE:
+		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a <= b })
+	default:
+		return nil // Complex operators (LIKE, IN, etc.) not supported in pushdown
+	}
+}
+
+// extractFieldAndLiteral extracts field name and literal value from a binary expression.
+// Handles both field op literal and literal op field orderings.
+func extractFieldAndLiteral(binary *syndrQL.BinaryExpression) (string, interface{}, bool) {
+	// Try: field op literal
+	if ident, ok := binary.Left.(*syndrQL.IdentifierExpression); ok {
+		if lit, ok := binary.Right.(*syndrQL.LiteralExpression); ok {
+			return ident.Name, lit.Value, true
+		}
+	}
+	// Try: literal op field (reversed)
+	if lit, ok := binary.Left.(*syndrQL.LiteralExpression); ok {
+		if ident, ok := binary.Right.(*syndrQL.IdentifierExpression); ok {
+			return ident.Name, lit.Value, true
+		}
+	}
+	// Try qualified identifier on left: "bundle"."field"
+	if qual, ok := binary.Left.(*syndrQL.QualifiedIdentifierExpression); ok {
+		if lit, ok := binary.Right.(*syndrQL.LiteralExpression); ok {
+			return qual.Field, lit.Value, true
+		}
+	}
+	return "", nil, false
+}
+
+// makeEqPredicate creates an equality predicate for a field
+func makeEqPredicate(fieldName string, literalValue interface{}) func(*models.Document) bool {
+	return func(doc *models.Document) bool {
+		if doc.Fields == nil {
+			return false
+		}
+		field, exists := doc.Fields[fieldName]
+		if !exists {
+			// Case-insensitive fallback
+			lowerName := strings.ToLower(fieldName)
+			for k, v := range doc.Fields {
+				if strings.ToLower(k) == lowerName {
+					field = v
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				return false
+			}
+		}
+		// Compare field value with literal using AsInterface()
+		fieldVal := field.Value.AsInterface()
+		if fieldVal == nil && literalValue == nil {
+			return true
+		}
+		if fieldVal == nil || literalValue == nil {
+			return false
+		}
+		// Try numeric comparison first (handles int vs float64 mismatches)
+		if fv, fok := predicateToFloat64(fieldVal); fok {
+			if lv, lok := predicateToFloat64(literalValue); lok {
+				return fv == lv
+			}
+		}
+		return fmt.Sprintf("%v", fieldVal) == fmt.Sprintf("%v", literalValue)
+	}
+}
+
+// makeComparisonPredicate creates a numeric comparison predicate
+func makeComparisonPredicate(fieldName string, literalValue interface{}, cmp func(float64, float64) bool) func(*models.Document) bool {
+	// Pre-convert literal to float64
+	litFloat, ok := predicateToFloat64(literalValue)
+	if !ok {
+		return nil // Can't compare non-numeric literals with pushdown
+	}
+	return func(doc *models.Document) bool {
+		if doc.Fields == nil {
+			return false
+		}
+		field, exists := doc.Fields[fieldName]
+		if !exists {
+			lowerName := strings.ToLower(fieldName)
+			for k, v := range doc.Fields {
+				if strings.ToLower(k) == lowerName {
+					field = v
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				return false
+			}
+		}
+		docFloat, ok := fieldValueToFloat64(field.Value)
+		if !ok {
+			return false
+		}
+		return cmp(docFloat, litFloat)
+	}
+}
+
+// predicateToFloat64 converts an interface value to float64 for predicate pushdown
+func predicateToFloat64(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case int:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case float32:
+		return float64(val), true
+	case float64:
+		return val, true
+	default:
+		return 0, false
+	}
+}
+
+// fieldValueToFloat64 converts a models.FieldValue to float64
+func fieldValueToFloat64(fv models.FieldValue) (float64, bool) {
+	switch fv.Type {
+	case models.FieldTypeFloat:
+		return fv.FloatVal, true
+	case models.FieldTypeInt:
+		return float64(fv.IntVal), true
+	default:
+		return 0, false
 	}
 }

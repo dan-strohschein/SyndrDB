@@ -227,7 +227,7 @@ func (v *UniqueConstraintValidator) checkHashIndexForDuplicates(
 	// Perform O(1) hash lookup to check if value already exists
 	v.logger.Debugf("[UNIQUE] Searching unique index '%s' for value '%s'", indexName, valueStr)
 	searchStart := time.Now()
-	results, err := hashIndex.Search(valueStr)
+	results, _, err := hashIndex.Search(valueStr)
 	searchDuration := time.Since(searchStart)
 	if searchDuration > 1*time.Millisecond {
 		v.logger.Warnf("        ⚠️  hashIndex.Search took %v", searchDuration)

@@ -198,34 +198,41 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 		batchCount++
 
 		// Process documents in this page - apply predicate filter
-		for docID, doc := range page.Documents {
-			// All documents are now accessed via page cache - no memtable
+		// Use DocumentSlice when available to avoid map iteration overhead
+		if len(page.DocumentSlice) > 0 {
+			for i := range page.DocumentSlice {
+				doc := &page.DocumentSlice[i]
+				totalScanned++
 
-			totalScanned++
+				if sbs.snapshotSequence > 0 {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+						continue
+					}
+				}
 
-			// Apply MVCC snapshot filtering if scanner has snapshot context
-			if sbs.snapshotSequence > 0 {
-				if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
-					continue // Skip documents not visible to this snapshot
+				if predicate(doc) {
+					result.Documents = append(result.Documents, doc)
+					result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
 				}
 			}
+		} else {
+			for docID, doc := range page.Documents {
+				totalScanned++
 
-			// Apply predicate filter - only copy documents that match
-			docCopy := new(models.Document)
-			*docCopy = doc
-			if predicate(docCopy) {
-				result.Documents = append(result.Documents, docCopy)
-				result.DocumentIDs = append(result.DocumentIDs, docID)
+				if sbs.snapshotSequence > 0 {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+						continue
+					}
+				}
+
+				docRef := doc
+				if predicate(&docRef) {
+					result.Documents = append(result.Documents, &docRef)
+					result.DocumentIDs = append(result.DocumentIDs, docID)
+				}
 			}
 		}
 
-		// Memory pressure management
-		if len(result.Documents) > sbs.config.MemoryThreshold {
-			sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
-				sbs.config.MemoryThreshold)
-			runtime.GC()
-			sbs.metrics.MemoryPressureGCs++
-		}
 	}
 
 	// All documents are now accessed via page cache - no memtable documents to add
@@ -294,7 +301,11 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 	}
 
 	// PHASE 1: Use parallel loading if multiple workers configured
-	if workers > 1 && pageCount > 1 {
+	// BUG FIX: When maxDocuments > 0 (LIMIT query), force sequential path.
+	// The parallel path gives each worker its own localScanned counter, so
+	// each worker independently loads up to maxDocuments, resulting in
+	// workers * maxDocuments total rows instead of maxDocuments.
+	if workers > 1 && pageCount > 1 && maxDocuments <= 0 {
 		sbs.logger.Debugf("Using parallel page loading with %d workers for %d pages", workers, pageCount)
 
 		// Parallel loading: workers process page ranges concurrently
@@ -342,27 +353,37 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 						continue
 					}
 
-					// Process documents in this page
-					for docID, doc := range page.Documents {
-						// Early termination check per document
-						if maxDocuments > 0 && localScanned >= maxDocuments {
-							break
-						}
-
-						localScanned++
-
-						// Apply MVCC snapshot filtering
-						if sbs.snapshotSequence > 0 {
-							if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
-								continue
+					// Process documents in this page - use DocumentSlice when available
+					if len(page.DocumentSlice) > 0 {
+						for i := range page.DocumentSlice {
+							if maxDocuments > 0 && localScanned >= maxDocuments {
+								break
 							}
+							localScanned++
+							doc := &page.DocumentSlice[i]
+							if sbs.snapshotSequence > 0 {
+								if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+									continue
+								}
+							}
+							localDocs = append(localDocs, doc)
+							localIDs = append(localIDs, doc.DocumentID)
 						}
-
-						// Copy document for result set
-						docCopy := new(models.Document)
-						*docCopy = doc
-						localDocs = append(localDocs, docCopy)
-						localIDs = append(localIDs, docID)
+					} else {
+						for docID, doc := range page.Documents {
+							if maxDocuments > 0 && localScanned >= maxDocuments {
+								break
+							}
+							localScanned++
+							if sbs.snapshotSequence > 0 {
+								if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+									continue
+								}
+							}
+							docRef := doc
+							localDocs = append(localDocs, &docRef)
+							localIDs = append(localIDs, docID)
+						}
 					}
 				}
 
@@ -387,14 +408,6 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 			result.DocumentIDs = append(result.DocumentIDs, batch.documentIDs...)
 			totalScanned += batch.scanned
 			batchCount++
-
-			// Memory pressure management
-			if len(result.Documents) > sbs.config.MemoryThreshold {
-				sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
-					sbs.config.MemoryThreshold)
-				runtime.GC()
-				sbs.metrics.MemoryPressureGCs++
-			}
 		}
 	} else {
 		// Sequential loading fallback (single worker or single page)
@@ -417,37 +430,37 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 
 			batchCount++
 
-			// Process documents in this page
-			for docID, doc := range page.Documents {
-				// Early termination check per document
-				if maxDocuments > 0 && totalScanned >= maxDocuments {
-					break
-				}
-
-				totalScanned++
-
-				// Apply MVCC snapshot filtering if scanner has snapshot context
-				if sbs.snapshotSequence > 0 {
-					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
-						continue // Skip documents not visible to this snapshot
+			// Process documents in this page - use DocumentSlice when available
+			if len(page.DocumentSlice) > 0 {
+				for i := range page.DocumentSlice {
+					if maxDocuments > 0 && totalScanned >= maxDocuments {
+						break
 					}
+					totalScanned++
+					doc := &page.DocumentSlice[i]
+					if sbs.snapshotSequence > 0 {
+						if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+							continue
+						}
+					}
+					result.Documents = append(result.Documents, doc)
+					result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
 				}
-
-				// CRITICAL: Create a copy only for documents that make it into the result set
-				// This is much more memory-efficient than copying ALL documents upfront like GetAllDocuments()
-				// We only copy documents that pass filtering and are actually returned
-				docCopy := new(models.Document)
-				*docCopy = doc
-				result.Documents = append(result.Documents, docCopy)
-				result.DocumentIDs = append(result.DocumentIDs, docID)
-			}
-
-			// Memory pressure management
-			if len(result.Documents) > sbs.config.MemoryThreshold {
-				sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
-					sbs.config.MemoryThreshold)
-				runtime.GC()
-				sbs.metrics.MemoryPressureGCs++
+			} else {
+				for docID, doc := range page.Documents {
+					if maxDocuments > 0 && totalScanned >= maxDocuments {
+						break
+					}
+					totalScanned++
+					if sbs.snapshotSequence > 0 {
+						if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+							continue
+						}
+					}
+					docRef := doc
+					result.Documents = append(result.Documents, &docRef)
+					result.DocumentIDs = append(result.DocumentIDs, docID)
+				}
 			}
 		}
 	}
@@ -617,13 +630,6 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 			}
 		}
 
-		// Memory pressure management
-		if len(result.Documents) > sbs.config.MemoryThreshold {
-			sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
-				sbs.config.MemoryThreshold)
-			runtime.GC()
-			sbs.metrics.MemoryPressureGCs++
-		}
 	}
 
 	// Finalize results
@@ -672,14 +678,6 @@ func (sbs *SmartBundleScanner) performBatchedScan(query *ScanQuery) (*ScanResult
 				result.Documents = append(result.Documents, doc)
 				result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
 			}
-		}
-
-		// Memory pressure relief - prevent memory spikes for large result sets
-		if len(result.Documents) > sbs.config.MemoryThreshold {
-			sbs.logger.Debugf("Memory threshold reached (%d docs), triggering GC",
-				sbs.config.MemoryThreshold)
-			runtime.GC()
-			sbs.metrics.MemoryPressureGCs++
 		}
 
 		// Break early if we have enough results (optimization for LIMIT-style queries)

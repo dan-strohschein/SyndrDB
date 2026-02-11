@@ -7,6 +7,7 @@ import (
 
 	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/settings"
 )
@@ -163,7 +164,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 			continue
 		}
 
-		// Extract field value as string
+		// Extract field value as string (same normalization as query lookups and scheduleIndexUpdate)
 		var keyValue string
 		if indexRef.HashIndexField.FieldName == "DocumentID" {
 			keyValue = docID
@@ -173,7 +174,7 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 				// Skip documents that don't have the indexed field
 				continue
 			}
-			keyValue = field.Value.String()
+			keyValue = conversion.ValueToString(field.Value.AsInterface())
 		}
 
 		// Insert into new index (commitSequence=0, versionSequence=0 for committed docs)

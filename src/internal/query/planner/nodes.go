@@ -9,11 +9,9 @@ import (
 	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
-	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/settings"
-
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	// Import your B-tree index package when ready
 )
 
@@ -49,69 +47,140 @@ func (node *IndexScanNode) executeHashIndexScan(ctx context.Context) (map[string
 		return nil, fmt.Errorf("index %s is not a hash index (type: %s)", node.IndexName, indexRef.IndexType)
 	}
 
-	// SPRINT 5 FIX: Cast to the V3 LSM-style hash index
-	_, ok := indexRef.IndexInstance.(primitive.D)
-	if indexRef.IndexInstance == nil || ok {
-		node.Logger.Debugf("IndexRef is NIL - Loading hash index V3 %s for bundle %s", node.IndexName, node.Bundle.Name)
-		var err error
-		indexRef.IndexInstance, err = queryparser.EnsureHashIndexV3Loaded(node.Bundle, &indexRef, node.Logger)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load hash index V3 %s: %w", node.IndexName, err)
-		}
+	// Use BundleService's cached index instance (same one that writes go to)
+	// so we see the latest MemTable entries, not a stale disk-only copy.
+	if node.BundleServiceInt == nil {
+		return nil, fmt.Errorf("BundleServiceInt is required for hash index scan on bundle %s", node.Bundle.Name)
 	}
-
-	hashIndex, ok := indexRef.IndexInstance.(*hashindexV3.HashIndexV3)
+	loadedIndex, err := node.BundleServiceInt.GetOrLoadHashIndexInterface(node.Bundle, node.IndexName, indexRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load hash index %s: %w", node.IndexName, err)
+	}
+	hashIndex, ok := loadedIndex.(*hashindexV3.HashIndexV3)
 	if !ok {
-		return nil, fmt.Errorf("hash index %s is not of type *hashindexV3.HashIndexV3 (actual type: %T)", node.IndexName, indexRef.IndexInstance)
+		return nil, fmt.Errorf("hash index %s is not of type *hashindexV3.HashIndexV3 (actual type: %T)", node.IndexName, loadedIndex)
 	}
 
-	// Convert search key to string
-	searchKeyStr := fmt.Sprintf("%v", node.SearchKey)
+	// Convert search key to string using the same conversion as index writes
+	searchKeyStr := conversion.ValueToString(node.SearchKey)
 
-	// Search the hash index for document IDs
-	documentIDs, err := hashIndex.Search(searchKeyStr)
+	// Get both docIDs and pageIDs from the hash index
+	// NOTE: Do not pass snapshot sequence here — most index entries have CommitSequence==0
+	// (autocommit writes don't populate it), so MVCC filtering would discard valid results.
+	// Document-level visibility is handled downstream by GetDocument/GetDocumentPage.
+	documentIDs, pageIDs, err := hashIndex.Get(searchKeyStr)
 	if err != nil {
 		return nil, fmt.Errorf("hash index search failed: %w", err)
 	}
 
 	node.Logger.Debugf("Hash index returned %d document IDs for key %v", len(documentIDs), node.SearchKey)
 
+	// When index returns no doc IDs, fall back to full scan + filter so queries still return
+	// correct results (e.g. index empty, index created after data load, or legacy wrong-key entries).
+	if len(documentIDs) == 0 {
+		node.Logger.Warnf("[HASH-IDX] MISS (fallback): bundle=%s index=%s field=%s key=%q → full scan (index empty for key; ~15ms typical)",
+			node.Bundle.Name, node.IndexName, indexRef.HashIndexField.FieldName, searchKeyStr)
+		fallbackResults, fallbackErr := node.executeHashIndexScanFallback(ctx, indexRef, searchKeyStr)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		node.Logger.Warnf("[HASH-IDX] fallback returned %d document(s) for key %q", len(fallbackResults), searchKeyStr)
+		return fallbackResults, nil
+	}
+
+	node.Logger.Infof("[HASH-IDX] HIT: bundle=%s index=%s field=%s key=%q docCount=%d",
+		node.Bundle.Name, node.IndexName, indexRef.HashIndexField.FieldName, searchKeyStr, len(documentIDs))
+
 	// Retrieve the actual documents using BundleService (write-through page cache)
 	results := make(map[string]*models.Document)
 
-	// WRITE-THROUGH CACHE: All document retrieval goes through page cache
 	if node.BundleServiceInt == nil {
 		node.Logger.Warnf("BundleServiceInt is nil, cannot retrieve documents for bundle %s", node.Bundle.Name)
 		return results, nil
 	}
 
-	docCount := 0
-	for _, docID := range documentIDs {
+	for i, docID := range documentIDs {
 		// Check context every 1000 documents
-		// TODO: I can make this check frequency adaptive based on document processing rate
-		if docCount%1000 == 0 {
+		if i%1000 == 0 {
 			select {
 			case <-ctx.Done():
-				// Return partial results on timeout
 				return results, ctx.Err()
 			default:
-				// Continue processing
 			}
 		}
-		// Retrieve document from page cache via BundleService
-		doc, err := node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
-		if err != nil {
-			// Issue 4: Fail fast — do not return partial results when GetDocument fails
-			return nil, fmt.Errorf("hash index: GetDocument failed for document ID %s: %w", docID, err)
+
+		var doc *models.Document
+		// Try direct page lookup using index-provided pageID (skips findDocumentPage).
+		// NOTE: Page IDs are 0-based, so pageID=0 is valid (first physical page).
+		// Always attempt the fast path when the index provides a pageID; fall through
+		// to GetDocument only if the document is not found on the specified page.
+		if i < len(pageIDs) {
+			page, pageErr := node.BundleServiceInt.GetDocumentPage(
+				node.Bundle.Name, node.Bundle.Database.Name, pageIDs[i])
+			if pageErr == nil && page != nil {
+				if d, exists := page.Documents[docID]; exists {
+					doc = &d
+				}
+			}
+		}
+		// Fallback to GetDocument if direct lookup missed (stale pageID)
+		if doc == nil {
+			doc, err = node.BundleServiceInt.GetDocument(node.Bundle.Name, node.Bundle.Database.Name, docID)
+			if err != nil {
+				// Orphan index entry: the hash index references a document that no
+				// longer exists on any storage page. This can happen when:
+				//   - A document insert partially completed (index updated, disk write lost)
+				//   - A document was deleted but the field-level index was not tombstoned
+				//   - Page boundaries shifted and the page scan limit was reached
+				// Skip the orphan gracefully instead of failing the entire query.
+				// This matches how Postgres/MySQL handle dead index tuples.
+				node.Logger.Warnf("[HASH-IDX] Skipping orphan index entry: docID=%s key=%v index=%s err=%v",
+					docID, node.SearchKey, node.IndexName, err)
+				continue // Skip this orphan entry and process remaining documents
+			}
 		}
 		if doc != nil {
 			results[docID] = doc
 			node.Logger.Debugf("Retrieved document %s from bundle", docID)
 		}
-		docCount++
 	}
 
 	node.Logger.Debugf("Hash index scan returned %d documents for key %v", len(results), node.SearchKey)
+	return results, nil
+}
+
+// executeHashIndexScanFallback runs a full scan of the bundle and filters by indexed field == searchKeyStr.
+// Used when the hash index returns 0 document IDs so queries still return correct results (e.g. index
+// empty, index created after data load, or legacy wrong-key entries).
+func (node *IndexScanNode) executeHashIndexScanFallback(ctx context.Context, indexRef models.IndexReference, searchKeyStr string) (map[string]*models.Document, error) {
+	fieldName := indexRef.HashIndexField.FieldName
+	results := make(map[string]*models.Document)
+
+	if node.DocumentScanner == nil {
+		node.Logger.Debugf("Hash index fallback skipped: no DocumentScanner for bundle %s", node.Bundle.Name)
+		return results, nil
+	}
+
+	// Full scan then filter by field value (same key normalization as index lookups).
+	scanResult, err := node.DocumentScanner.ScanAllDocuments()
+	if err != nil {
+		return nil, fmt.Errorf("hash index fallback scan failed for bundle %s: %w", node.Bundle.Name, err)
+	}
+	for _, doc := range scanResult.Documents {
+		if doc == nil {
+			continue
+		}
+		field, ok := doc.Fields[fieldName]
+		if !ok {
+			continue
+		}
+		docKeyStr := conversion.ValueToString(field.Value.AsInterface())
+		if docKeyStr == searchKeyStr {
+			results[doc.DocumentID] = doc
+		}
+	}
+
+	node.Logger.Debugf("Hash index fallback returned %d documents for key %q on field %s", len(results), searchKeyStr, fieldName)
 	return results, nil
 }
 
@@ -537,7 +606,8 @@ func (node *BTreeOrderedScanNode) EstimateMemoryUsage() int64 { return 0 }
 func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	node.Logger.Debugf("Executing optimized full bundle scan on %s using document scanner", node.Bundle.Name)
 
-	results := make(map[string]*models.Document)
+	// Pre-allocate map after scan completes (capacity set below after scan)
+	var results map[string]*models.Document
 
 	// Get memory tracker from context for per-query memory limit
 	memoryTracker := GetMemoryTrackerFromContext(ctx)
@@ -611,6 +681,8 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 	}
 
 	// Convert scanner result to the expected map format
+	// Pre-allocate map with known capacity to avoid rehashing during insertion
+	results = make(map[string]*models.Document, len(scanResult.Documents))
 	docCount := 0
 
 	for i, doc := range scanResult.Documents {
@@ -655,6 +727,84 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 	return results, nil
 }
 
+// ExecuteSlice returns scan results as a slice, avoiding the O(n) map insertion overhead.
+// This is used by FilterNode and other consumers that iterate linearly over results.
+func (node *FullScanNode) ExecuteSlice(ctx context.Context) ([]*models.Document, []string, error) {
+	node.Logger.Debugf("Executing slice-based full bundle scan on %s", node.Bundle.Name)
+
+	// Get memory tracker from context for per-query memory limit
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+
+	// PHASE 4: MVCC - Set snapshot on scanner if available in context
+	if snapshotInfo := GetSnapshotInfoFromContext(ctx); snapshotInfo != nil {
+		if smartScanner, ok := node.DocumentScanner.(interface {
+			SetSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool)
+		}); ok {
+			smartScanner.SetSnapshot(snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID, snapshotInfo.ActiveTxIDs)
+		}
+	}
+
+	// PROJECTION: Establish projection for this scan
+	if node.BundleServiceInt != nil {
+		node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, node.ProjectionFields)
+		defer node.BundleServiceInt.SetProjectionFieldsForBundle(node.Bundle.Name, nil)
+	}
+	if smartScanner, ok := node.DocumentScanner.(interface {
+		GetBundle() documentscanner.BundleInterface
+	}); ok {
+		if bundleAdapter, ok := smartScanner.GetBundle().(*documentscanner.BundleAdapter); ok {
+			bundleAdapter.SetProjectionFields(node.ProjectionFields)
+			defer bundleAdapter.SetProjectionFields(nil)
+		}
+	}
+
+	if node.DocumentScanner == nil {
+		return nil, nil, fmt.Errorf("document scanner is required for paginated document scanning")
+	}
+
+	var scanResult *documentscanner.ScanResult
+	var err error
+	// PREDICATE PUSHDOWN: When a predicate is set, use ScanWithPredicate to filter
+	// during page iteration. This avoids copying non-matching documents entirely.
+	if node.Predicate != nil {
+		scanResult, err = node.DocumentScanner.ScanWithPredicate(node.Predicate)
+	} else if node.MaxDocuments > 0 {
+		if scannerWithLimit, ok := node.DocumentScanner.(interface {
+			ScanAllDocumentsWithLimit(int) (*documentscanner.ScanResult, error)
+		}); ok {
+			scanResult, err = scannerWithLimit.ScanAllDocumentsWithLimit(node.MaxDocuments)
+		} else {
+			scanResult, err = node.DocumentScanner.ScanAllDocuments()
+		}
+	} else {
+		scanResult, err = node.DocumentScanner.ScanAllDocuments()
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("document scanner failed: %w", err)
+	}
+
+	// Memory tracking on sampled documents
+	if memoryTracker != nil {
+		for i, doc := range scanResult.Documents {
+			if i%100 == 0 {
+				docSize := models.EstimateDocumentSize(doc)
+				if err := memoryTracker.Sample(docSize, i); err != nil {
+					return nil, nil, err
+				}
+				totalDocs := len(scanResult.Documents)
+				if memoryTracker.WillExceedLimit(totalDocs) {
+					return nil, nil, ErrMemoryLimitExceeded
+				}
+			}
+		}
+	}
+
+	node.Logger.Debugf("Slice-based scan completed: %d documents in %v",
+		len(scanResult.Documents), scanResult.ScanLatency)
+
+	return scanResult.Documents, scanResult.DocumentIDs, nil
+}
+
 // ExecuteStreaming processes documents in batches using the document scanner
 // This approach is memory-efficient for very large bundles
 func (node *FullScanNode) ExecuteStreaming(callback func(map[string]*models.Document) error) error {
@@ -692,36 +842,25 @@ func (node *FullScanNode) ExecuteStreaming(callback func(map[string]*models.Docu
 }
 
 func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	// Execute child node first
-	documents, err := node.Child.Execute(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	// Get settings for optimization configuration
 	args := settings.GetSettings()
 
-	// TIER 1 SUBQUERY SUPPORT: Detect and execute subqueries before applying WHERE optimizations
+	// Prepare expression and subquery context (shared by both map and slice paths)
 	var subqueryContext syndrQL.SubqueryExecutionContext
+	var err error
 	if node.WhereExpression != nil && node.SubqueryExecutor != nil && node.Database != nil {
 		if expr, ok := node.WhereExpression.(syndrQL.Expression); ok {
-			// Detect and execute all subqueries in the WHERE expression
 			subqueryContext, err = DetectAndExecuteSubqueries(ctx, expr, node.Database, node.SubqueryExecutor, node.Logger)
 			if err != nil {
-				// Subquery execution failed - return error
 				node.Logger.Errorf("Subquery execution failed: %v", err)
 				return nil, fmt.Errorf("subquery execution failed: %w", err)
 			}
-			// Log subquery execution if any subqueries were found
 			if len(subqueryContext) > 0 {
 				node.Logger.Debugf("Executed %d subqueries before WHERE evaluation", len(subqueryContext))
 			}
 		}
 	}
 
-	// PRIORITY 4: Expression caching and predicate reordering (applied before evaluation)
-	// exprToUse is the expression for this execution only; we never mutate node.WhereExpression
-	// so that the same plan can be run twice or by concurrent clones without shared mutation (Issue 2).
 	var exprToUse syndrQL.Expression
 	if node.WhereExpression != nil {
 		if expr, ok := node.WhereExpression.(syndrQL.Expression); ok {
@@ -741,25 +880,83 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 		}
 	}
 
+	evaluator := syndrQL.NewExpressionEvaluatorWithSIMD(node.Logger, args.WhereSIMDEnabled)
+
+	var bundleCtx *syndrQL.BundleContext
+	if node.BundleContext != nil {
+		if bc, ok := node.BundleContext.(*syndrQL.BundleContext); ok {
+			bundleCtx = bc
+		} else {
+			node.Logger.Errorf("BundleContext is not a *syndrQL.BundleContext: %T", node.BundleContext)
+		}
+	}
+
+	// OPTIMIZATION: Use slice-based execution path when child supports it.
+	// This avoids the O(n) map insertion in FullScanNode.Execute() for scan-heavy queries.
+	if sliceChild, ok := node.Child.(SliceExecutionNode); ok {
+		docSlice, docIDs, err := sliceChild.ExecuteSlice(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		filtered := make(map[string]*models.Document, len(docSlice)/4) // Estimate 25% selectivity
+		memoryTracker := GetMemoryTrackerFromContext(ctx)
+		docCount := 0
+		matchCount := 0
+
+		for i, doc := range docSlice {
+			if node.MaxDocuments > 0 && matchCount >= node.MaxDocuments {
+				node.Logger.Debugf("Early termination: reached LIMIT of %d matching documents", node.MaxDocuments)
+				break
+			}
+
+			if docCount%1000 == 0 {
+				select {
+				case <-ctx.Done():
+					return filtered, ctx.Err()
+				default:
+				}
+			}
+
+			if memoryTracker != nil && docCount%100 == 0 {
+				docSize := models.EstimateDocumentSize(doc)
+				if err := memoryTracker.Sample(docSize, docCount); err != nil {
+					return nil, err
+				}
+				if memoryTracker.WillExceedLimit(len(docSlice)) {
+					return nil, ErrMemoryLimitExceeded
+				}
+			}
+
+			if node.matchesConditions(doc, subqueryContext, exprToUse, evaluator, bundleCtx) {
+				filtered[docIDs[i]] = doc
+				matchCount++
+			}
+			docCount++
+		}
+
+		node.Logger.Debugf("Filter node (slice path) reduced %d documents to %d", len(docSlice), len(filtered))
+		return filtered, nil
+	}
+
+	// Fallback: map-based execution path
+	documents, err := node.Child.Execute(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// PRIORITY 2: Bloom filter pre-filtering for multi-condition AND queries (cheapest, run first)
 	if args.WhereBloomEnabled && len(documents) >= args.WhereBloomMinDocuments && exprToUse != nil {
-		// Create Bloom optimizer
 		bloomOpt := NewWhereBloomOptimizer(args.WhereBloomMinDocuments, 0.01, node.Logger)
-
-		// Check if this query benefits from Bloom pre-filtering
 		if bloomOpt.ShouldUseBloom(len(documents), exprToUse) {
-			// Build Bloom filter for most selective condition
 			bloom, selectivePred, err := bloomOpt.BuildBloomForMostSelective(
 				documents,
 				exprToUse,
 				node.BundleContext,
 			)
-
 			if err == nil && bloom != nil {
-				// Pre-filter documents using Bloom filter
 				originalCount := len(documents)
 				documents = bloomOpt.PrefilterWithBloom(documents, bloom)
-
 				node.Logger.Debugf("Bloom filter pre-filter: %d → %d documents (%.1f%% reduction) on condition: %s %s %v",
 					originalCount,
 					len(documents),
@@ -778,44 +975,34 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	docCount := 0
 	matchCount := 0 // Track matching documents for early termination
 	for docID, doc := range documents {
-		// PERFORMANCE OPTIMIZATION: Early termination for LIMIT pushdown (no ORDER BY)
-		// When MaxDocuments is set, stop after finding enough matching documents
 		if node.MaxDocuments > 0 && matchCount >= node.MaxDocuments {
 			node.Logger.Debugf("Early termination: reached LIMIT of %d matching documents", node.MaxDocuments)
 			break
 		}
 
-		// Check context every 1000 documents
-		// TODO: I can make this check frequency adaptive based on document processing rate
 		if docCount%1000 == 0 {
 			select {
 			case <-ctx.Done():
-				// Return partial results on timeout
 				return filtered, ctx.Err()
 			default:
-				// Continue processing
 			}
 		}
 
-		// Memory tracking: Sample every 100th document
 		if memoryTracker != nil && docCount%100 == 0 {
 			docSize := models.EstimateDocumentSize(doc)
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
 			}
-
-			// Check if projected memory exceeds limit
 			if memoryTracker.WillExceedLimit(len(documents)) {
 				errorMsg := memoryTracker.FormatErrorMessage(len(documents))
 				node.Logger.Warnf("Memory limit exceeded during filter: %s", errorMsg)
-				// TODO: I could implement graceful degradation by returning partial results with a warning flag
 				return nil, ErrMemoryLimitExceeded
 			}
 		}
 
-		if node.matchesConditions(doc, subqueryContext, exprToUse) {
+		if node.matchesConditions(doc, subqueryContext, exprToUse, evaluator, bundleCtx) {
 			filtered[docID] = doc
-			matchCount++ // Track matches for LIMIT pushdown early termination
+			matchCount++
 		}
 		docCount++
 	}
@@ -824,28 +1011,16 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	return filtered, nil
 }
 
-// matchesConditions evaluates the given expression against the document.
+// matchesConditions evaluates the given expression against the document using the pre-created evaluator.
 // expr is the expression to use for this evaluation (e.g. cache-optimized); when nil, all documents match.
+// evaluator is the pre-created ExpressionEvaluator (created once in Execute, reused for all documents).
+// bundleCtx is the pre-resolved BundleContext (created once in Execute, reused for all documents).
 // Callers must not mutate node.WhereExpression; pass a local exprToUse so the same plan is safe for reuse (Issue 2).
-func (node *FilterNode) matchesConditions(doc *models.Document, subqueryContext syndrQL.SubqueryExecutionContext, expr syndrQL.Expression) bool {
+func (node *FilterNode) matchesConditions(doc *models.Document, subqueryContext syndrQL.SubqueryExecutionContext, expr syndrQL.Expression, evaluator *syndrQL.ExpressionEvaluator, bundleCtx *syndrQL.BundleContext) bool {
 	if expr == nil {
 		return true
 	}
 
-	// Get BundleContext if available (for qualified field resolution)
-	var bundleCtx *syndrQL.BundleContext
-	if node.BundleContext != nil {
-		if bc, ok := node.BundleContext.(*syndrQL.BundleContext); ok {
-			bundleCtx = bc
-		} else {
-			node.Logger.Errorf("BundleContext is not a *syndrQL.BundleContext: %T", node.BundleContext)
-			return false
-		}
-	}
-
-	// Create evaluator with SIMD configuration from settings (Phase 1 WHERE optimization)
-	args := settings.GetSettings()
-	evaluator := syndrQL.NewExpressionEvaluatorWithSIMD(node.Logger, args.WhereSIMDEnabled)
 	result, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, subqueryContext, nil)
 	if err != nil {
 		node.Logger.Errorf("Expression evaluation failed: %v", err)

@@ -1730,7 +1730,7 @@ func ScanHashIndex(bundle *models.Bundle, idxRef *models.IndexReference, value i
 	}
 
 	// Search the V3 LSM-style hash index
-	docIDs, err := hashIndex.Search(searchKeyStr)
+	docIDs, _, err := hashIndex.Search(searchKeyStr)
 	if err != nil {
 		return nil, fmt.Errorf("hash index V3 search failed for value '%v' in index %s: %w", value, idxRef.IndexName, err)
 	}

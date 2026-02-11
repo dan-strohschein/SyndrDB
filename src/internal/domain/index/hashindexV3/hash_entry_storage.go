@@ -165,6 +165,20 @@ func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*Bucket
 		return nil, fmt.Errorf("failed to discover bucket files: %w", err)
 	}
 
+	// DIAG: Log bucket file discovery for debugging index read misses
+	if bfm.logger != nil {
+		fileNames := make([]string, len(existingFiles))
+		for i, f := range existingFiles {
+			fileNames[i] = filepath.Base(f)
+		}
+		bfm.logger.Warnw("[BUCKET-DIAG] GetOrCreateBucketHandle discovery",
+			"bucketNum", bucketNum,
+			"fieldName", bfm.fieldName,
+			"dataDir", bfm.namingHelper.dataDir,
+			"numFilesFound", len(existingFiles),
+			"files", fileNames)
+	}
+
 	if len(existingFiles) > 0 {
 		// Sort files by file number
 		sort.Strings(existingFiles)
@@ -606,6 +620,17 @@ func (es *EntryStorage) AppendEntry(entry *HashIndexEntry) error {
 //
 // Returns error if append fails
 func (es *EntryStorage) appendEntryToBucket(entry *HashIndexEntry) error {
+	// #region agent log
+	// DEBUG INSTRUMENTATION: Log actual disk writes for first 10 entries (Hypothesis C,D)
+	entrySeq := atomic.LoadUint64(&es.totalEntries)
+	if entrySeq < 10 {
+		if df, derr := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); derr == nil {
+			fmt.Fprintf(df, "{\"location\":\"hash_entry_storage.go:appendEntryToBucket\",\"message\":\"disk_write\",\"hypothesisId\":\"CD\",\"timestamp\":%d,\"data\":{\"key\":\"%s\",\"bucketNum\":%d,\"hashValue\":%d,\"docID\":\"%s\",\"indexName\":\"%s\",\"useBuckets\":%v}}\n",
+				time.Now().UnixMilli(), entry.KeyValue, entry.BucketNum, entry.HashValue, entry.DocumentID, es.indexName, es.useBuckets)
+			df.Close()
+		}
+	}
+	// #endregion
 	// Get or create bucket file handle
 	handle, err := es.bucketFileManager.GetOrCreateBucketHandle(entry.BucketNum)
 	if err != nil {
@@ -655,8 +680,18 @@ func (es *EntryStorage) appendEntryToBucket(entry *HashIndexEntry) error {
 	}
 	handle.PwriteMutex.Unlock()
 
-	// Update global statistics (atomic for thread safety)
-	atomic.AddUint64(&es.totalEntries, 1)
+	// DIAG: Log every 500th write to confirm entries reach disk in the correct bucket
+	entryCount := atomic.AddUint64(&es.totalEntries, 1)
+	if es.logger != nil && (entryCount <= 3 || entryCount%500 == 0) {
+		es.logger.Warnw("[BUCKET-DIAG] appendEntryToBucket wrote",
+			"key", entry.KeyValue,
+			"bucketNum", entry.BucketNum,
+			"hashValue", entry.HashValue,
+			"writeOffset", writeOffset,
+			"dataLen", dataLen,
+			"totalEntries", entryCount,
+			"file", filepath.Base(handle.CurrentFile.Name()))
+	}
 	atomic.AddUint64(&es.totalBytes, uint64(len(data)))
 
 	return nil
@@ -922,6 +957,13 @@ func (es *EntryStorage) ScanBucket(bucketNum uint32, visitor func(*HashIndexEntr
 		}
 	}
 
+	// DIAG: Log bucket scan scope
+	if es.logger != nil {
+		es.logger.Warnw("[BUCKET-DIAG] ScanBucket starting",
+			"bucketNum", bucketNum,
+			"numFiles", len(handle.AllFiles))
+	}
+
 	// Scan bucket files from newest to oldest
 	// This ensures we find the most recent version of any key first
 	for i := len(handle.AllFiles) - 1; i >= 0; i-- {
@@ -944,8 +986,10 @@ func (es *EntryStorage) ScanBucket(bucketNum uint32, visitor func(*HashIndexEntr
 // Returns the latest entry or nil if not found
 func (es *EntryStorage) GetLatestEntryFromBucket(key string, bucketNum uint32) (*HashIndexEntry, error) {
 	var foundEntry *HashIndexEntry
+	var scannedCount int
 
 	err := es.ScanBucket(bucketNum, func(entry *HashIndexEntry) bool {
+		scannedCount++
 		// Important: Verify hash matches to detect collisions
 		if entry.KeyValue == key && entry.BucketNum == bucketNum {
 			foundEntry = entry
@@ -953,6 +997,15 @@ func (es *EntryStorage) GetLatestEntryFromBucket(key string, bucketNum uint32) (
 		}
 		return true // Continue scanning
 	})
+
+	// DIAG: Log lookup result with scan stats
+	if es.logger != nil {
+		es.logger.Warnw("[BUCKET-DIAG] GetLatestEntryFromBucket result",
+			"key", key,
+			"bucketNum", bucketNum,
+			"entriesScanned", scannedCount,
+			"found", foundEntry != nil)
+	}
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan bucket %d for key %s: %w", bucketNum, key, err)
@@ -1390,6 +1443,7 @@ func (es *EntryStorage) scanFileBackward(filePath string, visitor func(*HashInde
 
 	// Parse all entries first (we need to reverse them)
 	entries := make([]*HashIndexEntry, 0, 1000)
+	headerSize := offset // save for diagnostic
 
 	for offset < len(data) {
 		entry, bytesRead, err := DeserializeEntry(data[offset:])
@@ -1406,6 +1460,23 @@ func (es *EntryStorage) scanFileBackward(filePath string, visitor func(*HashInde
 
 		entries = append(entries, entry)
 		offset += bytesRead
+	}
+
+	// DIAG: Log file scan results (first call per file)
+	if es.logger != nil {
+		sampleKey := ""
+		sampleBucket := uint32(0)
+		if len(entries) > 0 {
+			sampleKey = entries[0].KeyValue
+			sampleBucket = entries[0].BucketNum
+		}
+		es.logger.Warnw("[BUCKET-DIAG] scanFileBackward result",
+			"file", filepath.Base(filePath),
+			"fileSize", len(data),
+			"headerSize", headerSize,
+			"entriesParsed", len(entries),
+			"sampleKey", sampleKey,
+			"sampleBucket", sampleBucket)
 	}
 
 	// Visit entries in reverse order (newest first)

@@ -48,41 +48,41 @@ func (e *KeyEncoder) EncodeKey(value interface{}) ([]byte, error) {
 		return nil, fmt.Errorf("cannot encode nil value")
 	}
 
+	// IMPORTANT: This encoding MUST match convertValueToBytes in bundle_service.go,
+	// which is used at index insertion time. The BTree stores keys using string
+	// representations for numeric types, so queries must use the same format.
 	switch v := value.(type) {
 	case string:
-		// Strings are already sortable lexicographically
 		return []byte(v), nil
 
 	case []byte:
-		// Byte slices are already in binary form
 		return v, nil
 
 	case int:
-		return e.encodeInt64(int64(v)), nil
+		return []byte(fmt.Sprintf("%d", v)), nil
 
 	case int32:
-		return e.encodeInt64(int64(v)), nil
+		return []byte(fmt.Sprintf("%d", v)), nil
 
 	case int64:
-		return e.encodeInt64(v), nil
+		return []byte(fmt.Sprintf("%d", v)), nil
 
 	case uint:
-		return e.encodeUint64(uint64(v)), nil
+		return []byte(fmt.Sprintf("%d", v)), nil
 
 	case uint32:
-		return e.encodeUint64(uint64(v)), nil
+		return []byte(fmt.Sprintf("%d", v)), nil
 
 	case uint64:
-		return e.encodeUint64(v), nil
+		return []byte(fmt.Sprintf("%d", v)), nil
 
 	case float32:
-		return e.encodeFloat64(float64(v)), nil
+		return []byte(fmt.Sprintf("%.6f", v)), nil
 
 	case float64:
-		return e.encodeFloat64(v), nil
+		return []byte(fmt.Sprintf("%.6f", v)), nil
 
 	default:
-		// Fallback to string representation for unknown types
 		return []byte(fmt.Sprintf("%v", v)), nil
 	}
 }

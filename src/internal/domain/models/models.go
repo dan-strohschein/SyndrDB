@@ -443,6 +443,7 @@ type DocumentPage struct {
 	PageID         uint32              // Unique page identifier within bundle
 	BundleID       string              // Bundle this page belongs to
 	Documents      map[string]Document // Limited set of documents in this page
+	DocumentSlice  []Document          // Slice-based document storage for scan-optimized access (avoids map overhead)
 	NextPageID     *uint32             // Pointer to next page (for sequential access)
 	PreviousPageID *uint32             // Pointer to previous page (for sequential access)
 	IsDirty        bool                // Whether this page has been modified

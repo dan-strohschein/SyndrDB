@@ -46,6 +46,11 @@ func UnwrapGrouped(expr Expression) Expression {
 //   - age > 25 → ("", nil, false) - not equality
 //   - age == x + 1 → ("", nil, false) - right side not literal
 func ExtractSimpleEquality(expr Expression) (field string, value interface{}, ok bool) {
+	// Unwrap GroupedExpression (handles parenthesized conditions like ("ID" == 196))
+	if grouped, isGrouped := expr.(*GroupedExpression); isGrouped {
+		expr = grouped.Expression
+	}
+
 	// Must be a binary expression
 	binary, isBinary := expr.(*BinaryExpression)
 	if !isBinary {
@@ -93,6 +98,11 @@ func ExtractSimpleEquality(expr Expression) (field string, value interface{}, ok
 //   - price <= 99.99 → ("price", "<=", 99.99, true)
 //   - status != "deleted" → ("status", "!=", "deleted", true)
 func ExtractRangeCondition(expr Expression) (field string, operator string, value interface{}, ok bool) {
+	// Unwrap GroupedExpression (handles parenthesized conditions like (age > 18))
+	if grouped, isGrouped := expr.(*GroupedExpression); isGrouped {
+		expr = grouped.Expression
+	}
+
 	binary, isBinary := expr.(*BinaryExpression)
 	if !isBinary {
 		return "", "", nil, false

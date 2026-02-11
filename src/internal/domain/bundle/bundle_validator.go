@@ -215,7 +215,7 @@ func (v *ReferentialIntegrityValidator) checkHashIndexForReferences(
 	// Perform O(1) hash lookup to check for references
 	v.logger.Debugf("[REFINT] Searching hash index '%s' for documentID '%s' (checking if any %s.%s == '%s')",
 		indexName, documentID, targetBundle.Name, foreignKeyField, documentID)
-	results, err := hashIndex.Search(documentID)
+	results, _, err := hashIndex.Search(documentID)
 	if err != nil {
 		return "", fmt.Errorf("failed to search hash index '%s': %w", indexName, err)
 	}
@@ -697,7 +697,7 @@ func (v *ReferentialIntegrityValidator) findDependentDocuments(
 
 	// Search for references
 	// Note: Search() returns []string (document IDs) directly
-	documentIDs, err := hashIndex.Search(documentID)
+	documentIDs, _, err := hashIndex.Search(documentID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search hash index '%s': %w", indexName, err)
 	}

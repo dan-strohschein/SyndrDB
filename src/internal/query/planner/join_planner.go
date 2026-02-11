@@ -40,6 +40,7 @@ import (
 	"sync"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/document"
+	btreeindexV2 "syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
 	joinexecutor "syndrdb/src/internal/query/join_executor" // NEW: For JOIN executor integration
@@ -541,15 +542,21 @@ func (jen *JoinExecutionNode) Execute(ctx context.Context) (map[string]*models.D
 	if bundleService != nil && len(jen.Query.JoinClauses) > 0 {
 		first := jen.Query.JoinClauses[0]
 		leftF, rightF := computeRequiredFieldsForJoin(jen.Query, first, jen.Query.FromBundle, first.RightBundle)
-		// Do not set projection when a predicate is pushed to that side: the predicate may reference
-		// fields (e.g. rating) that computeRequiredFieldsForJoin does not include (it only uses join
-		// keys, SelectFields, OrderBy; it does not extract fields from the Expression predicate).
-		// Projecting would omit those fields and cause the filter to drop all rows (e.g. 0 results).
-		if len(leftF) > 0 && jen.LeftPredicate == nil {
+		// J3: When a predicate is pushed down, merge predicate-referenced fields into the
+		// projection list so projection stays enabled even with WHERE pushdown.
+		if len(leftF) > 0 {
+			if jen.LeftPredicate != nil {
+				predFields := syndrQL.ExtractFieldNames(jen.LeftPredicate)
+				leftF = append(leftF, predFields...)
+			}
 			bundleService.SetProjectionFieldsForBundle(jen.Query.FromBundle, leftF)
 			defer bundleService.SetProjectionFieldsForBundle(jen.Query.FromBundle, nil)
 		}
-		if len(rightF) > 0 && jen.RightPredicate == nil {
+		if len(rightF) > 0 {
+			if jen.RightPredicate != nil {
+				predFields := syndrQL.ExtractFieldNames(jen.RightPredicate)
+				rightF = append(rightF, predFields...)
+			}
 			bundleService.SetProjectionFieldsForBundle(first.RightBundle, rightF)
 			defer bundleService.SetProjectionFieldsForBundle(first.RightBundle, nil)
 		}
@@ -740,13 +747,25 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		rightAdapter = jen.RightBundleInterface
 		jen.Logger.Debugf("Using pre-created predicate-filtered RIGHT bundle adapter")
 	} else if jen.RightPredicate != nil {
-		// Create filtered adapter with pushdown predicate; pass streaming opts when bundleService available
-		var rightStreamOpts *ExprFilterAdapterOpts
-		if bundleService != nil {
-			rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name}
+		// J2: Try B-tree index for range predicates before falling back to expression filter
+		var usedBTree bool
+		if bundleService != nil && rightBundle.Indexes != nil {
+			btreeAdapter := tryCreateBTreeFilteredAdapter(baseRightAdapter, jen.RightPredicate, rightBundle, bundleService, jen.Logger)
+			if btreeAdapter != nil {
+				rightAdapter = btreeAdapter
+				usedBTree = true
+				jen.Logger.Debugf("J2: Using BTreeFilteredBundleAdapter for RIGHT bundle predicate")
+			}
 		}
-		rightAdapter = NewExpressionFilteredBundleAdapter(baseRightAdapter, jen.RightPredicate, jen.Logger, rightStreamOpts)
-		jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
+		if !usedBTree {
+			// Fallback: Create filtered adapter with pushdown predicate
+			var rightStreamOpts *ExprFilterAdapterOpts
+			if bundleService != nil {
+				rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name}
+			}
+			rightAdapter = NewExpressionFilteredBundleAdapter(baseRightAdapter, jen.RightPredicate, jen.Logger, rightStreamOpts)
+			jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
+		}
 	} else {
 		// Use standard adapter
 		rightAdapter = baseRightAdapter
@@ -777,6 +796,15 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		joinType = joinexecutor.InnerJoin
 	}
 
+	// J1: Push LIMIT into the join request for early termination in probe.
+	// Safety: Only push for INNER JOIN without ORDER BY — any N matches are equivalent.
+	// For LEFT/RIGHT JOIN or ORDER BY, we need all matches.
+	probeLimit := 0
+	hasOrderBy := jen.OrderBy != nil && len(jen.OrderBy.Fields) > 0
+	if joinType == joinexecutor.InnerJoin && !hasOrderBy && jen.Limit > 0 {
+		probeLimit = jen.Limit + jen.Offset
+	}
+
 	return &joinexecutor.JoinRequest{
 		LeftBundle:         leftAdapter,
 		RightBundle:        rightAdapter,
@@ -785,6 +813,7 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		ExpectedResultSize: int64(jen.EstimatedRows),
 		MemoryLimit:        64 * 1024 * 1024, // 64MB default
 		AllowDiskSpillover: true,
+		Limit:              probeLimit,
 	}, nil
 }
 
@@ -1839,4 +1868,272 @@ func (f *ExpressionFilteredBundleAdapter) matchesPredicate(doc *models.Document)
 	}
 
 	return result
+}
+
+// =============================================================================
+// J2: BTreeFilteredBundleAdapter — B-tree index-based predicate filtering
+// =============================================================================
+
+// tryCreateBTreeFilteredAdapter tries to create a BTreeFilteredBundleAdapter
+// for range predicates (>=, >, <=, <) when a B-tree index exists on the field.
+// Returns nil if no suitable B-tree index is found.
+func tryCreateBTreeFilteredAdapter(
+	inner documentscanner.BundleInterface,
+	predicate syndrQL.Expression,
+	bundle *models.Bundle,
+	bundleService BundleServiceInterface,
+	logger *zap.SugaredLogger,
+) *BTreeFilteredBundleAdapter {
+	// Extract range condition from predicate
+	fieldName, operator, value, ok := syndrQL.ExtractRangeCondition(predicate)
+	if !ok {
+		return nil
+	}
+
+	// Look for a B-tree index on the predicate field
+	for indexName, indexRef := range bundle.Indexes {
+		if indexRef.IndexType != "btree" {
+			continue
+		}
+
+		// Check if this index covers the predicate field
+		matched := false
+		for _, field := range indexRef.Fields {
+			if field.Name == fieldName {
+				matched = true
+				break
+			}
+		}
+		if !matched && indexRef.BTreeIndexField.FieldName != "" {
+			if indexRef.BTreeIndexField.FieldName == fieldName {
+				matched = true
+			}
+		}
+		if !matched {
+			continue
+		}
+
+		// Load the B-tree index
+		var btreeIndex *btreeindexV2.BTreeIndex
+		if indexRef.IndexInstance != nil {
+			if idx, ok := indexRef.IndexInstance.(*btreeindexV2.BTreeIndex); ok {
+				btreeIndex = idx
+			}
+		}
+		if btreeIndex == nil {
+			loaded, err := bundleService.GetOrLoadBTreeIndex(bundle, indexName, indexRef)
+			if err != nil {
+				logger.Debugf("J2: Failed to load B-tree index %s: %v", indexName, err)
+				continue
+			}
+			if idx, ok := loaded.(*btreeindexV2.BTreeIndex); ok {
+				btreeIndex = idx
+			}
+		}
+		if btreeIndex == nil {
+			continue
+		}
+
+		// Compute key range from operator + value
+		encoder := NewKeyEncoder()
+		keyBytes, err := encoder.EncodeKey(value)
+		if err != nil {
+			logger.Debugf("J2: Failed to encode predicate value %v: %v", value, err)
+			continue
+		}
+
+		var startKey, endKey []byte
+		var excludeStart, excludeEnd bool
+		maxKey := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+		minKey := []byte{0x00}
+
+		switch operator {
+		case ">=":
+			startKey, endKey = keyBytes, maxKey
+			excludeStart, excludeEnd = false, false
+		case ">":
+			startKey, endKey = keyBytes, maxKey
+			excludeStart, excludeEnd = true, false
+		case "<=":
+			startKey, endKey = minKey, keyBytes
+			excludeStart, excludeEnd = false, false
+		case "<":
+			startKey, endKey = minKey, keyBytes
+			excludeStart, excludeEnd = false, true
+		case "!=":
+			// != is not a simple range; fall back to expression filter
+			return nil
+		default:
+			return nil
+		}
+
+		logger.Debugf("J2: Created BTreeFilteredBundleAdapter on field=%s, op=%s, index=%s", fieldName, operator, indexName)
+		return &BTreeFilteredBundleAdapter{
+			inner:         inner,
+			btreeIndex:    btreeIndex,
+			startKey:      startKey,
+			endKey:        endKey,
+			excludeStart:  excludeStart,
+			excludeEnd:    excludeEnd,
+			bundleService: bundleService,
+			bundle:        bundle,
+			logger:        logger,
+		}
+	}
+
+	return nil
+}
+
+// BTreeFilteredBundleAdapter wraps a BundleInterface and uses a B-tree index
+// for range-based filtering. Instead of scanning all documents and evaluating
+// a predicate, it fetches only matching document IDs from the B-tree index,
+// then batch-loads the documents. Combined with J1 (LIMIT early termination),
+// this allows the probe to stop after fetching a small subset of documents.
+type BTreeFilteredBundleAdapter struct {
+	inner         documentscanner.BundleInterface
+	btreeIndex    *btreeindexV2.BTreeIndex
+	startKey      []byte
+	endKey        []byte
+	excludeStart  bool
+	excludeEnd    bool
+	bundleService BundleServiceInterface
+	bundle        *models.Bundle
+	logger        *zap.SugaredLogger
+	cachedDocIDs  []string // cached result of range search
+}
+
+// getMatchingDocIDs performs the B-tree range search (cached after first call).
+func (b *BTreeFilteredBundleAdapter) getMatchingDocIDs() ([]string, error) {
+	if b.cachedDocIDs != nil {
+		return b.cachedDocIDs, nil
+	}
+	docIDs, err := b.btreeIndex.RangeSearchWithBounds(b.startKey, b.endKey, b.excludeStart, b.excludeEnd)
+	if err != nil {
+		return nil, err
+	}
+	b.cachedDocIDs = docIDs
+	b.logger.Debugf("J2: B-tree range search returned %d document IDs", len(docIDs))
+	return docIDs, nil
+}
+
+func (b *BTreeFilteredBundleAdapter) GetDocumentIDs() []string {
+	ids, err := b.getMatchingDocIDs()
+	if err != nil {
+		b.logger.Warnf("J2: B-tree range search failed: %v", err)
+		return b.inner.GetDocumentIDs()
+	}
+	return ids
+}
+
+func (b *BTreeFilteredBundleAdapter) GetDocument(docID string) *models.Document {
+	return b.inner.GetDocument(docID)
+}
+
+func (b *BTreeFilteredBundleAdapter) GetDocumentsByIDs(docIDs []string) map[string]*models.Document {
+	return b.inner.GetDocumentsByIDs(docIDs)
+}
+
+func (b *BTreeFilteredBundleAdapter) GetAllDocuments() map[string]*models.Document {
+	ids, err := b.getMatchingDocIDs()
+	if err != nil {
+		b.logger.Warnf("J2: B-tree range search failed, falling back to inner: %v", err)
+		return b.inner.GetAllDocuments()
+	}
+	if len(ids) == 0 {
+		return make(map[string]*models.Document)
+	}
+	return b.inner.GetDocumentsByIDs(ids)
+}
+
+func (b *BTreeFilteredBundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.Document {
+	if limit <= 0 {
+		return b.GetAllDocuments()
+	}
+	ids, err := b.getMatchingDocIDs()
+	if err != nil {
+		return b.inner.GetAllDocumentsWithLimit(limit)
+	}
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	return b.inner.GetDocumentsByIDs(ids)
+}
+
+// ScanDocumentChunks streams matching documents in chunks.
+// Splits the B-tree result IDs into chunks, batch-fetches each chunk, and calls fn.
+// If fn returns false (e.g., LIMIT reached via J1), stops fetching further chunks.
+func (b *BTreeFilteredBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	ids, err := b.getMatchingDocIDs()
+	if err != nil {
+		b.logger.Warnf("J2: B-tree range search failed, falling back to inner ScanDocumentChunks: %v", err)
+		return b.inner.ScanDocumentChunks(ctx, chunkSize, fn)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Process IDs in chunks
+	for start := 0; start < len(ids); start += chunkSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		end := start + chunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+
+		chunkIDs := ids[start:end]
+		docsMap := b.bundleService.GetDocumentsByIDsFromCacheDirect(b.bundle, chunkIDs)
+
+		docs := make([]*models.Document, 0, len(docsMap))
+		for _, doc := range docsMap {
+			if doc != nil {
+				docs = append(docs, doc)
+			}
+		}
+
+		if len(docs) > 0 {
+			if !fn(docs) {
+				return nil // Early termination (J1 limit reached)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *BTreeFilteredBundleAdapter) GetName() string {
+	return b.inner.GetName() + " [btree-filtered]"
+}
+
+func (b *BTreeFilteredBundleAdapter) GetTotalDocuments() int {
+	// Return the B-tree match count if available, otherwise upper bound
+	ids, err := b.getMatchingDocIDs()
+	if err != nil {
+		return b.inner.GetTotalDocuments()
+	}
+	return len(ids)
+}
+
+func (b *BTreeFilteredBundleAdapter) GetHashIndexForField(fieldName string) interface{} {
+	return b.inner.GetHashIndexForField(fieldName)
+}
+
+func (b *BTreeFilteredBundleAdapter) HasIndexOnField(fieldName string) bool {
+	return b.inner.HasIndexOnField(fieldName)
+}
+
+func (b *BTreeFilteredBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, error) {
+	return b.inner.LoadPage(pageID)
+}
+
+func (b *BTreeFilteredBundleAdapter) GetTotalPages() uint32 {
+	return b.inner.GetTotalPages()
+}
+
+func (b *BTreeFilteredBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	return b.inner.CopyProjectedToSessionCache(ctx, projectFields, effectiveLimit)
 }

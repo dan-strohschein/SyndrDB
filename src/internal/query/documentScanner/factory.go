@@ -249,7 +249,8 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 		return nil, fmt.Errorf("failed to load page %d: %w", pageID, err)
 	}
 
-	// Convert slice to map for compatibility with existing scanner code
+	// OPTIMIZATION: Store documents in both slice (for scan) and map (for random access)
+	// The slice avoids 100K by-value map insertions during full scans
 	docsMap := make(map[string]models.Document, len(docs))
 	for _, doc := range docs {
 		docsMap[doc.DocumentID] = doc
@@ -257,28 +258,20 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 
 	// Create a synthetic page with snapshotted documents
 	page := &models.DocumentPage{
-		PageID:    pageID,
-		BundleID:  ba.bundle.Name,
-		Documents: docsMap,
+		PageID:        pageID,
+		BundleID:      ba.bundle.Name,
+		Documents:     docsMap,
+		DocumentSlice: docs, // Direct slice from SnapshotPageDocuments - no copy needed
 	}
 
 	// Apply projection in memory if projectionFields is set
 	// This prevents cache poisoning: we cache full pages, then filter fields in memory
 	if len(ba.projectionFields) > 0 {
 		// Create a copy of the page with only projected fields
-		projectedPage := &models.DocumentPage{
-			PageID:         page.PageID,
-			BundleID:       page.BundleID,
-			Documents:      make(map[string]models.Document),
-			NextPageID:     page.NextPageID,
-			PreviousPageID: page.PreviousPageID,
-			IsDirty:        page.IsDirty,
-			LoadedAt:       page.LoadedAt,
-			DocumentCount:  0,
-		}
+		projectedDocs := make([]models.Document, 0, len(docs))
+		projectedMap := make(map[string]models.Document, len(docs))
 
-		// Project each document to only include specified fields
-		for docID, doc := range page.Documents {
+		for _, doc := range docs {
 			projectedDoc := models.Document{
 				DocumentID: doc.DocumentID,
 				Fields:     make(map[string]models.Field),
@@ -293,8 +286,16 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 					projectedDoc.Fields[fieldName] = field
 				}
 			}
-			projectedPage.Documents[docID] = projectedDoc
-			projectedPage.DocumentCount++
+			projectedDocs = append(projectedDocs, projectedDoc)
+			projectedMap[doc.DocumentID] = projectedDoc
+		}
+
+		projectedPage := &models.DocumentPage{
+			PageID:        page.PageID,
+			BundleID:      page.BundleID,
+			Documents:     projectedMap,
+			DocumentSlice: projectedDocs,
+			DocumentCount: len(projectedDocs),
 		}
 
 		ba.logger.Debugf("PROJECTION: Applied in-memory projection to page %d (fields: %v)", pageID, ba.projectionFields)
@@ -686,25 +687,23 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 
 // ScanDocumentChunks streams documents page-by-page to avoid loading the full bundle.
 // NOTE: Does not merge memtable; streams only persisted pages.
+// OPTIMIZATION D: Uses index-based access from snapshot slice to eliminate per-doc copying.
+// OPTIMIZATION C: Applies projection filtering when ba.projectionFields is set.
 func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
 	if chunkSize <= 0 {
 		chunkSize = 4096
 	}
 	pageCount := ba.getSafePageCount()
 	buffer := make([]*models.Document, 0, chunkSize)
+	hasProjection := len(ba.projectionFields) > 0
 
-	// OPTIMIZATION: Avoid double copying - reuse buffer slice directly instead of copying
 	flush := func() bool {
 		if len(buffer) == 0 {
 			return true
 		}
-		// CRITICAL FIX: Pass buffer directly instead of copying
-		// The callback can use the documents, and we'll reset the buffer after
-		// This eliminates the expensive copy() call that was causing slowdown
 		if !fn(buffer) {
 			return false
 		}
-		// Reset buffer for next chunk (reuse underlying array)
 		buffer = buffer[:0]
 		return true
 	}
@@ -724,12 +723,27 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 			continue
 		}
 
-		// Iterate over snapshot safely
-		for _, doc := range docs {
-			// CRITICAL: Still need to copy document to avoid loop variable aliasing
-			// But we avoid the second copy in flush()
-			docCopy := doc
-			buffer = append(buffer, &docCopy)
+		// OPTIMIZATION C: Apply projection in-place on the snapshot copy.
+		// SnapshotPageDocuments returns owned copies, so modifying them is safe.
+		if hasProjection {
+			for i := range docs {
+				projFields := make(map[string]models.Field, len(ba.projectionFields)+1)
+				if docIDField, exists := docs[i].Fields["DocumentID"]; exists {
+					projFields["DocumentID"] = docIDField
+				}
+				for _, fieldName := range ba.projectionFields {
+					if field, exists := docs[i].Fields[fieldName]; exists {
+						projFields[fieldName] = field
+					}
+				}
+				docs[i].Fields = projFields
+			}
+		}
+
+		// OPTIMIZATION D: Use index-based access to avoid per-document copy.
+		// docs is a snapshot copy slice — &docs[i] is a stable pointer.
+		for i := range docs {
+			buffer = append(buffer, &docs[i])
 			if len(buffer) >= chunkSize {
 				if !flush() {
 					return nil
