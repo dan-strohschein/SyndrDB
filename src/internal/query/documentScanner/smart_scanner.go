@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"syndrdb/src/internal/domain/models"
@@ -14,6 +15,12 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// activeScanCount tracks the number of concurrent scan operations in progress.
+// Used to cap per-query parallelism under high concurrency — when many queries
+// are running simultaneously, per-query parallel workers cause goroutine explosion
+// (30 connections * 8-16 workers = 240-480 goroutines competing for CPU).
+var activeScanCount atomic.Int64
 
 // SmartBundleScanner implements intelligent document scanning with batching, caching, and hot key optimization
 // This scanner uses PostgreSQL-inspired techniques: sequential I/O, vectorized processing, and predicate pushdown
@@ -35,6 +42,10 @@ type SmartBundleScanner struct {
 	txID             uint64          // Transaction ID for this scanner (0 = autocommit)
 	activeTxIDs      map[uint64]bool // Active transaction IDs at snapshot time (for visibility rules)
 	gracePeriodMs    int             // RCU grace period for superseded document visibility
+
+	// VISIBILITY MAP: Per-page all-visible tracking to skip MVCC checks
+	visibilityMap  VisibilityMapInterface // nil = no VM, check every doc
+	vmGeneration   uint64                 // Generation at scan start (detect concurrent clears)
 }
 
 // NewSmartBundleScanner creates a new smart bundle scanner
@@ -93,6 +104,25 @@ func (sbs *SmartBundleScanner) SetSnapshot(snapshotSeq uint64, txID uint64, acti
 	if len(gracePeriodMs) > 0 {
 		sbs.gracePeriodMs = gracePeriodMs[0]
 	}
+}
+
+// SetVisibilityMap sets the visibility map for page-level MVCC optimization.
+// When set, scan methods skip per-document IsVisibleToSnapshot() calls for
+// pages marked all-visible, providing significant speedup on stable data.
+func (sbs *SmartBundleScanner) SetVisibilityMap(vm VisibilityMapInterface) {
+	sbs.visibilityMap = vm
+	if vm != nil {
+		sbs.vmGeneration = vm.Generation()
+	}
+}
+
+// isPageAllVisible checks if a page can skip per-document MVCC visibility checks.
+// Returns true only when: VM is set, page is marked all-visible, and generation
+// hasn't changed since scan start (no concurrent writes cleared a bit).
+func (sbs *SmartBundleScanner) isPageAllVisible(pageID uint32) bool {
+	return sbs.visibilityMap != nil &&
+		sbs.visibilityMap.IsAllVisible(pageID) &&
+		sbs.visibilityMap.Generation() == sbs.vmGeneration
 }
 
 // ScanForKeyValue performs an optimized scan for documents matching a key-value query
@@ -182,13 +212,10 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 	batchCount := 0
 	totalScanned := 0
 
-	// All documents are now accessed via write-through page cache
-	// No memtable - reads go directly through page cache
-
-	// Iterate pages directly (sequential access, optimal I/O pattern)
-	// This uses the universal page cache efficiently - no individual GetDocument() calls
+	// Sequential page iteration — under concurrent load (30+ connections), the system already
+	// has natural parallelism from multiple concurrent queries. Per-query parallelism creates
+	// goroutine explosion (30 conn * N workers) that worsens tail latency via CPU contention.
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
-		// Load page from cache (uses shared documentPages cache - fast!)
 		page, err := sbs.loadPage(pageID)
 		if err != nil {
 			sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
@@ -197,14 +224,16 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 
 		batchCount++
 
-		// Process documents in this page - apply predicate filter
-		// Use DocumentSlice when available to avoid map iteration overhead
+		// VISIBILITY MAP: Skip per-doc MVCC checks when page is all-visible
+		pageAllVisible := sbs.isPageAllVisible(pageID)
+
+		// Use DocumentSlice when available (zero-copy scan path)
 		if len(page.DocumentSlice) > 0 {
 			for i := range page.DocumentSlice {
 				doc := &page.DocumentSlice[i]
 				totalScanned++
 
-				if sbs.snapshotSequence > 0 {
+				if !pageAllVisible && sbs.snapshotSequence > 0 {
 					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 						continue
 					}
@@ -219,7 +248,7 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 			for docID, doc := range page.Documents {
 				totalScanned++
 
-				if sbs.snapshotSequence > 0 {
+				if !pageAllVisible && sbs.snapshotSequence > 0 {
 					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 						continue
 					}
@@ -232,10 +261,7 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 				}
 			}
 		}
-
 	}
-
-	// All documents are now accessed via page cache - no memtable documents to add
 
 	// Finalize results
 	result.ScanLatency = time.Since(startTime)
@@ -259,6 +285,10 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 	startTime := time.Now()
 
 	sbs.logger.Debugf("Starting page-by-page document scan (limit=%d) - streaming from cache without duplication", maxDocuments)
+
+	// Track concurrent scan count for adaptive parallelism
+	activeScanCount.Add(1)
+	defer activeScanCount.Add(-1)
 
 	result := &ScanResult{
 		Documents:   make([]*models.Document, 0),
@@ -298,6 +328,14 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 	}
 	if workers < 1 {
 		workers = 1 // At least 1 worker
+	}
+
+	// CONCURRENCY FIX: Under concurrent load, disable per-query parallelism.
+	// With 30 connections * 8+ workers = 240+ goroutines competing for CPU,
+	// causing context switching overhead and cache-line bouncing.
+	// Sequential scanning under concurrent load lets the OS scheduler work efficiently.
+	if workers > 1 && activeScanCount.Load() > 4 {
+		workers = 1
 	}
 
 	// PHASE 1: Use parallel loading if multiple workers configured
@@ -353,6 +391,9 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 						continue
 					}
 
+					// VISIBILITY MAP: Skip per-doc MVCC checks when page is all-visible
+					pageAllVisible := sbs.isPageAllVisible(pageID)
+
 					// Process documents in this page - use DocumentSlice when available
 					if len(page.DocumentSlice) > 0 {
 						for i := range page.DocumentSlice {
@@ -361,7 +402,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 							}
 							localScanned++
 							doc := &page.DocumentSlice[i]
-							if sbs.snapshotSequence > 0 {
+							if !pageAllVisible && sbs.snapshotSequence > 0 {
 								if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 									continue
 								}
@@ -375,7 +416,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 								break
 							}
 							localScanned++
-							if sbs.snapshotSequence > 0 {
+							if !pageAllVisible && sbs.snapshotSequence > 0 {
 								if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 									continue
 								}
@@ -430,6 +471,9 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 
 			batchCount++
 
+			// VISIBILITY MAP: Skip per-doc MVCC checks when page is all-visible
+			pageAllVisible := sbs.isPageAllVisible(pageID)
+
 			// Process documents in this page - use DocumentSlice when available
 			if len(page.DocumentSlice) > 0 {
 				for i := range page.DocumentSlice {
@@ -438,7 +482,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 					}
 					totalScanned++
 					doc := &page.DocumentSlice[i]
-					if sbs.snapshotSequence > 0 {
+					if !pageAllVisible && sbs.snapshotSequence > 0 {
 						if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 							continue
 						}
@@ -452,7 +496,7 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 						break
 					}
 					totalScanned++
-					if sbs.snapshotSequence > 0 {
+					if !pageAllVisible && sbs.snapshotSequence > 0 {
 						if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
 							continue
 						}
@@ -481,9 +525,9 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 // loadPage loads a page using the bundle's page loading mechanism
 // This abstracts the page loading to work with different bundle implementations
 func (sbs *SmartBundleScanner) loadPage(pageID uint32) (*models.DocumentPage, error) {
-	// Try to use BundleAdapter's loadDocumentPage if available
+	// Use scan-optimized page loader (skips map creation, uses zero-copy when possible)
 	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
-		return bundleAdapter.loadDocumentPage(pageID)
+		return bundleAdapter.loadDocumentPageForScan(pageID)
 	}
 
 	// Fallback: Use GetAllDocuments and extract page (inefficient but works)
@@ -571,65 +615,99 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 	batchCount := 0
 	totalScanned := 0
 
-	// TODO: For >5000 values, implement parallel processing with worker pools
-	// This would split the document scan across multiple goroutines
-	if len(values) > 5000 {
-		sbs.logger.Debugf("Very large IN query (%d values). Parallel processing recommended.", len(values))
-		// TODO: Implement: return sbs.parallelInScan(field, valueSet, caseInsensitive, negate)
+	// Get page count efficiently from BundleAdapter
+	var pageCount uint32
+	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
+		pageCount = bundleAdapter.getSafePageCount()
+	} else {
+		totalDocs := sbs.bundle.GetTotalDocuments()
+		pageCount = uint32((totalDocs + 4095) / 4096)
+		if pageCount == 0 && totalDocs > 0 {
+			pageCount = 1
+		}
 	}
 
-	// Process documents in batches
-	for batch := range sbs.getBatchedDocuments() {
-		batchCount++
-
-		// Check each document in the batch
-		for _, doc := range batch {
-			totalScanned++
-
-			if doc.Data == nil {
-				continue
-			}
-
-			docValue, exists := doc.Data[field]
-			if !exists {
-				continue
-			}
-
-			// Perform membership check with hash set lookup (O(1))
-			matched := false
-
-			if caseInsensitive {
-				// Case-insensitive string matching
-				if docStr, ok := docValue.(string); ok {
-					docStrLower := strings.ToLower(docStr)
-					for value := range valueSet {
-						if valueStr, ok := value.(string); ok {
-							if strings.ToLower(valueStr) == docStrLower {
-								matched = true
-								break
-							}
-						}
-					}
-				} else {
-					// Non-string with case-insensitive flag - use exact match
-					matched = valueSet[docValue]
-				}
-			} else {
-				// Case-sensitive or non-string comparison
-				matched = valueSet[docValue]
-			}
-
-			// Apply negation if NOT IN
+	// matchDoc checks if a single document matches the IN/NOT IN criteria
+	matchDoc := func(doc *models.Document) bool {
+		if doc.Data == nil {
+			return false
+		}
+		docValue, exists := doc.Data[field]
+		if !exists {
 			if negate {
-				matched = !matched
+				return true // NOT IN: missing field means not in the set
 			}
-
-			if matched {
-				result.Documents = append(result.Documents, doc)
-				result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
-			}
+			return false
 		}
 
+		matched := false
+		if caseInsensitive {
+			if docStr, ok := docValue.(string); ok {
+				docStrLower := strings.ToLower(docStr)
+				for value := range valueSet {
+					if valueStr, ok := value.(string); ok {
+						if strings.ToLower(valueStr) == docStrLower {
+							matched = true
+							break
+						}
+					}
+				}
+			} else {
+				matched = valueSet[docValue]
+			}
+		} else {
+			matched = valueSet[docValue]
+		}
+
+		if negate {
+			matched = !matched
+		}
+		return matched
+	}
+
+	// Page-by-page iteration — same pattern as ScanWithPredicate
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		page, err := sbs.loadPage(pageID)
+		if err != nil {
+			sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
+			continue
+		}
+		batchCount++
+
+		// VISIBILITY MAP: Skip per-doc MVCC checks when page is all-visible
+		pageAllVisible := sbs.isPageAllVisible(pageID)
+
+		if len(page.DocumentSlice) > 0 {
+			for i := range page.DocumentSlice {
+				doc := &page.DocumentSlice[i]
+				totalScanned++
+				// BUG FIX: Was missing MVCC visibility checks entirely
+				if !pageAllVisible && sbs.snapshotSequence > 0 {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+						continue
+					}
+				}
+				if matchDoc(doc) {
+					result.Documents = append(result.Documents, doc)
+					result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
+				}
+			}
+		} else {
+			for docID, doc := range page.Documents {
+				totalScanned++
+				// BUG FIX: Was missing MVCC visibility checks entirely
+				if !pageAllVisible && sbs.snapshotSequence > 0 {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+						continue
+					}
+				}
+				docRef := doc
+				if matchDoc(&docRef) {
+					result.Documents = append(result.Documents, &docRef)
+					result.DocumentIDs = append(result.DocumentIDs, docID)
+				}
+			}
+		}
 	}
 
 	// Finalize results
@@ -650,8 +728,9 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 	return result, nil
 }
 
-// performBatchedScan executes the core batched scanning algorithm
-// This implements PostgreSQL-style sequential scanning with predicate pushdown
+// performBatchedScan executes the core scanning algorithm using page-by-page iteration.
+// Uses the same efficient pattern as ScanWithPredicate — iterates pages directly
+// instead of calling GetDocument() per doc ID (which causes per-doc lock contention).
 func (sbs *SmartBundleScanner) performBatchedScan(query *ScanQuery) (*ScanResult, error) {
 	result := &ScanResult{
 		Documents:   make([]*models.Document, 0),
@@ -660,28 +739,67 @@ func (sbs *SmartBundleScanner) performBatchedScan(query *ScanQuery) (*ScanResult
 		CacheHits:   0,
 	}
 
+	// Get page count efficiently from BundleAdapter
+	var pageCount uint32
+	if bundleAdapter, ok := sbs.bundle.(*BundleAdapter); ok {
+		pageCount = bundleAdapter.getSafePageCount()
+	} else {
+		totalDocs := sbs.bundle.GetTotalDocuments()
+		pageCount = uint32((totalDocs + 4095) / 4096)
+		if pageCount == 0 && totalDocs > 0 {
+			pageCount = 1
+		}
+	}
+
 	batchCount := 0
 	totalScanned := 0
 
-	// Process documents in batches - this is our key performance optimization
-	// Batching provides better cache locality and reduces I/O overhead
-	for batch := range sbs.getBatchedDocuments() {
+	// Page-by-page iteration — same pattern as ScanWithPredicate
+	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		page, err := sbs.loadPage(pageID)
+		if err != nil {
+			sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
+			continue
+		}
+
 		batchCount++
 
-		// Vectorized processing within the batch
-		// Process multiple documents per CPU instruction cycle when possible
-		for _, doc := range batch {
-			totalScanned++
+		// VISIBILITY MAP: Skip per-doc MVCC checks when page is all-visible
+		pageAllVisible := sbs.isPageAllVisible(pageID)
 
-			// Early predicate pushdown - filter as soon as possible
-			if sbs.documentMatchesQuery(doc, query) {
-				result.Documents = append(result.Documents, doc)
-				result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
+		if len(page.DocumentSlice) > 0 {
+			for i := range page.DocumentSlice {
+				doc := &page.DocumentSlice[i]
+				totalScanned++
+				// BUG FIX: Was missing MVCC visibility checks entirely
+				if !pageAllVisible && sbs.snapshotSequence > 0 {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+						continue
+					}
+				}
+				if sbs.documentMatchesQuery(doc, query) {
+					result.Documents = append(result.Documents, doc)
+					result.DocumentIDs = append(result.DocumentIDs, doc.DocumentID)
+				}
+			}
+		} else {
+			for docID, doc := range page.Documents {
+				totalScanned++
+				// BUG FIX: Was missing MVCC visibility checks entirely
+				if !pageAllVisible && sbs.snapshotSequence > 0 {
+					if !doc.IsVisibleToSnapshot(sbs.snapshotSequence, sbs.txID, sbs.activeTxIDs, sbs.gracePeriodMs) {
+						continue
+					}
+				}
+				docRef := doc
+				if sbs.documentMatchesQuery(&docRef, query) {
+					result.Documents = append(result.Documents, &docRef)
+					result.DocumentIDs = append(result.DocumentIDs, docID)
+				}
 			}
 		}
 
-		// Break early if we have enough results (optimization for LIMIT-style queries)
-		// This is similar to PostgreSQL's ability to stop scanning when enough rows are found
+		// Break early if we have enough results
 		if len(result.Documents) > 50000 {
 			sbs.logger.Debugf("Large result set (%d docs), stopping scan", len(result.Documents))
 			break

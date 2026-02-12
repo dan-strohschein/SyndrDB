@@ -306,6 +306,60 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 	return page, nil
 }
 
+// loadDocumentPageForScan returns a DocumentPage with only DocumentSlice populated (no Documents map).
+// This avoids O(page_size) map insertions per page for scan paths that only iterate the slice.
+// When projection is active, uses mutable SnapshotPageDocuments; otherwise uses zero-copy ReadOnly path.
+func (ba *BundleAdapter) loadDocumentPageForScan(pageID uint32) (*models.DocumentPage, error) {
+	if ba.bundleService == nil {
+		return nil, fmt.Errorf("bundle service not available")
+	}
+
+	var docs []models.Document
+	var err error
+
+	if len(ba.projectionFields) > 0 {
+		// Projection requires mutable copy (we modify doc.Fields in-place)
+		docs, err = ba.bundleService.SnapshotPageDocuments(ba.bundle.Name, ba.bundle.Database.Name, pageID)
+	} else {
+		// No projection: use zero-copy read-only path
+		docs, err = ba.bundleService.SnapshotPageDocumentsReadOnly(ba.bundle.Name, ba.bundle.Database.Name, pageID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to load page %d for scan: %w", pageID, err)
+	}
+
+	page := &models.DocumentPage{
+		PageID:        pageID,
+		BundleID:      ba.bundle.Name,
+		Documents:     nil, // Not needed by scan paths
+		DocumentSlice: docs,
+	}
+
+	// Apply projection if needed (only when docs is a mutable copy)
+	if len(ba.projectionFields) > 0 {
+		projectedDocs := make([]models.Document, 0, len(docs))
+		for _, doc := range docs {
+			projectedDoc := models.Document{
+				DocumentID: doc.DocumentID,
+				Fields:     make(map[string]models.Field),
+			}
+			if docIDField, exists := doc.Fields["DocumentID"]; exists {
+				projectedDoc.Fields["DocumentID"] = docIDField
+			}
+			for _, fieldName := range ba.projectionFields {
+				if field, exists := doc.Fields[fieldName]; exists {
+					projectedDoc.Fields[fieldName] = field
+				}
+			}
+			projectedDocs = append(projectedDocs, projectedDoc)
+		}
+		page.DocumentSlice = projectedDocs
+		page.DocumentCount = len(projectedDocs)
+	}
+
+	return page, nil
+}
+
 // getSafePageCount returns a validated page count with defensive bounds checking
 // This replaces hard-coded maxSafePages with metadata-driven limits
 // Returns: validated page count that is safe to iterate over
@@ -694,8 +748,8 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 		chunkSize = 4096
 	}
 	pageCount := ba.getSafePageCount()
-	buffer := make([]*models.Document, 0, chunkSize)
 	hasProjection := len(ba.projectionFields) > 0
+	buffer := make([]*models.Document, 0, chunkSize)
 
 	flush := func() bool {
 		if len(buffer) == 0 {
@@ -708,6 +762,15 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 		return true
 	}
 
+	// Get scanner for MVCC visibility checks and VM optimization
+	var smartScanner *SmartBundleScanner
+	if ba.scanner != nil {
+		smartScanner, _ = ba.scanner.(*SmartBundleScanner)
+	}
+
+	// Sequential page iteration — under concurrent load (30+ connections), the system already
+	// has natural parallelism. Per-query parallel prefetch creates goroutine explosion
+	// (30 conn * N workers) that worsens tail latency via CPU/cache contention.
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		select {
 		case <-ctx.Done():
@@ -715,34 +778,22 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 		default:
 		}
 
-		// CONCURRENT MAP FIX: Use SnapshotPageDocuments to safely get documents
-		// This uses sharded locks to prevent concurrent modification during iteration
-		docs, err := ba.bundleService.SnapshotPageDocuments(ba.bundle.Name, ba.bundle.Database.Name, pageID)
+		docs, err := ba.loadPageDocs(pageID, hasProjection)
 		if err != nil {
 			ba.logger.Errorf("Failed to snapshot page %d: %v", pageID, err)
 			continue
 		}
 
-		// OPTIMIZATION C: Apply projection in-place on the snapshot copy.
-		// SnapshotPageDocuments returns owned copies, so modifying them is safe.
-		if hasProjection {
-			for i := range docs {
-				projFields := make(map[string]models.Field, len(ba.projectionFields)+1)
-				if docIDField, exists := docs[i].Fields["DocumentID"]; exists {
-					projFields["DocumentID"] = docIDField
-				}
-				for _, fieldName := range ba.projectionFields {
-					if field, exists := docs[i].Fields[fieldName]; exists {
-						projFields[fieldName] = field
-					}
-				}
-				docs[i].Fields = projFields
-			}
-		}
+		// VISIBILITY MAP + MVCC: Skip per-doc checks when page is all-visible
+		pageAllVisible := smartScanner != nil && smartScanner.isPageAllVisible(pageID)
 
-		// OPTIMIZATION D: Use index-based access to avoid per-document copy.
-		// docs is a snapshot copy slice — &docs[i] is a stable pointer.
 		for i := range docs {
+			// MVCC visibility filtering (when scanner has snapshot)
+			if !pageAllVisible && smartScanner != nil && smartScanner.snapshotSequence > 0 {
+				if !docs[i].IsVisibleToSnapshot(smartScanner.snapshotSequence, smartScanner.txID, smartScanner.activeTxIDs, smartScanner.gracePeriodMs) {
+					continue
+				}
+			}
 			buffer = append(buffer, &docs[i])
 			if len(buffer) >= chunkSize {
 				if !flush() {
@@ -755,6 +806,37 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 		flush()
 	}
 	return nil
+}
+
+// loadPageDocs loads documents from a page, using zero-copy or mutable snapshot based on projection needs.
+func (ba *BundleAdapter) loadPageDocs(pageID uint32, hasProjection bool) ([]models.Document, error) {
+	var docs []models.Document
+	var err error
+	if hasProjection {
+		docs, err = ba.bundleService.SnapshotPageDocuments(ba.bundle.Name, ba.bundle.Database.Name, pageID)
+	} else {
+		docs, err = ba.bundleService.SnapshotPageDocumentsReadOnly(ba.bundle.Name, ba.bundle.Database.Name, pageID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if hasProjection {
+		for i := range docs {
+			projFields := make(map[string]models.Field, len(ba.projectionFields)+1)
+			if docIDField, exists := docs[i].Fields["DocumentID"]; exists {
+				projFields["DocumentID"] = docIDField
+			}
+			for _, fieldName := range ba.projectionFields {
+				if field, exists := docs[i].Fields[fieldName]; exists {
+					projFields[fieldName] = field
+				}
+			}
+			docs[i].Fields = projFields
+		}
+	}
+
+	return docs, nil
 }
 
 // GetName returns the bundle name for logging and metrics

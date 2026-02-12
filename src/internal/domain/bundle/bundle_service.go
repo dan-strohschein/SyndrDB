@@ -111,6 +111,7 @@ func (s *pageCacheShard) deleteLocked(pageKey string) {
 	delete(s.pages, pageKey)
 	s.fastLookup.Delete(pageKey)
 	s.readerView.Delete(pageKey)
+	s.cowSnapshot.Delete(pageKey) // Invalidate COW snapshot on eviction to prevent stale reads
 	// Clean up LRU tracking to prevent memory leaks
 	if elem, exists := s.lruElements[pageKey]; exists {
 		s.lruOrder.Remove(elem)
@@ -721,6 +722,15 @@ type BundleService struct {
 	// Callback for external cache flush (e.g., JOIN hash table cache)
 	// Set by server during initialization to avoid circular imports
 	onCacheFlush func()
+
+	// VISIBILITY MAP: Per-bundle all-visible page tracking for scan optimization.
+	// When a page is all-visible (all docs committed, not deleted, not superseded),
+	// scanners skip per-document IsVisibleToSnapshot() calls entirely.
+	visibilityMaps sync.Map // bundleName -> *VisibilityMap
+
+	// VISIBILITY MAP: Background refresher context
+	vmRefresherCtx    context.Context    // Context for background VM refresher goroutine
+	vmRefresherCancel context.CancelFunc // Cancel function to stop VM refresher
 }
 
 // IndexMaintenanceSchedulerInterface defines the interface for scheduling index rebuilds
@@ -871,6 +881,12 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	service.idleCacheFlushThresholdNs = 30 * int64(time.Second) // 30 seconds
 	service.lastCacheFlushTime.Store(time.Now().UnixNano())
 	service.startIdleCacheFlusher(service.idleCacheFlusherCtx)
+
+	// VISIBILITY MAP: Start background VM refresher to set all-visible bits
+	// Evaluates pages every 10 seconds and marks stable pages as all-visible
+	// so scanners can skip per-document MVCC checks on those pages
+	service.vmRefresherCtx, service.vmRefresherCancel = context.WithCancel(context.Background())
+	go service.startVisibilityMapRefresher(service.vmRefresherCtx)
 
 	return service
 }
@@ -1604,6 +1620,116 @@ func (s *BundleService) startIdleCacheFlusher(ctx context.Context) {
 // getPageShardIndex computes which shard to use for a given page key.
 // Uses xxhash for fast, high-quality hashing with bit-masking for modulo.
 // Returns an index in [0, PageCacheShardCount).
+// getOrCreateVisibilityMap returns the visibility map for the bundle,
+// creating one if it doesn't exist. Thread-safe via sync.Map.
+func (s *BundleService) getOrCreateVisibilityMap(bundleName string, pageCount uint32) *VisibilityMap {
+	if v, ok := s.visibilityMaps.Load(bundleName); ok {
+		vm := v.(*VisibilityMap)
+		if pageCount > 0 {
+			vm.Grow(pageCount)
+		}
+		return vm
+	}
+	vm := NewVisibilityMap(bundleName, pageCount)
+	actual, _ := s.visibilityMaps.LoadOrStore(bundleName, vm)
+	return actual.(*VisibilityMap)
+}
+
+// GetVisibilityMap returns the visibility map for a bundle, or nil if none exists.
+// Called by the scanner integration layer to pass VM to SmartBundleScanner.
+func (s *BundleService) GetVisibilityMap(bundleName string) *VisibilityMap {
+	if v, ok := s.visibilityMaps.Load(bundleName); ok {
+		return v.(*VisibilityMap)
+	}
+	return nil
+}
+
+// clearVisibilityForPage clears the visibility bit for a page after a write operation.
+// Called from all write paths (insert, update, delete) that modify page content.
+func (s *BundleService) clearVisibilityForPage(bundleName string, pageID uint32) {
+	if v, ok := s.visibilityMaps.Load(bundleName); ok {
+		v.(*VisibilityMap).ClearPage(pageID)
+	}
+}
+
+// clearVisibilityForBundle clears all visibility bits for a bundle.
+// Called after compaction or bulk operations that invalidate the entire bundle.
+func (s *BundleService) clearVisibilityForBundle(bundleName string) {
+	if v, ok := s.visibilityMaps.Load(bundleName); ok {
+		v.(*VisibilityMap).ClearAll()
+	}
+}
+
+// startVisibilityMapRefresher runs a background goroutine that periodically evaluates
+// pages and sets all-visible bits. Similar to PostgreSQL's VACUUM setting VM bits.
+// Pages marked all-visible allow scanners to skip per-document MVCC checks entirely.
+func (s *BundleService) startVisibilityMapRefresher(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second) // Evaluate every 10 seconds
+	defer ticker.Stop()
+	s.logger.Debug("Background visibility map refresher started (10s interval)")
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Debug("Background visibility map refresher stopped")
+			return
+		case <-ticker.C:
+			s.refreshVisibilityMaps()
+		}
+	}
+}
+
+// refreshVisibilityMaps evaluates all tracked bundles and sets all-visible bits
+// for pages where every document is committed, not deleted, and not superseded.
+func (s *BundleService) refreshVisibilityMaps() {
+	// Get oldest active snapshot from SnapshotManager
+	var oldestSnapshot uint64
+	serviceRegistry := registry.GetRegistry()
+	if walManager := serviceRegistry.GetWALManager(); walManager != nil {
+		if snapshotMgr := walManager.GetSnapshotManager(); snapshotMgr != nil {
+			oldestSnapshot = snapshotMgr.GetOldestActiveSnapshot()
+		}
+	}
+
+	// Iterate all known bundles with visibility maps
+	s.visibilityMaps.Range(func(key, value interface{}) bool {
+		bundleName := key.(string)
+		vm := value.(*VisibilityMap)
+
+		// Look up the bundle metadata to get database name
+		bundle, exists := s.bundleMetadata[bundleName]
+		if !exists || bundle.Database == nil {
+			return true // continue to next bundle
+		}
+		databaseName := bundle.Database.Name
+
+		pageCount := vm.PageCount()
+		pagesSet := 0
+
+		for pageID := uint32(0); pageID < pageCount; pageID++ {
+			if vm.IsAllVisible(pageID) {
+				continue // Already marked, skip
+			}
+
+			// Load page documents using read-only snapshot (no allocation)
+			docs, err := s.SnapshotPageDocumentsReadOnly(bundleName, databaseName, pageID)
+			if err != nil || len(docs) == 0 {
+				continue
+			}
+
+			if CheckPageAllVisible(docs, oldestSnapshot) {
+				vm.SetAllVisible(pageID)
+				pagesSet++
+			}
+		}
+
+		if pagesSet > 0 {
+			s.logger.Debugf("VM refresher: set %d pages all-visible for bundle '%s'", pagesSet, bundleName)
+		}
+		return true
+	})
+}
+
 func (s *BundleService) getPageShardIndex(pageKey string) int {
 	return int(xxhash.Sum64String(pageKey) % PageCacheShardCount)
 }
@@ -1626,6 +1752,9 @@ func (s *BundleService) getPageShardIndex(pageKey string) int {
 //   - pageID: The page ID where the document resides
 //   - doc: The document to add/update in the cache
 func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID uint32, doc *models.Document) {
+	// Clear visibility map bit for this page (page content is changing)
+	s.clearVisibilityForPage(bundleName, pageID)
+
 	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 	shardIdx := s.getPageShardIndex(pageKey)
 	shard := s.pageShards[shardIdx]
@@ -1643,11 +1772,25 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 			}
 			newSnapshot.Documents[doc.DocumentID] = *doc
 
+			// Build COW outside lock — newSnapshot is already a private copy
+			cowDocs := make([]models.Document, 0, len(newSnapshot.Documents))
+			for _, d := range newSnapshot.Documents {
+				if d.IsVisibleReadCommitted() {
+					cowDocs = append(cowDocs, d)
+				}
+			}
+			freshCOW := &cowSnapshotEntry{
+				documents: cowDocs,
+				timestamp: time.Now().UnixMilli(),
+				pageKey:   pageKey,
+			}
+
 			shard.mu.Lock()
 			page, exists := shard.pages[pageKey]
 			if exists {
 				page.Documents[doc.DocumentID] = *doc
 				shard.readerView.Store(pageKey, newSnapshot)
+				shard.cowSnapshot.Store(pageKey, freshCOW)
 			}
 			shard.mu.Unlock()
 			if exists {
@@ -1659,7 +1802,6 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 
 	// Phase 1 path: no reader view yet or page missing (create + set reader view under Lock).
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 
 	page, exists := shard.pages[pageKey]
 	if !exists {
@@ -1677,7 +1819,21 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 	}
 
 	page.Documents[doc.DocumentID] = *doc
-	shard.readerView.Store(pageKey, s.createSafePageCopy(page))
+	safeCopy := s.createSafePageCopy(page)
+	shard.readerView.Store(pageKey, safeCopy)
+	// Build COW under lock to prevent stale overwrites from concurrent writers
+	cowDocs := make([]models.Document, 0, len(safeCopy.Documents))
+	for _, d := range safeCopy.Documents {
+		if d.IsVisibleReadCommitted() {
+			cowDocs = append(cowDocs, d)
+		}
+	}
+	shard.cowSnapshot.Store(pageKey, &cowSnapshotEntry{
+		documents: cowDocs,
+		timestamp: time.Now().UnixMilli(),
+		pageKey:   pageKey,
+	})
+	shard.mu.Unlock()
 }
 
 // removeFromPageCache removes a document from the page cache after a successful delete.
@@ -1712,11 +1868,26 @@ func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, do
 					newSnapshot.Documents[id] = d
 				}
 			}
+
+			// Build COW outside lock — newSnapshot is already a private copy
+			cowDocs := make([]models.Document, 0, len(newSnapshot.Documents))
+			for _, d := range newSnapshot.Documents {
+				if d.IsVisibleReadCommitted() {
+					cowDocs = append(cowDocs, d)
+				}
+			}
+			freshCOW := &cowSnapshotEntry{
+				documents: cowDocs,
+				timestamp: time.Now().UnixMilli(),
+				pageKey:   pageKey,
+			}
+
 			shard.mu.Lock()
 			page, exists := shard.pages[pageKey]
 			if exists {
 				delete(page.Documents, docID)
 				shard.readerView.Store(pageKey, newSnapshot)
+				shard.cowSnapshot.Store(pageKey, freshCOW)
 			}
 			shard.mu.Unlock()
 			if exists {
@@ -1727,13 +1898,27 @@ func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, do
 
 	// Fallback: no reader view or page missing; update under Lock.
 	shard.mu.Lock()
-	defer shard.mu.Unlock()
 	page, exists := shard.pages[pageKey]
 	if !exists {
+		shard.mu.Unlock()
 		return
 	}
 	delete(page.Documents, docID)
-	shard.readerView.Store(pageKey, s.createSafePageCopy(page))
+	safeCopy := s.createSafePageCopy(page)
+	shard.readerView.Store(pageKey, safeCopy)
+	// Build COW under lock to prevent stale overwrites from concurrent writers
+	cowDocs := make([]models.Document, 0, len(safeCopy.Documents))
+	for _, d := range safeCopy.Documents {
+		if d.IsVisibleReadCommitted() {
+			cowDocs = append(cowDocs, d)
+		}
+	}
+	shard.cowSnapshot.Store(pageKey, &cowSnapshotEntry{
+		documents: cowDocs,
+		timestamp: time.Now().UnixMilli(),
+		pageKey:   pageKey,
+	})
+	shard.mu.Unlock()
 }
 
 // getOrCreateSchemaManager retrieves or creates a GraphQL schema manager for the specified database.
@@ -2732,8 +2917,10 @@ func (s *BundleService) FlushAllBuffers() error {
 	}
 
 	// 3. Force metadata persistence regardless of thresholds
-	if len(s.metadataUpdateBuffer) > 0 {
-
+	s.metadataUpdateMutex.RLock()
+	needsMetaFlush := len(s.metadataUpdateBuffer) > 0
+	s.metadataUpdateMutex.RUnlock()
+	if needsMetaFlush {
 		s.ForceMetadataPersistence()
 	}
 
@@ -3093,8 +3280,11 @@ func (s *BundleService) forceFlushIndexUpdates() {
 		s.logger.Debugf("Force flushing %d pending index updates", indexCount)
 		s.flushIndexUpdates()
 	}
-	if len(s.metadataUpdateBuffer) > 0 {
-		s.logger.Debugf("Force flushing %d pending metadata updates", len(s.metadataUpdateBuffer))
+	s.metadataUpdateMutex.RLock()
+	metaCount := len(s.metadataUpdateBuffer)
+	s.metadataUpdateMutex.RUnlock()
+	if metaCount > 0 {
+		s.logger.Debugf("Force flushing %d pending metadata updates", metaCount)
 		s.FlushMetadataUpdates()
 	}
 }
@@ -3446,11 +3636,12 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 		elem := shard.lruOrder.PushFront(pageKey)
 		shard.lruElements[pageKey] = elem
 		// Reader view: store immutable snapshot so future reads are lock-free.
+		// Return the snapshot directly — readerView entries are immutable by contract,
+		// so no second copy is needed (eliminates redundant createSafePageCopy).
 		snapshot := s.createSafePageCopy(page)
 		shard.readerView.Store(pageKey, snapshot)
-		safeCopy := s.createSafePageCopy(snapshot)
 		shard.mu.Unlock()
-		return safeCopy, nil
+		return snapshot, nil
 	}
 
 	// TryLock failed (Issue 4): Optional backoff then blocking Lock so at least one goroutine
@@ -3471,11 +3662,11 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 	elem := shard.lruOrder.PushFront(pageKey)
 	shard.lruElements[pageKey] = elem
 	// Reader view: store immutable snapshot so future reads are lock-free.
+	// Return directly — no second copy needed (immutable by contract).
 	snapshot := s.createSafePageCopy(page)
 	shard.readerView.Store(pageKey, snapshot)
-	safeCopy := s.createSafePageCopy(snapshot)
 	shard.mu.Unlock()
-	return safeCopy, nil
+	return snapshot, nil
 }
 
 // SnapshotPageDocuments safely snapshots documents from a page to avoid concurrent map iteration.
@@ -3602,6 +3793,112 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 	}
 
 	// PHASE 3: Cache snapshot (even for disk-loaded pages)
+	snapshot := &cowSnapshotEntry{
+		documents: docs,
+		timestamp: time.Now().UnixMilli(),
+		pageKey:   pageKey,
+	}
+	shard.cowSnapshot.Store(pageKey, snapshot)
+
+	return docs, nil
+}
+
+// SnapshotPageDocumentsReadOnly returns a read-only view of the COW snapshot slice WITHOUT copying.
+// This is a zero-allocation fast path for scan operations that only read documents (predicate evaluation,
+// pointer collection) and never mutate them.
+//
+// Safety contract: Caller MUST NOT:
+//   - Mutate the returned slice (no append, no element assignment)
+//   - Mutate any Document struct in the slice (no writing to doc.Fields, doc.Data, etc.)
+//
+// This is safe because:
+//   - COW entries are immutable after creation
+//   - cowSnapshot.Delete() on write doesn't free the old slice (Go GC keeps it alive)
+//   - Scan paths only read documents to evaluate predicates and collect pointers
+//
+// When callers need to mutate documents (e.g., projection), use SnapshotPageDocuments() instead.
+func (s *BundleService) SnapshotPageDocumentsReadOnly(bundleName, databaseName string, pageID uint32) ([]models.Document, error) {
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
+	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
+
+	// FAST PATH: Return COW snapshot slice directly (zero allocation)
+	if cached, ok := shard.cowSnapshot.Load(pageKey); ok {
+		snapshot := cached.(*cowSnapshotEntry)
+		return snapshot.documents, nil
+	}
+
+	// READER VIEW: Lock-free read path
+	if v, ok := shard.readerView.Load(pageKey); ok {
+		if snapshot, ok := v.(*models.DocumentPage); ok {
+			docs := make([]models.Document, 0, len(snapshot.Documents))
+			for _, doc := range snapshot.Documents {
+				if doc.IsVisibleReadCommitted() {
+					docs = append(docs, doc)
+				}
+			}
+			// Store in COW cache for subsequent reads
+			snapshotEntry := &cowSnapshotEntry{
+				documents: docs,
+				timestamp: time.Now().UnixMilli(),
+				pageKey:   pageKey,
+			}
+			shard.cowSnapshot.Store(pageKey, snapshotEntry)
+			return docs, nil
+		}
+	}
+
+	// Fallback: authoritative page in fastLookup (requires RLock to copy)
+	if cached, ok := shard.fastLookup.Load(pageKey); ok {
+		if page, ok := cached.(*models.DocumentPage); ok {
+			shard.mu.RLock()
+			safePage := s.createSafePageCopy(page)
+			shard.mu.RUnlock()
+			docs := make([]models.Document, 0, len(safePage.Documents))
+			for _, doc := range safePage.Documents {
+				if doc.IsVisibleReadCommitted() {
+					docs = append(docs, doc)
+				}
+			}
+			snapshotEntry := &cowSnapshotEntry{
+				documents: docs,
+				timestamp: time.Now().UnixMilli(),
+				pageKey:   pageKey,
+			}
+			shard.cowSnapshot.Store(pageKey, snapshotEntry)
+			return docs, nil
+		}
+	}
+
+	// Page not in cache - load from disk
+	databasePath := helpers.GetDatabaseFolderPath(databaseName)
+	loadedPage, err := s.store.LoadDocumentPage(bundleName, databaseName, pageID, databasePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load document page %d for read-only snapshot: %w", pageID, err)
+	}
+
+	docs := make([]models.Document, 0, len(loadedPage.Documents))
+	for _, doc := range loadedPage.Documents {
+		if doc.IsVisibleReadCommitted() {
+			docs = append(docs, doc)
+		}
+	}
+
+	// Best-effort insert into authoritative cache
+	if shard.mu.TryLock() {
+		if _, exists := shard.pages[pageKey]; !exists {
+			if len(shard.pages) >= shard.maxPages {
+				shard.evictOldestLocked()
+			}
+			shard.insertLocked(pageKey, loadedPage)
+			elem := shard.lruOrder.PushFront(pageKey)
+			shard.lruElements[pageKey] = elem
+			shard.readerView.Store(pageKey, s.createSafePageCopy(loadedPage))
+		}
+		shard.mu.Unlock()
+	}
+
+	// Cache snapshot for subsequent reads
 	snapshot := &cowSnapshotEntry{
 		documents: docs,
 		timestamp: time.Now().UnixMilli(),
@@ -4102,6 +4399,9 @@ func (s *BundleService) invalidateDocumentPageMapEntry(bundleName, documentID st
 func (s *BundleService) InvalidateDocumentPageMapForBundle(bundleName string) {
 	s.documentPageCache.InvalidateBundle(bundleName)
 
+	// Clear entire visibility map on compaction (page contents may have changed)
+	s.clearVisibilityForBundle(bundleName)
+
 	// PAGE ID ARCHITECTURE ALIGNMENT: Rebuild SortedIndex after compaction
 	// Compaction removes tombstoned documents and rewrites the bundle file,
 	// which changes document positions. Rebuild the SortedIndex from the
@@ -4335,8 +4635,10 @@ func (s *BundleService) getAllDocumentsForIndexing(bundleName string, snapshotSe
 	// This is necessary because document additions schedule deferred metadata updates
 	// and SELECT TOP needs accurate PageCount to work correctly
 
-	if len(s.metadataUpdateBuffer) > 0 {
-		//s.logger.Debugf("DEBUG DEBUG DEBUG :: Forcing metadata flush for bundle %s to ensure current PageCount", bundleName)
+	s.metadataUpdateMutex.RLock()
+	needsMetaFlush4338 := len(s.metadataUpdateBuffer) > 0
+	s.metadataUpdateMutex.RUnlock()
+	if needsMetaFlush4338 {
 		s.FlushMetadataUpdates()
 	}
 	//s.logger.Debugf("Bundle %s memtable state: Documents=%v, DocumentsComplete=%v",
@@ -4426,7 +4728,10 @@ func (s *BundleService) GetDocumentChunksForIndexing(ctx context.Context, bundle
 	if !exists {
 		return fmt.Errorf("bundle metadata not found for %s", bundleName)
 	}
-	if len(s.metadataUpdateBuffer) > 0 {
+	s.metadataUpdateMutex.RLock()
+	needsMetaFlush4436 := len(s.metadataUpdateBuffer) > 0
+	s.metadataUpdateMutex.RUnlock()
+	if needsMetaFlush4436 {
 		s.FlushMetadataUpdates()
 	}
 	if chunkSize <= 0 {
@@ -4507,7 +4812,10 @@ func (s *BundleService) GetAllDocumentsForIndexingWithOptions(bundleName string,
 		return nil, fmt.Errorf("bundle metadata not found for %s", bundleName)
 	}
 
-	if len(s.metadataUpdateBuffer) > 0 {
+	s.metadataUpdateMutex.RLock()
+	needsMetaFlush4520 := len(s.metadataUpdateBuffer) > 0
+	s.metadataUpdateMutex.RUnlock()
+	if needsMetaFlush4520 {
 		s.FlushMetadataUpdates()
 	}
 
@@ -5219,6 +5527,7 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 					Name:  fieldName,
 					Value: models.NewInterfaceValue(evaluatedValue),
 				}
+				doc.CachedJSON = nil // Force lazy rebuild on next read
 
 				// Update the document in the bundle file
 				err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
@@ -5253,6 +5562,7 @@ func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, 
 
 			if _, hasField := doc.Fields[fieldName]; hasField {
 				delete(doc.Fields, fieldName)
+				doc.CachedJSON = nil // Force lazy rebuild on next read
 
 				// Update the document in the bundle file
 				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
@@ -5297,6 +5607,7 @@ func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldNa
 
 				// Remove old field
 				delete(doc.Fields, oldFieldName)
+				doc.CachedJSON = nil // Force lazy rebuild on next read
 
 				// Update the document in the bundle file
 				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
@@ -5348,6 +5659,7 @@ func (s *BundleService) convertFieldType(bundle *models.Bundle, fieldName, fromT
 			// Update field value
 			field.Value = models.NewInterfaceValue(convertedValue) // ✅ Use NewInterfaceValue
 			doc.Fields[fieldName] = field
+			doc.CachedJSON = nil // Force lazy rebuild on next read
 
 			// Persist the change
 			err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
@@ -5523,6 +5835,7 @@ func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldN
 					Name:  fieldName,
 					Value: models.NewInterfaceValue(evaluatedValue),
 				}
+				doc.CachedJSON = nil // Force lazy rebuild on next read
 
 				// Persist the change
 				err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
@@ -5635,6 +5948,9 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 		shard.mu.Unlock()
 	}
 	s.logger.Debugf("Invalidated %d cached pages for bundle '%s'", totalDeleted, bundleName)
+
+	// Clear entire visibility map when full page cache is invalidated
+	s.clearVisibilityForBundle(bundleName)
 }
 
 // invalidateDocumentPagesForInsert invalidates only the affected page(s) after an INSERT
@@ -5659,9 +5975,8 @@ func (s *BundleService) invalidateDocumentPagesForInsert(bundleName string, page
 	}
 	shard.mu.Unlock()
 
-	// Note: We only invalidate the specific page where the document was inserted.
-	// This is conservative and preserves cache for all other pages.
-	// Future enhancement: Could implement snapshot isolation to avoid invalidation entirely.
+	// Clear visibility map bit for this page (page may contain uncommitted docs now)
+	s.clearVisibilityForPage(bundleName, pageID)
 }
 
 // invalidatePlanCacheForBundle invalidates all cached query plans for a bundle
@@ -6121,7 +6436,10 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		skippedCount := 0
 
 		// Ensure metadata is current so PageCount is accurate
-		if len(s.metadataUpdateBuffer) > 0 {
+		s.metadataUpdateMutex.RLock()
+		needsMetaFlush6137 := len(s.metadataUpdateBuffer) > 0
+		s.metadataUpdateMutex.RUnlock()
+		if needsMetaFlush6137 {
 			s.FlushMetadataUpdates()
 		}
 
@@ -7679,6 +7997,9 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 			doc.Fields[kv.Key] = foundField
 		}
 
+		// Rebuild pre-encoded JSON cache after field mutations
+		helpers.BuildCachedJSON(doc)
+
 		// TASK 3: Use deferred index updates for B-tree indexes instead of synchronous operations
 		// This reduces per-document index overhead by batching updates
 		for indexName, fieldName := range btreeIndexesToUpdate {
@@ -8059,6 +8380,9 @@ func (s *BundleService) createUpdatedDocumentRCU(oldDoc *models.Document, update
 		newDoc.Fields[kv.Key] = field
 	}
 
+	// Rebuild pre-encoded JSON cache after field mutations
+	helpers.BuildCachedJSON(newDoc)
+
 	// CommitSequence is now set by AppendVersionToBundleFile using SnapshotManager.GetNextCommitSequence()
 	// This ensures globally ordered, atomic commit sequence allocation
 
@@ -8319,6 +8643,8 @@ func (s *BundleService) DeleteDocumentFromBundleRCU(bundle *models.Bundle, docCo
 				shard.deleteLocked(pageKey)
 				shard.mu.Unlock()
 				invalidatedPages[pageID] = true
+				// Clear visibility map bit for deleted page
+				s.clearVisibilityForPage(docCommand.BundleName, pageID)
 			}
 		}
 		// Invalidate the document->page cache entry
@@ -8678,6 +9004,8 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 				shard.deleteLocked(pageKey)
 				shard.mu.Unlock()
 				invalidatedPages[pageID] = true
+				// Clear visibility map bit for deleted page
+				s.clearVisibilityForPage(docCommand.BundleName, pageID)
 			}
 		}
 		// Invalidate the document->page cache entry
@@ -10598,6 +10926,12 @@ func (s *BundleService) Shutdown() error {
 		s.idleCacheFlusherCancel()
 	}
 
+	// Stop background visibility map refresher
+	if s.vmRefresherCancel != nil {
+		s.logger.Debug("Stopping background visibility map refresher")
+		s.vmRefresherCancel()
+	}
+
 	// Close scanners before other cleanup
 	s.CloseAllScanners()
 
@@ -10615,8 +10949,11 @@ func (s *BundleService) Shutdown() error {
 
 	// Also force flush any remaining metadata updates during shutdown
 	// CRITICAL: Use forceMetadataPersistence to ensure disk write happens
-	if len(s.metadataUpdateBuffer) > 0 {
-		s.logger.Debugf("Force flushing %d remaining metadata updates during shutdown", len(s.metadataUpdateBuffer))
+	s.metadataUpdateMutex.RLock()
+	shutdownMetaCount := len(s.metadataUpdateBuffer)
+	s.metadataUpdateMutex.RUnlock()
+	if shutdownMetaCount > 0 {
+		s.logger.Debugf("Force flushing %d remaining metadata updates during shutdown", shutdownMetaCount)
 		s.ForceMetadataPersistence()
 	}
 
@@ -10684,6 +11021,16 @@ func (s *BundleService) GetOrCreateDocumentScanner(bundle *models.Bundle) (docum
 	scanner, err := s.scannerIntegration.CreateScannerForBundle(bundle, s, s.logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create document scanner for bundle '%s': %w", bundle.Name, err)
+	}
+
+	// VISIBILITY MAP: Wire the VM into the scanner for page-level MVCC skip optimization
+	if smartScanner, ok := scanner.(*documentscanner.SmartBundleScanner); ok {
+		pageCount := uint32(bundle.PageCount)
+		if pageCount == 0 {
+			pageCount = 1
+		}
+		vm := s.getOrCreateVisibilityMap(bundle.Name, pageCount)
+		smartScanner.SetVisibilityMap(vm)
 	}
 
 	// Cache the scanner
