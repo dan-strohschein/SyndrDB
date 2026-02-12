@@ -2,6 +2,7 @@ package planner
 
 import (
 	"context"
+	"fmt"
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
@@ -67,6 +68,34 @@ type SliceExecutionNode interface {
 	ExecuteSlice(ctx context.Context) ([]*models.Document, []string, error)
 }
 
+// IteratorNode is a Volcano-style pull-based execution interface.
+// Each call to Next() returns exactly one document. EOF is signaled by (nil, nil).
+//
+// Lifecycle: Init(ctx) → Next()* → Close()
+//
+// Ownership: Documents returned by Next() are independent copies from the page cache
+// (via SnapshotPageDocuments). Callers may read fields freely. Nodes that mutate
+// Fields (e.g. projection) must copy the document first.
+//
+// Concurrency: A single IteratorNode is NOT safe for concurrent use.
+// Each query execution must create its own iterator chain.
+type IteratorNode interface {
+	// Init prepares the iterator for iteration. Must be called before Next().
+	Init(ctx context.Context) error
+	// Next returns the next document, or (nil, nil) on EOF.
+	// After returning (nil, nil), all subsequent calls must also return (nil, nil).
+	Next() (*models.Document, error)
+	// Close releases resources. Must be called even if iteration is incomplete.
+	// Safe to call multiple times.
+	Close() error
+}
+
+// IterableNode is an optional interface for ExecutionNodes that can produce
+// a native IteratorNode without materialization overhead.
+type IterableNode interface {
+	AsIterator() IteratorNode
+}
+
 // ExecutionPlan represents the complete execution plan
 type ExecutionPlan struct {
 	RootNode      ExecutionNode
@@ -85,6 +114,13 @@ type ExecutionPlan struct {
 	// IsGeneric is true when the plan is a generic (parameter-independent) plan.
 	// Set when serving from cache; used by RecordPlanStats.
 	IsGeneric bool
+
+	// Iterator support: when UseIterator is true, the plan should be executed via
+	// the pull-based iterator path instead of the materialized Execute() path.
+	// IteratorFactory creates a fresh iterator chain per execution (iterators are
+	// not reusable after Close()).
+	UseIterator     bool
+	IteratorFactory func() IteratorNode
 }
 
 // ScanType represents different types of scans
@@ -199,4 +235,18 @@ type UnionNode struct {
 // This method implements the ExecutionPlanInterface for subquery execution
 func (ep *ExecutionPlan) Execute(ctx context.Context) (interface{}, error) {
 	return ep.RootNode.Execute(ctx)
+}
+
+// ExecuteIterator creates and initializes an iterator chain for pull-based execution.
+// The caller must call Close() on the returned iterator when done.
+func (ep *ExecutionPlan) ExecuteIterator(ctx context.Context) (IteratorNode, error) {
+	if ep.IteratorFactory == nil {
+		return nil, fmt.Errorf("plan does not support iterator execution")
+	}
+	iter := ep.IteratorFactory()
+	if err := iter.Init(ctx); err != nil {
+		iter.Close()
+		return nil, err
+	}
+	return iter, nil
 }

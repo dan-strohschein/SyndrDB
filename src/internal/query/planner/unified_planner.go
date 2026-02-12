@@ -318,9 +318,17 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 		estimatedMemoryBytes: memoryEstimate,
 	}
 
+	// Step 5: Check if iterator path is beneficial for this query
+	if ShouldUseIterator(query) {
+		plan.UseIterator = true
+		plan.IteratorFactory = BuildIteratorPipeline(finalNode, query)
+		uqp.logger.Debugf("Iterator path enabled for query (LIMIT=%d, OrderBy=%v)",
+			query.Limit, query.OrderBy != nil)
+	}
+
 	uqp.logger.Debugf("Unified execution plan created successfully: "+
-		"Type=%s, Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v, MemoryEstimate=%d bytes",
-		query.QueryType, plan.Cost, plan.EstimatedRows, plan.IndexesUsed, memoryEstimate)
+		"Type=%s, Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v, MemoryEstimate=%d bytes, UseIterator=%v",
+		query.QueryType, plan.Cost, plan.EstimatedRows, plan.IndexesUsed, memoryEstimate, plan.UseIterator)
 
 	return plan, nil
 }

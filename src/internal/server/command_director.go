@@ -1136,12 +1136,36 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	}
 
 	// Execute the plan with context.
-	// When streaming and the root node supports slice execution, use ExecuteSlice
-	// to avoid O(n) map insertion overhead and get cache-friendly sequential iteration.
+	// Priority: (1) Iterator path for LIMIT queries (2) SliceExecution for streaming (3) Execute()
 	execStart := time.Now()
 	var documents map[string]*models.Document
 	var streamSliceDocs []*models.Document
-	if useStreaming {
+
+	// Iterator path: pull-based execution for LIMIT queries.
+	// Drains the iterator into a slice (bounded by LIMIT), avoiding full materialization.
+	if plan.UseIterator && plan.IteratorFactory != nil {
+		iter, iterErr := plan.ExecuteIterator(ctx)
+		if iterErr != nil {
+			logger.Warnf("Iterator execution failed, falling back to Execute(): %v", iterErr)
+			// Fall through to traditional Execute() path
+		} else {
+			iterDocs, drainErr := planner.DrainIterator(iter)
+			iter.Close()
+			if drainErr != nil {
+				err = drainErr
+			} else {
+				streamSliceDocs = iterDocs
+				documents = make(map[string]*models.Document, len(iterDocs))
+				for _, doc := range iterDocs {
+					documents[doc.DocumentID] = doc
+				}
+				logger.Debugf("Iterator path: drained %d documents", len(iterDocs))
+			}
+		}
+	}
+
+	// Streaming slice path (when iterator not used)
+	if streamSliceDocs == nil && err == nil && useStreaming {
 		if sliceNode, ok := plan.RootNode.(planner.SliceExecutionNode); ok {
 			var sliceDocIDs []string
 			streamSliceDocs, sliceDocIDs, err = sliceNode.ExecuteSlice(ctx)
@@ -1155,6 +1179,8 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			}
 		}
 	}
+
+	// Fallback: materialized Execute() path
 	if streamSliceDocs == nil && err == nil {
 		documents, err = plan.RootNode.Execute(ctx)
 	}
