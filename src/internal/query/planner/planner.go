@@ -151,6 +151,45 @@ type IndexScanNode struct {
 	DocumentScanner documentscanner.DocumentScannerInterface
 }
 
+// BRINScanNode uses a BRIN index to skip page ranges that cannot match the predicate.
+// For each range whose [min, max] overlaps the query range, loads and scans those pages.
+type BRINScanNode struct {
+	Bundle           *models.Bundle
+	IndexName        string
+	FieldName        string
+	Operator         string      // ">", ">=", "<", "<=", "=", "BETWEEN"
+	SearchValue      interface{} // Query value (single-sided) or min for BETWEEN
+	SearchValueEnd   interface{} // End value for BETWEEN
+	Cost             float64
+	EstimatedRows    int
+	Logger           *zap.SugaredLogger
+	BundleServiceInt BundleServiceInterface
+	DocumentScanner  documentscanner.DocumentScannerInterface
+}
+
+func (node *BRINScanNode) GetCost() float64           { return node.Cost }
+func (node *BRINScanNode) GetEstimatedRows() int      { return node.EstimatedRows }
+func (node *BRINScanNode) EstimateMemoryUsage() int64 { return 0 }
+
+// IndexOnlyScanNode reads data from the index without fetching full documents.
+// Used when the index covers all columns needed by the query (SELECT + WHERE fields).
+// Delegates to the underlying index scan but signals to the planner that this is
+// a cheaper path (no heap fetch needed when all data is in the index).
+type IndexOnlyScanNode struct {
+	Child           ExecutionNode       // The underlying index scan node
+	Bundle          *models.Bundle
+	IndexName       string
+	IndexRef        models.IndexReference
+	ProjectedFields []string            // Fields to return from the index
+	Cost            float64
+	EstimatedRows   int
+	Logger          *zap.SugaredLogger
+}
+
+func (node *IndexOnlyScanNode) GetCost() float64           { return node.Cost }
+func (node *IndexOnlyScanNode) GetEstimatedRows() int      { return node.EstimatedRows }
+func (node *IndexOnlyScanNode) EstimateMemoryUsage() int64 { return 0 }
+
 // OrderedChild is an optional interface for execution nodes that can produce documents
 // in a defined order (e.g. B-tree index key order). AggregationNode uses this to skip
 // the in-memory sort in SortGroupAggregate when the child is already ordered by the first GROUP BY field.

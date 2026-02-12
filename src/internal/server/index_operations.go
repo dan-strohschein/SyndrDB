@@ -60,3 +60,28 @@ func CreateBTreeIndex(command string, logger *zap.SugaredLogger, serviceManager 
 	}
 	return cmdResponse, nil
 }
+
+// CreateBRINIndex handles the CREATE BRIN INDEX command
+func CreateBRINIndex(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database) (*CommandResponse, error) {
+	brinIndexCommand, err := index.ParseCreateBRINIndexCommand(command, logger)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
+	}
+	logger.Infof("Parsed BRIN index command: %+v", brinIndexCommand)
+
+	bundle, err := serviceManager.BundleService.GetBundleByName(database, brinIndexCommand.BundleName)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", brinIndexCommand.BundleName)
+	}
+
+	err = serviceManager.BundleService.AddIndexToBundle(database, bundle, brinIndexCommand)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", brinIndexCommand.BundleName).WithContext("index_name", brinIndexCommand.IndexName)
+	}
+
+	cmdResponse := &CommandResponse{
+		ResultCount: 1,
+		Result:      "BRIN index created successfully",
+	}
+	return cmdResponse, nil
+}

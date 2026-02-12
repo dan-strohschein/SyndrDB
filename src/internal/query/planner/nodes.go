@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"syndrdb/src/internal/domain/index/brinindex"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	// "syndrdb/src/internal/domain/index/hashindexV2" // OLD - Sprint 5: Replaced with V3
 	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
@@ -12,7 +13,6 @@ import (
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/settings"
-	// Import your B-tree index package when ready
 )
 
 // Execute methods for different node types
@@ -1059,3 +1059,72 @@ func (node *FullScanNode) GetCost() float64       { return node.Cost }
 func (node *FullScanNode) GetEstimatedRows() int  { return node.EstimatedRows }
 func (node *FilterNode) GetCost() float64         { return node.Cost }
 func (node *FilterNode) GetEstimatedRows() int    { return node.EstimatedRows }
+
+// Execute performs a BRIN index scan: queries the BRIN index to find matching page ranges,
+// then loads only documents from those pages. Skips ranges whose min/max doesn't overlap the query.
+func (node *BRINScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
+	node.Logger.Debugf("Executing BRIN scan on index '%s' field '%s' operator '%s'",
+		node.IndexName, node.FieldName, node.Operator)
+
+	// Load BRIN index instance from bundle metadata
+	indexRef, exists := node.Bundle.Indexes[node.IndexName]
+	if !exists {
+		return nil, fmt.Errorf("BRIN index '%s' not found in bundle '%s'", node.IndexName, node.Bundle.Name)
+	}
+	brinIdx, ok := indexRef.IndexInstance.(*brinindex.BRINIndex)
+	if !ok {
+		return nil, fmt.Errorf("index '%s' is not a BRIN index (type: %T)", node.IndexName, indexRef.IndexInstance)
+	}
+
+	// Get matching page ranges from BRIN index
+	var pageRanges []brinindex.PageRange
+	switch node.Operator {
+	case "BETWEEN":
+		pageRanges = brinIdx.ScanRanges(node.SearchValue, node.SearchValueEnd)
+	case ">", ">=":
+		pageRanges = brinIdx.ScanRanges(node.SearchValue, nil)
+	case "<", "<=":
+		pageRanges = brinIdx.ScanRanges(nil, node.SearchValue)
+	case "=":
+		pageRanges = brinIdx.ScanRanges(node.SearchValue, node.SearchValue)
+	default:
+		pageRanges = brinIdx.AllRanges()
+	}
+
+	node.Logger.Debugf("BRIN scan: %d ranges match (out of %d total)",
+		len(pageRanges), brinIdx.EntryCount())
+
+	// Load documents only from matching page ranges
+	results := make(map[string]*models.Document)
+	for _, pr := range pageRanges {
+		for pageID := pr.StartPageID; pageID <= pr.EndPageID; pageID++ {
+			select {
+			case <-ctx.Done():
+				return results, ctx.Err()
+			default:
+			}
+
+			docs, err := node.BundleServiceInt.SnapshotPageDocuments(
+				node.Bundle.Name, node.Bundle.Database.Name, pageID)
+			if err != nil {
+				continue // Page may not exist (sparse allocation)
+			}
+			for i := range docs {
+				doc := &docs[i]
+				results[doc.DocumentID] = doc
+			}
+		}
+	}
+
+	node.Logger.Debugf("BRIN scan returned %d documents", len(results))
+	return results, nil
+}
+
+// Execute delegates to the underlying index scan node.
+// Currently functionally identical to a regular index scan, but with reduced cost
+// signaling to the planner that heap fetches are unnecessary.
+// When a visibility map is available, this can skip document fetches for all-visible pages.
+func (node *IndexOnlyScanNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
+	node.Logger.Debugf("Executing index-only scan on '%s' (projected fields: %v)", node.IndexName, node.ProjectedFields)
+	return node.Child.Execute(ctx)
+}

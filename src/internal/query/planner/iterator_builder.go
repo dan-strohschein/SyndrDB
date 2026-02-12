@@ -80,6 +80,10 @@ func buildIterator(node ExecutionNode, query *queryparser.UnifiedSelectQuery) It
 	case *AggregationNode:
 		return NewAggregationIterator(n)
 
+	case *IndexOnlyScanNode:
+		// Index-only scan delegates to its child; build iterator for the child
+		return buildIterator(n.Child, query)
+
 	default:
 		// Fallback: wrap any node with MaterializingIterator
 		return NewMaterializingIterator(node)

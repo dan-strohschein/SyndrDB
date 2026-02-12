@@ -535,6 +535,21 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 	indexNode, indexName := qr.tryIndexOptimization(bundle, expr, docScanner)
 	if indexNode != nil {
 		qr.logger.Debugf("Using index '%s' for WHERE clause optimization", indexName)
+
+		// Check if index-only scan is possible (all needed fields in the index)
+		if indexRef, exists := bundle.Indexes[indexName]; exists && isQueryCoveredByIndex(query, indexRef) {
+			qr.logger.Debugf("INDEX-ONLY SCAN: query fully covered by index '%s'", indexName)
+			return &IndexOnlyScanNode{
+				Child:           indexNode,
+				Bundle:          bundle,
+				IndexName:       indexName,
+				IndexRef:        indexRef,
+				Cost:            indexNode.GetCost() * 0.5, // 50% cheaper: no heap fetch
+				EstimatedRows:   indexNode.GetEstimatedRows(),
+				Logger:          qr.logger,
+			}, []string{indexName}, nil
+		}
+
 		// No FilterNode needed - index scan already filters
 		return indexNode, []string{indexName}, nil
 	}
@@ -664,10 +679,76 @@ func (qr *QueryRouter) tryIndexOptimization(
 		}
 	}
 
+	// Try BRIN index optimization for range conditions
+	if field, operator, value, ok := syndrQL.ExtractRangeCondition(expr); ok {
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType == "brin" && len(indexRef.Fields) == 1 && indexRef.Fields[0].Name == field {
+				qr.logger.Debugf("Found BRIN index '%s' on field '%s' for operator '%s'", indexName, field, operator)
+				return &BRINScanNode{
+					Bundle:           bundle,
+					IndexName:        indexName,
+					FieldName:        field,
+					Operator:         operator,
+					SearchValue:      value,
+					Cost:             float64(bundle.TotalDocuments) * 0.05,
+					EstimatedRows:    int(bundle.TotalDocuments) / 20,
+					Logger:           qr.logger,
+					BundleServiceInt: qr.bundleService,
+					DocumentScanner:  docScanner,
+				}, indexName
+			}
+		}
+	}
+
 	// Try to optimize AND clauses (can use multiple indexes)
 	clauses := syndrQL.ExtractANDClauses(expr)
 	if len(clauses) > 1 {
-		// Try to find an index for any of the AND clauses
+		// Try multi-column B-tree index (left-prefix matching)
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.IndexType != "btree" || len(indexRef.Fields) <= 1 {
+				continue
+			}
+			// Check left-prefix match: query has equality on a left prefix of index fields?
+			matchedFields := 0
+			matchedValues := make([]interface{}, 0, len(indexRef.Fields))
+			for _, fieldDef := range indexRef.Fields {
+				found := false
+				for _, clause := range clauses {
+					if f, val, ok := syndrQL.ExtractSimpleEquality(clause); ok && f == fieldDef.Name {
+						matchedValues = append(matchedValues, val)
+						found = true
+						break
+					}
+				}
+				if !found {
+					break // Left prefix broken
+				}
+				matchedFields++
+			}
+			if matchedFields >= 2 {
+				qr.logger.Debugf("MULTI-COLUMN INDEX: Using '%s' with %d prefix fields", indexName, matchedFields)
+				// Build composite search key from matched values
+				encoder := NewKeyEncoder()
+				compositeKey, encErr := encoder.EncodeCompositeKey(matchedValues)
+				if encErr != nil {
+					qr.logger.Warnf("Failed to encode composite key: %v", encErr)
+					continue
+				}
+				return &IndexScanNode{
+					Bundle:           bundle,
+					IndexName:        indexName,
+					ScanType:         BTreeIndexScan,
+					SearchKey:        compositeKey,
+					Cost:             qr.costModel.BTreeRangeScanCost(bundle.TotalDocuments, bundle.TotalDocuments/100),
+					EstimatedRows:    int(bundle.TotalDocuments) / 100,
+					Logger:           qr.logger,
+					BundleServiceInt: qr.bundleService,
+					DocumentScanner:  docScanner,
+				}, indexName
+			}
+		}
+
+		// Try to find an index for any single AND clause
 		for _, clause := range clauses {
 			if node, indexName := qr.tryIndexOptimization(bundle, clause, docScanner); node != nil {
 				// Found an index for one clause
@@ -679,6 +760,67 @@ func (qr *QueryRouter) tryIndexOptimization(
 
 	// No index optimization possible
 	return nil, ""
+}
+
+// isQueryCoveredByIndex checks if all columns needed by the query
+// (SELECT fields, WHERE fields) are present in the index.
+// Returns true if the index can satisfy the query without a heap fetch.
+func isQueryCoveredByIndex(query *queryparser.UnifiedSelectQuery, indexRef models.IndexReference) bool {
+	if query == nil {
+		return false
+	}
+
+	// SELECT * requires all fields - can't be covered by index
+	for _, sf := range query.SelectFields {
+		if sf == "*" {
+			return false
+		}
+	}
+
+	// Aggregate-only queries may need all docs
+	if query.IsAggregateOnly && !query.IsCountOnly {
+		return false
+	}
+
+	// Collect all fields needed by the query
+	neededFields := make(map[string]bool)
+	for _, sf := range query.SelectFields {
+		if sf != "" && sf != "*" {
+			neededFields[sf] = true
+		}
+	}
+	// WHERE fields
+	if query.WhereExpression != nil {
+		if expr, ok := query.WhereExpression.(syndrQL.Expression); ok {
+			for _, f := range syndrQL.ExtractFieldNames(expr) {
+				neededFields[f] = true
+			}
+		}
+	}
+	// ORDER BY fields
+	if query.OrderBy != nil {
+		for _, ob := range query.OrderBy.Fields {
+			neededFields[ob.FieldName] = true
+		}
+	}
+
+	// COUNT(*) only needs the index to exist, not specific fields
+	if query.IsCountOnly && len(neededFields) == 0 {
+		return true
+	}
+
+	// Check if index covers all needed fields
+	indexedFields := make(map[string]bool)
+	for _, fd := range indexRef.Fields {
+		indexedFields[fd.Name] = true
+	}
+
+	for f := range neededFields {
+		if !indexedFields[f] {
+			return false
+		}
+	}
+	return true
 }
 
 // convertWhereClauseToString converts WhereGroup to string format

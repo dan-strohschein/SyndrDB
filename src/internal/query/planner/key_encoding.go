@@ -160,6 +160,32 @@ func (e *KeyEncoder) encodeFloat64(value float64) []byte {
 	return buf
 }
 
+// EncodeCompositeKey encodes multiple values into a single byte slice for composite B-tree keys.
+// Values are encoded sequentially with length prefixes so that byte comparison
+// yields the correct lexicographic order: (a1, b1) < (a2, b2) iff a1 < a2 or (a1 == a2 and b1 < b2).
+func (e *KeyEncoder) EncodeCompositeKey(values []interface{}) ([]byte, error) {
+	var buf []byte
+	for _, v := range values {
+		if v == nil {
+			// Encode nil as 0-length component
+			lenBytes := make([]byte, 4)
+			binary.BigEndian.PutUint32(lenBytes, 0)
+			buf = append(buf, lenBytes...)
+			continue
+		}
+		encoded, err := e.EncodeKey(v)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode composite key component: %w", err)
+		}
+		// Length-prefix each component (4 bytes, big-endian) for unambiguous decoding
+		lenBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(lenBytes, uint32(len(encoded)))
+		buf = append(buf, lenBytes...)
+		buf = append(buf, encoded...)
+	}
+	return buf, nil
+}
+
 // DecodeInt64 decodes a byte representation back to int64
 // This is useful for debugging and validation
 func (e *KeyEncoder) DecodeInt64(encoded []byte) (int64, error) {

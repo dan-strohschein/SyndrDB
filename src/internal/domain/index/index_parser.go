@@ -3,6 +3,7 @@ package index
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"syndrdb/src/internal/domain/models"
 
@@ -197,5 +198,67 @@ func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*mo
 		IndexName:  indexName,
 		BundleName: bundleName,
 		Fields:     Fields,
+	}, nil
+}
+
+// ParseCreateBRINIndexCommand parses:
+//
+//	CREATE BRIN INDEX "idx_name" ON BUNDLE "bundle_name" WITH FIELDS ({"field_name", required, unique})
+//	CREATE BRIN INDEX "idx_name" ON BUNDLE "bundle_name" WITH FIELDS ({"field_name", required, unique}) PAGES_PER_RANGE 64
+func ParseCreateBRINIndexCommand(command string, logger *zap.SugaredLogger) (*models.CreateIndexCommand, error) {
+	command = strings.Trim(command, " \n\r\t;")
+	command = regexp.MustCompile(`\s+`).ReplaceAllString(command, " ")
+
+	logger.Debugf("Parsing cleaned BRIN INDEX command: %s", command)
+
+	// Pattern: CREATE BRIN INDEX "name" ON BUNDLE "bundle" WITH FIELDS ({...}) [PAGES_PER_RANGE N]
+	re := regexp.MustCompile(`(?i)^CREATE\s+BRIN\s+INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+FIELDS\s*\(([^)]+)\)(?:\s+PAGES_PER_RANGE\s+(\d+))?`)
+	matches := re.FindStringSubmatch(command)
+	if matches == nil {
+		logger.Errorf("BRIN INDEX command does not match expected pattern: %s", command)
+		return nil, fmt.Errorf("invalid CREATE BRIN INDEX command syntax: %s", command)
+	}
+
+	indexName := matches[1]
+	bundleName := matches[2]
+	fieldsPart := strings.TrimSpace(matches[3])
+
+	// Parse field definitions using same pattern as BTree/Hash
+	fieldRegex := regexp.MustCompile(`\{\s*"([^"]+)"\s*,\s*(true|false)\s*,\s*(true|false)\s*\}`)
+	fieldMatches := fieldRegex.FindAllStringSubmatch(fieldsPart, -1)
+	if fieldMatches == nil {
+		return nil, fmt.Errorf("invalid field definitions in CREATE BRIN INDEX command: %s", command)
+	}
+
+	var fields []models.FieldDefinition
+	for _, match := range fieldMatches {
+		if len(match) != 4 {
+			return nil, fmt.Errorf("invalid field definition in CREATE BRIN INDEX command: %s", command)
+		}
+		fields = append(fields, models.FieldDefinition{
+			Name:       match[1],
+			IsRequired: match[2] == "true",
+			IsUnique:   match[3] == "true",
+		})
+	}
+
+	// Parse optional PAGES_PER_RANGE
+	pagesPerRange := uint32(128)
+	if len(matches) > 4 && matches[4] != "" {
+		val, err := strconv.ParseUint(matches[4], 10, 32)
+		if err == nil && val > 0 {
+			pagesPerRange = uint32(val)
+		}
+	}
+
+	logger.Debugf("Parsed BRIN INDEX: name='%s', bundle='%s', fields=%d, pagesPerRange=%d",
+		indexName, bundleName, len(fields), pagesPerRange)
+
+	return &models.CreateIndexCommand{
+		IndexType:     "brin",
+		IndexName:     indexName,
+		BundleName:    bundleName,
+		Fields:        fields,
+		PagesPerRange: pagesPerRange,
 	}, nil
 }

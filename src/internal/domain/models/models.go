@@ -665,8 +665,9 @@ type CreateHashIndexCommand struct {
 }
 
 type CreateIndexCommand struct {
-	IndexType  string // "BTree" or "Hash"
-	IndexName  string
-	BundleName string
-	Fields     []FieldDefinition
+	IndexType     string // "BTree", "Hash", or "brin"
+	IndexName     string
+	BundleName    string
+	Fields        []FieldDefinition
+	PagesPerRange uint32 // BRIN only: pages per range (default 128)
 }

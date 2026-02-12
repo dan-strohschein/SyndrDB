@@ -3,6 +3,7 @@ package bundle
 import (
 	"container/list"
 	"context"
+	"encoding/binary"
 	stderrors "errors"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
 
+	"syndrdb/src/internal/domain/index/brinindex"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 
 	hashindex "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
@@ -2369,6 +2371,19 @@ func (s *BundleService) scheduleIndexUpdate(bundleName, indexName, indexType, op
 						zap.String("bundle", bundleName),
 						zap.String("index", indexName),
 						zap.Error(err))
+				}
+			}
+		}
+	}
+
+	// BRIN indexes: update min/max in-memory immediately (very cheap O(1) operation)
+	if indexType == "brin" {
+		bundle, exists := s.bundleMetadata[bundleName]
+		if exists {
+			indexRef, indexExists := bundle.Indexes[indexName]
+			if indexExists {
+				if brinIdx, ok := indexRef.IndexInstance.(*brinindex.BRINIndex); ok {
+					brinIdx.UpdateRange(update.PageID, fieldValue)
 				}
 			}
 		}
@@ -6372,6 +6387,10 @@ func (s *BundleService) AddIndexToBundle(database *models.Database, bundle *mode
 		err1 := CreateHashIndex(s, bundle, indexCommand)
 		return err1
 
+	case "brin":
+		err1 := CreateBRINIndex(s, bundle, indexCommand)
+		return err1
+
 	default:
 		return fmt.Errorf("unknown index type: %s", indexCommand.IndexType)
 	}
@@ -6643,17 +6662,15 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		return fmt.Errorf("no fields specified for BTree index creation")
 	}
 
-	// For now, support single-field indexes (can be extended for composite indexes later)
-	if len(indexCommand.Fields) > 1 {
-		return fmt.Errorf("composite BTree indexes not yet supported, please create separate indexes for each field")
-	}
-
 	fieldDef := indexCommand.Fields[0]
 
-	// Validate that the field exists in the bundle structure
-	if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldDef.Name]; !exists {
-		return fmt.Errorf("field '%s' does not exist in bundle '%s'", fieldDef.Name, bundle.Name)
+	// Validate that all indexed fields exist in the bundle structure
+	for _, fd := range indexCommand.Fields {
+		if _, exists := bundle.DocumentStructure.FieldDefinitions[fd.Name]; !exists {
+			return fmt.Errorf("field '%s' does not exist in bundle '%s'", fd.Name, bundle.Name)
+		}
 	}
+	isComposite := len(indexCommand.Fields) > 1
 
 	s.logger.Debugf("Creating BTree index '%s' on field '%s' for bundle '%s'",
 		indexCommand.IndexName, fieldDef.Name, bundle.Name)
@@ -6729,18 +6746,27 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		insertedCount := 0
 		skippedCount := 0
 		for documentID, document := range allDocuments {
-			// Extract the field value for indexing
-			fieldValue, err := extractFieldValueForIndex(*document, fieldDef.Name)
-			if err != nil {
-				s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, err)
-				continue
-			}
+			var keyBytes []byte
 
-			// Convert field value to bytes for BTree storage
-			keyBytes, err := convertValueToBytes(fieldValue)
-			if err != nil {
-				s.logger.Warnf("Failed to convert field value to bytes for document '%s': %v", documentID, err)
-				continue
+			if isComposite {
+				// Composite key: encode all field values with length prefixes
+				keyBytes, err = encodeCompositeKeyForIndex(*document, indexCommand.Fields)
+				if err != nil {
+					s.logger.Warnf("Failed to encode composite key for document '%s': %v", documentID, err)
+					continue
+				}
+			} else {
+				// Single-field key
+				fieldValue, fErr := extractFieldValueForIndex(*document, fieldDef.Name)
+				if fErr != nil {
+					s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, fErr)
+					continue
+				}
+				keyBytes, err = convertValueToBytes(fieldValue)
+				if err != nil {
+					s.logger.Warnf("Failed to convert field value to bytes for document '%s': %v", documentID, err)
+					continue
+				}
 			}
 
 			// Insert into the BTree index
@@ -6815,6 +6841,120 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 	return nil
 }
 
+// CreateBRINIndex creates a BRIN (Block Range INdex) on a field.
+// BRIN indexes store min/max per page range and are ideal for naturally ordered columns
+// (timestamps, sequential IDs). Tiny index size (~few KB for millions of docs).
+func CreateBRINIndex(s *BundleService, bundle *models.Bundle, indexCommand *models.CreateIndexCommand) error {
+	if len(indexCommand.Fields) == 0 {
+		return fmt.Errorf("no fields specified for BRIN index creation")
+	}
+	fieldDef := indexCommand.Fields[0]
+
+	// Validate that the field exists in the bundle structure
+	if bundle.DocumentStructure.FieldDefinitions != nil {
+		if _, exists := bundle.DocumentStructure.FieldDefinitions[fieldDef.Name]; !exists {
+			return fmt.Errorf("field '%s' does not exist in bundle '%s'", fieldDef.Name, bundle.Name)
+		}
+	}
+
+	s.logger.Debugf("Creating BRIN index '%s' on field '%s' for bundle '%s'",
+		indexCommand.IndexName, fieldDef.Name, bundle.Name)
+
+	databasePath := helpers.GetDatabaseFolderPath(bundle.Database.Name)
+	indexesPath := filepath.Join(databasePath, bundle.Name, "indexes", "brin")
+	if err := os.MkdirAll(indexesPath, 0755); err != nil {
+		return fmt.Errorf("failed to create BRIN indexes directory: %w", err)
+	}
+
+	ppr := indexCommand.PagesPerRange
+	if ppr == 0 {
+		ppr = 128
+	}
+
+	config := brinindex.BRINConfig{
+		IndexName:     indexCommand.IndexName,
+		BundleName:    bundle.Name,
+		DatabaseName:  bundle.Database.Name,
+		FieldName:     fieldDef.Name,
+		DataDir:       indexesPath,
+		PagesPerRange: ppr,
+		Logger:        s.logger,
+	}
+
+	brinIdx, err := brinindex.NewBRINIndex(config)
+	if err != nil {
+		return fmt.Errorf("failed to create BRIN index: %w", err)
+	}
+
+	// Backfill: iterate pages to build min/max per range (page-aware)
+	s.logger.Debugf("Populating BRIN index with documents from bundle '%s' (%d pages)", bundle.Name, bundle.PageCount)
+	insertedCount := 0
+	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
+		docs, snapErr := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
+		if snapErr != nil {
+			continue // page may not exist
+		}
+		for i := range docs {
+			doc := &docs[i]
+			if doc.Fields == nil {
+				continue
+			}
+			fieldValue, fErr := extractFieldValueForIndex(*doc, fieldDef.Name)
+			if fErr != nil {
+				continue
+			}
+			brinIdx.UpdateRange(pageID, fieldValue)
+			insertedCount++
+		}
+	}
+
+	s.logger.Debugf("BRIN index population complete: processed %d documents", insertedCount)
+
+	if err := brinIdx.Flush(); err != nil {
+		return fmt.Errorf("failed to persist BRIN index: %w", err)
+	}
+
+	// Register in bundle metadata
+	if bundle.Indexes == nil {
+		bundle.Indexes = make(map[string]models.IndexReference)
+	}
+
+	indexRef := models.IndexReference{
+		IndexName:     indexCommand.IndexName,
+		Fields:        indexCommand.Fields,
+		IndexType:     "brin",
+		CreateTime:    time.Now(),
+		IndexInstance: brinIdx,
+	}
+	bundle.Indexes[indexCommand.IndexName] = indexRef
+	bundle.IndexNames = append(bundle.IndexNames, indexCommand.IndexName)
+
+	err = s.store.UpdateBundleFile(bundle.Database, bundle)
+	if err != nil {
+		s.logger.Errorf("Failed to update bundle file after creating BRIN index: %v", err)
+		return fmt.Errorf("failed to update bundle file after creating BRIN index: %w", err)
+	}
+
+	s.logger.Debugf("Successfully created BRIN index '%s' on field '%s' for bundle '%s'",
+		indexCommand.IndexName, fieldDef.Name, bundle.Name)
+	return nil
+}
+
+// getBRINIndexForField looks up a BRIN index on the given field in the bundle's indexes.
+func (s *BundleService) getBRINIndexForField(bundle *models.Bundle, fieldName string) *brinindex.BRINIndex {
+	if bundle.Indexes == nil {
+		return nil
+	}
+	for _, indexRef := range bundle.Indexes {
+		if indexRef.IndexType == "brin" && len(indexRef.Fields) > 0 && indexRef.Fields[0].Name == fieldName {
+			if brin, ok := indexRef.IndexInstance.(*brinindex.BRINIndex); ok {
+				return brin
+			}
+		}
+	}
+	return nil
+}
+
 // extractFieldValueForIndex extracts the value of a specific field from a document
 // This function handles the document field structure and returns the raw value
 // for index key generation
@@ -6836,6 +6976,32 @@ func extractFieldValueForIndex(document models.Document, fieldName string) (inte
 	}
 
 	return field.Value, nil
+}
+
+// encodeCompositeKeyForIndex encodes multiple field values into a single composite key.
+// Each component is length-prefixed (4 bytes big-endian) for unambiguous decoding
+// and correct lexicographic ordering.
+func encodeCompositeKeyForIndex(document models.Document, fields []models.FieldDefinition) ([]byte, error) {
+	var buf []byte
+	for _, fd := range fields {
+		fieldValue, err := extractFieldValueForIndex(document, fd.Name)
+		if err != nil {
+			// Missing field: encode as 0-length component
+			lenBytes := make([]byte, 4)
+			binary.BigEndian.PutUint32(lenBytes, 0)
+			buf = append(buf, lenBytes...)
+			continue
+		}
+		encoded, err := convertValueToBytes(fieldValue)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode composite key component '%s': %w", fd.Name, err)
+		}
+		lenBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(lenBytes, uint32(len(encoded)))
+		buf = append(buf, lenBytes...)
+		buf = append(buf, encoded...)
+	}
+	return buf, nil
 }
 
 // fieldValueToIndexKeyString converts a value (possibly models.FieldValue from a document field)
@@ -11265,6 +11431,10 @@ func (s *BundleService) DeleteBundle(database *models.Database, bundleCommand *m
 				case *btreeindexV2.BTreeIndex:
 					if err := idx.Close(); err != nil {
 						s.logger.Warnf("Failed to close btree index '%s': %v", indexName, err)
+					}
+				case *brinindex.BRINIndex:
+					if err := idx.Close(); err != nil {
+						s.logger.Warnf("Failed to close BRIN index '%s': %v", indexName, err)
 					}
 				}
 			}

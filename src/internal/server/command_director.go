@@ -293,6 +293,20 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					fmt.Sprintf("unknown command format: %s", command),
 					errors.LayerCommand).WithContext("command", command)
 			}
+		case "brin":
+			// CREATE BRIN INDEX
+			if len(firstWords) >= 3 && strings.ToLower(firstWords[2]) == "index" {
+				result1, err := CreateBRINIndex(command, logger, serviceManager, database)
+				if err != nil {
+					return result1, err
+				} else {
+					return result1, nil
+				}
+			} else {
+				return &result, errors.New(errors.ERR_VALIDATION_SYNTAX,
+					fmt.Sprintf("unknown command format: %s", command),
+					errors.LayerCommand).WithContext("command", command)
+			}
 		case "h-index":
 			result1, err, shouldReturn := CreateHashIndex(command, logger, serviceManager, database)
 			if shouldReturn {
