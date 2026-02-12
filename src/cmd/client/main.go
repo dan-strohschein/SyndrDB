@@ -25,6 +25,8 @@ func main() {
 	flag.StringVar(&args.Username, "username", "user", "Username")
 	flag.StringVar(&args.Password, "password", "password", "Password")
 	flag.BoolVar(&args.PrettyPrintResults, "pretty_print", true, "Pretty print JSON results with indentation (default: true)")
+	flag.BoolVar(&args.Compress, "compress", false, "Enable zstd response compression")
+	flag.BoolVar(&args.Pipeline, "pipeline", false, "Enable pipeline mode (READY sentinel framing for batch commands)")
 	// Parse the command line
 	flag.Parse()
 
@@ -42,6 +44,28 @@ func main() {
 
 	//Parse the connection String if provided
 	if args.ConnectionString != "" {
+		// Append compression option if --compress flag is set
+		if args.Compress && !strings.Contains(args.ConnectionString, "compress=") {
+			// Connection string format: syndrdb://host:port:db:user:pass[:options]
+			// Append :compress=zstd as the 6th colon-separated field
+			trimmed := strings.TrimSuffix(args.ConnectionString, ";")
+			trimmed = strings.TrimSpace(trimmed)
+			args.ConnectionString = trimmed + ":compress=zstd"
+		}
+
+		// Append pipeline option if --pipeline flag is set
+		if args.Pipeline && !strings.Contains(args.ConnectionString, "pipeline=") {
+			trimmed := strings.TrimSuffix(args.ConnectionString, ";")
+			trimmed = strings.TrimSpace(trimmed)
+			// If options field already exists (6th colon-separated field), append with &
+			parts := strings.Split(strings.TrimPrefix(trimmed, "syndrdb://"), ":")
+			if len(parts) > 5 {
+				args.ConnectionString = trimmed + "&pipeline=true"
+			} else {
+				args.ConnectionString = trimmed + ":pipeline=true"
+			}
+		}
+
 		// Parse the connection string and set the fields accordingly
 		err := internal.ValidateConnectionString(args.ConnectionString)
 		if err != nil {
@@ -70,6 +94,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer dbClient.Close()
+
+	// Set pipeline mode on the client if requested
+	dbClient.PipelineMode = args.Pipeline
 
 	// Send connection string to the server immediately after connecting
 	connectionCommand := fmt.Sprintf("%s;\n", args.ConnectionString)
@@ -174,6 +201,11 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 	for !done {
 		select {
 		case message := <-messageChan:
+			// Pipeline mode: skip READY sentinel (it's a framing marker, not content)
+			if strings.TrimSpace(message) == "READY" {
+				continue
+			}
+
 			// Check if this is a streamed response (large chunk, typically 4096 bytes)
 			isLargeChunk := len(message) >= 4096
 

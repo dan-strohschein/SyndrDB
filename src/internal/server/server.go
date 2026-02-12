@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -32,6 +33,7 @@ import (
 	"syndrdb/src/internal/registry"
 
 	"github.com/dan-strohschein/HVJson/hvjson"
+	"github.com/klauspost/compress/zstd"
 
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
@@ -67,6 +69,25 @@ func hvjsonMarshal(v interface{}) ([]byte, error) {
 	return data, nil
 }
 
+// zstdEncoderPool reuses zstd encoders (level 1 = SpeedFastest) across queries.
+// Encoders are ~4KB each; pooling avoids re-initialization overhead.
+var zstdEncoderPool = sync.Pool{
+	New: func() interface{} {
+		enc, _ := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+		return enc
+	},
+}
+
+// compressBufPool reuses bytes.Buffers for zstd compression output.
+var compressBufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
+	},
+}
+
+// compressionDisabled is checked once at startup from SYNDRDB_NO_COMPRESS env var.
+var compressionDisabled = os.Getenv("SYNDRDB_NO_COMPRESS") == "1"
+
 // Server represents the main TCP server for SyndrDB
 type Server struct {
 	Host                  string
@@ -100,17 +121,19 @@ type Server struct {
 
 // Connection represents an active client connection
 type Connection struct {
-	ID           string
-	Conn         net.Conn
-	Reader       *bufio.Reader
-	Writer       *bufio.Writer
-	DatabaseName string
-	Database     *models.Database // Current database for this connection
-	User         string
-	Authorized   bool
-	Session      *Session // Associated session
-	LastActive   time.Time
-	Logger       *zap.SugaredLogger
+	ID               string
+	Conn             net.Conn
+	Reader           *bufio.Reader
+	Writer           *bufio.Writer
+	DatabaseName     string
+	Database         *models.Database // Current database for this connection
+	User             string
+	Authorized       bool
+	CompressResponse bool // When true, streaming responses are zstd-compressed
+	PipelineMode     bool // When true, send READY sentinel after each response for pipeline framing
+	Session          *Session // Associated session
+	LastActive       time.Time
+	Logger           *zap.SugaredLogger
 }
 
 // ConnectionString represents parsed MongoDB connection string
@@ -1131,9 +1154,14 @@ func (s *Server) acceptConnections() {
 
 // handleConnection processes a single client connection
 func (s *Server) handleConnection(conn net.Conn) {
+	// TCP_NODELAY: Disable Nagle's algorithm to avoid batching small writes (up to 40ms delay).
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
 	connID := generateConnectionID()
 	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
+	writer := bufio.NewWriterSize(conn, 262144) // 256KB buffer reduces TCP write syscalls from ~7500 to ~115 for 30MB responses
 
 	// Create a connection-specific logger with connection ID context
 	// Create a connection-specific logger with connection ID context
@@ -1288,129 +1316,146 @@ func (s *Server) handleConnection(conn net.Conn) {
 		case line, ok := <-dataCh:
 			if !ok {
 				// Channel closed
-
 				goto cleanup
 			}
-			// Process the line
-			//connLogger.Infof("DEBUG DEBUG DEBUG \n\n\n Received: %s", line)
 
-			// Your existing logic for handling commands
-			//When the client connects, it should send the connection string
-			//as the first command.
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "syndrdb://") {
-				connLogger.Debug("Reading connection string")
-				//TODO fix this - its sending the connection string attached to the first command sent.
-				connStr, err := parseConnectionString(s, line)
-				if err != nil {
-					connLogger.Errorw("Error parsing connection string", "error", err, "input", line)
-					connLogger.Sync()
-					s.sendError(writer, errors.Wrap(err, errors.ERR_VALIDATION_SYNTAX, errors.LayerAPI).WithContext("input", line))
-					// Give TCP stack time to send the data
-					time.Sleep(100 * time.Millisecond)
-					goto cleanup
-				}
-
-				connLogger.Infof("Client %s Connected", connection.ID)
-				connLogger.Infof("Database: %s", connStr.Database)
-				connLogger.Infof("User: %s", connStr.Username)
-
-				connLogger.Sync()
-
-				// Read client input
-
-				//line = strings.TrimSpace(line)
-				connection.LastActive = time.Now()
-				connection.DatabaseName = connStr.Database
-				//connection.Database = s.Databases[connStr.Database]
-
-				connection.User = connStr.Username
-
-				//if connection.Authorized { }
-
-				//if !strings.EqualFold(connStr.Database, "primary") {
-				db, err := s.databaseService.GetDatabaseByName(connStr.Database)
-				if err != nil {
-					s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", connStr.Database), errors.LayerAPI))
-					goto cleanup
-				}
-				if db == nil {
-					s.sendError(writer, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' does not exist", connStr.Database), errors.LayerAPI))
-					goto cleanup
-				}
-				connection.Database = db
-				//}
-
-				// TODO: IF the db is legit, check to see if the user is allowed to access it
-				clientIP := ExtractIPFromConn(connection.Conn)
-
-				// Use enhanced authentication with rate limiting and progressive delays
-				if s.AuthEnabled {
-					err := s.authenticateWithIP(connStr.Username, connStr.Password, clientIP)
-					if err != nil {
-						// Check if this is a rate limiting error for better user feedback
-						if authErr, ok := err.(*auth.AuthLockoutError); ok {
-							var authError errors.SyndrDBError
-							switch authErr.Type {
-							case "user":
-								authError = errors.New(errors.ERR_AUTH_LOCKOUT, fmt.Sprintf("Account locked until %s due to too many failed attempts", authErr.LockedUntil.Format("15:04:05")), errors.LayerAuth)
-							case "ip":
-								authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, fmt.Sprintf("IP address blocked until %s due to suspicious activity", authErr.LockedUntil.Format("15:04:05")), errors.LayerAuth)
-							case "delay":
-								authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, fmt.Sprintf("Too many attempts. Please wait %s before trying again", authErr.Delay.String()), errors.LayerAuth)
-							default:
-								authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, "Authentication blocked due to security restrictions", errors.LayerAuth)
-							}
-							s.sendError(writer, authError)
-						} else {
-							s.sendError(writer, errors.New(errors.ERR_AUTH_FAILED, "Authentication failed", errors.LayerAuth))
+			// Batch-drain: collect all immediately-available commands for pipeline processing.
+			// If the client sent multiple \x04-terminated commands in one TCP write, the reader
+			// goroutine has already split them and pushed each to dataCh. We drain them all here
+			// so they are processed in a single batch without returning to the select loop.
+			{
+				batch := []string{strings.TrimSpace(line)}
+				channelClosed := false
+			drainLoop:
+				for {
+					select {
+					case nextLine, nextOk := <-dataCh:
+						if !nextOk {
+							channelClosed = true
+							break drainLoop
 						}
-						goto cleanup
+						batch = append(batch, strings.TrimSpace(nextLine))
+					default:
+						break drainLoop
 					}
 				}
 
-				// Create a session for the authenticated user with IP binding
-				connectionFingerprint := ExtractConnectionFingerprint(connection.Conn)
+				// Process batch in order, sending each result before the next command
+				for _, cmd := range batch {
+					if strings.HasPrefix(cmd, "syndrdb://") {
+						connLogger.Debug("Reading connection string")
+						connStr, err := parseConnectionString(s, cmd)
+						if err != nil {
+							connLogger.Errorw("Error parsing connection string", "error", err, "input", cmd)
+							connLogger.Sync()
+							s.sendError(writer, errors.Wrap(err, errors.ERR_VALIDATION_SYNTAX, errors.LayerAPI).WithContext("input", cmd))
+							// Give TCP stack time to send the data
+							time.Sleep(100 * time.Millisecond)
+							goto cleanup
+						}
 
-				session, err := s.SessionManager.CreateSession(
-					connStr.Username,
-					connStr.Username, // Using username as userID for now
-					connStr.Database,
-					connection.Database,
-					connection.ID,
-					s.SessionTimeout,
-					clientIP,
-					connectionFingerprint,
-				)
-				if err != nil {
-					s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_INTERNAL, "Failed to create session", errors.LayerAPI))
-					goto cleanup
+						connLogger.Infof("Client %s Connected", connection.ID)
+						connLogger.Infof("Database: %s", connStr.Database)
+						connLogger.Infof("User: %s", connStr.Username)
+
+						connLogger.Sync()
+
+						connection.LastActive = time.Now()
+						connection.DatabaseName = connStr.Database
+						connection.User = connStr.Username
+
+						db, err := s.databaseService.GetDatabaseByName(connStr.Database)
+						if err != nil {
+							s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' not found", connStr.Database), errors.LayerAPI))
+							goto cleanup
+						}
+						if db == nil {
+							s.sendError(writer, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database '%s' does not exist", connStr.Database), errors.LayerAPI))
+							goto cleanup
+						}
+						connection.Database = db
+
+						clientIP := ExtractIPFromConn(connection.Conn)
+
+						// Use enhanced authentication with rate limiting and progressive delays
+						if s.AuthEnabled {
+							err := s.authenticateWithIP(connStr.Username, connStr.Password, clientIP)
+							if err != nil {
+								if authErr, ok := err.(*auth.AuthLockoutError); ok {
+									var authError errors.SyndrDBError
+									switch authErr.Type {
+									case "user":
+										authError = errors.New(errors.ERR_AUTH_LOCKOUT, fmt.Sprintf("Account locked until %s due to too many failed attempts", authErr.LockedUntil.Format("15:04:05")), errors.LayerAuth)
+									case "ip":
+										authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, fmt.Sprintf("IP address blocked until %s due to suspicious activity", authErr.LockedUntil.Format("15:04:05")), errors.LayerAuth)
+									case "delay":
+										authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, fmt.Sprintf("Too many attempts. Please wait %s before trying again", authErr.Delay.String()), errors.LayerAuth)
+									default:
+										authError = errors.New(errors.ERR_AUTH_RATE_LIMIT, "Authentication blocked due to security restrictions", errors.LayerAuth)
+									}
+									s.sendError(writer, authError)
+								} else {
+									s.sendError(writer, errors.New(errors.ERR_AUTH_FAILED, "Authentication failed", errors.LayerAuth))
+								}
+								goto cleanup
+							}
+						}
+
+						// Create a session for the authenticated user with IP binding
+						connectionFingerprint := ExtractConnectionFingerprint(connection.Conn)
+
+						session, err := s.SessionManager.CreateSession(
+							connStr.Username,
+							connStr.Username, // Using username as userID for now
+							connStr.Database,
+							connection.Database,
+							connection.ID,
+							s.SessionTimeout,
+							clientIP,
+							connectionFingerprint,
+						)
+						if err != nil {
+							s.sendError(writer, errors.WrapWithMessage(err, errors.ERR_INTERNAL, "Failed to create session", errors.LayerAPI))
+							goto cleanup
+						}
+
+						connection.Authorized = true
+						connection.DatabaseName = connStr.Database
+						connection.User = connStr.Username
+						connection.Session = session
+						connection.Logger = connLogger.Desugar().Sugar()
+						connection.CompressResponse = !compressionDisabled && settings.GetSettings().EnableResponseCompression && connStr.Options["compress"] == "zstd"
+						connection.PipelineMode = connStr.Options["pipeline"] == "true"
+
+						connLogger.Infow("Client authenticated and session created",
+							"user", connection.User,
+							"database", connection.DatabaseName,
+							"sessionID", session.SessionID,
+							"pipelineMode", connection.PipelineMode)
+
+						sendSuccess(writer, fmt.Sprintf("Authentication successful - Session: %s", session.SessionID))
+						continue // next command in batch
+					}
+
+					// Process command for authenticated clients
+					result, err := s.processCommand(connection, cmd)
+					if err != nil {
+						s.sendError(writer, err)
+					} else {
+						sendResult(writer, result, connLogger, connection.CompressResponse)
+					}
+
+					// Pipeline mode: send READY sentinel after each response so the client
+					// can unambiguously determine response boundaries in a multi-result stream.
+					if connection.PipelineMode {
+						writer.WriteString("READY\n")
+						writer.Flush()
+					}
 				}
 
-				connection.Authorized = true
-				connection.DatabaseName = connStr.Database
-				connection.User = connStr.Username
-				connection.Session = session
-				connection.Logger = connLogger.Desugar().Sugar()
-
-				connLogger.Infow("Client authenticated and session created",
-					"user", connection.User,
-					"database", connection.DatabaseName,
-					"sessionID", session.SessionID)
-
-				sendSuccess(writer, fmt.Sprintf("Authentication successful - Session: %s", session.SessionID))
-				continue
-
-			}
-
-			// Process command for authenticated clients
-			//log.Printf("Processing command from %s: %s", connection.ID, line)
-			result, err := s.processCommand(connection, line)
-			if err != nil {
-				// Convert error to SyndrDBError and send using error framework
-				s.sendError(writer, err)
-			} else {
-				sendResult(writer, result, connLogger)
+				if channelClosed {
+					goto cleanup
+				}
 			}
 		case err, ok := <-errCh:
 			if !ok {
@@ -1654,8 +1699,16 @@ func parseConnectionString(server *Server, connStr string) (ConnectionString, er
 
 	result.Username = optionsParts[3]
 	result.Password = optionsParts[4]
-	// TODO Check to make sure the user exists
-	// TODO Check to make sure the user has access to the database
+
+	// Optional 6th field: key=value options (e.g., "compress=zstd")
+	if len(optionsParts) > 5 {
+		for _, opt := range strings.Split(optionsParts[5], "&") {
+			opt = strings.TrimSpace(opt)
+			if kv := strings.SplitN(opt, "=", 2); len(kv) == 2 {
+				result.Options[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+			}
+		}
+	}
 
 	return result, nil
 }
@@ -1731,7 +1784,7 @@ func sendSuccess(writer *bufio.Writer, message string) {
 	writer.Flush()
 }
 
-func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLogger) {
+func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLogger, compress bool) {
 	var data []byte
 
 	// PHASE A: Return pooled maps after JSON marshaling (no closure = no allocation)
@@ -1750,7 +1803,36 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 	switch typedResult := result.(type) {
 	case *CommandResponse:
 		// PHASE H: Check if we can use streaming encoder
+		// Prefer StreamSlice (cache-friendly sequential iteration) over StreamDocuments (random map iteration)
+		if len(typedResult.StreamSlice) > 0 {
+			if compress {
+				sendResultCompressed(writer, typedResult, typedResult.StreamSlice, nil, logger)
+				return
+			}
+			writer.WriteString("{\"ResultCount\":")
+			writer.WriteString(strconv.Itoa(typedResult.ResultCount))
+			writer.WriteString(",\"Result\":")
+
+			err := helpers.StreamDocumentSliceToJSON(writer, typedResult.StreamSlice, typedResult.StreamFields)
+			if err != nil {
+				logger.Errorf("Failed to stream document slice: %v", err)
+				data, _ = hvjsonMarshal(result)
+				writer.WriteString(string(data) + "\n")
+				writer.Flush()
+				return
+			}
+
+			writer.WriteString(",\"ExecutionTimeMS\":")
+			writer.WriteString(strconv.FormatFloat(typedResult.ExecutionTimeMS, 'f', 2, 64))
+			writer.WriteString("}\n")
+			writer.Flush()
+			return
+		}
 		if len(typedResult.StreamDocuments) > 0 {
+			if compress {
+				sendResultCompressed(writer, typedResult, nil, typedResult.StreamDocuments, logger)
+				return
+			}
 			// Stream documents directly to JSON without intermediate maps
 			writer.WriteString("{\"ResultCount\":")
 			writer.WriteString(strconv.Itoa(typedResult.ResultCount))
@@ -1799,6 +1881,61 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 		writer.WriteString(string(data) + "\n")
 		writer.Flush()
 	}
+}
+
+// sendResultCompressed compresses the entire JSON response with zstd and sends it
+// using the ZSTD:<length>\n<compressed bytes>\n wire format.
+func sendResultCompressed(writer *bufio.Writer, resp *CommandResponse, slice []*models.Document, docMap map[string]*models.Document, logger *zap.SugaredLogger) {
+	// Get pooled compression buffer and encoder
+	compBuf := compressBufPool.Get().(*bytes.Buffer)
+	compBuf.Reset()
+	defer compressBufPool.Put(compBuf)
+
+	zw := zstdEncoderPool.Get().(*zstd.Encoder)
+	zw.Reset(compBuf)
+	defer zstdEncoderPool.Put(zw)
+
+	// Write the entire JSON response into the zstd writer
+	zw.Write([]byte("{\"ResultCount\":"))
+	zw.Write([]byte(strconv.Itoa(resp.ResultCount)))
+	zw.Write([]byte(",\"Result\":"))
+
+	var streamErr error
+	if len(slice) > 0 {
+		streamErr = helpers.StreamDocumentSliceToJSON(zw, slice, resp.StreamFields)
+	} else {
+		streamErr = helpers.StreamDocumentsToJSON(zw, docMap, resp.StreamFields)
+	}
+	if streamErr != nil {
+		logger.Errorf("Failed to stream documents for compression: %v", streamErr)
+		// Fallback to uncompressed
+		data, _ := hvjsonMarshal(resp)
+		writer.WriteString(string(data) + "\n")
+		writer.Flush()
+		return
+	}
+
+	zw.Write([]byte(",\"ExecutionTimeMS\":"))
+	zw.Write([]byte(strconv.FormatFloat(resp.ExecutionTimeMS, 'f', 2, 64)))
+	zw.Write([]byte("}"))
+
+	if err := zw.Close(); err != nil {
+		logger.Errorf("zstd compression failed: %v", err)
+		data, _ := hvjsonMarshal(resp)
+		writer.WriteString(string(data) + "\n")
+		writer.Flush()
+		return
+	}
+
+	compressed := compBuf.Bytes()
+
+	// Write ZSTD:<length>\n header followed by compressed bytes and \n
+	writer.WriteString("ZSTD:")
+	writer.WriteString(strconv.Itoa(len(compressed)))
+	writer.WriteByte('\n')
+	writer.Write(compressed)
+	writer.WriteByte('\n')
+	writer.Flush()
 }
 
 // Secure password hashing using Argon2id

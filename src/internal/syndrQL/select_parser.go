@@ -27,6 +27,9 @@ type SelectStatement struct {
 	GroupBy          []string       // GROUP BY fields
 	Having           Expression     // HAVING clause
 
+	// Locking
+	ForUpdate bool // FOR UPDATE clause - acquire row locks for subsequent modification
+
 	// Pattern recognition metadata
 	Pattern    SelectPattern // Recognized query pattern
 	Complexity int           // Estimated execution cost
@@ -622,6 +625,13 @@ func (p *SelectParser) parseOptionalClauses(stmt *SelectStatement, logger *zap.S
 		}
 	}
 
+	// Parse FOR UPDATE (if present)
+	if p.current.Type == TOKEN_FOR {
+		if err := p.parseForUpdateClause(stmt); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -807,6 +817,22 @@ func (p *SelectParser) parseOffsetClause(stmt *SelectStatement) error {
 	}
 	p.advance()
 
+	return nil
+}
+
+// parseForUpdateClause parses FOR UPDATE clause
+// Syntax: FOR UPDATE
+// This clause requests row-level locks on all returned documents,
+// allowing the transaction to subsequently modify them without conflict.
+func (p *SelectParser) parseForUpdateClause(stmt *SelectStatement) error {
+	p.advance() // consume FOR
+
+	if p.current.Type != TOKEN_UPDATE {
+		return fmt.Errorf("expected UPDATE after FOR, got %s", p.current.Type.String())
+	}
+	p.advance() // consume UPDATE
+
+	stmt.ForUpdate = true
 	return nil
 }
 

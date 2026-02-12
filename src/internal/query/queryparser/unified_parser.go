@@ -135,6 +135,9 @@ type UnifiedSelectQuery struct {
 	TopCount int // SELECT TOP N (legacy syntax)
 	Limit    int // LIMIT N (standard SQL syntax)
 	Offset   int // OFFSET M (pagination)
+
+	// Locking
+	ForUpdate bool // FOR UPDATE - acquire row locks for subsequent modification
 }
 
 // ParseUnifiedSelectQuery parses any SELECT query variation into a unified structure

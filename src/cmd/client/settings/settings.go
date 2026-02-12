@@ -12,6 +12,8 @@ type Arguments struct {
 	Command            string   `json:"command"`
 	CommandArgs        []string `json:"commandArgs"`
 	PrettyPrintResults bool     `json:"pretty_print_results"`
+	Compress           bool     `json:"compress"`
+	Pipeline           bool     `json:"pipeline"`
 }
 
 var (

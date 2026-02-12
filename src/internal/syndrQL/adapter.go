@@ -70,6 +70,9 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 		TopCount: stmt.TopN,
 		Limit:    stmt.Limit,
 		Offset:   stmt.Offset,
+
+		// Map locking
+		ForUpdate: stmt.ForUpdate,
 	}
 
 	// Convert WHERE clause if present - Store Expression directly

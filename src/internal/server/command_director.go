@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"runtime"
-	"runtime/debug"
 	"sort"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
@@ -19,6 +17,11 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// largeScanSem limits concurrent large-result streaming queries.
+// Cap of 15 means max ~450MB concurrent JSON (15 x 30MB) instead of 900MB (30 x 30MB).
+// Balances GC pressure reduction against queue-induced tail latency.
+var largeScanSem = make(chan struct{}, 15)
 
 // Helper function for debugging
 func getKeys(m map[string]interface{}) []string {
@@ -69,10 +72,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// during read-only workloads, preventing false "server idle" triggers.
 	if serviceManager.BundleService != nil {
 		serviceManager.BundleService.RecordActivity()
-		// Flush pending hash index updates after every command so index entries reach disk
-		// before we return. Otherwise with batch size 500 and 10s interval, inserts < 500
-		// never flush; after restart the index is empty and lookups miss.
-		defer serviceManager.BundleService.ForceFlushIndexUpdates()
+		// NOTE: ForceFlushIndexUpdates is called explicitly in write handlers (ADD, UPDATE, DELETE, COMMIT)
+		// rather than on every command. This eliminates indexUpdateMutex contention for read paths.
 	}
 
 	if database == nil {
@@ -322,8 +323,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		}
 		switch strings.ToLower(firstWords[1]) {
 		case "document":
-
-			return AddDocument(firstWords, command, logger, serviceManager, database, session)
+			result1, err := AddDocument(firstWords, command, logger, serviceManager, database, session)
+			if serviceManager.BundleService != nil {
+				serviceManager.BundleService.ForceFlushIndexUpdates()
+			}
+			return result1, err
 		case "user":
 			return AddUser(command, logger, serviceManager)
 		}
@@ -489,7 +493,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			*/
 
 			result1, err := UpdateDocument(firstWords, serviceManager, database, command, logger, session, startTime)
-
+			if serviceManager.BundleService != nil {
+				serviceManager.BundleService.ForceFlushIndexUpdates()
+			}
 			return result1, err
 
 		case "user":
@@ -861,6 +867,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					deletedCount, bundleName, idsJSON)
 			}
 
+			// Flush index updates after delete
+			if serviceManager.BundleService != nil {
+				serviceManager.BundleService.ForceFlushIndexUpdates()
+			}
+
 			// Return proper CommandResponse with ExecutionTimeMS
 			cmdResponse := &CommandResponse{
 				ResultCount:     deletedCount,
@@ -1110,9 +1121,43 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		}()
 	}
 
-	// Execute the plan with context
+	// Determine streaming eligibility early (needed for semaphore + ExecuteSlice decisions)
+	useStreaming := !query.IsCountOnly && !query.HasOrderBy()
+
+	// Throttle concurrent large-result streaming queries to reduce GC pressure and TCP contention.
+	// Only applies to non-GROUP BY, non-aggregate streaming queries (full scan results).
+	if useStreaming && !query.HasGroupBy() && !query.IsAggregateOnly {
+		select {
+		case largeScanSem <- struct{}{}:
+			defer func() { <-largeScanSem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Execute the plan with context.
+	// When streaming and the root node supports slice execution, use ExecuteSlice
+	// to avoid O(n) map insertion overhead and get cache-friendly sequential iteration.
 	execStart := time.Now()
-	documents, err := plan.RootNode.Execute(ctx)
+	var documents map[string]*models.Document
+	var streamSliceDocs []*models.Document
+	if useStreaming {
+		if sliceNode, ok := plan.RootNode.(planner.SliceExecutionNode); ok {
+			var sliceDocIDs []string
+			streamSliceDocs, sliceDocIDs, err = sliceNode.ExecuteSlice(ctx)
+			_ = sliceDocIDs
+			if err == nil {
+				// Build documents map for compatibility (transaction locks, count, etc.)
+				documents = make(map[string]*models.Document, len(streamSliceDocs))
+				for _, doc := range streamSliceDocs {
+					documents[doc.DocumentID] = doc
+				}
+			}
+		}
+	}
+	if streamSliceDocs == nil && err == nil {
+		documents, err = plan.RootNode.Execute(ctx)
+	}
 	execDuration := time.Since(execStart)
 	if serviceManager.UnifiedPlanner != nil {
 		serviceManager.UnifiedPlanner.RecordPlanStats(plan, execDuration)
@@ -1163,11 +1208,10 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 
 	logger.Debugf("Query executed successfully: Retrieved %d documents", len(documents))
 
-	// TRANSACTION SUPPORT: Acquire read locks for documents accessed in a transaction
-	// This ensures repeatable read isolation - prevents other transactions from modifying
-	// documents that this transaction has read
-	if session != nil && session.IsInTransaction() {
-		// Extract bundle name from query for lock acquisition
+	// FOR UPDATE: Acquire read locks only when explicitly requested via SELECT ... FOR UPDATE.
+	// Ordinary SELECT relies on MVCC snapshot isolation for consistent reads without locking.
+	// This follows PostgreSQL's model: readers never block writers, writers never block readers.
+	if query.ForUpdate && session != nil && session.IsInTransaction() {
 		bundleName := query.FromBundle
 		for docID := range documents {
 			if err := serviceManager.LockManager.AcquireReadLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
@@ -1176,7 +1220,11 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 					errors.LayerTransaction).WithContext("document_id", docID)
 			}
 		}
-		logger.Debugf("Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
+		logger.Debugf("FOR UPDATE: Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
+	} else if query.ForUpdate && (session == nil || !session.IsInTransaction()) {
+		return nil, errors.New(errors.ERR_TRANSACTION_CONFLICT,
+			"FOR UPDATE requires an active transaction (use BEGIN TRANSACTION first)",
+			errors.LayerCommand)
 	}
 
 	// EXPRESSION-ONLY SELECT: Handle queries without FROM clause
@@ -1199,13 +1247,6 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			}, nil
 		}
 	}
-
-	// PHASE H: For simple SELECT queries, stream documents directly without intermediate transform
-	// Only use streaming when:
-	// 1. Not a COUNT query (needs aggregation)
-	// 2. No ORDER BY (would need sorting which requires materialized slice)
-	// Streaming eliminates ~300 allocations by skipping the map[string]interface{} intermediate layer
-	useStreaming := !query.IsCountOnly && !query.HasOrderBy()
 
 	// CRITICAL FIX: For GROUP BY queries, merge SelectFields with aggregate field names
 	// Aggregate fields (MIN, MAX, COUNT, SUM, AVG) are not in SelectFields but need to be included in results
@@ -1330,10 +1371,16 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 
 	// PHASE H: For streaming path, store documents for direct encoding
 	if useStreaming {
-		cmdResponse.StreamDocuments = documents
+		if streamSliceDocs != nil {
+			// Prefer slice path: cache-friendly sequential iteration, no map overhead
+			cmdResponse.StreamSlice = streamSliceDocs
+			cmdResponse.ResultCount = len(streamSliceDocs)
+		} else {
+			cmdResponse.StreamDocuments = documents
+			cmdResponse.ResultCount = len(documents)
+		}
 		cmdResponse.StreamFields = selectedFields // Use merged fields (includes aggregates)
-		cmdResponse.ResultCount = len(documents)
-		// NOTE: StreamDocuments is used by sendResult() for efficient JSON streaming.
+		// NOTE: StreamDocuments/StreamSlice is used by sendResult() for efficient JSON streaming.
 		// We do NOT populate Result here to avoid double-work (40,000+ allocations for large JOINs).
 		// If Result is needed (e.g., for E2E tests calling SelectDocuments directly),
 		// the caller should check StreamDocuments and transform if needed.
@@ -1349,33 +1396,6 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 
 	// Record memory tracking metrics for successful queries
 	memoryTracker.RecordMetrics(cmdResponse.ResultCount)
-
-	// MEMORY CLEANUP: Force garbage collection and return memory to OS after query execution
-	// This prevents memory spikes from accumulating across queries, especially under high concurrency
-	// We only do this for large result sets (>1000 docs) or when projected memory is high (>50% of limit)
-	// to avoid performance impact for small queries
-	projectedMemory := memoryTracker.ProjectTotalMemory(cmdResponse.ResultCount)
-	shouldCleanup := cmdResponse.ResultCount > 1000 || projectedMemory > memoryLimit/2
-
-	if shouldCleanup {
-		// Clear large intermediate variables to help GC identify unreachable memory
-		documents = nil
-		flattenedDocs = nil
-		sortedDocs = nil // Clear if it exists
-
-		// Force GC to free heap memory
-		// This marks unreachable objects and makes them available for reallocation
-		runtime.GC()
-
-		// Try to return memory to OS (Linux/Unix: calls madvise MADV_DONTNEED)
-		// This reduces RSS (Resident Set Size) shown by OS monitoring tools
-		// Note: Go runtime may not return all memory immediately due to fragmentation
-		// or because it's holding onto memory for reuse (memory pressure management)
-		debug.FreeOSMemory()
-
-		logger.Debugf("Memory cleanup completed: freed memory after query with %d results (projected memory was %d bytes, limit %d bytes)",
-			cmdResponse.ResultCount, projectedMemory, memoryLimit)
-	}
 
 	return cmdResponse, nil
 
@@ -1585,8 +1605,10 @@ func ExecutePreparedQuery(
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", preparedStmt.ParsedQuery.FromBundle)
 	}
 
-	// Acquire read locks for documents in transaction (if applicable)
-	if session != nil && session.IsInTransaction() {
+	// FOR UPDATE: Acquire read locks only for prepared statements with FOR UPDATE.
+	// Ordinary SELECT relies on MVCC snapshot isolation for consistent reads.
+	query := preparedStmt.ParsedQuery
+	if query.ForUpdate && session != nil && session.IsInTransaction() {
 		bundleName := preparedStmt.BundleName
 		for docID := range documents {
 			if err := serviceManager.LockManager.AcquireReadLock(bundleName, docID, session.ActiveTransactionID, session.SessionID); err != nil {
@@ -1595,11 +1617,10 @@ func ExecutePreparedQuery(
 					errors.LayerTransaction).WithContext("document_id", docID)
 			}
 		}
-		logger.Debugf("Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
+		logger.Debugf("FOR UPDATE: Acquired read locks for %d documents in transaction %s", len(documents), session.ActiveTransactionID)
 	}
 
 	// Transform documents to flat format with projection
-	query := preparedStmt.ParsedQuery
 	selectedFields := query.SelectFields
 	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
 

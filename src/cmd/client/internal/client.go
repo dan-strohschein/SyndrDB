@@ -3,20 +3,37 @@ package internal
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
+
+// zstdDecoder is a package-level singleton for decompressing zstd-compressed responses.
+// zstd.Decoder is goroutine-safe after creation.
+var zstdDecoder *zstd.Decoder
+
+func init() {
+	var err error
+	zstdDecoder, err = zstd.NewReader(nil)
+	if err != nil {
+		panic("failed to create zstd decoder: " + err.Error())
+	}
+}
 
 // Client represents a TCP connection to the database server
 type Client struct {
-	conn     net.Conn
-	reader   *bufio.Reader
-	host     string
-	port     int
-	database string
-	username string
-	password string
+	conn         net.Conn
+	reader       *bufio.Reader
+	host         string
+	port         int
+	database     string
+	username     string
+	password     string
+	PipelineMode bool // When true, expect READY sentinel between pipeline responses
 }
 
 // NewClient creates a new client instance
@@ -146,7 +163,9 @@ func escapeParameterValue(value string) string {
 	return result.String()
 }
 
-// ReceiveResponse reads the server's response as a string
+// ReceiveResponse reads the server's response as a string.
+// Detects zstd-compressed responses (ZSTD:<length>\n<compressed bytes>\n)
+// and decompresses them transparently.
 func (c *Client) ReceiveResponse() (string, error) {
 	if c.conn == nil {
 		return "", fmt.Errorf("not connected to server")
@@ -158,17 +177,42 @@ func (c *Client) ReceiveResponse() (string, error) {
 		return "", fmt.Errorf("failed to set read deadline: %w", err)
 	}
 
-	// Read response line by line until we get an empty line or a specific terminator
-	// Adjust this logic based on your server's protocol
-	var responseBuilder strings.Builder
-
-	// For simple line-based protocols:
-	response, err := c.reader.ReadString('\n')
+	// Read the first line — either raw JSON or ZSTD:<length> header
+	line, err := c.reader.ReadString('\n')
 	if err != nil {
 		return "", fmt.Errorf("failed to read server response: %w", err)
 	}
 
-	responseBuilder.WriteString(response)
+	// Check for zstd-compressed response
+	if strings.HasPrefix(line, "ZSTD:") {
+		// Parse compressed length from "ZSTD:<length>\n"
+		lengthStr := strings.TrimSpace(strings.TrimPrefix(line, "ZSTD:"))
+		compLen, parseErr := strconv.Atoi(lengthStr)
+		if parseErr != nil {
+			return "", fmt.Errorf("invalid ZSTD header length: %w", parseErr)
+		}
+
+		// Read exactly compLen bytes of compressed data
+		compressed := make([]byte, compLen)
+		_, readErr := io.ReadFull(c.reader, compressed)
+		if readErr != nil {
+			return "", fmt.Errorf("failed to read compressed data: %w", readErr)
+		}
+
+		// Read the trailing newline
+		c.reader.ReadByte()
+
+		// Decompress
+		decompressed, decErr := zstdDecoder.DecodeAll(compressed, nil)
+		if decErr != nil {
+			return "", fmt.Errorf("zstd decompression failed: %w", decErr)
+		}
+
+		// Reset the read deadline
+		c.conn.SetReadDeadline(time.Time{})
+
+		return string(decompressed) + "\n", nil
+	}
 
 	// Reset the read deadline
 	err = c.conn.SetReadDeadline(time.Time{})
@@ -176,8 +220,7 @@ func (c *Client) ReceiveResponse() (string, error) {
 		return "", fmt.Errorf("failed to reset read deadline: %w", err)
 	}
 
-	return responseBuilder.String(), nil
-
+	return line, nil
 }
 
 func (c *Client) CheckForMessage() (string, error) {
@@ -187,28 +230,165 @@ func (c *Client) CheckForMessage() (string, error) {
 
 	// Set a very short read deadline to make this non-blocking
 	c.conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-	defer c.conn.SetReadDeadline(time.Time{}) // Reset deadline
 
-	// Try to read data if available
-	var buf [4096]byte
-	n, err := c.conn.Read(buf[:])
-
-	// Handle the case where no data is available
-	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			// This is expected for a non-blocking check - no data available
+	// Peek at available data to check for ZSTD header
+	peekBuf, peekErr := c.reader.Peek(5)
+	if peekErr != nil {
+		c.conn.SetReadDeadline(time.Time{})
+		if netErr, ok := peekErr.(net.Error); ok && netErr.Timeout() {
 			return "", nil
 		}
-		// Return any other errors
+		return "", peekErr
+	}
+
+	// If this looks like a compressed response, switch to blocking read
+	if string(peekBuf) == "ZSTD:" {
+		// Give enough time to read the full compressed payload
+		c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		defer c.conn.SetReadDeadline(time.Time{})
+
+		// Read the ZSTD:<length>\n header line
+		headerLine, readErr := c.reader.ReadString('\n')
+		if readErr != nil {
+			return "", fmt.Errorf("failed to read ZSTD header: %w", readErr)
+		}
+
+		// Parse length
+		lengthStr := strings.TrimSpace(strings.TrimPrefix(headerLine, "ZSTD:"))
+		compLen, parseErr := strconv.Atoi(lengthStr)
+		if parseErr != nil {
+			return "", fmt.Errorf("invalid ZSTD header length: %w", parseErr)
+		}
+
+		// Read exactly compLen bytes
+		compressed := make([]byte, compLen)
+		_, readErr = io.ReadFull(c.reader, compressed)
+		if readErr != nil {
+			return "", fmt.Errorf("failed to read compressed data: %w", readErr)
+		}
+
+		// Read trailing newline
+		c.reader.ReadByte()
+
+		// Decompress
+		decompressed, decErr := zstdDecoder.DecodeAll(compressed, nil)
+		if decErr != nil {
+			return "", fmt.Errorf("zstd decompression failed: %w", decErr)
+		}
+
+		return string(decompressed) + "\n", nil
+	}
+
+	// Not compressed — read available raw data from the buffered reader.
+	// Peek already loaded data into the bufio buffer, so we must read from c.reader.
+	// The 1ms deadline from Peek is still active — serves as non-blocking timeout.
+	defer c.conn.SetReadDeadline(time.Time{})
+	var buf [4096]byte
+	n, err := c.reader.Read(buf[:])
+
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return "", nil
+		}
 		return "", err
 	}
 
-	// If we got data, return it
 	if n > 0 {
 		return string(buf[:n]), nil
 	}
 
 	return "", nil
+}
+
+// SendPipelineCommands sends multiple commands in a single TCP write for pipeline processing.
+// Commands are concatenated with \x04 terminators so the server processes them as a batch.
+// Returns the number of commands sent. Use ReceivePipelineResponses to read the responses.
+func (c *Client) SendPipelineCommands(commands []string) (int, error) {
+	if c.conn == nil {
+		return 0, fmt.Errorf("not connected to server")
+	}
+
+	var builder strings.Builder
+	for _, cmd := range commands {
+		builder.WriteString(cmd)
+		builder.WriteString(CommandTerminator)
+	}
+
+	_, err := c.conn.Write([]byte(builder.String()))
+	if err != nil {
+		return 0, fmt.Errorf("failed to send pipeline commands: %w", err)
+	}
+
+	return len(commands), nil
+}
+
+// ReceivePipelineResponses reads exactly n responses from the server.
+// In pipeline mode (READY sentinel framing), each response is terminated by a "READY\n" line.
+// In non-pipeline mode, each response is a single line (JSON or ZSTD-compressed).
+func (c *Client) ReceivePipelineResponses(n int) ([]string, error) {
+	if c.conn == nil {
+		return nil, fmt.Errorf("not connected to server")
+	}
+
+	responses := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		if c.PipelineMode {
+			// In pipeline mode, read lines until we see READY sentinel
+			var respBuilder strings.Builder
+			for {
+				err := c.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				if err != nil {
+					return responses, fmt.Errorf("failed to set read deadline: %w", err)
+				}
+
+				line, err := c.reader.ReadString('\n')
+				if err != nil {
+					return responses, fmt.Errorf("failed to read pipeline response %d: %w", i+1, err)
+				}
+
+				if strings.TrimSpace(line) == "READY" {
+					break
+				}
+
+				// Handle ZSTD-compressed response within pipeline
+				if strings.HasPrefix(line, "ZSTD:") {
+					lengthStr := strings.TrimSpace(strings.TrimPrefix(line, "ZSTD:"))
+					compLen, parseErr := strconv.Atoi(lengthStr)
+					if parseErr != nil {
+						return responses, fmt.Errorf("invalid ZSTD header in pipeline response %d: %w", i+1, parseErr)
+					}
+
+					compressed := make([]byte, compLen)
+					_, readErr := io.ReadFull(c.reader, compressed)
+					if readErr != nil {
+						return responses, fmt.Errorf("failed to read compressed pipeline data %d: %w", i+1, readErr)
+					}
+					c.reader.ReadByte() // trailing \n
+
+					decompressed, decErr := zstdDecoder.DecodeAll(compressed, nil)
+					if decErr != nil {
+						return responses, fmt.Errorf("zstd decompression failed for pipeline response %d: %w", i+1, decErr)
+					}
+					respBuilder.WriteString(string(decompressed))
+					respBuilder.WriteByte('\n')
+					continue
+				}
+
+				respBuilder.WriteString(line)
+			}
+			responses = append(responses, strings.TrimSpace(respBuilder.String()))
+		} else {
+			// Non-pipeline mode: each response is from a single ReceiveResponse call
+			resp, err := c.ReceiveResponse()
+			if err != nil {
+				return responses, fmt.Errorf("failed to receive response %d: %w", i+1, err)
+			}
+			responses = append(responses, strings.TrimSpace(resp))
+		}
+	}
+
+	c.conn.SetReadDeadline(time.Time{})
+	return responses, nil
 }
 
 // Send transmits data to the server
