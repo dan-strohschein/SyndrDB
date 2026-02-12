@@ -55,6 +55,11 @@ type QueryRouter struct {
 	// TIER 1 SUBQUERY SUPPORT: Subquery executor for IN/EXISTS evaluation
 	subqueryExecutor interface{} // Passed from UnifiedQueryPlanner
 
+	// COST INTELLIGENCE: Column statistics store for cost-based optimization
+	statsStore             *StatsStore
+	costModel              *CostModel
+	selectivityEstimator   *SelectivityEstimator
+
 	// logger for debugging
 	logger *zap.SugaredLogger
 }
@@ -85,6 +90,7 @@ func NewQueryRouter(
 		joinPlanner:   joinPlanner,
 		bundleService: bundleService,
 		queryCache:    queryCache,
+		costModel:     NewCostModel(),
 		logger:        logger,
 	}
 }
@@ -244,15 +250,14 @@ func (qr *QueryRouter) routeSimpleQuery(
 				OrderedByFieldName: fieldName,
 				Logger:             qr.logger,
 				BundleServiceInt:   qr.bundleService,
-				Cost:               float64(limit) * 0.01, // Much cheaper: only fetches limit docs from index
+				Cost:               qr.costModel.BTreeOrderedScanCost(bundle.TotalDocuments, limit),
 				EstimatedRows:      limit,
 				Descending:         isDescending,
 				Limit:              limit,
 			}
 
 			if limit == 0 {
-				// No limit - still cheaper than full scan + sort
-				orderedNode.Cost = float64(bundle.TotalDocuments) * 0.3
+				orderedNode.Cost = qr.costModel.BTreeOrderedScanCost(bundle.TotalDocuments, 0)
 				orderedNode.EstimatedRows = int(bundle.TotalDocuments)
 			}
 
@@ -282,7 +287,7 @@ func (qr *QueryRouter) routeSimpleQuery(
 	qr.logger.Debug("No WHERE clause, creating full scan plan")
 	scanNode := &FullScanNode{
 		Bundle:           bundle,
-		Cost:             float64(bundle.TotalDocuments),
+		Cost:             qr.costModel.FullScanCost(bundle.TotalDocuments),
 		EstimatedRows:    int(bundle.TotalDocuments),
 		Logger:           qr.logger,
 		BundleServiceInt: qr.bundleService,
@@ -414,7 +419,7 @@ func (qr *QueryRouter) routeGroupByQuery(
 	// No WHERE, or legacy WHERE (WhereExpression is nil): create full scan as the base
 	scanNode := &FullScanNode{
 		Bundle:           bundle,
-		Cost:             float64(bundle.TotalDocuments),
+		Cost:             qr.costModel.FullScanCost(bundle.TotalDocuments),
 		EstimatedRows:    int(bundle.TotalDocuments),
 		Logger:           qr.logger,
 		BundleServiceInt: qr.bundleService,
@@ -437,12 +442,19 @@ func (qr *QueryRouter) routeGroupByQuery(
 
 		bundleCtx := syndrQL.NewBundleContextForSingleBundle(bundle)
 
+		// Use selectivity estimator for accurate row estimates when available
+		groupByFilterRows := scanNode.GetEstimatedRows() / 2
+		if qr.selectivityEstimator != nil {
+			if whereExpr, ok := query.WhereExpression.(syndrQL.Expression); ok {
+				groupByFilterRows = int(qr.selectivityEstimator.EstimateRows(whereExpr, bundle.Name, bundle.TotalDocuments))
+			}
+		}
 		filterNode := &FilterNode{
 			Child:            scanNode,
 			WhereExpression:  query.WhereExpression,
 			BundleContext:    bundleCtx,
-			Cost:             scanNode.GetCost(),
-			EstimatedRows:    scanNode.GetEstimatedRows() / 2, // Rough estimate: WHERE filters ~50%
+			Cost:             qr.costModel.FilterCost(scanNode.GetCost(), bundle.TotalDocuments, 1),
+			EstimatedRows:    groupByFilterRows,
 			Logger:           qr.logger,
 			QueryCache:       qr.queryCache,
 			SubqueryExecutor: qr.subqueryExecutor,
@@ -532,7 +544,7 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 
 	fullScan := &FullScanNode{
 		Bundle:           bundle,
-		Cost:             float64(bundle.TotalDocuments),
+		Cost:             qr.costModel.FullScanCost(bundle.TotalDocuments),
 		EstimatedRows:    int(bundle.TotalDocuments),
 		Logger:           qr.logger,
 		BundleServiceInt: qr.bundleService,
@@ -549,12 +561,17 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 	}
 
 	// Create FilterNode with Expression
+	// Use cost model and selectivity estimator for accurate cost/row estimates
+	estimatedFilterRows := int(bundle.TotalDocuments) / 2 // Default: 50% selectivity
+	if qr.selectivityEstimator != nil {
+		estimatedFilterRows = int(qr.selectivityEstimator.EstimateRows(expr, bundle.Name, bundle.TotalDocuments))
+	}
 	filterNode := &FilterNode{
 		Child:            fullScan,
 		WhereExpression:  expr,
 		BundleContext:    bundleCtx,
-		Cost:             fullScan.Cost + (float64(bundle.TotalDocuments) * 0.01), // Small cost for filtering
-		EstimatedRows:    int(bundle.TotalDocuments) / 2,                          // Assume 50% selectivity
+		Cost:             qr.costModel.FilterCost(fullScan.Cost, bundle.TotalDocuments, countPredicates(expr)),
+		EstimatedRows:    estimatedFilterRows,
 		Logger:           qr.logger,
 		DocumentScanner:  docScanner,
 		QueryCache:       qr.queryCache,       // Priority 4: Enable expression caching
@@ -607,8 +624,8 @@ func (qr *QueryRouter) tryIndexOptimization(
 						IndexName:        indexName,
 						ScanType:         HashIndexScan,
 						SearchKey:        value,
-						Cost:             1.0, // Hash lookup is O(1)
-						EstimatedRows:    1,   // Exact match
+						Cost:             qr.costModel.HashIndexScanCost(1),
+						EstimatedRows:    1,
 						Logger:           qr.logger,
 						BundleServiceInt: qr.bundleService,
 						DocumentScanner:  docScanner,
@@ -637,8 +654,8 @@ func (qr *QueryRouter) tryIndexOptimization(
 					Operator:         operator,
 					RangeStart:       value,
 					RangeEnd:         value,
-					Cost:             float64(bundle.TotalDocuments) * 0.1, // BTree scan
-					EstimatedRows:    int(bundle.TotalDocuments) / 10,      // Estimate
+					Cost:             qr.costModel.BTreeRangeScanCost(bundle.TotalDocuments, bundle.TotalDocuments/10),
+					EstimatedRows:    int(bundle.TotalDocuments) / 10,
 					Logger:           qr.logger,
 					BundleServiceInt: qr.bundleService,
 					DocumentScanner:  docScanner,

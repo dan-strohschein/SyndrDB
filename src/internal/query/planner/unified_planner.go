@@ -72,6 +72,9 @@ type UnifiedQueryPlanner struct {
 	viewRegistry      *view.ViewRegistry      // In-memory cache of views for fast lookups
 	viewQueryRewriter *view.ViewQueryRewriter // Query rewriter for view expansion
 
+	// COST INTELLIGENCE: Column statistics store for cost-based optimization
+	statsStore *StatsStore
+
 	// logger for debugging
 	logger *zap.SugaredLogger
 }
@@ -448,4 +451,19 @@ func (uqp *UnifiedQueryPlanner) GetBasePlanner() *QueryPlanner {
 // PHASE 3: Accessor for testing
 func (uqp *UnifiedQueryPlanner) GetJoinPlanner() *JoinQueryPlanner {
 	return uqp.joinPlanner
+}
+
+// SetStatsStore wires the column statistics store into the planner and router.
+// Called during server initialization after both StatsStore and planner are created.
+func (uqp *UnifiedQueryPlanner) SetStatsStore(ss *StatsStore) {
+	uqp.statsStore = ss
+	if uqp.router != nil {
+		uqp.router.statsStore = ss
+		uqp.router.selectivityEstimator = NewSelectivityEstimator(ss, uqp.logger)
+	}
+}
+
+// GetStatsStore returns the column statistics store.
+func (uqp *UnifiedQueryPlanner) GetStatsStore() *StatsStore {
+	return uqp.statsStore
 }

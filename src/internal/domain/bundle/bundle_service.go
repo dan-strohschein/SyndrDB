@@ -723,6 +723,9 @@ type BundleService struct {
 	// Set by server during initialization to avoid circular imports
 	onCacheFlush func()
 
+	// COLUMN STATISTICS: Incremental stats updater for planner cost estimation
+	statsUpdater StatsUpdater
+
 	// VISIBILITY MAP: Per-bundle all-visible page tracking for scan optimization.
 	// When a page is all-visible (all docs committed, not deleted, not superseded),
 	// scanners skip per-document IsVisibleToSnapshot() calls entirely.
@@ -897,6 +900,11 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 func (s *BundleService) SetCatalogService(catalogService CatalogServiceInterface) {
 	s.catalogService = catalogService
 	s.logger.Debug("Catalog service injected into BundleService")
+}
+
+// SetStatsUpdater injects a column statistics updater for incremental stats maintenance.
+func (s *BundleService) SetStatsUpdater(updater StatsUpdater) {
+	s.statsUpdater = updater
 }
 
 // SetOnCacheFlush registers a callback to be invoked when FlushAllDocumentCaches runs.
@@ -7310,6 +7318,18 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// the in-memory cache so subsequent reads don't need a disk round-trip
 	s.updatePageCacheWithDocument(bundle.Name, pageID, newDocument)
 
+	// Update column statistics incrementally for the planner
+	if s.statsUpdater != nil && newDocument.Fields != nil {
+		for fieldName, field := range newDocument.Fields {
+			s.statsUpdater.IncrementalUpdate(
+				bundle.Name, fieldName,
+				nil, // oldValue: nil for INSERT
+				field.Value.AsInterface(),
+				bundle.TotalDocuments,
+			)
+		}
+	}
+
 	// Now schedule index updates with the actual pageID from storage
 	//indexStart := time.Now()
 	indexCount := 0
@@ -8117,6 +8137,23 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	}
 	s.logger.Debugf("Write-through: Updated %d documents in page cache for bundle '%s'", len(updatedDocs), bundle.Name)
 
+	// Update column statistics for updated fields
+	if s.statsUpdater != nil {
+		for _, doc := range updatedDocs {
+			if doc.Fields == nil {
+				continue
+			}
+			for fieldName, field := range doc.Fields {
+				s.statsUpdater.IncrementalUpdate(
+					bundle.Name, fieldName,
+					nil, // oldValue unavailable after in-place mutation
+					field.Value.AsInterface(),
+					bundle.TotalDocuments,
+				)
+			}
+		}
+	}
+
 	// NOTE: Metadata updates (TotalDocuments, PageCount) are handled via scheduleMetadataUpdate
 	// which is atomic and uses its own mutex. No bundle write lock needed here.
 	// The deferred metadata flush handles concurrent access safely.
@@ -8887,6 +8924,23 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	s.logger.Debugf("DELETE: Wrote %d deletion markers to disk", len(docIDs))
 	// Observability (Phase 1b): log batch delete. TODO: metrics.DeleteBatchDuration, DeleteVerifySkipCount, requested vs deleted.
 	s.logger.Infow("Delete batch", "bundle", docCommand.BundleName, "docCount", len(docIDs))
+
+	// Update column statistics for deleted documents
+	if s.statsUpdater != nil && docIDToDoc != nil {
+		for _, doc := range docIDToDoc {
+			if doc == nil || doc.Fields == nil {
+				continue
+			}
+			for fieldName, field := range doc.Fields {
+				s.statsUpdater.IncrementalUpdate(
+					bundle.Name, fieldName,
+					field.Value.AsInterface(),
+					nil, // newValue: nil for DELETE
+					bundle.TotalDocuments,
+				)
+			}
+		}
+	}
 
 	// Close the write buffer so subsequent opens see the correct file size (including tombstones).
 	// Subsequent ADDs will recreate the buffer. Documented in plan §1.5 CloseWriteBuffer.

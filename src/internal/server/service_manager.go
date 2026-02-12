@@ -146,6 +146,11 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		// STEP 2: Initialize unified query planner with plan caching
 		unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, bundleService)
 
+		// COST INTELLIGENCE: Initialize column statistics store and wire into planner + bundle service
+		statsStore := planner.NewStatsStore(logger)
+		unifiedPlanner.SetStatsStore(statsStore)
+		bundleService.SetStatsUpdater(statsStore)
+
 		// Register planner with bundle service for schema change invalidation
 		bundle.SetQueryPlanner(unifiedPlanner)
 		
