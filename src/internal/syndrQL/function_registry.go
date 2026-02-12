@@ -17,6 +17,7 @@ type FunctionSignature struct {
 	Name           string                                                                                // Function name (uppercase)
 	MinArgs        int                                                                                   // Minimum argument count
 	MaxArgs        int                                                                                   // Maximum argument count (-1 for variadic)
+	ReturnType     FieldType                                                                             // Declared return type for semantic analysis (zero = Unknown)
 	Implementation func(args []models.FieldValue, evalCtx *EvaluationContext) (models.FieldValue, error) // Function implementation
 	CallCount      uint64                                                                                // Atomic counter for telemetry (wrapping intentional)
 	Description    string                                                                                // Documentation for error messages

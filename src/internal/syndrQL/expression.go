@@ -33,8 +33,9 @@ const (
 
 // LiteralExpression represents a literal value (string, number, bool, null)
 type LiteralExpression struct {
-	Token TokenType
-	Value interface{} // Actual value (string, int64, float64, bool, nil)
+	Token        TokenType
+	Value        interface{} // Actual value (string, int64, float64, bool, nil)
+	ResolvedType FieldType   // Set by semantic analyzer
 }
 
 func (le *LiteralExpression) expressionNode() {}
@@ -51,7 +52,9 @@ func (le *LiteralExpression) String() string {
 
 // IdentifierExpression represents a field name or identifier
 type IdentifierExpression struct {
-	Name string
+	Name         string
+	ResolvedType FieldType // Set by semantic analyzer from bundle schema
+	BundleName   string    // Set when resolved to a specific bundle (for JOINs)
 }
 
 func (ie *IdentifierExpression) expressionNode() {}
@@ -61,9 +64,10 @@ func (ie *IdentifierExpression) String() string {
 
 // BinaryExpression represents a binary operation (left op right)
 type BinaryExpression struct {
-	Left     Expression
-	Operator TokenType
-	Right    Expression
+	Left         Expression
+	Operator     TokenType
+	Right        Expression
+	ResolvedType FieldType // Result type of the operation (e.g., Bool for comparisons)
 }
 
 func (be *BinaryExpression) expressionNode() {}
@@ -77,8 +81,9 @@ func (be *BinaryExpression) String() string {
 
 // UnaryExpression represents a unary operation (op right)
 type UnaryExpression struct {
-	Operator TokenType
-	Right    Expression
+	Operator     TokenType
+	Right        Expression
+	ResolvedType FieldType
 }
 
 func (ue *UnaryExpression) expressionNode() {}
@@ -88,8 +93,9 @@ func (ue *UnaryExpression) String() string {
 
 // CallExpression represents a function call
 type CallExpression struct {
-	Function  string
-	Arguments []Expression
+	Function     string
+	Arguments    []Expression
+	ResolvedType FieldType // Return type of the function
 }
 
 func (ce *CallExpression) expressionNode() {}
@@ -104,7 +110,9 @@ func (ce *CallExpression) String() string {
 
 // ArrayExpression represents an array literal [value1, value2, ...]
 type ArrayExpression struct {
-	Elements []Expression
+	Elements    []Expression
+	ResolvedType FieldType // FieldTypeArray
+	ElementType  FieldType // Common type of elements (Unknown if mixed)
 }
 
 func (ae *ArrayExpression) expressionNode() {}
@@ -118,7 +126,8 @@ func (ae *ArrayExpression) String() string {
 
 // GroupedExpression represents a parenthesized expression
 type GroupedExpression struct {
-	Expression Expression
+	Expression   Expression
+	ResolvedType FieldType // Same as inner expression's type
 }
 
 func (ge *GroupedExpression) expressionNode() {}
@@ -128,8 +137,9 @@ func (ge *GroupedExpression) String() string {
 
 // QualifiedIdentifierExpression represents a qualified field name like "Bundle"."Field"
 type QualifiedIdentifierExpression struct {
-	Bundle string
-	Field  string
+	Bundle       string
+	Field        string
+	ResolvedType FieldType
 }
 
 func (qie *QualifiedIdentifierExpression) expressionNode() {}
@@ -148,9 +158,7 @@ type SubqueryExpression struct {
 	NestingDepth     int              // Current nesting level (enforced max from config)
 	IsCorrelated     bool             // Whether subquery references outer query (false for Tier 1)
 	CorrelatedFields []string         // Fields that reference outer query (empty for Tier 1)
-
-	// TODO: In Tier 2, add CanFlatten bool to indicate if optimizer can rewrite to JOIN
-	// TODO: In Tier 3, add ParameterBindings map[string]interface{} for correlated execution
+	ResolvedType     FieldType        // Bool for EXISTS, matches inner for IN
 }
 
 // SubqueryType categorizes the type of subquery
@@ -192,7 +200,8 @@ func (se *SubqueryExpression) String() string {
 // Parameter reuse is allowed (e.g., WHERE x=$1 AND y=$1 binds same value twice).
 // TODO: Could add type hint validation here for PREPARE stmt (text, integer) FROM ... syntax in future enhancement
 type ParameterExpression struct {
-	Index int // 1-indexed parameter number ($1 = Index 1, $2 = Index 2, etc.)
+	Index        int // 1-indexed parameter number ($1 = Index 1, $2 = Index 2, etc.)
+	ResolvedType FieldType
 }
 
 func (pe *ParameterExpression) expressionNode() {}
@@ -209,6 +218,7 @@ type IntervalExpression struct {
 	Value           string    // Raw interval value: '7', '7 days', '1 month 2 days'
 	Unit            TokenType // Unit token: TOKEN_YEAR, TOKEN_MONTH, TOKEN_DAY, TOKEN_HOUR, TOKEN_MINUTE, TOKEN_SECOND
 	IsNumericFormat bool      // true for INTERVAL '7' DAY, false for INTERVAL '7 days'
+	ResolvedType    FieldType // Always FieldTypeInterval
 }
 
 func (ie *IntervalExpression) expressionNode() {}
@@ -225,8 +235,9 @@ func (ie *IntervalExpression) String() string {
 // TODO: I will add compile-time timezone validation when implementing static analysis optimization
 // TODO: I will add support for expression-based timezone (e.g., field reference) when dynamic timezone conversion is needed
 type AtTimeZoneExpression struct {
-	Expression Expression // The DateTime expression to convert
-	Timezone   string     // Target timezone name (IANA format: 'America/New_York', 'UTC', etc.)
+	Expression   Expression // The DateTime expression to convert
+	Timezone     string     // Target timezone name (IANA format: 'America/New_York', 'UTC', etc.)
+	ResolvedType FieldType  // Always FieldTypeDateTime
 }
 
 func (atze *AtTimeZoneExpression) expressionNode() {}

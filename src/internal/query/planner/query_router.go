@@ -137,6 +137,25 @@ func (qr *QueryRouter) routeJoinQuery(
 
 	qr.logger.Debug("Routing to JoinQueryPlanner")
 
+	// Semantic analysis for JOIN queries: register all involved bundles
+	if query.WhereExpression != nil {
+		analyzer := syndrQL.NewSemanticAnalyzer(qr.logger).
+			SetPrimaryBundle(query.FromBundle)
+		if primaryBundle, bErr := qr.bundleService.GetBundleByName(database, query.FromBundle); bErr == nil && primaryBundle != nil {
+			analyzer.WithBundle(primaryBundle)
+		}
+		for _, jc := range query.JoinClauses {
+			if joinedBundle, bErr := qr.bundleService.GetBundleByName(database, jc.RightBundle); bErr == nil && joinedBundle != nil {
+				analyzer.WithBundle(joinedBundle)
+			}
+		}
+		if whereExpr, ok := query.WhereExpression.(syndrQL.Expression); ok {
+			if err := analyzer.AnalyzeExpression(whereExpr); err != nil {
+				qr.logger.Warnf("Semantic analysis warning for JOIN WHERE: %v", err)
+			}
+		}
+	}
+
 	// Convert UnifiedSelectQuery to SelectJoinQuery format
 	joinQuery := qr.convertToJoinQuery(query)
 
@@ -171,6 +190,18 @@ func (qr *QueryRouter) routeSimpleQuery(
 	docScanner, err := qr.bundleService.GetOrCreateDocumentScanner(bundle)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create document scanner for bundle '%s': %w", query.FromBundle, err)
+	}
+
+	// Semantic analysis: annotate WHERE expression nodes with ResolvedType
+	if query.WhereExpression != nil {
+		if whereExpr, ok := query.WhereExpression.(syndrQL.Expression); ok {
+			analyzer := syndrQL.NewSemanticAnalyzer(qr.logger).
+				WithBundle(bundle).
+				SetPrimaryBundle(query.FromBundle)
+			if err := analyzer.AnalyzeExpression(whereExpr); err != nil {
+				qr.logger.Warnf("Semantic analysis warning for WHERE clause: %v", err)
+			}
+		}
 	}
 
 	// Handle GROUP BY queries with manual tree construction
@@ -322,6 +353,27 @@ func (qr *QueryRouter) routeGroupByQuery(
 ) (ExecutionNode, []string, error) {
 
 	qr.logger.Debugf("Routing GROUP BY query for bundle '%s'", query.FromBundle)
+
+	// Semantic analysis for GROUP BY queries: annotate WHERE and HAVING expressions
+	if query.WhereExpression != nil || query.HavingExpression != nil {
+		analyzer := syndrQL.NewSemanticAnalyzer(qr.logger).
+			WithBundle(bundle).
+			SetPrimaryBundle(query.FromBundle)
+		if query.WhereExpression != nil {
+			if whereExpr, ok := query.WhereExpression.(syndrQL.Expression); ok {
+				if err := analyzer.AnalyzeExpression(whereExpr); err != nil {
+					qr.logger.Warnf("Semantic analysis warning for GROUP BY WHERE: %v", err)
+				}
+			}
+		}
+		if query.HavingExpression != nil {
+			if havingExpr, ok := query.HavingExpression.(syndrQL.Expression); ok {
+				if err := analyzer.AnalyzeExpression(havingExpr); err != nil {
+					qr.logger.Warnf("Semantic analysis warning for HAVING: %v", err)
+				}
+			}
+		}
+	}
 
 	var rootNode ExecutionNode
 	var indexesUsed []string
