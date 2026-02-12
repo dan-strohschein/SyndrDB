@@ -26,9 +26,9 @@ Architecture:
 - Single-level savepoints (nested savepoints return error)
 
 Transaction Isolation:
-- Lock-based isolation (not MVCC for community edition)
-- Document-level READ and WRITE locks
-- Auto-upgrade from READ to WRITE for same transaction
+- MVCC snapshot isolation for reads (no read locks on SELECT)
+- Write locks (document-level) for mutations (UPDATE, DELETE)
+- Auto-upgrade from READ to WRITE for same transaction (SELECT FOR UPDATE)
 - 30-second hardcoded deadlock timeout
 - First-wins conflict resolution
 
@@ -296,6 +296,11 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 
 	// Mark transaction as committed in session
 	session.CommitTransaction()
+
+	// Flush index updates after commit (transactions may have buffered index updates)
+	if serviceManager.BundleService != nil {
+		serviceManager.BundleService.ForceFlushIndexUpdates()
+	}
 
 	// Debug-aware logging
 	debugMode := settings.GetSettings().Debug

@@ -1931,6 +1931,134 @@ func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, do
 	shard.mu.Unlock()
 }
 
+// RemoveDeadVersionsFromPage removes dead document versions from a page's in-memory cache.
+// A document version is "dead" if it has been superseded (SupersededAt is non-zero) AND the
+// grace period (100ms) has passed AND its CommitSequence < safeCutoff (no active snapshot can see it),
+// OR if it has been deleted (DeletedByTxID > 0) AND CommitSequence < safeCutoff.
+//
+// This is the equivalent of PostgreSQL's VACUUM for individual heap tuples within a page.
+// Only modifies the in-memory page cache — the on-disk version is cleaned up by segment compaction.
+//
+// Returns: (removedDocIDs []string, remainingCount int, err error)
+func (s *BundleService) RemoveDeadVersionsFromPage(bundleName string, pageID uint32, safeCutoff uint64) ([]string, int, error) {
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
+	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
+
+	// Load the current reader view to identify dead documents
+	v, ok := shard.readerView.Load(pageKey)
+	if !ok {
+		// Page not in cache — nothing to reclaim in memory
+		return nil, 0, nil
+	}
+	oldSnapshot, ok := v.(*models.DocumentPage)
+	if !ok {
+		return nil, 0, nil
+	}
+
+	// Identify dead documents
+	var deadDocIDs []string
+	for docID, doc := range oldSnapshot.Documents {
+		if isDeadVersion(&doc, safeCutoff) {
+			deadDocIDs = append(deadDocIDs, docID)
+		}
+	}
+
+	if len(deadDocIDs) == 0 {
+		return nil, len(oldSnapshot.Documents), nil
+	}
+
+	// Build new snapshot without dead documents (copy-outside-lock pattern)
+	deadSet := make(map[string]struct{}, len(deadDocIDs))
+	for _, id := range deadDocIDs {
+		deadSet[id] = struct{}{}
+	}
+
+	newSnapshot := &models.DocumentPage{
+		PageID:    pageID,
+		BundleID:  bundleName,
+		Documents: make(map[string]models.Document, len(oldSnapshot.Documents)-len(deadDocIDs)),
+	}
+	for docID, d := range oldSnapshot.Documents {
+		if _, dead := deadSet[docID]; !dead {
+			newSnapshot.Documents[docID] = d
+		}
+	}
+
+	// Build COW outside lock
+	cowDocs := make([]models.Document, 0, len(newSnapshot.Documents))
+	for _, d := range newSnapshot.Documents {
+		if d.IsVisibleReadCommitted() {
+			cowDocs = append(cowDocs, d)
+		}
+	}
+	freshCOW := &cowSnapshotEntry{
+		documents: cowDocs,
+		timestamp: time.Now().UnixMilli(),
+		pageKey:   pageKey,
+	}
+
+	// Apply under lock
+	shard.mu.Lock()
+	page, exists := shard.pages[pageKey]
+	if exists {
+		for _, docID := range deadDocIDs {
+			delete(page.Documents, docID)
+		}
+		shard.readerView.Store(pageKey, newSnapshot)
+		shard.cowSnapshot.Store(pageKey, freshCOW)
+	}
+	shard.mu.Unlock()
+
+	// Invalidate document-to-page mappings for removed documents
+	for _, docID := range deadDocIDs {
+		s.invalidateDocumentPageMapEntry(bundleName, docID)
+	}
+
+	return deadDocIDs, len(newSnapshot.Documents), nil
+}
+
+// ScheduleIndexUpdateForVacuum is a public wrapper around scheduleIndexUpdate for the vacuum path.
+// Called by MVCCGCWorker to clean up index entries for reclaimed document versions.
+func (s *BundleService) ScheduleIndexUpdateForVacuum(bundleName, indexName, indexType, operation, documentID string, fieldValue interface{}, pageID uint32) {
+	s.scheduleIndexUpdate(bundleName, indexName, indexType, operation, documentID, fieldValue, pageID, nil, false)
+}
+
+// isDeadVersion checks if a document version can be safely reclaimed.
+// A version is dead if:
+//  1. It has been superseded (SupersededAt is set) AND grace period (100ms) has passed
+//     AND CommitSequence < safeCutoff (no active snapshot can see it)
+//  2. OR it has been deleted (DeletedByTxID > 0) AND CommitSequence < safeCutoff
+func isDeadVersion(doc *models.Document, safeCutoff uint64) bool {
+	if doc == nil {
+		return false
+	}
+
+	// Never reclaim the current version (not superseded, not deleted)
+	if doc.SupersededAt.IsZero() && doc.DeletedByTxID == 0 {
+		return false
+	}
+
+	// Superseded version: grace period must have passed
+	if !doc.SupersededAt.IsZero() {
+		if !doc.IsSafeToCleanup() {
+			return false // Grace period not expired
+		}
+	}
+
+	// Must be older than oldest active snapshot
+	if safeCutoff == 0 {
+		return false // No cutoff available — can't safely reclaim
+	}
+
+	// Uncommitted versions (CommitSequence == 0) are never reclaimed
+	if doc.CommitSequence == 0 {
+		return false
+	}
+
+	return doc.CommitSequence < safeCutoff
+}
+
 // getOrCreateSchemaManager retrieves or creates a GraphQL schema manager for the specified database.
 // Schema managers are created lazily on first use because they require database-specific directory paths.
 // This method is thread-safe using the sharded schema manager map.
@@ -8463,6 +8591,12 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 		}
 	}
 
+	// HOT OPTIMIZATION: Check if update touches any indexed field (excluding DocumentID).
+	// If not, we can skip the hash index UpdatePageLocation since the SortedIndex
+	// gives the same pageID for the same DocumentID — the pointer doesn't change.
+	// This is the SyndrDB equivalent of PostgreSQL's Heap-Only Tuple (HOT) optimization.
+	isHOT := !updatesIndexedField(bundle, docCommand.Fields)
+
 	// STEP 2-5: For each document, create new version and swap atomically
 	successCount := 0
 
@@ -8512,7 +8646,10 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 		}
 
 		// STEP 4: SWAP - Atomically update index pointer to new location
-		if hashIndex != nil {
+		// HOT OPTIMIZATION: Skip hash index update when no indexed field changed.
+		// The SortedIndex gives the same pageID for the same DocumentID, so the
+		// pointer doesn't need updating. CommitSequence is tracked on the document itself.
+		if !isHOT && hashIndex != nil {
 			if idx, ok := hashIndex.(interface {
 				UpdatePageLocation(keyValue, documentID string, newPageID uint32, commitSequence uint64) error
 			}); ok {
@@ -8590,6 +8727,45 @@ func (s *BundleService) createUpdatedDocumentRCU(oldDoc *models.Document, update
 	// This ensures globally ordered, atomic commit sequence allocation
 
 	return newDoc
+}
+
+// updatesIndexedField returns true if any field in the update touches a non-DocumentID
+// indexed field (B-tree, hash on user field, or BRIN). When this returns false, a
+// HOT-like update is possible: the hash index pointer doesn't need updating (same
+// pageID since DocumentID is unchanged), and no secondary index maintenance is needed.
+//
+// This is the SyndrDB equivalent of PostgreSQL's Heap-Only Tuple (HOT) detection.
+func updatesIndexedField(bundle *models.Bundle, updates []models.KeyValue) bool {
+	if bundle.Indexes == nil {
+		return false
+	}
+	for _, kv := range updates {
+		for _, indexRef := range bundle.Indexes {
+			switch indexRef.IndexType {
+			case "hash":
+				if indexRef.HashIndexField.FieldName == kv.Key && indexRef.HashIndexField.FieldName != "DocumentID" {
+					return true
+				}
+			case "btree":
+				if indexRef.BTreeIndexField.FieldName == kv.Key {
+					return true
+				}
+				// Check multi-column btree indexes
+				for _, fieldDef := range indexRef.Fields {
+					if fieldDef.Name == kv.Key {
+						return true
+					}
+				}
+			case "brin":
+				for _, fieldDef := range indexRef.Fields {
+					if fieldDef.Name == kv.Key {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // ============================================================================

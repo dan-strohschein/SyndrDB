@@ -735,10 +735,13 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 				}
 				return nil
 			},
-			ActiveQueryCount: &server.activeQueryCount,
-			Compactor:        compactionManager,
-			MetricsReporter:  metricsReporter,
-			Logger:           sugar,
+			ActiveQueryCount:         &server.activeQueryCount,
+			Compactor:                compactionManager,
+			MetricsReporter:          metricsReporter,
+			Logger:                   sugar,
+			VacuumEnabled:            config.VacuumEnabled,
+			VacuumDeadRatioThreshold: config.VacuumDeadRatioThreshold,
+			VacuumMaxPagesPerCycle:   config.VacuumMaxPagesPerCycle,
 		})
 
 		server.MVCCGCWorker = mvccGCWorker

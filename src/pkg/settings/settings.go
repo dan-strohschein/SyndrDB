@@ -133,6 +133,9 @@ type Arguments struct {
 	// Hash Index Configuration
 	IndexSequenceSafetyMargin int `yaml:"index_sequence_safety_margin"` // Safety margin for sequence recovery (default: 100)
 
+	// Response Compression Configuration
+	EnableResponseCompression bool `yaml:"enable_response_compression"` // Allow zstd response compression when client requests it (default: true)
+
 	// RCU (Read-Copy-Update) Write Mode Configuration
 	// Enables lock-free concurrent writes using PostgreSQL-inspired MVCC patterns
 	EnableRCUWrites  bool `yaml:"enable_rcu_writes"`   // Enable RCU-based lock-free updates (default: true)
@@ -257,6 +260,11 @@ type Arguments struct {
 	MVCCGCPauseThreshold       int  `yaml:"mvcc_gc_pause_threshold"`        // Active query pause threshold (default: 500)
 	MVCCGCMaxVersionsThreshold int  `yaml:"mvcc_gc_max_versions_threshold"` // Trigger compaction if document has >N versions (default: 5)
 	MVCCGCMinVersionAgeHours   int  `yaml:"mvcc_gc_min_version_age_hours"`  // Minimum age in hours before considering version for GC (default: 1)
+
+	// Vacuum (Dead Version Reclamation) Configuration
+	VacuumEnabled            bool    `yaml:"vacuum_enabled"`              // Enable page-level dead version reclamation (default: true)
+	VacuumDeadRatioThreshold float64 `yaml:"vacuum_dead_ratio_threshold"` // Trigger full compaction at this dead ratio (default: 0.3)
+	VacuumMaxPagesPerCycle   int     `yaml:"vacuum_max_pages_per_cycle"`  // Max pages to scan per GC cycle (default: 100)
 
 	// Index Maintenance (Automatic Index Rebuild) Configuration
 	IndexMaintenanceEnabled              bool    `yaml:"index_maintenance_enabled"`                // Enable automatic index rebuilding (default: true)
@@ -518,6 +526,14 @@ func GetSettings() *Arguments {
 			MVCCGCPauseThreshold:       500,  // Pause when 500+ queries active
 			MVCCGCMaxVersionsThreshold: 5,    // Trigger compaction if document has >5 versions
 			MVCCGCMinVersionAgeHours:   1,    // Minimum 1 hour age before considering version for GC
+
+			// Vacuum (Dead Version Reclamation) Defaults
+			VacuumEnabled:            true, // Enable page-level dead version reclamation
+			VacuumDeadRatioThreshold: 0.3,  // Trigger full compaction at 30% dead ratio
+			VacuumMaxPagesPerCycle:   100,  // Scan up to 100 pages per GC cycle
+
+			// Response Compression Defaults
+			EnableResponseCompression: true, // Allow zstd compression when client requests it
 
 			// RCU (Read-Copy-Update) Write Mode Defaults
 			// Lock-free concurrent writes using PostgreSQL-inspired patterns

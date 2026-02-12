@@ -62,6 +62,11 @@ type MVCCGCWorker struct {
 	dataDir              string         // Data directory for bundle file paths
 	activeQueryCount     *atomic.Uint64 // Server's query counter for load detection
 
+	// Vacuum configuration (dead version reclamation)
+	vacuumDeadRatioThreshold float64 // Trigger full compaction at this dead ratio (default: 0.3)
+	vacuumMaxPagesPerCycle   int     // Max pages to scan per GC cycle (default: 100)
+	vacuumEnabled            bool    // Enable page-level dead version reclamation (default: true)
+
 	// Service access (using interface to avoid import cycles)
 	serviceManagerGetter  func() interface{} // Returns ServiceManager to avoid direct import
 	snapshotManagerGetter func() interface{} // Returns SnapshotManager to check oldest snapshot
@@ -99,6 +104,11 @@ type MVCCGCConfig struct {
 	Compactor             *CompactionManager
 	MetricsReporter       MetricsReporter // Callback for reporting metrics
 	Logger                *zap.SugaredLogger
+
+	// Vacuum configuration (dead version reclamation)
+	VacuumDeadRatioThreshold float64 // Trigger full compaction at this dead ratio (default: 0.3)
+	VacuumMaxPagesPerCycle   int     // Max pages to scan per GC cycle (default: 100)
+	VacuumEnabled            bool    // Enable page-level dead version reclamation (default: true)
 }
 
 // NewMVCCGCWorker creates a new MVCC GC worker
@@ -139,22 +149,39 @@ func NewMVCCGCWorker(config MVCCGCConfig) *MVCCGCWorker {
 		config.MinVersionAge = 1 * time.Hour
 	}
 
+	// Default vacuum settings
+	vacuumDeadRatio := config.VacuumDeadRatioThreshold
+	if vacuumDeadRatio <= 0 {
+		vacuumDeadRatio = 0.3
+	}
+	vacuumMaxPages := config.VacuumMaxPagesPerCycle
+	if vacuumMaxPages <= 0 {
+		vacuumMaxPages = 100
+	}
+	vacuumEnabled := config.VacuumEnabled
+	// Default to true if not explicitly set (zero value = false, but we want default true)
+	// Callers that want to disable must explicitly set VacuumEnabled = false
+	// Since Go zero value for bool is false, we use the config directly; server.go sets it
+
 	return &MVCCGCWorker{
-		interval:              config.Interval,
-		batchSize:             config.BatchSize,
-		pauseThreshold:        config.PauseThreshold,
-		maxVersionsThreshold:  config.MaxVersionsThreshold,
-		minVersionAge:         config.MinVersionAge,
-		dataDir:               config.DataDir,
-		serviceManagerGetter:  config.ServiceManagerGetter,
-		snapshotManagerGetter: config.SnapshotManagerGetter,
-		activeQueryCount:      config.ActiveQueryCount,
-		compactor:             config.Compactor,
-		metricsReporter:       config.MetricsReporter,
-		stopChan:              make(chan struct{}),
-		doneChan:              make(chan struct{}),
-		immediateGCChan:       make(chan string, 1), // Buffered to allow non-blocking trigger
-		logger:                config.Logger,
+		interval:                 config.Interval,
+		batchSize:                config.BatchSize,
+		pauseThreshold:           config.PauseThreshold,
+		maxVersionsThreshold:     config.MaxVersionsThreshold,
+		minVersionAge:            config.MinVersionAge,
+		dataDir:                  config.DataDir,
+		serviceManagerGetter:     config.ServiceManagerGetter,
+		snapshotManagerGetter:    config.SnapshotManagerGetter,
+		activeQueryCount:         config.ActiveQueryCount,
+		compactor:                config.Compactor,
+		metricsReporter:          config.MetricsReporter,
+		vacuumDeadRatioThreshold: vacuumDeadRatio,
+		vacuumMaxPagesPerCycle:   vacuumMaxPages,
+		vacuumEnabled:            vacuumEnabled,
+		stopChan:                 make(chan struct{}),
+		doneChan:                 make(chan struct{}),
+		immediateGCChan:          make(chan string, 1), // Buffered to allow non-blocking trigger
+		logger:                   config.Logger,
 	}
 }
 
@@ -398,30 +425,60 @@ func (w *MVCCGCWorker) performGCCycleWithContext(ctx context.Context, triggerTyp
 			bundlesScanned++
 
 			if shouldCompact {
-				versions, err := w.sampleDocumentVersions(ctx, bundleName, db.Name, bundleService)
-				if err != nil {
-					w.logger.Warnw("Failed to sample document versions for age analysis",
-						"bundle", bundleName,
-						"database", db.Name,
-						"error", err)
-					continue
-				}
-
-				if w.shouldCompactByAge(oldestSnapshotSeq, versions) {
-					// Trigger compaction
-					err := w.triggerMVCCCompaction(bundleName, db.Name)
+				// Phase 2a: Lightweight page-level dead version reclamation
+				if w.vacuumEnabled {
+					removed, preserved, err := w.reclaimDeadVersionsInBundle(ctx, bundleName, db.Name, bundleService, oldestSnapshotSeq)
 					if err != nil {
-						w.logger.Warnw("Failed to trigger MVCC compaction",
+						w.logger.Warnw("Failed to reclaim dead versions",
 							"bundle", bundleName,
 							"database", db.Name,
 							"error", err)
 					} else {
-						compactionsTriggered++
-						versionsRemoved += uint64(versionCount - 1) // Assume we keep 1 version
-						versionsPreserved += 1
+						versionsRemoved += uint64(removed)
+						versionsPreserved += uint64(preserved)
+
+						// Phase 2b: Trigger full segment compaction if dead ratio is high
+						if removed > 0 {
+							deadRatio := float64(removed) / float64(removed+preserved)
+							if deadRatio > w.vacuumDeadRatioThreshold {
+								err := w.triggerMVCCCompaction(bundleName, db.Name)
+								if err != nil {
+									w.logger.Warnw("Failed to trigger MVCC compaction after vacuum",
+										"bundle", bundleName,
+										"database", db.Name,
+										"error", err)
+								} else {
+									compactionsTriggered++
+								}
+							}
+						}
 					}
 				} else {
-					versionsPreserved += uint64(versionCount)
+					// Vacuum disabled — fall back to old compaction-only path
+					versions, err := w.sampleDocumentVersions(ctx, bundleName, db.Name, bundleService)
+					if err != nil {
+						w.logger.Warnw("Failed to sample document versions for age analysis",
+							"bundle", bundleName,
+							"database", db.Name,
+							"error", err)
+						continue
+					}
+
+					if w.shouldCompactByAge(oldestSnapshotSeq, versions) {
+						err := w.triggerMVCCCompaction(bundleName, db.Name)
+						if err != nil {
+							w.logger.Warnw("Failed to trigger MVCC compaction",
+								"bundle", bundleName,
+								"database", db.Name,
+								"error", err)
+						} else {
+							compactionsTriggered++
+							versionsRemoved += uint64(versionCount - 1)
+							versionsPreserved += 1
+						}
+					} else {
+						versionsPreserved += uint64(versionCount)
+					}
 				}
 			} else {
 				versionsPreserved += uint64(versionCount)
@@ -676,4 +733,135 @@ func (w *MVCCGCWorker) triggerMVCCCompaction(bundleName, databaseName string) er
 		"database", databaseName)
 
 	return nil
+}
+
+// reclaimDeadVersionsInBundle performs lightweight page-level dead version reclamation.
+// Iterates pages in the bundle and removes dead document versions from the in-memory page cache.
+// This is the equivalent of PostgreSQL's VACUUM for individual heap tuples.
+//
+// Dead versions are removed from the page cache immediately. On-disk cleanup happens
+// when full segment compaction is triggered (when dead ratio exceeds threshold).
+//
+// Returns: (removed, preserved, error)
+func (w *MVCCGCWorker) reclaimDeadVersionsInBundle(
+	ctx context.Context,
+	bundleName, databaseName string,
+	bundleService *bundle.BundleService,
+	safeCutoff uint64,
+) (int, int, error) {
+	if safeCutoff == 0 {
+		return 0, 0, nil // No safe cutoff — can't reclaim anything
+	}
+
+	// Get bundle metadata to find page count
+	bundleMeta := w.getBundleMetadata(bundleService, bundleName)
+	if bundleMeta == nil {
+		return 0, 0, nil
+	}
+
+	pageCount := int(bundleMeta.PageCount)
+	if pageCount == 0 {
+		return 0, 0, nil
+	}
+
+	totalRemoved := 0
+	totalPreserved := 0
+	pagesScanned := 0
+
+	for pageID := 0; pageID < pageCount && pagesScanned < w.vacuumMaxPagesPerCycle; pageID++ {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			return totalRemoved, totalPreserved, ctx.Err()
+		default:
+		}
+
+		removedDocIDs, remaining, err := bundleService.RemoveDeadVersionsFromPage(bundleName, uint32(pageID), safeCutoff)
+		if err != nil {
+			w.logger.Debugw("Failed to reclaim dead versions from page",
+				"bundle", bundleName,
+				"pageID", pageID,
+				"error", err)
+			continue
+		}
+
+		removed := len(removedDocIDs)
+		totalRemoved += removed
+		totalPreserved += remaining
+		pagesScanned++
+
+		// Clean up index entries for reclaimed documents
+		if removed > 0 {
+			w.cleanupIndexEntriesForBundle(bundleName, databaseName, bundleService, bundleMeta, removedDocIDs)
+
+			w.logger.Debugw("Reclaimed dead versions from page",
+				"bundle", bundleName,
+				"pageID", pageID,
+				"removed", removed,
+				"remaining", remaining)
+		}
+
+		// Yield CPU periodically
+		if pagesScanned%10 == 0 {
+			runtime.Gosched()
+		}
+	}
+
+	if totalRemoved > 0 {
+		w.logger.Infow("Dead version reclamation complete",
+			"bundle", bundleName,
+			"database", databaseName,
+			"pagesScanned", pagesScanned,
+			"totalRemoved", totalRemoved,
+			"totalPreserved", totalPreserved)
+
+		// Report metrics
+		if w.metricsReporter != nil {
+			w.metricsReporter("MVCCVacuumPagesScanned", uint64(pagesScanned))
+			w.metricsReporter("MVCCVacuumVersionsRemoved", uint64(totalRemoved))
+		}
+	}
+
+	return totalRemoved, totalPreserved, nil
+}
+
+// cleanupIndexEntriesForBundle removes index entries pointing to reclaimed document versions.
+// For hash indexes: schedules delete operations via scheduleIndexUpdate.
+// For B-tree indexes: schedules delete operations for the reclaimed document IDs.
+func (w *MVCCGCWorker) cleanupIndexEntriesForBundle(
+	bundleName, databaseName string,
+	bundleService *bundle.BundleService,
+	bundleMeta *models.Bundle,
+	reclaimedDocIDs []string,
+) {
+	if bundleMeta.Indexes == nil || len(reclaimedDocIDs) == 0 {
+		return
+	}
+
+	for indexName, indexRef := range bundleMeta.Indexes {
+		switch indexRef.IndexType {
+		case "hash":
+			// Hash indexes: schedule delete for each reclaimed document
+			for _, docID := range reclaimedDocIDs {
+				bundleService.ScheduleIndexUpdateForVacuum(bundleName, indexName, "hash", "delete", docID, docID, 0)
+			}
+		case "btree":
+			// B-tree indexes: schedule delete for each reclaimed document
+			// The field value is unknown at this point, but the index can handle deletion by docID
+			for _, docID := range reclaimedDocIDs {
+				bundleService.ScheduleIndexUpdateForVacuum(bundleName, indexName, "btree", "delete", docID, nil, 0)
+			}
+		case "brin":
+			// BRIN indexes don't store per-document entries — no cleanup needed
+		}
+	}
+}
+
+// getBundleMetadata retrieves bundle metadata from the bundle service.
+func (w *MVCCGCWorker) getBundleMetadata(bundleService *bundle.BundleService, bundleName string) *models.Bundle {
+	allBundles := bundleService.GetAllBundles()
+	if allBundles == nil {
+		return nil
+	}
+	return allBundles[bundleName]
 }
