@@ -266,6 +266,11 @@ type Arguments struct {
 	VacuumDeadRatioThreshold float64 `yaml:"vacuum_dead_ratio_threshold"` // Trigger full compaction at this dead ratio (default: 0.3)
 	VacuumMaxPagesPerCycle   int     `yaml:"vacuum_max_pages_per_cycle"`  // Max pages to scan per GC cycle (default: 100)
 
+	// Streaming & Cursor Configuration
+	StreamingChunkSize       int `yaml:"streaming_chunk_size"`         // Documents per streaming chunk (default: 256)
+	MaxOpenCursorsPerSession int `yaml:"max_open_cursors_per_session"` // Max server-side cursors per session (default: 64)
+	CursorIdleTimeoutSeconds int `yaml:"cursor_idle_timeout_seconds"`  // Idle timeout for cursors in seconds (default: 300)
+
 	// Index Maintenance (Automatic Index Rebuild) Configuration
 	IndexMaintenanceEnabled              bool    `yaml:"index_maintenance_enabled"`                // Enable automatic index rebuilding (default: true)
 	IndexMaintenanceIntervalSeconds      int     `yaml:"index_maintenance_interval_seconds"`       // Evaluation interval in seconds (default: 300 = 5 minutes)
@@ -531,6 +536,11 @@ func GetSettings() *Arguments {
 			VacuumEnabled:            true, // Enable page-level dead version reclamation
 			VacuumDeadRatioThreshold: 0.3,  // Trigger full compaction at 30% dead ratio
 			VacuumMaxPagesPerCycle:   100,  // Scan up to 100 pages per GC cycle
+
+			// Streaming & Cursor Defaults
+			StreamingChunkSize:       256, // 256 documents per streaming chunk
+			MaxOpenCursorsPerSession: 64,  // Max 64 open cursors per session
+			CursorIdleTimeoutSeconds: 300, // 5-minute idle timeout for cursors
 
 			// Response Compression Defaults
 			EnableResponseCompression: true, // Allow zstd compression when client requests it

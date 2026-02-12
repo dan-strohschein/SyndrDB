@@ -162,6 +162,14 @@ const (
 	TOKEN_EXECUTE    // EXECUTE
 	TOKEN_DEALLOCATE // DEALLOCATE
 
+	// Keywords - Cursor System
+	TOKEN_DECLARE // DECLARE
+	TOKEN_CURSOR  // CURSOR
+	TOKEN_FETCH   // FETCH
+	TOKEN_CLOSE   // CLOSE
+	TOKEN_ALL     // ALL (for FETCH ALL)
+	TOKEN_NEXT    // NEXT (for FETCH NEXT)
+
 	// Parameterized Queries
 	TOKEN_PARAMETER // $1, $2, $3, ... (for prepared statements and parameter binding)
 
@@ -588,6 +596,14 @@ var keywords = map[string]TokenType{
 	"PREPARE":    TOKEN_PREPARE,
 	"EXECUTE":    TOKEN_EXECUTE,
 	"DEALLOCATE": TOKEN_DEALLOCATE,
+
+	// Cursor Keywords
+	"DECLARE": TOKEN_DECLARE,
+	"CURSOR":  TOKEN_CURSOR,
+	"FETCH":   TOKEN_FETCH,
+	"CLOSE":   TOKEN_CLOSE,
+	"ALL":     TOKEN_ALL,
+	"NEXT":    TOKEN_NEXT,
 
 	// DateTime Function Keywords - REMOVED from keywords map
 	// These are ONLY recognized when prefixed with F: (handled by readFunctionToken)

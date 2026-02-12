@@ -2,6 +2,7 @@ package server
 
 import (
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/pkg/common/helpers"
 )
 
@@ -27,6 +28,11 @@ type CommandResponse struct {
 	// STEP 1: Document pooling - store pooled documents for centralized cleanup
 	// Returns documents to pool after response sent (similar to PooledMaps pattern)
 	PooledDocuments []*models.Document `json:"-"`
+
+	// Iterator-based streaming: when set, the server uses streamResultFromIterator
+	// instead of materializing. Takes precedence over StreamSlice/StreamDocuments
+	// when the client has negotiated streaming=chunked.
+	StreamIterator planner.IteratorNode `json:"-"`
 }
 
 // GetResultOrTransform returns the Result field if populated, otherwise transforms
@@ -39,7 +45,10 @@ func (cr *CommandResponse) GetResultOrTransform() interface{} {
 		return cr.Result
 	}
 
-	// Streaming path: transform StreamDocuments on demand
+	// Streaming path: prefer StreamSlice (already a slice), fallback to StreamDocuments
+	if len(cr.StreamSlice) > 0 {
+		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(cr.StreamSlice, cr.StreamFields)
+	}
 	if len(cr.StreamDocuments) > 0 {
 		docSlice := make([]*models.Document, 0, len(cr.StreamDocuments))
 		for _, doc := range cr.StreamDocuments {

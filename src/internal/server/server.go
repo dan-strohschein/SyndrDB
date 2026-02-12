@@ -29,6 +29,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/planner"
 	joinexecutor "syndrdb/src/internal/query/join_executor"
 	"syndrdb/src/internal/registry"
 
@@ -129,8 +130,9 @@ type Connection struct {
 	Database         *models.Database // Current database for this connection
 	User             string
 	Authorized       bool
-	CompressResponse bool // When true, streaming responses are zstd-compressed
-	PipelineMode     bool // When true, send READY sentinel after each response for pipeline framing
+	CompressResponse bool   // When true, streaming responses are zstd-compressed
+	PipelineMode     bool   // When true, send READY sentinel after each response for pipeline framing
+	StreamingMode    string // "" = legacy, "chunked" = chunked streaming protocol (STREAM:v1)
 	Session          *Session // Associated session
 	LastActive       time.Time
 	Logger           *zap.SugaredLogger
@@ -1429,12 +1431,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 						connection.Logger = connLogger.Desugar().Sugar()
 						connection.CompressResponse = !compressionDisabled && settings.GetSettings().EnableResponseCompression && connStr.Options["compress"] == "zstd"
 						connection.PipelineMode = connStr.Options["pipeline"] == "true"
+						connection.StreamingMode = connStr.Options["streaming"] // "chunked" or ""
 
 						connLogger.Infow("Client authenticated and session created",
 							"user", connection.User,
 							"database", connection.DatabaseName,
 							"sessionID", session.SessionID,
-							"pipelineMode", connection.PipelineMode)
+							"pipelineMode", connection.PipelineMode,
+							"streamingMode", connection.StreamingMode)
 
 						sendSuccess(writer, fmt.Sprintf("Authentication successful - Session: %s", session.SessionID))
 						continue // next command in batch
@@ -1445,7 +1449,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 					if err != nil {
 						s.sendError(writer, err)
 					} else {
-						sendResult(writer, result, connLogger, connection.CompressResponse)
+						sendResult(writer, result, connLogger, connection.CompressResponse, connection.StreamingMode)
 					}
 
 					// Pipeline mode: send READY sentinel after each response so the client
@@ -1787,7 +1791,7 @@ func sendSuccess(writer *bufio.Writer, message string) {
 	writer.Flush()
 }
 
-func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLogger, compress bool) {
+func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLogger, compress bool, streamingMode string) {
 	var data []byte
 
 	// PHASE A: Return pooled maps after JSON marshaling (no closure = no allocation)
@@ -1805,6 +1809,17 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 
 	switch typedResult := result.(type) {
 	case *CommandResponse:
+		// Iterator-based streaming: when client negotiated chunked streaming and
+		// the response has an iterator, stream documents directly to the wire.
+		if typedResult.StreamIterator != nil && streamingMode == "chunked" {
+			chunkSize := settings.GetSettings().StreamingChunkSize
+			if chunkSize <= 0 {
+				chunkSize = 256
+			}
+			streamResultFromIterator(writer, typedResult.StreamIterator, typedResult.StreamFields, compress, logger, chunkSize)
+			return
+		}
+
 		// PHASE H: Check if we can use streaming encoder
 		// Prefer StreamSlice (cache-friendly sequential iteration) over StreamDocuments (random map iteration)
 		if len(typedResult.StreamSlice) > 0 {
@@ -1939,6 +1954,142 @@ func sendResultCompressed(writer *bufio.Writer, resp *CommandResponse, slice []*
 	writer.Write(compressed)
 	writer.WriteByte('\n')
 	writer.Flush()
+}
+
+// streamResultFromIterator streams documents from an IteratorNode to the wire
+// using the chunked streaming protocol (STREAM:v1). Documents are pulled one-at-a-time
+// via Next() and batched into chunks of chunkSize before flushing to the wire.
+//
+// This function owns the iterator lifecycle: it calls Close() when done or on error.
+func streamResultFromIterator(
+	writer *bufio.Writer,
+	iterator planner.IteratorNode,
+	fields []string,
+	compress bool,
+	logger *zap.SugaredLogger,
+	chunkSize int,
+) {
+	defer iterator.Close()
+
+	startTime := time.Now()
+
+	// 1. Send stream header
+	writer.WriteString("STREAM:v1\n")
+
+	// 2. Send result metadata (field names for client-side schema)
+	metaJSON, _ := hvjsonMarshal(&map[string]interface{}{
+		"ResultMeta": map[string]interface{}{
+			"Fields":   fields,
+			"Compress": compress,
+		},
+	})
+	writer.WriteString(string(metaJSON) + "\n")
+
+	// 3. Pull documents and send in chunks
+	chunk := make([]*models.Document, 0, chunkSize)
+	totalCount := 0
+
+	for {
+		doc, err := iterator.Next()
+		if err != nil {
+			// Flush any partial chunk before error
+			if len(chunk) > 0 {
+				if writeErr := writeChunk(writer, chunk, fields, compress, logger); writeErr != nil {
+					logger.Errorf("Failed to write partial chunk before error: %v", writeErr)
+				}
+			}
+			// Send error frame
+			errJSON, _ := hvjsonMarshal(&map[string]interface{}{
+				"code":    "ERR_QUERY_EXECUTION",
+				"message": err.Error(),
+			})
+			writer.WriteString("ERR:" + string(errJSON) + "\n")
+			writer.Flush()
+			return
+		}
+
+		// (nil, nil) signals EOF
+		if doc == nil {
+			// Flush remaining chunk
+			if len(chunk) > 0 {
+				if writeErr := writeChunk(writer, chunk, fields, compress, logger); writeErr != nil {
+					logger.Errorf("Failed to write final chunk: %v", writeErr)
+					return
+				}
+			}
+			break
+		}
+
+		chunk = append(chunk, doc)
+		totalCount++
+
+		// Flush chunk when full
+		if len(chunk) >= chunkSize {
+			if writeErr := writeChunk(writer, chunk, fields, compress, logger); writeErr != nil {
+				logger.Errorf("Failed to write chunk: %v", writeErr)
+				return
+			}
+			chunk = chunk[:0]
+		}
+	}
+
+	// 4. Send end frame
+	execTimeMS := float64(time.Since(startTime).Microseconds()) / 1000.0
+	writer.WriteString("END:")
+	writer.WriteString(strconv.Itoa(totalCount))
+	writer.WriteByte(',')
+	writer.WriteString(strconv.FormatFloat(execTimeMS, 'f', 2, 64))
+	writer.WriteByte('\n')
+	writer.Flush()
+}
+
+// writeChunk encodes a batch of documents as a JSON array and writes it as a
+// CHUNK (or ZCHUNK if compression is enabled) frame to the wire.
+func writeChunk(
+	writer *bufio.Writer,
+	docs []*models.Document,
+	fields []string,
+	compress bool,
+	logger *zap.SugaredLogger,
+) error {
+	// Encode chunk into a temporary buffer
+	var buf bytes.Buffer
+	if err := helpers.StreamDocumentSliceToJSON(&buf, docs, fields); err != nil {
+		return err
+	}
+
+	payload := buf.Bytes()
+
+	if compress {
+		compBuf := compressBufPool.Get().(*bytes.Buffer)
+		compBuf.Reset()
+		defer compressBufPool.Put(compBuf)
+
+		zw := zstdEncoderPool.Get().(*zstd.Encoder)
+		zw.Reset(compBuf)
+		defer zstdEncoderPool.Put(zw)
+
+		zw.Write(payload)
+		if err := zw.Close(); err != nil {
+			// Fallback to uncompressed
+			logger.Warnf("Chunk compression failed, sending uncompressed: %v", err)
+			writer.WriteString("CHUNK:" + strconv.Itoa(len(payload)) + "\n")
+			writer.Write(payload)
+			writer.WriteByte('\n')
+			return writer.Flush()
+		}
+
+		compressed := compBuf.Bytes()
+		writer.WriteString("ZCHUNK:" + strconv.Itoa(len(compressed)) + ":" + strconv.Itoa(len(payload)) + "\n")
+		writer.Write(compressed)
+		writer.WriteByte('\n')
+	} else {
+		writer.WriteString("CHUNK:" + strconv.Itoa(len(payload)) + "\n")
+		writer.Write(payload)
+		writer.WriteByte('\n')
+	}
+
+	return writer.Flush()
 }
 
 // Secure password hashing using Argon2id

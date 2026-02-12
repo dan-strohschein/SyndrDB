@@ -131,6 +131,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return ParseAndExecutePreparedStatementCommand(ctx, command, session, database, serviceManager, logger)
 	}
 
+	// CURSOR OPERATIONS: Check for DECLARE/FETCH/CLOSE cursor commands
+	if IsCursorCommand(command) {
+		return HandleCursorCommand(ctx, command, session, serviceManager, database, logger, startTime)
+	}
+
 	// TRANSACTION MANAGEMENT: Check for transaction commands first (before any other processing)
 	if IsTransactionCommand(command) {
 		return ParseAndExecuteTransactionCommand(command, session, serviceManager, database, logger)

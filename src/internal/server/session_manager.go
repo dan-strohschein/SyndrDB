@@ -174,6 +174,9 @@ type Session struct {
 	RoleCacheTTL      time.Duration      // TTL for role cache (default: 5 minutes)
 	PermissionService *PermissionService // Reference to permission service for role lookup
 
+	// Server-side cursor management
+	Cursors *CursorManager
+
 	// Synchronization
 	mu     sync.RWMutex
 	Logger *zap.SugaredLogger
@@ -451,6 +454,12 @@ func (sm *SessionManager) CreateSession(username, userID, databaseName string, d
 		IsAdmin:           false,           // Will be set by GetRole()
 		RoleCacheTime:     time.Time{},     // Zero time means cache is empty
 		PermissionService: nil,             // Will be set by server initialization
+
+		// Server-side cursor management
+		Cursors: NewCursorManager(
+			settingsArgs.MaxOpenCursorsPerSession,
+			sm.logger.With("sessionID", sessionID, "component", "cursors"),
+		),
 	}
 
 	// PHASE 7: Store session using sharded map and lock-free indexes
@@ -752,6 +761,11 @@ func (sm *SessionManager) cleanupSession(session *Session) error {
 
 	// Set state to terminated
 	session.State = SessionStateTerminated
+
+	// Close all open cursors to release suspended iterators
+	if session.Cursors != nil {
+		session.Cursors.CloseAll()
+	}
 
 	// Cancel active transactions
 	for txID, cancelFunc := range session.ActiveTransactions {
@@ -1599,6 +1613,10 @@ func (s *Session) CommitTransaction() {
 	defer s.mu.Unlock()
 
 	s.TransactionStatus = TransactionStatusCommitted
+	// Close all cursors on transaction end (PostgreSQL semantics)
+	if s.Cursors != nil {
+		s.Cursors.CloseAll()
+	}
 	s.clearTransactionState()
 }
 
@@ -1608,6 +1626,10 @@ func (s *Session) AbortTransaction() {
 	defer s.mu.Unlock()
 
 	s.TransactionStatus = TransactionStatusAborted
+	// Close all cursors on transaction end (PostgreSQL semantics)
+	if s.Cursors != nil {
+		s.Cursors.CloseAll()
+	}
 	s.clearTransactionState()
 }
 
