@@ -586,10 +586,15 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 	sbs.logger.Debugf("Starting IN scan for field='%s', values count=%d, case-insensitive=%v, negate=%v",
 		field, len(values), caseInsensitive, negate)
 
-	// Convert values to hash set for O(1) lookups
-	valueSet := make(map[interface{}]bool, len(values))
+	// Build string-key set for O(1) lookups (avoids interface{} boxing per value)
+	valueSet := make(map[string]struct{}, len(values))
 	for _, v := range values {
-		valueSet[v] = true
+		fv := models.NewInterfaceValue(v)
+		key := fv.KeyString()
+		if caseInsensitive {
+			key = fv.KeyStringCaseInsensitive()
+		}
+		valueSet[key] = struct{}{}
 	}
 
 	// TODO: For >1000 values, consider using bloom filter to reduce memory
@@ -627,38 +632,34 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 		}
 	}
 
-	// matchDoc checks if a single document matches the IN/NOT IN criteria
+	// matchDoc checks if a single document matches the IN/NOT IN criteria.
+	// Prefer doc.Fields (typed) and string-key set; fall back to doc.Data for schemaless.
 	matchDoc := func(doc *models.Document) bool {
-		if doc.Data == nil {
-			return false
+		var docFV models.FieldValue
+		exists := false
+		if doc.Fields != nil {
+			if f, ok := doc.Fields[field]; ok {
+				docFV = f.Value
+				exists = true
+			}
 		}
-		docValue, exists := doc.Data[field]
+		if !exists && doc.Data != nil {
+			if v, ok := doc.Data[field]; ok {
+				docFV = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
 			if negate {
 				return true // NOT IN: missing field means not in the set
 			}
 			return false
 		}
-
-		matched := false
+		key := docFV.KeyString()
 		if caseInsensitive {
-			if docStr, ok := docValue.(string); ok {
-				docStrLower := strings.ToLower(docStr)
-				for value := range valueSet {
-					if valueStr, ok := value.(string); ok {
-						if strings.ToLower(valueStr) == docStrLower {
-							matched = true
-							break
-						}
-					}
-				}
-			} else {
-				matched = valueSet[docValue]
-			}
-		} else {
-			matched = valueSet[docValue]
+			key = docFV.KeyStringCaseInsensitive()
 		}
-
+		_, matched := valueSet[key]
 		if negate {
 			matched = !matched
 		}
@@ -854,20 +855,22 @@ func (sbs *SmartBundleScanner) getBatchedDocuments() <-chan []*models.Document {
 	return batchChan
 }
 
-// documentMatchesQuery determines if a document matches the query criteria
-// This implements efficient value comparison with type safety
+// documentMatchesQuery determines if a document matches the query criteria.
+// Prefers doc.Fields (typed); falls back to doc.Data for schemaless docs.
 func (sbs *SmartBundleScanner) documentMatchesQuery(doc *models.Document, query *ScanQuery) bool {
-	if doc.Data == nil {
-		return false
+	var docValue interface{}
+	if doc.Fields != nil {
+		if f, ok := doc.Fields[query.KeyName]; ok {
+			docValue = f.Value.AsInterface()
+			return sbs.compareValues(docValue, query.Value, query.Operator, query.CaseSensitive)
+		}
 	}
-
-	docValue, exists := doc.Data[query.KeyName]
-	if !exists {
-		return false
+	if doc.Data != nil {
+		if v, exists := doc.Data[query.KeyName]; exists {
+			return sbs.compareValues(v, query.Value, query.Operator, query.CaseSensitive)
+		}
 	}
-
-	// Use optimized comparison based on operator
-	return sbs.compareValues(docValue, query.Value, query.Operator, query.CaseSensitive)
+	return false
 }
 
 // compareValues performs optimized value comparison with proper type handling

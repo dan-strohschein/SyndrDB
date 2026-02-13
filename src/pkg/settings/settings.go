@@ -271,6 +271,10 @@ type Arguments struct {
 	MaxOpenCursorsPerSession int `yaml:"max_open_cursors_per_session"` // Max server-side cursors per session (default: 64)
 	CursorIdleTimeoutSeconds int `yaml:"cursor_idle_timeout_seconds"`  // Idle timeout for cursors in seconds (default: 300)
 
+	// Page-Level Storage Compression Configuration
+	StorageCompression    string `yaml:"storage_compression"`      // "none" or "zstd" (default: "none")
+	CompressionMinDocSize int    `yaml:"compression_min_doc_size"` // Min bytes to compress (default: 256)
+
 	// Index Maintenance (Automatic Index Rebuild) Configuration
 	IndexMaintenanceEnabled              bool    `yaml:"index_maintenance_enabled"`                // Enable automatic index rebuilding (default: true)
 	IndexMaintenanceIntervalSeconds      int     `yaml:"index_maintenance_interval_seconds"`       // Evaluation interval in seconds (default: 300 = 5 minutes)
@@ -541,6 +545,10 @@ func GetSettings() *Arguments {
 			StreamingChunkSize:       256, // 256 documents per streaming chunk
 			MaxOpenCursorsPerSession: 64,  // Max 64 open cursors per session
 			CursorIdleTimeoutSeconds: 300, // 5-minute idle timeout for cursors
+
+			// Page-Level Storage Compression Defaults
+			StorageCompression:    "none", // Disabled by default for backward compatibility
+			CompressionMinDocSize: 256,    // Only compress documents >= 256 bytes
 
 			// Response Compression Defaults
 			EnableResponseCompression: true, // Allow zstd compression when client requests it

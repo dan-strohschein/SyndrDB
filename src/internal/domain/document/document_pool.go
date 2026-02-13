@@ -36,6 +36,7 @@ func (p *DocumentPool) GetDocument() *models.Document {
 	doc := p.documentPool.Get().(*models.Document)
 
 	doc.DocumentID = ""
+	doc.CachedJSON = nil // Clear cached JSON fragments from previous use
 	if doc.Fields == nil {
 		doc.Fields = make(map[string]models.Field, 8)
 	} else {
@@ -56,6 +57,7 @@ func (p *DocumentPool) PutDocument(doc *models.Document) {
 		}
 		// Clear sensitive data but keep the map allocated (or nil; GetDocument will re-init if needed)
 		doc.DocumentID = ""
+		doc.CachedJSON = nil // Allow GC of cached JSON fragments
 		p.documentPool.Put(doc)
 	}
 }

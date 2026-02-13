@@ -91,23 +91,23 @@ type BucketFileHandle struct {
 // BucketFileManager manages per-bucket file handles for optimized writes
 // Enables O(1) bucket lookup and parallel compaction
 type BucketFileManager struct {
-	buckets             map[uint32]*BucketFileHandle // Map of bucket number to file handle
-	numBuckets          uint32                       // Total number of buckets
-	bucketMaxSize       int64                        // Max file size per bucket file
-	writeBufferSize     int                          // Write buffer size
-	indexName           string                       // Index name for header creation
-	fieldName           string                       // Field name for file naming
-	bundleName          string                       // Bundle name for header creation
-	isForeignKey        bool                         // Whether this is a foreign key index
-	namingHelper        *FileNamingHelper            // File naming utilities
-	headerManager       *HeaderManager               // Header manager for writing headers
-	globalMutex         sync.RWMutex                 // Protects buckets map
-	logger              *zap.SugaredLogger           // Logger
-	batchThreshold      int                          // Entries to accumulate before flush (default: 100)
-	batchSizeBytes      int                          // Bytes to accumulate before flush (default: 32KB)
-	pendingEntries      int32                        // Atomic counter of pending entries across buckets
-	coordinator         interface{}                  // Write coordinator reference
-	lastBackgroundFlush time.Time                    // Last time background writer flushed
+	bucketSlots         []atomic.Pointer[BucketFileHandle] // Lock-free bucket handles (length = numBuckets)
+	bucketInits         []sync.Mutex                       // Per-bucket init mutexes for lazy creation
+	numBuckets          uint32                             // Total number of buckets
+	bucketMaxSize       int64                              // Max file size per bucket file
+	writeBufferSize     int                                // Write buffer size
+	indexName           string                             // Index name for header creation
+	fieldName           string                             // Field name for file naming
+	bundleName          string                             // Bundle name for header creation
+	isForeignKey        bool                               // Whether this is a foreign key index
+	namingHelper        *FileNamingHelper                  // File naming utilities
+	headerManager       *HeaderManager                     // Header manager for writing headers
+	logger              *zap.SugaredLogger                 // Logger
+	batchThreshold      int                                // Entries to accumulate before flush (default: 100)
+	batchSizeBytes      int                                // Bytes to accumulate before flush (default: 32KB)
+	pendingEntries      int32                              // Atomic counter of pending entries across buckets
+	coordinator         interface{}                        // Write coordinator reference
+	lastBackgroundFlush time.Time                          // Last time background writer flushed
 }
 
 // NewBucketFileManager creates a new bucket file manager
@@ -116,7 +116,8 @@ func NewBucketFileManager(numBuckets uint32, bucketMaxSize int64, writeBufferSiz
 	headerManager *HeaderManager, logger *zap.SugaredLogger) *BucketFileManager {
 
 	return &BucketFileManager{
-		buckets:         make(map[uint32]*BucketFileHandle),
+		bucketSlots:     make([]atomic.Pointer[BucketFileHandle], numBuckets),
+		bucketInits:     make([]sync.Mutex, numBuckets),
 		numBuckets:      numBuckets,
 		bucketMaxSize:   bucketMaxSize,
 		writeBufferSize: writeBufferSize,
@@ -131,28 +132,30 @@ func NewBucketFileManager(numBuckets uint32, bucketMaxSize int64, writeBufferSiz
 }
 
 // GetOrCreateBucketHandle gets or creates a file handle for a bucket
-// Thread-safe lazy initialization
+// Thread-safe lazy initialization using lock-free atomic pointer fast path
 func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*BucketFileHandle, error) {
-	// Fast path: read lock first
-	bfm.globalMutex.RLock()
-	handle, exists := bfm.buckets[bucketNum]
-	bfm.globalMutex.RUnlock()
-
-	if exists {
+	// Fast path: single atomic pointer load — zero lock contention
+	if handle := bfm.bucketSlots[bucketNum].Load(); handle != nil {
 		return handle, nil
 	}
 
-	// Slow path: write lock and create
-	bfm.globalMutex.Lock()
-	defer bfm.globalMutex.Unlock()
+	// Slow path: per-bucket mutex — only one bucket blocked at a time
+	return bfm.createBucketHandle(bucketNum)
+}
 
-	// Double-check after acquiring write lock
-	if handle, exists := bfm.buckets[bucketNum]; exists {
+// createBucketHandle lazily initializes a bucket handle under a per-bucket mutex.
+// Called only on the first access to a given bucket (cold path).
+func (bfm *BucketFileManager) createBucketHandle(bucketNum uint32) (*BucketFileHandle, error) {
+	bfm.bucketInits[bucketNum].Lock()
+	defer bfm.bucketInits[bucketNum].Unlock()
+
+	// Double-check after acquiring per-bucket lock
+	if handle := bfm.bucketSlots[bucketNum].Load(); handle != nil {
 		return handle, nil
 	}
 
 	// Create new bucket handle
-	handle = &BucketFileHandle{
+	handle := &BucketFileHandle{
 		BucketNum:      bucketNum,
 		CurrentFileNum: 0,
 		CurrentSize:    0,
@@ -163,20 +166,6 @@ func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*Bucket
 	existingFiles, err := bfm.namingHelper.GetBucketFiles(bfm.fieldName, bfm.isForeignKey, bucketNum)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover bucket files: %w", err)
-	}
-
-	// DIAG: Log bucket file discovery for debugging index read misses
-	if bfm.logger != nil {
-		fileNames := make([]string, len(existingFiles))
-		for i, f := range existingFiles {
-			fileNames[i] = filepath.Base(f)
-		}
-		bfm.logger.Warnw("[BUCKET-DIAG] GetOrCreateBucketHandle discovery",
-			"bucketNum", bucketNum,
-			"fieldName", bfm.fieldName,
-			"dataDir", bfm.namingHelper.dataDir,
-			"numFilesFound", len(existingFiles),
-			"files", fileNames)
 	}
 
 	if len(existingFiles) > 0 {
@@ -199,7 +188,7 @@ func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*Bucket
 					handle.AtomicOffset = stat.Size() // RCU: Initialize atomic offset from file size
 					handle.CurrentFileNum = parsed.FileNumber
 					handle.WriteBuffer = bufio.NewWriterSize(file, bfm.writeBufferSize)
-					bfm.buckets[bucketNum] = handle
+					bfm.bucketSlots[bucketNum].Store(handle)
 					return handle, nil
 				}
 				_ = file.Close()
@@ -214,7 +203,7 @@ func (bfm *BucketFileManager) GetOrCreateBucketHandle(bucketNum uint32) (*Bucket
 		return nil, fmt.Errorf("failed to open bucket file: %w", err)
 	}
 
-	bfm.buckets[bucketNum] = handle
+	bfm.bucketSlots[bucketNum].Store(handle)
 	return handle, nil
 }
 
@@ -325,23 +314,25 @@ func (bfm *BucketFileManager) rotateBucketFile(handle *BucketFileHandle) error {
 
 // CloseAll closes all bucket file handles
 func (bfm *BucketFileManager) CloseAll() error {
-	bfm.globalMutex.Lock()
-	defer bfm.globalMutex.Unlock()
-
 	var firstErr error
-	for bucketNum, handle := range bfm.buckets {
+	for i := uint32(0); i < bfm.numBuckets; i++ {
+		handle := bfm.bucketSlots[i].Load()
+		if handle == nil {
+			continue
+		}
+
 		handle.Mutex.Lock()
 
 		// Flush and close
 		if handle.WriteBuffer != nil {
 			if err := handle.WriteBuffer.Flush(); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("failed to flush bucket %d: %w", bucketNum, err)
+				firstErr = fmt.Errorf("failed to flush bucket %d: %w", i, err)
 			}
 		}
 
 		if handle.CurrentFile != nil {
 			if err := handle.CurrentFile.Close(); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("failed to close bucket %d: %w", bucketNum, err)
+				firstErr = fmt.Errorf("failed to close bucket %d: %w", i, err)
 			}
 		}
 
@@ -620,17 +611,6 @@ func (es *EntryStorage) AppendEntry(entry *HashIndexEntry) error {
 //
 // Returns error if append fails
 func (es *EntryStorage) appendEntryToBucket(entry *HashIndexEntry) error {
-	// #region agent log
-	// DEBUG INSTRUMENTATION: Log actual disk writes for first 10 entries (Hypothesis C,D)
-	entrySeq := atomic.LoadUint64(&es.totalEntries)
-	if entrySeq < 10 {
-		if df, derr := os.OpenFile("/Users/danstrohschein/Documents/CodeProjects/golang/SyndrDB/.cursor/debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); derr == nil {
-			fmt.Fprintf(df, "{\"location\":\"hash_entry_storage.go:appendEntryToBucket\",\"message\":\"disk_write\",\"hypothesisId\":\"CD\",\"timestamp\":%d,\"data\":{\"key\":\"%s\",\"bucketNum\":%d,\"hashValue\":%d,\"docID\":\"%s\",\"indexName\":\"%s\",\"useBuckets\":%v}}\n",
-				time.Now().UnixMilli(), entry.KeyValue, entry.BucketNum, entry.HashValue, entry.DocumentID, es.indexName, es.useBuckets)
-			df.Close()
-		}
-	}
-	// #endregion
 	// Get or create bucket file handle
 	handle, err := es.bucketFileManager.GetOrCreateBucketHandle(entry.BucketNum)
 	if err != nil {

@@ -107,7 +107,7 @@ type CacheEntry struct {
 	collectionVersion uint64
 
 	// Execution statistics
-	execCount int64
+	execCount atomic.Int64
 	totalTime time.Duration
 	avgTime   time.Duration
 
@@ -251,12 +251,14 @@ func (spc *ShardedPlanCache) Get(
 
 // get retrieves a plan from the shard, handling stale plan serving.
 // Returns (plan, true) when serving a stale plan (caller must increment staleServes).
+// Uses RLock fast path for cache hits; only upgrades to Lock 1-in-8 hits for MoveToFront.
 func (shard *PlanCacheShard) get(
 	ctx context.Context,
 	query *queryparser.UnifiedSelectQuery,
 	key uint64,
 	useGeneric bool,
 ) (*ExecutionPlan, bool) {
+	// RLock fast path: lookup + version check without exclusive lock
 	shard.mu.RLock()
 	elem, ok := shard.cache[key]
 	if !ok {
@@ -272,15 +274,27 @@ func (shard *PlanCacheShard) get(
 	isValid := entry.collectionVersion == currentVersion
 
 	if isValid {
-		// Plan is fresh - update LRU and stats. Clone before return so concurrent
-		// callers do not share the same plan (avoids race on sortedDocuments etc.).
-		shard.lru.MoveToFront(elem)
-		entry.lastUsed = time.Now()
-		entry.execCount++
+		// Plan is fresh - atomically increment execCount (lock-free)
+		ec := entry.execCount.Add(1)
+		plan := entry.plan
+		isGeneric := entry.isGeneric
 		shard.mu.RUnlock()
-		p := entry.plan.Clone()
+
+		// Probabilistic MoveToFront: upgrade to write lock only 1-in-8 hits.
+		// LRU position is approximate anyway; this avoids write lock contention.
+		if ec%8 == 0 {
+			shard.mu.Lock()
+			// Re-check elem is still in cache (could have been evicted)
+			if _, stillOk := shard.cache[key]; stillOk {
+				shard.lru.MoveToFront(elem)
+			}
+			shard.mu.Unlock()
+		}
+
+		// Clone before return so concurrent callers don't share mutable plan state
+		p := plan.Clone()
 		p.CacheKey = key
-		p.IsGeneric = entry.isGeneric
+		p.IsGeneric = isGeneric
 		return p, false
 	}
 
@@ -523,7 +537,7 @@ func (spc *ShardedPlanCache) shouldUseGenericPlan(query *queryparser.UnifiedSele
 
 	// Need at least threshold executions before considering generic
 	threshold := settings.GetSettings().PlanCacheCustomThreshold
-	if entry.execCount < int64(threshold) {
+	if entry.execCount.Load() < int64(threshold) {
 		return false
 	}
 
@@ -559,10 +573,12 @@ func (spc *ShardedPlanCache) UpdatePlanStats(key uint64, duration time.Duration,
 	}
 
 	entry := elem.Value.(*CacheEntry)
-	entry.execCount++
+	// Note: execCount already incremented atomically in get(); don't double-count
 	entry.totalTime += duration
-	entry.avgTime = entry.totalTime / time.Duration(entry.execCount)
-	entry.lastUsed = time.Now()
+	ec := entry.execCount.Load()
+	if ec > 0 {
+		entry.avgTime = entry.totalTime / time.Duration(ec)
+	}
 
 	// Track costs for adaptive planning
 	if !isGeneric && len(entry.customPlanCost) < 5 {

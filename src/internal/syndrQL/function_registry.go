@@ -23,15 +23,25 @@ type FunctionSignature struct {
 	Description    string                                                                                // Documentation for error messages
 }
 
-// EvaluationContext provides runtime context for function evaluation
+// EvaluationContext provides runtime context for function evaluation.
+// FieldValues is populated from doc.Fields (typed); use GetFieldValue for document field access.
 // TODO: I will add TransactionID when implementing MVCC isolation levels
 // TODO: I will add QueryTimeout when implementing per-query resource limits
 type EvaluationContext struct {
 	CurrentTime   time.Time                    // Cached NOW() value (query-scoped)
 	TimezoneCache interface{}                  // Timezone cache reference (avoid import cycle)
-	Document      map[string]interface{}       // Current document being evaluated
 	BundleName    string                       // Bundle being queried
-	FieldValues   map[string]models.FieldValue // Pre-evaluated field values for performance
+	FieldValues   map[string]models.FieldValue // Pre-evaluated field values (from doc.Fields, no interface boxing)
+}
+
+// GetFieldValue returns the typed field value for name from the current document context.
+// Use this instead of reading Document (removed) when a function needs document fields.
+func (ec *EvaluationContext) GetFieldValue(name string) (models.FieldValue, bool) {
+	if ec == nil || ec.FieldValues == nil {
+		return models.FieldValue{}, false
+	}
+	fv, ok := ec.FieldValues[name]
+	return fv, ok
 }
 
 // FunctionRegistry manages registered functions with thread-safe access

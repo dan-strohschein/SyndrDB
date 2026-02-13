@@ -355,6 +355,53 @@ func extractFieldNamesRecursive(expr Expression, seen map[string]bool, result *[
 	}
 }
 
+// ExtractFunctionCallEquality detects patterns like LOWER(name) = 'john' or UPPER(email) = 'TEST'
+// where the left side is a CallExpression and the right side is a LiteralExpression.
+// Returns the function name, field name, comparison value, and whether the pattern matched.
+func ExtractFunctionCallEquality(expr Expression) (funcName, fieldName string, value interface{}, ok bool) {
+	// Unwrap grouped expressions
+	expr = UnwrapGrouped(expr)
+
+	binary, isBinary := expr.(*BinaryExpression)
+	if !isBinary {
+		return "", "", nil, false
+	}
+
+	// Must be equality operator (== or =)
+	if binary.Operator != TOKEN_EQ && binary.Operator != TOKEN_ASSIGN {
+		return "", "", nil, false
+	}
+
+	// Left side must be a function call
+	call, isCall := binary.Left.(*CallExpression)
+	if !isCall {
+		return "", "", nil, false
+	}
+
+	// Function must have exactly one argument that is a field identifier
+	if len(call.Arguments) != 1 {
+		return "", "", nil, false
+	}
+
+	var field string
+	switch arg := call.Arguments[0].(type) {
+	case *IdentifierExpression:
+		field = strings.Trim(arg.Name, "\"")
+	case *QualifiedIdentifierExpression:
+		field = strings.Trim(arg.Field, "\"")
+	default:
+		return "", "", nil, false
+	}
+
+	// Right side must be a literal value
+	literal, isLiteral := binary.Right.(*LiteralExpression)
+	if !isLiteral {
+		return "", "", nil, false
+	}
+
+	return strings.ToUpper(call.Function), field, literal.Value, true
+}
+
 // tokenToOperator converts a TokenType to its string operator representation
 func tokenToOperator(tok TokenType) string {
 	switch tok {

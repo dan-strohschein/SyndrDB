@@ -1033,9 +1033,9 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 			Value: models.NewStringValue(doc.DocumentID),
 		}
 
-		// Populate Data map from Fields
+		// Populate Data map from Fields at boundary (box once per field for storage/API)
 		for key, field := range doc.Fields {
-			doc.Data[key] = field.Value
+			doc.Data[key] = field.Value.AsInterface()
 		}
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], permissionsBundle, doc)
@@ -1091,9 +1091,9 @@ func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
 			Value: models.NewStringValue(doc.DocumentID),
 		}
 
-		// Populate Data map from Fields
+		// Populate Data map from Fields at boundary (box once per field for storage/API)
 		for key, field := range doc.Fields {
-			doc.Data[key] = field.Value
+			doc.Data[key] = field.Value.AsInterface()
 		}
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesBundle, doc)
@@ -1191,7 +1191,7 @@ func HydrateRolesPermissionsPrimaryCatalogs(databaseService *database.DatabaseSe
 
 					// Populate Data map from Fields
 					for key, field := range rolePermDoc.Fields {
-						rolePermDoc.Data[key] = field.Value
+						rolePermDoc.Data[key] = field.Value.AsInterface()
 					}
 
 					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesPermissionsBundle, rolePermDoc)
@@ -1314,7 +1314,7 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 
 		// Populate Data map for consistent access
 		for key, field := range fields {
-			doc.Data[key] = field.Value
+			doc.Data[key] = field.Value.AsInterface()
 		}
 		doc.Data["DocumentID"] = doc.DocumentID
 
@@ -1381,7 +1381,7 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 
 		// Populate Data map
 		for key, field := range userRoleDoc.Fields {
-			userRoleDoc.Data[key] = field.Value
+			userRoleDoc.Data[key] = field.Value.AsInterface()
 		}
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userRolesBundle, userRoleDoc)
@@ -1489,7 +1489,7 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 
 					// Populate Data map from Fields
 					for key, field := range userPermDoc.Fields {
-						userPermDoc.Data[key] = field.Value
+						userPermDoc.Data[key] = field.Value.AsInterface()
 					}
 
 					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userPermissionsBundle, userPermDoc)

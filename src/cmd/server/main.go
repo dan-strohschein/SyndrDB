@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/graphQL"
@@ -39,6 +41,15 @@ func printUsage() {
 }
 
 func main() {
+	// GC tuning: GOGC=150 triggers GC at 1.5x live heap (default 100 = 1x).
+	// Moderate increase reduces GC frequency without causing the long STW pauses
+	// that GOGC=200 creates under 30 concurrent connections.
+	// 4GB soft limit prevents OOM while allowing higher heap headroom.
+	debug.SetGCPercent(150)
+	debug.SetMemoryLimit(4 * 1024 * 1024 * 1024) // 4GB
+	runtime.SetMutexProfileFraction(5)             // Sample 1-in-5 mutex contention events
+	runtime.SetBlockProfileRate(1000)              // Report blocking events ≥ 1µs
+
 	// Create a new settings.Arguments instance
 	// Get the global settings instance
 	args := settings.GetSettings()
@@ -150,6 +161,9 @@ func main() {
 	// Per-Query Memory Limit Flags (DoS Protection)
 	flag.IntVar(&args.QueryMaxMemoryMB, "query-max-memory", 25, "Maximum memory per query in MB (any positive integer)")
 	flag.IntVar(&args.AdminQueryMaxMemoryMB, "admin-query-max-memory", 25, "Maximum memory per admin query in MB (any positive integer)")
+
+	// Response Compression
+	flag.BoolVar(&args.EnableResponseCompression, "enable-response-compression", true, "Allow zstd response compression when client requests it (default: true)")
 
 	// STEP 1: Do an initial parse to check for --config flag
 	flag.Parse()
@@ -264,6 +278,7 @@ func main() {
 	flag.StringVar(&args.GraphQLRateAlgorithm, "graphql-rate-algorithm", args.GraphQLRateAlgorithm, "GraphQL rate limiting algorithm")
 
 	flag.BoolVar(&args.EnableRCUWrites, "enable-rcu-writes", args.EnableRCUWrites, "Enable RCU Writes ")
+	flag.BoolVar(&args.EnableResponseCompression, "enable-response-compression", args.EnableResponseCompression, "Allow zstd response compression when client requests it (default: true)")
 
 	// Final parse with CLI taking precedence
 	flag.Parse()

@@ -32,6 +32,9 @@ type BundleServiceInterface interface {
 	// GetDocumentPage loads a specific page by page ID
 	// Used for PostgreSQL-style index-based joins to load pages directly
 	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error)
+	// GetDocumentPageReadOnly returns an immutable readerView snapshot without copying.
+	// Zero-allocation fast path — caller MUST NOT mutate the returned page or Documents map.
+	GetDocumentPageReadOnly(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error)
 	// SnapshotPageDocuments safely snapshots documents from a page to avoid concurrent map iteration
 	SnapshotPageDocuments(bundleName, databaseName string, pageID uint32) ([]models.Document, error)
 	// CopyProjectedFromCache copies projected documents from documentPages cache under one RLock

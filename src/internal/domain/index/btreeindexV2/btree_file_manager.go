@@ -1400,6 +1400,44 @@ func (fm *BTreeFileManager) SerializePageBinary(pageData interface{}) ([]byte, e
 			return nil, err
 		}
 
+		// Write IncludeData (covering index INCLUDE column values)
+		// Format: [hasIncludeData:1][count:4][per-key: [docCount:4][per-doc: [fieldCount:4][per-field: [keyLen:4][key][valLen:4][val]]]]
+		hasInclude := len(data.IncludeData) > 0
+		if err := binary.Write(buf, binary.LittleEndian, hasInclude); err != nil {
+			return nil, err
+		}
+		if hasInclude {
+			if err := binary.Write(buf, binary.LittleEndian, uint32(len(data.IncludeData))); err != nil {
+				return nil, err
+			}
+			for _, docsInclude := range data.IncludeData {
+				if err := binary.Write(buf, binary.LittleEndian, uint32(len(docsInclude))); err != nil {
+					return nil, err
+				}
+				for _, docFields := range docsInclude {
+					if err := binary.Write(buf, binary.LittleEndian, uint32(len(docFields))); err != nil {
+						return nil, err
+					}
+					for k, v := range docFields {
+						kBytes := []byte(k)
+						if err := binary.Write(buf, binary.LittleEndian, uint32(len(kBytes))); err != nil {
+							return nil, err
+						}
+						if err := binary.Write(buf, binary.LittleEndian, kBytes); err != nil {
+							return nil, err
+						}
+						vBytes := []byte(v)
+						if err := binary.Write(buf, binary.LittleEndian, uint32(len(vBytes))); err != nil {
+							return nil, err
+						}
+						if err := binary.Write(buf, binary.LittleEndian, vBytes); err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+		}
+
 		return buf.Bytes(), nil
 	case *BTreeMetadata:
 		buf := new(bytes.Buffer)
@@ -1793,6 +1831,52 @@ func (fm *BTreeFileManager) deserializeNodeBinary(buf *bytes.Reader) (*BTreeNode
 		return nil, fmt.Errorf("failed to read tombstone count: %w", err)
 	}
 
+	// Read IncludeData if present (covering index INCLUDE column values)
+	// Backward compatible: if no more data, IncludeData stays nil
+	var includeData [][]map[string]string
+	var hasInclude bool
+	if err := binary.Read(buf, binary.LittleEndian, &hasInclude); err == nil && hasInclude {
+		var includeKeyCount uint32
+		if err := binary.Read(buf, binary.LittleEndian, &includeKeyCount); err == nil {
+			includeData = make([][]map[string]string, includeKeyCount)
+			for i := uint32(0); i < includeKeyCount; i++ {
+				var docCount uint32
+				if err := binary.Read(buf, binary.LittleEndian, &docCount); err != nil {
+					break
+				}
+				docsInclude := make([]map[string]string, docCount)
+				for j := uint32(0); j < docCount; j++ {
+					var fieldCount uint32
+					if err := binary.Read(buf, binary.LittleEndian, &fieldCount); err != nil {
+						break
+					}
+					fields := make(map[string]string, fieldCount)
+					for k := uint32(0); k < fieldCount; k++ {
+						var kLen uint32
+						if err := binary.Read(buf, binary.LittleEndian, &kLen); err != nil {
+							break
+						}
+						kBytes := make([]byte, kLen)
+						if err := binary.Read(buf, binary.LittleEndian, &kBytes); err != nil {
+							break
+						}
+						var vLen uint32
+						if err := binary.Read(buf, binary.LittleEndian, &vLen); err != nil {
+							break
+						}
+						vBytes := make([]byte, vLen)
+						if err := binary.Read(buf, binary.LittleEndian, &vBytes); err != nil {
+							break
+						}
+						fields[string(kBytes)] = string(vBytes)
+					}
+					docsInclude[j] = fields
+				}
+				includeData[i] = docsInclude
+			}
+		}
+	}
+
 	// Construct the BTreeNode
 	node := &BTreeNode{
 		PageNum:        pageNum,
@@ -1807,6 +1891,7 @@ func (fm *BTreeFileManager) deserializeNodeBinary(buf *bytes.Reader) (*BTreeNode
 		Children:       children,
 		Tombstones:     tombstones,     // CRITICAL: Set the Tombstones field from deserialized data
 		TombstoneCount: tombstoneCount, // CRITICAL: Set the TombstoneCount field from deserialized data
+		IncludeData:    includeData,    // Covering index INCLUDE data (nil for non-covering indexes)
 	}
 	// Return the constructed node
 	return node, nil

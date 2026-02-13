@@ -534,6 +534,15 @@ type IndexReference struct {
 	HashIndexField  IndexField  // TODO: Consider removing - metadata in headers
 	BTreeIndexField IndexField  // TODO: Consider removing - metadata in headers
 
+	// Covering index: INCLUDE columns (stored in leaf but not searched)
+	IncludeFields []string `json:"include_fields,omitempty"`
+
+	// Partial index: only index documents matching this predicate
+	WherePredicate string `json:"where_predicate,omitempty"`
+
+	// Expression index: computed expression (e.g., "LOWER(name)")
+	Expression string `json:"expression,omitempty"`
+
 	// Index maintenance metadata (for automatic rebuild on staleness)
 	Maintenance *IndexMaintenanceMetadata `json:"maintenance,omitempty"`
 }
@@ -670,4 +679,13 @@ type CreateIndexCommand struct {
 	BundleName    string
 	Fields        []FieldDefinition
 	PagesPerRange uint32 // BRIN only: pages per range (default 128)
+
+	// Covering index: INCLUDE columns (stored but not searched)
+	IncludeFields []string
+
+	// Partial index: WHERE predicate expression string
+	WherePredicate string
+
+	// Expression index: expression string (e.g., "LOWER(name)")
+	Expression string
 }

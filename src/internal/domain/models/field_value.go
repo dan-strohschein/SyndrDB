@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dan-strohschein/HVJson/hvjson"
@@ -233,6 +234,37 @@ func (fv FieldValue) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// KeyString returns a canonical string key for set/map membership (e.g. IN list lookup).
+// Avoids interface{} boxing when using value sets. Use KeyStringCaseInsensitive for case-insensitive matching.
+func (fv FieldValue) KeyString() string {
+	switch fv.Type {
+	case FieldTypeString:
+		return fv.StringVal
+	case FieldTypeInt:
+		return strconv.FormatInt(fv.IntVal, 10)
+	case FieldTypeFloat:
+		return strconv.FormatFloat(fv.FloatVal, 'g', -1, 64)
+	case FieldTypeBool:
+		if fv.BoolVal {
+			return "true"
+		}
+		return "false"
+	case FieldTypeNil:
+		return "nil"
+	default:
+		return fv.String()
+	}
+}
+
+// KeyStringCaseInsensitive returns a key for case-insensitive set membership.
+// For string type returns lowercased value; otherwise same as KeyString().
+func (fv FieldValue) KeyStringCaseInsensitive() string {
+	if fv.Type == FieldTypeString {
+		return strings.ToLower(fv.StringVal)
+	}
+	return fv.KeyString()
 }
 
 // BSON Marshaling/Unmarshaling (eliminates interface{} boxing during serialization)

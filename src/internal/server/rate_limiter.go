@@ -3,9 +3,10 @@ package server
 import (
 	"fmt"
 	"net"
+	"sync"
+	"sync/atomic"
 	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/fatal"
-	"sync"
 	"time"
 )
 
@@ -41,12 +42,20 @@ type IPTracker struct {
 	LastActivity    time.Time
 }
 
+const numRateLimitShards = 32
+
+// rateLimitShard holds a subset of IP trackers behind its own mutex.
+type rateLimitShard struct {
+	mu       sync.Mutex
+	trackers map[string]*IPTracker
+}
+
 // RateLimiter manages rate limiting for the server
 type RateLimiter struct {
 	config            *RateLimitConfig
-	ipTrackers        map[string]*IPTracker
-	globalConnections int
-	mutex             sync.RWMutex
+	shards            [numRateLimitShards]rateLimitShard
+	globalConnections atomic.Int32
+	whitelistSet      map[string]bool // immutable after construction — safe to read without lock
 	stopCleanup       chan bool
 }
 
@@ -56,10 +65,21 @@ func NewRateLimiter(config *RateLimitConfig) *RateLimiter {
 		config = DefaultRateLimitConfig()
 	}
 
+	// Build immutable whitelist set for O(1) lock-free lookups
+	wset := make(map[string]bool, len(config.WhitelistedIPs))
+	for _, ip := range config.WhitelistedIPs {
+		wset[ip] = true
+	}
+
 	rl := &RateLimiter{
-		config:      config,
-		ipTrackers:  make(map[string]*IPTracker),
-		stopCleanup: make(chan bool),
+		config:       config,
+		whitelistSet: wset,
+		stopCleanup:  make(chan bool),
+	}
+
+	// Initialize shard maps
+	for i := range rl.shards {
+		rl.shards[i].trackers = make(map[string]*IPTracker)
 	}
 
 	// Start cleanup goroutine
@@ -73,17 +93,29 @@ func (rl *RateLimiter) Stop() {
 	close(rl.stopCleanup)
 }
 
+// shardFor returns the shard index for an IP using FNV-1a-like hash.
+func shardFor(ip string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(ip); i++ {
+		h ^= uint32(ip[i])
+		h *= 16777619
+	}
+	return h % numRateLimitShards
+}
+
 // CheckRequest checks if a request from the given IP should be allowed
 func (rl *RateLimiter) CheckRequest(ip string) error {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
-
-	// Check if IP is whitelisted
-	if rl.isWhitelisted(ip) {
+	// Lock-free fast path: whitelisted IPs bypass rate limiting entirely.
+	// whitelistSet is immutable after construction — no synchronization needed.
+	if rl.whitelistSet[ip] {
 		return nil
 	}
 
-	tracker := rl.getOrCreateTracker(ip)
+	shard := &rl.shards[shardFor(ip)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	tracker := getOrCreateTrackerInShard(shard, ip)
 	now := time.Now()
 
 	// Check if IP is currently banned
@@ -115,23 +147,24 @@ func (rl *RateLimiter) CheckRequest(ip string) error {
 
 // CheckConnection checks if a new connection from the given IP should be allowed
 func (rl *RateLimiter) CheckConnection(ip string) error {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
-
-	// Check global connection limit
-	if rl.globalConnections >= rl.config.MaxGlobalConnections {
+	// Check global connection limit (atomic — no lock needed)
+	if int(rl.globalConnections.Load()) >= rl.config.MaxGlobalConnections {
 		return errors.New(errors.ERR_RESOURCE_EXHAUSTED,
 			fmt.Sprintf("server has reached maximum global connection limit (%d)", rl.config.MaxGlobalConnections),
 			errors.LayerAPI).WithContext("max_global_connections", fmt.Sprintf("%d", rl.config.MaxGlobalConnections))
 	}
 
-	// Check if IP is whitelisted
-	if rl.isWhitelisted(ip) {
-		rl.globalConnections++
+	// Lock-free fast path for whitelisted IPs
+	if rl.whitelistSet[ip] {
+		rl.globalConnections.Add(1)
 		return nil
 	}
 
-	tracker := rl.getOrCreateTracker(ip)
+	shard := &rl.shards[shardFor(ip)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	tracker := getOrCreateTrackerInShard(shard, ip)
 	now := time.Now()
 
 	// Check if IP is currently banned
@@ -150,100 +183,92 @@ func (rl *RateLimiter) CheckConnection(ip string) error {
 
 	tracker.ConnectionCount++
 	tracker.LastActivity = now
-	rl.globalConnections++
+	rl.globalConnections.Add(1)
 
 	return nil
 }
 
 // ReleaseConnection releases a connection for the given IP
 func (rl *RateLimiter) ReleaseConnection(ip string) {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
+	// Whitelisted IPs only tracked via global counter
+	if rl.whitelistSet[ip] {
+		rl.globalConnections.Add(-1)
+		return
+	}
 
-	if tracker, exists := rl.ipTrackers[ip]; exists {
+	shard := &rl.shards[shardFor(ip)]
+	shard.mu.Lock()
+	if tracker, exists := shard.trackers[ip]; exists {
 		if tracker.ConnectionCount > 0 {
 			tracker.ConnectionCount--
 		}
 	}
+	shard.mu.Unlock()
 
-	if rl.globalConnections > 0 {
-		rl.globalConnections--
-	}
+	rl.globalConnections.Add(-1)
 }
 
 // GetStats returns current rate limiting statistics
 func (rl *RateLimiter) GetStats() map[string]interface{} {
-	rl.mutex.RLock()
-	defer rl.mutex.RUnlock()
-
-	stats := map[string]interface{}{
-		"global_connections": rl.globalConnections,
-		"tracked_ips":        len(rl.ipTrackers),
-		"config":             rl.config,
-	}
-
-	// Add per-IP stats
 	ipStats := make(map[string]interface{})
-	for ip, tracker := range rl.ipTrackers {
-		ipStats[ip] = map[string]interface{}{
-			"request_count":    tracker.RequestCount,
-			"connection_count": tracker.ConnectionCount,
-			"banned_until":     tracker.BannedUntil,
-			"last_activity":    tracker.LastActivity,
+	for i := range rl.shards {
+		shard := &rl.shards[i]
+		shard.mu.Lock()
+		for ip, tracker := range shard.trackers {
+			ipStats[ip] = map[string]interface{}{
+				"request_count":    tracker.RequestCount,
+				"connection_count": tracker.ConnectionCount,
+				"banned_until":     tracker.BannedUntil,
+				"last_activity":    tracker.LastActivity,
+			}
 		}
+		shard.mu.Unlock()
 	}
-	stats["ip_stats"] = ipStats
 
-	return stats
+	return map[string]interface{}{
+		"global_connections": int(rl.globalConnections.Load()),
+		"tracked_ips":        len(ipStats),
+		"config":             rl.config,
+		"ip_stats":           ipStats,
+	}
 }
 
 // BanIP manually bans an IP for the configured duration
 func (rl *RateLimiter) BanIP(ip string, duration time.Duration) {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
+	shard := &rl.shards[shardFor(ip)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	tracker := rl.getOrCreateTracker(ip)
+	tracker := getOrCreateTrackerInShard(shard, ip)
 	tracker.BannedUntil = time.Now().Add(duration)
 }
 
 // UnbanIP manually unbans an IP
 func (rl *RateLimiter) UnbanIP(ip string) {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
+	shard := &rl.shards[shardFor(ip)]
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
-	if tracker, exists := rl.ipTrackers[ip]; exists {
+	if tracker, exists := shard.trackers[ip]; exists {
 		tracker.BannedUntil = time.Time{}
 	}
 }
 
 // SetMaxGlobalConnections updates the maximum global connection limit
-// TODO: I could add validation to ensure new limit >= current active connections
 func (rl *RateLimiter) SetMaxGlobalConnections(max int) {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
 	rl.config.MaxGlobalConnections = max
 }
 
-// isWhitelisted checks if an IP is in the whitelist
-func (rl *RateLimiter) isWhitelisted(ip string) bool {
-	for _, whitelistedIP := range rl.config.WhitelistedIPs {
-		if ip == whitelistedIP {
-			return true
-		}
-	}
-	return false
-}
-
-// getOrCreateTracker gets an existing tracker or creates a new one
-func (rl *RateLimiter) getOrCreateTracker(ip string) *IPTracker {
-	tracker, exists := rl.ipTrackers[ip]
+// getOrCreateTrackerInShard gets or creates a tracker within a shard (caller must hold shard.mu).
+func getOrCreateTrackerInShard(shard *rateLimitShard, ip string) *IPTracker {
+	tracker, exists := shard.trackers[ip]
 	if !exists {
 		tracker = &IPTracker{
 			IP:            ip,
 			RequestWindow: time.Now(),
 			LastActivity:  time.Now(),
 		}
-		rl.ipTrackers[ip] = tracker
+		shard.trackers[ip] = tracker
 	}
 	return tracker
 }
@@ -270,19 +295,20 @@ func (rl *RateLimiter) cleanupRoutine() {
 
 // cleanup removes old inactive IP trackers
 func (rl *RateLimiter) cleanup() {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
-
 	now := time.Now()
-	cutoff := now.Add(-time.Hour) // Remove entries older than 1 hour
+	cutoff := now.Add(-time.Hour)
 
-	for ip, tracker := range rl.ipTrackers {
-		// Remove if inactive for more than 1 hour and not banned and no active connections
-		if tracker.LastActivity.Before(cutoff) &&
-			now.After(tracker.BannedUntil) &&
-			tracker.ConnectionCount == 0 {
-			delete(rl.ipTrackers, ip)
+	for i := range rl.shards {
+		shard := &rl.shards[i]
+		shard.mu.Lock()
+		for ip, tracker := range shard.trackers {
+			if tracker.LastActivity.Before(cutoff) &&
+				now.After(tracker.BannedUntil) &&
+				tracker.ConnectionCount == 0 {
+				delete(shard.trackers, ip)
+			}
 		}
+		shard.mu.Unlock()
 	}
 }
 

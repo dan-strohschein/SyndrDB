@@ -84,22 +84,19 @@ type ServiceManager struct {
 
 // Private instance and mutex for thread safety
 var (
-	instance *ServiceManager
-	once     sync.Once
-	mu       sync.RWMutex
+	instancePtr atomic.Pointer[ServiceManager] // lock-free singleton access
+	once        sync.Once
+	mu          sync.RWMutex // only used for rare admin mutations (SetGraphQLProcessor, etc.)
 )
 
-// GetServiceManager returns the singleton instance of ServiceManager
+// GetServiceManager returns the singleton instance of ServiceManager.
+// Uses atomic.Pointer for zero-contention reads on the hot path.
 func GetServiceManager() *ServiceManager {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	if instance == nil {
-		// If someone tries to get the instance before initialization,
-		// return a basic empty instance
-		return &ServiceManager{}
+	if sm := instancePtr.Load(); sm != nil {
+		return sm
 	}
-	return instance
+	// Pre-initialization fallback (should be rare)
+	return &ServiceManager{}
 }
 
 // InitServiceManager initializes the ServiceManager singleton with services
@@ -168,7 +165,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		migrationServiceCore := migration.NewMigrationService(bundleServiceAdapter, migrationConfig, logger.Desugar())
 		migrationService := NewMigrationServiceAdapter(migrationServiceCore, logger)
 
-		instance = &ServiceManager{
+		sm := &ServiceManager{
 			DatabaseService:        dbService,
 			BundleService:          bundleService,
 			InternalCatalogService: catalogService,
@@ -183,6 +180,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			ConflictTracker:        conflictTracker,
 			logger:                 logger,
 		}
+		instancePtr.Store(sm)
 
 		if logger != nil {
 			if walManager != nil {
@@ -201,14 +199,14 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		}
 	})
 
-	return instance
+	return instancePtr.Load()
 }
 
 // ResetServiceManager is useful for testing - it resets the singleton
 func ResetServiceManager() {
 	mu.Lock()
 	defer mu.Unlock()
-	instance = nil
+	instancePtr.Store(nil)
 	// Reset the sync.Once so InitServiceManager can be called again
 	once = sync.Once{}
 }
@@ -238,10 +236,10 @@ func GetParserMetrics() map[string]int64 {
 func SetGraphQLProcessor(processor GraphQLProcessor) {
 	mu.Lock()
 	defer mu.Unlock()
-	if instance != nil {
-		instance.GraphQLProcessor = processor
-		if instance.logger != nil {
-			instance.logger.Info("GraphQL processor has been set on ServiceManager")
+	if sm := instancePtr.Load(); sm != nil {
+		sm.GraphQLProcessor = processor
+		if sm.logger != nil {
+			sm.logger.Info("GraphQL processor has been set on ServiceManager")
 		}
 	}
 }
@@ -252,11 +250,11 @@ func SetGraphQLProcessor(processor GraphQLProcessor) {
 func SetSessionContext(sessionManager *SessionManager, activeConnections map[string]*Connection) {
 	mu.Lock()
 	defer mu.Unlock()
-	if instance != nil {
-		instance.SessionManager = sessionManager
-		instance.ActiveConnections = activeConnections
-		if instance.logger != nil {
-			instance.logger.Info("Session context has been set on ServiceManager for RBAC FORCE operations")
+	if sm := instancePtr.Load(); sm != nil {
+		sm.SessionManager = sessionManager
+		sm.ActiveConnections = activeConnections
+		if sm.logger != nil {
+			sm.logger.Info("Session context has been set on ServiceManager for RBAC FORCE operations")
 		}
 	}
 }

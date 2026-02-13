@@ -35,19 +35,15 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 	n.startTime = time.Now()
 
 	// Create synthetic empty document for evaluation context
-	// TODO: Consider refactoring evaluator to make document parameter optional, handle nil gracefully,
-	// or create document-free evaluation path for pure expression evaluation.
 	emptyDoc := &models.Document{
 		DocumentID: "expression_eval_synthetic",
 		Fields:     make(map[string]models.Field),
-		Data:       make(map[string]interface{}),
 	}
 
-	// Create result document to hold expression values
+	// Create result document; store in Fields only (Data left nil; downstream uses DocumentToMap)
 	resultDoc := &models.Document{
 		DocumentID: "expression_result",
 		Fields:     make(map[string]models.Field),
-		Data:       make(map[string]interface{}),
 	}
 
 	// Use pre-parsed fields when available (Issue 11: parse once at plan build)
@@ -59,8 +55,7 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 				return nil, fmt.Errorf("failed to evaluate expression for column %s: %w", pf.ColumnName, err)
 			}
 			fieldValue := models.NewInterfaceValue(result)
-			resultDoc.Fields[pf.ColumnName] = models.Field{Value: fieldValue}
-			resultDoc.Data[pf.ColumnName] = result
+			resultDoc.Fields[pf.ColumnName] = models.Field{Name: pf.ColumnName, Value: fieldValue}
 		}
 	} else {
 		// Fallback: parse each SelectField at execution (e.g. when node not built via planner)
@@ -88,8 +83,7 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 				return nil, fmt.Errorf("failed to evaluate expression '%s': %w", exprToEval, err)
 			}
 			fieldValue := models.NewInterfaceValue(result)
-			resultDoc.Fields[columnName] = models.Field{Value: fieldValue}
-			resultDoc.Data[columnName] = result
+			resultDoc.Fields[columnName] = models.Field{Name: columnName, Value: fieldValue}
 		}
 	}
 

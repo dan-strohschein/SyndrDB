@@ -34,6 +34,7 @@ package planner
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	// "runtime/debug" // NOTE: Uncomment only if troubleshooting join issues
 	"strings"
@@ -747,25 +748,16 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		rightAdapter = jen.RightBundleInterface
 		jen.Logger.Debugf("Using pre-created predicate-filtered RIGHT bundle adapter")
 	} else if jen.RightPredicate != nil {
-		// J2: Try B-tree index for range predicates before falling back to expression filter
-		var usedBTree bool
-		if bundleService != nil && rightBundle.Indexes != nil {
-			btreeAdapter := tryCreateBTreeFilteredAdapter(baseRightAdapter, jen.RightPredicate, rightBundle, bundleService, jen.Logger)
-			if btreeAdapter != nil {
-				rightAdapter = btreeAdapter
-				usedBTree = true
-				jen.Logger.Debugf("J2: Using BTreeFilteredBundleAdapter for RIGHT bundle predicate")
-			}
+		// Always use ExpressionFilteredBundleAdapter for JOIN predicate pushdown.
+		// B-tree adapters are disabled here because:
+		// (a) hash_join index-assisted build/probe bypasses B-tree filtering
+		// (b) string-encoded numeric keys break lexicographic range comparison for multi-digit values
+		var rightStreamOpts *ExprFilterAdapterOpts
+		if bundleService != nil {
+			rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name}
 		}
-		if !usedBTree {
-			// Fallback: Create filtered adapter with pushdown predicate
-			var rightStreamOpts *ExprFilterAdapterOpts
-			if bundleService != nil {
-				rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name}
-			}
-			rightAdapter = NewExpressionFilteredBundleAdapter(baseRightAdapter, jen.RightPredicate, jen.Logger, rightStreamOpts)
-			jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
-		}
+		rightAdapter = NewExpressionFilteredBundleAdapter(baseRightAdapter, jen.RightPredicate, jen.Logger, rightStreamOpts)
+		jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
 	} else {
 		// Use standard adapter
 		rightAdapter = baseRightAdapter
@@ -949,7 +941,10 @@ func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.Joined
 	}
 
 	doc := document.GetPooledDocument()
-	doc.DocumentID = joinedDoc.JoinKey
+	// Use a unique DocumentID per joined row to prevent map key collisions
+	// that silently lose rows in one-to-many JOINs. The JoinKey alone is not
+	// unique when multiple right-side documents match the same left-side key.
+	doc.DocumentID = joinedDoc.JoinKey + "_" + strconv.Itoa(index)
 	doc.Fields = mergedFields
 	doc.PooledFields = true
 	doc.CreatedAt = time.Now()
@@ -1246,8 +1241,8 @@ func (pba *PlannerBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage, 
 		databaseName = pba.bundle.Database.Name
 	}
 
-	// Use bundleService to get document page (uses shared cache)
-	return pba.bundleService.GetDocumentPage(pba.bundle.Name, databaseName, pageID)
+	// Use bundleService to get document page (read-only, zero-allocation fast path)
+	return pba.bundleService.GetDocumentPageReadOnly(pba.bundle.Name, databaseName, pageID)
 }
 
 // GetTotalPages implements BundleInterface - returns page count from bundle metadata

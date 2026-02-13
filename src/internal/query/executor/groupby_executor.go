@@ -85,11 +85,11 @@ type GroupByExecutor struct {
 
 // AggregateValue stores aggregated values for a group
 type AggregateValue struct {
-	Count    int64       // For COUNT(*)
-	Sum      float64     // For SUM()
-	AvgCount int64       // For AVG(): count of non-null numeric values (AVG = Sum / AvgCount)
-	Min      interface{} // For MIN()
-	Max      interface{} // For MAX()
+	Count    int64              // For COUNT(*)
+	Sum      float64            // For SUM()
+	AvgCount int64              // For AVG(): count of non-null numeric values (AVG = Sum / AvgCount)
+	Min      models.FieldValue  // For MIN() (typed, no interface boxing)
+	Max      models.FieldValue  // For MAX() (typed, no interface boxing)
 }
 
 // GroupKey represents the key for grouping (combination of GROUP BY field values)
@@ -97,8 +97,8 @@ type GroupKey string
 
 // GroupResult represents the final result for a group
 type GroupResult struct {
-	GroupFields     map[string]interface{} // GROUP BY field values
-	AggregateValues map[string]interface{} // Calculated aggregate values
+	GroupFields     map[string]models.FieldValue // GROUP BY field values (typed, no interface boxing)
+	AggregateValues map[string]interface{}       // Final aggregate values (Count, Sum, AVG result, Min, Max) for result build
 }
 
 // NewGroupByExecutor creates a new GROUP BY executor
@@ -285,8 +285,8 @@ func (e *GroupByExecutor) executeSortGroupAggregate(documents map[string]*models
 }
 
 // createGroupKey creates a unique key for the group based on GROUP BY fields
-func (e *GroupByExecutor) createGroupKey(doc *models.Document) (GroupKey, map[string]interface{}, error) {
-	groupFields := make(map[string]interface{})
+func (e *GroupByExecutor) createGroupKey(doc *models.Document) (GroupKey, map[string]models.FieldValue, error) {
+	groupFields := make(map[string]models.FieldValue, len(e.query.GroupBy.Fields))
 	keyParts := make([]string, 0, len(e.query.GroupBy.Fields))
 
 	for _, fieldName := range e.query.GroupBy.Fields {
@@ -296,7 +296,7 @@ func (e *GroupByExecutor) createGroupKey(doc *models.Document) (GroupKey, map[st
 		}
 
 		groupFields[fieldName] = field.Value
-		keyParts = append(keyParts, fmt.Sprintf("%s=%v", fieldName, field.Value))
+		keyParts = append(keyParts, fieldName+"="+field.Value.KeyString())
 	}
 
 	groupKey := GroupKey(strings.Join(keyParts, "|"))
@@ -336,15 +336,15 @@ func (e *GroupByExecutor) updateAggregates(groupResult *GroupResult, doc *models
 			}
 
 		case "MIN":
-			if field, exists := doc.Fields[aggFunc.Field]; exists {
-				if aggValue.Min == nil || e.isLess(field.Value, aggValue.Min) {
+			if field, exists := doc.Fields[aggFunc.Field]; exists && !field.Value.IsNil() {
+				if aggValue.Min.IsNil() || e.isLess(field.Value.AsInterface(), aggValue.Min.AsInterface()) {
 					aggValue.Min = field.Value
 				}
 			}
 
 		case "MAX":
-			if field, exists := doc.Fields[aggFunc.Field]; exists {
-				if aggValue.Max == nil || e.isGreater(field.Value, aggValue.Max) {
+			if field, exists := doc.Fields[aggFunc.Field]; exists && !field.Value.IsNil() {
+				if aggValue.Max.IsNil() || e.isGreater(field.Value.AsInterface(), aggValue.Max.AsInterface()) {
 					aggValue.Max = field.Value
 				}
 			}
@@ -398,6 +398,18 @@ func (e *GroupByExecutor) getAggregateKey(aggFunc queryparser.AggregateFunction)
 
 // convertToFloat converts various numeric types to float64
 func (e *GroupByExecutor) convertToFloat(value interface{}) (float64, error) {
+	if fv, ok := value.(models.FieldValue); ok {
+		switch fv.Type {
+		case models.FieldTypeFloat:
+			return fv.FloatVal, nil
+		case models.FieldTypeInt:
+			return float64(fv.IntVal), nil
+		case models.FieldTypeString:
+			return strconv.ParseFloat(fv.StringVal, 64)
+		default:
+			return 0, fmt.Errorf("cannot convert FieldValue of type %v to float64", fv.Type)
+		}
+	}
 	switch v := value.(type) {
 	case float64:
 		return v, nil
@@ -477,11 +489,11 @@ func (e *GroupByExecutor) convertGroupResultsToDocuments(groupResults map[GroupK
 		docID := fmt.Sprintf("group_%d", groupIndex)
 		fields := make(map[string]models.Field)
 
-		// Add GROUP BY fields
+		// Add GROUP BY fields (value is already FieldValue, no boxing)
 		for fieldName, value := range groupResult.GroupFields {
 			fields[fieldName] = models.Field{
 				Name:  fieldName,
-				Value: models.NewInterfaceValue(value), // ✅ Convert interface{} to FieldValue
+				Value: value,
 			}
 		}
 

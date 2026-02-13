@@ -972,7 +972,7 @@ func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string][
 				continue
 			}
 
-			// Convert to Document struct
+			// Convert to Document struct (Fields only; Data left nil)
 			doc := models.Document{}
 			if docID, ok := docMap["DocumentID"].(string); ok {
 				doc.DocumentID = docID

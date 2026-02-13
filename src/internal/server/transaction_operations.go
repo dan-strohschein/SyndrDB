@@ -297,9 +297,9 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 	// Mark transaction as committed in session
 	session.CommitTransaction()
 
-	// Flush index updates after commit (transactions may have buffered index updates)
+	// Flush ALL index updates after commit including B-tree disk flush (full durability)
 	if serviceManager.BundleService != nil {
-		serviceManager.BundleService.ForceFlushIndexUpdates()
+		serviceManager.BundleService.ForceFlushIndexUpdatesFull()
 	}
 
 	// Debug-aware logging

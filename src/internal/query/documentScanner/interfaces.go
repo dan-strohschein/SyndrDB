@@ -10,8 +10,8 @@ import (
 // ProjectedDocument represents a document with only projected fields (GROUP BY fields + DocumentID)
 // Used for session-specific cache to minimize memory footprint
 type ProjectedDocument struct {
-	DocumentID    string                 // Document ID (always included)
-	GroupByFields map[string]interface{} // GROUP BY field values (only needed fields)
+	DocumentID    string                          // Document ID (always included)
+	GroupByFields map[string]models.FieldValue    // GROUP BY field values (typed, no interface boxing)
 }
 
 // CacheInterface defines the contract for caching implementations

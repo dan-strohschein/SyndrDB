@@ -787,8 +787,8 @@ func (bse *BundleStorageEngine) readFileSafeForActiveBuffer(filePath string, wri
 	// Wait for any in-flight writes to complete by spinning until counter is 0
 	// We do NOT freeze the buffer - we just wait for current in-flight writes
 	backoff := time.Microsecond
-	maxBackoff := time.Millisecond * 10
-	maxWaitTime := time.Second * 5
+	maxBackoff := 100 * time.Microsecond
+	maxWaitTime := 500 * time.Millisecond
 	startTime := time.Now()
 
 	for atomic.LoadInt64(&writeBuffer.inflightWrites) > 0 {
@@ -943,13 +943,25 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 		magic := binary.LittleEndian.Uint32((*fileData)[offset : offset+4])
 		size := binary.LittleEndian.Uint32((*fileData)[offset+4 : offset+8])
 
-		if magic == 0xDEADBEEF {
-			// Document record
+		if magic == 0xDEADBEEF || magic == CompressedDocMagic {
+			// Document record (compressed or uncompressed)
 			if offset+8+int(size) > len(*fileData) {
 				break
 			}
 
 			documentData := (*fileData)[offset+8 : offset+8+int(size)]
+
+			// Decompress if compressed magic
+			if magic == CompressedDocMagic {
+				decompressed, decErr := DecompressDocument(documentData)
+				if decErr != nil {
+					bse.logger.Warnf("Failed to decompress document at offset %d: %v", offset, decErr)
+					offset += 8 + int(size)
+					continue
+				}
+				documentData = decompressed
+			}
+
 			fullDoc, err := helpers.DecodeFastBinaryToDocument(documentData)
 			if err != nil {
 				bse.logger.Warnf("Failed to decode document at offset %d: %v", offset, err)
@@ -967,13 +979,24 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 			}
 
 			offset += 8 + int(size)
-		} else if magic == 0xDEADDEAD {
-			// Tombstone marker
+		} else if magic == 0xDEADDEAD || magic == CompressedTombstoneMagic {
+			// Tombstone marker (compressed or uncompressed)
 			if offset+8+int(size) > len(*fileData) {
 				break
 			}
 
 			deletionData := (*fileData)[offset+8 : offset+8+int(size)]
+
+			// Decompress if compressed magic
+			if magic == CompressedTombstoneMagic {
+				decompressed, decErr := DecompressDocument(deletionData)
+				if decErr != nil {
+					offset += 8 + int(size)
+					continue
+				}
+				deletionData = decompressed
+			}
+
 			deletionDoc, err := helpers.DecodeFastBinaryToDocument(deletionData)
 			if err == nil && deletionDoc != nil {
 				deletedDocIDs[deletionDoc.DocumentID] = true
@@ -1583,12 +1606,6 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	// 		"documentCount", len(documents))
 	// }
 
-	// CRITICAL: Acquire write lock ONCE for entire batch
-	// This prevents lock contention and ensures atomic batch operation
-	lock := b.getWriteLock(bundle.Name)
-	lock.Lock()
-	defer lock.Unlock()
-
 	// Validate inputs once at the start
 	if bundle == nil {
 		return fmt.Errorf("bundle cannot be nil")
@@ -1642,7 +1659,13 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 	// Writes go directly to page cache (write-through) - no memtable needed
 	// The page cache is updated after successful disk writes
 
-	// Process all documents in batch (serialization and disk writes)
+	// CONCURRENCY FIX: Acquire write lock only for buffer writes (in-memory, fast).
+	// Release BEFORE disk flush so readers are not blocked during I/O.
+	// The WriteBuffer has its own internal mutex that prevents concurrent writes.
+	lock := b.getWriteLock(bundle.Name)
+	lock.Lock()
+
+	// Process all documents in batch (serialization and buffer writes)
 	successCount := 0
 	for _, document := range documents {
 		// Validate each document
@@ -1681,25 +1704,27 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 		successCount++
 	}
 
+	// Update bundle metadata while still holding the lock
+	if bundle.TotalDocuments > 0 {
+		bundle.PageCount = int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
+	}
+	bundle.IsDirty = true
+
+	// Release write lock BEFORE disk flush — readers are no longer blocked during I/O
+	lock.Unlock()
+
 	if successCount == 0 {
 		return fmt.Errorf("BATCH UPDATE: Failed to update any documents")
 	}
 
-	// CRITICAL FIX: Single flush at the end for entire batch
-	// This writes all buffered updates to disk in one I/O operation
-	// READERS ARE BLOCKED BY THE WRITE LOCK UNTIL THIS COMPLETES
+	// Flush buffered writes to disk (outside lock — WriteBuffer has its own mutex)
 	if err := writeBuffer.Flush(); err != nil {
 		return fmt.Errorf("BATCH UPDATE: Failed to flush write buffer: %w", err)
 	}
 
-	// R3: Sync is configurable via DurabilityMode. Read settings.GetSettings().DurabilityMode
-	// directly here; bundle_storage_engine does not use it elsewhere for the Sync decision.
+	// R3: Sync is configurable via DurabilityMode.
 	// - "performance" (default): skip Sync; rely on WAL + write buffer flush policy (matches ADD).
-	// - "strict": sync to disk before releasing lock.
-	// TODO: If we experience durability or Sync-throughput issues, consider a "balanced" coalesced Sync:
-	// queue batches to a background goroutine, coalesce, single Sync per N batches or per time window
-	// (PostgreSQL wal_writer_delay–style).
-	// PHASE 0.2: Verify durability mode is correctly applied
+	// - "strict": sync to disk after flush.
 	dm := settings.GetSettings().DurabilityMode
 	if dm == "strict" {
 		if err := writeBuffer.SyncGroupCommit(); err != nil {
@@ -1709,29 +1734,10 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 		b.logger.Debugf("BATCH UPDATE: DurabilityMode is '%s' - skipping fsync for performance", dm)
 	}
 
-	// Update bundle metadata ONCE after all documents are written
-	// Note: Updates don't change TotalDocuments count, only PageCount might change
-	// if documents grew significantly
-	if bundle.TotalDocuments > 0 {
-		bundle.PageCount = int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
-	}
-
-	// Mark bundle as dirty to trigger metadata persistence
-	bundle.IsDirty = true
-
 	// CACHE INVALIDATION: Only invalidate the latest file's cache since writes append there
 	// This is much more efficient than invalidating all 7+ cached file entries
 	b.InvalidateParsedDocsCacheForLatestFile(bundle.Name, bundle.Database.Name)
 
-	// if b.logger != nil {
-	// 	b.logger.Infow("BATCH UPDATE: Successfully updated documents",
-	// 		"bundle", bundle.Name,
-	// 		"updatedCount", successCount,
-	// 		"totalCount", len(documents),
-	// 		"pageCount", bundle.PageCount)
-	// }
-
-	// CRITICAL: Lock is released here by defer, ensuring atomic visibility
 	return nil
 }
 
@@ -1901,11 +1907,6 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 }
 
 func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle, documentID string) error {
-	// CRITICAL FIX: Acquire write lock to prevent dirty reads during deletion
-	lock := b.getWriteLock(bundle.Name)
-	lock.Lock()
-	defer lock.Unlock()
-
 	// Validate inputs
 	if bundle == nil {
 		return fmt.Errorf("bundle cannot be nil")
@@ -1923,8 +1924,8 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		return fmt.Errorf("bundle file does not exist: %s_%s.bnd", bundle.Database.Name, bundle.Name)
 	}
 
-	// PERFORMANCE OPTIMIZATION: Use streaming verification
-	// This avoids loading the entire file into memory
+	// PERFORMANCE OPTIMIZATION: Use streaming verification OUTSIDE the write lock
+	// This avoids holding the lock during file read I/O
 	documentExists, err := b.verifyDocumentExistsStreaming(bundle.Name, bundle.Database.Name, documentID)
 	if err != nil {
 		return fmt.Errorf("failed to verify document existence: %w", err)
@@ -1937,30 +1938,45 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 		b.logger.Debugf("Deleting document %s from bundle %s", documentID, bundle.Name)
 	}
 
+	// CONCURRENCY FIX: Acquire write lock only for tombstone write + metadata update.
+	// Verification above and flush/sync below happen outside the lock.
+	lock := b.getWriteLock(bundle.Name)
+	lock.Lock()
+
 	// Append deletion tombstone using write buffer for optimal performance
 	err = b.appendDeletionMarker(bundle.Name, documentID, filePath)
 	if err != nil {
+		lock.Unlock()
 		return fmt.Errorf("failed to append deletion marker: %w", err)
 	}
 
 	// PAGE ID ARCHITECTURE ALIGNMENT: Remove document from SortedIndex
-	// This keeps the SortedIndex in sync with actual live documents.
-	// Note: DELETE causes position shifts for other documents, which introduces staleness.
-	// This staleness is acceptable and will be fixed during the next compaction cycle.
 	if bundle.SortedIndex != nil {
 		bundle.SortedIndex.Delete(documentID)
 	}
 
+	// Update bundle metadata under lock
+	pageSize := uint32(4096)
+	if bundle.PageSize > 0 {
+		pageSize = uint32(bundle.PageSize)
+	}
+	if bundle.TotalDocuments > 0 {
+		bundle.PageCount = int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
+	} else {
+		bundle.PageCount = 0
+	}
+	bundle.IsDirty = true
+
+	// Release write lock BEFORE flush/sync — readers are no longer blocked during I/O
+	lock.Unlock()
+
 	// D7: Keep FlushWriteBuffers — ensures pending ADDs/UPDATEs are on disk before the tombstone.
-	// Without it, a crash could leave a tombstone for a "never existed" doc. Flush is cheap.
 	err = b.FlushWriteBuffers(bundle.Name)
 	if err != nil {
 		b.logger.Warnf("Failed to flush write buffer for bundle %s: %v", bundle.Name, err)
 	}
 
-	// D7: Make only writeBuffer.Sync() conditional on DurabilityMode. Tombstone is in appendDeletionMarker's
-	// file; Sync here orders buffered writes. D3: "strict" sync, else skip.
-	// PHASE 3: Using ShardedBufferCache.Range to sync all buffers for this bundle
+	// Sync conditional on DurabilityMode (outside lock)
 	if settings.GetSettings().DurabilityMode == "strict" {
 		slash, back := "/"+bundle.Name+"/", "\\"+bundle.Name+"\\"
 		b.writeBufferCache.Range(func(bufferKey string, writeBuffer *WriteBuffer) bool {
@@ -1969,48 +1985,18 @@ func (b *BundleStorageEngine) DeleteDocumentFromBundleFile(bundle *models.Bundle
 					b.logger.Warnf("Failed to sync write buffer to disk: %v (continuing anyway)", err)
 				}
 			}
-			return true // continue iteration
+			return true
 		})
 	}
-
-	// CRITICAL FIX: Do NOT decrement TotalDocuments on deletion
-	// In append-only storage, tombstones are still entries on disk, so TotalDocuments
-	// should represent total document entries (including tombstones), not active documents.
-	// Active document count is calculated dynamically by filtering tombstones during queries.
-	// Decrementing TotalDocuments causes corruption when:
-	// 1. Documents exist that were never counted (pre-tracking, migration, etc.)
-	// 2. Same document is deleted multiple times
-	// 3. Documents are deleted that exist only in memtable (not yet flushed)
-	//
-	// TotalDocuments now represents: total document entries ever written (inserts + tombstones)
-	// Active document count = TotalDocuments - tombstone count (calculated dynamically)
-	// Since we no longer decrement TotalDocuments, it cannot go negative
-
-	// Always calculate PageCount from TotalDocuments to ensure consistency
-	// Use ceiling division: ceil(a/b) = (a + b - 1) / b
-	pageSize := uint32(4096)
-	if bundle.PageSize > 0 {
-		pageSize = uint32(bundle.PageSize)
-	}
-	if bundle.TotalDocuments > 0 {
-		calculatedPageCount := int64((uint32(bundle.TotalDocuments) + pageSize - 1) / pageSize)
-		bundle.PageCount = calculatedPageCount
-	} else {
-		bundle.PageCount = 0
-	}
-
-	// Mark bundle as dirty to trigger metadata persistence
-	bundle.IsDirty = true
 
 	if args.Debug {
 		b.logger.Debugf("Successfully deleted document %s from bundle %s (new TotalDocuments: %d, PageCount: %d)",
 			documentID, bundle.Name, bundle.TotalDocuments, bundle.PageCount)
 	}
 
-	// CACHE INVALIDATION: Only invalidate the latest file's cache since deletes append tombstones there
+	// CACHE INVALIDATION
 	b.InvalidateParsedDocsCacheForLatestFile(bundle.Name, bundle.Database.Name)
 
-	// CRITICAL: Lock is released here by defer, ensuring atomic visibility
 	return nil
 }
 
@@ -2413,11 +2399,15 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		}
 
 		// Update manifest: freeze current file and mark as immutable
+		frozenFileID := int(currentFileID)
+		frozenFileName := fmt.Sprintf("%06d.bnd", currentFileID)
 		if manifestMgr.GetActiveFileID() > 0 {
-			if err := manifestMgr.FreezeFile(int(currentFileID)); err != nil {
+			if err := manifestMgr.FreezeFile(frozenFileID); err != nil {
 				rotationLock.Unlock()
 				return 0, fmt.Errorf("failed to freeze file in manifest: %w", err)
 			}
+			// Async bloom filter build for the frozen file
+			b.buildBloomFilterForFrozenFile(manifestMgr, bundleDir, frozenFileID, frozenFileName)
 		}
 
 		// Create new file with incremented ID
@@ -2505,11 +2495,23 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 		return 0, fmt.Errorf("failed to encode document: %w", err)
 	}
 
+	// Page-level compression: compress document bytes if enabled and beneficial
+	docMagic := uint32(0xDEADBEEF) // Default: uncompressed
+	compressionSettings := settings.GetSettings()
+	if compressionSettings.StorageCompression == "zstd" && len(documentBytes) >= compressionSettings.CompressionMinDocSize {
+		compressed, compErr := CompressDocument(documentBytes, CompressionZstd)
+		if compErr == nil && len(compressed) < len(documentBytes) {
+			documentBytes = compressed
+			docMagic = CompressedDocMagic // Use compressed magic
+		}
+		// If compression doesn't help or fails, fall through with uncompressed
+	}
+
 	// CRITICAL FIX: Allocate header buffer per-write to avoid race conditions
 	// Shared buffers cause corruption when multiple goroutines write simultaneously
 	headerSize := uint32(len(documentBytes))
-	headerBytes := make([]byte, 8)                              // 8 bytes: 4 for magic, 4 for size
-	binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF) // Magic number for document boundaries
+	headerBytes := make([]byte, 8)                             // 8 bytes: 4 for magic, 4 for size
+	binary.LittleEndian.PutUint32(headerBytes[0:4], docMagic)  // Magic number for document boundaries
 	binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
 
 	// Log write operation start for corruption debugging
@@ -2760,11 +2762,15 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 			return 0, fmt.Errorf("failed to close write buffer before rotation: %w", err)
 		}
 
+		frozenFileID := int(currentFileID)
+		frozenFileName := fmt.Sprintf("%06d.bnd", currentFileID)
 		if manifestMgr.GetActiveFileID() > 0 {
-			if err := manifestMgr.FreezeFile(int(currentFileID)); err != nil {
+			if err := manifestMgr.FreezeFile(frozenFileID); err != nil {
 				rotationLock.Unlock()
 				return 0, fmt.Errorf("failed to freeze file in manifest: %w", err)
 			}
+			// Async bloom filter build for the frozen file
+			b.buildBloomFilterForFrozenFile(manifestMgr, bundleDir, frozenFileID, frozenFileName)
 		}
 
 		currentFileID++
@@ -3009,6 +3015,96 @@ func (b *BundleStorageEngine) persistDirtyManifests() {
 // getWriteLock gets or creates a write lock for a specific bundle
 // This ensures thread-safe access to bundle data during concurrent reads and writes
 // PERFORMANCE: Uses sharded lock map (64 shards) to reduce contention under high concurrency
+// buildBloomFilterForFrozenFile asynchronously builds a bloom filter for a just-frozen segment file.
+// Called after FreezeFile succeeds during file rotation. Runs in a goroutine to avoid blocking the write path.
+func (b *BundleStorageEngine) buildBloomFilterForFrozenFile(manifestMgr *ManifestManager, bundleDir string, fileID int, fileName string) {
+	go func() {
+		filePath := filepath.Join(bundleDir, fileName)
+
+		data, err := b.getOrReadFile(filePath)
+		if err != nil {
+			b.logger.Warnw("Bloom filter build: failed to read frozen file",
+				"fileID", fileID, "error", err)
+			return
+		}
+
+		// Extract document IDs from the parsed file
+		docIDs := make([]string, 0, 1024)
+		offset := 0
+
+		// Skip bundle metadata header if present
+		if len(data) >= 8 {
+			magic := binary.LittleEndian.Uint32(data[0:4])
+			if magic == 0x42444D44 { // "BDMD"
+				metadataSize := binary.LittleEndian.Uint32(data[4:8])
+				offset = int(8 + metadataSize)
+			}
+		}
+
+		// Scan through file to collect document IDs
+		for offset < len(data) {
+			if offset+8 > len(data) {
+				break
+			}
+			magic := binary.LittleEndian.Uint32(data[offset : offset+4])
+			size := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+
+			if magic == 0xDEADBEEF || magic == CompressedDocMagic {
+				if offset+8+int(size) > len(data) {
+					break
+				}
+				docData := data[offset+8 : offset+8+int(size)]
+
+				// Decompress if needed
+				if magic == CompressedDocMagic {
+					decompressed, decErr := DecompressDocument(docData)
+					if decErr != nil {
+						offset += 8 + int(size)
+						continue
+					}
+					docData = decompressed
+				}
+
+				doc, decErr := helpers.DecodeFastBinaryToDocument(docData)
+				if decErr == nil && doc.DocumentID != "" {
+					docIDs = append(docIDs, doc.DocumentID)
+				}
+				offset += 8 + int(size)
+			} else if magic == 0xDEADDEAD || magic == CompressedTombstoneMagic {
+				// Deletion marker — skip
+				offset += 8 + int(size)
+			} else {
+				break
+			}
+		}
+
+		if len(docIDs) == 0 {
+			return
+		}
+
+		bf := BuildBloomFilterForDocuments(docIDs, 0.01)
+		if bf == nil {
+			return
+		}
+
+		bloomData, bloomSize, bloomHashes, err := SerializeBloomFilter(bf)
+		if err != nil {
+			b.logger.Warnw("Bloom filter build: failed to serialize",
+				"fileID", fileID, "error", err)
+			return
+		}
+
+		if err := manifestMgr.UpdateBloomFilter(fileID, bloomData, bloomSize, bloomHashes); err != nil {
+			b.logger.Warnw("Bloom filter build: failed to store in manifest",
+				"fileID", fileID, "error", err)
+			return
+		}
+
+		b.logger.Debugw("Built bloom filter for frozen file",
+			"fileID", fileID, "docCount", len(docIDs))
+	}()
+}
+
 func (b *BundleStorageEngine) getWriteLock(bundleName string) *sync.RWMutex {
 	return b.writeLocks.Get(bundleName)
 }
@@ -4032,6 +4128,12 @@ func (b *BundleStorageEngine) GetDocumentVersions(bundleName, databaseName, docu
 
 	// Scan each file backward to find all versions
 	for _, fileInfo := range files {
+		// Check bloom filter — skip file if document definitely absent
+		bf := manifestMgr.GetDeserializedBloomFilter(fileInfo.FileID)
+		if bf != nil && !bf.MayContain(documentID) {
+			continue // Bloom says definitely not here — skip file read
+		}
+
 		bundleDir := GetBundleDirectory(databaseName, bundleName)
 		filePath := filepath.Join(bundleDir, fileInfo.FileName)
 

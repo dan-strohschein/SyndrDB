@@ -482,13 +482,20 @@ func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Doc
 		e.nowCache = time.Now().UTC()
 	}
 
-	// Create evaluation context
+	// Create evaluation context: populate FieldValues from doc.Fields (no doc.Data boxing)
 	evalCtx := &EvaluationContext{
 		CurrentTime:   e.nowCache,
 		TimezoneCache: e.tzCache,
-		Document:      doc.Data,
-		BundleName:    "", // TODO: Extract from bundleContext when needed
+		BundleName:    "",
 		FieldValues:   make(map[string]models.FieldValue),
+	}
+	if bundleContext != nil && bundleContext.PrimaryBundle != "" {
+		evalCtx.BundleName = bundleContext.PrimaryBundle
+	}
+	if doc != nil && doc.Fields != nil {
+		for name, field := range doc.Fields {
+			evalCtx.FieldValues[name] = field.Value
+		}
 	}
 
 	// Call function via registry

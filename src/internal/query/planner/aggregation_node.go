@@ -335,116 +335,31 @@ executeChild:
 				return nil, fmt.Errorf("AggregationNode: streaming aggregate-only failed: %w", err)
 			}
 		} else if ok && fullScan != nil && childIsDirectFullScan && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
-			n.Logger.Debugf("AggregationNode: Child is FullScanNode with GROUP BY")
-
-			// OPTIMIZATION A: For COUNT(*)-only GROUP BY queries, skip session cache entirely.
-			// Session cache builds a 100k-entry projected map before aggregation even begins,
-			// but for COUNT(*) we only need the GROUP BY key — streaming is strictly faster.
-			isSingleCountStarGroupBy := len(n.AggregateFields) == 1 &&
-				n.AggregateFields[0].Function == "COUNT" && n.AggregateFields[0].Field == "*" &&
-				!hasHavingClause
-
-			if isSingleCountStarGroupBy && fullScan.DocumentScanner != nil {
-				n.Logger.Debugf("OPTIMIZATION: Skipping session cache for COUNT(*)-only GROUP BY — going directly to streaming")
+			// OPTIMIZATION: Always use streaming for GROUP BY queries.
+			// Session cache allocates 100k+ ProjectedDocument structs with map[string]interface{} fields
+			// (200k+ allocations) before any aggregation begins. Streaming processes documents
+			// in-place from COW cache pages with zero intermediate allocations — strictly faster.
+			if fullScan.DocumentScanner != nil {
+				n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for GROUP BY (skipping session cache)")
 				groupResults, totalInput, err = n.executeHashAggregateStreamingWithProjection(ctx, fullScan)
 				if err != nil {
 					return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
 				}
-			} else if fullScan.DocumentScanner != nil {
-				// Try session cache first (Phase 1-3: Session-specific projected cache)
-				bundleInterface, ok := fullScan.DocumentScanner.(interface {
-					GetBundle() documentscanner.BundleInterface
-				})
-				if ok {
-					ba := bundleInterface.GetBundle()
-					if ba != nil {
-						// Extract GROUP BY field names for projection
-						projectFields := make([]string, 0, len(n.GroupBy.Fields)+len(n.AggregateFields)+1)
-						for _, qualifiedField := range n.GroupBy.Fields {
-							fieldName := n.extractFieldName(qualifiedField)
-							projectFields = append(projectFields, fieldName)
-						}
-						// Include aggregate field names (for SUM, AVG, MIN, MAX - COUNT(*) doesn't need field)
-						for _, aggFunc := range n.AggregateFields {
-							if aggFunc.Field != "*" {
-								fieldName := n.extractFieldName(aggFunc.Field)
-								projectFields = append(projectFields, fieldName)
-							}
-						}
-						// Always include DocumentID
-						projectFields = append(projectFields, "DocumentID")
-
-						// Try session cache (effectiveLimit=0 for GROUP BY - we need all docs)
-						n.Logger.Debugf("AggregationNode: Attempting to copy projected fields to session cache: %v", projectFields)
-						sessionCache, docsCopied, cachedPages, totalPages, cacheErr := ba.CopyProjectedToSessionCache(ctx, projectFields, 0)
-						if cacheErr == nil && len(sessionCache) > 0 && totalPages > 0 {
-							// Check cache hit rate (Phase 3: Hybrid approach)
-							// LOWERED THRESHOLD: Use session cache if >=50% cached (more aggressive)
-							// Session cache is still faster than per-page streaming even with partial cache
-							cacheHitRate := float64(cachedPages) / float64(totalPages)
-							if cacheHitRate >= 0.5 || cachedPages == totalPages {
-								// High cache hit rate - use session cache
-								n.Logger.Debugf("OPTIMIZATION: Using session cache for GROUP BY (cache hit rate: %.1f%%, %d/%d pages cached, %d docs)",
-									cacheHitRate*100, cachedPages, totalPages, docsCopied)
-								groupResults, totalInput, err = n.executeHashAggregateWithSessionCache(ctx, sessionCache)
-								if err == nil {
-									// Success - session cache worked, skip to post-aggregation processing
-									// (groupResults and totalInput are set, will be processed after switch)
-									n.Logger.Debugf("AggregationNode: Session cache aggregation succeeded with %d groups", len(groupResults))
-								} else {
-									// If session cache aggregation failed, fall through to streaming
-									n.Logger.Warnf("Session cache aggregation failed, falling back to streaming: %v", err)
-									groupResults = nil // Clear so streaming path runs
-								}
-							} else {
-								// Very low cache hit rate - fall back to streaming
-								n.Logger.Debugf("Cache hit rate too low (%.1f%%, %d/%d pages), falling back to streaming", cacheHitRate*100, cachedPages, totalPages)
-								groupResults = nil // Clear so streaming path runs
-							}
-						} else {
-							if cacheErr != nil {
-								n.Logger.Debugf("Session cache copy failed, falling back to streaming: %v", cacheErr)
-							} else if len(sessionCache) == 0 {
-								n.Logger.Debugf("Session cache is empty (docsCopied=%d, cachedPages=%d, totalPages=%d), falling back to streaming", docsCopied, cachedPages, totalPages)
-							} else if totalPages == 0 {
-								n.Logger.Debugf("Total pages is 0, falling back to streaming")
-							}
-							groupResults = nil // Clear so streaming path runs
-						}
-					} else {
-						n.Logger.Debugf("AggregationNode: bundleInterface.GetBundle() returned nil")
-					}
-				} else {
-					n.Logger.Debugf("AggregationNode: DocumentScanner does not implement GetBundle() interface")
-				}
 			} else {
-				n.Logger.Debugf("AggregationNode: FullScanNode.DocumentScanner is nil")
-			}
-
-			// Fall back to streaming aggregation if session cache didn't succeed
-			if groupResults == nil {
-				if fullScan.DocumentScanner != nil {
-					n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for GROUP BY to avoid GetAllDocuments() lock contention")
-					groupResults, totalInput, err = n.executeHashAggregateStreamingWithProjection(ctx, fullScan)
-					if err != nil {
-						return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
-					}
-				} else {
-					// Fallback to regular execution (no scanner available)
-					documents, err = n.Child.Execute(ctx)
-					if err != nil {
-						return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
-					}
-					totalInput = len(documents)
-					n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
-					if totalInput == 0 {
-						isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
-						if !isAggregateOnly {
-							return documents, nil
-						}
-					}
-					groupResults, err = n.executeHashAggregate(ctx, documents)
+				// Fallback to regular execution (no scanner available)
+				documents, err = n.Child.Execute(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("AggregationNode: child execution failed: %w", err)
 				}
+				totalInput = len(documents)
+				n.Logger.Debugf("AggregationNode received %d documents from child", totalInput)
+				if totalInput == 0 {
+					isAggregateOnly := (n.GroupBy == nil || len(n.GroupBy.Fields) == 0) && len(n.AggregateFields) > 0
+					if !isAggregateOnly {
+						return documents, nil
+					}
+				}
+				groupResults, err = n.executeHashAggregate(ctx, documents)
 			}
 		} else {
 			// Regular execution path - try to find a DocumentScanner from child nodes
@@ -590,17 +505,17 @@ type groupKey string
 
 // aggregateValue stores intermediate aggregated values for a group
 type aggregateValue struct {
-	Count    int64       // For COUNT(*)
-	Sum      float64     // For SUM()
-	AvgCount int64       // For AVG(): count of non-null numeric values (AVG = Sum / AvgCount)
-	Min      interface{} // For MIN()
-	Max      interface{} // For MAX()
+	Count    int64              // For COUNT(*)
+	Sum      float64            // For SUM()
+	AvgCount int64              // For AVG(): count of non-null numeric values (AVG = Sum / AvgCount)
+	Min      models.FieldValue  // For MIN() (typed, no interface boxing)
+	Max      models.FieldValue  // For MAX() (typed, no interface boxing)
 }
 
 // groupResult represents the final result for a group
 type groupResult struct {
-	GroupFields     map[string]interface{}     // GROUP BY field values
-	AggregateValues map[string]*aggregateValue // Intermediate aggregate values
+	GroupFields     map[string]models.FieldValue // GROUP BY field values (typed, no interface boxing)
+	AggregateValues map[string]*aggregateValue   // Intermediate aggregate values
 }
 
 // executeHashAggregate implements hash-based aggregation strategy
@@ -627,7 +542,7 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 	if len(documents) == 0 && isAggregateOnly {
 		// Create empty group with key ""
 		gResult := &groupResult{
-			GroupFields:     make(map[string]interface{}),
+			GroupFields:     make(map[string]models.FieldValue),
 			AggregateValues: make(map[string]*aggregateValue),
 		}
 		// Initialize aggregate values to zero
@@ -800,7 +715,7 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 						gResult, exists := groupMap[gKey]
 						if !exists {
 							gResult = &groupResult{
-								GroupFields:     make(map[string]interface{}),
+								GroupFields:     make(map[string]models.FieldValue),
 								AggregateValues: make(map[string]*aggregateValue),
 							}
 							for _, aggFunc := range n.AggregateFields {
@@ -856,7 +771,7 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 			}
 			totalInput++
 
-			if memoryTracker != nil && i%100 == 0 {
+			if memoryTracker != nil && i%500 == 0 {
 				docSize := models.EstimateDocumentSize(doc)
 				if err := memoryTracker.Sample(docSize, i); err != nil {
 					return nil, totalInput, err
@@ -899,7 +814,7 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 				gResult, exists := groupMap[gKey]
 				if !exists {
 					gResult = &groupResult{
-						GroupFields:     make(map[string]interface{}),
+						GroupFields:     make(map[string]models.FieldValue),
 						AggregateValues: make(map[string]*aggregateValue),
 					}
 					for _, aggFunc := range n.AggregateFields {
@@ -924,41 +839,13 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 	return groupMap, totalInput, nil
 }
 
-// executeHashAggregateStreamingWithProjection sets projection fields on the scanner's BundleAdapter
-// before calling streaming aggregation. This ensures ScanDocumentChunks only copies the GROUP BY
-// fields instead of all document fields, reducing per-document copy cost significantly.
-// OPTIMIZATION C: Projection pushdown into streaming GROUP BY path.
+// executeHashAggregateStreamingWithProjection streams documents from the scanner for GROUP BY.
+// OPTIMIZATION: Does NOT set projection fields on BundleAdapter, so loadPageDocs uses
+// SnapshotPageDocumentsReadOnly (zero-copy, returns COW slice directly) instead of
+// SnapshotPageDocuments (copies entire slice + allocates per-doc projection maps).
+// The streaming callbacks (createGroupKeyFast, updateAggregates) only READ specific fields
+// via getCaseInsensitiveFieldClean — they never modify documents, so projection is redundant work.
 func (n *AggregationNode) executeHashAggregateStreamingWithProjection(ctx context.Context, fullScan *FullScanNode) (map[groupKey]*groupResult, int, error) {
-	// Build projection field list: GROUP BY fields + aggregate fields + DocumentID
-	projectFields := make([]string, 0, len(n.GroupBy.Fields)+len(n.AggregateFields)+1)
-	for _, qualifiedField := range n.GroupBy.Fields {
-		fieldName := n.extractFieldName(qualifiedField)
-		projectFields = append(projectFields, fieldName)
-	}
-	for _, aggFunc := range n.AggregateFields {
-		if aggFunc.Field != "*" {
-			fieldName := n.extractFieldName(aggFunc.Field)
-			projectFields = append(projectFields, fieldName)
-		}
-	}
-	projectFields = append(projectFields, "DocumentID")
-
-	// Set projection on the BundleAdapter so ScanDocumentChunks applies it
-	if smartScanner, ok := fullScan.DocumentScanner.(interface {
-		GetBundle() documentscanner.BundleInterface
-	}); ok {
-		if bundleAdapter, ok := smartScanner.GetBundle().(*documentscanner.BundleAdapter); ok {
-			bundleAdapter.SetProjectionFields(projectFields)
-			defer bundleAdapter.SetProjectionFields(nil) // Clear when done
-			n.Logger.Debugf("PROJECTION PUSHDOWN: Set projection fields %v on BundleAdapter for streaming GROUP BY", projectFields)
-		}
-	}
-	// Also set on bundle service if available
-	if fullScan.BundleServiceInt != nil {
-		fullScan.BundleServiceInt.SetProjectionFieldsForBundle(fullScan.Bundle.Name, projectFields)
-		defer fullScan.BundleServiceInt.SetProjectionFieldsForBundle(fullScan.Bundle.Name, nil)
-	}
-
 	return n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
 }
 
@@ -1023,12 +910,13 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 
 		// G1: Fast group key creation using pre-computed field info
 		var gKey groupKey
-		var fieldValues []interface{}
+		var fieldValues []models.FieldValue
+		var groupFields map[string]models.FieldValue
 		var err error
 		if fieldInfos != nil {
 			gKey, fieldValues, err = n.createGroupKeyFromProjectedFast(projDoc, fieldInfos)
 		} else {
-			gKey, _, err = n.createGroupKeyFromProjected(projDoc)
+			gKey, groupFields, err = n.createGroupKeyFromProjected(projDoc)
 		}
 		if err != nil {
 			n.Logger.Warnf("Error creating group key for document %s: %v", docID, err)
@@ -1039,11 +927,10 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 		gResult, exists := groupMap[gKey]
 		if !exists {
 			// G4: Build groupFields only for new groups
-			var groupFields map[string]interface{}
 			if fieldInfos != nil && fieldValues != nil {
 				groupFields = n.buildGroupFieldsFromProjected(fieldInfos, fieldValues)
-			} else {
-				groupFields = make(map[string]interface{})
+			} else if groupFields == nil {
+				groupFields = make(map[string]models.FieldValue)
 			}
 			gResult = &groupResult{
 				GroupFields:     groupFields,
@@ -1072,13 +959,13 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 					if ai.fieldName == "*" {
 						aggVal.Count++
 					} else {
-						if val, exists := projDoc.GroupByFields[ai.fieldName]; exists && val != nil {
+						if val, exists := projDoc.GroupByFields[ai.fieldName]; exists && !val.IsNil() {
 							aggVal.Count++
 						}
 					}
 				case "SUM", "AVG":
-					if val, exists := projDoc.GroupByFields[ai.fieldName]; exists && val != nil {
-						if numValue, err := n.convertToFloatFromInterface(val); err == nil {
+					if val, exists := projDoc.GroupByFields[ai.fieldName]; exists && !val.IsNil() {
+						if numValue, err := n.convertToFloat(val); err == nil {
 							aggVal.Sum += numValue
 							if ai.function == "AVG" {
 								aggVal.AvgCount++
@@ -1086,24 +973,14 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 						}
 					}
 				case "MIN", "MAX":
-					if val, exists := projDoc.GroupByFields[ai.fieldName]; exists && val != nil {
-						var compareVal interface{} = val
-						if fv, ok := val.(models.FieldValue); ok {
-							if fv.Type == models.FieldTypeDateTime {
-								compareVal = fv.DateTimeVal
-							} else if fv.Type == models.FieldTypeDate {
-								compareVal = fv.DateVal
-							} else {
-								compareVal = fv.AsInterface()
-							}
-						}
+					if val, exists := projDoc.GroupByFields[ai.fieldName]; exists && !val.IsNil() {
 						if ai.function == "MIN" {
-							if aggVal.Min == nil || n.isLess(compareVal, aggVal.Min) {
-								aggVal.Min = compareVal
+							if aggVal.Min.IsNil() || n.isLessFieldValue(val, aggVal.Min) {
+								aggVal.Min = val
 							}
 						} else {
-							if aggVal.Max == nil || n.isGreater(compareVal, aggVal.Max) {
-								aggVal.Max = compareVal
+							if aggVal.Max.IsNil() || n.isGreaterFieldValue(val, aggVal.Max) {
+								aggVal.Max = val
 							}
 						}
 					}
@@ -1119,13 +996,13 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 
 // createGroupKeyFromProjected creates a group key from a projected document
 // Similar to createGroupKey but works with ProjectedDocument instead of full Document
-func (n *AggregationNode) createGroupKeyFromProjected(projDoc *ProjectedDocument) (groupKey, map[string]interface{}, error) {
+func (n *AggregationNode) createGroupKeyFromProjected(projDoc *ProjectedDocument) (groupKey, map[string]models.FieldValue, error) {
 	// Handle aggregate-only queries (no GROUP BY clause)
 	if n.GroupBy == nil || len(n.GroupBy.Fields) == 0 {
 		return groupKey(""), nil, nil
 	}
 
-	groupFields := make(map[string]interface{})
+	groupFields := make(map[string]models.FieldValue, len(n.GroupBy.Fields))
 	keyParts := make([]string, 0, len(n.GroupBy.Fields))
 
 	for _, qualifiedFieldName := range n.GroupBy.Fields {
@@ -1137,7 +1014,7 @@ func (n *AggregationNode) createGroupKeyFromProjected(projDoc *ProjectedDocument
 		}
 
 		groupFields[fieldName] = fieldValue
-		keyParts = append(keyParts, fieldName+"="+fmt.Sprint(fieldValue))
+		keyParts = append(keyParts, fieldName+"="+fieldValue.KeyString())
 	}
 
 	gKey := groupKey(strings.Join(keyParts, "|"))
@@ -1164,9 +1041,9 @@ func writeInterfaceToBuilder(sb *strings.Builder, v interface{}) {
 
 // createGroupKeyFromProjectedFast creates a group key using pre-computed field info.
 // Returns the key and raw field values for deferred groupFields construction.
-func (n *AggregationNode) createGroupKeyFromProjectedFast(projDoc *ProjectedDocument, fieldInfos []groupKeyFieldInfo) (groupKey, []interface{}, error) {
+func (n *AggregationNode) createGroupKeyFromProjectedFast(projDoc *ProjectedDocument, fieldInfos []groupKeyFieldInfo) (groupKey, []models.FieldValue, error) {
 	nFields := len(fieldInfos)
-	fieldValues := make([]interface{}, nFields)
+	fieldValues := make([]models.FieldValue, nFields)
 
 	// Single-field fast path
 	if nFields == 1 {
@@ -1176,8 +1053,7 @@ func (n *AggregationNode) createGroupKeyFromProjectedFast(projDoc *ProjectedDocu
 			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in projected document", fi.QualifiedName)
 		}
 		fieldValues[0] = fieldValue
-		// OPTIMIZATION B: Type-specific key string (avoids fmt.Sprint interface boxing)
-		gKey := groupKey(interfaceToKeyString(fieldValue))
+		gKey := groupKey(fieldValue.KeyString())
 		return gKey, fieldValues, nil
 	}
 
@@ -1196,15 +1072,15 @@ func (n *AggregationNode) createGroupKeyFromProjectedFast(projDoc *ProjectedDocu
 		}
 		sb.WriteString(fi.CleanName)
 		sb.WriteByte('=')
-		writeInterfaceToBuilder(&sb, fieldValue)
+		writeFieldValueToBuilder(&sb, fieldValue)
 	}
 
 	return groupKey(sb.String()), fieldValues, nil
 }
 
 // buildGroupFieldsFromProjected constructs the groupFields map from projected field values.
-func (n *AggregationNode) buildGroupFieldsFromProjected(fieldInfos []groupKeyFieldInfo, fieldValues []interface{}) map[string]interface{} {
-	gf := make(map[string]interface{}, len(fieldInfos))
+func (n *AggregationNode) buildGroupFieldsFromProjected(fieldInfos []groupKeyFieldInfo, fieldValues []models.FieldValue) map[string]models.FieldValue {
+	gf := make(map[string]models.FieldValue, len(fieldInfos))
 	for i, fi := range fieldInfos {
 		gf[fi.CleanName] = fieldValues[i]
 	}
@@ -1390,9 +1266,8 @@ func (n *AggregationNode) precomputeGroupKeyFields() []groupKeyFieldInfo {
 }
 
 // createGroupKey creates a unique key for the group based on GROUP BY fields.
-// Returns the group key and a slice of field values (parallel to precomputed field infos).
-// The caller builds the groupFields map only when creating a new group (!exists).
-func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[string]interface{}, error) {
+// Returns the group key and group field values (typed). The caller builds the groupFields map only when creating a new group (!exists).
+func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[string]models.FieldValue, error) {
 	// Handle aggregate-only queries (no GROUP BY clause)
 	if n.GroupBy == nil || len(n.GroupBy.Fields) == 0 {
 		// All documents belong to the same group (empty key)
@@ -1404,7 +1279,7 @@ func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[st
 		return "", nil, fmt.Errorf("document has nil Fields map")
 	}
 
-	groupFields := make(map[string]interface{})
+	groupFields := make(map[string]models.FieldValue, len(n.GroupBy.Fields))
 	keyParts := make([]string, 0, len(n.GroupBy.Fields))
 
 	for _, qualifiedFieldName := range n.GroupBy.Fields {
@@ -1416,7 +1291,7 @@ func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[st
 		}
 
 		groupFields[fieldName] = field.Value
-		keyParts = append(keyParts, fieldName+"="+fmt.Sprint(field.Value))
+		keyParts = append(keyParts, fieldName+"="+fieldValueToKeyString(field.Value))
 	}
 
 	gKey := groupKey(strings.Join(keyParts, "|"))
@@ -1521,8 +1396,8 @@ func (n *AggregationNode) createGroupKeyFast(doc *models.Document, fieldInfos []
 
 // buildGroupFields constructs the groupFields map from pre-computed field infos and values.
 // Called only when creating a new group (inside if !exists).
-func (n *AggregationNode) buildGroupFields(fieldInfos []groupKeyFieldInfo, fieldValues []models.FieldValue) map[string]interface{} {
-	gf := make(map[string]interface{}, len(fieldInfos))
+func (n *AggregationNode) buildGroupFields(fieldInfos []groupKeyFieldInfo, fieldValues []models.FieldValue) map[string]models.FieldValue {
+	gf := make(map[string]models.FieldValue, len(fieldInfos))
 	for i, fi := range fieldInfos {
 		gf[fi.CleanName] = fieldValues[i]
 	}
@@ -1626,43 +1501,18 @@ func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Doc
 			}
 
 		case "MIN":
-			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(aggFunc.Field)
-			// Use case-insensitive field lookup
-			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
-				// Extract the actual value from FieldValue based on type
-				var compareValue interface{}
-				if field.Value.Type == models.FieldTypeDateTime {
-					compareValue = field.Value.DateTimeVal
-				} else if field.Value.Type == models.FieldTypeDate {
-					compareValue = field.Value.DateVal
-				} else {
-					compareValue = field.Value
-				}
-
-				if aggVal.Min == nil || n.isLess(compareValue, aggVal.Min) {
-					aggVal.Min = compareValue
+			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists && !field.Value.IsNil() {
+				if aggVal.Min.IsNil() || n.isLessFieldValue(field.Value, aggVal.Min) {
+					aggVal.Min = field.Value
 				}
 			}
 
 		case "MAX":
-			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(aggFunc.Field)
-			// Use case-insensitive field lookup
-			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
-				// Extract the actual value from FieldValue based on type
-				var compareValue interface{}
-				if field.Value.Type == models.FieldTypeDateTime {
-					compareValue = field.Value.DateTimeVal
-				} else if field.Value.Type == models.FieldTypeDate {
-					compareValue = field.Value.DateVal
-				} else {
-					// For other types, use the FieldValue itself
-					compareValue = field.Value
-				}
-
-				if aggVal.Max == nil || n.isGreater(compareValue, aggVal.Max) {
-					aggVal.Max = compareValue
+			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists && !field.Value.IsNil() {
+				if aggVal.Max.IsNil() || n.isGreaterFieldValue(field.Value, aggVal.Max) {
+					aggVal.Max = field.Value
 				}
 			}
 		}
@@ -1706,11 +1556,11 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 		docID := fmt.Sprintf("group_%d", groupIndex)
 		fields := make(map[string]models.Field)
 
-		// Add GROUP BY fields
+		// Add GROUP BY fields (value is already FieldValue, no boxing)
 		for fieldName, value := range gResult.GroupFields {
 			fields[fieldName] = models.Field{
 				Name:  fieldName,
-				Value: models.NewInterfaceValue(value),
+				Value: value,
 			}
 		}
 
@@ -1719,27 +1569,27 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 			aggKey := n.getAggregateKey(aggFunc)
 			aggVal := gResult.AggregateValues[aggKey]
 
-			var finalValue interface{}
+			var fv models.FieldValue
 			switch aggFunc.Function {
 			case "COUNT":
-				finalValue = aggVal.Count
+				fv = models.NewIntValue(aggVal.Count)
 			case "SUM":
-				finalValue = aggVal.Sum
+				fv = models.NewFloatValue(aggVal.Sum)
 			case "AVG":
 				if aggVal.AvgCount > 0 {
-					finalValue = aggVal.Sum / float64(aggVal.AvgCount)
+					fv = models.NewFloatValue(aggVal.Sum / float64(aggVal.AvgCount))
 				} else {
-					finalValue = nil
+					fv = models.FieldValue{Type: models.FieldTypeNil}
 				}
 			case "MIN":
-				finalValue = aggVal.Min
+				fv = aggVal.Min
 			case "MAX":
-				finalValue = aggVal.Max
+				fv = aggVal.Max
 			}
 
 			fields[aggKey] = models.Field{
 				Name:  aggKey,
-				Value: models.NewInterfaceValue(finalValue),
+				Value: fv,
 			}
 			// n.Logger.Info("Added aggregate field to result",
 			// 	zap.String("aggKey", aggKey),
@@ -1787,22 +1637,22 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 		aggKey := n.getAggregateKey(aggFunc)
 		aggVal := gResult.AggregateValues[aggKey]
 
-		var finalValue interface{}
+		var fv models.FieldValue
 		switch aggFunc.Function {
 		case "COUNT":
-			finalValue = aggVal.Count
+			fv = models.NewIntValue(aggVal.Count)
 		case "SUM":
-			finalValue = aggVal.Sum
+			fv = models.NewFloatValue(aggVal.Sum)
 		case "AVG":
 			if aggVal.AvgCount > 0 {
-				finalValue = aggVal.Sum / float64(aggVal.AvgCount)
+				fv = models.NewFloatValue(aggVal.Sum / float64(aggVal.AvgCount))
 			} else {
-				finalValue = nil
+				fv = models.FieldValue{Type: models.FieldTypeNil}
 			}
 		case "MIN":
-			finalValue = aggVal.Min
+			fv = aggVal.Min
 		case "MAX":
-			finalValue = aggVal.Max
+			fv = aggVal.Max
 		}
 
 		// Use Column1, Column2, etc. as field names for synthetic documents
@@ -1810,11 +1660,11 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 
 		fields[columnName] = models.Field{
 			Name:  columnName,
-			Value: models.NewInterfaceValue(finalValue),
+			Value: fv,
 		}
 
 		n.Logger.Debugf("Added synthetic field %s with value %v (from %s(%s))",
-			columnName, finalValue, aggFunc.Function, aggFunc.Field)
+			columnName, fv.AsInterface(), aggFunc.Function, aggFunc.Field)
 
 		columnIndex++
 	}
@@ -1968,6 +1818,16 @@ func (n *AggregationNode) isGreater(a, b interface{}) bool {
 	}
 	// Fallback to string comparison for other types
 	return fmt.Sprintf("%v", a) > fmt.Sprintf("%v", b)
+}
+
+// isLessFieldValue compares two FieldValues for MIN (avoids boxing when both are typed).
+func (n *AggregationNode) isLessFieldValue(a, b models.FieldValue) bool {
+	return n.isLess(a.AsInterface(), b.AsInterface())
+}
+
+// isGreaterFieldValue compares two FieldValues for MAX (avoids boxing when both are typed).
+func (n *AggregationNode) isGreaterFieldValue(a, b models.FieldValue) bool {
+	return n.isGreater(a.AsInterface(), b.AsInterface())
 }
 
 // applyHavingClause filters aggregated groups based on HAVING conditions

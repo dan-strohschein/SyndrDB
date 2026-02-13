@@ -55,11 +55,11 @@ func TestDistinctNode_MemoryLimitFallbackUsesFullInput(t *testing.T) {
 	// So we need actual memory use to be large. Use a long string value so serialized is big.
 	longVal := string(make([]byte, 400)) // 400 bytes per value
 	docsWithLong := map[string]*models.Document{
-		"id1": {DocumentID: "id1", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("x" + longVal)}}, Data: map[string]interface{}{}},
-		"id2": {DocumentID: "id2", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("x" + longVal)}}, Data: map[string]interface{}{}},
-		"id3": {DocumentID: "id3", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("y" + longVal)}}, Data: map[string]interface{}{}},
-		"id4": {DocumentID: "id4", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("y" + longVal)}}, Data: map[string]interface{}{}},
-		"id5": {DocumentID: "id5", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("z" + longVal)}}, Data: map[string]interface{}{}},
+		"id1": {DocumentID: "id1", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("x" + longVal)}}},
+		"id2": {DocumentID: "id2", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("x" + longVal)}}},
+		"id3": {DocumentID: "id3", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("y" + longVal)}}},
+		"id4": {DocumentID: "id4", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("y" + longVal)}}},
+		"id5": {DocumentID: "id5", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("z" + longVal)}}},
 	}
 	childLong := &mockChildNode{docs: docsWithLong, cost: 5, rows: 5}
 	// MemoryLimit 2000: estimated 1250 <= 1600 so hash. Actual 5*(400+64)=2320 > 2000 -> fallback.

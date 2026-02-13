@@ -3,16 +3,18 @@ package documentscanner
 import (
 	"container/list"
 	"sync"
+	"sync/atomic"
 )
 
 // SimpleLRUCache implements a basic LRU (Least Recently Used) cache
 // This is a simple implementation for the document scanner that can be replaced
 // with more sophisticated caching solutions like Redis or memcached
 type SimpleLRUCache struct {
-	maxSize int                           // Maximum number of entries
-	cache   map[interface{}]*list.Element // Hash map for O(1) access
-	lru     *list.List                    // Doubly-linked list for LRU ordering
-	mu      sync.RWMutex                  // Protects cache and lru
+	maxSize    int                           // Maximum number of entries
+	cache      map[interface{}]*list.Element // Hash map for O(1) access
+	lru        *list.List                    // Doubly-linked list for LRU ordering
+	mu         sync.RWMutex                  // Protects cache and lru
+	probeCount uint64                        // Atomic counter for probabilistic LRU promotion
 }
 
 // cacheEntry represents an entry in the cache with key-value pair
@@ -31,20 +33,30 @@ func NewSimpleLRUCache(maxSize int) *SimpleLRUCache {
 	}
 }
 
-// Get retrieves a value from the cache and marks it as recently used
-// Returns the value and true if found, nil and false if not found
+// Get retrieves a value from the cache and marks it as recently used.
+// Uses RLock for the read path and probabilistic LRU promotion (1 in 8 gets)
+// to reduce write lock contention under high concurrency.
 func (c *SimpleLRUCache) Get(key interface{}) (interface{}, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if element, found := c.cache[key]; found {
-		// Move to front (mark as recently used)
-		c.lru.MoveToFront(element)
-		entry := element.Value.(*cacheEntry)
-		return entry.value, true
+	c.mu.RLock()
+	element, found := c.cache[key]
+	if !found {
+		c.mu.RUnlock()
+		return nil, false
 	}
+	entry := element.Value.(*cacheEntry)
+	value := entry.value
+	c.mu.RUnlock()
 
-	return nil, false
+	// Probabilistic LRU promotion — only 1 in 8 gets promote to reduce lock contention.
+	// Uses atomic counter instead of rand for zero-allocation hot path.
+	if atomic.AddUint64(&c.probeCount, 1)%8 == 0 {
+		c.mu.Lock()
+		if element, found := c.cache[key]; found {
+			c.lru.MoveToFront(element)
+		}
+		c.mu.Unlock()
+	}
+	return value, true
 }
 
 // Put stores a value in the cache

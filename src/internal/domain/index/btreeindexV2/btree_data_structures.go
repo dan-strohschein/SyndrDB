@@ -182,6 +182,10 @@ type BTreeNode struct {
 	Tombstones      map[string]bool // Map of deleted document IDs (key: key+docID)
 	TombstoneCount  uint32          // Number of tombstones in this node
 	NeedsCompaction bool            // Flag indicating node should be compacted during VACUUM
+
+	// Covering index INCLUDE data: parallel to Values, stores INCLUDE column values per doc per key
+	// IncludeData[i][j] maps to Values[i][j] - INCLUDE column values for the j-th doc ID of the i-th key
+	IncludeData [][]map[string]string
 }
 
 // BTreePage represents the on-disk format of a BTree node
@@ -209,6 +213,9 @@ type IndexEntry struct {
 	KeyLength   uint32    // Length of the key in bytes
 	ValueCount  uint32    // Number of document IDs
 	Timestamp   time.Time // When this entry was created/modified
+
+	// Covering index: INCLUDE column values per document ID (parallel to DocumentIDs)
+	IncludeValues []map[string]string
 }
 
 // BTreeConfig contains configuration parameters for creating a BTree index

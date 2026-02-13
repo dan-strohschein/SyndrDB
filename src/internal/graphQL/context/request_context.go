@@ -217,19 +217,12 @@ func (rc *RequestContext) createLoaderForBundle(bundleName string, fieldName str
 		results := make(map[string]interface{})
 
 		for _, doc := range documents {
-			// Convert Document to map for GraphQL compatibility
-			docMap := make(map[string]interface{})
-			docMap["DocumentID"] = doc.DocumentID
-
-			// Copy all data fields
-			for k, v := range doc.Data {
-				docMap[k] = v
-			}
+			// Build map from Fields (and Data if present) for GraphQL compatibility
+			docMap := models.DocumentToMap(doc)
 
 			// Get the field value that this document matches (e.g., the authorId value)
-			// This is what we'll use to group results
 			var fieldValue string
-			if val, ok := doc.Data[fieldName]; ok {
+			if val, ok := docMap[fieldName]; ok && val != nil {
 				fieldValue = fmt.Sprintf("%v", val)
 			} else if fieldName == "DocumentID" {
 				fieldValue = doc.DocumentID

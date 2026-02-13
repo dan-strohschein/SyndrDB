@@ -152,7 +152,8 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 			// Do NOT use index-assisted probe when the probe has predicate pushdown: the index does
 			// not apply the predicate, and HashIndex returns only 1 doc per key, which produces wrong
 			// counts and extra GetDocument I/O. Use full probe instead.
-			if strings.Contains(probeBundle.GetName(), " [expr-filtered]") {
+			// Check for any filtered adapter (expr-filtered, btree-filtered, etc.)
+			if strings.Contains(probeBundle.GetName(), "filtered]") {
 				hjs.logger.Debugf("Skipping index-assisted probe: probe has expression filter (index does not apply predicate)")
 				joinedDocs, probeStats, err = hjs.probeHashTable(hashTable, bloom, probeBundle, probeKey, request, swapped)
 				indexUsed = false
@@ -292,8 +293,8 @@ func (hjs *HashJoinStrategy) buildHashTable(
 	bundleName := buildBundle.GetName()
 
 	// PERFORMANCE OPTIMIZATION: Check hash table cache first
-	// Skip cache for filtered bundles (they have different data than base bundle)
-	useCache := !strings.Contains(bundleName, "[expr-filtered]") && !strings.Contains(bundleName, "[filtered]")
+	// Skip cache for any filtered bundle (they have different data than base bundle)
+	useCache := !strings.Contains(bundleName, "filtered]")
 	if useCache {
 		cacheKey := HashTableCacheKey{
 			BundleName: bundleName,
@@ -336,12 +337,12 @@ func (hjs *HashJoinStrategy) buildHashTable(
 
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
-	// CRITICAL: Skip index-assisted build for filtered bundles
-	// Filtered bundles (e.g., "products [expr-filtered]") have predicates applied,
+	// CRITICAL: Skip index-assisted build for any filtered bundle
+	// Filtered bundles (e.g., "products [expr-filtered]", "[btree-filtered]") have predicates applied,
 	// but the index contains all documents from the base bundle, not just filtered ones.
 	// Using the index would include documents that don't match the filter, causing incorrect results.
 	var buildIndex interface{}
-	if strings.Contains(bundleName, "[expr-filtered]") || strings.Contains(bundleName, "[filtered]") {
+	if strings.Contains(bundleName, "filtered]") {
 		hjs.logger.Debugf("Skipping index-assisted build for filtered bundle %s (index contains all base bundle documents, not just filtered subset)",
 			bundleName)
 		// Fall through to regular build path (buildIndex remains nil)
@@ -818,6 +819,9 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
 	stats := &ScanStats{DocumentsScanned: 0, Comparisons: 0}
 
+	// J1: Early termination limit for index-assisted probe (same as probeHashTable)
+	probeLimit := request.Limit // 0 = no limit
+
 	// OPTIMIZATION: Batch load all documents at once instead of N individual GetDocument calls
 	// This eliminates the N+1 query problem by using GetDocumentsByIDs
 	allDocIDs := make([]string, 0, totalMatches)
@@ -830,7 +834,11 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 	hjs.logger.Debugf("Batch loaded %d/%d probe documents via GetDocumentsByIDs", len(probeDocsMap), len(allDocIDs))
 
 	// Process each key and its matching documents using the pre-loaded map
+	limitReached := false
 	for keyStr, docIDs := range docIDsByKey {
+		if limitReached {
+			break
+		}
 		// Check for cancellation
 		select {
 		case <-request.Context.Done():
@@ -874,6 +882,11 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 					joinedDoc := hjs.createJoinedDocument(buildDoc, probeDoc, keyStr, swapped, request.JoinType)
 					if joinedDoc != nil {
 						joinedDocs = append(joinedDocs, joinedDoc)
+						// J1: Early termination when we have enough results
+						if probeLimit > 0 && len(joinedDocs) >= probeLimit {
+							limitReached = true
+							break
+						}
 					}
 				}
 			} else if request.JoinType == LeftJoin && !swapped {
@@ -881,13 +894,24 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, keyStr, swapped, request.JoinType)
 				if joinedDoc != nil {
 					joinedDocs = append(joinedDocs, joinedDoc)
+					if probeLimit > 0 && len(joinedDocs) >= probeLimit {
+						limitReached = true
+						break
+					}
 				}
 			} else if request.JoinType == RightJoin && swapped {
 				// Right outer join: include unmatched documents from right (probe) side
 				joinedDoc := hjs.createJoinedDocument(nil, probeDoc, keyStr, swapped, request.JoinType)
 				if joinedDoc != nil {
 					joinedDocs = append(joinedDocs, joinedDoc)
+					if probeLimit > 0 && len(joinedDocs) >= probeLimit {
+						limitReached = true
+						break
+					}
 				}
+			}
+			if limitReached {
+				break
 			}
 		}
 	}

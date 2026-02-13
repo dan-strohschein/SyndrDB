@@ -267,11 +267,11 @@ func (m *mockBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, pro
 		}
 		projected := &documentscanner.ProjectedDocument{
 			DocumentID:    docID,
-			GroupByFields: make(map[string]interface{}),
+			GroupByFields: make(map[string]models.FieldValue),
 		}
 		for _, field := range projectFields {
 			if f, exists := doc.Fields[field]; exists {
-				projected.GroupByFields[field] = f.Value.AsInterface()
+				projected.GroupByFields[field] = f.Value
 			}
 		}
 		result[docID] = projected

@@ -290,9 +290,9 @@ func (ht *HierarchicalTransformer) documentToFieldValue(doc *models.Document) ma
 	// Add DocumentID
 	fieldMap["DocumentID"] = doc.DocumentID
 
-	// Add all fields
+	// Add all fields (box at boundary for JSON/client)
 	for fieldName, field := range doc.Fields {
-		fieldMap[fieldName] = field.Value
+		fieldMap[fieldName] = field.Value.AsInterface()
 	}
 
 	// Add timestamps

@@ -26,14 +26,61 @@ type Document struct {
 	CreatedByTxID   uint64 // Transaction that created this version (0 = autocommit/system)
 	DeletedByTxID   uint64 // Transaction that deleted this version (0 = not deleted)
 	VersionSequence uint64 // Version number within document ID (1, 2, 3...)
+
+	// CachedJSON holds pre-encoded JSON fragments per user-data field.
+	// Each entry is a complete "fieldName":encodedValue fragment (no leading/trailing comma).
+	// Populated on write path (INSERT/UPDATE) and lazily on read path if nil.
+	// NOT persisted to disk — rebuilt on load.
+	// NOT copied during document pool recycling — cleared on return.
+	CachedJSON map[string][]byte
 }
 
 // GetField returns the value for a given field name, or nil if not present.
+// For backward compatibility only. Internal hot path should use GetFieldValue to avoid interface boxing.
 func (d *Document) GetField(fieldName string) interface{} {
 	if d == nil || d.Fields == nil {
 		return nil
 	}
 	return d.Fields[fieldName]
+}
+
+// GetFieldValue returns the typed field value for a given field name and whether it existed.
+// Use this instead of GetField in the query/scan path to avoid interface boxing.
+func (d *Document) GetFieldValue(fieldName string) (FieldValue, bool) {
+	if d == nil || d.Fields == nil {
+		return FieldValue{}, false
+	}
+	f, ok := d.Fields[fieldName]
+	if !ok {
+		return FieldValue{}, false
+	}
+	return f.Value, true
+}
+
+// DocumentToMap builds a map from document fields for client/API boundaries (e.g. JSON, GraphQL).
+// Uses doc.Fields and boxes only at this boundary. Prefer this over reading doc.Data when Data may be nil.
+func DocumentToMap(doc *Document) map[string]interface{} {
+	if doc == nil {
+		return nil
+	}
+	out := make(map[string]interface{})
+	out["DocumentID"] = doc.DocumentID
+	out["CreatedAt"] = doc.CreatedAt
+	out["UpdatedAt"] = doc.UpdatedAt
+	if doc.Fields != nil {
+		for name, field := range doc.Fields {
+			out[name] = field.Value.AsInterface()
+		}
+	}
+	// If Data was populated (legacy path), merge so we don't drop fields not in Fields
+	if doc.Data != nil {
+		for k, v := range doc.Data {
+			if _, has := out[k]; !has {
+				out[k] = v
+			}
+		}
+	}
+	return out
 }
 
 // IsDeleted returns true if the document has been deleted

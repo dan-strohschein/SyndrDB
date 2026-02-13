@@ -20,7 +20,8 @@ type VisibilityMapInterface interface {
 type BundleServiceInterface interface {
 	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
 	LoadDocumentPage(bundleName, databaseName string, pageID uint32, databasePath string) (*models.DocumentPage, error)
-	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error) // GetDocumentPage uses shared documentPages cache
+	GetDocumentPage(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error)         // GetDocumentPage uses shared documentPages cache
+	GetDocumentPageReadOnly(bundleName, databaseName string, pageID uint32) (*models.DocumentPage, error) // Zero-allocation immutable snapshot (caller must not mutate)
 	CountDocuments(bundleName, databaseName string) (int, error)                                  // Count all documents using optimized count-only parser
 	// SnapshotPageDocuments safely snapshots documents from a page to avoid concurrent map iteration
 	SnapshotPageDocuments(bundleName, databaseName string, pageID uint32) ([]models.Document, error)

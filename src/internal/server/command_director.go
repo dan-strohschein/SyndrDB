@@ -72,8 +72,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// during read-only workloads, preventing false "server idle" triggers.
 	if serviceManager.BundleService != nil {
 		serviceManager.BundleService.RecordActivity()
-		// NOTE: ForceFlushIndexUpdates is called explicitly in write handlers (ADD, UPDATE, DELETE, COMMIT)
-		// rather than on every command. This eliminates indexUpdateMutex contention for read paths.
+		// NOTE: ForceFlushIndexUpdates (hash-only, fast) is called in ADD/UPDATE/DELETE.
+		// ForceFlushIndexUpdatesFull (includes B-tree disk flush) is only called on COMMIT.
 	}
 
 	if database == nil {
@@ -886,7 +886,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 					deletedCount, bundleName, idsJSON)
 			}
 
-			// Flush index updates after delete
+			// Flush index updates after delete (hash-only, fast)
 			if serviceManager.BundleService != nil {
 				serviceManager.BundleService.ForceFlushIndexUpdates()
 			}
@@ -1114,30 +1114,6 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	if timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-
-		// Launch warning goroutine at 80% threshold
-		// TODO: Make warning threshold configurable for different deployment scenarios
-		go func() {
-			warningTime := time.Duration(float64(timeout) * 0.8)
-			timer := time.NewTimer(warningTime)
-			defer timer.Stop() // Ensure timer is stopped even if goroutine exits early
-
-			select {
-			case <-timer.C:
-				username := "anonymous"
-				if session != nil {
-					username = session.Username
-				}
-				logger.Warnw("Query approaching timeout",
-					"query", query.FromBundle,
-					"timeout", timeout,
-					"elapsed", warningTime,
-					"username", username,
-				)
-			case <-ctx.Done():
-				return // timer.Stop() will be called by defer
-			}
-		}()
 	}
 
 	// Determine streaming eligibility early (needed for semaphore + ExecuteSlice decisions)
@@ -1278,10 +1254,11 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	if query.FromBundle == "" && len(documents) == 1 {
 		logger.Debugf("EXPRESSION-ONLY SELECT detected: FromBundle='%s', document count=%d", query.FromBundle, len(documents))
 		for docID, doc := range documents {
-			// Expression results are in doc.Data map - return directly
-			logger.Debugf("Expression result document ID: %s, Data keys: %v, Data values: %+v", docID, getKeys(doc.Data), doc.Data)
+			// Build map from doc.Fields at boundary (doc.Data may be nil when using typed path)
+			resultMap := models.DocumentToMap(doc)
+			logger.Debugf("Expression result document ID: %s, keys: %v", docID, getKeys(resultMap))
 			results := make([]map[string]interface{}, 1)
-			results[0] = doc.Data
+			results[0] = resultMap
 
 			executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6
 
@@ -1597,29 +1574,12 @@ func ExecutePreparedQuery(
 		}
 	}()
 
-	// Set up query timeout with 80% warning threshold
+	// Set up query timeout
 	timeout := args.GetQueryTimeout(isAdmin)
 	var cancel context.CancelFunc
 	if timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
-
-		// Start timeout warning goroutine
-		go func() {
-			warningTime := time.Duration(float64(timeout) * 0.8)
-			timer := time.NewTimer(warningTime)
-			defer timer.Stop() // Ensure timer is stopped even if goroutine exits early
-
-			select {
-			case <-timer.C:
-				if ctx.Err() == nil {
-					logger.Warnf("Prepared query execution approaching timeout: %s (%.0f%% of %s)",
-						time.Since(startTime), 80.0, timeout)
-				}
-			case <-ctx.Done():
-				return // timer.Stop() will be called by defer
-			}
-		}()
 	}
 
 	// Create execution plan through unified planner

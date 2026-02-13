@@ -30,38 +30,46 @@ import (
 // }
 
 func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*models.CreateIndexCommand, error) {
-	// This function should parse the command string and return a CreateBTreeIndexCommand struct
-	//args := settings.GetSettings()
-
-	// Regular expression to match the command structure
-	// command = strings.Trim(command, " \n\r\t")
-	// command = strings.ReplaceAll(command, "\n", " ")
-	// command = strings.ReplaceAll(command, "\t", " ")
-	// command = strings.ReplaceAll(command, "\r", " ")
-	/*
-		Example command when we support composite indexes:
-		CREATE B-INDEX "INDEX_NAME" ON BUNDLE "BUNDLE_NAME"
-		WITH FIELD (
-			{"<FIELDNAME>", <REQUIRED>, <UNIQUE>},
-			{"<FIELDNAME>", <REQUIRED>, <UNIQUE>}
-			)
-
-		Example command when we support single field indexes:
-		CREATE B-INDEX "INDEX_NAME" ON BUNDLE "BUNDLE_NAME"
-		WITH FIELD (
-			{"<FIELDNAME>", <REQUIRED>, <UNIQUE>}
-			)
-	*/
-	// Clean up the command string more thoroughly
-	command = strings.Trim(command, " \n\r\t;")                        // Remove semicolon and whitespace
-	command = regexp.MustCompile(`\s+`).ReplaceAllString(command, " ") // Normalize all whitespace to single spaces
+	command = strings.Trim(command, " \n\r\t;")
+	command = regexp.MustCompile(`\s+`).ReplaceAllString(command, " ")
 
 	logger.Debugf("Parsing cleaned B-INDEX command: %s", command)
 
-	// Updated regex pattern that's more flexible with whitespace and optional semicolon
-	updateDocRegex := regexp.MustCompile(`(?i)^CREATE\s+B-INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+FIELDS\s*\(([^)]+)\)(?:\s*;?\s*)?$`)
+	// Check for EXPRESSION syntax first: CREATE B-INDEX "name" ON BUNDLE "bundle" WITH EXPRESSION (...)
+	exprRegex := regexp.MustCompile(`(?i)^CREATE\s+B-INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+EXPRESSION\s*\(([^)]+)\)`)
+	if exprMatches := exprRegex.FindStringSubmatch(command); exprMatches != nil {
+		indexName := exprMatches[1]
+		bundleName := exprMatches[2]
+		expressionStr := strings.TrimSpace(exprMatches[3])
 
-	matches := updateDocRegex.FindStringSubmatch(command)
+		// Extract field name from expression (e.g., LOWER("name") -> name)
+		fieldName, err := extractFieldFromExpression(expressionStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid expression index: %w", err)
+		}
+
+		cmd := &models.CreateIndexCommand{
+			IndexType:  "btree",
+			IndexName:  indexName,
+			BundleName: bundleName,
+			Fields: []models.FieldDefinition{
+				{Name: fieldName, IsRequired: false, IsUnique: false},
+			},
+			Expression: expressionStr,
+		}
+
+		// Check for WHERE clause after expression
+		remainder := command[len(exprMatches[0]):]
+		if whereIdx := strings.Index(strings.ToUpper(remainder), "WHERE "); whereIdx >= 0 {
+			cmd.WherePredicate = strings.TrimSpace(remainder[whereIdx+6:])
+		}
+
+		return cmd, nil
+	}
+
+	// Standard FIELDS syntax
+	fieldsRegex := regexp.MustCompile(`(?i)^CREATE\s+B-INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+FIELDS\s*\(([^)]+)\)`)
+	matches := fieldsRegex.FindStringSubmatch(command)
 	if matches == nil {
 		logger.Errorf("B-INDEX command does not match expected pattern: %s", command)
 		return nil, fmt.Errorf("invalid CREATE B-INDEX command syntax: %s", command)
@@ -78,18 +86,39 @@ func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*m
 
 	logger.Debugf("Parsed B-INDEX: name='%s', bundle='%s', fields='%s'", indexName, bundleName, fieldsContent)
 
-	// Parse the field definitions
 	fields, err := parseBIndexFieldDefinitions(fieldsContent, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse field definitions: %w", err)
 	}
 
-	return &models.CreateIndexCommand{
+	cmd := &models.CreateIndexCommand{
 		IndexType:  "btree",
 		IndexName:  indexName,
 		BundleName: bundleName,
 		Fields:     fields,
-	}, nil
+	}
+
+	// Parse optional suffix clauses from remainder after the FIELDS(...) match
+	remainder := command[len(matches[0]):]
+
+	// Check for INCLUDE clause: INCLUDE ("col1", "col2")
+	includeRegex := regexp.MustCompile(`(?i)INCLUDE\s*\(([^)]+)\)`)
+	if includeMatch := includeRegex.FindStringSubmatch(remainder); includeMatch != nil {
+		fieldNameRegex := regexp.MustCompile(`"([^"]+)"`)
+		includeFieldMatches := fieldNameRegex.FindAllStringSubmatch(includeMatch[1], -1)
+		for _, m := range includeFieldMatches {
+			cmd.IncludeFields = append(cmd.IncludeFields, m[1])
+		}
+		// Remove INCLUDE clause from remainder for WHERE parsing
+		remainder = includeRegex.ReplaceAllString(remainder, "")
+	}
+
+	// Check for WHERE clause
+	if whereIdx := strings.Index(strings.ToUpper(remainder), "WHERE "); whereIdx >= 0 {
+		cmd.WherePredicate = strings.TrimSpace(remainder[whereIdx+6:])
+	}
+
+	return cmd, nil
 }
 
 // parseBIndexFieldDefinitions extracts field definitions from the fields content
@@ -193,12 +222,24 @@ func ParseCreateHashIndexCommand(command string, logger *zap.SugaredLogger) (*mo
 		}
 		Fields = append(Fields, fieldDef)
 	}
-	return &models.CreateIndexCommand{
+	cmd := &models.CreateIndexCommand{
 		IndexType:  "hash",
 		IndexName:  indexName,
 		BundleName: bundleName,
 		Fields:     Fields,
-	}, nil
+	}
+
+	// Check for WHERE clause (partial index)
+	upperCmd := strings.ToUpper(command)
+	if whereIdx := strings.Index(upperCmd, "WHERE "); whereIdx >= 0 {
+		// Make sure WHERE is after the FIELDS section
+		fieldsIdx := strings.Index(upperCmd, "WITH FIELDS")
+		if fieldsIdx >= 0 && whereIdx > fieldsIdx {
+			cmd.WherePredicate = strings.TrimSpace(command[whereIdx+6:])
+		}
+	}
+
+	return cmd, nil
 }
 
 // ParseCreateBRINIndexCommand parses:
@@ -261,4 +302,15 @@ func ParseCreateBRINIndexCommand(command string, logger *zap.SugaredLogger) (*mo
 		Fields:        fields,
 		PagesPerRange: pagesPerRange,
 	}, nil
+}
+
+// extractFieldFromExpression extracts the field name from an expression like LOWER("name") or UPPER("email")
+func extractFieldFromExpression(expr string) (string, error) {
+	// Match patterns like LOWER("name"), UPPER("email"), TRIM("name"), LENGTH("name")
+	fieldRegex := regexp.MustCompile(`(?i)(?:LOWER|UPPER|TRIM|LENGTH|YEAR|MONTH)\s*\(\s*"([^"]+)"\s*\)`)
+	match := fieldRegex.FindStringSubmatch(expr)
+	if match != nil {
+		return match[1], nil
+	}
+	return "", fmt.Errorf("cannot extract field name from expression: %s", expr)
 }

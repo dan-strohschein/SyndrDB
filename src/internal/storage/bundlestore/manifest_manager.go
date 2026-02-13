@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syndrdb/src/internal/query/bloomfilter"
 	"syndrdb/src/pkg/common"
 	"time"
 
@@ -92,6 +93,9 @@ type ManifestManager struct {
 	// With 19 files and 50K writes, that's 1.9M iterations per test run.
 	// This map provides O(1) lookup, eliminating the bottleneck.
 	filesByID map[int]*ManifestFileInfo
+
+	// Deserialized bloom filter cache: avoids re-deserializing base64 on every lookup
+	bloomCache map[int]*bloomfilter.BloomFilter
 }
 
 // NewManifestManager creates a new manifest manager for a bundle
@@ -109,10 +113,20 @@ func NewManifestManager(dataDir, databaseName, bundleName string, logger *zap.Su
 // LoadOrCreate loads an existing manifest or creates a new one
 // PERFORMANCE FIX: Returns cached manifest if already loaded to avoid disk I/O on every call
 func (mm *ManifestManager) LoadOrCreate(databaseName, bundleName string) (*BundleManifest, error) {
+	// FAST PATH: RLock to check cached manifest (concurrent readers don't block each other)
+	mm.mutex.RLock()
+	if mm.manifest != nil {
+		m := mm.manifest
+		mm.mutex.RUnlock()
+		return m, nil
+	}
+	mm.mutex.RUnlock()
+
+	// SLOW PATH: exclusive lock for first-time load/creation
 	mm.mutex.Lock()
 	defer mm.mutex.Unlock()
 
-	// FAST PATH: Return cached manifest if already loaded
+	// Double-check after acquiring write lock
 	if mm.manifest != nil {
 		return mm.manifest, nil
 	}
@@ -359,9 +373,12 @@ func (mm *ManifestManager) RemoveFiles(fileIDs []int) error {
 
 	mm.manifest.Files = newFiles
 
-	// PERFORMANCE FIX: Remove from filesByID map
+	// PERFORMANCE FIX: Remove from filesByID map and bloom cache
 	for _, id := range fileIDs {
 		delete(mm.filesByID, id)
+		if mm.bloomCache != nil {
+			delete(mm.bloomCache, id)
+		}
 	}
 
 	mm.recalculateTotalsUnsafe()
@@ -529,6 +546,11 @@ func (mm *ManifestManager) UpdateBloomFilter(fileID int, bloomData string, bloom
 	file.BloomFilterSize = bloomSize
 	file.BloomFilterHashes = bloomHashes
 
+	// Invalidate cached deserialized bloom filter so next access re-deserializes
+	if mm.bloomCache != nil {
+		delete(mm.bloomCache, fileID)
+	}
+
 	mm.manifest.LastUpdated = time.Now()
 	return mm.persistManifestUnsafe()
 }
@@ -549,4 +571,45 @@ func (mm *ManifestManager) GetBloomFilter(fileID int) (string, uint64, uint32, b
 		return file.BloomFilterData, file.BloomFilterSize, file.BloomFilterHashes, true
 	}
 	return "", 0, 0, false
+}
+
+// GetDeserializedBloomFilter returns a cached, deserialized bloom filter for a file.
+// Returns nil if no bloom filter is available or on any deserialization error (graceful degradation).
+func (mm *ManifestManager) GetDeserializedBloomFilter(fileID int) *bloomfilter.BloomFilter {
+	// Fast path: check cache under RLock
+	mm.mutex.RLock()
+	if mm.bloomCache != nil {
+		if bf, ok := mm.bloomCache[fileID]; ok {
+			mm.mutex.RUnlock()
+			return bf
+		}
+	}
+	// Check if raw data exists before upgrading lock
+	file := mm.filesByID[fileID]
+	if file == nil || file.BloomFilterData == "" {
+		mm.mutex.RUnlock()
+		return nil
+	}
+	// Copy the data we need before releasing RLock
+	data := file.BloomFilterData
+	size := file.BloomFilterSize
+	hashes := file.BloomFilterHashes
+	mm.mutex.RUnlock()
+
+	// Slow path: deserialize and cache under write lock
+	bf, err := DeserializeBloomFilter(data, size, hashes)
+	if err != nil {
+		mm.logger.Warnw("Failed to deserialize bloom filter, skipping",
+			"fileID", fileID, "error", err)
+		return nil
+	}
+
+	mm.mutex.Lock()
+	if mm.bloomCache == nil {
+		mm.bloomCache = make(map[int]*bloomfilter.BloomFilter)
+	}
+	mm.bloomCache[fileID] = bf
+	mm.mutex.Unlock()
+
+	return bf
 }

@@ -49,46 +49,56 @@ func ValidateConnectionString(connectionString string) error {
 	if strings.HasPrefix(connectionString, "syndrdb://") {
 		connectionString = strings.TrimPrefix(connectionString, "syndrdb://")
 	} else {
-		return fmt.Errorf("Invalid connection string format. Expected format: syndrdb://host:port:database:username:password")
+		return fmt.Errorf("Invalid connection string format. Expected format: syndrdb://host:port:database:username:password[:options]")
 	}
 
-	// Split the connection string by semicolon
-	parts := strings.Split(connectionString, ";")
-	// Iterate over each part
-	for _, part := range parts {
-		// Split by equals sign
-		keyValue := strings.SplitN(part, "=", 2)
-		if len(keyValue) != 2 {
-			continue // Skip invalid parts
-		}
-		key := strings.TrimSpace(keyValue[0])
-		value := strings.TrimSpace(keyValue[1])
-		switch key {
-		case "host":
-			if value == "" {
-				return fmt.Errorf("Missing Host value in connection string")
+	// Connection string format: host:port:database:username:password[:options]
+	// The colon-delimited format requires at least 5 parts.
+	// Optional 6th part contains key=value options separated by &.
+	colonParts := strings.Split(connectionString, ":")
+	if len(colonParts) < 5 {
+		return fmt.Errorf("Invalid connection string format. Expected at least 5 colon-separated fields: host:port:database:username:password")
+	}
+
+	// Validate host
+	if colonParts[0] == "" {
+		return fmt.Errorf("Missing Host value in connection string")
+	}
+	// Validate port
+	if colonParts[1] == "" {
+		return fmt.Errorf("Missing port value in connection string")
+	}
+	if _, err := parsePort(colonParts[1]); err != nil {
+		return fmt.Errorf("Invalid port value in connection string: %s", colonParts[1])
+	}
+	// Validate database
+	if colonParts[2] == "" {
+		return fmt.Errorf("Missing database value in connection string")
+	}
+	// Validate username
+	if colonParts[3] == "" {
+		return fmt.Errorf("Missing username value in connection string")
+	}
+	// Validate password
+	if colonParts[4] == "" {
+		return fmt.Errorf("Missing password value in connection string")
+	}
+
+	// Optional 6th field: key=value options (e.g., "compress=zstd")
+	if len(colonParts) > 5 {
+		optionsPart := colonParts[5]
+		for _, opt := range strings.Split(optionsPart, "&") {
+			opt = strings.TrimSpace(opt)
+			if opt == "" {
+				continue
 			}
-		case "port":
-			if value == "" {
-				return fmt.Errorf("Missing port value in connection string")
-			}
-			if _, err := parsePort(value); err != nil {
-				return fmt.Errorf("Invalid port value in connection string: %s", value)
-			}
-		case "database":
-			if value == "" {
-				return fmt.Errorf("Missing database value in connection string")
-			}
-		case "username":
-			if value == "" {
-				return fmt.Errorf("Missing username value in connection string")
-			}
-		case "password":
-			if value == "" {
-				return fmt.Errorf("Missing password value in connection string")
+			kv := strings.SplitN(opt, "=", 2)
+			if len(kv) != 2 || kv[0] == "" {
+				return fmt.Errorf("Invalid option format in connection string: %s (expected key=value)", opt)
 			}
 		}
 	}
+
 	return nil
 }
 

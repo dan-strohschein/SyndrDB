@@ -1221,8 +1221,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 		connLogger.Sync()
 	}()
 
-	// Channel for received data
-	dataCh := make(chan string)
+	// Channel for received data — buffered to decouple the TCP reader from the
+	// command processing goroutine. At 150 concurrency the unbuffered channel
+	// caused 1.69 hours of cumulative chansend1 blocking. Buffer of 8 covers
+	// typical pipeline batches while preserving backpressure.
+	dataCh := make(chan string, 8)
 	// Channel for errors - buffered to prevent reader goroutine from blocking
 	// when main loop exits via return instead of cleanup
 	errCh := make(chan error, 1)

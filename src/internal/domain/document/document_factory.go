@@ -40,6 +40,9 @@ func (f *DocumentFactoryImpl) NewDocument(docCommand models.DocumentCommand) *mo
 		Value: models.NewStringValue(newDoc.DocumentID), // ✅ Convert string to FieldValue
 	}
 
+	// Pre-encode JSON fragments for fast SELECT serialization
+	helpers.BuildCachedJSON(newDoc)
+
 	return newDoc
 }
 
@@ -54,6 +57,10 @@ func (f *DocumentFactoryImpl) NewDocumentWithID(docCommand models.DocumentComman
 		Name:  "DocumentID",
 		Value: models.NewStringValue(newDoc.DocumentID),
 	}
+
+	// Pre-encode JSON fragments for fast SELECT serialization
+	helpers.BuildCachedJSON(newDoc)
+
 	return newDoc
 }
 

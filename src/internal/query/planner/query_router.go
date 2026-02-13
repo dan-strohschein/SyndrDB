@@ -619,6 +619,33 @@ func (qr *QueryRouter) tryIndexOptimization(
 	docScanner documentscanner.DocumentScannerInterface,
 ) (ExecutionNode, string) {
 
+	// Try expression index optimization for function-call equality (e.g., LOWER(name) = 'john')
+	if funcName, fieldName, value, ok := syndrQL.ExtractFunctionCallEquality(expr); ok {
+		exprStr := funcName + "(" + fieldName + ")"
+		qr.logger.Debugf("INDEX OPTIMIZATION: Found expression equality: %s = %v", exprStr, value)
+
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.Expression != "" && strings.EqualFold(indexRef.Expression, exprStr) {
+				// Skip partial indexes whose predicate is not implied by the query
+				if indexRef.WherePredicate != "" && !queryImpliesIndexPredicate(expr, indexRef.WherePredicate) {
+					continue
+				}
+				qr.logger.Debugf("INDEX SELECTED: Using expression index '%s' for %s", indexName, exprStr)
+				return &IndexScanNode{
+					Bundle:           bundle,
+					IndexName:        indexName,
+					ScanType:         BTreeIndexScan,
+					SearchKey:        value,
+					Cost:             qr.costModel.HashIndexScanCost(1),
+					EstimatedRows:    1,
+					Logger:           qr.logger,
+					BundleServiceInt: qr.bundleService,
+					DocumentScanner:  docScanner,
+				}, indexName
+			}
+		}
+	}
+
 	// Try hash index optimization for simple equality
 	if field, value, ok := syndrQL.ExtractSimpleEquality(expr); ok {
 		qr.logger.Debugf("INDEX OPTIMIZATION: Found simple equality: %s == %v", field, value)
@@ -626,6 +653,10 @@ func (qr *QueryRouter) tryIndexOptimization(
 		// Check if hash index exists for this field
 		for indexName, indexRef := range bundle.Indexes {
 			if indexRef.IndexType == "hash" {
+				// Skip partial indexes whose predicate is not implied by the query
+				if indexRef.WherePredicate != "" && !queryImpliesIndexPredicate(expr, indexRef.WherePredicate) {
+					continue
+				}
 				// Hash indexes use HashIndexField.FieldName, not Fields array
 				hashFieldName := indexRef.HashIndexField.FieldName
 				qr.logger.Debugf("INDEX CHECK: index='%s' type='hash' hashField='%s' matchesField=%v",
@@ -659,7 +690,11 @@ func (qr *QueryRouter) tryIndexOptimization(
 
 		// Check if BTree index exists for this field
 		for indexName, indexRef := range bundle.Indexes {
-			if indexRef.IndexType == "btree" && len(indexRef.Fields) == 1 && indexRef.Fields[0].Name == field {
+			if indexRef.IndexType == "btree" && len(indexRef.Fields) == 1 && indexRef.Fields[0].Name == field && indexRef.Expression == "" {
+				// Skip partial indexes whose predicate is not implied by the query
+				if indexRef.WherePredicate != "" && !queryImpliesIndexPredicate(expr, indexRef.WherePredicate) {
+					continue
+				}
 				qr.logger.Debugf("Found BTree index '%s' on field '%s'", indexName, field)
 
 				return &IndexScanNode{
@@ -810,9 +845,13 @@ func isQueryCoveredByIndex(query *queryparser.UnifiedSelectQuery, indexRef model
 	}
 
 	// Check if index covers all needed fields
+	// Include both key fields and INCLUDE (covering) fields
 	indexedFields := make(map[string]bool)
 	for _, fd := range indexRef.Fields {
 		indexedFields[fd.Name] = true
+	}
+	for _, f := range indexRef.IncludeFields {
+		indexedFields[f] = true
 	}
 
 	for f := range neededFields {
@@ -820,6 +859,46 @@ func isQueryCoveredByIndex(query *queryparser.UnifiedSelectQuery, indexRef model
 			return false
 		}
 	}
+	return true
+}
+
+// queryImpliesIndexPredicate checks whether the query's WHERE clause implies a partial index predicate.
+// For a partial index with predicate P, the query can only use the index if the query's WHERE clause
+// logically implies P (i.e., every row matching the query's WHERE also matches P).
+//
+// Strategy: Parse the index predicate into AND clauses. For each clause, check if the same clause
+// (or a stronger one) appears in the query's AND clauses using normalized string comparison.
+func queryImpliesIndexPredicate(queryExpr syndrQL.Expression, indexPredicate string) bool {
+	if indexPredicate == "" {
+		return true // No predicate = all rows qualify
+	}
+
+	// Parse the index predicate
+	predExpr, err := syndrQL.ParseExpression(indexPredicate)
+	if err != nil {
+		return false // Can't parse predicate = can't verify implication
+	}
+
+	// Extract AND clauses from both
+	predClauses := syndrQL.ExtractANDClauses(predExpr)
+	queryClauses := syndrQL.ExtractANDClauses(queryExpr)
+
+	// For each predicate clause, check if the query has a matching clause
+	for _, predClause := range predClauses {
+		predStr := strings.ToLower(syndrQL.ExpressionToString(predClause))
+		found := false
+		for _, queryClause := range queryClauses {
+			queryStr := strings.ToLower(syndrQL.ExpressionToString(queryClause))
+			if predStr == queryStr {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
 	return true
 }
 

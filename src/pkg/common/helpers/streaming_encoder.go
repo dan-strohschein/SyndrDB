@@ -2,31 +2,27 @@ package helpers
 
 import (
 	"io"
-	"strconv"
 	"time"
 
 	"syndrdb/src/internal/domain/models"
 
-	jsoniter "github.com/json-iterator/go"
+	hvjson "github.com/dan-strohschein/HVJson/hvjson"
 )
 
-// PHASE H: Direct JSON streaming - eliminates intermediate []map[string]interface{}
-// Instead of: Documents → []map[string]interface{} → JSON
-// We do: Documents → JSON encoder (direct)
-// This eliminates ~300 allocations per query
+// arrayOpen/close/comma are reused byte slices for the outer JSON array envelope.
+// The ISE handles each document object at depth 0; we write array structure manually
+// because the ISE's structural writers don't auto-insert commas in nested arrays.
+var (
+	arrayOpen  = []byte{'['}
+	arrayClose = []byte{']'}
+	comma      = []byte{','}
+)
 
-// StreamDocumentsToJSON writes documents directly to JSON without intermediate allocations
-// This function replaces the pattern:
-//
-//	flatDocs := TransformDocumentsToFlatFormat(docs)
-//	json.Marshal(flatDocs)
-//
-// With direct streaming that avoids creating the intermediate slice and maps
+// StreamDocumentsToJSON writes documents directly to JSON without intermediate allocations.
+// Uses HVJson IncrementalStreamEncoder with SIMD-accelerated string escaping and
+// number formatting, with 64KB incremental flushes to bound memory.
 func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Document, selectedFields []string) error {
-	stream := jsoniter.NewStream(jsoniter.ConfigCompatibleWithStandardLibrary, writer, 4096)
-
-	// Start array
-	stream.WriteArrayStart()
+	ise := hvjson.NewIncrementalEncoder(writer, 0) // 64KB default threshold
 
 	// Build field filter for projection
 	var fieldFilter map[string]bool
@@ -38,64 +34,42 @@ func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Docume
 		}
 	}
 
-	// Sort document IDs for deterministic output
+	// Collect document IDs
 	docIDs := make([]string, 0, len(documents))
 	for docID := range documents {
 		docIDs = append(docIDs, docID)
 	}
-	// Note: We skip sorting for now to save allocations - caller can sort if needed
 
-	// Stream each document
-	first := true
-	for _, docID := range docIDs {
-		doc := documents[docID]
-
-		if !first {
-			stream.WriteMore()
-		}
-		first = false
-
-		// Write document object
-		stream.WriteObjectStart()
-
-		// Metadata fields (always included)
-		stream.WriteObjectField(FieldDocumentID)
-		stream.WriteString(doc.DocumentID)
-		stream.WriteMore()
-
-		stream.WriteObjectField(FieldCreatedAt)
-		writeTimeValue(stream, doc.CreatedAt)
-		stream.WriteMore()
-
-		stream.WriteObjectField(FieldUpdatedAt)
-		writeTimeValue(stream, doc.UpdatedAt)
-
-		// Data fields (with projection)
-		for fieldName, field := range doc.Fields {
-			shouldInclude := !hasProjection || fieldFilter[fieldName]
-			if shouldInclude {
-				stream.WriteMore()
-				stream.WriteObjectField(fieldName)
-				writeFieldValue(stream, field.Value)
-			}
-		}
-
-		stream.WriteObjectEnd()
+	// Write array envelope manually; ISE handles each object at depth 0
+	if _, err := writer.Write(arrayOpen); err != nil {
+		return err
 	}
 
-	// End array
-	stream.WriteArrayEnd()
+	for i, docID := range docIDs {
+		doc := documents[docID]
+		if i > 0 {
+			// Flush ISE buffer before writing comma to ensure correct byte ordering
+			if err := ise.Flush(); err != nil {
+				return err
+			}
+			if _, err := writer.Write(comma); err != nil {
+				return err
+			}
+		}
+		writeDocumentObject(ise, doc, fieldFilter, hasProjection)
+	}
 
-	return stream.Flush()
+	if err := ise.Flush(); err != nil {
+		return err
+	}
+	_, err := writer.Write(arrayClose)
+	return err
 }
 
-// StreamDocumentSliceToJSON writes a sorted slice of documents directly to JSON
-// Preserves the input order (important for ORDER BY queries)
+// StreamDocumentSliceToJSON writes an ordered slice of documents directly to JSON.
+// Preserves the input order (important for ORDER BY queries).
 func StreamDocumentSliceToJSON(writer io.Writer, documents []*models.Document, selectedFields []string) error {
-	stream := jsoniter.NewStream(jsoniter.ConfigCompatibleWithStandardLibrary, writer, 4096)
-
-	// Start array
-	stream.WriteArrayStart()
+	ise := hvjson.NewIncrementalEncoder(writer, 0)
 
 	// Build field filter for projection
 	var fieldFilter map[string]bool
@@ -107,133 +81,124 @@ func StreamDocumentSliceToJSON(writer io.Writer, documents []*models.Document, s
 		}
 	}
 
-	// Stream each document in order
+	if _, err := writer.Write(arrayOpen); err != nil {
+		return err
+	}
+
 	for i, doc := range documents {
 		if i > 0 {
-			stream.WriteMore()
-		}
-
-		// Write document object
-		stream.WriteObjectStart()
-
-		// Metadata fields
-		stream.WriteObjectField(FieldDocumentID)
-		stream.WriteString(doc.DocumentID)
-		stream.WriteMore()
-
-		stream.WriteObjectField(FieldCreatedAt)
-		writeTimeValue(stream, doc.CreatedAt)
-		stream.WriteMore()
-
-		stream.WriteObjectField(FieldUpdatedAt)
-		writeTimeValue(stream, doc.UpdatedAt)
-
-		// Data fields (with projection)
-		for fieldName, field := range doc.Fields {
-			shouldInclude := !hasProjection || fieldFilter[fieldName]
-			if shouldInclude {
-				stream.WriteMore()
-				stream.WriteObjectField(fieldName)
-				writeFieldValue(stream, field.Value)
+			if err := ise.Flush(); err != nil {
+				return err
+			}
+			if _, err := writer.Write(comma); err != nil {
+				return err
 			}
 		}
-
-		stream.WriteObjectEnd()
+		writeDocumentObject(ise, doc, fieldFilter, hasProjection)
 	}
 
-	// End array
-	stream.WriteArrayEnd()
-
-	return stream.Flush()
+	if err := ise.Flush(); err != nil {
+		return err
+	}
+	_, err := writer.Write(arrayClose)
+	return err
 }
 
-// writeFieldValue writes a field value to the JSON stream
-// Handles all common field types without allocations
-func writeFieldValue(stream *jsoniter.Stream, value interface{}) {
+// writeDocumentObject writes a single document as a JSON object using the ISE.
+// Uses pre-encoded JSON cache when available (fast path: memcpy of cached fragments).
+// Falls back to field-by-field encoding if cache is not populated.
+func writeDocumentObject(ise *hvjson.IncrementalStreamEncoder, doc *models.Document, fieldFilter map[string]bool, hasProjection bool) {
+	// Lazy cache population for documents loaded from disk
+	if doc.CachedJSON == nil && len(doc.Fields) > 0 {
+		BuildCachedJSON(doc)
+	}
+
+	useCachedPath := doc.CachedJSON != nil
+
+	ise.WriteObjectStart()
+
+	// Metadata fields (always included, always encoded inline — not cached)
+	ise.WriteObjectField(FieldDocumentID)
+	ise.WriteString(doc.DocumentID)
+
+	ise.WriteObjectField(FieldCreatedAt)
+	ise.WriteString(doc.CreatedAt.Format(time.RFC3339))
+
+	ise.WriteObjectField(FieldUpdatedAt)
+	ise.WriteString(doc.UpdatedAt.Format(time.RFC3339))
+
+	if useCachedPath {
+		// Fast path: write pre-encoded fragments as raw bytes
+		for fieldName, fragment := range doc.CachedJSON {
+			if !hasProjection || fieldFilter[fieldName] {
+				ise.WriteMore()         // comma separator
+				ise.WriteRawBytes(fragment) // "name":value as pre-encoded bytes
+			}
+		}
+	} else {
+		// Fallback: field-by-field encoding (same as original code)
+		for fieldName, field := range doc.Fields {
+			if !hasProjection || fieldFilter[fieldName] {
+				ise.WriteObjectField(fieldName)
+				writeFieldValue(ise, field.Value)
+			}
+		}
+	}
+
+	ise.WriteObjectEnd()
+}
+
+// writeFieldValue writes a field value to the ISE stream.
+// Handles all SyndrDB field types with typed writes for SIMD acceleration.
+// Complex nested types (slices, maps) use WriteValue for correct encoding.
+func writeFieldValue(ise *hvjson.IncrementalStreamEncoder, value interface{}) {
 	if value == nil {
-		stream.WriteNil()
+		ise.WriteNull()
 		return
 	}
 
-	// Handle models.FieldValue type (typed union)
+	// Handle models.FieldValue typed union (hot path)
 	if fv, ok := value.(models.FieldValue); ok {
-		// Use the FieldValue's custom JSON marshaling
-		// This handles DateTime as RFC3339 and Date as "YYYY-MM-DD"
 		switch fv.Type {
 		case models.FieldTypeString:
-			stream.WriteString(fv.StringVal)
+			ise.WriteString(fv.StringVal)
 		case models.FieldTypeInt:
-			stream.WriteInt64(fv.IntVal)
+			ise.WriteInt64(fv.IntVal)
 		case models.FieldTypeFloat:
-			stream.WriteFloat64(fv.FloatVal)
+			ise.WriteFloat64(fv.FloatVal)
 		case models.FieldTypeBool:
-			stream.WriteBool(fv.BoolVal)
+			ise.WriteBool(fv.BoolVal)
 		case models.FieldTypeDateTime:
-			// DateTime: RFC3339 format
-			stream.WriteString(fv.DateTimeVal.Format(time.RFC3339))
+			ise.WriteString(fv.DateTimeVal.Format(time.RFC3339))
 		case models.FieldTypeDate:
-			// Date: YYYY-MM-DD format
-			stream.WriteString(fv.DateVal.Format("2006-01-02"))
+			ise.WriteString(fv.DateVal.Format("2006-01-02"))
 		case models.FieldTypeInterface:
-			writeFieldValue(stream, fv.InterfaceVal)
+			writeFieldValue(ise, fv.InterfaceVal)
 		case models.FieldTypeNil:
-			stream.WriteNil()
+			ise.WriteNull()
 		default:
-			stream.WriteNil()
+			ise.WriteNull()
 		}
 		return
 	}
 
+	// Go primitive types
 	switch v := value.(type) {
 	case string:
-		stream.WriteString(v)
+		ise.WriteString(v)
 	case int:
-		stream.WriteInt(v)
+		ise.WriteInt64(int64(v))
 	case int64:
-		stream.WriteInt64(v)
+		ise.WriteInt64(v)
 	case float64:
-		stream.WriteFloat64(v)
+		ise.WriteFloat64(v)
 	case bool:
-		stream.WriteBool(v)
+		ise.WriteBool(v)
 	case time.Time:
-		writeTimeValue(stream, v)
-	case []interface{}:
-		// Array of values (e.g., nested documents from JOIN)
-		stream.WriteArrayStart()
-		for i, item := range v {
-			if i > 0 {
-				stream.WriteMore()
-			}
-			writeFieldValue(stream, item)
-		}
-		stream.WriteArrayEnd()
-	case map[string]interface{}:
-		// Nested object (e.g., related document from JOIN)
-		stream.WriteObjectStart()
-		first := true
-		for key, val := range v {
-			if !first {
-				stream.WriteMore()
-			}
-			first = false
-			stream.WriteObjectField(key)
-			writeFieldValue(stream, val)
-		}
-		stream.WriteObjectEnd()
+		ise.WriteString(v.Format(time.RFC3339))
 	default:
-		// Fallback for unknown types - use json-iterator's automatic handling
-		stream.WriteVal(v)
+		// Complex types ([]interface{}, map[string]interface{}, etc.)
+		// use WriteValue which delegates to the full HVJson encoder
+		ise.WriteValue(v)
 	}
-}
-
-// writeTimeValue writes a time.Time value in RFC3339 format
-func writeTimeValue(stream *jsoniter.Stream, t time.Time) {
-	// Format: "2006-01-02T15:04:05Z07:00"
-	stream.WriteString(t.Format(time.RFC3339))
-}
-
-// writeIntValue writes an integer with optimal allocation
-func writeIntValue(stream *jsoniter.Stream, value int64) {
-	// Use strconv directly to avoid allocations
-	stream.WriteRaw(strconv.FormatInt(value, 10))
 }
