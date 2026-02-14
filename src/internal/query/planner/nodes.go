@@ -904,6 +904,59 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 			return nil, err
 		}
 
+		// SIMD BATCH OPTIMIZATION: Try batch evaluation on simple predicates before scalar loop.
+		// This activates SIMD-accelerated int64/float64/string comparisons and LIKE patterns.
+		if args.WhereBatchSIMDEnabled && len(docSlice) >= 100 && exprToUse != nil {
+			var schema *models.BundleFieldSchema
+			if bundleCtx != nil {
+				if b, exists := bundleCtx.Bundles[bundleCtx.PrimaryBundle]; exists && b != nil {
+					schema = b.DocumentStructure.FieldSchema()
+				}
+			}
+
+			// Try simple comparison predicate (==, !=, >, <, >=, <=)
+			if pred := extractSimplePredicate(exprToUse); pred != nil {
+				batchEval := NewBatchWhereEvaluator(100, node.Logger)
+				resultDocs, resultIDs, used := batchEval.EvaluateBatchSlice(docSlice, docIDs, *pred, schema)
+				if used {
+					node.Logger.Debugf("Batch SIMD (slice path): %d → %d documents", len(docSlice), len(resultDocs))
+					filtered := make(map[string]*models.Document, len(resultDocs))
+					for i, doc := range resultDocs {
+						filtered[resultIDs[i]] = doc
+					}
+					return filtered, nil
+				}
+			}
+
+			// Try LIKE/CONTAINS predicate
+			if pred := extractLikePredicate(exprToUse); pred != nil {
+				batchEval := NewBatchWhereEvaluator(100, node.Logger)
+				resultDocs, resultIDs, used := batchEval.EvaluateLikeBatchSlice(docSlice, docIDs, *pred, schema)
+				if used {
+					node.Logger.Debugf("Batch SIMD LIKE (slice path): %d → %d documents", len(docSlice), len(resultDocs))
+					filtered := make(map[string]*models.Document, len(resultDocs))
+					for i, doc := range resultDocs {
+						filtered[resultIDs[i]] = doc
+					}
+					return filtered, nil
+				}
+			}
+
+			// Try compound AND/OR predicate with bitmap combination
+			if compound := extractCompoundPredicate(exprToUse); compound != nil {
+				batchEval := NewBatchWhereEvaluator(100, node.Logger)
+				resultDocs, resultIDs, used := batchEval.EvaluateCompoundBatchSlice(docSlice, docIDs, *compound, schema)
+				if used {
+					node.Logger.Debugf("Batch SIMD compound (slice path): %d → %d documents", len(docSlice), len(resultDocs))
+					filtered := make(map[string]*models.Document, len(resultDocs))
+					for i, doc := range resultDocs {
+						filtered[resultIDs[i]] = doc
+					}
+					return filtered, nil
+				}
+			}
+		}
+
 		filtered := make(map[string]*models.Document, len(docSlice)/4) // Estimate 25% selectivity
 		memoryTracker := GetMemoryTrackerFromContext(ctx)
 		docCount := 0
@@ -948,6 +1001,34 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 	documents, err := node.Child.Execute(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// SIMD BATCH OPTIMIZATION (map path): Try batch evaluation on simple predicates before scalar loop.
+	if args.WhereBatchSIMDEnabled && len(documents) >= 100 && exprToUse != nil {
+		var schema *models.BundleFieldSchema
+		if bundleCtx != nil {
+			if b, exists := bundleCtx.Bundles[bundleCtx.PrimaryBundle]; exists && b != nil {
+				schema = b.DocumentStructure.FieldSchema()
+			}
+		}
+
+		if pred := extractSimplePredicate(exprToUse); pred != nil {
+			batchEval := NewBatchWhereEvaluator(100, node.Logger)
+			result, used := batchEval.EvaluateBatch(documents, *pred, schema)
+			if used {
+				node.Logger.Debugf("Batch SIMD (map path): %d → %d documents", len(documents), len(result))
+				return result, nil
+			}
+		}
+
+		if pred := extractLikePredicate(exprToUse); pred != nil {
+			batchEval := NewBatchWhereEvaluator(100, node.Logger)
+			result, used := batchEval.EvaluateLikeBatch(documents, *pred, schema)
+			if used {
+				node.Logger.Debugf("Batch SIMD LIKE (map path): %d → %d documents", len(documents), len(result))
+				return result, nil
+			}
+		}
 	}
 
 	// PRIORITY 2: Bloom filter pre-filtering for multi-condition AND queries (cheapest, run first)

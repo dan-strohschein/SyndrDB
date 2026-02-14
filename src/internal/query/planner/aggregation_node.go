@@ -59,6 +59,7 @@ import (
 	"syndrdb/src/pkg/settings"
 	"time"
 
+	syndrdbsimd "github.com/dan-strohschein/syndrdb-simd"
 	"go.uber.org/zap"
 )
 
@@ -677,7 +678,50 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 			memoryTracker := GetMemoryTrackerFromContext(ctx)
 			usedChunks = true
 
+			// SIMD: For aggregate-only queries, check if we can batch-process whole chunks
+			useSIMDAgg := fieldInfos == nil && !isSingleCountStar && n.canUseSIMDAggregation()
+			if useSIMDAgg {
+				n.Logger.Debugf("SIMD: Using batch aggregation for aggregate-only streaming")
+			}
+
 			chunkErr = bundleInterface.ScanDocumentChunks(ctx, 4096, func(chunk []*models.Document) bool {
+				// SIMD aggregate-only fast path: process entire chunk at once
+				if useSIMDAgg && fieldInfos == nil {
+					// Count non-nil docs for totalInput
+					nonNilCount := 0
+					for _, doc := range chunk {
+						if doc != nil {
+							nonNilCount++
+						}
+					}
+					totalInput += nonNilCount
+
+					// Ensure the single group exists
+					gKey := groupKey("")
+					gResult, exists := groupMap[gKey]
+					if !exists {
+						gResult = &groupResult{
+							GroupFields:     make(map[string]models.FieldValue),
+							AggregateValues: make(map[string]*aggregateValue),
+						}
+						for _, aggFunc := range n.AggregateFields {
+							gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+						}
+						groupMap[gKey] = gResult
+					}
+
+					n.updateAggregatesSIMD(gResult, chunk)
+
+					// Context cancellation check per chunk
+					select {
+					case <-ctx.Done():
+						chunkErr = ctx.Err()
+						return false
+					default:
+					}
+					return true
+				}
+
 				for _, doc := range chunk {
 					// Check for cancellation periodically
 					if totalInput%4096 == 0 {
@@ -1687,6 +1731,105 @@ func (n *AggregationNode) getAggFieldValue(doc *models.Document, ai *aggFieldRes
 		return models.FieldValue{}, false
 	}
 	return field.Value, exists
+}
+
+// updateAggregatesSIMD performs SIMD-accelerated aggregation on a chunk of documents.
+// This is used for aggregate-only queries (no GROUP BY) with SUM/MIN/MAX/AVG on int64 fields.
+// Returns true if SIMD was used, false if the caller should fall back to scalar per-doc updates.
+func (n *AggregationNode) updateAggregatesSIMD(gResult *groupResult, chunk []*models.Document) bool {
+	aggInfos := n.getCachedAggInfos()
+	if aggInfos == nil || len(aggInfos) == 0 {
+		return false
+	}
+
+	// SIMD aggregation only applies to int64 fields accessed via schema index.
+	// For each aggregate, try to extract a contiguous int64 slice and apply SIMD.
+	allHandled := true
+	for i := range aggInfos {
+		ai := &aggInfos[i]
+		aggVal := gResult.AggregateValues[ai.AggKey]
+
+		switch ai.Function {
+		case "COUNT":
+			if ai.FieldName == "*" {
+				aggVal.Count += int64(len(chunk))
+			} else {
+				// COUNT(field) needs null check - fall back to scalar for this agg
+				allHandled = false
+			}
+		case "SUM", "AVG", "MIN", "MAX":
+			if ai.SchemaIndex < 0 {
+				allHandled = false
+				continue
+			}
+
+			// Extract int64 values from chunk using pre-resolved schema index
+			values := make([]int64, 0, len(chunk))
+			for _, doc := range chunk {
+				if doc == nil || ai.SchemaIndex >= len(doc.Values) {
+					continue
+				}
+				fv := doc.Values[ai.SchemaIndex]
+				if v, ok := fv.AsInt(); ok {
+					values = append(values, v)
+				}
+			}
+
+			if len(values) == 0 {
+				continue
+			}
+
+			switch ai.Function {
+			case "SUM":
+				aggVal.Sum += float64(syndrdbsimd.SumInt64(values))
+			case "AVG":
+				aggVal.Sum += float64(syndrdbsimd.SumInt64(values))
+				aggVal.AvgCount += int64(len(values))
+			case "MIN":
+				chunkMin := syndrdbsimd.MinInt64(values)
+				chunkMinFV := models.NewIntValue(chunkMin)
+				if aggVal.Min.IsNil() || n.isLessFieldValue(chunkMinFV, aggVal.Min) {
+					aggVal.Min = chunkMinFV
+				}
+			case "MAX":
+				chunkMax := syndrdbsimd.MaxInt64(values)
+				chunkMaxFV := models.NewIntValue(chunkMax)
+				if aggVal.Max.IsNil() || n.isGreaterFieldValue(chunkMaxFV, aggVal.Max) {
+					aggVal.Max = chunkMaxFV
+				}
+			}
+		default:
+			allHandled = false
+		}
+	}
+
+	return allHandled
+}
+
+// canUseSIMDAggregation checks whether all aggregate fields are eligible for SIMD processing.
+// Returns true if the query has aggregate fields on int64 columns with resolved schema indices.
+func (n *AggregationNode) canUseSIMDAggregation() bool {
+	aggInfos := n.getCachedAggInfos()
+	if aggInfos == nil || len(aggInfos) == 0 {
+		return false
+	}
+
+	for i := range aggInfos {
+		ai := &aggInfos[i]
+		switch ai.Function {
+		case "COUNT":
+			// COUNT(*) is always fine; COUNT(field) doesn't benefit from SIMD
+			continue
+		case "SUM", "AVG", "MIN", "MAX":
+			if ai.SchemaIndex < 0 {
+				return false // Unresolved field - can't use SIMD
+			}
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 // getAggregateKey creates a key for the aggregate function result
