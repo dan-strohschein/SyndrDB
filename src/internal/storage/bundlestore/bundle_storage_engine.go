@@ -1101,6 +1101,15 @@ func (bse *BundleStorageEngine) SetSchemaProvider(fn func(bundleName, databaseNa
 	bse.schemaProvider = fn
 }
 
+// InvalidateBundleCaches clears all cached document data for a bundle so pages are
+// re-deserialized from disk on next access. Called when bundle metadata becomes available
+// after background cache warming may have deserialized documents with a minimal schema.
+func (bse *BundleStorageEngine) InvalidateBundleCaches(bundleName, databaseName string) {
+	bse.mergedBundleCache.Delete(bundleName + ":" + databaseName)
+	// Also clear parsedDocsCache entries for this bundle (keyed as "bundleName:filePath")
+	bse.parsedDocsCache.DeleteByPrefix(bundleName + ":")
+}
+
 // GetSchemaForBundle returns the field schema for a bundle (for use by compactor, etc.). Returns nil if provider not set or bundle unknown.
 func (bse *BundleStorageEngine) GetSchemaForBundle(bundleName, databaseName string) *models.BundleFieldSchema {
 	if bse.schemaProvider == nil {

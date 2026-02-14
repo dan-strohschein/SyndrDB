@@ -123,6 +123,28 @@ func (hjs *HashJoinStrategy) Execute(request *JoinRequest) (*JoinResult, error) 
 	buildBundle, probeBundle, swapped := hjs.chooseBuildProbe(request.LeftBundle, request.RightBundle)
 	buildKey, probeKey := hjs.getJoinKeys(request.Conditions, swapped)
 
+	// Resolve join keys to canonical schema form (case-insensitive matching).
+	// SQL may use "ID" but the schema stores "id" — without this, doc.Data["ID"]
+	// fails and the hash table is built empty, producing zero join results.
+	if buildSchema := buildBundle.FieldSchema(); buildSchema != nil && buildSchema.LowerNameToIndex != nil {
+		if idx, ok := buildSchema.LowerNameToIndex[strings.ToLower(buildKey)]; ok {
+			canonical := buildSchema.Names[idx]
+			if canonical != buildKey {
+				hjs.logger.Debugf("Resolved build join key %q → canonical %q", buildKey, canonical)
+				buildKey = canonical
+			}
+		}
+	}
+	if probeSchema := probeBundle.FieldSchema(); probeSchema != nil && probeSchema.LowerNameToIndex != nil {
+		if idx, ok := probeSchema.LowerNameToIndex[strings.ToLower(probeKey)]; ok {
+			canonical := probeSchema.Names[idx]
+			if canonical != probeKey {
+				hjs.logger.Debugf("Resolved probe join key %q → canonical %q", probeKey, canonical)
+				probeKey = canonical
+			}
+		}
+	}
+
 	// CRITICAL DEBUG: Log join keys and index strategy
 	hjs.logger.Debugf("Hash join: build=%s (key=%s), probe=%s (key=%s), indexStrategy=%v",
 		buildBundle.GetName(), buildKey, probeBundle.GetName(), probeKey,
@@ -422,7 +444,8 @@ func (hjs *HashJoinStrategy) buildHashTable(
 	// SIMD-accelerated extraction provides ~1.2x speedup
 	// TODO: Consider parallel extraction for large document sets (>10,000 docs)
 	allDocs := buildBundle.GetAllDocuments()
-	buildKeyValues, buildDocsSlice, err := ExtractJoinKeysWithSIMD(allDocs, buildKey)
+	buildSchema := buildBundle.FieldSchema()
+	buildKeyValues, buildDocsSlice, err := ExtractJoinKeysWithSIMD(allDocs, buildKey, buildSchema)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to extract build keys: %w", err)
 	}
@@ -558,6 +581,7 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 	buildSchema := buildBundle.FieldSchema()
 
 	// Step 3: Build hash table from loaded documents
+	lowerBuildKey := strings.ToLower(buildKey)
 	for _, doc := range loadedDocs {
 		var keyValue interface{}
 		if strings.EqualFold(buildKey, "documentid") {
@@ -567,10 +591,21 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 			var exists bool
 			if buildSchema != nil && len(doc.Values) > 0 {
 				fv, exists = doc.GetFieldValue(buildSchema, buildKey)
+				if !exists {
+					fv, exists = doc.GetFieldValueCI(buildSchema, lowerBuildKey)
+				}
 			} else if doc.Data != nil {
 				if v, ok := doc.Data[buildKey]; ok {
 					fv = models.NewInterfaceValue(v)
 					exists = true
+				} else {
+					for k, v := range doc.Data {
+						if strings.ToLower(k) == lowerBuildKey {
+							fv = models.NewInterfaceValue(v)
+							exists = true
+							break
+						}
+					}
 				}
 			}
 			if !exists {
@@ -972,16 +1007,29 @@ func (hjs *HashJoinStrategy) createJoinedDocument(
 func (hjs *HashJoinStrategy) extractJoinKeysOnce(docs map[string]*models.Document, keyName string, schema *models.BundleFieldSchema) ([]interface{}, []*models.Document, error) {
 	keyValues := make([]interface{}, 0, len(docs))
 	docsSlice := make([]*models.Document, 0, len(docs))
+	lowerKeyName := strings.ToLower(keyName)
 	for _, doc := range docs {
 		docsSlice = append(docsSlice, doc)
 		var fv models.FieldValue
 		var exists bool
 		if schema != nil && len(doc.Values) > 0 {
 			fv, exists = doc.GetFieldValue(schema, keyName)
+			if !exists {
+				fv, exists = doc.GetFieldValueCI(schema, lowerKeyName)
+			}
 		} else if doc.Data != nil {
 			if v, ok := doc.Data[keyName]; ok {
 				fv = models.NewInterfaceValue(v)
 				exists = true
+			} else {
+				// Case-insensitive fallback
+				for k, v := range doc.Data {
+					if strings.ToLower(k) == lowerKeyName {
+						fv = models.NewInterfaceValue(v)
+						exists = true
+						break
+					}
+				}
 			}
 		}
 		if !exists {

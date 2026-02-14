@@ -46,7 +46,6 @@ package planner
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,19 +114,14 @@ type AggregationNode struct {
 	// Computed once on first use via getCachedAggInfos().
 	resolvedAggInfos []aggFieldResolvedInfo
 
-	// diagCount limits diagnostic output
-	diagCount int
+	// resultSchema is the schema for aggregation result documents (GROUP BY fields + aggregate fields).
+	// Set by convertGroupResultsToDocuments/convertAggregateOnlyToSyntheticDocument after execution.
+	resultSchema *models.BundleFieldSchema
 }
 
-func docDataKeys(doc *models.Document) []string {
-	if doc == nil || doc.Data == nil {
-		return nil
-	}
-	keys := make([]string, 0, len(doc.Data))
-	for k := range doc.Data {
-		keys = append(keys, k)
-	}
-	return keys
+// GetResultSchema returns the schema for aggregation result documents, or nil if not yet computed.
+func (n *AggregationNode) GetResultSchema() *models.BundleFieldSchema {
+	return n.resultSchema
 }
 
 // NewAggregationNode creates a new aggregation execution node
@@ -224,10 +218,6 @@ func NewAggregationNode(
 //   - map[string]*models.Document: Aggregated group documents
 //   - error: Any error during execution
 func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
-	t0Execute := time.Now()
-	defer func() {
-		fmt.Fprintf(os.Stderr, "PERF AggregationNode.Execute total: %v\n", time.Since(t0Execute))
-	}()
 	groupByFieldCount := 0
 	if n.GroupBy != nil {
 		groupByFieldCount = len(n.GroupBy.Fields)
@@ -310,7 +300,10 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 
 			doc := document.GetPooledDocument()
 			doc.DocumentID = "synthetic_0"
-			setDocumentValuesFromFieldMap(doc, fields)
+			names := setDocumentValuesFromFieldMap(doc, fields)
+			if len(names) > 0 {
+				n.resultSchema = models.BuildBundleFieldSchemaFromNames(names)
+			}
 
 			result := map[string]*models.Document{
 				"synthetic_0": doc,
@@ -648,7 +641,6 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 // all documents, pre-computed field names, fast group key (no fmt.Sprintf), deferred groupFields
 // allocation, and inline COUNT(*) fast path.
 func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, scanner documentscanner.DocumentScannerInterface) (map[groupKey]*groupResult, int, error) {
-	t0 := time.Now()
 	n.Logger.Debugf("Executing Hash Aggregate strategy with chunk-based streaming")
 
 	groupMap := make(map[groupKey]*groupResult)
@@ -905,10 +897,6 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 			}
 		}
 	}
-
-	elapsed := time.Since(t0)
-	fmt.Fprintf(os.Stderr, "PERF executeHashAggregateStreaming took %v: groups=%d, docs=%d, usedChunks=%v\n",
-		elapsed, len(groupMap), totalInput, usedChunks)
 
 	return groupMap, totalInput, nil
 }
@@ -1311,11 +1299,11 @@ func (n *AggregationNode) getCachedSchema() *models.BundleFieldSchema {
 }
 
 // setDocumentValuesFromFieldMap sets doc.Values from a field map (stable order: sorted names).
-// Used when building aggregation result documents that use Values instead of Fields.
-func setDocumentValuesFromFieldMap(doc *models.Document, fields map[string]models.Field) {
+// Returns the sorted field names so the caller can build a BundleFieldSchema for the result.
+func setDocumentValuesFromFieldMap(doc *models.Document, fields map[string]models.Field) []string {
 	if len(fields) == 0 {
 		doc.Values = nil
-		return
+		return nil
 	}
 	names := make([]string, 0, len(fields))
 	for k := range fields {
@@ -1326,6 +1314,7 @@ func setDocumentValuesFromFieldMap(doc *models.Document, fields map[string]model
 	for i, name := range names {
 		doc.Values[i] = fields[name].Value
 	}
+	return names
 }
 
 // getCaseInsensitiveField performs a case-insensitive lookup for a field in a document (schema + Values or Data)
@@ -1391,13 +1380,6 @@ func (n *AggregationNode) precomputeGroupKeyFields() []groupKeyFieldInfo {
 			CleanName:     cleanName,
 			SchemaIndex:   schemaIdx,
 		}
-		// Diagnostic: log schema resolution result
-		var schemaNames []string
-		if schema != nil {
-			schemaNames = schema.Names
-		}
-		fmt.Fprintf(os.Stderr, "DIAG precomputeGroupKeyFields: qf=%q clean=%q schemaIdx=%d schemaNames=%v\n",
-			qf, cleanName, schemaIdx, schemaNames)
 	}
 	return infos
 }
@@ -1497,12 +1479,6 @@ func (n *AggregationNode) createGroupKeyFast(doc *models.Document, fieldInfos []
 		} else {
 			field, exists := n.getCaseInsensitiveFieldClean(doc, fi.CleanName)
 			if !exists {
-				if n.diagCount < 3 {
-					n.diagCount++
-					schema := n.getCachedSchema()
-					fmt.Fprintf(os.Stderr, "DIAG createGroupKeyFast: field=%q clean=%q schemaIdx=%d docValuesLen=%d schema=%v docDataKeys=%v\n",
-						fi.QualifiedName, fi.CleanName, fi.SchemaIndex, len(doc.Values), schema != nil, docDataKeys(doc))
-				}
 				return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fi.QualifiedName)
 			}
 			fv = field.Value
@@ -1776,6 +1752,33 @@ func (n *AggregationNode) updateAggregatesSIMD(gResult *groupResult, chunk []*mo
 			}
 
 			if len(values) == 0 {
+				// Int64 extraction failed (e.g. float column) - scalar float fallback
+				for _, doc := range chunk {
+					if doc == nil || ai.SchemaIndex >= len(doc.Values) {
+						continue
+					}
+					fv := doc.Values[ai.SchemaIndex]
+					if fv.IsNil() {
+						continue
+					}
+					if numValue, err := n.convertToFloat(fv); err == nil {
+						switch ai.Function {
+						case "SUM":
+							aggVal.Sum += numValue
+						case "AVG":
+							aggVal.Sum += numValue
+							aggVal.AvgCount++
+						case "MIN":
+							if aggVal.Min.IsNil() || n.isLessFieldValue(fv, aggVal.Min) {
+								aggVal.Min = fv
+							}
+						case "MAX":
+							if aggVal.Max.IsNil() || n.isGreaterFieldValue(fv, aggVal.Max) {
+								aggVal.Max = fv
+							}
+						}
+					}
+				}
 				continue
 			}
 
@@ -1911,8 +1914,13 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 		// TODO: Option C - Implement reference counting for automatic pool return
 		doc := document.GetPooledDocument()
 		doc.DocumentID = docID
-		setDocumentValuesFromFieldMap(doc, fields)
+		names := setDocumentValuesFromFieldMap(doc, fields)
 		resultDocs[docID] = doc
+
+		// Build result schema once (all groups have the same fields)
+		if n.resultSchema == nil && len(names) > 0 {
+			n.resultSchema = models.BuildBundleFieldSchemaFromNames(names)
+		}
 
 		groupIndex++
 	}
@@ -1983,7 +1991,10 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 	// Create synthetic document
 	doc := document.GetPooledDocument()
 	doc.DocumentID = "synthetic_0"
-	setDocumentValuesFromFieldMap(doc, fields)
+	names := setDocumentValuesFromFieldMap(doc, fields)
+	if len(names) > 0 {
+		n.resultSchema = models.BuildBundleFieldSchemaFromNames(names)
+	}
 
 	n.Logger.Debugf("Created synthetic document for aggregate-only query with %d fields", len(fields))
 

@@ -1819,7 +1819,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 			if chunkSize <= 0 {
 				chunkSize = 256
 			}
-			streamResultFromIterator(writer, typedResult.StreamIterator, typedResult.StreamFields, compress, logger, chunkSize)
+			streamResultFromIterator(writer, typedResult.StreamIterator, typedResult.StreamFields, compress, logger, chunkSize, typedResult.StreamSchema)
 			return
 		}
 
@@ -1834,7 +1834,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 			writer.WriteString(strconv.Itoa(typedResult.ResultCount))
 			writer.WriteString(",\"Result\":")
 
-			err := helpers.StreamDocumentSliceToJSON(writer, typedResult.StreamSlice, typedResult.StreamFields, nil)
+			err := helpers.StreamDocumentSliceToJSON(writer, typedResult.StreamSlice, typedResult.StreamFields, typedResult.StreamSchema)
 			if err != nil {
 				logger.Errorf("Failed to stream document slice: %v", err)
 				data, _ = hvjsonMarshal(result)
@@ -1860,7 +1860,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 			writer.WriteString(",\"Result\":")
 
 			// Stream the documents array
-			err := helpers.StreamDocumentsToJSON(writer, typedResult.StreamDocuments, typedResult.StreamFields, nil)
+			err := helpers.StreamDocumentsToJSON(writer, typedResult.StreamDocuments, typedResult.StreamFields, typedResult.StreamSchema)
 			if err != nil {
 				logger.Errorf("Failed to stream documents: %v", err)
 				// Fallback to regular marshaling
@@ -1923,9 +1923,9 @@ func sendResultCompressed(writer *bufio.Writer, resp *CommandResponse, slice []*
 
 	var streamErr error
 	if len(slice) > 0 {
-		streamErr = helpers.StreamDocumentSliceToJSON(zw, slice, resp.StreamFields, nil)
+		streamErr = helpers.StreamDocumentSliceToJSON(zw, slice, resp.StreamFields, resp.StreamSchema)
 	} else {
-		streamErr = helpers.StreamDocumentsToJSON(zw, docMap, resp.StreamFields, nil)
+		streamErr = helpers.StreamDocumentsToJSON(zw, docMap, resp.StreamFields, resp.StreamSchema)
 	}
 	if streamErr != nil {
 		logger.Errorf("Failed to stream documents for compression: %v", streamErr)
@@ -1971,6 +1971,7 @@ func streamResultFromIterator(
 	compress bool,
 	logger *zap.SugaredLogger,
 	chunkSize int,
+	schema *models.BundleFieldSchema,
 ) {
 	defer iterator.Close()
 
@@ -1997,7 +1998,7 @@ func streamResultFromIterator(
 		if err != nil {
 			// Flush any partial chunk before error
 			if len(chunk) > 0 {
-				if writeErr := writeChunk(writer, chunk, fields, compress, logger); writeErr != nil {
+				if writeErr := writeChunk(writer, chunk, fields, compress, logger, schema); writeErr != nil {
 					logger.Errorf("Failed to write partial chunk before error: %v", writeErr)
 				}
 			}
@@ -2015,7 +2016,7 @@ func streamResultFromIterator(
 		if doc == nil {
 			// Flush remaining chunk
 			if len(chunk) > 0 {
-				if writeErr := writeChunk(writer, chunk, fields, compress, logger); writeErr != nil {
+				if writeErr := writeChunk(writer, chunk, fields, compress, logger, schema); writeErr != nil {
 					logger.Errorf("Failed to write final chunk: %v", writeErr)
 					return
 				}
@@ -2028,7 +2029,7 @@ func streamResultFromIterator(
 
 		// Flush chunk when full
 		if len(chunk) >= chunkSize {
-			if writeErr := writeChunk(writer, chunk, fields, compress, logger); writeErr != nil {
+			if writeErr := writeChunk(writer, chunk, fields, compress, logger, schema); writeErr != nil {
 				logger.Errorf("Failed to write chunk: %v", writeErr)
 				return
 			}
@@ -2054,10 +2055,11 @@ func writeChunk(
 	fields []string,
 	compress bool,
 	logger *zap.SugaredLogger,
+	schema *models.BundleFieldSchema,
 ) error {
 	// Encode chunk into a temporary buffer
 	var buf bytes.Buffer
-	if err := helpers.StreamDocumentSliceToJSON(&buf, docs, fields, nil); err != nil {
+	if err := helpers.StreamDocumentSliceToJSON(&buf, docs, fields, schema); err != nil {
 		return err
 	}
 

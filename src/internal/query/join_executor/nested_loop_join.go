@@ -2,6 +2,7 @@ package joinexecutor
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"syndrdb/src/internal/domain/models"
@@ -108,6 +109,18 @@ func (nljs *NestedLoopJoinStrategy) Execute(request *JoinRequest) (*JoinResult, 
 	// Choose outer and inner loops based on size (smaller becomes inner)
 	outerBundle, innerBundle, swapped := nljs.chooseOuterInner(request.LeftBundle, request.RightBundle)
 	outerKey, innerKey := nljs.getJoinKeys(request.Conditions, swapped)
+
+	// Resolve join keys to canonical schema form (case-insensitive matching)
+	if outerSchema := outerBundle.FieldSchema(); outerSchema != nil && outerSchema.LowerNameToIndex != nil {
+		if idx, ok := outerSchema.LowerNameToIndex[strings.ToLower(outerKey)]; ok {
+			outerKey = outerSchema.Names[idx]
+		}
+	}
+	if innerSchema := innerBundle.FieldSchema(); innerSchema != nil && innerSchema.LowerNameToIndex != nil {
+		if idx, ok := innerSchema.LowerNameToIndex[strings.ToLower(innerKey)]; ok {
+			innerKey = innerSchema.Names[idx]
+		}
+	}
 
 	// DEBUG: Log join configuration
 	//nljs.logger.Debugf("JOIN DEBUG: Outer bundle: %s, Inner bundle: %s, Swapped: %t",
@@ -461,16 +474,29 @@ func (nljs *NestedLoopJoinStrategy) createJoinedDocument(
 func (nljs *NestedLoopJoinStrategy) extractJoinKeysOnce(docs map[string]*models.Document, keyName string, schema *models.BundleFieldSchema) ([]interface{}, []*models.Document, error) {
 	keyValues := make([]interface{}, 0, len(docs))
 	docsSlice := make([]*models.Document, 0, len(docs))
+	lowerKeyName := strings.ToLower(keyName)
 	for _, doc := range docs {
 		docsSlice = append(docsSlice, doc)
 		var fv models.FieldValue
 		var exists bool
 		if schema != nil && len(doc.Values) > 0 {
 			fv, exists = doc.GetFieldValue(schema, keyName)
+			if !exists {
+				fv, exists = doc.GetFieldValueCI(schema, lowerKeyName)
+			}
 		} else if doc.Data != nil {
 			if v, ok := doc.Data[keyName]; ok {
 				fv = models.NewInterfaceValue(v)
 				exists = true
+			} else {
+				// Case-insensitive fallback
+				for k, v := range doc.Data {
+					if strings.ToLower(k) == lowerKeyName {
+						fv = models.NewInterfaceValue(v)
+						exists = true
+						break
+					}
+				}
 			}
 		}
 		if !exists {

@@ -544,6 +544,18 @@ func (ds *DocumentStructure) InvalidateFieldSchema() {
 	ds.fieldSchema = nil
 }
 
+// BuildBundleFieldSchemaFromNames builds a BundleFieldSchema from pre-ordered field names.
+// Used for aggregation result documents where the field order is already determined.
+func BuildBundleFieldSchemaFromNames(names []string) *BundleFieldSchema {
+	nameToIndex := make(map[string]int, len(names))
+	lowerNameToIndex := make(map[string]int, len(names))
+	for i, n := range names {
+		nameToIndex[n] = i
+		lowerNameToIndex[strings.ToLower(n)] = i
+	}
+	return &BundleFieldSchema{Names: names, NameToIndex: nameToIndex, LowerNameToIndex: lowerNameToIndex}
+}
+
 // NewProjectionSchema builds a minimal schema for a projection: DocumentID first, then projection fields.
 func NewProjectionSchema(projectionFields []string) *BundleFieldSchema {
 	names := make([]string, 0, len(projectionFields)+1)

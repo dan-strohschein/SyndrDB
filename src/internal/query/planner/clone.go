@@ -130,5 +130,6 @@ func (ep *ExecutionPlan) Clone() *ExecutionPlan {
 		estimatedMemoryBytes: ep.estimatedMemoryBytes,
 		CacheKey:             ep.CacheKey,
 		IsGeneric:            ep.IsGeneric,
+		ResultSchema:         ep.ResultSchema,
 	}
 }

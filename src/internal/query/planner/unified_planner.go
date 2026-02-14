@@ -318,7 +318,14 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 		estimatedMemoryBytes: memoryEstimate,
 	}
 
-	// Step 5: Check if iterator path is beneficial for this query
+	// Step 5: Set result schema from the source bundle for Values→field name mapping
+	if query.FromBundle != "" {
+		if bundle, err := uqp.bundleService.GetBundleByName(database, query.FromBundle); err == nil && bundle != nil {
+			plan.ResultSchema = bundle.DocumentStructure.FieldSchema()
+		}
+	}
+
+	// Step 6: Check if iterator path is beneficial for this query
 	if ShouldUseIterator(query) {
 		plan.UseIterator = true
 		plan.IteratorFactory = BuildIteratorPipeline(finalNode, query)

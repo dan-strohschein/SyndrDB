@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"io"
+	"strings"
 	"time"
 
 	"syndrdb/src/internal/domain/models"
@@ -24,14 +25,11 @@ var (
 func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Document, selectedFields []string, schema *models.BundleFieldSchema) error {
 	ise := hvjson.NewIncrementalEncoder(writer, 0) // 64KB default threshold
 
-	// Build field filter for projection
+	// Build field filter for projection (with qualified-name normalization for JOINs)
 	var fieldFilter map[string]bool
 	hasProjection := len(selectedFields) > 0
 	if hasProjection {
-		fieldFilter = make(map[string]bool, len(selectedFields))
-		for _, field := range selectedFields {
-			fieldFilter[field] = true
-		}
+		fieldFilter = buildStreamFieldFilter(selectedFields)
 	}
 
 	// Collect document IDs
@@ -71,14 +69,11 @@ func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Docume
 func StreamDocumentSliceToJSON(writer io.Writer, documents []*models.Document, selectedFields []string, schema *models.BundleFieldSchema) error {
 	ise := hvjson.NewIncrementalEncoder(writer, 0)
 
-	// Build field filter for projection
+	// Build field filter for projection (with qualified-name normalization for JOINs)
 	var fieldFilter map[string]bool
 	hasProjection := len(selectedFields) > 0
 	if hasProjection {
-		fieldFilter = make(map[string]bool, len(selectedFields))
-		for _, field := range selectedFields {
-			fieldFilter[field] = true
-		}
+		fieldFilter = buildStreamFieldFilter(selectedFields)
 	}
 
 	if _, err := writer.Write(arrayOpen); err != nil {
@@ -127,24 +122,58 @@ func writeDocumentObject(ise *hvjson.IncrementalStreamEncoder, doc *models.Docum
 
 	if useCachedPath {
 		for fieldName, fragment := range doc.CachedJSON {
-			if !hasProjection || fieldFilter[fieldName] {
+			if !hasProjection || fieldFilter[fieldName] || fieldFilter[strings.ToLower(fieldName)] {
 				ise.WriteMore()
 				ise.WriteRawBytes(fragment)
 			}
 		}
-	} else if schema != nil && doc.Values != nil {
+	} else if schema != nil && len(doc.Values) > 0 {
 		for i, fieldName := range schema.Names {
 			if i >= len(doc.Values) {
 				break
 			}
-			if !hasProjection || fieldFilter[fieldName] {
+			if !hasProjection || fieldFilter[fieldName] || fieldFilter[strings.ToLower(fieldName)] {
 				ise.WriteObjectField(fieldName)
 				writeFieldValue(ise, doc.Values[i])
 			}
 		}
 	}
+	// Data fallback: for JOIN merged documents (Data set, Values nil) or legacy documents
+	if doc.Data != nil {
+		for name, v := range doc.Data {
+			if !hasProjection || fieldFilter[name] || fieldFilter[strings.ToLower(name)] {
+				ise.WriteObjectField(name)
+				writeFieldValue(ise, v)
+			}
+		}
+	}
 
 	ise.WriteObjectEnd()
+}
+
+// buildStreamFieldFilter builds a field filter map with qualified-name normalization.
+// Handles JOIN field names like products"."name by also adding bare unqualified names.
+func buildStreamFieldFilter(selectedFields []string) map[string]bool {
+	fieldFilter := make(map[string]bool, len(selectedFields)*3)
+	for _, field := range selectedFields {
+		fieldFilter[field] = true
+		// Strip qualifier: products"."name → name
+		if dotIdx := strings.LastIndex(field, "."); dotIdx >= 0 {
+			bare := strings.Trim(field[dotIdx+1:], `"'`)
+			if bare != "" {
+				fieldFilter[bare] = true
+				fieldFilter[strings.ToLower(bare)] = true
+			}
+		}
+		// Strip quotes from unqualified: "name" → name
+		bare := strings.Trim(field, `"'`)
+		if bare != field {
+			fieldFilter[bare] = true
+			fieldFilter[strings.ToLower(bare)] = true
+		}
+		fieldFilter[strings.ToLower(field)] = true
+	}
+	return fieldFilter
 }
 
 // writeFieldValue writes a field value to the ISE stream.

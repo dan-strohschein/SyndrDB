@@ -528,6 +528,9 @@ type JoinExecutionNode struct {
 	Offset int
 	// sortedDocuments: stores documents in sorted order for downstream LimitNode
 	sortedDocuments []*models.Document
+	// Cached schemas for mergeJoinedDocument (populated in convertQueryToJoinRequest)
+	leftSchema  *models.BundleFieldSchema
+	rightSchema *models.BundleFieldSchema
 }
 
 // Execute implements ExecutionNode interface using the new JOIN executor
@@ -702,6 +705,10 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		return nil, fmt.Errorf("failed to get right bundle '%s': %w", firstJoin.RightBundle, err)
 	}
 
+	// Cache schemas for mergeJoinedDocument
+	jen.leftSchema = leftBundle.DocumentStructure.FieldSchema()
+	jen.rightSchema = rightBundle.DocumentStructure.FieldSchema()
+
 	// Create bundle adapters with bundleService for document loading
 	// Extract bundleService from ServiceManager if it implements the full interface
 	var bundleService BundleServiceInterface
@@ -734,7 +741,9 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		// Create filtered adapter with pushdown predicate; pass streaming opts when bundleService available
 		var leftStreamOpts *ExprFilterAdapterOpts
 		if bundleService != nil {
-			leftStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: leftBundle.Name}
+			leftStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: leftBundle.Name, Bundle: leftBundle}
+		} else {
+			leftStreamOpts = &ExprFilterAdapterOpts{BundleName: leftBundle.Name, Bundle: leftBundle}
 		}
 		leftAdapter = NewExpressionFilteredBundleAdapter(baseLeftAdapter, jen.LeftPredicate, jen.Logger, leftStreamOpts)
 		jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for LEFT bundle with predicate: %s", jen.LeftPredicate.String())
@@ -754,7 +763,9 @@ func (jen *JoinExecutionNode) convertQueryToJoinRequest() (*joinexecutor.JoinReq
 		// (b) string-encoded numeric keys break lexicographic range comparison for multi-digit values
 		var rightStreamOpts *ExprFilterAdapterOpts
 		if bundleService != nil {
-			rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name}
+			rightStreamOpts = &ExprFilterAdapterOpts{BundleService: bundleService, BundleName: rightBundle.Name, Bundle: rightBundle}
+		} else {
+			rightStreamOpts = &ExprFilterAdapterOpts{BundleName: rightBundle.Name, Bundle: rightBundle}
 		}
 		rightAdapter = NewExpressionFilteredBundleAdapter(baseRightAdapter, jen.RightPredicate, jen.Logger, rightStreamOpts)
 		jen.Logger.Debugf("Created ExpressionFilteredBundleAdapter for RIGHT bundle with predicate: %s", jen.RightPredicate.String())
@@ -888,7 +899,11 @@ func computeRequiredFieldsForJoin(
 // Includes: join key names (stripped), SelectFields (stripped), OrderBy (stripped), and "join_key".
 func computeMergeRequiredFields(query *queryparser.SelectJoinQuery, firstJoin queryparser.JoinClause) map[string]bool {
 	set := make(map[string]bool)
-	add := func(f string) { set[stripBundlePrefix(f)] = true }
+	add := func(f string) {
+		bare := stripBundlePrefix(f)
+		set[bare] = true
+		set[strings.ToLower(bare)] = true // case-insensitive matching
+	}
 	for _, c := range firstJoin.JoinConditions {
 		add(c.LeftField)
 		add(c.RightField)
@@ -903,20 +918,33 @@ func computeMergeRequiredFields(query *queryparser.SelectJoinQuery, firstJoin qu
 	return set
 }
 
-// mergeJoinedDocument creates a single document from JOIN results
-// LIFECYCLE: After this function copies fields to the final result document, the input JoinedDocument
-// mergeJoinedDocument builds a single document from left and right with Data map (Option B).
+// mergeJoinedDocument creates a single document from JOIN results.
+// Extracts fields from doc.Values (schema-ordered) or doc.Data (legacy) into a merged Data map.
 func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, index int) *models.Document {
 	mergedData := make(map[string]interface{})
 	onlyRequired := len(jen.MergeRequiredFields) > 0
 
-	addFromDoc := func(doc *models.Document) {
+	addFromDoc := func(doc *models.Document, schema *models.BundleFieldSchema) {
 		if doc == nil {
 			return
 		}
+		// Primary path: extract from schema-ordered Values (modern documents)
+		if schema != nil && len(doc.Values) > 0 {
+			for i, name := range schema.Names {
+				if i >= len(doc.Values) {
+					break
+				}
+				if onlyRequired && !jen.MergeRequiredFields[name] && !jen.MergeRequiredFields[strings.ToLower(name)] {
+					continue
+				}
+				mergedData[name] = doc.Values[i].AsInterface()
+			}
+			return
+		}
+		// Legacy fallback: extract from Data map
 		if doc.Data != nil {
 			for name, v := range doc.Data {
-				if onlyRequired && !jen.MergeRequiredFields[name] {
+				if onlyRequired && !jen.MergeRequiredFields[name] && !jen.MergeRequiredFields[strings.ToLower(name)] {
 					continue
 				}
 				mergedData[name] = v
@@ -924,8 +952,8 @@ func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.Joined
 		}
 	}
 
-	addFromDoc(joinedDoc.LeftDocument)
-	addFromDoc(joinedDoc.RightDocument)
+	addFromDoc(joinedDoc.LeftDocument, jen.leftSchema)
+	addFromDoc(joinedDoc.RightDocument, jen.rightSchema)
 	mergedData["join_key"] = joinedDoc.JoinKey
 
 	doc := document.GetPooledDocument()
@@ -1509,6 +1537,7 @@ const maxFilterWorkers = 4
 type ExprFilterAdapterOpts struct {
 	BundleService BundleServiceInterface // required for streaming+parallel path
 	BundleName    string                 // bundle to load
+	Bundle        *models.Bundle         // bundle for schema resolution in predicate evaluation
 }
 
 // ExpressionFilteredBundleAdapter wraps a BundleInterface and applies a syndrQL.Expression
@@ -1527,6 +1556,7 @@ type ExpressionFilteredBundleAdapter struct {
 	logger        *zap.SugaredLogger
 	evaluator     *syndrQL.ExpressionEvaluator
 	streamingOpts *ExprFilterAdapterOpts // optional; when set, use streaming+parallel load
+	bundleCtx     *syndrQL.BundleContext // for schema-aware predicate evaluation
 }
 
 // NewExpressionFilteredBundleAdapter creates a new expression-filtered bundle adapter.
@@ -1538,13 +1568,21 @@ func NewExpressionFilteredBundleAdapter(
 	logger *zap.SugaredLogger,
 	opts *ExprFilterAdapterOpts,
 ) *ExpressionFilteredBundleAdapter {
-	return &ExpressionFilteredBundleAdapter{
+	adapter := &ExpressionFilteredBundleAdapter{
 		inner:         inner,
 		predicate:     predicate,
 		logger:        logger,
 		evaluator:     syndrQL.NewExpressionEvaluator(logger),
 		streamingOpts: opts,
 	}
+	// Build BundleContext for schema-aware predicate evaluation.
+	// Without this, matchesPredicate can't resolve field values from doc.Values
+	// (modern documents have nil doc.Data).
+	if opts != nil && opts.Bundle != nil {
+		bundles := map[string]*models.Bundle{opts.BundleName: opts.Bundle}
+		adapter.bundleCtx = syndrQL.NewBundleContext(bundles, opts.BundleName, nil)
+	}
+	return adapter
 }
 
 // GetDocumentIDs returns document IDs that match the predicate
@@ -1851,7 +1889,7 @@ func (f *ExpressionFilteredBundleAdapter) matchesPredicate(doc *models.Document)
 		return true
 	}
 
-	result, err := f.evaluator.EvaluateAsBool(f.predicate, doc, nil, nil, nil)
+	result, err := f.evaluator.EvaluateAsBool(f.predicate, doc, f.bundleCtx, nil, nil)
 	if err != nil {
 		// Log error but don't crash - treat as non-match
 		f.logger.Warnf("Predicate evaluation error for doc %s: %v", doc.DocumentID, err)

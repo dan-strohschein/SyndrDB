@@ -24,6 +24,7 @@ type CommandResponse struct {
 	StreamDocuments map[string]*models.Document `json:"-"`
 	StreamSlice     []*models.Document          `json:"-"`
 	StreamFields    []string                    `json:"-"` // Selected fields for projection
+	StreamSchema    *models.BundleFieldSchema   `json:"-"` // Schema mapping Values[i] → field names
 
 	// STEP 1: Document pooling - store pooled documents for centralized cleanup
 	// Returns documents to pool after response sent (similar to PooledMaps pattern)
@@ -47,14 +48,14 @@ func (cr *CommandResponse) GetResultOrTransform() interface{} {
 
 	// Streaming path: prefer StreamSlice (already a slice), fallback to StreamDocuments
 	if len(cr.StreamSlice) > 0 {
-		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(cr.StreamSlice, cr.StreamFields, nil)
+		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(cr.StreamSlice, cr.StreamFields, cr.StreamSchema)
 	}
 	if len(cr.StreamDocuments) > 0 {
 		docSlice := make([]*models.Document, 0, len(cr.StreamDocuments))
 		for _, doc := range cr.StreamDocuments {
 			docSlice = append(docSlice, doc)
 		}
-		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(docSlice, cr.StreamFields, nil)
+		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(docSlice, cr.StreamFields, cr.StreamSchema)
 	}
 
 	return nil

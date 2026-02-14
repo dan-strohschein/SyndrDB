@@ -32,6 +32,25 @@ func getKeys(m map[string]interface{}) []string {
 	return keys
 }
 
+func dataKeys(m map[string]interface{}) []string {
+	if m == nil {
+		return []string{"<nil>"}
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func mapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
 	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
@@ -1296,6 +1315,14 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		logger.Debugf("GROUP BY: Including %d fields in projection: %v", len(selectedFields), selectedFields)
 	}
 
+	// Resolve the result schema for Values[i] → field name mapping.
+	// Aggregation nodes produce synthetic schemas; regular queries use the bundle schema.
+	// JOIN queries produce merged documents with Data (not Values), so schema is not applicable.
+	var resultSchema *models.BundleFieldSchema
+	if len(query.JoinClauses) == 0 {
+		resultSchema = plan.GetEffectiveResultSchema()
+	}
+
 	var flattenedDocs []map[string]interface{}
 	var sortedDocs []*models.Document // Declare at function scope for memory cleanup
 
@@ -1322,7 +1349,17 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			// Use order-preserving transform for sorted documents
 			// This respects the sort order from the planner (user ORDER BY or default CreatedAt)
 			// Note: sortedDocs may be empty if the query returned no results - this is valid
-			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields, nil)
+			// DEBUG: trace JOIN field projection
+			if len(query.JoinClauses) > 0 && len(sortedDocs) > 0 {
+				logger.Infof("JOIN DEBUG: selectedFields=%v, resultSchema=%v, sortedDocs=%d", selectedFields, resultSchema, len(sortedDocs))
+				d := sortedDocs[0]
+				logger.Infof("JOIN DEBUG: doc[0] DocumentID=%s, Values=%v (len=%d), Data keys=%v (len=%d)",
+					d.DocumentID, d.Values != nil, len(d.Values), dataKeys(d.Data), len(d.Data))
+			}
+			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields, resultSchema)
+			if len(query.JoinClauses) > 0 && len(flattenedDocs) > 0 {
+				logger.Infof("JOIN DEBUG: flattenedDocs[0] keys=%v", mapKeys(flattenedDocs[0]))
+			}
 		} else {
 			// Fallback: SortNode/LimitNode not found in plan tree
 			// This is expected for aggregate-only queries without ORDER BY (optimization)
@@ -1332,7 +1369,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			} else {
 				logger.Debug("SortNode/LimitNode not found for aggregate-only query (expected optimization)")
 			}
-			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields, nil)
+			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields, resultSchema)
 		}
 	} // NOTE: Sorting is handled by the SortNode in the unified query planner execution tree.
 	// This legacy sort code was causing a bug where documents were re-sorted AFTER the
@@ -1399,6 +1436,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			cmdResponse.ResultCount = len(documents)
 		}
 		cmdResponse.StreamFields = selectedFields // Use merged fields (includes aggregates)
+		cmdResponse.StreamSchema = resultSchema
 		// NOTE: StreamDocuments/StreamSlice is used by sendResult() for efficient JSON streaming.
 		// We do NOT populate Result here to avoid double-work (40,000+ allocations for large JOINs).
 		// If Result is needed (e.g., for E2E tests calling SelectDocuments directly),

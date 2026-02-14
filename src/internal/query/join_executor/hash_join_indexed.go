@@ -45,6 +45,7 @@ TODO: Future enhancements
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/domain/models"
@@ -281,11 +282,22 @@ func extractFieldValue(doc *models.Document, fieldName string, schema *models.Bu
 		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
 			return fv.AsInterface(), nil
 		}
+		// Case-insensitive fallback
+		if fv, ok := doc.GetFieldValueCI(schema, strings.ToLower(fieldName)); ok {
+			return fv.AsInterface(), nil
+		}
 		return nil, fmt.Errorf("field %s not found", fieldName)
 	}
 	if doc.Data != nil {
 		if v, ok := doc.Data[fieldName]; ok {
 			return v, nil
+		}
+		// Case-insensitive fallback
+		lowerField := strings.ToLower(fieldName)
+		for k, v := range doc.Data {
+			if strings.ToLower(k) == lowerField {
+				return v, nil
+			}
 		}
 	}
 	return nil, fmt.Errorf("field %s not found", fieldName)

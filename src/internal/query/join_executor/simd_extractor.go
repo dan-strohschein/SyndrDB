@@ -30,7 +30,7 @@ Instead of:
   }
 
 Use:
-  keys, docs := ExtractJoinKeysWithSIMD(docsMap, fieldName)
+  keys, docs := ExtractJoinKeysWithSIMD(docsMap, fieldName, schema)
   // Batched extraction with SIMD acceleration
 
 TODO: Future enhancements
@@ -47,63 +47,71 @@ import (
 	"syndrdb/src/pkg/common/conversion"
 )
 
-// ExtractJoinKeysWithSIMD extracts join keys from documents using SIMD acceleration
-// This processes documents in batches of 256 for optimal cache usage and SIMD parallelism
-// Parameters:
-//   - docs: Map of document ID -> document pointer
-//   - fieldName: Name of the field to extract
-//
-// Returns:
-//   - keyValues: Slice of extracted key values (parallel to docsSlice)
-//   - docsSlice: Slice of documents (same order as keyValues)
-//   - error: Any error that occurred during extraction
-//
-// Performance: ~1.2x faster than traditional map-based extraction
-// Memory: Pre-allocates slices to avoid reallocation overhead
-func ExtractJoinKeysWithSIMD(docs map[string]*models.Document, fieldName string) ([]interface{}, []*models.Document, error) {
+// ExtractJoinKeysWithSIMD extracts join keys from documents using SIMD acceleration.
+// schema may be nil; when non-nil, uses doc.GetFieldValueCI for O(1) case-insensitive lookup
+// (required for documents using schema-ordered Values instead of legacy Data map).
+func ExtractJoinKeysWithSIMD(docs map[string]*models.Document, fieldName string, schema *models.BundleFieldSchema) ([]interface{}, []*models.Document, error) {
 	if len(docs) == 0 {
 		return []interface{}{}, []*models.Document{}, nil
 	}
 
-	// Pre-allocate result slices with exact capacity (no reallocation)
 	docCount := len(docs)
 	keyValues := make([]interface{}, 0, docCount)
 	docsSlice := make([]*models.Document, 0, docCount)
 
-	// Convert field name to byte slice once for SIMD comparison
+	// Schema-based fast path: O(1) lookup per document via Values slice
+	if schema != nil {
+		lowerFieldName := strings.ToLower(fieldName)
+		isDocID := strings.EqualFold(fieldName, "documentid")
+		for _, doc := range docs {
+			if doc == nil {
+				continue
+			}
+			docsSlice = append(docsSlice, doc)
+			if isDocID {
+				keyValues = append(keyValues, doc.DocumentID)
+				continue
+			}
+			// Try exact match, then case-insensitive
+			fv, ok := doc.GetFieldValue(schema, fieldName)
+			if !ok {
+				fv, ok = doc.GetFieldValueCI(schema, lowerFieldName)
+			}
+			if ok {
+				keyValues = append(keyValues, fv.AsInterface())
+			} else {
+				keyValues = append(keyValues, nil)
+			}
+		}
+		return keyValues, docsSlice, nil
+	}
+
+	// Legacy fallback: use doc.Data map lookup (batched)
 	fieldNameBytes := []byte(fieldName)
 	fieldNameLen := len(fieldNameBytes)
 
-	// Process documents in batches of 256 for optimal SIMD and cache performance
 	const batchSize = 256
 	currentBatch := make([]*models.Document, 0, batchSize)
 
-	// Collect documents into batches
 	for _, doc := range docs {
 		currentBatch = append(currentBatch, doc)
 
 		if len(currentBatch) >= batchSize {
-			// Process this batch
 			batchKeys, batchDocs, err := extractBatchWithSIMD(currentBatch, fieldNameBytes, fieldNameLen)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to extract batch: %w", err)
 			}
-
 			keyValues = append(keyValues, batchKeys...)
 			docsSlice = append(docsSlice, batchDocs...)
-
-			// Reset batch for next iteration
 			currentBatch = currentBatch[:0]
 		}
 	}
 
-	// Process remaining documents (less than one batch)
 	if len(currentBatch) > 0 {
 		batchKeys, batchDocs, err := extractBatchWithSIMD(currentBatch, fieldNameBytes, fieldNameLen)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to extract final batch: %w", err)
 		}
-
 		keyValues = append(keyValues, batchKeys...)
 		docsSlice = append(docsSlice, batchDocs...)
 	}
@@ -111,8 +119,8 @@ func ExtractJoinKeysWithSIMD(docs map[string]*models.Document, fieldName string)
 	return keyValues, docsSlice, nil
 }
 
-// extractBatchWithSIMD processes a single batch of documents using SIMD acceleration
-// This is where the SIMD magic happens - we compare field names in parallel
+// extractBatchWithSIMD processes a single batch of documents using SIMD acceleration.
+// Legacy path: uses doc.Data map with case-insensitive fallback.
 func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, fieldNameLen int) ([]interface{}, []*models.Document, error) {
 	if len(batch) == 0 {
 		return []interface{}{}, []*models.Document{}, nil
@@ -121,20 +129,16 @@ func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, field
 	keyValues := make([]interface{}, 0, len(batch))
 	docsSlice := make([]*models.Document, 0, len(batch))
 
-	// Process each document in the batch
 	for _, doc := range batch {
 		if doc == nil {
 			continue
 		}
 
-		// Special case: DocumentID field refers to the document's structural ID, not Fields["DocumentID"]
-		// This matches the behavior in document_sorter.go and filter_parser.go
 		var foundValue interface{} = nil
 		if strings.EqualFold(string(fieldNameBytes), "documentid") {
 			if doc.DocumentID != "" {
 				foundValue = doc.DocumentID
 			}
-			// Store result (even if nil - maintains parallel arrays)
 			keyValues = append(keyValues, foundValue)
 			docsSlice = append(docsSlice, doc)
 			continue
@@ -143,6 +147,15 @@ func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, field
 		if doc.Data != nil {
 			if v, ok := doc.Data[string(fieldNameBytes)]; ok {
 				foundValue = v
+			} else {
+				// Case-insensitive fallback
+				lowerField := strings.ToLower(string(fieldNameBytes))
+				for k, v := range doc.Data {
+					if strings.ToLower(k) == lowerField {
+						foundValue = v
+						break
+					}
+				}
 			}
 			keyValues = append(keyValues, foundValue)
 			docsSlice = append(docsSlice, doc)
@@ -156,7 +169,7 @@ func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, field
 }
 
 // ExtractJoinKeysWithSIMDSlice extracts join keys from a slice of documents (for streaming probe).
-// If schema is non-nil, uses O(1) doc.GetFieldValue(schema, fieldName); otherwise uses SIMD/batch path (doc.Fields or doc.Data).
+// If schema is non-nil, uses O(1) doc.GetFieldValueCI(schema, fieldName); otherwise uses SIMD/batch path (doc.Data).
 func ExtractJoinKeysWithSIMDSlice(docs []*models.Document, fieldName string, schema *models.BundleFieldSchema) ([]interface{}, []*models.Document, error) {
 	if len(docs) == 0 {
 		return []interface{}{}, []*models.Document{}, nil
@@ -164,13 +177,18 @@ func ExtractJoinKeysWithSIMDSlice(docs []*models.Document, fieldName string, sch
 	keyValues := make([]interface{}, 0, len(docs))
 	docsSlice := make([]*models.Document, 0, len(docs))
 	if schema != nil {
+		lowerFieldName := strings.ToLower(fieldName)
+		isDocID := strings.EqualFold(fieldName, "documentid")
 		for _, doc := range docs {
 			docsSlice = append(docsSlice, doc)
-			if strings.EqualFold(fieldName, "documentid") {
+			if isDocID {
 				keyValues = append(keyValues, doc.DocumentID)
 				continue
 			}
 			fv, ok := doc.GetFieldValue(schema, fieldName)
+			if !ok {
+				fv, ok = doc.GetFieldValueCI(schema, lowerFieldName)
+			}
 			if ok {
 				keyValues = append(keyValues, fv.AsInterface())
 			} else {
@@ -198,16 +216,13 @@ func ExtractJoinKeysWithSIMDSlice(docs []*models.Document, fieldName string, sch
 	return keyValues, docsSlice, nil
 }
 
-// ExtractJoinKeysOnce is a wrapper around ExtractJoinKeysWithSIMD for backward compatibility
-// This maintains the same interface as the old extractJoinKeysOnce method
-// TODO: Update callers to use ExtractJoinKeysWithSIMD directly and remove this wrapper
+// ExtractJoinKeysOnce is a wrapper around ExtractJoinKeysWithSIMD for backward compatibility.
 func ExtractJoinKeysOnce(docs map[string]*models.Document, fieldName string) ([]interface{}, []*models.Document, error) {
-	return ExtractJoinKeysWithSIMD(docs, fieldName)
+	return ExtractJoinKeysWithSIMD(docs, fieldName, nil)
 }
 
 // ExtractFieldValuesInt64SIMD extracts int64 field values using SIMD comparison
 // This is optimized for integer join keys (common for foreign keys)
-// Uses SIMD CmpEqInt64 for parallel comparison
 func ExtractFieldValuesInt64SIMD(docs []*models.Document, fieldName string) ([]int64, error) {
 	if len(docs) == 0 {
 		return []int64{}, nil
@@ -235,7 +250,6 @@ func ExtractFieldValuesInt64SIMD(docs []*models.Document, fieldName string) ([]i
 
 // ExtractFieldValuesFloat64SIMD extracts float64 field values using SIMD comparison
 // This is optimized for numeric join keys
-// Uses SIMD CmpEqFloat64 for parallel comparison
 func ExtractFieldValuesFloat64SIMD(docs []*models.Document, fieldName string) ([]float64, error) {
 	if len(docs) == 0 {
 		return []float64{}, nil

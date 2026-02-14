@@ -912,10 +912,21 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	if bse, ok := store.(*bundlestore.BundleStorageEngine); ok {
 		bse.SetSchemaProvider(func(bundleName, databaseName string) *models.BundleFieldSchema {
 			bundle, exists := service.bundleMetadata[bundleName]
-			if !exists || bundle == nil {
+			if exists && bundle != nil {
+				return bundle.DocumentStructure.FieldSchema()
+			}
+			// Fallback: load bundle metadata from disk. This handles the case where
+			// background cache warming (warmParsedDocsCache) deserializes documents
+			// before GetBundleByName has populated bundleMetadata. Without this
+			// fallback, documents get Values=[DocumentID] only, and GROUP BY/aggregate
+			// queries fail because all business fields are lost.
+			databasePath := helpers.GetDatabaseFolderPath(databaseName)
+			fileName := fmt.Sprintf("%s_%s.bnd", databaseName, bundleName)
+			diskBundle, err := bse.LoadBundleMetadata(nil, databasePath, fileName)
+			if err != nil || diskBundle == nil {
 				return nil
 			}
-			return bundle.DocumentStructure.FieldSchema()
+			return diskBundle.DocumentStructure.FieldSchema()
 		})
 		logger.Debugf("Schema provider wired to BundleStorageEngine for Values-based document access")
 	}
@@ -1684,6 +1695,31 @@ func (s *BundleService) GetVisibilityMap(bundleName string) *VisibilityMap {
 func (s *BundleService) clearVisibilityForPage(bundleName string, pageID uint32) {
 	if v, ok := s.visibilityMaps.Load(bundleName); ok {
 		v.(*VisibilityMap).ClearPage(pageID)
+	}
+}
+
+// invalidatePageCachesForBundle clears COW snapshots, reader views, and fastLookup
+// entries for a bundle across all page shards. Called when bundle metadata is first
+// loaded so that stale documents (deserialized with minimal schema before the full
+// schema was available) are evicted and re-loaded with correct field values.
+func (s *BundleService) invalidatePageCachesForBundle(bundleName string) {
+	prefix := bundleName + ":"
+	for i := range s.pageShards {
+		shard := s.pageShards[i]
+		shard.mu.Lock()
+		for key := range shard.pages {
+			if strings.HasPrefix(key, prefix) {
+				delete(shard.pages, key)
+				shard.cowSnapshot.Delete(key)
+				shard.readerView.Delete(key)
+				shard.fastLookup.Delete(key)
+				if elem, ok := shard.lruElements[key]; ok {
+					shard.lruOrder.Remove(elem)
+					delete(shard.lruElements, key)
+				}
+			}
+		}
+		shard.mu.Unlock()
 	}
 }
 
@@ -3828,6 +3864,16 @@ func (s *BundleService) GetBundleMetadata(database *models.Database, name string
 			// }
 
 			s.bundleMetadata[name] = bundle
+
+			// Invalidate any page/document caches that were built before the
+			// schema was available (e.g. by background cache warming). Those
+			// cached documents only have Values=[DocumentID] because the
+			// schemaProvider returned nil before bundleMetadata was populated.
+			if bse, ok := s.store.(*bundlestore.BundleStorageEngine); ok {
+				bse.InvalidateBundleCaches(name, database.Name)
+			}
+			s.invalidatePageCachesForBundle(name)
+
 			return bundle, nil
 		} else {
 			return nil, errors.New(errors.ERR_INTERNAL_STORAGE, fmt.Sprintf("Bundle file exists in memory but not on disk. '%s_%s.bnd' not found", database.Name, name), errors.LayerStorage).WithContext("bundle_name", name)

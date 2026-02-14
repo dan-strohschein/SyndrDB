@@ -118,12 +118,51 @@ type ExecutionPlan struct {
 	// Set when serving from cache; used by RecordPlanStats.
 	IsGeneric bool
 
+	// ResultSchema maps Values[i] to field names for result documents.
+	// Set from the bundle's FieldSchema at plan build time; aggregation nodes
+	// override it with their synthetic result schema after Execute().
+	ResultSchema *models.BundleFieldSchema
+
 	// Iterator support: when UseIterator is true, the plan should be executed via
 	// the pull-based iterator path instead of the materialized Execute() path.
 	// IteratorFactory creates a fresh iterator chain per execution (iterators are
 	// not reusable after Close()).
 	UseIterator     bool
 	IteratorFactory func() IteratorNode
+}
+
+// GetEffectiveResultSchema returns the schema that should be used for encoding result documents.
+// If an AggregationNode has a result schema (set after Execute), that takes precedence over
+// the bundle schema since aggregation produces synthetic documents with different fields.
+func (ep *ExecutionPlan) GetEffectiveResultSchema() *models.BundleFieldSchema {
+	if schema := findAggregationResultSchema(ep.RootNode); schema != nil {
+		return schema
+	}
+	return ep.ResultSchema
+}
+
+// findAggregationResultSchema walks the plan tree to find an AggregationNode with a result schema.
+func findAggregationResultSchema(node ExecutionNode) *models.BundleFieldSchema {
+	if node == nil {
+		return nil
+	}
+	if agg, ok := node.(*AggregationNode); ok {
+		if s := agg.GetResultSchema(); s != nil {
+			return s
+		}
+	}
+	// Check common wrapper nodes
+	switch n := node.(type) {
+	case *SortNode:
+		return findAggregationResultSchema(n.Child)
+	case *LimitNode:
+		return findAggregationResultSchema(n.Child)
+	case *FilterNode:
+		return findAggregationResultSchema(n.Child)
+	case *DistinctNode:
+		return findAggregationResultSchema(n.Child)
+	}
+	return nil
 }
 
 // ScanType represents different types of scans

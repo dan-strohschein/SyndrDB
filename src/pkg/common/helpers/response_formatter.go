@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"syndrdb/src/internal/domain/models"
 )
@@ -99,48 +100,65 @@ func TransformDocumentsToFlatFormat(documents map[string]*models.Document, schem
 //   - Document metadata (DocumentID, CreatedAt, UpdatedAt) always included
 //   - If a selected field doesn't exist in a document, it's omitted from that document
 func TransformDocumentsToFlatFormatWithProjection(documents map[string]*models.Document, selectedFields []string, schema *models.BundleFieldSchema) []map[string]interface{} {
-	// ✅ PRE-ALLOCATE TO EXACT SIZE - eliminates slice growth allocations!
 	flattenedDocs := make([]map[string]interface{}, 0, len(documents))
 
-	// Build field filter map for O(1) lookup
+	// Build field filter map with qualified-name normalization (same as sorted variant)
 	var fieldFilter map[string]bool
 	hasProjection := len(selectedFields) > 0
 	if hasProjection {
-		fieldFilter = make(map[string]bool, len(selectedFields)) // ✅ Pre-size
+		fieldFilter = make(map[string]bool, len(selectedFields)*3)
 		for _, field := range selectedFields {
 			fieldFilter[field] = true
+			if dotIdx := strings.LastIndex(field, "."); dotIdx >= 0 {
+				bare := strings.Trim(field[dotIdx+1:], `"'`)
+				if bare != "" {
+					fieldFilter[bare] = true
+					fieldFilter[strings.ToLower(bare)] = true
+				}
+			}
+			bare := strings.Trim(field, `"'`)
+			if bare != field {
+				fieldFilter[bare] = true
+				fieldFilter[strings.ToLower(bare)] = true
+			}
+			fieldFilter[strings.ToLower(field)] = true
 		}
 	}
 
 	// PHASE F: Sort document IDs for deterministic ordering
-	// Pre-allocate with exact capacity to avoid slice growth
-	docIDs := make([]string, 0, len(documents)) // ✅ Use append pattern
+	docIDs := make([]string, 0, len(documents))
 	for docID := range documents {
 		docIDs = append(docIDs, docID)
 	}
 	sort.Strings(docIDs)
 
-	// Process documents in sorted ID order
 	for _, docID := range docIDs {
 		doc := documents[docID]
-		// Get a map from the pool (PHASE A OPTIMIZATION)
-		// This eliminates 100+ allocations per query by reusing maps
 		flatDoc := GetDocMap()
 
-		// PHASE G: Always include document metadata using interned string constants
 		flatDoc[FieldDocumentID] = doc.DocumentID
 		flatDoc[FieldCreatedAt] = doc.CreatedAt
 		flatDoc[FieldUpdatedAt] = doc.UpdatedAt
 
-		// Add fields based on projection (schema-ordered Values)
-		if schema != nil && doc.Values != nil {
+		if schema != nil && len(doc.Values) > 0 {
 			for i, fieldName := range schema.Names {
 				if i >= len(doc.Values) {
 					break
 				}
-				shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(doc.Values[i])
+				shouldInclude := !hasProjection || fieldFilter[fieldName] || fieldFilter[strings.ToLower(fieldName)] || isNestedRelationshipFieldValue(doc.Values[i])
 				if shouldInclude {
 					flatDoc[fieldName] = doc.Values[i].ToJSONValue()
+				}
+			}
+		}
+		if doc.Data != nil {
+			for name, v := range doc.Data {
+				if _, already := flatDoc[name]; already {
+					continue
+				}
+				shouldInclude := !hasProjection || fieldFilter[name] || fieldFilter[strings.ToLower(name)]
+				if shouldInclude {
+					flatDoc[name] = v
 				}
 			}
 		}
@@ -168,13 +186,31 @@ func TransformSortedDocumentsToFlatFormatWithProjection(documents []*models.Docu
 	// ✅ PRE-ALLOCATE TO EXACT SIZE - eliminates slice growth allocations!
 	flattenedDocs := make([]map[string]interface{}, 0, len(documents))
 
-	// Build field filter map for O(1) lookup
+	// Build field filter map for O(1) lookup.
+	// For JOIN queries, selectedFields may be qualified ("products"."name") —
+	// also add unqualified names so Data-based fallback can match.
 	var fieldFilter map[string]bool
 	hasProjection := len(selectedFields) > 0
 	if hasProjection {
-		fieldFilter = make(map[string]bool, len(selectedFields)) // ✅ Pre-size
+		fieldFilter = make(map[string]bool, len(selectedFields)*3)
 		for _, field := range selectedFields {
 			fieldFilter[field] = true
+			// Strip qualifier: "products"."name" → name
+			if dotIdx := strings.LastIndex(field, "."); dotIdx >= 0 {
+				bare := strings.Trim(field[dotIdx+1:], `"'`)
+				if bare != "" {
+					fieldFilter[bare] = true
+					fieldFilter[strings.ToLower(bare)] = true
+				}
+			}
+			// Strip quotes from unqualified: "name" → name
+			bare := strings.Trim(field, `"'`)
+			if bare != field {
+				fieldFilter[bare] = true
+				fieldFilter[strings.ToLower(bare)] = true
+			}
+			// Always add lowercase variant for case-insensitive matching
+			fieldFilter[strings.ToLower(field)] = true
 		}
 	}
 
@@ -190,14 +226,27 @@ func TransformSortedDocumentsToFlatFormatWithProjection(documents []*models.Docu
 		flatDoc[FieldUpdatedAt] = doc.UpdatedAt
 
 		// Add fields based on projection (schema-ordered Values)
-		if schema != nil && doc.Values != nil {
+		if schema != nil && len(doc.Values) > 0 {
 			for i, fieldName := range schema.Names {
 				if i >= len(doc.Values) {
 					break
 				}
-				shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(doc.Values[i])
+				shouldInclude := !hasProjection || fieldFilter[fieldName] || fieldFilter[strings.ToLower(fieldName)] || isNestedRelationshipFieldValue(doc.Values[i])
 				if shouldInclude {
 					flatDoc[fieldName] = doc.Values[i].ToJSONValue()
+				}
+			}
+		}
+		// Data path: for JOIN merged documents (Data set, Values nil) or legacy documents.
+		// Not exclusive with Values path — both can contribute fields.
+		if doc.Data != nil {
+			for name, v := range doc.Data {
+				if _, already := flatDoc[name]; already {
+					continue // Values path already added this field
+				}
+				shouldInclude := !hasProjection || fieldFilter[name] || fieldFilter[strings.ToLower(name)]
+				if shouldInclude {
+					flatDoc[name] = v
 				}
 			}
 		}
