@@ -114,9 +114,11 @@ func ShowVersions(command string, database *models.Database, logger *zap.Sugared
 			"UpdatedAt":       doc.UpdatedAt.Format("2006-01-02 15:04:05.000000"),
 		}
 
-		// Add field count for summary
-		if doc.Fields != nil {
-			versionData["FieldCount"] = len(doc.Fields)
+		// Add field count for summary (Option B: Values or Data)
+		if len(doc.Values) > 0 {
+			versionData["FieldCount"] = len(doc.Values)
+		} else if doc.Data != nil {
+			versionData["FieldCount"] = len(doc.Data)
 		}
 
 		versionInfo = append(versionInfo, versionData)

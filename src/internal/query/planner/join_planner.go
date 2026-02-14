@@ -905,48 +905,32 @@ func computeMergeRequiredFields(query *queryparser.SelectJoinQuery, firstJoin qu
 
 // mergeJoinedDocument creates a single document from JOIN results
 // LIFECYCLE: After this function copies fields to the final result document, the input JoinedDocument
-// will be returned to the pool via deferred cleanup in the Execute() function.
-// This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup.
-// Opt #3: when MergeRequiredFields is non-nil and non-empty, only those fields are copied.
-// The merged Fields map is from document.GetPooledFieldMap(); ReturnPooledDocument will
-// return it via doc.PooledFields.
+// mergeJoinedDocument builds a single document from left and right with Data map (Option B).
 func (jen *JoinExecutionNode) mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, index int) *models.Document {
-	mergedFields := document.GetPooledFieldMap()
+	mergedData := make(map[string]interface{})
 	onlyRequired := len(jen.MergeRequiredFields) > 0
 
-	// Add left document fields
-	if joinedDoc.LeftDocument != nil {
-		for fieldName, field := range joinedDoc.LeftDocument.Fields {
-			if onlyRequired && !jen.MergeRequiredFields[fieldName] {
-				continue
+	addFromDoc := func(doc *models.Document) {
+		if doc == nil {
+			return
+		}
+		if doc.Data != nil {
+			for name, v := range doc.Data {
+				if onlyRequired && !jen.MergeRequiredFields[name] {
+					continue
+				}
+				mergedData[name] = v
 			}
-			mergedFields[fieldName] = field
 		}
 	}
 
-	// Add right document fields (right overwrites left on collision)
-	if joinedDoc.RightDocument != nil {
-		for fieldName, field := range joinedDoc.RightDocument.Fields {
-			if onlyRequired && !jen.MergeRequiredFields[fieldName] {
-				continue
-			}
-			mergedFields[fieldName] = field
-		}
-	}
-
-	// Add JOIN metadata
-	mergedFields["join_key"] = models.Field{
-		Name:  "join_key",
-		Value: models.NewStringValue(joinedDoc.JoinKey),
-	}
+	addFromDoc(joinedDoc.LeftDocument)
+	addFromDoc(joinedDoc.RightDocument)
+	mergedData["join_key"] = joinedDoc.JoinKey
 
 	doc := document.GetPooledDocument()
-	// Use a unique DocumentID per joined row to prevent map key collisions
-	// that silently lose rows in one-to-many JOINs. The JoinKey alone is not
-	// unique when multiple right-side documents match the same left-side key.
 	doc.DocumentID = joinedDoc.JoinKey + "_" + strconv.Itoa(index)
-	doc.Fields = mergedFields
-	doc.PooledFields = true
+	doc.Data = mergedData
 	doc.CreatedAt = time.Now()
 	doc.UpdatedAt = time.Now()
 	return doc
@@ -988,9 +972,15 @@ func (pba *PlannerBundleAdapter) GetDocumentIDs() []string {
 	return []string{}
 }
 
+// FieldSchema returns the bundle's field schema for document field access (Option B).
+func (pba *PlannerBundleAdapter) FieldSchema() *models.BundleFieldSchema {
+	if pba.bundle == nil {
+		return nil
+	}
+	return pba.bundle.DocumentStructure.FieldSchema()
+}
+
 // GetDocument retrieves a document by its ID using direct lookup (O(1) via index)
-// FIX: Previously loaded ALL documents just to find one (O(N) per call = N+1 problem in JOINs)
-// Now uses BundleService.GetDocument for efficient index-based lookup
 func (pba *PlannerBundleAdapter) GetDocument(docID string) *models.Document {
 	if pba.bundle == nil {
 		return nil
@@ -1277,8 +1267,9 @@ func (pba *PlannerBundleAdapter) CopyProjectedToSessionCache(ctx context.Context
 	}
 
 	totalPages := pba.GetTotalPages()
+	schema := pba.bundle.DocumentStructure.FieldSchema()
 	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := pba.bundleService.CopyProjectedFromCache(
-		pba.bundle.Name, databaseName, totalPages, projectFields, effectiveLimit)
+		pba.bundle.Name, databaseName, totalPages, projectFields, effectiveLimit, schema)
 	if err != nil {
 		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents: %w", err)
 	}
@@ -1781,6 +1772,11 @@ func (f *ExpressionFilteredBundleAdapter) ScanDocumentChunks(ctx context.Context
 		}
 		return fn(filtered)
 	})
+}
+
+// FieldSchema delegates to the inner bundle (Option B).
+func (f *ExpressionFilteredBundleAdapter) FieldSchema() *models.BundleFieldSchema {
+	return f.inner.FieldSchema()
 }
 
 // GetName returns the bundle name with a filter indicator

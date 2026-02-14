@@ -53,14 +53,11 @@ func NewBatchEncoder(estimatedDocs int) *BatchEncoder {
 	}
 }
 
-// AddDocument serializes and adds a document to the batch.
-// Uses V2 format for each document to enable O(1) field access on read.
-func (be *BatchEncoder) AddDocument(doc *models.Document) error {
-	// Record where this document starts
+// AddDocument serializes and adds a document to the batch. Schema is required for V2 format.
+func (be *BatchEncoder) AddDocument(doc *models.Document, schema *models.BundleFieldSchema) error {
 	be.offsets = append(be.offsets, uint32(len(be.buffer)))
 
-	// Serialize document using V2 format
-	data, err := be.serializer.SerializeDocumentV2(doc)
+	data, err := be.serializer.SerializeDocumentV2(doc, schema)
 	if err != nil {
 		return fmt.Errorf("serialize document %s: %w", doc.DocumentID, err)
 	}
@@ -76,9 +73,8 @@ func (be *BatchEncoder) AddDocument(doc *models.Document) error {
 }
 
 // AddDocumentMap serializes and adds a map-based document to the batch.
-// Converts to models.Document internally for V2 serialization.
-func (be *BatchEncoder) AddDocumentMap(docEntry map[string]interface{}) error {
-	// Convert map to Document
+// Schema is required to build doc.Values from the Fields map.
+func (be *BatchEncoder) AddDocumentMap(docEntry map[string]interface{}, schema *models.BundleFieldSchema) error {
 	doc := &models.Document{}
 
 	if docID, ok := docEntry["DocumentID"].(string); ok {
@@ -87,13 +83,22 @@ func (be *BatchEncoder) AddDocumentMap(docEntry map[string]interface{}) error {
 		return fmt.Errorf("DocumentID is required and must be a string")
 	}
 
-	if fieldsInterface, ok := docEntry["Fields"]; ok {
-		if fields, ok := fieldsInterface.(map[string]models.Field); ok {
-			doc.Fields = fields
+	if schema != nil {
+		if fieldsInterface, ok := docEntry["Fields"]; ok {
+			if fields, ok := fieldsInterface.(map[string]models.Field); ok {
+				doc.Values = make([]models.FieldValue, len(schema.Names))
+				for i, name := range schema.Names {
+					if f, ok := fields[name]; ok {
+						doc.Values[i] = f.Value
+					} else {
+						doc.Values[i] = models.FieldValue{Type: models.FieldTypeNil}
+					}
+				}
+			}
 		}
 	}
 
-	return be.AddDocument(doc)
+	return be.AddDocument(doc, schema)
 }
 
 // Bytes returns the complete batch with header.
@@ -180,18 +185,17 @@ func (be *BatchEncoder) Reset() {
 //
 // Returns:
 //   - error: First serialization error, or nil if all succeeded
-func (be *BatchEncoder) AddDocumentsParallel(docs []*models.Document, parallelThreshold, maxWorkers int) error {
+func (be *BatchEncoder) AddDocumentsParallel(docs []*models.Document, schema *models.BundleFieldSchema, parallelThreshold, maxWorkers int) error {
 	if parallelThreshold <= 0 {
-		parallelThreshold = 8 // Default: parallelize batches of 8+ docs
+		parallelThreshold = 8
 	}
 	if maxWorkers <= 0 {
 		maxWorkers = runtime.NumCPU()
 	}
 
-	// For small batches, use sequential encoding (avoid goroutine overhead)
 	if len(docs) < parallelThreshold {
 		for _, doc := range docs {
-			if err := be.AddDocument(doc); err != nil {
+			if err := be.AddDocument(doc, schema); err != nil {
 				return err
 			}
 		}
@@ -212,23 +216,20 @@ func (be *BatchEncoder) AddDocumentsParallel(docs []*models.Document, parallelTh
 
 	for i, doc := range docs {
 		wg.Add(1)
-		go func(idx int, d *models.Document) {
+		go func(idx int, d *models.Document, sch *models.BundleFieldSchema) {
 			defer wg.Done()
 
-			// Acquire semaphore
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// Check if we already have an error
 			select {
 			case <-errChan:
-				return // Another goroutine hit an error
+				return
 			default:
 			}
 
-			// Use a separate serializer per goroutine (FastDocumentSerializer is not thread-safe)
 			serializer := NewFastDocumentSerializer()
-			data, err := serializer.SerializeDocumentV2(d)
+			data, err := serializer.SerializeDocumentV2(d, sch)
 			if err != nil {
 				select {
 				case errChan <- fmt.Errorf("serialize document %s: %w", d.DocumentID, err):
@@ -238,7 +239,7 @@ func (be *BatchEncoder) AddDocumentsParallel(docs []*models.Document, parallelTh
 			}
 
 			results[idx] = serializedDoc{index: idx, data: data}
-		}(i, doc)
+		}(i, doc, schema)
 	}
 
 	wg.Wait()
@@ -354,57 +355,45 @@ func (bd *BatchDecoder) Count() int {
 	return int(bd.docCount)
 }
 
-// GetDocument deserializes the document at the given index.
-// Index must be in range [0, Count()).
-func (bd *BatchDecoder) GetDocument(index int) (*models.Document, error) {
+// GetDocument deserializes the document at the given index. Schema is required.
+func (bd *BatchDecoder) GetDocument(index int, schema *models.BundleFieldSchema) (*models.Document, error) {
 	if index < 0 || index >= int(bd.docCount) {
 		return nil, fmt.Errorf("document index out of range: %d", index)
 	}
-
-	// Get document offset and length
 	offset := bd.offsets[index]
 	if int(offset)+4 > len(bd.data) {
 		return nil, fmt.Errorf("document offset out of bounds")
 	}
-
 	docLen := binary.LittleEndian.Uint32(bd.data[offset : offset+4])
 	docData := bd.data[offset+4 : offset+4+docLen]
-
-	// Detect format and deserialize
 	if DetectFormatVersion(docData) == FormatVersionV2 {
-		return bd.deserialize.DeserializeDocumentV2(docData, nil)
+		return bd.deserialize.DeserializeDocumentV2(docData, schema, nil)
 	}
-	return bd.deserialize.DeserializeDocument(docData)
+	return bd.deserialize.DeserializeDocument(docData, schema)
 }
 
-// GetDocumentInto deserializes document at index into pre-allocated document.
-// Use with pooled documents to avoid allocations.
-func (bd *BatchDecoder) GetDocumentInto(index int, doc *models.Document) error {
+// GetDocumentInto deserializes document at index into pre-allocated document. Schema is required.
+func (bd *BatchDecoder) GetDocumentInto(index int, doc *models.Document, schema *models.BundleFieldSchema) error {
 	if index < 0 || index >= int(bd.docCount) {
 		return fmt.Errorf("document index out of range: %d", index)
 	}
-
 	offset := bd.offsets[index]
 	if int(offset)+4 > len(bd.data) {
 		return fmt.Errorf("document offset out of bounds")
 	}
-
 	docLen := binary.LittleEndian.Uint32(bd.data[offset : offset+4])
 	docData := bd.data[offset+4 : offset+4+docLen]
-
 	if DetectFormatVersion(docData) == FormatVersionV2 {
-		return bd.deserialize.DeserializeDocumentV2Into(docData, nil, doc)
+		return bd.deserialize.DeserializeDocumentV2Into(docData, schema, nil, doc)
 	}
-	return bd.deserialize.DeserializeDocumentInto(docData, doc)
+	return bd.deserialize.DeserializeDocumentInto(docData, doc, schema)
 }
 
-// IterateDocuments calls the callback for each document in the batch.
-// If callback returns false, iteration stops.
-// Returns the number of documents processed.
-func (bd *BatchDecoder) IterateDocuments(fn func(index int, doc *models.Document) bool) (int, error) {
+// IterateDocuments calls the callback for each document. Schema is required.
+func (bd *BatchDecoder) IterateDocuments(schema *models.BundleFieldSchema, fn func(index int, doc *models.Document) bool) (int, error) {
 	count := 0
 	for i := 0; i < int(bd.docCount); i++ {
-		doc, err := bd.GetDocument(i)
+		doc, err := bd.GetDocument(i, schema)
 		if err != nil {
 			return count, fmt.Errorf("error reading document %d: %w", i, err)
 		}

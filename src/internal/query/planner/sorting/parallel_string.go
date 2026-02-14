@@ -82,6 +82,7 @@ func ParallelStringSort(
 	useSIMD bool,
 	numWorkers int,
 	logger *zap.SugaredLogger,
+	schema *models.BundleFieldSchema,
 ) ([]*models.Document, error) {
 	if len(documents) == 0 {
 		return []*models.Document{}, nil
@@ -101,14 +102,13 @@ func ParallelStringSort(
 	// Phase 1: Convert documents to abbreviated keys and divide into chunks
 	allKeys := make([]AbbreviatedKey, 0, len(documents))
 	for _, doc := range documents {
-		field, exists := doc.Fields[fieldName]
+		fv, exists := GetFieldValueForSort(doc, fieldName, schema)
 		if !exists {
 			continue
 		}
 
-		// Convert to string
 		var strValue string
-		switch v := field.Value.AsInterface().(type) { // ✅ Use AsInterface()
+		switch v := fv.AsInterface().(type) {
 		case string:
 			strValue = v
 		case []byte:

@@ -293,9 +293,7 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 		// Throttle read I/O (PostgreSQL autovacuum_cost_delay equivalent)
 		bc.throttler.Throttle(int64(len(fileData)))
 
-		// Parse all documents from this file (no range filtering)
-		// PROJECTION PUSHDOWN: Pass nil projection fields (full deserialization) for compaction
-		fileDocuments, _, err := bc.storageEngine.parseAppendedDocumentsRange(bundleName, &fileData, 0, ^uint32(0), nil)
+		fileDocuments, _, err := bc.storageEngine.parseAppendedDocumentsRange(bundleName, databaseName, &fileData, 0, ^uint32(0), nil)
 		if err != nil {
 			bc.logger.Warnf("Failed to parse documents from file %s: %v", filePath, err)
 			continue
@@ -357,11 +355,10 @@ func (bc *BundleCompactor) Compact(databaseName, bundleName string, trigger Comp
 		os.Remove(tempFilePath) // Clean up temp file on error
 	}()
 
-	// Write documents to output file
+	schema := bc.storageEngine.GetSchemaForBundle(bundleName, databaseName)
 	documentsWritten := 0
 	for _, doc := range liveDocuments {
-		// Serialize document
-		docBytes, err := bc.storageEngine.serializeDocumentDirect(&doc)
+		docBytes, err := bc.storageEngine.serializeDocumentDirect(&doc, schema)
 		if err != nil {
 			bc.logger.Warnf("Failed to serialize document %s: %v", doc.DocumentID, err)
 			continue

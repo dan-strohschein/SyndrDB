@@ -93,6 +93,16 @@ type AdaptiveSpillManager struct {
 	totalSpilledBytes   int64 // Total bytes written to disk
 	totalSpilledEntries int64 // Total entries spilled
 	repartitionCount    int   // Number of times we doubled partitions
+
+	// schema is optional; when set, convertToSpilledEntry/convertFromSpilledEntry use doc.Values
+	schema *models.BundleFieldSchema
+}
+
+// SetSchema sets the bundle field schema for serializing/deserializing doc.Values.
+func (asm *AdaptiveSpillManager) SetSchema(schema *models.BundleFieldSchema) {
+	asm.mutex.Lock()
+	defer asm.mutex.Unlock()
+	asm.schema = schema
 }
 
 // NewAdaptiveSpillManager creates a new adaptive spill manager for a join operation
@@ -526,30 +536,34 @@ func (asm *AdaptiveSpillManager) estimateDocumentMemory(doc *models.Document) in
 	if doc == nil {
 		return 0
 	}
-
-	// Base document overhead
 	memory := int64(128)
-
-	// Estimate field memory
-	if doc.Fields != nil {
-		for _, field := range doc.Fields {
-			memory += 64 // Field struct overhead
-			// Estimate value size based on FieldValue type
-			switch field.Value.Type {
-			case models.FieldTypeString:
-				memory += int64(len(field.Value.StringVal))
-			case models.FieldTypeInt, models.FieldTypeFloat, models.FieldTypeBool:
-				memory += 8
-			case models.FieldTypeDateTime, models.FieldTypeDate:
-				memory += 24 // time.Time size
-			case models.FieldTypeInterface:
-				memory += 32 // Estimate for interface types
-			default:
-				memory += 16
-			}
+	estimateFV := func(fv models.FieldValue) {
+		switch fv.Type {
+		case models.FieldTypeString:
+			memory += int64(len(fv.StringVal))
+		case models.FieldTypeInt, models.FieldTypeFloat, models.FieldTypeBool:
+			memory += 8
+		case models.FieldTypeDateTime, models.FieldTypeDate:
+			memory += 24
+		case models.FieldTypeInterface:
+			memory += 32
+		default:
+			memory += 16
 		}
 	}
-
+	if len(doc.Values) > 0 {
+		for _, fv := range doc.Values {
+			memory += 64
+			estimateFV(fv)
+		}
+		return memory
+	}
+	if doc.Data != nil {
+		for _, v := range doc.Data {
+			memory += 64
+			estimateFV(models.NewInterfaceValue(v))
+		}
+	}
 	return memory
 }
 
@@ -570,15 +584,26 @@ func (asm *AdaptiveSpillManager) convertToSpilledEntry(entry partitionEntry) spi
 		FieldMaps:   make([]map[string]FieldData, len(entry.Documents)),
 	}
 
+	asm.mutex.RLock()
+	schema := asm.schema
+	asm.mutex.RUnlock()
+
 	for i, doc := range entry.Documents {
 		spilled.DocumentIDs[i] = doc.DocumentID
 		spilled.FieldMaps[i] = make(map[string]FieldData)
 
-		if doc.Fields != nil {
-			for fieldName, field := range doc.Fields {
-				spilled.FieldMaps[i][fieldName] = FieldData{
-					Name:  field.Name,
-					Value: field.Value,
+		if schema != nil && len(doc.Values) > 0 {
+			for idx, fv := range doc.Values {
+				if idx < len(schema.Names) {
+					name := schema.Names[idx]
+					spilled.FieldMaps[i][name] = FieldData{Name: name, Value: fv}
+				}
+			}
+		} else if doc.Data != nil {
+			for name, v := range doc.Data {
+				spilled.FieldMaps[i][name] = FieldData{
+					Name:  name,
+					Value: models.NewInterfaceValue(v),
 				}
 			}
 		}
@@ -588,6 +613,10 @@ func (asm *AdaptiveSpillManager) convertToSpilledEntry(entry partitionEntry) spi
 }
 
 func (asm *AdaptiveSpillManager) convertFromSpilledEntry(spilled spilledEntry) partitionEntry {
+	asm.mutex.RLock()
+	schema := asm.schema
+	asm.mutex.RUnlock()
+
 	entry := partitionEntry{
 		KeyHash:   spilled.KeyHash,
 		Key:       spilled.KeyString,
@@ -595,18 +624,21 @@ func (asm *AdaptiveSpillManager) convertFromSpilledEntry(spilled spilledEntry) p
 	}
 
 	for i, docID := range spilled.DocumentIDs {
-		doc := &models.Document{
-			DocumentID: docID,
-			Fields:     make(map[string]models.Field, len(spilled.FieldMaps[i])),
-		}
-
-		for fieldName, fd := range spilled.FieldMaps[i] {
-			doc.Fields[fieldName] = models.Field{
-				Name:  fd.Name,
-				Value: fd.Value,
+		doc := &models.Document{DocumentID: docID}
+		m := spilled.FieldMaps[i]
+		if schema != nil && len(m) > 0 {
+			doc.Values = make([]models.FieldValue, len(schema.Names))
+			for idx, name := range schema.Names {
+				if fd, ok := m[name]; ok {
+					doc.Values[idx] = fd.Value
+				}
+			}
+		} else {
+			doc.Data = make(map[string]interface{}, len(m))
+			for name, fd := range m {
+				doc.Data[name] = fd.Value.AsInterface()
 			}
 		}
-
 		entry.Documents[i] = doc
 	}
 

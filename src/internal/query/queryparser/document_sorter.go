@@ -50,18 +50,25 @@ import (
 	"go.uber.org/zap"
 )
 
-// DocumentSorter handles sorting of document collections based on ORDER BY clauses
+// DocumentSorter handles sorting of document collections based on ORDER BY clauses.
+// Schema is required for schema-ordered document Values; set via SetSchema before SortDocuments.
 type DocumentSorter struct {
 	orderBy *OrderByClause
 	logger  *zap.SugaredLogger
+	schema  *models.BundleFieldSchema
 }
 
-// NewDocumentSorter creates a new document sorter with the given ORDER BY clause
+// NewDocumentSorter creates a new document sorter with the given ORDER BY clause.
 func NewDocumentSorter(orderBy *OrderByClause, logger *zap.SugaredLogger) *DocumentSorter {
 	return &DocumentSorter{
 		orderBy: orderBy,
 		logger:  logger,
 	}
+}
+
+// SetSchema sets the bundle field schema for document field access (required for Values-based documents).
+func (ds *DocumentSorter) SetSchema(schema *models.BundleFieldSchema) {
+	ds.schema = schema
 }
 
 // SortDocuments sorts a slice of documents according to the ORDER BY clause
@@ -161,26 +168,28 @@ func (ds *DocumentSorter) compareDocuments(doc1, doc2 *models.Document) bool {
 	return false
 }
 
-// getFieldValue extracts a field value from a document
+// getFieldValue extracts a field value from a document using schema-ordered Values when schema is set.
 func (ds *DocumentSorter) getFieldValue(doc *models.Document, fieldName string) (models.FieldValue, bool) {
-	// Handle special DocumentID field
 	if strings.EqualFold(fieldName, "documentid") {
-		// Return DocumentID as a String FieldValue
 		return models.NewStringValue(doc.DocumentID), true
 	}
-
-	// Check document fields
-	if field, exists := doc.Fields[fieldName]; exists {
-		return field.Value, true
+	if ds.schema != nil && len(doc.Values) > 0 {
+		if idx, ok := ds.schema.NameToIndex[fieldName]; ok && idx < len(doc.Values) {
+			return doc.Values[idx], true
+		}
+		// Case-insensitive fallback
+		for i, name := range ds.schema.Names {
+			if strings.EqualFold(name, fieldName) && i < len(doc.Values) {
+				return doc.Values[i], true
+			}
+		}
+		return models.FieldValue{}, false
 	}
-
-	// Try case-insensitive match
-	for docFieldName, field := range doc.Fields {
-		if strings.EqualFold(docFieldName, fieldName) {
-			return field.Value, true
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), true
 		}
 	}
-
 	return models.FieldValue{}, false
 }
 

@@ -82,6 +82,7 @@ func ParallelRadixSort(
 	ascending bool,
 	numWorkers int,
 	logger *zap.SugaredLogger,
+	schema *models.BundleFieldSchema,
 ) ([]*models.Document, error) {
 	if len(documents) == 0 {
 		return []*models.Document{}, nil
@@ -101,14 +102,13 @@ func ParallelRadixSort(
 	// Convert map to slice and extract sort keys
 	keys := make([]RadixSortKey, 0, len(documents))
 	for _, doc := range documents {
-		field, exists := doc.Fields[fieldName]
+		fv, exists := GetFieldValueForSort(doc, fieldName, schema)
 		if !exists {
 			continue
 		}
 
-		// Extract integer value
 		var intValue int64
-		switch v := field.Value.AsInterface().(type) { // ✅ Use AsInterface()
+		switch v := fv.AsInterface().(type) {
 		case int:
 			intValue = int64(v)
 		case int32:

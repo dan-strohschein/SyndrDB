@@ -1380,14 +1380,14 @@ func (h *GraphQLHandler) executeUnifiedQuery(query *queryparser.UnifiedSelectQue
 		if sortedDocs != nil {
 			// Use slice-based transformation to preserve ORDER BY sort order
 			h.logger.Debugf("[GraphQL Native Query] Preserving ORDER BY sort order (%d sorted documents)", len(sortedDocs))
-			flattenedDocs = helpers.TransformDocumentSliceToFlatFormat(sortedDocs, query.SelectFields)
+			flattenedDocs = helpers.TransformDocumentSliceToFlatFormat(sortedDocs, query.SelectFields, nil)
 		} else {
 			// No sorted documents, use map-based transformation (sorts by DocumentID)
-			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields, nil)
 		}
 	} else {
 		// Not a LimitNode, use map-based transformation
-		flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields)
+		flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, query.SelectFields, nil)
 	}
 
 	return flattenedDocs, nil
@@ -1457,12 +1457,8 @@ func (h *GraphQLHandler) formatGraphQLResults(ctx context.Context, results []map
 				// PHASE 8: Resolve relationship field
 				h.logger.Debugf("[GraphQL Relationship] Resolving relationship '%s' for document", fieldName)
 
-				// STEP 1: Use document pool to reduce allocations
-				// TODO: Option C - Implement reference counting for automatic pool return
-				// Convert map[string]interface{} to *models.Document
-				// Use the Data field for raw document data
+				// STEP 1: Use document pool to reduce allocations (Option B: no Fields, use Data only)
 				parentDoc := document.GetPooledDocument()
-				parentDoc.Fields = make(map[string]models.Field)
 				parentDoc.Data = make(map[string]interface{})
 
 				// Copy DocumentID

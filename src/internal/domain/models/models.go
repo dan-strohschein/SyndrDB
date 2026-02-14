@@ -6,6 +6,7 @@ import (
 
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -451,8 +452,119 @@ type DocumentPage struct {
 	DocumentCount  int                 // Number of documents in this page
 }
 
+// BundleFieldSchema provides O(1) name→index lookup for schema-ordered document values.
+// Names[i] is the field name at index i; NameToIndex[name] is the index.
+// Order is stable: DocumentID first, then fixed-size types (bool, int, float, date, datetime),
+// then variable-length (string, number, other), with alphabetical order within each group.
+type BundleFieldSchema struct {
+	Names            []string       // index → field name
+	NameToIndex      map[string]int // field name → index
+	LowerNameToIndex map[string]int // strings.ToLower(name) → index (case-insensitive O(1) lookup)
+}
+
+// fieldTypeSortOrder defines the stable order for schema columns (after DocumentID).
+// Fixed-size types first, then variable-length. Used by BuildBundleFieldSchema.
+var fieldTypeSortOrder = map[string]int{
+	"bool": 0, "int": 1, "float": 2, "number": 2, "date": 3, "datetime": 4,
+	"string": 5, // variable-length
+	// any other type (interface-like) sorts last
+}
+
+const fieldTypeSortOrderOther = 99
+
+// BuildBundleFieldSchema constructs a BundleFieldSchema from DocumentStructure with stable order:
+// DocumentID first, then fields grouped by type (fixed-size then variable), alphabetical within group.
+func BuildBundleFieldSchema(ds *DocumentStructure) *BundleFieldSchema {
+	if ds == nil || ds.FieldDefinitions == nil {
+		return &BundleFieldSchema{Names: []string{}, NameToIndex: make(map[string]int), LowerNameToIndex: make(map[string]int)}
+	}
+	type nameType struct {
+		name string
+		typ  string
+	}
+	var fields []nameType
+	for name, def := range ds.FieldDefinitions {
+		fields = append(fields, nameType{name: name, typ: strings.ToLower(def.Type)})
+	}
+	// Sort: DocumentID first, then by type group, then alphabetical by name within group
+	sort.Slice(fields, func(i, j int) bool {
+		ni, nj := fields[i].name, fields[j].name
+		ti, tj := fields[i].typ, fields[j].typ
+		if strings.EqualFold(ni, "DocumentID") {
+			return true
+		}
+		if strings.EqualFold(nj, "DocumentID") {
+			return false
+		}
+		oi, okI := fieldTypeSortOrder[ti]
+		if !okI {
+			oi = fieldTypeSortOrderOther
+		}
+		oj, okJ := fieldTypeSortOrder[tj]
+		if !okJ {
+			oj = fieldTypeSortOrderOther
+		}
+		if oi != oj {
+			return oi < oj
+		}
+		return ni < nj
+	})
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		names = append(names, f.name)
+	}
+	nameToIndex := make(map[string]int, len(names))
+	lowerNameToIndex := make(map[string]int, len(names))
+	for i, n := range names {
+		nameToIndex[n] = i
+		lowerNameToIndex[strings.ToLower(n)] = i
+	}
+	return &BundleFieldSchema{Names: names, NameToIndex: nameToIndex, LowerNameToIndex: lowerNameToIndex}
+}
+
 type DocumentStructure struct {
 	FieldDefinitions map[string]FieldDefinition `bson:"FieldDefinitions" json:"FieldDefinitions"`
+	// fieldSchema is computed from FieldDefinitions when needed; not persisted.
+	fieldSchema *BundleFieldSchema
+}
+
+// FieldSchema returns the schema (Names + NameToIndex) for this document structure.
+// Computed on first call and cached. Call InvalidateFieldSchema() after DDL that changes FieldDefinitions.
+func (ds *DocumentStructure) FieldSchema() *BundleFieldSchema {
+	if ds.fieldSchema != nil {
+		return ds.fieldSchema
+	}
+	ds.fieldSchema = BuildBundleFieldSchema(ds)
+	return ds.fieldSchema
+}
+
+// InvalidateFieldSchema clears the cached schema so it is recomputed on next FieldSchema().
+// Call after any change to FieldDefinitions (ADD/DROP/RENAME column).
+func (ds *DocumentStructure) InvalidateFieldSchema() {
+	ds.fieldSchema = nil
+}
+
+// NewProjectionSchema builds a minimal schema for a projection: DocumentID first, then projection fields.
+func NewProjectionSchema(projectionFields []string) *BundleFieldSchema {
+	names := make([]string, 0, len(projectionFields)+1)
+	names = append(names, "DocumentID")
+	seen := map[string]bool{"DocumentID": true}
+	for _, n := range projectionFields {
+		if strings.EqualFold(n, "DocumentID") {
+			continue
+		}
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	nameToIndex := make(map[string]int, len(names))
+	lowerNameToIndex := make(map[string]int, len(names))
+	for i, n := range names {
+		nameToIndex[n] = i
+		lowerNameToIndex[strings.ToLower(n)] = i
+	}
+	return &BundleFieldSchema{Names: names, NameToIndex: nameToIndex, LowerNameToIndex: lowerNameToIndex}
 }
 
 type FieldDefinition struct {

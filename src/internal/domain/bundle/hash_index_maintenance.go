@@ -169,12 +169,12 @@ func (s *BundleService) RebuildHashIndexFromBundle(
 		if indexRef.HashIndexField.FieldName == "DocumentID" {
 			keyValue = docID
 		} else {
-			field, exists := doc.Fields[indexRef.HashIndexField.FieldName]
+			schema := bundle.DocumentStructure.FieldSchema()
+			fv, exists := doc.GetFieldValue(schema, indexRef.HashIndexField.FieldName)
 			if !exists {
-				// Skip documents that don't have the indexed field
 				continue
 			}
-			keyValue = conversion.ValueToString(field.Value.AsInterface())
+			keyValue = conversion.ValueToString(fv.AsInterface())
 		}
 
 		// Insert into new index (commitSequence=0, versionSequence=0 for committed docs)

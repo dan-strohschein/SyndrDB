@@ -461,10 +461,10 @@ func (m *mockBundleServiceForAnalyze) GetDocumentChunksForIndexing(
 func makeTestDocument(id string, fields map[string]interface{}) *models.Document {
 	doc := &models.Document{
 		DocumentID: id,
-		Fields:     make(map[string]models.Field),
+		Data:       make(map[string]interface{}),
 	}
 	for k, v := range fields {
-		doc.Fields[k] = models.Field{Value: models.NewInterfaceValue(v)}
+		doc.Data[k] = v
 	}
 	return doc
 }
@@ -483,7 +483,7 @@ func TestAnalyzeBundle_Basic(t *testing.T) {
 
 	mock := &mockBundleServiceForAnalyze{docs: docs}
 
-	err := AnalyzeBundle(context.Background(), "users", mock, ss, logger.Sugar(), 100)
+	err := AnalyzeBundle(context.Background(), "users", mock, ss, logger.Sugar(), nil, 100)
 	if err != nil {
 		t.Fatalf("AnalyzeBundle failed: %v", err)
 	}
@@ -519,7 +519,7 @@ func TestAnalyzeBundle_EmptyBundle(t *testing.T) {
 
 	mock := &mockBundleServiceForAnalyze{docs: nil}
 
-	err := AnalyzeBundle(context.Background(), "empty", mock, ss, logger.Sugar())
+	err := AnalyzeBundle(context.Background(), "empty", mock, ss, logger.Sugar(), nil)
 	if err != nil {
 		t.Fatalf("AnalyzeBundle failed on empty bundle: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestAnalyzeBundle_WithNulls(t *testing.T) {
 
 	mock := &mockBundleServiceForAnalyze{docs: docs}
 
-	err := AnalyzeBundle(context.Background(), "users", mock, ss, logger.Sugar(), 100)
+	err := AnalyzeBundle(context.Background(), "users", mock, ss, logger.Sugar(), nil, 100)
 	if err != nil {
 		t.Fatalf("AnalyzeBundle failed: %v", err)
 	}
@@ -582,7 +582,7 @@ func TestAnalyzeBundle_Cancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	err := AnalyzeBundle(ctx, "users", mock, ss, logger.Sugar(), 100)
+	err := AnalyzeBundle(ctx, "users", mock, ss, logger.Sugar(), nil, 100)
 	// Should not error - cancellation just stops early
 	if err != nil {
 		t.Fatalf("AnalyzeBundle with cancelled context: %v", err)

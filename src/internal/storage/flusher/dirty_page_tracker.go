@@ -33,12 +33,13 @@ type IndexUpdate struct {
 type DirtyPage struct {
 	PageID       uint32
 	BundleName   string
-	Documents    []*models.Document // Documents pending write
-	IndexUpdates []IndexUpdate      // Index updates pending write
-	DirtyTime    time.Time          // When page first became dirty
-	WriteCount   uint32             // Number of writes accumulated
-	ByteSize     int64              // Estimated size of pending data
-	mu           sync.Mutex         // Per-page lock for concurrent access
+	Documents    []*models.Document    // Documents pending write
+	Schema       *models.BundleFieldSchema // Schema for encoding (required for Values)
+	IndexUpdates []IndexUpdate          // Index updates pending write
+	DirtyTime    time.Time              // When page first became dirty
+	WriteCount   uint32                 // Number of writes accumulated
+	ByteSize     int64                  // Estimated size of pending data
+	mu           sync.Mutex             // Per-page lock for concurrent access
 }
 
 // Reset clears the dirty page for reuse.
@@ -133,8 +134,9 @@ func NewDirtyPageTracker(config DirtyPageTrackerConfig) *DirtyPageTracker {
 }
 
 // MarkDirty adds a document update to the dirty tracker.
+// schema is required for encoding document Values; set on first doc for the page.
 // Returns true if the page should be flushed immediately (threshold exceeded).
-func (dt *DirtyPageTracker) MarkDirty(bundleName string, pageID uint32, doc *models.Document, estimatedBytes int64) bool {
+func (dt *DirtyPageTracker) MarkDirty(bundleName string, pageID uint32, doc *models.Document, estimatedBytes int64, schema *models.BundleFieldSchema) bool {
 	key := pageKey{Bundle: bundleName, PageID: pageID}
 
 	dt.mu.Lock()
@@ -145,21 +147,22 @@ func (dt *DirtyPageTracker) MarkDirty(bundleName string, pageID uint32, doc *mod
 			PageID:     pageID,
 			BundleName: bundleName,
 			Documents:  make([]*models.Document, 0, dt.maxDocsPerPage),
+			Schema:     schema,
 			DirtyTime:  time.Now(),
 		}
 		dt.dirtyPages[key] = page
 		dt.totalDirtyPages.Add(1)
 
-		// Track in bundle map
 		if dt.bundlePages[bundleName] == nil {
 			dt.bundlePages[bundleName] = make(map[uint32]bool)
 		}
 		dt.bundlePages[bundleName][pageID] = true
+	} else if schema != nil && page.Schema == nil {
+		page.Schema = schema
 	}
 
 	dt.mu.Unlock()
 
-	// Update page with fine-grained lock
 	page.mu.Lock()
 	page.Documents = append(page.Documents, doc)
 	page.WriteCount++

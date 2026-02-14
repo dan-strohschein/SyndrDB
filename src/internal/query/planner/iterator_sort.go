@@ -126,9 +126,15 @@ func (it *SortIterator) topNSort(docMap map[string]*models.Document) ([]*models.
 		return []*models.Document{}, nil
 	}
 
-	field, exists := sampleDoc.Fields[primaryField.FieldName]
-	if !exists {
-		return sorting.TopNHeapSort(docMap, it.limit, it.node.OrderBy, it.node.Logger)
+	var schema *models.BundleFieldSchema
+	var val interface{}
+	if fv, ex := sampleDoc.GetFieldValue(schema, primaryField.FieldName); ex {
+		val = fv.AsInterface()
+	} else if sampleDoc.Data != nil {
+		val = sampleDoc.Data[primaryField.FieldName]
+	}
+	if val == nil {
+		return sorting.TopNHeapSort(docMap, it.limit, it.node.OrderBy, it.node.Logger, schema)
 	}
 
 	ascending := primaryField.Direction == queryparser.SortAsc
@@ -142,15 +148,15 @@ func (it *SortIterator) topNSort(docMap map[string]*models.Document) ([]*models.
 		nullsFirst = !ascending
 	}
 
-	switch field.Value.AsInterface().(type) {
+	switch val.(type) {
 	case string, []byte:
 		return sorting.StringHeapSort(
 			docMap, it.limit, primaryField.FieldName,
 			ascending, it.node.config.SIMDEnabled, nullsFirst,
-			it.node.Logger,
+			it.node.Logger, schema,
 		)
 	default:
-		return sorting.TopNHeapSort(docMap, it.limit, it.node.OrderBy, it.node.Logger)
+		return sorting.TopNHeapSort(docMap, it.limit, it.node.OrderBy, it.node.Logger, schema)
 	}
 }
 

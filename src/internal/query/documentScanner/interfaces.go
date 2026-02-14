@@ -98,6 +98,10 @@ type BundleInterface interface {
 	// Groups documents by page and loads each page once to minimize I/O
 	// Returns a map of documentID -> *Document for found documents (missing docs are not in map)
 	GetDocumentsByIDs(docIDs []string) map[string]*models.Document
+
+	// FieldSchema returns the bundle's field schema (Names + NameToIndex) for document field access.
+	// Used for schema-ordered Values lookup (Option B). May return nil for non-BundleAdapter implementations.
+	FieldSchema() *models.BundleFieldSchema
 }
 
 // ScanMetrics holds performance and usage metrics for the scanner

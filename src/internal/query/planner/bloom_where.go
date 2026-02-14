@@ -385,14 +385,21 @@ func (wbo *WhereBloomOptimizer) evaluateSimplePredicate(
 	evaluator *syndrQL.ExpressionEvaluator,
 	bundleCtx interface{},
 ) bool {
-	// Get field value from document
-	field, exists := doc.Fields[pred.FieldName]
-	if !exists {
-		return false // Field doesn't exist - doesn't match
+	var fieldValue interface{}
+	if bundleCtx != nil {
+		if b, ok := bundleCtx.(*models.Bundle); ok && b.DocumentStructure.FieldSchema() != nil {
+			fv, exists := doc.GetFieldValue(b.DocumentStructure.FieldSchema(), pred.FieldName)
+			if exists {
+				fieldValue = fv.AsInterface()
+			}
+		}
 	}
-
-	// Get the actual value
-	fieldValue := field.Value.AsInterface()
+	if fieldValue == nil && doc.Data != nil {
+		fieldValue = doc.Data[pred.FieldName]
+	}
+	if fieldValue == nil {
+		return false
+	}
 
 	// Compare using operator
 	switch pred.Operator {

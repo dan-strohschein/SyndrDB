@@ -204,21 +204,40 @@ func (e *ExpressionEvaluator) evaluateIdentifier(expr *IdentifierExpression, doc
 		}
 	}
 
-	// Special case: DocumentID field
 	if strings.EqualFold(fieldName, "documentid") {
-		return models.NewStringValue(doc.DocumentID), nil // ✅ Return FieldValue
+		return models.NewStringValue(doc.DocumentID), nil
 	}
 
-	// Look up field in document
-	if field, exists := doc.Fields[fieldName]; exists {
-		return field.Value, nil // ✅ Return FieldValue directly (zero allocations!)
+	schema := e.schemaFromContext(bundleContext, "")
+	if schema != nil {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv, nil
+		}
 	}
-
-	// Field not found - return nil (will be treated as NULL in comparisons)
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), nil
+		}
+	}
 	if e.logger != nil {
 		e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
 	}
-	return models.FieldValue{Type: models.FieldTypeNil}, nil // ✅ Return nil FieldValue
+	return models.FieldValue{Type: models.FieldTypeNil}, nil
+}
+
+// schemaFromContext returns the field schema for the given bundle (or primary if bundleName is empty).
+func (e *ExpressionEvaluator) schemaFromContext(bundleContext *BundleContext, bundleName string) *models.BundleFieldSchema {
+	if bundleContext == nil || bundleContext.Bundles == nil {
+		return nil
+	}
+	if bundleName == "" {
+		bundleName = bundleContext.PrimaryBundle
+	}
+	b := bundleContext.Bundles[bundleName]
+	if b == nil {
+		return nil
+	}
+	return b.DocumentStructure.FieldSchema()
 }
 
 // evaluateQualifiedIdentifier evaluates a qualified identifier (Bundle.Field notation)
@@ -232,29 +251,27 @@ func (e *ExpressionEvaluator) evaluateQualifiedIdentifier(expr *QualifiedIdentif
 		}
 	}
 
-	// In the context of evaluating against a single document,
-	// we ignore the bundle name and just look up the field
-	// (the bundle filtering happens at the SELECT query execution level)
-	fieldName := expr.Field
-
-	// Remove quotes if present
-	fieldName = strings.Trim(fieldName, "\"")
-
-	// Special case: DocumentID field
+	fieldName := strings.Trim(expr.Field, "\"")
 	if strings.EqualFold(fieldName, "documentid") {
-		return models.NewStringValue(doc.DocumentID), nil // ✅ Return FieldValue
+		return models.NewStringValue(doc.DocumentID), nil
 	}
 
-	// Look up field in document
-	if field, exists := doc.Fields[fieldName]; exists {
-		return field.Value, nil // ✅ Return FieldValue directly (zero allocations!)
+	bundleName := strings.Trim(expr.Bundle, "\"")
+	schema := e.schemaFromContext(bundleContext, bundleName)
+	if schema != nil {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv, nil
+		}
 	}
-
-	// Field not found - return nil (will be treated as NULL in comparisons)
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), nil
+		}
+	}
 	if e.logger != nil {
 		e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
 	}
-	return models.FieldValue{Type: models.FieldTypeNil}, nil // ✅ Return nil FieldValue
+	return models.FieldValue{Type: models.FieldTypeNil}, nil
 }
 
 // evaluateBinary evaluates a binary expression (e.g., a == b, a AND b)
@@ -482,7 +499,6 @@ func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Doc
 		e.nowCache = time.Now().UTC()
 	}
 
-	// Create evaluation context: populate FieldValues from doc.Fields (no doc.Data boxing)
 	evalCtx := &EvaluationContext{
 		CurrentTime:   e.nowCache,
 		TimezoneCache: e.tzCache,
@@ -492,9 +508,18 @@ func (e *ExpressionEvaluator) evaluateCall(expr *CallExpression, doc *models.Doc
 	if bundleContext != nil && bundleContext.PrimaryBundle != "" {
 		evalCtx.BundleName = bundleContext.PrimaryBundle
 	}
-	if doc != nil && doc.Fields != nil {
-		for name, field := range doc.Fields {
-			evalCtx.FieldValues[name] = field.Value
+	if doc != nil {
+		schema := e.schemaFromContext(bundleContext, "")
+		if schema != nil && len(doc.Values) > 0 {
+			for i, name := range schema.Names {
+				if i < len(doc.Values) {
+					evalCtx.FieldValues[name] = doc.Values[i]
+				}
+			}
+		} else if doc.Data != nil {
+			for k, v := range doc.Data {
+				evalCtx.FieldValues[k] = models.NewInterfaceValue(v)
+			}
 		}
 	}
 

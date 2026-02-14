@@ -44,23 +44,23 @@ func NewBatchWhereEvaluator(minBatchSize int, logger *zap.SugaredLogger) *BatchW
 func (bwe *BatchWhereEvaluator) EvaluateBatch(
 	documents map[string]*models.Document,
 	predicate SimplePredicate,
+	schema *models.BundleFieldSchema,
 ) (map[string]*models.Document, bool) {
 
 	if len(documents) < bwe.minBatchSize {
 		bwe.logger.Debugf("Batch SIMD skipped: %d documents < minimum %d", len(documents), bwe.minBatchSize)
-		return nil, false // Not worth batching overhead
+		return nil, false
 	}
 
-	// Extract field values into typed array based on type
 	switch predicate.ValueType {
 	case "int64":
-		return bwe.evaluateInt64Batch(documents, predicate)
+		return bwe.evaluateInt64Batch(documents, predicate, schema)
 	case "float64":
-		return bwe.evaluateFloat64Batch(documents, predicate)
+		return bwe.evaluateFloat64Batch(documents, predicate, schema)
 	case "string":
-		return bwe.evaluateStringBatch(documents, predicate)
+		return bwe.evaluateStringBatch(documents, predicate, schema)
 	case "bool":
-		return bwe.evaluateBoolBatch(documents, predicate)
+		return bwe.evaluateBoolBatch(documents, predicate, schema)
 	default:
 		bwe.logger.Debugf("Batch SIMD skipped: unsupported type %s", predicate.ValueType)
 		return nil, false // Unsupported type for batching
@@ -71,33 +71,37 @@ func (bwe *BatchWhereEvaluator) EvaluateBatch(
 func (bwe *BatchWhereEvaluator) evaluateInt64Batch(
 	documents map[string]*models.Document,
 	predicate SimplePredicate,
+	schema *models.BundleFieldSchema,
 ) (map[string]*models.Document, bool) {
 
-	// Pre-allocate arrays
 	values := make([]int64, 0, len(documents))
 	docSlice := make([]*models.Document, 0, len(documents))
 	docIDs := make([]string, 0, len(documents))
 
 	compareVal, ok := predicate.Value.(int64)
 	if !ok {
-		// Try int conversion
-		if intVal, ok := predicate.Value.(int); ok {
+		if intVal, ok2 := predicate.Value.(int); ok2 {
 			compareVal = int64(intVal)
 		} else {
 			return nil, false
 		}
 	}
 
-	// Extract field values
 	for docID, doc := range documents {
-		field, exists := doc.Fields[predicate.FieldName]
+		fv, exists := doc.GetFieldValue(schema, predicate.FieldName)
+		if !exists && doc.Data != nil {
+			if v, ok := doc.Data[predicate.FieldName]; ok {
+				fv = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
 			continue
 		}
 
-		val, ok := field.Value.AsInt()
+		val, ok := fv.AsInt()
 		if !ok {
-			continue // Skip type mismatches
+			continue
 		}
 
 		values = append(values, val)
@@ -148,9 +152,9 @@ func (bwe *BatchWhereEvaluator) evaluateInt64Batch(
 func (bwe *BatchWhereEvaluator) evaluateFloat64Batch(
 	documents map[string]*models.Document,
 	predicate SimplePredicate,
+	schema *models.BundleFieldSchema,
 ) (map[string]*models.Document, bool) {
 
-	// Pre-allocate arrays
 	values := make([]float64, 0, len(documents))
 	docSlice := make([]*models.Document, 0, len(documents))
 	docIDs := make([]string, 0, len(documents))
@@ -160,14 +164,19 @@ func (bwe *BatchWhereEvaluator) evaluateFloat64Batch(
 		return nil, false
 	}
 
-	// Extract field values
 	for docID, doc := range documents {
-		field, exists := doc.Fields[predicate.FieldName]
+		fv, exists := doc.GetFieldValue(schema, predicate.FieldName)
+		if !exists && doc.Data != nil {
+			if v, ok := doc.Data[predicate.FieldName]; ok {
+				fv = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
 			continue
 		}
 
-		val, ok := field.Value.AsFloat()
+		val, ok := fv.AsFloat()
 		if !ok {
 			continue // Skip type mismatches
 		}
@@ -219,9 +228,9 @@ func (bwe *BatchWhereEvaluator) evaluateFloat64Batch(
 func (bwe *BatchWhereEvaluator) evaluateStringBatch(
 	documents map[string]*models.Document,
 	predicate SimplePredicate,
+	schema *models.BundleFieldSchema,
 ) (map[string]*models.Document, bool) {
 
-	// Pre-allocate arrays
 	values := make([]string, 0, len(documents))
 	docSlice := make([]*models.Document, 0, len(documents))
 	docIDs := make([]string, 0, len(documents))
@@ -231,16 +240,21 @@ func (bwe *BatchWhereEvaluator) evaluateStringBatch(
 		return nil, false
 	}
 
-	// Extract field values
 	for docID, doc := range documents {
-		field, exists := doc.Fields[predicate.FieldName]
+		fv, exists := doc.GetFieldValue(schema, predicate.FieldName)
+		if !exists && doc.Data != nil {
+			if v, ok := doc.Data[predicate.FieldName]; ok {
+				fv = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
 			continue
 		}
 
-		val, ok := field.Value.AsString()
+		val, ok := fv.AsString()
 		if !ok {
-			continue // Skip type mismatches
+			continue
 		}
 
 		values = append(values, val)
@@ -252,7 +266,6 @@ func (bwe *BatchWhereEvaluator) evaluateStringBatch(
 		return nil, false
 	}
 
-	// SIMD batch comparison
 	var matches []bool
 	switch predicate.Operator {
 	case "==", "=":
@@ -283,9 +296,9 @@ func (bwe *BatchWhereEvaluator) evaluateStringBatch(
 func (bwe *BatchWhereEvaluator) evaluateBoolBatch(
 	documents map[string]*models.Document,
 	predicate SimplePredicate,
+	schema *models.BundleFieldSchema,
 ) (map[string]*models.Document, bool) {
 
-	// For boolean comparisons, we can use a simple loop since there are only 2 values
 	compareVal, ok := predicate.Value.(bool)
 	if !ok {
 		return nil, false
@@ -295,12 +308,18 @@ func (bwe *BatchWhereEvaluator) evaluateBoolBatch(
 	matchCount := 0
 
 	for docID, doc := range documents {
-		field, exists := doc.Fields[predicate.FieldName]
+		fv, exists := doc.GetFieldValue(schema, predicate.FieldName)
+		if !exists && doc.Data != nil {
+			if v, ok := doc.Data[predicate.FieldName]; ok {
+				fv = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
 			continue
 		}
 
-		val, ok := field.Value.AsBool()
+		val, ok := fv.AsBool()
 		if !ok {
 			continue
 		}

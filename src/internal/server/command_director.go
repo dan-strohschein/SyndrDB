@@ -969,24 +969,21 @@ func filterDocumentFields(documents map[string]*models.Document, selectedFields 
 	filteredDocuments := make(map[string]*models.Document)
 
 	for docID, doc := range documents {
-		// Create a new document with only the selected fields
-		filteredFields := make(map[string]models.Field)
-
-		// Add selected fields if they exist in the original document
+		filteredData := make(map[string]interface{})
 		for _, fieldName := range selectedFields {
-			if field, exists := doc.Fields[fieldName]; exists {
-				filteredFields[fieldName] = field
+			if fv, exists := doc.GetFieldValue(nil, fieldName); exists {
+				filteredData[fieldName] = fv.AsInterface()
 				logger.Debugf("Including field '%s' for document %s", fieldName, docID)
-			} else {
-				logger.Debugf("Field '%s' not found in document %s", fieldName, docID)
+			} else if doc.Data != nil {
+				if v, ok := doc.Data[fieldName]; ok {
+					filteredData[fieldName] = v
+				}
 			}
 		}
 
-		// Use plain allocation; GetPooledDocument was not being Put back, causing pool drain.
-		// If pool return is added (e.g. via CommandResponse.PooledDocuments), consider GetPooledDocument again.
 		filteredDoc := &models.Document{
 			DocumentID: doc.DocumentID,
-			Fields:     filteredFields,
+			Data:       filteredData,
 			CreatedAt:  doc.CreatedAt,
 			UpdatedAt:  doc.UpdatedAt,
 		}
@@ -1255,7 +1252,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		logger.Debugf("EXPRESSION-ONLY SELECT detected: FromBundle='%s', document count=%d", query.FromBundle, len(documents))
 		for docID, doc := range documents {
 			// Build map from doc.Fields at boundary (doc.Data may be nil when using typed path)
-			resultMap := models.DocumentToMap(doc)
+			resultMap := models.DocumentToMap(doc, nil)
 			logger.Debugf("Expression result document ID: %s, keys: %v", docID, getKeys(resultMap))
 			results := make([]map[string]interface{}, 1)
 			results[0] = resultMap
@@ -1325,7 +1322,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			// Use order-preserving transform for sorted documents
 			// This respects the sort order from the planner (user ORDER BY or default CreatedAt)
 			// Note: sortedDocs may be empty if the query returned no results - this is valid
-			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields)
+			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields, nil)
 		} else {
 			// Fallback: SortNode/LimitNode not found in plan tree
 			// This is expected for aggregate-only queries without ORDER BY (optimization)
@@ -1335,7 +1332,7 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			} else {
 				logger.Debug("SortNode/LimitNode not found for aggregate-only query (expected optimization)")
 			}
-			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
+			flattenedDocs = helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields, nil)
 		}
 	} // NOTE: Sorting is handled by the SortNode in the unified query planner execution tree.
 	// This legacy sort code was causing a bug where documents were re-sorted AFTER the
@@ -1627,7 +1624,7 @@ func ExecutePreparedQuery(
 
 	// Transform documents to flat format with projection
 	selectedFields := query.SelectFields
-	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields)
+	flattenedDocs := helpers.TransformDocumentsToFlatFormatWithProjection(documents, selectedFields, nil)
 
 	// Record execution time and update statistics
 	executionTime := time.Since(startTime)

@@ -136,13 +136,19 @@ func (fw *FlushWorker) flushPage(page *DirtyPage) {
 		return // Nothing to flush
 	}
 
-	// Use batch encoder for efficient serialization
-	encoder := helpers.GetBatchEncoder()
+	if page.Schema == nil {
+		fw.logger.Error("Cannot flush page without schema (Values-based documents require schema)",
+			"worker", fw.id,
+			"bundle", page.BundleName,
+			"page", page.PageID)
+		fw.writeErrors.Add(1)
+		page.mu.Unlock()
+		return
+	}
 
-	// PERFORMANCE: Use parallel encoding for large batches (8+ documents)
-	// This leverages multiple CPU cores for serialization
+	encoder := helpers.GetBatchEncoder()
 	if docCount >= 8 {
-		if err := encoder.AddDocumentsParallel(page.Documents, 8, 0); err != nil {
+		if err := encoder.AddDocumentsParallel(page.Documents, page.Schema, 8, 0); err != nil {
 			fw.logger.Error("Failed to encode documents in parallel",
 				"worker", fw.id,
 				"bundle", page.BundleName,
@@ -152,9 +158,8 @@ func (fw *FlushWorker) flushPage(page *DirtyPage) {
 			fw.writeErrors.Add(1)
 		}
 	} else {
-		// Sequential encoding for small batches (avoid goroutine overhead)
 		for _, doc := range page.Documents {
-			if err := encoder.AddDocument(doc); err != nil {
+			if err := encoder.AddDocument(doc, page.Schema); err != nil {
 				fw.logger.Error("Failed to encode document",
 					"worker", fw.id,
 					"bundle", page.BundleName,

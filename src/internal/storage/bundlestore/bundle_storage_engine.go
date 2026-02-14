@@ -101,10 +101,18 @@ type BundleStorageEngine struct {
 	// This replaces the hand-rolled parseInFlight map + mutex pattern.
 	parseSingleflight singleflight.Group
 
+	// MERGED BUNDLE CACHE: One merge+sort per bundle; serve all page requests by slicing.
+	// Key: "bundleName:databaseName". Eliminates O(pages × (merge+sort)) in multi-file LoadDocumentPage.
+	mergedBundleCache *ShardedMergedBundleCache
+	mergeSingleflight singleflight.Group
+
 	// COMPACTION CALLBACK: Invoked when compaction completes for a bundle so
 	// BundleService can invalidate documentPageMap (logical page positions change).
 	onCompactionComplete   func(databaseName, bundleName string)
 	onCompactionCompleteMu sync.RWMutex
+
+	// schemaProvider returns the bundle field schema for decode/encode. Set by bundle_service so BSE can fill doc.Values.
+	schemaProvider func(bundleName, databaseName string) *models.BundleFieldSchema
 }
 
 // fileReadCacheEntry holds a cached file buffer and lastAccess for LRU eviction.
@@ -236,8 +244,9 @@ func NewBundleStore(dataDir string, bufferPool *buffer.BufferPool, logger *zap.S
 		writeVerifier:    NewDocumentWriteVerifier(logger),        // Initialize write verification
 		writeLogger:      NewBundleWriteLogger(logger, 10000),     // Keep last 10000 write operations (increased to reduce wrapping)
 		fileReadCache:    NewShardedFileReadCache(),               // PHASE 3: Sharded file read cache (replaces map + mutex)
-		parsedDocsCache:  NewShardedParsedDocsCache(),             // PHASE 3: Sharded parsed docs cache (replaces map + mutex)
-		// PHASE 8: parseSingleflight requires no initialization (zero value is ready to use)
+		parsedDocsCache:   NewShardedParsedDocsCache(),             // PHASE 3: Sharded parsed docs cache (replaces map + mutex)
+		mergedBundleCache: NewShardedMergedBundleCache(),            // Merge-once per bundle for multi-file LoadDocumentPage
+		// PHASE 8: parseSingleflight and mergeSingleflight require no initialization (zero value is ready to use)
 	}
 
 	// Initialize compaction system (3 workers, PostgreSQL autovacuum-inspired)
@@ -481,157 +490,67 @@ func (bse *BundleStorageEngine) loadBundleMetadataFromFile(dataDir, fileName str
 }
 
 // LoadDocumentPage loads a specific page of documents for a bundle
-// OPTIMIZATION: Uses parsedDocsCache to avoid re-parsing files for different page loads.
-// First page load of any page from a set of files parses all files once and caches results.
-// Subsequent page loads extract from cached results: O(F) parsing → O(1) cache lookup.
+// OPTIMIZATION: Uses mergedBundleCache so we merge+sort once per bundle, then serve all pages by slicing.
+// First page load builds merged view (or uses singleflight); subsequent page loads are O(pageSize) from cache.
 func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
 	// MULTI-FILE STORAGE: Load manifest to get all segment files
 	manifestMgr := bse.getOrCreateManifestManager(databaseName, bundleName)
 	manifest, err := manifestMgr.LoadOrCreate(databaseName, bundleName)
 	if err != nil {
-		// Fall back to legacy single-file format if manifest doesn't exist
 		return bse.loadDocumentPageLegacy(bundleName, databaseName, pageID, dataRootDir)
 	}
-
-	// Check if we have any files in the manifest
 	if len(manifest.Files) == 0 {
-		// No files yet - fall back to legacy format
 		return bse.loadDocumentPageLegacy(bundleName, databaseName, pageID, dataRootDir)
 	}
 
-	// MULTI-FILE SCANNING: Load documents from all segment files and merge
 	pageSize := uint32(4096) // Use consistent page size with BundleService (power of 2)
 	startIndex := pageID * pageSize
 	endIndex := startIndex + pageSize
+	bundleKey := bundleName + ":" + databaseName
 
-	// Merged documents map with last-write-wins semantics
-	// Later files (higher fileID) overwrite earlier files
-	mergedDocuments := make(map[string]models.Document)
-	deletedDocIDs := make(map[string]bool)
-	var totalDocsAcrossFiles uint32
-
-	// OPTIMIZATION: Use parsed docs cache to avoid re-parsing files for different pages
-	// This turns O(F * N) into O(1) for subsequent page loads where F = files, N = docs
-	// PHASE 3: Using ShardedParsedDocsCache for concurrent access without global mutex
-	for _, fileInfo := range manifest.Files {
-		bundleDir := GetBundleDirectory(databaseName, bundleName)
-		filePath := filepath.Join(bundleDir, fileInfo.FileName)
-		cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
-
-		// Check parsed docs cache first
-		cached := bse.parsedDocsCache.GetAndTouch(cacheKey)
-		cacheHit := cached != nil
-
-		if cacheHit {
-			// Use cached parsed documents - O(1) instead of O(N) parsing
-			for docID, doc := range cached.documents {
-				mergedDocuments[docID] = doc
-			}
-			for docID := range cached.deletedDocIDs {
-				deletedDocIDs[docID] = true
-			}
-			totalDocsAcrossFiles += cached.totalDocs
-			continue
+	// FAST PATH: Serve from cached merged view (O(pageSize) per page)
+	if entry := bse.mergedBundleCache.Get(bundleKey); entry != nil {
+		page := bse.pageFromMergedEntry(bundleName, pageID, pageSize, startIndex, endIndex, entry)
+		if bse.logger != nil && settings.GetSettings().Debug {
+			bse.logger.Debugf("Loaded page %d for bundle %s from merged cache (%d docs in page, total: %d)",
+				pageID, bundleName, len(page.Documents), len(entry.SortedDocIDs))
 		}
-
-		// Cache miss - PHASE 8: Use singleflight.Do() to prevent thundering herd
-		// Only one goroutine parses the file while others wait for its result
-		// singleflight automatically handles panic recovery and result sharing
-		type parseResult struct {
-			documents   map[string]models.Document
-			deletedIDs  map[string]bool
-			totalDocs   uint32
-			fileSkipped bool
-		}
-
-		result, err, _ := bse.parseSingleflight.Do(cacheKey, func() (interface{}, error) {
-			// Check if file exists (skip if not - may have been compacted)
-			if _, err := os.Stat(filePath); os.IsNotExist(err) {
-				if bse.logger != nil && settings.GetSettings().Debug {
-					bse.logger.Debugf("Skipping non-existent file %s (likely compacted)", filePath)
-				}
-				return &parseResult{fileSkipped: true}, nil
-			}
-
-			// Use file-read cache to avoid repeated full-file reads (data is read-only; do not modify)
-			data, err := bse.getOrReadFile(filePath)
-			if err != nil {
-				bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
-				return &parseResult{fileSkipped: true}, nil // Not fatal, just skip this file
-			}
-
-			// Parse ALL documents from this file (not just page range) so we can cache them
-			// This is a one-time cost per file; subsequent page loads use the cache
-			docs, deleted, total, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &data)
-			if err != nil {
-				bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
-				return &parseResult{fileSkipped: true}, nil // Not fatal, just skip this file
-			}
-
-			// Cache the parsed results for subsequent requests
-			bse.cacheParsedDocs(cacheKey, docs, deleted, total)
-
-			return &parseResult{
-				documents:  docs,
-				deletedIDs: deleted,
-				totalDocs:  total,
-			}, nil
-		})
-
-		// Handle singleflight result
-		if err != nil {
-			// Unexpected error from singleflight
-			if bse.logger != nil {
-				bse.logger.Warnf("Singleflight error for %s: %v", cacheKey, err)
-			}
-			continue
-		}
-
-		parsed := result.(*parseResult)
-		if parsed.fileSkipped || parsed.documents == nil {
-			continue
-		}
-
-		// Merge documents with last-write-wins
-		for docID, doc := range parsed.documents {
-			mergedDocuments[docID] = doc
-		}
-		for docID := range parsed.deletedIDs {
-			deletedDocIDs[docID] = true
-		}
-		totalDocsAcrossFiles += parsed.totalDocs
+		return page, nil
 	}
 
-	// TOMBSTONE FILTERING: Remove deleted documents
-	// Apply deletedDocIDs from tombstone markers across all files
-	for docID := range deletedDocIDs {
-		delete(mergedDocuments, docID)
-	}
-
-	// Filter empty DocumentID as safety measure
-	for docID, doc := range mergedDocuments {
-		if doc.DocumentID == "" {
-			delete(mergedDocuments, docID)
+	// SLOW PATH: Build merged view once (singleflight), cache it, then serve this page
+	result, err, _ := bse.mergeSingleflight.Do(bundleKey, func() (interface{}, error) {
+		entry, buildErr := bse.buildMergedBundleView(databaseName, bundleName, manifest)
+		if buildErr != nil {
+			return nil, buildErr
 		}
+		// Cache for all subsequent page loads
+		bse.mergedBundleCache.Set(bundleKey, entry)
+		return entry, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build merged view for %s: %w", bundleKey, err)
 	}
-
-	// PAGINATION: Extract only documents in the requested page range
-	// Since we now cache all documents, we need to extract the page range
-	// Convert merged docs to a deterministic order for consistent pagination
-	sortedDocIDs := make([]string, 0, len(mergedDocuments))
-	for docID := range mergedDocuments {
-		sortedDocIDs = append(sortedDocIDs, docID)
+	entry := result.(*mergedBundleCacheEntry)
+	page := bse.pageFromMergedEntry(bundleName, pageID, pageSize, startIndex, endIndex, entry)
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Loaded page %d for bundle %s: merged %d files, %d documents in page (total: %d)",
+			pageID, bundleName, len(manifest.Files), len(page.Documents), len(entry.SortedDocIDs))
 	}
-	sort.Strings(sortedDocIDs) // Deterministic ordering
+	return page, nil
+}
 
+// pageFromMergedEntry extracts a single page from a cached merged view (O(pageSize)).
+func (bse *BundleStorageEngine) pageFromMergedEntry(bundleName string, pageID uint32, pageSize uint32, startIndex, endIndex uint32, entry *mergedBundleCacheEntry) *models.DocumentPage {
+	totalDocs := uint32(len(entry.SortedDocIDs))
 	pageDocuments := make(map[string]models.Document)
-	for idx, docID := range sortedDocIDs {
-		docIndex := uint32(idx)
-		if docIndex >= startIndex && docIndex < endIndex {
-			pageDocuments[docID] = mergedDocuments[docID]
+	if startIndex < totalDocs {
+		sorted := entry.SortedDocIDs
+		for i := int(startIndex); i < int(endIndex) && i < len(sorted); i++ {
+			docID := sorted[i]
+			pageDocuments[docID] = entry.Documents[docID]
 		}
 	}
-
 	page := &models.DocumentPage{
 		PageID:    pageID,
 		BundleID:  bundleName,
@@ -639,14 +558,10 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 		LoadedAt:  time.Now(),
 		IsDirty:   false,
 	}
-
-	// Set pagination pointers based on total document count
-	totalDocs := uint32(len(mergedDocuments))
 	if pageID > 0 {
 		prevPageID := pageID - 1
 		page.PreviousPageID = &prevPageID
 	}
-
 	totalPages := (totalDocs + pageSize - 1) / pageSize
 	if totalPages == 0 {
 		totalPages = 1
@@ -655,68 +570,162 @@ func (bse *BundleStorageEngine) LoadDocumentPage(bundleName string, databaseName
 		nextPageID := pageID + 1
 		page.NextPageID = &nextPageID
 	}
+	return page
+}
 
-	if bse.logger != nil && settings.GetSettings().Debug {
-		bse.logger.Debugf("Loaded page %d for bundle %s: merged %d files, %d documents in page (total: %d)",
-			pageID, bundleName, len(manifest.Files), len(pageDocuments), totalDocs)
+// buildMergedBundleView merges all segment files, applies tombstone/empty filters, and returns sorted doc IDs.
+// Called once per bundle (under singleflight); result is cached for all page requests.
+func (bse *BundleStorageEngine) buildMergedBundleView(databaseName string, bundleName string, manifest *BundleManifest) (*mergedBundleCacheEntry, error) {
+	mergedDocuments := make(map[string]models.Document)
+	deletedDocIDs := make(map[string]bool)
+
+	for _, fileInfo := range manifest.Files {
+		bundleDir := GetBundleDirectory(databaseName, bundleName)
+		filePath := filepath.Join(bundleDir, fileInfo.FileName)
+		cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
+
+		cached := bse.parsedDocsCache.GetAndTouch(cacheKey)
+		if cached != nil {
+			for docID, doc := range cached.documents {
+				mergedDocuments[docID] = doc
+			}
+			for docID := range cached.deletedDocIDs {
+				deletedDocIDs[docID] = true
+			}
+			continue
+		}
+
+		type parseResult struct {
+			documents   map[string]models.Document
+			deletedIDs  map[string]bool
+			totalDocs   uint32
+			fileSkipped bool
+		}
+		result, err, _ := bse.parseSingleflight.Do(cacheKey, func() (interface{}, error) {
+			if _, err := os.Stat(filePath); os.IsNotExist(err) {
+				return &parseResult{fileSkipped: true}, nil
+			}
+			data, err := bse.getOrReadFile(filePath)
+			if err != nil {
+				bse.logger.Warnf("Failed to read bundle file '%s': %v", filePath, err)
+				return &parseResult{fileSkipped: true}, nil
+			}
+			docs, deleted, total, err := bse.parseAllDocumentsFromFile(bundleName, databaseName, &data)
+			if err != nil {
+				bse.logger.Warnf("Failed to parse documents from file '%s': %v", filePath, err)
+				return &parseResult{fileSkipped: true}, nil
+			}
+			bse.cacheParsedDocs(cacheKey, docs, deleted, total)
+			return &parseResult{documents: docs, deletedIDs: deleted, totalDocs: total}, nil
+		})
+		if err != nil {
+			continue
+		}
+		parsed := result.(*parseResult)
+		if parsed.fileSkipped || parsed.documents == nil {
+			continue
+		}
+		for docID, doc := range parsed.documents {
+			mergedDocuments[docID] = doc
+		}
+		for docID := range parsed.deletedIDs {
+			deletedDocIDs[docID] = true
+		}
 	}
 
+	for docID := range deletedDocIDs {
+		delete(mergedDocuments, docID)
+	}
+	for docID, doc := range mergedDocuments {
+		if doc.DocumentID == "" {
+			delete(mergedDocuments, docID)
+		}
+	}
+
+	sortedDocIDs := make([]string, 0, len(mergedDocuments))
+	for docID := range mergedDocuments {
+		sortedDocIDs = append(sortedDocIDs, docID)
+	}
+	sort.Strings(sortedDocIDs)
+
+	return &mergedBundleCacheEntry{
+		Documents:    mergedDocuments,
+		SortedDocIDs: sortedDocIDs,
+	}, nil
+}
+
+// loadDocumentPageLegacy loads a page from the legacy single-file format.
+// OPTIMIZATION: Uses the same mergedBundleCache as multi-file — parse the entire file once,
+// cache (documents + sorted doc IDs), then serve all page requests by slicing. This removes
+// O(pageCount) full-file scans that caused 28+ second aggregate/group query latency.
+func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
+	pageSize := uint32(4096)
+	startIndex := pageID * pageSize
+	endIndex := startIndex + pageSize
+	bundleKey := bundleName + ":" + databaseName
+
+	// FAST PATH: Serve from cached merged view (same cache as multi-file path)
+	if entry := bse.mergedBundleCache.Get(bundleKey); entry != nil {
+		page := bse.pageFromMergedEntry(bundleName, pageID, pageSize, startIndex, endIndex, entry)
+		if bse.logger != nil && settings.GetSettings().Debug {
+			bse.logger.Debugf("Loaded legacy page %d for bundle %s from merged cache (%d docs in page, total: %d)",
+				pageID, bundleName, len(page.Documents), len(entry.SortedDocIDs))
+		}
+		return page, nil
+	}
+
+	// SLOW PATH: Parse entire file once (singleflight), cache, then serve this page
+	result, err, _ := bse.mergeSingleflight.Do(bundleKey, func() (interface{}, error) {
+		entry, buildErr := bse.buildMergedBundleViewLegacy(bundleName, databaseName, dataRootDir)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		bse.mergedBundleCache.Set(bundleKey, entry)
+		return entry, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build merged view for legacy bundle %s: %w", bundleKey, err)
+	}
+	entry := result.(*mergedBundleCacheEntry)
+	page := bse.pageFromMergedEntry(bundleName, pageID, pageSize, startIndex, endIndex, entry)
+	if bse.logger != nil && settings.GetSettings().Debug {
+		bse.logger.Debugf("Loaded legacy page %d for bundle %s: %d documents in page (total: %d)",
+			pageID, bundleName, len(page.Documents), len(entry.SortedDocIDs))
+	}
 	return page, nil
 }
 
-// loadDocumentPageLegacy loads a page from the legacy single-file format
-// This provides backward compatibility during migration to multi-file storage
-func (bse *BundleStorageEngine) loadDocumentPageLegacy(bundleName string, databaseName string, pageID uint32, dataRootDir string) (*models.DocumentPage, error) {
+// buildMergedBundleViewLegacy parses the entire legacy single file once and returns merged view for caching.
+func (bse *BundleStorageEngine) buildMergedBundleViewLegacy(bundleName string, databaseName string, dataRootDir string) (*mergedBundleCacheEntry, error) {
 	databasePath := helpers.GetDatabaseFolderPath(databaseName)
 	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
 
-	// Use file-read cache to avoid repeated full-file reads when loading many pages (data is read-only; do not modify)
 	data, err := bse.getOrReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read bundle file '%s': %w", filePath, err)
 	}
-
-	// Use the configured serializer to load bundle metadata for format validation
 	_, err = bse.serializer.DeserializeBundleMetadata(data)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse bundle metadata for document extraction: %w", err)
+		return nil, fmt.Errorf("failed to parse bundle metadata: %w", err)
 	}
 
-	// PERFORMANCE FIX: Use efficient page-based loading instead of loading all documents
-	pageSize := uint32(4096) // Use consistent page size with BundleService (power of 2)
-	startIndex := pageID * pageSize
-	endIndex := startIndex + pageSize
-
-	// Load only the documents needed for this page using range-based loading
-	// CRITICAL: Pass empty slice (not nil) to bypass global projection state and always load full documents
-	// This prevents race conditions where concurrent queries set projection and poison the cache with partial pages
-	// Projection is applied in-memory after retrieval, not during disk load
-	pageDocuments, totalDocs, err := bse.readDocumentRange(bundleName, databaseName, startIndex, endIndex, &data, []string{})
+	// Parse entire file in one pass (range 0..MaxUint32 => all documents)
+	const maxU32 = uint32(0xffffffff)
+	allDocuments, _, err := bse.readDocumentRange(bundleName, databaseName, 0, maxU32, &data, []string{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load document range for bundle %s page %d: %w", bundleName, pageID, err)
+		return nil, fmt.Errorf("failed to read document range: %w", err)
 	}
 
-	page := &models.DocumentPage{
-		PageID:    pageID,
-		BundleID:  bundleName,
-		Documents: pageDocuments,
-		LoadedAt:  time.Now(),
-		IsDirty:   false,
+	sortedDocIDs := make([]string, 0, len(allDocuments))
+	for docID := range allDocuments {
+		sortedDocIDs = append(sortedDocIDs, docID)
 	}
+	sort.Strings(sortedDocIDs)
 
-	// Set pagination pointers based on actual document count
-	if pageID > 0 {
-		prevPageID := pageID - 1
-		page.PreviousPageID = &prevPageID
-	}
-
-	totalPages := (totalDocs + pageSize - 1) / pageSize
-	if pageID < totalPages-1 {
-		nextPageID := pageID + 1
-		page.NextPageID = &nextPageID
-	}
-
-	return page, nil
+	return &mergedBundleCacheEntry{
+		Documents:    allDocuments,
+		SortedDocIDs: sortedDocIDs,
+	}, nil
 }
 
 // getOrReadFile returns the file content from the file-read cache, or reads from disk and caches it.
@@ -926,6 +935,13 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 	seenDocIDs := make(map[string]struct{})
 	offset := 0
 
+	schema := models.NewProjectionSchema(nil) // minimal for decode
+	if bse.schemaProvider != nil {
+		if s := bse.schemaProvider(bundleName, databaseName); s != nil {
+			schema = s
+		}
+	}
+
 	// Skip bundle metadata header if present
 	if len(*fileData) >= 8 {
 		magic := binary.LittleEndian.Uint32((*fileData)[0:4])
@@ -962,7 +978,7 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 				documentData = decompressed
 			}
 
-			fullDoc, err := helpers.DecodeFastBinaryToDocument(documentData)
+			fullDoc, err := helpers.DecodeFastBinaryToDocument(documentData, schema)
 			if err != nil {
 				bse.logger.Warnf("Failed to decode document at offset %d: %v", offset, err)
 				offset += 8 + int(size)
@@ -997,7 +1013,7 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 				deletionData = decompressed
 			}
 
-			deletionDoc, err := helpers.DecodeFastBinaryToDocument(deletionData)
+			deletionDoc, err := helpers.DecodeFastBinaryToDocument(deletionData, schema)
 			if err == nil && deletionDoc != nil {
 				deletedDocIDs[deletionDoc.DocumentID] = true
 				delete(documents, deletionDoc.DocumentID) // Remove if already added
@@ -1045,46 +1061,57 @@ func (bse *BundleStorageEngine) cacheParsedDocs(cacheKey string, documents map[s
 	}
 }
 
-// InvalidateParsedDocsCacheForBundle removes all cached parsed docs for a bundle.
+// InvalidateParsedDocsCacheForBundle removes all cached parsed docs and merged view for a bundle.
 // Call after writes, compaction, or any operation that changes bundle contents.
-// PHASE 3: Using ShardedParsedDocsCache.DeleteByPrefix for concurrent-safe iteration
 func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForBundle(bundleName string) {
 	prefix := bundleName + ":"
 	bse.parsedDocsCache.DeleteByPrefix(prefix)
+	bse.mergedBundleCache.DeleteByPrefix(prefix)
 
 	if bse.logger != nil && settings.GetSettings().Debug {
-		bse.logger.Debugf("Invalidated parsed docs cache for bundle %s", bundleName)
+		bse.logger.Debugf("Invalidated parsed docs and merged bundle cache for bundle %s", bundleName)
 	}
 }
 
 // InvalidateParsedDocsCacheForLatestFile invalidates only the cache entry for the latest segment file.
 // This is more efficient than InvalidateParsedDocsCacheForBundle when only the latest file was modified.
 // Writes always append to the latest file, so older segment files remain valid.
-// PHASE 3: Using ShardedParsedDocsCache.Delete for concurrent-safe invalidation
+// Also invalidates the merged bundle view for this bundle so the next page load rebuilds with new data.
 func (bse *BundleStorageEngine) InvalidateParsedDocsCacheForLatestFile(bundleName, databaseName string) {
-	// Get manifest to find the latest file
 	mm := bse.getOrCreateManifestManager(databaseName, bundleName)
 	manifest := mm.GetManifest()
-
 	if len(manifest.Files) == 0 {
-		return // No files to invalidate
+		return
 	}
-
-	// Latest file is the last one in the manifest
 	latestFile := manifest.Files[len(manifest.Files)-1]
 	bundleDir := GetBundleDirectory(databaseName, bundleName)
 	filePath := filepath.Join(bundleDir, latestFile.FileName)
 	cacheKey := fmt.Sprintf("%s:%s", bundleName, filePath)
-
 	bse.parsedDocsCache.Delete(cacheKey)
-
+	bse.mergedBundleCache.Delete(bundleName + ":" + databaseName)
 	if bse.logger != nil && settings.GetSettings().Debug {
-		bse.logger.Debugf("Invalidated parsed docs cache for latest file %s in bundle %s", latestFile.FileName, bundleName)
+		bse.logger.Debugf("Invalidated parsed docs and merged cache for latest file %s in bundle %s", latestFile.FileName, bundleName)
 	}
 }
 
 // RegisterCompactionComplete sets the callback invoked when compaction completes for a bundle.
 // BundleService registers InvalidateDocumentPageMapForBundle so documentPageMap stays correct.
+// SetSchemaProvider sets the function used to resolve bundle field schema for decode/encode. Required for Values-based documents.
+func (bse *BundleStorageEngine) SetSchemaProvider(fn func(bundleName, databaseName string) *models.BundleFieldSchema) {
+	bse.schemaProvider = fn
+}
+
+// GetSchemaForBundle returns the field schema for a bundle (for use by compactor, etc.). Returns nil if provider not set or bundle unknown.
+func (bse *BundleStorageEngine) GetSchemaForBundle(bundleName, databaseName string) *models.BundleFieldSchema {
+	if bse.schemaProvider == nil {
+		return models.NewProjectionSchema(nil)
+	}
+	if s := bse.schemaProvider(bundleName, databaseName); s != nil {
+		return s
+	}
+	return models.NewProjectionSchema(nil)
+}
+
 func (bse *BundleStorageEngine) RegisterCompactionComplete(fn func(databaseName, bundleName string)) {
 	bse.onCompactionCompleteMu.Lock()
 	defer bse.onCompactionCompleteMu.Unlock()
@@ -1674,26 +1701,22 @@ func (b *BundleStorageEngine) UpdateDocumentsBatch(bundle *models.Bundle, docume
 			continue
 		}
 
-		// Serialize document
-		documentBytes, err := b.serializeDocumentDirect(document)
+		schema := bundle.DocumentStructure.FieldSchema()
+		documentBytes, err := b.serializeDocumentDirect(document, schema)
 		if err != nil {
 			b.logger.Warnf("BATCH UPDATE: Failed to serialize document %s: %v", document.DocumentID, err)
 			continue
 		}
 
-		// Create header with magic number
-		// CRITICAL FIX: Allocate header buffer per-write to avoid race conditions
 		headerSize := uint32(len(documentBytes))
-		headerBytes := make([]byte, 8)                              // 8 bytes: 4 for magic, 4 for size
-		binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF) // Magic number for document boundaries
+		headerBytes := make([]byte, 8)
+		binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF)
 		binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
 
-		// Combine header + document data using buffer pool
 		combinedData := b.getCombinedBuffer(len(headerBytes) + len(documentBytes))
 		copy(combinedData[:8], headerBytes)
 		copy(combinedData[8:], documentBytes)
 
-		// Write to buffer (NOT to disk yet)
 		if err := writeBuffer.Write(combinedData[:len(headerBytes)+len(documentBytes)]); err != nil {
 			b.returnCombinedBuffer(combinedData)
 			b.logger.Warnf("BATCH UPDATE: Failed to buffer document %s: %v", document.DocumentID, err)
@@ -1847,25 +1870,22 @@ func (b *BundleStorageEngine) UpdateDocumentsBatchWithLocks(bundle *models.Bundl
 			continue
 		}
 
-		// Serialize document
-		documentBytes, err := b.serializeDocumentDirect(document)
+		schema := bundle.DocumentStructure.FieldSchema()
+		documentBytes, err := b.serializeDocumentDirect(document, schema)
 		if err != nil {
 			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Failed to serialize document %s: %v", document.DocumentID, err)
 			continue
 		}
 
-		// Create header
 		headerSize := uint32(len(documentBytes))
 		headerBytes := make([]byte, 8)
 		binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADBEEF)
 		binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
 
-		// Combine header + document data
 		combinedData := b.getCombinedBuffer(len(headerBytes) + len(documentBytes))
 		copy(combinedData[:8], headerBytes)
 		copy(combinedData[8:], documentBytes)
 
-		// Write to buffer (thread-safe via WriteBuffer mutex)
 		if err := writeBuffer.Write(combinedData[:len(headerBytes)+len(documentBytes)]); err != nil {
 			b.returnCombinedBuffer(combinedData)
 			b.logger.Warnf("BATCH UPDATE WITH LOCKS: Failed to buffer document %s: %v", document.DocumentID, err)
@@ -2027,7 +2047,7 @@ func (b *BundleStorageEngine) verifyDocumentExistsStreaming(bundleName, database
 
 	// Use the same parser that SELECT operations use
 	// This ensures consistency in how we interpret the file format
-	documents, err := b.parseAppendedDocuments(bundleName, fileData)
+	documents, err := b.parseAppendedDocuments(bundleName, databaseName, fileData)
 	if err != nil {
 		return false, fmt.Errorf("failed to parse bundle file: %w", err)
 	}
@@ -2488,9 +2508,8 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 	// Documents are stored via write-through page cache
 	// No memtable update needed - the page cache handles document storage
 
-	// PERFORMANCE FIX: Direct binary serialization without map conversion
-	// Use Go's native binary encoding for maximum speed
-	documentBytes, err := b.serializeDocumentDirect(document)
+	schema := bundle.DocumentStructure.FieldSchema()
+	documentBytes, err := b.serializeDocumentDirect(document, schema)
 	if err != nil {
 		return 0, fmt.Errorf("failed to encode document: %w", err)
 	}
@@ -2810,8 +2829,8 @@ func (b *BundleStorageEngine) AppendVersionToBundleFile(bundle *models.Bundle, n
 		pageID = currentDocCount / pageSize
 	}
 
-	// Serialize the new document version
-	documentBytes, err := b.serializeDocumentDirect(newDoc)
+	schema := bundle.DocumentStructure.FieldSchema()
+	documentBytes, err := b.serializeDocumentDirect(newDoc, schema)
 	if err != nil {
 		return 0, fmt.Errorf("failed to encode document version: %w", err)
 	}
@@ -3065,7 +3084,8 @@ func (b *BundleStorageEngine) buildBloomFilterForFrozenFile(manifestMgr *Manifes
 					docData = decompressed
 				}
 
-				doc, decErr := helpers.DecodeFastBinaryToDocument(docData)
+				minSchema := models.NewProjectionSchema(nil) // DocumentID only for bloom
+				doc, decErr := helpers.DecodeFastBinaryToDocument(docData, minSchema)
 				if decErr == nil && doc.DocumentID != "" {
 					docIDs = append(docIDs, doc.DocumentID)
 				}
@@ -3184,9 +3204,9 @@ func (b *BundleStorageEngine) extractDocumentIDOnly(data []byte) (string, error)
 		return "", fmt.Errorf("insufficient data for DocumentID extraction")
 	}
 
-	// Use DecodeFastBinaryAuto to auto-detect V1/V2 format
-	// This ensures we can read documents regardless of binary format version
-	doc, err := helpers.DecodeFastBinaryAuto(data)
+	// Decode with minimal schema (DocumentID only) for fast extraction
+	minSchema := models.NewProjectionSchema(nil)
+	doc, err := helpers.DecodeFastBinaryToDocument(data, minSchema)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode DocumentID: %w", err)
 	}
@@ -3905,6 +3925,9 @@ func (b *BundleStorageEngine) FlushAllDocumentCaches() {
 	// Clear parsed docs cache - holds parsed document objects
 	b.parsedDocsCache.Flush()
 
+	// Clear merged bundle cache - holds full merged view per bundle (merge-once, serve many)
+	b.mergedBundleCache.Flush()
+
 	// Clear projection cache - holds projection field sets (not document data, but can grow)
 	b.projectionCache.Flush()
 
@@ -4045,10 +4068,7 @@ func (b *BundleStorageEngine) readDocumentRange(bundleName string, databaseName 
 
 	//b.logger.Debugf("DEBUG: readDocumentRange - read %d bytes from file (expected %d)", bytesRead, fileInfo.Size())
 
-	// Parse documents with range limiting
-	// PROJECTION PUSHDOWN: Pass projection fields to deserialize only specified fields (e.g., "name" for ORDER BY queries)
-	// If projectionFields is nil or empty, deserializes all fields (backward compatible)
-	pageDocuments, totalCount, err := b.parseAppendedDocumentsRange(bundleName, fileData, startIndex, endIndex, projectionFields)
+	pageDocuments, totalCount, err := b.parseAppendedDocumentsRange(bundleName, databaseName, fileData, startIndex, endIndex, projectionFields)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to parse document range: %w", err)
 	}
@@ -4083,8 +4103,7 @@ func (b *BundleStorageEngine) ReadAppendedDocuments(bundleName, databaseName str
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// Try to parse as append-only format first
-	documents, appendErr := b.parseAppendedDocuments(bundleName, fileData)
+	documents, appendErr := b.parseAppendedDocuments(bundleName, databaseName, fileData)
 	if appendErr != nil {
 		return nil, fmt.Errorf("failed to parse bundle file: %w", appendErr)
 	}
@@ -4149,8 +4168,7 @@ func (b *BundleStorageEngine) GetDocumentVersions(bundleName, databaseName, docu
 			continue
 		}
 
-		// Scan backward through this file to find all versions of documentID
-		fileVersions := b.scanFileBackwardForDocument(&data, documentID)
+		fileVersions := b.scanFileBackwardForDocument(&data, bundleName, databaseName, documentID)
 		allVersions = append(allVersions, fileVersions...)
 	}
 
@@ -4178,8 +4196,7 @@ func (b *BundleStorageEngine) getDocumentVersionsLegacy(bundleName, databaseName
 		return nil, fmt.Errorf("failed to read bundle file: %w", err)
 	}
 
-	// Scan backward through file
-	versions := b.scanFileBackwardForDocument(&data, documentID)
+	versions := b.scanFileBackwardForDocument(&data, bundleName, databaseName, documentID)
 
 	// Sort by VersionSequence descending (newest first)
 	sort.Slice(versions, func(i, j int) bool {
@@ -4190,51 +4207,43 @@ func (b *BundleStorageEngine) getDocumentVersionsLegacy(bundleName, databaseName
 }
 
 // scanFileBackwardForDocument scans a file forward to find all versions of a document
-// PHASE 0: MVCC - Scans forward through file to collect all versions
-// Note: Despite the name, we scan forward because append-only storage has newer versions at the end
-// We collect all versions and sort by VersionSequence later
-func (b *BundleStorageEngine) scanFileBackwardForDocument(data *[]byte, documentID string) []*models.Document {
+func (b *BundleStorageEngine) scanFileBackwardForDocument(data *[]byte, bundleName, databaseName, documentID string) []*models.Document {
 	versions := make([]*models.Document, 0)
 
-	// Skip bundle metadata header if present
+	schema := models.NewProjectionSchema(nil)
+	if b.schemaProvider != nil {
+		if s := b.schemaProvider(bundleName, databaseName); s != nil {
+			schema = s
+		}
+	}
+
 	headerOffset := 0
 	if len(*data) >= 8 {
 		magic := binary.LittleEndian.Uint32((*data)[0:4])
-		if magic == 0x42444D44 { // "BDMD" = Bundle Metadata
+		if magic == 0x42444D44 {
 			metadataSize := binary.LittleEndian.Uint32((*data)[4:8])
 			headerOffset = int(8 + metadataSize)
 		}
 	}
 
-	// Scan backward from end of file
-	// We'll scan forward but collect in reverse order, or scan backward by reading sizes
-	// For efficiency, scan forward but track all versions, then reverse
-	seenVersions := make(map[uint64]*models.Document) // VersionSequence -> Document
-
-	// Scan forward through file to find all versions
+	seenVersions := make(map[uint64]*models.Document)
 	currentOffset := headerOffset
 	for currentOffset < len(*data) {
-		// Need at least 8 bytes for header
 		if currentOffset+8 > len(*data) {
 			break
 		}
 
-		// Read magic number and size
 		magic := binary.LittleEndian.Uint32((*data)[currentOffset : currentOffset+4])
 		size := binary.LittleEndian.Uint32((*data)[currentOffset+4 : currentOffset+8])
 
-		// Handle document records
 		if magic == 0xDEADBEEF {
-			// Validate size
 			if currentOffset+8+int(size) > len(*data) {
 				break
 			}
 
-			// Extract document data
 			documentData := (*data)[currentOffset+8 : currentOffset+8+int(size)]
 
-			// Decode document
-			doc, err := helpers.DecodeFastBinaryToDocument(documentData)
+			doc, err := helpers.DecodeFastBinaryToDocument(documentData, schema)
 			if err != nil {
 				// Skip corrupted documents
 				currentOffset += 8 + int(size)
@@ -4281,12 +4290,19 @@ func (b *BundleStorageEngine) scanFileBackwardForDocument(data *[]byte, document
 //   - map[string]models.Document: Parsed documents
 //   - uint32: Total document count
 //   - error: Any parsing error
-func (b *BundleStorageEngine) parseAppendedDocumentsRange(bundleName string, data *[]byte, startIndex, endIndex uint32, projectionFields []string) (map[string]models.Document, uint32, error) {
+func (b *BundleStorageEngine) parseAppendedDocumentsRange(bundleName, databaseName string, data *[]byte, startIndex, endIndex uint32, projectionFields []string) (map[string]models.Document, uint32, error) {
 	pageDocuments := make(map[string]models.Document)
 	deletedDocuments := make(map[string]bool) // Track deleted documents
 	seenDocIDs := make(map[string]struct{})   // Track unique DocumentIDs for counting (avoids storing full docs; was allDocuments)
 	offset := 0
 	documentIndex := uint32(0)
+
+	schema := models.NewProjectionSchema(nil)
+	if b.schemaProvider != nil {
+		if s := b.schemaProvider(bundleName, databaseName); s != nil {
+			schema = s
+		}
+	}
 
 	// DEBUG: Log parsing start
 	if b.logger != nil {
@@ -4351,17 +4367,13 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(bundleName string, dat
 			var fullDoc *models.Document
 			var err error
 			if len(projectionFields) > 0 {
-				// Use projected deserialization - only deserialize specified fields
-				projectedDoc, err = helpers.DecodeFastBinaryProjected(documentData, projectionFields)
+				projectedDoc, err = helpers.DecodeFastBinaryProjected(documentData, projectionFields, schema)
 				if err != nil {
-					// Fall back to full deserialization on error
 					docMap, err = helpers.DecodeFastBinary(documentData)
 					projectedDoc = nil
 				}
-				// If projected deserialization succeeded, projectedDoc is set and we'll use it directly below
 			} else {
-				// No projection - deserialize directly to Document (avoids intermediate map vs DecodeFastBinary)
-				fullDoc, err = helpers.DecodeFastBinaryToDocument(documentData)
+				fullDoc, err = helpers.DecodeFastBinaryToDocument(documentData, schema)
 			}
 			if err != nil {
 				// CRITICAL: Data corruption detected
@@ -4401,13 +4413,20 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(bundleName string, dat
 			} else if fullDoc != nil {
 				finalDoc = fullDoc
 			} else {
-				// Fallback from failed projection: convert from docMap
+				// Fallback from failed projection: build Values from docMap using schema
 				pooledDoc := document.GetPooledDocument()
 				if docID, ok := docMap["DocumentID"].(string); ok {
 					pooledDoc.DocumentID = docID
 				}
-				if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
-					pooledDoc.Fields = fields
+				pooledDoc.Values = make([]models.FieldValue, len(schema.Names))
+				for i, name := range schema.Names {
+					if name == "DocumentID" && pooledDoc.DocumentID != "" {
+						pooledDoc.Values[i] = models.NewStringValue(pooledDoc.DocumentID)
+						continue
+					}
+					if v, ok := docMap[name]; ok && v != nil {
+						pooledDoc.Values[i] = models.NewInterfaceValue(v)
+					}
 				}
 				if createdAt, ok := docMap["CreatedAt"].(time.Time); ok {
 					pooledDoc.CreatedAt = createdAt
@@ -4568,10 +4587,17 @@ func (b *BundleStorageEngine) parseAppendedDocumentsRange(bundleName string, dat
 }
 
 // parseAppendedDocuments parses documents in the append-only format
-func (b *BundleStorageEngine) parseAppendedDocuments(bundleName string, data []byte) (map[string]models.Document, error) {
+func (b *BundleStorageEngine) parseAppendedDocuments(bundleName, databaseName string, data []byte) (map[string]models.Document, error) {
 	documents := make(map[string]models.Document)
-	deletedDocuments := make(map[string]bool) // Track deleted documents
+	deletedDocuments := make(map[string]bool)
 	offset := 0
+
+	schema := models.NewProjectionSchema(nil)
+	if b.schemaProvider != nil {
+		if s := b.schemaProvider(bundleName, databaseName); s != nil {
+			schema = s
+		}
+	}
 
 	for offset < len(data) {
 		// Need at least 8 bytes for header
@@ -4629,54 +4655,24 @@ func (b *BundleStorageEngine) parseAppendedDocuments(bundleName string, data []b
 			// 	}
 			// }
 
-			// Decode document using fast binary format
-			docMap, err := helpers.DecodeFastBinary(documentData)
+			doc, err := helpers.DecodeFastBinaryToDocument(documentData, schema)
 			if err != nil {
-				// CRITICAL: Data corruption detected
 				b.logger.Errorf("CRITICAL CORRUPTION DETECTED at offset %d: %v", offset, err)
 				b.logger.Errorf("Document data length: %d bytes", len(documentData))
 				b.logger.Errorf("Expected size from header: %d bytes", size)
-
-				// Check for the magic corruption pattern 0x69696969
 				if size == 1768845170 || (len(documentData) > 4 && binary.LittleEndian.Uint32(documentData[0:4]) == 1768845170) {
-					corruptionReason := fmt.Sprintf("Detected corruption pattern 0x69696969 (1768845170 decimal) at offset %d. "+
-						"This indicates incomplete write or uninitialized memory. Size field corrupted: %d bytes. "+
-						"Document data preview (first 64 bytes): %x",
+					corruptionReason := fmt.Sprintf("Detected corruption pattern 0x69696969 at offset %d. Size: %d. Preview: %x",
 						offset, size, documentData[:min(64, len(documentData))])
-
-					// Dump diagnostics and halt server
+					b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), bundleName)
+				} else {
+					corruptionReason := fmt.Sprintf("Failed to decode document at offset %d: %v. Size: %d. Preview: %x",
+						offset, err, size, documentData[:min(64, len(documentData))])
 					b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), bundleName)
 				}
-
-				// Generic corruption - still halt
-				corruptionReason := fmt.Sprintf("Failed to decode document at offset %d: %v. "+
-					"Size: %d bytes. Data preview (first 64 bytes): %x",
-					offset, err, size, documentData[:min(64, len(documentData))])
-				b.writeLogger.DumpDiagnostics(corruptionReason, int64(offset), bundleName)
-
-				// This line will never be reached, but keep for safety
 				offset += 8 + int(size)
 				continue
 			}
 
-			// Convert to Document struct
-			// STEP 1: Use document pool to reduce allocations
-			// TODO: Implement reference counting for automatic pool return when last consumer releases document
-			doc := document.GetPooledDocument()
-			if docID, ok := docMap["DocumentID"].(string); ok {
-				doc.DocumentID = docID
-			}
-			if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
-				doc.Fields = fields
-			}
-			if createdAt, ok := docMap["CreatedAt"].(time.Time); ok {
-				doc.CreatedAt = createdAt
-			}
-			if updatedAt, ok := docMap["UpdatedAt"].(time.Time); ok {
-				doc.UpdatedAt = updatedAt
-			}
-
-			// Only add document if it hasn't been deleted
 			if !deletedDocuments[doc.DocumentID] {
 				documents[doc.DocumentID] = *doc
 			}
@@ -5194,12 +5190,12 @@ func ConvertToStringSlice(arr primitive.A) []string {
 // PERFORMANCE OPTIMIZATION METHODS
 // These methods provide zero-allocation operations for high-performance writes
 
-// serializeDocumentDirect serializes a document directly without map conversion
-func (b *BundleStorageEngine) serializeDocumentDirect(document *models.Document) ([]byte, error) {
-	// Use V2 format with field directory for O(1) field access and better performance
-	// V2 format includes xxHash64 field directory enabling fast projected reads
-	// Pass document directly to avoid intermediate map allocation
-	return helpers.EncodeFastBinaryV2(document)
+// serializeDocumentDirect serializes a document using schema-ordered Values. Caller must pass bundle's FieldSchema.
+func (b *BundleStorageEngine) serializeDocumentDirect(document *models.Document, schema *models.BundleFieldSchema) ([]byte, error) {
+	if schema == nil {
+		schema = models.NewProjectionSchema(nil)
+	}
+	return helpers.EncodeFastBinaryV2(document, schema)
 }
 
 // parseDocumentBinary parses a document using the fast binary format

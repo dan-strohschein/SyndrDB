@@ -256,9 +256,10 @@ func (mjs *MergeJoinStrategy) getSortedIterator(
 
 	docs := bundle.GetAllDocuments()
 	sorted := make([]SortedDocEntry, 0, len(docs))
+	schema := bundle.FieldSchema()
 
 	for _, doc := range docs {
-		keyVal, err := extractFieldValue(doc, keyField)
+		keyVal, err := extractFieldValue(doc, keyField, schema)
 		if err != nil {
 			// Skip documents without the join key
 			continue

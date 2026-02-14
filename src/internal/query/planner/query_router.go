@@ -1010,15 +1010,33 @@ func compileExpressionToPredicate(expr syndrQL.Expression, bundleCtx interface{}
 		return nil
 	}
 
+	// Extract schema from bundleCtx for O(1) field lookups in predicates
+	var schema *models.BundleFieldSchema
+	if bc, ok := bundleCtx.(*syndrQL.BundleContext); ok && bc != nil && bc.PrimaryBundle != "" {
+		if b := bc.Bundles[bc.PrimaryBundle]; b != nil {
+			schema = b.DocumentStructure.FieldSchema()
+		}
+	}
+
+	return compileExpressionToPredicateWithSchema(expr, schema, logger)
+}
+
+// compileExpressionToPredicateWithSchema is the internal implementation that carries
+// the resolved schema through recursive calls.
+func compileExpressionToPredicateWithSchema(expr syndrQL.Expression, schema *models.BundleFieldSchema, logger *zap.SugaredLogger) func(*models.Document) bool {
+	if expr == nil {
+		return nil
+	}
+
 	// Unwrap GroupedExpression
 	if grouped, ok := expr.(*syndrQL.GroupedExpression); ok {
-		return compileExpressionToPredicate(grouped.Expression, bundleCtx, logger)
+		return compileExpressionToPredicateWithSchema(grouped.Expression, schema, logger)
 	}
 
 	// Handle AND: compile both sides and combine
 	if binary, ok := expr.(*syndrQL.BinaryExpression); ok && binary.Operator == syndrQL.TOKEN_AND {
-		left := compileExpressionToPredicate(binary.Left, bundleCtx, logger)
-		right := compileExpressionToPredicate(binary.Right, bundleCtx, logger)
+		left := compileExpressionToPredicateWithSchema(binary.Left, schema, logger)
+		right := compileExpressionToPredicateWithSchema(binary.Right, schema, logger)
 		if left != nil && right != nil {
 			return func(doc *models.Document) bool {
 				return left(doc) && right(doc)
@@ -1057,21 +1075,21 @@ func compileExpressionToPredicate(expr syndrQL.Expression, bundleCtx interface{}
 	// Compile comparison based on operator
 	switch binary.Operator {
 	case syndrQL.TOKEN_EQ:
-		return makeEqPredicate(fieldName, literalValue)
+		return makeEqPredicate(fieldName, literalValue, schema)
 	case syndrQL.TOKEN_NEQ:
-		eq := makeEqPredicate(fieldName, literalValue)
+		eq := makeEqPredicate(fieldName, literalValue, schema)
 		if eq == nil {
 			return nil
 		}
 		return func(doc *models.Document) bool { return !eq(doc) }
 	case syndrQL.TOKEN_GT:
-		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a > b })
+		return makeComparisonPredicate(fieldName, literalValue, schema, func(a, b float64) bool { return a > b })
 	case syndrQL.TOKEN_GTE:
-		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a >= b })
+		return makeComparisonPredicate(fieldName, literalValue, schema, func(a, b float64) bool { return a >= b })
 	case syndrQL.TOKEN_LT:
-		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a < b })
+		return makeComparisonPredicate(fieldName, literalValue, schema, func(a, b float64) bool { return a < b })
 	case syndrQL.TOKEN_LTE:
-		return makeComparisonPredicate(fieldName, literalValue, func(a, b float64) bool { return a <= b })
+		return makeComparisonPredicate(fieldName, literalValue, schema, func(a, b float64) bool { return a <= b })
 	default:
 		return nil // Complex operators (LIKE, IN, etc.) not supported in pushdown
 	}
@@ -1101,29 +1119,33 @@ func extractFieldAndLiteral(binary *syndrQL.BinaryExpression) (string, interface
 	return "", nil, false
 }
 
-// makeEqPredicate creates an equality predicate for a field
-func makeEqPredicate(fieldName string, literalValue interface{}) func(*models.Document) bool {
+func makeEqPredicate(fieldName string, literalValue interface{}, schema *models.BundleFieldSchema) func(*models.Document) bool {
+	// Pre-compute lowercase field name for CI fallback
+	lowerFieldName := strings.ToLower(fieldName)
 	return func(doc *models.Document) bool {
-		if doc.Fields == nil {
-			return false
+		var fieldVal interface{}
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			fieldVal = fv.AsInterface()
+		} else if schema != nil {
+			// O(1) case-insensitive fallback
+			if fv, ok := doc.GetFieldValueCI(schema, lowerFieldName); ok {
+				fieldVal = fv.AsInterface()
+			}
 		}
-		field, exists := doc.Fields[fieldName]
-		if !exists {
-			// Case-insensitive fallback
-			lowerName := strings.ToLower(fieldName)
-			for k, v := range doc.Fields {
-				if strings.ToLower(k) == lowerName {
-					field = v
-					exists = true
-					break
+		if fieldVal == nil && doc.Data != nil {
+			fieldVal = doc.Data[fieldName]
+			if fieldVal == nil {
+				for k, v := range doc.Data {
+					if strings.ToLower(k) == lowerFieldName {
+						fieldVal = v
+						break
+					}
 				}
 			}
-			if !exists {
-				return false
-			}
 		}
-		// Compare field value with literal using AsInterface()
-		fieldVal := field.Value.AsInterface()
+		if fieldVal == nil && literalValue != nil {
+			return false
+		}
 		if fieldVal == nil && literalValue == nil {
 			return true
 		}
@@ -1141,31 +1163,37 @@ func makeEqPredicate(fieldName string, literalValue interface{}) func(*models.Do
 }
 
 // makeComparisonPredicate creates a numeric comparison predicate
-func makeComparisonPredicate(fieldName string, literalValue interface{}, cmp func(float64, float64) bool) func(*models.Document) bool {
+func makeComparisonPredicate(fieldName string, literalValue interface{}, schema *models.BundleFieldSchema, cmp func(float64, float64) bool) func(*models.Document) bool {
 	// Pre-convert literal to float64
 	litFloat, ok := predicateToFloat64(literalValue)
 	if !ok {
 		return nil // Can't compare non-numeric literals with pushdown
 	}
+	// Pre-compute lowercase field name for CI fallback
+	lowerFieldName := strings.ToLower(fieldName)
 	return func(doc *models.Document) bool {
-		if doc.Fields == nil {
-			return false
+		var fv models.FieldValue
+		if v, ok := doc.GetFieldValue(schema, fieldName); ok {
+			fv = v
+		} else if schema != nil {
+			// O(1) case-insensitive fallback
+			if v, ok := doc.GetFieldValueCI(schema, lowerFieldName); ok {
+				fv = v
+			}
 		}
-		field, exists := doc.Fields[fieldName]
-		if !exists {
-			lowerName := strings.ToLower(fieldName)
-			for k, v := range doc.Fields {
-				if strings.ToLower(k) == lowerName {
-					field = v
-					exists = true
-					break
+		if fv.Type == 0 && doc.Data != nil {
+			if v, ok := doc.Data[fieldName]; ok {
+				fv = models.NewInterfaceValue(v)
+			} else {
+				for k, v := range doc.Data {
+					if strings.ToLower(k) == lowerFieldName {
+						fv = models.NewInterfaceValue(v)
+						break
+					}
 				}
 			}
-			if !exists {
-				return false
-			}
 		}
-		docFloat, ok := fieldValueToFloat64(field.Value)
+		docFloat, ok := fieldValueToFloat64(fv)
 		if !ok {
 			return false
 		}

@@ -48,41 +48,49 @@ import (
 // Returns:
 //   - Slice of field values in order
 //   - Error if field extraction fails
-func extractDistinctFields(doc *models.Document, fields []string) ([]interface{}, error) {
+func extractDistinctFields(doc *models.Document, fields []string, schema *models.BundleFieldSchema) ([]interface{}, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("cannot extract fields from nil document")
 	}
 
-	// Handle SELECT DISTINCT * case - extract all fields alphabetically
 	if len(fields) == 0 {
-		// Get all field names sorted alphabetically for deterministic ordering
-		fieldNames := make([]string, 0, len(doc.Fields))
-		for fieldName := range doc.Fields {
-			fieldNames = append(fieldNames, fieldName)
+		if schema != nil && len(doc.Values) > 0 {
+			values := make([]interface{}, 0, len(schema.Names))
+			for i := range schema.Names {
+				if i < len(doc.Values) {
+					values = append(values, doc.Values[i].AsInterface())
+				} else {
+					values = append(values, nil)
+				}
+			}
+			return values, nil
 		}
-		sort.Strings(fieldNames)
-
-		// Extract values in alphabetical field order
-		values := make([]interface{}, 0, len(fieldNames))
-		for _, fieldName := range fieldNames {
-			field := doc.Fields[fieldName]
-			values = append(values, field.Value)
+		if doc.Data != nil {
+			fieldNames := make([]string, 0, len(doc.Data))
+			for k := range doc.Data {
+				fieldNames = append(fieldNames, k)
+			}
+			sort.Strings(fieldNames)
+			values := make([]interface{}, 0, len(fieldNames))
+			for _, name := range fieldNames {
+				values = append(values, doc.Data[name])
+			}
+			return values, nil
 		}
-		return values, nil
+		return nil, nil
 	}
 
-	// Extract specified fields in order
 	values := make([]interface{}, 0, len(fields))
 	for _, fieldName := range fields {
-		field, exists := doc.Fields[fieldName]
-		if !exists {
-			// Field doesn't exist - treat as nil for consistency
-			values = append(values, nil)
+		fv, exists := doc.GetFieldValue(schema, fieldName)
+		if !exists && doc.Data != nil {
+			values = append(values, doc.Data[fieldName])
+		} else if exists {
+			values = append(values, fv.AsInterface())
 		} else {
-			values = append(values, field.Value)
+			values = append(values, nil)
 		}
 	}
-
 	return values, nil
 }
 

@@ -155,7 +155,7 @@ func testPrefixPatterns() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -206,7 +206,7 @@ func testSuffixPatterns() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -257,7 +257,7 @@ func testContainsPatterns() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -308,7 +308,7 @@ func testUnderscoreWildcards() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -359,7 +359,7 @@ func testCaseInsensitiveMatching() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -410,7 +410,7 @@ func testEscapeSequences() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -461,7 +461,7 @@ func testComplexPatterns() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -512,7 +512,7 @@ func testUnicodePatterns() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -563,7 +563,7 @@ func testNotLikeOperator() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -619,7 +619,7 @@ func testCombinedConditions() error {
 
 		matchCount := 0
 		for _, doc := range testDocs {
-			if queryparser.EvaluateWhereClause(doc, where, ColorLogger) {
+			if queryparser.EvaluateWhereClause(doc, where, nil, ColorLogger) {
 				matchCount++
 			}
 		}
@@ -649,9 +649,9 @@ func testStatisticsTracking() error {
 
 	// Execute queries
 	for _, doc := range testDocs {
-		queryparser.EvaluateWhereClause(doc, where1, ColorLogger)
-		queryparser.EvaluateWhereClause(doc, where2, ColorLogger)
-		queryparser.EvaluateWhereClause(doc, where3, ColorLogger)
+		queryparser.EvaluateWhereClause(doc, where1, nil, ColorLogger)
+		queryparser.EvaluateWhereClause(doc, where2, nil, ColorLogger)
+		queryparser.EvaluateWhereClause(doc, where3, nil, ColorLogger)
 	}
 
 	// Get statistics

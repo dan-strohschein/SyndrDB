@@ -41,7 +41,7 @@ type BundleServiceInterface interface {
 	// OPTIMIZATION: One-time lock acquisition, iterates cached pages, copies only projected fields
 	// Returns: (projected docs map, docs copied, pages that were cached, total pages, error)
 	// effectiveLimit: 0 = no limit, >0 = stop after that many docs
-	CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error)
+	CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int, schema *models.BundleFieldSchema) (map[string]*documentscanner.ProjectedDocument, int, int, int, error)
 	// GetDocument retrieves a single document by ID using direct lookup (O(1) via index)
 	// Much more efficient than GetAllDocumentsForIndexing for single document retrieval
 	// Used by JOINs to avoid N+1 query problem

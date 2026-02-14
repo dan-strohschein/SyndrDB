@@ -785,10 +785,10 @@ func TestSortIterator_BasicSort(t *testing.T) {
 		t.Fatalf("expected 10 docs, got %d", len(results))
 	}
 
-	// Verify sorted order (ascending by age)
+	// Verify sorted order (ascending by age) (Option B: Data)
 	for i := 0; i < len(results)-1; i++ {
-		ageI := results[i].Fields["age"].Value.AsInterface().(float64)
-		ageJ := results[i+1].Fields["age"].Value.AsInterface().(float64)
+		ageI := results[i].Data["age"].(float64)
+		ageJ := results[i+1].Data["age"].(float64)
 		if ageI > ageJ {
 			t.Errorf("not sorted: doc[%d].age=%v > doc[%d].age=%v", i, ageI, i+1, ageJ)
 		}
@@ -851,10 +851,10 @@ func TestSortIterator_TopN(t *testing.T) {
 		t.Fatalf("expected at least 5 docs, got %d", len(results))
 	}
 
-	// Verify first 5 are in ascending order
+	// Verify first 5 are in ascending order (Option B: Data)
 	for i := 0; i < min(len(results)-1, 4); i++ {
-		ageI := results[i].Fields["age"].Value.AsInterface().(float64)
-		ageJ := results[i+1].Fields["age"].Value.AsInterface().(float64)
+		ageI := results[i].Data["age"].(float64)
+		ageJ := results[i+1].Data["age"].(float64)
 		if ageI > ageJ {
 			t.Errorf("not sorted: doc[%d].age=%v > doc[%d].age=%v", i, ageI, i+1, ageJ)
 		}

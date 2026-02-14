@@ -119,10 +119,10 @@ func (sc *StatisticsCollector) AnalyzeBundle(bundle *models.Bundle) (*BundleStat
 		return nil, fmt.Errorf("failed to sample documents: %w", err)
 	}
 
-	// Collect field-level statistics
+	schema := bundle.DocumentStructure.FieldSchema()
 	fieldStats := make(map[string]*FieldStatistics)
 	for fieldName := range bundle.DocumentStructure.FieldDefinitions {
-		stats, err := sc.analyzeField(fieldName, sampledDocs, int(totalDocs))
+		stats, err := sc.analyzeField(fieldName, sampledDocs, schema, int(totalDocs))
 		if err != nil {
 			sc.logger.Warnf("Failed to analyze field %s: %v", fieldName, err)
 			continue
@@ -163,30 +163,31 @@ func (sc *StatisticsCollector) sampleDocuments(bundle *models.Bundle, sampleRate
 	return nil, fmt.Errorf("sampleDocuments needs refactoring: bundle.Documents memtable removed, use page cache")
 }
 
-// analyzeField collects statistics for a single field
-func (sc *StatisticsCollector) analyzeField(fieldName string, documents []*models.Document, totalDocs int) (*FieldStatistics, error) {
+// analyzeField collects statistics for a single field.
+// schema may be nil only when documents is empty (e.g. sampleDocuments not yet refactored).
+func (sc *StatisticsCollector) analyzeField(fieldName string, documents []*models.Document, schema *models.BundleFieldSchema, totalDocs int) (*FieldStatistics, error) {
 	stats := &FieldStatistics{
 		FieldName:        fieldName,
 		MostCommonValues: make([]ValueFrequency, 0, DEFAULT_MCV_COUNT),
 		Histogram:        make([]HistogramBucket, 0, DEFAULT_HISTOGRAM_BUCKETS),
 	}
 
-	// Count values and track nulls
 	valueCount := make(map[interface{}]int64)
 	var nullCount int64
 	var totalSize int64
 
 	for _, doc := range documents {
-		field, exists := doc.Fields[fieldName]
-		if !exists || field.Value.IsNil() {
+		if schema == nil {
 			nullCount++
 			continue
 		}
-
-		value := field.Value.AsInterface()
+		fv, exists := doc.GetFieldValue(schema, fieldName)
+		if !exists || fv.IsNil() {
+			nullCount++
+			continue
+		}
+		value := fv.AsInterface()
 		valueCount[value]++
-
-		// Estimate size (rough approximation)
 		totalSize += sc.estimateValueSize(value)
 	}
 

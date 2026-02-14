@@ -80,8 +80,8 @@ func FreeResultSet(results []map[string]interface{}) {
 // - If selectedFields is provided, only those fields are included in the output
 // - Nested relationship fields (arrays/objects) are always preserved regardless of projection
 // - DocumentID, CreatedAt, UpdatedAt metadata are always included
-func TransformDocumentsToFlatFormat(documents map[string]*models.Document) []map[string]interface{} {
-	return TransformDocumentsToFlatFormatWithProjection(documents, nil)
+func TransformDocumentsToFlatFormat(documents map[string]*models.Document, schema *models.BundleFieldSchema) []map[string]interface{} {
+	return TransformDocumentsToFlatFormatWithProjection(documents, nil, schema)
 }
 
 // TransformDocumentsToFlatFormatWithProjection converts documents with optional field projection
@@ -98,7 +98,7 @@ func TransformDocumentsToFlatFormat(documents map[string]*models.Document) []map
 //   - Nested relationships (arrays/slices/maps) are always included (JOIN results)
 //   - Document metadata (DocumentID, CreatedAt, UpdatedAt) always included
 //   - If a selected field doesn't exist in a document, it's omitted from that document
-func TransformDocumentsToFlatFormatWithProjection(documents map[string]*models.Document, selectedFields []string) []map[string]interface{} {
+func TransformDocumentsToFlatFormatWithProjection(documents map[string]*models.Document, selectedFields []string, schema *models.BundleFieldSchema) []map[string]interface{} {
 	// ✅ PRE-ALLOCATE TO EXACT SIZE - eliminates slice growth allocations!
 	flattenedDocs := make([]map[string]interface{}, 0, len(documents))
 
@@ -132,17 +132,16 @@ func TransformDocumentsToFlatFormatWithProjection(documents map[string]*models.D
 		flatDoc[FieldCreatedAt] = doc.CreatedAt
 		flatDoc[FieldUpdatedAt] = doc.UpdatedAt
 
-		// Add fields based on projection
-		for fieldName, field := range doc.Fields {
-			// Check if this field should be included
-			// ✅ ZERO-ALLOCATION: Check FieldValue type directly (no boxing)!
-			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(field.Value)
-
-			if shouldInclude {
-				// Convert FieldValue to concrete JSON value
-				// This ensures JSON encoders (including HVJson) serialize the actual value
-				// instead of the FieldValue struct wrapper
-				flatDoc[fieldName] = field.Value.ToJSONValue()
+		// Add fields based on projection (schema-ordered Values)
+		if schema != nil && doc.Values != nil {
+			for i, fieldName := range schema.Names {
+				if i >= len(doc.Values) {
+					break
+				}
+				shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(doc.Values[i])
+				if shouldInclude {
+					flatDoc[fieldName] = doc.Values[i].ToJSONValue()
+				}
 			}
 		}
 
@@ -165,7 +164,7 @@ func TransformDocumentsToFlatFormatWithProjection(documents map[string]*models.D
 //
 // Returns:
 //   - Array of flattened document objects in the same order as input
-func TransformSortedDocumentsToFlatFormatWithProjection(documents []*models.Document, selectedFields []string) []map[string]interface{} {
+func TransformSortedDocumentsToFlatFormatWithProjection(documents []*models.Document, selectedFields []string, schema *models.BundleFieldSchema) []map[string]interface{} {
 	// ✅ PRE-ALLOCATE TO EXACT SIZE - eliminates slice growth allocations!
 	flattenedDocs := make([]map[string]interface{}, 0, len(documents))
 
@@ -190,17 +189,16 @@ func TransformSortedDocumentsToFlatFormatWithProjection(documents []*models.Docu
 		flatDoc[FieldCreatedAt] = doc.CreatedAt
 		flatDoc[FieldUpdatedAt] = doc.UpdatedAt
 
-		// Add fields based on projection
-		for fieldName, field := range doc.Fields {
-			// Check if this field should be included
-			// ✅ ZERO-ALLOCATION: Check FieldValue type directly (no boxing)!
-			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(field.Value)
-
-			if shouldInclude {
-				// Convert FieldValue to concrete JSON value
-				// This ensures JSON encoders (including HVJson) serialize the actual value
-				// instead of the FieldValue struct wrapper
-				flatDoc[fieldName] = field.Value.ToJSONValue()
+		// Add fields based on projection (schema-ordered Values)
+		if schema != nil && doc.Values != nil {
+			for i, fieldName := range schema.Names {
+				if i >= len(doc.Values) {
+					break
+				}
+				shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(doc.Values[i])
+				if shouldInclude {
+					flatDoc[fieldName] = doc.Values[i].ToJSONValue()
+				}
 			}
 		}
 
@@ -262,7 +260,7 @@ func isNestedRelationship(value interface{}) bool {
 //
 // Returns:
 //   - Array of flattened document objects in the same order as input
-func TransformDocumentSliceToFlatFormat(documents []*models.Document, selectedFields []string) []map[string]interface{} {
+func TransformDocumentSliceToFlatFormat(documents []*models.Document, selectedFields []string, schema *models.BundleFieldSchema) []map[string]interface{} {
 	flattenedDocs := make([]map[string]interface{}, 0, len(documents))
 
 	// Build field filter map for O(1) lookup
@@ -285,17 +283,16 @@ func TransformDocumentSliceToFlatFormat(documents []*models.Document, selectedFi
 		flatDoc[FieldCreatedAt] = doc.CreatedAt
 		flatDoc[FieldUpdatedAt] = doc.UpdatedAt
 
-		// Add fields based on projection
-		for fieldName, field := range doc.Fields {
-			// Check if this field should be included
-			// ✅ ZERO-ALLOCATION: Check FieldValue type directly (no boxing)!
-			shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(field.Value)
-
-			if shouldInclude {
-				// Convert FieldValue to concrete JSON value
-				// This ensures JSON encoders (including HVJson) serialize the actual value
-				// instead of the FieldValue struct wrapper
-				flatDoc[fieldName] = field.Value.ToJSONValue()
+		// Add fields based on projection (schema-ordered Values)
+		if schema != nil && doc.Values != nil {
+			for i, fieldName := range schema.Names {
+				if i >= len(doc.Values) {
+					break
+				}
+				shouldInclude := !hasProjection || fieldFilter[fieldName] || isNestedRelationshipFieldValue(doc.Values[i])
+				if shouldInclude {
+					flatDoc[fieldName] = doc.Values[i].ToJSONValue()
+				}
 			}
 		}
 

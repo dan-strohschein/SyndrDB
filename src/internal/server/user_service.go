@@ -95,13 +95,14 @@ func (us *UserService) isSystemUser(username string) error {
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
+	schema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-		if nameField, ok := doc.Fields["Username"]; ok {
-			if nameValue, ok := nameField.Value.AsString(); ok {
+		if fv, ok := doc.GetFieldValue(schema, "Username"); ok {
+			if nameValue, ok := fv.AsString(); ok {
 				if strings.ToLower(nameValue) == usernameLower {
 					// Check IsSystem field
-					if isSystemField, ok := doc.Fields["IsSystem"]; ok {
-						if isSystem, ok := isSystemField.Value.AsBool(); ok && isSystem {
+					if isSystemField, ok := doc.GetFieldValue(schema, "IsSystem"); ok {
+						if isSystem, ok := isSystemField.AsBool(); ok && isSystem {
 							return errors.New(errors.ERR_PERMISSION_DENIED,
 								fmt.Sprintf("Cannot modify system user '%s'", username),
 								errors.LayerAuth).WithContext("username", username)
@@ -163,9 +164,10 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 	if err != nil {
 		return "", errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
+	createSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range existingDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
+		if fv, ok := doc.GetFieldValue(createSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && strings.EqualFold(str, username) {
 				return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 					fmt.Sprintf("user '%s' already exists", username),
 					errors.LayerCommand).WithContext("username", username)
@@ -191,46 +193,19 @@ func (us *UserService) CreateUser(username, password string) (string, error) {
 
 	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
 	// This is a user-facing operation (lower frequency than query hot-path)
-	// Create user document for the primary database Users bundle
+	// Create user document for the primary database Users bundle (Option B: Data)
 	userDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
-		Fields: map[string]models.Field{
-			"DocumentID": {
-				Name:  "DocumentID",
-				Value: models.NewStringValue(helpers.GenerateFastUUID()),
-			},
-			"UserID": {
-				Name:  "UserID",
-				Value: models.NewStringValue(userID),
-			},
-			"PasswordHash": {
-				Name:  "PasswordHash",
-				Value: models.NewStringValue(string(storedUser.PasswordHash.Hash)), // Store the hash
-			},
-			"Name": {
-				Name:  "Name",
-				Value: models.NewStringValue(username),
-			},
-			"IsActive": {
-				Name:  "IsActive",
-				Value: models.NewBoolValue(true),
-			},
-			"IsLockedOut": {
-				Name:  "IsLockedOut",
-				Value: models.NewBoolValue(false),
-			},
-			"FailedLoginAttempts": {
-				Name:  "FailedLoginAttempts",
-				Value: models.NewIntValue(0),
-			},
-			"LockoutExpiresOn": {
-				Name:  "LockoutExpiresOn",
-				Value: models.NewStringValue(time.Now().Format(time.RFC3339)),
-			},
-			"IsSystem": {
-				Name:  "IsSystem",
-				Value: models.NewBoolValue(false), // User-created users are not system users
-			},
+		Data: map[string]interface{}{
+			"DocumentID":           helpers.GenerateFastUUID(),
+			"UserID":               userID,
+			"PasswordHash":          string(storedUser.PasswordHash.Hash),
+			"Name":                 username,
+			"IsActive":             true,
+			"IsLockedOut":          false,
+			"FailedLoginAttempts":   int64(0),
+			"LockoutExpiresOn":     time.Now().Format(time.RFC3339),
+			"IsSystem":             false, // User-created users are not system users
 		},
 	}
 
@@ -274,9 +249,10 @@ func (us *UserService) GetUserByUsername(username string) (*models.Document, err
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
+	getByNameSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
+		if fv, ok := doc.GetFieldValue(getByNameSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && strings.EqualFold(str, username) {
 				return doc, nil
 			}
 		}
@@ -313,9 +289,10 @@ func (us *UserService) GetUserByID(userID string) (*models.Document, error) {
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
+	getByIDSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-		if idField, ok := doc.Fields["UserID"]; ok {
-			if str, ok := idField.Value.AsString(); ok && str == userID {
+		if idField, ok := doc.GetFieldValue(getByIDSchema, "UserID"); ok {
+			if str, ok := idField.AsString(); ok && str == userID {
 				return doc, nil
 			}
 		}
@@ -398,9 +375,10 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 		return errors.WrapWithMessage(err, errors.ERR_INTERNAL, "failed to retrieve users", errors.LayerCommand)
 	}
 
+	updateSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-		if nameField, ok := doc.Fields["Username"]; ok {
-			if nameValue, ok := nameField.Value.AsString(); ok {
+		if fv, ok := doc.GetFieldValue(updateSchema, "Username"); ok {
+			if nameValue, ok := fv.AsString(); ok {
 				if strings.ToLower(nameValue) == usernameLower {
 					targetDocID = doc.DocumentID
 					break
@@ -460,8 +438,8 @@ func (us *UserService) UpdateUser(username string, updates map[string]string, fo
 		switch strings.ToUpper(field) {
 		case "PASSWORD":
 			// Hash the new password using UserStore
-			if userIDField, ok := targetDoc.Fields["UserID"]; ok {
-				if userID, ok := userIDField.Value.AsString(); ok {
+			if userIDField, ok := targetDoc.GetFieldValue(updateSchema, "UserID"); ok {
+				if userID, ok := userIDField.AsString(); ok {
 					newUser := auth.NewUser{
 						UserID:   userID,
 						Username: username,
@@ -549,13 +527,14 @@ func (us *UserService) DeleteUser(username string, force bool) error {
 		return errors.WrapWithMessage(err, errors.ERR_INTERNAL, "failed to retrieve users", errors.LayerCommand)
 	}
 
+	deleteSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-		if nameField, ok := doc.Fields["Username"]; ok {
-			if nameValue, ok := nameField.Value.AsString(); ok {
+		if fv, ok := doc.GetFieldValue(deleteSchema, "Username"); ok {
+			if nameValue, ok := fv.AsString(); ok {
 				if strings.ToLower(nameValue) == usernameLower {
 					// Get UserID for junction table cleanup
-					if idField, ok := doc.Fields["UserID"]; ok {
-						if id, ok := idField.Value.AsString(); ok {
+					if idField, ok := doc.GetFieldValue(deleteSchema, "UserID"); ok {
+						if id, ok := idField.AsString(); ok {
 							userID = id
 						}
 					}
@@ -637,12 +616,13 @@ func (us *UserService) cleanupJunctionTable(junctionBundle *models.Bundle, field
 
 	removedCount := 0
 
-	// Collect matching document IDs for batch delete
+	// Collect matching document IDs for batch delete (Option B: schema + GetFieldValue)
+	schema := junctionBundle.DocumentStructure.FieldSchema()
 	var toDeleteIDs []string
 	var toDeleteDocs []*models.Document
 	for _, doc := range docs {
-		if field, ok := doc.Fields[fieldName]; ok {
-			if value, ok := field.Value.AsString(); ok && value == fieldValue {
+		if field, ok := doc.GetFieldValue(schema, fieldName); ok {
+			if value, ok := field.AsString(); ok && value == fieldValue {
 				toDeleteIDs = append(toDeleteIDs, doc.DocumentID)
 				toDeleteDocs = append(toDeleteDocs, doc)
 			}

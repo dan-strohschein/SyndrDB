@@ -170,11 +170,16 @@ func (node *IndexScanNode) executeHashIndexScanFallback(ctx context.Context, ind
 		if doc == nil {
 			continue
 		}
-		field, ok := doc.Fields[fieldName]
-		if !ok {
+		var val interface{}
+		if fv, ok := doc.GetFieldValue(nil, fieldName); ok {
+			val = fv.AsInterface()
+		} else if doc.Data != nil {
+			val = doc.Data[fieldName]
+		}
+		if val == nil {
 			continue
 		}
-		docKeyStr := conversion.ValueToString(field.Value.AsInterface())
+		docKeyStr := conversion.ValueToString(val)
 		if docKeyStr == searchKeyStr {
 			results[doc.DocumentID] = doc
 		}
@@ -700,7 +705,7 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 
 		// Memory tracking: Sample every 500th document
 		if memoryTracker != nil && i%500 == 0 {
-			docSize := models.EstimateDocumentSize(doc)
+			docSize := models.EstimateDocumentSize(doc, nil)
 			if err := memoryTracker.Sample(docSize, i); err != nil {
 				return nil, err
 			}
@@ -787,7 +792,7 @@ func (node *FullScanNode) ExecuteSlice(ctx context.Context) ([]*models.Document,
 	if memoryTracker != nil {
 		for i, doc := range scanResult.Documents {
 			if i%500 == 0 {
-				docSize := models.EstimateDocumentSize(doc)
+				docSize := models.EstimateDocumentSize(doc, nil)
 				if err := memoryTracker.Sample(docSize, i); err != nil {
 					return nil, nil, err
 				}
@@ -919,7 +924,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 			}
 
 			if memoryTracker != nil && docCount%100 == 0 {
-				docSize := models.EstimateDocumentSize(doc)
+				docSize := models.EstimateDocumentSize(doc, nil)
 				if err := memoryTracker.Sample(docSize, docCount); err != nil {
 					return nil, err
 				}
@@ -989,7 +994,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 		}
 
 		if memoryTracker != nil && docCount%100 == 0 {
-			docSize := models.EstimateDocumentSize(doc)
+			docSize := models.EstimateDocumentSize(doc, nil)
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
 			}

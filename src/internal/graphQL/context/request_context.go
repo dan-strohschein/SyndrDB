@@ -218,7 +218,7 @@ func (rc *RequestContext) createLoaderForBundle(bundleName string, fieldName str
 
 		for _, doc := range documents {
 			// Build map from Fields (and Data if present) for GraphQL compatibility
-			docMap := models.DocumentToMap(doc)
+			docMap := models.DocumentToMap(doc, nil)
 
 			// Get the field value that this document matches (e.g., the authorId value)
 			var fieldValue string

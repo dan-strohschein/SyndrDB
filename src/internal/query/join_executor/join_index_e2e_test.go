@@ -64,20 +64,14 @@ func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldN
 		Indexes:        make(map[string]models.IndexReference),
 	}
 
-	// Create documents
+	// Create documents (Option B: Data)
 	for i := 0; i < docCount; i++ {
 		docID := fmt.Sprintf("doc_%d", i)
 		doc := models.Document{
 			DocumentID: docID,
-			Fields: map[string]models.Field{
-				indexFieldName: {
-					Name:  indexFieldName,
-					Value: models.NewStringValue(fmt.Sprintf("key_%d", i%100)), // 100 unique keys, multiple docs per key
-				},
-				"data": {
-					Name:  "data",
-					Value: models.NewStringValue(fmt.Sprintf("data_%d", i)),
-				},
+			Data: map[string]interface{}{
+				indexFieldName: fmt.Sprintf("key_%d", i%100),
+				"data":         fmt.Sprintf("data_%d", i),
 			},
 		}
 		docs[docID] = doc
@@ -105,10 +99,12 @@ func createTestBundle(t *testing.T, bundleName string, docCount int, indexFieldN
 		index, err = hashindexV3.NewHashIndexV3(indexConfig)
 		require.NoError(t, err, "Should create index")
 
-		// Populate index from the local docs map
+		// Populate index from the local docs map (Option B: Data)
 		for docID, doc := range docs {
-			field := doc.Fields[indexFieldName]
-			keyValue := field.Value.StringVal
+			var keyValue string
+			if v, ok := doc.Data[indexFieldName].(string); ok {
+				keyValue = v
+			}
 			// Updated Put signature: (keyValue, documentID, pageID, commitSequence, versionSequence)
 			err = index.Put(keyValue, docID, 0, 0, 0)
 			require.NoError(t, err, "Should put entry in index")
@@ -193,6 +189,11 @@ func (m *mockBundleAdapter) GetName() string {
 	return m.bundle.Name
 }
 
+// FieldSchema returns nil; tests use doc.Fields so schema-based lookup is not required.
+func (m *mockBundleAdapter) FieldSchema() *models.BundleFieldSchema {
+	return nil
+}
+
 func (m *mockBundleAdapter) GetTotalDocuments() int {
 	return int(m.bundle.TotalDocuments)
 }
@@ -270,8 +271,10 @@ func (m *mockBundleAdapter) CopyProjectedToSessionCache(ctx context.Context, pro
 			GroupByFields: make(map[string]models.FieldValue),
 		}
 		for _, field := range projectFields {
-			if f, exists := doc.Fields[field]; exists {
-				projected.GroupByFields[field] = f.Value
+			if v, ok := doc.Data[field]; ok {
+				projected.GroupByFields[field] = models.NewInterfaceValue(v)
+			} else if fv, ok := doc.GetFieldValue(nil, field); ok {
+				projected.GroupByFields[field] = fv
 			}
 		}
 		result[docID] = projected

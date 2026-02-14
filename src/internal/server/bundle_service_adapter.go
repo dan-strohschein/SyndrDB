@@ -249,16 +249,25 @@ func (a *BundleServiceAdapter) QueryDocuments(dbName, bundleName string, filter 
 
 	a.logger.Debugf("QueryDocuments: bundle=%s, filter=%+v, found %d documents", bundleName, filter, len(documents))
 
-	// Convert []*models.Document to []map[string]interface{}
+	var schema *models.BundleFieldSchema
+	if bndl != nil {
+		schema = bndl.DocumentStructure.FieldSchema()
+	}
 	result := make([]map[string]interface{}, 0, len(documents))
 	for _, doc := range documents {
 		docMap := make(map[string]interface{})
 		docMap["DocumentID"] = doc.DocumentID
 
-		// Copy all fields from the Fields map
-		// CRITICAL: Extract actual value from FieldValue union using AsInterface()
-		for fieldName, field := range doc.Fields {
-			docMap[fieldName] = field.Value.AsInterface()
+		if doc.Data != nil {
+			for k, v := range doc.Data {
+				docMap[k] = v
+			}
+		} else if schema != nil && len(doc.Values) > 0 {
+			for i, name := range schema.Names {
+				if i < len(doc.Values) {
+					docMap[name] = doc.Values[i].AsInterface()
+				}
+			}
 		}
 
 		result = append(result, docMap)

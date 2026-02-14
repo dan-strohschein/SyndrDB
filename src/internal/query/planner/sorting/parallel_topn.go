@@ -122,7 +122,7 @@ func ParallelTopNHeapSort(
 			defer wg.Done()
 
 			// Run sequential Top-N heapsort on this chunk
-			topN, err := TopNHeapSort(chunk, limit, orderBy, logger)
+			topN, err := TopNHeapSort(chunk, limit, orderBy, logger, nil)
 			results[workerID] = chunkResult{docs: topN, err: err}
 
 			logger.Debugf("ParallelTopNHeapSort: worker %d processed %d documents, found %d top docs",
@@ -155,7 +155,7 @@ func ParallelTopNHeapSort(
 
 	// Run final Top-N heapsort on merged results
 	// This is fast because we're only processing at most (numWorkers * limit) documents
-	finalResult, err := TopNHeapSort(mergeMap, limit, orderBy, logger)
+	finalResult, err := TopNHeapSort(mergeMap, limit, orderBy, logger, nil)
 	if err != nil {
 		return nil, fmt.Errorf("final merge failed: %w", err)
 	}

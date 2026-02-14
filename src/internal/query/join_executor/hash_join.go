@@ -555,19 +555,29 @@ func (hjs *HashJoinStrategy) buildHashTableWithIndex(
 
 	hjs.logger.Debugf("Loaded %d documents using staleness-aware loading", len(loadedDocs))
 
+	buildSchema := buildBundle.FieldSchema()
+
 	// Step 3: Build hash table from loaded documents
 	for _, doc := range loadedDocs {
-		// Extract join key value
 		var keyValue interface{}
 		if strings.EqualFold(buildKey, "documentid") {
 			keyValue = doc.DocumentID
 		} else {
-			field, exists := doc.Fields[buildKey]
+			var fv models.FieldValue
+			var exists bool
+			if buildSchema != nil && len(doc.Values) > 0 {
+				fv, exists = doc.GetFieldValue(buildSchema, buildKey)
+			} else if doc.Data != nil {
+				if v, ok := doc.Data[buildKey]; ok {
+					fv = models.NewInterfaceValue(v)
+					exists = true
+				}
+			}
 			if !exists {
 				hjs.logger.Warnf("Skipping document %s: missing key %s", doc.DocumentID, buildKey)
 				continue
 			}
-			keyValue = field.Value.AsInterface()
+			keyValue = fv.AsInterface()
 		}
 
 		if keyValue == nil {
@@ -647,6 +657,8 @@ func (hjs *HashJoinStrategy) probeHashTable(
 	hjs.logger.Debugf("Probing hash table with bundle %s on key %s (Bloom filter: %v)",
 		probeBundle.GetName(), probeKey, bloom != nil)
 
+	probeSchema := probeBundle.FieldSchema()
+
 	// OPTIMIZATION: Pre-allocate result slice with estimated capacity, but cap to avoid
 	// huge allocations (e.g. 20k*20k*0.1=40M => 320MB) when many concurrent joins run.
 	probeSize := int64(probeBundle.GetTotalDocuments())
@@ -668,7 +680,7 @@ func (hjs *HashJoinStrategy) probeHashTable(
 		if len(chunk) == 0 {
 			return true
 		}
-		probeKeyValues, probeDocsSlice, e := ExtractJoinKeysWithSIMDSlice(chunk, probeKey)
+		probeKeyValues, probeDocsSlice, e := ExtractJoinKeysWithSIMDSlice(chunk, probeKey, probeSchema)
 		if e != nil {
 			extractErr = e
 			return false
@@ -857,19 +869,26 @@ func (hjs *HashJoinStrategy) probeWithIndex(
 
 			stats.DocumentsScanned++
 
-			// Extract the actual key value from the document (for hash table lookup)
-			// Special case: DocumentID field refers to the document's structural ID, not Fields["DocumentID"]
 			var keyValue interface{}
 			if strings.EqualFold(probeKey, "documentid") {
 				keyValue = probeDoc.DocumentID
 			} else {
-				field, exists := probeDoc.Fields[probeKey]
+				probeSchema := probeBundle.FieldSchema()
+				var fv models.FieldValue
+				var exists bool
+				if probeSchema != nil && len(probeDoc.Values) > 0 {
+					fv, exists = probeDoc.GetFieldValue(probeSchema, probeKey)
+				} else if probeDoc.Data != nil {
+					if v, ok := probeDoc.Data[probeKey]; ok {
+						fv = models.NewInterfaceValue(v)
+						exists = true
+					}
+				}
 				if !exists {
 					hjs.logger.Warnf("Document %s missing join key %s", docID, probeKey)
 					continue
 				}
-				// Convert FieldValue to interface{} to match what's stored in hash table from build phase
-				keyValue = field.Value.AsInterface()
+				keyValue = fv.AsInterface()
 			}
 
 			// Step 4: Look up matching documents in hash table
@@ -948,27 +967,29 @@ func (hjs *HashJoinStrategy) createJoinedDocument(
 	return joined
 }
 
-// extractJoinKeysOnce pre-extracts join key values from all documents
-// This eliminates repeated map lookups in the hot comparison loop
-// Returns: (keyValues []interface{}, docsSlice []*models.Document, error)
-// TODO: Consider parallel extraction for large document sets (>10,000 docs) to further improve performance
-func (hjs *HashJoinStrategy) extractJoinKeysOnce(docs map[string]*models.Document, keyName string) ([]interface{}, []*models.Document, error) {
+// extractJoinKeysOnce pre-extracts join key values from all documents (schema + Values or Data).
+// schema may be nil; then doc.Data is used for lookup.
+func (hjs *HashJoinStrategy) extractJoinKeysOnce(docs map[string]*models.Document, keyName string, schema *models.BundleFieldSchema) ([]interface{}, []*models.Document, error) {
 	keyValues := make([]interface{}, 0, len(docs))
 	docsSlice := make([]*models.Document, 0, len(docs))
-
 	for _, doc := range docs {
 		docsSlice = append(docsSlice, doc)
-
-		// Extract key value
-		field, exists := doc.Fields[keyName]
+		var fv models.FieldValue
+		var exists bool
+		if schema != nil && len(doc.Values) > 0 {
+			fv, exists = doc.GetFieldValue(schema, keyName)
+		} else if doc.Data != nil {
+			if v, ok := doc.Data[keyName]; ok {
+				fv = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
-			keyValues = append(keyValues, nil) // Mark as missing
+			keyValues = append(keyValues, nil)
 			continue
 		}
-
-		keyValues = append(keyValues, field.Value)
+		keyValues = append(keyValues, fv.AsInterface())
 	}
-
 	return keyValues, docsSlice, nil
 }
 

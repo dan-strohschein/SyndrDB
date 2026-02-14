@@ -75,7 +75,7 @@ func TestE2E_SimpleInQuery(t *testing.T) {
 	for docID, doc := range *bundle.Documents {
 		docPtr := &doc
 		t.Logf("Doc %s Status field: %+v", docID, doc.Fields["Status"])
-		if EvaluateWhereClause(docPtr, whereGroup, logger) {
+		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -100,7 +100,7 @@ func TestE2E_NotInQuery(t *testing.T) {
 	matchCount := 0
 	for _, doc := range *bundle.Documents {
 		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, logger) {
+		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -133,7 +133,7 @@ func TestE2E_NumericInQuery(t *testing.T) {
 		catField := doc.Fields["CategoryID"]
 		t.Logf("Doc %s CategoryID: Type=%d, IntVal=%d, AsInterface=%v",
 			docID, catField.Value.Type, catField.Value.IntVal, catField.Value.AsInterface())
-		if EvaluateWhereClause(docPtr, whereGroup, logger) {
+		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -158,7 +158,7 @@ func TestE2E_InWithAndCondition(t *testing.T) {
 	matchCount := 0
 	for _, doc := range *bundle.Documents {
 		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, logger) {
+		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -180,7 +180,7 @@ func TestE2E_MultipleInQueries(t *testing.T) {
 	matchCount := 0
 	for _, doc := range *bundle.Documents {
 		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, logger) {
+		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -216,7 +216,7 @@ func TestE2E_SingleValueOptimization(t *testing.T) {
 	matchCount := 0
 	for _, doc := range *bundle.Documents {
 		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, logger) {
+		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -252,7 +252,7 @@ func TestE2E_LargeInList(t *testing.T) {
 	matchCount := 0
 	for _, doc := range *bundle.Documents {
 		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, logger) {
+		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}

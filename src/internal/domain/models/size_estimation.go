@@ -45,30 +45,30 @@ import (
 	"time"
 )
 
-// EstimateDocumentSize calculates the approximate memory footprint of a Document in bytes
-// This is a conservative estimate used for memory limit tracking
-// Returns estimated bytes including all fields, field names, and nested structures
-func EstimateDocumentSize(doc *Document) int64 {
+// EstimateDocumentSize calculates the approximate memory footprint of a Document in bytes.
+// Schema defines the order of doc.Values; if nil, only Values slice and Data are estimated.
+func EstimateDocumentSize(doc *Document, schema *BundleFieldSchema) int64 {
 	if doc == nil {
 		return 0
 	}
 
-	// Base document structure overhead
-	// Includes: DocumentID, Fields map, Data map, CreatedAt, UpdatedAt
-	size := int64(200) // Conservative base overhead estimate
-
-	// DocumentID string
+	size := int64(200)
 	size += int64(len(doc.DocumentID))
 
-	// Fields map
-	if doc.Fields != nil {
-		// Map overhead: ~48 bytes base + ~16 bytes per entry
-		size += 48 + int64(len(doc.Fields))*16
-
-		// Each field: field name + field value
-		for fieldName, field := range doc.Fields {
-			size += int64(len(fieldName))               // Field name
-			size += estimateFieldValueSize(field.Value) // Field value
+	// Values slice: header + element size per slot
+	if doc.Values != nil {
+		size += 24 + int64(cap(doc.Values))*64 // slice header + backing array
+		if schema != nil {
+			for i, name := range schema.Names {
+				size += int64(len(name))
+				if i < len(doc.Values) {
+					size += estimateFieldValueSize(doc.Values[i])
+				}
+			}
+		} else {
+			for _, fv := range doc.Values {
+				size += estimateFieldValueSize(fv)
+			}
 		}
 	}
 
@@ -226,7 +226,7 @@ func EstimateBatchSize(docs []*Document) int64 {
 
 	var totalSize int64
 	for _, doc := range docs {
-		totalSize += EstimateDocumentSize(doc)
+		totalSize += EstimateDocumentSize(doc, nil)
 	}
 
 	return totalSize

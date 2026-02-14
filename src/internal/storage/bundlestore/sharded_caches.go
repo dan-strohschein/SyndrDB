@@ -36,6 +36,8 @@ import (
 	"time"
 
 	"github.com/cespare/xxhash/v2"
+
+	"syndrdb/src/internal/domain/models"
 )
 
 const (
@@ -991,6 +993,98 @@ func (c *ShardedParsedDocsCache) Flush() {
 		shard.mu.Lock()
 		// Replace with empty map
 		shard.cache = make(map[string]*parsedDocsCacheEntry)
+		shard.mu.Unlock()
+	}
+}
+
+// ============================================================================
+// ShardedMergedBundleCache - Merge-once, serve many pages (multi-file LoadDocumentPage)
+// ============================================================================
+//
+// Caches the result of merging all segment files + sorting all doc IDs per bundle.
+// Key: "bundleName:databaseName". Value: merged map + sorted doc ID slice.
+// One merge+sort per bundle; subsequent page loads extract by slice (O(pageSize)).
+// Invalidated on bundle write/compaction via DeleteByPrefix(bundleName + ":").
+
+// mergedBundleCacheEntry holds the full merged view for a bundle (read-only after creation).
+type mergedBundleCacheEntry struct {
+	// Documents is the merged map (last-write-wins across segment files).
+	Documents   map[string]models.Document
+	SortedDocIDs []string
+}
+
+type mergedBundleCacheShard struct {
+	mu    sync.RWMutex
+	cache map[string]*mergedBundleCacheEntry
+}
+
+// ShardedMergedBundleCache provides concurrent access to merged bundle views.
+type ShardedMergedBundleCache struct {
+	shards [CacheShardCount]mergedBundleCacheShard
+}
+
+// NewShardedMergedBundleCache creates a new sharded merged-bundle cache.
+func NewShardedMergedBundleCache() *ShardedMergedBundleCache {
+	c := &ShardedMergedBundleCache{}
+	for i := range c.shards {
+		c.shards[i].cache = make(map[string]*mergedBundleCacheEntry)
+	}
+	return c
+}
+
+func (c *ShardedMergedBundleCache) shardIndex(key string) uint64 {
+	return xxhash.Sum64String(key) & (CacheShardCount - 1)
+}
+
+// Get returns the cached merged view for the bundle, or nil if not found.
+func (c *ShardedMergedBundleCache) Get(key string) *mergedBundleCacheEntry {
+	idx := c.shardIndex(key)
+	shard := &c.shards[idx]
+	shard.mu.RLock()
+	entry := shard.cache[key]
+	shard.mu.RUnlock()
+	return entry
+}
+
+// Set stores the merged view for the bundle.
+func (c *ShardedMergedBundleCache) Set(key string, entry *mergedBundleCacheEntry) {
+	idx := c.shardIndex(key)
+	shard := &c.shards[idx]
+	shard.mu.Lock()
+	shard.cache[key] = entry
+	shard.mu.Unlock()
+}
+
+// Delete removes the cached merged view for the given key.
+func (c *ShardedMergedBundleCache) Delete(key string) {
+	idx := c.shardIndex(key)
+	shard := &c.shards[idx]
+	shard.mu.Lock()
+	delete(shard.cache, key)
+	shard.mu.Unlock()
+}
+
+// DeleteByPrefix removes all entries with keys starting with the given prefix.
+// Used to invalidate all cached merged views for a bundle (all databases).
+func (c *ShardedMergedBundleCache) DeleteByPrefix(prefix string) {
+	for i := range c.shards {
+		shard := &c.shards[i]
+		shard.mu.Lock()
+		for k := range shard.cache {
+			if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+				delete(shard.cache, k)
+			}
+		}
+		shard.mu.Unlock()
+	}
+}
+
+// Flush clears all entries (e.g. FlushAllDocumentCaches).
+func (c *ShardedMergedBundleCache) Flush() {
+	for i := range c.shards {
+		shard := &c.shards[i]
+		shard.mu.Lock()
+		shard.cache = make(map[string]*mergedBundleCacheEntry)
 		shard.mu.Unlock()
 	}
 }

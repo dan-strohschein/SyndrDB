@@ -80,24 +80,21 @@ func RadixSort(
 	fieldName string,
 	ascending bool,
 	logger *zap.SugaredLogger,
+	schema *models.BundleFieldSchema,
 ) ([]*models.Document, error) {
 	if len(documents) == 0 {
 		return []*models.Document{}, nil
 	}
 
-	// Convert map to slice and extract sort keys
 	keys := make([]RadixSortKey, 0, len(documents))
 	for _, doc := range documents {
-		field, exists := doc.Fields[fieldName]
+		fv, exists := GetFieldValueForSort(doc, fieldName, schema)
 		if !exists {
-			// TODO: I could add configurable NULL handling - include at start/end,
-			// skip, or raise error based on NULLS FIRST/LAST semantics
 			continue
 		}
 
-		// Extract integer value
 		var intValue int64
-		switch v := field.Value.AsInterface().(type) { // ✅ Use AsInterface()
+		switch v := fv.AsInterface().(type) {
 		case int:
 			intValue = int64(v)
 		case int32:

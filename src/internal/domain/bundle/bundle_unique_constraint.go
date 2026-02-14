@@ -508,12 +508,12 @@ func createBTreeIndexForUniqueField(s *BundleService, bundle *models.Bundle, ind
 
 	if len(allDocuments) > 0 {
 		s.logger.Debugf("Populating unique B-tree index with %d existing documents", len(allDocuments))
-
+		schema := bundle.DocumentStructure.FieldSchema()
 		insertedCount := 0
 		skippedCount := 0
 		for documentID, document := range allDocuments {
 			// Extract field value for indexing
-			fieldValue, err := extractFieldValueForIndex(*document, fieldDef.Name)
+			fieldValue, err := extractFieldValueForIndex(*document, fieldDef.Name, schema)
 			if err != nil {
 				s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, err)
 				continue

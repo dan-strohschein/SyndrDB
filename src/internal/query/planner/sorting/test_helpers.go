@@ -39,16 +39,14 @@ Main Functions:
 func createTestDocuments(count int, fieldName string) map[string]*models.Document {
 	docs := make(map[string]*models.Document, count)
 
+	schema := models.NewProjectionSchema([]string{fieldName})
 	for i := 0; i < count; i++ {
 		doc := &models.Document{
 			DocumentID: uuid.New().String(),
-			Fields: map[string]models.Field{
-				fieldName: {
-					Name:  fieldName,
-					Value: models.NewIntValue(int64(i)), // ✅ Use NewIntValue
-				},
-			},
+			Values:     make([]models.FieldValue, len(schema.Names)),
 		}
+		doc.Values[0] = models.NewStringValue(doc.DocumentID)
+		doc.Values[1] = models.NewIntValue(int64(i))
 		docs[doc.DocumentID] = doc
 	}
 
@@ -87,20 +85,23 @@ func createTestDocumentsWithValues(
 
 	docs := make(map[string]*models.Document, count)
 
+	fieldNames := make([]string, 0, len(values))
+	for fn := range values {
+		fieldNames = append(fieldNames, fn)
+	}
+	projSchema := models.NewProjectionSchema(fieldNames)
 	for i := 0; i < count; i++ {
 		doc := &models.Document{
 			DocumentID: uuid.New().String(),
-			Fields:     make(map[string]models.Field),
+			Values:     make([]models.FieldValue, len(projSchema.Names)),
 		}
-
-		// Populate all fields for this document
-		for fieldName, vals := range values {
-			doc.Fields[fieldName] = models.Field{
-				Name:  fieldName,
-				Value: models.NewInterfaceValue(vals[i]), // ✅ Use NewInterfaceValue
+		for j, name := range projSchema.Names {
+			if name == "DocumentID" {
+				doc.Values[j] = models.NewStringValue(doc.DocumentID)
+			} else if vals, ok := values[name]; ok && i < len(vals) {
+				doc.Values[j] = models.NewInterfaceValue(vals[i])
 			}
 		}
-
 		docs[doc.DocumentID] = doc
 	}
 
@@ -129,16 +130,14 @@ func createTestDocumentsWithStrings(
 ) map[string]*models.Document {
 	docs := make(map[string]*models.Document, count)
 
+	schema := models.NewProjectionSchema([]string{fieldName})
 	for i := 0; i < count; i++ {
 		doc := &models.Document{
 			DocumentID: uuid.New().String(),
-			Fields: map[string]models.Field{
-				fieldName: {
-					Name:  fieldName,
-					Value: models.NewStringValue(fmt.Sprintf("%s%03d", prefix, i)), // ✅ Use NewStringValue
-				},
-			},
+			Values:     make([]models.FieldValue, len(schema.Names)),
 		}
+		doc.Values[0] = models.NewStringValue(doc.DocumentID)
+		doc.Values[1] = models.NewStringValue(fmt.Sprintf("%s%03d", prefix, i))
 		docs[doc.DocumentID] = doc
 	}
 

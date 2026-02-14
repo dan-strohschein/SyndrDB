@@ -13,13 +13,22 @@ func TestDirtyPageTrackerBasic(t *testing.T) {
 	tracker := NewDirtyPageTracker(config)
 	defer tracker.Close()
 
+	schema := models.NewProjectionSchema(nil)
 	doc := &models.Document{
 		DocumentID: "test-doc-1",
-		Fields:     make(map[string]models.Field),
+		Values:     []models.FieldValue{models.NewStringValue("test-doc-1")},
+	}
+	if len(schema.Names) != len(doc.Values) {
+		doc.Values = make([]models.FieldValue, len(schema.Names))
+		for i, n := range schema.Names {
+			if n == "DocumentID" {
+				doc.Values[i] = models.NewStringValue(doc.DocumentID)
+			}
+		}
 	}
 
-	// Mark a page dirty
-	shouldFlush := tracker.MarkDirty("test-bundle", 1, doc, 100)
+	// Mark a page dirty (schema required for flush)
+	shouldFlush := tracker.MarkDirty("test-bundle", 1, doc, 100, schema)
 
 	if shouldFlush {
 		t.Error("Should not flush after single document")
@@ -66,7 +75,7 @@ func TestDirtyPageTrackerThreshold(t *testing.T) {
 	// Add documents until threshold
 	for i := 0; i < 4; i++ {
 		doc := &models.Document{DocumentID: "doc-" + string(rune('a'+i))}
-		shouldFlush := tracker.MarkDirty("bundle", 1, doc, 100)
+		shouldFlush := tracker.MarkDirty("bundle", 1, doc, 100, nil)
 		if shouldFlush {
 			t.Errorf("Should not flush at %d documents", i+1)
 		}
@@ -74,7 +83,7 @@ func TestDirtyPageTrackerThreshold(t *testing.T) {
 
 	// 5th document should trigger flush
 	doc := &models.Document{DocumentID: "doc-e"}
-	shouldFlush := tracker.MarkDirty("bundle", 1, doc, 100)
+	shouldFlush := tracker.MarkDirty("bundle", 1, doc, 100, nil)
 	if !shouldFlush {
 		t.Error("Should flush after reaching threshold")
 	}
@@ -94,13 +103,13 @@ func TestDirtyPageTrackerBytesThreshold(t *testing.T) {
 	doc := &models.Document{DocumentID: "doc-1"}
 
 	// First write under threshold
-	shouldFlush := tracker.MarkDirty("bundle", 1, doc, 200)
+	shouldFlush := tracker.MarkDirty("bundle", 1, doc, 200, nil)
 	if shouldFlush {
 		t.Error("Should not flush under byte threshold")
 	}
 
 	// Second write pushes over threshold
-	shouldFlush = tracker.MarkDirty("bundle", 1, doc, 400)
+	shouldFlush = tracker.MarkDirty("bundle", 1, doc, 400, nil)
 	if !shouldFlush {
 		t.Error("Should flush after exceeding byte threshold")
 	}
@@ -116,8 +125,8 @@ func TestDirtyPageTrackerPageKeyNoCollision(t *testing.T) {
 	docA := &models.Document{DocumentID: "doc-bundle-a"}
 	docB := &models.Document{DocumentID: "doc-bundle-b"}
 
-	tracker.MarkDirty("bundle-a", samePageID, docA, 100)
-	tracker.MarkDirty("bundle-b", samePageID, docB, 100)
+	tracker.MarkDirty("bundle-a", samePageID, docA, 100, nil)
+	tracker.MarkDirty("bundle-b", samePageID, docB, 100, nil)
 
 	var nameA, nameB string
 	var docIDA, docIDB string
@@ -162,7 +171,7 @@ func TestDirtyPageTrackerMultipleBundles(t *testing.T) {
 	for _, bundle := range bundles {
 		for page := uint32(0); page < uint32(pagesPerBundle); page++ {
 			doc := &models.Document{DocumentID: "doc"}
-			tracker.MarkDirty(bundle, page, doc, 100)
+			tracker.MarkDirty(bundle, page, doc, 100, nil)
 		}
 	}
 
@@ -193,7 +202,7 @@ func TestDirtyPageTrackerEnqueueFlush(t *testing.T) {
 	defer tracker.Close()
 
 	doc := &models.Document{DocumentID: "doc-1"}
-	tracker.MarkDirty("test-bundle", 5, doc, 100)
+	tracker.MarkDirty("test-bundle", 5, doc, 100, nil)
 
 	// Enqueue for flush
 	enqueued := tracker.EnqueueForFlush("test-bundle", 5)
@@ -239,7 +248,7 @@ func TestDirtyPageTrackerConcurrent(t *testing.T) {
 
 			for i := 0; i < docsPerGoroutine; i++ {
 				doc := &models.Document{DocumentID: "doc"}
-				tracker.MarkDirty(bundle, pageID, doc, 50)
+				tracker.MarkDirty(bundle, pageID, doc, 50, nil)
 			}
 		}(g)
 	}
@@ -303,7 +312,7 @@ func TestDirtyPageTrackerEnqueueDecrementsCount(t *testing.T) {
 
 	doc := &models.Document{DocumentID: "doc"}
 	for i := uint32(0); i < 5; i++ {
-		tracker.MarkDirty("bundle", i, doc, 100)
+		tracker.MarkDirty("bundle", i, doc, 100, nil)
 	}
 	if n := tracker.GetStats().DirtyPageCount; n != 5 {
 		t.Errorf("expected 5 dirty pages, got %d", n)
@@ -337,7 +346,7 @@ func TestDirtyPageTrackerConcurrentMarkAndEnqueue(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 10; i++ {
 				doc := &models.Document{DocumentID: "doc"}
-				tracker.MarkDirty("bundle", 1, doc, 100)
+				tracker.MarkDirty("bundle", 1, doc, 100, nil)
 			}
 		}()
 		go func() {
@@ -360,7 +369,7 @@ func TestDirtyPageTrackerClearPageTotalDocsPending(t *testing.T) {
 	defer tracker.Close()
 
 	for i := 0; i < 3; i++ {
-		tracker.MarkDirty("bundle", 1, &models.Document{DocumentID: "doc"}, 100)
+		tracker.MarkDirty("bundle", 1, &models.Document{DocumentID: "doc"}, 100, nil)
 	}
 	if n := tracker.GetStats().PendingDocs; n != 3 {
 		t.Errorf("expected 3 pending docs, got %d", n)
@@ -381,15 +390,16 @@ func BenchmarkDirtyPageTrackerMarkDirty(b *testing.B) {
 	tracker := NewDirtyPageTracker(DefaultDirtyPageTrackerConfig)
 	defer tracker.Close()
 
+	schema := models.NewProjectionSchema(nil)
 	doc := &models.Document{
 		DocumentID: "bench-doc",
-		Fields:     make(map[string]models.Field),
+		Values:     []models.FieldValue{models.NewStringValue("bench-doc")},
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		pageID := uint32(i % 100)
-		tracker.MarkDirty("bench-bundle", pageID, doc, 100)
+		tracker.MarkDirty("bench-bundle", pageID, doc, 100, nil)
 	}
 }
 
@@ -398,9 +408,10 @@ func BenchmarkDirtyPageTrackerConcurrent(b *testing.B) {
 	tracker := NewDirtyPageTracker(DefaultDirtyPageTrackerConfig)
 	defer tracker.Close()
 
+	schema := models.NewProjectionSchema(nil)
 	doc := &models.Document{
 		DocumentID: "bench-doc",
-		Fields:     make(map[string]models.Field),
+		Values:     []models.FieldValue{models.NewStringValue("bench-doc")},
 	}
 
 	b.ResetTimer()
@@ -408,7 +419,7 @@ func BenchmarkDirtyPageTrackerConcurrent(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			pageID := uint32(i % 100)
-			tracker.MarkDirty("bench-bundle", pageID, doc, 100)
+			tracker.MarkDirty("bench-bundle", pageID, doc, 100, nil)
 			i++
 		}
 	})

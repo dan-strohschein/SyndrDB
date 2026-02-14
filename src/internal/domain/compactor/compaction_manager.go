@@ -972,13 +972,18 @@ func (cm *CompactionManager) parseBundleDocuments(filePath string) (map[string][
 				continue
 			}
 
-			// Convert to Document struct (Fields only; Data left nil)
+			// Convert to Document struct (Values from schema-ordered format; Data for legacy)
 			doc := models.Document{}
 			if docID, ok := docMap["DocumentID"].(string); ok {
 				doc.DocumentID = docID
 			}
-			if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
-				doc.Fields = fields
+			if values, ok := docMap["Values"].([]models.FieldValue); ok {
+				doc.Values = values
+			} else if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
+				doc.Data = make(map[string]interface{})
+				for k, f := range fields {
+					doc.Data[k] = f.Value.AsInterface()
+				}
 			}
 			if createdAt, ok := docMap["CreatedAt"].(time.Time); ok {
 				doc.CreatedAt = createdAt
@@ -1070,10 +1075,10 @@ func (cm *CompactionManager) isTombstoneDocument(wrapper *bundleDocumentWrapper)
 //
 // TODO: Add document compression option for large payloads
 func (cm *CompactionManager) writeBundleDocument(file *os.File, doc *models.Document) (int, error) {
-	// Serialize document using fast binary format
+	// Serialize document using fast binary format (Option B: Values in schema order)
 	docMap := map[string]interface{}{
 		"DocumentID": doc.DocumentID,
-		"Fields":     doc.Fields,
+		"Values":     doc.Values,
 		"CreatedAt":  doc.CreatedAt,
 		"UpdatedAt":  doc.UpdatedAt,
 	}

@@ -44,20 +44,25 @@ func (cs *CatalogService) AddDatabaseToCatalog(db *models.Database) error {
 		return fmt.Errorf("failed to get primary.Databases bundle: %w", err)
 	}
 
-	// Generate document ID using fast UUID
 	docID := helpers.GenerateFastUUID()
-
-	// Create a document for this database in the Databases catalog
+	schema := databasesBundle.DocumentStructure.FieldSchema()
 	catalogDoc := models.Document{
 		DocumentID: docID,
-		Fields: map[string]models.Field{
-			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(docID)},
-			"DatabaseID": {Name: "DatabaseID", Value: models.NewStringValue(db.DatabaseID)},
-			"Name":       {Name: "Name", Value: models.NewStringValue(db.Name)},
-			"FilePath":   {Name: "FilePath", Value: models.NewStringValue(db.DataDirectory)},
-		},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Values:     make([]models.FieldValue, len(schema.Names)),
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	for name, idx := range schema.NameToIndex {
+		switch name {
+		case "DocumentID":
+			catalogDoc.Values[idx] = models.NewStringValue(docID)
+		case "DatabaseID":
+			catalogDoc.Values[idx] = models.NewStringValue(db.DatabaseID)
+		case "Name":
+			catalogDoc.Values[idx] = models.NewStringValue(db.Name)
+		case "FilePath":
+			catalogDoc.Values[idx] = models.NewStringValue(db.DataDirectory)
+		}
 	}
 
 	// Add the document to the Databases bundle using the service method
@@ -92,18 +97,19 @@ func (cs *CatalogService) RemoveDatabaseFromCatalog(databaseID string) error {
 	var databaseName string
 	// TODO: I need to iterate through documents using page cache via BundleService.GetDocumentPage()
 	// For now, we scan through all document IDs and load each document
+	dbSchema := databasesBundle.DocumentStructure.FieldSchema()
 	dbDocIDs := databasesBundle.SortedIndex.GetAllDocumentIDs()
 	for _, docID := range dbDocIDs {
 		doc, err := cs.bundleService.GetDocument(databasesBundle.Name, cs.databaseService.Databases["primary"].Name, docID)
 		if err != nil {
 			continue
 		}
-		// Access the DatabaseID field from the Document struct
-		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
-			if dbID, ok := dbIDField.Value.AsString(); ok && dbID == databaseID {
+		fv, exists := doc.GetFieldValue(dbSchema, "DatabaseID")
+		if exists {
+			if dbID, ok := fv.AsString(); ok && dbID == databaseID {
 				docIDToRemove = docID
-				if nameField, exists := doc.Fields["Name"]; exists {
-					if name, ok := nameField.Value.AsString(); ok {
+				if nv, ex := doc.GetFieldValue(dbSchema, "Name"); ex {
+					if name, ok := nv.AsString(); ok {
 						databaseName = name
 					}
 				}
@@ -149,23 +155,31 @@ func (cs *CatalogService) RegisterBundleInCatalog(bundle *models.Bundle) error {
 		return fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
 	}
 
-	// Generate document ID using fast UUID
 	docID := helpers.GenerateFastUUID()
-
-	// Create a document for this bundle in the Bundles catalog
+	bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
 	catalogDoc := models.Document{
 		DocumentID: docID,
-		Fields: map[string]models.Field{
-			"DocumentID":   {Name: "DocumentID", Value: models.NewStringValue(docID)},
-			"BundleID":     {Name: "BundleID", Value: models.NewStringValue(bundle.BundleID)},
-			"Name":         {Name: "Name", Value: models.NewStringValue(bundle.Name)},
-			"DatabaseID":   {Name: "DatabaseID", Value: models.NewStringValue(bundle.Database.DatabaseID)},
-			"DatabaseName": {Name: "DatabaseName", Value: models.NewStringValue(bundle.Database.Name)}, // This doesn't actually exist on the bundle struct but we can get it from the Database reference
-			"FieldCount":   {Name: "FieldCount", Value: models.NewIntValue(int64(len(bundle.DocumentStructure.FieldDefinitions)))},
-			"FilePath":     {Name: "FilePath", Value: models.NewStringValue(fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))},
-		},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		Values:     make([]models.FieldValue, len(bundlesSchema.Names)),
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	for name, idx := range bundlesSchema.NameToIndex {
+		switch name {
+		case "DocumentID":
+			catalogDoc.Values[idx] = models.NewStringValue(docID)
+		case "BundleID":
+			catalogDoc.Values[idx] = models.NewStringValue(bundle.BundleID)
+		case "Name":
+			catalogDoc.Values[idx] = models.NewStringValue(bundle.Name)
+		case "DatabaseID":
+			catalogDoc.Values[idx] = models.NewStringValue(bundle.Database.DatabaseID)
+		case "DatabaseName":
+			catalogDoc.Values[idx] = models.NewStringValue(bundle.Database.Name)
+		case "FieldCount":
+			catalogDoc.Values[idx] = models.NewIntValue(int64(len(bundle.DocumentStructure.FieldDefinitions)))
+		case "FilePath":
+			catalogDoc.Values[idx] = models.NewStringValue(fmt.Sprintf("%s_%s.bnd", bundle.Database.Name, bundle.Name))
+		}
 	}
 
 	// Add the document to the Bundles bundle using the service method
@@ -210,46 +224,50 @@ func (cs *CatalogService) UpdateBundleNameInCatalog(bundleID, databaseName, oldN
 		return fmt.Errorf("failed to get primary.Bundles bundle: %w", err)
 	}
 
-	// Load all documents from the catalog using page-based loading
 	docs, err := cs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
 	if err != nil {
 		return fmt.Errorf("failed to load catalog documents: %w", err)
 	}
 
-	// Find the document for this bundle by BundleID
-	var targetDoc *models.Document
-	for _, doc := range docs {
-		if bundleIDField, exists := doc.Fields["BundleID"]; exists {
-			if bID, ok := bundleIDField.Value.AsString(); ok && bID == bundleID {
-				targetDoc = doc
+	bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
+	var targetIdx int
+	found := false
+	for i, doc := range docs {
+		fv, exists := doc.GetFieldValue(bundlesSchema, "BundleID")
+		if exists {
+			if bID, ok := fv.AsString(); ok && bID == bundleID {
+				targetIdx = i
+				found = true
 				break
 			}
 		}
+	}
+	var targetDoc *models.Document
+	if found {
+		targetDoc = docs[targetIdx]
 	}
 
 	if targetDoc == nil {
 		return fmt.Errorf("bundle with ID '%s' not found in catalog", bundleID)
 	}
 
-	// Verify the old name matches (validation check)
-	if nameField, exists := targetDoc.Fields["Name"]; exists {
-		if currentName, ok := nameField.Value.AsString(); ok && currentName != oldName {
+	if nv, exists := targetDoc.GetFieldValue(bundlesSchema, "Name"); exists {
+		if currentName, ok := nv.AsString(); ok && currentName != oldName {
 			cs.logger.Warnf("Catalog name mismatch: expected '%s' but found '%s' (proceeding with update)", oldName, currentName)
 		}
 	}
 
-	// Update the Name field
-	targetDoc.Fields["Name"] = models.Field{
-		Name:  "Name",
-		Value: models.NewStringValue(newName),
+	// Update Name and FilePath by index (copy Values so we don't mutate shared slice)
+	newValues := make([]models.FieldValue, len(targetDoc.Values))
+	copy(newValues, targetDoc.Values)
+	if i, ok := bundlesSchema.NameToIndex["Name"]; ok && i < len(newValues) {
+		newValues[i] = models.NewStringValue(newName)
 	}
-
-	// Update the FilePath field (format: <databaseName>_<bundleName>.bnd)
 	newFilePath := fmt.Sprintf("%s_%s.bnd", databaseName, newName)
-	targetDoc.Fields["FilePath"] = models.Field{
-		Name:  "FilePath",
-		Value: models.NewStringValue(newFilePath),
+	if i, ok := bundlesSchema.NameToIndex["FilePath"]; ok && i < len(newValues) {
+		newValues[i] = models.NewStringValue(newFilePath)
 	}
+	targetDoc.Values = newValues
 
 	// Update the timestamp
 	targetDoc.UpdatedAt = time.Now()
@@ -304,18 +322,18 @@ func (cs *CatalogService) UpdateDatabaseNameInCatalog(databaseID, oldName, newNa
 		return fmt.Errorf("failed to get primary.Databases bundle: %w", err)
 	}
 
-	// Load all documents from the catalog using page-based loading
 	docs, err := cs.bundleService.LoadCatalogBundleDocuments(databasesBundle.Name)
 	if err != nil {
 		return fmt.Errorf("failed to load catalog documents: %w", err)
 	}
 
-	// Find the document for this database by DatabaseID
+	dbSchema := databasesBundle.DocumentStructure.FieldSchema()
 	var targetDoc *models.Document
-	for _, doc := range docs {
-		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
-			if dbID, ok := dbIDField.Value.AsString(); ok && dbID == databaseID {
-				targetDoc = doc
+	for i := range docs {
+		fv, exists := docs[i].GetFieldValue(dbSchema, "DatabaseID")
+		if exists {
+			if dbID, ok := fv.AsString(); ok && dbID == databaseID {
+				targetDoc = docs[i]
 				break
 			}
 		}
@@ -325,25 +343,22 @@ func (cs *CatalogService) UpdateDatabaseNameInCatalog(databaseID, oldName, newNa
 		return fmt.Errorf("database with ID '%s' not found in catalog", databaseID)
 	}
 
-	// Verify the old name matches (validation check)
-	if nameField, exists := targetDoc.Fields["Name"]; exists {
-		if currentName, ok := nameField.Value.AsString(); ok && !strings.EqualFold(currentName, oldName) {
+	if nv, exists := targetDoc.GetFieldValue(dbSchema, "Name"); exists {
+		if currentName, ok := nv.AsString(); ok && !strings.EqualFold(currentName, oldName) {
 			cs.logger.Warnf("Catalog name mismatch: expected '%s' but found '%s' (proceeding with update)", oldName, currentName)
 		}
 	}
 
-	// Update the Name field
-	targetDoc.Fields["Name"] = models.Field{
-		Name:  "Name",
-		Value: models.NewStringValue(newName),
-	}
-
-	// Update the FilePath field (now points to new database directory)
 	newFilePath := filepath.Join(cs.databaseService.Settings.DataDir, newName)
-	targetDoc.Fields["FilePath"] = models.Field{
-		Name:  "FilePath",
-		Value: models.NewStringValue(newFilePath),
+	newValues := make([]models.FieldValue, len(targetDoc.Values))
+	copy(newValues, targetDoc.Values)
+	if i, ok := dbSchema.NameToIndex["Name"]; ok && i < len(newValues) {
+		newValues[i] = models.NewStringValue(newName)
 	}
+	if i, ok := dbSchema.NameToIndex["FilePath"]; ok && i < len(newValues) {
+		newValues[i] = models.NewStringValue(newFilePath)
+	}
+	targetDoc.Values = newValues
 
 	// Update the timestamp
 	targetDoc.UpdatedAt = time.Now()
@@ -388,11 +403,13 @@ func (cs *CatalogService) UnRegisterBundleInCatalog(bundleID, bundleName, databa
 	if err != nil {
 		return fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
 	}
+	bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
 	docIDs := make([]string, 0)
 	for _, doc := range docs {
-		if name, okN := doc.Fields["Name"].Value.AsString(); okN {
-			if dbID, okD := doc.Fields["DatabaseID"].Value.AsString(); okD && name == bundleName && dbID == databaseID {
-				// Create a delete command for the bundle using BundleID as the where clause
+		nv, _ := doc.GetFieldValue(bundlesSchema, "Name")
+		dv, _ := doc.GetFieldValue(bundlesSchema, "DatabaseID")
+		if name, okN := nv.AsString(); okN {
+			if dbID, okD := dv.AsString(); okD && name == bundleName && dbID == databaseID {
 				docIDs = append(docIDs, doc.DocumentID)
 			}
 		}
@@ -435,15 +452,12 @@ func (cs *CatalogService) GetDatabaseFromCatalog(databaseID string) (*models.Doc
 		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", databasesBundle.Name, err)
 	}
 
-	// Find the document for this database
-
-	for _, doc := range docs {
-		// Access the DatabaseID field from the Document struct
-		if dbIDField, exists := doc.Fields["DatabaseID"]; exists {
-			if dbID, ok := dbIDField.Value.AsString(); ok && dbID == databaseID {
-				// Convert document to map for return
-
-				return doc, nil
+	dbSchema := databasesBundle.DocumentStructure.FieldSchema()
+	for i := range docs {
+		fv, exists := docs[i].GetFieldValue(dbSchema, "DatabaseID")
+		if exists {
+			if dbID, ok := fv.AsString(); ok && dbID == databaseID {
+				return docs[i], nil
 			}
 		}
 	}
@@ -451,7 +465,7 @@ func (cs *CatalogService) GetDatabaseFromCatalog(databaseID string) (*models.Doc
 	return nil, fmt.Errorf("database with ID '%s' not found in catalog", databaseID)
 }
 
-// GetDatabaseFromCatalog retrieves a database document from the catalog by DatabaseID
+// GetDatabaseFromCatalogByName retrieves a database document from the catalog by name
 func (cs *CatalogService) GetDatabaseFromCatalogByName(databaseName string) (*models.Document, error) {
 	// Get the primary database
 	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
@@ -470,15 +484,12 @@ func (cs *CatalogService) GetDatabaseFromCatalogByName(databaseName string) (*mo
 		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", databasesBundle.Name, err)
 	}
 
-	// Find the document for this database
-
-	for _, doc := range docs {
-		// Access the DatabaseID field from the Document struct
-		if dbIDField, exists := doc.Fields["Name"]; exists {
-			if dbName, ok := dbIDField.Value.AsString(); ok && strings.EqualFold(dbName, databaseName) {
-				// Found it!
-
-				return doc, nil
+	dbSchema := databasesBundle.DocumentStructure.FieldSchema()
+	for i := range docs {
+		fv, exists := docs[i].GetFieldValue(dbSchema, "Name")
+		if exists {
+			if dbName, ok := fv.AsString(); ok && strings.EqualFold(dbName, databaseName) {
+				return docs[i], nil
 			}
 		}
 	}
@@ -506,19 +517,18 @@ func (cs *CatalogService) ListAllDatabasesInCatalog() ([]map[string]interface{},
 		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", databasesBundle.Name, err)
 	}
 
+	dbSchema := databasesBundle.DocumentStructure.FieldSchema()
 	var databases []map[string]interface{}
 	for _, doc := range docs {
-		// Convert document to map
 		docMap := make(map[string]interface{})
 		docMap["DocumentID"] = doc.DocumentID
 		docMap["CreatedAt"] = doc.CreatedAt
 		docMap["UpdatedAt"] = doc.UpdatedAt
-
-		// Add all fields to the result
-		for fieldName, field := range doc.Fields {
-			docMap[fieldName] = field.Value
+		for i, name := range dbSchema.Names {
+			if i < len(doc.Values) {
+				docMap[name] = doc.Values[i].AsInterface()
+			}
 		}
-
 		databases = append(databases, docMap)
 	}
 
@@ -564,16 +574,16 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 		return fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
 	}
 
-	// Find the document for this bundle
+	bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
 	var docIDToRemove string
 	var bundleName string
 	for _, doc := range docs {
-		// Access the BundleID field from the Document struct
-		if bundleIDField, exists := doc.Fields["BundleID"]; exists {
-			if bID, ok := bundleIDField.Value.AsString(); ok && bID == bundleID {
+		fv, exists := doc.GetFieldValue(bundlesSchema, "BundleID")
+		if exists {
+			if bID, ok := fv.AsString(); ok && bID == bundleID {
 				docIDToRemove = doc.DocumentID
-				if nameField, exists := doc.Fields["Name"]; exists {
-					if name, ok := nameField.Value.AsString(); ok {
+				if nv, ex := doc.GetFieldValue(bundlesSchema, "Name"); ex {
+					if name, ok := nv.AsString(); ok {
 						bundleName = name
 					}
 				}
@@ -583,7 +593,6 @@ func (cs *CatalogService) RemoveBundleFromCatalog(bundleID string) error {
 	}
 
 	if docIDToRemove != "" {
-		// Create a delete command for the document using DocumentID as the where clause
 		deleteCommand := &models.DocumentDeleteCommand{
 			BundleName:  "Bundles",
 			WhereClause: fmt.Sprintf("DocumentID='%s'", docIDToRemove),
@@ -625,32 +634,33 @@ func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (map[string]inte
 		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
 	}
 
-	// Find the document for this bundle
-
+	bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-		// Access the BundleID field from the Document struct
-		if bundleIDField, exists := doc.Fields["BundleID"]; exists {
-			if bID, ok := bundleIDField.Value.AsString(); ok && bID == bundleID {
-				name, _ := doc.Fields["Name"].Value.AsString()
+		fv, exists := doc.GetFieldValue(bundlesSchema, "BundleID")
+		if exists {
+			if bID, ok := fv.AsString(); ok && bID == bundleID {
+				nv, _ := doc.GetFieldValue(bundlesSchema, "Name")
+				name, _ := nv.AsString()
 				actualBundle, err1 := cs.bundleService.GetBundleByName(primaryDB, name)
 				if err1 != nil {
 					return nil, fmt.Errorf("failed to get bundle Metadata from Catalog by name '%s': %w", name, err1)
 				}
-				// Convert document to map for return
 				result := make(map[string]interface{})
 				result["BundleMetadata"] = actualBundle
 				result["CreatedAt"] = doc.CreatedAt
 				result["UpdatedAt"] = doc.UpdatedAt
-				result["DatabaseName"] = doc.Fields["DatabaseName"].Value
-				result["DatabaseID"] = doc.Fields["DatabaseID"].Value
-				result["FieldCount"] = doc.Fields["FieldCount"].Value
-				result["FilePath"] = doc.Fields["FilePath"].Value
-
-				// // Add all fields to the result
-				// for fieldName, field := range doc.Fields {
-				// 	result[fieldName] = field.Value
-				// }
-
+				if v, ok := doc.GetFieldValue(bundlesSchema, "DatabaseName"); ok {
+					result["DatabaseName"] = v.AsInterface()
+				}
+				if v, ok := doc.GetFieldValue(bundlesSchema, "DatabaseID"); ok {
+					result["DatabaseID"] = v.AsInterface()
+				}
+				if v, ok := doc.GetFieldValue(bundlesSchema, "FieldCount"); ok {
+					result["FieldCount"] = v.AsInterface()
+				}
+				if v, ok := doc.GetFieldValue(bundlesSchema, "FilePath"); ok {
+					result["FilePath"] = v.AsInterface()
+				}
 				return result, nil
 			}
 		}
@@ -659,7 +669,7 @@ func (cs *CatalogService) GetBundleFromCatalog(bundleID string) (map[string]inte
 	return nil, fmt.Errorf("bundle with ID '%s' not found in catalog", bundleID)
 }
 
-// GetBundleFromCatalog retrieves a bundle document from the catalog by BundleID
+// GetBundlesFromCatalogByDatabaseName returns all bundles in the catalog for a given database name
 func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName string) (*[]map[string]interface{}, error) {
 	// Get the primary database
 	primaryDB, err := cs.databaseService.GetDatabaseByName("primary")
@@ -687,13 +697,13 @@ func (cs *CatalogService) GetBundlesFromCatalogByDatabaseName(databaseName strin
 	results := make([]map[string]interface{}, 0)
 	// Find the document for this bundle
 
+	bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-
-		// Access the DatabaseName field from the Document struct
-		if databaseNameField, exists := doc.Fields["DatabaseName"]; exists {
-			if dbName, ok := databaseNameField.Value.AsString(); ok && dbName == databaseName {
-				// Add doc to slice for return
-				name, _ := doc.Fields["Name"].Value.AsString()
+		dv, exists := doc.GetFieldValue(bundlesSchema, "DatabaseName")
+		if exists {
+			if dbName, ok := dv.AsString(); ok && dbName == databaseName {
+				nv, _ := doc.GetFieldValue(bundlesSchema, "Name")
+				name, _ := nv.AsString()
 				actualBundle, err1 := cs.bundleService.GetBundleByName(targetDB, name)
 				if err1 != nil {
 					return nil, fmt.Errorf("failed to get bundle Metadata from Catalog by name '%s': %w", name, err1)
@@ -766,19 +776,18 @@ func (cs *CatalogService) ListAllBundlesInCatalog() ([]map[string]interface{}, e
 		return nil, fmt.Errorf("failed to load documents for bundle '%s': %w", bundlesBundle.Name, err)
 	}
 
+	bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
 	var bundles []map[string]interface{}
 	for _, doc := range docs {
-		// Convert document to map
 		docMap := make(map[string]interface{})
 		docMap["DocumentID"] = doc.DocumentID
 		docMap["CreatedAt"] = doc.CreatedAt
 		docMap["UpdatedAt"] = doc.UpdatedAt
-
-		// Add all fields to the result
-		for fieldName, field := range doc.Fields {
-			docMap[fieldName] = field.Value
+		for i, name := range bundlesSchema.Names {
+			if i < len(doc.Values) {
+				docMap[name] = doc.Values[i].AsInterface()
+			}
 		}
-
 		bundles = append(bundles, docMap)
 	}
 

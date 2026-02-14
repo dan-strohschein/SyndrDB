@@ -224,44 +224,28 @@ func convertToJoinRequest(joinQuery *queryparser.SelectJoinQuery, database *mode
 	}, nil
 }
 
-// mergeJoinedDocument merges left and right documents from a JOIN result into a single document
-// LIFECYCLE: After this function copies fields to the final result document, the input JoinedDocument
-// is automatically returned to the pool via deferred cleanup in the calling function.
-// This follows the same pattern as document_pool.go's FreeDocuments() for bulk cleanup.
-// The merged Fields map is from document.GetPooledFieldMap(); ReturnPooledDocument will
-// return it via doc.PooledFields.
+// mergeJoinedDocument merges left and right documents from a JOIN result into a single document.
+// Uses Data map for merged fields (Option B: no Fields); schema not available in this path.
 func mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, logger *zap.SugaredLogger) *models.Document {
-	mergedFields := document.GetPooledFieldMap()
+	mergedData := make(map[string]interface{})
 
-	// Add fields from left document with prefix to avoid conflicts
-	if joinedDoc.LeftDocument != nil {
-		for fieldName, field := range joinedDoc.LeftDocument.Fields {
-			prefixedName := fmt.Sprintf("left_%s", fieldName)
-			mergedFields[prefixedName] = field
+	if joinedDoc.LeftDocument != nil && joinedDoc.LeftDocument.Data != nil {
+		for k, v := range joinedDoc.LeftDocument.Data {
+			mergedData["left_"+k] = v
 		}
 	}
-
-	// Add fields from right document with prefix
-	if joinedDoc.RightDocument != nil {
-		for fieldName, field := range joinedDoc.RightDocument.Fields {
-			prefixedName := fmt.Sprintf("right_%s", fieldName)
-			mergedFields[prefixedName] = field
+	if joinedDoc.RightDocument != nil && joinedDoc.RightDocument.Data != nil {
+		for k, v := range joinedDoc.RightDocument.Data {
+			mergedData["right_"+k] = v
 		}
 	}
-
-	// Add join metadata
-	mergedFields["join_key"] = models.Field{
-		Name:  "join_key",
-		Value: models.NewStringValue(joinedDoc.JoinKey),
-	}
+	mergedData["join_key"] = joinedDoc.JoinKey
 
 	mergedDoc := document.GetPooledDocument()
 	mergedDoc.DocumentID = fmt.Sprintf("join_%s", joinedDoc.JoinKey)
-	mergedDoc.Fields = mergedFields
-	mergedDoc.PooledFields = true
+	mergedDoc.Data = mergedData
 	mergedDoc.CreatedAt = time.Now()
 	mergedDoc.UpdatedAt = time.Now()
-
 	return mergedDoc
 }
 
@@ -270,10 +254,15 @@ func mergeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, logger *zap.Sug
 // used for JOIN operations where documents have been pre-filtered before the JOIN.
 type PreFilteredBundleAdapter struct {
 	bundleName string
-	documents  map[string]*models.Document // Pre-loaded filtered documents
-	docIDs     []string                    // Cached list of document IDs
+	documents  map[string]*models.Document
+	docIDs     []string
 	indexes    map[string]models.IndexReference
 	logger     *zap.SugaredLogger
+}
+
+// FieldSchema implements documentscanner.BundleInterface (Option B); no schema for pre-filtered docs.
+func (p *PreFilteredBundleAdapter) FieldSchema() *models.BundleFieldSchema {
+	return nil
 }
 
 // NewPreFilteredBundleAdapter creates a new adapter for pre-filtered documents
@@ -497,9 +486,11 @@ func transformHierarchicalToResponse(documents map[string]*models.Document) []ma
 		docMap["CreatedAt"] = doc.CreatedAt.Format(time.RFC3339)
 		docMap["UpdatedAt"] = doc.UpdatedAt.Format(time.RFC3339)
 
-		// Add all document fields
-		for fieldName, field := range doc.Fields {
-			docMap[fieldName] = field.Value
+		// Add all document fields (Option B: Data or Values via DocumentToMap)
+		for k, v := range models.DocumentToMap(doc, nil) {
+			if k != "DocumentID" && k != "CreatedAt" && k != "UpdatedAt" {
+				docMap[k] = v
+			}
 		}
 
 		response = append(response, docMap)
@@ -681,34 +672,25 @@ func shouldIncludeJoinedDocument(joinedDoc *joinexecutor.JoinedDocument, conditi
 	return true
 }
 
-// createVirtualDocumentForEvaluation creates a combined document from joined results for WHERE evaluation
+// createVirtualDocumentForEvaluation creates a combined document from joined results for WHERE evaluation (Option B: Data only).
 func createVirtualDocumentForEvaluation(joinedDoc *joinexecutor.JoinedDocument) map[string]interface{} {
 	virtualDoc := make(map[string]interface{})
-
-	// Add fields from left document with bundle prefix
-	if joinedDoc.LeftDocument != nil {
-		for fieldName, field := range joinedDoc.LeftDocument.Fields {
-			// Add both prefixed and unprefixed versions for flexibility
-			virtualDoc[fieldName] = field.Value
+	if joinedDoc.LeftDocument != nil && joinedDoc.LeftDocument.Data != nil {
+		for k, v := range joinedDoc.LeftDocument.Data {
+			virtualDoc[k] = v
 			if joinedDoc.LeftDocument.DocumentID != "" {
-				// Use the bundle name if available, otherwise use "left"
-				virtualDoc["left."+fieldName] = field.Value
+				virtualDoc["left."+k] = v
 			}
 		}
 	}
-
-	// Add fields from right document with bundle prefix
-	if joinedDoc.RightDocument != nil {
-		for fieldName, field := range joinedDoc.RightDocument.Fields {
-			// Add both prefixed and unprefixed versions for flexibility
-			virtualDoc[fieldName] = field.Value
+	if joinedDoc.RightDocument != nil && joinedDoc.RightDocument.Data != nil {
+		for k, v := range joinedDoc.RightDocument.Data {
+			virtualDoc[k] = v
 			if joinedDoc.RightDocument.DocumentID != "" {
-				// Use the bundle name if available, otherwise use "right"
-				virtualDoc["right."+fieldName] = field.Value
+				virtualDoc["right."+k] = v
 			}
 		}
 	}
-
 	return virtualDoc
 }
 

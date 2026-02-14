@@ -216,7 +216,7 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 
 			// Sample every 100th document
 			if docCount%100 == 0 {
-				docSize := models.EstimateDocumentSize(doc)
+				docSize := models.EstimateDocumentSize(doc, nil)
 				if err := memoryTracker.Sample(docSize, docCount); err != nil {
 					return nil, err
 				}
@@ -293,7 +293,7 @@ func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner docume
 
 			// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 			if memoryTracker != nil && docCount%100 == 0 {
-				docSize := models.EstimateDocumentSize(doc)
+				docSize := models.EstimateDocumentSize(doc, nil)
 				if sampleErr = memoryTracker.Sample(docSize, docCount); sampleErr != nil {
 					return false
 				}
@@ -474,14 +474,18 @@ func (n *SortNode) tryRadixSort(documents map[string]*models.Document, limit int
 		return nil, nil
 	}
 
-	// Check if field exists and is integer type
-	field, exists := sampleDoc.Fields[primaryField.FieldName]
-	if !exists {
+	var schema *models.BundleFieldSchema
+	var fieldVal interface{}
+	if fv, ex := sampleDoc.GetFieldValue(schema, primaryField.FieldName); ex {
+		fieldVal = fv.AsInterface()
+	} else if sampleDoc.Data != nil {
+		fieldVal = sampleDoc.Data[primaryField.FieldName]
+	}
+	if fieldVal == nil {
 		return nil, nil
 	}
 
-	// Only use radix sort for integer types
-	switch field.Value.AsInterface().(type) {
+	switch fieldVal.(type) {
 	case int, int32, int64:
 		// Integer field - check if radix sort is beneficial
 		if !sorting.ShouldUseRadixSort(len(documents), limit, n.config.RadixMinSize, n.config.RadixLimitRatio) {
@@ -501,7 +505,7 @@ func (n *SortNode) tryRadixSort(documents map[string]*models.Document, limit int
 			n.Logger.Debugf("Using PARALLEL radix sort for integer field '%s': %d documents, LIMIT %d (ASC: %v)",
 				primaryField.FieldName, len(documents), limit, ascending)
 
-			sortedDocs, err := sorting.ParallelRadixSort(documents, primaryField.FieldName, ascending, numWorkers, n.Logger)
+			sortedDocs, err := sorting.ParallelRadixSort(documents, primaryField.FieldName, ascending, numWorkers, n.Logger, schema)
 			if err != nil {
 				n.Logger.Warnf("Parallel radix sort failed, falling back to sequential radix: %v", err)
 				// Fall through to sequential radix sort
@@ -515,7 +519,7 @@ func (n *SortNode) tryRadixSort(documents map[string]*models.Document, limit int
 		n.Logger.Debugf("Using radix sort for integer field '%s': %d documents, LIMIT %d (ASC: %v)",
 			primaryField.FieldName, len(documents), limit, ascending)
 
-		sortedDocs, err := sorting.RadixSort(documents, primaryField.FieldName, ascending, n.Logger)
+		sortedDocs, err := sorting.RadixSort(documents, primaryField.FieldName, ascending, n.Logger, schema)
 		if err != nil {
 			n.Logger.Warnf("Radix sort failed, falling back to standard sort: %v", err)
 			return nil, nil
@@ -564,18 +568,19 @@ func (n *SortNode) selectTopNAlgorithm(documents map[string]*models.Document, li
 		return []*models.Document{}, nil
 	}
 
-	// Extract field and detect type
-	field, exists := sampleDoc.Fields[primaryField.FieldName]
-	if !exists {
-		// Field doesn't exist, use generic algorithm
+	var sortSchema *models.BundleFieldSchema
+	var fieldVal interface{}
+	if fv, ex := sampleDoc.GetFieldValue(sortSchema, primaryField.FieldName); ex {
+		fieldVal = fv.AsInterface()
+	} else if sampleDoc.Data != nil {
+		fieldVal = sampleDoc.Data[primaryField.FieldName]
+	}
+	if fieldVal == nil {
 		n.Logger.Debugf("Field '%s' not found in sample document, using generic Top-N heap", primaryField.FieldName)
-		return sorting.TopNHeapSort(documents, limit, n.OrderBy, n.Logger)
+		return sorting.TopNHeapSort(documents, limit, n.OrderBy, n.Logger, sortSchema)
 	}
 
-	// Determine ascending/descending
 	ascending := primaryField.Direction == queryparser.SortAsc
-
-	// Determine NULLS handling
 	var nullsFirst bool
 	switch primaryField.NullsPosition {
 	case queryparser.NullsFirst:
@@ -583,12 +588,10 @@ func (n *SortNode) selectTopNAlgorithm(documents map[string]*models.Document, li
 	case queryparser.NullsLast:
 		nullsFirst = false
 	case queryparser.NullsDefault:
-		// PostgreSQL semantics: ASC = NULLS LAST, DESC = NULLS FIRST
 		nullsFirst = !ascending
 	}
 
-	// Select algorithm based on field value type
-	switch field.Value.AsInterface().(type) {
+	switch fieldVal.(type) {
 	case string, []byte:
 		// Check if parallel string sort should be used
 		// Parallel benefits: 2-6x speedup with SIMD acceleration
@@ -605,6 +608,7 @@ func (n *SortNode) selectTopNAlgorithm(documents map[string]*models.Document, li
 				n.config.SIMDEnabled,
 				numWorkers,
 				n.Logger,
+				sortSchema,
 			)
 			if err != nil {
 				n.Logger.Warnf("Parallel string sort failed, falling back to sequential: %v", err)
@@ -628,6 +632,7 @@ func (n *SortNode) selectTopNAlgorithm(documents map[string]*models.Document, li
 			n.config.SIMDEnabled,
 			nullsFirst,
 			n.Logger,
+			sortSchema,
 		)
 
 	case int, int32, int64, float32, float64:
@@ -656,12 +661,11 @@ func (n *SortNode) selectTopNAlgorithm(documents map[string]*models.Document, li
 
 		// Use sequential integer/numeric Top-N heap
 		n.Logger.Debugf("Using TopNHeapSort for numeric field '%s'", primaryField.FieldName)
-		return sorting.TopNHeapSort(documents, limit, n.OrderBy, n.Logger)
+		return sorting.TopNHeapSort(documents, limit, n.OrderBy, n.Logger, sortSchema)
 
 	default:
-		// Fallback to generic Top-N heap
-		n.Logger.Debugf("Using generic TopNHeapSort for field '%s' (type: %T)", primaryField.FieldName, field.Value)
-		return sorting.TopNHeapSort(documents, limit, n.OrderBy, n.Logger)
+		n.Logger.Debugf("Using generic TopNHeapSort for field '%s' (type: %T)", primaryField.FieldName, fieldVal)
+		return sorting.TopNHeapSort(documents, limit, n.OrderBy, n.Logger, sortSchema)
 	}
 }
 

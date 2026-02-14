@@ -303,21 +303,10 @@ func (rs *RestoreService) restorePrimaryDBDocs(targetDBName string, manifest *Ma
 			}
 		}
 
-		// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
-		// This is a backup/restore operation (infrequent, lower priority than query hot-path)
-		// Create document from data
+		// Create document from data (Option B: Data-only for restore; bundle add path will use Data when Values is nil)
 		document := &models.Document{
 			DocumentID: doc.DocumentID,
 			Data:       doc.Data,
-			Fields:     make(map[string]models.Field),
-		}
-
-		// Populate Fields from Data
-		for key, value := range doc.Data {
-			document.Fields[key] = models.Field{
-				Name:  key,
-				Value: models.NewInterfaceValue(value),
-			}
 		}
 
 		// Add document to bundle

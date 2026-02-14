@@ -81,6 +81,7 @@ type GroupByExecutor struct {
 	logger  *zap.SugaredLogger
 	workMem int    // Memory limit in MB for hash tables
 	tempDir string // Directory for temporary files when spilling
+	Schema  *models.BundleFieldSchema // For doc.Values field access (optional)
 }
 
 // AggregateValue stores aggregated values for a group
@@ -284,23 +285,34 @@ func (e *GroupByExecutor) executeSortGroupAggregate(documents map[string]*models
 	return groupMap, nil
 }
 
+// getDocField returns the FieldValue for a field name using Schema + Values or Data
+func (e *GroupByExecutor) getDocField(doc *models.Document, fieldName string) (models.FieldValue, bool) {
+	if e.Schema != nil && len(doc.Values) > 0 {
+		return doc.GetFieldValue(e.Schema, fieldName)
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), true
+		}
+	}
+	return models.FieldValue{}, false
+}
+
 // createGroupKey creates a unique key for the group based on GROUP BY fields
 func (e *GroupByExecutor) createGroupKey(doc *models.Document) (GroupKey, map[string]models.FieldValue, error) {
 	groupFields := make(map[string]models.FieldValue, len(e.query.GroupBy.Fields))
 	keyParts := make([]string, 0, len(e.query.GroupBy.Fields))
 
 	for _, fieldName := range e.query.GroupBy.Fields {
-		field, exists := doc.Fields[fieldName]
+		fv, exists := e.getDocField(doc, fieldName)
 		if !exists {
 			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fieldName)
 		}
-
-		groupFields[fieldName] = field.Value
-		keyParts = append(keyParts, fieldName+"="+field.Value.KeyString())
+		groupFields[fieldName] = fv
+		keyParts = append(keyParts, fieldName+"="+fv.KeyString())
 	}
 
-	groupKey := GroupKey(strings.Join(keyParts, "|"))
-	return groupKey, groupFields, nil
+	return GroupKey(strings.Join(keyParts, "|")), groupFields, nil
 }
 
 // updateAggregates updates aggregate values for a group with data from a document
@@ -314,38 +326,37 @@ func (e *GroupByExecutor) updateAggregates(groupResult *GroupResult, doc *models
 			if aggFunc.Field == "*" {
 				aggValue.Count++
 			} else {
-				// COUNT(field) - count non-null values
-				if field, exists := doc.Fields[aggFunc.Field]; exists && !field.Value.IsNil() { // ✅ Use IsNil()
+				if fv, exists := e.getDocField(doc, aggFunc.Field); exists && !fv.IsNil() {
 					aggValue.Count++
 				}
 			}
 
 		case "SUM":
-			if field, exists := doc.Fields[aggFunc.Field]; exists {
-				if numValue, err := e.convertToFloat(field.Value); err == nil {
+			if fv, exists := e.getDocField(doc, aggFunc.Field); exists {
+				if numValue, err := e.convertToFloat(fv); err == nil {
 					aggValue.Sum += numValue
 				}
 			}
 
 		case "AVG":
-			if field, exists := doc.Fields[aggFunc.Field]; exists {
-				if numValue, err := e.convertToFloat(field.Value); err == nil {
+			if fv, exists := e.getDocField(doc, aggFunc.Field); exists {
+				if numValue, err := e.convertToFloat(fv); err == nil {
 					aggValue.Sum += numValue
 					aggValue.AvgCount++
 				}
 			}
 
 		case "MIN":
-			if field, exists := doc.Fields[aggFunc.Field]; exists && !field.Value.IsNil() {
-				if aggValue.Min.IsNil() || e.isLess(field.Value.AsInterface(), aggValue.Min.AsInterface()) {
-					aggValue.Min = field.Value
+			if fv, exists := e.getDocField(doc, aggFunc.Field); exists && !fv.IsNil() {
+				if aggValue.Min.IsNil() || e.isLess(fv.AsInterface(), aggValue.Min.AsInterface()) {
+					aggValue.Min = fv
 				}
 			}
 
 		case "MAX":
-			if field, exists := doc.Fields[aggFunc.Field]; exists && !field.Value.IsNil() {
-				if aggValue.Max.IsNil() || e.isGreater(field.Value.AsInterface(), aggValue.Max.AsInterface()) {
-					aggValue.Max = field.Value
+			if fv, exists := e.getDocField(doc, aggFunc.Field); exists && !fv.IsNil() {
+				if aggValue.Max.IsNil() || e.isGreater(fv.AsInterface(), aggValue.Max.AsInterface()) {
+					aggValue.Max = fv
 				}
 			}
 		}
@@ -444,8 +455,8 @@ func (e *GroupByExecutor) isGreater(a, b interface{}) bool {
 func (e *GroupByExecutor) sortDocumentsByGroupFields(docs []*models.Document) error {
 	sort.Slice(docs, func(i, j int) bool {
 		for _, fieldName := range e.query.GroupBy.Fields {
-			fieldI, existsI := docs[i].Fields[fieldName]
-			fieldJ, existsJ := docs[j].Fields[fieldName]
+			fvI, existsI := e.getDocField(docs[i], fieldName)
+			fvJ, existsJ := e.getDocField(docs[j], fieldName)
 
 			if !existsI && !existsJ {
 				continue
@@ -456,19 +467,15 @@ func (e *GroupByExecutor) sortDocumentsByGroupFields(docs []*models.Document) er
 			if !existsJ {
 				return false
 			}
-
-			// Type-aware comparison: uses models.FieldValue.CompareLessThan for correct
-			// ordering of numeric, date, and string types (avoids "10" < "2" for numbers)
-			if fieldI.Value.CompareLessThan(fieldJ.Value) {
+			if fvI.CompareLessThan(fvJ) {
 				return true
 			}
-			if fieldJ.Value.CompareLessThan(fieldI.Value) {
+			if fvJ.CompareLessThan(fvI) {
 				return false
 			}
 		}
 		return false
 	})
-
 	return nil
 }
 
@@ -480,38 +487,65 @@ func (e *GroupByExecutor) applyHavingClause(groupResults map[GroupKey]*GroupResu
 	return groupResults, nil
 }
 
-// convertGroupResultsToDocuments converts group results to document format
+// convertGroupResultsToDocuments converts group results to document format (Values + result schema)
 func (e *GroupByExecutor) convertGroupResultsToDocuments(groupResults map[GroupKey]*GroupResult) (map[string]*models.Document, error) {
 	resultDocs := make(map[string]*models.Document)
 	groupIndex := 0
 
+	// Build result schema: DocumentID, group fields, then aggregate keys
+	names := make([]string, 0, 1+len(e.query.GroupBy.Fields)+len(e.query.AggregateFields))
+	names = append(names, "DocumentID")
+	names = append(names, e.query.GroupBy.Fields...)
+	for _, agg := range e.query.AggregateFields {
+		names = append(names, e.getAggregateKey(agg))
+	}
+	resultSchema := &models.BundleFieldSchema{
+		Names:       names,
+		NameToIndex: make(map[string]int),
+	}
+	for i, n := range names {
+		resultSchema.NameToIndex[n] = i
+	}
+
 	for _, groupResult := range groupResults {
 		docID := fmt.Sprintf("group_%d", groupIndex)
-		fields := make(map[string]models.Field)
-
-		// Add GROUP BY fields (value is already FieldValue, no boxing)
-		for fieldName, value := range groupResult.GroupFields {
-			fields[fieldName] = models.Field{
-				Name:  fieldName,
-				Value: value,
-			}
-		}
-
-		// Add aggregate fields
-		for aggKey, value := range groupResult.AggregateValues {
-			fields[aggKey] = models.Field{
-				Name:  aggKey,
-				Value: models.NewInterfaceValue(value), // ✅ Convert interface{} to FieldValue
-			}
-		}
-
-		// STEP 1: Use document pool to reduce allocations
-		// TODO: Option C - Implement reference counting for automatic pool return
 		doc := document.GetPooledDocument()
 		doc.DocumentID = docID
-		doc.Fields = fields
+		doc.Values = make([]models.FieldValue, len(names))
+		doc.Values[0] = models.NewStringValue(docID)
+		idx := 1
+		for _, fieldName := range e.query.GroupBy.Fields {
+			if v, ok := groupResult.GroupFields[fieldName]; ok {
+				doc.Values[idx] = v
+			}
+			idx++
+		}
+		for _, agg := range e.query.AggregateFields {
+			aggKey := e.getAggregateKey(agg)
+			av := groupResult.AggregateValues[aggKey].(*AggregateValue)
+			var fv models.FieldValue
+			switch agg.Function {
+			case "COUNT":
+				fv = models.NewIntValue(av.Count)
+			case "SUM":
+				fv = models.NewFloatValue(av.Sum)
+			case "AVG":
+				if av.AvgCount > 0 {
+					fv = models.NewFloatValue(av.Sum / float64(av.AvgCount))
+				} else {
+					fv = models.FieldValue{Type: models.FieldTypeNil}
+				}
+			case "MIN":
+				fv = av.Min
+			case "MAX":
+				fv = av.Max
+			default:
+				fv = models.FieldValue{Type: models.FieldTypeNil}
+			}
+			doc.Values[idx] = fv
+			idx++
+		}
 		resultDocs[docID] = doc
-
 		groupIndex++
 	}
 

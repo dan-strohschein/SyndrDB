@@ -473,12 +473,16 @@ func (h *HashJoinNode) getHashKey(doc *models.Document, isLeftSide bool) string 
 			fieldName = condition.RightField
 		}
 
-		if field, exists := doc.Fields[fieldName]; exists {
-			keyParts = append(keyParts, fmt.Sprintf("%v", field.Value))
-		} else {
-			// Field doesn't exist - return empty key to exclude from join
+		var val interface{}
+		if fv, ex := doc.GetFieldValue(nil, fieldName); ex {
+			val = fv.AsInterface()
+		} else if doc.Data != nil {
+			val = doc.Data[fieldName]
+		}
+		if val == nil {
 			return ""
 		}
+		keyParts = append(keyParts, fmt.Sprintf("%v", val))
 	}
 
 	return strings.Join(keyParts, "|")
@@ -491,14 +495,25 @@ func (m *MergeJoinNode) sortDocuments(docs []*models.Document) {
 	})
 }
 
+func getDocFieldVal(doc *models.Document, fieldName string) (interface{}, bool) {
+	if doc == nil {
+		return nil, false
+	}
+	if fv, ex := doc.GetFieldValue(nil, fieldName); ex {
+		return fv.AsInterface(), true
+	}
+	if doc.Data != nil {
+		v, ok := doc.Data[fieldName]
+		return v, ok
+	}
+	return nil, false
+}
+
 // compareJoinKeys compares join keys of two documents
 func (m *MergeJoinNode) compareJoinKeys(leftDoc, rightDoc *models.Document) int {
 	for _, condition := range m.JoinConditions {
-		leftField := condition.LeftField
-		rightField := condition.RightField
-
-		leftValue, leftExists := leftDoc.Fields[leftField]
-		rightValue, rightExists := rightDoc.Fields[rightField]
+		leftVal, leftExists := getDocFieldVal(leftDoc, condition.LeftField)
+		rightVal, rightExists := getDocFieldVal(rightDoc, condition.RightField)
 
 		if !leftExists && !rightExists {
 			continue
@@ -510,9 +525,8 @@ func (m *MergeJoinNode) compareJoinKeys(leftDoc, rightDoc *models.Document) int 
 			return 1
 		}
 
-		// Compare values as strings for simplicity
-		leftStr := fmt.Sprintf("%v", leftValue.Value)
-		rightStr := fmt.Sprintf("%v", rightValue.Value)
+		leftStr := fmt.Sprintf("%v", leftVal)
+		rightStr := fmt.Sprintf("%v", rightVal)
 
 		if leftStr < rightStr {
 			return -1
@@ -525,22 +539,20 @@ func (m *MergeJoinNode) compareJoinKeys(leftDoc, rightDoc *models.Document) int 
 
 // Shared utility functions
 
-// evaluateJoinConditions checks if join conditions are satisfied
 func evaluateJoinConditions(leftDoc, rightDoc *models.Document, conditions []queryparser.JoinCondition, logger *zap.SugaredLogger) bool {
 	if leftDoc == nil || rightDoc == nil {
 		return false
 	}
 
 	for _, condition := range conditions {
-		leftField, leftExists := leftDoc.Fields[condition.LeftField]
-		rightField, rightExists := rightDoc.Fields[condition.RightField]
+		leftVal, leftExists := getDocFieldVal(leftDoc, condition.LeftField)
+		rightVal, rightExists := getDocFieldVal(rightDoc, condition.RightField)
 
 		if !leftExists || !rightExists {
 			return false
 		}
 
-		// Evaluate condition based on operator
-		if !evaluateComparison(leftField.Value, condition.Operator, rightField.Value, logger) {
+		if !evaluateComparison(leftVal, condition.Operator, rightVal, logger) {
 			return false
 		}
 	}
@@ -625,37 +637,29 @@ func toFloat64(value interface{}) (float64, bool) {
 	}
 }
 
-// createJoinedDocument combines fields from two documents
+// createJoinedDocument combines fields from two documents into one with Data map (Option B).
 func createJoinedDocument(leftDoc, rightDoc *models.Document, leftDocID, rightDocID string, logger *zap.SugaredLogger) *models.Document {
 	logger.Infof("Creating joined document from left ID: %s and right ID: %s", leftDocID, rightDocID)
-	// STEP 1: Use document pool to reduce allocations
-	// TODO: Option C - Implement reference counting for automatic pool return
 	joinedDoc := document.GetPooledDocument()
 	joinedDoc.DocumentID = fmt.Sprintf("joined_%s_%s", leftDocID, rightDocID)
-	joinedDoc.Fields = make(map[string]models.Field)
+	joinedDoc.Data = make(map[string]interface{})
 
-	// Add fields from left document with prefix
 	if leftDoc != nil {
-		for fieldName, field := range leftDoc.Fields {
-			prefixedName := fmt.Sprintf("left_%s", fieldName)
-			joinedDoc.Fields[prefixedName] = field
+		if leftDoc.Data != nil {
+			for k, v := range leftDoc.Data {
+				joinedDoc.Data["left_"+k] = v
+			}
 		}
-		joinedDoc.Fields["left_DocumentID"] = models.Field{
-			Name:  "left_DocumentID",
-			Value: models.NewStringValue(leftDoc.DocumentID),
-		}
+		joinedDoc.Data["left_DocumentID"] = leftDoc.DocumentID
 	}
 
-	// Add fields from right document with prefix
 	if rightDoc != nil {
-		for fieldName, field := range rightDoc.Fields {
-			prefixedName := fmt.Sprintf("right_%s", fieldName)
-			joinedDoc.Fields[prefixedName] = field
+		if rightDoc.Data != nil {
+			for k, v := range rightDoc.Data {
+				joinedDoc.Data["right_"+k] = v
+			}
 		}
-		joinedDoc.Fields["right_DocumentID"] = models.Field{
-			Name:  "right_DocumentID",
-			Value: models.NewStringValue(rightDoc.DocumentID),
-		}
+		joinedDoc.Data["right_DocumentID"] = rightDoc.DocumentID
 	}
 
 	return joinedDoc

@@ -122,9 +122,8 @@ func (nljs *NestedLoopJoinStrategy) Execute(request *JoinRequest) (*JoinResult, 
 	nljs.logger.Debugf("Loaded %d documents for inner loop from bundle %s",
 		len(innerDocs), innerBundle.GetName())
 
-	// Execute nested loop join
 	joinedDocs, stats, err := nljs.executeNestedLoop(
-		outerBundle, innerDocs, outerKey, innerKey, request, swapped)
+		outerBundle, innerBundle, innerDocs, outerKey, innerKey, request, swapped)
 	if err != nil {
 		return nil, fmt.Errorf("nested loop execution failed: %w", err)
 	}
@@ -191,20 +190,16 @@ func (nljs *NestedLoopJoinStrategy) getJoinKeys(conditions []JoinCondition, swap
 
 // executeNestedLoop performs the actual nested loop join operation
 func (nljs *NestedLoopJoinStrategy) executeNestedLoop(
-	outerBundle documentscanner.BundleInterface,
+	outerBundle, innerBundle documentscanner.BundleInterface,
 	innerDocs map[string]*models.Document,
 	outerKey, innerKey string,
 	request *JoinRequest,
 	swapped bool,
 ) ([]*JoinedDocument, *NestedLoopStats, error) {
 
-	// OPTIMIZATION: Pre-allocate result slice with estimated capacity
-	// Eliminates ~10-15 slice reallocations during append operations
 	outerSize := int64(outerBundle.GetTotalDocuments())
 	innerSize := int64(len(innerDocs))
-	// TODO: Integrate with JoinPatternTracker to learn actual selectivity per pattern
-	// from historical execution stats instead of using fixed 0.1 default
-	selectivity := 0.1 // Default 10% selectivity estimate
+	selectivity := 0.1
 	estimatedResults := int(float64(outerSize) * float64(innerSize) * selectivity)
 	joinedDocs := make([]*JoinedDocument, 0, estimatedResults)
 
@@ -214,22 +209,20 @@ func (nljs *NestedLoopJoinStrategy) executeNestedLoop(
 		Comparisons:  0,
 	}
 
-	// PROTECTION: Add limits to prevent infinite loops from massive datasets
 	maxOuterDocs := 10000
 	maxInnerDocs := 10000
 	maxFailures := 1000
 	failureCount := 0
 
-	// OPTIMIZATION: Pre-extract join keys once to eliminate repeated map lookups
-	// Eliminates 100,000+ map accesses in hot loop (50,000 comparisons × 2 sides)
-	// Saves ~500 microseconds per join operation
 	outerDocs := outerBundle.GetAllDocuments()
-	outerKeyValues, outerDocsSlice, err := nljs.extractJoinKeysOnce(outerDocs, outerKey)
+	outerSchema := outerBundle.FieldSchema()
+	innerSchema := innerBundle.FieldSchema()
+	outerKeyValues, outerDocsSlice, err := nljs.extractJoinKeysOnce(outerDocs, outerKey, outerSchema)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to extract outer join keys: %w", err)
 	}
 
-	innerKeyValues, innerDocsSlice, err := nljs.extractJoinKeysOnce(innerDocs, innerKey)
+	innerKeyValues, innerDocsSlice, err := nljs.extractJoinKeysOnce(innerDocs, innerKey, innerSchema)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to extract inner join keys: %w", err)
 	}
@@ -464,27 +457,28 @@ func (nljs *NestedLoopJoinStrategy) createJoinedDocument(
 	return joined
 }
 
-// extractJoinKeysOnce pre-extracts join key values from all documents
-// This eliminates repeated map lookups in the hot comparison loop
-// Returns: (keyValues []interface{}, docsSlice []*models.Document, error)
-// TODO: Consider parallel extraction for large document sets (>10,000 docs) to further improve performance
-func (nljs *NestedLoopJoinStrategy) extractJoinKeysOnce(docs map[string]*models.Document, keyName string) ([]interface{}, []*models.Document, error) {
+// extractJoinKeysOnce pre-extracts join key values from all documents (schema + Values or Data).
+func (nljs *NestedLoopJoinStrategy) extractJoinKeysOnce(docs map[string]*models.Document, keyName string, schema *models.BundleFieldSchema) ([]interface{}, []*models.Document, error) {
 	keyValues := make([]interface{}, 0, len(docs))
 	docsSlice := make([]*models.Document, 0, len(docs))
-
 	for _, doc := range docs {
 		docsSlice = append(docsSlice, doc)
-
-		// Extract key value
-		field, exists := doc.Fields[keyName]
+		var fv models.FieldValue
+		var exists bool
+		if schema != nil && len(doc.Values) > 0 {
+			fv, exists = doc.GetFieldValue(schema, keyName)
+		} else if doc.Data != nil {
+			if v, ok := doc.Data[keyName]; ok {
+				fv = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
-			keyValues = append(keyValues, nil) // Mark as missing
+			keyValues = append(keyValues, nil)
 			continue
 		}
-
-		keyValues = append(keyValues, field.Value)
+		keyValues = append(keyValues, fv.AsInterface())
 	}
-
 	return keyValues, docsSlice, nil
 }
 

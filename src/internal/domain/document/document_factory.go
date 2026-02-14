@@ -10,99 +10,63 @@ type DocumentFactoryImpl struct {
 	//Bundle *Bundle
 }
 
+// DocumentFactory creates documents with schema-ordered Values. Schema is required.
 type DocumentFactory interface {
-	NewDocument(docCommand models.DocumentCommand) *models.Document
-	NewDocumentWithID(docCommand models.DocumentCommand, documentID string) *models.Document
+	NewDocument(docCommand models.DocumentCommand, schema *models.BundleFieldSchema) *models.Document
+	NewDocumentWithID(docCommand models.DocumentCommand, documentID string, schema *models.BundleFieldSchema) *models.Document
 }
 
 func NewDocumentFactory() DocumentFactory {
-	return &DocumentFactoryImpl{
-		// Initialize with default values if needed
-	}
+	return &DocumentFactoryImpl{}
 }
 
-func (f *DocumentFactoryImpl) NewDocument(docCommand models.DocumentCommand) *models.Document {
-	// Use cached time to avoid expensive time.Now() calls
+// NewDocument creates a document with Values filled from docCommand in schema order.
+// Schema must be the bundle's field schema; DocumentID is set at the DocumentID index.
+func (f *DocumentFactoryImpl) NewDocument(docCommand models.DocumentCommand, schema *models.BundleFieldSchema) *models.Document {
 	now := helpers.GetCachedNow()
-
-	// Use pooled document to avoid allocation
 	newDoc := GetPooledDocument()
 	newDoc.DocumentID = helpers.GenerateFastUUID()
-	newDoc.Fields = f.MakeDocumentFieldsPooled(docCommand)
+	newDoc.Values = f.MakeDocumentValues(docCommand, newDoc.DocumentID, schema)
 	newDoc.CreatedAt = now
 	newDoc.UpdatedAt = now
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	// This ensures DocumentID can be accessed via document.Fields["DocumentID"]
-	// just like other fields, fixing query filter issues
-	newDoc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(newDoc.DocumentID), // ✅ Convert string to FieldValue
-	}
-
-	// Pre-encode JSON fragments for fast SELECT serialization
-	helpers.BuildCachedJSON(newDoc)
-
+	helpers.BuildCachedJSON(newDoc, schema)
 	return newDoc
 }
 
-func (f *DocumentFactoryImpl) NewDocumentWithID(docCommand models.DocumentCommand, documentID string) *models.Document {
+// NewDocumentWithID creates a document with the given DocumentID and Values in schema order.
+func (f *DocumentFactoryImpl) NewDocumentWithID(docCommand models.DocumentCommand, documentID string, schema *models.BundleFieldSchema) *models.Document {
 	now := helpers.GetCachedNow()
 	newDoc := GetPooledDocument()
 	newDoc.DocumentID = documentID
-	newDoc.Fields = f.MakeDocumentFieldsPooled(docCommand)
+	newDoc.Values = f.MakeDocumentValues(docCommand, documentID, schema)
 	newDoc.CreatedAt = now
 	newDoc.UpdatedAt = now
-	newDoc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(newDoc.DocumentID),
-	}
-
-	// Pre-encode JSON fragments for fast SELECT serialization
-	helpers.BuildCachedJSON(newDoc)
-
+	helpers.BuildCachedJSON(newDoc, schema)
 	return newDoc
 }
 
-func (f *DocumentFactoryImpl) MakeDocumentFields(docCommand models.DocumentCommand) map[string]models.Field {
-	// Legacy method - prefer MakeDocumentFieldsPooled for performance
-	return f.MakeDocumentFieldsPooled(docCommand)
-}
-
-func (f *DocumentFactoryImpl) MakeDocumentFieldsPooled(docCommand models.DocumentCommand) map[string]models.Field {
-	// Use pooled field map to avoid allocation
-	fields := GetPooledFieldMap()
-
-	// Iterate over the field definitions in the document command
+// MakeDocumentValues builds Values slice in schema order from docCommand.
+// DocumentID is written at the DocumentID index; other fields from docCommand by name; missing = FieldTypeNil.
+func (f *DocumentFactoryImpl) MakeDocumentValues(docCommand models.DocumentCommand, documentID string, schema *models.BundleFieldSchema) []models.FieldValue {
+	if schema == nil || len(schema.Names) == 0 {
+		return nil
+	}
+	// Build name -> value from command
+	cmdMap := make(map[string]interface{}, len(docCommand.Fields))
 	for _, f := range docCommand.Fields {
-		// Create a new field based on the definition
-		field := models.Field{
-			Name:  f.Key,
-			Value: models.NewInterfaceValue(f.Value), // ✅ Convert interface{} to FieldValue
+		cmdMap[f.Key] = f.Value
+	}
+	values := make([]models.FieldValue, len(schema.Names))
+	for i, name := range schema.Names {
+		if name == "DocumentID" || name == "documentid" {
+			values[i] = models.NewStringValue(documentID)
+			continue
 		}
-
-		// Add the field to the map with its name as the key
-		fields[field.Name] = field
-	}
-
-	return fields
-}
-
-func (f *DocumentFactoryImpl) NewDocumentWithFields(docCommand models.DocumentCommand, fields map[string]models.Field) *models.Document {
-	newDoc := f.NewDocument(docCommand)
-
-	// Add fields to the new document
-	for fieldName, field := range fields {
-		newDoc.Fields[fieldName] = field
-	}
-
-	// Ensure DocumentID field is present (NewDocument already adds it, but ensure it's not overwritten)
-	if _, exists := newDoc.Fields["DocumentID"]; !exists {
-		newDoc.Fields["DocumentID"] = models.Field{
-			Name:  "DocumentID",
-			Value: models.NewStringValue(newDoc.DocumentID), // ✅ Convert string to FieldValue
+		if v, ok := cmdMap[name]; ok && v != nil {
+			values[i] = models.NewInterfaceValue(v)
+		} else {
+			values[i] = models.FieldValue{Type: models.FieldTypeNil}
 		}
 	}
-
-	return newDoc
+	return values
 }

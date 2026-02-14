@@ -633,14 +633,15 @@ func (sbs *SmartBundleScanner) ScanForInList(field string, values []interface{},
 	}
 
 	// matchDoc checks if a single document matches the IN/NOT IN criteria.
-	// Prefer doc.Fields (typed) and string-key set; fall back to doc.Data for schemaless.
+	// Prefer schema + doc.Values (typed); fall back to doc.Data for schemaless.
+	schema := sbs.bundle.FieldSchema()
 	matchDoc := func(doc *models.Document) bool {
 		var docFV models.FieldValue
 		exists := false
-		if doc.Fields != nil {
-			if f, ok := doc.Fields[field]; ok {
-				docFV = f.Value
-				exists = true
+		if schema != nil && len(doc.Values) > 0 {
+			if idx, ok := schema.NameToIndex[field]; ok && idx < len(doc.Values) {
+				docFV = doc.Values[idx]
+				exists = !docFV.IsNil()
 			}
 		}
 		if !exists && doc.Data != nil {
@@ -856,12 +857,12 @@ func (sbs *SmartBundleScanner) getBatchedDocuments() <-chan []*models.Document {
 }
 
 // documentMatchesQuery determines if a document matches the query criteria.
-// Prefers doc.Fields (typed); falls back to doc.Data for schemaless docs.
+// Prefers schema + doc.Values (typed); falls back to doc.Data for schemaless docs.
 func (sbs *SmartBundleScanner) documentMatchesQuery(doc *models.Document, query *ScanQuery) bool {
-	var docValue interface{}
-	if doc.Fields != nil {
-		if f, ok := doc.Fields[query.KeyName]; ok {
-			docValue = f.Value.AsInterface()
+	schema := sbs.bundle.FieldSchema()
+	if schema != nil && len(doc.Values) > 0 {
+		if idx, ok := schema.NameToIndex[query.KeyName]; ok && idx < len(doc.Values) {
+			docValue := doc.Values[idx].AsInterface()
 			return sbs.compareValues(docValue, query.Value, query.Operator, query.CaseSensitive)
 		}
 	}

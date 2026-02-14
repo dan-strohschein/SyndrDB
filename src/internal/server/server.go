@@ -1834,7 +1834,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 			writer.WriteString(strconv.Itoa(typedResult.ResultCount))
 			writer.WriteString(",\"Result\":")
 
-			err := helpers.StreamDocumentSliceToJSON(writer, typedResult.StreamSlice, typedResult.StreamFields)
+			err := helpers.StreamDocumentSliceToJSON(writer, typedResult.StreamSlice, typedResult.StreamFields, nil)
 			if err != nil {
 				logger.Errorf("Failed to stream document slice: %v", err)
 				data, _ = hvjsonMarshal(result)
@@ -1860,7 +1860,7 @@ func sendResult(writer *bufio.Writer, result interface{}, logger *zap.SugaredLog
 			writer.WriteString(",\"Result\":")
 
 			// Stream the documents array
-			err := helpers.StreamDocumentsToJSON(writer, typedResult.StreamDocuments, typedResult.StreamFields)
+			err := helpers.StreamDocumentsToJSON(writer, typedResult.StreamDocuments, typedResult.StreamFields, nil)
 			if err != nil {
 				logger.Errorf("Failed to stream documents: %v", err)
 				// Fallback to regular marshaling
@@ -1923,9 +1923,9 @@ func sendResultCompressed(writer *bufio.Writer, resp *CommandResponse, slice []*
 
 	var streamErr error
 	if len(slice) > 0 {
-		streamErr = helpers.StreamDocumentSliceToJSON(zw, slice, resp.StreamFields)
+		streamErr = helpers.StreamDocumentSliceToJSON(zw, slice, resp.StreamFields, nil)
 	} else {
-		streamErr = helpers.StreamDocumentsToJSON(zw, docMap, resp.StreamFields)
+		streamErr = helpers.StreamDocumentsToJSON(zw, docMap, resp.StreamFields, nil)
 	}
 	if streamErr != nil {
 		logger.Errorf("Failed to stream documents for compression: %v", streamErr)
@@ -2057,7 +2057,7 @@ func writeChunk(
 ) error {
 	// Encode chunk into a temporary buffer
 	var buf bytes.Buffer
-	if err := helpers.StreamDocumentSliceToJSON(&buf, docs, fields); err != nil {
+	if err := helpers.StreamDocumentSliceToJSON(&buf, docs, fields, nil); err != nil {
 		return err
 	}
 

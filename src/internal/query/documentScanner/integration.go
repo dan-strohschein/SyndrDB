@@ -32,7 +32,7 @@ type BundleServiceInterface interface {
 	// OPTIMIZATION: One-time lock acquisition, iterates cached pages, copies only projected fields
 	// Returns: (projected docs map, docs copied, pages that were cached, total pages, error)
 	// effectiveLimit: 0 = no limit, >0 = stop after that many docs
-	CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int) (map[string]*ProjectedDocument, int, int, int, error)
+	CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int, schema *models.BundleFieldSchema) (map[string]*ProjectedDocument, int, int, int, error)
 }
 
 // ScannerIntegration provides example integration between the document scanner and SyndrDB

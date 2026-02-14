@@ -21,7 +21,7 @@ var (
 // StreamDocumentsToJSON writes documents directly to JSON without intermediate allocations.
 // Uses HVJson IncrementalStreamEncoder with SIMD-accelerated string escaping and
 // number formatting, with 64KB incremental flushes to bound memory.
-func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Document, selectedFields []string) error {
+func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Document, selectedFields []string, schema *models.BundleFieldSchema) error {
 	ise := hvjson.NewIncrementalEncoder(writer, 0) // 64KB default threshold
 
 	// Build field filter for projection
@@ -56,7 +56,7 @@ func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Docume
 				return err
 			}
 		}
-		writeDocumentObject(ise, doc, fieldFilter, hasProjection)
+		writeDocumentObject(ise, doc, fieldFilter, hasProjection, schema)
 	}
 
 	if err := ise.Flush(); err != nil {
@@ -68,7 +68,7 @@ func StreamDocumentsToJSON(writer io.Writer, documents map[string]*models.Docume
 
 // StreamDocumentSliceToJSON writes an ordered slice of documents directly to JSON.
 // Preserves the input order (important for ORDER BY queries).
-func StreamDocumentSliceToJSON(writer io.Writer, documents []*models.Document, selectedFields []string) error {
+func StreamDocumentSliceToJSON(writer io.Writer, documents []*models.Document, selectedFields []string, schema *models.BundleFieldSchema) error {
 	ise := hvjson.NewIncrementalEncoder(writer, 0)
 
 	// Build field filter for projection
@@ -94,7 +94,7 @@ func StreamDocumentSliceToJSON(writer io.Writer, documents []*models.Document, s
 				return err
 			}
 		}
-		writeDocumentObject(ise, doc, fieldFilter, hasProjection)
+		writeDocumentObject(ise, doc, fieldFilter, hasProjection, schema)
 	}
 
 	if err := ise.Flush(); err != nil {
@@ -107,17 +107,15 @@ func StreamDocumentSliceToJSON(writer io.Writer, documents []*models.Document, s
 // writeDocumentObject writes a single document as a JSON object using the ISE.
 // Uses pre-encoded JSON cache when available (fast path: memcpy of cached fragments).
 // Falls back to field-by-field encoding if cache is not populated.
-func writeDocumentObject(ise *hvjson.IncrementalStreamEncoder, doc *models.Document, fieldFilter map[string]bool, hasProjection bool) {
-	// Lazy cache population for documents loaded from disk
-	if doc.CachedJSON == nil && len(doc.Fields) > 0 {
-		BuildCachedJSON(doc)
+func writeDocumentObject(ise *hvjson.IncrementalStreamEncoder, doc *models.Document, fieldFilter map[string]bool, hasProjection bool, schema *models.BundleFieldSchema) {
+	if doc.CachedJSON == nil && schema != nil && len(doc.Values) > 0 {
+		BuildCachedJSON(doc, schema)
 	}
 
 	useCachedPath := doc.CachedJSON != nil
 
 	ise.WriteObjectStart()
 
-	// Metadata fields (always included, always encoded inline — not cached)
 	ise.WriteObjectField(FieldDocumentID)
 	ise.WriteString(doc.DocumentID)
 
@@ -128,19 +126,20 @@ func writeDocumentObject(ise *hvjson.IncrementalStreamEncoder, doc *models.Docum
 	ise.WriteString(doc.UpdatedAt.Format(time.RFC3339))
 
 	if useCachedPath {
-		// Fast path: write pre-encoded fragments as raw bytes
 		for fieldName, fragment := range doc.CachedJSON {
 			if !hasProjection || fieldFilter[fieldName] {
-				ise.WriteMore()         // comma separator
-				ise.WriteRawBytes(fragment) // "name":value as pre-encoded bytes
+				ise.WriteMore()
+				ise.WriteRawBytes(fragment)
 			}
 		}
-	} else {
-		// Fallback: field-by-field encoding (same as original code)
-		for fieldName, field := range doc.Fields {
+	} else if schema != nil && doc.Values != nil {
+		for i, fieldName := range schema.Names {
+			if i >= len(doc.Values) {
+				break
+			}
 			if !hasProjection || fieldFilter[fieldName] {
 				ise.WriteObjectField(fieldName)
-				writeFieldValue(ise, field.Value)
+				writeFieldValue(ise, doc.Values[i])
 			}
 		}
 	}

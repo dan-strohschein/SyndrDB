@@ -95,13 +95,14 @@ func (ps *PermissionService) isSystemRole(roleName string) error {
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
 	}
+	schema := rolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range docs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if nameValue, ok := nameField.Value.AsString(); ok {
+		if fv, ok := doc.GetFieldValue(schema, "Name"); ok {
+			if nameValue, ok := fv.AsString(); ok {
 				if strings.ToLower(nameValue) == roleNameLower {
 					// Check IsSystem field
-					if isSystemField, ok := doc.Fields["IsSystem"]; ok {
-						if isSystem, ok := isSystemField.Value.AsBool(); ok && isSystem {
+					if isSystemField, ok := doc.GetFieldValue(schema, "IsSystem"); ok {
+						if isSystem, ok := isSystemField.AsBool(); ok && isSystem {
 							return errors.New(errors.ERR_PERMISSION_DENIED,
 								fmt.Sprintf("Cannot modify system role '%s'", roleName),
 								errors.LayerAuth).WithContext("role", roleName)
@@ -151,11 +152,12 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
+	usersSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-				if idField, ok := doc.Fields["UserID"]; ok {
-					userID, _ = idField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(usersSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && strings.EqualFold(str, username) {
+				if idField, ok := doc.GetFieldValue(usersSchema, "UserID"); ok {
+					userID, _ = idField.AsString()
 					found = true
 					break
 				}
@@ -186,11 +188,12 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserPermissions")
 	}
+	upSchema := userPermissionsBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userPermDocs {
-		if userIDField, ok := doc.Fields["UserID"]; ok {
-			if permIDField, ok := doc.Fields["PermissionID"]; ok {
-				str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := permIDField.Value.AsString()
+		if userIDField, ok := doc.GetFieldValue(upSchema, "UserID"); ok {
+			if permIDField, ok := doc.GetFieldValue(upSchema, "PermissionID"); ok {
+				str1, ok1 := userIDField.AsString()
+				str2, ok2 := permIDField.AsString()
 				if ok1 && ok2 && str1 == userID && str2 == permissionID {
 					return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 						fmt.Sprintf("user '%s' already has permission '%s'", username, permissionName),
@@ -202,26 +205,14 @@ func (ps *PermissionService) GrantPermissionToUser(username, permissionName stri
 
 	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
 	// This is a user-facing operation (lower frequency than query hot-path)
-	// Create UserPermission document
+	// Create UserPermission document (Option B: Data for add-by-struct path)
 	userPermDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
-		Fields: map[string]models.Field{
-			"DocumentID": {
-				Name:  "DocumentID",
-				Value: models.NewStringValue(helpers.GenerateFastUUID()),
-			},
-			"UserPermissionID": {
-				Name:  "UserPermissionID",
-				Value: models.NewStringValue(helpers.GenerateUUID()),
-			},
-			"UserID": {
-				Name:  "UserID",
-				Value: models.NewStringValue(userID),
-			},
-			"PermissionID": {
-				Name:  "PermissionID",
-				Value: models.NewStringValue(permissionID),
-			},
+		Data: map[string]interface{}{
+			"DocumentID":         helpers.GenerateFastUUID(),
+			"UserPermissionID":  helpers.GenerateUUID(),
+			"UserID":            userID,
+			"PermissionID":       permissionID,
 		},
 	}
 
@@ -280,11 +271,12 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Users")
 	}
+	usersSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-				if idField, ok := doc.Fields["UserID"]; ok {
-					userID, _ = idField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(usersSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && strings.EqualFold(str, username) {
+				if idField, ok := doc.GetFieldValue(usersSchema, "UserID"); ok {
+					userID, _ = idField.AsString()
 					found = true
 					break
 				}
@@ -315,11 +307,12 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserRoles")
 	}
+	urSchema := userRolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userRoleDocs {
-		if userIDField, ok := doc.Fields["UserID"]; ok {
-			if roleIDField, ok := doc.Fields["RoleID"]; ok {
-				str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := roleIDField.Value.AsString()
+		if userIDField, ok := doc.GetFieldValue(urSchema, "UserID"); ok {
+			if roleIDField, ok := doc.GetFieldValue(urSchema, "RoleID"); ok {
+				str1, ok1 := userIDField.AsString()
+				str2, ok2 := roleIDField.AsString()
 				if ok1 && ok2 && str1 == userID && str2 == roleID {
 					return errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 						fmt.Sprintf("user '%s' already has role '%s'", username, roleName),
@@ -331,22 +324,13 @@ func (ps *PermissionService) GrantRoleToUser(username, roleName string) error {
 
 	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
 	// This is a user-facing operation (lower frequency than query hot-path)
-	// Create UserRole document
+	// Create UserRole document (Option B: Data)
 	userRoleDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
-		Fields: map[string]models.Field{
-			"DocumentID": {
-				Name:  "DocumentID",
-				Value: models.NewStringValue(helpers.GenerateFastUUID()),
-			},
-			"UserID": {
-				Name:  "UserID",
-				Value: models.NewStringValue(userID),
-			},
-			"RoleID": {
-				Name:  "RoleID",
-				Value: models.NewStringValue(roleID),
-			},
+		Data: map[string]interface{}{
+			"DocumentID": helpers.GenerateFastUUID(),
+			"UserID":     userID,
+			"RoleID":     roleID,
 		},
 	}
 
@@ -414,11 +398,12 @@ func (ps *PermissionService) RevokePermissionFromUser(username, permissionName s
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserPermissions")
 	}
+	revokeUPSchema := userPermissionsBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userPermDocs {
-		if userIDField, ok := doc.Fields["UserID"]; ok {
-			if permIDField, ok := doc.Fields["PermissionID"]; ok {
-				str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := permIDField.Value.AsString()
+		if userIDField, ok := doc.GetFieldValue(revokeUPSchema, "UserID"); ok {
+			if permIDField, ok := doc.GetFieldValue(revokeUPSchema, "PermissionID"); ok {
+				str1, ok1 := userIDField.AsString()
+				str2, ok2 := permIDField.AsString()
 				if ok1 && ok2 && str1 == userID && str2 == permissionID {
 					deleteCmd := &models.DocumentDeleteCommand{
 						BundleName: "UserPermissions",
@@ -495,11 +480,12 @@ func (ps *PermissionService) RevokeRoleFromUser(username, roleName string) error
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "UserRoles")
 	}
+	revokeURSchema := userRolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userRoleDocs {
-		if userIDField, ok := doc.Fields["UserID"]; ok {
-			if roleIDField, ok := doc.Fields["RoleID"]; ok {
-				str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := roleIDField.Value.AsString()
+		if userIDField, ok := doc.GetFieldValue(revokeURSchema, "UserID"); ok {
+			if roleIDField, ok := doc.GetFieldValue(revokeURSchema, "RoleID"); ok {
+				str1, ok1 := userIDField.AsString()
+				str2, ok2 := roleIDField.AsString()
 				if ok1 && ok2 && str1 == userID && str2 == roleID {
 					deleteCmd := &models.DocumentDeleteCommand{
 						BundleName: "UserRoles",
@@ -574,11 +560,12 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 		}
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission query failed", errors.LayerCommand)
 	}
+	permSchema := permissionsBundle.DocumentStructure.FieldSchema()
 	for _, doc := range permDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && str == permissionName {
-				if idField, ok := doc.Fields["PermissionID"]; ok {
-					str, _ := idField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(permSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && str == permissionName {
+				if idField, ok := doc.GetFieldValue(permSchema, "PermissionID"); ok {
+					str, _ := idField.AsString()
 					return str, nil
 				}
 			}
@@ -587,23 +574,14 @@ func (ps *PermissionService) GetOrCreatePermission(permissionName string) (strin
 
 	// TODO (STEP 1 - Future): Replace with document.GetPooledDocument() to reduce allocations
 	// This is a user-facing operation (lower frequency than query hot-path)
-	// Permission doesn't exist, create it
+	// Permission doesn't exist, create it (Option B: Data)
 	permissionID := helpers.GenerateUUID()
 	permDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
-		Fields: map[string]models.Field{
-			"DocumentID": {
-				Name:  "DocumentID",
-				Value: models.NewStringValue(helpers.GenerateFastUUID()),
-			},
-			"PermissionID": {
-				Name:  "PermissionID",
-				Value: models.NewStringValue(permissionID),
-			},
-			"Name": {
-				Name:  "Name",
-				Value: models.NewStringValue(permissionName),
-			},
+		Data: map[string]interface{}{
+			"DocumentID":    helpers.GenerateFastUUID(),
+			"PermissionID":  permissionID,
+			"Name":         permissionName,
 		},
 	}
 
@@ -659,11 +637,12 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 	if err == nil {
 		userPermDocs, err := ps.bundleService.GetDocumentsByFilter(userPermissionsBundle, "", nil)
 		if err == nil {
+			uhpUPSchema := userPermissionsBundle.DocumentStructure.FieldSchema()
 			for _, doc := range userPermDocs {
-				if userIDField, ok := doc.Fields["UserID"]; ok {
-					if permIDField, ok := doc.Fields["PermissionID"]; ok {
-						str1, ok1 := userIDField.Value.AsString()
-						str2, ok2 := permIDField.Value.AsString()
+				if userIDField, ok := doc.GetFieldValue(uhpUPSchema, "UserID"); ok {
+					if permIDField, ok := doc.GetFieldValue(uhpUPSchema, "PermissionID"); ok {
+						str1, ok1 := userIDField.AsString()
+						str2, ok2 := permIDField.AsString()
 						if ok1 && ok2 && str1 == userID && str2 == permissionID {
 							return true, nil // Direct permission found
 						}
@@ -684,11 +663,12 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 	var userRoleIDs []string
 	userRoleDocs, err := ps.bundleService.GetDocumentsByFilter(userRolesBundle, "", nil)
 	if err == nil {
+		uhpURSchema := userRolesBundle.DocumentStructure.FieldSchema()
 		for _, doc := range userRoleDocs {
-			if userIDField, ok := doc.Fields["UserID"]; ok {
-				if str, ok := userIDField.Value.AsString(); ok && str == userID {
-					if roleIDField, ok := doc.Fields["RoleID"]; ok {
-						if str, ok := roleIDField.Value.AsString(); ok {
+			if userIDField, ok := doc.GetFieldValue(uhpURSchema, "UserID"); ok {
+				if str, ok := userIDField.AsString(); ok && str == userID {
+					if roleIDField, ok := doc.GetFieldValue(uhpURSchema, "RoleID"); ok {
+						if str, ok := roleIDField.AsString(); ok {
 							userRoleIDs = append(userRoleIDs, str)
 						}
 					}
@@ -712,12 +692,13 @@ func (ps *PermissionService) UserHasPermission(username, permissionName string) 
 
 	rolesPermDocs, err := ps.bundleService.GetDocumentsByFilter(rolesPermissionsBundle, "", nil)
 	if err == nil {
+		rpSchema := rolesPermissionsBundle.DocumentStructure.FieldSchema()
 		for _, doc := range rolesPermDocs {
-			if roleIDField, ok := doc.Fields["RoleID"]; ok {
-				if permIDField, ok := doc.Fields["PermissionID"]; ok {
+			if roleIDField, ok := doc.GetFieldValue(rpSchema, "RoleID"); ok {
+				if permIDField, ok := doc.GetFieldValue(rpSchema, "PermissionID"); ok {
 					// Check if this role-permission mapping matches
-					roleID, _ := roleIDField.Value.AsString()
-					permID, _ := permIDField.Value.AsString()
+					roleID, _ := roleIDField.AsString()
+					permID, _ := permIDField.AsString()
 
 					// Is this one of the user's roles?
 					for _, userRoleID := range userRoleIDs {
@@ -759,11 +740,12 @@ func (ps *PermissionService) getUserID(username string) (string, error) {
 		}
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: user query failed", errors.LayerCommand)
 	}
+	guSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userDocs {
-		if nameField, ok := doc.Fields["Username"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, username) {
-				if idField, ok := doc.Fields["UserID"]; ok {
-					str, _ := idField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(guSchema, "Username"); ok {
+			if str, ok := fv.AsString(); ok && strings.EqualFold(str, username) {
+				if idField, ok := doc.GetFieldValue(guSchema, "UserID"); ok {
+					str, _ := idField.AsString()
 					return str, nil
 				}
 			}
@@ -801,11 +783,12 @@ func (ps *PermissionService) getRoleID(roleName string) (string, error) {
 		}
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: role query failed", errors.LayerCommand)
 	}
+	grSchema := rolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range roleDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && str == roleName {
-				if idField, ok := doc.Fields["RoleID"]; ok {
-					str, _ := idField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(grSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && str == roleName {
+				if idField, ok := doc.GetFieldValue(grSchema, "RoleID"); ok {
+					str, _ := idField.AsString()
 					return str, nil
 				}
 			}
@@ -842,11 +825,12 @@ func (ps *PermissionService) getPermissionID(permissionName string) (string, err
 		}
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: permission query failed", errors.LayerCommand)
 	}
+	gpSchema := permissionsBundle.DocumentStructure.FieldSchema()
 	for _, doc := range permDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && str == permissionName {
-				if idField, ok := doc.Fields["PermissionID"]; ok {
-					str, _ := idField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(gpSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && str == permissionName {
+				if idField, ok := doc.GetFieldValue(gpSchema, "PermissionID"); ok {
+					str, _ := idField.AsString()
 					return str, nil
 				}
 			}
@@ -899,9 +883,10 @@ func (ps *PermissionService) CreateRole(roleName, description string) (string, e
 		}
 		return "", errors.New(errors.ERR_INTERNAL, "internal error: role query failed", errors.LayerCommand)
 	}
+	grbnSchema := rolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range roleDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && strings.EqualFold(str, roleName) {
+		if fv, ok := doc.GetFieldValue(grbnSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && strings.EqualFold(str, roleName) {
 				if ps.debugMode {
 					return "", errors.New(errors.ERR_VALIDATION_CONSTRAINT, fmt.Sprintf("role '%s' already exists", roleName), errors.LayerCommand).WithContext("role", roleName)
 				}
@@ -913,30 +898,15 @@ func (ps *PermissionService) CreateRole(roleName, description string) (string, e
 	// Generate RoleID
 	roleID := helpers.GenerateUUID()
 
-	// Create role document
+	// Create role document (Option B: Data)
 	roleDoc := &models.Document{
 		DocumentID: helpers.GenerateFastUUID(),
-		Fields: map[string]models.Field{
-			"DocumentID": {
-				Name:  "DocumentID",
-				Value: models.NewStringValue(helpers.GenerateFastUUID()),
-			},
-			"RoleID": {
-				Name:  "RoleID",
-				Value: models.NewStringValue(roleID),
-			},
-			"Name": {
-				Name:  "Name",
-				Value: models.NewStringValue(roleName),
-			},
-			"Description": {
-				Name:  "Description",
-				Value: models.NewStringValue(description),
-			},
-			"IsSystem": {
-				Name:  "IsSystem",
-				Value: models.NewBoolValue(false), // User-created roles are not system roles
-			},
+		Data: map[string]interface{}{
+			"DocumentID":  helpers.GenerateFastUUID(),
+			"RoleID":      roleID,
+			"Name":        roleName,
+			"Description": description,
+			"IsSystem":    false, // User-created roles are not system roles
 		},
 	}
 
@@ -992,10 +962,10 @@ func (ps *PermissionService) UpdateRole(roleName string, updates map[string]stri
 	if err != nil {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
 	}
-
+	delRoleFindSchema := rolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range roleDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if nameValue, ok := nameField.Value.AsString(); ok {
+		if fv, ok := doc.GetFieldValue(delRoleFindSchema, "Name"); ok {
+			if nameValue, ok := fv.AsString(); ok {
 				if strings.ToLower(nameValue) == roleNameLower {
 					targetDoc = doc
 					break
@@ -1126,13 +1096,14 @@ func (ps *PermissionService) DeleteRole(roleName string, force bool) error {
 		return errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", "Roles")
 	}
 
+	delRoleSchema := rolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range roleDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if nameValue, ok := nameField.Value.AsString(); ok {
+		if fv, ok := doc.GetFieldValue(delRoleSchema, "Name"); ok {
+			if nameValue, ok := fv.AsString(); ok {
 				if strings.ToLower(nameValue) == roleNameLower {
 					// Get RoleID for junction table cleanup
-					if idField, ok := doc.Fields["RoleID"]; ok {
-						if id, ok := idField.Value.AsString(); ok {
+					if idField, ok := doc.GetFieldValue(delRoleSchema, "RoleID"); ok {
+						if id, ok := idField.AsString(); ok {
 							roleID = id
 						}
 					}
@@ -1247,11 +1218,12 @@ func (ps *PermissionService) getUsersWithRole(roleName string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
+	guwrURSchema := userRolesBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userRoleDocs {
-		if roleIDField, ok := doc.Fields["RoleID"]; ok {
-			if rid, ok := roleIDField.Value.AsString(); ok && rid == roleID {
-				if userIDField, ok := doc.Fields["UserID"]; ok {
-					if uid, ok := userIDField.Value.AsString(); ok {
+		if roleIDField, ok := doc.GetFieldValue(guwrURSchema, "RoleID"); ok {
+			if rid, ok := roleIDField.AsString(); ok && rid == roleID {
+				if userIDField, ok := doc.GetFieldValue(guwrURSchema, "UserID"); ok {
+					if uid, ok := userIDField.AsString(); ok {
 						userIDs = append(userIDs, uid)
 					}
 				}
@@ -1265,12 +1237,13 @@ func (ps *PermissionService) getUsersWithRole(roleName string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
+	guwrUSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, userID := range userIDs {
 		for _, doc := range userDocs {
-			if idField, ok := doc.Fields["UserID"]; ok {
-				if uid, ok := idField.Value.AsString(); ok && uid == userID {
-					if nameField, ok := doc.Fields["Name"]; ok {
-						if username, ok := nameField.Value.AsString(); ok {
+			if idField, ok := doc.GetFieldValue(guwrUSchema, "UserID"); ok {
+				if uid, ok := idField.AsString(); ok && uid == userID {
+					if nameField, ok := doc.GetFieldValue(guwrUSchema, "Name"); ok {
+						if username, ok := nameField.AsString(); ok {
 							usernames = append(usernames, username)
 						}
 					}
@@ -1294,11 +1267,12 @@ func (ps *PermissionService) cleanupRoleJunctionTable(junctionBundle *models.Bun
 
 	removedCount := 0
 
-	// Collect docIDs to delete
+	// Collect docIDs to delete (Option B: schema + GetFieldValue)
+	schema := junctionBundle.DocumentStructure.FieldSchema()
 	toDelete := make([]string, 0)
 	for _, doc := range docs {
-		if field, ok := doc.Fields[fieldName]; ok {
-			if value, ok := field.Value.AsString(); ok && value == fieldValue {
+		if field, ok := doc.GetFieldValue(schema, fieldName); ok {
+			if value, ok := field.AsString(); ok && value == fieldValue {
 				toDelete = append(toDelete, doc.DocumentID)
 			}
 		}

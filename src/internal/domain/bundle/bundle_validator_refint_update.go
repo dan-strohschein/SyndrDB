@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/index/hashindexV3"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/pkg/common/conversion"
 )
 
 /*
@@ -1068,6 +1069,7 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 						continue
 					}
 
+					schema := bundle.DocumentStructure.FieldSchema()
 					for _, doc := range docs {
 						counter++
 
@@ -1078,19 +1080,24 @@ func (v *ReferentialIntegrityValidator) ValidateDropBundleDocumentReferences(
 						}
 
 						// Check if this document has a FK value matching target bundle
-						for _, field := range doc.Fields {
-							if field.Name == fkField && field.Value.Type == models.FieldTypeString {
-								fkValue := field.Value.StringVal
-								// Check if this FK value exists in target bundle
-								for _, targetDocID := range targetDocumentIDs {
-									if fkValue == targetDocID {
-										violations++
-
-										if useSampling && violations >= 100 {
-											return fmt.Errorf("Cannot drop bundle '%s' - at least 100 documents reference this bundle (sampling mode detected violations, actual count may be higher). Remove references first or use DROP BUNDLE \"%s\" WITH FORCE", targetBundle.Name, targetBundle.Name)
-										}
-										break
+						var fkValue string
+						if schema != nil && len(doc.Values) > 0 {
+							if idx, ok := schema.NameToIndex[fkField]; ok && idx < len(doc.Values) && doc.Values[idx].Type == models.FieldTypeString {
+								fkValue = doc.Values[idx].StringVal
+							}
+						} else if doc.Data != nil {
+							if v, ok := doc.Data[fkField]; ok && v != nil {
+								fkValue = conversion.ValueToString(v)
+							}
+						}
+						if fkValue != "" {
+							for _, targetDocID := range targetDocumentIDs {
+								if fkValue == targetDocID {
+									violations++
+									if useSampling && violations >= 100 {
+										return fmt.Errorf("Cannot drop bundle '%s' - at least 100 documents reference this bundle (sampling mode detected violations, actual count may be higher). Remove references first or use DROP BUNDLE \"%s\" WITH FORCE", targetBundle.Name, targetBundle.Name)
 									}
+									break
 								}
 							}
 						}

@@ -56,9 +56,10 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 			"failed to retrieve user documents", errors.LayerCommand)
 	}
+	usersSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range existingDocs {
-		if usernameField, ok := doc.Fields["Username"]; ok {
-			if str, ok := usernameField.Value.AsString(); ok && str == username {
+		if fv, ok := doc.GetFieldValue(usersSchema, "Username"); ok {
+			if str, ok := fv.AsString(); ok && str == username {
 				return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 					fmt.Sprintf("user '%s' already exists", username),
 					errors.LayerCommand).WithContext("username", username)
@@ -72,15 +73,15 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	// Hash the password (simplified - in production use proper hashing like bcrypt)
 	hashedPassword := fmt.Sprintf("hashed_%s", password) // TODO: Implement proper password hashing
 
-	// Create the user document
+	// Create the user document (Option B: Data)
 	userDoc := models.Document{
 		DocumentID: userID,
-		Fields: map[string]models.Field{
-			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(userID)},
-			"UserID":     {Name: "UserID", Value: models.NewStringValue(userID)},
-			"Username":   {Name: "Username", Value: models.NewStringValue(username)},
-			"Password":   {Name: "Password", Value: models.NewStringValue(hashedPassword)},
-			"CreatedAt":  {Name: "CreatedAt", Value: models.NewStringValue(time.Now().Format(time.RFC3339))},
+		Data: map[string]interface{}{
+			"DocumentID": userID,
+			"UserID":     userID,
+			"Username":   username,
+			"Password":   hashedPassword,
+			"CreatedAt":  time.Now().Format(time.RFC3339),
 		},
 	}
 
@@ -185,12 +186,13 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 			"failed to retrieve user documents", errors.LayerCommand)
 	}
+	attachSchema := usersBundle.DocumentStructure.FieldSchema()
 	found := false
 	for _, doc := range userDocs {
-		if usernameField, ok := doc.Fields["Username"]; ok {
-			if str, ok := usernameField.Value.AsString(); ok && str == username {
-				if userIDField, ok := doc.Fields["UserID"]; ok {
-					userID, _ = userIDField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(attachSchema, "Username"); ok {
+			if str, ok := fv.AsString(); ok && str == username {
+				if userIDField, ok := doc.GetFieldValue(attachSchema, "UserID"); ok {
+					userID, _ = userIDField.AsString()
 					found = true
 					break
 				}
@@ -216,12 +218,13 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 			"failed to retrieve database documents", errors.LayerCommand)
 	}
+	dbSchema := databasesBundle.DocumentStructure.FieldSchema()
 	dbFound := false
 	for _, doc := range dbDocs {
-		if nameField, ok := doc.Fields["Name"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && str == databaseName {
-				if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
-					databaseID, _ = dbIDField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(dbSchema, "Name"); ok {
+			if str, ok := fv.AsString(); ok && str == databaseName {
+				if dbIDField, ok := doc.GetFieldValue(dbSchema, "DatabaseID"); ok {
+					databaseID, _ = dbIDField.AsString()
 					dbFound = true
 					break
 				}
@@ -247,11 +250,12 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 			"failed to retrieve database user documents", errors.LayerCommand)
 	}
+	dbUserSchema := databaseUsersBundle.DocumentStructure.FieldSchema()
 	for _, doc := range dbUserDocs {
-		if userIDField, ok := doc.Fields["UserID"]; ok {
-			if dbIDField, ok := doc.Fields["DatabaseID"]; ok {
-				str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := dbIDField.Value.AsString()
+		if userIDField, ok := doc.GetFieldValue(dbUserSchema, "UserID"); ok {
+			if dbIDField, ok := doc.GetFieldValue(dbUserSchema, "DatabaseID"); ok {
+				str1, ok1 := userIDField.AsString()
+				str2, ok2 := dbIDField.AsString()
 				if ok1 && ok2 && str1 == userID && str2 == databaseID {
 					return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 						fmt.Sprintf("user '%s' is already attached to database '%s'", username, databaseName),
@@ -261,15 +265,15 @@ func AttachUserToDatabase(command string, logger *zap.SugaredLogger, serviceMana
 		}
 	}
 
-	// Create the user-database relationship
+	// Create the user-database relationship (Option B: Data)
 	relationshipID := fmt.Sprintf("dbuser_%s_%s_%d", userID, databaseID, time.Now().Unix())
 	relationshipDoc := models.Document{
 		DocumentID: relationshipID,
-		Fields: map[string]models.Field{
-			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(relationshipID)},
-			"UserID":     {Name: "UserID", Value: models.NewStringValue(userID)},
-			"DatabaseID": {Name: "DatabaseID", Value: models.NewStringValue(databaseID)},
-			"AttachedAt": {Name: "AttachedAt", Value: models.NewStringValue(time.Now().Format(time.RFC3339))},
+		Data: map[string]interface{}{
+			"DocumentID":  relationshipID,
+			"UserID":     userID,
+			"DatabaseID": databaseID,
+			"AttachedAt": time.Now().Format(time.RFC3339),
 		},
 	}
 
@@ -311,12 +315,13 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 		return false, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 			"failed to retrieve user documents", errors.LayerCommand)
 	}
+	chupUsersSchema := usersBundle.DocumentStructure.FieldSchema()
 	found := false
 	for _, doc := range userDocs {
-		if usernameField, ok := doc.Fields["Username"]; ok {
-			if str, ok := usernameField.Value.AsString(); ok && str == username {
-				if userIDField, ok := doc.Fields["UserID"]; ok {
-					userID, _ = userIDField.Value.AsString()
+		if fv, ok := doc.GetFieldValue(chupUsersSchema, "Username"); ok {
+			if str, ok := fv.AsString(); ok && str == username {
+				if userIDField, ok := doc.GetFieldValue(chupUsersSchema, "UserID"); ok {
+					userID, _ = userIDField.AsString()
 					found = true
 					break
 				}
@@ -342,12 +347,13 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 		return false, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 			"failed to retrieve permission documents", errors.LayerCommand)
 	}
+	chupPermSchema := permissionsBundle.DocumentStructure.FieldSchema()
 	permFound := false
 	for _, doc := range permDocs {
-		if nameField, ok := doc.Fields["PermissionName"]; ok {
-			if str, ok := nameField.Value.AsString(); ok && str == permission {
-				if idField, ok := doc.Fields["PermissionID"]; ok {
-					permissionID, _ = idField.Value.AsString()
+		if nameField, ok := doc.GetFieldValue(chupPermSchema, "Name"); ok {
+			if str, ok := nameField.AsString(); ok && str == permission {
+				if idField, ok := doc.GetFieldValue(chupPermSchema, "PermissionID"); ok {
+					permissionID, _ = idField.AsString()
 					permFound = true
 					break
 				}
@@ -370,11 +376,12 @@ func CheckUserHasPermission(username, permission string, serviceManager ServiceM
 		return false, errors.WrapWithMessage(err, errors.ERR_INTERNAL_QUERY,
 			"failed to retrieve user permission documents", errors.LayerCommand)
 	}
+	chupUPSchema := userPermissionsBundle.DocumentStructure.FieldSchema()
 	for _, doc := range userPermDocs {
-		if userIDField, ok := doc.Fields["UserID"]; ok {
-			if permIDField, ok := doc.Fields["PermissionID"]; ok {
-				str1, ok1 := userIDField.Value.AsString()
-				str2, ok2 := permIDField.Value.AsString()
+		if userIDField, ok := doc.GetFieldValue(chupUPSchema, "UserID"); ok {
+			if permIDField, ok := doc.GetFieldValue(chupUPSchema, "PermissionID"); ok {
+				str1, ok1 := userIDField.AsString()
+				str2, ok2 := permIDField.AsString()
 				if ok1 && ok2 && str1 == userID && str2 == permissionID {
 					return true, nil
 				}

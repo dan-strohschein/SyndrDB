@@ -179,21 +179,20 @@ func (ht *HierarchicalTransformer) createHierarchicalDocument(group []*joinexecu
 		return nil, 0, fmt.Errorf("parent document is nil")
 	}
 
-	// STEP 1: Use document pool to reduce allocations
-	// TODO: Option C - Implement reference counting for automatic pool return
-	// Create a copy of the parent document for the hierarchical result
 	hierarchicalDoc := document.GetPooledDocument()
 	hierarchicalDoc.DocumentID = parentDoc.DocumentID
-	hierarchicalDoc.Fields = make(map[string]models.Field)
 	hierarchicalDoc.CreatedAt = parentDoc.CreatedAt
 	hierarchicalDoc.UpdatedAt = parentDoc.UpdatedAt
-
-	// Copy parent fields
-	for fieldName, field := range parentDoc.Fields {
-		hierarchicalDoc.Fields[fieldName] = field
+	if len(parentDoc.Values) > 0 {
+		hierarchicalDoc.Values = make([]models.FieldValue, len(parentDoc.Values))
+		copy(hierarchicalDoc.Values, parentDoc.Values)
+	} else if parentDoc.Data != nil {
+		hierarchicalDoc.Data = make(map[string]interface{}, len(parentDoc.Data))
+		for k, v := range parentDoc.Data {
+			hierarchicalDoc.Data[k] = v
+		}
 	}
 
-	// Collect child documents
 	var childDocuments []*models.Document
 	for _, joinResult := range group {
 		var childDoc *models.Document
@@ -202,22 +201,20 @@ func (ht *HierarchicalTransformer) createHierarchicalDocument(group []*joinexecu
 		} else {
 			childDoc = joinResult.LeftDocument
 		}
-
 		if childDoc != nil {
-			// STEP 1: Use document pool to reduce allocations
-			// TODO: Option C - Implement reference counting for automatic pool return
-			// Create a copy of the child document
 			childCopy := document.GetPooledDocument()
 			childCopy.DocumentID = childDoc.DocumentID
-			childCopy.Fields = make(map[string]models.Field)
 			childCopy.CreatedAt = childDoc.CreatedAt
 			childCopy.UpdatedAt = childDoc.UpdatedAt
-
-			// Copy child fields
-			for fieldName, field := range childDoc.Fields {
-				childCopy.Fields[fieldName] = field
+			if len(childDoc.Values) > 0 {
+				childCopy.Values = make([]models.FieldValue, len(childDoc.Values))
+				copy(childCopy.Values, childDoc.Values)
+			} else if childDoc.Data != nil {
+				childCopy.Data = make(map[string]interface{}, len(childDoc.Data))
+				for k, v := range childDoc.Data {
+					childCopy.Data[k] = v
+				}
 			}
-
 			childDocuments = append(childDocuments, childCopy)
 		}
 	}
@@ -244,30 +241,20 @@ func (ht *HierarchicalTransformer) createHierarchicalDocument(group []*joinexecu
 func (ht *HierarchicalTransformer) addChildDocumentsToParent(parentDoc *models.Document, childDocuments []*models.Document, relationship RelationshipMetadata) error {
 	relationshipFieldName := relationship.RelationshipName
 
+	if parentDoc.Data == nil {
+		parentDoc.Data = make(map[string]interface{})
+	}
 	switch relationship.Cardinality {
 	case OneToOne:
-		// For 1:1 relationships, add the child as a single object
 		if len(childDocuments) > 0 {
-			// Convert first child document to a field value (simplified approach)
-			childFields := ht.documentToFieldValue(childDocuments[0])
-			parentDoc.Fields[relationshipFieldName] = models.Field{
-				Name:  relationshipFieldName,
-				Value: models.NewInterfaceValue(childFields), // ✅ Use NewInterfaceValue
-			}
+			parentDoc.Data[relationshipFieldName] = ht.documentToFieldValue(childDocuments[0])
 		}
-
 	case OneToMany, ManyToMany:
-		// For 1:Many and Many:Many relationships, add children as an array
 		var childArray []interface{}
 		for _, childDoc := range childDocuments {
-			childFields := ht.documentToFieldValue(childDoc)
-			childArray = append(childArray, childFields)
+			childArray = append(childArray, ht.documentToFieldValue(childDoc))
 		}
-
-		parentDoc.Fields[relationshipFieldName] = models.Field{
-			Name:  relationshipFieldName,
-			Value: models.NewInterfaceValue(childArray), // ✅ Use NewInterfaceValue
-		}
+		parentDoc.Data[relationshipFieldName] = childArray
 
 	default:
 		return fmt.Errorf("unsupported relationship cardinality: %v", relationship.Cardinality)
@@ -290,9 +277,12 @@ func (ht *HierarchicalTransformer) documentToFieldValue(doc *models.Document) ma
 	// Add DocumentID
 	fieldMap["DocumentID"] = doc.DocumentID
 
-	// Add all fields (box at boundary for JSON/client)
-	for fieldName, field := range doc.Fields {
-		fieldMap[fieldName] = field.Value.AsInterface()
+	if doc.Data != nil {
+		for k, v := range doc.Data {
+			fieldMap[k] = v
+		}
+	} else if len(doc.Values) > 0 {
+		// No schema here; cannot map by name. Omit field iteration.
 	}
 
 	// Add timestamps
@@ -317,18 +307,21 @@ func (ht *HierarchicalTransformer) applyFieldSelection(doc *models.Document, sel
 		return doc
 	}
 
-	// STEP 1: Use document pool to reduce allocations
-	// TODO: Option C - Implement reference counting for automatic pool return
 	filteredDoc := document.GetPooledDocument()
 	filteredDoc.DocumentID = doc.DocumentID
-	filteredDoc.Fields = make(map[string]models.Field)
 	filteredDoc.CreatedAt = doc.CreatedAt
 	filteredDoc.UpdatedAt = doc.UpdatedAt
+	filteredDoc.Data = make(map[string]interface{})
 
-	// Always include the relationship field if it exists
 	relationshipFieldName := relationship.RelationshipName
-	if relationshipField, exists := doc.Fields[relationshipFieldName]; exists {
-		filteredDoc.Fields[relationshipFieldName] = relationshipField
+	var getVal func(string) (interface{}, bool)
+	if doc.Data != nil {
+		getVal = func(name string) (interface{}, bool) { v, ok := doc.Data[name]; return v, ok }
+	} else {
+		getVal = func(string) (interface{}, bool) { return nil, false }
+	}
+	if v, exists := getVal(relationshipFieldName); exists {
+		filteredDoc.Data[relationshipFieldName] = v
 	}
 
 	// Include selected fields if they exist
@@ -344,10 +337,9 @@ func (ht *HierarchicalTransformer) applyFieldSelection(doc *models.Document, sel
 			continue
 		}
 
-		if field, exists := doc.Fields[fieldName]; exists {
-			filteredDoc.Fields[fieldName] = field
+		if v, exists := getVal(fieldName); exists {
+			filteredDoc.Data[fieldName] = v
 		}
 	}
-
 	return filteredDoc
 }

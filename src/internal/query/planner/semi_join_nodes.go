@@ -153,27 +153,32 @@ func (sjn *SemiJoinNode) buildHashTable() (*HashTable, bool) {
 	return hashTable, hasNull
 }
 
-// buildJoinKey creates a composite join key from document fields
 func (sjn *SemiJoinNode) buildJoinKey(doc *models.Document) interface{} {
+	getVal := func(name string) (interface{}, bool) {
+		if fv, ok := doc.GetFieldValue(nil, name); ok && !fv.IsNil() {
+			return fv.AsInterface(), true
+		}
+		if doc.Data != nil {
+			v, ok := doc.Data[name]
+			return v, ok && v != nil
+		}
+		return nil, false
+	}
 	if len(sjn.joinFields) == 1 {
-		// Single field - return value directly
-		field, exists := doc.Fields[sjn.joinFields[0]]
-		if !exists || field.Value.IsNil() {
+		val, ok := getVal(sjn.joinFields[0])
+		if !ok {
 			return nil
 		}
-		return field.Value.AsInterface()
+		return val
 	}
-
-	// Multiple fields - create composite key
 	keyParts := make([]interface{}, len(sjn.joinFields))
 	for i, fieldName := range sjn.joinFields {
-		field, exists := doc.Fields[fieldName]
-		if !exists || field.Value.IsNil() {
-			return nil // Any NULL in composite key makes entire key NULL
+		val, ok := getVal(fieldName)
+		if !ok {
+			return nil
 		}
-		keyParts[i] = field.Value.AsInterface()
+		keyParts[i] = val
 	}
-
 	return &CompositeKey{Parts: keyParts}
 }
 

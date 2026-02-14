@@ -112,16 +112,20 @@ func (s *DatabaseService) registerDatabaseInPrimary(newDB *models.Database) erro
 		return errors.New(errors.ERR_NOT_FOUND_BUNDLE, "Databases bundle not found in Primary database", errors.LayerDomain)
 	}
 
-	// Create a document representing the new database
+	// Create a document representing the new database (schema-ordered Values)
+	names := []string{"DocumentID", "DatabaseID", "Name", "FilePath"}
+	schema := models.NewProjectionSchema(names)
+	docIDVal := fmt.Sprintf("db_%s", newDB.DatabaseID)
 	databaseDoc := models.Document{
-		DocumentID: fmt.Sprintf("db_%s", newDB.DatabaseID),
-		Fields: map[string]models.Field{
-			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(fmt.Sprintf("db_%s", newDB.DatabaseID))},
-			"DatabaseID": {Name: "DatabaseID", Value: models.NewStringValue(newDB.DatabaseID)},
-			"Name":       {Name: "Name", Value: models.NewStringValue(newDB.Name)},
-			"FilePath":   {Name: "FilePath", Value: models.NewStringValue(fmt.Sprintf("%s/%s/%s.db", newDB.DataDirectory, newDB.Name, newDB.Name))},
+		DocumentID: docIDVal,
+		Values: []models.FieldValue{
+			models.NewStringValue(docIDVal),
+			models.NewStringValue(newDB.DatabaseID),
+			models.NewStringValue(newDB.Name),
+			models.NewStringValue(fmt.Sprintf("%s/%s/%s.db", newDB.DataDirectory, newDB.Name, newDB.Name)),
 		},
 	}
+	_ = schema // schema defines order; Values match names
 
 	// WRITE-THROUGH CACHE: Document storage now goes through page cache
 	// TODO: Refactor to use BundleService.AddDocumentToBundle() instead of direct memtable manipulation

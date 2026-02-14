@@ -3,6 +3,8 @@ package documentscanner
 import (
 	"context"
 	"fmt"
+	"os"
+	"time"
 
 	"syndrdb/src/internal/domain/models"
 
@@ -264,28 +266,30 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 		DocumentSlice: docs, // Direct slice from SnapshotPageDocuments - no copy needed
 	}
 
-	// Apply projection in memory if projectionFields is set
-	// This prevents cache poisoning: we cache full pages, then filter fields in memory
 	if len(ba.projectionFields) > 0 {
-		// Create a copy of the page with only projected fields
+		fullSchema := ba.bundle.DocumentStructure.FieldSchema()
+		projSchema := models.NewProjectionSchema(ba.projectionFields)
 		projectedDocs := make([]models.Document, 0, len(docs))
 		projectedMap := make(map[string]models.Document, len(docs))
 
 		for _, doc := range docs {
 			projectedDoc := models.Document{
 				DocumentID: doc.DocumentID,
-				Fields:     make(map[string]models.Field),
+				Values:     make([]models.FieldValue, len(projSchema.Names)),
 			}
-			// Always include DocumentID
-			if docIDField, exists := doc.Fields["DocumentID"]; exists {
-				projectedDoc.Fields["DocumentID"] = docIDField
-			}
-			// Include only projected fields
-			for _, fieldName := range ba.projectionFields {
-				if field, exists := doc.Fields[fieldName]; exists {
-					projectedDoc.Fields[fieldName] = field
+			for i, name := range projSchema.Names {
+				if idx, ok := fullSchema.NameToIndex[name]; ok && idx < len(doc.Values) {
+					projectedDoc.Values[i] = doc.Values[idx]
+				} else {
+					projectedDoc.Values[i] = models.FieldValue{Type: models.FieldTypeNil}
 				}
 			}
+			projectedDoc.CreatedAt = doc.CreatedAt
+			projectedDoc.UpdatedAt = doc.UpdatedAt
+			projectedDoc.CreatedByTxID = doc.CreatedByTxID
+			projectedDoc.DeletedByTxID = doc.DeletedByTxID
+			projectedDoc.CommitSequence = doc.CommitSequence
+			projectedDoc.VersionSequence = doc.VersionSequence
 			projectedDocs = append(projectedDocs, projectedDoc)
 			projectedMap[doc.DocumentID] = projectedDoc
 		}
@@ -297,7 +301,6 @@ func (ba *BundleAdapter) loadDocumentPage(pageID uint32) (*models.DocumentPage, 
 			DocumentSlice: projectedDocs,
 			DocumentCount: len(projectedDocs),
 		}
-
 		ba.logger.Debugf("PROJECTION: Applied in-memory projection to page %d (fields: %v)", pageID, ba.projectionFields)
 		return projectedPage, nil
 	}
@@ -318,7 +321,7 @@ func (ba *BundleAdapter) loadDocumentPageForScan(pageID uint32) (*models.Documen
 	var err error
 
 	if len(ba.projectionFields) > 0 {
-		// Projection requires mutable copy (we modify doc.Fields in-place)
+		// Projection requires mutable copy (we replace doc.Values with projected slice)
 		docs, err = ba.bundleService.SnapshotPageDocuments(ba.bundle.Name, ba.bundle.Database.Name, pageID)
 	} else {
 		// No projection: use zero-copy read-only path
@@ -335,22 +338,28 @@ func (ba *BundleAdapter) loadDocumentPageForScan(pageID uint32) (*models.Documen
 		DocumentSlice: docs,
 	}
 
-	// Apply projection if needed (only when docs is a mutable copy)
 	if len(ba.projectionFields) > 0 {
+		fullSchema := ba.bundle.DocumentStructure.FieldSchema()
+		projSchema := models.NewProjectionSchema(ba.projectionFields)
 		projectedDocs := make([]models.Document, 0, len(docs))
 		for _, doc := range docs {
 			projectedDoc := models.Document{
 				DocumentID: doc.DocumentID,
-				Fields:     make(map[string]models.Field),
+				Values:     make([]models.FieldValue, len(projSchema.Names)),
 			}
-			if docIDField, exists := doc.Fields["DocumentID"]; exists {
-				projectedDoc.Fields["DocumentID"] = docIDField
-			}
-			for _, fieldName := range ba.projectionFields {
-				if field, exists := doc.Fields[fieldName]; exists {
-					projectedDoc.Fields[fieldName] = field
+			for i, name := range projSchema.Names {
+				if idx, ok := fullSchema.NameToIndex[name]; ok && idx < len(doc.Values) {
+					projectedDoc.Values[i] = doc.Values[idx]
+				} else {
+					projectedDoc.Values[i] = models.FieldValue{Type: models.FieldTypeNil}
 				}
 			}
+			projectedDoc.CreatedAt = doc.CreatedAt
+			projectedDoc.UpdatedAt = doc.UpdatedAt
+			projectedDoc.CreatedByTxID = doc.CreatedByTxID
+			projectedDoc.DeletedByTxID = doc.DeletedByTxID
+			projectedDoc.CommitSequence = doc.CommitSequence
+			projectedDoc.VersionSequence = doc.VersionSequence
 			projectedDocs = append(projectedDocs, projectedDoc)
 		}
 		page.DocumentSlice = projectedDocs
@@ -364,6 +373,13 @@ func (ba *BundleAdapter) loadDocumentPageForScan(pageID uint32) (*models.Documen
 // This replaces hard-coded maxSafePages with metadata-driven limits
 // Returns: validated page count that is safe to iterate over
 func (ba *BundleAdapter) getSafePageCount() uint32 {
+	t0 := time.Now()
+	defer func() {
+		if elapsed := time.Since(t0); elapsed > 5*time.Millisecond {
+			fmt.Fprintf(os.Stderr, "PERF getSafePageCount took %v (bundle=%s, TotalDocs=%d, PageCount=%d)\n",
+				elapsed, ba.bundle.Name, ba.bundle.TotalDocuments, ba.bundle.PageCount)
+		}
+	}()
 	pageCount := uint32(ba.bundle.PageCount)
 
 	// CRITICAL FIX: Handle negative TotalDocuments (corruption from over-deletion)
@@ -744,12 +760,16 @@ func (ba *BundleAdapter) GetAllDocumentsWithLimit(limit int) map[string]*models.
 // OPTIMIZATION D: Uses index-based access from snapshot slice to eliminate per-doc copying.
 // OPTIMIZATION C: Applies projection filtering when ba.projectionFields is set.
 func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, fn func(chunk []*models.Document) (stop bool)) error {
+	t0 := time.Now()
 	if chunkSize <= 0 {
 		chunkSize = 4096
 	}
 	pageCount := ba.getSafePageCount()
+	tPageCount := time.Since(t0)
 	hasProjection := len(ba.projectionFields) > 0
 	buffer := make([]*models.Document, 0, chunkSize)
+	var tLoadTotal, tCallbackTotal time.Duration
+	totalDocs := 0
 
 	flush := func() bool {
 		if len(buffer) == 0 {
@@ -778,7 +798,9 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 		default:
 		}
 
+		tLoad := time.Now()
 		docs, err := ba.loadPageDocs(pageID, hasProjection)
+		tLoadTotal += time.Since(tLoad)
 		if err != nil {
 			ba.logger.Errorf("Failed to snapshot page %d: %v", pageID, err)
 			continue
@@ -794,16 +816,26 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 					continue
 				}
 			}
+			totalDocs++
 			buffer = append(buffer, &docs[i])
 			if len(buffer) >= chunkSize {
+				tCb := time.Now()
 				if !flush() {
 					return nil
 				}
+				tCallbackTotal += time.Since(tCb)
 			}
 		}
 	}
 	if len(buffer) > 0 {
+		tCb := time.Now()
 		flush()
+		tCallbackTotal += time.Since(tCb)
+	}
+	elapsed := time.Since(t0)
+	if elapsed > 50*time.Millisecond {
+		fmt.Fprintf(os.Stderr, "PERF ScanDocumentChunks took %v: getSafePageCount=%v, loadPages=%v, callback=%v, pages=%d, docs=%d\n",
+			elapsed, tPageCount, tLoadTotal, tCallbackTotal, pageCount, totalDocs)
 	}
 	return nil
 }
@@ -822,17 +854,18 @@ func (ba *BundleAdapter) loadPageDocs(pageID uint32, hasProjection bool) ([]mode
 	}
 
 	if hasProjection {
+		fullSchema := ba.bundle.DocumentStructure.FieldSchema()
+		projSchema := models.NewProjectionSchema(ba.projectionFields)
 		for i := range docs {
-			projFields := make(map[string]models.Field, len(ba.projectionFields)+1)
-			if docIDField, exists := docs[i].Fields["DocumentID"]; exists {
-				projFields["DocumentID"] = docIDField
-			}
-			for _, fieldName := range ba.projectionFields {
-				if field, exists := docs[i].Fields[fieldName]; exists {
-					projFields[fieldName] = field
+			projValues := make([]models.FieldValue, len(projSchema.Names))
+			for j, name := range projSchema.Names {
+				if idx, ok := fullSchema.NameToIndex[name]; ok && idx < len(docs[i].Values) {
+					projValues[j] = docs[i].Values[idx]
+				} else {
+					projValues[j] = models.FieldValue{Type: models.FieldTypeNil}
 				}
 			}
-			docs[i].Fields = projFields
+			docs[i].Values = projValues
 		}
 	}
 
@@ -842,6 +875,14 @@ func (ba *BundleAdapter) loadPageDocs(pageID uint32, hasProjection bool) ([]mode
 // GetName returns the bundle name for logging and metrics
 func (ba *BundleAdapter) GetName() string {
 	return ba.bundle.Name
+}
+
+// FieldSchema returns the bundle's field schema for document field access (schema-ordered Values).
+func (ba *BundleAdapter) FieldSchema() *models.BundleFieldSchema {
+	if ba.bundle == nil {
+		return nil
+	}
+	return ba.bundle.DocumentStructure.FieldSchema()
 }
 
 // GetTotalDocuments returns the total number of documents efficiently
@@ -904,8 +945,9 @@ func (ba *BundleAdapter) CopyProjectedToSessionCache(ctx context.Context, projec
 
 	// Call bundle service to copy projected documents from cache
 	// The service will hold RLock once and iterate all cached pages
+	schema := ba.bundle.DocumentStructure.FieldSchema()
 	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := ba.bundleService.CopyProjectedFromCache(
-		ba.bundle.Name, databaseName, totalPages, projectFields, effectiveLimit)
+		ba.bundle.Name, databaseName, totalPages, projectFields, effectiveLimit, schema)
 	if err != nil {
 		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents from cache: %w", err)
 	}

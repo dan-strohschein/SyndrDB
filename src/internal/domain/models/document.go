@@ -4,17 +4,20 @@ import (
 	"time"
 )
 
+// Document stores fields in schema order as Values[i] for schema.Names[i].
+// Schema is not stored on the document; callers must supply it from context.
 type Document struct {
 	DocumentID string
-	Fields     map[string]Field
-	Data       map[string]interface{} // Raw document data for storage compatibility
+	// Values holds field values in the order defined by the bundle/result schema (schema.Names).
+	// len(Values) must equal len(schema.Names). Use GetFieldValue(schema, name) for lookup.
+	Values []FieldValue
+	Data   map[string]interface{} // Raw document data for storage compatibility (legacy paths)
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 
-	// PooledFields is set when Fields was obtained from document.GetPooledFieldMap()
-	// (e.g. in mergeJoinedDocument). ReturnPooledDocument will return that map to the
-	// field map pool and clear Fields when this is true.
-	PooledFields bool
+	// PooledValues is set when Values was obtained from a slice pool (e.g. in mergeJoinedDocument).
+	// ReturnPooledDocument will return that slice to the pool and clear Values when this is true.
+	PooledValues bool
 
 	// RCU (Read-Copy-Update) Version Metadata
 	// Simplified model: single version, last-writer-wins, read-committed isolation
@@ -35,31 +38,47 @@ type Document struct {
 	CachedJSON map[string][]byte
 }
 
-// GetField returns the value for a given field name, or nil if not present.
-// For backward compatibility only. Internal hot path should use GetFieldValue to avoid interface boxing.
-func (d *Document) GetField(fieldName string) interface{} {
-	if d == nil || d.Fields == nil {
-		return nil
+// GetFieldValue returns the typed field value for the given field name using the provided schema.
+// Schema must be the one that defines the order of d.Values. Returns (zero, false) if schema is nil,
+// field name is not in schema, or index is out of range.
+func (d *Document) GetFieldValue(schema *BundleFieldSchema, fieldName string) (FieldValue, bool) {
+	if d == nil || schema == nil {
+		return FieldValue{}, false
 	}
-	return d.Fields[fieldName]
+	idx, ok := schema.NameToIndex[fieldName]
+	if !ok || idx < 0 || idx >= len(d.Values) {
+		return FieldValue{}, false
+	}
+	return d.Values[idx], true
 }
 
-// GetFieldValue returns the typed field value for a given field name and whether it existed.
-// Use this instead of GetField in the query/scan path to avoid interface boxing.
-func (d *Document) GetFieldValue(fieldName string) (FieldValue, bool) {
-	if d == nil || d.Fields == nil {
+// GetFieldValueCI returns the typed field value for the given field name using case-insensitive lookup.
+// The lowerFieldName parameter must already be strings.ToLower(fieldName).
+// Uses schema.LowerNameToIndex for O(1) case-insensitive lookup instead of O(n) linear scan.
+func (d *Document) GetFieldValueCI(schema *BundleFieldSchema, lowerFieldName string) (FieldValue, bool) {
+	if d == nil || schema == nil || schema.LowerNameToIndex == nil {
 		return FieldValue{}, false
 	}
-	f, ok := d.Fields[fieldName]
+	idx, ok := schema.LowerNameToIndex[lowerFieldName]
+	if !ok || idx < 0 || idx >= len(d.Values) {
+		return FieldValue{}, false
+	}
+	return d.Values[idx], true
+}
+
+// GetField returns the value for a given field name as interface{}, or nil if not present.
+// Requires schema from context. Prefer GetFieldValue(schema, name) to avoid boxing.
+func (d *Document) GetField(schema *BundleFieldSchema, fieldName string) interface{} {
+	fv, ok := d.GetFieldValue(schema, fieldName)
 	if !ok {
-		return FieldValue{}, false
+		return nil
 	}
-	return f.Value, true
+	return fv.AsInterface()
 }
 
 // DocumentToMap builds a map from document fields for client/API boundaries (e.g. JSON, GraphQL).
-// Uses doc.Fields and boxes only at this boundary. Prefer this over reading doc.Data when Data may be nil.
-func DocumentToMap(doc *Document) map[string]interface{} {
+// Schema defines the order of doc.Values; if nil, only DocumentID/CreatedAt/UpdatedAt are added.
+func DocumentToMap(doc *Document, schema *BundleFieldSchema) map[string]interface{} {
 	if doc == nil {
 		return nil
 	}
@@ -67,12 +86,13 @@ func DocumentToMap(doc *Document) map[string]interface{} {
 	out["DocumentID"] = doc.DocumentID
 	out["CreatedAt"] = doc.CreatedAt
 	out["UpdatedAt"] = doc.UpdatedAt
-	if doc.Fields != nil {
-		for name, field := range doc.Fields {
-			out[name] = field.Value.AsInterface()
+	if schema != nil && doc.Values != nil {
+		for i, name := range schema.Names {
+			if i < len(doc.Values) {
+				out[name] = doc.Values[i].AsInterface()
+			}
 		}
 	}
-	// If Data was populated (legacy path), merge so we don't drop fields not in Fields
 	if doc.Data != nil {
 		for k, v := range doc.Data {
 			if _, has := out[k]; !has {

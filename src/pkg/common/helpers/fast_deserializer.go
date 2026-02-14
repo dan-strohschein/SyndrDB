@@ -25,20 +25,16 @@ func NewFastDocumentDeserializer() *FastDocumentDeserializer {
 	return &FastDocumentDeserializer{}
 }
 
-// DeserializeDocument converts optimized binary format back to a document
-// Binary format: [DocumentID_len][DocumentID][field_count][field1][field2]...[CreatedAt][UpdatedAt]
-// Each field: [name_len][name][type][value_len][value]
-func (d *FastDocumentDeserializer) DeserializeDocument(data []byte) (*models.Document, error) {
+// DeserializeDocument converts V1 binary format back to a document with schema-ordered Values.
+// Schema is required; doc.Values will have length len(schema.Names).
+func (d *FastDocumentDeserializer) DeserializeDocument(data []byte, schema *models.BundleFieldSchema) (*models.Document, error) {
 	d.data = data
 	d.offset = 0
 
-	// Read document ID
 	documentID, err := d.readString()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read document ID: %w", err)
 	}
-
-	// Read field count
 	fieldCount, err := d.readUint32()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read field count: %w", err)
@@ -65,25 +61,21 @@ func (d *FastDocumentDeserializer) DeserializeDocument(data []byte) (*models.Doc
 		return nil, fmt.Errorf("failed to read UpdatedAt: %w", err)
 	}
 
-	// Convert timestamps back to time.Time
 	createdAt := time.Unix(0, createdAtNano)
 	updatedAt := time.Unix(0, updatedAtNano)
 
-	// Read MVCC version metadata (4 × uint64 = 32 bytes)
-	// Default to 0 if not present (backward compatibility with old documents)
 	var createdByTxID, deletedByTxID, commitSequence, versionSequence uint64
 	if d.offset+32 <= len(d.data) {
-		// Version fields are present
 		createdByTxID, _ = d.readUint64()
 		deletedByTxID, _ = d.readUint64()
 		commitSequence, _ = d.readUint64()
 		versionSequence, _ = d.readUint64()
 	}
-	// If not present, values remain 0 (default)
 
+	values := fieldsToValues(schema, fields)
 	return &models.Document{
 		DocumentID:      documentID,
-		Fields:          fields,
+		Values:          values,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
 		CreatedByTxID:   createdByTxID,
@@ -93,50 +85,29 @@ func (d *FastDocumentDeserializer) DeserializeDocument(data []byte) (*models.Doc
 	}, nil
 }
 
-// DeserializeDocumentInto populates a pre-allocated document from binary data.
-// Use this with pooled documents to avoid allocations:
-//
-//	doc := document.GetPooledDocument()
-//	err := deserializer.DeserializeDocumentInto(data, doc)
-//
-// The caller is responsible for clearing/resetting the document before calling.
-func (d *FastDocumentDeserializer) DeserializeDocumentInto(data []byte, doc *models.Document) error {
+// DeserializeDocumentInto populates a pre-allocated document from V1 binary data.
+// Schema is required; doc.Values is set in schema order.
+func (d *FastDocumentDeserializer) DeserializeDocumentInto(data []byte, doc *models.Document, schema *models.BundleFieldSchema) error {
 	d.data = data
 	d.offset = 0
 
-	// Read document ID
 	documentID, err := d.readString()
 	if err != nil {
 		return fmt.Errorf("failed to read document ID: %w", err)
 	}
 	doc.DocumentID = documentID
-
-	// Read field count
 	fieldCount, err := d.readUint32()
 	if err != nil {
 		return fmt.Errorf("failed to read field count: %w", err)
 	}
-
-	// Ensure Fields map exists and is empty
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field, int(fieldCount))
-	} else {
-		// Clear existing fields
-		for k := range doc.Fields {
-			delete(doc.Fields, k)
-		}
-	}
-
-	// Read each field into the existing map
+	fields := make(map[string]models.Field, int(fieldCount))
 	for i := uint32(0); i < fieldCount; i++ {
 		fieldName, field, err := d.readField()
 		if err != nil {
 			return fmt.Errorf("failed to read field %d: %w", i, err)
 		}
-		doc.Fields[fieldName] = field
+		fields[fieldName] = field
 	}
-
-	// Read timestamps
 	createdAtNano, err := d.readInt64()
 	if err != nil {
 		return fmt.Errorf("failed to read CreatedAt: %w", err)
@@ -147,21 +118,32 @@ func (d *FastDocumentDeserializer) DeserializeDocumentInto(data []byte, doc *mod
 	}
 	doc.CreatedAt = time.Unix(0, createdAtNano)
 	doc.UpdatedAt = time.Unix(0, updatedAtNano)
-
-	// Read MVCC version metadata
 	if d.offset+32 <= len(d.data) {
 		doc.CreatedByTxID, _ = d.readUint64()
 		doc.DeletedByTxID, _ = d.readUint64()
 		doc.CommitSequence, _ = d.readUint64()
 		doc.VersionSequence, _ = d.readUint64()
 	} else {
-		doc.CreatedByTxID = 0
-		doc.DeletedByTxID = 0
-		doc.CommitSequence = 0
-		doc.VersionSequence = 0
+		doc.CreatedByTxID, doc.DeletedByTxID, doc.CommitSequence, doc.VersionSequence = 0, 0, 0, 0
 	}
-
+	doc.Values = fieldsToValues(schema, fields)
 	return nil
+}
+
+// fieldsToValues fills a schema-ordered []FieldValue from a name->Field map. Missing keys get FieldTypeNil.
+func fieldsToValues(schema *models.BundleFieldSchema, fields map[string]models.Field) []models.FieldValue {
+	if schema == nil {
+		return nil
+	}
+	values := make([]models.FieldValue, len(schema.Names))
+	for i, name := range schema.Names {
+		if f, ok := fields[name]; ok {
+			values[i] = f.Value
+		} else {
+			values[i] = models.FieldValue{Type: models.FieldTypeNil}
+		}
+	}
+	return values
 }
 
 // DeserializeDocumentMap converts binary format back to a map-based document
@@ -250,9 +232,8 @@ func DetectFormatVersion(data []byte) byte {
 }
 
 // DeserializeDocumentV2 decodes V2 binary format with field directory back to a document.
-// Supports optional projection: only specified fields are fully deserialized.
-// If projection is nil or empty, all fields are deserialized.
-func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, projection []string) (*models.Document, error) {
+// Schema is required; doc.Values is filled in schema order. Projection limits which fields are read.
+func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, schema *models.BundleFieldSchema, projection []string) (*models.Document, error) {
 	d.data = data
 	d.offset = 0
 
@@ -330,18 +311,13 @@ func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, projection
 	// ─────────────────────────────────────────────────────────────
 	fields := make(map[string]models.Field, len(directoryEntries))
 	for _, entry := range directoryEntries {
-		// Check projection - skip if not in requested fields
 		if projectionHashes != nil && !projectionHashes[entry.NameHash64] {
 			continue
 		}
-
-		// Read field name from NameOffset
 		if int(entry.NameOffset)+int(entry.NameLen) > len(d.data) {
 			return nil, fmt.Errorf("field name offset out of bounds: %d+%d > %d", entry.NameOffset, entry.NameLen, len(d.data))
 		}
 		fieldName := string(d.data[entry.NameOffset : entry.NameOffset+uint32(entry.NameLen)])
-
-		// Read field value from DataOffset using direct offset access
 		field, err := d.readFieldValueAtOffset(entry)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read field %s: %w", fieldName, err)
@@ -350,10 +326,6 @@ func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, projection
 		fields[fieldName] = field
 	}
 
-	// ─────────────────────────────────────────────────────────────
-	// 6. Read timestamps and MVCC (at end of data, 48 bytes)
-	// ─────────────────────────────────────────────────────────────
-	// Timestamps and MVCC are at the very end
 	if len(d.data) < 48 {
 		return nil, fmt.Errorf("insufficient data for timestamps")
 	}
@@ -365,9 +337,10 @@ func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, projection
 	commitSequence := binary.LittleEndian.Uint64(d.data[metadataOffset+32 : metadataOffset+40])
 	versionSequence := binary.LittleEndian.Uint64(d.data[metadataOffset+40 : metadataOffset+48])
 
+	values := fieldsToValues(schema, fields)
 	return &models.Document{
 		DocumentID:      documentID,
-		Fields:          fields,
+		Values:          values,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
 		CreatedByTxID:   createdByTxID,
@@ -378,15 +351,8 @@ func (d *FastDocumentDeserializer) DeserializeDocumentV2(data []byte, projection
 }
 
 // DeserializeDocumentV2Into populates a pre-allocated document from V2 binary data.
-// Use with pooled documents to avoid allocations. Supports projection pushdown.
-//
-// Example with pooling:
-//
-//	doc := document.GetPooledDocument()
-//	err := deserializer.DeserializeDocumentV2Into(data, projection, doc)
-//
-// The caller must ensure doc.Fields is initialized or nil (will be created if nil).
-func (d *FastDocumentDeserializer) DeserializeDocumentV2Into(data []byte, projection []string, doc *models.Document) error {
+// Schema is required; doc.Values is filled in schema order. Projection limits which fields are read.
+func (d *FastDocumentDeserializer) DeserializeDocumentV2Into(data []byte, schema *models.BundleFieldSchema, projection []string, doc *models.Document) error {
 	d.data = data
 	d.offset = 0
 
@@ -450,35 +416,24 @@ func (d *FastDocumentDeserializer) DeserializeDocumentV2Into(data []byte, projec
 		}
 	}
 
-	// Ensure Fields map exists and is empty
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field, len(directoryEntries))
-	} else {
-		for k := range doc.Fields {
-			delete(doc.Fields, k)
-		}
-	}
-
-	// Deserialize fields with optional projection
+	fields := make(map[string]models.Field, len(directoryEntries))
 	for _, entry := range directoryEntries {
 		if projectionHashes != nil && !projectionHashes[entry.NameHash64] {
 			continue
 		}
-
 		if int(entry.NameOffset)+int(entry.NameLen) > len(d.data) {
 			return fmt.Errorf("field name offset out of bounds")
 		}
 		fieldName := string(d.data[entry.NameOffset : entry.NameOffset+uint32(entry.NameLen)])
-
 		field, err := d.readFieldValueAtOffset(entry)
 		if err != nil {
 			return fmt.Errorf("failed to read field %s: %w", fieldName, err)
 		}
 		field.Name = fieldName
-		doc.Fields[fieldName] = field
+		fields[fieldName] = field
 	}
+	doc.Values = fieldsToValues(schema, fields)
 
-	// Read metadata from end of data
 	if len(d.data) < 48 {
 		return fmt.Errorf("insufficient data for timestamps")
 	}
@@ -957,7 +912,7 @@ func (d *FastDocumentDeserializer) skipField() error {
 // Returns:
 //   - *models.Document: Document with only requested fields
 //   - error: Any deserialization error
-func (d *FastDocumentDeserializer) DeserializeProjectedFields(data []byte, fieldsToExtract []string) (*models.Document, error) {
+func (d *FastDocumentDeserializer) DeserializeProjectedFields(data []byte, fieldsToExtract []string, schema *models.BundleFieldSchema) (*models.Document, error) {
 	d.data = data
 	d.offset = 0
 
@@ -1038,11 +993,10 @@ func (d *FastDocumentDeserializer) DeserializeProjectedFields(data []byte, field
 		commitSequence, _ = d.readUint64()
 		versionSequence, _ = d.readUint64()
 	}
-	// If not present, values remain 0 (default)
-
+	values := fieldsToValues(schema, fields)
 	return &models.Document{
 		DocumentID:      documentID,
-		Fields:          fields,
+		Values:          values,
 		CreatedAt:       createdAt,
 		UpdatedAt:       updatedAt,
 		CreatedByTxID:   createdByTxID,
@@ -1318,22 +1272,18 @@ func DecodeFastBinary(data []byte) (map[string]interface{}, error) {
 	return d.DeserializeDocumentMap(data)
 }
 
-// DecodeFastBinaryToDocument deserializes binary data directly to a models.Document.
-// Provides direct deserialization without the map conversion overhead.
-// Safe for concurrent use.
-// Automatically detects V2 format and uses optimized deserialization when available.
-func DecodeFastBinaryToDocument(data []byte) (*models.Document, error) {
+// DecodeFastBinaryToDocument deserializes binary data to a models.Document with schema-ordered Values.
+// Schema is required. Auto-detects V1/V2 format.
+func DecodeFastBinaryToDocument(data []byte, schema *models.BundleFieldSchema) (*models.Document, error) {
 	d := deserializerPool.Get().(*FastDocumentDeserializer)
 	defer func() {
 		d.data, d.offset = nil, 0
 		deserializerPool.Put(d)
 	}()
-
-	// Auto-detect format version and use appropriate deserializer
 	if DetectFormatVersion(data) == FormatVersionV2 {
-		return d.DeserializeDocumentV2(data, nil) // All fields
+		return d.DeserializeDocumentV2(data, schema, nil)
 	}
-	return d.DeserializeDocument(data)
+	return d.DeserializeDocument(data, schema)
 }
 
 // DecodeFastBinaryProjected deserializes only specified fields for projection pushdown optimization.
@@ -1357,50 +1307,43 @@ func DecodeFastBinaryToDocument(data []byte) (*models.Document, error) {
 // Performance:
 //   - V1 format: O(fields) scan through all fields
 //   - V2 format: O(projection) using xxHash64 directory lookup
-func DecodeFastBinaryProjected(data []byte, fieldsToExtract []string) (*models.Document, error) {
+func DecodeFastBinaryProjected(data []byte, fieldsToExtract []string, schema *models.BundleFieldSchema) (*models.Document, error) {
 	d := deserializerPool.Get().(*FastDocumentDeserializer)
 	defer func() {
 		d.data, d.offset = nil, 0
 		deserializerPool.Put(d)
 	}()
-
-	// PROJECTION PUSHDOWN V2: Auto-detect format and use O(1) lookup for V2 documents
 	if DetectFormatVersion(data) == FormatVersionV2 {
-		return d.DeserializeDocumentV2(data, fieldsToExtract)
+		return d.DeserializeDocumentV2(data, schema, fieldsToExtract)
 	}
-	return d.DeserializeProjectedFields(data, fieldsToExtract)
+	return d.DeserializeProjectedFields(data, fieldsToExtract, schema)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // V2 Format Global Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-// DecodeFastBinaryAuto auto-detects format version and deserializes accordingly.
-// This allows gradual migration: old V1 documents coexist with new V2 documents.
-func DecodeFastBinaryAuto(data []byte) (*models.Document, error) {
+// DecodeFastBinaryAuto auto-detects format version and deserializes with schema-ordered Values.
+func DecodeFastBinaryAuto(data []byte, schema *models.BundleFieldSchema) (*models.Document, error) {
 	d := deserializerPool.Get().(*FastDocumentDeserializer)
 	defer func() {
 		d.data, d.offset = nil, 0
 		deserializerPool.Put(d)
 	}()
-
-	version := DetectFormatVersion(data)
-	if version == FormatVersionV2 {
-		return d.DeserializeDocumentV2(data, nil) // All fields
+	if DetectFormatVersion(data) == FormatVersionV2 {
+		return d.DeserializeDocumentV2(data, schema, nil)
 	}
-	return d.DeserializeDocument(data) // V1 format
+	return d.DeserializeDocument(data, schema)
 }
 
 // DecodeFastBinaryV2Projected deserializes V2 format with projection pushdown.
-// Only specified fields are fully deserialized, providing significant speedup
-// for queries that only need a subset of fields (e.g., SELECT name FROM users).
-func DecodeFastBinaryV2Projected(data []byte, projection []string) (*models.Document, error) {
+func DecodeFastBinaryV2Projected(data []byte, projection []string, schema *models.BundleFieldSchema) (*models.Document, error) {
 	d := deserializerPool.Get().(*FastDocumentDeserializer)
 	defer func() {
 		d.data, d.offset = nil, 0
 		deserializerPool.Put(d)
 	}()
-	return d.DeserializeDocumentV2(data, projection)
+	return d.DeserializeDocumentV2(data, schema, projection)
 }
 
 // LookupFieldByHashV2 performs O(1) single-field lookup in V2 format documents.
@@ -1464,14 +1407,13 @@ func (c *ProjectionHashCache) LookupField(data []byte, fieldName string) (*model
 }
 
 // DeserializeWithCachedProjection deserializes only the cached fields.
-// More efficient than DecodeFastBinaryV2Projected for repeated use.
-func (c *ProjectionHashCache) DeserializeWithCachedProjection(data []byte) (*models.Document, error) {
+func (c *ProjectionHashCache) DeserializeWithCachedProjection(data []byte, schema *models.BundleFieldSchema) (*models.Document, error) {
 	d := deserializerPool.Get().(*FastDocumentDeserializer)
 	defer func() {
 		d.data, d.offset = nil, 0
 		deserializerPool.Put(d)
 	}()
-	return d.DeserializeDocumentV2(data, c.fieldList)
+	return d.DeserializeDocumentV2(data, schema, c.fieldList)
 }
 
 // Fields returns the list of fields in this cache.

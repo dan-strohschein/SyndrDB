@@ -211,11 +211,8 @@ func (cf *ConcurrentFlusher) MarkDirty(bundleName string, pageID uint32, doc int
 }
 
 // MarkPageDirty records a document write with page-level tracking.
-// This is the full tracking path for concurrent page writes.
-// doc may be nil if the caller only cares about triggering flush; otherwise
-// pass *models.Document so the tracker can include it in the page batch for flush.
-func (cf *ConcurrentFlusher) MarkPageDirty(bundleName string, pageID uint32, doc interface{}, estimatedBytes int64) bool {
-	// Track at bundle level
+// schema is required for encoding document Values; pass bundle.DocumentStructure.FieldSchema().
+func (cf *ConcurrentFlusher) MarkPageDirty(bundleName string, pageID uint32, doc interface{}, estimatedBytes int64, schema *models.BundleFieldSchema) bool {
 	cf.MarkDirty(bundleName, pageID, doc, estimatedBytes)
 
 	var docPtr *models.Document
@@ -225,7 +222,7 @@ func (cf *ConcurrentFlusher) MarkPageDirty(bundleName string, pageID uint32, doc
 		}
 	}
 
-	shouldFlush := cf.tracker.MarkDirty(bundleName, pageID, docPtr, estimatedBytes)
+	shouldFlush := cf.tracker.MarkDirty(bundleName, pageID, docPtr, estimatedBytes, schema)
 
 	if shouldFlush {
 		cf.tracker.EnqueueForFlush(bundleName, pageID)

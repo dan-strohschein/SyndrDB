@@ -323,13 +323,16 @@ func (n *DistinctNode) executeHashBased(ctx context.Context, documents map[strin
 	memoryTracker := GetMemoryTrackerFromContext(ctx)
 	docCount := 0
 
+	schema := (*models.BundleFieldSchema)(nil)
+	if n.Bundle != nil {
+		schema = n.Bundle.DocumentStructure.FieldSchema()
+	}
 	// Process each document
 	for docID, doc := range documents {
 		docCount++
 
-		// Query-level memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && docCount%100 == 0 {
-			docSize := models.EstimateDocumentSize(doc)
+			docSize := models.EstimateDocumentSize(doc, schema)
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
 			}
@@ -338,8 +341,7 @@ func (n *DistinctNode) executeHashBased(ctx context.Context, documents map[strin
 			}
 		}
 
-		// Extract DISTINCT field values
-		values, err := extractDistinctFields(doc, n.DistinctFields)
+		values, err := extractDistinctFields(doc, n.DistinctFields, schema)
 		if err != nil {
 			n.Logger.Warnf("Failed to extract fields from document %s: %v", docID, err)
 			continue
@@ -455,11 +457,14 @@ func (n *DistinctNode) executeSortBased(documents map[string]*models.Document) (
 		docIDMap[doc] = docID
 	}
 
+	schema := (*models.BundleFieldSchema)(nil)
+	if n.Bundle != nil {
+		schema = n.Bundle.DocumentStructure.FieldSchema()
+	}
 	// Sort documents by DISTINCT fields
 	sort.Slice(docSlice, func(i, j int) bool {
-		// Extract field values for comparison
-		vals1, err1 := extractDistinctFields(docSlice[i], n.DistinctFields)
-		vals2, err2 := extractDistinctFields(docSlice[j], n.DistinctFields)
+		vals1, err1 := extractDistinctFields(docSlice[i], n.DistinctFields, schema)
+		vals2, err2 := extractDistinctFields(docSlice[j], n.DistinctFields, schema)
 
 		// Handle extraction errors - treat errors as "greater than"
 		if err1 != nil {
@@ -480,8 +485,7 @@ func (n *DistinctNode) executeSortBased(documents map[string]*models.Document) (
 	var prevValues []interface{}
 
 	for _, doc := range docSlice {
-		// Extract current values
-		values, err := extractDistinctFields(doc, n.DistinctFields)
+		values, err := extractDistinctFields(doc, n.DistinctFields, schema)
 		if err != nil {
 			n.Logger.Warnf("Failed to extract fields during deduplication: %v", err)
 			continue

@@ -225,20 +225,17 @@ func probeWithIndex(
 
 	hjs.logger.Debugf("Batch retrieved %d/%d probe documents via GetDocumentsByIDs", len(probeDocs), len(allDocIDs))
 
-	// Step 6: Probe hash table with retrieved documents
-	// Pre-allocate result slice
-	joinedDocs := make([]*JoinedDocument, 0, len(probeDocs))
+	probeSchema := probeBundle.FieldSchema()
 
+	// Step 6: Probe hash table with retrieved documents
+	joinedDocs := make([]*JoinedDocument, 0, len(probeDocs))
 	for _, probeDoc := range probeDocs {
-		// Check for cancellation
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
-
-		// Extract key value from document
-		keyValue, err := extractFieldValue(probeDoc, probeKey)
+		keyValue, err := extractFieldValue(probeDoc, probeKey, probeSchema)
 		if err != nil {
 			hjs.logger.Warnf("Skipping document %s: %v", probeDoc.DocumentID, err)
 			continue
@@ -277,19 +274,19 @@ func getHashIndexForField(bundle documentscanner.BundleInterface, fieldName stri
 	return nil
 }
 
-// extractFieldValue extracts a field value from a document
-// Returns error if field doesn't exist
-func extractFieldValue(doc *models.Document, fieldName string) (interface{}, error) {
-	if doc.Fields == nil {
-		return nil, fmt.Errorf("document has no fields")
+// extractFieldValue extracts a field value from a document (schema + Values or Data).
+// schema may be nil; then doc.Data or doc.Fields is used.
+func extractFieldValue(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) (interface{}, error) {
+	if schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv.AsInterface(), nil
+		}
+		return nil, fmt.Errorf("field %s not found", fieldName)
 	}
-
-	for _, field := range doc.Fields {
-		if field.Name == fieldName {
-			// Convert FieldValue (typed union) to interface{}
-			return field.Value.AsInterface(), nil
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return v, nil
 		}
 	}
-
 	return nil, fmt.Errorf("field %s not found", fieldName)
 }

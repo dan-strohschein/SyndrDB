@@ -47,14 +47,14 @@ func (cr *CommandResponse) GetResultOrTransform() interface{} {
 
 	// Streaming path: prefer StreamSlice (already a slice), fallback to StreamDocuments
 	if len(cr.StreamSlice) > 0 {
-		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(cr.StreamSlice, cr.StreamFields)
+		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(cr.StreamSlice, cr.StreamFields, nil)
 	}
 	if len(cr.StreamDocuments) > 0 {
 		docSlice := make([]*models.Document, 0, len(cr.StreamDocuments))
 		for _, doc := range cr.StreamDocuments {
 			docSlice = append(docSlice, doc)
 		}
-		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(docSlice, cr.StreamFields)
+		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(docSlice, cr.StreamFields, nil)
 	}
 
 	return nil

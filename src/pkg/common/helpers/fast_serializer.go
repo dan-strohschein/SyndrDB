@@ -72,33 +72,30 @@ func NewFastDocumentSerializer() *FastDocumentSerializer {
 	}
 }
 
-// SerializeDocument converts a document to optimized binary format
-// Binary format: [DocumentID_len][DocumentID][field_count][field1][field2]...
-// Each field: [name_len][name][type][value_len][value]
-func (s *FastDocumentSerializer) SerializeDocument(document *models.Document) ([]byte, error) {
+// SerializeDocument converts a document to V1 binary format using schema-ordered Values.
+// Schema is required.
+func (s *FastDocumentSerializer) SerializeDocument(document *models.Document, schema *models.BundleFieldSchema) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// CRITICAL: Reset buffer length but preserve capacity to prevent reallocations
-	// Reallocations during append() can cause race conditions if old buffer is still being copied
 	s.buffer = s.buffer[:0]
-
-	// If buffer is getting too large, reallocate fresh to prevent unbounded growth
-	if cap(s.buffer) > 1024*1024 { // 1MB cap
-		s.buffer = make([]byte, 0, 65536) // Reset to 64KB
+	if cap(s.buffer) > 1024*1024 {
+		s.buffer = make([]byte, 0, 65536)
 	}
 
-	// Write document ID
 	docIDBytes := []byte(document.DocumentID)
 	s.writeUint32(uint32(len(docIDBytes)))
 	s.buffer = append(s.buffer, docIDBytes...)
 
-	// Write field count
-	s.writeUint32(uint32(len(document.Fields)))
-
-	// Write each field
-	for fieldName, field := range document.Fields {
-		if err := s.writeField(fieldName, field); err != nil {
+	s.writeUint32(uint32(len(schema.Names)))
+	for i, fieldName := range schema.Names {
+		var fv models.FieldValue
+		if i < len(document.Values) {
+			fv = document.Values[i]
+		} else {
+			fv = models.FieldValue{Type: models.FieldTypeNil}
+		}
+		if err := s.writeField(fieldName, models.Field{Name: fieldName, Value: fv}); err != nil {
 			return nil, fmt.Errorf("failed to write field %s: %w", fieldName, err)
 		}
 	}
@@ -199,74 +196,50 @@ func (s *FastDocumentSerializer) SerializeDocumentMap(docEntry map[string]interf
 	return result, nil
 }
 
-// SerializeDocumentV2 converts a document to V2 binary format with field directory for O(1) field access.
-// V2 Format Layout:
-//
-//	[Version:1][Flags:1][DocIDLen:4][DocID:N][FieldCount:4]
-//	[FieldDirectory: FieldCount × 24 bytes]
-//	[NameTable: variable length field names]
-//	[DataSection: field values in same order as directory]
-//	[CreatedAt:8][UpdatedAt:8][CreatedByTxID:8][DeletedByTxID:8][CommitSeq:8][VersionSeq:8]
-//
-// Each FieldDirectoryEntry (24 bytes):
-//
-//	[NameHash64:8][NameOffset:4][NameLen:2][FieldType:1][_pad:1][DataOffset:4][DataLen:4]
-//
-// Benefits:
-//   - O(1) field lookup via xxHash64 matching in directory
-//   - Projection pushdown: deserialize only requested fields by offset
-//   - 3-5x faster hash computation than FNV-1a
-func (s *FastDocumentSerializer) SerializeDocumentV2(document *models.Document) ([]byte, error) {
+// SerializeDocumentV2 converts a document to V2 binary format using schema-ordered Values.
+// Schema is required; document.Values must have length len(schema.Names).
+func (s *FastDocumentSerializer) SerializeDocumentV2(document *models.Document, schema *models.BundleFieldSchema) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Reset buffer but preserve capacity
 	s.buffer = s.buffer[:0]
 	if cap(s.buffer) > 1024*1024 {
 		s.buffer = make([]byte, 0, 65536)
 	}
 
-	// ─────────────────────────────────────────────────────────────
-	// 1. Write header: Version + Flags
-	// ─────────────────────────────────────────────────────────────
 	s.buffer = append(s.buffer, FormatVersionV2)
-	flags := byte(FlagHasFieldDirectory) // Always set for V2
-	s.buffer = append(s.buffer, flags)
+	s.buffer = append(s.buffer, byte(FlagHasFieldDirectory))
 
-	// ─────────────────────────────────────────────────────────────
-	// 2. Write DocumentID
-	// ─────────────────────────────────────────────────────────────
 	docIDBytes := []byte(document.DocumentID)
 	s.writeUint32(uint32(len(docIDBytes)))
 	s.buffer = append(s.buffer, docIDBytes...)
 
-	// ─────────────────────────────────────────────────────────────
-	// 3. Write field count and reserve space for directory
-	// ─────────────────────────────────────────────────────────────
-	fieldCount := uint32(len(document.Fields))
+	fieldCount := uint32(len(schema.Names))
 	s.writeUint32(fieldCount)
 
-	// Remember where directory starts - we'll back-patch offsets later
 	directoryOffset := len(s.buffer)
-	directorySize := int(fieldCount) * 24 // 24 bytes per FieldDirectoryEntry
-	// Reserve space with zeros (will be filled in later)
+	directorySize := int(fieldCount) * 24
 	for i := 0; i < directorySize; i++ {
 		s.buffer = append(s.buffer, 0)
 	}
 
-	// ─────────────────────────────────────────────────────────────
-	// 4. Build field directory entries and write name table
-	// ─────────────────────────────────────────────────────────────
 	type fieldInfo struct {
 		name      string
 		field     models.Field
 		entry     FieldDirectoryEntry
-		nameStart uint32 // Offset in buffer where name starts
+		nameStart uint32
 	}
-	fieldInfos := make([]fieldInfo, 0, len(document.Fields))
+	fieldInfos := make([]fieldInfo, 0, len(schema.Names))
 
 	nameTableOffset := len(s.buffer)
-	for fieldName, field := range document.Fields {
+	for i, fieldName := range schema.Names {
+		var fv models.FieldValue
+		if i < len(document.Values) {
+			fv = document.Values[i]
+		} else {
+			fv = models.FieldValue{Type: models.FieldTypeNil}
+		}
+		field := models.Field{Name: fieldName, Value: fv}
 		info := fieldInfo{
 			name:      fieldName,
 			field:     field,
@@ -276,7 +249,6 @@ func (s *FastDocumentSerializer) SerializeDocumentV2(document *models.Document) 
 		info.entry.NameLen = uint16(len(fieldName))
 		info.entry.FieldType = s.getFieldTypeCode(field)
 
-		// Write field name to name table
 		s.buffer = append(s.buffer, []byte(fieldName)...)
 		fieldInfos = append(fieldInfos, info)
 	}
@@ -548,9 +520,7 @@ func EncodeFastBinary(docEntry map[string]interface{}) ([]byte, error) {
 	return globalFastSerializer.SerializeDocumentMap(docEntry)
 }
 
-// EncodeFastBinaryV2 serializes a document using V2 format with field directory.
-// Provides O(1) field lookup during deserialization via xxHash64 field directory.
-// Use this for new documents; existing documents can still be read with auto-detection.
-func EncodeFastBinaryV2(doc *models.Document) ([]byte, error) {
-	return globalFastSerializer.SerializeDocumentV2(doc)
+// EncodeFastBinaryV2 serializes a document using V2 format. Schema is required.
+func EncodeFastBinaryV2(doc *models.Document, schema *models.BundleFieldSchema) ([]byte, error) {
+	return globalFastSerializer.SerializeDocumentV2(doc, schema)
 }

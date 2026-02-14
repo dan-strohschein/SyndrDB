@@ -5,19 +5,21 @@ import (
 )
 
 // BuildCachedJSON populates doc.CachedJSON with pre-encoded JSON fragments for all
-// user-data fields. Each entry is a complete "fieldName":encodedValue fragment.
+// user-data fields in schema order. Each entry is a complete "fieldName":encodedValue fragment.
 // Metadata fields (DocumentID, CreatedAt, UpdatedAt) are NOT cached — they're
-// always encoded inline because they're simple strings with fast encoding paths.
-func BuildCachedJSON(doc *models.Document) {
-	if doc == nil || len(doc.Fields) == 0 {
+// always encoded inline. Schema defines the order of doc.Values; if nil, no cache is built.
+func BuildCachedJSON(doc *models.Document, schema *models.BundleFieldSchema) {
+	if doc == nil || schema == nil || len(doc.Values) == 0 {
 		return
 	}
-	cache := make(map[string][]byte, len(doc.Fields))
-	for fieldName, field := range doc.Fields {
+	cache := make(map[string][]byte, len(schema.Names))
+	for i, fieldName := range schema.Names {
 		if fieldName == FieldDocumentID {
-			continue // Metadata — always encoded inline
+			continue
 		}
-		cache[fieldName] = BuildFieldFragment(fieldName, field.Value)
+		if i < len(doc.Values) {
+			cache[fieldName] = BuildFieldFragment(fieldName, doc.Values[i])
+		}
 	}
 	doc.CachedJSON = cache
 }

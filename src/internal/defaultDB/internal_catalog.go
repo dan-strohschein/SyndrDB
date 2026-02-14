@@ -13,6 +13,18 @@ import (
 	"go.uber.org/zap"
 )
 
+// buildCatalogDocument builds a Document with Values from a bundle schema and field map (Option B).
+func buildCatalogDocument(bundle *models.Bundle, docID string, fields map[string]models.Field) *models.Document {
+	schema := bundle.DocumentStructure.FieldSchema()
+	doc := &models.Document{DocumentID: docID, Values: make([]models.FieldValue, len(schema.Names))}
+	for name, idx := range schema.NameToIndex {
+		if f, ok := fields[name]; ok {
+			doc.Values[idx] = f.Value
+		}
+	}
+	return doc
+}
+
 func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	storageEngine *databasestore.DatabaseStorageEngine,
 	db *models.Database,
@@ -595,17 +607,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	dbBundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	dbBundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(dbBundle_doc.DocumentID),
-	}
+	docID := helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	dbBundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err := bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, dbBundle_doc)
 	if err != nil {
@@ -642,17 +646,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	bundles_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	bundles_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(bundles_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	bundles_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, bundles_Bundle_doc)
 	if err != nil {
@@ -689,17 +685,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	permissions_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	permissions_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(permissions_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	permissions_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, permissions_Bundle_doc)
 	if err != nil {
@@ -736,17 +724,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	roles_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	roles_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(roles_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	roles_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, roles_Bundle_doc)
 	if err != nil {
@@ -783,17 +763,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	users_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	users_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(users_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	users_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, users_Bundle_doc)
 	if err != nil {
@@ -830,17 +802,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	userPermissions_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	userPermissions_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(userPermissions_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	userPermissions_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, userPermissions_Bundle_doc)
 	if err != nil {
@@ -877,17 +841,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	databaseUsers_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	databaseUsers_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(databaseUsers_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	databaseUsers_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, databaseUsers_Bundle_doc)
 	if err != nil {
@@ -923,17 +879,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	userRoles_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	userRoles_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(userRoles_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	userRoles_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, userRoles_Bundle_doc)
 	if err != nil {
@@ -969,17 +917,9 @@ func HydrateBundlesPrimaryCatalogs(databaseService *database.DatabaseService,
 	fields["FieldCount"] = field3
 	fields["DatabaseName"] = field4
 	fields["FilePath"] = field5
-
-	views_Bundle_doc := &models.Document{
-		DocumentID: helpers.GenerateFastUUID(),
-		Fields:     fields,
-	}
-
-	// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-	views_Bundle_doc.Fields["DocumentID"] = models.Field{
-		Name:  "DocumentID",
-		Value: models.NewStringValue(views_Bundle_doc.DocumentID),
-	}
+	docID = helpers.GenerateFastUUID()
+	fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+	views_Bundle_doc := buildCatalogDocument(&bundles_Bundle, docID, fields)
 
 	err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], &bundles_Bundle, views_Bundle_doc)
 	if err != nil {
@@ -1021,23 +961,9 @@ func HydratePermissionPrimaryCatalogs(databaseService *database.DatabaseService,
 		fields["PermissionID"] = field1
 		fields["Name"] = field2
 		fields["IsSystem"] = field3
-		doc := &models.Document{
-			DocumentID: helpers.GenerateFastUUID(),
-			Fields:     fields,
-			Data:       make(map[string]interface{}),
-		}
-
-		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-		doc.Fields["DocumentID"] = models.Field{
-			Name:  "DocumentID",
-			Value: models.NewStringValue(doc.DocumentID),
-		}
-
-		// Populate Data map from Fields at boundary (box once per field for storage/API)
-		for key, field := range doc.Fields {
-			doc.Data[key] = field.Value.AsInterface()
-		}
-
+		docID := helpers.GenerateFastUUID()
+		fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+		doc := buildCatalogDocument(permissionsBundle, docID, fields)
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], permissionsBundle, doc)
 		if err != nil {
 			logger.Warnf("Warning: Failed to add document to Permissions bundle: %v", err)
@@ -1079,23 +1005,9 @@ func HydrateRolesPrimaryCatalogs(databaseService *database.DatabaseService,
 		fields["RoleID"] = field1
 		fields["Name"] = field2
 		fields["IsSystem"] = field3
-		doc := &models.Document{
-			DocumentID: helpers.GenerateFastUUID(),
-			Fields:     fields,
-			Data:       make(map[string]interface{}),
-		}
-
-		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-		doc.Fields["DocumentID"] = models.Field{
-			Name:  "DocumentID",
-			Value: models.NewStringValue(doc.DocumentID),
-		}
-
-		// Populate Data map from Fields at boundary (box once per field for storage/API)
-		for key, field := range doc.Fields {
-			doc.Data[key] = field.Value.AsInterface()
-		}
-
+		docID := helpers.GenerateFastUUID()
+		fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+		doc := buildCatalogDocument(rolesBundle, docID, fields)
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesBundle, doc)
 		if err != nil {
 			logger.Warnf("Warning: Failed to add document to Roles bundle: %v", err)
@@ -1160,8 +1072,11 @@ func HydrateRolesPermissionsPrimaryCatalogs(databaseService *database.DatabaseSe
 	// TODO: I will add support for dynamic role-permission assignment via SyndrQL commands
 	// TODO: I will add role inheritance (e.g., Admin inherits all permissions from other roles)
 
+	rolesSchema := rolesBundle.DocumentStructure.FieldSchema()
+	permsSchema := permissionsBundle.DocumentStructure.FieldSchema()
 	for _, roleDoc := range roleDocs {
-		roleName, _ := roleDoc.Fields["Name"].Value.AsString() // ✅ Use AsString()
+		rv, _ := roleDoc.GetFieldValue(rolesSchema, "Name")
+		roleName, _ := rv.AsString()
 		permissionNames, exists := rolePermissionMap[roleName]
 		if !exists {
 			continue
@@ -1169,30 +1084,18 @@ func HydrateRolesPermissionsPrimaryCatalogs(databaseService *database.DatabaseSe
 
 		for _, permName := range permissionNames {
 			for _, permDoc := range permissionDocs {
-				if str, ok := permDoc.Fields["Name"].Value.AsString(); ok && str == permName {
-					rolePermDoc := &models.Document{
-						DocumentID: helpers.GenerateFastUUID(),
-						Fields: map[string]models.Field{
-							"DocumentID": {
-								Name:  "DocumentID",
-								Value: models.NewStringValue(helpers.GenerateFastUUID()),
-							},
-							"RoleID": {
-								Name:  "RoleID",
-								Value: roleDoc.Fields["RoleID"].Value,
-							},
-							"PermissionID": {
-								Name:  "PermissionID",
-								Value: permDoc.Fields["PermissionID"].Value,
-							},
-						},
-						Data: make(map[string]interface{}),
+				pv, _ := permDoc.GetFieldValue(permsSchema, "Name")
+				if str, ok := pv.AsString(); ok && str == permName {
+					roleIDVal, _ := roleDoc.GetFieldValue(rolesSchema, "RoleID")
+					permIDVal, _ := permDoc.GetFieldValue(permsSchema, "PermissionID")
+					rpFields := map[string]models.Field{
+						"DocumentID":    {Name: "DocumentID", Value: models.NewStringValue(helpers.GenerateFastUUID())},
+						"RoleID":        {Name: "RoleID", Value: roleIDVal},
+						"PermissionID":  {Name: "PermissionID", Value: permIDVal},
 					}
-
-					// Populate Data map from Fields
-					for key, field := range rolePermDoc.Fields {
-						rolePermDoc.Data[key] = field.Value.AsInterface()
-					}
+					rpDocID := helpers.GenerateFastUUID()
+					rpFields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(rpDocID)}
+					rolePermDoc := buildCatalogDocument(rolesPermissionsBundle, rpDocID, rpFields)
 
 					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], rolesPermissionsBundle, rolePermDoc)
 					if err != nil {
@@ -1305,18 +1208,9 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 				Value: models.NewBoolValue(true),
 			},
 		}
-
-		doc := &models.Document{
-			DocumentID: helpers.GenerateFastUUID(),
-			Fields:     fields,
-			Data:       make(map[string]interface{}),
-		}
-
-		// Populate Data map for consistent access
-		for key, field := range fields {
-			doc.Data[key] = field.Value.AsInterface()
-		}
-		doc.Data["DocumentID"] = doc.DocumentID
+		docID := helpers.GenerateFastUUID()
+		fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+		doc := buildCatalogDocument(usersBundle, docID, fields)
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], usersBundle, doc)
 		if err != nil {
@@ -1341,10 +1235,13 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 			continue
 		}
 
+		rolesSchema := rolesBundle.DocumentStructure.FieldSchema()
 		var roleID string
 		for _, roleDoc := range rolleDocs {
-			if roleName, ok := roleDoc.Fields["Name"].Value.AsString(); ok && roleName == user.Role {
-				roleID, _ = roleDoc.Fields["RoleID"].Value.AsString()
+			nv, _ := roleDoc.GetFieldValue(rolesSchema, "Name")
+			if roleName, ok := nv.AsString(); ok && roleName == user.Role {
+				rv, _ := roleDoc.GetFieldValue(rolesSchema, "RoleID")
+				roleID, _ = rv.AsString()
 				break
 			}
 		}
@@ -1360,29 +1257,14 @@ func HydrateUserPrimaryCatalogs(databaseService *database.DatabaseService,
 			continue
 		}
 
-		userRoleDoc := &models.Document{
-			DocumentID: helpers.GenerateFastUUID(),
-			Fields: map[string]models.Field{
-				"DocumentID": {
-					Name:  "DocumentID",
-					Value: models.NewStringValue(helpers.GenerateFastUUID()),
-				},
-				"RoleID": {
-					Name:  "RoleID",
-					Value: models.NewStringValue(roleID),
-				},
-				"UserID": {
-					Name:  "UserID",
-					Value: models.NewStringValue(userID),
-				},
-			},
-			Data: make(map[string]interface{}),
+		urFields := map[string]models.Field{
+			"DocumentID": {Name: "DocumentID", Value: models.NewStringValue(helpers.GenerateFastUUID())},
+			"RoleID":     {Name: "RoleID", Value: models.NewStringValue(roleID)},
+			"UserID":     {Name: "UserID", Value: models.NewStringValue(userID)},
 		}
-
-		// Populate Data map
-		for key, field := range userRoleDoc.Fields {
-			userRoleDoc.Data[key] = field.Value.AsInterface()
-		}
+		urDocID := helpers.GenerateFastUUID()
+		urFields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(urDocID)}
+		userRoleDoc := buildCatalogDocument(userRolesBundle, urDocID, urFields)
 
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userRolesBundle, userRoleDoc)
 		if err != nil {
@@ -1437,13 +1319,15 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 		return err
 	}
 
+	usersSchema := usersBundle.DocumentStructure.FieldSchema()
+	permsSchema := permissionsBundle.DocumentStructure.FieldSchema()
 	for _, userDoc := range userDocs {
-		userName, _ := userDoc.Fields["Username"].Value.AsString()
+		uv, _ := userDoc.GetFieldValue(usersSchema, "Username")
+		userName, _ := uv.AsString()
 		var permissionNames []string
 
 		switch userName {
 		case "Root":
-			// Root user gets all permissions (full system access)
 			permissionNames = []string{"Read", "Write", "Admin", "Read-Write"}
 		case "Admin":
 			permissionNames = []string{"Read", "Write", "Admin", "Read-Write"}
@@ -1457,40 +1341,18 @@ func HydrateUserPermissionsPrimaryCatalogs(databaseService *database.DatabaseSer
 
 		for _, permName := range permissionNames {
 			for _, permDoc := range permissionDocs {
-				if str, ok := permDoc.Fields["Name"].Value.AsString(); ok && str == permName {
-					field1 := models.Field{
-						Name:  "UserPermissionID",
-						Value: models.NewStringValue(helpers.GenerateUUID()),
+				pv, _ := permDoc.GetFieldValue(permsSchema, "Name")
+				if str, ok := pv.AsString(); ok && str == permName {
+					userIDVal, _ := userDoc.GetFieldValue(usersSchema, "UserID")
+					permIDVal, _ := permDoc.GetFieldValue(permsSchema, "PermissionID")
+					upFields := map[string]models.Field{
+						"UserPermissionID": {Name: "UserPermissionID", Value: models.NewStringValue(helpers.GenerateUUID())},
+						"UserID":           {Name: "UserID", Value: userIDVal},
+						"PermissionID":     {Name: "PermissionID", Value: permIDVal},
 					}
-					field2 := models.Field{
-						Name:  "UserID",
-						Value: userDoc.Fields["UserID"].Value,
-					}
-					field3 := models.Field{
-						Name:  "PermissionID",
-						Value: permDoc.Fields["PermissionID"].Value,
-					}
-
-					userPermDoc := &models.Document{
-						DocumentID: helpers.GenerateFastUUID(),
-						Fields: map[string]models.Field{
-							"UserPermissionID": field1,
-							"UserID":           field2,
-							"PermissionID":     field3,
-						},
-						Data: make(map[string]interface{}),
-					}
-
-					// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-					userPermDoc.Fields["DocumentID"] = models.Field{
-						Name:  "DocumentID",
-						Value: models.NewStringValue(userPermDoc.DocumentID),
-					}
-
-					// Populate Data map from Fields
-					for key, field := range userPermDoc.Fields {
-						userPermDoc.Data[key] = field.Value.AsInterface()
-					}
+					upDocID := helpers.GenerateFastUUID()
+					upFields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(upDocID)}
+					userPermDoc := buildCatalogDocument(userPermissionsBundle, upDocID, upFields)
 
 					err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], userPermissionsBundle, userPermDoc)
 					if err != nil {
@@ -1533,35 +1395,17 @@ func HydrateDatabaseUsersPrimaryCatalogs(databaseService *database.DatabaseServi
 	}
 	primaryDBID := databaseService.Databases["primary"].DatabaseID
 
+	usersSchema := usersBundle.DocumentStructure.FieldSchema()
 	for _, userDoc := range userDocs {
-		field1 := models.Field{
-			Name:  "DatabaseUserID",
-			Value: models.NewStringValue(helpers.GenerateUUID()),
+		userIDVal, _ := userDoc.GetFieldValue(usersSchema, "UserID")
+		fields := map[string]models.Field{
+			"DatabaseUserID": {Name: "DatabaseUserID", Value: models.NewStringValue(helpers.GenerateUUID())},
+			"UserID":         {Name: "UserID", Value: userIDVal},
+			"DatabaseID":     {Name: "DatabaseID", Value: models.NewStringValue(primaryDBID)},
 		}
-		field2 := models.Field{
-			Name:  "UserID",
-			Value: userDoc.Fields["UserID"].Value,
-		}
-		field3 := models.Field{
-			Name:  "DatabaseID",
-			Value: models.NewStringValue(primaryDBID),
-		}
-
-		dbUserDoc := &models.Document{
-			DocumentID: helpers.GenerateFastUUID(),
-			Fields: map[string]models.Field{
-				"DatabaseUserID": field1,
-				"UserID":         field2,
-				"DatabaseID":     field3,
-			},
-		}
-
-		// CRITICAL FIX: Add DocumentID to Fields map for consistent field access
-		dbUserDoc.Fields["DocumentID"] = models.Field{
-			Name:  "DocumentID",
-			Value: models.NewStringValue(dbUserDoc.DocumentID),
-		}
-
+		docID := helpers.GenerateFastUUID()
+		fields["DocumentID"] = models.Field{Name: "DocumentID", Value: models.NewStringValue(docID)}
+		dbUserDoc := buildCatalogDocument(databaseUsersBundle, docID, fields)
 		err = bundleService.AddDocumentToBundleByStruct(databaseService.Databases["primary"], databaseUsersBundle, dbUserDoc)
 		if err != nil {
 			logger.Warnf("Warning: Failed to add document to DatabaseUsers bundle: %v", err)

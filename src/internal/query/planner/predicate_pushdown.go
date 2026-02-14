@@ -229,8 +229,12 @@ func (fba *FilteredBundleAdapter) CopyProjectedToSessionCache(ctx context.Contex
 	}
 
 	totalPages := fba.GetTotalPages()
+	var schema *models.BundleFieldSchema
+	if fba.bundle != nil {
+		schema = fba.bundle.DocumentStructure.FieldSchema()
+	}
 	sessionCache, docsCopied, cachedPages, totalPagesReturned, err := fba.bundleService.CopyProjectedFromCache(
-		fba.bundleName, databaseName, totalPages, projectFields, effectiveLimit)
+		fba.bundleName, databaseName, totalPages, projectFields, effectiveLimit, schema)
 	if err != nil {
 		return nil, 0, 0, 0, fmt.Errorf("failed to copy projected documents: %w", err)
 	}
@@ -283,9 +287,12 @@ func (fba *FilteredBundleAdapter) GetAllDocuments() map[string]*models.Document 
 	fba.logger.Debugf("Loading documents from bundle '%s' with %d filter conditions (predicate pushdown)",
 		fba.bundleName, len(fba.conditions))
 
-	// Create predicate function that evaluates all conditions
+	var schema *models.BundleFieldSchema
+	if fba.bundle != nil {
+		schema = fba.bundle.DocumentStructure.FieldSchema()
+	}
 	predicate := func(doc *models.Document) bool {
-		return evaluateConditions(doc, fba.conditions, fba.logger)
+		return evaluateConditions(doc, fba.conditions, schema, fba.logger)
 	}
 
 	// Use document scanner with predicate filtering
@@ -333,8 +340,12 @@ func (fba *FilteredBundleAdapter) LoadPage(pageID uint32) (*models.DocumentPage,
 			DocumentCount: 0,
 		}
 
+		var schema *models.BundleFieldSchema
+		if fba.bundle != nil {
+			schema = fba.bundle.DocumentStructure.FieldSchema()
+		}
 		for _, doc := range docs {
-			if evaluateConditions(&doc, fba.conditions, fba.logger) {
+			if evaluateConditions(&doc, fba.conditions, schema, fba.logger) {
 				filteredPage.Documents[doc.DocumentID] = doc
 				filteredPage.DocumentCount++
 			}
@@ -377,10 +388,14 @@ func (fba *FilteredBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkS
 	if bundleName == "" {
 		return fmt.Errorf("FilteredBundleAdapter: bundle name unknown")
 	}
+	var schema *models.BundleFieldSchema
+	if fba.bundle != nil {
+		schema = fba.bundle.DocumentStructure.FieldSchema()
+	}
 	return fba.bundleService.GetDocumentChunksForIndexing(ctx, bundleName, chunkSize, func(chunk []*models.Document) bool {
 		filtered := make([]*models.Document, 0, len(chunk))
 		for _, doc := range chunk {
-			if evaluateConditions(doc, fba.conditions, fba.logger) {
+			if evaluateConditions(doc, fba.conditions, schema, fba.logger) {
 				filtered = append(filtered, doc)
 			}
 		}
@@ -391,10 +406,11 @@ func (fba *FilteredBundleAdapter) ScanDocumentChunks(ctx context.Context, chunkS
 	})
 }
 
-// evaluateConditions checks if a document matches all conditions
-func evaluateConditions(doc *models.Document, conditions []queryparser.WhereClause, logger *zap.SugaredLogger) bool {
+// evaluateConditions checks if a document matches all conditions.
+// schema may be nil; then Matches uses document.Data for field lookup.
+func evaluateConditions(doc *models.Document, conditions []queryparser.WhereClause, schema *models.BundleFieldSchema, logger *zap.SugaredLogger) bool {
 	for _, condition := range conditions {
-		if !condition.Matches(doc, logger) {
+		if !condition.Matches(doc, schema, logger) {
 			return false
 		}
 	}

@@ -34,19 +34,16 @@ type ExpressionEvaluationNode struct {
 func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
 	n.startTime = time.Now()
 
-	// Create synthetic empty document for evaluation context
 	emptyDoc := &models.Document{
 		DocumentID: "expression_eval_synthetic",
-		Fields:     make(map[string]models.Field),
+		Data:       make(map[string]interface{}),
 	}
 
-	// Create result document; store in Fields only (Data left nil; downstream uses DocumentToMap)
 	resultDoc := &models.Document{
 		DocumentID: "expression_result",
-		Fields:     make(map[string]models.Field),
+		Data:       make(map[string]interface{}),
 	}
 
-	// Use pre-parsed fields when available (Issue 11: parse once at plan build)
 	evaluator := syndrQL.NewExpressionEvaluator(n.Logger)
 	if len(n.ParsedFields) > 0 {
 		for _, pf := range n.ParsedFields {
@@ -54,11 +51,9 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 			if err != nil {
 				return nil, fmt.Errorf("failed to evaluate expression for column %s: %w", pf.ColumnName, err)
 			}
-			fieldValue := models.NewInterfaceValue(result)
-			resultDoc.Fields[pf.ColumnName] = models.Field{Name: pf.ColumnName, Value: fieldValue}
+			resultDoc.Data[pf.ColumnName] = result
 		}
 	} else {
-		// Fallback: parse each SelectField at execution (e.g. when node not built via planner)
 		usedColumnNames := make(map[string]bool)
 		for i, fieldExpr := range n.SelectFields {
 			columnName, exprToEval := n.columnNameAndExpr(fieldExpr, i, usedColumnNames)
@@ -82,8 +77,7 @@ func (n *ExpressionEvaluationNode) Execute(ctx context.Context) (map[string]*mod
 			if err != nil {
 				return nil, fmt.Errorf("failed to evaluate expression '%s': %w", exprToEval, err)
 			}
-			fieldValue := models.NewInterfaceValue(result)
-			resultDoc.Fields[columnName] = models.Field{Name: columnName, Value: fieldValue}
+			resultDoc.Data[columnName] = result
 		}
 	}
 

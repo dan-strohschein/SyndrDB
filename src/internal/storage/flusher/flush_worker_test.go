@@ -81,14 +81,20 @@ func TestFlushWorkerBasic(t *testing.T) {
 	worker := NewFlushWorker(0, tracker, writer, testWorkerLogger())
 	worker.Start()
 
-	// Add dirty page
+	// Add dirty page (schema required for encoding Values)
+	schema := models.NewProjectionSchema([]string{"name"})
 	doc := &models.Document{
 		DocumentID: "test-doc",
-		Fields: map[string]models.Field{
-			"name": {Name: "name", Value: models.NewStringValue("Test")},
-		},
+		Values:     []models.FieldValue{models.NewStringValue("test-doc"), models.NewStringValue("Test")},
 	}
-	tracker.MarkDirty("test-bundle", 1, doc, 100)
+	if len(doc.Values) != len(schema.Names) {
+		doc.Values = make([]models.FieldValue, len(schema.Names))
+		doc.Values[0] = models.NewStringValue(doc.DocumentID)
+		if len(schema.Names) > 1 {
+			doc.Values[1] = models.NewStringValue("Test")
+		}
+	}
+	tracker.MarkDirty("test-bundle", 1, doc, 100, schema)
 
 	// Enqueue for flush
 	tracker.EnqueueForFlush("test-bundle", 1)
@@ -130,14 +136,12 @@ func TestFlushWorkerMultiplePages(t *testing.T) {
 	worker := NewFlushWorker(0, tracker, writer, testWorkerLogger())
 	worker.Start()
 
-	// Add multiple pages
+	schema := models.NewProjectionSchema(nil)
+	docValues := []models.FieldValue{models.NewStringValue("doc")}
 	for page := uint32(0); page < 5; page++ {
 		for i := 0; i < 3; i++ {
-			doc := &models.Document{
-				DocumentID: "doc",
-				Fields:     make(map[string]models.Field),
-			}
-			tracker.MarkDirty("bundle", page, doc, 50)
+			doc := &models.Document{DocumentID: "doc", Values: docValues}
+			tracker.MarkDirty("bundle", page, doc, 50, schema)
 		}
 	}
 
@@ -177,13 +181,11 @@ func TestFlushWorkerPoolBasic(t *testing.T) {
 	pool := NewFlushWorkerPool(4, tracker, writer, testWorkerLogger())
 	pool.Start()
 
-	// Add pages that will go to different workers
+	schema := models.NewProjectionSchema(nil)
+	docValues := []models.FieldValue{models.NewStringValue("doc")}
 	for page := uint32(0); page < 8; page++ {
-		doc := &models.Document{
-			DocumentID: "doc",
-			Fields:     make(map[string]models.Field),
-		}
-		tracker.MarkDirty("bundle", page, doc, 100)
+		doc := &models.Document{DocumentID: "doc", Values: docValues}
+		tracker.MarkDirty("bundle", page, doc, 100, schema)
 		tracker.EnqueueForFlush("bundle", page)
 	}
 
@@ -224,14 +226,13 @@ func TestFlushWorkerPoolConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(numPages)
 
+	schema := models.NewProjectionSchema(nil)
+	docValues := []models.FieldValue{models.NewStringValue("doc")}
 	for i := 0; i < numPages; i++ {
 		go func(pageID int) {
 			defer wg.Done()
-			doc := &models.Document{
-				DocumentID: "doc",
-				Fields:     make(map[string]models.Field),
-			}
-			tracker.MarkDirty("bundle", uint32(pageID), doc, 100)
+			doc := &models.Document{DocumentID: "doc", Values: docValues}
+			tracker.MarkDirty("bundle", uint32(pageID), doc, 100, schema)
 			tracker.EnqueueForFlush("bundle", uint32(pageID))
 		}(i)
 	}
@@ -263,11 +264,12 @@ func TestFlushWorkerErrorHandling(t *testing.T) {
 	worker := NewFlushWorker(0, tracker, writer, testWorkerLogger())
 	worker.Start()
 
+	schema := models.NewProjectionSchema(nil)
 	doc := &models.Document{
 		DocumentID: "test-doc",
-		Fields:     make(map[string]models.Field),
+		Values:     []models.FieldValue{models.NewStringValue("test-doc")},
 	}
-	tracker.MarkDirty("test-bundle", 1, doc, 100)
+	tracker.MarkDirty("test-bundle", 1, doc, 100, schema)
 	tracker.EnqueueForFlush("test-bundle", 1)
 
 	time.Sleep(100 * time.Millisecond)
@@ -296,10 +298,11 @@ func TestFlushWorkerGracefulShutdown(t *testing.T) {
 	worker := NewFlushWorker(0, tracker, writer, testWorkerLogger())
 	worker.Start()
 
-	// Add many pages quickly
+	schema := models.NewProjectionSchema(nil)
+	docValues := []models.FieldValue{models.NewStringValue("doc")}
 	for i := 0; i < 10; i++ {
-		doc := &models.Document{DocumentID: "doc", Fields: make(map[string]models.Field)}
-		tracker.MarkDirty("bundle", uint32(i), doc, 100)
+		doc := &models.Document{DocumentID: "doc", Values: docValues}
+		tracker.MarkDirty("bundle", uint32(i), doc, 100, schema)
 		tracker.EnqueueForFlush("bundle", uint32(i))
 	}
 
@@ -326,17 +329,16 @@ func BenchmarkFlushWorkerPool(b *testing.B) {
 	pool := NewFlushWorkerPool(4, tracker, writer, testWorkerLogger())
 	pool.Start()
 
+	schema := models.NewProjectionSchema([]string{"name"})
 	doc := &models.Document{
 		DocumentID: "bench-doc",
-		Fields: map[string]models.Field{
-			"name": {Name: "name", Value: models.NewStringValue("Test")},
-		},
+		Values:     []models.FieldValue{models.NewStringValue("bench-doc"), models.NewStringValue("Test")},
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		pageID := uint32(i % 1000)
-		tracker.MarkDirty("bench-bundle", pageID, doc, 100)
+		tracker.MarkDirty("bench-bundle", pageID, doc, 100, schema)
 		if i%10 == 0 { // Flush every 10 docs
 			tracker.EnqueueForFlush("bench-bundle", pageID)
 		}

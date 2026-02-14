@@ -541,35 +541,26 @@ func (rr *RelationshipResolver) singularize(word string) string {
 }
 
 // getFieldValue extracts a field value from a document
-// Handles both DocumentID (special field) and regular fields
+// Handles both DocumentID (special field) and regular fields (Option B: GetFieldValue/Data).
 func (rr *RelationshipResolver) getFieldValue(doc *models.Document, fieldName string) (interface{}, error) {
-	// Special case: "id" or "documentID" refers to DocumentID
 	if fieldName == "id" || fieldName == "documentID" || fieldName == "DocumentID" {
 		return doc.DocumentID, nil
 	}
-
-	// Look up field in document's Fields map
-	value, exists := doc.Fields[fieldName]
-	if !exists {
-		return nil, fmt.Errorf("field '%s' not found in document", fieldName)
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return v, nil
+		}
 	}
-
-	return value, nil
+	if fv, ok := doc.GetFieldValue(nil, fieldName); ok {
+		return fv.AsInterface(), nil
+	}
+	return nil, fmt.Errorf("field '%s' not found in document", fieldName)
 }
 
-// documentToMap converts a Document to a map[string]interface{} for GraphQL response
-// Includes DocumentID as "id" field and all document fields
+// documentToMap converts a Document to a map[string]interface{} for GraphQL response (Option B: DocumentToMap).
 func (rr *RelationshipResolver) documentToMap(doc *models.Document) map[string]interface{} {
-	result := make(map[string]interface{})
-
-	// Add special "id" field
+	result := models.DocumentToMap(doc, nil)
 	result["id"] = doc.DocumentID
-
-	// Add all document fields
-	for key, value := range doc.Fields {
-		result[key] = value
-	}
-
 	return result
 }
 

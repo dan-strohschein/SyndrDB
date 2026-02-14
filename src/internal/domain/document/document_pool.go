@@ -5,12 +5,11 @@ import (
 	"syndrdb/src/internal/domain/models"
 )
 
-// DocumentPool provides object pooling for Document and Field structures
-// Eliminates repeated map allocations and GC pressure during document creation
-// Designed for high-throughput write operations with minimal allocation overhead
+// DocumentPool provides object pooling for Document and optionally []FieldValue slices.
+// Schema-ordered documents use Values []FieldValue; pool resets Values on Get/Put.
 type DocumentPool struct {
 	documentPool sync.Pool
-	fieldMapPool sync.Pool
+	valuesPool   sync.Pool // pools []FieldValue for reuse by capacity
 }
 
 // NewDocumentPool creates a new document object pool
@@ -18,67 +17,57 @@ func NewDocumentPool() *DocumentPool {
 	return &DocumentPool{
 		documentPool: sync.Pool{
 			New: func() interface{} {
-				return &models.Document{
-					Fields: make(map[string]models.Field, 8), // Pre-allocate for typical document size
-				}
+				return &models.Document{}
 			},
 		},
-		fieldMapPool: sync.Pool{
+		valuesPool: sync.Pool{
 			New: func() interface{} {
-				return make(map[string]models.Field, 8) // Pre-allocate for typical field count
+				return make([]models.FieldValue, 0, 16)
 			},
 		},
 	}
 }
 
-// GetDocument obtains a pooled Document instance
+// GetDocument obtains a pooled Document instance. Values is nil; caller sets Values from schema.
 func (p *DocumentPool) GetDocument() *models.Document {
 	doc := p.documentPool.Get().(*models.Document)
-
 	doc.DocumentID = ""
-	doc.CachedJSON = nil // Clear cached JSON fragments from previous use
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field, 8)
-	} else {
-		for k := range doc.Fields {
-			delete(doc.Fields, k)
-		}
-	}
+	doc.Values = nil
+	doc.CachedJSON = nil
+	doc.PooledValues = false
 	return doc
 }
 
-// PutDocument returns a Document instance to the pool
+// PutDocument returns a Document instance to the pool.
+// If PooledValues is true, the Values slice is returned to the values pool.
 func (p *DocumentPool) PutDocument(doc *models.Document) {
 	if doc != nil {
-		if doc.PooledFields {
-			ReturnPooledFieldMap(doc.Fields)
-			doc.Fields = nil
-			doc.PooledFields = false
+		if doc.PooledValues && doc.Values != nil {
+			p.PutValuesSlice(doc.Values)
+			doc.Values = nil
+			doc.PooledValues = false
 		}
-		// Clear sensitive data but keep the map allocated (or nil; GetDocument will re-init if needed)
 		doc.DocumentID = ""
-		doc.CachedJSON = nil // Allow GC of cached JSON fragments
+		doc.Values = nil
+		doc.CachedJSON = nil
 		p.documentPool.Put(doc)
 	}
 }
 
-// GetFieldMap obtains a pooled field map
-func (p *DocumentPool) GetFieldMap() map[string]models.Field {
-	fieldMap := p.fieldMapPool.Get().(map[string]models.Field)
-
-	// Clear the map but keep it allocated
-	for k := range fieldMap {
-		delete(fieldMap, k)
+// GetValuesSlice returns a slice from the pool with at least the given capacity.
+// Caller may resize (e.g. values = values[:schemaLen]). Return with PutValuesSlice when done.
+func (p *DocumentPool) GetValuesSlice(minCap int) []models.FieldValue {
+	v := p.valuesPool.Get().([]models.FieldValue)
+	if cap(v) < minCap {
+		return make([]models.FieldValue, 0, minCap)
 	}
-
-	return fieldMap
+	return v[:0]
 }
 
-// PutFieldMap returns a field map to the pool
-func (p *DocumentPool) PutFieldMap(fieldMap map[string]models.Field) {
-	if fieldMap != nil {
-		// Keep the map allocated for reuse
-		p.fieldMapPool.Put(fieldMap)
+// PutValuesSlice returns a slice to the pool for reuse.
+func (p *DocumentPool) PutValuesSlice(s []models.FieldValue) {
+	if s != nil {
+		p.valuesPool.Put(s[:0])
 	}
 }
 
@@ -95,14 +84,14 @@ func ReturnPooledDocument(doc *models.Document) {
 	globalDocumentPool.PutDocument(doc)
 }
 
-// GetPooledFieldMap gets a field map from the global pool
-func GetPooledFieldMap() map[string]models.Field {
-	return globalDocumentPool.GetFieldMap()
+// GetPooledValuesSlice returns a []FieldValue slice from the global pool with at least minCap capacity.
+func GetPooledValuesSlice(minCap int) []models.FieldValue {
+	return globalDocumentPool.GetValuesSlice(minCap)
 }
 
-// ReturnPooledFieldMap returns a field map to the global pool
-func ReturnPooledFieldMap(fieldMap map[string]models.Field) {
-	globalDocumentPool.PutFieldMap(fieldMap)
+// ReturnPooledValuesSlice returns a slice to the global pool.
+func ReturnPooledValuesSlice(s []models.FieldValue) {
+	globalDocumentPool.PutValuesSlice(s)
 }
 
 // FreeDocuments returns a batch of documents to the pool

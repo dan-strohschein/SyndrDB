@@ -23,14 +23,11 @@ func (m *mockChildNode) GetCost() float64              { return m.cost }
 func (m *mockChildNode) GetEstimatedRows() int         { return m.rows }
 func (m *mockChildNode) EstimateMemoryUsage() int64     { return 0 }
 
-// makeDoc creates a document with one field "a" set to the given int value.
+// makeDoc creates a document with one field "a" set to the given int value (Option B: Data).
 func makeDoc(id string, a int64) *models.Document {
 	return &models.Document{
 		DocumentID: id,
-		Fields: map[string]models.Field{
-			"a": {Name: "a", Value: models.NewIntValue(a)},
-		},
-		Data: make(map[string]interface{}),
+		Data:       map[string]interface{}{"a": a},
 	}
 }
 
@@ -53,13 +50,13 @@ func TestDistinctNode_MemoryLimitFallbackUsesFullInput(t *testing.T) {
 	// During execution we add ~(serialized+64) per doc. Int serialization is small (~10 bytes).
 	// So 5*(10+64)=370. To exceed we need MemoryLimit < 370. That would make us choose "sort" (370*0.8=296 < 1250).
 	// So we need actual memory use to be large. Use a long string value so serialized is big.
-	longVal := string(make([]byte, 400)) // 400 bytes per value
+	longVal := string(make([]byte, 400)) // 400 bytes per value (Option B: Data)
 	docsWithLong := map[string]*models.Document{
-		"id1": {DocumentID: "id1", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("x" + longVal)}}},
-		"id2": {DocumentID: "id2", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("x" + longVal)}}},
-		"id3": {DocumentID: "id3", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("y" + longVal)}}},
-		"id4": {DocumentID: "id4", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("y" + longVal)}}},
-		"id5": {DocumentID: "id5", Fields: map[string]models.Field{"a": {Name: "a", Value: models.NewStringValue("z" + longVal)}}},
+		"id1": {DocumentID: "id1", Data: map[string]interface{}{"a": "x" + longVal}},
+		"id2": {DocumentID: "id2", Data: map[string]interface{}{"a": "x" + longVal}},
+		"id3": {DocumentID: "id3", Data: map[string]interface{}{"a": "y" + longVal}},
+		"id4": {DocumentID: "id4", Data: map[string]interface{}{"a": "y" + longVal}},
+		"id5": {DocumentID: "id5", Data: map[string]interface{}{"a": "z" + longVal}},
 	}
 	childLong := &mockChildNode{docs: docsWithLong, cost: 5, rows: 5}
 	// MemoryLimit 2000: estimated 1250 <= 1600 so hash. Actual 5*(400+64)=2320 > 2000 -> fallback.

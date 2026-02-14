@@ -60,6 +60,7 @@ type TopNHeap struct {
 	orderBy  *queryparser.OrderByClause // Sort specification
 	lessFunc func(i, j int) bool        // Comparison function
 	logger   *zap.SugaredLogger         // Logger for debugging
+	schema   *models.BundleFieldSchema  // For doc.Values field access (optional)
 }
 
 // Len implements heap.Interface
@@ -170,11 +171,13 @@ func NewTopNHeap(
 		orderBy:  orderBy,
 		logger:   logger,
 	}
-
-	// Create comparison function based on ORDER BY fields
 	h.lessFunc = h.createComparisonFunc()
-
 	return h
+}
+
+// SetSchema sets the bundle field schema for document field access (required for Values-based docs).
+func (h *TopNHeap) SetSchema(schema *models.BundleFieldSchema) {
+	h.schema = schema
 }
 
 // createComparisonFunc creates a comparison function for the heap
@@ -254,13 +257,26 @@ func (h *TopNHeap) shouldNullsSortFirst(field queryparser.OrderByField) bool {
 	}
 }
 
-// getFieldValue extracts a field value from a document
+// getFieldValue extracts a field value from a document using schema when set
 func (h *TopNHeap) getFieldValue(doc *models.Document, fieldName string) (interface{}, bool) {
-	field, exists := doc.Fields[fieldName]
-	if !exists {
+	if strings.EqualFold(fieldName, "documentid") {
+		if doc != nil && doc.DocumentID != "" {
+			return doc.DocumentID, true
+		}
 		return nil, false
 	}
-	return field.Value, true
+	if h.schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(h.schema, fieldName); ok {
+			return fv.AsInterface(), true
+		}
+		return nil, false
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return v, true
+		}
+	}
+	return nil, false
 }
 
 // compareValues compares two values of any type
@@ -311,23 +327,45 @@ func toFloat64(v interface{}) (float64, bool) {
 	}
 }
 
-// getFieldValueForExtract extracts a sort key from a document for pre-extraction (opt #4).
-// Handles doc.Fields[fieldName] and DocumentID when fieldName is "documentid".
-func getFieldValueForExtract(doc *models.Document, fieldName string) (interface{}, bool) {
+// GetFieldValueForSort returns the FieldValue for a sort key (package helper for radix/string sort). Uses schema + doc.Values when schema non-nil.
+func GetFieldValueForSort(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) (models.FieldValue, bool) {
+	if strings.EqualFold(fieldName, "documentid") {
+		if doc != nil && doc.DocumentID != "" {
+			return models.NewStringValue(doc.DocumentID), true
+		}
+		return models.FieldValue{}, false
+	}
+	if schema != nil && doc != nil && len(doc.Values) > 0 {
+		return doc.GetFieldValue(schema, fieldName)
+	}
+	if doc != nil && doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), true
+		}
+	}
+	return models.FieldValue{}, false
+}
+
+// getFieldValueForExtract extracts a sort key from a document. Uses schema + doc.Values when schema is non-nil.
+func getFieldValueForExtract(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) (interface{}, bool) {
 	if strings.EqualFold(fieldName, "documentid") {
 		if doc != nil && doc.DocumentID != "" {
 			return doc.DocumentID, true
 		}
 		return nil, false
 	}
-	if doc == nil || doc.Fields == nil {
+	if schema != nil && doc != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv.AsInterface(), true
+		}
 		return nil, false
 	}
-	field, exists := doc.Fields[fieldName]
-	if !exists {
-		return nil, false
+	if doc != nil && doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return v, true
+		}
 	}
-	return field.Value, true
+	return nil, false
 }
 
 // compareValuesStatic compares two values; returns -1, 0, 1. Used by topNHeapWithKeys.
@@ -494,6 +532,7 @@ func TopNHeapSort(
 	limit int,
 	orderBy *queryparser.OrderByClause,
 	logger *zap.SugaredLogger,
+	schema *models.BundleFieldSchema,
 ) ([]*models.Document, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("invalid limit: must be > 0, got %d", limit)
@@ -506,14 +545,13 @@ func TopNHeapSort(
 
 	logger.Debugf("TopNHeapSort: selecting top %d from %d documents", limit, len(documents))
 
-	// Opt #4: single-column ORDER BY — pre-extract sort keys to avoid map lookups in hot loop
 	if orderBy != nil && len(orderBy.Fields) == 1 {
 		field := orderBy.Fields[0]
 		docsSlice := make([]*models.Document, 0, len(documents))
 		sortKeys := make([]interface{}, 0, len(documents))
 		isNull := make([]bool, 0, len(documents))
 		for _, doc := range documents {
-			v, ok := getFieldValueForExtract(doc, field.FieldName)
+			v, ok := getFieldValueForExtract(doc, field.FieldName, schema)
 			docsSlice = append(docsSlice, doc)
 			sortKeys = append(sortKeys, v)
 			isNull = append(isNull, !ok)
@@ -521,8 +559,8 @@ func TopNHeapSort(
 		return topNHeapSortWithKeys(docsSlice, sortKeys, isNull, limit, field, logger)
 	}
 
-	// Multi-column or no ORDER BY: use document-based heap
 	topNHeap := NewTopNHeap(limit, orderBy, logger)
+	topNHeap.SetSchema(schema)
 	heap.Init(topNHeap)
 
 	for _, doc := range documents {

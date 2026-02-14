@@ -227,24 +227,14 @@ func (e *StandardSubqueryExecutor) materializeResult(
 			// Convert flattened format to Documents
 			documents = make([]*models.Document, len(flatDocs))
 			for i, flatDoc := range flatDocs {
-				// Reconstruct Document from flattened map
-				// This is a simplified conversion - real implementation may need more logic
-				doc := &models.Document{
-					DocumentID: "", // Will be populated from flatDoc if present
-					Fields:     make(map[string]models.Field),
-				}
-
+				doc := &models.Document{Data: make(map[string]interface{})}
 				for key, val := range flatDoc {
 					if key == "DocumentID" {
 						if strVal, ok := val.(string); ok {
 							doc.DocumentID = strVal
 						}
 					} else {
-						// Convert interface{} to models.FieldValue
-						doc.Fields[key] = models.Field{
-							Name:  key,
-							Value: convertToValue(val),
-						}
+						doc.Data[key] = val
 					}
 				}
 				documents[i] = doc
@@ -292,23 +282,29 @@ func (e *StandardSubqueryExecutor) materializeResult(
 
 	for _, doc := range documents {
 		var value models.FieldValue
-
 		if fieldToExtract == "" {
-			// SELECT * or no field specified - use first field
-			if len(doc.Fields) > 0 {
-				for _, field := range doc.Fields {
-					value = field.Value
+			if len(doc.Values) > 0 {
+				value = doc.Values[0]
+			} else if doc.Data != nil {
+				for _, v := range doc.Data {
+					value = convertToValue(v)
 					break
 				}
-			} else {
+			}
+			if len(doc.Values) == 0 && (doc.Data == nil || len(doc.Data) == 0) {
 				value = models.NewInterfaceValue(nil)
 			}
 		} else {
-			// Extract specific field by name
-			if field, exists := doc.Fields[fieldToExtract]; exists {
-				value = field.Value
+			if doc.Data != nil {
+				if v, ok := doc.Data[fieldToExtract]; ok {
+					value = convertToValue(v)
+				} else {
+					value = models.NewInterfaceValue(nil)
+				}
+			} else if doc.Values != nil {
+				// No schema in subquery context; cannot resolve by name
+				value = models.NewInterfaceValue(nil)
 			} else {
-				// Field not found - treat as NULL
 				value = models.NewInterfaceValue(nil)
 			}
 		}

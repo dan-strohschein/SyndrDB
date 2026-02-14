@@ -177,6 +177,7 @@ func StringHeapSort(
 	useSIMD bool,
 	nullsFirst bool,
 	logger *zap.SugaredLogger,
+	schema *models.BundleFieldSchema,
 ) ([]*models.Document, error) {
 	if len(documents) == 0 {
 		return []*models.Document{}, nil
@@ -194,17 +195,13 @@ func StringHeapSort(
 	// OPTIMIZATION: Iterate map directly instead of converting to slice first
 	// This eliminates ~20KB allocation for 5,041 documents and reduces memory copies
 	for _, doc := range documents {
-		// Extract field value
-		field, exists := doc.Fields[fieldName]
+		fv, exists := GetFieldValueForSort(doc, fieldName, schema)
 		if !exists {
-			// TODO: I could add configurable NULL handling - skip, include at start/end,
-			// or raise error based on query semantics
 			continue
 		}
 
-		// Convert to string
 		var strValue string
-		switch v := field.Value.AsInterface().(type) { // ✅ Use AsInterface()
+		switch v := fv.AsInterface().(type) {
 		case string:
 			strValue = v
 		case []byte:

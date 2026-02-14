@@ -22,12 +22,14 @@ const (
 
 // AnalyzeBundle performs full statistics collection for a bundle.
 // Uses reservoir sampling for bounded memory usage.
+// schema is optional; when set and doc.Values is present, uses schema.Names+doc.Values; otherwise uses doc.Data.
 func AnalyzeBundle(
 	ctx context.Context,
 	bundleName string,
 	bundleService BundleServiceInterface,
 	statsStore *StatsStore,
 	logger *zap.SugaredLogger,
+	schema *models.BundleFieldSchema,
 	sampleSize ...int,
 ) error {
 	targetSample := DefaultAnalyzeSampleSize
@@ -73,28 +75,52 @@ func AnalyzeBundle(
 	fieldStats := make(map[string]*ColumnStats)
 
 	for _, doc := range reservoir {
-		if doc == nil || doc.Fields == nil {
+		if doc == nil {
 			continue
 		}
-		for fieldName, field := range doc.Fields {
-			cs, ok := fieldStats[fieldName]
-			if !ok {
-				cs = &ColumnStats{
-					BundleName: bundleName,
-					FieldName:  fieldName,
-					RowCount:   totalSeen,
-					HLL:        NewHyperLogLog(),
-					SampleSize: int64(len(reservoir)),
+		if schema != nil && len(doc.Values) > 0 {
+			for i, fieldName := range schema.Names {
+				if i >= len(doc.Values) {
+					continue
 				}
-				fieldStats[fieldName] = cs
+				cs, ok := fieldStats[fieldName]
+				if !ok {
+					cs = &ColumnStats{
+						BundleName: bundleName,
+						FieldName:  fieldName,
+						RowCount:   totalSeen,
+						HLL:        NewHyperLogLog(),
+						SampleSize: int64(len(reservoir)),
+					}
+					fieldStats[fieldName] = cs
+				}
+				val := doc.Values[i].AsInterface()
+				if val == nil {
+					cs.NullCount++
+				} else {
+					cs.HLL.AddString(fmt.Sprintf("%v", val))
+					cs.updateMinMax(val)
+				}
 			}
-
-			val := field.Value.AsInterface()
-			if val == nil {
-				cs.NullCount++
-			} else {
-				cs.HLL.AddString(fmt.Sprintf("%v", val))
-				cs.updateMinMax(val)
+		} else if doc.Data != nil {
+			for fieldName, v := range doc.Data {
+				cs, ok := fieldStats[fieldName]
+				if !ok {
+					cs = &ColumnStats{
+						BundleName: bundleName,
+						FieldName:  fieldName,
+						RowCount:   totalSeen,
+						HLL:        NewHyperLogLog(),
+						SampleSize: int64(len(reservoir)),
+					}
+					fieldStats[fieldName] = cs
+				}
+				if v == nil {
+					cs.NullCount++
+				} else {
+					cs.HLL.AddString(fmt.Sprintf("%v", v))
+					cs.updateMinMax(v)
+				}
 			}
 		}
 	}

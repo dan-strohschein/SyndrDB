@@ -45,8 +45,6 @@ import (
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/common/conversion"
-
-	syndrdbsimd "github.com/dan-strohschein/syndrdb-simd"
 )
 
 // ExtractJoinKeysWithSIMD extracts join keys from documents using SIMD acceleration
@@ -142,31 +140,15 @@ func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, field
 			continue
 		}
 
-		if doc.Fields == nil {
-			// DocumentID was already handled above, so this is a different field but Fields is nil
-			keyValues = append(keyValues, nil)
+		if doc.Data != nil {
+			if v, ok := doc.Data[string(fieldNameBytes)]; ok {
+				foundValue = v
+			}
+			keyValues = append(keyValues, foundValue)
 			docsSlice = append(docsSlice, doc)
 			continue
 		}
-
-		// Use SIMD to find matching field
-		// We iterate through fields and use SIMD string comparison
-		for fieldName, field := range doc.Fields {
-			// Convert current field name to bytes
-			currentFieldBytes := []byte(fieldName)
-
-			// Use SIMD string equality check
-			if len(currentFieldBytes) == fieldNameLen {
-				if syndrdbsimd.StrEq(fieldNameBytes, currentFieldBytes) {
-					// Found matching field - extract value
-					foundValue = field.Value.AsInterface()
-					break
-				}
-			}
-		}
-
-		// Store result (even if nil - maintains parallel arrays)
-		keyValues = append(keyValues, foundValue)
+		keyValues = append(keyValues, nil)
 		docsSlice = append(docsSlice, doc)
 	}
 
@@ -174,16 +156,31 @@ func extractBatchWithSIMD(batch []*models.Document, fieldNameBytes []byte, field
 }
 
 // ExtractJoinKeysWithSIMDSlice extracts join keys from a slice of documents (for streaming probe).
-// Same semantics as ExtractJoinKeysWithSIMD but works on a slice to avoid building a full-bundle map.
-// Used when probing in chunks to limit memory.
-func ExtractJoinKeysWithSIMDSlice(docs []*models.Document, fieldName string) ([]interface{}, []*models.Document, error) {
+// If schema is non-nil, uses O(1) doc.GetFieldValue(schema, fieldName); otherwise uses SIMD/batch path (doc.Fields or doc.Data).
+func ExtractJoinKeysWithSIMDSlice(docs []*models.Document, fieldName string, schema *models.BundleFieldSchema) ([]interface{}, []*models.Document, error) {
 	if len(docs) == 0 {
 		return []interface{}{}, []*models.Document{}, nil
 	}
-	fieldNameBytes := []byte(fieldName)
-	fieldNameLen := len(fieldNameBytes)
 	keyValues := make([]interface{}, 0, len(docs))
 	docsSlice := make([]*models.Document, 0, len(docs))
+	if schema != nil {
+		for _, doc := range docs {
+			docsSlice = append(docsSlice, doc)
+			if strings.EqualFold(fieldName, "documentid") {
+				keyValues = append(keyValues, doc.DocumentID)
+				continue
+			}
+			fv, ok := doc.GetFieldValue(schema, fieldName)
+			if ok {
+				keyValues = append(keyValues, fv.AsInterface())
+			} else {
+				keyValues = append(keyValues, nil)
+			}
+		}
+		return keyValues, docsSlice, nil
+	}
+	fieldNameBytes := []byte(fieldName)
+	fieldNameLen := len(fieldNameBytes)
 	const batchSize = 256
 	for i := 0; i < len(docs); i += batchSize {
 		end := i + batchSize
@@ -217,30 +214,19 @@ func ExtractFieldValuesInt64SIMD(docs []*models.Document, fieldName string) ([]i
 	}
 
 	values := make([]int64, 0, len(docs))
-	fieldNameBytes := []byte(fieldName)
-	fieldNameLen := len(fieldNameBytes)
-
 	for _, doc := range docs {
-		if doc == nil || doc.Fields == nil {
-			values = append(values, 0) // Default value for missing field
+		if doc == nil {
+			values = append(values, 0)
 			continue
 		}
-
-		// Find field using SIMD string comparison
 		var foundValue int64 = 0
-		for fname, field := range doc.Fields {
-			currentFieldBytes := []byte(fname)
-			if len(currentFieldBytes) == fieldNameLen {
-				if syndrdbsimd.StrEq(fieldNameBytes, currentFieldBytes) {
-					// Extract int64 value
-					if intVal, ok := field.Value.AsInt(); ok {
-						foundValue = intVal
-					}
-					break
+		if doc.Data != nil {
+			if v, ok := doc.Data[fieldName]; ok {
+				if intVal, ok := models.NewInterfaceValue(v).AsInt(); ok {
+					foundValue = intVal
 				}
 			}
 		}
-
 		values = append(values, foundValue)
 	}
 
@@ -256,33 +242,22 @@ func ExtractFieldValuesFloat64SIMD(docs []*models.Document, fieldName string) ([
 	}
 
 	values := make([]float64, 0, len(docs))
-	fieldNameBytes := []byte(fieldName)
-	fieldNameLen := len(fieldNameBytes)
-
 	for _, doc := range docs {
-		if doc == nil || doc.Fields == nil {
-			values = append(values, 0.0) // Default value for missing field
+		if doc == nil {
+			values = append(values, 0.0)
 			continue
 		}
-
-		// Find field using SIMD string comparison
 		var foundValue float64 = 0.0
-		for fname, field := range doc.Fields {
-			currentFieldBytes := []byte(fname)
-			if len(currentFieldBytes) == fieldNameLen {
-				if syndrdbsimd.StrEq(fieldNameBytes, currentFieldBytes) {
-					// Extract float64 value
-					if floatVal, ok := field.Value.AsFloat(); ok {
-						foundValue = floatVal
-					} else if intVal, ok := field.Value.AsInt(); ok {
-						// Convert int to float if needed
-						foundValue = float64(intVal)
-					}
-					break
+		if doc.Data != nil {
+			if v, ok := doc.Data[fieldName]; ok {
+				fv := models.NewInterfaceValue(v)
+				if floatVal, ok := fv.AsFloat(); ok {
+					foundValue = floatVal
+				} else if intVal, ok := fv.AsInt(); ok {
+					foundValue = float64(intVal)
 				}
 			}
 		}
-
 		values = append(values, foundValue)
 	}
 
@@ -297,33 +272,17 @@ func ExtractFieldValuesStringSIMD(docs []*models.Document, fieldName string) ([]
 	}
 
 	values := make([]string, 0, len(docs))
-	fieldNameBytes := []byte(fieldName)
-	fieldNameLen := len(fieldNameBytes)
-
 	for _, doc := range docs {
-		if doc == nil || doc.Fields == nil {
-			values = append(values, "") // Default value for missing field
+		if doc == nil {
+			values = append(values, "")
 			continue
 		}
-
-		// Find field using SIMD string comparison
 		var foundValue string = ""
-		for fname, field := range doc.Fields {
-			currentFieldBytes := []byte(fname)
-			if len(currentFieldBytes) == fieldNameLen {
-				if syndrdbsimd.StrEq(fieldNameBytes, currentFieldBytes) {
-					// Extract string value
-					if strVal, ok := field.Value.AsString(); ok {
-						foundValue = strVal
-					} else {
-						// Convert to string if not already
-						foundValue = conversion.ValueToString(field.Value.AsInterface())
-					}
-					break
-				}
+		if doc.Data != nil {
+			if v, ok := doc.Data[fieldName]; ok {
+				foundValue = conversion.ValueToString(v)
 			}
 		}
-
 		values = append(values, foundValue)
 	}
 

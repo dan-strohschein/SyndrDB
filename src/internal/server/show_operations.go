@@ -269,19 +269,16 @@ func ShowUsers(command string, database *models.Database, logger *zap.SugaredLog
 			"failed to retrieve user documents", errors.LayerCommand)
 	}
 
-	// Convert documents to response format
+	// Convert documents to response format (Option B: schema + Values or DocumentToMap)
+	schema := usersBundle.DocumentStructure.FieldSchema()
 	var users []map[string]interface{}
 	for _, doc := range userDocs {
 		user := make(map[string]interface{})
-
-		// Extract relevant user fields from the document
-		for fieldName, field := range doc.Fields {
-			// Skip sensitive fields like password hash
-			if fieldName != "PasswordHash" {
-				user[fieldName] = field.Value
+		for k, v := range models.DocumentToMap(doc, schema) {
+			if k != "PasswordHash" {
+				user[k] = v
 			}
 		}
-
 		users = append(users, user)
 	}
 

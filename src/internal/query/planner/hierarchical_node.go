@@ -307,11 +307,16 @@ func (n *HierarchicalTransformNode) filterJoinResultsByDocumentIDs(
 		// The mergeJoinedDocument sets DocumentID to joinedDoc.JoinKey
 		leftDocIDs[docID] = true
 
-		// Also try: Extract DocumentID from fields (in case it's stored there)
-		if docIDField, exists := doc.Fields["DocumentID"]; exists {
-			if fieldDocID, ok := docIDField.Value.AsString(); ok {
+		if fv, exists := doc.GetFieldValue(nil, "DocumentID"); exists {
+			if fieldDocID, ok := fv.AsString(); ok {
 				leftDocIDs[fieldDocID] = true
 				n.Logger.Debugf("Extracted DocumentID from field: %s", fieldDocID)
+			}
+		} else if doc.Data != nil {
+			if v, ok := doc.Data["DocumentID"]; ok {
+				if s, ok := v.(string); ok {
+					leftDocIDs[s] = true
+				}
 			}
 		}
 	}

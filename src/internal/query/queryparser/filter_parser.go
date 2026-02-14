@@ -158,31 +158,39 @@ type WhereGroup struct {
 }
 
 // DEPRECATED: Matches is an old parser method. Use SyndrQL's EvaluateAsBool instead.
-func (wc *WhereClause) Matches(document *models.Document, logger *zap.SugaredLogger) bool {
-	// If the field doesn't exist in the document, return false
-
-	// If the bundle name is attached to the field like this "<bundle_name>"."<field_name>", strip it
+// schema may be nil; then field value is resolved from document.Data if present.
+func (wc *WhereClause) Matches(document *models.Document, schema *models.BundleFieldSchema, logger *zap.SugaredLogger) bool {
 	if strings.Contains(wc.Field, ".") {
 		parts := strings.SplitN(wc.Field, ".", 2)
 		wc.Field = parts[1]
 	}
-
 	if strings.Contains(wc.Field, "\"") {
 		parts := strings.Split(wc.Field, "\"")
 		wc.Field = parts[1]
 	}
 
-	// Resolve field value without mutating the document (avoids concurrent map write when
-	// the document's Fields map is shared with memtable and another goroutine is iterating it).
 	var fieldValue models.FieldValue
 	if strings.EqualFold(wc.Field, "documentid") {
 		fieldValue = models.NewStringValue(document.DocumentID)
 	} else {
-		if _, exists := document.Fields[wc.Field]; !exists {
+		if schema != nil && len(document.Values) > 0 {
+			fv, exists := document.GetFieldValue(schema, wc.Field)
+			if !exists {
+				logger.Infof("Field '%s' does not exist in document, returning false", wc.Field)
+				return false
+			}
+			fieldValue = fv
+		} else if document.Data != nil {
+			if v, ok := document.Data[wc.Field]; ok {
+				fieldValue = models.NewInterfaceValue(v)
+			} else {
+				logger.Infof("Field '%s' does not exist in document, returning false", wc.Field)
+				return false
+			}
+		} else {
 			logger.Infof("Field '%s' does not exist in document, returning false", wc.Field)
 			return false
 		}
-		fieldValue = document.Fields[wc.Field].Value
 	}
 
 	// If no value is specified in the clause, we assume it matches any value
@@ -797,26 +805,20 @@ func parseValue(valueToken string) (interface{}, error) {
 }
 
 // DEPRECATED: EvaluateWhereClause is the old parser evaluator.
-// DO NOT USE FOR NEW CODE - Use SyndrQL instead:
-//
-//	evaluator := syndrQL.NewExpressionEvaluator(doc)
-//	result, err := evaluator.EvaluateAsBool(expr)
-func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logger *zap.SugaredLogger) bool {
-	// If there are no clauses or subgroups, default to true
+// schema may be nil; then evaluateClause uses document.Data for field lookup.
+func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, schema *models.BundleFieldSchema, logger *zap.SugaredLogger) bool {
 	if len(whereGroup.Clauses) == 0 && len(whereGroup.SubGroups) == 0 {
 		return true
 	}
 
-	// Evaluate all clauses in this group
 	clauseResults := make([]bool, 0, len(whereGroup.Clauses))
 	for _, clause := range whereGroup.Clauses {
-		clauseResults = append(clauseResults, evaluateClause(document, clause, logger))
+		clauseResults = append(clauseResults, evaluateClause(document, clause, schema, logger))
 	}
 
-	// Evaluate all subgroups by recursively calling EvaluateWhereClause
 	subgroupResults := make([]bool, 0, len(whereGroup.SubGroups))
 	for _, subgroup := range whereGroup.SubGroups {
-		subgroupResults = append(subgroupResults, EvaluateWhereClause(document, &subgroup, logger))
+		subgroupResults = append(subgroupResults, EvaluateWhereClause(document, &subgroup, schema, logger))
 	}
 
 	// Combine all results using appropriate logic
@@ -838,37 +840,31 @@ func EvaluateWhereClause(document *models.Document, whereGroup *WhereGroup, logg
 }
 
 // DEPRECATED: evaluateClause is the old parser evaluator helper.
-// DO NOT USE FOR NEW CODE - Use SyndrQL instead.
-func evaluateClause(document *models.Document, clause WhereClause, logger *zap.SugaredLogger) bool {
-	// Get field value from document
-	// TODO: I will extend IS NULL/IS NOT NULL support to SELECT field expressions
-	// This will allow queries like: SELECT name, email IS NULL as missing_email FROM Users
-	// Currently IS NULL/IS NOT NULL only works in WHERE clauses
-	// Implementation requires: expression evaluator updates, result field aliasing, type handling
-
+func evaluateClause(document *models.Document, clause WhereClause, schema *models.BundleFieldSchema, logger *zap.SugaredLogger) bool {
 	if strings.Contains(clause.Field, "\"") {
 		clause.Field = strings.ReplaceAll(clause.Field, "\"", "")
 	}
 
-	// DEBUG: Log all available fields in document
-	// logger.Infof("[FILTER DEBUG] Evaluating clause: Field='%s', Operator='%s', Value='%v'", clause.Field, clause.Operator, clause.Value)
-	// logger.Infof("[FILTER DEBUG] Document ID: %s, Available fields in document:", document.DocumentID)
-	// for fieldName, fieldVal := range document.Fields {
-	// 	logger.Infof("[FILTER DEBUG]   - '%s' = %v (type: %T)", fieldName, fieldVal.Value.AsInterface(), fieldVal.Value.AsInterface())
-	// }
-
-	field, exists := document.Fields[clause.Field]
-	if !exists && !strings.EqualFold(clause.Field, "documentid") {
-		logger.Infof("[FILTER DEBUG] Field '%s' does not exist in document for value %s, returning false", clause.Field, clause.Value)
-		return false // Field doesn't exist
-	}
-
+	var fieldValue models.FieldValue
 	if strings.EqualFold(clause.Field, "documentid") {
-		// Special case for document ID
-		field = models.Field{
-			//Name:  "DocumentID",
-			Value: models.NewStringValue(document.DocumentID), // ✅ Convert string to FieldValue
+		fieldValue = models.NewStringValue(document.DocumentID)
+	} else if schema != nil && len(document.Values) > 0 {
+		fv, exists := document.GetFieldValue(schema, clause.Field)
+		if !exists {
+			logger.Infof("[FILTER DEBUG] Field '%s' does not exist in document for value %s, returning false", clause.Field, clause.Value)
+			return false
 		}
+		fieldValue = fv
+	} else if document.Data != nil {
+		if v, ok := document.Data[clause.Field]; ok {
+			fieldValue = models.NewInterfaceValue(v)
+		} else {
+			logger.Infof("[FILTER DEBUG] Field '%s' does not exist in document for value %s, returning false", clause.Field, clause.Value)
+			return false
+		}
+	} else {
+		logger.Infof("[FILTER DEBUG] Field '%s' does not exist in document for value %s, returning false", clause.Field, clause.Value)
+		return false
 	}
 
 	// If no value is specified in the clause, we assume it matches any value
@@ -877,10 +873,7 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 	}
 
 	// CRITICAL FIX: Extract actual value from FieldValue typed union before comparison
-	// FieldValue is a struct with different value types (String, Int, Float, etc.)
-	// We need to unwrap it to get the actual comparable value (similar to IN operator fix)
-	// NOTE: This fix is for the deprecated filter_parser.go - SyndrQL evaluator handles this correctly
-	actualFieldValue := field.Value.AsInterface()
+	actualFieldValue := fieldValue.AsInterface()
 
 	// Handle NULL comparisons using magic value
 	// WHERE "Email" == NULL -> checks if Email field contains ::SYNDR_NULL::
@@ -890,7 +883,7 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 			// Check if comparing against NULL
 			if upperValue == "NULL" || upperValue == "SYNDR_NULL" || queryValueStr == "::SYNDR_NULL::" {
 				// Direct magic value comparison for NULL checks
-				fieldValueStr, fieldIsStr := field.Value.AsString() // ✅ Use FieldValue accessor
+				fieldValueStr, fieldIsStr := fieldValue.AsString()
 				if fieldIsStr && fieldValueStr == "::SYNDR_NULL::" {
 					return clause.Operator == "==" // Match if operator is ==
 				}
@@ -914,29 +907,25 @@ func evaluateClause(document *models.Document, clause WhereClause, logger *zap.S
 	case "<":
 		return compareValues(actualFieldValue, clause.Value, logger, func(a, b float64) bool { return a < b })
 	case "IN":
-		return EvaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
+		return EvaluateInOperator(fieldValue, clause.Value, clause.CaseInsensitive, false,
 			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
 	case "NOT IN":
-		return EvaluateInOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
+		return EvaluateInOperator(fieldValue, clause.Value, clause.CaseInsensitive, true,
 			clause.Field, clause.OriginalListSize, clause.SingleValueOptimized, logger)
 	case "LIKE":
-		return EvaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, false,
+		return EvaluateLikeOperator(fieldValue, clause.Value, clause.CaseInsensitive, false,
 			clause.Field, clause.PatternType, logger)
 	case "NOT LIKE":
-		return EvaluateLikeOperator(field.Value, clause.Value, clause.CaseInsensitive, true,
+		return EvaluateLikeOperator(fieldValue, clause.Value, clause.CaseInsensitive, true,
 			clause.Field, clause.PatternType, logger)
 	case "IS NULL":
-		// Handle IS NULL operator from GraphQL or direct WhereClause usage
-		// Check if field value equals the magic NULL value
-		fieldValueStr, fieldIsStr := field.Value.AsString()
+		fieldValueStr, fieldIsStr := fieldValue.AsString()
 		if fieldIsStr && fieldValueStr == "::SYNDR_NULL::" {
 			return true
 		}
 		return false
 	case "IS NOT NULL":
-		// Handle IS NOT NULL operator from GraphQL or direct WhereClause usage
-		// Check if field value does NOT equal the magic NULL value
-		fieldValueStr, fieldIsStr := field.Value.AsString()
+		fieldValueStr, fieldIsStr := fieldValue.AsString()
 		if fieldIsStr && fieldValueStr == "::SYNDR_NULL::" {
 			return false
 		}
@@ -1638,7 +1627,7 @@ func FilterDocumentsRaw(docs []*models.Document, where string, logger *zap.Sugar
 	}
 
 	for _, doc := range docs {
-		if EvaluateWhereClause(doc, whereGroup, logger) {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			result = append(result, doc)
 		}
 	}
@@ -1688,9 +1677,10 @@ func FilterDocumentsByIndex(bundle *models.Bundle, docs []*models.Document, wher
 	}
 
 	// Fallback: full scan
+	schema := bundle.DocumentStructure.FieldSchema()
 	var result []*models.Document
 	for _, doc := range docs {
-		if EvaluateWhereClause(doc, whereGroup, logger) {
+		if EvaluateWhereClause(doc, whereGroup, schema, logger) {
 			result = append(result, doc)
 		}
 	}

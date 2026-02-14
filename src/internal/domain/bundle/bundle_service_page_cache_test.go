@@ -8,10 +8,8 @@ import (
 )
 
 // TestCreateSafePageCopyShallowCopy documents that createSafePageCopy is a shallow copy:
-// the returned page has its own Documents map, but each document's Fields and Data maps
-// are shared with the original. Mutating a document's Fields in the copy affects the original.
-// When deep copy is implemented (Issue 3 Option B), change this test to assert that after
-// mutating the copy's document Fields, the original page's document Fields are unchanged.
+// the returned page has its own Documents map, but each document's Data map may be shared.
+// Option B: Documents use Data (no Fields). Mutating copy's document Data affects original if same map.
 func TestCreateSafePageCopyShallowCopy(t *testing.T) {
 	s := &BundleService{}
 	orig := &models.DocumentPage{
@@ -20,7 +18,7 @@ func TestCreateSafePageCopyShallowCopy(t *testing.T) {
 		Documents: map[string]models.Document{
 			"doc1": {
 				DocumentID: "doc1",
-				Fields:     map[string]models.Field{"x": {Name: "x", Value: models.NewStringValue("v1")}},
+				Data:       map[string]interface{}{"x": "v1"},
 			},
 		},
 	}
@@ -28,22 +26,18 @@ func TestCreateSafePageCopyShallowCopy(t *testing.T) {
 	if copy == orig {
 		t.Fatal("copy should be a different pointer")
 	}
-	// Copy has its own Documents map: adding a new key to copy doesn't appear in orig
 	copy.Documents["doc2"] = models.Document{DocumentID: "doc2"}
 	if _, ok := orig.Documents["doc2"]; ok {
 		t.Fatal("copy should have a different Documents map; orig must not have doc2")
 	}
-	// With shallow copy, document structs are copied by value but Fields map is shared.
-	// Mutating the copy's document Fields mutates the original (same map reference).
 	copyDoc := copy.Documents["doc1"]
-	if copyDoc.Fields == nil {
-		copyDoc.Fields = make(map[string]models.Field)
+	if copyDoc.Data == nil {
+		copyDoc.Data = make(map[string]interface{})
 	}
-	copyDoc.Fields["y"] = models.Field{Name: "y", Value: models.NewStringValue("v2")}
+	copyDoc.Data["y"] = "v2"
 	copy.Documents["doc1"] = copyDoc
-	// Current shallow copy: original is affected (Fields map shared). When deep copy is added, assert !hasY for isolation.
-	if _, hasY := orig.Documents["doc1"].Fields["y"]; !hasY {
-		t.Error("shallow copy: mutating copy's document Fields should affect original (Fields map is shared)")
+	if _, hasY := orig.Documents["doc1"].Data["y"]; !hasY {
+		t.Error("shallow copy: mutating copy's document Data should affect original (Data map is shared)")
 	}
 }
 

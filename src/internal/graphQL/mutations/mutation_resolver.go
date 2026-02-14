@@ -192,16 +192,23 @@ func (r *MutationResolver) resolveDocumentFields(document *models.Document, bund
 			continue
 		}
 
-		// Resolve direct field from document
-		if docField, exists := document.Fields[fieldName]; exists {
-			result[fieldName] = docField.Value
+		// Resolve direct field from document (Option B: schema + GetFieldValue or Data)
+		var val interface{}
+		if bundle != nil {
+			if fv, exists := document.GetFieldValue(bundle.DocumentStructure.FieldSchema(), fieldName); exists {
+				val = fv.AsInterface()
+			}
+		}
+		if val == nil && document.Data != nil {
+			if v, ok := document.Data[fieldName]; ok {
+				val = v
+			}
+		}
+		if val != nil {
+			result[fieldName] = val
 		} else if fieldName == "DocumentID" {
-			// Allow explicit DocumentID access
 			result["DocumentID"] = document.DocumentID
 		} else {
-			// Field not found - could be a relationship field
-			// TODO: I will add relationship field detection and resolution here.
-			// For now, log a warning and return null
 			r.logger.Warnf("Field '%s' not found in document '%s'", fieldName, document.DocumentID)
 			result[fieldName] = nil
 		}

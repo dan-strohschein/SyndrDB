@@ -88,26 +88,46 @@ func NewNullHandler(logger *zap.SugaredLogger) *NullHandler {
 	}
 }
 
-// IsNull checks if a field contains any type of NULL value (explicit NULL,
-// missing, deleted, or default). Returns true for any magic value that
-// represents absence of a real value.
-//
-// Example:
-//
-//	if handler.IsNull(document, "email") {
-//	    // Field is NULL in some form
-//	}
-func (nh *NullHandler) IsNull(doc *models.Document, fieldName string) bool {
-	if doc == nil || doc.Fields == nil {
-		return true
+// getDocField returns the field value from doc (Values+schema or Data). schema may be nil.
+func getDocField(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) (models.FieldValue, bool) {
+	if doc == nil {
+		return models.FieldValue{}, false
 	}
+	if schema != nil && len(doc.Values) > 0 {
+		return doc.GetFieldValue(schema, fieldName)
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), true
+		}
+	}
+	return models.FieldValue{}, false
+}
 
-	field, exists := doc.Fields[fieldName]
+// setDocField sets a field value on doc (Values+schema or Data). schema may be nil.
+func setDocField(doc *models.Document, fieldName string, fv models.FieldValue, schema *models.BundleFieldSchema) {
+	if doc == nil {
+		return
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		if idx, ok := schema.NameToIndex[fieldName]; ok && idx >= 0 && idx < len(doc.Values) {
+			doc.Values[idx] = fv
+		}
+		return
+	}
+	if doc.Data == nil {
+		doc.Data = make(map[string]interface{})
+	}
+	doc.Data[fieldName] = fv.AsInterface()
+}
+
+// IsNull checks if a field contains any type of NULL value. schema may be nil (uses doc.Data).
+func (nh *NullHandler) IsNull(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) bool {
+	fv, exists := getDocField(doc, fieldName, schema)
 	if !exists {
 		return true
 	}
-
-	return nh.IsNullValue(field.Value)
+	return nh.IsNullValue(fv.AsInterface())
 }
 
 // IsNullValue checks if a raw value is a magic NULL value.
@@ -144,17 +164,12 @@ func (nh *NullHandler) IsNullValue(value interface{}) bool {
 //	case HasValue:
 //	    // Field has a real value
 //	}
-func (nh *NullHandler) GetNullType(doc *models.Document, fieldName string) NullType {
-	if doc == nil || doc.Fields == nil {
-		return MissingField
-	}
-
-	field, exists := doc.Fields[fieldName]
+func (nh *NullHandler) GetNullType(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) NullType {
+	fv, exists := getDocField(doc, fieldName, schema)
 	if !exists {
 		return MissingField
 	}
-
-	return nh.GetNullTypeFromValue(field.Value)
+	return nh.GetNullTypeFromValue(fv.AsInterface())
 }
 
 // GetNullTypeFromValue determines the NULL type from a raw value.
@@ -191,30 +206,20 @@ func (nh *NullHandler) GetNullTypeFromValue(value interface{}) NullType {
 //	value := handler.GetFieldValue(document, "email")
 //	// If field contains SYNDR_NULL, returns nil
 //	// Otherwise returns the actual value
-func (nh *NullHandler) GetFieldValue(doc *models.Document, fieldName string) interface{} {
-	if doc == nil || doc.Fields == nil {
-		return nil
-	}
-
-	field, exists := doc.Fields[fieldName]
+func (nh *NullHandler) GetFieldValue(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) interface{} {
+	fv, exists := getDocField(doc, fieldName, schema)
 	if !exists {
 		return nil
 	}
-
-	// If it's a magic value, return nil for external APIs
-	if nh.IsNullValue(field.Value) {
+	if nh.IsNullValue(fv.AsInterface()) {
 		return nil
 	}
-
-	// Check if the value needs unescaping
-	if strValue, ok := field.Value.AsString(); ok { // ✅ Use AsString()
+	if strValue, ok := fv.AsString(); ok {
 		if strings.HasPrefix(strValue, SYNDR_ESCAPED) {
-			// Remove the escape prefix to get original user value
 			return strings.TrimPrefix(strValue, SYNDR_ESCAPED)
 		}
 	}
-
-	return field.Value
+	return fv.AsInterface()
 }
 
 // SetFieldValue sets a field value, automatically handling NULL values and
@@ -224,27 +229,12 @@ func (nh *NullHandler) GetFieldValue(doc *models.Document, fieldName string) int
 //
 //	handler.SetFieldValue(document, "email", "user@example.com")
 //	handler.SetFieldValue(document, "phone", nil) // Sets SYNDR_NULL
-func (nh *NullHandler) SetFieldValue(doc *models.Document, fieldName string, value interface{}) {
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field)
-	}
-
-	// Convert nil to SYNDR_NULL
+func (nh *NullHandler) SetFieldValue(doc *models.Document, fieldName string, value interface{}, schema *models.BundleFieldSchema) {
 	if value == nil {
-		doc.Fields[fieldName] = models.Field{
-			Name:  fieldName,
-			Value: models.NewStringValue(SYNDR_NULL), // ✅ Use NewStringValue
-		}
+		setDocField(doc, fieldName, models.NewStringValue(SYNDR_NULL), schema)
 		return
 	}
-
-	// Escape user values that look like magic values
-	escapedValue := nh.EscapeUserValue(value)
-
-	doc.Fields[fieldName] = models.Field{
-		Name:  fieldName,
-		Value: models.NewInterfaceValue(escapedValue), // ✅ Use NewInterfaceValue
-	}
+	setDocField(doc, fieldName, models.NewInterfaceValue(nh.EscapeUserValue(value)), schema)
 }
 
 // EscapeUserValue escapes user data that looks like a magic value to prevent
@@ -284,38 +274,16 @@ func (nh *NullHandler) UnescapeValue(value interface{}) interface{} {
 	return value
 }
 
-// SetMissingField explicitly marks a field as missing.
-func (nh *NullHandler) SetMissingField(doc *models.Document, fieldName string) {
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field)
-	}
-
-	doc.Fields[fieldName] = models.Field{
-		Name:  fieldName,
-		Value: models.NewStringValue(SYNDR_MISSING), // ✅ Use NewStringValue
-	}
+func (nh *NullHandler) SetMissingField(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) {
+	setDocField(doc, fieldName, models.NewStringValue(SYNDR_MISSING), schema)
 }
 
-// SetDeletedField marks a field as deleted (tombstone).
-func (nh *NullHandler) SetDeletedField(doc *models.Document, fieldName string) {
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field)
-	}
+func (nh *NullHandler) SetDeletedField(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) {
+	setDocField(doc, fieldName, models.NewStringValue(SYNDR_DELETED), schema)
+}
 
-	doc.Fields[fieldName] = models.Field{
-		Name:  fieldName,
-		Value: models.NewStringValue(SYNDR_DELETED), // ✅ Use NewStringValue
-	}
-} // SetDefaultField marks a field as using its default value.
-func (nh *NullHandler) SetDefaultField(doc *models.Document, fieldName string) {
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field)
-	}
-
-	doc.Fields[fieldName] = models.Field{
-		Name:  fieldName,
-		Value: models.NewStringValue(SYNDR_DEFAULT), // ✅ Use NewStringValue
-	}
+func (nh *NullHandler) SetDefaultField(doc *models.Document, fieldName string, schema *models.BundleFieldSchema) {
+	setDocField(doc, fieldName, models.NewStringValue(SYNDR_DEFAULT), schema)
 } // InitializeDocumentFields initializes document fields based on bundle schema.
 // For each field definition:
 // - If field is required and not provided: return error
@@ -324,55 +292,34 @@ func (nh *NullHandler) SetDefaultField(doc *models.Document, fieldName string) {
 //
 // This should be called during document creation to ensure proper NULL handling.
 //
-// TODO: Integrate this with AddDocumentToBundle in bundle_service.go
-// TODO: Consider performance optimization for bulk document creation
 func (nh *NullHandler) InitializeDocumentFields(doc *models.Document, bundle *models.Bundle, providedFields map[string]bool) error {
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field)
-	}
-
+	schema := bundle.DocumentStructure.FieldSchema()
 	if bundle.DocumentStructure.FieldDefinitions == nil {
 		return fmt.Errorf("bundle '%s' has no field definitions", bundle.Name)
 	}
 
 	for fieldName, fieldDef := range bundle.DocumentStructure.FieldDefinitions {
-		// Skip DocumentID - it's auto-generated
 		if fieldName == "DocumentID" {
 			continue
 		}
-
-		// If field was provided, skip initialization (already set)
 		if providedFields[fieldName] {
-			// Escape the value if it looks like a magic value
-			if field, exists := doc.Fields[fieldName]; exists {
-				field.Value = models.NewInterfaceValue(nh.EscapeUserValue(field.Value.AsInterface())) // ✅ Use NewInterfaceValue
-				doc.Fields[fieldName] = field
+			if fv, exists := getDocField(doc, fieldName, schema); exists {
+				setDocField(doc, fieldName, models.NewInterfaceValue(nh.EscapeUserValue(fv.AsInterface())), schema)
 			}
 			continue
 		}
-
-		// Field was not provided - determine what to set
 		if fieldDef.IsRequired {
-			// Required field missing - this should have been caught by validation
 			nh.logger.Warnf("[NULL_HANDLER] Required field '%s' missing during initialization", fieldName)
 			return fmt.Errorf("required field '%s' is missing", fieldName)
 		}
-
-		// Optional field - check for default value
 		if fieldDef.DefaultValue != nil {
-			// Use default value with SYNDR_DEFAULT marker
-			nh.SetDefaultField(doc, fieldName)
+			nh.SetDefaultField(doc, fieldName, schema)
 			nh.logger.Debugf("[NULL_HANDLER] Field '%s' set to SYNDR_DEFAULT", fieldName)
 		} else {
-			// No default value - set to SYNDR_NULL
-			doc.Fields[fieldName] = models.Field{
-				Name:  fieldName,
-				Value: models.NewStringValue(SYNDR_NULL), // ✅ Use NewStringValue
-			}
+			setDocField(doc, fieldName, models.NewStringValue(SYNDR_NULL), schema)
 			nh.logger.Debugf("[NULL_HANDLER] Field '%s' set to SYNDR_NULL (optional, no default)", fieldName)
 		}
 	}
-
 	return nil
 }
 
@@ -385,48 +332,48 @@ func (nh *NullHandler) InitializeDocumentFields(doc *models.Document, bundle *mo
 //	jsonData := handler.ToJSON(document)
 //	// Fields with SYNDR_NULL become JSON null
 //	// Fields with SYNDR_ESCAPED values are unescaped
-func (nh *NullHandler) ToJSON(doc *models.Document) map[string]interface{} {
+func (nh *NullHandler) ToJSON(doc *models.Document, schema *models.BundleFieldSchema) map[string]interface{} {
 	if doc == nil {
 		return nil
 	}
-
 	result := make(map[string]interface{})
-
-	// Always include DocumentID
 	result["DocumentID"] = doc.DocumentID
-
-	if doc.Fields == nil {
+	if schema != nil && len(doc.Values) > 0 {
+		for i, name := range schema.Names {
+			if name == "DocumentID" {
+				continue
+			}
+			if i < len(doc.Values) {
+				if nh.IsNullValue(doc.Values[i].AsInterface()) {
+					result[name] = nil
+				} else {
+					result[name] = nh.UnescapeValue(doc.Values[i].AsInterface())
+				}
+			}
+		}
 		return result
 	}
-
-	for fieldName, field := range doc.Fields {
-		if nh.IsNullValue(field.Value) {
-			result[fieldName] = nil // Standard JSON null
-		} else {
-			// Unescape if needed
-			result[fieldName] = nh.UnescapeValue(field.Value)
+	if doc.Data != nil {
+		for name, v := range doc.Data {
+			if nh.IsNullValue(v) {
+				result[name] = nil
+			} else {
+				result[name] = nh.UnescapeValue(v)
+			}
 		}
 	}
-
 	return result
 }
 
-// FromJSON creates or updates a document from a JSON-compatible map, converting
-// nil values to SYNDR_NULL and escaping magic-like strings.
-//
-// TODO: Integrate this with document parsing in command handlers
-func (nh *NullHandler) FromJSON(jsonData map[string]interface{}, doc *models.Document) {
-	if doc.Fields == nil {
-		doc.Fields = make(map[string]models.Field)
-	}
-
+func (nh *NullHandler) FromJSON(jsonData map[string]interface{}, doc *models.Document, schema *models.BundleFieldSchema) {
 	for fieldName, value := range jsonData {
 		if fieldName == "DocumentID" {
-			doc.DocumentID = value.(string)
+			if s, ok := value.(string); ok {
+				doc.DocumentID = s
+			}
 			continue
 		}
-
-		nh.SetFieldValue(doc, fieldName, value)
+		nh.SetFieldValue(doc, fieldName, value, schema)
 	}
 }
 
@@ -465,7 +412,7 @@ func (nh *NullHandler) CompareValues(value1, value2 interface{}) bool {
 //
 // TODO: Integrate with hot key tracker to optimize NULL-heavy fields
 // TODO: Add telemetry for NULL access patterns
-func (nh *NullHandler) GetNullStatistics(doc *models.Document) map[string]int {
+func (nh *NullHandler) GetNullStatistics(doc *models.Document, schema *models.BundleFieldSchema) map[string]int {
 	stats := map[string]int{
 		"total_fields":  0,
 		"has_value":     0,
@@ -474,29 +421,46 @@ func (nh *NullHandler) GetNullStatistics(doc *models.Document) map[string]int {
 		"deleted":       0,
 		"default_value": 0,
 	}
-
-	if doc == nil || doc.Fields == nil {
+	if doc == nil {
 		return stats
 	}
-
-	stats["total_fields"] = len(doc.Fields)
-
-	for _, field := range doc.Fields {
-		nullType := nh.GetNullTypeFromValue(field.Value)
-		switch nullType {
-		case HasValue:
-			stats["has_value"]++
-		case ExplicitNull:
-			stats["explicit_null"]++
-		case MissingField:
-			stats["missing"]++
-		case DeletedField:
-			stats["deleted"]++
-		case DefaultValue:
-			stats["default_value"]++
+	if schema != nil && len(doc.Values) > 0 {
+		stats["total_fields"] = len(doc.Values)
+		for _, fv := range doc.Values {
+			nullType := nh.GetNullTypeFromValue(fv.AsInterface())
+			switch nullType {
+			case HasValue:
+				stats["has_value"]++
+			case ExplicitNull:
+				stats["explicit_null"]++
+			case MissingField:
+				stats["missing"]++
+			case DeletedField:
+				stats["deleted"]++
+			case DefaultValue:
+				stats["default_value"]++
+			}
+		}
+		return stats
+	}
+	if doc.Data != nil {
+		stats["total_fields"] = len(doc.Data)
+		for _, v := range doc.Data {
+			nullType := nh.GetNullTypeFromValue(v)
+			switch nullType {
+			case HasValue:
+				stats["has_value"]++
+			case ExplicitNull:
+				stats["explicit_null"]++
+			case MissingField:
+				stats["missing"]++
+			case DeletedField:
+				stats["deleted"]++
+			case DefaultValue:
+				stats["default_value"]++
+			}
 		}
 	}
-
 	return stats
 }
 

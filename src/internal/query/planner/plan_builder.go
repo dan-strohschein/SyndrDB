@@ -27,6 +27,7 @@ import (
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/syndrQL"
 
 	"go.uber.org/zap"
 )
@@ -323,7 +324,29 @@ func (pb *PlanBuilder) addAggregationNode(
 		pb.logger,
 	)
 
+	// Set BundleContext from child so aggregationSchema() returns the bundle's field schema.
+	// This enables O(1) doc.Values lookup via GetFieldValue(schema, name) instead of doc.Data fallback.
+	if bundle := getBundleFromExecutionNode(child); bundle != nil {
+		aggNode.BundleContext = syndrQL.NewBundleContextForSingleBundle(bundle)
+	}
+
 	return aggNode, nil
+}
+
+// getBundleFromExecutionNode extracts the primary *models.Bundle from an execution tree.
+// Used to set BundleContext on AggregationNode so GROUP BY can use schema-ordered doc.Values.
+func getBundleFromExecutionNode(node ExecutionNode) *models.Bundle {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *FullScanNode:
+		return n.Bundle
+	case *FilterNode:
+		return getBundleFromExecutionNode(n.Child)
+	default:
+		return nil
+	}
 }
 
 // addDistinctNode wraps tree with DISTINCT deduplication
