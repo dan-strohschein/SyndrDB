@@ -46,6 +46,7 @@ package planner
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,6 +105,28 @@ type AggregationNode struct {
 	// Limit specifies maximum groups to collect (0 = no limit)
 	// Used for early termination when LIMIT is present without HAVING/ORDER BY/OFFSET
 	Limit int
+
+	// cachedSchema is the bundle field schema for doc.Values lookup, computed once on first use.
+	// Avoids repeated schema resolution; getCachedSchema() computes once and reuses.
+	cachedSchema *models.BundleFieldSchema
+
+	// resolvedAggInfos caches pre-resolved aggregate field infos (schema indices).
+	// Computed once on first use via getCachedAggInfos().
+	resolvedAggInfos []aggFieldResolvedInfo
+
+	// diagCount limits diagnostic output
+	diagCount int
+}
+
+func docDataKeys(doc *models.Document) []string {
+	if doc == nil || doc.Data == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(doc.Data))
+	for k := range doc.Data {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // NewAggregationNode creates a new aggregation execution node
@@ -200,6 +223,10 @@ func NewAggregationNode(
 //   - map[string]*models.Document: Aggregated group documents
 //   - error: Any error during execution
 func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Document, error) {
+	t0Execute := time.Now()
+	defer func() {
+		fmt.Fprintf(os.Stderr, "PERF AggregationNode.Execute total: %v\n", time.Since(t0Execute))
+	}()
 	groupByFieldCount := 0
 	if n.GroupBy != nil {
 		groupByFieldCount = len(n.GroupBy.Fields)
@@ -282,7 +309,7 @@ func (n *AggregationNode) Execute(ctx context.Context) (map[string]*models.Docum
 
 			doc := document.GetPooledDocument()
 			doc.DocumentID = "synthetic_0"
-			doc.Fields = fields
+			setDocumentValuesFromFieldMap(doc, fields)
 
 			result := map[string]*models.Document{
 				"synthetic_0": doc,
@@ -568,7 +595,7 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 
 		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && docCount%100 == 0 {
-			docSize := models.EstimateDocumentSize(doc)
+			docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
 			}
@@ -620,6 +647,7 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 // all documents, pre-computed field names, fast group key (no fmt.Sprintf), deferred groupFields
 // allocation, and inline COUNT(*) fast path.
 func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, scanner documentscanner.DocumentScannerInterface) (map[groupKey]*groupResult, int, error) {
+	t0 := time.Now()
 	n.Logger.Debugf("Executing Hash Aggregate strategy with chunk-based streaming")
 
 	groupMap := make(map[groupKey]*groupResult)
@@ -668,7 +696,7 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 
 					// Memory tracking: Sample every 100th document
 					if memoryTracker != nil && totalInput%100 == 0 {
-						docSize := models.EstimateDocumentSize(doc)
+						docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 						if err := memoryTracker.Sample(docSize, totalInput); err != nil {
 							chunkErr = err
 							return false
@@ -772,7 +800,7 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 			totalInput++
 
 			if memoryTracker != nil && i%500 == 0 {
-				docSize := models.EstimateDocumentSize(doc)
+				docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 				if err := memoryTracker.Sample(docSize, i); err != nil {
 					return nil, totalInput, err
 				}
@@ -834,7 +862,9 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 		}
 	}
 
-	n.Logger.Debugf("Streaming hash aggregate created %d groups from %d documents", len(groupMap), totalInput)
+	elapsed := time.Since(t0)
+	fmt.Fprintf(os.Stderr, "PERF executeHashAggregateStreaming took %v: groups=%d, docs=%d, usedChunks=%v\n",
+		elapsed, len(groupMap), totalInput, usedChunks)
 
 	return groupMap, totalInput, nil
 }
@@ -1167,7 +1197,7 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 
 		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
 		if memoryTracker != nil && docCount%100 == 0 {
-			docSize := models.EstimateDocumentSize(doc)
+			docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
 			}
@@ -1209,37 +1239,78 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 	return groupMap, nil
 }
 
-// getCaseInsensitiveField performs a case-insensitive lookup for a field in a document
-// This ensures consistent behavior with SQL's standard case-insensitive identifier matching
-// Parameters:
-//   - doc: The document to search
-//   - fieldName: The field name to look for (case-insensitive)
-//
-// Returns:
-//   - models.Field: The field if found
-//   - bool: true if the field exists, false otherwise
-func (n *AggregationNode) getCaseInsensitiveField(doc *models.Document, fieldName string) (models.Field, bool) {
-	if doc.Fields == nil {
-		return models.Field{}, false
+// aggregationSchema returns the field schema from BundleContext (primary bundle) for doc.Values lookup
+func (n *AggregationNode) aggregationSchema() *models.BundleFieldSchema {
+	if n.BundleContext == nil {
+		return nil
 	}
+	bc, ok := n.BundleContext.(*syndrQL.BundleContext)
+	if !ok || bc == nil || bc.Bundles == nil || bc.PrimaryBundle == "" {
+		return nil
+	}
+	b := bc.Bundles[bc.PrimaryBundle]
+	if b == nil {
+		return nil
+	}
+	return b.DocumentStructure.FieldSchema()
+}
 
-	// Strip quotes from field name if present (SQL identifier normalization)
+// getCachedSchema returns the bundle field schema, computing and caching it on first use.
+// Use this in hot paths (createGroupKeyFast, getCaseInsensitiveFieldClean, updateAggregates, EstimateDocumentSize)
+// to avoid repeated type assertion and lookup per document.
+func (n *AggregationNode) getCachedSchema() *models.BundleFieldSchema {
+	if n.cachedSchema != nil {
+		return n.cachedSchema
+	}
+	n.cachedSchema = n.aggregationSchema()
+	return n.cachedSchema
+}
+
+// setDocumentValuesFromFieldMap sets doc.Values from a field map (stable order: sorted names).
+// Used when building aggregation result documents that use Values instead of Fields.
+func setDocumentValuesFromFieldMap(doc *models.Document, fields map[string]models.Field) {
+	if len(fields) == 0 {
+		doc.Values = nil
+		return
+	}
+	names := make([]string, 0, len(fields))
+	for k := range fields {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	doc.Values = make([]models.FieldValue, len(names))
+	for i, name := range names {
+		doc.Values[i] = fields[name].Value
+	}
+}
+
+// getCaseInsensitiveField performs a case-insensitive lookup for a field in a document (schema + Values or Data)
+func (n *AggregationNode) getCaseInsensitiveField(doc *models.Document, fieldName string) (models.Field, bool) {
 	cleanFieldName := strings.Trim(fieldName, "\"'")
 
-	// Try exact match first (optimization for correctly cased fields)
-	if field, exists := doc.Fields[cleanFieldName]; exists {
-		return field, true
+	schema := n.getCachedSchema()
+	if schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, cleanFieldName); ok {
+			return models.Field{Value: fv}, true
+		}
+		// O(1) case-insensitive fallback via LowerNameToIndex
+		if fv, ok := doc.GetFieldValueCI(schema, strings.ToLower(cleanFieldName)); ok {
+			return models.Field{Value: fv}, true
+		}
+		// SAFETY: Don't return false here — fall through to doc.Data in case
+		// doc.Values was populated with a different schema than getCachedSchema().
 	}
-
-	// Fall back to case-insensitive search
-	// TODO: Consider caching field name mappings for better performance in hot paths
-	lowerFieldName := strings.ToLower(cleanFieldName)
-	for key, field := range doc.Fields {
-		if strings.ToLower(key) == lowerFieldName {
-			return field, true
+	if doc.Data != nil {
+		if v, ok := doc.Data[cleanFieldName]; ok {
+			return models.Field{Value: models.NewInterfaceValue(v)}, true
+		}
+		lowerFieldName := strings.ToLower(cleanFieldName)
+		for k, v := range doc.Data {
+			if strings.ToLower(k) == lowerFieldName {
+				return models.Field{Value: models.NewInterfaceValue(v)}, true
+			}
 		}
 	}
-
 	return models.Field{}, false
 }
 
@@ -1248,19 +1319,41 @@ func (n *AggregationNode) getCaseInsensitiveField(doc *models.Document, fieldNam
 type groupKeyFieldInfo struct {
 	QualifiedName string // original qualified name from GroupBy.Fields
 	CleanName     string // result of extractFieldName (computed once)
+	SchemaIndex   int    // pre-resolved index into doc.Values (-1 = not resolved)
 }
 
 // precomputeGroupKeyFields computes cleaned field names once for the GROUP BY fields.
+// Also pre-resolves schema indices for O(1) doc.Values access in the hot loop.
 func (n *AggregationNode) precomputeGroupKeyFields() []groupKeyFieldInfo {
 	if n.GroupBy == nil || len(n.GroupBy.Fields) == 0 {
 		return nil
 	}
+	schema := n.getCachedSchema()
 	infos := make([]groupKeyFieldInfo, len(n.GroupBy.Fields))
 	for i, qf := range n.GroupBy.Fields {
+		cleanName := n.extractFieldName(qf)
+		schemaIdx := -1
+		if schema != nil {
+			if idx, ok := schema.NameToIndex[cleanName]; ok {
+				schemaIdx = idx
+			} else if schema.LowerNameToIndex != nil {
+				if idx, ok := schema.LowerNameToIndex[strings.ToLower(cleanName)]; ok {
+					schemaIdx = idx
+				}
+			}
+		}
 		infos[i] = groupKeyFieldInfo{
 			QualifiedName: qf,
-			CleanName:     n.extractFieldName(qf),
+			CleanName:     cleanName,
+			SchemaIndex:   schemaIdx,
 		}
+		// Diagnostic: log schema resolution result
+		var schemaNames []string
+		if schema != nil {
+			schemaNames = schema.Names
+		}
+		fmt.Fprintf(os.Stderr, "DIAG precomputeGroupKeyFields: qf=%q clean=%q schemaIdx=%d schemaNames=%v\n",
+			qf, cleanName, schemaIdx, schemaNames)
 	}
 	return infos
 }
@@ -1272,11 +1365,6 @@ func (n *AggregationNode) createGroupKey(doc *models.Document) (groupKey, map[st
 	if n.GroupBy == nil || len(n.GroupBy.Fields) == 0 {
 		// All documents belong to the same group (empty key)
 		return groupKey(""), nil, nil
-	}
-
-	// Guard against nil Fields map during concurrent operations
-	if doc.Fields == nil {
-		return "", nil, fmt.Errorf("document has nil Fields map")
 	}
 
 	groupFields := make(map[string]models.FieldValue, len(n.GroupBy.Fields))
@@ -1351,44 +1439,58 @@ func writeFieldValueToBuilder(sb *strings.Builder, fv models.FieldValue) {
 // createGroupKeyFast creates a group key using pre-computed field info.
 // Returns the key string and the raw field values (parallel to fieldInfos).
 // The caller should build the groupFields map only for new groups.
+// When SchemaIndex >= 0, uses direct doc.Values[idx] access (O(1)) instead of
+// getCaseInsensitiveFieldClean (which falls back to O(n) linear scan).
 func (n *AggregationNode) createGroupKeyFast(doc *models.Document, fieldInfos []groupKeyFieldInfo) (groupKey, []models.FieldValue, error) {
-	// Guard against nil Fields map during concurrent operations
-	if doc.Fields == nil {
-		return "", nil, fmt.Errorf("document has nil Fields map")
-	}
-
 	nFields := len(fieldInfos)
 
 	// Single-field fast path: no allocation for keyParts, no strings.Join
 	if nFields == 1 {
 		fi := &fieldInfos[0]
-		field, exists := n.getCaseInsensitiveFieldClean(doc, fi.CleanName)
-		if !exists {
-			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fi.QualifiedName)
+		var fv models.FieldValue
+		if fi.SchemaIndex >= 0 && fi.SchemaIndex < len(doc.Values) {
+			fv = doc.Values[fi.SchemaIndex]
+		} else {
+			field, exists := n.getCaseInsensitiveFieldClean(doc, fi.CleanName)
+			if !exists {
+				if n.diagCount < 3 {
+					n.diagCount++
+					schema := n.getCachedSchema()
+					fmt.Fprintf(os.Stderr, "DIAG createGroupKeyFast: field=%q clean=%q schemaIdx=%d docValuesLen=%d schema=%v docDataKeys=%v\n",
+						fi.QualifiedName, fi.CleanName, fi.SchemaIndex, len(doc.Values), schema != nil, docDataKeys(doc))
+				}
+				return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fi.QualifiedName)
+			}
+			fv = field.Value
 		}
-		// OPTIMIZATION B: Type-specific key string (avoids fmt.Sprint interface boxing)
-		gKey := groupKey(fieldValueToKeyString(field.Value))
-		return gKey, []models.FieldValue{field.Value}, nil
+		gKey := groupKey(fieldValueToKeyString(fv))
+		return gKey, []models.FieldValue{fv}, nil
 	}
 
 	// Multi-field path: use strings.Builder to avoid fmt.Sprintf per field
 	fieldValues := make([]models.FieldValue, nFields)
 	var sb strings.Builder
-	sb.Grow(64) // reasonable initial capacity
+	sb.Grow(64)
 
 	for i := range fieldInfos {
 		fi := &fieldInfos[i]
-		field, exists := n.getCaseInsensitiveFieldClean(doc, fi.CleanName)
-		if !exists {
-			return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fi.QualifiedName)
+		var fv models.FieldValue
+		if fi.SchemaIndex >= 0 && fi.SchemaIndex < len(doc.Values) {
+			fv = doc.Values[fi.SchemaIndex]
+		} else {
+			field, exists := n.getCaseInsensitiveFieldClean(doc, fi.CleanName)
+			if !exists {
+				return "", nil, fmt.Errorf("GROUP BY field '%s' not found in document", fi.QualifiedName)
+			}
+			fv = field.Value
 		}
-		fieldValues[i] = field.Value
+		fieldValues[i] = fv
 		if i > 0 {
 			sb.WriteByte('|')
 		}
 		sb.WriteString(fi.CleanName)
 		sb.WriteByte('=')
-		writeFieldValueToBuilder(&sb, field.Value)
+		writeFieldValueToBuilder(&sb, fv)
 	}
 
 	return groupKey(sb.String()), fieldValues, nil
@@ -1404,26 +1506,33 @@ func (n *AggregationNode) buildGroupFields(fieldInfos []groupKeyFieldInfo, field
 	return gf
 }
 
-// getCaseInsensitiveFieldClean performs field lookup with an already-cleaned field name
-// (no quote stripping needed since caller pre-computed the clean name).
+// getCaseInsensitiveFieldClean performs field lookup with an already-cleaned field name (schema + Values or Data).
+// Uses cached schema and exact GetFieldValue first for O(1) lookup when doc.Values is present.
+// Falls back to O(1) LowerNameToIndex instead of O(n) linear scan.
 func (n *AggregationNode) getCaseInsensitiveFieldClean(doc *models.Document, cleanFieldName string) (models.Field, bool) {
-	if doc.Fields == nil {
-		return models.Field{}, false
+	schema := n.getCachedSchema()
+	if schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, cleanFieldName); ok {
+			return models.Field{Value: fv}, true
+		}
+		// O(1) case-insensitive fallback via LowerNameToIndex
+		if fv, ok := doc.GetFieldValueCI(schema, strings.ToLower(cleanFieldName)); ok {
+			return models.Field{Value: fv}, true
+		}
+		// SAFETY: Don't return false here — fall through to doc.Data in case
+		// doc.Values was populated with a different schema than getCachedSchema().
 	}
-
-	// Try exact match first (optimization for correctly cased fields)
-	if field, exists := doc.Fields[cleanFieldName]; exists {
-		return field, true
-	}
-
-	// Fall back to case-insensitive search
-	lowerFieldName := strings.ToLower(cleanFieldName)
-	for key, field := range doc.Fields {
-		if strings.ToLower(key) == lowerFieldName {
-			return field, true
+	if doc.Data != nil {
+		if v, ok := doc.Data[cleanFieldName]; ok {
+			return models.Field{Value: models.NewInterfaceValue(v)}, true
+		}
+		lowerFieldName := strings.ToLower(cleanFieldName)
+		for k, v := range doc.Data {
+			if strings.ToLower(k) == lowerFieldName {
+				return models.Field{Value: models.NewInterfaceValue(v)}, true
+			}
 		}
 	}
-
 	return models.Field{}, false
 }
 
@@ -1456,69 +1565,128 @@ func getFieldNames(fields map[string]models.Field) []string {
 	return names
 }
 
-// updateAggregates updates aggregate values for a group with data from a document
+// aggFieldResolvedInfo holds pre-resolved info for an aggregate field.
+// Pre-computed once before the document loop to avoid per-doc string operations.
+type aggFieldResolvedInfo struct {
+	AggKey      string // result of getAggregateKey (computed once)
+	Function    string // aggregate function name (COUNT, SUM, etc.)
+	FieldName   string // cleaned field name (result of extractFieldName)
+	SchemaIndex int    // pre-resolved index into doc.Values (-1 = unresolved)
+}
+
+// precomputeAggregateFields pre-resolves aggregate field names against the schema.
+// Returns nil if no aggregate fields. Called once before the document loop.
+func (n *AggregationNode) precomputeAggregateFields() []aggFieldResolvedInfo {
+	if len(n.AggregateFields) == 0 {
+		return nil
+	}
+	schema := n.getCachedSchema()
+	infos := make([]aggFieldResolvedInfo, len(n.AggregateFields))
+	for i, af := range n.AggregateFields {
+		fieldName := n.extractFieldName(af.Field)
+		schemaIdx := -1
+		if schema != nil && fieldName != "*" {
+			if idx, ok := schema.NameToIndex[fieldName]; ok {
+				schemaIdx = idx
+			} else if schema.LowerNameToIndex != nil {
+				if idx, ok := schema.LowerNameToIndex[strings.ToLower(fieldName)]; ok {
+					schemaIdx = idx
+				}
+			}
+		}
+		infos[i] = aggFieldResolvedInfo{
+			AggKey:      n.getAggregateKey(af),
+			Function:    af.Function,
+			FieldName:   fieldName,
+			SchemaIndex: schemaIdx,
+		}
+	}
+	return infos
+}
+
+// cachedAggInfos lazily computes and caches the pre-resolved aggregate field infos.
+func (n *AggregationNode) getCachedAggInfos() []aggFieldResolvedInfo {
+	if n.resolvedAggInfos != nil {
+		return n.resolvedAggInfos
+	}
+	n.resolvedAggInfos = n.precomputeAggregateFields()
+	return n.resolvedAggInfos
+}
+
+// updateAggregates updates aggregate values for a group with data from a document.
+// Uses pre-resolved schema indices for O(1) field access when available.
 // PHASE 3: Aggregate accumulation
 func (n *AggregationNode) updateAggregates(gResult *groupResult, doc *models.Document) error {
-	// Guard against nil Fields map during concurrent operations
-	if doc.Fields == nil {
-		n.Logger.Warn("Skipping document with nil Fields map in updateAggregates")
+	aggInfos := n.getCachedAggInfos()
+	if aggInfos == nil {
 		return nil
 	}
 
-	for _, aggFunc := range n.AggregateFields {
-		aggKey := n.getAggregateKey(aggFunc)
-		aggVal := gResult.AggregateValues[aggKey]
+	for i := range aggInfos {
+		ai := &aggInfos[i]
+		aggVal := gResult.AggregateValues[ai.AggKey]
 
-		switch aggFunc.Function {
+		switch ai.Function {
 		case "COUNT":
-			if aggFunc.Field == "*" {
+			if ai.FieldName == "*" {
 				aggVal.Count++
 			} else {
-				// COUNT(field) - count non-null values
-				// Extract actual field name from qualified identifier
-				fieldName := n.extractFieldName(aggFunc.Field)
-				// Use case-insensitive field lookup
-				if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists && !field.Value.IsNil() {
+				// COUNT(field) - count non-null values using pre-resolved index
+				fv, exists := n.getAggFieldValue(doc, ai)
+				if exists && !fv.IsNil() {
 					aggVal.Count++
 				}
 			}
 
 		case "SUM":
-			fieldName := n.extractFieldName(aggFunc.Field)
-			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
-				if numValue, err := n.convertToFloat(field.Value); err == nil {
+			fv, exists := n.getAggFieldValue(doc, ai)
+			if exists {
+				if numValue, err := n.convertToFloat(fv); err == nil {
 					aggVal.Sum += numValue
 				}
 			}
 
 		case "AVG":
-			fieldName := n.extractFieldName(aggFunc.Field)
-			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists {
-				if numValue, err := n.convertToFloat(field.Value); err == nil {
+			fv, exists := n.getAggFieldValue(doc, ai)
+			if exists {
+				if numValue, err := n.convertToFloat(fv); err == nil {
 					aggVal.Sum += numValue
 					aggVal.AvgCount++
 				}
 			}
 
 		case "MIN":
-			fieldName := n.extractFieldName(aggFunc.Field)
-			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists && !field.Value.IsNil() {
-				if aggVal.Min.IsNil() || n.isLessFieldValue(field.Value, aggVal.Min) {
-					aggVal.Min = field.Value
+			fv, exists := n.getAggFieldValue(doc, ai)
+			if exists && !fv.IsNil() {
+				if aggVal.Min.IsNil() || n.isLessFieldValue(fv, aggVal.Min) {
+					aggVal.Min = fv
 				}
 			}
 
 		case "MAX":
-			fieldName := n.extractFieldName(aggFunc.Field)
-			if field, exists := n.getCaseInsensitiveField(doc, fieldName); exists && !field.Value.IsNil() {
-				if aggVal.Max.IsNil() || n.isGreaterFieldValue(field.Value, aggVal.Max) {
-					aggVal.Max = field.Value
+			fv, exists := n.getAggFieldValue(doc, ai)
+			if exists && !fv.IsNil() {
+				if aggVal.Max.IsNil() || n.isGreaterFieldValue(fv, aggVal.Max) {
+					aggVal.Max = fv
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// getAggFieldValue retrieves a field value using pre-resolved schema index for O(1) access.
+// Falls back to getCaseInsensitiveField if the index was not resolved.
+func (n *AggregationNode) getAggFieldValue(doc *models.Document, ai *aggFieldResolvedInfo) (models.FieldValue, bool) {
+	if ai.SchemaIndex >= 0 && ai.SchemaIndex < len(doc.Values) {
+		return doc.Values[ai.SchemaIndex], true
+	}
+	field, exists := n.getCaseInsensitiveField(doc, ai.FieldName)
+	if !exists {
+		return models.FieldValue{}, false
+	}
+	return field.Value, exists
 }
 
 // getAggregateKey creates a key for the aggregate function result
@@ -1600,7 +1768,7 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 		// TODO: Option C - Implement reference counting for automatic pool return
 		doc := document.GetPooledDocument()
 		doc.DocumentID = docID
-		doc.Fields = fields
+		setDocumentValuesFromFieldMap(doc, fields)
 		resultDocs[docID] = doc
 
 		groupIndex++
@@ -1672,7 +1840,7 @@ func (n *AggregationNode) convertAggregateOnlyToSyntheticDocument(groupResults m
 	// Create synthetic document
 	doc := document.GetPooledDocument()
 	doc.DocumentID = "synthetic_0"
-	doc.Fields = fields
+	setDocumentValuesFromFieldMap(doc, fields)
 
 	n.Logger.Debugf("Created synthetic document for aggregate-only query with %d fields", len(fields))
 
@@ -1704,22 +1872,9 @@ func (n *AggregationNode) sortDocumentsByGroupFields(docs []*models.Document) er
 		}
 
 		for _, qualifiedFieldName := range n.GroupBy.Fields {
-			// Extract actual field name from qualified identifier
 			fieldName := n.extractFieldName(qualifiedFieldName)
-
-			// Guard against nil Fields map during concurrent operations
-			if docs[i].Fields == nil && docs[j].Fields == nil {
-				continue
-			}
-			if docs[i].Fields == nil {
-				return true
-			}
-			if docs[j].Fields == nil {
-				return false
-			}
-
-			fieldI, existsI := docs[i].Fields[fieldName]
-			fieldJ, existsJ := docs[j].Fields[fieldName]
+			fieldI, existsI := n.getCaseInsensitiveField(docs[i], fieldName)
+			fieldJ, existsJ := n.getCaseInsensitiveField(docs[j], fieldName)
 
 			if !existsI && !existsJ {
 				continue

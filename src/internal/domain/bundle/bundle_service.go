@@ -905,6 +905,21 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	service.vmRefresherCtx, service.vmRefresherCancel = context.WithCancel(context.Background())
 	go service.startVisibilityMapRefresher(service.vmRefresherCtx)
 
+	// SCHEMA PROVIDER: Wire up schema resolution so documents loaded from disk have
+	// correctly-populated doc.Values (schema-ordered field array). Without this,
+	// documents are deserialized with a minimal schema (just DocumentID) and GROUP BY /
+	// aggregate field lookups fail because doc.Values doesn't contain business fields.
+	if bse, ok := store.(*bundlestore.BundleStorageEngine); ok {
+		bse.SetSchemaProvider(func(bundleName, databaseName string) *models.BundleFieldSchema {
+			bundle, exists := service.bundleMetadata[bundleName]
+			if !exists || bundle == nil {
+				return nil
+			}
+			return bundle.DocumentStructure.FieldSchema()
+		})
+		logger.Debugf("Schema provider wired to BundleStorageEngine for Values-based document access")
+	}
+
 	return service
 }
 
@@ -4335,27 +4350,22 @@ func (s *BundleService) CountDocuments(bundleName, databaseName string) (int, er
 //   - int: Number of pages that were in cache
 //   - int: Total pages checked
 //   - error: Any error encountered
-func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
-	// Build field set for O(1) lookup
+func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, pageCount uint32, projectFields []string, effectiveLimit int, schema *models.BundleFieldSchema) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
 	fieldSet := make(map[string]bool, len(projectFields))
 	for _, field := range projectFields {
 		fieldSet[field] = true
 	}
-	// Always include DocumentID
 	fieldSet["DocumentID"] = true
 
-	projectedDocs := make(map[string]*documentscanner.ProjectedDocument, 4096) // Pre-allocate reasonable capacity
+	projectedDocs := make(map[string]*documentscanner.ProjectedDocument, 4096)
 	docsCopied := 0
 	cachedPages := 0
 
-	// DEADLOCK FIX: Use per-shard locking instead of global mutex
-	// Iterate through all pages, acquiring shard locks as needed
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
 		pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 		shardIdx := s.getPageShardIndex(pageKey)
 		shard := s.pageShards[shardIdx]
 
-		// READER VIEW: Lock-free lookup first (no shard mutex)
 		if v, ok := shard.readerView.Load(pageKey); ok {
 			if p, ok := v.(*models.DocumentPage); ok {
 				cachedPages++
@@ -4367,9 +4377,24 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 						DocumentID:    docID,
 						GroupByFields: make(map[string]models.FieldValue),
 					}
-					for fieldName, field := range doc.Fields {
-						if fieldSet[fieldName] {
-							projDoc.GroupByFields[fieldName] = field.Value
+					projDoc.GroupByFields["DocumentID"] = models.NewStringValue(doc.DocumentID)
+					for fieldName := range fieldSet {
+						if fieldName == "DocumentID" {
+							continue
+						}
+						var fv models.FieldValue
+						var ok bool
+						if schema != nil && len(doc.Values) > 0 {
+							fv, ok = doc.GetFieldValue(schema, fieldName)
+						}
+						if !ok && doc.Data != nil {
+							if v, dataOk := doc.Data[fieldName]; dataOk {
+								fv = models.NewInterfaceValue(v)
+								ok = true
+							}
+						}
+						if ok {
+							projDoc.GroupByFields[fieldName] = fv
 						}
 					}
 					projectedDocs[docID] = projDoc
@@ -4378,7 +4403,6 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 				continue
 			}
 		}
-		// Fallback: iterate + project directly under RLock (skips O(N) createSafePageCopy)
 		cached, exists := shard.fastLookup.Load(pageKey)
 		if !exists {
 			continue
@@ -4398,9 +4422,24 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 				DocumentID:    docID,
 				GroupByFields: make(map[string]models.FieldValue),
 			}
-			for fieldName, field := range doc.Fields {
-				if fieldSet[fieldName] {
-					projDoc.GroupByFields[fieldName] = field.Value
+			projDoc.GroupByFields["DocumentID"] = models.NewStringValue(doc.DocumentID)
+			for fieldName := range fieldSet {
+				if fieldName == "DocumentID" {
+					continue
+				}
+				var fv models.FieldValue
+				var ok bool
+				if schema != nil && len(doc.Values) > 0 {
+					fv, ok = doc.GetFieldValue(schema, fieldName)
+				}
+				if !ok && doc.Data != nil {
+					if v, dataOk := doc.Data[fieldName]; dataOk {
+						fv = models.NewInterfaceValue(v)
+						ok = true
+					}
+				}
+				if ok {
+					projDoc.GroupByFields[fieldName] = fv
 				}
 			}
 			projectedDocs[docID] = projDoc
@@ -5811,27 +5850,33 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 			continue // Skip pages that don't exist yet
 		}
 
-		// Update each document in the page
+		schema := bundle.DocumentStructure.FieldSchema()
 		for _, doc := range docs {
-			// Add field with default value if it doesn't exist
-			if doc.Fields == nil {
-				doc.Fields = make(map[string]models.Field)
+			var hasField bool
+			if schema != nil && len(doc.Values) > 0 {
+				if idx, ok := schema.NameToIndex[fieldName]; ok && idx < len(doc.Values) {
+					hasField = !doc.Values[idx].IsNil()
+				}
+			} else {
+				if doc.Data == nil {
+					doc.Data = make(map[string]interface{})
+				}
+				_, hasField = doc.Data[fieldName]
 			}
-
-			if _, hasField := doc.Fields[fieldName]; !hasField {
-				// Evaluate default value (supports Expression or literal)
+			if !hasField {
 				evaluatedValue, err := s.evaluateDefaultValue(defaultValue, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to evaluate default value for field '%s': %w", fieldName, err)
 				}
-
-				doc.Fields[fieldName] = models.Field{
-					Name:  fieldName,
-					Value: models.NewInterfaceValue(evaluatedValue),
+				fv := models.NewInterfaceValue(evaluatedValue)
+				if schema != nil && len(doc.Values) > 0 {
+					if idx, ok := schema.NameToIndex[fieldName]; ok && idx < len(doc.Values) {
+						doc.Values[idx] = fv
+					}
+				} else {
+					doc.Data[fieldName] = evaluatedValue
 				}
-				doc.CachedJSON = nil // Force lazy rebuild on next read
-
-				// Update the document in the bundle file
+				doc.CachedJSON = nil
 				err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
@@ -5840,33 +5885,35 @@ func (s *BundleService) applyDefaultToExistingDocuments(bundle *models.Bundle, f
 		}
 	}
 
-	// Invalidate cached pages to force reload
 	s.invalidateBundlePageCache(bundle.Name)
-
 	return nil
 }
 
-// removeFieldFromExistingDocuments removes a field from all documents
 func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, fieldName string) error {
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-	// Iterate through all document pages
+	schema := bundle.DocumentStructure.FieldSchema()
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
-			continue // Skip pages that don't exist yet
+			continue
 		}
-
-		// Update each document in the page
 		for _, doc := range docs {
-			if doc.Fields == nil {
-				continue
+			var hasField bool
+			if schema != nil && len(doc.Values) > 0 {
+				if idx, ok := schema.NameToIndex[fieldName]; ok && idx < len(doc.Values) {
+					hasField = true
+				}
+			} else if doc.Data != nil {
+				_, hasField = doc.Data[fieldName]
 			}
-
-			if _, hasField := doc.Fields[fieldName]; hasField {
-				delete(doc.Fields, fieldName)
-				doc.CachedJSON = nil // Force lazy rebuild on next read
-
-				// Update the document in the bundle file
+			if hasField {
+				if schema != nil && len(doc.Values) > 0 {
+					if idx, ok := schema.NameToIndex[fieldName]; ok && idx < len(doc.Values) {
+						doc.Values[idx] = models.FieldValue{Type: models.FieldTypeNil}
+					}
+				} else if doc.Data != nil {
+					delete(doc.Data, fieldName)
+				}
+				doc.CachedJSON = nil
 				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
@@ -5874,44 +5921,45 @@ func (s *BundleService) removeFieldFromExistingDocuments(bundle *models.Bundle, 
 			}
 		}
 	}
-
-	// Invalidate cached pages to force reload
 	s.invalidateBundlePageCache(bundle.Name)
-
 	return nil
 }
 
-// renameFieldInDocuments renames a field in all documents
 func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldName, newFieldName string) error {
 	s.logger.Debugf("Renaming field '%s' to '%s' in all documents of bundle '%s'", oldFieldName, newFieldName, bundle.Name)
-
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-	// Iterate through all document pages
+	schema := bundle.DocumentStructure.FieldSchema()
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
-			continue // Skip pages that don't exist yet
+			continue
 		}
-
-		// Update each document in the page
 		for _, doc := range docs {
-			if doc.Fields == nil {
-				continue
-			}
-
-			// Check if old field exists
-			if oldFieldValue, hasField := doc.Fields[oldFieldName]; hasField {
-				// Copy the field with new name
-				doc.Fields[newFieldName] = models.Field{
-					Name:  newFieldName,
-					Value: oldFieldValue.Value,
+			var oldFV models.FieldValue
+			var hasOld bool
+			if schema != nil && len(doc.Values) > 0 {
+				if idx, ok := schema.NameToIndex[oldFieldName]; ok && idx < len(doc.Values) {
+					oldFV = doc.Values[idx]
+					hasOld = true
 				}
-
-				// Remove old field
-				delete(doc.Fields, oldFieldName)
-				doc.CachedJSON = nil // Force lazy rebuild on next read
-
-				// Update the document in the bundle file
+			} else if doc.Data != nil {
+				if v, ok := doc.Data[oldFieldName]; ok {
+					oldFV = models.NewInterfaceValue(v)
+					hasOld = true
+				}
+			}
+			if hasOld {
+				if schema != nil && len(doc.Values) > 0 {
+					if newIdx, ok := schema.NameToIndex[newFieldName]; ok && newIdx < len(doc.Values) {
+						doc.Values[newIdx] = oldFV
+					}
+					if oldIdx, ok := schema.NameToIndex[oldFieldName]; ok && oldIdx < len(doc.Values) && oldFieldName != newFieldName {
+						doc.Values[oldIdx] = models.FieldValue{Type: models.FieldTypeNil}
+					}
+				} else if doc.Data != nil {
+					doc.Data[newFieldName] = oldFV.AsInterface()
+					delete(doc.Data, oldFieldName)
+				}
+				doc.CachedJSON = nil
 				err := s.store.UpdateDocumentInBundleFile(bundle, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
@@ -5919,51 +5967,50 @@ func (s *BundleService) renameFieldInDocuments(bundle *models.Bundle, oldFieldNa
 			}
 		}
 	}
-
-	// Invalidate cached pages to force reload
 	s.invalidateBundlePageCache(bundle.Name)
-
 	s.logger.Debugf("Successfully renamed field '%s' to '%s' in bundle '%s'", oldFieldName, newFieldName, bundle.Name)
 	return nil
 }
 
-// convertFieldType attempts to convert all values of a field to a new type
 func (s *BundleService) convertFieldType(bundle *models.Bundle, fieldName, fromType, toType string) error {
 	conversionErrors := []string{}
-
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-	// Iterate through all document pages
+	schema := bundle.DocumentStructure.FieldSchema()
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
-			continue // Skip pages that don't exist yet
+			continue
 		}
-
-		// Update each document in the page
 		for _, doc := range docs {
-			if doc.Fields == nil {
-				continue
+			var fv models.FieldValue
+			var hasField bool
+			if schema != nil && len(doc.Values) > 0 {
+				fv, hasField = doc.GetFieldValue(schema, fieldName)
+			} else if doc.Data != nil {
+				if v, ok := doc.Data[fieldName]; ok {
+					fv = models.NewInterfaceValue(v)
+					hasField = true
+				}
 			}
-
-			field, hasField := doc.Fields[fieldName]
 			if !hasField {
 				continue
 			}
-
-			// Attempt conversion
-			convertedValue, err := s.convertValue(field.Value, fromType, toType)
+			convertedValue, err := s.convertValue(fv.AsInterface(), fromType, toType)
 			if err != nil {
-				conversionErrors = append(conversionErrors,
-					fmt.Sprintf("doc %s: %v", doc.DocumentID, err))
+				conversionErrors = append(conversionErrors, fmt.Sprintf("doc %s: %v", doc.DocumentID, err))
 				continue
 			}
-
-			// Update field value
-			field.Value = models.NewInterfaceValue(convertedValue) // ✅ Use NewInterfaceValue
-			doc.Fields[fieldName] = field
-			doc.CachedJSON = nil // Force lazy rebuild on next read
-
-			// Persist the change
+			newFV := models.NewInterfaceValue(convertedValue)
+			if schema != nil && len(doc.Values) > 0 {
+				if idx, ok := schema.NameToIndex[fieldName]; ok && idx < len(doc.Values) {
+					doc.Values[idx] = newFV
+				}
+			} else {
+				if doc.Data == nil {
+					doc.Data = make(map[string]interface{})
+				}
+				doc.Data[fieldName] = convertedValue
+			}
+			doc.CachedJSON = nil
 			err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
 			if err != nil {
 				return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
@@ -6033,30 +6080,29 @@ func (s *BundleService) convertValue(value interface{}, fromType, toType string)
 	}
 }
 
-// validateFieldUniqueness checks that all values for a field are unique
 func (s *BundleService) validateFieldUniqueness(bundle *models.Bundle, fieldName string) error {
-	valuesSeen := make(map[string][]string) // value -> []documentIDs
-
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-	// Iterate through all document pages
+	valuesSeen := make(map[string][]string)
+	schema := bundle.DocumentStructure.FieldSchema()
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
-			continue // Skip pages that don't exist yet
+			continue
 		}
-
 		for _, doc := range docs {
-			if doc.Fields == nil {
-				continue
+			var fv models.FieldValue
+			var hasField bool
+			if schema != nil && len(doc.Values) > 0 {
+				fv, hasField = doc.GetFieldValue(schema, fieldName)
+			} else if doc.Data != nil {
+				if v, ok := doc.Data[fieldName]; ok {
+					fv = models.NewInterfaceValue(v)
+					hasField = true
+				}
 			}
-
-			field, hasField := doc.Fields[fieldName]
 			if !hasField {
 				continue
 			}
-
-			// Convert to string for comparison (simple approach)
-			valueKey := conversion.ValueToString(field.Value)
+			valueKey := conversion.ValueToString(fv.AsInterface())
 			valuesSeen[valueKey] = append(valuesSeen[valueKey], doc.DocumentID)
 		}
 	}
@@ -6077,26 +6123,26 @@ func (s *BundleService) validateFieldUniqueness(bundle *models.Bundle, fieldName
 	return nil
 }
 
-// validateAllDocumentsHaveField checks that all documents have a non-nil value for a field
 func (s *BundleService) validateAllDocumentsHaveField(bundle *models.Bundle, fieldName string) error {
 	missingCount := 0
-
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-	// Iterate through all document pages
+	schema := bundle.DocumentStructure.FieldSchema()
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
-			continue // Skip pages that don't exist yet
+			continue
 		}
-
 		for _, doc := range docs {
-			if doc.Fields == nil {
-				missingCount++
-				continue
+			var fv models.FieldValue
+			var hasField bool
+			if schema != nil && len(doc.Values) > 0 {
+				fv, hasField = doc.GetFieldValue(schema, fieldName)
+			} else if doc.Data != nil {
+				if v, ok := doc.Data[fieldName]; ok {
+					fv = models.NewInterfaceValue(v)
+					hasField = true
+				}
 			}
-
-			field, hasField := doc.Fields[fieldName]
-			if !hasField || field.Value.IsNil() { // ✅ Use IsNil()
+			if !hasField || fv.IsNil() {
 				missingCount++
 			}
 		}
@@ -6109,37 +6155,41 @@ func (s *BundleService) validateAllDocumentsHaveField(bundle *models.Bundle, fie
 	return nil
 }
 
-// applyDefaultToMissingField adds default value to documents missing a field
 func (s *BundleService) applyDefaultToMissingField(bundle *models.Bundle, fieldName string, defaultValue interface{}) error {
-	// UNIVERSAL CACHE: Use GetDocumentPage to populate and benefit from shared documentPages cache
-	// Iterate through all document pages
+	schema := bundle.DocumentStructure.FieldSchema()
 	for pageID := uint32(0); pageID < uint32(bundle.PageCount); pageID++ {
 		docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 		if err != nil {
-			continue // Skip pages that don't exist yet
+			continue
 		}
-
-		// Update each document in the page
 		for _, doc := range docs {
-			if doc.Fields == nil {
-				doc.Fields = make(map[string]models.Field)
+			var fv models.FieldValue
+			var hasField bool
+			if schema != nil && len(doc.Values) > 0 {
+				fv, hasField = doc.GetFieldValue(schema, fieldName)
+			} else if doc.Data != nil {
+				if v, ok := doc.Data[fieldName]; ok {
+					fv = models.NewInterfaceValue(v)
+					hasField = true
+				}
 			}
-
-			field, hasField := doc.Fields[fieldName]
-			if !hasField || field.Value.IsNil() { // ✅ Use IsNil()
-				// Evaluate default value (supports Expression or literal)
+			if !hasField || fv.IsNil() {
 				evaluatedValue, err := s.evaluateDefaultValue(defaultValue, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to evaluate default value for field '%s': %w", fieldName, err)
 				}
-
-				doc.Fields[fieldName] = models.Field{
-					Name:  fieldName,
-					Value: models.NewInterfaceValue(evaluatedValue),
+				newFV := models.NewInterfaceValue(evaluatedValue)
+				if schema != nil && len(doc.Values) > 0 {
+					if idx, ok := schema.NameToIndex[fieldName]; ok && idx < len(doc.Values) {
+						doc.Values[idx] = newFV
+					}
+				} else {
+					if doc.Data == nil {
+						doc.Data = make(map[string]interface{})
+					}
+					doc.Data[fieldName] = evaluatedValue
 				}
-				doc.CachedJSON = nil // Force lazy rebuild on next read
-
-				// Persist the change
+				doc.CachedJSON = nil
 				err = s.store.UpdateDocumentInBundleFile(bundle, &doc)
 				if err != nil {
 					return fmt.Errorf("failed to update document %s: %w", doc.DocumentID, err)
@@ -6734,6 +6784,7 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 	// We iterate page-by-page so we can record the correct pageID per document,
 	// which the query planner uses to skip directly to the right storage page.
 	fieldName := indexCommand.Fields[0].Name
+	schema := bundle.DocumentStructure.FieldSchema()
 	if bundle.PageCount > 0 || bundle.TotalDocuments > 0 {
 		s.logger.Infof("Backfilling hash index '%s' on field '%s' for bundle '%s' (%d pages)",
 			indexCommand.IndexName, fieldName, bundle.Name, bundle.PageCount)
@@ -6741,13 +6792,11 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		insertedCount := 0
 		skippedCount := 0
 
-		// Ensure metadata is current so PageCount is accurate
 		if s.metadataBufferLen.Load() > 0 {
 			s.FlushMetadataUpdates()
 		}
 
 		pageCount := uint32(bundle.PageCount)
-		// Handle edge case: PageCount=0 but documents may exist on page 0
 		if pageCount == 0 {
 			pageCount = 1
 		}
@@ -6755,13 +6804,11 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		for pageID := uint32(0); pageID < pageCount; pageID++ {
 			docs, err := s.SnapshotPageDocuments(bundle.Name, bundle.Database.Name, pageID)
 			if err != nil {
-				// Page doesn't exist or can't be loaded; skip
 				continue
 			}
 
 			for _, doc := range docs {
-				// Extract the field value for hashing
-				fieldValue, err := extractFieldValueForIndex(doc, fieldName)
+				fieldValue, err := extractFieldValueForIndex(doc, fieldName, schema)
 				if err != nil {
 					// Field may not exist on every document (sparse fields); skip gracefully.
 					skippedCount++
@@ -6951,11 +6998,11 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		}
 	}
 	isComposite := len(indexCommand.Fields) > 1
+	indexSchema := bundle.DocumentStructure.FieldSchema()
 
-	// Compile partial index predicate if present
 	var partialPredicate func(*models.Document) bool
 	if indexCommand.WherePredicate != "" {
-		pred, predErr := compilePartialIndexPredicate(indexCommand.WherePredicate)
+		pred, predErr := compilePartialIndexPredicate(indexCommand.WherePredicate, indexSchema)
 		if predErr != nil {
 			return fmt.Errorf("failed to compile partial index predicate: %w", predErr)
 		}
@@ -7057,8 +7104,7 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 			var keyBytes []byte
 
 			if exprFn != nil {
-				// Expression index: apply expression function to derive key
-				fieldValue, fErr := extractFieldValueForIndex(*document, fieldDef.Name)
+				fieldValue, fErr := extractFieldValueForIndex(*document, fieldDef.Name, indexSchema)
 				if fErr != nil {
 					s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, fErr)
 					continue
@@ -7070,15 +7116,13 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 					continue
 				}
 			} else if isComposite {
-				// Composite key: encode all field values with length prefixes
-				keyBytes, err = encodeCompositeKeyForIndex(*document, indexCommand.Fields)
+				keyBytes, err = encodeCompositeKeyForIndex(*document, indexCommand.Fields, indexSchema)
 				if err != nil {
 					s.logger.Warnf("Failed to encode composite key for document '%s': %v", documentID, err)
 					continue
 				}
 			} else {
-				// Single-field key
-				fieldValue, fErr := extractFieldValueForIndex(*document, fieldDef.Name)
+				fieldValue, fErr := extractFieldValueForIndex(*document, fieldDef.Name, indexSchema)
 				if fErr != nil {
 					s.logger.Warnf("Failed to extract field value for document '%s': %v", documentID, fErr)
 					continue
@@ -7218,12 +7262,10 @@ func CreateBRINIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		if snapErr != nil {
 			continue // page may not exist
 		}
+		schema := bundle.DocumentStructure.FieldSchema()
 		for i := range docs {
 			doc := &docs[i]
-			if doc.Fields == nil {
-				continue
-			}
-			fieldValue, fErr := extractFieldValueForIndex(*doc, fieldDef.Name)
+			fieldValue, fErr := extractFieldValueForIndex(*doc, fieldDef.Name, schema)
 			if fErr != nil {
 				continue
 			}
@@ -7289,39 +7331,28 @@ func (s *BundleService) getBRINIndexForField(bundle *models.Bundle, fieldName st
 // Returns:
 //   - interface{}: The field value
 //   - error: Any error that occurred during extraction
-// compilePartialIndexPredicate compiles a WHERE predicate string into a function that
-// evaluates whether a document matches the predicate. Used for partial index filtering.
-func compilePartialIndexPredicate(predicate string) (func(*models.Document) bool, error) {
-	// Parse the predicate expression
+func compilePartialIndexPredicate(predicate string, schema *models.BundleFieldSchema) (func(*models.Document) bool, error) {
 	expr, err := syndrQL.ParseExpression(predicate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse partial index predicate '%s': %w", predicate, err)
 	}
-
-	// Return a closure that evaluates the predicate against a document
 	return func(doc *models.Document) bool {
-		if doc == nil || doc.Fields == nil {
+		if doc == nil {
 			return false
 		}
-
-		// Evaluate the expression against the document's fields
-		return evaluatePartialIndexExpr(expr, doc)
+		return evaluatePartialIndexExpr(expr, doc, schema)
 	}, nil
 }
 
-// evaluatePartialIndexExpr evaluates a parsed expression against a document for partial index filtering.
-// Supports simple binary comparisons (field == value, field != value, field > value, etc.)
-func evaluatePartialIndexExpr(expr syndrQL.Expression, doc *models.Document) bool {
+func evaluatePartialIndexExpr(expr syndrQL.Expression, doc *models.Document, schema *models.BundleFieldSchema) bool {
 	switch e := expr.(type) {
 	case *syndrQL.BinaryExpression:
 		if e.Operator == syndrQL.TOKEN_AND {
-			return evaluatePartialIndexExpr(e.Left, doc) && evaluatePartialIndexExpr(e.Right, doc)
+			return evaluatePartialIndexExpr(e.Left, doc, schema) && evaluatePartialIndexExpr(e.Right, doc, schema)
 		}
 		if e.Operator == syndrQL.TOKEN_OR {
-			return evaluatePartialIndexExpr(e.Left, doc) || evaluatePartialIndexExpr(e.Right, doc)
+			return evaluatePartialIndexExpr(e.Left, doc, schema) || evaluatePartialIndexExpr(e.Right, doc, schema)
 		}
-
-		// Extract field name
 		var fieldName string
 		switch left := e.Left.(type) {
 		case *syndrQL.IdentifierExpression:
@@ -7331,59 +7362,60 @@ func evaluatePartialIndexExpr(expr syndrQL.Expression, doc *models.Document) boo
 		default:
 			return false
 		}
-
-		// Get field value from document
-		field, exists := doc.Fields[fieldName]
+		var docValue models.FieldValue
+		var exists bool
+		if schema != nil && len(doc.Values) > 0 {
+			docValue, exists = doc.GetFieldValue(schema, fieldName)
+		} else if doc.Data != nil {
+			if v, ok := doc.Data[fieldName]; ok {
+				docValue = models.NewInterfaceValue(v)
+				exists = true
+			}
+		}
 		if !exists {
 			return false
 		}
-		docValue := field.Value
-
-		// Get comparison value
 		literal, isLiteral := e.Right.(*syndrQL.LiteralExpression)
 		if !isLiteral {
 			return false
 		}
 		compValue := literal.Value
-
-		// Compare based on operator
 		switch e.Operator {
 		case syndrQL.TOKEN_EQ, syndrQL.TOKEN_ASSIGN:
-			return fmt.Sprintf("%v", docValue) == fmt.Sprintf("%v", compValue)
+			return fmt.Sprintf("%v", docValue.AsInterface()) == fmt.Sprintf("%v", compValue)
 		case syndrQL.TOKEN_NEQ:
-			return fmt.Sprintf("%v", docValue) != fmt.Sprintf("%v", compValue)
+			return fmt.Sprintf("%v", docValue.AsInterface()) != fmt.Sprintf("%v", compValue)
 		default:
 			return false
 		}
-
 	case *syndrQL.GroupedExpression:
-		return evaluatePartialIndexExpr(e.Expression, doc)
-
+		return evaluatePartialIndexExpr(e.Expression, doc, schema)
 	default:
 		return false
 	}
 }
 
-func extractFieldValueForIndex(document models.Document, fieldName string) (interface{}, error) {
-	if document.Fields == nil {
-		return nil, fmt.Errorf("document has no fields")
+func extractFieldValueForIndex(document models.Document, fieldName string, schema *models.BundleFieldSchema) (interface{}, error) {
+	if schema != nil && len(document.Values) > 0 {
+		if fv, ok := document.GetFieldValue(schema, fieldName); ok {
+			return fv.AsInterface(), nil
+		}
 	}
-
-	field, exists := document.Fields[fieldName]
-	if !exists {
-		return nil, fmt.Errorf("field '%s' not found in document", fieldName)
+	if document.Data != nil {
+		if v, ok := document.Data[fieldName]; ok {
+			return v, nil
+		}
 	}
-
-	return field.Value, nil
+	return nil, fmt.Errorf("field '%s' not found in document", fieldName)
 }
 
 // encodeCompositeKeyForIndex encodes multiple field values into a single composite key.
 // Each component is length-prefixed (4 bytes big-endian) for unambiguous decoding
 // and correct lexicographic ordering.
-func encodeCompositeKeyForIndex(document models.Document, fields []models.FieldDefinition) ([]byte, error) {
+func encodeCompositeKeyForIndex(document models.Document, fields []models.FieldDefinition, schema *models.BundleFieldSchema) ([]byte, error) {
 	var buf []byte
 	for _, fd := range fields {
-		fieldValue, err := extractFieldValueForIndex(document, fd.Name)
+		fieldValue, err := extractFieldValueForIndex(document, fd.Name, schema)
 		if err != nil {
 			// Missing field: encode as 0-length component
 			lenBytes := make([]byte, 4)
@@ -7862,8 +7894,8 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		return "", err
 	}
 
-	// Add the document to the bundle
-	newDocument := s.documentFactory.NewDocument(*docCommand)
+	schema := bundle.DocumentStructure.FieldSchema()
+	newDocument := s.documentFactory.NewDocument(*docCommand, schema)
 
 	// DIAGNOSTIC: Log bundle index status (only if verbose logging enabled)
 	if s.verboseLogging {
@@ -7892,15 +7924,17 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	// the in-memory cache so subsequent reads don't need a disk round-trip
 	s.updatePageCacheWithDocument(bundle.Name, pageID, newDocument)
 
-	// Update column statistics incrementally for the planner
-	if s.statsUpdater != nil && newDocument.Fields != nil {
-		for fieldName, field := range newDocument.Fields {
-			s.statsUpdater.IncrementalUpdate(
-				bundle.Name, fieldName,
-				nil, // oldValue: nil for INSERT
-				field.Value.AsInterface(),
-				bundle.TotalDocuments,
-			)
+	if s.statsUpdater != nil {
+		if schema != nil && len(newDocument.Values) > 0 {
+			for i, name := range schema.Names {
+				if i < len(newDocument.Values) {
+					s.statsUpdater.IncrementalUpdate(bundle.Name, name, nil, newDocument.Values[i].AsInterface(), bundle.TotalDocuments)
+				}
+			}
+		} else if newDocument.Data != nil {
+			for fieldName, v := range newDocument.Data {
+				s.statsUpdater.IncrementalUpdate(bundle.Name, fieldName, nil, v, bundle.TotalDocuments)
+			}
 		}
 	}
 
@@ -7913,24 +7947,19 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 			s.logger.Debugf("Scheduling deferred update for index '%s' of type '%s'", indexName, indexRef.IndexType)
 
 			if indexRef.IndexType == "hash" {
-				// Partial index: skip if document doesn't match the predicate
 				if indexRef.WherePredicate != "" {
-					pred, predErr := compilePartialIndexPredicate(indexRef.WherePredicate)
+					pred, predErr := compilePartialIndexPredicate(indexRef.WherePredicate, schema)
 					if predErr != nil || !pred(newDocument) {
 						continue
 					}
 				}
 
-				// Handle ALL hash indexes (DocumentID and foreign keys)
 				fieldName := indexRef.HashIndexField.FieldName
-
-				// Extract the field value for hash indexing
 				var fieldValue interface{}
 				if fieldName == "DocumentID" {
 					fieldValue = newDocument.DocumentID
 				} else {
-					// Extract the foreign key or other field value
-					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName)
+					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName, schema)
 					if err != nil {
 						s.logger.Warnf("[HASH-IDX] Skipped indexing document %s for index %s: field %q not in document (%v); check field name case (e.g. ID vs id)",
 							newDocument.DocumentID, indexName, fieldName, err)
@@ -7947,9 +7976,8 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 				indexCount++
 
 			} else if indexRef.IndexType == "btree" {
-				// Partial index: skip if document doesn't match the predicate
 				if indexRef.WherePredicate != "" {
-					pred, predErr := compilePartialIndexPredicate(indexRef.WherePredicate)
+					pred, predErr := compilePartialIndexPredicate(indexRef.WherePredicate, schema)
 					if predErr != nil || !pred(newDocument) {
 						continue
 					}
@@ -7957,21 +7985,19 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 
 				var fieldValue interface{}
 				if indexRef.Expression != "" {
-					// Expression index: apply expression function to derive key
 					_, exprFn, exprErr := indexutils.CompileIndexExpression(indexRef.Expression)
 					if exprErr != nil {
 						s.logger.Warnf("Failed to compile expression for index '%s': %v", indexName, exprErr)
 						continue
 					}
-					rawValue, fErr := extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName)
+					rawValue, fErr := extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName, schema)
 					if fErr != nil {
 						continue
 					}
 					fieldValue = exprFn(rawValue)
 				} else {
-					// Standard index: extract field value directly
 					var fErr error
-					fieldValue, fErr = extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName)
+					fieldValue, fErr = extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName, schema)
 					if fErr != nil {
 						s.logger.Warnf("Failed to extract field value for document '%s': %v", newDocument.DocumentID, fErr)
 						continue
@@ -8043,11 +8069,12 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 		return "", err
 	}
 
+	schema := bundle.DocumentStructure.FieldSchema()
 	var newDocument *models.Document
 	if docID != "" {
-		newDocument = s.documentFactory.NewDocumentWithID(*docCommand, docID)
+		newDocument = s.documentFactory.NewDocumentWithID(*docCommand, docID, schema)
 	} else {
-		newDocument = s.documentFactory.NewDocument(*docCommand)
+		newDocument = s.documentFactory.NewDocument(*docCommand, schema)
 	}
 
 	// Set MVCC version metadata
@@ -8074,7 +8101,7 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 				if fieldName == "DocumentID" {
 					fieldValue = newDocument.DocumentID
 				} else {
-					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName)
+					extractedValue, err := extractFieldValueForIndex(*newDocument, fieldName, schema)
 					if err != nil {
 						s.logger.Warnf("[HASH-IDX] Skipped indexing document %s for index %s: field %q not in document (%v)",
 							newDocument.DocumentID, indexName, fieldName, err)
@@ -8089,7 +8116,7 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 					indexName, newDocument.DocumentID, fieldName, pageID)
 
 			} else if indexRef.IndexType == "btree" {
-				fieldValue, err := extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName)
+				fieldValue, err := extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName, schema)
 				if err != nil {
 					s.logger.Warnf("Failed to extract field value for document '%s': %v", newDocument.DocumentID, err)
 					continue
@@ -8118,6 +8145,7 @@ func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, b
 // AddDocumentToBundleByStructWithTxID adds a document with transaction tracking.
 // PHASE 3: No bundle write lock; append path is concurrent-safe (WriteBuffer, rotationLock).
 func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Database, bundle *models.Bundle, document *models.Document, txID string) error {
+	schema := bundle.DocumentStructure.FieldSchema()
 	// TODO: Unique constraint validation disabled for AddDocumentToBundleByStruct
 	// This method is primarily used for primary catalog initialization where we trust
 	// the developer to create bundles correctly. Enabling validation would require
@@ -8169,7 +8197,7 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 					fieldValue = document.DocumentID
 				} else {
 					// Extract the foreign key or other field value
-					extractedValue, err := extractFieldValueForIndex(*document, fieldName)
+					extractedValue, err := extractFieldValueForIndex(*document, fieldName, schema)
 					if err != nil {
 						s.logger.Warnf("[HASH-IDX] Skipped indexing document %s for index %s: field %q not in document (%v)",
 							document.DocumentID, indexName, fieldName, err)
@@ -8186,7 +8214,7 @@ func (s *BundleService) AddDocumentToBundleByStructWithTxID(database *models.Dat
 
 			} else if indexRef.IndexType == "btree" {
 				// Extract the field value for BTree indexing
-				fieldValue, err := extractFieldValueForIndex(*document, indexRef.BTreeIndexField.FieldName)
+				fieldValue, err := extractFieldValueForIndex(*document, indexRef.BTreeIndexField.FieldName, schema)
 				if err != nil {
 					s.logger.Warnf("Failed to extract field value for document '%s': %v", document.DocumentID, err)
 					continue
@@ -8598,45 +8626,44 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		}
 	}
 
-	// R1: Per-doc loop: update fields and schedule deferred index updates. Collect updatedDocs; call UpdateDocumentsBatch once after.
-	// TIMING: Per-document processing
 	perDocStart := time.Now()
 	updatedDocs := make([]*models.Document, 0, len(filteredDocs))
+	schema := bundle.DocumentStructure.FieldSchema()
 	for _, doc := range filteredDocs {
 		originalDoc := *doc
 
-		// Avoid concurrent map read/write: doc.Fields may be shared with memtable or
-		// page cache (from GetDocumentsByFilter). Copy so we only mutate our own map;
-		// other goroutines can still read the original until UpdateDocumentsBatch replaces it.
-		newFields := make(map[string]models.Field, len(doc.Fields))
-		for k, v := range doc.Fields {
-			newFields[k] = v
+		if schema != nil && len(doc.Values) > 0 {
+			newValues := make([]models.FieldValue, len(doc.Values))
+			copy(newValues, doc.Values)
+			for _, kv := range docCommand.Fields {
+				if idx, ok := schema.NameToIndex[kv.Key]; ok && idx < len(newValues) {
+					newValues[idx] = models.NewInterfaceValue(kv.Value)
+				}
+			}
+			doc.Values = newValues
+		} else {
+			if doc.Data == nil {
+				doc.Data = make(map[string]interface{})
+			}
+			for _, kv := range docCommand.Fields {
+				doc.Data[kv.Key] = kv.Value
+			}
 		}
-		doc.Fields = newFields
 
-		// Update the document fields
-		for _, kv := range docCommand.Fields {
-			foundField := doc.Fields[kv.Key]
-			foundField.Name = kv.Key
-			foundField.Value = models.NewInterfaceValue(kv.Value)
-			doc.Fields[kv.Key] = foundField
-		}
-
-		// Rebuild pre-encoded JSON cache after field mutations
-		helpers.BuildCachedJSON(doc)
+		helpers.BuildCachedJSON(doc, schema)
 
 		// TASK 3: Use deferred index updates for B-tree indexes instead of synchronous operations
 		// This reduces per-document index overhead by batching updates
 		for indexName, fieldName := range btreeIndexesToUpdate {
 			s.logger.Debugf("Indexed field '%s' was updated, scheduling deferred BTree index '%s' update", fieldName, indexName)
 
-			oldFieldValue, extErr := extractFieldValueForIndex(originalDoc, fieldName)
+			oldFieldValue, extErr := extractFieldValueForIndex(originalDoc, fieldName, schema)
 			if extErr != nil {
 				s.logger.Warnf("Failed to extract old field value for document '%s': %v", doc.DocumentID, extErr)
 				continue
 			}
 
-			newFieldValue, extErr := extractFieldValueForIndex(*doc, fieldName)
+			newFieldValue, extErr := extractFieldValueForIndex(*doc, fieldName, schema)
 			if extErr != nil {
 				s.logger.Warnf("Failed to extract new field value for document '%s': %v", doc.DocumentID, extErr)
 				continue
@@ -8742,19 +8769,18 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 	}
 	s.logger.Debugf("Write-through: Updated %d documents in page cache for bundle '%s'", len(updatedDocs), bundle.Name)
 
-	// Update column statistics for updated fields
-	if s.statsUpdater != nil {
+	if s.statsUpdater != nil && schema != nil {
 		for _, doc := range updatedDocs {
-			if doc.Fields == nil {
-				continue
-			}
-			for fieldName, field := range doc.Fields {
-				s.statsUpdater.IncrementalUpdate(
-					bundle.Name, fieldName,
-					nil, // oldValue unavailable after in-place mutation
-					field.Value.AsInterface(),
-					bundle.TotalDocuments,
-				)
+			if len(doc.Values) > 0 {
+				for i, name := range schema.Names {
+					if i < len(doc.Values) {
+						s.statsUpdater.IncrementalUpdate(bundle.Name, name, nil, doc.Values[i].AsInterface(), bundle.TotalDocuments)
+					}
+				}
+			} else if doc.Data != nil {
+				for fieldName, v := range doc.Data {
+					s.statsUpdater.IncrementalUpdate(bundle.Name, fieldName, nil, v, bundle.TotalDocuments)
+				}
 			}
 		}
 	}
@@ -8928,6 +8954,7 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 		return err // ErrWriteConflict - caller should retry
 	}
 
+	schema := bundle.DocumentStructure.FieldSchema()
 	for _, oldDoc := range filteredDocs {
 		// Documents already filtered by IsVisibleToSnapshot in GetDocumentsByFilterWithContext
 		// Double-check with read-committed for any in-flight changes
@@ -8937,7 +8964,7 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 		}
 
 		// STEP 2: COPY - Create new document with updated fields
-		newDoc := s.createUpdatedDocumentRCU(oldDoc, docCommand.Fields)
+		newDoc := s.createUpdatedDocumentRCU(oldDoc, docCommand.Fields, schema)
 
 		// Get next commit sequence for this version (atomic, globally ordered)
 		var commitSequence uint64
@@ -8997,42 +9024,39 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 	return nil
 }
 
-// createUpdatedDocumentRCU creates a new document version with updated fields
-// This is the "Copy" step of RCU - creates an immutable new version
-func (s *BundleService) createUpdatedDocumentRCU(oldDoc *models.Document, updates []models.KeyValue) *models.Document {
-	// Create deep copy of old document
+func (s *BundleService) createUpdatedDocumentRCU(oldDoc *models.Document, updates []models.KeyValue, schema *models.BundleFieldSchema) *models.Document {
 	newDoc := &models.Document{
-		DocumentID:   oldDoc.DocumentID,
-		CreatedAt:    oldDoc.CreatedAt,
-		UpdatedAt:    time.Now(),
-		PooledFields: false, // New allocation, not pooled
-
-		// RCU fields - CommitSequence and VersionSequence are set by AppendVersionToBundleFile
-		CommitSequence: 0,           // Set by AppendVersionToBundleFile from SnapshotManager
-		SupersededAt:   time.Time{}, // Zero = current version
-
-		// Legacy fields for compatibility
+		DocumentID:      oldDoc.DocumentID,
+		CreatedAt:       oldDoc.CreatedAt,
+		UpdatedAt:       time.Now(),
+		CommitSequence:  0,
+		SupersededAt:    time.Time{},
 		CreatedByTxID:   0,
 		DeletedByTxID:   0,
-		VersionSequence: 0, // Set by AppendVersionToBundleFile (oldDoc.VersionSequence + 1)
+		VersionSequence: 0,
 	}
 
-	// Copy fields from old document
-	newDoc.Fields = make(map[string]models.Field, len(oldDoc.Fields))
-	for k, v := range oldDoc.Fields {
-		newDoc.Fields[k] = v
+	if schema != nil && len(oldDoc.Values) > 0 {
+		newDoc.Values = make([]models.FieldValue, len(oldDoc.Values))
+		copy(newDoc.Values, oldDoc.Values)
+		for _, kv := range updates {
+			if idx, ok := schema.NameToIndex[kv.Key]; ok && idx < len(newDoc.Values) {
+				newDoc.Values[idx] = models.NewInterfaceValue(kv.Value)
+			}
+		}
+	} else {
+		newDoc.Data = make(map[string]interface{})
+		if oldDoc.Data != nil {
+			for k, v := range oldDoc.Data {
+				newDoc.Data[k] = v
+			}
+		}
+		for _, kv := range updates {
+			newDoc.Data[kv.Key] = kv.Value
+		}
 	}
 
-	// Apply updates
-	for _, kv := range updates {
-		field := newDoc.Fields[kv.Key]
-		field.Name = kv.Key
-		field.Value = models.NewInterfaceValue(kv.Value)
-		newDoc.Fields[kv.Key] = field
-	}
-
-	// Rebuild pre-encoded JSON cache after field mutations
-	helpers.BuildCachedJSON(newDoc)
+	helpers.BuildCachedJSON(newDoc, schema)
 
 	// CommitSequence is now set by AppendVersionToBundleFile using SnapshotManager.GetNextCommitSequence()
 	// This ensures globally ordered, atomic commit sequence allocation
@@ -9166,6 +9190,7 @@ func (s *BundleService) DeleteDocumentFromBundleRCU(bundle *models.Bundle, docCo
 	harvestFailedDocIDs := make(map[string]struct{})
 
 	const harvestSkipThreshold = 500
+	schema := bundle.DocumentStructure.FieldSchema()
 	if bundle.Indexes != nil && bundle.Database != nil {
 		if len(docIDs) > harvestSkipThreshold && docIDToDoc == nil {
 			for _, docID := range docIDs {
@@ -9197,7 +9222,7 @@ func (s *BundleService) DeleteDocumentFromBundleRCU(bundle *models.Bundle, docCo
 						continue
 					}
 					fieldName := indexRef.BTreeIndexField.FieldName
-					fv, err := extractFieldValueForIndex(*doc, fieldName)
+					fv, err := extractFieldValueForIndex(*doc, fieldName, schema)
 					if err != nil {
 						continue
 					}
@@ -9508,6 +9533,7 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 			}
 		}
 	}
+	harvestSchema := bundle.DocumentStructure.FieldSchema()
 	if bundle.Indexes != nil && bundle.Database != nil {
 		// Skip harvest loop only when over threshold AND no preFetchedDocs (avoids N×GetDocument)
 		if len(docIDs) > harvestSkipThreshold && docIDToDoc == nil {
@@ -9538,7 +9564,7 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 						continue
 					}
 					fieldName := indexRef.BTreeIndexField.FieldName
-					fv, err := extractFieldValueForIndex(*doc, fieldName)
+					fv, err := extractFieldValueForIndex(*doc, fieldName, harvestSchema)
 					if err != nil {
 						s.logger.Warnf("B-tree harvest: extract %s for %s: %v; skipping", fieldName, docID, err)
 						continue
@@ -9578,19 +9604,22 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	// Observability (Phase 1b): log batch delete. TODO: metrics.DeleteBatchDuration, DeleteVerifySkipCount, requested vs deleted.
 	s.logger.Infow("Delete batch", "bundle", docCommand.BundleName, "docCount", len(docIDs))
 
-	// Update column statistics for deleted documents
 	if s.statsUpdater != nil && docIDToDoc != nil {
+		delSchema := bundle.DocumentStructure.FieldSchema()
 		for _, doc := range docIDToDoc {
-			if doc == nil || doc.Fields == nil {
+			if doc == nil {
 				continue
 			}
-			for fieldName, field := range doc.Fields {
-				s.statsUpdater.IncrementalUpdate(
-					bundle.Name, fieldName,
-					field.Value.AsInterface(),
-					nil, // newValue: nil for DELETE
-					bundle.TotalDocuments,
-				)
+			if delSchema != nil && len(doc.Values) > 0 {
+				for i, name := range delSchema.Names {
+					if i < len(doc.Values) {
+						s.statsUpdater.IncrementalUpdate(bundle.Name, name, doc.Values[i].AsInterface(), nil, bundle.TotalDocuments)
+					}
+				}
+			} else if doc.Data != nil {
+				for fieldName, v := range doc.Data {
+					s.statsUpdater.IncrementalUpdate(bundle.Name, fieldName, v, nil, bundle.TotalDocuments)
+				}
 			}
 		}
 	}
