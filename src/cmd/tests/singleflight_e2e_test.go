@@ -12,7 +12,7 @@
 // - Error handling and result sharing
 // - High concurrency stress test
 
-package tests
+package main
 
 import (
 	"fmt"
