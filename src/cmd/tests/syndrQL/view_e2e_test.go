@@ -949,7 +949,7 @@ func getResultCount(response interface{}) int {
 }
 
 // getDatabaseBundles safely gets bundles map from database
-func getDatabaseBundles(db interface{}) map[string]interface{} {
+func getDatabaseBundles() map[string]interface{} {
 	// This is a placeholder since the actual structure may vary
 	// In real tests, this would access db.Bundles after proper type assertion
 	return make(map[string]interface{})

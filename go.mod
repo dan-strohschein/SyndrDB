@@ -9,7 +9,7 @@ require (
 	github.com/vektah/gqlparser/v2 v2.5.30
 	go.mongodb.org/mongo-driver v1.17.3
 	golang.org/x/crypto v0.38.0
-	golang.org/x/sys v0.40.0
+	golang.org/x/sys v0.41.0
 )
 
 require (
@@ -29,5 +29,6 @@ require (
 	github.com/klauspost/compress v1.18.1
 	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.19.0
+	golang.org/x/term v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )

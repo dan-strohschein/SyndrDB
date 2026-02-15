@@ -296,7 +296,7 @@ func (m *MockBundleService) Reset() {
 // ===== HELPER FUNCTIONS =====
 
 // setupMigrationTest creates a test environment with mock services
-func setupMigrationTest(t *testing.T) (*migration.MigrationService, *MockBundleService) {
+func setupMigrationTest() (*migration.MigrationService, *MockBundleService) {
 	logger := zap.NewNop()
 	mockBundle := NewMockBundleService()
 
@@ -336,7 +336,7 @@ func createTestMigration(t *testing.T, service *migration.MigrationService, dbNa
 
 // TestMigration_CreateBasic tests basic migration creation
 func TestMigration_CreateBasic(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	cmd := migration.MigrationCommand{
 		DatabaseName: "testdb",
@@ -374,7 +374,7 @@ func TestMigration_CreateBasic(t *testing.T) {
 
 // TestMigration_CreateAutoDescription tests auto-generated descriptions
 func TestMigration_CreateAutoDescription(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	cmd := migration.MigrationCommand{
 		DatabaseName: "testdb",
@@ -400,7 +400,7 @@ func TestMigration_CreateAutoDescription(t *testing.T) {
 
 // TestMigration_CreateSequentialVersions tests version numbering
 func TestMigration_CreateSequentialVersions(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create first migration
 	mig1 := createTestMigration(t, service, "testdb", []string{"CREATE BUNDLE Users"})
@@ -423,7 +423,7 @@ func TestMigration_CreateSequentialVersions(t *testing.T) {
 
 // TestMigration_CreateExceedsCommandLimit tests command count validation
 func TestMigration_CreateExceedsCommandLimit(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create migration with too many commands (limit is 100)
 	commands := make([]string, 101)
@@ -448,7 +448,7 @@ func TestMigration_CreateExceedsCommandLimit(t *testing.T) {
 
 // TestMigration_CreateLongDescription tests description length validation
 func TestMigration_CreateLongDescription(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create description over 500 characters
 	longDesc := strings.Repeat("A", 501)
@@ -471,7 +471,7 @@ func TestMigration_CreateLongDescription(t *testing.T) {
 
 // TestMigration_ApplySuccess tests successful migration application
 func TestMigration_ApplySuccess(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create migration
 	mig := createTestMigration(t, service, "testdb", []string{`CREATE BUNDLE "Users" WITH FIELDS ({"id", "INT", true, true, null})`})
@@ -505,7 +505,7 @@ func TestMigration_ApplySuccess(t *testing.T) {
 
 // TestMigration_ApplyNonexistent tests applying nonexistent migration
 func TestMigration_ApplyNonexistent(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	err := service.ApplyMigration("testdb", 999, false)
 	if err == nil {
@@ -518,7 +518,7 @@ func TestMigration_ApplyNonexistent(t *testing.T) {
 
 // TestMigration_ApplyAlreadyApplied tests re-applying migration without force
 func TestMigration_ApplyAlreadyApplied(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create and apply migration
 	mig := createTestMigration(t, service, "testdb", []string{`CREATE BUNDLE "Users" WITH FIELDS ({"id", "INT", true, true, null})`})
@@ -541,7 +541,7 @@ func TestMigration_ApplyAlreadyApplied(t *testing.T) {
 
 // TestMigration_ApplyWithForce tests force re-application
 func TestMigration_ApplyWithForce(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create and apply migration
 	mig := createTestMigration(t, service, "testdb", []string{`CREATE BUNDLE "Users" WITH FIELDS ({"id", "INT", true, true, null})`})
@@ -567,7 +567,7 @@ func TestMigration_ApplyWithForce(t *testing.T) {
 
 // TestMigration_RollbackSuccess tests successful rollback
 func TestMigration_RollbackSuccess(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create migrations with down commands
 	cmd1 := migration.MigrationCommand{
@@ -613,7 +613,7 @@ func TestMigration_RollbackSuccess(t *testing.T) {
 
 // TestMigration_RollbackToZero tests rollback to initial state
 func TestMigration_RollbackToZero(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create migration with down command
 	cmd := migration.MigrationCommand{
@@ -647,7 +647,7 @@ func TestMigration_RollbackToZero(t *testing.T) {
 
 // TestMigration_RollbackInvalidVersion tests rollback to invalid version
 func TestMigration_RollbackInvalidVersion(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create and apply migration
 	mig := createTestMigration(t, service, "testdb", []string{"CREATE BUNDLE Users"})
@@ -665,7 +665,7 @@ func TestMigration_RollbackInvalidVersion(t *testing.T) {
 
 // TestValidation_MigrationSuccess tests successful migration validation
 func TestValidation_MigrationSuccess(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create migration
 	mig := createTestMigration(t, service, "testdb", []string{"CREATE BUNDLE Users"})
@@ -684,7 +684,7 @@ func TestValidation_MigrationSuccess(t *testing.T) {
 
 // TestValidation_RollbackSuccess tests successful rollback validation
 func TestValidation_RollbackSuccess(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create and apply migrations
 	mig1 := createTestMigration(t, service, "testdb", []string{"CREATE BUNDLE Users"})
@@ -709,7 +709,7 @@ func TestValidation_RollbackSuccess(t *testing.T) {
 
 // TestValidation_SyntaxError tests validation with syntax errors
 func TestValidation_SyntaxError(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create migration with invalid syntax
 	cmd := migration.MigrationCommand{
@@ -747,7 +747,7 @@ func TestValidation_SyntaxError(t *testing.T) {
 
 // TestLocking_ConcurrentMigrations tests fail-fast locking
 func TestLocking_ConcurrentMigrations(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create two migrations
 	mig1 := createTestMigration(t, service, "testdb", []string{"CREATE BUNDLE Users"})
@@ -783,7 +783,7 @@ func TestLocking_ConcurrentMigrations(t *testing.T) {
 
 // TestIsolation_MultipleDatabases tests per-database isolation
 func TestIsolation_MultipleDatabases(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create migrations for different databases
 	mig1 := createTestMigration(t, service, "db1", []string{"CREATE BUNDLE Users"})
@@ -815,7 +815,7 @@ func TestIsolation_MultipleDatabases(t *testing.T) {
 
 // TestIsolation_CurrentVersionPerDatabase tests version tracking isolation
 func TestIsolation_CurrentVersionPerDatabase(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Create and apply migrations for different databases
 	mig1 := createTestMigration(t, service, "db1", []string{"CREATE BUNDLE Users"})
@@ -846,7 +846,7 @@ func TestIsolation_CurrentVersionPerDatabase(t *testing.T) {
 
 // TestChecksum_Verification tests checksum generation and verification
 func TestChecksum_Verification(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create migration
 	cmd := migration.MigrationCommand{
@@ -887,7 +887,7 @@ func TestChecksum_Verification(t *testing.T) {
 
 // TestEdgeCase_EmptyDatabase tests migration on empty database
 func TestEdgeCase_EmptyDatabase(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Get current version of nonexistent database
 	version, err := service.GetCurrentVersion("nonexistent")
@@ -901,7 +901,7 @@ func TestEdgeCase_EmptyDatabase(t *testing.T) {
 
 // TestEdgeCase_ListEmptyMigrations tests listing with no migrations
 func TestEdgeCase_ListEmptyMigrations(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	migrations, err := service.ListMigrations("testdb", map[string]interface{}{})
 	if err != nil {
@@ -915,7 +915,7 @@ func TestEdgeCase_ListEmptyMigrations(t *testing.T) {
 
 // TestEdgeCase_LargeCommandCount tests migration with many commands
 func TestEdgeCase_LargeCommandCount(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create migration with maximum allowed commands (100)
 	commands := make([]string, 100)
@@ -941,7 +941,7 @@ func TestEdgeCase_LargeCommandCount(t *testing.T) {
 
 // TestEdgeCase_SpecialCharactersInDescription tests description with special chars
 func TestEdgeCase_SpecialCharactersInDescription(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	specialDesc := "Migration with 特殊文字 and émojis 🚀 and \"quotes\" and 'apostrophes'"
 
@@ -964,7 +964,7 @@ func TestEdgeCase_SpecialCharactersInDescription(t *testing.T) {
 
 // TestEdgeCase_NilDownCommands tests migration with nil down commands
 func TestEdgeCase_NilDownCommands(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	cmd := migration.MigrationCommand{
 		DatabaseName: "testdb",
@@ -986,7 +986,7 @@ func TestEdgeCase_NilDownCommands(t *testing.T) {
 
 // TestEdgeCase_RollbackBeyondHistory tests rollback to negative version
 func TestEdgeCase_RollbackBeyondHistory(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Try to rollback to negative version
 	err := service.RollbackToVersion("testdb", -1)
@@ -999,7 +999,7 @@ func TestEdgeCase_RollbackBeyondHistory(t *testing.T) {
 
 // TestPerformance_SlowQuery tests performance warning detection
 func TestPerformance_SlowQuery(t *testing.T) {
-	service, mockBundle := setupMigrationTest(t)
+	service, mockBundle := setupMigrationTest()
 
 	// Configure mock to simulate slow queries (>1 second)
 	mockBundle.queryDelay = 1500 * time.Millisecond
@@ -1027,7 +1027,7 @@ func TestPerformance_SlowQuery(t *testing.T) {
 
 // TestPerformance_ManyMigrations tests performance with many migrations
 func TestPerformance_ManyMigrations(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create 50 migrations
 	start := time.Now()
@@ -1058,7 +1058,7 @@ func TestPerformance_ManyMigrations(t *testing.T) {
 
 // TestAutoReverse_SimpleCommands tests auto-generation of reverse commands
 func TestAutoReverse_SimpleCommands(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// CREATE should auto-reverse to DROP
 	cmd := migration.MigrationCommand{
@@ -1159,7 +1159,7 @@ func TestAutoReverse_RequireExplicit(t *testing.T) {
 
 // TestReportLimit_MaxSize tests validation report size limits
 func TestReportLimit_MaxSize(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create migration with many commands to generate large report
 	commands := make([]string, 100)
@@ -1185,7 +1185,7 @@ func TestReportLimit_MaxSize(t *testing.T) {
 
 // TestArchive_ExpiredReports tests soft-delete of old reports
 func TestArchive_ExpiredReports(t *testing.T) {
-	service, _ := setupMigrationTest(t)
+	service, _ := setupMigrationTest()
 
 	// Create and validate migration to generate report
 	mig := createTestMigration(t, service, "testdb", []string{"CREATE BUNDLE Users"})

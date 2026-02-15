@@ -14,6 +14,7 @@ type Arguments struct {
 	PrettyPrintResults bool     `json:"pretty_print_results"`
 	Compress           bool     `json:"compress"`
 	Pipeline           bool     `json:"pipeline"`
+	HistorySize        int      `json:"history_size"`
 }
 
 var (

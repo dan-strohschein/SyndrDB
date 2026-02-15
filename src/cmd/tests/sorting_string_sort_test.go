@@ -46,7 +46,7 @@ func skipTestCompareAbbreviatedKeys_DISABLED(t *testing.T) {
 
 // Remaining tests use exported StringHeapSort function
 
-func skipOldTestCompareAbbreviatedKeys_REMOVED(t *testing.T) {
+func skipOldTestCompareAbbreviatedKeys_REMOVED() {
 	logger := zap.NewNop().Sugar()
 	defer logger.Sync()
 
@@ -138,41 +138,15 @@ func TestStringHeapSort_ASC(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	defer logger.Sync()
 
-	// Create test documents with string field
 	documents := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("zebra")},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("apple")},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("mango")},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("banana")},
-			},
-		},
-		"doc5": {
-			DocumentID: "doc5",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("orange")},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"name": "zebra"}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"name": "apple"}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"name": "mango"}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"name": "banana"}},
+		"doc5": {DocumentID: "doc5", Data: map[string]interface{}{"name": "orange"}},
 	}
 
-	// Sort by name ASC, LIMIT 3
+	schema := sortSchema("name")
 	results, err := StringHeapSort(
 		documents,
 		3,      // limit
@@ -181,35 +155,32 @@ func TestStringHeapSort_ASC(t *testing.T) {
 		true,   // useSIMD
 		false,  // nullsFirst
 		logger,
+		schema,
 	)
 
 	if err != nil {
 		t.Fatalf("StringHeapSort failed: %v", err)
 	}
 
-	// Verify we got exactly 3 results
 	if len(results) != 3 {
 		t.Fatalf("Expected 3 results, got %d", len(results))
 	}
 
-	// Verify correct order: apple, banana, mango
 	expectedNames := []string{"apple", "banana", "mango"}
 	for i, doc := range results {
-		nameField, exists := doc.Fields["name"]
-		if !exists {
+		name, ok := getSortResultString(doc, nil, "name")
+		if !ok {
 			t.Fatalf("Document %d missing 'name' field", i)
 		}
-
-		name, _ := nameField.Value.AsString()
 		if name != expectedNames[i] {
 			t.Errorf("Result[%d] = %q, want %q", i, name, expectedNames[i])
 		}
 	}
 
-	t.Logf("ASC sort correct: %s, %s, %s",
-		results[0].Fields["name"].Value,
-		results[1].Fields["name"].Value,
-		results[2].Fields["name"].Value)
+	n0, _ := getSortResultString(results[0], nil, "name")
+	n1, _ := getSortResultString(results[1], nil, "name")
+	n2, _ := getSortResultString(results[2], nil, "name")
+	t.Logf("ASC sort correct: %s, %s, %s", n0, n1, n2)
 }
 
 // TestStringHeapSort_DESC tests descending string sorting
@@ -217,41 +188,15 @@ func TestStringHeapSort_DESC(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	defer logger.Sync()
 
-	// Create test documents
 	documents := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: models.NewStringValue("boston")},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: models.NewStringValue("seattle")},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: models.NewStringValue("austin")},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: models.NewStringValue("denver")},
-			},
-		},
-		"doc5": {
-			DocumentID: "doc5",
-			Fields: map[string]models.Field{
-				"city": {Name: "city", Value: models.NewStringValue("portland")},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"city": "boston"}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"city": "seattle"}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"city": "austin"}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"city": "denver"}},
+		"doc5": {DocumentID: "doc5", Data: map[string]interface{}{"city": "portland"}},
 	}
 
-	// Sort by city DESC, LIMIT 3
+	schema := sortSchema("city")
 	results, err := StringHeapSort(
 		documents,
 		3,      // limit
@@ -260,35 +205,32 @@ func TestStringHeapSort_DESC(t *testing.T) {
 		true,   // useSIMD
 		false,  // nullsFirst
 		logger,
+		schema,
 	)
 
 	if err != nil {
 		t.Fatalf("StringHeapSort failed: %v", err)
 	}
 
-	// Verify we got exactly 3 results
 	if len(results) != 3 {
 		t.Fatalf("Expected 3 results, got %d", len(results))
 	}
 
-	// Verify correct order: seattle, portland, denver
 	expectedCities := []string{"seattle", "portland", "denver"}
 	for i, doc := range results {
-		cityField, exists := doc.Fields["city"]
-		if !exists {
+		city, ok := getSortResultString(doc, nil, "city")
+		if !ok {
 			t.Fatalf("Document %d missing 'city' field", i)
 		}
-
-		city, _ := cityField.Value.AsString()
 		if city != expectedCities[i] {
 			t.Errorf("Result[%d] = %q, want %q", i, city, expectedCities[i])
 		}
 	}
 
-	t.Logf("DESC sort correct: %s, %s, %s",
-		results[0].Fields["city"].Value,
-		results[1].Fields["city"].Value,
-		results[2].Fields["city"].Value)
+	c0, _ := getSortResultString(results[0], nil, "city")
+	c1, _ := getSortResultString(results[1], nil, "city")
+	c2, _ := getSortResultString(results[2], nil, "city")
+	t.Logf("DESC sort correct: %s, %s, %s", c0, c1, c2)
 }
 
 // TestStringHeapSort_SIMD_vs_NonSIMD verifies both paths work correctly
@@ -296,48 +238,30 @@ func TestStringHeapSort_SIMD_vs_NonSIMD(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	defer logger.Sync()
 
-	// Create test documents with long strings to exercise SIMD fallback
 	documents := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"description": {Name: "description", Value: models.NewStringValue("database_alpha_version_1")},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"description": {Name: "description", Value: models.NewStringValue("database_beta_version_2")},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"description": {Name: "description", Value: models.NewStringValue("database_gamma_version_3")},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"description": "database_alpha_version_1"}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"description": "database_beta_version_2"}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"description": "database_gamma_version_3"}},
 	}
 
-	// Test with SIMD
-	resultsSIMD, err := StringHeapSort(documents, 2, "description", true, true, false, logger)
+	schema := sortSchema("description")
+	resultsSIMD, err := StringHeapSort(documents, 2, "description", true, true, false, logger, schema)
 	if err != nil {
 		t.Fatalf("SIMD sort failed: %v", err)
 	}
 
-	// Test without SIMD
-	resultsNoSIMD, err := StringHeapSort(documents, 2, "description", true, false, false, logger)
+	resultsNoSIMD, err := StringHeapSort(documents, 2, "description", true, false, false, logger, schema)
 	if err != nil {
 		t.Fatalf("Non-SIMD sort failed: %v", err)
 	}
 
-	// Both should produce same results
 	if len(resultsSIMD) != len(resultsNoSIMD) {
 		t.Fatalf("Result count mismatch: SIMD=%d, NoSIMD=%d", len(resultsSIMD), len(resultsNoSIMD))
 	}
 
 	for i := range resultsSIMD {
-		simdDesc, _ := resultsSIMD[i].Fields["description"].Value.AsString()
-		noSimdDesc, _ := resultsNoSIMD[i].Fields["description"].Value.AsString()
+		simdDesc, _ := getSortResultString(resultsSIMD[i], nil, "description")
+		noSimdDesc, _ := getSortResultString(resultsNoSIMD[i], nil, "description")
 
 		if simdDesc != noSimdDesc {
 			t.Errorf("Result[%d] mismatch: SIMD=%q, NoSIMD=%q", i, simdDesc, noSimdDesc)
@@ -353,8 +277,9 @@ func TestStringHeapSort_EmptyInput(t *testing.T) {
 	defer logger.Sync()
 
 	documents := map[string]*models.Document{}
+	schema := sortSchema("name")
 
-	results, err := StringHeapSort(documents, 10, "name", true, true, false, logger)
+	results, err := StringHeapSort(documents, 10, "name", true, true, false, logger, schema)
 	if err != nil {
 		t.Fatalf("StringHeapSort failed on empty input: %v", err)
 	}
@@ -370,15 +295,11 @@ func TestStringHeapSort_ZeroLimit(t *testing.T) {
 	defer logger.Sync()
 
 	documents := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("test")},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"name": "test"}},
 	}
+	schema := sortSchema("name")
 
-	results, err := StringHeapSort(documents, 0, "name", true, true, false, logger)
+	results, err := StringHeapSort(documents, 0, "name", true, true, false, logger, schema)
 	if err != nil {
 		t.Fatalf("StringHeapSort failed with zero limit: %v", err)
 	}

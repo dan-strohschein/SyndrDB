@@ -37,6 +37,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// compactionTestSchema defines field order for parsed documents (name, version).
+// Used to build Document.Values from decoded Fields when parsing bundle files.
+var compactionTestSchema = models.BuildBundleFieldSchemaFromNames([]string{"name", "version"})
+
+// testDocEntry is the map-based document shape used by EncodeFastBinary/DecodeFastBinary.
+// Serialization uses "Fields" (map[string]models.Field); Document uses Values + schema elsewhere.
+type testDocEntry struct {
+	DocumentID string
+	Fields     map[string]models.Field
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
 // TestBundleCompactionBasic tests basic bundle compaction with tombstones
 func TestBundleCompactionBasic(t *testing.T) {
 	// Setup test directory
@@ -44,10 +57,11 @@ func TestBundleCompactionBasic(t *testing.T) {
 	bundleFilePath := filepath.Join(tempDir, "test_bundle.bnd")
 
 	// Create test bundle with 3 active documents and 2 tombstones
-	err := createTestBundleFile(bundleFilePath, map[string]models.Document{
-		"doc1": {DocumentID: "doc1", CreatedAt: time.Now(), UpdatedAt: time.Now(), Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Alice")}}},
-		"doc2": {DocumentID: "doc2", CreatedAt: time.Now(), UpdatedAt: time.Now(), Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Bob")}}},
-		"doc3": {DocumentID: "doc3", CreatedAt: time.Now(), UpdatedAt: time.Now(), Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Charlie")}}},
+	now := time.Now()
+	err := createTestBundleFile(bundleFilePath, map[string]testDocEntry{
+		"doc1": {DocumentID: "doc1", CreatedAt: now, UpdatedAt: now, Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Alice")}}},
+		"doc2": {DocumentID: "doc2", CreatedAt: now, UpdatedAt: now, Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Bob")}}},
+		"doc3": {DocumentID: "doc3", CreatedAt: now, UpdatedAt: now, Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Charlie")}}},
 	}, []string{"doc4", "doc5"}) // doc4 and doc5 are tombstones
 	if err != nil {
 		t.Fatalf("Failed to create test bundle: %v", err)
@@ -82,7 +96,7 @@ func TestBundleCompactionBasic(t *testing.T) {
 	}
 
 	// Verify compacted file contains only active documents
-	documents, tombstones, err := parseTestBundleFile(compactedPath)
+	documents, tombstones, err := parseTestBundleFile(compactedPath, compactionTestSchema)
 	if err != nil {
 		t.Fatalf("Failed to parse compacted bundle: %v", err)
 	}
@@ -128,9 +142,10 @@ func TestBundleCompactionNoTombstones(t *testing.T) {
 	bundleFilePath := filepath.Join(tempDir, "test_bundle_no_tombstones.bnd")
 
 	// Create bundle with only active documents
-	err := createTestBundleFile(bundleFilePath, map[string]models.Document{
-		"doc1": {DocumentID: "doc1", CreatedAt: time.Now(), UpdatedAt: time.Now(), Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Alice")}}},
-		"doc2": {DocumentID: "doc2", CreatedAt: time.Now(), UpdatedAt: time.Now(), Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Bob")}}},
+	now := time.Now()
+	err := createTestBundleFile(bundleFilePath, map[string]testDocEntry{
+		"doc1": {DocumentID: "doc1", CreatedAt: now, UpdatedAt: now, Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Alice")}}},
+		"doc2": {DocumentID: "doc2", CreatedAt: now, UpdatedAt: now, Fields: map[string]models.Field{"name": {Value: models.NewStringValue("Bob")}}},
 	}, nil) // No tombstones
 	if err != nil {
 		t.Fatalf("Failed to create test bundle: %v", err)
@@ -220,7 +235,7 @@ func TestBundleCompactionAllTombstones(t *testing.T) {
 	}
 
 	// Parse and verify
-	documents, tombstones, err := parseTestBundleFile(compactedPath)
+	documents, tombstones, err := parseTestBundleFile(compactedPath, compactionTestSchema)
 	if err != nil {
 		t.Fatalf("Failed to parse compacted bundle: %v", err)
 	}
@@ -254,7 +269,7 @@ func TestBundleCompactionTemporalOrdering(t *testing.T) {
 	}
 
 	// Write older version of doc1
-	olderDoc := models.Document{
+	olderDoc := testDocEntry{
 		DocumentID: "doc1",
 		CreatedAt:  time.Now().Add(-2 * time.Hour),
 		UpdatedAt:  time.Now().Add(-2 * time.Hour),
@@ -263,7 +278,7 @@ func TestBundleCompactionTemporalOrdering(t *testing.T) {
 	writeDocument(file, olderDoc)
 
 	// Write newer version of doc1
-	newerDoc := models.Document{
+	newerDoc := testDocEntry{
 		DocumentID: "doc1",
 		CreatedAt:  time.Now().Add(-2 * time.Hour),
 		UpdatedAt:  time.Now().Add(-1 * time.Hour),
@@ -295,7 +310,7 @@ func TestBundleCompactionTemporalOrdering(t *testing.T) {
 	}
 
 	// Parse compacted file
-	documents, _, err := parseTestBundleFile(bundleFilePath)
+	documents, _, err := parseTestBundleFile(bundleFilePath, compactionTestSchema)
 	if err != nil {
 		t.Fatalf("Failed to parse compacted bundle: %v", err)
 	}
@@ -310,12 +325,12 @@ func TestBundleCompactionTemporalOrdering(t *testing.T) {
 		t.Fatal("Expected doc1 to exist")
 	}
 
-	// Verify it's the newer version
-	versionField, ok := doc.Fields["version"]
+	// Verify it's the newer version (schema-ordered Values)
+	versionVal, ok := doc.GetFieldValue(compactionTestSchema, "version")
 	if !ok {
 		t.Fatal("Expected version field")
 	}
-	val, ok := versionField.Value.AsString()
+	val, ok := versionVal.AsString()
 	if !ok {
 		t.Fatal("Expected string value")
 	}
@@ -326,22 +341,21 @@ func TestBundleCompactionTemporalOrdering(t *testing.T) {
 
 // Helper functions
 
-// createTestBundleFile creates a bundle file with active documents and tombstones
-func createTestBundleFile(filePath string, documents map[string]models.Document, tombstoneIDs []string) error {
+// createTestBundleFile creates a bundle file with active documents and tombstones.
+// Documents use testDocEntry (map-based Fields) for EncodeFastBinary compatibility.
+func createTestBundleFile(filePath string, documents map[string]testDocEntry, tombstoneIDs []string) error {
 	file, err := os.Create(filePath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	// Write active documents
-	for _, doc := range documents {
-		if err := writeDocument(file, doc); err != nil {
+	for _, entry := range documents {
+		if err := writeDocument(file, entry); err != nil {
 			return err
 		}
 	}
 
-	// Write tombstones
 	for _, docID := range tombstoneIDs {
 		if err := writeTombstone(file, docID); err != nil {
 			return err
@@ -351,13 +365,13 @@ func createTestBundleFile(filePath string, documents map[string]models.Document,
 	return nil
 }
 
-// writeDocument writes a document with 0xDEADBEEF magic
-func writeDocument(file *os.File, doc models.Document) error {
+// writeDocument writes a document with 0xDEADBEEF magic using the map format (Fields).
+func writeDocument(file *os.File, entry testDocEntry) error {
 	docMap := map[string]interface{}{
-		"DocumentID": doc.DocumentID,
-		"Fields":     doc.Fields,
-		"CreatedAt":  doc.CreatedAt,
-		"UpdatedAt":  doc.UpdatedAt,
+		"DocumentID": entry.DocumentID,
+		"Fields":     entry.Fields,
+		"CreatedAt":  entry.CreatedAt,
+		"UpdatedAt":  entry.UpdatedAt,
 	}
 
 	docBytes, err := helpers.EncodeFastBinary(docMap)
@@ -365,7 +379,6 @@ func writeDocument(file *os.File, doc models.Document) error {
 		return err
 	}
 
-	// Write header
 	header := make([]byte, 8)
 	binary.LittleEndian.PutUint32(header[0:4], 0xDEADBEEF)
 	binary.LittleEndian.PutUint32(header[4:8], uint32(len(docBytes)))
@@ -406,8 +419,9 @@ func writeTombstone(file *os.File, documentID string) error {
 	return nil
 }
 
-// parseTestBundleFile parses a bundle file and returns active documents and tombstones
-func parseTestBundleFile(filePath string) (map[string]models.Document, []string, error) {
+// parseTestBundleFile parses a bundle file and returns active documents (with Values from schema) and tombstones.
+// schema defines field order so decoded Fields are converted to Document.Values for assertions.
+func parseTestBundleFile(filePath string, schema *models.BundleFieldSchema) (map[string]models.Document, []string, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, nil, err
@@ -432,7 +446,6 @@ func parseTestBundleFile(filePath string) (map[string]models.Document, []string,
 		docData := data[offset+8 : offset+8+int64(size)]
 
 		if magic == 0xDEADBEEF {
-			// Active document
 			docMap, err := helpers.DecodeFastBinary(docData)
 			if err != nil {
 				offset += 8 + int64(size)
@@ -443,9 +456,6 @@ func parseTestBundleFile(filePath string) (map[string]models.Document, []string,
 			if docID, ok := docMap["DocumentID"].(string); ok {
 				doc.DocumentID = docID
 			}
-			if fields, ok := docMap["Fields"].(map[string]models.Field); ok {
-				doc.Fields = fields
-			}
 			if createdAt, ok := docMap["CreatedAt"].(time.Time); ok {
 				doc.CreatedAt = createdAt
 			}
@@ -453,10 +463,24 @@ func parseTestBundleFile(filePath string) (map[string]models.Document, []string,
 				doc.UpdatedAt = updatedAt
 			}
 
+			// Convert decoded Fields to schema-ordered Values for Document model
+			if schema != nil {
+				doc.Values = make([]models.FieldValue, len(schema.Names))
+				fields, _ := docMap["Fields"].(map[string]models.Field)
+				for i, name := range schema.Names {
+					if fields != nil {
+						if f, ok := fields[name]; ok {
+							doc.Values[i] = f.Value
+							continue
+						}
+					}
+					doc.Values[i] = models.FieldValue{Type: models.FieldTypeNil}
+				}
+			}
+
 			documents[doc.DocumentID] = doc
 
 		} else if magic == 0xDEADDEAD {
-			// Tombstone
 			tombstoneMap, err := helpers.DecodeFastBinary(docData)
 			if err != nil {
 				offset += 8 + int64(size)

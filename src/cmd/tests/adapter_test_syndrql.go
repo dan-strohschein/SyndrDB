@@ -14,20 +14,16 @@ func TestEvaluatorSimpleComparison(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	evaluator := syndrQL.NewExpressionEvaluator(logger)
 
-	// Create a test document
 	doc := &models.Document{
 		DocumentID: "test-123",
-		Fields: map[string]models.Field{
-			"age":  {Value: models.NewIntValue(int64(25))},
-			"name": {Value: models.NewStringValue("Alice")},
-		},
+		Data:       map[string]interface{}{"age": int64(25), "name": "Alice"},
 	}
 
 	// Test: age == 25
 	expr := &syndrQL.BinaryExpression{
 		Left:     &syndrQL.IdentifierExpression{Name: "age"},
 		Operator: syndrQL.TOKEN_EQ,
-		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(42))},
+		Right:    &syndrQL.LiteralExpression{Value: models.NewIntValue(int64(25))},
 	}
 
 	result, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
@@ -60,10 +56,7 @@ func TestEvaluatorLogicalOperators(t *testing.T) {
 	evaluator := syndrQL.NewExpressionEvaluator(logger)
 
 	doc := &models.Document{
-		Fields: map[string]models.Field{
-			"age":    {Value: models.NewIntValue(int64(25))},
-			"active": {Value: models.NewBoolValue(true)},
-		},
+		Data: map[string]interface{}{"age": int64(25), "active": true},
 	}
 
 	// Test: age == 25 AND active == true
@@ -281,10 +274,7 @@ func TestEvaluatorNullHandling(t *testing.T) {
 	evaluator := syndrQL.NewExpressionEvaluator(logger)
 
 	doc := &models.Document{
-		Fields: map[string]models.Field{
-			"name":   {Value: models.NewStringValue("Alice")},
-			"status": {Value: models.NewStringValue("::SYNDR_NULL::")},
-		},
+		Data: map[string]interface{}{"name": "Alice", "status": "::SYNDR_NULL::"},
 	}
 
 	// Test: status == NULL (using magic value)
@@ -320,10 +310,7 @@ func TestEvaluatorTypeCoercion(t *testing.T) {
 	evaluator := syndrQL.NewExpressionEvaluator(logger)
 
 	doc := &models.Document{
-		Fields: map[string]models.Field{
-			"count":  {Value: models.NewStringValue("42")},  // String that can be parsed as number
-			"active": {Value: models.NewIntValue(int64(1))}, // Number that can be treated as boolean
-		},
+		Data: map[string]interface{}{"count": "42", "active": int64(1)},
 	}
 
 	// Test: count == 42 (string to number comparison)
@@ -348,9 +335,7 @@ func BenchmarkEvaluatorSimpleComparison(b *testing.B) {
 	evaluator := syndrQL.NewExpressionEvaluator(logger)
 
 	doc := &models.Document{
-		Fields: map[string]models.Field{
-			"age": {Value: models.NewIntValue(int64(25))},
-		},
+		Data: map[string]interface{}{"age": int64(25)},
 	}
 
 	expr := &syndrQL.BinaryExpression{
@@ -371,11 +356,7 @@ func BenchmarkEvaluatorComplexExpression(b *testing.B) {
 	evaluator := syndrQL.NewExpressionEvaluator(logger)
 
 	doc := &models.Document{
-		Fields: map[string]models.Field{
-			"age":    {Value: models.NewIntValue(int64(25))},
-			"active": {Value: models.NewBoolValue(true)},
-			"score":  {Value: models.NewIntValue(int64(85))},
-		},
+		Data: map[string]interface{}{"age": int64(25), "active": true, "score": int64(85)},
 	}
 
 	// (age >= 18 AND age <= 65) AND (active == true OR score > 80)

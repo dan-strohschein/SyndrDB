@@ -34,7 +34,7 @@ Test Strategy:
 // TestMemoryLimit_SmallQuery verifies memory limit is NOT triggered for small queries
 func TestMemoryLimit_SmallQuery(t *testing.T) {
 	fixture := setupFullServer(t)
-	defer cleanupFullServer(t, fixture)
+	defer cleanupFullServer(t)
 
 	// Seed 100 small authors
 	seedAuthors(t, fixture, 100)
@@ -74,10 +74,10 @@ func TestMemoryLimit_SmallQuery(t *testing.T) {
 // TestMemoryLimit_LargeDocumentsExceedLimit verifies large documents trigger memory limit
 func TestMemoryLimit_LargeDocumentsExceedLimit(t *testing.T) {
 	fixture := setupFullServer(t)
-	defer cleanupFullServer(t, fixture)
+	defer cleanupFullServer(t)
 
 	// Set memory limit to 1MB for this test (200 docs × 300KB = 60MB >> 1MB)
-	defer setTestMemoryLimit(t, fixture, 1)()
+	defer setTestMemoryLimit(t, 1)()
 
 	// Seed authors with LARGE biographies to trigger memory limit
 	// Each document will be ~300KB with nested content
@@ -127,10 +127,10 @@ func TestMemoryLimit_LargeDocumentsExceedLimit(t *testing.T) {
 // TestMemoryLimit_NestedStructures verifies deep nesting is properly estimated
 func TestMemoryLimit_NestedStructures(t *testing.T) {
 	fixture := setupFullServer(t)
-	defer cleanupFullServer(t, fixture)
+	defer cleanupFullServer(t)
 
 	// Set memory limit to 2MB for this test (150 docs × ~20KB = 3MB >> 2MB)
-	defer setTestMemoryLimit(t, fixture, 2)()
+	defer setTestMemoryLimit(t, 2)()
 
 	// Seed 150 authors with deeply nested metadata (50 levels × 100 chars/level = ~5KB base + overhead)
 	seedAuthorsWithNestedMetadata(t, fixture, 150)
@@ -171,10 +171,10 @@ func TestMemoryLimit_NestedStructures(t *testing.T) {
 // TestMemoryLimit_AggregationQuery verifies aggregations respect memory limits
 func TestMemoryLimit_AggregationQuery(t *testing.T) {
 	fixture := setupFullServer(t)
-	defer cleanupFullServer(t, fixture)
+	defer cleanupFullServer(t)
 
 	// Set memory limit to 5MB for this test (200 docs × 300KB = 60MB >> 5MB)
-	defer setTestMemoryLimit(t, fixture, 5)()
+	defer setTestMemoryLimit(t, 5)()
 
 	// Seed large authors
 	seedLargeAuthors(t, fixture, 200)
@@ -211,7 +211,7 @@ func TestMemoryLimit_AggregationQuery(t *testing.T) {
 // TestMemoryLimit_ConcurrentQueries verifies concurrent safety and metrics
 func TestMemoryLimit_ConcurrentQueries(t *testing.T) {
 	fixture := setupFullServer(t)
-	defer cleanupFullServer(t, fixture)
+	defer cleanupFullServer(t)
 
 	// Seed moderate-sized authors
 	seedAuthors(t, fixture, 100)
@@ -272,7 +272,7 @@ func TestMemoryLimit_ConcurrentQueries(t *testing.T) {
 // TestMemoryLimit_Metrics verifies metrics tracking works correctly
 func TestMemoryLimit_Metrics(t *testing.T) {
 	fixture := setupFullServer(t)
-	defer cleanupFullServer(t, fixture)
+	defer cleanupFullServer(t)
 
 	// Reset metrics
 	server.GetGlobalMemoryMetrics().Reset()
@@ -324,7 +324,7 @@ func TestMemoryLimit_Metrics(t *testing.T) {
 // setTestMemoryLimit temporarily sets the query memory limit for testing
 // Returns a cleanup function to restore the original limit
 // Usage: defer setTestMemoryLimit(t, fixture, 1)()
-func setTestMemoryLimit(t *testing.T, fixture *TestFixture, limitMB int) func() {
+func setTestMemoryLimit(t *testing.T, limitMB int) func() {
 	t.Helper()
 
 	// Modify the global settings (used by CommandDirector)
@@ -379,9 +379,9 @@ func seedAuthors(t *testing.T, fixture *TestFixture, count int) {
 	for i := 0; i < count; i++ {
 		doc := &models.Document{
 			DocumentID: fmt.Sprintf("author_%d", i),
-			Fields: map[string]models.Field{
-				"Name":    {Name: "Name", Value: models.NewStringValue(fmt.Sprintf("Author %d", i))},
-				"Country": {Name: "Country", Value: models.NewStringValue("USA")},
+			Data: map[string]interface{}{
+				"Name":    fmt.Sprintf("Author %d", i),
+				"Country": "USA",
 			},
 		}
 		if err := bundleService.AddDocumentToBundleByStruct(fixture.Database, bundle, doc); err != nil {
@@ -416,10 +416,10 @@ func seedLargeAuthors(t *testing.T, fixture *TestFixture, count int) {
 	for i := 0; i < count; i++ {
 		doc := &models.Document{
 			DocumentID: fmt.Sprintf("author_%d", i),
-			Fields: map[string]models.Field{
-				"Name":      {Name: "Name", Value: models.NewStringValue(fmt.Sprintf("Author %d", i))},
-				"Country":   {Name: "Country", Value: models.NewStringValue("USA")},
-				"Biography": {Name: "Biography", Value: models.NewStringValue(largeBio)},
+			Data: map[string]interface{}{
+				"Name":      fmt.Sprintf("Author %d", i),
+				"Country":   "USA",
+				"Biography": largeBio,
 			},
 		}
 		if err := bundleService.AddDocumentToBundleByStruct(fixture.Database, bundle, doc); err != nil {
@@ -468,9 +468,9 @@ func seedAuthorsWithNestedMetadata(t *testing.T, fixture *TestFixture, count int
 
 		doc := &models.Document{
 			DocumentID: fmt.Sprintf("author_%d", i),
-			Fields: map[string]models.Field{
-				"Name":     {Name: "Name", Value: models.NewStringValue(fmt.Sprintf("Author %d", i))},
-				"Metadata": {Name: "Metadata", Value: models.NewInterfaceValue(nestedData)},
+			Data: map[string]interface{}{
+				"Name":     fmt.Sprintf("Author %d", i),
+				"Metadata": nestedData,
 			},
 		}
 
@@ -487,7 +487,7 @@ func seedAuthorsWithNestedMetadata(t *testing.T, fixture *TestFixture, count int
 }
 
 // cleanupFullServer tears down test fixture
-func cleanupFullServer(t *testing.T, fixture *TestFixture) {
+func cleanupFullServer(t *testing.T) {
 	t.Helper()
 	// Cleanup is handled automatically by defer statements in test setup
 }

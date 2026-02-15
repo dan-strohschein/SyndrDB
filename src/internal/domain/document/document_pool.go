@@ -40,6 +40,7 @@ func (p *DocumentPool) GetDocument() *models.Document {
 
 // PutDocument returns a Document instance to the pool.
 // If PooledValues is true, the Values slice is returned to the values pool.
+// Data is cleared so reused documents do not leak previous content.
 func (p *DocumentPool) PutDocument(doc *models.Document) {
 	if doc != nil {
 		if doc.PooledValues && doc.Values != nil {
@@ -49,6 +50,7 @@ func (p *DocumentPool) PutDocument(doc *models.Document) {
 		}
 		doc.DocumentID = ""
 		doc.Values = nil
+		doc.Data = nil
 		doc.CachedJSON = nil
 		p.documentPool.Put(doc)
 	}

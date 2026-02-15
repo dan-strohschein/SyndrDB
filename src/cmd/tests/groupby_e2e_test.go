@@ -97,12 +97,12 @@ func TestGroupByBasicAggregates(t *testing.T) {
 			expectError:    false,
 			expectedGroups: -1, // Will be determined by data
 			validateResults: func(t *testing.T, docs map[string]*models.Document) {
-				// Verify each document has city field and count_all field
+				// Verify each document has city field and count_all field (Data or Values via schema)
 				for _, doc := range docs {
-					if _, exists := doc.Fields["city"]; !exists {
+					if !hasResultField(doc, nil, "city") {
 						t.Error("Missing 'city' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["count_all"]; !exists {
+					if !hasResultField(doc, nil, "count_all") {
 						t.Error("Missing 'count_all' field in GROUP BY result")
 					}
 				}
@@ -115,10 +115,10 @@ func TestGroupByBasicAggregates(t *testing.T) {
 			expectedGroups: -1,
 			validateResults: func(t *testing.T, docs map[string]*models.Document) {
 				for _, doc := range docs {
-					if _, exists := doc.Fields["department"]; !exists {
+					if !hasResultField(doc, nil, "department") {
 						t.Error("Missing 'department' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["sum_salary"]; !exists {
+					if !hasResultField(doc, nil, "sum_salary") {
 						t.Error("Missing 'sum_salary' field in GROUP BY result")
 					}
 				}
@@ -131,10 +131,10 @@ func TestGroupByBasicAggregates(t *testing.T) {
 			expectedGroups: -1,
 			validateResults: func(t *testing.T, docs map[string]*models.Document) {
 				for _, doc := range docs {
-					if _, exists := doc.Fields["category"]; !exists {
+					if !hasResultField(doc, nil, "category") {
 						t.Error("Missing 'category' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["avg_price"]; !exists {
+					if !hasResultField(doc, nil, "avg_price") {
 						t.Error("Missing 'avg_price' field in GROUP BY result")
 					}
 				}
@@ -147,13 +147,13 @@ func TestGroupByBasicAggregates(t *testing.T) {
 			expectedGroups: -1,
 			validateResults: func(t *testing.T, docs map[string]*models.Document) {
 				for _, doc := range docs {
-					if _, exists := doc.Fields["region"]; !exists {
+					if !hasResultField(doc, nil, "region") {
 						t.Error("Missing 'region' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["min_temperature"]; !exists {
+					if !hasResultField(doc, nil, "min_temperature") {
 						t.Error("Missing 'min_temperature' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["max_temperature"]; !exists {
+					if !hasResultField(doc, nil, "max_temperature") {
 						t.Error("Missing 'max_temperature' field in GROUP BY result")
 					}
 				}
@@ -166,16 +166,16 @@ func TestGroupByBasicAggregates(t *testing.T) {
 			expectedGroups: -1,
 			validateResults: func(t *testing.T, docs map[string]*models.Document) {
 				for _, doc := range docs {
-					if _, exists := doc.Fields["status"]; !exists {
+					if !hasResultField(doc, nil, "status") {
 						t.Error("Missing 'status' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["count_all"]; !exists {
+					if !hasResultField(doc, nil, "count_all") {
 						t.Error("Missing 'count_all' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["sum_amount"]; !exists {
+					if !hasResultField(doc, nil, "sum_amount") {
 						t.Error("Missing 'sum_amount' field in GROUP BY result")
 					}
-					if _, exists := doc.Fields["avg_amount"]; !exists {
+					if !hasResultField(doc, nil, "avg_amount") {
 						t.Error("Missing 'avg_amount' field in GROUP BY result")
 					}
 				}
@@ -653,6 +653,24 @@ func containsIgnoreCase(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
 
+// hasResultField returns true if the document has a field with the given name.
+// Checks doc.Data when present; otherwise uses doc.Values with the given schema.
+// For aggregation results (Values only), pass the result schema; for Data-only docs, schema can be nil.
+func hasResultField(doc *models.Document, schema *models.BundleFieldSchema, fieldName string) bool {
+	if doc == nil {
+		return false
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		_, ok := doc.GetFieldValue(schema, fieldName)
+		return ok
+	}
+	if doc.Data != nil {
+		_, ok := doc.Data[fieldName]
+		return ok
+	}
+	return false
+}
+
 // MockScanNode is a simple mock ExecutionNode for testing
 type MockScanNode struct {
 	Documents map[string]*models.Document
@@ -683,30 +701,30 @@ func TestGroupByAggregationNodeExecution(t *testing.T) {
 	defer logger.Sync()
 
 	t.Run("AggregationNode execution with sample data", func(t *testing.T) {
-		// Create sample documents
+		// Create sample documents with Data (AggregationNode reads via getCachedSchema/Data when schema is nil)
 		docs := map[string]*models.Document{
 			"doc1": {
 				DocumentID: "doc1",
-				Fields: map[string]models.Field{
-					"city":   {Name: "city", Value: models.NewStringValue("Seattle")},
-					"age":    {Name: "age", Value: models.NewIntValue(25)},
-					"salary": {Name: "salary", Value: models.NewIntValue(75000)},
+				Data: map[string]interface{}{
+					"city":   "Seattle",
+					"age":    int64(25),
+					"salary": int64(75000),
 				},
 			},
 			"doc2": {
 				DocumentID: "doc2",
-				Fields: map[string]models.Field{
-					"city":   {Name: "city", Value: models.NewStringValue("Seattle")},
-					"age":    {Name: "age", Value: models.NewIntValue(30)},
-					"salary": {Name: "salary", Value: models.NewIntValue(85000)},
+				Data: map[string]interface{}{
+					"city":   "Seattle",
+					"age":    int64(30),
+					"salary": int64(85000),
 				},
 			},
 			"doc3": {
 				DocumentID: "doc3",
-				Fields: map[string]models.Field{
-					"city":   {Name: "city", Value: models.NewStringValue("Portland")},
-					"age":    {Name: "age", Value: models.NewIntValue(28)},
-					"salary": {Name: "salary", Value: models.NewIntValue(70000)},
+				Data: map[string]interface{}{
+					"city":   "Portland",
+					"age":    int64(28),
+					"salary": int64(70000),
 				},
 			},
 		}
@@ -736,6 +754,7 @@ func TestGroupByAggregationNodeExecution(t *testing.T) {
 			aggFields,
 			nil, // No HAVING
 			nil, // No ORDER BY (handled by SortNode)
+			0,   // No LIMIT
 			logger,
 		)
 
@@ -750,15 +769,19 @@ func TestGroupByAggregationNodeExecution(t *testing.T) {
 			t.Errorf("Expected 2 groups (Seattle, Portland), got %d", len(results))
 		}
 
-		// Check that results contain expected fields
+		// AggregationNode produces result docs with Values (schema-ordered); build schema for validation.
+		// setDocumentValuesFromFieldMap uses sorted field names, so order is alphabetical.
+		resultSchema := models.BuildBundleFieldSchemaFromNames([]string{"avg_salary", "city", "count_all"})
+
+		// Check that results contain expected fields (Values + resultSchema)
 		for _, doc := range results {
-			if _, exists := doc.Fields["city"]; !exists {
+			if !hasResultField(doc, resultSchema, "city") {
 				t.Error("Result missing 'city' field")
 			}
-			if _, exists := doc.Fields["count_all"]; !exists {
+			if !hasResultField(doc, resultSchema, "count_all") {
 				t.Error("Result missing 'count_all' field")
 			}
-			if _, exists := doc.Fields["avg_salary"]; !exists {
+			if !hasResultField(doc, resultSchema, "avg_salary") {
 				t.Error("Result missing 'avg_salary' field")
 			}
 		}

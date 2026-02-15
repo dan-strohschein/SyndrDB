@@ -66,7 +66,7 @@ func executeMigrationCommand(t *testing.T, fixture *TestFixture, command string)
 }
 
 // createMigrationWithCommands creates a migration and returns its version
-func createMigrationWithCommands(t *testing.T, fixture *TestFixture, dbName, description string, commands []string) int64 {
+func createMigrationWithCommands(t *testing.T, fixture *TestFixture, description string, commands []string) int64 {
 	t.Helper()
 
 	// Build START MIGRATION command
@@ -130,7 +130,7 @@ func createMigrationWithCommands(t *testing.T, fixture *TestFixture, dbName, des
 }
 
 // applyMigration applies a migration by version
-func applyMigration(t *testing.T, fixture *TestFixture, dbName string, version int64) {
+func applyMigration(t *testing.T, fixture *TestFixture, version int64) {
 	t.Helper()
 
 	applyCmd := fmt.Sprintf(
@@ -149,7 +149,7 @@ func applyMigration(t *testing.T, fixture *TestFixture, dbName string, version i
 }
 
 // rollbackToVersion rolls back to a specific version
-func rollbackToVersion(t *testing.T, fixture *TestFixture, dbName string, version int64) {
+func rollbackToVersion(t *testing.T, fixture *TestFixture, version int64) {
 	t.Helper()
 
 	rollbackCmd := fmt.Sprintf(
@@ -220,17 +220,17 @@ func TestMigrationCommand_CreateBundle(t *testing.T) {
 	fixture := setupFullServer(t)
 
 	// Keep test in original database context for migration operations
-	originalDB := fixture.Database
+	//originalDB := fixture.Database
 
 	// Create migration with CREATE BUNDLE command
 	// Note: Migrations are stored in the database where they're created
 	commands := []string{
 		`CREATE BUNDLE "TestUsers" WITH FIELDS ({"Name", "TEXT", true, false, null}, {"Age", "NUMBER", false, false, null}, {"Email", "TEXT", false, true, null})`,
 	}
-	version := createMigrationWithCommands(t, fixture, originalDB.Name, "Create TestUsers bundle", commands)
+	version := createMigrationWithCommands(t, fixture, "Create TestUsers bundle", commands)
 
 	// Apply migration in the same database
-	applyMigration(t, fixture, originalDB.Name, version)
+	applyMigration(t, fixture, version)
 
 	// Verify bundle exists
 	if !bundleExists(t, fixture, "TestUsers") {
@@ -259,8 +259,8 @@ func TestMigrationCommand_CreateBundleRollback(t *testing.T) {
 	commands := []string{
 		`CREATE BUNDLE "TempBundle" WITH FIELDS ({"ID", "TEXT", true, false, null})`,
 	}
-	version := createMigrationWithCommands(t, fixture, fixture.Database.Name, "Create temp bundle", commands)
-	applyMigration(t, fixture, fixture.Database.Name, version)
+	version := createMigrationWithCommands(t, fixture, "Create temp bundle", commands)
+	applyMigration(t, fixture, version)
 
 	// Verify bundle exists
 	if !bundleExists(t, fixture, "TempBundle") {
@@ -285,7 +285,7 @@ func TestMigrationCommand_CreateBundleRollback(t *testing.T) {
 
 	// Verify lock was properly released by attempting another operation
 	// If lock wasn't released, this would fail with unique constraint violation
-	_, err = executeMigrationCommand(t, fixture, fmt.Sprintf(`SHOW MIGRATIONS`))
+	_, err = executeMigrationCommand(t, fixture, "SHOW MIGRATIONS")
 	if err != nil {
 		t.Errorf("Failed to execute command after rollback attempt (lock not released?): %v", err)
 	} else {

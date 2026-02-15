@@ -23,44 +23,34 @@ var (
 	EvaluateWhereClause = queryparser.EvaluateWhereClause
 )
 
-// createE2ETestBundle creates a test bundle for E2E testing
-func createE2ETestBundle(t *testing.T, bundleName string, docCount int) *models.Bundle {
+// createE2ETestDocuments creates a slice of test documents for E2E filter evaluation.
+// Documents use Data for field storage so EvaluateWhereClause can run with schema=nil
+// (evaluateClause falls back to document.Data when schema is nil).
+func createE2ETestDocuments(t *testing.T, docCount int) []*models.Document {
 	t.Helper()
 
-	documents := make(map[string]models.Document)
 	statuses := []string{"active", "pending", "verified", "cancelled", "refunded"}
 	categories := []int{1, 2, 3, 4, 5, 10, 15, 20}
+	out := make([]*models.Document, 0, docCount)
 
 	for i := 0; i < docCount; i++ {
 		docID := fmt.Sprintf("doc_%d", i)
-		bob := statuses[i%len(statuses)]
-		doc := models.Document{
+		doc := &models.Document{
 			DocumentID: docID,
 			Data: map[string]interface{}{
 				"Status":     statuses[i%len(statuses)],
 				"CategoryID": categories[i%len(categories)],
 				"Priority":   i % 10,
 			},
-			Fields: map[string]models.Field{
-				"Status":     {Name: "Status", Value: models.NewStringValue(bob)},
-				"CategoryID": {Name: "CategoryID", Value: models.NewIntValue(int64(categories[i%len(categories)]))},
-				"Priority":   {Name: "Priority", Value: models.NewIntValue(int64(i % 10))},
-			},
 		}
-		documents[docID] = doc
+		out = append(out, doc)
 	}
-
-	return &models.Bundle{
-		Name:       bundleName,
-		Documents:  &documents,
-		IndexNames: []string{},
-		Indexes:    make(map[string]models.IndexReference),
-	}
+	return out
 }
 
 // TestE2E_SimpleInQuery tests basic IN query functionality
 func TestE2E_SimpleInQuery(t *testing.T) {
-	bundle := createE2ETestBundle(t, "test_simple_in", 100)
+	documents := createE2ETestDocuments(t, 100)
 	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active", "pending", "verified")`
@@ -72,10 +62,8 @@ func TestE2E_SimpleInQuery(t *testing.T) {
 	t.Logf("WhereGroup: %+v", whereGroup)
 
 	matchCount := 0
-	for docID, doc := range *bundle.Documents {
-		docPtr := &doc
-		t.Logf("Doc %s Status field: %+v", docID, doc.Fields["Status"])
-		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
+	for _, doc := range documents {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -88,7 +76,7 @@ func TestE2E_SimpleInQuery(t *testing.T) {
 
 // TestE2E_NotInQuery tests NOT IN query functionality
 func TestE2E_NotInQuery(t *testing.T) {
-	bundle := createE2ETestBundle(t, "test_not_in", 50)
+	documents := createE2ETestDocuments(t, 50)
 	logger := CreateTestLogger()
 
 	whereClause := `"Status" NOT IN ("cancelled", "refunded")`
@@ -98,9 +86,8 @@ func TestE2E_NotInQuery(t *testing.T) {
 	}
 
 	matchCount := 0
-	for _, doc := range *bundle.Documents {
-		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
+	for _, doc := range documents {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -113,7 +100,7 @@ func TestE2E_NotInQuery(t *testing.T) {
 
 // TestE2E_NumericInQuery tests IN with numeric values
 func TestE2E_NumericInQuery(t *testing.T) {
-	bundle := createE2ETestBundle(t, "test_numeric", 100)
+	documents := createE2ETestDocuments(t, 100)
 	logger := CreateTestLogger()
 
 	whereClause := `"CategoryID" IN (1, 2, 5, 10)`
@@ -128,12 +115,8 @@ func TestE2E_NumericInQuery(t *testing.T) {
 	}
 
 	matchCount := 0
-	for docID, doc := range *bundle.Documents {
-		docPtr := &doc
-		catField := doc.Fields["CategoryID"]
-		t.Logf("Doc %s CategoryID: Type=%d, IntVal=%d, AsInterface=%v",
-			docID, catField.Value.Type, catField.Value.IntVal, catField.Value.AsInterface())
-		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
+	for _, doc := range documents {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -146,7 +129,7 @@ func TestE2E_NumericInQuery(t *testing.T) {
 
 // TestE2E_InWithAndCondition tests IN combined with AND
 func TestE2E_InWithAndCondition(t *testing.T) {
-	bundle := createE2ETestBundle(t, "test_in_and", 100)
+	documents := createE2ETestDocuments(t, 100)
 	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active", "pending") AND "Priority" == 5`
@@ -156,9 +139,8 @@ func TestE2E_InWithAndCondition(t *testing.T) {
 	}
 
 	matchCount := 0
-	for _, doc := range *bundle.Documents {
-		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
+	for _, doc := range documents {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -168,7 +150,7 @@ func TestE2E_InWithAndCondition(t *testing.T) {
 
 // TestE2E_MultipleInQueries tests multiple IN clauses
 func TestE2E_MultipleInQueries(t *testing.T) {
-	bundle := createE2ETestBundle(t, "test_multiple_in", 100)
+	documents := createE2ETestDocuments(t, 100)
 	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active", "pending") AND "CategoryID" IN (1, 2, 3)`
@@ -178,9 +160,8 @@ func TestE2E_MultipleInQueries(t *testing.T) {
 	}
 
 	matchCount := 0
-	for _, doc := range *bundle.Documents {
-		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
+	for _, doc := range documents {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -190,7 +171,7 @@ func TestE2E_MultipleInQueries(t *testing.T) {
 
 // TestE2E_SingleValueOptimization tests single-value IN optimization
 func TestE2E_SingleValueOptimization(t *testing.T) {
-	bundle := createE2ETestBundle(t, "test_single_opt", 100)
+	documents := createE2ETestDocuments(t, 100)
 	logger := CreateTestLogger()
 
 	whereClause := `"Status" IN ("active")`
@@ -214,9 +195,8 @@ func TestE2E_SingleValueOptimization(t *testing.T) {
 	}
 
 	matchCount := 0
-	for _, doc := range *bundle.Documents {
-		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
+	for _, doc := range documents {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
@@ -230,7 +210,7 @@ func TestE2E_LargeInList(t *testing.T) {
 		t.Skip("Skipping large IN list test in short mode")
 	}
 
-	bundle := createE2ETestBundle(t, "test_large_in", 1000)
+	documents := createE2ETestDocuments(t, 1000)
 	logger := CreateTestLogger()
 
 	// Create IN list with 100 values
@@ -250,22 +230,21 @@ func TestE2E_LargeInList(t *testing.T) {
 	}
 
 	matchCount := 0
-	for _, doc := range *bundle.Documents {
-		docPtr := &doc
-		if EvaluateWhereClause(docPtr, whereGroup, nil, logger) {
+	for _, doc := range documents {
+		if EvaluateWhereClause(doc, whereGroup, nil, logger) {
 			matchCount++
 		}
 	}
 
 	// All documents should match (Priority is 0-9, all < 100)
-	if matchCount != len(*bundle.Documents) {
-		t.Errorf("Expected %d matches, got %d", len(*bundle.Documents), matchCount)
+	if matchCount != len(documents) {
+		t.Errorf("Expected %d matches, got %d", len(documents), matchCount)
 	}
 
 	t.Logf("Successfully processed IN query with 100 values")
 }
 
-// TestE2E_QueryParser Integration tests complete query parsing
+// TestE2E_QueryParserIntegration tests complete query parsing
 func TestE2E_QueryParserIntegration(t *testing.T) {
 	tests := []struct {
 		name        string

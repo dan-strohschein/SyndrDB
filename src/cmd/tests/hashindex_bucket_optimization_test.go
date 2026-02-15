@@ -109,7 +109,10 @@ func TestBucketComputation(t *testing.T) {
 
 	for _, key := range testCases {
 		hash := hashindexV3.ComputeHash(key)
-		bucket := hashindexV3.ComputeBucketNum(hash, numBuckets)
+		bucket, err := hashindexV3.ComputeBucketNum(hash, numBuckets)
+		if err != nil {
+			t.Fatalf("ComputeBucketNum failed for key '%s': %v", key, err)
+		}
 
 		// Bucket must be in valid range
 		if bucket >= numBuckets {
@@ -117,7 +120,10 @@ func TestBucketComputation(t *testing.T) {
 		}
 
 		// Verify convenience function matches
-		hash2, bucket2 := hashindexV3.ComputeHashAndBucket(key, numBuckets)
+		hash2, bucket2, err := hashindexV3.ComputeHashAndBucket(key, numBuckets)
+		if err != nil {
+			t.Fatalf("ComputeHashAndBucket failed for key '%s': %v", key, err)
+		}
 		if hash != hash2 || bucket != bucket2 {
 			t.Errorf("Convenience function mismatch: hash=%d/%d, bucket=%d/%d",
 				hash, hash2, bucket, bucket2)
@@ -137,7 +143,10 @@ func TestBucketDistribution(t *testing.T) {
 	for i := 0; i < numKeys; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		hash := hashindexV3.ComputeHash(key)
-		bucket := hashindexV3.ComputeBucketNum(hash, numBuckets)
+		bucket, err := hashindexV3.ComputeBucketNum(hash, numBuckets)
+		if err != nil {
+			t.Fatalf("ComputeBucketNum failed for key '%s': %v", key, err)
+		}
 		bucketCounts[bucket]++
 	}
 
@@ -192,13 +201,16 @@ func TestBucketFileOrganization(t *testing.T) {
 
 	buckets := make(map[uint32]bool)
 	for _, td := range testData {
-		err := idx.Put(td.key, td.docID, 1)
+		err := idx.Put(td.key, td.docID, 1, 0, 0)
 		if err != nil {
 			t.Fatalf("Put failed: %v", err)
 		}
 
 		hash := hashindexV3.ComputeHash(td.key)
-		bucket := hashindexV3.ComputeBucketNum(hash, 256)
+		bucket, err := hashindexV3.ComputeBucketNum(hash, 256)
+		if err != nil {
+			t.Fatalf("ComputeBucketNum failed: %v", err)
+		}
 		buckets[bucket] = true
 
 		t.Logf("Inserted '%s' -> Bucket %d", td.key, bucket)
@@ -240,7 +252,7 @@ func TestBucketOptimizedLookup(t *testing.T) {
 	for i := 0; i < numEntries; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		docID := fmt.Sprintf("doc_%d", i)
-		err := idx.Put(key, docID, uint32(i))
+		err := idx.Put(key, docID, uint32(i), 0, 0)
 		if err != nil {
 			t.Fatalf("Put failed: %v", err)
 		}
@@ -291,7 +303,7 @@ func TestCollisionHandling(t *testing.T) {
 	}
 
 	for _, td := range testData {
-		err := idx.Put(td.key, td.docID, 1)
+		err := idx.Put(td.key, td.docID, 1, 0, 0)
 		if err != nil {
 			t.Fatalf("Put(%s) failed: %v", td.key, err)
 		}
@@ -329,7 +341,7 @@ func TestStressLargeDataset(t *testing.T) {
 	for i := 0; i < numEntries; i++ {
 		key := fmt.Sprintf("stress_key_%d", i)
 		docID := fmt.Sprintf("stress_doc_%d", i)
-		err := idx.Put(key, docID, uint32(i))
+		err := idx.Put(key, docID, uint32(i), 0, 0)
 		if err != nil {
 			t.Fatalf("Put failed at entry %d: %v", i, err)
 		}
@@ -380,7 +392,7 @@ func TestEdgeCaseEmptyBuckets(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		key := fmt.Sprintf("sparse_key_%d", i)
 		docID := fmt.Sprintf("sparse_doc_%d", i)
-		err := idx.Put(key, docID, uint32(i))
+		err := idx.Put(key, docID, uint32(i), 0, 0)
 		if err != nil {
 			t.Fatalf("Put failed: %v", err)
 		}
@@ -407,7 +419,7 @@ func TestBucketFileNaming(t *testing.T) {
 	// Insert entries
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("naming_test_%d", i)
-		err := idx.Put(key, fmt.Sprintf("doc_%d", i), 1)
+		err := idx.Put(key, fmt.Sprintf("doc_%d", i), 1, 0, 0)
 		if err != nil {
 			t.Fatalf("Put failed: %v", err)
 		}
@@ -458,7 +470,7 @@ func TestUpdateAndDelete(t *testing.T) {
 	key := "update_test_key"
 
 	// Insert initial value
-	err := idx.Put(key, "doc_v1", 1)
+	err := idx.Put(key, "doc_v1", 1, 0, 0)
 	if err != nil {
 		t.Fatalf("Initial Put failed: %v", err)
 	}
@@ -470,7 +482,7 @@ func TestUpdateAndDelete(t *testing.T) {
 	}
 
 	// Update value
-	err = idx.Put(key, "doc_v2", 2)
+	err = idx.Put(key, "doc_v2", 2, 0, 0)
 	if err != nil {
 		t.Fatalf("Update Put failed: %v", err)
 	}
@@ -485,7 +497,7 @@ func TestUpdateAndDelete(t *testing.T) {
 	}
 
 	// Delete
-	deleted, err := idx.Delete(key)
+	deleted, err := idx.Delete(key, 0)
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}

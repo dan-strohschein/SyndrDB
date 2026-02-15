@@ -59,7 +59,7 @@ func TestCompaction_SetCompactor(t *testing.T) {
 	defer idx.Close()
 
 	// Verify index works without compactor
-	err = idx.Put("test_key", uuid.New().String(), 1)
+	err = idx.Put("test_key", uuid.New().String(), 1, 0, 0)
 	require.NoError(t, err, "Put should work without compactor")
 
 	// Create compactor
@@ -77,7 +77,7 @@ func TestCompaction_SetCompactor(t *testing.T) {
 	idx.SetCompactor(cm)
 
 	// Verify index still works with compactor
-	err = idx.Put("test_key2", uuid.New().String(), 1)
+	err = idx.Put("test_key2", uuid.New().String(), 1, 0, 0)
 	require.NoError(t, err, "Put should work with compactor")
 
 	t.Log("SetCompactor test passed - external injection works")
@@ -128,7 +128,7 @@ func TestCompaction_DataIntegrity(t *testing.T) {
 		key := fmt.Sprintf("key_%d", i)
 		docID := uuid.New().String()
 		entries[key] = docID
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err)
 	}
 
@@ -137,7 +137,7 @@ func TestCompaction_DataIntegrity(t *testing.T) {
 		key := fmt.Sprintf("key_%d", i)
 		newDocID := uuid.New().String()
 		entries[key] = newDocID
-		err := idx.Put(key, newDocID, 1)
+		err := idx.Put(key, newDocID, 1, 0, 0)
 		require.NoError(t, err)
 	}
 
@@ -145,7 +145,7 @@ func TestCompaction_DataIntegrity(t *testing.T) {
 	for i := 30; i < 50; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		delete(entries, key)
-		_, err := idx.Delete(key)
+		_, err := idx.Delete(key, 0)
 		require.NoError(t, err)
 	}
 
@@ -241,7 +241,7 @@ func TestCompaction_IntegrationBasic(t *testing.T) {
 		docID := uuid.New().String()
 		documentIDs[key] = docID
 
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err, "Failed to put entry %d", i)
 
 		// Periodically flush to force file creation
@@ -321,7 +321,7 @@ func TestCompaction_TriggerCheck(t *testing.T) {
 	for i := 0; i < 150; i++ {
 		key := fmt.Sprintf("key_%d", i)
 		docID := uuid.New().String()
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err)
 	}
 
@@ -378,7 +378,7 @@ func TestCompaction_ManualCompaction(t *testing.T) {
 		key := fmt.Sprintf("key_%d", i)
 		docID := uuid.New().String()
 		entries[key] = docID
-		err := idx.Put(key, docID, 1)
+		err := idx.Put(key, docID, 1, 0, 0)
 		require.NoError(t, err)
 	}
 
@@ -447,7 +447,7 @@ func TestCompaction_StatsTracking(t *testing.T) {
 
 	// Add some data
 	for i := 0; i < 50; i++ {
-		err := idx.Put(fmt.Sprintf("key_%d", i), uuid.New().String(), 1)
+		err := idx.Put(fmt.Sprintf("key_%d", i), uuid.New().String(), 1, 0, 0)
 		require.NoError(t, err)
 	}
 

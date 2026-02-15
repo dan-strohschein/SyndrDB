@@ -174,13 +174,35 @@ func LoadHistory(path string, capacity int) *RingBuffer {
 		return NewRingBuffer(capacity)
 	}
 
-	// Validate capacity matches (or adjust if needed)
+	// Migrate entries into a correctly-sized buffer when capacity changed
 	if rb.Capacity != capacity {
-		// TODO: Handle capacity mismatch - for now, use loaded capacity
-		// Could implement migration logic to resize buffer while preserving entries
+		newRB := NewRingBuffer(capacity)
+		entries := rb.ToSlice()
+		for _, cmd := range entries {
+			newRB.Add(cmd)
+		}
+		return newRB
 	}
 
 	return &rb
+}
+
+// Len returns the number of entries currently stored in the ring buffer
+func (rb *RingBuffer) Len() int {
+	return rb.Count
+}
+
+// Get returns the command at the given chronological index (0 = oldest).
+// Returns "" if index is out of range. O(1) access.
+func (rb *RingBuffer) Get(index int) string {
+	if index < 0 || index >= rb.Count {
+		return ""
+	}
+	if rb.Count < rb.Capacity {
+		return rb.Entries[index]
+	}
+	// Buffer is full — oldest is at Head
+	return rb.Entries[(rb.Head+index)%rb.Capacity]
 }
 
 // TODO (FUTURE ENHANCEMENT): Add search functionality

@@ -55,11 +55,8 @@ func createTestBundleWithDocs(name string, fields map[string]models.FieldDefinit
 		},
 		Indexes:           make(map[string]models.IndexReference),
 		Relationships:     make(map[string]models.Relationship),
-		Documents:         &documentsMap,
 		DocumentsComplete: true,
 	}
-
-	// Create database
 	bundle.Database = &models.Database{
 		Name:    "testdb",
 		Bundles: make(map[string]models.Bundle),

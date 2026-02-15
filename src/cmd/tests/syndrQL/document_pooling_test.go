@@ -18,8 +18,7 @@ func TestDocumentPoolReuse(t *testing.T) {
 
 	// Set some data
 	doc1.DocumentID = "test-doc-1"
-	doc1.Fields = make(map[string]models.Field)
-	doc1.Fields["name"] = models.Field{Name: "name", Value: models.NewStringValue("Test Document")}
+	doc1.Data = map[string]interface{}{"name": "Test Document"}
 
 	// Return it to the pool
 	document.ReturnPooledDocument(doc1)
@@ -34,8 +33,8 @@ func TestDocumentPoolReuse(t *testing.T) {
 	if doc2.DocumentID != "" {
 		t.Errorf("Expected empty DocumentID after pool return, got: %s", doc2.DocumentID)
 	}
-	if len(doc2.Fields) != 0 {
-		t.Errorf("Expected empty Fields map after pool return, got %d fields", len(doc2.Fields))
+	if doc2.Data != nil || len(doc2.Data) != 0 {
+		t.Errorf("Expected empty Data map after pool return, got %d entries", len(doc2.Data))
 	}
 
 	// Clean up

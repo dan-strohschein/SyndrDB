@@ -225,14 +225,13 @@ func TestDropRelationship_FieldsPreserved(t *testing.T) {
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addAuthorCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to add author document")
 
-	// Get the author's DocumentID
+	// Get the author's DocumentID via GetDocumentsByFilter (bundle has no Documents map)
 	authorsBundle, err := fixture.ServiceManager.BundleService.GetBundleByName(fixture.Database, "Authors")
 	require.NoError(t, err, "Failed to get Authors bundle")
-	var authorDocID string
-	for docID := range *authorsBundle.Documents {
-		authorDocID = docID
-		break
-	}
+	authorDocs, err := fixture.ServiceManager.BundleService.GetDocumentsByFilter(authorsBundle, "", nil)
+	require.NoError(t, err, "Failed to get author documents")
+	require.NotEmpty(t, authorDocs, "Expected at least one author document")
+	authorDocID := authorDocs[0].DocumentID
 
 	// STEP 4: Add a book document with foreign key reference
 	addBookCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"ID"=1}, {"Title"="Test Book"}, {"AuthorsID"="%s"});`, authorDocID)

@@ -9,7 +9,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// Function aliases for sorting functions
+// Function aliases for sorting functions (RadixSort is declared in sorting_parallel_radix_test.go)
 var (
 	ShouldUseRadixSort = sorting.ShouldUseRadixSort
 )
@@ -18,70 +18,38 @@ var (
 func TestRadixSort_ASC(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
-	// Create test documents with integer ages
+	// Create test documents with integer ages (Data only; sort reads via schema/Data)
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Alice")},
-				"age":  {Name: "age", Value: models.NewIntValue(int64(35))},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Bob")},
-				"age":  {Name: "age", Value: models.NewIntValue(int64(28))},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
-				"age":  {Name: "age", Value: models.NewIntValue(int64(42))},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Diana")},
-				"age":  {Name: "age", Value: models.NewIntValue(int64(18))},
-			},
-		},
-		"doc5": {
-			DocumentID: "doc5",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Eve")},
-				"age":  {Name: "age", Value: models.NewIntValue(int64(25))},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"name": "Alice", "age": int64(35)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"name": "Bob", "age": int64(28)}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"name": "Charlie", "age": int64(42)}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"name": "Diana", "age": int64(18)}},
+		"doc5": {DocumentID: "doc5", Data: map[string]interface{}{"name": "Eve", "age": int64(25)}},
 	}
 
-	// Sort ascending
-	result, err := RadixSort(docs, "age", true, logger)
+	schema := sortSchema("age")
+	result, err := RadixSort(docs, "age", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
 
-	// Verify results
 	if len(result) != 5 {
 		t.Errorf("Expected 5 results, got %d", len(result))
 	}
 
-	// Check order: 18, 25, 28, 35, 42
 	expectedAges := []int64{18, 25, 28, 35, 42}
 	for i, doc := range result {
-		age, _ := doc.Fields["age"].Value.AsInt()
+		age, _ := getSortResultInt(doc, nil, "age")
 		if age != expectedAges[i] {
 			t.Errorf("Result[%d]: expected age %d, got %d", i, expectedAges[i], age)
 		}
 	}
 
-	age0, _ := result[0].Fields["age"].Value.AsInt()
-	age1, _ := result[1].Fields["age"].Value.AsInt()
-	age2, _ := result[2].Fields["age"].Value.AsInt()
-	age3, _ := result[3].Fields["age"].Value.AsInt()
-	age4, _ := result[4].Fields["age"].Value.AsInt()
+	age0, _ := getSortResultInt(result[0], nil, "age")
+	age1, _ := getSortResultInt(result[1], nil, "age")
+	age2, _ := getSortResultInt(result[2], nil, "age")
+	age3, _ := getSortResultInt(result[3], nil, "age")
+	age4, _ := getSortResultInt(result[4], nil, "age")
 	t.Logf("ASC radix sort correct: %d, %d, %d, %d, %d", age0, age1, age2, age3, age4)
 }
 
@@ -89,58 +57,35 @@ func TestRadixSort_ASC(t *testing.T) {
 func TestRadixSort_DESC(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
-	// Create test documents
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(100))},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(250))},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(175))},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(50))},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"score": int64(100)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"score": int64(250)}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"score": int64(175)}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"score": int64(50)}},
 	}
 
-	// Sort descending
-	result, err := RadixSort(docs, "score", false, logger)
+	schema := sortSchema("score")
+	result, err := RadixSort(docs, "score", false, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
 
-	// Verify results
 	if len(result) != 4 {
 		t.Errorf("Expected 4 results, got %d", len(result))
 	}
 
-	// Check order: 250, 175, 100, 50
 	expectedScores := []int64{250, 175, 100, 50}
 	for i, doc := range result {
-		score, _ := doc.Fields["score"].Value.AsInt()
+		score, _ := getSortResultInt(doc, nil, "score")
 		if score != expectedScores[i] {
 			t.Errorf("Result[%d]: expected score %d, got %d", i, expectedScores[i], score)
 		}
 	}
 
-	score0, _ := result[0].Fields["score"].Value.AsInt()
-	score1, _ := result[1].Fields["score"].Value.AsInt()
-	score2, _ := result[2].Fields["score"].Value.AsInt()
-	score3, _ := result[3].Fields["score"].Value.AsInt()
+	score0, _ := getSortResultInt(result[0], nil, "score")
+	score1, _ := getSortResultInt(result[1], nil, "score")
+	score2, _ := getSortResultInt(result[2], nil, "score")
+	score3, _ := getSortResultInt(result[3], nil, "score")
 	t.Logf("DESC radix sort correct: %d, %d, %d, %d", score0, score1, score2, score3)
 }
 
@@ -148,60 +93,33 @@ func TestRadixSort_DESC(t *testing.T) {
 func TestRadixSort_NegativeNumbers(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
-	// Create test documents with negative, zero, and positive values
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(-15))},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(0))},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(25))},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(-5))},
-			},
-		},
-		"doc5": {
-			DocumentID: "doc5",
-			Fields: map[string]models.Field{
-				"temperature": {Name: "temperature", Value: models.NewIntValue(int64(10))},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"temperature": int64(-15)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"temperature": int64(0)}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"temperature": int64(25)}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"temperature": int64(-5)}},
+		"doc5": {DocumentID: "doc5", Data: map[string]interface{}{"temperature": int64(10)}},
 	}
 
-	// Sort ascending
-	result, err := RadixSort(docs, "temperature", true, logger)
+	schema := sortSchema("temperature")
+	result, err := RadixSort(docs, "temperature", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
 
-	// Verify results: -15, -5, 0, 10, 25
 	expectedTemps := []int64{-15, -5, 0, 10, 25}
 	for i, doc := range result {
-		temp, _ := doc.Fields["temperature"].Value.AsInt()
+		temp, _ := getSortResultInt(doc, nil, "temperature")
 		if temp != expectedTemps[i] {
 			t.Errorf("Result[%d]: expected temp %d, got %d", i, expectedTemps[i], temp)
 		}
 	}
 
-	temp0, _ := result[0].Fields["temperature"].Value.AsInt()
-	temp1, _ := result[1].Fields["temperature"].Value.AsInt()
-	temp2, _ := result[2].Fields["temperature"].Value.AsInt()
-	temp3, _ := result[3].Fields["temperature"].Value.AsInt()
-	temp4, _ := result[4].Fields["temperature"].Value.AsInt()
+	temp0, _ := getSortResultInt(result[0], nil, "temperature")
+	temp1, _ := getSortResultInt(result[1], nil, "temperature")
+	temp2, _ := getSortResultInt(result[2], nil, "temperature")
+	temp3, _ := getSortResultInt(result[3], nil, "temperature")
+	temp4, _ := getSortResultInt(result[4], nil, "temperature")
 	t.Logf("Negative number sort correct: %d, %d, %d, %d, %d", temp0, temp1, temp2, temp3, temp4)
 }
 
@@ -210,52 +128,31 @@ func TestRadixSort_LargeNumbers(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: models.NewIntValue(int64(9223372036854775807))}, // Max int64
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: models.NewIntValue(int64(1000000000000))}, // 1 trillion
-			},
-		},
-		"doc3": {
-			DocumentID: "min",
-			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: models.NewIntValue(int64(-9223372036854775808))}, // Min int64
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"value": {Name: "value", Value: models.NewIntValue(int64(0))},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"value": int64(9223372036854775807)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"value": int64(1000000000000)}},
+		"min":  {DocumentID: "min", Data: map[string]interface{}{"value": int64(-9223372036854775808)}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"value": int64(0)}},
 	}
 
-	// Sort ascending
-	result, err := RadixSort(docs, "value", true, logger)
+	schema := sortSchema("value")
+	result, err := RadixSort(docs, "value", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
 
-	// Verify order: min, 0, 1T, max
 	if len(result) != 4 {
 		t.Fatalf("Expected 4 results, got %d", len(result))
 	}
 
 	expectedValues := []int64{
-		-9223372036854775808, // Min int64
+		-9223372036854775808,
 		0,
-		1000000000000,       // 1 trillion
-		9223372036854775807, // Max int64
+		1000000000000,
+		9223372036854775807,
 	}
 
 	for i, doc := range result {
-		value, _ := doc.Fields["value"].Value.AsInt()
+		value, _ := getSortResultInt(doc, nil, "value")
 		if value != expectedValues[i] {
 			t.Errorf("Result[%d]: expected %d, got %d", i, expectedValues[i], value)
 		}
@@ -269,37 +166,20 @@ func TestRadixSort_Int32(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"count": {Name: "count", Value: models.NewIntValue(int64(500))},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"count": {Name: "count", Value: models.NewIntValue(int64(100))},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"count": {Name: "count", Value: models.NewIntValue(int64(300))},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"count": int64(500)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"count": int64(100)}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"count": int64(300)}},
 	}
 
-	// Sort ascending
-	result, err := RadixSort(docs, "count", true, logger)
+	schema := sortSchema("count")
+	result, err := RadixSort(docs, "count", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
 
-	// Verify order: 100, 300, 500
-	expectedCounts := []int64{100, 300, 500} // Converted to int64
+	expectedCounts := []int64{100, 300, 500}
 	for i, doc := range result {
-		// int32 is converted to int64 internally
-		count, _ := doc.Fields["count"].Value.AsInt()
+		count, _ := getSortResultInt(doc, nil, "count")
 		if count != expectedCounts[i] {
 			t.Errorf("Result[%d]: expected %d, got %d", i, expectedCounts[i], count)
 		}
@@ -314,7 +194,8 @@ func TestRadixSort_EmptyInput(t *testing.T) {
 
 	docs := map[string]*models.Document{}
 
-	result, err := RadixSort(docs, "age", true, logger)
+	schema := sortSchema("age")
+	result, err := RadixSort(docs, "age", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
@@ -329,22 +210,12 @@ func TestRadixSort_MissingField(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Alice")},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Bob")},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"name": "Alice"}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"name": "Bob"}},
 	}
 
-	// Try to sort by non-existent field
-	result, err := RadixSort(docs, "age", true, logger)
+	schema := sortSchema("age")
+	result, err := RadixSort(docs, "age", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
@@ -360,22 +231,12 @@ func TestRadixSort_NonIntegerField(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Alice")},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Bob")},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"name": "Alice"}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"name": "Bob"}},
 	}
 
-	// Try to sort string field with radix sort
-	result, err := RadixSort(docs, "name", true, logger)
+	schema := sortSchema("name")
+	result, err := RadixSort(docs, "name", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
@@ -391,15 +252,11 @@ func TestRadixSort_SingleDocument(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"age": {Name: "age", Value: models.NewIntValue(int64(30))},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"age": int64(30)}},
 	}
 
-	result, err := RadixSort(docs, "age", true, logger)
+	schema := sortSchema("age")
+	result, err := RadixSort(docs, "age", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
@@ -418,33 +275,14 @@ func TestRadixSort_DuplicateValues(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	docs := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(100))},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(200))},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(100))},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"score": {Name: "score", Value: models.NewIntValue(int64(200))},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"score": int64(100)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"score": int64(200)}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"score": int64(100)}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"score": int64(200)}},
 	}
 
-	result, err := RadixSort(docs, "score", true, logger)
+	schema := sortSchema("score")
+	result, err := RadixSort(docs, "score", true, logger, schema)
 	if err != nil {
 		t.Fatalf("RadixSort failed: %v", err)
 	}
@@ -453,16 +291,15 @@ func TestRadixSort_DuplicateValues(t *testing.T) {
 		t.Errorf("Expected 4 results, got %d", len(result))
 	}
 
-	// Verify all 100s come before all 200s
 	for i := 0; i < 2; i++ {
-		score, _ := result[i].Fields["score"].Value.AsInt()
+		score, _ := getSortResultInt(result[i], nil, "score")
 		if score != 100 {
 			t.Errorf("Result[%d]: expected score 100, got %d", i, score)
 		}
 	}
 
 	for i := 2; i < 4; i++ {
-		score, _ := result[i].Fields["score"].Value.AsInt()
+		score, _ := getSortResultInt(result[i], nil, "score")
 		if score != 200 {
 			t.Errorf("Result[%d]: expected score 200, got %d", i, score)
 		}
@@ -554,20 +391,18 @@ func TestShouldUseRadixSort(t *testing.T) {
 func BenchmarkRadixSort_1000(b *testing.B) {
 	logger := zap.NewNop().Sugar()
 
-	// Create 1000 documents with random ages
 	docs := make(map[string]*models.Document, 1000)
 	for i := 0; i < 1000; i++ {
 		docs[fmt.Sprintf("doc%d", i)] = &models.Document{
 			DocumentID: fmt.Sprintf("doc%d", i),
-			Fields: map[string]models.Field{
-				"age": {Name: "age", Value: models.NewIntValue(int64(i % 100))},
-			},
+			Data:       map[string]interface{}{"age": int64(i % 100)},
 		}
 	}
+	schema := sortSchema("age")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		RadixSort(docs, "age", true, logger)
+		RadixSort(docs, "age", true, logger, schema)
 	}
 }
 
@@ -575,19 +410,17 @@ func BenchmarkRadixSort_1000(b *testing.B) {
 func BenchmarkRadixSort_10000(b *testing.B) {
 	logger := zap.NewNop().Sugar()
 
-	// Create 10000 documents
 	docs := make(map[string]*models.Document, 10000)
 	for i := 0; i < 10000; i++ {
 		docs[fmt.Sprintf("doc%d", i)] = &models.Document{
 			DocumentID: fmt.Sprintf("doc%d", i),
-			Fields: map[string]models.Field{
-				"age": {Name: "age", Value: models.NewIntValue(int64(i % 1000))},
-			},
+			Data:       map[string]interface{}{"age": int64(i % 1000)},
 		}
 	}
+	schema := sortSchema("age")
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		RadixSort(docs, "age", true, logger)
+		RadixSort(docs, "age", true, logger, schema)
 	}
 }

@@ -1,33 +1,98 @@
 // B-tree Range Scan Integration Tests
 //
-// NOTE: This test file is currently disabled because it tests query planner
-// functionality (IndexScanNode.executeBTreeRangeScan) that hasn't been implemented yet.
-// The IndexScanNode type exists in src/internal/query/planner/planner.go but the
-// executeBTreeRangeScan, convertToBytes, and other methods tested here are not yet implemented.
-//
-// To enable these tests:
-// 1. Implement the executeBTreeRangeScan method on IndexScanNode
-// 2. Implement the convertToBytes helper method
-// 3. Ensure proper integration with B-tree range queries
-// 4. Remove the build tag at the top of this file
+// Tests IndexScanNode B-tree range scan (executeBTreeRangeScan), operator-to-key-range
+// conversion (OperatorToKeyRange), and type conversion (ConvertToBytes). Uses a mock
+// BundleService that returns documents by ID so range scan can resolve doc IDs to full documents.
+// Documents use the schema-ordered Values model with BundleFieldSchema.
 
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/index/btreeindexV2"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/query/documentscanner"
 	"syndrdb/src/internal/query/planner"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+// btreeRangeScanSchema defines field order for test documents (age, name).
+var btreeRangeScanSchema = models.BuildBundleFieldSchemaFromNames([]string{"age", "name"})
+
+// mockBundleServiceForBTreeRangeScan implements planner.BundleServiceInterface for B-tree range scan tests.
+// It returns documents from a map by ID and passes through B-tree index from the bundle.
+type mockBundleServiceForBTreeRangeScan struct {
+	docsByID map[string]*models.Document
+}
+
+func (m *mockBundleServiceForBTreeRangeScan) GetDocument(bundleName, databaseName, documentID string, _ ...interface{}) (*models.Document, error) {
+	if doc, ok := m.docsByID[documentID]; ok {
+		return doc, nil
+	}
+	return nil, nil
+}
+
+func (m *mockBundleServiceForBTreeRangeScan) GetOrLoadBTreeIndex(b *models.Bundle, indexName string, indexRef models.IndexReference) (interface{}, error) {
+	return indexRef.IndexInstance, nil
+}
+
+func (m *mockBundleServiceForBTreeRangeScan) GetOrLoadHashIndexInterface(_ *models.Bundle, _ string, _ models.IndexReference) (interface{}, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetOrCreateDocumentScanner(_ *models.Bundle) (documentscanner.DocumentScannerInterface, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetBundleByName(_ *models.Database, _ string) (*models.Bundle, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetAllDocumentsForIndexing(_ string) ([]*models.Document, error) {
+	return nil, nil
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetAllDocumentsForIndexingWithOptions(_ string, _ *bundle.IndexingOptions) ([]*models.Document, error) {
+	return nil, nil
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetDocumentChunksForIndexing(_ context.Context, _ string, _ int, _ func(chunk []*models.Document) (stop bool)) error {
+	return nil
+}
+func (m *mockBundleServiceForBTreeRangeScan) SetProjectionFieldsForBundle(_ string, _ []string) {}
+func (m *mockBundleServiceForBTreeRangeScan) CountDocuments(_, _ string) (int, error) {
+	return len(m.docsByID), nil
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetDocumentPage(_, _ string, _ uint32) (*models.DocumentPage, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetDocumentPageReadOnly(_, _ string, _ uint32) (*models.DocumentPage, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockBundleServiceForBTreeRangeScan) SnapshotPageDocuments(_, _ string, _ uint32) ([]models.Document, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockBundleServiceForBTreeRangeScan) CopyProjectedFromCache(_, _ string, _ uint32, _ []string, _ int, _ *models.BundleFieldSchema) (map[string]*documentscanner.ProjectedDocument, int, int, int, error) {
+	return nil, 0, 0, 0, fmt.Errorf("not implemented")
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetDocumentsByIDs(b *models.Bundle, docIDs []string) ([]*models.Document, error) {
+	out := make([]*models.Document, 0, len(docIDs))
+	for _, id := range docIDs {
+		if doc, ok := m.docsByID[id]; ok {
+			out = append(out, doc)
+		}
+	}
+	return out, nil
+}
+func (m *mockBundleServiceForBTreeRangeScan) GetDocumentsByIDsFromCacheDirect(b *models.Bundle, docIDs []string) []*models.Document {
+	out, _ := m.GetDocumentsByIDs(b, docIDs)
+	return out
+}
 
 // TestBTreeRangeScanIntegration tests the integration between query planner and B-tree range scans
 func TestBTreeRangeScanIntegration(t *testing.T) {
@@ -73,27 +138,27 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 		require.NoError(t, err, "Failed to insert age=%d, docID=%s", age, docID)
 	}
 
-	// Create mock bundle with documents
-	documents := make(map[string]models.Document)
+	// Build documents with schema-ordered Values (age, name) for mock lookup
+	docsByID := make(map[string]*models.Document)
+	now := time.Now().UTC()
 	for docID, age := range testData {
-		documents[docID] = models.Document{
+		docsByID[docID] = &models.Document{
 			DocumentID: docID,
-			Fields: map[string]models.Field{
-				"age": {
-					Name:  "age",
-					Value: models.NewIntValue(int64(age)),
-				},
-				"name": {
-					Name:  "name",
-					Value: models.NewStringValue(fmt.Sprintf("Person_%s", docID)),
-				},
+			Values: []models.FieldValue{
+				models.NewIntValue(int64(age)),
+				models.NewStringValue(fmt.Sprintf("Person_%s", docID)),
 			},
+			CreatedAt: now,
+			UpdatedAt: now,
 		}
 	}
+	mockSvc := &mockBundleServiceForBTreeRangeScan{docsByID: docsByID}
 
 	bundle := &models.Bundle{
-		Name:      "test_bundle",
-		Documents: &documents,
+		Name: "test_bundle",
+		Database: &models.Database{
+			Name: dbName,
+		},
 		Indexes: map[string]models.IndexReference{
 			"age_index": {
 				IndexName:     "age_index",
@@ -106,12 +171,13 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 	// Test Case 1: Greater Than (age > 25)
 	t.Run("GreaterThan", func(t *testing.T) {
 		node := &planner.IndexScanNode{
-			Bundle:    bundle,
-			IndexName: "age_index",
-			ScanType:  planner.BTreeRangeScan,
-			Operator:  ">",
-			SearchKey: "025", // age 25
-			Logger:    sugaredLogger,
+			Bundle:           bundle,
+			IndexName:        "age_index",
+			ScanType:         planner.BTreeRangeScan,
+			Operator:         ">",
+			SearchKey:        "025", // age 25
+			Logger:            sugaredLogger,
+			BundleServiceInt: mockSvc,
 		}
 
 		results, err := node.ExecuteBTreeRangeScan()
@@ -121,20 +187,22 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 		assert.GreaterOrEqual(t, len(results), 5, "Should find at least 5 documents with age > 25")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.IntVal
-			assert.Greater(t, age, int64(25), "Document %s has age %d, expected > 25", docID, age)
+			ageVal, ok := doc.GetFieldValue(btreeRangeScanSchema, "age")
+			require.True(t, ok, "document %s missing age", docID)
+			assert.Greater(t, ageVal.IntVal, int64(25), "Document %s has age %d, expected > 25", docID, ageVal.IntVal)
 		}
 	})
 
 	// Test Case 2: Greater Than or Equal (age >= 30)
 	t.Run("GreaterThanOrEqual", func(t *testing.T) {
 		node := &planner.IndexScanNode{
-			Bundle:    bundle,
-			IndexName: "age_index",
-			ScanType:  planner.BTreeRangeScan,
-			Operator:  ">=",
-			SearchKey: "030", // age 30
-			Logger:    sugaredLogger,
+			Bundle:           bundle,
+			IndexName:        "age_index",
+			ScanType:         planner.BTreeRangeScan,
+			Operator:         ">=",
+			SearchKey:        "030", // age 30
+			Logger:            sugaredLogger,
+			BundleServiceInt: mockSvc,
 		}
 
 		results, err := node.ExecuteBTreeRangeScan()
@@ -144,20 +212,22 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 		assert.GreaterOrEqual(t, len(results), 4, "Should find at least 4 documents with age >= 30")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.IntVal
-			assert.GreaterOrEqual(t, age, int64(30), "Document %s has age %d, expected >= 30", docID, age)
+			ageVal, ok := doc.GetFieldValue(btreeRangeScanSchema, "age")
+			require.True(t, ok, "document %s missing age", docID)
+			assert.GreaterOrEqual(t, ageVal.IntVal, int64(30), "Document %s has age %d, expected >= 30", docID, ageVal.IntVal)
 		}
 	})
 
 	// Test Case 3: Less Than or Equal (age <= 20)
 	t.Run("LessThanOrEqual", func(t *testing.T) {
 		node := &planner.IndexScanNode{
-			Bundle:    bundle,
-			IndexName: "age_index",
-			ScanType:  planner.BTreeRangeScan,
-			Operator:  "<=",
-			SearchKey: "020", // age 20
-			Logger:    sugaredLogger,
+			Bundle:           bundle,
+			IndexName:        "age_index",
+			ScanType:         planner.BTreeRangeScan,
+			Operator:         "<=",
+			SearchKey:        "020", // age 20
+			Logger:            sugaredLogger,
+			BundleServiceInt: mockSvc,
 		}
 
 		results, err := node.ExecuteBTreeRangeScan()
@@ -167,21 +237,23 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 		assert.GreaterOrEqual(t, len(results), 3, "Should find at least 3 documents with age <= 20")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.IntVal
-			assert.LessOrEqual(t, age, int64(20), "Document %s has age %d, expected <= 20", docID, age)
+			ageVal, ok := doc.GetFieldValue(btreeRangeScanSchema, "age")
+			require.True(t, ok, "document %s missing age", docID)
+			assert.LessOrEqual(t, ageVal.IntVal, int64(20), "Document %s has age %d, expected <= 20", docID, ageVal.IntVal)
 		}
 	})
 
 	// Test Case 4: BETWEEN (age BETWEEN 20 AND 30)
 	t.Run("Between", func(t *testing.T) {
 		node := &planner.IndexScanNode{
-			Bundle:     bundle,
-			IndexName:  "age_index",
-			ScanType:   planner.BTreeRangeScan,
-			Operator:   "BETWEEN",
-			RangeStart: "020", // age 20
-			RangeEnd:   "030", // age 30
-			Logger:     sugaredLogger,
+			Bundle:           bundle,
+			IndexName:        "age_index",
+			ScanType:         planner.BTreeRangeScan,
+			Operator:         "BETWEEN",
+			RangeStart:        "020", // age 20
+			RangeEnd:          "030", // age 30
+			Logger:            sugaredLogger,
+			BundleServiceInt: mockSvc,
 		}
 
 		results, err := node.ExecuteBTreeRangeScan()
@@ -191,21 +263,23 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 		assert.GreaterOrEqual(t, len(results), 5, "Should find at least 5 documents with age BETWEEN 20 AND 30")
 
 		for docID, doc := range results {
-			age := doc.Fields["age"].Value.IntVal
-			assert.GreaterOrEqual(t, age, int64(20), "Document %s has age %d, expected >= 20", docID, age)
-			assert.LessOrEqual(t, age, int64(30), "Document %s has age %d, expected <= 30", docID, age)
+			ageVal, ok := doc.GetFieldValue(btreeRangeScanSchema, "age")
+			require.True(t, ok, "document %s missing age", docID)
+			assert.GreaterOrEqual(t, ageVal.IntVal, int64(20), "Document %s has age %d, expected >= 20", docID, ageVal.IntVal)
+			assert.LessOrEqual(t, ageVal.IntVal, int64(30), "Document %s has age %d, expected <= 30", docID, ageVal.IntVal)
 		}
 	})
 
 	// Test Case 5: Empty Result Set (age > 100)
 	t.Run("EmptyResultSet", func(t *testing.T) {
 		node := &planner.IndexScanNode{
-			Bundle:    bundle,
-			IndexName: "age_index",
-			ScanType:  planner.BTreeRangeScan,
-			Operator:  ">",
-			SearchKey: "100", // age 100
-			Logger:    sugaredLogger,
+			Bundle:           bundle,
+			IndexName:        "age_index",
+			ScanType:         planner.BTreeRangeScan,
+			Operator:         ">",
+			SearchKey:        "100", // age 100
+			Logger:            sugaredLogger,
+			BundleServiceInt: mockSvc,
 		}
 
 		results, err := node.ExecuteBTreeRangeScan()
@@ -216,12 +290,12 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 	// Test Case 6: Error handling - missing range values for BETWEEN
 	t.Run("BetweenMissingRangeValues", func(t *testing.T) {
 		node := &planner.IndexScanNode{
-			Bundle:    bundle,
-			IndexName: "age_index",
-			ScanType:  planner.BTreeRangeScan,
-			Operator:  "BETWEEN",
-			// Missing RangeStart and RangeEnd
-			Logger: sugaredLogger,
+			Bundle:           bundle,
+			IndexName:        "age_index",
+			ScanType:         planner.BTreeRangeScan,
+			Operator:         "BETWEEN",
+			Logger:            sugaredLogger,
+			BundleServiceInt: mockSvc,
 		}
 
 		_, err := node.ExecuteBTreeRangeScan()
@@ -232,12 +306,13 @@ func TestBTreeRangeScanIntegration(t *testing.T) {
 	// Test Case 7: Error handling - unsupported operator
 	t.Run("UnsupportedOperator", func(t *testing.T) {
 		node := &planner.IndexScanNode{
-			Bundle:    bundle,
-			IndexName: "age_index",
-			ScanType:  planner.BTreeRangeScan,
-			Operator:  "LIKE", // Not supported for range scans
-			SearchKey: "025",
-			Logger:    sugaredLogger,
+			Bundle:           bundle,
+			IndexName:        "age_index",
+			ScanType:         planner.BTreeRangeScan,
+			Operator:         "LIKE", // Not supported for range scans
+			SearchKey:        "025",
+			Logger:            sugaredLogger,
+			BundleServiceInt: mockSvc,
 		}
 
 		_, err := node.ExecuteBTreeRangeScan()

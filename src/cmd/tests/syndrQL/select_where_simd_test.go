@@ -120,7 +120,7 @@ func executeSelectQuery(t testing.TB, fixture *TestFixture, query string) []*mod
 	}
 
 	// Handle streaming response (newer format) - convert map to slice
-	if cmdResp.StreamDocuments != nil && len(cmdResp.StreamDocuments) > 0 {
+	if len(cmdResp.StreamDocuments) > 0 {
 		docs := make([]*models.Document, 0, len(cmdResp.StreamDocuments))
 		for _, doc := range cmdResp.StreamDocuments {
 			docs = append(docs, doc)
@@ -142,39 +142,21 @@ func executeSelectQuery(t testing.TB, fixture *TestFixture, query string) []*mod
 			t.Fatalf("Expected []*models.Document or []map[string]interface{}, got %T", cmdResp.Result)
 		}
 
-		// Reconstruct Document objects from flattened format
+		// Reconstruct Document objects from flattened format (use Data, not Fields)
 		docs := make([]*models.Document, 0, len(flatDocs))
 		for _, flatDoc := range flatDocs {
 			doc := &models.Document{
-				Fields: make(map[string]models.Field),
+				Data: make(map[string]interface{}),
 			}
 
-			// Extract DocumentID if present
-			if docID, exists := flatDoc["DocumentID"]; exists {
-				if docIDStr, ok := docID.(string); ok {
-					doc.DocumentID = docIDStr
-				}
-			}
-
-			// Copy all other fields
 			for key, value := range flatDoc {
 				if key == "DocumentID" {
-					continue // Already handled
+					if docIDStr, ok := value.(string); ok {
+						doc.DocumentID = docIDStr
+					}
+					continue
 				}
-
-				// Convert to FieldValue and create Field
-				var fieldValue models.FieldValue
-				if fv, ok := value.(models.FieldValue); ok {
-					fieldValue = fv
-				} else {
-					// Wrap in interface FieldValue if not already a FieldValue
-					fieldValue = models.NewInterfaceValue(value)
-				}
-
-				doc.Fields[key] = models.Field{
-					Name:  key,
-					Value: fieldValue,
-				}
+				doc.Data[key] = value
 			}
 
 			docs = append(docs, doc)
@@ -185,18 +167,31 @@ func executeSelectQuery(t testing.TB, fixture *TestFixture, query string) []*mod
 	return docs
 }
 
+// getDocFloat64 returns the float64 value for field from doc.Data.
+func getDocFloat64(doc *models.Document, field string) (float64, bool) {
+	if doc == nil || doc.Data == nil {
+		return 0, false
+	}
+	if v, ok := doc.Data[field]; ok && v != nil {
+		switch n := v.(type) {
+		case float64:
+			return n, true
+		case int:
+			return float64(n), true
+		case int64:
+			return float64(n), true
+		}
+	}
+	return 0, false
+}
+
 // validateStringField validates that a document field matches expected string value
 func validateStringField(t testing.TB, doc *models.Document, fieldName, expectedValue string) {
 	t.Helper()
 
-	field, exists := doc.Fields[fieldName]
-	if !exists {
-		t.Fatalf("Document missing field %s", fieldName)
-	}
-
-	actualValue, ok := field.Value.AsString()
+	actualValue, ok := getDocString(doc, fieldName)
 	if !ok {
-		t.Fatalf("Field %s is not a string: %v", fieldName, field.Value)
+		t.Fatalf("Document missing field %s or not a string", fieldName)
 	}
 
 	if actualValue != expectedValue {
@@ -208,14 +203,9 @@ func validateStringField(t testing.TB, doc *models.Document, fieldName, expected
 func validateIntFieldGreaterThan(t testing.TB, doc *models.Document, fieldName string, threshold int64) {
 	t.Helper()
 
-	field, exists := doc.Fields[fieldName]
-	if !exists {
-		t.Fatalf("Document missing field %s", fieldName)
-	}
-
-	actualValue, ok := field.Value.AsInt()
+	actualValue, ok := getDocInt64(doc, fieldName)
 	if !ok {
-		t.Fatalf("Field %s is not an integer: %v", fieldName, field.Value)
+		t.Fatalf("Document missing field %s or not an integer", fieldName)
 	}
 
 	if actualValue <= threshold {
@@ -227,14 +217,9 @@ func validateIntFieldGreaterThan(t testing.TB, doc *models.Document, fieldName s
 func validateFloatFieldGreaterThan(t testing.TB, doc *models.Document, fieldName string, threshold float64) {
 	t.Helper()
 
-	field, exists := doc.Fields[fieldName]
-	if !exists {
-		t.Fatalf("Document missing field %s", fieldName)
-	}
-
-	actualValue, ok := field.Value.AsFloat()
+	actualValue, ok := getDocFloat64(doc, fieldName)
 	if !ok {
-		t.Fatalf("Field %s is not a float: %v", fieldName, field.Value)
+		t.Fatalf("Document missing field %s or not a float", fieldName)
 	}
 
 	if actualValue <= threshold {
@@ -248,7 +233,7 @@ func validateFloatFieldGreaterThan(t testing.TB, doc *models.Document, fieldName
 
 // TestWhereSIMD_StringEquality verifies SIMD string equality comparisons
 func TestWhereSIMD_StringEquality(t *testing.T) {
-	fixture := setupRealServer(t)
+	fixture := setupFullServer(t)
 	seedRandomizedAuthors(t, fixture, 100)
 
 	// Ensure SIMD is enabled
@@ -273,7 +258,7 @@ func TestWhereSIMD_StringEquality(t *testing.T) {
 
 // TestWhereSIMD_IntegerRange verifies SIMD integer range comparisons
 func TestWhereSIMD_IntegerRange(t *testing.T) {
-	fixture := setupRealServer(t)
+	fixture := setupFullServer(t)
 	seedRandomizedAuthors(t, fixture, 100)
 
 	// Ensure SIMD is enabled
@@ -298,7 +283,7 @@ func TestWhereSIMD_IntegerRange(t *testing.T) {
 
 // TestWhereSIMD_MultiCondition verifies SIMD works with AND/OR logic
 func TestWhereSIMD_MultiCondition(t *testing.T) {
-	fixture := setupRealServer(t)
+	fixture := setupFullServer(t)
 	seedRandomizedAuthors(t, fixture, 100)
 
 	// Ensure SIMD is enabled
@@ -319,7 +304,7 @@ func TestWhereSIMD_MultiCondition(t *testing.T) {
 
 // TestWhereSIMD_vs_Scalar compares SIMD and scalar results for identical queries
 func TestWhereSIMD_vs_Scalar(t *testing.T) {
-	fixture := setupRealServer(t)
+	fixture := setupFullServer(t)
 	seedRandomizedBooks(t, fixture, 100)
 
 	query := `SELECT * FROM "Books" WHERE "Genre" = 'Fiction'`
@@ -351,7 +336,7 @@ func TestWhereSIMD_vs_Scalar(t *testing.T) {
 
 // TestWhereSIMD_Fallback verifies graceful fallback for mixed/unsupported types
 func TestWhereSIMD_Fallback(t *testing.T) {
-	fixture := setupRealServer(t)
+	fixture := setupFullServer(t)
 	seedRandomizedBooks(t, fixture, 100)
 
 	// Ensure SIMD is enabled
@@ -381,7 +366,7 @@ func TestWhereSIMD_Fallback(t *testing.T) {
 
 // BenchmarkWhereSIMD_StringEq_100 measures string equality at 100 documents
 func BenchmarkWhereSIMD_StringEq_100(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 100)
 	query := `SELECT * FROM "Authors" WHERE "Country" = 'USA'`
 
@@ -404,7 +389,7 @@ func BenchmarkWhereSIMD_StringEq_100(b *testing.B) {
 
 // BenchmarkWhereSIMD_StringEq_500 measures string equality at 500 documents
 func BenchmarkWhereSIMD_StringEq_500(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 500)
 	query := `SELECT * FROM "Authors" WHERE "Country" = 'USA'`
 
@@ -427,7 +412,7 @@ func BenchmarkWhereSIMD_StringEq_500(b *testing.B) {
 
 // BenchmarkWhereSIMD_StringEq_1000 measures string equality at 1000 documents
 func BenchmarkWhereSIMD_StringEq_1000(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 1000)
 	query := `SELECT * FROM "Authors" WHERE "Country" = 'USA'`
 
@@ -450,7 +435,7 @@ func BenchmarkWhereSIMD_StringEq_1000(b *testing.B) {
 
 // BenchmarkWhereSIMD_IntRange_100 measures integer range at 100 documents
 func BenchmarkWhereSIMD_IntRange_100(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 100)
 	query := `SELECT * FROM "Authors" WHERE "BirthYear" > 1970`
 
@@ -473,7 +458,7 @@ func BenchmarkWhereSIMD_IntRange_100(b *testing.B) {
 
 // BenchmarkWhereSIMD_IntRange_500 measures integer range at 500 documents
 func BenchmarkWhereSIMD_IntRange_500(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 500)
 	query := `SELECT * FROM "Authors" WHERE "BirthYear" > 1970`
 
@@ -496,7 +481,7 @@ func BenchmarkWhereSIMD_IntRange_500(b *testing.B) {
 
 // BenchmarkWhereSIMD_IntRange_1000 measures integer range at 1000 documents
 func BenchmarkWhereSIMD_IntRange_1000(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 1000)
 	query := `SELECT * FROM "Authors" WHERE "BirthYear" > 1970`
 
@@ -519,7 +504,7 @@ func BenchmarkWhereSIMD_IntRange_1000(b *testing.B) {
 
 // BenchmarkWhereSIMD_MultiCond_100 measures multi-condition at 100 documents
 func BenchmarkWhereSIMD_MultiCond_100(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 100)
 	query := `SELECT * FROM "Authors" WHERE "BirthYear" > 1970 AND "Country" = 'USA'`
 
@@ -542,7 +527,7 @@ func BenchmarkWhereSIMD_MultiCond_100(b *testing.B) {
 
 // BenchmarkWhereSIMD_MultiCond_500 measures multi-condition at 500 documents
 func BenchmarkWhereSIMD_MultiCond_500(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 500)
 	query := `SELECT * FROM "Authors" WHERE "BirthYear" > 1970 AND "Country" = 'USA'`
 
@@ -565,7 +550,7 @@ func BenchmarkWhereSIMD_MultiCond_500(b *testing.B) {
 
 // BenchmarkWhereSIMD_MultiCond_1000 measures multi-condition at 1000 documents
 func BenchmarkWhereSIMD_MultiCond_1000(b *testing.B) {
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 	seedRandomizedAuthors(b, fixture, 1000)
 	query := `SELECT * FROM "Authors" WHERE "BirthYear" > 1970 AND "Country" = 'USA'`
 

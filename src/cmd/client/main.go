@@ -1,17 +1,22 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syndrdb/src/cmd/client/internal"
 	"syndrdb/src/cmd/client/settings"
+	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 func main() {
@@ -27,6 +32,7 @@ func main() {
 	flag.BoolVar(&args.PrettyPrintResults, "pretty_print", true, "Pretty print JSON results with indentation (default: true)")
 	flag.BoolVar(&args.Compress, "compress", false, "Enable zstd response compression")
 	flag.BoolVar(&args.Pipeline, "pipeline", false, "Enable pipeline mode (READY sentinel framing for batch commands)")
+	flag.IntVar(&args.HistorySize, "history_size", 250, "Maximum number of commands to keep in history")
 	// Parse the command line
 	flag.Parse()
 
@@ -126,19 +132,67 @@ func main() {
 	startInteractiveShellWithAsync(dbClient, args)
 }
 
+// isTTY returns true when stdout is a terminal (used to decide raw mode output).
+var isTTY = term.IsTerminal(int(os.Stdout.Fd()))
+
+// rawPrintf is like fmt.Printf but translates \n → \r\n when the terminal is
+// in raw mode (raw mode disables automatic output newline translation).
+func rawPrintf(format string, a ...interface{}) {
+	s := fmt.Sprintf(format, a...)
+	if isTTY {
+		s = strings.ReplaceAll(s, "\n", "\r\n")
+	}
+	fmt.Print(s)
+}
+
+// rawPrint is like fmt.Print but translates \n → \r\n in raw mode.
+func rawPrint(a ...interface{}) {
+	s := fmt.Sprint(a...)
+	if isTTY {
+		s = strings.ReplaceAll(s, "\n", "\r\n")
+	}
+	fmt.Print(s)
+}
+
+// getHistoryFilePath returns the path to the history file (~/.syndrdb_history).
+func getHistoryFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".syndrdb_history"
+	}
+	return filepath.Join(home, ".syndrdb_history")
+}
+
 // startInteractiveShellWithAsync runs an interactive shell that can receive asynchronous messages
 func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Arguments) {
-	reader := bufio.NewReader(os.Stdin)
 	var inputBuffer strings.Builder
 
 	// Channel for receiving async messages from server
 	messageChan := make(chan string)
 	errorChan := make(chan error)
-	inputChan := make(chan string) // New channel for handling input
+	inputChan := make(chan string)
 
 	// Use WaitGroup to manage our goroutines
 	var wg sync.WaitGroup
-	wg.Add(2) // Now we have 2 goroutines to manage
+	wg.Add(2) // server listener + line editor
+
+	// Context for cancelling goroutines
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Load history and create line editor
+	historyPath := getHistoryFilePath()
+	history := internal.LoadHistory(historyPath, args.HistorySize)
+	lineEditor := internal.NewLineEditor(history)
+
+	// Install signal handler to restore terminal on SIGTERM/SIGINT
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sigCh
+		lineEditor.Cleanup()
+		os.Exit(0)
+	}()
 
 	// Flag to signal goroutines to exit
 	done := false
@@ -166,28 +220,11 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 		}
 	}()
 
-	// Start goroutine to handle user input
+	// Start line editor goroutine (replaces old bufio.Reader goroutine)
 	go func() {
 		defer wg.Done()
-
-		for !done {
-			// This will block until the user enters a line
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if !done { // Only report errors if we're not shutting down
-					fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
-				}
-				continue
-			}
-
-			if !done { // Only send if we're not shutting down
-				inputChan <- line
-			}
-		}
+		lineEditor.Run(ctx, inputChan)
 	}()
-
-	// Print the initial prompt
-	fmt.Print("> ")
 
 	// Track TimeOnly mode for the current command (accessible to both sync and async response handlers)
 	var currentTimeOnlyMode bool
@@ -214,7 +251,7 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 				isStreaming = true
 				chunkCount = 0
 				responseBuffer.Reset()
-				fmt.Print("Receiving response")
+				rawPrint("Receiving response")
 			}
 
 			if isStreaming {
@@ -223,7 +260,7 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 				chunkCount++
 
 				// Show progress dot
-				fmt.Print(".")
+				rawPrint(".")
 
 				// Check if response is complete (balanced braces and ends with })
 				assembledResponse := responseBuffer.String()
@@ -240,19 +277,19 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 				// If we can parse it and it appears complete, we're done streaming
 				if parseErr == nil && hasBalancedBraces && endsWithBrace {
 					// Streaming complete - clear the progress dots line
-					fmt.Print("\r                                                    \r")
+					rawPrint("\r                                                    \r")
 
 					// Display the response based on TimeOnly mode
 					if currentTimeOnlyMode {
 						filteredResponse := filterTimeOnlyResponse(assembledResponse, args.PrettyPrintResults)
-						fmt.Printf("Server: %s\n", filteredResponse)
+						rawPrintf("Server: %s\n", filteredResponse)
 					} else {
 						// Display full response
 						if args.PrettyPrintResults {
 							formattedResponse := prettyPrintJSON(assembledResponse)
-							fmt.Printf("Server: %s\n", formattedResponse)
+							rawPrintf("Server: %s\n", formattedResponse)
 						} else {
-							fmt.Printf("Server: %s\n", assembledResponse)
+							rawPrintf("Server: %s\n", assembledResponse)
 						}
 					}
 
@@ -263,7 +300,7 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 					chunkCount = 0
 
 					// Re-print the prompt
-					fmt.Print("> " + inputBuffer.String())
+					lineEditor.RedrawPrompt()
 					continue
 				}
 				// Otherwise, continue buffering and showing dots
@@ -279,38 +316,43 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 					// Complete JSON response - handle based on TimeOnly mode
 					if currentTimeOnlyMode {
 						filteredResponse := filterTimeOnlyResponse(message, args.PrettyPrintResults)
-						fmt.Printf("Server: %s\n", filteredResponse)
+						rawPrintf("Server: %s\n", filteredResponse)
 						currentTimeOnlyMode = false
 					} else {
 						if args.PrettyPrintResults {
 							message = prettyPrintJSON(message)
 						}
-						fmt.Printf("Server: %s\n", message)
+						rawPrintf("Server: %s\n", message)
 					}
 				} else {
 					// Not JSON or incomplete - display as-is
 					if args.PrettyPrintResults {
 						message = prettyPrintJSON(message)
 					}
-					fmt.Printf("Server: %s\n", message)
+					rawPrintf("Server: %s\n", message)
 				}
 
 				// Re-print the prompt and any partial input
-				fmt.Print("> " + inputBuffer.String())
+				lineEditor.RedrawPrompt()
 			}
 
 		case err := <-errorChan:
 			// Handle error from the message listener
-			fmt.Printf("\nError receiving server message: %v\n", err)
+			rawPrintf("\nError receiving server message: %v\n", err)
 
 			// Close the connection
 			dbClient.Close()
 
 			// Print a goodbye message
-			fmt.Println("Connection lost. Disconnecting from server.")
+			rawPrint("Connection lost. Disconnecting from server.\n")
 
 			// Signal the goroutines to stop
 			done = true
+			cancel()
+
+			// Save history before exit
+			history.SaveHistory(historyPath)
+			lineEditor.Cleanup()
 
 			// Exit the program (wait for goroutines happens at end of function)
 			os.Exit(1)
@@ -322,15 +364,21 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 			// Check for exit commands
 			trimmedInput := strings.TrimSpace(input)
 			if trimmedInput == "exit;" || trimmedInput == "quit;" {
-				fmt.Println("\nDisconnecting from server. Goodbye!")
+				rawPrint("Disconnecting from server. Goodbye!\n")
 				done = true
+				cancel()
+				history.SaveHistory(historyPath)
+				lineEditor.Cleanup()
 				continue
 			}
 
 			// Check for Ctrl+Q
 			if strings.EqualFold("^Q", trimmedInput) {
-				fmt.Println("\nDisconnecting from server. Goodbye!")
+				rawPrint("Disconnecting from server. Goodbye!\n")
 				done = true
+				cancel()
+				history.SaveHistory(historyPath)
+				lineEditor.Cleanup()
 				continue
 			}
 
@@ -338,9 +386,6 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 			if strings.HasSuffix(trimmedInput, ";") {
 				// Get the complete command
 				command := inputBuffer.String()
-
-				// For debugging
-				//fmt.Printf("Debug: Sending command: %q\n", command)
 
 				// Reset the buffer for next command
 				inputBuffer.Reset()
@@ -350,8 +395,10 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 				isStreaming = false
 				chunkCount = 0
 
-				// Check if command starts with "TimeOnly" prefix (case-insensitive)
+				// Add to history (the full command, trimmed)
 				trimmedCommand := strings.TrimSpace(command)
+				history.Add(trimmedCommand)
+
 				// Check if command starts with "TimeOnly" prefix (case-insensitive)
 				currentTimeOnlyMode = false
 				if len(trimmedCommand) >= 8 && strings.EqualFold(trimmedCommand[:8], "TimeOnly") {
@@ -373,7 +420,7 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 						// Keep currentTimeOnlyMode true so async chunks get filtered
 					} else {
 						// Real error - reset TimeOnly mode
-						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						rawPrintf("Error: %v\n", err)
 						log.Printf("Error: %v\n", err)
 						currentTimeOnlyMode = false
 					}
@@ -399,55 +446,21 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 							response = prettyPrintJSON(response)
 						}
 					}
-					fmt.Printf("Response: %s\n", response)
+					rawPrintf("Response: %s\n", response)
 				}
 
-				// Print the prompt for the next command
-				fmt.Print("> ")
+				// Prompt will be redrawn by the line editor
+				lineEditor.RedrawPrompt()
 			}
 		}
 	}
 
 	// Signal to our goroutines to exit and wait for them
 	done = true
+	cancel()
+	history.SaveHistory(historyPath)
+	lineEditor.Cleanup()
 	wg.Wait()
-}
-
-// readInputWithTimeout reads user input with a short timeout to allow for async message handling
-// readInputWithTimeout reads user input with a short timeout to allow for async message handling
-func readInputWithTimeout(reader *bufio.Reader) (string, error) {
-	// Check if there's data in the buffer
-	if reader.Buffered() > 0 {
-		return reader.ReadString('\n')
-	}
-
-	// Use a better approach to check for input availability
-	var readString string
-	var err error
-
-	// This is a simple non-blocking check using a goroutine and channel
-	inputCh := make(chan struct{})
-	go func() {
-		readString, err = reader.ReadString('\n')
-		close(inputCh)
-	}()
-
-	// Try to read for a very short time, then continue with the main loop
-	select {
-	case <-inputCh:
-		// Input was available and read successfully
-		return readString, err
-	case <-time.After(10 * time.Millisecond):
-		// No input available in our short timeout
-		return "", fmt.Errorf("no input available")
-	}
-}
-
-// isInputAvailable checks if there is input ready to be read
-func isInputAvailable() bool {
-	// This is a simplified implementation - a more robust version would use platform-specific
-	// mechanisms to check stdin without blocking
-	return false
 }
 
 // sendCommandToServer sends a command to the server and returns the response

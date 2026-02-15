@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,13 +14,8 @@ import (
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/document"
-	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/domain/models"
-	"syndrdb/src/internal/journal"
-	"syndrdb/src/internal/lock"
-	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/internal/server"
-	"syndrdb/src/internal/storage"
 	"syndrdb/src/internal/storage/buffer"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/internal/storage/databasestore"
@@ -29,7 +23,6 @@ import (
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 ) /*
 SELECT E2E TEST SUITE
 
@@ -51,298 +44,7 @@ Data Limits:
 - Zero-tolerance ordering validation (fail on first inversion)
 */
 
-// TestFixture holds real server components for E2E testing
-type TestFixture struct {
-	ServiceManager    *server.ServiceManager
-	Database          *models.Database
-	TempDir           string
-	Logger            *zap.SugaredLogger
-	Settings          *settings.Arguments
-	IsSetup           bool
-	AuthorDocumentIDs []string
-}
-
-// filteredWriter wraps an io.Writer and filters out lines containing specific text
-type filteredWriter struct {
-	underlying io.Writer
-	filter     string
-}
-
-func (fw *filteredWriter) Write(p []byte) (n int, err error) {
-	// If the message contains the filter text, don't write it
-	if strings.Contains(string(p), fw.filter) {
-		return len(p), nil // Pretend we wrote it
-	}
-	return fw.underlying.Write(p)
-}
-
-// =============================================================================
-// INFRASTRUCTURE SETUP
-// =============================================================================
-
-// setupRealServer initializes real server components in a temporary directory
-func setupFullServer(t *testing.T) *TestFixture {
-	t.Helper()
-	return setupFullServerTB(t)
-}
-
-// SetupFullServer is the exported version for use in other test packages
-// PHASE 6: MVCC - Export setup function for MVCC tests
-func SetupFullServer(t *testing.T) *TestFixture {
-	t.Helper()
-	return setupFullServerTB(t)
-}
-
-// setupFullServerTB is the testing.TB version for benchmarks
-func setupFullServerTB(tb testing.TB) *TestFixture {
-	tb.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Create temporary directory - DON'T use tb.TempDir() so we can inspect it
-	//tempDir, err := os.MkdirTemp("", "TestSelect_*")
-	tempDir := tb.TempDir()
-	//if err != nil {
-	// 	tb.Fatalf("Failed to create temp directory: %v", err)
-	// }
-	tb.Logf("TEST DATA DIRECTORY (will be auto-cleaned): %s", tempDir)
-
-	// Create a writer that filters out hash index header warnings
-	filterWriter := &filteredWriter{
-		underlying: os.Stderr,
-		filter:     "Failed to update header after flush",
-	}
-
-	// Setup logger with filtered output
-	loggerConfig := zap.NewDevelopmentConfig()
-	loggerConfig.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	loggerConfig.OutputPaths = []string{"stderr"}
-	loggerConfig.ErrorOutputPaths = []string{"stderr"}
-
-	logger, err := loggerConfig.Build(zap.WrapCore(func(c zapcore.Core) zapcore.Core {
-		return zapcore.NewCore(
-			zapcore.NewConsoleEncoder(loggerConfig.EncoderConfig),
-			zapcore.AddSync(filterWriter),
-			loggerConfig.Level,
-		)
-	}))
-	if err != nil {
-		tb.Fatalf("Failed to create logger: %v", err)
-	}
-	sugar := logger.Sugar()
-
-	// Create settings
-	args := &settings.Arguments{
-		DataDir:         filepath.Join(tempDir, "data_files"),
-		TempDir:         filepath.Join(tempDir, "temp_files"),
-		LogDir:          filepath.Join(tempDir, "log_files"),
-		LogLevel:        "warn",
-		CreateDefaultDB: true, // Enable primary database creation
-		UseNewParser:    true,
-	}
-
-	// Set global settings for WAL manager and other services that use settings.GetSettings()
-	globalSettings := settings.GetSettings()
-	globalSettings.LogDir = args.LogDir
-	globalSettings.DataDir = args.DataDir
-	globalSettings.TempDir = args.TempDir
-
-	// DEBUG: Verify global settings are set correctly
-	// tb.Logf("DEBUG: Test tempDir=%s", tempDir)
-	// tb.Logf("DEBUG: args.DataDir=%s", args.DataDir)
-	// tb.Logf("DEBUG: globalSettings.DataDir=%s", globalSettings.DataDir)
-
-	// Create directory structure
-	if err := os.MkdirAll(args.DataDir, 0755); err != nil {
-		tb.Fatalf("Failed to create data directory: %v", err)
-	}
-	if err := os.MkdirAll(args.TempDir, 0755); err != nil {
-		tb.Fatalf("Failed to create temp directory: %v", err)
-	}
-	if err := os.MkdirAll(args.LogDir, 0755); err != nil {
-		tb.Fatalf("Failed to create log directory: %v", err)
-	}
-
-	// Create database storage engine
-	databaseStore, err := databasestore.NewDatabaseStore(args.DataDir, sugar)
-	if err != nil {
-		tb.Fatalf("Failed to create database store: %v", err)
-	}
-
-	// Create database service
-	databaseFactory := database.NewDatabaseFactory()
-	databaseService := database.NewDatabaseService(databaseStore, databaseFactory, args, sugar)
-
-	// Create buffer pool and file registry for bundle store
-	fileRegistry, err := buffer.NewFileRegistry(args.DataDir, buffer.SyncInterval, sugar)
-	if err != nil {
-		tb.Fatalf("Failed to create file registry: %v", err)
-	}
-	bufferPool := buffer.NewBufferPool(1000, buffer.DefaultPageSize, fileRegistry, sugar)
-
-	// Create bundle store and service
-	bundleStore, err := bundlestore.NewBundleStore(args.DataDir, bufferPool, sugar, "binary")
-	if err != nil {
-		tb.Fatalf("Failed to create bundle store: %v", err)
-	}
-	bundleFactory := bundle.NewBundleFactory()
-	documentFactory := document.NewDocumentFactory()
-	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, args)
-
-	// Create catalog service
-	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
-
-	// CRITICAL: Inject catalog service into bundle service (resolves circular dependency)
-	// This is what the real server does and is REQUIRED for proper operation
-	bundleService.SetCatalogService(catalogService)
-
-	// Create and initialize the "primary" database (required for catalog operations)
-	primaryDB := &models.Database{
-		DatabaseID:    helpers.GenerateUUID(),
-		Name:          "primary",
-		Description:   "Primary database for test catalogs",
-		DataDirectory: args.DataDir,
-		Bundles:       make(map[string]models.Bundle),
-		BundleFiles:   []string{},
-	}
-
-	// Save the primary database
-	err = databaseStore.CreateDatabaseDataFile(primaryDB)
-	if err != nil {
-		tb.Fatalf("Failed to create primary database: %v", err)
-	}
-	databaseService.Databases[primaryDB.Name] = primaryDB
-
-	// Initialize primary database bundle catalogs (same as real server)
-	err = defaultdb.InitPrimaryBundleCatalogs(databaseService, databaseStore, primaryDB, sugar, bundleService)
-	if err != nil {
-		tb.Fatalf("Failed to initialize primary bundle catalogs: %v", err)
-	}
-
-	// Hydrate all catalog bundles (same as real server does on startup)
-	err = defaultdb.HydrateBundlesPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
-	if err != nil {
-		sugar.Warnf("Warning: Failed to hydrate bundles catalog: %v", err)
-	}
-
-	err = defaultdb.HydratePermissionPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
-	if err != nil {
-		sugar.Warnf("Warning: Failed to hydrate permissions catalog: %v", err)
-	}
-
-	err = defaultdb.HydrateRolesPrimaryCatalogs(databaseService, databaseStore, sugar, bundleService)
-	if err != nil {
-		sugar.Warnf("Warning: Failed to hydrate roles catalog: %v", err)
-	}
-
-	// Initialize service manager (no GraphQL for tests)
-	// NOTE: Don't use InitServiceManager in tests because it uses sync.Once which creates
-	// a singleton shared across all tests. Instead, create a fresh ServiceManager for each test.
-	sessionManager := server.NewSessionManager(sugar, 30*time.Minute, 1000)
-
-	// Initialize WAL Manager
-	walManager, err := journal.NewWALManager(sugar)
-	if err != nil {
-		sugar.Warnf("Warning: Failed to initialize WAL Manager: %v", err)
-		walManager = nil
-	}
-
-	// Initialize RBAC services (needed for permission checks)
-	userService := server.NewUserService(bundleService, databaseService, nil, sugar, false)
-	permissionService := server.NewPermissionService(bundleService, databaseService, nil, sugar, false)
-	lockService := lock.NewLockService(sugar.Desugar())
-
-	// Initialize unified query planner
-	unifiedPlanner := planner.NewUnifiedQueryPlanner(sugar, bundleService)
-
-	// Initialize transaction lock manager
-	lockManager := storage.NewLockManager(sugar)
-
-	// Initialize Migration service (same as production)
-	migrationConfig := migration.LoadConfigFromSettings(globalSettings)
-	bundleServiceAdapter := server.NewBundleServiceAdapter(bundleService, databaseService, catalogService, walManager, sugar)
-	migrationServiceCore := migration.NewMigrationService(bundleServiceAdapter, migrationConfig, sugar.Desugar())
-	migrationService := server.NewMigrationServiceAdapter(migrationServiceCore, sugar)
-
-	serviceManager := &server.ServiceManager{
-		DatabaseService:        databaseService,
-		BundleService:          bundleService,
-		InternalCatalogService: catalogService,
-		WALManager:             walManager,
-		LockService:            lockService,
-		LockManager:            lockManager,
-		GraphQLProcessor:       nil,
-		UserService:            userService,
-		PermissionService:      permissionService,
-		MigrationService:       migrationService,
-		SessionManager:         sessionManager,
-		ActiveConnections:      make(map[string]*server.Connection),
-		UnifiedPlanner:         unifiedPlanner,
-	}
-
-	// Wire LockManager to SessionManager for proper lock cleanup on session termination
-	sessionManager.SetLockReleaser(lockManager)
-
-	// Create unique test database (use test name + timestamp to avoid conflicts)
-	dbName := fmt.Sprintf("testdb_%s_%d", tb.Name(), time.Now().UnixNano())
-	createDBCmd := fmt.Sprintf(`CREATE DATABASE "%s"`, dbName)
-	startTime := time.Now()
-	_, err = server.CommandDirector(ctx, nil, *serviceManager, createDBCmd, sugar, startTime, nil, "127.0.0.1")
-	if err != nil {
-		tb.Fatalf("Failed to create %s database: %v", dbName, err)
-	}
-
-	// DEBUG: Check if database directory was created
-	dbDir := filepath.Join(args.DataDir, dbName)
-	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
-		tb.Logf("WARNING: Database directory NOT created at: %s", dbDir)
-		tb.Logf("DEBUG: Current globalSettings.DataDir=%s", settings.GetSettings().DataDir)
-	} else {
-		tb.Logf("SUCCESS: Database directory created at: %s", dbDir)
-	}
-
-	// CRITICAL: Switch to the test database context (like USE command in client)
-	// This ensures subsequent commands operate on the correct database
-	useDBCmd := fmt.Sprintf(`USE "%s"`, dbName)
-	startTime = time.Now()
-	_, err = server.CommandDirector(ctx, nil, *serviceManager, useDBCmd, sugar, startTime, nil, "127.0.0.1")
-	if err != nil {
-		tb.Fatalf("Failed to switch to %s database: %v", dbName, err)
-	}
-
-	// Retrieve the database AFTER the USE command to get the active context
-	db, err := serviceManager.DatabaseService.GetDatabaseByName(dbName)
-	if err != nil {
-		tb.Fatalf("Failed to retrieve %s database: %v", dbName, err)
-	}
-
-	// Register the test database in the system catalog (same as real server)
-	err = catalogService.AddDatabaseToCatalog(db)
-	if err != nil {
-		sugar.Warnf("Warning: Failed to register test database in system catalog: %v", err)
-	}
-
-	// CRITICAL: Flush all buffers to ensure metadata (PageCount, etc.) is written to disk
-	// This is what the real server does after catalog initialization
-	// Without this, indexes and document pages may not be properly persisted!
-	err = bundleService.FlushAllBuffers()
-	if err != nil {
-		sugar.Warnf("Warning: Failed to flush bundle metadata: %v", err)
-	} else {
-		sugar.Debugf("Successfully flushed bundle metadata after test database setup")
-	}
-
-	//sugar.Infof("✓ Real server initialized in: %s (active database: %s)", tempDir, dbName)
-
-	return &TestFixture{
-		ServiceManager: serviceManager,
-		Database:       db,
-		TempDir:        tempDir,
-		Logger:         sugar,
-		Settings:       args,
-	}
-}
+// TestFixture, filteredWriter, SetupFullServer, setupFullServer, and setupFullServerTB are defined in helpers.go.
 
 // resetDatabase drops and recreates all test bundles
 func resetDatabase(t *testing.T, fixture *TestFixture) {
@@ -584,7 +286,7 @@ func seedAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 	// After flush, documents are on disk, but memtable still exists with potentially stale data
 	// Setting DocumentsComplete=true forces reads from disk
 	authorsBundle, _ := fixture.ServiceManager.BundleService.GetBundleByName(fixture.Database, "Authors")
-	if authorsBundle != nil && authorsBundle.Documents != nil {
+	if authorsBundle != nil {
 		authorsBundle.DocumentsComplete = true
 		t.Logf("Cleared Authors memtable, forcing disk reads")
 	}
@@ -659,7 +361,7 @@ func seedBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 	// After flush, documents are on disk, but memtable still exists with potentially stale data
 	// Setting DocumentsComplete=true forces reads from disk
 	booksBundle, _ := fixture.ServiceManager.BundleService.GetBundleByName(fixture.Database, "Books")
-	if booksBundle != nil && booksBundle.Documents != nil {
+	if booksBundle != nil {
 		booksBundle.DocumentsComplete = true
 		t.Logf("Cleared Books memtable, forcing disk reads")
 	}
@@ -729,7 +431,7 @@ func seedPublishersBundle(t *testing.T, fixture *TestFixture, count int) {
 	// After flush, documents are on disk, but memtable still exists with potentially stale data
 	// Setting DocumentsComplete=true forces reads from disk
 	publishersBundle, _ := fixture.ServiceManager.BundleService.GetBundleByName(fixture.Database, "Publishers")
-	if publishersBundle != nil && publishersBundle.Documents != nil {
+	if publishersBundle != nil {
 		publishersBundle.DocumentsComplete = true
 		t.Logf("Cleared Publishers memtable, forcing disk reads")
 	}
@@ -782,11 +484,14 @@ func extractDocuments(t *testing.T, response interface{}) []map[string]interface
 	}
 
 	// PHASE H: Handle streaming response where documents aren't materialized as maps
-	if cmdResponse.StreamDocuments != nil && len(cmdResponse.StreamDocuments) > 0 {
+	if cmdResponse.StreamDocuments != nil || len(cmdResponse.StreamDocuments) > 0 {
 		// Convert StreamDocuments to the expected format
 		return helpers.TransformDocumentsToFlatFormatWithProjection(
+			// Fix: Provide bundle schema as third argument per new helpers.TransformDocumentsToFlatFormatWithProjection signature.
+			// Fix: Provide nil for bundle schema, since CommandResponse no longer has BundleSchema.
 			cmdResponse.StreamDocuments,
 			cmdResponse.StreamFields,
+			nil,
 		)
 	}
 

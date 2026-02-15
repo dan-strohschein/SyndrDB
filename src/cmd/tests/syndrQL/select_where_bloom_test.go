@@ -75,6 +75,37 @@ func seedUsersWithPrices(t testing.TB, fixture *TestFixture, count int) {
 	}
 }
 
+// getDocString returns the string value for field from doc.Data.
+func getDocString(doc *models.Document, field string) (string, bool) {
+	if doc == nil || doc.Data == nil {
+		return "", false
+	}
+	if v, ok := doc.Data[field]; ok && v != nil {
+		if s, ok := v.(string); ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// getDocInt64 returns the int64 value for field from doc.Data.
+func getDocInt64(doc *models.Document, field string) (int64, bool) {
+	if doc == nil || doc.Data == nil {
+		return 0, false
+	}
+	if v, ok := doc.Data[field]; ok && v != nil {
+		switch n := v.(type) {
+		case int64:
+			return n, true
+		case int:
+			return int64(n), true
+		case float64:
+			return int64(n), true
+		}
+	}
+	return 0, false
+}
+
 // executeQuery executes SELECT and returns documents
 func executeQuery(t testing.TB, fixture *TestFixture, query string) []*models.Document {
 	t.Helper()
@@ -105,7 +136,7 @@ func executeQuery(t testing.TB, fixture *TestFixture, query string) []*models.Do
 
 // TestWhereBloom_MultiCondition tests Bloom with multi-condition AND
 func TestWhereBloom_MultiCondition(t *testing.T) {
-	fixture := setupRealServer(t)
+	fixture := setupFullServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -126,11 +157,11 @@ func TestWhereBloom_MultiCondition(t *testing.T) {
 
 	results := executeQuery(t, fixture, `SELECT * FROM Users WHERE Country == "USA" AND Age > 30 AND Status == "active"`)
 
-	// Validate all results match
+	// Validate all results match (read from doc.Data)
 	for _, doc := range results {
-		country, _ := doc.Fields["Country"].Value.AsString()
-		age, _ := doc.Fields["Age"].Value.AsInt()
-		status, _ := doc.Fields["Status"].Value.AsString()
+		country, _ := getDocString(doc, "Country")
+		age, _ := getDocInt64(doc, "Age")
+		status, _ := getDocString(doc, "Status")
 
 		if country != "USA" || age <= 30 || status != "active" {
 			t.Fatalf("Invalid result: Country=%s, Age=%d, Status=%s", country, age, status)
@@ -142,7 +173,7 @@ func TestWhereBloom_MultiCondition(t *testing.T) {
 
 // TestWhereBloom_vs_NoBloom compares Bloom enabled vs disabled
 func TestWhereBloom_vs_NoBloom(t *testing.T) {
-	fixture := setupRealServer(t)
+	fixture := setupFullServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -180,7 +211,7 @@ func TestWhereBloom_vs_NoBloom(t *testing.T) {
 // Benchmark_WhereBloom_Enabled measures Bloom-enabled performance at 1000 docs
 func Benchmark_WhereBloom_Enabled(b *testing.B) {
 	b.StopTimer()
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -220,7 +251,7 @@ func Benchmark_WhereBloom_Enabled(b *testing.B) {
 // Benchmark_WhereBloom_Disabled measures non-Bloom performance at 1000 docs
 func Benchmark_WhereBloom_Disabled(b *testing.B) {
 	b.StopTimer()
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -262,7 +293,7 @@ func Benchmark_WhereBloom_Disabled(b *testing.B) {
 // Benchmark_RangedWhere benchmarks SELECT with ranged WHERE clause (Price > X AND Price < Y)
 func Benchmark_RangedWhere(b *testing.B) {
 	b.StopTimer()
-	fixture := setupRealServerTB(b)
+	fixture := setupFullServerTB(b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

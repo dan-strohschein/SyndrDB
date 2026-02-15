@@ -49,17 +49,17 @@ func createTestBundleWithFields(name string, fields map[string]models.FieldDefin
 	return bundle
 }
 
+// createTestDocument builds a Document with the given ID and field map.
+// Document uses Data for flexible field storage; callers that need schema-ordered
+// Values must set them separately or use a bundle with DocumentStructure.
 func createTestDocument(documentID string, fields map[string]interface{}) models.Document {
-	docFields := make(map[string]models.Field)
+	data := make(map[string]interface{}, len(fields))
 	for k, v := range fields {
-		docFields[k] = models.Field{
-			Name:  k,
-			Value: models.NewInterfaceValue(v),
-		}
+		data[k] = v
 	}
 	return models.Document{
 		DocumentID: documentID,
-		Fields:     docFields,
+		Data:       data,
 	}
 }
 
@@ -556,9 +556,9 @@ func TestIsFieldUsedInRelationships(t *testing.T) {
 func TestCascadePreview_Structure(t *testing.T) {
 	t.Run("CascadePreview is always nil in v1.0.0", func(t *testing.T) {
 		violation := bundle.ForeignKeyViolation{
-			FieldName:      "author_id",
-			AttemptedValue: "999",
-			ParentBundle:   "Authors",
+			// FieldName:      "author_id",
+			// AttemptedValue: "999",
+			// ParentBundle:   "Authors",
 			CascadePreview: nil, // Always nil in RESTRICT-only implementation
 		}
 

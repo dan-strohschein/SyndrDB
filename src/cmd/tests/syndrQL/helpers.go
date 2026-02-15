@@ -73,6 +73,12 @@ func SetupFullServer(t *testing.T) *TestFixture {
 	return setupFullServerTB(t)
 }
 
+// setupFullServer is the package-internal wrapper used by E2E tests in this package.
+func setupFullServer(t *testing.T) *TestFixture {
+	t.Helper()
+	return setupFullServerTB(t)
+}
+
 // setupFullServerTB is the testing.TB version for benchmarks
 func setupFullServerTB(tb testing.TB) *TestFixture {
 	tb.Helper()

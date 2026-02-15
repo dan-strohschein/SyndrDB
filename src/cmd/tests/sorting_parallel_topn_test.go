@@ -21,26 +21,6 @@ var (
 	ShouldUseParallelTopN = sorting.ShouldUseParallelTopN
 )
 
-// Helper function to create test documents with sequential integer values
-func createTestDocuments1(count int, fieldName string) map[string]*models.Document {
-	docs := make(map[string]*models.Document, count)
-
-	for i := 0; i < count; i++ {
-		doc := &models.Document{
-			DocumentID: uuid.New().String(),
-			Fields: map[string]models.Field{
-				fieldName: {
-					Name:  fieldName,
-					Value: models.NewIntValue(int64(i)),
-				},
-			},
-		}
-		docs[doc.DocumentID] = doc
-	}
-
-	return docs
-}
-
 // TestParallelTopNHeapSort_BasicCorrectness verifies parallel Top-N produces correct results
 func TestParallelTopNHeapSort_BasicCorrectness(t *testing.T) {
 	logger := zap.NewNop().Sugar()
@@ -83,10 +63,10 @@ func TestParallelTopNHeapSort_BasicCorrectness(t *testing.T) {
 				t.Errorf("Expected %d results, got %d", tt.limit, len(result))
 			}
 
-			// Verify correct ordering
+			// Verify correct ordering (read from Data via getSortResultInt; schema nil ok)
 			for i := 0; i < len(result)-1; i++ {
-				score1, _ := result[i].Fields["score"].Value.AsInt()
-				score2, _ := result[i+1].Fields["score"].Value.AsInt()
+				score1, _ := getSortResultInt(result[i], nil, "score")
+				score2, _ := getSortResultInt(result[i+1], nil, "score")
 
 				if tt.direction == queryparser.SortAsc {
 					if score1 > score2 {
@@ -101,9 +81,8 @@ func TestParallelTopNHeapSort_BasicCorrectness(t *testing.T) {
 
 			// Verify we got the correct top-N values
 			if tt.direction == queryparser.SortAsc {
-				// For ASC, should have smallest values
 				for i := 0; i < len(result); i++ {
-					score, _ := result[i].Fields["score"].Value.AsInt()
+					score, _ := getSortResultInt(result[i], nil, "score")
 					if score >= int64(tt.limit) {
 						t.Errorf("ASC top-N incorrect: got score %d at index %d, expected < %d",
 							score, i, tt.limit)
@@ -111,9 +90,8 @@ func TestParallelTopNHeapSort_BasicCorrectness(t *testing.T) {
 					}
 				}
 			} else {
-				// For DESC, should have largest values
 				for i := 0; i < len(result); i++ {
-					score, _ := result[i].Fields["score"].Value.AsInt()
+					score, _ := getSortResultInt(result[i], nil, "score")
 					expectedMin := int64(tt.numDocs - tt.limit)
 					if score < expectedMin {
 						t.Errorf("DESC top-N incorrect: got score %d at index %d, expected >= %d",
@@ -149,8 +127,8 @@ func TestParallelTopNHeapSort_CompareWithSequential(t *testing.T) {
 				},
 			}
 
-			// Run sequential Top-N
-			seqResult, err := sorting.TopNHeapSort(docs, tt.limit, orderBy, logger)
+			// Run sequential Top-N (schema nil: sort reads from doc.Data)
+			seqResult, err := sorting.TopNHeapSort(docs, tt.limit, orderBy, logger, nil)
 			if err != nil {
 				t.Fatalf("Sequential TopNHeapSort failed: %v", err)
 			}
@@ -168,8 +146,8 @@ func TestParallelTopNHeapSort_CompareWithSequential(t *testing.T) {
 			}
 
 			for i := 0; i < len(seqResult); i++ {
-				seqVal, _ := seqResult[i].Fields["value"].Value.AsInt()
-				parVal, _ := parResult[i].Fields["value"].Value.AsInt()
+				seqVal, _ := getSortResultInt(seqResult[i], nil, "value")
+				parVal, _ := getSortResultInt(parResult[i], nil, "value")
 
 				if seqVal != parVal {
 					t.Errorf("Value mismatch at index %d: sequential=%d, parallel=%d",
@@ -184,14 +162,14 @@ func TestParallelTopNHeapSort_CompareWithSequential(t *testing.T) {
 func TestParallelTopNHeapSort_MultipleFields(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
-	// Create documents with two fields
+	// Create documents with two fields (Data only; sort reads via getFieldValueForExtract/Data)
 	docs := make(map[string]*models.Document)
 	for i := 0; i < 100; i++ {
 		doc := &models.Document{
 			DocumentID: uuid.New().String(),
-			Fields: map[string]models.Field{
-				"category": {Value: models.NewIntValue(int64(i % 10))}, // 10 categories
-				"score":    {Value: models.NewIntValue(int64(i))},
+			Data: map[string]interface{}{
+				"category": int64(i % 10),
+				"score":    int64(i),
 			},
 		}
 		docs[doc.DocumentID] = doc
@@ -211,10 +189,10 @@ func TestParallelTopNHeapSort_MultipleFields(t *testing.T) {
 
 	// Verify multi-field ordering
 	for i := 0; i < len(result)-1; i++ {
-		cat1, _ := result[i].Fields["category"].Value.AsInt()
-		cat2, _ := result[i+1].Fields["category"].Value.AsInt()
-		score1, _ := result[i].Fields["score"].Value.AsInt()
-		score2, _ := result[i+1].Fields["score"].Value.AsInt()
+		cat1, _ := getSortResultInt(result[i], nil, "category")
+		cat2, _ := getSortResultInt(result[i+1], nil, "category")
+		score1, _ := getSortResultInt(result[i], nil, "score")
+		score2, _ := getSortResultInt(result[i+1], nil, "score")
 
 		if cat1 > cat2 {
 			t.Errorf("Primary field ordering violated at index %d: category %d > %d",
@@ -297,7 +275,7 @@ func skipTestDivideDocumentsIntoChunks_DISABLED(t *testing.T) {
 			docs := createTestDocuments(tt.numDocs, "value")
 
 			// chunks := divideDocumentsIntoChunks(docs, tt.numChunks) // DISABLED - unexported
-			var chunks []map[string]*models.Document // placeholder
+			chunks := []map[string]*models.Document{} // placeholder (empty to avoid ranging over nil)
 
 			// Verify we got the right number of chunks
 			if len(chunks) != tt.numChunks {
@@ -351,14 +329,14 @@ func TestShouldUseParallelTopN(t *testing.T) {
 		name        string
 		datasetSize int
 		limit       int
-		config      *SortingConfig
+		config      *sorting.SortingConfig
 		expected    bool
 	}{
 		{
 			name:        "Large dataset, enabled",
 			datasetSize: 50000,
 			limit:       100,
-			config: &SortingConfig{
+			config: &sorting.SortingConfig{
 				ParallelEnabled: true,
 				ParallelMinSize: 10000,
 				TopNThreshold:   0.1,
@@ -369,7 +347,7 @@ func TestShouldUseParallelTopN(t *testing.T) {
 			name:        "Disabled",
 			datasetSize: 50000,
 			limit:       100,
-			config: &SortingConfig{
+			config: &sorting.SortingConfig{
 				ParallelEnabled: false,
 				ParallelMinSize: 10000,
 				TopNThreshold:   0.1,
@@ -380,7 +358,7 @@ func TestShouldUseParallelTopN(t *testing.T) {
 			name:        "Dataset too small",
 			datasetSize: 5000,
 			limit:       100,
-			config: &SortingConfig{
+			config: &sorting.SortingConfig{
 				ParallelEnabled: true,
 				ParallelMinSize: 10000,
 				TopNThreshold:   0.1,
@@ -391,7 +369,7 @@ func TestShouldUseParallelTopN(t *testing.T) {
 			name:        "Limit too large (ratio >= threshold)",
 			datasetSize: 1000,
 			limit:       150,
-			config: &SortingConfig{
+			config: &sorting.SortingConfig{
 				ParallelEnabled: true,
 				ParallelMinSize: 100,
 				TopNThreshold:   0.1,
@@ -402,7 +380,7 @@ func TestShouldUseParallelTopN(t *testing.T) {
 			name:        "Zero limit",
 			datasetSize: 50000,
 			limit:       0,
-			config: &SortingConfig{
+			config: &sorting.SortingConfig{
 				ParallelEnabled: true,
 				ParallelMinSize: 10000,
 				TopNThreshold:   0.1,
@@ -493,7 +471,7 @@ func BenchmarkParallelVsSequential(b *testing.B) {
 		b.Run(fmt.Sprintf("Sequential_%d", size), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = sorting.TopNHeapSort(docs, 100, orderBy, logger)
+				_, _ = sorting.TopNHeapSort(docs, 100, orderBy, logger, nil)
 			}
 		})
 

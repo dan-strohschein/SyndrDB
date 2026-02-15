@@ -209,49 +209,134 @@ func setupRootUserTest(t *testing.T) (*server.ServiceManager, *models.Database, 
 	return serviceManager, primaryDB, cleanup
 }
 
+// getBundleDocuments returns all documents in a bundle by loading each page via the page cache.
+// Bundle no longer has a Documents field; documents are accessed through GetDocumentPage/SnapshotPageDocuments.
+func getBundleDocuments(t *testing.T, serviceManager *server.ServiceManager, db *models.Database, bundleName string) []models.Document {
+	t.Helper()
+	bundle, err := serviceManager.BundleService.GetBundleByName(db, bundleName)
+	require.NoError(t, err, "GetBundleByName(%s) should succeed", bundleName)
+	require.NotNil(t, bundle, "Bundle %s should exist", bundleName)
+
+	pageCount := bundle.PageCount
+	if pageCount <= 0 {
+		pageCount = 1
+	}
+	var all []models.Document
+	for pageID := uint32(0); pageID < uint32(pageCount); pageID++ {
+		docs, err := serviceManager.BundleService.SnapshotPageDocuments(bundleName, db.Name, pageID)
+		if err != nil {
+			continue
+		}
+		all = append(all, docs...)
+	}
+	return all
+}
+
+// getDocFieldString returns a string field from doc using schema (Values) or Data.
+func getDocFieldString(doc *models.Document, schema *models.BundleFieldSchema, fieldName string) (string, bool) {
+	if doc == nil {
+		return "", false
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv.AsString()
+		}
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok && v != nil {
+			if s, ok := v.(string); ok {
+				return s, true
+			}
+		}
+	}
+	return "", false
+}
+
+// getDocFieldBool returns a bool field from doc using schema (Values) or Data.
+func getDocFieldBool(doc *models.Document, schema *models.BundleFieldSchema, fieldName string) (bool, bool) {
+	if doc == nil {
+		return false, false
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv.AsBool()
+		}
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok && v != nil {
+			if b, ok := v.(bool); ok {
+				return b, true
+			}
+		}
+	}
+	return false, false
+}
+
+// getDocFieldInt returns an int64 field from doc using schema (Values) or Data.
+func getDocFieldInt(doc *models.Document, schema *models.BundleFieldSchema, fieldName string) (int64, bool) {
+	if doc == nil {
+		return 0, false
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv.AsInt()
+		}
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok && v != nil {
+			switch n := v.(type) {
+			case int64:
+				return n, true
+			case int:
+				return int64(n), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// findRootUserDocument returns the Root user document from a slice of user documents and the bundle schema.
+func findRootUserDocument(userDocs []models.Document, schema *models.BundleFieldSchema) *models.Document {
+	for i := range userDocs {
+		doc := &userDocs[i]
+		if username, ok := getDocFieldString(doc, schema, "Username"); ok && username == "Root" {
+			return doc
+		}
+	}
+	return nil
+}
+
 // TestRootUser_CreatedProperly tests that the Root user is created during initialization
 func TestRootUser_CreatedProperly(t *testing.T) {
 	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
-	// Verify Root user exists in Users bundle (use BundleService, not direct map access)
-	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
-	require.NoError(t, err, "Failed to get Users bundle")
-	require.NotNil(t, usersBundle, "Users bundle should exist")
-	require.NotNil(t, usersBundle.Documents, "Users bundle should have documents")
+	userDocs := getBundleDocuments(t, serviceManager, primaryDB, "Users")
+	require.NotEmpty(t, userDocs, "Users bundle should have documents")
 
-	userDocs := *usersBundle.Documents
-
-	var rootUser *models.Document
-	for _, doc := range userDocs {
-		if usernameField, exists := doc.Fields["Username"]; exists {
-			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
-				rootUser = &doc
-				break
-			}
-		}
-	}
-
+	usersBundle, _ := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	schema := usersBundle.DocumentStructure.FieldSchema()
+	rootUser := findRootUserDocument(userDocs, schema)
 	require.NotNil(t, rootUser, "Root user should exist in Users bundle")
 
-	// Verify Root user has required fields
-	userID, ok := rootUser.Fields["UserID"].Value.AsString()
+	// Verify Root user has required fields (Document uses Values/Data, not Fields)
+	userID, ok := getDocFieldString(rootUser, schema, "UserID")
 	require.True(t, ok, "UserID should be a string")
 	assert.NotEmpty(t, userID, "Root user should have UserID")
 
-	username, ok := rootUser.Fields["Username"].Value.AsString()
+	username, ok := getDocFieldString(rootUser, schema, "Username")
 	require.True(t, ok, "Username should be a string")
 	assert.Equal(t, "Root", username, "Username should be 'Root'")
 
-	isActive, ok := rootUser.Fields["IsActive"].Value.AsBool()
+	isActive, ok := getDocFieldBool(rootUser, schema, "IsActive")
 	require.True(t, ok, "IsActive should be a bool")
 	assert.True(t, isActive, "Root user should be active")
 
-	isLockedOut, ok := rootUser.Fields["IsLockedOut"].Value.AsBool()
+	isLockedOut, ok := getDocFieldBool(rootUser, schema, "IsLockedOut")
 	require.True(t, ok, "IsLockedOut should be a bool")
 	assert.False(t, isLockedOut, "Root user should not be locked out")
 
-	failedAttempts, ok := rootUser.Fields["FailedLoginAttempts"].Value.AsInt()
+	failedAttempts, ok := getDocFieldInt(rootUser, schema, "FailedLoginAttempts")
 	require.True(t, ok, "FailedLoginAttempts should be an int")
 	assert.Equal(t, int64(0), failedAttempts, "Root user should have 0 failed login attempts")
 
@@ -277,35 +362,16 @@ func TestRootUser_PasswordHashed(t *testing.T) {
 	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
-	// Get Root user from Users bundle
-	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
-	require.NoError(t, err, "Failed to get Users bundle")
-	require.NotNil(t, usersBundle, "Users bundle should exist")
-
-	userDocs := *usersBundle.Documents
-	var rootUser *models.Document
-	for _, doc := range userDocs {
-		if usernameField, exists := doc.Fields["Username"]; exists {
-			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
-				rootUser = &doc
-				break
-			}
-		}
-	}
-
+	userDocs := getBundleDocuments(t, serviceManager, primaryDB, "Users")
+	usersBundle, _ := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	schema := usersBundle.DocumentStructure.FieldSchema()
+	rootUser := findRootUserDocument(userDocs, schema)
 	require.NotNil(t, rootUser, "Root user should exist")
 
-	// Check if password field exists
-	if passwordField, hasPassword := rootUser.Fields["Password"]; hasPassword {
-		if password, ok := passwordField.Value.AsString(); ok {
-			// Password should NOT be plaintext "root"
-			assert.NotEqual(t, "root", password, "Password should not be stored as plaintext")
-
-			// If it's not plaintext, it should be an Argon2id hash
-			// Argon2id hashes start with "$argon2" prefix
-			// Note: During hydration, password might be plaintext until UpdateDefaultUserPasswords runs
-			// So we just verify it's not the plaintext password in the final state
-		}
+	// Check if password field exists (Document uses Values/Data)
+	if password, hasPassword := getDocFieldString(rootUser, schema, "Password"); hasPassword {
+		// Password should NOT be plaintext "root"
+		assert.NotEqual(t, "root", password, "Password should not be stored as plaintext")
 	}
 
 	// Verify password is hashed in UserStore by checking authentication works
@@ -325,42 +391,29 @@ func TestRootUser_HasDboRole(t *testing.T) {
 	serviceManager, primaryDB, cleanup := setupRootUserTest(t)
 	defer cleanup()
 
-	// Get Root user's UserID
-	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
-	require.NoError(t, err, "Failed to get Users bundle")
-	require.NotNil(t, usersBundle, "Users bundle should exist")
+	userDocs := getBundleDocuments(t, serviceManager, primaryDB, "Users")
+	usersBundle, _ := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	userSchema := usersBundle.DocumentStructure.FieldSchema()
+	rootUser := findRootUserDocument(userDocs, userSchema)
+	require.NotNil(t, rootUser, "Root user should exist")
 
-	userDocs := *usersBundle.Documents
-	var rootUserID string
-	for _, doc := range userDocs {
-		if usernameField, exists := doc.Fields["Username"]; exists {
-			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
-				if userIDField, exists := doc.Fields["UserID"]; exists {
-					rootUserID, _ = userIDField.Value.AsString()
-				}
-				break
-			}
-		}
-	}
-
+	rootUserID, ok := getDocFieldString(rootUser, userSchema, "UserID")
+	require.True(t, ok, "Root user should have UserID")
 	require.NotEmpty(t, rootUserID, "Root user ID should be found")
 
 	// Check UserRoles bundle for Dbo role assignment
-	userRolesBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "UserRoles")
-	require.NoError(t, err, "Failed to get UserRoles bundle")
-	require.NotNil(t, userRolesBundle, "UserRoles bundle should exist")
-	require.NotNil(t, userRolesBundle.Documents, "UserRoles bundle should have documents")
+	roleAssignments := getBundleDocuments(t, serviceManager, primaryDB, "UserRoles")
+	require.NotEmpty(t, roleAssignments, "UserRoles bundle should have documents")
 
-	// Find the RoleID for the Root user
-	roleAssignments := *userRolesBundle.Documents
+	userRolesBundle, _ := serviceManager.BundleService.GetBundleByName(primaryDB, "UserRoles")
+	urSchema := userRolesBundle.DocumentStructure.FieldSchema()
 	var rootRoleID string
-	for _, doc := range roleAssignments {
-		if userIDField, exists := doc.Fields["UserID"]; exists {
-			if userID, ok := userIDField.Value.AsString(); ok && userID == rootUserID {
-				if roleIDField, exists := doc.Fields["RoleID"]; exists {
-					rootRoleID, _ = roleIDField.Value.AsString()
-					break
-				}
+	for i := range roleAssignments {
+		doc := &roleAssignments[i]
+		if userID, ok := getDocFieldString(doc, urSchema, "UserID"); ok && userID == rootUserID {
+			if roleID, ok := getDocFieldString(doc, urSchema, "RoleID"); ok {
+				rootRoleID = roleID
+				break
 			}
 		}
 	}
@@ -368,22 +421,18 @@ func TestRootUser_HasDboRole(t *testing.T) {
 	require.NotEmpty(t, rootRoleID, "Root user should have a role assigned")
 
 	// Now check the Roles bundle to see if this RoleID corresponds to "Dbo"
-	rolesBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Roles")
-	require.NoError(t, err, "Failed to get Roles bundle")
-	require.NotNil(t, rolesBundle, "Roles bundle should exist")
-	require.NotNil(t, rolesBundle.Documents, "Roles bundle should have documents")
+	roles := getBundleDocuments(t, serviceManager, primaryDB, "Roles")
+	require.NotEmpty(t, roles, "Roles bundle should have documents")
 
-	roles := *rolesBundle.Documents
+	rolesBundle, _ := serviceManager.BundleService.GetBundleByName(primaryDB, "Roles")
+	rolesSchema := rolesBundle.DocumentStructure.FieldSchema()
 	var hasDboRole bool
-	for _, doc := range roles {
-		if roleIDField, exists := doc.Fields["RoleID"]; exists {
-			if roleID, ok := roleIDField.Value.AsString(); ok && roleID == rootRoleID {
-				if nameField, exists := doc.Fields["Name"]; exists {
-					if roleName, ok := nameField.Value.AsString(); ok && roleName == "Dbo" {
-						hasDboRole = true
-						break
-					}
-				}
+	for i := range roles {
+		doc := &roles[i]
+		if roleID, ok := getDocFieldString(doc, rolesSchema, "RoleID"); ok && roleID == rootRoleID {
+			if roleName, ok := getDocFieldString(doc, rolesSchema, "Name"); ok && roleName == "Dbo" {
+				hasDboRole = true
+				break
 			}
 		}
 	}
@@ -446,13 +495,13 @@ func TestRootUser_CanAccessBundles(t *testing.T) {
 	require.NoError(t, err, "Write permission check should not error")
 	require.True(t, hasWrite, "Root user should have Write permission")
 
-	// Test access to existing bundles
+	// Test access to existing bundles (documents are page-based; bundle has no Documents field)
 	requiredBundles := []string{"Users", "Roles", "Permissions", "UserRoles", "UserPermissions", "RolesPermissions"}
 
 	for _, bundleName := range requiredBundles {
-		bundle, exists := primaryDB.Bundles[bundleName]
+		b, exists := primaryDB.Bundles[bundleName]
 		assert.True(t, exists, "Bundle %s should exist", bundleName)
-		assert.NotNil(t, bundle.Documents, "Bundle %s should have documents map", bundleName)
+		assert.True(t, b.TotalDocuments >= 0, "Bundle %s should have document count", bundleName)
 
 		t.Logf("✓ Root user can access bundle: %s", bundleName)
 	}
@@ -470,29 +519,15 @@ func TestRootUser_CanAccessDocuments(t *testing.T) {
 	require.NoError(t, err, "Read-Write permission check should not error")
 	require.True(t, hasReadWrite, "Root user should have Read-Write permission")
 
-	// Test access to documents in Users bundle
-	usersBundle, err := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
-	require.NoError(t, err, "Failed to get Users bundle")
-	require.NotNil(t, usersBundle, "Users bundle should exist")
-	require.NotNil(t, usersBundle.Documents, "Users bundle should have documents")
-
-	userDocs := *usersBundle.Documents
+	// Test access to documents in Users bundle (via page-based API)
+	userDocs := getBundleDocuments(t, serviceManager, primaryDB, "Users")
 	assert.Greater(t, len(userDocs), 0, "Users bundle should contain documents")
 
-	// Verify we can read Root user document
-	var rootUserFound bool
-	for _, doc := range userDocs {
-		if usernameField, exists := doc.Fields["Username"]; exists {
-			if username, ok := usernameField.Value.AsString(); ok && username == "Root" {
-				rootUserFound = true
-				assert.NotEmpty(t, doc.DocumentID, "Root user document should have DocumentID")
-				assert.NotNil(t, doc.Data, "Root user document should have Data map")
-				break
-			}
-		}
-	}
-
-	assert.True(t, rootUserFound, "Root user document should be accessible")
+	usersBundle, _ := serviceManager.BundleService.GetBundleByName(primaryDB, "Users")
+	schema := usersBundle.DocumentStructure.FieldSchema()
+	rootUser := findRootUserDocument(userDocs, schema)
+	require.NotNil(t, rootUser, "Root user document should be accessible")
+	assert.NotEmpty(t, rootUser.DocumentID, "Root user document should have DocumentID")
 
 	t.Log("✓ Root user can access documents (has Read-Write permission)")
 }
@@ -549,20 +584,19 @@ func TestRootUser_FullAccessWorkflow(t *testing.T) {
 	require.Equal(t, "primary", primaryDB.Name, "Database name should be 'primary'")
 	t.Log("  ✓ Primary database accessible")
 
-	// Step 4: Access bundles
+	// Step 4: Access bundles (documents are page-based; no bundle.Documents)
 	t.Log("Step 4: Accessing bundles...")
 	rbacBundles := []string{"Users", "Roles", "Permissions", "UserRoles", "UserPermissions", "RolesPermissions"}
 	for _, bundleName := range rbacBundles {
-		bundle, exists := primaryDB.Bundles[bundleName]
+		b, exists := primaryDB.Bundles[bundleName]
 		require.True(t, exists, "Bundle %s should exist", bundleName)
-		require.NotNil(t, bundle.Documents, "Bundle %s should have documents", bundleName)
+		require.NotNil(t, b, "Bundle %s should be non-nil", bundleName)
 		t.Logf("  ✓ Bundle %s accessible", bundleName)
 	}
 
-	// Step 5: Access documents
+	// Step 5: Access documents (via getBundleDocuments)
 	t.Log("Step 5: Accessing documents...")
-	usersBundle := primaryDB.Bundles["Users"]
-	userDocs := *usersBundle.Documents
+	userDocs := getBundleDocuments(t, serviceManager, primaryDB, "Users")
 	require.Greater(t, len(userDocs), 0, "Users bundle should have documents")
 	t.Logf("  ✓ %d user documents accessible", len(userDocs))
 

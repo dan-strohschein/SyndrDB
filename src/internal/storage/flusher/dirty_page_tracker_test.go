@@ -303,9 +303,9 @@ func TestDirtyPageTrackerIndexUpdates(t *testing.T) {
 func TestDirtyPageTrackerEnqueueDecrementsCount(t *testing.T) {
 	config := DirtyPageTrackerConfig{
 		WorkerCount:     1,
-		MaxDocsPerPage:   100,
-		MaxBytesPerPage:  1024 * 1024,
-		QueueSize:        10,
+		MaxDocsPerPage:  100,
+		MaxBytesPerPage: 1024 * 1024,
+		QueueSize:       10,
 	}
 	tracker := NewDirtyPageTracker(config)
 	defer tracker.Close()
@@ -390,7 +390,7 @@ func BenchmarkDirtyPageTrackerMarkDirty(b *testing.B) {
 	tracker := NewDirtyPageTracker(DefaultDirtyPageTrackerConfig)
 	defer tracker.Close()
 
-	schema := models.NewProjectionSchema(nil)
+	//schema := models.NewProjectionSchema(nil)
 	doc := &models.Document{
 		DocumentID: "bench-doc",
 		Values:     []models.FieldValue{models.NewStringValue("bench-doc")},
@@ -408,7 +408,7 @@ func BenchmarkDirtyPageTrackerConcurrent(b *testing.B) {
 	tracker := NewDirtyPageTracker(DefaultDirtyPageTrackerConfig)
 	defer tracker.Close()
 
-	schema := models.NewProjectionSchema(nil)
+	//schema := models.NewProjectionSchema(nil)
 	doc := &models.Document{
 		DocumentID: "bench-doc",
 		Values:     []models.FieldValue{models.NewStringValue("bench-doc")},

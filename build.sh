@@ -18,7 +18,7 @@ go build -o ../bin/server/server cmd/server/main.go
 echo "Build complete: ../bin/server/server"
 
 # Build the syndrdb client
-go build -o ../bin/client/client cmd/client/main.go
+go build -o ../bin/client/client ./cmd/client/
 
 echo "Build complete: ../bin/client/client"
 

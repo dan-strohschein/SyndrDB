@@ -44,24 +44,21 @@ func TestParallelRadixSort_BasicCorrectness(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create documents
 			docs := createDocsFromValues(tt.values, "value")
+			schema := sortSchema("value")
 
-			// Run parallel radix sort
-			result, err := ParallelRadixSort(docs, "value", tt.ascending, tt.numWorkers, logger)
+			result, err := ParallelRadixSort(docs, "value", tt.ascending, tt.numWorkers, logger, schema)
 			if err != nil {
 				t.Fatalf("ParallelRadixSort failed: %v", err)
 			}
 
-			// Verify correct count
 			if len(result) != len(tt.values) {
 				t.Fatalf("Expected %d results, got %d", len(tt.values), len(result))
 			}
 
-			// Verify correct ordering
 			for i := 0; i < len(result)-1; i++ {
-				val1, _ := result[i].Fields["value"].Value.AsInt()
-				val2, _ := result[i+1].Fields["value"].Value.AsInt()
+				val1, _ := getSortResultInt(result[i], schema, "value")
+				val2, _ := getSortResultInt(result[i+1], schema, "value")
 
 				if tt.ascending {
 					if val1 > val2 {
@@ -94,28 +91,26 @@ func TestParallelRadixSort_CompareWithSequential(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			docs := createDocsFromValues(tt.values, "num")
+			schema := sortSchema("num")
 
-			// Run sequential radix sort
-			seqResult, err := RadixSort(docs, "num", true, logger)
+			seqResult, err := RadixSort(docs, "num", true, logger, schema)
 			if err != nil {
 				t.Fatalf("Sequential RadixSort failed: %v", err)
 			}
 
-			// Run parallel radix sort
-			parResult, err := ParallelRadixSort(docs, "num", true, 4, logger)
+			parResult, err := ParallelRadixSort(docs, "num", true, 4, logger, schema)
 			if err != nil {
 				t.Fatalf("ParallelRadixSort failed: %v", err)
 			}
 
-			// Verify results match
 			if len(seqResult) != len(parResult) {
 				t.Fatalf("Result count mismatch: sequential=%d, parallel=%d",
 					len(seqResult), len(parResult))
 			}
 
 			for i := 0; i < len(seqResult); i++ {
-				seqVal, _ := seqResult[i].Fields["num"].Value.AsInt()
-				parVal, _ := parResult[i].Fields["num"].Value.AsInt()
+				seqVal, _ := getSortResultInt(seqResult[i], schema, "num")
+				parVal, _ := getSortResultInt(parResult[i], schema, "num")
 
 				if seqVal != parVal {
 					t.Errorf("Value mismatch at index %d: sequential=%d, parallel=%d",
@@ -129,46 +124,23 @@ func TestParallelRadixSort_CompareWithSequential(t *testing.T) {
 // TestParallelRadixSort_MixedTypes tests different integer types
 func TestParallelRadixSort_MixedTypes(t *testing.T) {
 	logger := zap.NewNop().Sugar()
+	schema := sortSchema("value")
 
 	docs := make(map[string]*models.Document)
 
-	// Add int
-	doc1 := &models.Document{
-		DocumentID: uuid.New().String(),
-		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: models.NewIntValue(int64(42))},
-		},
-	}
+	doc1 := &models.Document{DocumentID: uuid.New().String(), Data: map[string]interface{}{"value": int64(42)}}
 	docs[doc1.DocumentID] = doc1
 
-	// Add int32
-	doc2 := &models.Document{
-		DocumentID: uuid.New().String(),
-		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: models.NewIntValue(int64(15))},
-		},
-	}
+	doc2 := &models.Document{DocumentID: uuid.New().String(), Data: map[string]interface{}{"value": int64(15)}}
 	docs[doc2.DocumentID] = doc2
 
-	// Add int64
-	doc3 := &models.Document{
-		DocumentID: uuid.New().String(),
-		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: models.NewIntValue(int64(99))},
-		},
-	}
+	doc3 := &models.Document{DocumentID: uuid.New().String(), Data: map[string]interface{}{"value": int64(99)}}
 	docs[doc3.DocumentID] = doc3
 
-	// Add float64 (should convert to int)
-	doc4 := &models.Document{
-		DocumentID: uuid.New().String(),
-		Fields: map[string]models.Field{
-			"value": {Name: "value", Value: models.NewFloatValue(7.9)}, // Converts to 7
-		},
-	}
+	doc4 := &models.Document{DocumentID: uuid.New().String(), Data: map[string]interface{}{"value": 7.9}}
 	docs[doc4.DocumentID] = doc4
 
-	result, err := ParallelRadixSort(docs, "value", true, 2, logger)
+	result, err := ParallelRadixSort(docs, "value", true, 2, logger, schema)
 	if err != nil {
 		t.Fatalf("ParallelRadixSort failed: %v", err)
 	}
@@ -177,10 +149,13 @@ func TestParallelRadixSort_MixedTypes(t *testing.T) {
 		t.Fatalf("Expected 4 results, got %d", len(result))
 	}
 
-	// Expected order: 7, 15, 42, 99
 	expectedValues := []int64{7, 15, 42, 99}
 	for i, expected := range expectedValues {
-		fv := result[i].Fields["value"].Value
+		fv, ok := getSortResultFieldValue(result[i], schema, "value")
+		if !ok {
+			t.Errorf("At index %d: no value", i)
+			continue
+		}
 		var actualInt64 int64
 		if intVal, ok := fv.AsInt(); ok {
 			actualInt64 = intVal
@@ -197,10 +172,11 @@ func TestParallelRadixSort_MixedTypes(t *testing.T) {
 // TestParallelRadixSort_EmptyInput tests handling of empty input
 func TestParallelRadixSort_EmptyInput(t *testing.T) {
 	logger := zap.NewNop().Sugar()
+	schema := sortSchema("value")
 
 	docs := make(map[string]*models.Document)
 
-	result, err := ParallelRadixSort(docs, "value", true, 4, logger)
+	result, err := ParallelRadixSort(docs, "value", true, 4, logger, schema)
 	if err != nil {
 		t.Fatalf("Expected no error for empty input, got: %v", err)
 	}
@@ -213,10 +189,11 @@ func TestParallelRadixSort_EmptyInput(t *testing.T) {
 // TestParallelRadixSort_MissingField tests handling of missing field
 func TestParallelRadixSort_MissingField(t *testing.T) {
 	logger := zap.NewNop().Sugar()
+	schema := sortSchema("missing_field")
 
 	docs := createTestDocuments(100, "other_field")
 
-	result, err := ParallelRadixSort(docs, "missing_field", true, 4, logger)
+	result, err := ParallelRadixSort(docs, "missing_field", true, 4, logger, schema)
 	if err != nil {
 		t.Fatalf("Expected no error for missing field, got: %v", err)
 	}
@@ -312,6 +289,7 @@ func BenchmarkParallelRadixSort(b *testing.B) {
 
 	sizes := []int{1000, 10000, 100000}
 
+	schema := sortSchema("value")
 	for _, size := range sizes {
 		values := generateSequence(size, false)
 		docs := createDocsFromValues(values, "value")
@@ -319,7 +297,7 @@ func BenchmarkParallelRadixSort(b *testing.B) {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = ParallelRadixSort(docs, "value", true, runtime.NumCPU(), logger)
+				_, _ = ParallelRadixSort(docs, "value", true, runtime.NumCPU(), logger, schema)
 			}
 		})
 	}
@@ -328,6 +306,7 @@ func BenchmarkParallelRadixSort(b *testing.B) {
 // BenchmarkParallelRadixSort_Workers benchmarks different worker counts
 func BenchmarkParallelRadixSort_Workers(b *testing.B) {
 	logger := zap.NewNop().Sugar()
+	schema := sortSchema("value")
 
 	values := generateSequence(50000, false)
 	docs := createDocsFromValues(values, "value")
@@ -338,7 +317,7 @@ func BenchmarkParallelRadixSort_Workers(b *testing.B) {
 		b.Run(fmt.Sprintf("workers=%d", numWorkers), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = ParallelRadixSort(docs, "value", true, numWorkers, logger)
+				_, _ = ParallelRadixSort(docs, "value", true, numWorkers, logger, schema)
 			}
 		})
 	}
@@ -347,6 +326,7 @@ func BenchmarkParallelRadixSort_Workers(b *testing.B) {
 // BenchmarkParallelVsSequentialRadix compares parallel vs sequential radix
 func BenchmarkParallelVsSequentialRadix(b *testing.B) {
 	logger := zap.NewNop().Sugar()
+	schema := sortSchema("value")
 
 	sizes := []int{10000, 50000, 100000}
 
@@ -357,17 +337,63 @@ func BenchmarkParallelVsSequentialRadix(b *testing.B) {
 		b.Run(fmt.Sprintf("Sequential_%d", size), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = RadixSort(docs, "value", true, logger)
+				_, _ = RadixSort(docs, "value", true, logger, schema)
 			}
 		})
 
 		b.Run(fmt.Sprintf("Parallel_%d", size), func(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_, _ = ParallelRadixSort(docs, "value", true, runtime.NumCPU(), logger)
+				_, _ = ParallelRadixSort(docs, "value", true, runtime.NumCPU(), logger, schema)
 			}
 		})
 	}
+}
+
+// sortSchema returns a minimal schema for the sort field (used by ParallelRadixSort/RadixSort).
+func sortSchema(fieldName string) *models.BundleFieldSchema {
+	return models.BuildBundleFieldSchemaFromNames([]string{fieldName})
+}
+
+// getSortResultInt returns the int64 value of fieldName from a sort result document (Values or Data).
+func getSortResultInt(doc *models.Document, schema *models.BundleFieldSchema, fieldName string) (int64, bool) {
+	if doc == nil {
+		return 0, false
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
+			return fv.AsInt()
+		}
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok && v != nil {
+			switch n := v.(type) {
+			case int64:
+				return n, true
+			case int:
+				return int64(n), true
+			case float64:
+				return int64(n), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// getSortResultFieldValue returns the FieldValue for a sort result document (for AsInt/AsFloat).
+func getSortResultFieldValue(doc *models.Document, schema *models.BundleFieldSchema, fieldName string) (models.FieldValue, bool) {
+	if doc == nil {
+		return models.FieldValue{}, false
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		return doc.GetFieldValue(schema, fieldName)
+	}
+	if doc.Data != nil {
+		if v, ok := doc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), true
+		}
+	}
+	return models.FieldValue{}, false
 }
 
 // Helper functions
@@ -395,19 +421,15 @@ func createTestDocuments(count int, fieldName string) map[string]*models.Documen
 	return createDocsFromValues(values, fieldName)
 }
 
-// createDocsFromValues creates test documents from a slice of int64 values
+// createDocsFromValues creates test documents from a slice of int64 values.
+// Documents use Data for sort field; GetFieldValueForSort reads from Data when schema is passed.
 func createDocsFromValues(values []int64, fieldName string) map[string]*models.Document {
 	docs := make(map[string]*models.Document, len(values))
 
 	for _, val := range values {
 		doc := &models.Document{
 			DocumentID: uuid.New().String(),
-			Fields: map[string]models.Field{
-				fieldName: {
-					Name:  fieldName,
-					Value: models.NewIntValue(val),
-				},
-			},
+			Data:       map[string]interface{}{fieldName: val},
 		}
 		docs[doc.DocumentID] = doc
 	}

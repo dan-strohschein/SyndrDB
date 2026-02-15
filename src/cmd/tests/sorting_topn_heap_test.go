@@ -24,73 +24,38 @@ func TestTopNHeapSort_ASC(t *testing.T) {
 	sugar := logger.Sugar()
 	defer sugar.Sync()
 
-	// Create test documents with ages: 28, 35, 25, 42, 18
 	documents := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Alice")},
-				"age":  {Name: "age", Value: models.NewIntValue(28)},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Bob")},
-				"age":  {Name: "age", Value: models.NewIntValue(35)},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
-				"age":  {Name: "age", Value: models.NewIntValue(25)},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Diana")},
-				"age":  {Name: "age", Value: models.NewIntValue(42)},
-			},
-		},
-		"doc5": {
-			DocumentID: "doc5",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Eve")},
-				"age":  {Name: "age", Value: models.NewIntValue(18)},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"name": "Alice", "age": int64(28)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"name": "Bob", "age": int64(35)}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"name": "Charlie", "age": int64(25)}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"name": "Diana", "age": int64(42)}},
+		"doc5": {DocumentID: "doc5", Data: map[string]interface{}{"name": "Eve", "age": int64(18)}},
 	}
 
-	// ORDER BY age ASC, LIMIT 3 should return: Eve(18), Charlie(25), Alice(28)
 	orderBy := &queryparser.OrderByClause{
 		Fields: []queryparser.OrderByField{
-			{
-				FieldName: "age",
-				Direction: queryparser.SortAsc,
-			},
+			{FieldName: "age", Direction: queryparser.SortAsc},
 		},
 	}
+	schema := sortSchema("age")
 
-	result, err := TopNHeapSort(documents, 3, orderBy, sugar)
+	result, err := TopNHeapSort(documents, 3, orderBy, sugar, schema)
 	require.NoError(t, err)
 	require.Len(t, result, 3)
 
-	// Verify correct order
-	nameVal, _ := result[0].Fields["name"].Value.AsString()
+	nameVal, _ := getSortResultString(result[0], nil, "name")
 	assert.Equal(t, "Eve", nameVal)
-	ageVal, _ := result[0].Fields["age"].Value.AsInt()
+	ageVal, _ := getSortResultInt(result[0], nil, "age")
 	assert.Equal(t, int64(18), ageVal)
 
-	nameVal, _ = result[1].Fields["name"].Value.AsString()
+	nameVal, _ = getSortResultString(result[1], nil, "name")
 	assert.Equal(t, "Charlie", nameVal)
-	ageVal, _ = result[1].Fields["age"].Value.AsInt()
+	ageVal, _ = getSortResultInt(result[1], nil, "age")
 	assert.Equal(t, int64(25), ageVal)
 
-	nameVal, _ = result[2].Fields["name"].Value.AsString()
+	nameVal, _ = getSortResultString(result[2], nil, "name")
 	assert.Equal(t, "Alice", nameVal)
-	ageVal, _ = result[2].Fields["age"].Value.AsInt()
+	ageVal, _ = getSortResultInt(result[2], nil, "age")
 	assert.Equal(t, int64(28), ageVal)
 }
 
@@ -100,73 +65,38 @@ func TestTopNHeapSort_DESC(t *testing.T) {
 	sugar := logger.Sugar()
 	defer sugar.Sync()
 
-	// Create test documents with ages: 28, 35, 25, 42, 18
 	documents := map[string]*models.Document{
-		"doc1": {
-			DocumentID: "doc1",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Alice")},
-				"age":  {Name: "age", Value: models.NewIntValue(28)},
-			},
-		},
-		"doc2": {
-			DocumentID: "doc2",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Bob")},
-				"age":  {Name: "age", Value: models.NewIntValue(35)},
-			},
-		},
-		"doc3": {
-			DocumentID: "doc3",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Charlie")},
-				"age":  {Name: "age", Value: models.NewIntValue(25)},
-			},
-		},
-		"doc4": {
-			DocumentID: "doc4",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Diana")},
-				"age":  {Name: "age", Value: models.NewIntValue(42)},
-			},
-		},
-		"doc5": {
-			DocumentID: "doc5",
-			Fields: map[string]models.Field{
-				"name": {Name: "name", Value: models.NewStringValue("Eve")},
-				"age":  {Name: "age", Value: models.NewIntValue(18)},
-			},
-		},
+		"doc1": {DocumentID: "doc1", Data: map[string]interface{}{"name": "Alice", "age": int64(28)}},
+		"doc2": {DocumentID: "doc2", Data: map[string]interface{}{"name": "Bob", "age": int64(35)}},
+		"doc3": {DocumentID: "doc3", Data: map[string]interface{}{"name": "Charlie", "age": int64(25)}},
+		"doc4": {DocumentID: "doc4", Data: map[string]interface{}{"name": "Diana", "age": int64(42)}},
+		"doc5": {DocumentID: "doc5", Data: map[string]interface{}{"name": "Eve", "age": int64(18)}},
 	}
 
-	// ORDER BY age DESC, LIMIT 3 should return: Diana(42), Bob(35), Alice(28)
 	orderBy := &queryparser.OrderByClause{
 		Fields: []queryparser.OrderByField{
-			{
-				FieldName: "age",
-				Direction: queryparser.SortDesc,
-			},
+			{FieldName: "age", Direction: queryparser.SortDesc},
 		},
 	}
+	schema := sortSchema("age")
 
-	result, err := TopNHeapSort(documents, 3, orderBy, sugar)
+	result, err := TopNHeapSort(documents, 3, orderBy, sugar, schema)
 	require.NoError(t, err)
 	require.Len(t, result, 3)
 
-	// Verify correct order
-	nameVal, _ := result[0].Fields["name"].Value.AsString()
+	nameVal, _ := getSortResultString(result[0], nil, "name")
 	assert.Equal(t, "Diana", nameVal)
-	ageVal, _ := result[0].Fields["age"].Value.AsInt()
+	ageVal, _ := getSortResultInt(result[0], nil, "age")
 	assert.Equal(t, int64(42), ageVal)
 
-	nameVal, _ = result[1].Fields["name"].Value.AsString()
+	nameVal, _ = getSortResultString(result[1], nil, "name")
 	assert.Equal(t, "Bob", nameVal)
-	ageVal, _ = result[1].Fields["age"].Value.AsInt()
+	ageVal, _ = getSortResultInt(result[1], nil, "age")
 	assert.Equal(t, int64(35), ageVal)
 
-	nameVal, _ = result[2].Fields["name"].Value.AsString()
+	nameVal, _ = getSortResultString(result[2], nil, "name")
 	assert.Equal(t, "Alice", nameVal)
-	ageVal, _ = result[2].Fields["age"].Value.AsInt()
+	ageVal, _ = getSortResultInt(result[2], nil, "age")
 	assert.Equal(t, int64(28), ageVal)
 }
 

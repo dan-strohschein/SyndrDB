@@ -45,7 +45,7 @@ func TestMetadataPersistence_DirtyFlag(t *testing.T) {
 	defer cleanup()
 
 	// Create a test bundle
-	db, bundle := createTestBundleWithDB(t, service, "TestDB", "TestBundle")
+	db, bundle := createTestBundleWithDB("TestDB", "TestBundle")
 	assert.False(t, bundle.IsDirty, "Bundle should not be dirty initially")
 
 	// Add a document to trigger metadata update - use DocumentCommand
@@ -74,12 +74,12 @@ func TestMetadataPersistence_SingleBundleImmediatePersist(t *testing.T) {
 	service, cleanup := setupTestService(t)
 	defer cleanup()
 
-	db, bundle := createTestBundleWithDB(t, service, "TestDB", "SingleBundle")
+	db, bundle := createTestBundleWithDB("TestDB", "SingleBundle")
 
-	// Add document and flush
+	// Add document and flush (Document uses Data; bundle has no schema so storage encodes minimal payload)
 	doc := &models.Document{
 		DocumentID: "doc-1",
-		Fields:     map[string]models.Field{"name": {Name: "name", Value: models.NewStringValue("test")}},
+		Data:       map[string]interface{}{"name": "test"},
 	}
 
 	err := service.AddDocumentToBundleByStruct(db, bundle, doc)
@@ -92,7 +92,7 @@ func TestMetadataPersistence_SingleBundleImmediatePersist(t *testing.T) {
 	assert.False(t, bundle.IsDirty, "Bundle should not be dirty after persistence")
 
 	// Verify persistence by reloading from disk
-	reloaded := reloadBundleFromDisk(t, service, db.Name, bundle.Name)
+	reloaded := reloadBundleFromDisk(t)
 	assert.Equal(t, int64(1), reloaded.TotalDocuments, "Persisted TotalDocuments should be 1")
 	assert.Equal(t, int64(1), reloaded.PageCount, "Persisted PageCount should be 1")
 }
@@ -107,16 +107,16 @@ func TestMetadataPersistence_MultiBundleBatchedPersist(t *testing.T) {
 	service.SetMetadataPersistInterval(10)
 
 	// Create multiple bundles
-	db, bundle1 := createTestBundleWithDB(t, service, "TestDB", "Bundle1")
-	_, bundle2 := createTestBundleWithDB(t, service, "TestDB", "Bundle2")
-	_, bundle3 := createTestBundleWithDB(t, service, "TestDB", "Bundle3")
+	db, bundle1 := createTestBundleWithDB("TestDB", "Bundle1")
+	_, bundle2 := createTestBundleWithDB("TestDB", "Bundle2")
+	_, bundle3 := createTestBundleWithDB("TestDB", "Bundle3")
 
 	// Add 3 documents to each bundle (9 total operations - below threshold)
 	for i := 0; i < 3; i++ {
 		for _, bundle := range []*models.Bundle{bundle1, bundle2, bundle3} {
 			doc := &models.Document{
 				DocumentID: generateDocID(bundle.Name, i),
-				Fields:     map[string]models.Field{"value": {Name: "value", Value: models.NewIntValue(int64(i))}},
+				Data:       map[string]interface{}{"value": int64(i)},
 			}
 			err := service.AddDocumentToBundleByStruct(db, bundle, doc)
 			require.NoError(t, err)
@@ -134,7 +134,7 @@ func TestMetadataPersistence_MultiBundleBatchedPersist(t *testing.T) {
 	// Add one more document to push over threshold (10 operations total)
 	doc := &models.Document{
 		DocumentID: generateDocID(bundle1.Name, 100),
-		Fields:     map[string]models.Field{"value": {Name: "value", Value: models.NewIntValue(100)}},
+		Data:       map[string]interface{}{"value": int64(100)},
 	}
 	err := service.AddDocumentToBundleByStruct(db, bundle1, doc)
 	require.NoError(t, err)
@@ -148,9 +148,9 @@ func TestMetadataPersistence_MultiBundleBatchedPersist(t *testing.T) {
 	assert.False(t, bundle3.IsDirty, "Bundle3 should be clean after threshold persistence")
 
 	// Verify all bundles persisted correctly
-	reloaded1 := reloadBundleFromDisk(t, service, db.Name, bundle1.Name)
-	reloaded2 := reloadBundleFromDisk(t, service, db.Name, bundle2.Name)
-	reloaded3 := reloadBundleFromDisk(t, service, db.Name, bundle3.Name)
+	reloaded1 := reloadBundleFromDisk(t)
+	reloaded2 := reloadBundleFromDisk(t)
+	reloaded3 := reloadBundleFromDisk(t)
 
 	assert.Equal(t, int64(4), reloaded1.TotalDocuments, "Bundle1 should have 4 documents")
 	assert.Equal(t, int64(3), reloaded2.TotalDocuments, "Bundle2 should have 3 documents")
@@ -165,7 +165,7 @@ func TestMetadataPersistence_ConcurrentUpdates(t *testing.T) {
 
 	service.SetMetadataPersistInterval(100)
 
-	db, bundle := createTestBundleWithDB(t, service, "TestDB", "ConcurrentBundle")
+	db, bundle := createTestBundleWithDB("TestDB", "ConcurrentBundle")
 
 	// Concurrent document additions
 	const numGoroutines = 10
@@ -182,7 +182,7 @@ func TestMetadataPersistence_ConcurrentUpdates(t *testing.T) {
 			for j := 0; j < docsPerGoroutine; j++ {
 				doc := &models.Document{
 					DocumentID: generateDocID(bundle.Name, goroutineID*docsPerGoroutine+j),
-					Fields:     map[string]models.Field{"goroutine": {Name: "goroutine", Value: models.NewIntValue(int64(goroutineID))}, "index": {Name: "index", Value: models.NewIntValue(int64(j))}},
+					Data:       map[string]interface{}{"goroutine": int64(goroutineID), "index": int64(j)},
 				}
 				if err := service.AddDocumentToBundleByStruct(db, bundle, doc); err != nil {
 					errors <- err
@@ -208,7 +208,7 @@ func TestMetadataPersistence_ConcurrentUpdates(t *testing.T) {
 
 	// Force persistence and verify
 	service.ForceMetadataPersistence()
-	reloaded := reloadBundleFromDisk(t, service, db.Name, bundle.Name)
+	reloaded := reloadBundleFromDisk(t)
 	assert.Equal(t, int64(totalDocs), reloaded.TotalDocuments,
 		"Persisted count should match concurrent additions")
 }
@@ -222,17 +222,17 @@ func TestMetadataPersistence_ShutdownForcesPersist(t *testing.T) {
 	service.SetMetadataPersistInterval(10000)
 
 	// Create bundles and add documents
-	db, bundle1 := createTestBundleWithDB(t, service, "TestDB", "ShutdownBundle1")
-	_, bundle2 := createTestBundleWithDB(t, service, "TestDB", "ShutdownBundle2")
+	db, bundle1 := createTestBundleWithDB("TestDB", "ShutdownBundle1")
+	_, bundle2 := createTestBundleWithDB("TestDB", "ShutdownBundle2")
 
 	for i := 0; i < 5; i++ {
 		doc1 := &models.Document{
 			DocumentID: generateDocID(bundle1.Name, i),
-			Fields:     map[string]models.Field{"value": {Name: "value", Value: models.NewIntValue(int64(i))}},
+			Data:       map[string]interface{}{"value": int64(i)},
 		}
 		doc2 := &models.Document{
 			DocumentID: generateDocID(bundle2.Name, i),
-			Fields:     map[string]models.Field{"value": {Name: "value", Value: models.NewIntValue(int64(i))}},
+			Data:       map[string]interface{}{"value": int64(i)},
 		}
 		require.NoError(t, service.AddDocumentToBundleByStruct(db, bundle1, doc1))
 		require.NoError(t, service.AddDocumentToBundleByStruct(db, bundle2, doc2))
@@ -253,8 +253,8 @@ func TestMetadataPersistence_ShutdownForcesPersist(t *testing.T) {
 	assert.False(t, bundle2.IsDirty, "Bundle2 should be clean after shutdown")
 
 	// Verify persistence
-	reloaded1 := reloadBundleFromDisk(t, service, db.Name, bundle1.Name)
-	reloaded2 := reloadBundleFromDisk(t, service, db.Name, bundle2.Name)
+	reloaded1 := reloadBundleFromDisk(t)
+	reloaded2 := reloadBundleFromDisk(t)
 	assert.Equal(t, int64(5), reloaded1.TotalDocuments, "Bundle1 should have 5 documents")
 	assert.Equal(t, int64(5), reloaded2.TotalDocuments, "Bundle2 should have 5 documents")
 }
@@ -273,7 +273,7 @@ func TestMetadataPersistence_PageCountCalculation(t *testing.T) {
 	service, cleanup := setupTestService(t)
 	defer cleanup()
 
-	db, bundle := createTestBundleWithDB(t, service, "TestDB", "PageCountBundle")
+	db, bundle := createTestBundleWithDB("TestDB", "PageCountBundle")
 	bundle.PageSize = 100 // Set page size to 100 for easier testing
 
 	testCases := []struct {
@@ -296,7 +296,7 @@ func TestMetadataPersistence_PageCountCalculation(t *testing.T) {
 			for i := 0; i < tc.docsToAdd; i++ {
 				doc := &models.Document{
 					DocumentID: generateDocID(bundle.Name, totalDocs+i),
-					Fields:     map[string]models.Field{"value": {Name: "value", Value: models.NewIntValue(int64(totalDocs + i))}},
+					Data:       map[string]interface{}{"value": int64(totalDocs + i)},
 				}
 				require.NoError(t, service.AddDocumentToBundleByStruct(db, bundle, doc))
 			}
@@ -314,7 +314,7 @@ func TestMetadataPersistence_PageCountCalculation(t *testing.T) {
 
 	// Force persist and verify
 	service.ForceMetadataPersistence()
-	reloaded := reloadBundleFromDisk(t, service, db.Name, bundle.Name)
+	reloaded := reloadBundleFromDisk(t)
 	assert.Equal(t, int64(201), reloaded.TotalDocuments)
 	assert.Equal(t, int64(3), reloaded.PageCount)
 }
@@ -324,12 +324,12 @@ func TestMetadataPersistence_NoUnnecessaryPersistence(t *testing.T) {
 	service, cleanup := setupTestService(t)
 	defer cleanup()
 
-	db, bundle := createTestBundleWithDB(t, service, "TestDB", "CleanBundle")
+	db, bundle := createTestBundleWithDB("TestDB", "CleanBundle")
 
 	// Add document and persist
 	doc := &models.Document{
 		DocumentID: "doc-1",
-		Fields:     map[string]models.Field{"name": {Name: "name", Value: models.NewStringValue("test")}},
+		Data:       map[string]interface{}{"name": "test"},
 	}
 	require.NoError(t, service.AddDocumentToBundleByStruct(db, bundle, doc))
 	service.FlushMetadataUpdates()
@@ -388,7 +388,7 @@ func TestMetadataPersistence_HighThroughputScenario(t *testing.T) {
 
 	service.SetMetadataPersistInterval(500) // Moderate threshold
 
-	db, bundle := createTestBundleWithDB(t, service, "TestDB", "HighThroughputBundle")
+	db, bundle := createTestBundleWithDB("TestDB", "HighThroughputBundle")
 
 	// Simulate high-throughput writes
 	const totalDocs = 2000
@@ -397,7 +397,7 @@ func TestMetadataPersistence_HighThroughputScenario(t *testing.T) {
 	for i := 0; i < totalDocs; i++ {
 		doc := &models.Document{
 			DocumentID: generateDocID(bundle.Name, i),
-			Fields:     map[string]models.Field{"value": {Name: "value", Value: models.NewIntValue(int64(i))}},
+			Data:       map[string]interface{}{"value": int64(i)},
 		}
 		require.NoError(t, service.AddDocumentToBundleByStruct(db, bundle, doc))
 
@@ -416,7 +416,7 @@ func TestMetadataPersistence_HighThroughputScenario(t *testing.T) {
 		float64(totalDocs)/duration.Seconds())
 
 	// Verify final state
-	reloaded := reloadBundleFromDisk(t, service, db.Name, bundle.Name)
+	reloaded := reloadBundleFromDisk(t)
 	assert.Equal(t, int64(totalDocs), reloaded.TotalDocuments,
 		"All documents should be persisted")
 	assert.Equal(t, int64(2), reloaded.PageCount, "Should have 2 pages (1000 docs each)")
@@ -435,8 +435,8 @@ func setupTestService(t *testing.T) (*bundle.BundleService, func()) {
 
 	// Setup test settings
 	args := &settings.Arguments{
-		DataDir: tmpDir,
-		LogDir:  filepath.Join(tmpDir, "logs"),
+		//DataDir: tmpDir,
+		LogDir: filepath.Join(tmpDir, "logs"),
 	}
 
 	// Create log directory
@@ -461,7 +461,7 @@ func setupTestService(t *testing.T) (*bundle.BundleService, func()) {
 	return service, cleanup
 }
 
-func createTestBundleWithDB(t *testing.T, service *bundle.BundleService, dbName, bundleName string) (*models.Database, *models.Bundle) {
+func createTestBundleWithDB(dbName, bundleName string) (*models.Database, *models.Bundle) {
 	// Create database
 	db := &models.Database{
 		Name:    dbName,
@@ -495,7 +495,7 @@ func generateDocID(bundleName string, index int) string {
 	return fmt.Sprintf("%s-doc-%d", bundleName, index)
 }
 
-func reloadBundleFromDisk(t *testing.T, service *bundle.BundleService, dbName, bundleName string) *models.Bundle {
+func reloadBundleFromDisk(t *testing.T) *models.Bundle {
 	// Note: Cannot access service.store (unexported field)
 	// This test needs to be moved to the bundle package to access unexported fields
 	t.Skip("Cannot access service.store - unexported field")
