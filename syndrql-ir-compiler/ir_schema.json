@@ -1,0 +1,2128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SyndrQL Training Example",
+  "description": "A training data entry with natural language, IR, and compiled SyndrQL",
+  "$ref": "#/$defs/TrainingExample",
+  "$defs": {
+    "ApplyMigrationStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "migrationId": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "migrationId"
+      ]
+    },
+    "AttachDatabaseStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "$schema": "",
+          "type": "string"
+        },
+        "path": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "BackupDatabaseStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "database": {
+          "$schema": "",
+          "type": "string"
+        },
+        "path": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "database"
+      ]
+    },
+    "BeginTransactionStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "BundleFieldDef": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "defaultValue": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Value"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "$schema": "",
+          "type": "string"
+        },
+        "required": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "type": {
+          "$schema": "",
+          "type": "string"
+        },
+        "unique": {
+          "$schema": "",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "required",
+        "unique"
+      ]
+    },
+    "CheckpointStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "CloseCursorStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "cursorName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cursorName"
+      ]
+    },
+    "CommitStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "CreateBundleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "fields": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/BundleFieldDef"
+          }
+        }
+      },
+      "required": [
+        "bundle",
+        "fields"
+      ]
+    },
+    "CreateDatabaseStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "database": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "database"
+      ]
+    },
+    "CreateIndexStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "fields": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/IndexFieldDef"
+          }
+        },
+        "indexName": {
+          "$schema": "",
+          "type": "string"
+        },
+        "indexType": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "indexType",
+        "indexName",
+        "bundle",
+        "fields"
+      ]
+    },
+    "CreateRoleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "description": {
+          "$schema": "",
+          "type": "string"
+        },
+        "roleName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roleName"
+      ]
+    },
+    "CreateUserStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "password": {
+          "$schema": "",
+          "type": "string"
+        },
+        "username": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "username",
+        "password"
+      ]
+    },
+    "CreateViewStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "isMaterialized": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "query": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/SelectStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "viewName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "viewName",
+        "query"
+      ]
+    },
+    "DeallocateStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "statementName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "statementName"
+      ]
+    },
+    "DeclareCursorStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "cursorName": {
+          "$schema": "",
+          "type": "string"
+        },
+        "query": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/SelectStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "cursorName",
+        "query"
+      ]
+    },
+    "DeleteRoleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "force": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "roleName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roleName"
+      ]
+    },
+    "DeleteStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "confirmed": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "where": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "bundle"
+      ]
+    },
+    "DeleteUserStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "force": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "username": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "username"
+      ]
+    },
+    "DescribeViewStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "viewName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "viewName"
+      ]
+    },
+    "DropBundleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "force": {
+          "$schema": "",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bundle"
+      ]
+    },
+    "DropDatabaseStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "database": {
+          "$schema": "",
+          "type": "string"
+        },
+        "force": {
+          "$schema": "",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "database"
+      ]
+    },
+    "DropViewStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "isMaterialized": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "viewName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "viewName"
+      ]
+    },
+    "ExecuteStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "statementName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "statementName"
+      ]
+    },
+    "ExplainSelectStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "query": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/SelectStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "Expr": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "args": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/Expr"
+          }
+        },
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "index": {
+          "$schema": "",
+          "type": "integer"
+        },
+        "isBuiltIn": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "left": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "$schema": "",
+          "type": "string"
+        },
+        "operator": {
+          "$schema": "",
+          "type": "string"
+        },
+        "query": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/SelectStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "right": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "$schema": "",
+          "type": "string"
+        },
+        "value": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Value"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "FetchCursorStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "count": {
+          "$schema": "",
+          "type": "integer"
+        },
+        "cursorName": {
+          "$schema": "",
+          "type": "string"
+        },
+        "fetchAll": {
+          "$schema": "",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cursorName",
+        "count"
+      ]
+    },
+    "FieldChange": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "action": {
+          "$schema": "",
+          "type": "string"
+        },
+        "field": {
+          "$schema": "",
+          "type": "string"
+        },
+        "fieldDef": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/BundleFieldDef"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "newName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "field"
+      ]
+    },
+    "FieldValue": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "name": {
+          "$schema": "",
+          "type": "string"
+        },
+        "value": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Value"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "GrantPermissionStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "permission": {
+          "$schema": "",
+          "type": "string"
+        },
+        "username": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permission",
+        "username"
+      ]
+    },
+    "GrantRoleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "roleName": {
+          "$schema": "",
+          "type": "string"
+        },
+        "username": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roleName",
+        "username"
+      ]
+    },
+    "IREnvelope": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "confidence": {
+          "$schema": "",
+          "type": "number"
+        },
+        "explanation": {
+          "$schema": "",
+          "type": "string"
+        },
+        "statements": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/Statement"
+          }
+        }
+      },
+      "required": [
+        "statements"
+      ]
+    },
+    "IndexFieldDef": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "name": {
+          "$schema": "",
+          "type": "string"
+        },
+        "required": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "unique": {
+          "$schema": "",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "required",
+        "unique"
+      ]
+    },
+    "InsertStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "fields": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/FieldValue"
+          }
+        }
+      },
+      "required": [
+        "bundle",
+        "fields"
+      ]
+    },
+    "InvalidateSessionStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId"
+      ]
+    },
+    "JoinClause": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "conditions": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/JoinCondition"
+          }
+        },
+        "joinType": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "joinType",
+        "bundle",
+        "conditions"
+      ]
+    },
+    "JoinCondition": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "leftBundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "leftField": {
+          "$schema": "",
+          "type": "string"
+        },
+        "operator": {
+          "$schema": "",
+          "type": "string"
+        },
+        "rightBundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "rightField": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "leftBundle",
+        "leftField",
+        "operator",
+        "rightBundle",
+        "rightField"
+      ]
+    },
+    "OrderByClause": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "direction": {
+          "$schema": "",
+          "type": "string"
+        },
+        "field": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "direction"
+      ]
+    },
+    "PrepareStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "query": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/SelectStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "statementName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "statementName",
+        "query"
+      ]
+    },
+    "RefreshViewStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "viewName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "viewName"
+      ]
+    },
+    "RenameDatabaseStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "newName": {
+          "$schema": "",
+          "type": "string"
+        },
+        "oldName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "oldName",
+        "newName"
+      ]
+    },
+    "RestoreDatabaseStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "database": {
+          "$schema": "",
+          "type": "string"
+        },
+        "path": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "RevokePermissionStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "permission": {
+          "$schema": "",
+          "type": "string"
+        },
+        "username": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "permission",
+        "username"
+      ]
+    },
+    "RevokeRoleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "roleName": {
+          "$schema": "",
+          "type": "string"
+        },
+        "username": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roleName",
+        "username"
+      ]
+    },
+    "RollbackStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "RollbackToSavepointStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "name": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "SavepointStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "name": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "SelectField": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "$schema": "",
+          "type": "string"
+        },
+        "expression": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "expression"
+      ]
+    },
+    "SelectStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "distinct": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "fields": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/SelectField"
+          }
+        },
+        "forUpdate": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "groupBy": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "type": "string"
+          }
+        },
+        "having": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "joins": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/JoinClause"
+          }
+        },
+        "limit": {
+          "$schema": "",
+          "type": "integer"
+        },
+        "offset": {
+          "$schema": "",
+          "type": "integer"
+        },
+        "orderBy": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/OrderByClause"
+          }
+        },
+        "where": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "fields",
+        "bundle"
+      ]
+    },
+    "ShowActiveSnapshotsStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "ShowBundleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bundle"
+      ]
+    },
+    "ShowBundlesStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "ShowConflictLogStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "ShowDatabasesStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "ShowMigrationsStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "database": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "database"
+      ]
+    },
+    "ShowRateLimitStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "ShowSessionsStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "ShowUsersStmt": {
+      "$schema": "",
+      "type": "object"
+    },
+    "ShowVersionsStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "documentId": {
+          "$schema": "",
+          "type": "string"
+        }
+      }
+    },
+    "ShowViewsStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "database": {
+          "$schema": "",
+          "type": "string"
+        }
+      }
+    },
+    "StartMigrationStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "description": {
+          "$schema": "",
+          "type": "string"
+        }
+      }
+    },
+    "Statement": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "applyMigration": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ApplyMigrationStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "attachDatabase": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/AttachDatabaseStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "backupDatabase": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/BackupDatabaseStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "beginTransaction": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/BeginTransactionStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "checkpoint": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CheckpointStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "closeCursor": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CloseCursorStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "commit": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CommitStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "createBundle": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CreateBundleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "createDatabase": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CreateDatabaseStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "createIndex": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CreateIndexStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "createRole": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CreateRoleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "createUser": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CreateUserStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "createView": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/CreateViewStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "deallocate": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DeallocateStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "declareCursor": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DeclareCursorStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "delete": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DeleteStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "deleteRole": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DeleteRoleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "deleteUser": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DeleteUserStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "describeView": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DescribeViewStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "dropBundle": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DropBundleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "dropDatabase": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DropDatabaseStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "dropView": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/DropViewStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "execute": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ExecuteStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "explainSelect": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ExplainSelectStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "fetchCursor": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/FetchCursorStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "grantPermission": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/GrantPermissionStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "grantRole": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/GrantRoleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "insert": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/InsertStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "invalidateSession": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/InvalidateSessionStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "prepare": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/PrepareStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "refreshView": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/RefreshViewStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "renameDatabase": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/RenameDatabaseStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "restoreDatabase": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/RestoreDatabaseStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "revokePermission": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/RevokePermissionStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "revokeRole": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/RevokeRoleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "rollback": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/RollbackStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "rollbackToSavepoint": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/RollbackToSavepointStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "savepoint": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/SavepointStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "select": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/SelectStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showActiveSnapshots": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowActiveSnapshotsStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showBundle": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowBundleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showBundles": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowBundlesStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showConflictLog": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowConflictLogStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showDatabases": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowDatabasesStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showMigrations": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowMigrationsStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showRateLimit": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowRateLimitStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showSessions": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowSessionsStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showUsers": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowUsersStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showVersions": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowVersionsStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "showViews": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ShowViewsStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "startMigration": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/StartMigrationStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "statementType": {
+          "$schema": "",
+          "type": "string"
+        },
+        "update": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/UpdateStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "updateBundle": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/UpdateBundleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "updateRole": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/UpdateRoleStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "updateUser": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/UpdateUserStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "useDatabase": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/UseDatabaseStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "validateMigration": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ValidateMigrationStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        },
+        "validateRollback": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/ValidateRollbackStmt"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "statementType"
+      ]
+    },
+    "TrainingExample": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "ir": {
+          "$schema": "",
+          "$ref": "#/$defs/IREnvelope"
+        },
+        "nl": {
+          "$schema": "",
+          "type": "string"
+        },
+        "syndrql": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nl",
+        "ir",
+        "syndrql"
+      ]
+    },
+    "UpdateBundleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "changes": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/FieldChange"
+          }
+        },
+        "newBundleName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bundle"
+      ]
+    },
+    "UpdateRoleStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "force": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "newDescription": {
+          "$schema": "",
+          "type": "string"
+        },
+        "roleName": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "roleName",
+        "newDescription"
+      ]
+    },
+    "UpdateStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "$schema": "",
+          "type": "string"
+        },
+        "confirmed": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "fields": {
+          "$schema": "",
+          "type": "array",
+          "items": {
+            "$schema": "",
+            "$ref": "#/$defs/FieldValue"
+          }
+        },
+        "where": {
+          "$schema": "",
+          "anyOf": [
+            {
+              "$schema": "",
+              "$ref": "#/$defs/Expr"
+            },
+            {
+              "$schema": "",
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "bundle",
+        "fields"
+      ]
+    },
+    "UpdateUserStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "force": {
+          "$schema": "",
+          "type": "boolean"
+        },
+        "newPassword": {
+          "$schema": "",
+          "type": "string"
+        },
+        "username": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "username",
+        "newPassword"
+      ]
+    },
+    "UseDatabaseStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "database": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "database"
+      ]
+    },
+    "ValidateMigrationStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "migrationId": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "migrationId"
+      ]
+    },
+    "ValidateRollbackStmt": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "migrationId": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "migrationId"
+      ]
+    },
+    "Value": {
+      "$schema": "",
+      "type": "object",
+      "properties": {
+        "raw": {
+          "$schema": ""
+        },
+        "type": {
+          "$schema": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "raw"
+      ]
+    }
+  }
+}

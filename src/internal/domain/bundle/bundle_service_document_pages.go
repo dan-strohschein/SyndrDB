@@ -131,7 +131,7 @@ func (s *BundleService) GetDocumentPage(bundleName string, databaseName string, 
 
 	// Fallback: authoritative page in fastLookup (requires RLock to copy)
 	// Fallback: authoritative page in fastLookup (requires RLock to copy)
-	if cached, ok := shard.fastLookup.Load(pageKey); ok {
+	if cached, ok := shard.fastLookup.Load().Load(pageKey); ok {
 		if page, ok := cached.(*models.DocumentPage); ok {
 			shard.mu.RLock()
 			safeCopy := s.createSafePageCopy(page)
@@ -274,7 +274,7 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 	// PHASE 3: Check COW snapshot cache first (avoids RLock entirely)
 	// PERFORMANCE FIX: No staleness check on hot path - background cleaner handles cleanup
 	// Issue 2: Return a copy of the slice so callers cannot mutate the COW cache.
-	if cached, ok := shard.cowSnapshot.Load(pageKey); ok {
+	if cached, ok := shard.cowSnapshot.Load().Load(pageKey); ok {
 		snapshot := cached.(*cowSnapshotEntry)
 		docsCopy := make([]models.Document, 0, len(snapshot.documents))
 		docsCopy = append(docsCopy, snapshot.documents...)
@@ -296,13 +296,13 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 				timestamp: time.Now().UnixMilli(),
 				pageKey:   pageKey,
 			}
-			shard.cowSnapshot.Store(pageKey, snapshotEntry)
+			shard.cowSnapshot.Load().Store(pageKey, snapshotEntry)
 			return docs, nil
 		}
 	}
 
 	// Fallback: authoritative page in fastLookup (iterate directly under RLock, skip map copy)
-	if cached, ok := shard.fastLookup.Load(pageKey); ok {
+	if cached, ok := shard.fastLookup.Load().Load(pageKey); ok {
 		if page, ok := cached.(*models.DocumentPage); ok {
 			shard.mu.RLock()
 			docs := make([]models.Document, 0, len(page.Documents))
@@ -317,7 +317,7 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 				timestamp: time.Now().UnixMilli(),
 				pageKey:   pageKey,
 			}
-			shard.cowSnapshot.Store(pageKey, snapshotEntry)
+			shard.cowSnapshot.Load().Store(pageKey, snapshotEntry)
 			return docs, nil
 		}
 	}
@@ -361,7 +361,7 @@ func (s *BundleService) SnapshotPageDocuments(bundleName, databaseName string, p
 		timestamp: time.Now().UnixMilli(),
 		pageKey:   pageKey,
 	}
-	shard.cowSnapshot.Store(pageKey, snapshot)
+	shard.cowSnapshot.Load().Store(pageKey, snapshot)
 
 	return docs, nil
 }
@@ -382,7 +382,7 @@ func (s *BundleService) SnapshotPageDocumentsReadOnly(bundleName, databaseName s
 	shard := s.pageShards[shardIdx]
 
 	// FAST PATH: Return COW snapshot slice directly (zero allocation)
-	if cached, ok := shard.cowSnapshot.Load(pageKey); ok {
+	if cached, ok := shard.cowSnapshot.Load().Load(pageKey); ok {
 		snapshot := cached.(*cowSnapshotEntry)
 		return snapshot.documents, nil
 	}
@@ -402,13 +402,13 @@ func (s *BundleService) SnapshotPageDocumentsReadOnly(bundleName, databaseName s
 				timestamp: time.Now().UnixMilli(),
 				pageKey:   pageKey,
 			}
-			shard.cowSnapshot.Store(pageKey, snapshotEntry)
+			shard.cowSnapshot.Load().Store(pageKey, snapshotEntry)
 			return docs, nil
 		}
 	}
 
 	// Fallback: authoritative page in fastLookup (iterate directly under RLock, skip map copy)
-	if cached, ok := shard.fastLookup.Load(pageKey); ok {
+	if cached, ok := shard.fastLookup.Load().Load(pageKey); ok {
 		if page, ok := cached.(*models.DocumentPage); ok {
 			shard.mu.RLock()
 			docs := make([]models.Document, 0, len(page.Documents))
@@ -423,7 +423,7 @@ func (s *BundleService) SnapshotPageDocumentsReadOnly(bundleName, databaseName s
 				timestamp: time.Now().UnixMilli(),
 				pageKey:   pageKey,
 			}
-			shard.cowSnapshot.Store(pageKey, snapshotEntry)
+			shard.cowSnapshot.Load().Store(pageKey, snapshotEntry)
 			return docs, nil
 		}
 	}
@@ -462,7 +462,7 @@ func (s *BundleService) SnapshotPageDocumentsReadOnly(bundleName, databaseName s
 		timestamp: time.Now().UnixMilli(),
 		pageKey:   pageKey,
 	}
-	shard.cowSnapshot.Store(pageKey, snapshot)
+	shard.cowSnapshot.Load().Store(pageKey, snapshot)
 
 	return docs, nil
 }
@@ -619,7 +619,7 @@ func (s *BundleService) CopyProjectedFromCache(bundleName, databaseName string, 
 				continue
 			}
 		}
-		cached, exists := shard.fastLookup.Load(pageKey)
+		cached, exists := shard.fastLookup.Load().Load(pageKey)
 		if !exists {
 			continue
 		}

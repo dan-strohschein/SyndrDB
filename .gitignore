@@ -30,3 +30,4 @@ TRACE_ANALYSIS_GUIDE.md
 run_fsync_benchmarks.sh
 CR1.md
 docs/remaining_err.md
+syndrql-ir-compiler/node_modules

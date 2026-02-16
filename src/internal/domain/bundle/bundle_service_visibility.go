@@ -52,9 +52,9 @@ func (s *BundleService) invalidatePageCachesForBundle(bundleName string) {
 		for key := range shard.pages {
 			if strings.HasPrefix(key, prefix) {
 				delete(shard.pages, key)
-				shard.cowSnapshot.Delete(key)
+				shard.cowSnapshot.Load().Delete(key)
 				shard.readerView.Delete(key)
-				shard.fastLookup.Delete(key)
+				shard.fastLookup.Load().Delete(key)
 				if elem, ok := shard.lruElements[key]; ok {
 					shard.lruOrder.Remove(elem)
 					delete(shard.lruElements, key)

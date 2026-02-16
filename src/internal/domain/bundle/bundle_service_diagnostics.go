@@ -82,27 +82,25 @@ func (s *BundleService) GetBufferDiagnostics() BufferDiagnostics {
 		diag.PageCacheStats.ShardSizes[i] = shardSize
 		diag.PageCacheStats.TotalPages += shardSize
 
+		shard.mu.RUnlock()
+
 		// Count cowSnapshot entries (sync.Map doesn't have Len())
-		// CRITICAL FIX: Must hold RLock while calling Range() because compactCOWSnapshot()
-		// can replace the entire sync.Map variable. Without the lock, we could iterate
-		// on a partially-constructed or GC'd sync.Map causing "unlock of unlocked mutex" panic.
+		// Safe without lock: cowSnapshot is atomic.Pointer[sync.Map], so Load() always
+		// returns a consistent *sync.Map. No torn-read risk.
 		cowCount := 0
-		shard.cowSnapshot.Range(func(_, _ interface{}) bool {
+		shard.cowSnapshot.Load().Range(func(_, _ interface{}) bool {
 			cowCount++
 			return true
 		})
 		diag.PageCacheStats.TotalCOWSnapshots += cowCount
 
-		// Count fastLookup entries
-		// Same issue: compactFastLookup() can replace this sync.Map
+		// Count fastLookup entries (same: atomic pointer, safe without lock)
 		fastCount := 0
-		shard.fastLookup.Range(func(_, _ interface{}) bool {
+		shard.fastLookup.Load().Range(func(_, _ interface{}) bool {
 			fastCount++
 			return true
 		})
 		diag.PageCacheStats.TotalFastLookup += fastCount
-
-		shard.mu.RUnlock()
 	}
 
 	// Get hash index MemTable statistics

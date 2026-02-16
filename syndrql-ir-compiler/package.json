@@ -1,0 +1,18 @@
+{
+  "name": "@syndrdb/ir-compiler",
+  "version": "1.0.0",
+  "description": "SyndrQL IR to SyndrQL compiler",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/tests/compiler.test.js",
+    "prebuild": "true",
+    "pretest": "tsc"
+  },
+  "license": "BSL-1.1",
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "typescript": "^5.4.0"
+  }
+}

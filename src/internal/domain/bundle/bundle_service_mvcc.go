@@ -87,7 +87,7 @@ func (s *BundleService) RemoveDeadVersionsFromPage(bundleName string, pageID uin
 			delete(page.Documents, docID)
 		}
 		shard.readerView.Store(pageKey, newSnapshot)
-		shard.cowSnapshot.Store(pageKey, freshCOW)
+		shard.cowSnapshot.Load().Store(pageKey, freshCOW)
 	}
 	shard.mu.Unlock()
 
@@ -194,7 +194,7 @@ func (s *BundleService) filterDeletedDocuments(bundle *models.Bundle, documents 
 				}
 			}
 			// Fallback: check existence directly under RLock (skips O(N) createSafePageCopy)
-			if cached, ok := shard.fastLookup.Load(pageKey); ok {
+			if cached, ok := shard.fastLookup.Load().Load(pageKey); ok {
 				if page, ok := cached.(*models.DocumentPage); ok {
 					shard.mu.RLock()
 					for docID := range docIDSet {

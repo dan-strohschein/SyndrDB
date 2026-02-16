@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"syndrdb/src/internal/domain/models"
@@ -19,7 +20,7 @@ import (
 type pageCacheShard struct {
 	mu          sync.RWMutex                    // Protects pages, lruOrder, lruElements
 	pages       map[string]*models.DocumentPage // pageKey -> page (authoritative, protected by mu)
-	fastLookup  sync.Map                        // Lock-free lookup cache (pageKey -> *DocumentPage)
+	fastLookup  atomic.Pointer[sync.Map]         // Lock-free lookup cache (pageKey -> *DocumentPage); atomic swap prevents torn reads during compaction
 	lruOrder    *list.List                      // LRU order for this shard
 	lruElements map[string]*list.Element        // pageKey -> list element for O(1) promotion
 	maxPages    int                             // Max pages per shard (total max / shard count)
@@ -28,7 +29,7 @@ type pageCacheShard struct {
 	// Caches document snapshots to avoid RLock contention during parallel page loading
 	// Key: pageKey, Value: cowSnapshotEntry with documents and timestamp
 	// TODO: Expand to other SELECT paths beyond GROUP BY (per user requirement)
-	cowSnapshot sync.Map // pageKey -> *cowSnapshotEntry
+	cowSnapshot atomic.Pointer[sync.Map] // pageKey -> *cowSnapshotEntry; atomic swap prevents torn reads during compaction
 
 	// READER VIEW: Immutable snapshot per page for lock-free reads (READ_WRITE_CONTENTION_ANALYSIS).
 	// Key: pageKey, Value: *models.DocumentPage (immutable; never mutated after store).
@@ -46,21 +47,24 @@ type cowSnapshotEntry struct {
 
 // newPageCacheShard creates a new page cache shard
 func newPageCacheShard(maxPagesPerShard int) *pageCacheShard {
-	return &pageCacheShard{
+	s := &pageCacheShard{
 		pages:       make(map[string]*models.DocumentPage),
 		lruOrder:    list.New(),
 		lruElements: make(map[string]*list.Element),
 		maxPages:    maxPagesPerShard,
 	}
+	s.fastLookup.Store(&sync.Map{})
+	s.cowSnapshot.Store(&sync.Map{})
+	return s
 }
 
 // insertLocked inserts a page into both the authoritative map and lock-free lookup cache.
 // Caller must hold mu.Lock().
 func (s *pageCacheShard) insertLocked(pageKey string, page *models.DocumentPage) {
 	s.pages[pageKey] = page
-	s.fastLookup.Store(pageKey, page)
+	s.fastLookup.Load().Store(pageKey, page)
 	// PHASE 3: Invalidate COW snapshot on write
-	s.cowSnapshot.Delete(pageKey)
+	s.cowSnapshot.Load().Delete(pageKey)
 }
 
 // deleteLocked deletes a page from both the authoritative map and lock-free lookup cache.
@@ -68,9 +72,9 @@ func (s *pageCacheShard) insertLocked(pageKey string, page *models.DocumentPage)
 // Caller must hold mu.Lock().
 func (s *pageCacheShard) deleteLocked(pageKey string) {
 	delete(s.pages, pageKey)
-	s.fastLookup.Delete(pageKey)
+	s.fastLookup.Load().Delete(pageKey)
 	s.readerView.Delete(pageKey)
-	s.cowSnapshot.Delete(pageKey) // Invalidate COW snapshot on eviction to prevent stale reads
+	s.cowSnapshot.Load().Delete(pageKey) // Invalidate COW snapshot on eviction to prevent stale reads
 	// Clean up LRU tracking to prevent memory leaks
 	if elem, exists := s.lruElements[pageKey]; exists {
 		s.lruOrder.Remove(elem)
@@ -108,15 +112,16 @@ func (s *pageCacheShard) compactFastLookup() {
 	defer s.mu.Unlock()
 
 	// Create fresh sync.Map
-	var newLookup sync.Map
+	newLookup := &sync.Map{}
 
 	// Copy only current entries from authoritative pages map
 	for pageKey, page := range s.pages {
 		newLookup.Store(pageKey, page)
 	}
 
-	// Replace old sync.Map (old one will be GC'd)
-	s.fastLookup = newLookup
+	// Atomically replace old sync.Map pointer (old one will be GC'd)
+	// Readers load the pointer atomically, so they always see a consistent *sync.Map.
+	s.fastLookup.Store(newLookup)
 }
 
 // compactRegularMaps recreates the pages and lruElements Go maps to reclaim bucket memory.
@@ -178,15 +183,18 @@ func (s *pageCacheShard) compactRegularMaps() (entriesCompacted int) {
 // THREAD SAFETY: Holds s.mu.Lock() briefly during sync.Map replacement to prevent torn reads.
 // The Range() operations are done on the old sync.Map before acquiring the lock.
 func (s *pageCacheShard) compactCOWSnapshot(stalenessMs int64, now int64) (entriesBefore, entriesAfter int) {
-	// Count entries before compaction (for metrics) - done without lock
-	s.cowSnapshot.Range(func(key, value interface{}) bool {
+	// Load current sync.Map pointer atomically — this is a stable reference
+	old := s.cowSnapshot.Load()
+
+	// Count entries before compaction (for metrics)
+	old.Range(func(key, value interface{}) bool {
 		entriesBefore++
 		return true
 	})
 
-	// Create fresh sync.Map and populate with only fresh entries - done without lock
-	var newSnapshot sync.Map
-	s.cowSnapshot.Range(func(key, value interface{}) bool {
+	// Create fresh sync.Map and populate with only fresh entries
+	newSnapshot := &sync.Map{}
+	old.Range(func(key, value interface{}) bool {
 		snapshot := value.(*cowSnapshotEntry)
 		age := now - snapshot.timestamp
 		if age <= stalenessMs {
@@ -196,11 +204,10 @@ func (s *pageCacheShard) compactCOWSnapshot(stalenessMs int64, now int64) (entri
 		return true
 	})
 
-	// Replace old sync.Map atomically under lock (old one will be GC'd with all expunged entries)
-	// CRITICAL: sync.Map is a value type - assignment is not atomic without lock
-	s.mu.Lock()
-	s.cowSnapshot = newSnapshot
-	s.mu.Unlock()
+	// Atomically replace old sync.Map pointer (old one will be GC'd with all expunged entries).
+	// Readers load the pointer atomically, so they always see a consistent *sync.Map.
+	// No mutex needed — atomic.Pointer.Store is safe for concurrent readers.
+	s.cowSnapshot.Store(newSnapshot)
 
 	return entriesBefore, entriesAfter
 }
@@ -265,7 +272,7 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 			if exists {
 				page.Documents[doc.DocumentID] = *doc
 				shard.readerView.Store(pageKey, newSnapshot)
-				shard.cowSnapshot.Store(pageKey, freshCOW)
+				shard.cowSnapshot.Load().Store(pageKey, freshCOW)
 			}
 			shard.mu.Unlock()
 			if exists {
@@ -308,7 +315,7 @@ func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID ui
 		BundleID:  page.BundleID,
 		Documents: newDocs,
 	})
-	shard.cowSnapshot.Store(pageKey, &cowSnapshotEntry{
+	shard.cowSnapshot.Load().Store(pageKey, &cowSnapshotEntry{
 		documents: cowDocs,
 		timestamp: time.Now().UnixMilli(),
 		pageKey:   pageKey,
@@ -367,7 +374,7 @@ func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, do
 			if exists {
 				delete(page.Documents, docID)
 				shard.readerView.Store(pageKey, newSnapshot)
-				shard.cowSnapshot.Store(pageKey, freshCOW)
+				shard.cowSnapshot.Load().Store(pageKey, freshCOW)
 			}
 			shard.mu.Unlock()
 			if exists {
@@ -398,7 +405,7 @@ func (s *BundleService) removeFromPageCache(bundleName string, pageID uint32, do
 		BundleID:  page.BundleID,
 		Documents: newDocs,
 	})
-	shard.cowSnapshot.Store(pageKey, &cowSnapshotEntry{
+	shard.cowSnapshot.Load().Store(pageKey, &cowSnapshotEntry{
 		documents: cowDocs,
 		timestamp: time.Now().UnixMilli(),
 		pageKey:   pageKey,

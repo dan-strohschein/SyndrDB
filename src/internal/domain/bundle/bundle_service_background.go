@@ -187,10 +187,10 @@ func (s *BundleService) FlushAllDocumentCaches() {
 		// Clear LRU tracking
 		shard.lruOrder = list.New()
 		shard.lruElements = make(map[string]*list.Element)
-		// Clear fast lookup sync.Map by replacing with empty one
-		shard.fastLookup = sync.Map{}
-		// Clear COW snapshot cache by replacing with empty one
-		shard.cowSnapshot = sync.Map{}
+		// Clear fast lookup sync.Map by atomically swapping in a fresh one
+		shard.fastLookup.Store(&sync.Map{})
+		// Clear COW snapshot cache by atomically swapping in a fresh one
+		shard.cowSnapshot.Store(&sync.Map{})
 		shard.mu.Unlock()
 	}
 
