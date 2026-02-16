@@ -41,18 +41,13 @@ function compileLiteral(v: Value | undefined): string {
   if (!v) return 'NULL';
   switch (v.type) {
     case 'string':
-      return `"${v.raw as string}"`;
+      return `"${v.raw}"`;
     case 'int':
-      return String(Math.trunc(v.raw as number));
-    case 'float': {
-      const f = v.raw as number;
-      // Match Go's %g formatting
-      let s = String(f);
-      // Ensure integers show without trailing .0 for round numbers
-      return s;
-    }
+      return v.raw;
+    case 'float':
+      return v.raw;
     case 'bool':
-      return (v.raw as boolean) ? 'true' : 'false';
+      return v.raw;
     case 'null':
       return 'NULL';
     default:

@@ -55,30 +55,13 @@ func compileLiteral(v *ir.Value) string {
 	}
 	switch v.Type {
 	case "string":
-		if s, ok := v.Raw.(string); ok {
-			return fmt.Sprintf(`"%s"`, s)
-		}
-		return `""`
+		return fmt.Sprintf(`"%s"`, v.Raw)
 	case "int":
-		if f, ok := v.Raw.(float64); ok {
-			return fmt.Sprintf("%d", int64(f))
-		}
-		return "0"
+		return v.Raw
 	case "float":
-		if f, ok := v.Raw.(float64); ok {
-			// Format without trailing zeros but ensure decimal point
-			s := fmt.Sprintf("%g", f)
-			return s
-		}
-		return "0"
+		return v.Raw
 	case "bool":
-		if b, ok := v.Raw.(bool); ok {
-			if b {
-				return "true"
-			}
-			return "false"
-		}
-		return "false"
+		return v.Raw
 	case "null":
 		return "NULL"
 	default:

@@ -7,9 +7,9 @@ import { Statement, Expr, Value, SelectStmt } from '../src/generated/types';
 function ident(name: string): Expr { return { type: 'identifier', name }; }
 function literal(v: Value): Expr { return { type: 'literal', value: v }; }
 function strVal(s: string): Value { return { type: 'string', raw: s }; }
-function intVal(n: number): Value { return { type: 'int', raw: n }; }
-function floatVal(f: number): Value { return { type: 'float', raw: f }; }
-function boolVal(b: boolean): Value { return { type: 'bool', raw: b }; }
+function intVal(n: number): Value { return { type: 'int', raw: String(n) }; }
+function floatVal(f: number): Value { return { type: 'float', raw: String(f) }; }
+function boolVal(b: boolean): Value { return { type: 'bool', raw: b ? 'true' : 'false' }; }
 function binary(left: Expr, operator: string, right: Expr): Expr { return { type: 'binary', left, operator, right }; }
 function isNull(field: Expr): Expr { return { type: 'isNull', left: field }; }
 function inExpr(field: Expr, args: Expr[]): Expr { return { type: 'in', left: field, args }; }

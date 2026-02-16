@@ -40,9 +40,9 @@ const compiler_1 = require("../src/compiler");
 function ident(name) { return { type: 'identifier', name }; }
 function literal(v) { return { type: 'literal', value: v }; }
 function strVal(s) { return { type: 'string', raw: s }; }
-function intVal(n) { return { type: 'int', raw: n }; }
-function floatVal(f) { return { type: 'float', raw: f }; }
-function boolVal(b) { return { type: 'bool', raw: b }; }
+function intVal(n) { return { type: 'int', raw: String(n) }; }
+function floatVal(f) { return { type: 'float', raw: String(f) }; }
+function boolVal(b) { return { type: 'bool', raw: b ? 'true' : 'false' }; }
 function binary(left, operator, right) { return { type: 'binary', left, operator, right }; }
 function isNull(field) { return { type: 'isNull', left: field }; }
 function inExpr(field, args) { return { type: 'in', left: field, args }; }

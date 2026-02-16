@@ -1,10 +1,6 @@
 package generator
 
-import (
-	"fmt"
-
-	"syndrql-training/ir"
-)
+import "syndrql-training/ir"
 
 // BundleSchema defines a bundle with its fields and their types.
 type BundleSchema struct {
@@ -507,33 +503,8 @@ func ValueNL(v *ir.Value) string {
 	if v == nil {
 		return "null"
 	}
-	switch v.Type {
-	case "string":
-		if s, ok := v.Raw.(string); ok {
-			return s
-		}
-		return ""
-	case "int":
-		if f, ok := v.Raw.(float64); ok {
-			return fmt.Sprintf("%d", int64(f))
-		}
-		return "0"
-	case "float":
-		if f, ok := v.Raw.(float64); ok {
-			return fmt.Sprintf("%g", f)
-		}
-		return "0"
-	case "bool":
-		if b, ok := v.Raw.(bool); ok {
-			if b {
-				return "true"
-			}
-			return "false"
-		}
-		return "false"
-	case "null":
+	if v.Type == "null" {
 		return "null"
-	default:
-		return ""
 	}
+	return v.Raw
 }

@@ -152,9 +152,9 @@ function compileValue(v) {
         return 'NULL';
     switch (v.type) {
         case 'string': return `"${v.raw}"`;
-        case 'int': return String(Math.trunc(v.raw));
-        case 'float': return String(v.raw);
-        case 'bool': return v.raw ? 'true' : 'false';
+        case 'int': return v.raw;
+        case 'float': return v.raw;
+        case 'bool': return v.raw;
         case 'null': return 'NULL';
         default: return 'NULL';
     }

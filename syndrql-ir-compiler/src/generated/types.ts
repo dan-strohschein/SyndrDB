@@ -92,7 +92,7 @@ export interface Expr {
 
 export interface Value {
   type: string;
-  raw: unknown;
+  raw: string;
 }
 
 export interface SelectStmt {

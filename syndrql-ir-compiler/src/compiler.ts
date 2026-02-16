@@ -151,13 +151,13 @@ function compileSelect(s: SelectStmt): string {
   return compileSelectInner(s) + ';';
 }
 
-function compileValue(v: { type: string; raw: unknown } | undefined): string {
+function compileValue(v: { type: string; raw: string } | undefined): string {
   if (!v) return 'NULL';
   switch (v.type) {
-    case 'string': return `"${v.raw as string}"`;
-    case 'int': return String(Math.trunc(v.raw as number));
-    case 'float': return String(v.raw as number);
-    case 'bool': return (v.raw as boolean) ? 'true' : 'false';
+    case 'string': return `"${v.raw}"`;
+    case 'int': return v.raw;
+    case 'float': return v.raw;
+    case 'bool': return v.raw;
     case 'null': return 'NULL';
     default: return 'NULL';
   }

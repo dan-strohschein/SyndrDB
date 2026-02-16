@@ -1,5 +1,7 @@
 package ir
 
+import "fmt"
+
 // Expr represents a recursive expression tree used in WHERE, HAVING, and other clauses.
 type Expr struct {
 	Type     string  `json:"type"`               // "binary","literal","identifier","function","in","notIn","isNull","isNotNull","not","between","exists","parameter","qualified"
@@ -16,9 +18,12 @@ type Expr struct {
 }
 
 // Value represents a typed literal value in expressions.
+// Raw is always a string to ensure consistent JSON schema across all rows
+// (required by PyArrow/Hugging Face datasets). The Type discriminator tells
+// you how to interpret Raw.
 type Value struct {
-	Type string      `json:"type"` // "string","int","float","bool","null"
-	Raw  interface{} `json:"raw"`  // The actual value: string, float64, bool, or nil
+	Type string `json:"type"` // "string","int","float","bool","null"
+	Raw  string `json:"raw"`  // Always a string: "active", "100", "9.99", "true", ""
 }
 
 // NewStringValue creates a string literal value.
@@ -28,22 +33,25 @@ func NewStringValue(s string) *Value {
 
 // NewIntValue creates an integer literal value.
 func NewIntValue(n int64) *Value {
-	return &Value{Type: "int", Raw: float64(n)}
+	return &Value{Type: "int", Raw: fmt.Sprintf("%d", n)}
 }
 
 // NewFloatValue creates a float literal value.
 func NewFloatValue(f float64) *Value {
-	return &Value{Type: "float", Raw: f}
+	return &Value{Type: "float", Raw: fmt.Sprintf("%g", f)}
 }
 
 // NewBoolValue creates a boolean literal value.
 func NewBoolValue(b bool) *Value {
-	return &Value{Type: "bool", Raw: b}
+	if b {
+		return &Value{Type: "bool", Raw: "true"}
+	}
+	return &Value{Type: "bool", Raw: "false"}
 }
 
 // NewNullValue creates a null literal value.
 func NewNullValue() *Value {
-	return &Value{Type: "null", Raw: nil}
+	return &Value{Type: "null", Raw: ""}
 }
 
 // LiteralExpr creates a literal expression from a Value.
