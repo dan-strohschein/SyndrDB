@@ -71,7 +71,7 @@ RESPONSE_PART = "<|im_start|>assistant\n"
 print("Loading base model...")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="Qwen/Qwen2.5-3B-Instruct",
-    max_seq_length=2048,
+    max_seq_length=4096,
     dtype=None,
     load_in_4bit=True,
 )
@@ -152,7 +152,7 @@ trainer = SFTTrainer(
         output_dir=args.output,
         optim="adamw_8bit",
         seed=42,
-        max_seq_length=2048,
+        max_seq_length=4096,
         dataset_text_field="text",
     ),
 )

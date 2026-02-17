@@ -56,13 +56,103 @@ API_URL = f"{args.url}/v1/chat/completions"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def strip_null_keys_text(text: str) -> str:
+    """Strip null-valued keys from raw JSON text BEFORE parsing.
+
+    The model tends to output all 40+ statement-type keys as null
+    (e.g. "savepoint":null,"rollbackToSavepoint":null,...).
+    This wastes ~500 tokens and can cause truncation.  Stripping them
+    from the raw text recovers truncated JSON that would otherwise fail
+    to parse.
+    """
+    # Remove "key":null with optional trailing comma
+    cleaned = re.sub(r'"[^"]+"\s*:\s*null\s*,?\s*', '', text)
+    # Fix trailing commas before } or ]
+    cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
+    return cleaned
+
+
+def try_repair_truncated(text: str):
+    """Attempt to repair truncated JSON by closing open braces/brackets."""
+    # Count unclosed braces and brackets
+    opens = 0
+    open_brackets = 0
+    in_string = False
+    escape = False
+    for ch in text:
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            opens += 1
+        elif ch == '}':
+            opens -= 1
+        elif ch == '[':
+            open_brackets += 1
+        elif ch == ']':
+            open_brackets -= 1
+
+    if opens <= 0 and open_brackets <= 0:
+        return None  # Not actually truncated
+
+    # Remove trailing partial key/value (incomplete string, trailing comma, etc.)
+    repaired = re.sub(r',?\s*"[^"]*$', '', text)           # trailing partial key
+    repaired = re.sub(r',?\s*"[^"]*"\s*:\s*"?[^"{}[\]]*$', '', repaired)  # trailing partial kv
+    repaired = re.sub(r',\s*$', '', repaired)               # trailing comma
+
+    # Re-count after cleanup
+    opens = 0
+    open_brackets = 0
+    in_string = False
+    escape = False
+    for ch in repaired:
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            opens += 1
+        elif ch == '}':
+            opens -= 1
+        elif ch == '[':
+            open_brackets += 1
+        elif ch == ']':
+            open_brackets -= 1
+
+    # Close open structures
+    repaired += ']' * max(0, open_brackets)
+    repaired += '}' * max(0, opens)
+
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        return None
+
+
 def extract_json(text: str):
     """Try to extract a JSON object from model output.
 
-    Handles three cases:
+    Handles five cases:
     1. Output is already pure JSON  (ideal — trained correctly)
     2. JSON is wrapped in ```json ... ``` markdown fences
     3. JSON object is embedded in prose text
+    4. JSON with null keys stripped  (model outputs all 40+ statement keys as null)
+    5. Truncated JSON repaired by closing open braces
 
     Returns the parsed object, or None if extraction fails.
     """
@@ -89,6 +179,25 @@ def extract_json(text: str):
             return json.loads(brace_match.group(0))
         except json.JSONDecodeError:
             pass
+
+    # Case 4: strip null keys and retry — handles the model's null-key bloat
+    cleaned_text = strip_null_keys_text(text)
+    try:
+        return json.loads(cleaned_text)
+    except json.JSONDecodeError:
+        pass
+
+    brace_match = re.search(r"\{.*\}", cleaned_text, re.DOTALL)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # Case 5: try to repair truncated JSON (close open braces)
+    repaired = try_repair_truncated(cleaned_text)
+    if repaired is not None:
+        return repaired
 
     return None
 
@@ -207,7 +316,7 @@ def query_model(nl_prompt: str) -> str:
             {"role": "user", "content": nl_prompt},
         ],
         "temperature": args.temperature,
-        "max_tokens": 1800,
+        "max_tokens": 3600,
     }
     resp = requests.post(API_URL, json=payload, timeout=60)
     resp.raise_for_status()
