@@ -222,14 +222,14 @@ func (g *Generator) genSelectGroupBy() (*ir.TrainingExample, error) {
 	agg := AggFunctions[aggIdx]
 
 	var aggExpr *ir.Expr
-	var aggFieldName string
+	var aggFieldNL string // human-readable name for NL templates
 	if agg.SQL == "COUNT" {
 		aggExpr = ir.FuncExpr("COUNT", false, ir.IdentExpr("*"))
-		aggFieldName = "*"
+		aggFieldNL = "records"
 	} else {
 		numField := g.pickNumericField(b)
 		aggExpr = ir.FuncExpr(agg.SQL, false, ir.IdentExpr(numField.Name))
-		aggFieldName = numField.Name
+		aggFieldNL = numField.Name
 	}
 
 	tmpl := g.pickTemplate(SelectGroupByTemplates, "select_groupby")
@@ -237,7 +237,7 @@ func (g *Generator) genSelectGroupBy() (*ir.TrainingExample, error) {
 		"bundle":   b.Name,
 		"field":    groupField.Name,
 		"agg":      agg.NL,
-		"aggfield": aggFieldName,
+		"aggfield": aggFieldNL,
 	})
 
 	stmt := ir.Statement{
@@ -703,14 +703,14 @@ func (g *Generator) genSelectGroupByWhere() (*ir.TrainingExample, error) {
 	value := g.randomValue(whereField.Type)
 
 	var aggExpr *ir.Expr
-	var aggFieldName string
+	var aggFieldNL string // human-readable name for NL templates
 	if agg.SQL == "COUNT" {
 		aggExpr = ir.FuncExpr("COUNT", false, ir.IdentExpr("*"))
-		aggFieldName = "*"
+		aggFieldNL = "records"
 	} else {
 		numField := g.pickNumericField(b)
 		aggExpr = ir.FuncExpr(agg.SQL, false, ir.IdentExpr(numField.Name))
-		aggFieldName = numField.Name
+		aggFieldNL = numField.Name
 	}
 
 	tmpl := g.pickTemplate(SelectGroupByWhereTemplates, "select_groupby_where")
@@ -718,7 +718,7 @@ func (g *Generator) genSelectGroupByWhere() (*ir.TrainingExample, error) {
 		"bundle":    b.Name,
 		"field":     groupField.Name,
 		"agg":       agg.NL,
-		"aggfield":  aggFieldName,
+		"aggfield":  aggFieldNL,
 		"condition": ConditionNL(whereField.Name, op, value),
 	})
 

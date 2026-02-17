@@ -207,7 +207,7 @@ def query_model(nl_prompt: str) -> str:
             {"role": "user", "content": nl_prompt},
         ],
         "temperature": args.temperature,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
     }
     resp = requests.post(API_URL, json=payload, timeout=60)
     resp.raise_for_status()

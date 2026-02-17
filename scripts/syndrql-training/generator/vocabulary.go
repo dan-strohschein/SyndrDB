@@ -207,14 +207,14 @@ var SelectLimitOffsetTemplates = []string{
 }
 
 var SelectGroupByTemplates = []string{
-	"Count {bundle} grouped by {field}",
-	"How many {bundle} per {field}?",
-	"Show {agg} of {aggfield} grouped by {field} in {bundle}",
-	"Summarize {bundle} by {field}",
-	"Group {bundle} by {field} and count them",
-	"Break down {bundle} by {field}",
-	"Show the {agg} of {aggfield} per {field} from {bundle}",
-	"Aggregate {bundle} by {field}",
+	"Show the {agg} of {aggfield} grouped by {field} in {bundle}",
+	"Get the {agg} of {aggfield} per {field} from {bundle}",
+	"Show the {agg} of {aggfield} for each {field} in {bundle}",
+	"Calculate the {agg} of {aggfield} grouped by {field} from {bundle}",
+	"Display the {agg} of {aggfield} by {field} in {bundle}",
+	"What is the {agg} of {aggfield} by {field} in {bundle}?",
+	"Group {bundle} by {field} and show the {agg} of {aggfield}",
+	"Break down {bundle} by {field} showing the {agg} of {aggfield}",
 }
 
 // SelectOrderByWhereTemplates — ORDER BY combined with a WHERE clause.
@@ -241,14 +241,14 @@ var SelectOrderByMultiTemplates = []string{
 
 // SelectGroupByWhereTemplates — GROUP BY combined with a WHERE clause.
 var SelectGroupByWhereTemplates = []string{
-	"Count {bundle} where {condition} grouped by {field}",
-	"How many {bundle} per {field} where {condition}?",
-	"Show {agg} of {aggfield} grouped by {field} in {bundle} where {condition}",
-	"Summarize {bundle} by {field} where {condition}",
-	"Group {bundle} where {condition} by {field}",
-	"Break down {bundle} by {field} filtering by {condition}",
-	"Show the {agg} of {aggfield} per {field} from {bundle} where {condition}",
-	"Aggregate {bundle} by {field} where {condition}",
+	"Show the {agg} of {aggfield} grouped by {field} in {bundle} where {condition}",
+	"Get the {agg} of {aggfield} per {field} from {bundle} where {condition}",
+	"Show the {agg} of {aggfield} for each {field} in {bundle} where {condition}",
+	"Calculate the {agg} of {aggfield} by {field} from {bundle} where {condition}",
+	"Display the {agg} of {aggfield} by {field} in {bundle} filtering by {condition}",
+	"What is the {agg} of {aggfield} by {field} in {bundle} where {condition}?",
+	"Group {bundle} where {condition} by {field} and show the {agg} of {aggfield}",
+	"Break down {bundle} by {field} where {condition} showing the {agg} of {aggfield}",
 }
 
 // SelectOrderByLimitTemplates — ORDER BY combined with LIMIT (top-N queries).
