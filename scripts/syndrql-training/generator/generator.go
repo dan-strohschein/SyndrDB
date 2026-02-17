@@ -40,27 +40,36 @@ func (g *Generator) Generate(outputPath string) error {
 	enc := json.NewEncoder(f)
 	enc.SetEscapeHTML(false)
 
-	// Distribution (per 500)
+	// Distribution baseline — counts are relative weights, scaled to requested -count.
+	// Rebalanced to increase representation of patterns the model struggles with:
+	// compound WHERE, multi-field SELECT, ORDER BY combos, GROUP BY combos.
 	distribution := []struct {
 		category string
 		count    int
 		genFunc  func() (*ir.TrainingExample, error)
 	}{
-		// SELECT variants - 260 total (52%)
-		{"select_star", 20, g.genSelectStar},
-		{"select_fields", 20, g.genSelectFields},
-		{"select_where_simple", 30, g.genSelectWhereSimple},
-		{"select_where_compound", 20, g.genSelectWhereCompound},
-		{"select_orderby", 20, g.genSelectOrderBy},
-		{"select_limit", 15, g.genSelectLimit},
-		{"select_groupby", 25, g.genSelectGroupBy},
-		{"select_having", 15, g.genSelectHaving},
+		// SELECT variants - ~450 total (~65%)
+		{"select_star", 15, g.genSelectStar},                      // well-learned, keep minimal
+		{"select_fields", 35, g.genSelectFields},                   // multi-field projection
+		{"select_fields_where", 15, g.genSelectFieldsWhere},        // fields + WHERE combo
+		{"select_where_simple", 35, g.genSelectWhereSimple},        // basic WHERE
+		{"select_where_compound", 40, g.genSelectWhereCompound},    // 2-field AND/OR
+		{"select_where_three", 15, g.genSelectWhereThreeField},     // 3-field compound WHERE
+		{"select_orderby", 15, g.genSelectOrderBy},                 // plain ORDER BY
+		{"select_orderby_where", 20, g.genSelectOrderByWhere},      // ORDER BY + WHERE
+		{"select_orderby_multi", 15, g.genSelectOrderByMulti},      // multi-field ORDER BY
+		{"select_orderby_limit", 15, g.genSelectOrderByLimit},      // ORDER BY + LIMIT (top-N)
+		{"select_limit", 20, g.genSelectLimit},                     // LIMIT/OFFSET (fixed)
+		{"select_groupby", 20, g.genSelectGroupBy},                 // plain GROUP BY
+		{"select_groupby_where", 20, g.genSelectGroupByWhere},      // GROUP BY + WHERE
+		{"select_having", 10, g.genSelectHaving},                   // HAVING (COUNT only)
+		{"select_having_varied", 15, g.genSelectHavingVaried},       // HAVING (SUM/AVG/MIN/MAX)
 		{"select_distinct", 15, g.genSelectDistinct},
 		{"select_join", 20, g.genSelectJoin},
 		{"select_aggregate", 20, g.genSelectAggregate},
 		{"select_function", 15, g.genSelectFunction},
 		{"select_in", 10, g.genSelectIn},
-		{"select_complex", 10, g.genSelectComplex},
+		{"select_complex", 15, g.genSelectComplex},                 // WHERE + ORDER BY + LIMIT
 		{"select_forupdate", 5, g.genSelectForUpdate},
 
 		// DML
@@ -154,9 +163,22 @@ func (g *Generator) Generate(outputPath string) error {
 		}
 	}
 
-	// Fill remaining with random SELECT variants
+	// Fill remaining with a mix of under-represented patterns (not just SELECT *)
+	fillers := []func() (*ir.TrainingExample, error){
+		g.genSelectWhereCompound,
+		g.genSelectFields,
+		g.genSelectFieldsWhere,
+		g.genSelectWhereThreeField,
+		g.genSelectOrderByWhere,
+		g.genSelectGroupByWhere,
+		g.genSelectOrderByMulti,
+		g.genSelectHavingVaried,
+		g.genSelectWhereSimple,
+		g.genSelectOrderByLimit,
+	}
+	fillerIdx := 0
 	for generated < g.count {
-		example, err := g.genSelectStar()
+		example, err := fillers[fillerIdx%len(fillers)]()
 		if err != nil {
 			return fmt.Errorf("generate filler: %w", err)
 		}
@@ -164,6 +186,7 @@ func (g *Generator) Generate(outputPath string) error {
 			return fmt.Errorf("encode: %w", err)
 		}
 		generated++
+		fillerIdx++
 	}
 
 	return nil

@@ -184,7 +184,8 @@ var SelectOrderByTemplates = []string{
 	"What are the {bundle} ordered by {field} {dir}?",
 }
 
-var SelectLimitTemplates = []string{
+// SelectLimitNoOffsetTemplates — LIMIT only, no OFFSET. Used when offset=0.
+var SelectLimitNoOffsetTemplates = []string{
 	"Show the first {limit} {bundle}",
 	"Get the top {limit} {bundle}",
 	"List {limit} {bundle} records",
@@ -192,7 +193,17 @@ var SelectLimitTemplates = []string{
 	"Display the first {limit} results from {bundle}",
 	"Fetch {limit} records from {bundle}",
 	"Show me {limit} {bundle} entries",
+	"Give me the first {limit} {bundle}",
+}
+
+// SelectLimitOffsetTemplates — LIMIT with explicit OFFSET > 0.
+var SelectLimitOffsetTemplates = []string{
 	"Get {limit} {bundle} starting from position {offset}",
+	"Skip {offset} {bundle} then show the next {limit}",
+	"Show {limit} {bundle} starting after record {offset}",
+	"Fetch {limit} {bundle} records with offset {offset}",
+	"Get {limit} results from {bundle} skipping the first {offset}",
+	"Retrieve {limit} {bundle} entries starting from offset {offset}",
 }
 
 var SelectGroupByTemplates = []string{
@@ -204,6 +215,50 @@ var SelectGroupByTemplates = []string{
 	"Break down {bundle} by {field}",
 	"Show the {agg} of {aggfield} per {field} from {bundle}",
 	"Aggregate {bundle} by {field}",
+}
+
+// SelectOrderByWhereTemplates — ORDER BY combined with a WHERE clause.
+var SelectOrderByWhereTemplates = []string{
+	"Show {bundle} where {condition} ordered by {field} {dir}",
+	"List {bundle} matching {condition} sorted by {field} {dir}",
+	"Get {bundle} where {condition} in {dir} order of {field}",
+	"Find {bundle} with {condition} sorted by {field} {dir}",
+	"Retrieve {bundle} where {condition} ordered by {field} {dir}",
+	"Display {bundle} filtered by {condition} and sorted by {field} {dir}",
+	"Show {bundle} that have {condition} arranged by {field} {dir}",
+	"Get {bundle} matching {condition} ranked by {field} {dir}",
+}
+
+// SelectOrderByMultiTemplates — ORDER BY with 2 sort fields.
+var SelectOrderByMultiTemplates = []string{
+	"Show {bundle} ordered by {field1} {dir1} then by {field2} {dir2}",
+	"List {bundle} sorted by {field1} {dir1} and then {field2} {dir2}",
+	"Get {bundle} in order of {field1} {dir1}, {field2} {dir2}",
+	"Sort {bundle} by {field1} {dir1} then {field2} {dir2}",
+	"Display {bundle} ordered first by {field1} {dir1} then {field2} {dir2}",
+	"Retrieve {bundle} sorted by {field1} {dir1}, then by {field2} {dir2}",
+}
+
+// SelectGroupByWhereTemplates — GROUP BY combined with a WHERE clause.
+var SelectGroupByWhereTemplates = []string{
+	"Count {bundle} where {condition} grouped by {field}",
+	"How many {bundle} per {field} where {condition}?",
+	"Show {agg} of {aggfield} grouped by {field} in {bundle} where {condition}",
+	"Summarize {bundle} by {field} where {condition}",
+	"Group {bundle} where {condition} by {field}",
+	"Break down {bundle} by {field} filtering by {condition}",
+	"Show the {agg} of {aggfield} per {field} from {bundle} where {condition}",
+	"Aggregate {bundle} by {field} where {condition}",
+}
+
+// SelectOrderByLimitTemplates — ORDER BY combined with LIMIT (top-N queries).
+var SelectOrderByLimitTemplates = []string{
+	"Show the top {limit} {bundle} by {field} {dir}",
+	"Get the {limit} {bundle} with the highest {field}",
+	"List the first {limit} {bundle} sorted by {field} {dir}",
+	"Find the top {limit} {bundle} ordered by {field} {dir}",
+	"Retrieve the {limit} most recent {bundle} by {field}",
+	"Display the top {limit} {bundle} ranked by {field} {dir}",
 }
 
 var SelectDistinctTemplates = []string{
@@ -243,6 +298,30 @@ var SelectFunctionTemplates = []string{
 	"Apply {func} to {field} in {bundle}",
 	"Display {field} in {func} case from {bundle}",
 	"Show the length of {field} for {bundle} records",
+}
+
+// SelectFieldsWhereTemplates — multi-field SELECT with WHERE clause.
+var SelectFieldsWhereTemplates = []string{
+	"Show me {fields} from {bundle} where {condition}",
+	"Get {fields} of {bundle} where {condition}",
+	"List {fields} from {bundle} that match {condition}",
+	"Retrieve {fields} for {bundle} records where {condition}",
+	"Display {fields} from {bundle} filtered by {condition}",
+	"Show {fields} in {bundle} where {condition}",
+	"Find the {fields} of {bundle} with {condition}",
+	"Get the {fields} from {bundle} entries where {condition}",
+}
+
+// SelectWhereThreeFieldTemplates — compound WHERE with 3 conditions.
+var SelectWhereThreeFieldTemplates = []string{
+	"Find {bundle} where {cond1} {logic1} {cond2} {logic2} {cond3}",
+	"Show me {bundle} records where {cond1} {logic1} {cond2} {logic2} {cond3}",
+	"Get {bundle} that match {cond1} {logic1} {cond2} {logic2} {cond3}",
+	"List {bundle} entries where {cond1} {logic1} {cond2} {logic2} {cond3}",
+	"Retrieve {bundle} where {cond1} {logic1} {cond2} {logic2} {cond3}",
+	"Which {bundle} have {cond1} {logic1} {cond2} {logic2} {cond3}?",
+	"Search {bundle} where {cond1} {logic1} {cond2} {logic2} {cond3}",
+	"Find all {bundle} matching {cond1} {logic1} {cond2} {logic2} {cond3}",
 }
 
 var InsertTemplates = []string{

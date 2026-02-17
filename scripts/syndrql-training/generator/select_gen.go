@@ -172,22 +172,35 @@ func (g *Generator) genSelectOrderBy() (*ir.TrainingExample, error) {
 }
 
 // 6. LIMIT/OFFSET
+// Fixed: uses separate template pools for with-offset vs without-offset.
+// "Show the first 10 Customers" always means OFFSET 0.
+// "Get 10 Customers starting from position 25" uses explicit OFFSET.
 func (g *Generator) genSelectLimit() (*ir.TrainingExample, error) {
 	b := g.pickBundle()
 	limits := []int{5, 10, 20, 25, 50, 100}
 	limit := limits[g.rng.Intn(len(limits))]
 
-	offset := 0
-	if g.rng.Intn(3) == 0 {
-		offset = g.rng.Intn(50) + 1
-	}
+	var offset int
+	var nl string
 
-	tmpl := g.pickTemplate(SelectLimitTemplates, "select_limit")
-	nl := replaceTemplate(tmpl, map[string]string{
-		"bundle": b.Name,
-		"limit":  fmt.Sprintf("%d", limit),
-		"offset": fmt.Sprintf("%d", offset),
-	})
+	if g.rng.Intn(3) == 0 {
+		// With explicit offset — use offset-aware templates
+		offset = g.rng.Intn(50) + 1
+		tmpl := g.pickTemplate(SelectLimitOffsetTemplates, "select_limit_offset")
+		nl = replaceTemplate(tmpl, map[string]string{
+			"bundle": b.Name,
+			"limit":  fmt.Sprintf("%d", limit),
+			"offset": fmt.Sprintf("%d", offset),
+		})
+	} else {
+		// No offset — use "first N" style templates
+		offset = 0
+		tmpl := g.pickTemplate(SelectLimitNoOffsetTemplates, "select_limit")
+		nl = replaceTemplate(tmpl, map[string]string{
+			"bundle": b.Name,
+			"limit":  fmt.Sprintf("%d", limit),
+		})
+	}
 
 	stmt := ir.Statement{
 		StatementType: "select",
@@ -470,6 +483,320 @@ func (g *Generator) genSelectForUpdate() (*ir.TrainingExample, error) {
 			Bundle:    b.Name,
 			Where:     ir.BinaryExpr(ir.IdentExpr(field.Name), "==", ir.LiteralExpr(value)),
 			ForUpdate: true,
+		},
+	}
+	return g.makeExample(nl, stmt)
+}
+
+// 16. Compound WHERE with 3 fields (A op B) logicOp1 ((C op D) logicOp2 (E op F))
+// Teaches the model to build deeper recursive binary expression trees.
+func (g *Generator) genSelectWhereThreeField() (*ir.TrainingExample, error) {
+	b := g.pickBundle()
+	fields := g.pickNFields(b, 3)
+	f1, f2, f3 := fields[0], fields[1], fields[2]
+
+	// Pick operators appropriate to field types
+	op1 := g.opForType(f1.Type)
+	op2 := g.opForType(f2.Type)
+	op3 := g.opForType(f3.Type)
+
+	v1 := g.randomValue(f1.Type)
+	v2 := g.randomValue(f2.Type)
+	v3 := g.randomValue(f3.Type)
+
+	// Pick logic operators — AND is 2x more likely than OR
+	logicOp1 := "AND"
+	logicNL1 := "and"
+	if g.rng.Intn(3) == 0 {
+		logicOp1 = "OR"
+		logicNL1 = "or"
+	}
+	logicOp2 := "AND"
+	logicNL2 := "and"
+	if g.rng.Intn(3) == 0 {
+		logicOp2 = "OR"
+		logicNL2 = "or"
+	}
+
+	cond1NL := ConditionNL(f1.Name, op1, v1)
+	cond2NL := ConditionNL(f2.Name, op2, v2)
+	cond3NL := ConditionNL(f3.Name, op3, v3)
+
+	tmpl := g.pickTemplate(SelectWhereThreeFieldTemplates, "select_where_three")
+	nl := replaceTemplate(tmpl, map[string]string{
+		"bundle": b.Name,
+		"cond1":  cond1NL,
+		"logic1": logicNL1,
+		"cond2":  cond2NL,
+		"logic2": logicNL2,
+		"cond3":  cond3NL,
+	})
+
+	// Build tree: (cond1 logicOp1 cond2) logicOp2 cond3
+	where := ir.BinaryExpr(
+		ir.BinaryExpr(
+			ir.BinaryExpr(ir.IdentExpr(f1.Name), op1, ir.LiteralExpr(v1)),
+			logicOp1,
+			ir.BinaryExpr(ir.IdentExpr(f2.Name), op2, ir.LiteralExpr(v2)),
+		),
+		logicOp2,
+		ir.BinaryExpr(ir.IdentExpr(f3.Name), op3, ir.LiteralExpr(v3)),
+	)
+
+	stmt := ir.Statement{
+		StatementType: "select",
+		Select: &ir.SelectStmt{
+			Fields: []ir.SelectField{{Expression: ir.IdentExpr("*")}},
+			Bundle: b.Name,
+			Where:  where,
+		},
+	}
+	return g.makeExample(nl, stmt)
+}
+
+// 17. Named fields with WHERE clause
+// Combines multi-field SELECT with filtering — reinforces both patterns.
+func (g *Generator) genSelectFieldsWhere() (*ir.TrainingExample, error) {
+	b := g.pickBundle()
+	n := 2 + g.rng.Intn(3) // 2-4 fields
+	fields := g.pickNFields(b, n)
+
+	// Pick a field for the WHERE (can be any field, not just selected ones)
+	whereField := g.pickField(b)
+	op := g.opForType(whereField.Type)
+	value := g.randomValue(whereField.Type)
+
+	tmpl := g.pickTemplate(SelectFieldsWhereTemplates, "select_fields_where")
+	nl := replaceTemplate(tmpl, map[string]string{
+		"bundle":    b.Name,
+		"fields":    fieldNamesStr(fields),
+		"condition": ConditionNL(whereField.Name, op, value),
+	})
+
+	selectFields := make([]ir.SelectField, len(fields))
+	for i, f := range fields {
+		selectFields[i] = ir.SelectField{Expression: ir.IdentExpr(f.Name)}
+	}
+
+	stmt := ir.Statement{
+		StatementType: "select",
+		Select: &ir.SelectStmt{
+			Fields: selectFields,
+			Bundle: b.Name,
+			Where:  ir.BinaryExpr(ir.IdentExpr(whereField.Name), op, ir.LiteralExpr(value)),
+		},
+	}
+	return g.makeExample(nl, stmt)
+}
+
+// opForType returns an appropriate comparison operator for a field type.
+func (g *Generator) opForType(fieldType string) string {
+	switch fieldType {
+	case "STRING":
+		return g.randomEqualityOp()
+	case "INT", "FLOAT":
+		return g.randomOp()
+	case "BOOL":
+		return "=="
+	default:
+		return "=="
+	}
+}
+
+// 18. ORDER BY + WHERE — filtered and sorted results.
+func (g *Generator) genSelectOrderByWhere() (*ir.TrainingExample, error) {
+	b := g.pickBundle()
+	whereField := g.pickField(b)
+	orderField := g.pickField(b)
+	dir := g.randomDirection()
+
+	op := g.opForType(whereField.Type)
+	value := g.randomValue(whereField.Type)
+
+	tmpl := g.pickTemplate(SelectOrderByWhereTemplates, "select_orderby_where")
+	nl := replaceTemplate(tmpl, map[string]string{
+		"bundle":    b.Name,
+		"condition": ConditionNL(whereField.Name, op, value),
+		"field":     orderField.Name,
+		"dir":       g.directionNL(dir),
+	})
+
+	stmt := ir.Statement{
+		StatementType: "select",
+		Select: &ir.SelectStmt{
+			Fields:  []ir.SelectField{{Expression: ir.IdentExpr("*")}},
+			Bundle:  b.Name,
+			Where:   ir.BinaryExpr(ir.IdentExpr(whereField.Name), op, ir.LiteralExpr(value)),
+			OrderBy: []ir.OrderByClause{{Field: orderField.Name, Direction: dir}},
+		},
+	}
+	return g.makeExample(nl, stmt)
+}
+
+// 19. Multi-field ORDER BY — sort by two fields.
+func (g *Generator) genSelectOrderByMulti() (*ir.TrainingExample, error) {
+	b := g.pickBundle()
+	fields := g.pickNFields(b, 2)
+	dir1 := g.randomDirection()
+	dir2 := g.randomDirection()
+
+	tmpl := g.pickTemplate(SelectOrderByMultiTemplates, "select_orderby_multi")
+	nl := replaceTemplate(tmpl, map[string]string{
+		"bundle": b.Name,
+		"field1": fields[0].Name,
+		"dir1":   g.directionNL(dir1),
+		"field2": fields[1].Name,
+		"dir2":   g.directionNL(dir2),
+	})
+
+	stmt := ir.Statement{
+		StatementType: "select",
+		Select: &ir.SelectStmt{
+			Fields: []ir.SelectField{{Expression: ir.IdentExpr("*")}},
+			Bundle: b.Name,
+			OrderBy: []ir.OrderByClause{
+				{Field: fields[0].Name, Direction: dir1},
+				{Field: fields[1].Name, Direction: dir2},
+			},
+		},
+	}
+	return g.makeExample(nl, stmt)
+}
+
+// 20. ORDER BY + LIMIT — "top N" queries.
+func (g *Generator) genSelectOrderByLimit() (*ir.TrainingExample, error) {
+	b := g.pickBundle()
+	field := g.pickField(b)
+	dir := g.randomDirection()
+	limits := []int{5, 10, 20, 25, 50}
+	limit := limits[g.rng.Intn(len(limits))]
+
+	tmpl := g.pickTemplate(SelectOrderByLimitTemplates, "select_orderby_limit")
+	nl := replaceTemplate(tmpl, map[string]string{
+		"bundle": b.Name,
+		"field":  field.Name,
+		"dir":    g.directionNL(dir),
+		"limit":  fmt.Sprintf("%d", limit),
+	})
+
+	stmt := ir.Statement{
+		StatementType: "select",
+		Select: &ir.SelectStmt{
+			Fields:  []ir.SelectField{{Expression: ir.IdentExpr("*")}},
+			Bundle:  b.Name,
+			OrderBy: []ir.OrderByClause{{Field: field.Name, Direction: dir}},
+			Limit:   limit,
+		},
+	}
+	return g.makeExample(nl, stmt)
+}
+
+// 21. GROUP BY + WHERE — filter before grouping.
+func (g *Generator) genSelectGroupByWhere() (*ir.TrainingExample, error) {
+	b := g.pickBundle()
+	groupField := g.pickStringField(b)
+	whereField := g.pickField(b)
+	aggIdx := g.rng.Intn(len(AggFunctions))
+	agg := AggFunctions[aggIdx]
+
+	op := g.opForType(whereField.Type)
+	value := g.randomValue(whereField.Type)
+
+	var aggExpr *ir.Expr
+	var aggFieldName string
+	if agg.SQL == "COUNT" {
+		aggExpr = ir.FuncExpr("COUNT", false, ir.IdentExpr("*"))
+		aggFieldName = "*"
+	} else {
+		numField := g.pickNumericField(b)
+		aggExpr = ir.FuncExpr(agg.SQL, false, ir.IdentExpr(numField.Name))
+		aggFieldName = numField.Name
+	}
+
+	tmpl := g.pickTemplate(SelectGroupByWhereTemplates, "select_groupby_where")
+	nl := replaceTemplate(tmpl, map[string]string{
+		"bundle":    b.Name,
+		"field":     groupField.Name,
+		"agg":       agg.NL,
+		"aggfield":  aggFieldName,
+		"condition": ConditionNL(whereField.Name, op, value),
+	})
+
+	stmt := ir.Statement{
+		StatementType: "select",
+		Select: &ir.SelectStmt{
+			Fields: []ir.SelectField{
+				{Expression: ir.IdentExpr(groupField.Name)},
+				{Expression: aggExpr, Alias: agg.NL + "_val"},
+			},
+			Bundle:  b.Name,
+			Where:   ir.BinaryExpr(ir.IdentExpr(whereField.Name), op, ir.LiteralExpr(value)),
+			GroupBy: []string{groupField.Name},
+		},
+	}
+	return g.makeExample(nl, stmt)
+}
+
+// 22. HAVING with varied aggregate types (not just COUNT).
+func (g *Generator) genSelectHavingVaried() (*ir.TrainingExample, error) {
+	b := g.pickBundle()
+	groupField := g.pickStringField(b)
+	numField := g.pickNumericField(b)
+
+	// Pick an aggregate for HAVING — weighted toward SUM/AVG/COUNT
+	havingAggs := []struct {
+		sql string
+		nl  string
+	}{
+		{"COUNT", "count"},
+		{"SUM", "total"},
+		{"AVG", "average"},
+		{"MAX", "maximum"},
+		{"MIN", "minimum"},
+	}
+	havingAgg := havingAggs[g.rng.Intn(len(havingAggs))]
+
+	// Pick comparison for HAVING
+	havingOps := []string{">", ">=", "<", "<="}
+	havingOp := havingOps[g.rng.Intn(len(havingOps))]
+	threshold := IntValues[g.rng.Intn(len(IntValues))]
+
+	var havingExpr *ir.Expr
+	var havingFieldName string
+	if havingAgg.sql == "COUNT" {
+		havingExpr = ir.FuncExpr("COUNT", false, ir.IdentExpr("*"))
+		havingFieldName = "records"
+	} else {
+		havingExpr = ir.FuncExpr(havingAgg.sql, false, ir.IdentExpr(numField.Name))
+		havingFieldName = numField.Name
+	}
+
+	opNL := ConditionNL(havingAgg.nl+" of "+havingFieldName, havingOp, ir.NewIntValue(threshold))
+	nl := fmt.Sprintf("Show %s grouped by %s where the %s",
+		b.Name, groupField.Name, opNL)
+
+	// SELECT: groupField, aggregate
+	var selectAggExpr *ir.Expr
+	if havingAgg.sql == "COUNT" {
+		selectAggExpr = ir.FuncExpr("COUNT", false, ir.IdentExpr("*"))
+	} else {
+		selectAggExpr = ir.FuncExpr(havingAgg.sql, false, ir.IdentExpr(numField.Name))
+	}
+
+	stmt := ir.Statement{
+		StatementType: "select",
+		Select: &ir.SelectStmt{
+			Fields: []ir.SelectField{
+				{Expression: ir.IdentExpr(groupField.Name)},
+				{Expression: selectAggExpr, Alias: havingAgg.nl + "_val"},
+			},
+			Bundle:  b.Name,
+			GroupBy: []string{groupField.Name},
+			Having: ir.BinaryExpr(
+				havingExpr,
+				havingOp,
+				ir.LiteralExpr(ir.NewIntValue(threshold)),
+			),
 		},
 	}
 	return g.makeExample(nl, stmt)
