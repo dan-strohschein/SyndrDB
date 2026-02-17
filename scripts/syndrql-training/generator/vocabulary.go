@@ -282,14 +282,14 @@ var SelectJoinTemplates = []string{
 }
 
 var SelectAggregateTemplates = []string{
-	"How many {bundle} are there?",
-	"Count all records in {bundle}",
-	"What is the {agg} {field} in {bundle}?",
+	"What is the {agg} of {field} in {bundle}?",
 	"Calculate the {agg} of {field} from {bundle}",
-	"Find the {agg} {field} across all {bundle}",
-	"Get the total {agg} of {field} in {bundle}",
-	"What is the {agg} value of {field} in the {bundle} collection?",
-	"Compute the {agg} {field} from {bundle}",
+	"Find the {agg} of {field} across all {bundle}",
+	"Get the {agg} of {field} in {bundle}",
+	"What is the {agg} of {field} in the {bundle} collection?",
+	"Compute the {agg} of {field} from {bundle}",
+	"Show the {agg} of {field} from {bundle}",
+	"Return the {agg} of {field} in {bundle}",
 }
 
 var SelectFunctionTemplates = []string{

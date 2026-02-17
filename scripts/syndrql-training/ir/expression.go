@@ -1,6 +1,9 @@
 package ir
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Expr represents a recursive expression tree used in WHERE, HAVING, and other clauses.
 type Expr struct {
@@ -37,8 +40,14 @@ func NewIntValue(n int64) *Value {
 }
 
 // NewFloatValue creates a float literal value.
+// Always includes a decimal point so the model can distinguish floats from ints.
 func NewFloatValue(f float64) *Value {
-	return &Value{Type: "float", Raw: fmt.Sprintf("%g", f)}
+	s := fmt.Sprintf("%g", f)
+	// Ensure the string contains a decimal point so the model learns it's a float
+	if !strings.Contains(s, ".") && !strings.Contains(s, "e") && !strings.Contains(s, "E") {
+		s += ".0"
+	}
+	return &Value{Type: "float", Raw: s}
 }
 
 // NewBoolValue creates a boolean literal value.

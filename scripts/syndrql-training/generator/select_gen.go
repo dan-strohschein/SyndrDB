@@ -344,22 +344,22 @@ func (g *Generator) genSelectAggregate() (*ir.TrainingExample, error) {
 	agg := AggFunctions[aggIdx]
 
 	var aggExpr *ir.Expr
-	var fieldName string
+	var fieldNL string // human-readable name for NL templates
 
 	if agg.SQL == "COUNT" {
 		aggExpr = ir.FuncExpr("COUNT", false, ir.IdentExpr("*"))
-		fieldName = "*"
+		fieldNL = "records"
 	} else {
 		numField := g.pickNumericField(b)
 		aggExpr = ir.FuncExpr(agg.SQL, false, ir.IdentExpr(numField.Name))
-		fieldName = numField.Name
+		fieldNL = numField.Name
 	}
 
 	tmpl := g.pickTemplate(SelectAggregateTemplates, "select_aggregate")
 	nl := replaceTemplate(tmpl, map[string]string{
 		"bundle": b.Name,
 		"agg":    agg.NL,
-		"field":  fieldName,
+		"field":  fieldNL,
 	})
 
 	stmt := ir.Statement{

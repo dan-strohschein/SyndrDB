@@ -41,20 +41,20 @@ func (g *Generator) Generate(outputPath string) error {
 	enc.SetEscapeHTML(false)
 
 	// Distribution baseline — counts are relative weights, scaled to requested -count.
-	// Rebalanced to increase representation of patterns the model struggles with:
-	// compound WHERE, multi-field SELECT, ORDER BY combos, GROUP BY combos.
+	// Rebalanced: simple WHERE > compound, more function/aggregate examples,
+	// all templates explicitly name aggregates to prevent ambiguity.
 	distribution := []struct {
 		category string
 		count    int
 		genFunc  func() (*ir.TrainingExample, error)
 	}{
-		// SELECT variants - ~450 total (~65%)
+		// SELECT variants
 		{"select_star", 15, g.genSelectStar},                      // well-learned, keep minimal
 		{"select_fields", 35, g.genSelectFields},                   // multi-field projection
 		{"select_fields_where", 15, g.genSelectFieldsWhere},        // fields + WHERE combo
-		{"select_where_simple", 35, g.genSelectWhereSimple},        // basic WHERE
-		{"select_where_compound", 40, g.genSelectWhereCompound},    // 2-field AND/OR
-		{"select_where_three", 15, g.genSelectWhereThreeField},     // 3-field compound WHERE
+		{"select_where_simple", 50, g.genSelectWhereSimple},        // basic WHERE — must dominate compound
+		{"select_where_compound", 30, g.genSelectWhereCompound},    // 2-field AND/OR
+		{"select_where_three", 10, g.genSelectWhereThreeField},     // 3-field compound WHERE
 		{"select_orderby", 15, g.genSelectOrderBy},                 // plain ORDER BY
 		{"select_orderby_where", 20, g.genSelectOrderByWhere},      // ORDER BY + WHERE
 		{"select_orderby_multi", 15, g.genSelectOrderByMulti},      // multi-field ORDER BY
@@ -66,9 +66,9 @@ func (g *Generator) Generate(outputPath string) error {
 		{"select_having_varied", 15, g.genSelectHavingVaried},       // HAVING (SUM/AVG/MIN/MAX)
 		{"select_distinct", 15, g.genSelectDistinct},
 		{"select_join", 20, g.genSelectJoin},
-		{"select_aggregate", 20, g.genSelectAggregate},
-		{"select_function", 15, g.genSelectFunction},
-		{"select_in", 10, g.genSelectIn},
+		{"select_aggregate", 25, g.genSelectAggregate},             // more aggregate examples
+		{"select_function", 25, g.genSelectFunction},               // more function examples to teach args structure
+		{"select_in", 15, g.genSelectIn},                           // more IN/NOT IN examples
 		{"select_complex", 15, g.genSelectComplex},                 // WHERE + ORDER BY + LIMIT
 		{"select_forupdate", 5, g.genSelectForUpdate},
 
