@@ -52,9 +52,9 @@ func (g *Generator) Generate(outputPath string) error {
 		{"select_star", 15, g.genSelectStar},                      // well-learned, keep minimal
 		{"select_fields", 35, g.genSelectFields},                   // multi-field projection
 		{"select_fields_where", 15, g.genSelectFieldsWhere},        // fields + WHERE combo
-		{"select_where_simple", 50, g.genSelectWhereSimple},        // basic WHERE — must dominate compound
-		{"select_where_compound", 30, g.genSelectWhereCompound},    // 2-field AND/OR
-		{"select_where_three", 10, g.genSelectWhereThreeField},     // 3-field compound WHERE
+		{"select_where_simple", 65, g.genSelectWhereSimple},        // basic WHERE — must dominate compound
+		{"select_where_compound", 22, g.genSelectWhereCompound},    // 2-field AND/OR
+		{"select_where_three", 8, g.genSelectWhereThreeField},      // 3-field compound WHERE
 		{"select_orderby", 15, g.genSelectOrderBy},                 // plain ORDER BY
 		{"select_orderby_where", 20, g.genSelectOrderByWhere},      // ORDER BY + WHERE
 		{"select_orderby_multi", 15, g.genSelectOrderByMulti},      // multi-field ORDER BY
@@ -67,8 +67,8 @@ func (g *Generator) Generate(outputPath string) error {
 		{"select_distinct", 15, g.genSelectDistinct},
 		{"select_join", 20, g.genSelectJoin},
 		{"select_aggregate", 25, g.genSelectAggregate},             // more aggregate examples
-		{"select_function", 25, g.genSelectFunction},               // more function examples to teach args structure
-		{"select_in", 15, g.genSelectIn},                           // more IN/NOT IN examples
+		{"select_function", 30, g.genSelectFunction},               // more function examples to teach args structure
+		{"select_in", 30, g.genSelectIn},                           // doubled IN/NOT IN — was underrepresented
 		{"select_complex", 15, g.genSelectComplex},                 // WHERE + ORDER BY + LIMIT
 		{"select_forupdate", 5, g.genSelectForUpdate},
 
@@ -175,6 +175,7 @@ func (g *Generator) Generate(outputPath string) error {
 		g.genSelectHavingVaried,
 		g.genSelectWhereSimple,
 		g.genSelectOrderByLimit,
+		g.genSelectIn, // IN/NOT IN was missing from fillers
 	}
 	fillerIdx := 0
 	for generated < g.count {

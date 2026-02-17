@@ -29,7 +29,7 @@ import argparse
 parser = argparse.ArgumentParser(description="Fine-tune SyndrQL IR model")
 parser.add_argument("--data", default="training_data.jsonl",
                     help="Path to training JSONL (fields: nl, ir, syndrql)")
-parser.add_argument("--epochs", type=int, default=5,
+parser.add_argument("--epochs", type=int, default=7,
                     help="Number of training epochs")
 parser.add_argument("--output", default="./syndrql-adapter",
                     help="Directory to save the LoRA adapter")
@@ -39,7 +39,7 @@ parser.add_argument("--batch-size", type=int, default=4,
                     help="Per-device training batch size")
 parser.add_argument("--grad-accum", type=int, default=4,
                     help="Gradient accumulation steps")
-parser.add_argument("--lr", type=float, default=2e-4,
+parser.add_argument("--lr", type=float, default=1.5e-4,
                     help="Learning rate")
 args = parser.parse_args()
 
@@ -81,12 +81,12 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 # ---------------------------------------------------------------------------
 model = FastLanguageModel.get_peft_model(
     model,
-    r=16,
+    r=32,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",
     ],
-    lora_alpha=16,
+    lora_alpha=32,
     lora_dropout=0,
     bias="none",
     use_gradient_checkpointing="unsloth",
@@ -143,7 +143,7 @@ trainer = SFTTrainer(
     args=SFTConfig(
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
-        warmup_steps=10,
+        warmup_steps=20,
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
         fp16=not torch.cuda.is_bf16_supported(),
