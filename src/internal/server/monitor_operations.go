@@ -304,8 +304,8 @@ func RunMonitor(
 // queryInfoToMap converts a QueryInfo into a JSON-friendly map.
 func queryInfoToMap(q *QueryInfo) map[string]interface{} {
 	m := map[string]interface{}{
-		"query":     q.Query,
-		"status":    q.Status,
+		"query":      q.Query,
+		"status":     q.Status,
 		"start_time": q.StartTime.Format(time.RFC3339),
 	}
 	if q.EndTime != nil {
