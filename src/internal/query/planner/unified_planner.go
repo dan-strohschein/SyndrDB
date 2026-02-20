@@ -482,3 +482,18 @@ func (uqp *UnifiedQueryPlanner) SetStatsStore(ss *StatsStore) {
 func (uqp *UnifiedQueryPlanner) GetStatsStore() *StatsStore {
 	return uqp.statsStore
 }
+
+// SetMetricsReporter sets the callback used to export plan cache metrics to GlobalServerMetrics.
+func (uqp *UnifiedQueryPlanner) SetMetricsReporter(reporter func(string, uint64)) {
+	if uqp.planCache != nil {
+		uqp.planCache.SetMetricsReporter(reporter)
+	}
+}
+
+// PlanCacheStats returns a snapshot of plan cache statistics.
+func (uqp *UnifiedQueryPlanner) PlanCacheStats() CacheStatsSnapshot {
+	if uqp.planCache != nil {
+		return uqp.planCache.Stats()
+	}
+	return CacheStatsSnapshot{}
+}

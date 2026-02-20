@@ -11,6 +11,9 @@ type CommandResponse struct {
 	Result          interface{}
 	ExecutionTimeMS float64
 
+	// Observability: request trace ID for log correlation
+	TraceID string `json:"trace_id,omitempty"`
+
 	// Timeout information
 	Error           *string `json:"error,omitempty"`            // Error message (e.g., timeout)
 	TimeoutOccurred bool    `json:"timeout_occurred,omitempty"` // Whether query timed out

@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/pkg/errors"
@@ -291,4 +292,124 @@ func ShowUsers(command string, database *models.Database, logger *zap.SugaredLog
 	logger.Infof("Retrieved %d users from Users bundle", len(users))
 
 	return response, nil
+}
+
+// ShowServerStats returns all GlobalServerMetrics grouped by category prefix.
+// Syntax: SHOW SERVER STATS;
+//
+//	SHOW SERVER STATS FOR "category";
+func ShowServerStats(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
+	metrics := GetGlobalServerMetrics().GetMetrics()
+
+	// Parse optional category filter: SHOW SERVER STATS FOR "category"
+	var categoryFilter string
+	commandLower := strings.ToLower(command)
+	if idx := strings.Index(commandLower, " for "); idx != -1 {
+		rest := strings.TrimSpace(command[idx+5:])
+		rest = strings.Trim(rest, "\"'")
+		categoryFilter = strings.ToLower(rest)
+	}
+
+	// Group metrics by category prefix (e.g., "hash_index", "btree_index", "query", etc.)
+	grouped := make(map[string]map[string]uint64)
+	for name, value := range metrics {
+		// Derive category from first underscore-separated segment(s)
+		category := metricsCategory(name)
+		if categoryFilter != "" && !strings.HasPrefix(category, categoryFilter) {
+			continue
+		}
+		if grouped[category] == nil {
+			grouped[category] = make(map[string]uint64)
+		}
+		grouped[category][name] = value
+	}
+
+	// Build ordered result
+	categories := make([]string, 0, len(grouped))
+	for cat := range grouped {
+		categories = append(categories, cat)
+	}
+	sort.Strings(categories)
+
+	result := make([]map[string]interface{}, 0, len(categories))
+	totalMetrics := 0
+	for _, cat := range categories {
+		entry := map[string]interface{}{
+			"category": cat,
+			"metrics":  grouped[cat],
+		}
+		result = append(result, entry)
+		totalMetrics += len(grouped[cat])
+	}
+
+	return &CommandResponse{
+		ResultCount:     totalMetrics,
+		Result:          result,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+	}, nil
+}
+
+// metricsCategory derives a category name from a snake_case metric name.
+// E.g., "hash_index_puts_total" → "hash_index", "query_plan_cache_hits" → "query".
+func metricsCategory(name string) string {
+	prefixes := []string{
+		"hash_index", "btree_index", "btree_insert", "btree_search",
+		"query_plan_cache", "query_latency", "query",
+		"subquery", "transaction", "rotation_lock", "atomic",
+		"wal_replay", "wal_replication", "wal",
+		"compaction_duration", "compaction_triggered", "compaction",
+		"session", "document",
+		"ghost_cleanup", "ghost", "tombstone", "orphaned",
+		"mvcc_gc", "datetime",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(name, p) {
+			return p
+		}
+	}
+	// Fallback: first two segments
+	parts := strings.SplitN(name, "_", 3)
+	if len(parts) >= 2 {
+		return parts[0] + "_" + parts[1]
+	}
+	return parts[0]
+}
+
+// ShowCacheStats returns plan cache and page cache hit rates.
+// Syntax: SHOW CACHE STATS;
+func ShowCacheStats(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, startTime time.Time) (*CommandResponse, error) {
+	result := make(map[string]interface{})
+
+	// Plan cache statistics
+	if serviceManager.UnifiedPlanner != nil {
+		cacheStats := serviceManager.UnifiedPlanner.PlanCacheStats()
+		total := cacheStats.Hits + cacheStats.Misses
+		hitRate := float64(0)
+		if total > 0 {
+			hitRate = float64(cacheStats.Hits) / float64(total) * 100
+		}
+		result["plan_cache"] = map[string]interface{}{
+			"hits":          cacheStats.Hits,
+			"misses":        cacheStats.Misses,
+			"evictions":     cacheStats.Evictions,
+			"invalidations": cacheStats.Invalidations,
+			"stale_serves":  cacheStats.StaleServes,
+			"hit_rate_pct":  fmt.Sprintf("%.2f", hitRate),
+		}
+	}
+
+	// Page cache metrics from GlobalServerMetrics (no direct page cache stats API)
+	gsm := GetGlobalServerMetrics()
+	result["global_metrics"] = map[string]interface{}{
+		"hash_index_cache_hits":   gsm.HashIndexCacheHits.Load(),
+		"hash_index_cache_misses": gsm.HashIndexCacheMisses.Load(),
+		"btree_index_cache_hits":  gsm.BTreeIndexCacheHits.Load(),
+		"btree_index_cache_misses": gsm.BTreeIndexCacheMisses.Load(),
+	}
+
+	return &CommandResponse{
+		ResultCount:     len(result),
+		Result:          result,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+	}, nil
 }

@@ -151,14 +151,13 @@ func (mme *MemoryMappedExporter) exportLoop() {
 }
 
 // exportMetrics writes the current metrics to the memory-mapped file
-// Uses atomic file replacement (write to temp, then rename) to prevent partial reads
+// Uses atomic file replacement (write to temp, then rename) to prevent partial reads.
+// Uses MetricDescriptors for zero-allocation reads (no map alloc per cycle).
 func (mme *MemoryMappedExporter) exportMetrics() error {
-	// Get current metrics from global server metrics
-	globalMetrics := server.GetGlobalServerMetrics()
-	metrics := globalMetrics.GetMetrics()
+	descriptors := server.GetMetricDescriptors()
 
-	// Serialize metrics to binary format
-	data, err := mme.serializeMetrics(metrics)
+	// Serialize directly from descriptors to binary format
+	data, err := mme.serializeMetricsFromDescriptors(descriptors)
 	if err != nil {
 		return fmt.Errorf("failed to serialize metrics: %w", err)
 	}
@@ -175,6 +174,50 @@ func (mme *MemoryMappedExporter) exportMetrics() error {
 	}
 
 	return nil
+}
+
+// serializeMetricsFromDescriptors writes metrics directly from descriptors to binary format,
+// avoiding the intermediate map[string]uint64 allocation.
+func (mme *MemoryMappedExporter) serializeMetricsFromDescriptors(descriptors []server.MetricDescriptor) ([]byte, error) {
+	// Calculate total size needed
+	totalSize := 4 + 8 + 8 // version + timestamp + count
+	for i := range descriptors {
+		totalSize += 4 + len(descriptors[i].Name) + 8 // key_length + key + value
+	}
+
+	// Pre-allocate buffer
+	buf := make([]byte, 0, totalSize)
+
+	// Write version
+	versionBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(versionBytes, server.MMAP_FORMAT_VERSION)
+	buf = append(buf, versionBytes...)
+
+	// Write timestamp
+	timestampBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(timestampBytes, uint64(time.Now().Unix()))
+	buf = append(buf, timestampBytes...)
+
+	// Write count
+	countBytes := make([]byte, 8)
+	binary.LittleEndian.PutUint64(countBytes, uint64(len(descriptors)))
+	buf = append(buf, countBytes...)
+
+	// Write each metric
+	keyLenBytes := make([]byte, 4)
+	valueBytes := make([]byte, 8)
+	for i := range descriptors {
+		// Key length
+		binary.LittleEndian.PutUint32(keyLenBytes, uint32(len(descriptors[i].Name)))
+		buf = append(buf, keyLenBytes...)
+		// Key
+		buf = append(buf, descriptors[i].Name...)
+		// Value (load atomically)
+		binary.LittleEndian.PutUint64(valueBytes, descriptors[i].Ptr.Load())
+		buf = append(buf, valueBytes...)
+	}
+
+	return buf, nil
 }
 
 // serializeMetrics converts metrics map to binary format

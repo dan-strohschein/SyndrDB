@@ -15,17 +15,15 @@ const MMAP_FORMAT_VERSION uint32 = 1
 // GlobalMemoryMetrics tracks aggregate memory limit metrics across all queries
 // This provides insights into DoS protection effectiveness and query memory patterns
 //
-// Thread-safe: All methods use mutex protection for concurrent access
+// Thread-safe: All fields use atomic operations for lock-free concurrent access
 type GlobalMemoryMetrics struct {
-	mu sync.Mutex
-
 	// Counters
-	totalQueriesChecked int64 // Total number of queries that had memory tracking enabled
-	totalLimitExceeded  int64 // Number of queries that exceeded the memory limit
+	totalQueriesChecked atomic.Int64 // Total number of queries that had memory tracking enabled
+	totalLimitExceeded  atomic.Int64 // Number of queries that exceeded the memory limit
 
 	// Memory statistics
-	totalProjectedMemory int64 // Sum of all projected memory values (for calculating average)
-	maxProjectedMemory   int64 // Maximum projected memory across all queries
+	totalProjectedMemory atomic.Int64 // Sum of all projected memory values (for calculating average)
+	maxProjectedMemory   atomic.Int64 // Maximum projected memory across all queries
 }
 
 // globalMemoryMetrics is the singleton instance
@@ -38,49 +36,50 @@ func GetGlobalMemoryMetrics() *GlobalMemoryMetrics {
 
 // RecordQuery records metrics for a completed query
 func (gmm *GlobalMemoryMetrics) RecordQuery(projectedMemory int64, exceeded bool) {
-	gmm.mu.Lock()
-	defer gmm.mu.Unlock()
-
-	gmm.totalQueriesChecked++
-	gmm.totalProjectedMemory += projectedMemory
+	gmm.totalQueriesChecked.Add(1)
+	gmm.totalProjectedMemory.Add(projectedMemory)
 
 	if exceeded {
-		gmm.totalLimitExceeded++
+		gmm.totalLimitExceeded.Add(1)
 	}
 
-	if projectedMemory > gmm.maxProjectedMemory {
-		gmm.maxProjectedMemory = projectedMemory
+	// CAS loop for maxProjectedMemory (only update when new value exceeds current)
+	for {
+		current := gmm.maxProjectedMemory.Load()
+		if projectedMemory <= current {
+			break
+		}
+		if gmm.maxProjectedMemory.CompareAndSwap(current, projectedMemory) {
+			break
+		}
 	}
 }
 
 // GetMetrics returns current metrics as key-value pairs
 // Compatible with any monitoring system (Prometheus, DataDog, CloudWatch, etc.)
 func (gmm *GlobalMemoryMetrics) GetMetrics() map[string]interface{} {
-	gmm.mu.Lock()
-	defer gmm.mu.Unlock()
+	totalChecked := gmm.totalQueriesChecked.Load()
+	totalProjected := gmm.totalProjectedMemory.Load()
 
 	avgProjected := int64(0)
-	if gmm.totalQueriesChecked > 0 {
-		avgProjected = gmm.totalProjectedMemory / gmm.totalQueriesChecked
+	if totalChecked > 0 {
+		avgProjected = totalProjected / totalChecked
 	}
 
 	return map[string]interface{}{
-		"memory_limit_exceeded_count": gmm.totalLimitExceeded,
-		"queries_checked_count":       gmm.totalQueriesChecked,
+		"memory_limit_exceeded_count": gmm.totalLimitExceeded.Load(),
+		"queries_checked_count":       totalChecked,
 		"avg_projected_memory_bytes":  avgProjected,
-		"max_projected_memory_bytes":  gmm.maxProjectedMemory,
+		"max_projected_memory_bytes":  gmm.maxProjectedMemory.Load(),
 	}
 }
 
 // Reset clears all metrics (useful for testing)
 func (gmm *GlobalMemoryMetrics) Reset() {
-	gmm.mu.Lock()
-	defer gmm.mu.Unlock()
-
-	gmm.totalQueriesChecked = 0
-	gmm.totalLimitExceeded = 0
-	gmm.totalProjectedMemory = 0
-	gmm.maxProjectedMemory = 0
+	gmm.totalQueriesChecked.Store(0)
+	gmm.totalLimitExceeded.Store(0)
+	gmm.totalProjectedMemory.Store(0)
+	gmm.maxProjectedMemory.Store(0)
 }
 
 // ============================================================================
@@ -337,6 +336,212 @@ var globalServerMetrics = &GlobalServerMetrics{}
 // GetGlobalServerMetrics returns the singleton global metrics instance
 func GetGlobalServerMetrics() *GlobalServerMetrics {
 	return globalServerMetrics
+}
+
+// MetricDescriptor describes a single metric field for zero-allocation iteration.
+// Built once at init time via reflection; used by mmap exporter and HTTP /metrics.
+type MetricDescriptor struct {
+	Name string          // snake_case metric name
+	Ptr  *atomic.Uint64  // pointer to the atomic counter
+}
+
+// globalMetricDescriptors is the pre-built descriptor slice, populated at init.
+// Names match GetMetrics() exactly. Deprecated fields are excluded.
+var globalMetricDescriptors = buildMetricDescriptors()
+
+// GetMetricDescriptors returns the pre-built list of metric descriptors for zero-allocation export.
+func GetMetricDescriptors() []MetricDescriptor {
+	return globalMetricDescriptors
+}
+
+// buildMetricDescriptors constructs the descriptor list with hand-written names
+// matching the canonical snake_case keys in GetMetrics(). This avoids any
+// algorithmic CamelCase→snake_case conversion issues (acronyms, digits, compound words).
+func buildMetricDescriptors() []MetricDescriptor {
+	gsm := globalServerMetrics
+	return []MetricDescriptor{
+		// Hash Index Metrics
+		{"hash_index_puts_total", &gsm.HashIndexPutsTotal},
+		{"hash_index_gets_total", &gsm.HashIndexGetsTotal},
+		{"hash_index_deletes_total", &gsm.HashIndexDeletesTotal},
+		{"hash_index_cache_hits", &gsm.HashIndexCacheHits},
+		{"hash_index_cache_misses", &gsm.HashIndexCacheMisses},
+		{"hash_index_disk_reads", &gsm.HashIndexDiskReads},
+		{"hash_index_collisions", &gsm.HashIndexCollisions},
+		{"hash_index_rehashes", &gsm.HashIndexRehashes},
+		{"hash_index_bucket_splits", &gsm.HashIndexBucketSplits},
+		{"hash_index_bucket_merges", &gsm.HashIndexBucketMerges},
+
+		// Hash Index Latency Histograms
+		{"hash_index_put_latency_lt_1ms", &gsm.HashIndexPutLatencyLt1ms},
+		{"hash_index_put_latency_lt_10ms", &gsm.HashIndexPutLatencyLt10ms},
+		{"hash_index_put_latency_lt_100ms", &gsm.HashIndexPutLatencyLt100ms},
+		{"hash_index_put_latency_lt_1s", &gsm.HashIndexPutLatencyLt1s},
+		{"hash_index_put_latency_gte_1s", &gsm.HashIndexPutLatencyGte1s},
+		{"hash_index_get_latency_lt_1ms", &gsm.HashIndexGetLatencyLt1ms},
+		{"hash_index_get_latency_lt_10ms", &gsm.HashIndexGetLatencyLt10ms},
+		{"hash_index_get_latency_lt_100ms", &gsm.HashIndexGetLatencyLt100ms},
+		{"hash_index_get_latency_lt_1s", &gsm.HashIndexGetLatencyLt1s},
+		{"hash_index_get_latency_gte_1s", &gsm.HashIndexGetLatencyGte1s},
+
+		// B-Tree Index Metrics
+		{"btree_index_inserts_total", &gsm.BTreeIndexInsertsTotal},
+		{"btree_index_searches_total", &gsm.BTreeIndexSearchesTotal},
+		{"btree_index_range_queries", &gsm.BTreeIndexRangeQueries},
+		{"btree_index_deletes_total", &gsm.BTreeIndexDeletesTotal},
+		{"btree_index_cache_hits", &gsm.BTreeIndexCacheHits},
+		{"btree_index_cache_misses", &gsm.BTreeIndexCacheMisses},
+		{"btree_index_node_splits", &gsm.BTreeIndexNodeSplits},
+		{"btree_index_node_merges", &gsm.BTreeIndexNodeMerges},
+		{"btree_index_rebalances", &gsm.BTreeIndexRebalances},
+		{"btree_index_tombstones", &gsm.BTreeIndexTombstones},
+
+		// B-Tree Index Latency Histograms
+		{"btree_insert_latency_lt_1ms", &gsm.BTreeInsertLatencyLt1ms},
+		{"btree_insert_latency_lt_10ms", &gsm.BTreeInsertLatencyLt10ms},
+		{"btree_insert_latency_lt_100ms", &gsm.BTreeInsertLatencyLt100ms},
+		{"btree_insert_latency_lt_1s", &gsm.BTreeInsertLatencyLt1s},
+		{"btree_insert_latency_gte_1s", &gsm.BTreeInsertLatencyGte1s},
+		{"btree_search_latency_lt_1ms", &gsm.BTreeSearchLatencyLt1ms},
+		{"btree_search_latency_lt_10ms", &gsm.BTreeSearchLatencyLt10ms},
+		{"btree_search_latency_lt_100ms", &gsm.BTreeSearchLatencyLt100ms},
+		{"btree_search_latency_lt_1s", &gsm.BTreeSearchLatencyLt1s},
+		{"btree_search_latency_gte_1s", &gsm.BTreeSearchLatencyGte1s},
+
+		// Query Execution Metrics
+		{"query_executions_total", &gsm.QueryExecutionsTotal},
+		{"query_plan_cache_hits", &gsm.QueryPlanCacheHits},
+		{"query_plan_cache_misses", &gsm.QueryPlanCacheMisses},
+		{"query_timeouts_total", &gsm.QueryTimeoutsTotal},
+		{"query_memory_limit_exceeded", &gsm.QueryMemoryLimitExceeded},
+		{"query_full_table_scans", &gsm.QueryFullTableScans},
+		{"query_index_scans", &gsm.QueryIndexScans},
+		{"query_joins_total", &gsm.QueryJoinsTotal},
+		{"query_group_bys_total", &gsm.QueryGroupBysTotal},
+		{"query_order_bys_total", &gsm.QueryOrderBysTotal},
+
+		// Subquery Execution Metrics
+		{"subquery_executions_total", &gsm.SubqueryExecutionsTotal},
+		{"subquery_inlist_strategy", &gsm.SubqueryInListStrategy},
+		{"subquery_hashjoin_strategy", &gsm.SubqueryHashJoinStrategy},
+		{"subquery_indexed_lookup_strategy", &gsm.SubqueryIndexedLookupStrategy},
+		{"subquery_depth_exceeded", &gsm.SubqueryDepthExceeded},
+		{"subquery_memory_limit_exceeded", &gsm.SubqueryMemoryLimitExceeded},
+		{"subquery_contains_null", &gsm.SubqueryContainsNull},
+
+		// Query Latency Histograms
+		{"query_latency_lt_1ms", &gsm.QueryLatencyLt1ms},
+		{"query_latency_lt_10ms", &gsm.QueryLatencyLt10ms},
+		{"query_latency_lt_100ms", &gsm.QueryLatencyLt100ms},
+		{"query_latency_lt_1s", &gsm.QueryLatencyLt1s},
+		{"query_latency_gte_1s", &gsm.QueryLatencyGte1s},
+
+		// Transaction Metrics
+		{"transactions_begun", &gsm.TransactionsBegun},
+		{"transactions_committed", &gsm.TransactionsCommitted},
+		{"transactions_rolled_back", &gsm.TransactionsRolledBack},
+		{"transactions_aborted", &gsm.TransactionsAborted},
+
+		// MVCC Lock Contention Metrics
+		{"rotation_lock_wait_time_total_ns", &gsm.RotationLockWaitTimeTotal},
+		{"rotation_lock_acquisitions", &gsm.RotationLockAcquisitions},
+		{"atomic_operations_total", &gsm.AtomicOperationsTotal},
+
+		// WAL Metrics
+		{"wal_writes_total", &gsm.WALWritesTotal},
+		{"wal_flushes_total", &gsm.WALFlushesTotal},
+		{"wal_bytes_written", &gsm.WALBytesWritten},
+		{"wal_segment_rotations", &gsm.WALSegmentRotations},
+		{"wal_syncs_total", &gsm.WALSyncsTotal},
+
+		// Compaction Metrics
+		{"compactions_total", &gsm.CompactionsTotal},
+		{"compaction_bytes_read", &gsm.CompactionBytesRead},
+		{"compaction_bytes_written", &gsm.CompactionBytesWritten},
+		{"compaction_tombstones", &gsm.CompactionTombstones},
+
+		// Session Metrics
+		{"sessions_active", &gsm.SessionsActive},
+		{"sessions_created", &gsm.SessionsCreated},
+		{"sessions_terminated", &gsm.SessionsTerminated},
+		{"session_auth_failures", &gsm.SessionAuthFailures},
+
+		// Document Operation Metrics
+		{"document_inserts_total", &gsm.DocumentInsertsTotal},
+		{"document_updates_total", &gsm.DocumentUpdatesTotal},
+		{"document_deletes_total", &gsm.DocumentDeletesTotal},
+		{"document_reads_total", &gsm.DocumentReadsTotal},
+
+		// Index Error Counters
+		{"hash_index_put_errors", &gsm.HashIndexPutErrors},
+		{"hash_index_get_errors", &gsm.HashIndexGetErrors},
+		{"hash_index_delete_errors", &gsm.HashIndexDeleteErrors},
+		{"btree_index_insert_errors", &gsm.BTreeIndexInsertErrors},
+		{"btree_index_search_errors", &gsm.BTreeIndexSearchErrors},
+		{"btree_index_delete_errors", &gsm.BTreeIndexDeleteErrors},
+
+		// Plan Cache Enhanced Metrics
+		{"query_plan_cache_evictions", &gsm.QueryPlanCacheEvictions},
+		{"query_plan_cache_invalidations", &gsm.QueryPlanCacheInvalidations},
+		{"query_plan_cache_stale_serves", &gsm.QueryPlanCacheStaleServes},
+		{"query_plan_cache_memory_bytes", &gsm.QueryPlanCacheMemoryBytes},
+		// NOTE: QueryPlanCacheSize, QueryPlanCacheMaxSize, QueryPlanCacheMemoryUsed
+		// are DEPRECATED and intentionally excluded from descriptors.
+
+		// Compaction Duration Histograms
+		{"compaction_duration_lt_100ms", &gsm.CompactionDurationLt100ms},
+		{"compaction_duration_lt_1s", &gsm.CompactionDurationLt1s},
+		{"compaction_duration_lt_10s", &gsm.CompactionDurationLt10s},
+		{"compaction_duration_gte_10s", &gsm.CompactionDurationGte10s},
+
+		// Compaction Trigger Tracking
+		{"compaction_triggered_scheduled", &gsm.CompactionTriggeredScheduled},
+		{"compaction_triggered_manual", &gsm.CompactionTriggeredManual},
+		{"compaction_triggered_threshold", &gsm.CompactionTriggeredThreshold},
+		{"compaction_triggered_emergency", &gsm.CompactionTriggeredEmergency},
+
+		// WAL Replay Metrics
+		{"wal_replay_entries_total", &gsm.WALReplayEntriesTotal},
+		{"wal_replay_errors_total", &gsm.WALReplayErrorsTotal},
+		{"wal_replay_duration_ms", &gsm.WALReplayDurationMs},
+		{"wal_replay_last_timestamp", &gsm.WALReplayLastTimestamp},
+
+		// WAL Replication Lag Metrics
+		{"wal_last_flush_timestamp", &gsm.WALLastFlushTimestamp},
+		{"wal_last_sync_timestamp", &gsm.WALLastSyncTimestamp},
+		{"wal_replication_lag_ms", &gsm.WALReplicationLagMs},
+
+		// Ghost Cleanup Metrics
+		{"ghost_cleanup_cycles_total", &gsm.GhostCleanupCyclesTotal},
+		{"ghost_records_scanned", &gsm.GhostRecordsScanned},
+		{"ghost_records_removed", &gsm.GhostRecordsRemoved},
+		{"ghost_cleanup_duration_ms", &gsm.GhostCleanupDurationMs},
+		{"ghost_cleanup_paused_for_load", &gsm.GhostCleanupPausedForLoad},
+		{"ghost_cleanup_batches_processed", &gsm.GhostCleanupBatchesProcessed},
+		{"tombstone_cache_hits", &gsm.TombstoneCacheHits},
+		{"tombstone_cache_misses", &gsm.TombstoneCacheMisses},
+		{"tombstone_scans_performed", &gsm.TombstoneScansPerformed},
+		{"tombstone_cache_evictions", &gsm.TombstoneCacheEvictions},
+		{"compaction_triggered_ghost", &gsm.CompactionTriggeredGhost},
+		{"compaction_blocked_by_lock", &gsm.CompactionBlockedByLock},
+		{"orphaned_temp_files_removed", &gsm.OrphanedTempFilesRemoved},
+
+		// MVCC GC Metrics
+		{"mvcc_gc_cycles_total", &gsm.MVCCGCCyclesTotal},
+		{"mvcc_gc_bundles_scanned", &gsm.MVCCGCBundlesScanned},
+		{"mvcc_gc_versions_removed", &gsm.MVCCGCVersionsRemoved},
+		{"mvcc_gc_compactions_triggered", &gsm.MVCCGCCompactionsTriggered},
+		{"mvcc_gc_paused_for_load", &gsm.MVCCGCPausedForLoad},
+		{"mvcc_gc_duration_ms", &gsm.MVCCGCDurationMs},
+		{"mvcc_gc_versions_preserved", &gsm.MVCCGCVersionsPreserved},
+		{"mvcc_gc_startup_triggers", &gsm.MVCCGCStartupTriggers},
+		{"mvcc_gc_shutdown_triggers", &gsm.MVCCGCShutdownTriggers},
+
+		// DateTime Parsing Metrics
+		{"datetime_parse_attempts_total", &gsm.DateTimeParseAttemptsTotal},
+		{"datetime_parse_success_total", &gsm.DateTimeParseSuccessTotal},
+		{"datetime_parse_errors_total", &gsm.DateTimeParseErrorsTotal},
+	}
 }
 
 // GetMetrics returns current global metrics as a map (raw atomic values)

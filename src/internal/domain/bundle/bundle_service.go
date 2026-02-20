@@ -334,6 +334,9 @@ type BundleService struct {
 	// VISIBILITY MAP: Background refresher context
 	vmRefresherCtx    context.Context    // Context for background VM refresher goroutine
 	vmRefresherCancel context.CancelFunc // Cancel function to stop VM refresher
+
+	// Observability: metrics reporter callback for index operation tracking
+	metricsReporter func(metricName string, value uint64)
 }
 
 // IndexMaintenanceSchedulerInterface defines the interface for scheduling index rebuilds
@@ -555,6 +558,11 @@ func (s *BundleService) AddDatabaseToCatalog(db *models.Database) error {
 // SetStatsUpdater injects a column statistics updater for incremental stats maintenance.
 func (s *BundleService) SetStatsUpdater(updater StatsUpdater) {
 	s.statsUpdater = updater
+}
+
+// SetMetricsReporter sets the callback used to export index operation metrics to GlobalServerMetrics.
+func (s *BundleService) SetMetricsReporter(reporter func(string, uint64)) {
+	s.metricsReporter = reporter
 }
 
 // SetOnCacheFlush registers a callback to be invoked when FlushAllDocumentCaches runs.

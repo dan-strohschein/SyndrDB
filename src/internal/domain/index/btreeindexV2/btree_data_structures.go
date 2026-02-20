@@ -75,6 +75,9 @@ type BTreeIndex struct {
 	// sharedWAL *journal.WriteAheadLog // Shared bundle-level WAL (injected from BundleService)
 	// indexName string                 // Index name for WAL logging prefix
 	// syncMode string                  // "immediate", "batched", or "scheduled" from settings.BTreeSyncMode
+
+	// Observability: metrics reporter callback
+	metricsReporter func(metricName string, value uint64)
 }
 
 func (idx *BTreeIndex) GetRootPageNum() uint32 {

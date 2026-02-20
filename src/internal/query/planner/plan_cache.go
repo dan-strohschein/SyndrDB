@@ -73,7 +73,15 @@ type ShardedPlanCache struct {
 	// Per-bundle stale serve tracking
 	staleServesByBundle sync.Map // bundleName -> *atomic.Uint64
 
+	// Observability: metrics reporter callback for exporting cache stats to GlobalServerMetrics
+	metricsReporter func(metricName string, value uint64)
+
 	logger *zap.SugaredLogger
+}
+
+// SetMetricsReporter sets the callback used to export plan cache metrics to GlobalServerMetrics
+func (spc *ShardedPlanCache) SetMetricsReporter(reporter func(string, uint64)) {
+	spc.metricsReporter = reporter
 }
 
 // PlanCacheShard represents a single shard of the cache
@@ -90,6 +98,9 @@ type PlanCacheShard struct {
 
 	// Per-shard statistics
 	stats ShardStats
+
+	// Parent cache for global stats and metrics reporting
+	parent *ShardedPlanCache
 
 	// Graceful shutdown support
 	shutdown   atomic.Bool
@@ -176,6 +187,7 @@ func NewShardedPlanCache(settings *settings.Arguments, logger *zap.SugaredLogger
 			cache:              make(map[uint64]*list.Element, capacityPerShard),
 			lru:                list.New(),
 			collectionVersions: make(map[string]uint64),
+			parent:             cache,
 			logger:             logger,
 		}
 	}
@@ -224,9 +236,15 @@ func (spc *ShardedPlanCache) Get(
 	if plan != nil {
 		if staleServed {
 			spc.stats.staleServes.Add(1)
+			if spc.metricsReporter != nil {
+				spc.metricsReporter("QueryPlanCacheStaleServes", 1)
+			}
 		}
 		spc.stats.hits.Add(1)
 		shard.stats.hits.Add(1)
+		if spc.metricsReporter != nil {
+			spc.metricsReporter("QueryPlanCacheHits", 1)
+		}
 		spc.logger.Debugf("Plan cache HIT: shard=%d bundle=%s key=%016x execCount=%d",
 			key&0x7, query.FromBundle, key, plan.RootNode.GetEstimatedRows())
 		return plan, nil
@@ -235,6 +253,9 @@ func (spc *ShardedPlanCache) Get(
 	// Cache miss - build new plan
 	spc.stats.misses.Add(1)
 	shard.stats.misses.Add(1)
+	if spc.metricsReporter != nil {
+		spc.metricsReporter("QueryPlanCacheMisses", 1)
+	}
 	spc.logger.Debugf("Plan cache MISS: shard=%d bundle=%s key=%016x buildingPlan=true",
 		key&0x7, query.FromBundle, key)
 
@@ -373,6 +394,13 @@ func (shard *PlanCacheShard) insert(key uint64, bundleName string, plan *Executi
 			oldEntry := oldest.Value.(*CacheEntry)
 			delete(shard.cache, oldEntry.key)
 			shard.lru.Remove(oldest)
+
+			if shard.parent != nil {
+				shard.parent.stats.evictions.Add(1)
+				if shard.parent.metricsReporter != nil {
+					shard.parent.metricsReporter("QueryPlanCacheEvictions", 1)
+				}
+			}
 
 			shard.logger.Debugf("Evicted LRU plan: shard=%d bundle=%s age=%.1fmin memoryBytes=%d",
 				key&0x7, oldEntry.bundleName, time.Since(oldEntry.createdAt).Minutes(), oldEntry.estimatedMemoryBytes)
@@ -624,6 +652,9 @@ func (spc *ShardedPlanCache) InvalidateBundle(bundleName string) {
 
 	// Update global stats
 	spc.stats.invalidations.Add(1)
+	if spc.metricsReporter != nil {
+		spc.metricsReporter("QueryPlanCacheInvalidations", 1)
+	}
 
 	// Update per-bundle invalidation counter
 	counterInterface, _ := spc.bundleInvalidations.LoadOrStore(bundleName, &atomic.Uint64{})

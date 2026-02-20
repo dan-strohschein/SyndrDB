@@ -79,6 +79,10 @@ type ServiceManager struct {
 	// PHASE 3: MVCC - Conflict detection for write-write conflicts
 	ConflictTracker *ConflictTracker
 
+	// Observability: metrics reporting callback for index and plan cache metrics
+	// Accepts metric name and increment value; routes to GlobalServerMetrics atomic counters
+	MetricsReporter func(metricName string, value uint64)
+
 	logger *zap.SugaredLogger
 }
 
@@ -165,6 +169,107 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 		migrationServiceCore := migration.NewMigrationService(bundleServiceAdapter, migrationConfig, logger.Desugar())
 		migrationService := NewMigrationServiceAdapter(migrationServiceCore, logger)
 
+		// Observability: Wire metrics reporter into plan cache
+		// (metricsReporter defined below; plan cache pointer set after reporter creation)
+
+		// Observability: Create MetricsReporter callback that routes named metrics to GlobalServerMetrics
+		gsm := GetGlobalServerMetrics()
+		metricsReporter := func(metricName string, value uint64) {
+			switch metricName {
+			// Hash Index Metrics
+			case "HashIndexPutsTotal":
+				gsm.HashIndexPutsTotal.Add(value)
+			case "HashIndexGetsTotal":
+				gsm.HashIndexGetsTotal.Add(value)
+			case "HashIndexDeletesTotal":
+				gsm.HashIndexDeletesTotal.Add(value)
+			case "HashIndexCacheHits":
+				gsm.HashIndexCacheHits.Add(value)
+			case "HashIndexCacheMisses":
+				gsm.HashIndexCacheMisses.Add(value)
+			case "HashIndexDiskReads":
+				gsm.HashIndexDiskReads.Add(value)
+			case "HashIndexPutErrors":
+				gsm.HashIndexPutErrors.Add(value)
+			case "HashIndexGetErrors":
+				gsm.HashIndexGetErrors.Add(value)
+			case "HashIndexDeleteErrors":
+				gsm.HashIndexDeleteErrors.Add(value)
+			// Hash Index Latency Histograms
+			case "HashIndexPutLatencyLt1ms":
+				gsm.HashIndexPutLatencyLt1ms.Add(value)
+			case "HashIndexPutLatencyLt10ms":
+				gsm.HashIndexPutLatencyLt10ms.Add(value)
+			case "HashIndexPutLatencyLt100ms":
+				gsm.HashIndexPutLatencyLt100ms.Add(value)
+			case "HashIndexPutLatencyLt1s":
+				gsm.HashIndexPutLatencyLt1s.Add(value)
+			case "HashIndexPutLatencyGte1s":
+				gsm.HashIndexPutLatencyGte1s.Add(value)
+			case "HashIndexGetLatencyLt1ms":
+				gsm.HashIndexGetLatencyLt1ms.Add(value)
+			case "HashIndexGetLatencyLt10ms":
+				gsm.HashIndexGetLatencyLt10ms.Add(value)
+			case "HashIndexGetLatencyLt100ms":
+				gsm.HashIndexGetLatencyLt100ms.Add(value)
+			case "HashIndexGetLatencyLt1s":
+				gsm.HashIndexGetLatencyLt1s.Add(value)
+			case "HashIndexGetLatencyGte1s":
+				gsm.HashIndexGetLatencyGte1s.Add(value)
+			// B-Tree Index Metrics
+			case "BTreeIndexInsertsTotal":
+				gsm.BTreeIndexInsertsTotal.Add(value)
+			case "BTreeIndexSearchesTotal":
+				gsm.BTreeIndexSearchesTotal.Add(value)
+			case "BTreeIndexDeletesTotal":
+				gsm.BTreeIndexDeletesTotal.Add(value)
+			case "BTreeIndexInsertErrors":
+				gsm.BTreeIndexInsertErrors.Add(value)
+			case "BTreeIndexSearchErrors":
+				gsm.BTreeIndexSearchErrors.Add(value)
+			case "BTreeIndexDeleteErrors":
+				gsm.BTreeIndexDeleteErrors.Add(value)
+			// B-Tree Index Latency Histograms
+			case "BTreeInsertLatencyLt1ms":
+				gsm.BTreeInsertLatencyLt1ms.Add(value)
+			case "BTreeInsertLatencyLt10ms":
+				gsm.BTreeInsertLatencyLt10ms.Add(value)
+			case "BTreeInsertLatencyLt100ms":
+				gsm.BTreeInsertLatencyLt100ms.Add(value)
+			case "BTreeInsertLatencyLt1s":
+				gsm.BTreeInsertLatencyLt1s.Add(value)
+			case "BTreeInsertLatencyGte1s":
+				gsm.BTreeInsertLatencyGte1s.Add(value)
+			case "BTreeSearchLatencyLt1ms":
+				gsm.BTreeSearchLatencyLt1ms.Add(value)
+			case "BTreeSearchLatencyLt10ms":
+				gsm.BTreeSearchLatencyLt10ms.Add(value)
+			case "BTreeSearchLatencyLt100ms":
+				gsm.BTreeSearchLatencyLt100ms.Add(value)
+			case "BTreeSearchLatencyLt1s":
+				gsm.BTreeSearchLatencyLt1s.Add(value)
+			case "BTreeSearchLatencyGte1s":
+				gsm.BTreeSearchLatencyGte1s.Add(value)
+			// Plan Cache Metrics
+			case "QueryPlanCacheHits":
+				gsm.QueryPlanCacheHits.Add(value)
+			case "QueryPlanCacheMisses":
+				gsm.QueryPlanCacheMisses.Add(value)
+			case "QueryPlanCacheEvictions":
+				gsm.QueryPlanCacheEvictions.Add(value)
+			case "QueryPlanCacheInvalidations":
+				gsm.QueryPlanCacheInvalidations.Add(value)
+			case "QueryPlanCacheStaleServes":
+				gsm.QueryPlanCacheStaleServes.Add(value)
+			}
+		}
+
+		// Wire metrics reporter into plan cache for hit/miss/eviction/invalidation tracking
+		unifiedPlanner.SetMetricsReporter(metricsReporter)
+
+		// Wire metrics reporter into bundle service for index operation tracking
+		bundleService.SetMetricsReporter(metricsReporter)
+
 		sm := &ServiceManager{
 			DatabaseService:        dbService,
 			BundleService:          bundleService,
@@ -178,6 +283,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			MigrationService:       migrationService,
 			UnifiedPlanner:         unifiedPlanner,
 			ConflictTracker:        conflictTracker,
+			MetricsReporter:        metricsReporter,
 			logger:                 logger,
 		}
 		instancePtr.Store(sm)

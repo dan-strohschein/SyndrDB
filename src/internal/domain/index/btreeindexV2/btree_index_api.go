@@ -103,16 +103,17 @@ func CreateBTreeIndex(config *IndexConfig, logger *zap.SugaredLogger) (*BTreeInd
 
 	// Create BTree index instance
 	index := &BTreeIndex{
-		FilePath:    indexFilePath,
-		Metadata:    metadata,
-		FileManager: fileManager,
-		PageManager: pageManager,
-		rootPageNum: metadata.RootPageNum, //1, // Page 0 is metadata, root starts at page 1
-		mutex:       sync.RWMutex{},
-		isOpen:      true,
-		bundleName:  config.BundleName,
-		fieldName:   config.FieldName,
-		logger:      logger,
+		FilePath:        indexFilePath,
+		Metadata:        metadata,
+		FileManager:     fileManager,
+		PageManager:     pageManager,
+		rootPageNum:     metadata.RootPageNum, //1, // Page 0 is metadata, root starts at page 1
+		mutex:           sync.RWMutex{},
+		isOpen:          true,
+		bundleName:      config.BundleName,
+		fieldName:       config.FieldName,
+		logger:          logger,
+		metricsReporter: config.MetricsReporter,
 	}
 
 	// Initialize WAL manager if provided in config
@@ -800,6 +801,7 @@ func (idx *BTreeIndex) replayWALEntries() error {
 // Returns:
 //   - error: Any error that occurred during insertion
 func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
+	insertStart := time.Now()
 	if !idx.isOpen {
 		return fmt.Errorf("index is not open")
 	}
@@ -937,6 +939,11 @@ func (idx *BTreeIndex) Insert(key []byte, documentID string) error {
 	idx.logger.Debugf("Successfully inserted key '%s' with document ID '%s', nodes created: %d",
 		string(key), documentID, nodesCreated)
 
+	if idx.metricsReporter != nil {
+		idx.metricsReporter("BTreeIndexInsertsTotal", 1)
+		idx.reportBTreeLatencyBucket("BTreeInsertLatency", time.Since(insertStart).Seconds()*1000)
+	}
+
 	return nil
 }
 
@@ -1005,7 +1012,11 @@ func (idx *BTreeIndex) Delete(key []byte, documentID string) error {
 	}
 	idx.mutex.Lock()
 	defer idx.mutex.Unlock()
-	return idx.deleteOneLocked(key, documentID)
+	err := idx.deleteOneLocked(key, documentID)
+	if err == nil && idx.metricsReporter != nil {
+		idx.metricsReporter("BTreeIndexDeletesTotal", 1)
+	}
+	return err
 }
 
 // deleteOneLocked performs one (key, documentID) deletion. Caller must hold idx.mutex.
@@ -1149,6 +1160,7 @@ func (idx *BTreeIndex) checkMaintenanceNeeded() {
 //   - []string: List of document IDs associated with the key
 //   - error: Any error that occurred during search
 func (idx *BTreeIndex) Search(key []byte) ([]string, error) {
+	searchStart := time.Now()
 	if !idx.isOpen {
 		return nil, fmt.Errorf("index is not open")
 	}
@@ -1171,6 +1183,11 @@ func (idx *BTreeIndex) Search(key []byte) ([]string, error) {
 	// Update metadata statistics
 	idx.Metadata.UpdateStatistics("search")
 	idx.Metadata.UpdateSearchMetrics(len(results), totalNodesVisited)
+
+	if idx.metricsReporter != nil {
+		idx.metricsReporter("BTreeIndexSearchesTotal", 1)
+		idx.reportBTreeLatencyBucket("BTreeSearchLatency", time.Since(searchStart).Seconds()*1000)
+	}
 
 	idx.logger.Debugf("Search for key '%s' returned %d results", string(key), len(results))
 
@@ -1516,6 +1533,25 @@ func (idx *BTreeIndex) GetCacheStats() *CacheStats {
 		return nil
 	}
 	return idx.PageManager.GetPageManagerCacheStats()
+}
+
+// reportBTreeLatencyBucket reports a latency measurement to the appropriate histogram bucket.
+// prefix should be "BTreeInsertLatency" or "BTreeSearchLatency".
+func (idx *BTreeIndex) reportBTreeLatencyBucket(prefix string, latencyMs float64) {
+	var bucket string
+	switch {
+	case latencyMs < 1:
+		bucket = "Lt1ms"
+	case latencyMs < 10:
+		bucket = "Lt10ms"
+	case latencyMs < 100:
+		bucket = "Lt100ms"
+	case latencyMs < 1000:
+		bucket = "Lt1s"
+	default:
+		bucket = "Gte1s"
+	}
+	idx.metricsReporter(prefix+bucket, 1)
 }
 
 // DeletionStats represents tombstone and deletion-related metrics

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	bndle "syndrdb/src/internal/domain/bundle"
 	db "syndrdb/src/internal/domain/database"
@@ -17,6 +18,11 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// traceIDKey is the context key for request trace IDs.
+type traceIDKeyType struct{}
+
+var traceIDKey = traceIDKeyType{}
 
 // largeScanSem limits concurrent large-result streaming queries.
 // Cap of 15 means max ~450MB concurrent JSON (15 x 30MB) instead of 900MB (30 x 30MB).
@@ -86,6 +92,11 @@ func CommandDirectorWithParams(ctx context.Context, database *models.Database, s
 
 // executeCommand contains the main command execution logic
 func executeCommand(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+	// Observability: Generate trace ID for request correlation (xxhash-style hex, 16 chars)
+	traceID := strconv.FormatInt(startTime.UnixNano(), 16)
+	ctx = context.WithValue(ctx, traceIDKey, traceID)
+	logger = logger.With("traceID", traceID)
+
 	// IDLE DETECTION FIX: Record activity for all commands (read and write)
 	// This ensures the idle cache flusher correctly detects server activity
 	// during read-only workloads, preventing false "server idle" triggers.
@@ -222,7 +233,30 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		//               SELECT COUNT(*) FROM bundle
 		//               SELECT * FROM bundle JOIN...
 		//               SELECT field1, COUNT(*) FROM bundle GROUP BY field1
-		return SelectDocuments(ctx, command, serviceManager, database, logger, startTime, session)
+		result, err := SelectDocuments(ctx, command, serviceManager, database, logger, startTime, session)
+
+		// Observability: Slow query log
+		s := settings.GetSettings()
+		if s.SlowQueryLogEnabled {
+			elapsed := time.Since(startTime).Milliseconds()
+			if elapsed > int64(s.SlowQueryThresholdMs) {
+				truncated := command
+				if len(truncated) > 200 {
+					truncated = truncated[:200] + "..."
+				}
+				resultCount := 0
+				if cr, ok := result.(*CommandResponse); ok && cr != nil {
+					resultCount = cr.ResultCount
+				}
+				logger.Warnw("slow query",
+					"query", truncated,
+					"duration_ms", elapsed,
+					"rows_returned", resultCount,
+				)
+			}
+		}
+
+		return result, err
 	}
 
 	if strings.HasPrefix(commandLower, "show") {
@@ -242,8 +276,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		case "views":
 			// SHOW VIEWS [IN DATABASE "database_name"]
 			return HandleShowViews(command, logger, serviceManager, database, startTime)
-		case "sessions":
-			return ShowSessions(command, logger, serviceManager, startTime)
+		case "sessions", "processlist":
+			return ShowSessions(command, logger, serviceManager, startTime, session)
 		case "session":
 			return ShowSession(command, logger, serviceManager, startTime)
 		case "users":
@@ -257,6 +291,20 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			}
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown SHOW RATE command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
+		case "server":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "stats" {
+				return ShowServerStats(command, logger, serviceManager, startTime)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW SERVER command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
+		case "cache":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "stats" {
+				return ShowCacheStats(command, logger, serviceManager, startTime)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW CACHE command: %s", command),
 				errors.LayerCommand).WithContext("command", command)
 		case "versions":
 			// PHASE 6: MVCC - SHOW VERSIONS [FOR "documentID"] [IN BUNDLE "bundleName"]

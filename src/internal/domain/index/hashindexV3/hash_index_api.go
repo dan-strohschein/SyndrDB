@@ -103,6 +103,9 @@ type HashIndexV3 struct {
 
 	// Logging
 	logger *zap.SugaredLogger
+
+	// Observability: metrics reporter callback
+	metricsReporter func(metricName string, value uint64)
 }
 
 // IndexConfig holds configuration for the hash index
@@ -150,6 +153,9 @@ type IndexConfig struct {
 
 	// Logging
 	Logger *zap.SugaredLogger
+
+	// Observability: metrics reporter callback for exporting index stats to GlobalServerMetrics
+	MetricsReporter func(metricName string, value uint64)
 }
 
 // IndexStats tracks index performance metrics
@@ -271,12 +277,13 @@ func NewHashIndexV3(config IndexConfig) (*HashIndexV3, error) {
 
 	// Create index
 	idx := &HashIndexV3{
-		config:         config,
-		MemTable:       memTable,
-		storage:        storage,
-		GlobalSequence: 0,
-		isOpen:         true,
-		closed:         false,
+		config:          config,
+		MemTable:        memTable,
+		storage:         storage,
+		GlobalSequence:  0,
+		isOpen:          true,
+		closed:          false,
+		metricsReporter: config.MetricsReporter,
 		stats: IndexStats{
 			CreatedAt:    time.Now(),
 			LastModified: time.Now(),
@@ -1274,14 +1281,18 @@ func (idx *HashIndexV3) updatePutStats() {
 
 	idx.stats.TotalPuts++
 	idx.stats.LastModified = time.Now()
+
+	if idx.metricsReporter != nil {
+		idx.metricsReporter("HashIndexPutsTotal", 1)
+	}
 }
 
 // updatePutStatsWithLatency updates statistics for Put operations with latency tracking
 func (idx *HashIndexV3) updatePutStatsWithLatency(latencyMs float64) {
 	idx.updatePutStats()
-	// Note: Global metrics tracking should be added by importing syndrdb/src/internal/server
-	// For now, we'll track latency in local stats only to avoid circular dependencies
-	// TODO: Add global metrics when server package dependency is resolved
+	if idx.metricsReporter != nil {
+		idx.reportLatencyBucket("HashIndexPutLatency", latencyMs)
+	}
 }
 
 // updateGetStats updates statistics for Get operations
@@ -1290,14 +1301,18 @@ func (idx *HashIndexV3) updateGetStats() {
 	defer idx.statsMutex.Unlock()
 
 	idx.stats.TotalGets++
+
+	if idx.metricsReporter != nil {
+		idx.metricsReporter("HashIndexGetsTotal", 1)
+	}
 }
 
 // updateGetStatsWithLatency updates statistics for Get operations with latency tracking
 func (idx *HashIndexV3) updateGetStatsWithLatency(latencyMs float64) {
 	idx.updateGetStats()
-	// Note: Global metrics tracking should be added by importing syndrdb/src/internal/server
-	// For now, we'll track latency in local stats only to avoid circular dependencies
-	// TODO: Add global metrics when server package dependency is resolved
+	if idx.metricsReporter != nil {
+		idx.reportLatencyBucket("HashIndexGetLatency", latencyMs)
+	}
 }
 
 // updateDeleteStats updates statistics for Delete operations
@@ -1308,14 +1323,16 @@ func (idx *HashIndexV3) updateDeleteStats() {
 	idx.stats.TotalDeletes++
 	idx.stats.TombstoneCount++
 	idx.stats.LastModified = time.Now()
+
+	if idx.metricsReporter != nil {
+		idx.metricsReporter("HashIndexDeletesTotal", 1)
+	}
 }
 
 // updateDeleteStatsWithLatency updates statistics for Delete operations with latency tracking
 func (idx *HashIndexV3) updateDeleteStatsWithLatency(latencyMs float64) {
 	idx.updateDeleteStats()
-	// Note: Global metrics tracking should be added by importing syndrdb/src/internal/server
-	// For now, we'll track latency in local stats only to avoid circular dependencies
-	// TODO: Add global metrics when server package dependency is resolved
+	// Latency histograms not defined for Delete in GlobalServerMetrics
 }
 
 // updateCacheHit updates cache hit statistics
@@ -1324,6 +1341,10 @@ func (idx *HashIndexV3) updateCacheHit() {
 	defer idx.statsMutex.Unlock()
 
 	idx.stats.CacheHits++
+
+	if idx.metricsReporter != nil {
+		idx.metricsReporter("HashIndexCacheHits", 1)
+	}
 }
 
 // updateCacheMiss updates cache miss statistics
@@ -1332,7 +1353,30 @@ func (idx *HashIndexV3) updateCacheMiss() {
 	defer idx.statsMutex.Unlock()
 
 	idx.stats.CacheMisses++
+
+	if idx.metricsReporter != nil {
+		idx.metricsReporter("HashIndexCacheMisses", 1)
+	}
 	idx.stats.DiskReads++
+}
+
+// reportLatencyBucket reports a latency measurement to the appropriate histogram bucket.
+// prefix should be "HashIndexPutLatency" or "HashIndexGetLatency".
+func (idx *HashIndexV3) reportLatencyBucket(prefix string, latencyMs float64) {
+	var bucket string
+	switch {
+	case latencyMs < 1:
+		bucket = "Lt1ms"
+	case latencyMs < 10:
+		bucket = "Lt10ms"
+	case latencyMs < 100:
+		bucket = "Lt100ms"
+	case latencyMs < 1000:
+		bucket = "Lt1s"
+	default:
+		bucket = "Gte1s"
+	}
+	idx.metricsReporter(prefix+bucket, 1)
 }
 
 // GetIndexFilePath returns the path for index files

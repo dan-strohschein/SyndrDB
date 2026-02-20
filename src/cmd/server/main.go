@@ -407,6 +407,9 @@ func main() {
 
 	// Start pprof debug server on port 6060 for profiling and debugging
 	// Access goroutine dump at: http://localhost:6060/debug/pprof/goroutine?debug=2
+	// TODO: Phase 3 Observability - Register HTTP /metrics (Prometheus text format) and /health (JSON)
+	// endpoints on this DefaultServeMux. Gate behind settings.MetricsHTTPEnabled.
+	// See monitoring.RegisterMetricsHandlers() in the observability plan.
 	go func() {
 		pprofAddr := "localhost:6060"
 		log.Printf("🔍 pprof debug server starting on http://%s/debug/pprof/", pprofAddr)

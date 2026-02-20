@@ -82,6 +82,9 @@ type IndexConfig struct {
 
 	// Durability options (added for production readiness)
 	WALManager *journal.WALManager // Write-ahead logging manager for durability (optional)
+
+	// Observability: metrics reporter callback for exporting index stats to GlobalServerMetrics
+	MetricsReporter func(metricName string, value uint64)
 }
 
 // DefaultIndexConfig creates a configuration with optimal default values

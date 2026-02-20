@@ -418,6 +418,7 @@ func CreateHashIndex(s *BundleService, bundle *models.Bundle, indexCommand *mode
 		IsForeignKey:         isForeignKey,
 		ReferencedBundle:     referencedBundle,
 		ReferencedField:      referencedField,
+		MetricsReporter:      s.metricsReporter,
 	}
 
 	// Create the hash index using hashindexV3 LSM implementation
@@ -680,17 +681,18 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 
 	// Create configuration for the new BTree index
 	config := btreeindexV2.IndexConfig{
-		DatabaseName: bundle.Database.Name,
-		BundleName:   bundle.Name,
-		FieldName:    fieldDef.Name,
-		IsUnique:     fieldDef.IsUnique,
+		DatabaseName:    bundle.Database.Name,
+		BundleName:      bundle.Name,
+		FieldName:       fieldDef.Name,
+		IsUnique:        fieldDef.IsUnique,
 		// IndexDir removed - use proper database/bundle/indexes/btree path structure
-		DebugMode:    args.Debug,
-		PageSize:     8192,       // 8KB pages (PostgreSQL-style)
-		CacheSize:    100,        // Cache 100 pages for performance
-		FillFactor:   0.7,        // 70% fill factor for optimal balance between space and performance
-		MaxKeyLength: 2048,       // Set maximum key length to 2KB
-		SplitRatio:   splitRatio, // Use the calculated split ratio
+		DebugMode:       args.Debug,
+		PageSize:        8192,       // 8KB pages (PostgreSQL-style)
+		CacheSize:       100,        // Cache 100 pages for performance
+		FillFactor:      0.7,        // 70% fill factor for optimal balance between space and performance
+		MaxKeyLength:    2048,       // Set maximum key length to 2KB
+		SplitRatio:      splitRatio, // Use the calculated split ratio
+		MetricsReporter: s.metricsReporter,
 	}
 
 	// Configure WAL manager for durability using dependency injection

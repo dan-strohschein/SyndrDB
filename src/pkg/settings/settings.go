@@ -361,6 +361,10 @@ type Arguments struct {
 	ErrorExternalLogFile string `yaml:"error_external_log_file"` // External/access error log file path (default: "errors_external.log")
 	ErrorShowInConsole   bool   `yaml:"error_show_in_console"`   // Show errors in console (debug mode only, default: true when debug=true)
 	ErrorIncludeStack    bool   `yaml:"error_include_stack"`     // Include stack traces in internal logs (default: true)
+
+	// Observability: Slow Query Log Configuration
+	SlowQueryLogEnabled  bool `yaml:"slow_query_log_enabled"`  // Enable slow query warning log (default: true)
+	SlowQueryThresholdMs int  `yaml:"slow_query_threshold_ms"` // Threshold in ms for slow query detection (default: 1000)
 }
 
 var (
@@ -630,6 +634,10 @@ func GetSettings() *Arguments {
 			ErrorExternalLogFile: "errors_external.log", // External/access log
 			ErrorShowInConsole:   true,                  // Show in console (will be set based on debug mode)
 			ErrorIncludeStack:    true,                  // Include stack traces in logs
+
+			// Observability: Slow Query Log Defaults
+			SlowQueryLogEnabled:  true, // Enable slow query detection by default
+			SlowQueryThresholdMs: 1000, // 1 second threshold
 		}
 	})
 	return instance
