@@ -136,6 +136,11 @@ type Connection struct {
 	Session          *Session // Associated session
 	LastActive       time.Time
 	Logger           *zap.SugaredLogger
+
+	// Monitor (live session streaming) state
+	monitorCancel context.CancelFunc // non-nil when a MONITOR goroutine is active
+	monitorDone   chan struct{}       // closed when the monitor goroutine exits
+	writeMu       sync.Mutex         // protects Writer during concurrent monitor/command writes
 }
 
 // ConnectionString represents parsed MongoDB connection string
@@ -1602,16 +1607,65 @@ func (s *Server) handleConnection(conn net.Conn) {
 				// Process command for authenticated clients
 				result, err := s.processCommand(connection, cmd)
 					if err != nil {
+						connection.writeMu.Lock()
 						s.sendError(writer, err)
+						connection.writeMu.Unlock()
 					} else {
-						sendResult(writer, result, connLogger, connection.CompressResponse, connection.StreamingMode)
+						// Type-switch to handle MONITOR commands specially
+						switch mResp := result.(type) {
+						case *MonitorCommandResponse:
+							if mResp.Stop {
+								// STOP MONITOR — cancel any active monitor
+								if connection.monitorCancel != nil {
+									connection.monitorCancel()
+									<-connection.monitorDone
+									connection.monitorCancel = nil
+									connection.monitorDone = nil
+								}
+								connection.writeMu.Lock()
+								sendSuccess(writer, "Monitor stopped")
+								connection.writeMu.Unlock()
+							} else {
+								// Start a new monitor — cancel any existing one first
+								if connection.monitorCancel != nil {
+									connection.monitorCancel()
+									<-connection.monitorDone
+								}
+								monCtx, monCancel := context.WithCancel(context.Background())
+								monDone := make(chan struct{})
+								connection.monitorCancel = monCancel
+								connection.monitorDone = monDone
+
+								go RunMonitor(
+									monCtx,
+									writer,
+									&connection.writeMu,
+									mResp.Config,
+									s.SessionManager,
+									connection.Session,
+									mResp.IsAdmin,
+									connLogger,
+									monDone,
+								)
+
+								connection.writeMu.Lock()
+								sendSuccess(writer, fmt.Sprintf("Monitor started (interval: %dms)", mResp.Config.IntervalMS))
+								connection.writeMu.Unlock()
+							}
+						default:
+							connection.writeMu.Lock()
+							sendResult(writer, result, connLogger, connection.CompressResponse, connection.StreamingMode)
+							connection.writeMu.Unlock()
+						}
 					}
 
 					// Pipeline mode: send READY sentinel after each response so the client
 					// can unambiguously determine response boundaries in a multi-result stream.
 					if connection.PipelineMode {
+						connection.writeMu.Lock()
 						writer.WriteString("READY\n")
 						writer.Flush()
+						connection.writeMu.Unlock()
 					}
 				}
 
@@ -1631,6 +1685,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 			goto cleanup
 
 		case <-time.After(300 * time.Second):
+			// Active monitor counts as activity — don't idle-disconnect
+			if connection.monitorCancel != nil {
+				connection.LastActive = time.Now()
+			}
 			// Check for idle timeout (5-minute checks, but enforce configured timeout)
 			idleTime := time.Since(connection.LastActive)
 			if idleTime >= s.ConnectionIdleTimeout {
@@ -1651,6 +1709,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}
 
 cleanup:
+	// Cancel any active monitor goroutine before closing the connection
+	if connection.monitorCancel != nil {
+		connection.monitorCancel()
+		<-connection.monitorDone
+		connection.monitorCancel = nil
+		connection.monitorDone = nil
+	}
+
 	// Cleanup
 	close(doneCh)
 

@@ -277,6 +277,11 @@ type Arguments struct {
 	MaxOpenCursorsPerSession int `yaml:"max_open_cursors_per_session"` // Max server-side cursors per session (default: 64)
 	CursorIdleTimeoutSeconds int `yaml:"cursor_idle_timeout_seconds"`  // Idle timeout for cursors in seconds (default: 300)
 
+	// Monitor (Live Session Streaming) Configuration
+	MonitorDefaultIntervalMS int `yaml:"monitor_default_interval_ms"` // Default snapshot interval in milliseconds (default: 1000)
+	MonitorMinIntervalMS     int `yaml:"monitor_min_interval_ms"`     // Minimum allowed interval in milliseconds (default: 100)
+	MonitorMaxIntervalMS     int `yaml:"monitor_max_interval_ms"`     // Maximum allowed interval in milliseconds (default: 60000)
+
 	// Page-Level Storage Compression Configuration
 	StorageCompression    string `yaml:"storage_compression"`      // "none" or "zstd" (default: "none")
 	CompressionMinDocSize int    `yaml:"compression_min_doc_size"` // Min bytes to compress (default: 256)
@@ -561,6 +566,11 @@ func GetSettings() *Arguments {
 			StreamingChunkSize:       256, // 256 documents per streaming chunk
 			MaxOpenCursorsPerSession: 64,  // Max 64 open cursors per session
 			CursorIdleTimeoutSeconds: 300, // 5-minute idle timeout for cursors
+
+			// Monitor (Live Session Streaming) Defaults
+			MonitorDefaultIntervalMS: 1000,  // 1-second default interval
+			MonitorMinIntervalMS:     100,   // 100ms minimum interval
+			MonitorMaxIntervalMS:     60000, // 60-second maximum interval
 
 			// Page-Level Storage Compression Defaults
 			StorageCompression:    "none", // Disabled by default for backward compatibility

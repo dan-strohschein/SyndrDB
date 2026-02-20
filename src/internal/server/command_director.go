@@ -168,6 +168,29 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		}
 	}
 
+	// MONITOR OPERATIONS: Check for MONITOR/STOP MONITOR commands
+	if IsStopMonitorCommand(command) {
+		return &MonitorCommandResponse{Stop: true}, nil
+	}
+	if IsMonitorCommand(command) {
+		config, err := ParseMonitorCommand(command)
+		if err != nil {
+			return nil, err
+		}
+		// Determine admin status
+		monitorIsAdmin := false
+		if session != nil && authEnabled && serviceManager.PermissionService != nil {
+			err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled)
+			monitorIsAdmin = (err == nil)
+		} else if !authEnabled {
+			monitorIsAdmin = true
+		}
+		return &MonitorCommandResponse{
+			Config:  config,
+			IsAdmin: monitorIsAdmin,
+		}, nil
+	}
+
 	// PREPARED STATEMENTS: Check for PREPARE/EXECUTE/DEALLOCATE commands first
 	if IsPreparedStatementCommand(firstWords) {
 		return ParseAndExecutePreparedStatementCommand(ctx, command, session, database, serviceManager, logger)
@@ -1767,7 +1790,7 @@ func classifyCommandPermission(firstWords []string) string {
 
 	switch first {
 	// DML Read
-	case "select", "show", "explain":
+	case "select", "show", "explain", "monitor", "stop":
 		return "Read"
 
 	// DML Write
