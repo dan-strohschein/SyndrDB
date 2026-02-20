@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -245,6 +246,138 @@ func TestGatherSessionSnapshot(t *testing.T) {
 		snapshot := gatherSessionSnapshot(sm, adminSession, true, "nonexistent")
 		if len(snapshot) != 0 {
 			t.Errorf("expected 0 results for nonexistent session, got %d", len(snapshot))
+		}
+	})
+
+	t.Run("last_completed_query included in multi-session snapshot", func(t *testing.T) {
+		endTime := time.Now()
+		userSession1.LastSuccessfulQuery = &QueryInfo{
+			Query:        "SELECT * FROM orders",
+			Status:       "COMPLETED",
+			StartTime:    endTime.Add(-50 * time.Millisecond),
+			EndTime:      &endTime,
+			AffectedRows: 42,
+		}
+		defer func() { userSession1.LastSuccessfulQuery = nil }()
+
+		snapshot := gatherSessionSnapshot(sm, adminSession, true, "")
+		var found bool
+		for _, s := range snapshot {
+			if s["session_id"] == "user-1" {
+				lcq, ok := s["last_completed_query"].(map[string]interface{})
+				if !ok {
+					t.Fatal("last_completed_query should be a map")
+				}
+				if lcq["query"] != "SELECT * FROM orders" {
+					t.Errorf("query = %v, want 'SELECT * FROM orders'", lcq["query"])
+				}
+				if lcq["status"] != "COMPLETED" {
+					t.Errorf("status = %v, want 'COMPLETED'", lcq["status"])
+				}
+				if lcq["affected_rows"] != 42 {
+					t.Errorf("affected_rows = %v, want 42", lcq["affected_rows"])
+				}
+				if _, hasDuration := lcq["duration_ms"]; !hasDuration {
+					t.Error("expected duration_ms in last_completed_query")
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Error("user-1 not found in snapshot")
+		}
+	})
+
+	t.Run("query_history and last_completed_query in single-session detail", func(t *testing.T) {
+		now := time.Now()
+		endTime1 := now.Add(-200 * time.Millisecond)
+		endTime2 := now.Add(-100 * time.Millisecond)
+
+		userSession1.LastSuccessfulQuery = &QueryInfo{
+			Query:        "SELECT COUNT(*) FROM users",
+			Status:       "COMPLETED",
+			StartTime:    endTime2.Add(-10 * time.Millisecond),
+			EndTime:      &endTime2,
+			AffectedRows: 1,
+		}
+		userSession1.QueryHistory = []*QueryInfo{
+			{
+				Query:        "SELECT * FROM orders",
+				Status:       "COMPLETED",
+				StartTime:    endTime1.Add(-30 * time.Millisecond),
+				EndTime:      &endTime1,
+				AffectedRows: 42,
+			},
+			{
+				Query:        "SELECT COUNT(*) FROM users",
+				Status:       "COMPLETED",
+				StartTime:    endTime2.Add(-10 * time.Millisecond),
+				EndTime:      &endTime2,
+				AffectedRows: 1,
+			},
+		}
+		defer func() {
+			userSession1.LastSuccessfulQuery = nil
+			userSession1.QueryHistory = nil
+		}()
+
+		snapshot := gatherSessionSnapshot(sm, adminSession, true, "user-1")
+		if len(snapshot) != 1 {
+			t.Fatalf("expected 1 session detail, got %d", len(snapshot))
+		}
+		detail := snapshot[0]
+
+		// Check last_completed_query
+		lcq, ok := detail["last_completed_query"].(map[string]interface{})
+		if !ok {
+			t.Fatal("last_completed_query should be a map in detail view")
+		}
+		if lcq["query"] != "SELECT COUNT(*) FROM users" {
+			t.Errorf("last_completed_query.query = %v", lcq["query"])
+		}
+
+		// Check query_history
+		history, ok := detail["query_history"].([]map[string]interface{})
+		if !ok {
+			t.Fatal("query_history should be a []map[string]interface{}")
+		}
+		if len(history) != 2 {
+			t.Fatalf("expected 2 history entries, got %d", len(history))
+		}
+		if history[0]["query"] != "SELECT * FROM orders" {
+			t.Errorf("history[0].query = %v, want 'SELECT * FROM orders'", history[0]["query"])
+		}
+		if history[1]["query"] != "SELECT COUNT(*) FROM users" {
+			t.Errorf("history[1].query = %v, want 'SELECT COUNT(*) FROM users'", history[1]["query"])
+		}
+	})
+
+	t.Run("query_history capped at 10 most recent", func(t *testing.T) {
+		now := time.Now()
+		userSession1.QueryHistory = make([]*QueryInfo, 25)
+		for i := 0; i < 25; i++ {
+			end := now.Add(time.Duration(i) * time.Millisecond)
+			userSession1.QueryHistory[i] = &QueryInfo{
+				Query:     fmt.Sprintf("SELECT %d", i),
+				Status:    "COMPLETED",
+				StartTime: end.Add(-time.Millisecond),
+				EndTime:   &end,
+			}
+		}
+		defer func() { userSession1.QueryHistory = nil }()
+
+		snapshot := gatherSessionSnapshot(sm, adminSession, true, "user-1")
+		detail := snapshot[0]
+		history := detail["query_history"].([]map[string]interface{})
+		if len(history) != 10 {
+			t.Fatalf("expected 10 history entries (capped), got %d", len(history))
+		}
+		// Should be the last 10 (indices 15-24)
+		if history[0]["query"] != "SELECT 15" {
+			t.Errorf("first capped entry = %v, want 'SELECT 15'", history[0]["query"])
+		}
+		if history[9]["query"] != "SELECT 24" {
+			t.Errorf("last capped entry = %v, want 'SELECT 24'", history[9]["query"])
 		}
 	})
 }

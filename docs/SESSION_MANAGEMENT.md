@@ -128,6 +128,7 @@ Each `SNAPSHOT` is a **full replacement** (not a delta). The JSON payload is an 
 | `current_query` | string | Currently executing query (if any) |
 | `query_duration_ms` | int | Elapsed time of current query in ms |
 | `transaction_id` | string | Active transaction ID (if any) |
+| `last_completed_query` | object | Most recently completed query (see below) |
 
 ### MONITOR SESSION Additional Fields
 
@@ -140,6 +141,22 @@ Each `SNAPSHOT` is a **full replacement** (not a delta). The JSON payload is an 
 | `current_query_status` | string | Status of current query |
 | `transaction_status` | string | Transaction state (if in transaction) |
 | `last_error` | string | Most recent error message |
+| `last_completed_query` | object | Most recently completed query (see below) |
+| `query_history` | array | Last 10 completed queries (most recent last) |
+
+### Query Info Object
+
+Both `last_completed_query` and each entry in `query_history` share the same shape:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `query` | string | SQL text |
+| `status` | string | `"COMPLETED"` or `"FAILED"` |
+| `start_time` | string | Query start time (RFC3339) |
+| `end_time` | string | Query end time (RFC3339) |
+| `duration_ms` | int | Execution time in milliseconds |
+| `affected_rows` | int | Rows affected (omitted if 0) |
+| `error` | string | Error message (only for failed queries) |
 
 ## Security & Visibility
 

@@ -161,6 +161,10 @@ func gatherSessionSnapshot(sm *SessionManager, callerSession *Session, isAdmin b
 			info["query_duration_ms"] = time.Since(s.CurrentQuery.StartTime).Milliseconds()
 		}
 
+		if s.LastSuccessfulQuery != nil {
+			info["last_completed_query"] = queryInfoToMap(s.LastSuccessfulQuery)
+		}
+
 		if s.TransactionActive {
 			info["transaction_id"] = s.ActiveTransactionID
 		}
@@ -192,6 +196,23 @@ func buildSessionDetailInfo(s *Session) map[string]interface{} {
 		info["current_query"] = s.CurrentQuery.Query
 		info["current_query_status"] = s.CurrentQuery.Status
 		info["query_duration_ms"] = time.Since(s.CurrentQuery.StartTime).Milliseconds()
+	}
+
+	if s.LastSuccessfulQuery != nil {
+		info["last_completed_query"] = queryInfoToMap(s.LastSuccessfulQuery)
+	}
+
+	// Include recent query history (last 10 entries to keep snapshot size reasonable)
+	if len(s.QueryHistory) > 0 {
+		historyStart := 0
+		if len(s.QueryHistory) > 10 {
+			historyStart = len(s.QueryHistory) - 10
+		}
+		history := make([]map[string]interface{}, 0, len(s.QueryHistory)-historyStart)
+		for _, q := range s.QueryHistory[historyStart:] {
+			history = append(history, queryInfoToMap(q))
+		}
+		info["query_history"] = history
 	}
 
 	if s.TransactionActive {
@@ -280,16 +301,38 @@ func RunMonitor(
 	}
 }
 
+// queryInfoToMap converts a QueryInfo into a JSON-friendly map.
+func queryInfoToMap(q *QueryInfo) map[string]interface{} {
+	m := map[string]interface{}{
+		"query":      q.Query,
+		"status":     q.Status,
+		"start_time": q.StartTime.Format(time.RFC3339),
+	}
+	if q.EndTime != nil {
+		m["end_time"] = q.EndTime.Format(time.RFC3339)
+		m["duration_ms"] = q.EndTime.Sub(q.StartTime).Milliseconds()
+	}
+	if q.AffectedRows > 0 {
+		m["affected_rows"] = q.AffectedRows
+	}
+	if q.Error != nil {
+		m["error"] = q.Error.Error()
+	}
+	return m
+}
+
 // monitorFields returns the field names included in monitor snapshots.
 func monitorFields(monitorType string) []string {
 	base := []string{
 		"session_id", "username", "database", "state",
 		"client_ip", "created_at", "last_activity",
 		"current_query", "query_duration_ms", "transaction_id",
+		"last_completed_query",
 	}
 	if monitorType == "session" {
 		return append(base, "connection_id", "expires_at", "error_count",
-			"query_history_len", "current_query_status", "transaction_status", "last_error")
+			"query_history_len", "current_query_status", "transaction_status", "last_error",
+			"query_history")
 	}
 	return base
 }
