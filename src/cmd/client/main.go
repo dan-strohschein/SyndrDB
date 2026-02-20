@@ -234,12 +234,49 @@ func startInteractiveShellWithAsync(dbClient *internal.Client, args *settings.Ar
 	var responseBuffer strings.Builder
 	// Track chunk count for progress dots
 	var chunkCount int
+	// Track if we're in monitor mode (MONITOR:v1 session streaming)
+	var isMonitoring bool
 
 	for !done {
 		select {
 		case message := <-messageChan:
 			// Pipeline mode: skip READY sentinel (it's a framing marker, not content)
 			if strings.TrimSpace(message) == "READY" {
+				continue
+			}
+
+			// --- MONITOR:v1 protocol handling ---
+			trimmedMsg := strings.TrimSpace(message)
+
+			// Detect MONITOR:v1 header → enter monitor mode
+			if trimmedMsg == "MONITOR:v1" {
+				isMonitoring = true
+				rawPrint("\n--- Monitor started ---\n")
+				continue
+			}
+
+			// In monitor mode, handle frames
+			if isMonitoring {
+				// END frame → exit monitor mode
+				if trimmedMsg == "END:monitor_stopped" {
+					isMonitoring = false
+					rawPrint("--- Monitor stopped ---\n")
+					lineEditor.RedrawPrompt()
+					continue
+				}
+
+				// SNAPSHOT frame header
+				if strings.HasPrefix(trimmedMsg, "SNAPSHOT:") {
+					ts := strings.TrimPrefix(trimmedMsg, "SNAPSHOT:")
+					rawPrintf("\n[snapshot %s]\n", ts)
+					continue
+				}
+
+				// Data line (JSON array of sessions) — display it
+				if args.PrettyPrintResults {
+					message = prettyPrintJSON(message)
+				}
+				rawPrintf("%s\n", strings.TrimSpace(message))
 				continue
 			}
 
