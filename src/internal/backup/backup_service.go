@@ -594,6 +594,10 @@ func (bs *BackupService) extractArchive(archivePath, destDir string) error {
 	// Create tar reader
 	tarReader := tar.NewReader(decompReader)
 
+	// SECURITY: Track total decompressed bytes to prevent decompression bombs
+	maxRestoreSize := bs.settings.MaxRestoreSizeBytes
+	var totalBytesWritten int64
+
 	// Extract files
 	for {
 		header, err := tarReader.Next()
@@ -609,8 +613,14 @@ func (bs *BackupService) extractArchive(archivePath, destDir string) error {
 			continue
 		}
 
+		// SECURITY: Validate path to prevent directory traversal
+		cleanName := filepath.Clean(header.Name)
+		if strings.HasPrefix(cleanName, "..") || filepath.IsAbs(cleanName) {
+			return fmt.Errorf("invalid file path in archive: %s", header.Name)
+		}
+
 		// Create destination path
-		destPath := filepath.Join(destDir, header.Name)
+		destPath := filepath.Join(destDir, cleanName)
 
 		// Create parent directories
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
@@ -623,12 +633,28 @@ func (bs *BackupService) extractArchive(archivePath, destDir string) error {
 			return fmt.Errorf("failed to create file: %w", err)
 		}
 
-		// Copy data
-		if _, err := io.Copy(outFile, tarReader); err != nil {
-			outFile.Close()
-			return fmt.Errorf("failed to extract file: %w", err)
+		// Copy data with size limit check
+		var written int64
+		if maxRestoreSize > 0 {
+			remaining := maxRestoreSize - totalBytesWritten
+			if remaining <= 0 {
+				outFile.Close()
+				return fmt.Errorf("restore aborted: decompressed size exceeds maximum of %d bytes", maxRestoreSize)
+			}
+			limitedReader := io.LimitReader(tarReader, remaining+1) // +1 to detect overflow
+			written, err = io.Copy(outFile, limitedReader)
+			if written > remaining {
+				outFile.Close()
+				return fmt.Errorf("restore aborted: decompressed size exceeds maximum of %d bytes", maxRestoreSize)
+			}
+		} else {
+			written, err = io.Copy(outFile, tarReader)
 		}
 		outFile.Close()
+		if err != nil {
+			return fmt.Errorf("failed to extract file: %w", err)
+		}
+		totalBytesWritten += written
 	}
 
 	return nil

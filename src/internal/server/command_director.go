@@ -145,6 +145,18 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX, "Empty command", errors.LayerCommand)
 	}
 
+	// SECURITY: Permission enforcement gateway (Fix 1.2)
+	// Check if the user has the required permission for this command type
+	authEnabled := settings.GetSettings().AuthEnabled
+	if authEnabled {
+		requiredPerm := classifyCommandPermission(firstWords)
+		if requiredPerm != "" {
+			if err := RequirePermission(session, serviceManager.PermissionService, requiredPerm, authEnabled); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	// PREPARED STATEMENTS: Check for PREPARE/EXECUTE/DEALLOCATE commands first
 	if IsPreparedStatementCommand(firstWords) {
 		return ParseAndExecutePreparedStatementCommand(ctx, command, session, database, serviceManager, logger)
@@ -1694,4 +1706,88 @@ func SelectDatabases(firstWords []string, serviceManager ServiceManager) (*Comma
 		return cmdResponse, nil, true
 	}
 	return nil, nil, false
+}
+
+// classifyCommandPermission maps command keywords to the required permission level.
+// Returns "Read", "Write", or "Admin" based on the command type.
+// Returns "" for transaction commands and other commands that don't need permission checks.
+func classifyCommandPermission(firstWords []string) string {
+	if len(firstWords) == 0 {
+		return ""
+	}
+	first := strings.ToLower(firstWords[0])
+
+	switch first {
+	// DML Read
+	case "select", "show", "explain":
+		return "Read"
+
+	// DML Write
+	case "add":
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "document" {
+			return "Write"
+		}
+		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "user" {
+			return "Admin"
+		}
+		return "Write"
+	case "update":
+		if len(firstWords) >= 2 {
+			second := strings.ToLower(firstWords[1])
+			switch second {
+			case "documents":
+				return "Write"
+			case "user", "role", "database", "bundle":
+				return "Admin"
+			}
+		}
+		return "Write"
+	case "delete":
+		if len(firstWords) >= 2 {
+			second := strings.ToLower(firstWords[1])
+			switch second {
+			case "documents":
+				return "Write"
+			case "user", "role", "database", "bundle":
+				return "Admin"
+			}
+		}
+		return "Write"
+
+	// DDL / Admin
+	case "create", "drop", "alter":
+		return "Admin"
+	case "grant", "revoke":
+		return "Admin"
+	case "backup", "restore":
+		return "Admin"
+	case "lock", "unlock":
+		return "Admin"
+	case "rename":
+		return "Admin"
+	case "invalidate":
+		return "Admin"
+	case "checkpoint":
+		return "Admin"
+	case "attach":
+		return "Admin"
+	case "start", "apply", "validate":
+		// Migration commands
+		return "Admin"
+
+	// Use database - read level
+	case "use":
+		return "Read"
+
+	// Transaction commands, prepared statements, cursors - no separate permission check
+	// (they inherit permission from the underlying query)
+	case "begin", "commit", "rollback", "savepoint":
+		return ""
+	case "prepare", "execute", "deallocate":
+		return ""
+	case "declare", "fetch", "close":
+		return ""
+	}
+
+	return ""
 }

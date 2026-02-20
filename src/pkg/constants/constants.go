@@ -129,6 +129,26 @@ const (
 	// InputMaxCommandLength is the maximum command length (10000 bytes = 10KB)
 	// Prevents command buffer overflow attacks
 	InputMaxCommandLength = 10000
+
+	// MaxPartialDataSize is the maximum size of accumulated partial data (1MB)
+	// Prevents unbounded memory growth from malicious clients sending data without terminators
+	MaxPartialDataSize = 1 * 1024 * 1024
+
+	// MaxFieldsPerDocument is the maximum number of fields allowed in a single document
+	// Prevents DoS via extremely wide documents
+	MaxFieldsPerDocument = 500
+
+	// ExpressionMaxDepth is the maximum nesting depth for parsed expressions
+	// Prevents stack overflow from deeply nested WHERE clauses
+	ExpressionMaxDepth = 64
+
+	// LikePatternMaxLength is the maximum length of a LIKE pattern
+	// Prevents ReDoS attacks via long patterns
+	LikePatternMaxLength = 1000
+
+	// LikePatternMaxWildcards is the maximum number of % wildcards in a LIKE pattern
+	// Prevents exponential backtracking in pattern matching
+	LikePatternMaxWildcards = 20
 )
 
 // Memory and Size Limits

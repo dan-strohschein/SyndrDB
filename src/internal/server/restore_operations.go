@@ -55,9 +55,6 @@ func RestoreDatabase(command string, logger *zap.SugaredLogger, serviceManager *
 
 	logger.Infof("Starting database restore: backupPath=%s, database=%s", backupPath, dbName)
 
-	// TODO: Check user permissions - only admins can restore databases
-	// This requires session/authentication context to be passed through
-
 	// Create restore service
 	restoreService := backup.NewRestoreService(
 		serviceManager.DatabaseService,

@@ -46,6 +46,41 @@ TODO: I will implement time-based permission grants (expiration)
 TODO: I will add permission templates for common role combinations
 */
 
+// RequirePermission checks if the given session has the specified permission.
+// Returns nil if auth is disabled or if the user has the permission.
+// Returns ERR_PERMISSION_DENIED if the user lacks the permission.
+// Returns ERR_AUTH_REQUIRED if session is nil and auth is enabled.
+func RequirePermission(session *Session, permService *PermissionService, perm string, authEnabled bool) error {
+	if !authEnabled {
+		return nil // Auth disabled, skip all checks
+	}
+	if session == nil {
+		return errors.New(errors.ERR_AUTH_REQUIRED,
+			"authentication required", errors.LayerAuth)
+	}
+	if session.Username == "" {
+		return errors.New(errors.ERR_AUTH_REQUIRED,
+			"no authenticated user in session", errors.LayerAuth)
+	}
+	if permService == nil {
+		// No permission service configured — allow (graceful degradation)
+		return nil
+	}
+	hasPerm, err := permService.UserHasPermission(session.Username, perm)
+	if err != nil {
+		// If permission check fails (e.g., missing bundles), deny access
+		return errors.New(errors.ERR_PERMISSION_DENIED,
+			fmt.Sprintf("permission check failed for '%s': %v", perm, err),
+			errors.LayerAuth)
+	}
+	if !hasPerm {
+		return errors.New(errors.ERR_PERMISSION_DENIED,
+			fmt.Sprintf("user '%s' does not have '%s' permission", session.Username, perm),
+			errors.LayerAuth).WithContext("username", session.Username).WithContext("permission", perm)
+	}
+	return nil
+}
+
 // PermissionService provides centralized permission and role management
 type PermissionService struct {
 	bundleService   *bundle.BundleService

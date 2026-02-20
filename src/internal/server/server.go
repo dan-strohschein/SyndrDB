@@ -942,6 +942,11 @@ func (s *Server) Start() error {
 	s.Listener = listener
 	s.Running = true
 
+	// SECURITY: Warn when authentication is enabled but TLS is disabled
+	if s.AuthEnabled && s.TLSConfig == nil {
+		s.logger.Warnf("SECURITY WARNING: Authentication enabled but TLS disabled — credentials will be sent in plaintext")
+	}
+
 	// GraphQL is now handled via TCP socket with GRAPHQL:: prefix
 	if s.GraphQLEnabled {
 		s.logger.Info("GraphQL enabled for TCP connections - use GRAPHQL:: prefix in commands")
@@ -1317,7 +1322,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		Conn:       conn,
 		Reader:     reader,
 		Writer:     writer,
-		Authorized: true, //!s.AuthEnabled, // If auth is disabled, connection is automatically authorized
+		Authorized: !s.AuthEnabled, // If auth is disabled, connection is automatically authorized
 		LastActive: time.Now(),
 		Logger:     connLogger,
 	}
@@ -1411,6 +1416,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 					// Append to any previous partial data
 					partialData += data
+
+					// SECURITY: Prevent unbounded memory growth from partial data accumulation (Fix 2.1)
+					if len(partialData) > constants.MaxPartialDataSize {
+						errCh <- fmt.Errorf("command too large: partial data exceeds %d bytes", constants.MaxPartialDataSize)
+						return
+					}
 
 					// Split on CommandTerminator, respecting \x04\x04 in parameterized values.
 					// Sends each complete command separately to avoid bunching when TCP
@@ -1581,8 +1592,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 						continue // next command in batch
 					}
 
-					// Process command for authenticated clients
-					result, err := s.processCommand(connection, cmd)
+					// Reject commands from unauthorized connections
+				if !connection.Authorized {
+					s.sendError(writer, errors.New(errors.ERR_AUTH_REQUIRED,
+						"authentication required: send a valid connection string before executing commands", errors.LayerAuth))
+					continue
+				}
+
+				// Process command for authenticated clients
+				result, err := s.processCommand(connection, cmd)
 					if err != nil {
 						s.sendError(writer, err)
 					} else {
@@ -1809,18 +1827,25 @@ func parseConnectionString(server *Server, connStr string) (ConnectionString, er
 	result := ConnectionString{
 		Options: make(map[string]string),
 	}
-	server.logger.Infof("Parsing Connection Strin: %s", connStr)
-	// Strip syndr:// prefix if present
-
-	// if strings.HasPrefix(connStr, prefix) {
-	// 	connStr = connStr[len(prefix):]
-	// }
-
+	// Log connection attempt at Debug level without sensitive data
 	connStr = strings.TrimPrefix(connStr, "syndrdb://")
+
 	// Extract options
 	optionsParts := strings.Split(connStr, ":")
+
+	// Bounds check: connection string must have at least 5 parts (host:port:database:username:password)
+	if len(optionsParts) < 5 {
+		return result, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid connection string format: expected syndrdb://host:port:database:username:password", errors.LayerAPI)
+	}
+
 	// The Connection String is like this: host:port:database:username:password
 	result.Host = optionsParts[0]
+
+	// Log sanitized connection info (no password)
+	server.logger.Debugf("Parsing connection string: host=%s, database=%s, user=%s",
+		optionsParts[0], optionsParts[2], optionsParts[3])
+
 	// Convert port string to integer
 	portNum, err := strconv.Atoi(optionsParts[1])
 	if err != nil {

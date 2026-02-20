@@ -607,6 +607,12 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 		// Get or create group result
 		gResult, exists := groupMap[gKey]
 		if !exists {
+			// SECURITY: Check GROUP BY cardinality limit to prevent unbounded memory growth
+			maxCardinality := settings.GetSettings().MaxGroupByCardinality
+			if maxCardinality > 0 && len(groupMap) >= maxCardinality {
+				return nil, fmt.Errorf("GROUP BY cardinality exceeds maximum of %d groups", maxCardinality)
+			}
+
 			gResult = &groupResult{
 				GroupFields:     groupFields,
 				AggregateValues: make(map[string]*aggregateValue),

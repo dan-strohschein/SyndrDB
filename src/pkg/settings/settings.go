@@ -216,6 +216,7 @@ type Arguments struct {
 	BackupDir            string `yaml:"backup_dir"`             // Directory for backup files (default: "./backups")
 	BackupCompression    string `yaml:"backup_compression"`     // Compression format: "gzip", "zstd", "none" (default: "gzip")
 	BackupIncludeIndexes bool   `yaml:"backup_include_indexes"` // Include index files in backups (default: true)
+	MaxRestoreSizeBytes  int64  `yaml:"max_restore_size_bytes"` // Maximum decompressed restore size in bytes (default: 10GB, 0=unlimited)
 	// TODO: I will add BackupRetentionDays for automatic backup cleanup
 	// TODO: I will add BackupEncryption settings for encrypted backups
 	// TODO: I will add BackupCloudProvider for S3/GCS/Azure integration
@@ -245,6 +246,11 @@ type Arguments struct {
 	QueryMaxMemoryMB      int `yaml:"query_max_memory_mb"`       // Maximum memory per query in MB (default: 25)
 	AdminQueryMaxMemoryMB int `yaml:"admin_query_max_memory_mb"` // Maximum memory per admin query in MB (default: 25)
 	// Note: JOIN operations have a separate MemoryLimit in JoinRequest which remains unchanged
+
+	// Security: Resource limits for GROUP BY and JOIN operations
+	MaxGroupByCardinality int  `yaml:"max_group_by_cardinality"` // Maximum number of groups in GROUP BY (default: 1000000)
+	MaxJoinResultSize     int  `yaml:"max_join_result_size"`     // Maximum number of rows in JOIN result (default: 10000000)
+	RequireJoinCondition  bool `yaml:"require_join_condition"`   // Require ON clause for JOINs (default: true)
 
 	// Ghost Cleanup (Automatic Compaction) Configuration
 	GhostCleanupEnabled         bool    `yaml:"ghost_cleanup_enabled"`          // Enable automatic ghost record cleanup (default: true)
@@ -494,7 +500,8 @@ func GetSettings() *Arguments {
 			// Backup & Restore Defaults
 			BackupDir:            "./backups", // Default backup directory
 			BackupCompression:    "gzip",      // Use gzip compression by default
-			BackupIncludeIndexes: true,        // Include indexes in backups
+			BackupIncludeIndexes: true,                    // Include indexes in backups
+			MaxRestoreSizeBytes:  10 * 1024 * 1024 * 1024, // 10GB max decompressed restore size
 
 			// Migration System Defaults
 			MaxMigrationCommands:          1000,     // Maximum 1000 commands per migration
@@ -520,6 +527,11 @@ func GetSettings() *Arguments {
 			// Per-Query Memory Limit Defaults (DoS Protection)
 			QueryMaxMemoryMB:      25, // 25MB default per-query memory limit
 			AdminQueryMaxMemoryMB: 25, // 25MB default per-query memory limit for admins
+
+			// Security: Resource limits for GROUP BY and JOIN
+			MaxGroupByCardinality: 1_000_000,  // 1M groups max
+			MaxJoinResultSize:     10_000_000,  // 10M rows max
+			RequireJoinCondition:  true,        // Require ON clause to prevent Cartesian products
 
 			// Ghost Cleanup (Automatic Compaction) Defaults
 			GhostCleanupEnabled:         true,  // Enable ghost cleanup by default

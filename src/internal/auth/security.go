@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/subtle"
 	"io"
 	"strings"
 
@@ -65,18 +66,11 @@ func decrypt(data, key []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-// Constant-time comparison to prevent timing attacks
+// SlowEqual performs constant-time comparison to prevent timing attacks.
+// Uses crypto/subtle.ConstantTimeCompare which is truly constant-time
+// regardless of input length mismatch.
 func SlowEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	var result byte
-	for i := 0; i < len(a); i++ {
-		result |= a[i] ^ b[i]
-	}
-
-	return result == 0
+	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
 // VerifyCredentials checks if the provided credentials are valid with rate limiting

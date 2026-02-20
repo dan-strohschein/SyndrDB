@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"os"
@@ -36,16 +37,18 @@ func NewUserStoreWithAuditor(filePath string, encryptionKeyString string, logger
 	}
 
 	// Convert encryption key string to bytes (32 bytes for AES-256)
-	encryptionKey := []byte(encryptionKeyString)
-	if len(encryptionKey) < constants.EncryptionKeyMinLength {
-		// Pad the key if it's too short
-		paddedKey := make([]byte, constants.EncryptionKeyMinLength)
-		copy(paddedKey, encryptionKey)
-		encryptionKey = paddedKey
-	} else if len(encryptionKey) > constants.EncryptionKeyMinLength {
-		// Truncate if too long
-		encryptionKey = encryptionKey[:constants.EncryptionKeyMinLength]
+	// SECURITY: Use SHA-256 to derive a proper 32-byte key from any input length.
+	// This replaces zero-padding (weak) and silent truncation (surprising).
+	if encryptionKeyString == "" {
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"encryption key cannot be empty", errors.LayerAuth)
 	}
+	rawKey := []byte(encryptionKeyString)
+	if len(rawKey) < 16 && logger != nil {
+		logger.Warnf("Encryption key is short (%d bytes) — consider using at least 32 bytes for strong security", len(rawKey))
+	}
+	keyHash := sha256.Sum256(rawKey)
+	encryptionKey := keyHash[:]
 
 	// Initialize rate limiter if logger is provided
 	var rateLimiter *AuthRateLimiter

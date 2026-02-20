@@ -176,6 +176,12 @@ func (dje *DefaultJoinExecutor) Execute(request *JoinRequest) (*JoinResult, erro
 		result = fallbackResult
 	}
 
+	// SECURITY: Check JOIN result size limit to prevent memory exhaustion
+	maxJoinResultSize := globalSettings.MaxJoinResultSize
+	if maxJoinResultSize > 0 && len(result.Documents) > maxJoinResultSize {
+		return nil, fmt.Errorf("JOIN result size (%d rows) exceeds maximum of %d rows", len(result.Documents), maxJoinResultSize)
+	}
+
 	// Record performance metrics for learning
 	if dje.enablePatternTracking {
 		dje.patternTracker.RecordJoin(

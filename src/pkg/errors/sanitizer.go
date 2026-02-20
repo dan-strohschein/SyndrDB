@@ -137,6 +137,20 @@ func isSensitiveContextKey(key string) bool {
 	return false
 }
 
+// SanitizeErrorForClient returns a sanitized error message for client consumption.
+// In debug mode, returns the full error message. In production, strips sensitive details.
+func SanitizeErrorForClient(err error, debugMode bool) string {
+	if err == nil {
+		return ""
+	}
+	if debugMode {
+		return err.Error()
+	}
+	// Sanitize and return user-facing message only
+	sanitized := SanitizeError(err)
+	return sanitized.UserMessage()
+}
+
 // FormatUserResponse formats a SyndrDBError for client response
 // Returns a map suitable for JSON serialization
 func FormatUserResponse(err SyndrDBError) map[string]interface{} {

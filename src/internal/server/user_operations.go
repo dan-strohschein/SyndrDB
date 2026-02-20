@@ -36,6 +36,14 @@ func AddUser(command string, logger *zap.SugaredLogger, serviceManager ServiceMa
 	username := parts[2]
 	password := strings.Trim(parts[5], "'\"") // Remove quotes from password
 
+	// SECURITY: Validate password complexity before storing
+	securityConfig := DefaultSecurityConfig()
+	if err := ValidateInput(password, "password", securityConfig); err != nil {
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			fmt.Sprintf("password does not meet complexity requirements: %v", err),
+			errors.LayerCommand)
+	}
+
 	// Get the Primary database
 	primaryDB, err := serviceManager.DatabaseService.GetDatabaseByName("primary")
 	if err != nil {

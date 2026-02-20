@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"syndrdb/src/pkg/constants"
 	"syndrdb/src/pkg/errors"
 
 	"go.uber.org/zap"
@@ -307,6 +308,10 @@ type ExpressionParser struct {
 	// Error tracking
 	errors []string
 
+	// SECURITY: Depth tracking to prevent stack overflow from deeply nested expressions
+	depth    int
+	maxDepth int
+
 	// Logger for error reporting
 	logger *zap.SugaredLogger
 }
@@ -323,6 +328,8 @@ func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionP
 		prefixParsers: make(map[TokenType]prefixParseFunc),
 		infixParsers:  make(map[TokenType]infixParseFunc),
 		errors:        make([]string, 0),
+		depth:         0,
+		maxDepth:      constants.ExpressionMaxDepth,
 		logger:        logger,
 	}
 
@@ -422,6 +429,15 @@ func (p *ExpressionParser) Parse() (Expression, error) {
 
 // parseExpression is the core Pratt parser algorithm
 func (p *ExpressionParser) parseExpression(precedence Precedence) (Expression, error) {
+	// SECURITY: Check expression nesting depth to prevent stack overflow
+	p.depth++
+	defer func() { p.depth-- }()
+	if p.depth > p.maxDepth {
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			fmt.Sprintf("expression nesting depth exceeds maximum of %d", p.maxDepth),
+			errors.LayerParser)
+	}
+
 	// Get prefix parser for current token
 	prefix := p.prefixParsers[p.current.Type]
 	if prefix == nil {

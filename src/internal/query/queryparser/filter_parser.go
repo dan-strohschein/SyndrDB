@@ -1171,96 +1171,103 @@ func MatchLikePattern(value string, pattern string, patternType string, caseInse
 	return matchLikePatternComplex(value, processedPattern)
 }
 
-// matchLikePatternComplex performs rune-by-rune pattern matching for complex LIKE patterns
+// matchLikePatternComplex performs pattern matching for complex LIKE patterns
 // This handles patterns with _ (single character) and % (zero-or-more) wildcards
-// Uses fail-fast optimization to exit early on non-match
+// Uses O(m*n) DP algorithm to prevent ReDoS attacks
 func matchLikePatternComplex(value string, pattern string) bool {
+	// SECURITY: Enforce pattern length limit to prevent DoS
+	if len(pattern) > constants.LikePatternMaxLength {
+		return false
+	}
+
+	// SECURITY: Enforce wildcard count limit to prevent excessive memory use
+	wildcardCount := 0
+	for _, ch := range pattern {
+		if ch == '%' {
+			wildcardCount++
+		}
+	}
+	if wildcardCount > constants.LikePatternMaxWildcards {
+		return false
+	}
+
 	valueRunes := []rune(value)
 	patternRunes := []rune(pattern)
 
-	// Use dynamic programming approach for pattern matching
-	return matchLikePatternRecursive(valueRunes, patternRunes, 0, 0)
+	// Use O(m*n) dynamic programming approach for pattern matching
+	return matchLikePatternDP(valueRunes, patternRunes)
 }
 
-// matchLikePatternRecursive is a recursive helper for complex pattern matching
+// matchLikePatternDP is an O(m*n) dynamic programming algorithm for LIKE pattern matching.
+// Replaces the previous recursive backtracking implementation to prevent ReDoS attacks.
 // Parameters:
 //   - valueRunes: The value as rune slice
 //   - patternRunes: The pattern as rune slice
-//   - vIdx: Current index in value
-//   - pIdx: Current index in pattern
 //
 // Returns:
-//   - bool: true if remaining value matches remaining pattern
-func matchLikePatternRecursive(valueRunes []rune, patternRunes []rune, vIdx int, pIdx int) bool {
+//   - bool: true if value matches pattern
+func matchLikePatternDP(valueRunes []rune, patternRunes []rune) bool {
 	// Placeholder runes for escaped wildcards (must match ParseLikePattern)
 	const (
 		escapedUnderscore = '\uE000' // Private Use Area
 		escapedPercent    = '\uE001'
 	)
 
-	// Base case: reached end of pattern
-	if pIdx >= len(patternRunes) {
-		return vIdx >= len(valueRunes) // Match if we've also consumed all of value
+	n := len(valueRunes)
+	m := len(patternRunes)
+
+	// dp[j] represents whether pattern[0..j-1] matches value[0..i-1]
+	// Use two rows to save memory: prev (i-1) and curr (i)
+	prev := make([]bool, m+1)
+	curr := make([]bool, m+1)
+
+	// Base case: empty value matches empty pattern
+	prev[0] = true
+
+	// Base case: empty value can match a pattern of only % wildcards
+	for j := 1; j <= m; j++ {
+		if patternRunes[j-1] == '%' {
+			prev[j] = prev[j-1]
+		}
 	}
 
-	// Get current pattern character
-	pCh := patternRunes[pIdx]
+	for i := 1; i <= n; i++ {
+		curr[0] = false // non-empty value cannot match empty pattern
+		for j := 1; j <= m; j++ {
+			pCh := patternRunes[j-1]
+			vCh := valueRunes[i-1]
 
-	// Handle % wildcard (zero or more characters)
-	if pCh == '%' {
-		// Try matching zero characters (skip %)
-		if matchLikePatternRecursive(valueRunes, patternRunes, vIdx, pIdx+1) {
-			return true
-		}
-
-		// Try matching one or more characters
-		for i := vIdx; i < len(valueRunes); i++ {
-			if matchLikePatternRecursive(valueRunes, patternRunes, i+1, pIdx+1) {
-				return true
+			switch {
+			case pCh == '%':
+				// % matches zero chars (curr[j-1]) or one+ chars (prev[j])
+				curr[j] = curr[j-1] || prev[j]
+			case pCh == '_':
+				// _ matches exactly one character
+				curr[j] = prev[j-1]
+			case pCh == escapedUnderscore:
+				curr[j] = prev[j-1] && vCh == '_'
+			case pCh == escapedPercent:
+				curr[j] = prev[j-1] && vCh == '%'
+			default:
+				// Literal character match
+				curr[j] = prev[j-1] && pCh == vCh
 			}
 		}
-
-		// Fail-fast: % can match remaining string
-		return false
-	}
-
-	// Reached end of value but pattern has more non-% characters
-	if vIdx >= len(valueRunes) {
-		return false
-	}
-
-	vCh := valueRunes[vIdx]
-
-	// Handle _ wildcard (exactly one character)
-	if pCh == '_' {
-		// Match any single character and continue
-		return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
-	}
-
-	// Handle escaped wildcards (they match literally)
-	if pCh == escapedUnderscore {
-		// Must match literal underscore
-		if vCh == '_' {
-			return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
+		// Swap rows
+		prev, curr = curr, prev
+		// Clear curr for next iteration
+		for j := range curr {
+			curr[j] = false
 		}
-		return false
 	}
 
-	if pCh == escapedPercent {
-		// Must match literal percent
-		if vCh == '%' {
-			return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
-		}
-		return false
-	}
+	return prev[m]
+}
 
-	// Handle literal character match
-	if pCh == vCh {
-		return matchLikePatternRecursive(valueRunes, patternRunes, vIdx+1, pIdx+1)
-	}
-
-	// Fail-fast: character mismatch
-	return false
+// matchLikePatternRecursive is kept as an alias for backwards compatibility.
+// It now delegates to the O(m*n) DP algorithm to prevent ReDoS.
+func matchLikePatternRecursive(valueRunes []rune, patternRunes []rune, vIdx int, pIdx int) bool {
+	return matchLikePatternDP(valueRunes[vIdx:], patternRunes[pIdx:])
 }
 
 // EvaluateLikeOperator evaluates LIKE and NOT LIKE operators

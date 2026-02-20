@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"syndrdb/src/internal/utils"
+	"syndrdb/src/pkg/constants"
+	"syndrdb/src/pkg/errors"
 )
 
 /*
@@ -137,6 +139,13 @@ func (p *InsertParser) parseFieldValues() (map[string]interface{}, error) {
 	// Parse additional field-value sets (comma-separated)
 	for !p.isAtEnd() && p.peek().Type == TOKEN_COMMA {
 		p.advance() // consume comma
+
+		// SECURITY: Enforce maximum field count to prevent DoS via extremely wide documents
+		if len(fields) >= constants.MaxFieldsPerDocument {
+			return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+				fmt.Sprintf("document exceeds maximum of %d fields", constants.MaxFieldsPerDocument),
+				errors.LayerParser)
+		}
 
 		if err := p.parseFieldSet(fields); err != nil {
 			return nil, err

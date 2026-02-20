@@ -6,6 +6,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
@@ -17,15 +18,11 @@ import (
 func HandleCreateView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
 	logger.Infof("Handling CREATE VIEW command in database '%s'", database.Name)
 
-	// TODO: I should add permission check when authentication is fully wired
-	// For now, log a warning that permission checks are not yet implemented
-	logger.Debugf("TODO: Check if user has admin or owner permissions for database '%s'", database.Name)
-	// if session != nil && session.Username != "" {
-	//     hasPermission := CheckUserHasDatabasePermission(session.Username, database.Name, "owner", serviceManager)
-	//     if !hasPermission {
-	//         return nil, fmt.Errorf("Permission denied: only database owners and admins can create views")
-	//     }
-	// }
+	// Permission check: CREATE VIEW requires Admin permission
+	authEnabled := settings.GetSettings().AuthEnabled
+	if err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled); err != nil {
+		return nil, err
+	}
 
 	// Parse CREATE VIEW statement
 	parser, err := syndrQL.NewCreateViewParser(command)

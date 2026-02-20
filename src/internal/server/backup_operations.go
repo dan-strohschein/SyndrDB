@@ -50,9 +50,6 @@ func BackupDatabase(command string, logger *zap.SugaredLogger, serviceManager *S
 
 	logger.Infof("Starting database backup: database=%s, backupPath=%s", dbName, backupPath)
 
-	// TODO: Check user permissions - only admins can create backups
-	// This requires session/authentication context to be passed through
-
 	// Create backup service
 	backupService := backup.NewBackupService(
 		serviceManager.DatabaseService,

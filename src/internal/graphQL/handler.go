@@ -368,6 +368,21 @@ func (h *GraphQLHandler) ProcessGraphQLCommand(command string, session *server.S
 		return nil, fmt.Errorf("GraphQL query is required")
 	}
 
+	// SECURITY: Permission check for GraphQL commands (Fix 1.5)
+	// GraphQL queries require at least "Read" permission; mutations require "Write"
+	authEnabled := settings.GetSettings().AuthEnabled
+	if authEnabled {
+		// Determine required permission: mutations need "Write", queries need "Read"
+		requiredPerm := "Read"
+		queryLower := strings.ToLower(req.Query)
+		if strings.Contains(queryLower, "mutation") {
+			requiredPerm = "Write"
+		}
+		if err := server.RequirePermission(session, h.serviceManager.PermissionService, requiredPerm, authEnabled); err != nil {
+			return nil, err
+		}
+	}
+
 	// Populate security context from session
 	if session != nil {
 		req.SessionID = session.SessionID
