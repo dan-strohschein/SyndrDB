@@ -34,4 +34,7 @@ type CatalogServiceInterface interface {
 	// UnRegisterBundleInCatalog removes a bundle entry from the primary.Bundles catalog
 	// This is called when a bundle is deleted
 	UnRegisterBundleInCatalog(bundleID, bundleName, databaseID, databaseName string) error
+
+	// AddDatabaseToCatalog registers a database in the primary.Databases catalog
+	AddDatabaseToCatalog(db *models.Database) error
 }

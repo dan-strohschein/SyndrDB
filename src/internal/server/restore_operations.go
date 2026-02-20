@@ -27,9 +27,11 @@ package server
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"syndrdb/src/internal/backup"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/settings"
 	"time"
 
 	"go.uber.org/zap"
@@ -47,6 +49,9 @@ func RestoreDatabase(command string, logger *zap.SugaredLogger, serviceManager *
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
 			"failed to parse RESTORE command", errors.LayerCommand)
 	}
+
+	// Wire the parsed AS name into the restore options
+	options.TargetDBName = dbName
 
 	logger.Infof("Starting database restore: backupPath=%s, database=%s", backupPath, dbName)
 
@@ -84,7 +89,7 @@ func RestoreDatabase(command string, logger *zap.SugaredLogger, serviceManager *
 // parseRestoreCommand extracts backup path, target database name, and options from command tokens
 // Expected format: RESTORE DATABASE FROM "path/to/backup.sdb" AS "dbname" [WITH FORCE = true]
 func parseRestoreCommand(command string) (string, string, backup.RestoreOptions, error) {
-	tokens := strings.Fields(command)
+	tokens := tokenizeQuoted(command)
 
 	// Initialize default options
 	options := backup.RestoreOptions{
@@ -117,6 +122,11 @@ func parseRestoreCommand(command string) (string, string, backup.RestoreOptions,
 	if backupPath == "" {
 		return "", "", options, errors.New(errors.ERR_VALIDATION_REQUIRED,
 			"backup path cannot be empty", errors.LayerCommand)
+	}
+
+	// Resolve relative paths against the configured BackupDir
+	if !filepath.IsAbs(backupPath) {
+		backupPath = filepath.Join(settings.GetSettings().BackupDir, backupPath)
 	}
 
 	// Validate AS keyword (token 4)

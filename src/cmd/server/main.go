@@ -439,23 +439,38 @@ func main() {
 		}
 
 		if defaultDB != nil {
-			// Create GraphQL schema manager
-			schemaFilePath := filepath.Join(defaultDB.DataDirectory, fmt.Sprintf("%s_graphql_schemas.gqls", defaultDB.Name))
-			schemaManager, err := schema.NewSchemaManager(schemaFilePath, defaultDB.Name, defaultDB.DatabaseID)
-			if err != nil {
-				log.Printf("Warning: Failed to initialize GraphQL schema manager: %v", err)
-			} else {
-				// Create GraphQL handler with schema manager and security config
-				serviceManager := server.GetServiceManager()
-				gqlSecurityConfig := settings.BuildGraphQLSecurityConfig(args)
-				graphQLHandler, err := graphQL.NewGraphQLHandler(*serviceManager, defaultDB, schemaManager, srv.GetLogger(), gqlSecurityConfig)
-				if err != nil {
-					log.Printf("Warning: Failed to initialize GraphQL handler: %v", err)
-				} else {
-					// Set GraphQL processor for TCP socket connections
-					server.SetGraphQLProcessor(graphQLHandler)
-					log.Println("GraphQL enabled for TCP socket connections with GRAPHQL:: prefix")
+			serviceManager := server.GetServiceManager()
+
+			// Reconcile missing GraphQL schemas for existing bundles
+			if serviceManager != nil && serviceManager.BundleService != nil {
+				reconciled, reconcileErr := serviceManager.BundleService.ReconcileGraphQLSchemas(defaultDB)
+				if reconcileErr != nil {
+					log.Printf("Warning: GraphQL schema reconciliation error: %v", reconcileErr)
+				} else if reconciled > 0 {
+					log.Printf("GraphQL: Generated schemas for %d existing bundle(s)", reconciled)
 				}
+			}
+
+			// Get the schema manager from BundleService (same instance used by reconciliation
+			// and by AddBundle/UpdateBundle) so the handler sees the same schemas.
+			var schemaManager *schema.SchemaManager
+			var smErr error
+			if serviceManager != nil && serviceManager.BundleService != nil {
+				schemaManager, smErr = serviceManager.BundleService.GetSchemaManager(defaultDB)
+			}
+			if smErr != nil {
+				log.Printf("Warning: Failed to get GraphQL schema manager: %v", smErr)
+			}
+
+			// Create GraphQL handler with schema manager and security config
+			gqlSecurityConfig := settings.BuildGraphQLSecurityConfig(args)
+			graphQLHandler, err := graphQL.NewGraphQLHandler(*serviceManager, defaultDB, schemaManager, srv.GetLogger(), gqlSecurityConfig)
+			if err != nil {
+				log.Printf("Warning: Failed to initialize GraphQL handler: %v", err)
+			} else {
+				// Set GraphQL processor for TCP socket connections
+				server.SetGraphQLProcessor(graphQLHandler)
+				log.Println("GraphQL enabled for TCP socket connections with GRAPHQL:: prefix")
 			}
 		} else {
 			log.Println("Warning: No database available for GraphQL")

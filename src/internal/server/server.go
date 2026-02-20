@@ -609,6 +609,140 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 		}
 	}
 
+	// Synchronize bundle catalog entries for all loaded databases
+	// When bundles exist on disk but are missing from the Primary.Bundles catalog,
+	// SHOW BUNDLES returns empty results. This ensures every on-disk bundle is registered.
+	if catalogService != nil && len(server.Databases) > 0 {
+		// First, build a set of all (databaseName, bundleName) pairs already in the catalog
+		// by directly scanning the Bundles catalog documents. This avoids calling
+		// GetBundlesFromCatalogByDatabaseName which can fail if bundle metadata is missing.
+		type catalogKey struct{ db, bundle string }
+		existingCatalogEntries := make(map[catalogKey]bool)
+
+		primaryDB, primErr := databaseService.GetDatabaseByName("primary")
+		if primErr == nil {
+			bundlesBundle, bbErr := bundleService.GetBundleByName(primaryDB, "Bundles")
+			if bbErr == nil {
+				// Flush first to ensure PageCount is accurate
+				bundleService.FlushMetadataUpdates()
+				catalogDocs, loadErr := bundleService.LoadCatalogBundleDocuments("Bundles")
+				if loadErr == nil {
+					bundlesSchema := bundlesBundle.DocumentStructure.FieldSchema()
+					for _, doc := range catalogDocs {
+						dbNameVal, dbOk := doc.GetFieldValue(bundlesSchema, "DatabaseName")
+						nameVal, nameOk := doc.GetFieldValue(bundlesSchema, "Name")
+						if dbOk && nameOk {
+							dbStr, _ := dbNameVal.AsString()
+							nameStr, _ := nameVal.AsString()
+							if dbStr != "" && nameStr != "" {
+								existingCatalogEntries[catalogKey{dbStr, nameStr}] = true
+							}
+						}
+					}
+					sugar.Infof("[BUNDLE-SYNC] Found %d existing bundle catalog entries across all databases", len(existingCatalogEntries))
+				} else {
+					sugar.Warnf("[BUNDLE-SYNC] Failed to load Bundles catalog documents: %v", loadErr)
+				}
+			} else {
+				sugar.Warnf("[BUNDLE-SYNC] Failed to get primary.Bundles bundle: %v", bbErr)
+			}
+		} else {
+			sugar.Warnf("[BUNDLE-SYNC] Failed to get primary database: %v", primErr)
+		}
+
+		bundleSyncCount := 0
+		for _, db := range server.Databases {
+			if strings.ToLower(db.Name) == "primary" {
+				continue
+			}
+
+			// Collect bundle names to check: from BundleFiles if populated,
+			// otherwise discover from disk by scanning the database directory.
+			bundleNames := make([]string, 0)
+			if len(db.BundleFiles) > 0 {
+				for _, bundleFileName := range db.BundleFiles {
+					name := strings.TrimSuffix(bundleFileName, ".bnd")
+					name = strings.TrimPrefix(name, db.Name+"_")
+					if name != "" {
+						bundleNames = append(bundleNames, name)
+					}
+				}
+			} else {
+				// BundleFiles is empty — discover bundles from disk
+				dbPath := helpers.GetDatabaseFolderPath(db.Name)
+				entries, dirErr := os.ReadDir(dbPath)
+				if dirErr != nil {
+					sugar.Warnf("[BUNDLE-SYNC] Failed to read database directory '%s': %v", dbPath, dirErr)
+				} else {
+					seen := make(map[string]bool)
+					for _, entry := range entries {
+						name := entry.Name()
+						if entry.IsDir() {
+							// Modern format: subdirectory with bundle.manifest
+							manifestPath := filepath.Join(dbPath, name, "bundle.manifest")
+							if _, err := os.Stat(manifestPath); err == nil && !seen[name] {
+								seen[name] = true
+								bundleNames = append(bundleNames, name)
+							}
+						} else if strings.HasSuffix(name, ".bnd") {
+							// Legacy format: databaseName_bundleName.bnd
+							bName := strings.TrimSuffix(name, ".bnd")
+							bName = strings.TrimPrefix(bName, db.Name+"_")
+							if bName != "" && !seen[bName] {
+								seen[bName] = true
+								bundleNames = append(bundleNames, bName)
+							}
+						}
+					}
+					if len(bundleNames) > 0 {
+						sugar.Infof("[BUNDLE-SYNC] Discovered %d bundles on disk for database '%s' (BundleFiles was empty)", len(bundleNames), db.Name)
+						// Repair the BundleFiles list so future lookups work
+						for _, bName := range bundleNames {
+							db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s_%s.bnd", db.Name, bName))
+						}
+					}
+				}
+			}
+
+			sugar.Infof("[BUNDLE-SYNC] Database '%s': %d bundles to check", db.Name, len(bundleNames))
+
+			// Check each bundle and register any missing from catalog
+			for _, bundleName := range bundleNames {
+				key := catalogKey{db.Name, bundleName}
+				if existingCatalogEntries[key] {
+					sugar.Debugf("[BUNDLE-SYNC] Bundle '%s.%s' already in catalog, skipping", db.Name, bundleName)
+					continue
+				}
+
+				sugar.Infof("[BUNDLE-SYNC] Bundle '%s.%s' missing from catalog, registering...", db.Name, bundleName)
+
+				// Bundle exists on disk but not in catalog — load metadata and register
+				bundle, err := bundleService.GetBundleMetadata(db, bundleName)
+				if err != nil {
+					sugar.Warnf("[BUNDLE-SYNC] Failed to load bundle metadata for '%s.%s': %v", db.Name, bundleName, err)
+					continue
+				}
+				// Always set database reference to the correct database
+				bundle.Database = db
+
+				if err := catalogService.RegisterBundleInCatalog(bundle); err != nil {
+					sugar.Warnf("[BUNDLE-SYNC] Failed to register bundle '%s.%s': %v", db.Name, bundleName, err)
+				} else {
+					bundleSyncCount++
+					sugar.Infof("[BUNDLE-SYNC] Registered bundle '%s.%s' in system catalog", db.Name, bundleName)
+				}
+			}
+		}
+		if bundleSyncCount > 0 {
+			sugar.Infof("[BUNDLE-SYNC] Successfully synchronized %d bundles with system catalog", bundleSyncCount)
+			if err := bundleService.FlushAllBuffers(); err != nil {
+				sugar.Warnf("[BUNDLE-SYNC] Failed to flush after bundle sync: %v", err)
+			}
+		} else {
+			sugar.Infof("[BUNDLE-SYNC] All bundles already present in catalog, no sync needed")
+		}
+	}
+
 	// Initialize ghost cleanup worker for automatic background compaction
 	// Create metrics reporter callback to avoid import cycles
 	metricsReporter := func(metricName string, value uint64) {

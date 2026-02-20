@@ -779,7 +779,8 @@ func (es *EntryStorage) UpdateHeaderStatistics(globalSequence uint64) error {
 	}
 
 	// Update header statistics in memory
-	es.currentHeader.TotalEntries = es.totalEntries
+	// Use atomic load — totalEntries may be written via atomic.AddUint64 in appendEntryToBucket
+	es.currentHeader.TotalEntries = atomic.LoadUint64(&es.totalEntries)
 	// DeletedEntries would need to be tracked separately - for now keep existing value
 	es.currentHeader.FileSize = es.currentFileSize
 	es.currentHeader.GlobalSequence = globalSequence
@@ -799,7 +800,7 @@ func (es *EntryStorage) UpdateHeaderStatistics(globalSequence uint64) error {
 
 	if es.logger != nil {
 		es.logger.Debugf("Updated header statistics: entries=%d, size=%d, seq=%d",
-			es.totalEntries, es.currentFileSize, globalSequence)
+			atomic.LoadUint64(&es.totalEntries), es.currentFileSize, globalSequence)
 	}
 
 	return nil
@@ -1026,8 +1027,8 @@ func (es *EntryStorage) Close() error {
 			"indexName", es.indexName,
 			"bundleName", es.bundleName,
 			"useBuckets", es.useBuckets,
-			"totalEntries", es.totalEntries,
-			"totalBytes", es.totalBytes)
+			"totalEntries", atomic.LoadUint64(&es.totalEntries),
+			"totalBytes", atomic.LoadUint64(&es.totalBytes))
 	}
 
 	return nil
@@ -1175,8 +1176,8 @@ func (es *EntryStorage) GetStats() EntryStorageStats {
 		IndexName:       es.indexName,
 		BundleName:      es.bundleName,
 		FileCount:       len(es.allFiles),
-		TotalEntries:    es.totalEntries,
-		TotalBytes:      es.totalBytes,
+		TotalEntries:    atomic.LoadUint64(&es.totalEntries),
+		TotalBytes:      atomic.LoadUint64(&es.totalBytes),
 		CurrentFileSize: es.currentFileSize,
 		LastRotation:    es.lastRotation,
 	}

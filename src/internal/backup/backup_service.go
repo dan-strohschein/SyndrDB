@@ -116,7 +116,10 @@ func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (str
 		return "", fmt.Errorf("failed to write manifest: %w", err)
 	}
 
-	// Step 9: Create compressed archive
+	// Step 9: Ensure output directory exists, then create compressed archive
+	if err := os.MkdirAll(filepath.Dir(options.OutputPath), 0755); err != nil {
+		return "", fmt.Errorf("failed to create backup directory: %w", err)
+	}
 	if err := bs.createArchive(tempDir, options.OutputPath, options.Compression); err != nil {
 		return "", fmt.Errorf("failed to create archive: %w", err)
 	}
@@ -262,7 +265,10 @@ func (bs *BackupService) copyFilesWithCRC(db *models.Database, files []string, t
 	return nil
 }
 
-// collectPrimaryDBDocuments retrieves metadata from Primary database
+// collectPrimaryDBDocuments retrieves metadata from Primary database.
+// Uses LoadCatalogBundleDocuments (page-scanning) instead of SortedIndex
+// because the sorted_index.sidx file may not exist for system catalog
+// bundles, causing GetAllDocumentIDs() to return an empty list.
 func (bs *BackupService) collectPrimaryDBDocuments(db *models.Database, manifest *Manifest) error {
 	primaryDB, err := bs.databaseService.GetDatabaseByName("primary")
 	if err != nil {
@@ -275,21 +281,41 @@ func (bs *BackupService) collectPrimaryDBDocuments(db *models.Database, manifest
 		return fmt.Errorf("Databases bundle not found: %w", err)
 	}
 
-	// Find the document for this database
-	// TODO: I need to iterate through documents using page cache via BundleService.GetDocumentPage()
-	// For now, we scan through all document IDs and load each document
-	docIDs := databasesBundle.SortedIndex.GetAllDocumentIDs()
-	for _, docID := range docIDs {
-		doc, err := bs.bundleService.GetDocument(databasesBundle.Name, primaryDB.Name, docID)
-		if err != nil {
+	// Scan all documents in the Databases bundle via page iteration
+	dbSchema := databasesBundle.DocumentStructure.FieldSchema()
+	bs.bundleService.FlushMetadataUpdates()
+	dbDocs, err := bs.bundleService.LoadCatalogBundleDocuments(databasesBundle.Name)
+	if err != nil {
+		bs.logger.Warnw("Failed to load Databases catalog documents", "error", err)
+	}
+	bs.logger.Infow("[BACKUP-DIAG] Databases bundle scan",
+		"total_docs_returned", len(dbDocs),
+		"target_db", db.Name,
+		"page_count", databasesBundle.PageCount,
+		"total_docs_meta", databasesBundle.TotalDocuments,
+	)
+	for _, doc := range dbDocs {
+		data := ensureDocData(doc, dbSchema)
+		if data == nil {
+			bs.logger.Warnw("[BACKUP-DIAG] ensureDocData returned nil",
+				"docID", doc.DocumentID,
+				"hasData", doc.Data != nil,
+				"valuesLen", len(doc.Values),
+			)
 			continue
 		}
-		if nameField, ok := doc.Data["Name"]; ok {
-			if nameField.(string) == db.Name {
+		nameField, nameOK := data["Name"]
+		bs.logger.Infow("[BACKUP-DIAG] Databases doc",
+			"docID", doc.DocumentID,
+			"Name", nameField,
+			"nameFieldExists", nameOK,
+		)
+		if nameOK {
+			if nameStr, ok := nameField.(string); ok && nameStr == db.Name {
 				manifest.PrimaryDBDocuments = append(manifest.PrimaryDBDocuments, PrimaryDBDoc{
 					Bundle:     "Databases",
 					DocumentID: doc.DocumentID,
-					Data:       doc.Data,
+					Data:       data,
 				})
 				break
 			}
@@ -302,21 +328,34 @@ func (bs *BackupService) collectPrimaryDBDocuments(db *models.Database, manifest
 		return fmt.Errorf("Bundles bundle not found: %w", err)
 	}
 
-	// Collect all bundle documents for this database
-	// TODO: I need to iterate through documents using page cache via BundleService.GetDocumentPage()
-	// For now, we scan through all document IDs and load each document
-	bundleDocIDs := bundlesBundle.SortedIndex.GetAllDocumentIDs()
-	for _, docID := range bundleDocIDs {
-		doc, err := bs.bundleService.GetDocument(bundlesBundle.Name, primaryDB.Name, docID)
-		if err != nil {
+	// Scan all documents in the Bundles bundle via page iteration
+	bundleSchema := bundlesBundle.DocumentStructure.FieldSchema()
+	bundleDocs, err := bs.bundleService.LoadCatalogBundleDocuments(bundlesBundle.Name)
+	if err != nil {
+		bs.logger.Warnw("Failed to load Bundles catalog documents", "error", err)
+	}
+	bs.logger.Infow("[BACKUP-DIAG] Bundles bundle scan",
+		"total_docs_returned", len(bundleDocs),
+		"target_db", db.Name,
+		"page_count", bundlesBundle.PageCount,
+		"total_docs_meta", bundlesBundle.TotalDocuments,
+	)
+	for _, doc := range bundleDocs {
+		data := ensureDocData(doc, bundleSchema)
+		if data == nil {
 			continue
 		}
-		if dbNameField, ok := doc.Data["DatabaseName"]; ok {
-			if dbNameField.(string) == db.Name {
+		if dbNameField, ok := data["DatabaseName"]; ok {
+			if dbNameStr, ok := dbNameField.(string); ok && dbNameStr == db.Name {
+				bs.logger.Infow("[BACKUP-DIAG] matched Bundles doc",
+					"docID", doc.DocumentID,
+					"Name", data["Name"],
+					"DatabaseName", dbNameStr,
+				)
 				manifest.PrimaryDBDocuments = append(manifest.PrimaryDBDocuments, PrimaryDBDoc{
 					Bundle:     "Bundles",
 					DocumentID: doc.DocumentID,
-					Data:       doc.Data,
+					Data:       data,
 				})
 			}
 		}
@@ -327,6 +366,31 @@ func (bs *BackupService) collectPrimaryDBDocuments(db *models.Database, manifest
 		"document_count", len(manifest.PrimaryDBDocuments),
 	)
 
+	if len(manifest.PrimaryDBDocuments) == 0 {
+		bs.logger.Errorw("[BACKUP-DIAG] WARNING: 0 PrimaryDBDocuments captured! Restore will not register bundles in catalog.",
+			"database", db.Name,
+		)
+	}
+
+	return nil
+}
+
+// ensureDocData returns doc.Data if populated, otherwise builds a Data map
+// from doc.Values using the bundle's field schema so that backup metadata
+// is always captured even when the typed-Values path is active.
+func ensureDocData(doc *models.Document, schema *models.BundleFieldSchema) map[string]interface{} {
+	if doc.Data != nil && len(doc.Data) > 0 {
+		return doc.Data
+	}
+	if schema != nil && len(doc.Values) > 0 {
+		data := make(map[string]interface{}, len(schema.Names))
+		for i, name := range schema.Names {
+			if i < len(doc.Values) {
+				data[name] = doc.Values[i].AsInterface()
+			}
+		}
+		return data
+	}
 	return nil
 }
 
@@ -491,18 +555,31 @@ func (bs *BackupService) extractArchive(archivePath, destDir string) error {
 	}
 	defer archiveFile.Close()
 
-	// Detect compression based on file extension
-	var decompReader io.Reader
-	ext := filepath.Ext(archivePath)
+	// Detect compression by reading magic bytes from the file header.
+	// This is more reliable than file extension, especially for .sdb files
+	// which may be gzip or zstd compressed.
+	magic := make([]byte, 4)
+	n, err := archiveFile.Read(magic)
+	if err != nil || n < 2 {
+		return fmt.Errorf("failed to read archive header: %w", err)
+	}
+	// Seek back to the start so the decompressor reads from the beginning
+	if _, err := archiveFile.Seek(0, 0); err != nil {
+		return fmt.Errorf("failed to seek archive file: %w", err)
+	}
 
-	if strings.Contains(ext, "gz") || strings.Contains(archivePath, ".tar.gz") {
+	var decompReader io.Reader
+
+	if magic[0] == 0x1f && magic[1] == 0x8b {
+		// gzip magic bytes
 		gzReader, err := gzip.NewReader(archiveFile)
 		if err != nil {
 			return fmt.Errorf("failed to create gzip reader: %w", err)
 		}
 		defer gzReader.Close()
 		decompReader = gzReader
-	} else if strings.Contains(ext, "zst") || strings.Contains(archivePath, ".tar.zst") {
+	} else if n >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd {
+		// zstd magic bytes
 		zstReader, err := zstd.NewReader(archiveFile)
 		if err != nil {
 			return fmt.Errorf("failed to create zstd reader: %w", err)
@@ -510,6 +587,7 @@ func (bs *BackupService) extractArchive(archivePath, destDir string) error {
 		defer zstReader.Close()
 		decompReader = zstReader
 	} else {
+		// Assume uncompressed tar
 		decompReader = archiveFile
 	}
 

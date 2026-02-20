@@ -1429,13 +1429,23 @@ func (bs *BundleStorageEngine) processDocumentPage(pageData []byte, docs map[str
 
 func (b *BundleStorageEngine) BundleFileExists(bundleName string, databaseName string) bool {
 	// Check if the bundle file exists in the data directory
-	//args := settings.GetSettings()
-
 	databasePath := helpers.GetDatabaseFolderPath(databaseName)
 
+	// Check legacy single-file format: {database}/{database}_{bundle}.bnd
 	filePath := filepath.Join(databasePath, fmt.Sprintf("%s_%s.bnd", databaseName, bundleName))
-	b.logger.Debugf("Checking if bundle file exists: %s", filePath)
-	return helpers.FileExists(filePath, *b.logger)
+	if helpers.FileExists(filePath, *b.logger) {
+		return true
+	}
+
+	// Check multi-segment format: {database}/{bundle}/bundle.manifest
+	manifestPath := filepath.Join(databasePath, bundleName, "bundle.manifest")
+	if helpers.FileExists(manifestPath, *b.logger) {
+		return true
+	}
+
+	b.logger.Debugf("Bundle file not found for '%s' in database '%s' (checked %s and %s)",
+		bundleName, databaseName, filePath, manifestPath)
+	return false
 }
 
 func (b *BundleStorageEngine) CreateBundleFile(database *models.Database, bundle *models.Bundle) error {

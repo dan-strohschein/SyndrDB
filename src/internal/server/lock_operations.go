@@ -109,7 +109,7 @@ func UnlockDatabaseCommand(command string, logger *zap.SugaredLogger, serviceMan
 // parseLockCommand extracts database name, reason, and comment from command tokens
 // Expected format: LOCK DATABASE "dbname" [FOR "reason"] [COMMENT "comment"]
 func parseLockCommand(command string) (string, string, string, error) {
-	tokens := strings.Fields(command)
+	tokens := tokenizeQuoted(command)
 
 	// Minimum tokens: LOCK DATABASE "name" = 3 tokens
 	if len(tokens) < 3 {
@@ -169,10 +169,50 @@ func parseLockCommand(command string) (string, string, string, error) {
 	return dbName, reason, comment, nil
 }
 
+// tokenizeQuoted splits a command string by whitespace while keeping quoted
+// strings (single or double quotes) as single tokens. Trailing semicolons are
+// stripped from the raw command before tokenizing.
+func tokenizeQuoted(command string) []string {
+	command = strings.TrimRight(strings.TrimSpace(command), ";")
+
+	var tokens []string
+	var current strings.Builder
+	inQuote := false
+	var quoteChar byte
+
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+
+		if inQuote {
+			current.WriteByte(ch)
+			if ch == quoteChar {
+				inQuote = false
+			}
+		} else if ch == '"' || ch == '\'' {
+			inQuote = true
+			quoteChar = ch
+			current.WriteByte(ch)
+		} else if ch == ' ' || ch == '\t' || ch == ',' {
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+		} else {
+			current.WriteByte(ch)
+		}
+	}
+
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+
+	return tokens
+}
+
 // parseUnlockCommand extracts database name from command tokens
 // Expected format: UNLOCK DATABASE "dbname"
 func parseUnlockCommand(command string) (string, error) {
-	tokens := strings.Fields(command)
+	tokens := tokenizeQuoted(command)
 
 	// Minimum tokens: UNLOCK DATABASE "name" = 3 tokens
 	if len(tokens) < 3 {

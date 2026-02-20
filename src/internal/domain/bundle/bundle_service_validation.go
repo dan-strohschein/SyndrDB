@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -49,6 +50,13 @@ func (s *BundleService) getOrCreateSchemaManager(db *models.Database) (*graphQLS
 		s.logger.Debugf("GraphQL schema manager initialized for database '%s' at: %s", db.Name, schemaFilePath)
 		return manager, nil
 	})
+}
+
+// GetSchemaManager returns the GraphQL schema manager for the given database,
+// creating it if necessary. This is the exported wrapper around getOrCreateSchemaManager
+// so that main.go can pass the same manager instance to the GraphQL handler.
+func (s *BundleService) GetSchemaManager(db *models.Database) (*graphQLSchema.SchemaManager, error) {
+	return s.getOrCreateSchemaManager(db)
 }
 
 // regenerateGraphQLSchema regenerates the GraphQL schema for a bundle after structure changes.
@@ -157,6 +165,102 @@ func (s *BundleService) regenerateGraphQLSchema(bundle *models.Bundle) error {
 		bundle.Name, newVersion, len(newSchemaDef.Fields), len(breakingChanges))
 
 	return nil
+}
+
+// ReconcileGraphQLSchemas generates GraphQL schemas for any existing bundles that are
+// missing one. This is called at startup when --graphql is enabled to handle bundles
+// that were created while GraphQL was disabled.
+//
+// Because db.Bundles may be empty at startup (bundles are loaded on-demand), this
+// method discovers bundle names from .bnd files on disk, then uses GetBundleMetadata
+// to load each bundle with full FieldDefinitions before generating its schema.
+//
+// Returns the number of schemas generated and any error encountered.
+// Individual bundle failures are logged at Warn level but do not abort the process.
+func (s *BundleService) ReconcileGraphQLSchemas(db *models.Database) (int, error) {
+	if !s.graphQLEnabled || s.schemaGenerator == nil {
+		return 0, nil
+	}
+
+	schemaManager, err := s.getOrCreateSchemaManager(db)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get schema manager: %w", err)
+	}
+	if schemaManager == nil {
+		return 0, nil
+	}
+
+	// Discover bundle names from .bnd files on disk.
+	// Convention: {dbName}_{bundleName}.bnd  (first segment file per bundle)
+	databasePath := helpers.GetDatabaseFolderPath(db.Name)
+	entries, err := os.ReadDir(databasePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read database directory %s: %w", databasePath, err)
+	}
+
+	prefix := db.Name + "_"
+	suffix := ".bnd"
+	bundleNames := make(map[string]struct{})
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		// Strip prefix and suffix to get bundle name
+		bundleName := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+		if bundleName == "" {
+			continue
+		}
+		// Multi-segment bundles live in subdirectories; the top-level .bnd is
+		// the original single-file bundle.  Deduplicate.
+		bundleNames[bundleName] = struct{}{}
+	}
+
+	// Also scan subdirectories that match bundle names (multi-segment bundles
+	// store files in {databasePath}/{bundleName}/*.bnd with a .manifest).
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		subdir := entry.Name()
+		manifestPath := filepath.Join(databasePath, subdir, "bundle.manifest")
+		if _, err := os.Stat(manifestPath); err == nil {
+			bundleNames[subdir] = struct{}{}
+		}
+	}
+
+	reconciled := 0
+	for bundleName := range bundleNames {
+		// Load full bundle metadata (including FieldDefinitions) from disk.
+		// We always need this to populate db.Bundles (which is empty at startup).
+		bundle, err := s.GetBundleMetadata(db, bundleName)
+		if err != nil {
+			s.logger.Warnf("[GraphQL Reconcile] Failed to load bundle '%s': %v", bundleName, err)
+			continue
+		}
+
+		// Populate db.Bundles so loadSchemaFromBundles can iterate them
+		bundle.Database = db
+		db.Bundles[bundleName] = *bundle
+
+		// Check if this bundle already has a GraphQL schema
+		_, schemaErr := schemaManager.GetActiveSchemaForBundle(bundleName)
+		if schemaErr == nil {
+			continue // schema already exists, no regeneration needed
+		}
+
+		// No schema found — generate one
+		s.logger.Infof("[GraphQL Reconcile] Generating schema for bundle '%s'", bundleName)
+
+		if err := s.regenerateGraphQLSchema(bundle); err != nil {
+			s.logger.Warnf("[GraphQL Reconcile] Failed to generate schema for bundle '%s': %v", bundleName, err)
+			continue
+		}
+
+		reconciled++
+	}
+
+	return reconciled, nil
 }
 
 // validateDocumentFields validates that document fields match bundle field definitions

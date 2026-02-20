@@ -265,6 +265,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown SHOW CONFLICT command: %s", command),
 				errors.LayerCommand).WithContext("command", command)
+		case "backups":
+			return ShowBackups(command, logger, &serviceManager, startTime)
 		}
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unknown SHOW command: %s", command),

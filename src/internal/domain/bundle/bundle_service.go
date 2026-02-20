@@ -534,6 +534,24 @@ func (s *BundleService) SetCatalogService(catalogService CatalogServiceInterface
 	s.logger.Debug("Catalog service injected into BundleService")
 }
 
+// RegisterBundleInCatalog delegates to the injected CatalogService to register
+// a bundle in the primary.Bundles system catalog.
+func (s *BundleService) RegisterBundleInCatalog(bundle *models.Bundle) error {
+	if s.catalogService == nil {
+		return fmt.Errorf("catalog service not available")
+	}
+	return s.catalogService.RegisterBundleInCatalog(bundle)
+}
+
+// AddDatabaseToCatalog delegates to the injected CatalogService to register
+// a database in the primary.Databases system catalog.
+func (s *BundleService) AddDatabaseToCatalog(db *models.Database) error {
+	if s.catalogService == nil {
+		return fmt.Errorf("catalog service not available")
+	}
+	return s.catalogService.AddDatabaseToCatalog(db)
+}
+
 // SetStatsUpdater injects a column statistics updater for incremental stats maintenance.
 func (s *BundleService) SetStatsUpdater(updater StatsUpdater) {
 	s.statsUpdater = updater

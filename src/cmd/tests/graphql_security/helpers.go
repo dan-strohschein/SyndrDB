@@ -47,13 +47,14 @@ type PartialTestEnvironment struct {
 	cleanup        func()
 }
 
-// EnsureTestIsolation ensures the current test has isolated settings
+// EnsureTestIsolation ensures the current test has isolated settings.
+// We only reset at the START of each test. Resetting in t.Cleanup races with
+// background goroutines (e.g. warmParsedDocsCache) that read the settings
+// singleton concurrently — the next test's initial reset is sufficient.
 func EnsureTestIsolation(t *testing.T) {
 	t.Helper()
 	settings.ResetSettingsForTesting()
-	t.Cleanup(func() {
-		settings.ResetSettingsForTesting()
-	})
+	server.ResetServiceManager()
 }
 
 // SecurityTestConfig configures which security layers to enable for testing
@@ -108,6 +109,8 @@ func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *Te
 	globalSettings.LogDir = args.LogDir
 	globalSettings.DataDir = args.DataDir
 	globalSettings.TempDir = args.TempDir
+	// Disable cache warming to prevent background goroutines that race with settings reset
+	globalSettings.GroupByCacheWarmingEnabled = false
 
 	// Create directory structure
 	if err := os.MkdirAll(args.DataDir, 0755); err != nil {
@@ -145,6 +148,11 @@ func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *Te
 	bundleFactory := bundle.NewBundleFactory()
 	documentFactory := document.NewDocumentFactory()
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, args)
+
+	// Stop background goroutines on test cleanup to prevent cross-test races
+	t.Cleanup(func() {
+		bundleService.Shutdown()
+	})
 
 	// Create catalog service
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)
@@ -318,6 +326,7 @@ func setupPartialTestEnvironment(t *testing.T, enableSecurity bool) *PartialTest
 // setupPartialTestEnvironmentWithConfig creates partial environment with custom config
 func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *PartialTestEnvironment {
 	t.Helper()
+	EnsureTestIsolation(t)
 
 	// Create temporary directory
 	tempDir := t.TempDir()
@@ -347,6 +356,8 @@ func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConf
 	globalSettings.LogDir = args.LogDir
 	globalSettings.DataDir = args.DataDir
 	globalSettings.TempDir = args.TempDir
+	// Disable cache warming to prevent background goroutines that race with settings reset
+	globalSettings.GroupByCacheWarmingEnabled = false
 
 	// Create directory structure
 	if err := os.MkdirAll(args.DataDir, 0755); err != nil {
@@ -385,6 +396,11 @@ func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConf
 	bundleFactory := bundle.NewBundleFactory()
 	documentFactory := document.NewDocumentFactory()
 	bundleService := bundle.NewBundleService(bundleStore, bundleFactory, documentFactory, sugar, args)
+
+	// Stop background goroutines on test cleanup to prevent cross-test races
+	t.Cleanup(func() {
+		bundleService.Shutdown()
+	})
 
 	// Create catalog service
 	catalogService := defaultdb.NewCatalogService(databaseService, bundleService, sugar)

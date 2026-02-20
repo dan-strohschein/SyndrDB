@@ -253,7 +253,8 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 	`
 
 	// PHASE 6: If SchemaManager is available, generate types from bundle schemas
-	// Otherwise fall back to generic document structure
+	// Bundles without a registered GraphQL schema are skipped (reconciliation at
+	// startup via ReconcileGraphQLSchemas ensures schemas exist for all bundles).
 	bundleTypes := make(map[string]*schema.GraphQLSchemaDefinition)
 
 	if schemaManager != nil {
@@ -261,35 +262,27 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 		for bundleName := range database.Bundles {
 			// Retrieve the active schema for this bundle
 			bundleSchema, err := schemaManager.GetActiveSchemaForBundle(bundleName)
-			if err != nil {
-				logger.Warnf("Failed to get schema for bundle '%s': %v - using generic type", bundleName, err)
+			if err != nil || bundleSchema == nil || bundleSchema.Payload == nil {
+				// No GraphQL schema registered — skip this bundle
+				logger.Debugf("No GraphQL schema for bundle '%s' — skipping", bundleName)
 				continue
 			}
 
-			if bundleSchema != nil && bundleSchema.Payload != nil {
-				bundleTypes[bundleName] = bundleSchema.Payload
+			bundleTypes[bundleName] = bundleSchema.Payload
 
-				// Add query field for this bundle
-				// Example: users(limit: Int, offset: Int, where: String, orderBy: String): [User!]!
-				typeName := bundleSchema.Payload.TypeName
-				schemaString += fmt.Sprintf("\t\t%s(limit: Int, offset: Int, where: String, orderBy: String): [%s!]!\n",
-					bundleName, typeName)
-			}
+			// Add query field for this bundle
+			// Example: users(limit: Int, offset: Int, where: String, orderBy: String): [User!]!
+			typeName := bundleSchema.Payload.TypeName
+			schemaString += fmt.Sprintf("\t\t%s(limit: Int, offset: Int, where: String, orderBy: String): [%s!]!\n",
+				bundleName, typeName)
 		}
 	} else {
-		// Fallback: Use generic Document type if no schema manager
-		logger.Warn("No SchemaManager available - using generic Document type for all bundles")
-		for bundleName := range database.Bundles {
-			schemaString += fmt.Sprintf("\t\t%s(limit: Int, offset: Int, where: String, orderBy: String): [Document!]!\n", bundleName)
-		}
+		logger.Warn("No SchemaManager available - no bundle types will be exposed via GraphQL")
 	}
 
-	// If no bundles exist, add a placeholder query field to prevent empty Query type
+	// If no bundles were added at all, add a placeholder query field to prevent empty Query type
 	// GraphQL spec requires Query type to have at least one field
-	if len(bundleTypes) == 0 && schemaManager == nil {
-		schemaString += "\t\t_schema: String\n"
-	} else if len(bundleTypes) == 0 {
-		// SchemaManager exists but no bundles yet - add placeholder
+	if len(bundleTypes) == 0 {
 		schemaString += "\t\t_schema: String\n"
 	}
 
@@ -297,26 +290,16 @@ func loadSchemaFromBundles(database *models.Database, schemaManager *schema.Sche
 	schemaString += "\t}\n\n"
 
 	// PHASE 6: Generate type definitions for each bundle from Phase 5 schemas
-	if len(bundleTypes) > 0 {
-		for _, bundleSchema := range bundleTypes {
-			// Build type definition from schema
-			schemaString += fmt.Sprintf("\ttype %s {\n", bundleSchema.TypeName)
+	for _, bundleSchema := range bundleTypes {
+		// Build type definition from schema
+		schemaString += fmt.Sprintf("\ttype %s {\n", bundleSchema.TypeName)
 
-			// Add fields from bundle schema
-			for _, field := range bundleSchema.Fields {
-				schemaString += fmt.Sprintf("\t\t%s: %s\n", field.Name, field.Type)
-			}
-
-			schemaString += "\t}\n\n"
+		// Add fields from bundle schema
+		for _, field := range bundleSchema.Fields {
+			schemaString += fmt.Sprintf("\t\t%s: %s\n", field.Name, field.Type)
 		}
-	} else {
-		// Fallback generic Document type
-		schemaString += `
-	type Document {
-		id: ID!
-		fields: String!
-	}
-`
+
+		schemaString += "\t}\n\n"
 	}
 
 	// PHASE 11: Generate Mutation type with auto-generated CRUD mutations
@@ -368,10 +351,13 @@ func (h *GraphQLHandler) ProcessGraphQLCommand(command string, session *server.S
 
 	var req GraphQLRequest
 
-	// Try to parse as JSON first (for structured requests)
+	// Try to parse as JSON first (for structured requests like {"query": "..."})
+	// If JSON parsing fails, fall back to treating it as a plain GraphQL query string
+	// (both JSON payloads and raw GraphQL queries can start with "{")
 	if strings.HasPrefix(graphqlPayload, "{") {
-		if err := json.Unmarshal([]byte(graphqlPayload), &req); err != nil {
-			return nil, fmt.Errorf("invalid GraphQL JSON: %v", err)
+		if err := json.Unmarshal([]byte(graphqlPayload), &req); err != nil || req.Query == "" {
+			// Not valid JSON or missing query field — treat as raw GraphQL query
+			req = GraphQLRequest{Query: graphqlPayload}
 		}
 	} else {
 		// Treat as plain query string

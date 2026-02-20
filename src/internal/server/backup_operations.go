@@ -24,6 +24,7 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"syndrdb/src/internal/backup"
@@ -85,7 +86,7 @@ func BackupDatabase(command string, logger *zap.SugaredLogger, serviceManager *S
 // parseBackupCommand extracts database name, backup path, and options from command tokens
 // Expected format: BACKUP DATABASE "dbname" TO "path/to/backup.sdb" [WITH COMPRESSION = 'gzip']
 func parseBackupCommand(command string) (string, string, backup.BackupOptions, error) {
-	tokens := strings.Fields(command)
+	tokens := tokenizeQuoted(command)
 
 	// Initialize default options from settings
 	args := settings.GetSettings()
@@ -148,7 +149,63 @@ func parseBackupCommand(command string) (string, string, backup.BackupOptions, e
 		}
 	}
 
+	options.OutputPath = backupPath
+
 	return dbName, backupPath, options, nil
+}
+
+// ShowBackups handles the SHOW BACKUPS command.
+// It reads the configured BackupDir and lists all .sdb backup files.
+func ShowBackups(command string, logger *zap.SugaredLogger, serviceManager *ServiceManager, startTime time.Time) (*CommandResponse, error) {
+	backupDir := settings.GetSettings().BackupDir
+
+	// Check if the backup directory exists
+	info, err := os.Stat(backupDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &CommandResponse{
+				ResultCount:     0,
+				Result:          []map[string]interface{}{},
+				ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+			}, nil
+		}
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to access backup directory", errors.LayerCommand).WithContext("backup_dir", backupDir)
+	}
+	if !info.IsDir() {
+		return nil, errors.New(errors.ERR_INTERNAL_STORAGE,
+			fmt.Sprintf("backup path is not a directory: %s", backupDir),
+			errors.LayerCommand).WithContext("backup_dir", backupDir)
+	}
+
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
+			"failed to read backup directory", errors.LayerCommand).WithContext("backup_dir", backupDir)
+	}
+
+	results := make([]map[string]interface{}, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sdb" {
+			continue
+		}
+		fileInfo, err := entry.Info()
+		if err != nil {
+			logger.Warnf("Failed to stat backup file %s: %v", entry.Name(), err)
+			continue
+		}
+		results = append(results, map[string]interface{}{
+			"file_name":   entry.Name(),
+			"size_bytes":  fileInfo.Size(),
+			"modified_at": fileInfo.ModTime().UTC().Format(time.RFC3339),
+		})
+	}
+
+	return &CommandResponse{
+		ResultCount:     len(results),
+		Result:          results,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+	}, nil
 }
 
 // parseBackupOptions parses the WITH clause for backup options

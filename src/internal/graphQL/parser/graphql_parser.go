@@ -46,6 +46,7 @@ import (
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/graphQL/schema"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/syndrQL"
 
 	"github.com/vektah/gqlparser/v2/ast"
 	"go.uber.org/zap"
@@ -296,7 +297,7 @@ func (p *GraphQLParser) mapGraphQLFieldToBundleField(graphqlField string, bundle
 //   - variables: GraphQL query variables for parameterized queries
 //
 // Returns:
-//   - *queryparser.WhereGroup: Parsed WHERE clause (may be nil)
+//   - interface{}: Parsed WHERE expression as syndrQL.Expression (may be nil)
 //   - int: LIMIT value (0 if not specified)
 //   - int: OFFSET value (0 if not specified)
 //   - *queryparser.OrderByClause: ORDER BY specification (may be nil)
@@ -304,8 +305,8 @@ func (p *GraphQLParser) mapGraphQLFieldToBundleField(graphqlField string, bundle
 //
 // TODO: I will store pagination arguments (first/after/last/before) in UnifiedSelectQuery
 // when we add pagination support to the query execution pipeline in Phase 10.
-func (p *GraphQLParser) extractQueryArguments(field *ast.Field, variables map[string]interface{}) (*queryparser.WhereGroup, int, int, *queryparser.OrderByClause, error) {
-	var whereClause *queryparser.WhereGroup
+func (p *GraphQLParser) extractQueryArguments(field *ast.Field, variables map[string]interface{}) (interface{}, int, int, *queryparser.OrderByClause, error) {
+	var whereExpr interface{} // syndrQL.Expression
 	var limit, offset int
 	var orderBy *queryparser.OrderByClause
 
@@ -318,13 +319,13 @@ func (p *GraphQLParser) extractQueryArguments(field *ast.Field, variables map[st
 			// PHASE 9: Support both string WHERE (legacy) and structured WhereInput (new)
 			switch v := value.(type) {
 			case string:
-				// Legacy string WHERE clause: "status = 'active' AND age > 18"
+				// Parse WHERE string into syndrQL.Expression (same AST the planner expects)
 				if v != "" {
-					var err error
-					whereClause, err = p.parseWhereClause(v)
+					expr, err := syndrQL.ParseExpression(v)
 					if err != nil {
 						return nil, 0, 0, nil, fmt.Errorf("failed to parse where clause: %w", err)
 					}
+					whereExpr = expr
 				}
 
 			case map[string]interface{}:
@@ -426,7 +427,7 @@ func (p *GraphQLParser) extractQueryArguments(field *ast.Field, variables map[st
 		}
 	}
 
-	return whereClause, limit, offset, orderBy, nil
+	return whereExpr, limit, offset, orderBy, nil
 }
 
 // resolveArgumentValue resolves a GraphQL argument value (handles variables, literals)
@@ -485,42 +486,6 @@ func (p *GraphQLParser) parseIntArgument(value interface{}, argName string) (int
 	default:
 		return 0, fmt.Errorf("'%s' must be an integer", argName)
 	}
-}
-
-// parseWhereClause parses a WHERE clause string into a WhereGroup
-//
-// For MVP, this uses a simple parsing approach where the WHERE string is passed
-// as-is to the SyndrQL WHERE parser. This ensures consistent WHERE clause behavior
-// between GraphQL and SyndrQL.
-//
-// Example:
-//
-//	Input:  "status = 'active' AND age > 18"
-//	Output: WhereGroup with appropriate conditions
-//
-// TODO: I will implement structured WHERE objects (GraphQL-style filtering) when
-// adding advanced query features in a future phase. For now, string-based WHERE
-// clauses provide compatibility with existing SyndrQL queries.
-//
-// Parameters:
-//   - whereStr: WHERE clause string
-//
-// Returns:
-//   - *queryparser.WhereGroup: Parsed WHERE clause
-//   - error: Parsing errors
-//
-// TODO: DEPRECATED - This method uses the old queryparser.ParseWhereClause which is deprecated.
-// Migration requires replacing with SyndrQL's expression parser.
-// GraphQL queries should translate GraphQL filters to SyndrQL Expressions.
-// Use syndrQL.ParseExpressionCached() for new implementations.
-func (p *GraphQLParser) parseWhereClause(whereStr string) (*queryparser.WhereGroup, error) {
-	// TODO: DEPRECATED - Using old parser, needs migration to SyndrQL.
-	// See syndrQL.ParseExpressionCached() and expression adapter for migration path.
-	whereGroup, err := queryparser.ParseWhereClause(whereStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid WHERE clause: %w", err)
-	}
-	return whereGroup, nil
 }
 
 // parseOrderByClause parses an ORDER BY clause string into an OrderByClause

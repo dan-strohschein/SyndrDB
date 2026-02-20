@@ -298,7 +298,7 @@ func UseDatabase(command string, logger *zap.SugaredLogger, serviceManager Servi
 			// Check if the requested database exists in catalog
 			var foundInCatalog bool
 			for _, dbInfo := range allDatabases {
-				if dbName, ok := dbInfo["Name"].(models.FieldValue); ok && dbName.StringVal == databaseName {
+				if dbName, ok := dbInfo["Name"].(string); ok && strings.EqualFold(dbName, databaseName) {
 					foundInCatalog = true
 					break
 				}
