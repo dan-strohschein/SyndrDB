@@ -221,6 +221,30 @@ func (wm *WALManager) LogDocumentInsert(txID, bundleName, documentID string, doc
 	return nil
 }
 
+// LogBatchInsert logs a bulk document insertion operation as a single WAL entry
+func (wm *WALManager) LogBatchInsert(txID, bundleName string, documentIDs []string, documentsData interface{}) error {
+	afterData, err := hvjson.Marshal(&documentsData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal batch documents data: %w", err)
+	}
+
+	metadata := fmt.Sprintf(`{"bundle_name":"%s","document_count":%d}`, bundleName, len(documentIDs))
+
+	// Use first document ID as the representative; full list is in afterData
+	representativeID := "batch"
+	if len(documentIDs) > 0 {
+		representativeID = documentIDs[0]
+	}
+
+	err = wm.wal.LogOperation(txID, OpBatchInsert, bundleName, representativeID, "", string(afterData), metadata)
+	if err != nil {
+		return fmt.Errorf("failed to log batch insert: %w", err)
+	}
+
+	wm.logger.Debugf("Logged batch insert: bundle=%s, docs=%d, tx=%s", bundleName, len(documentIDs), txID)
+	return nil
+}
+
 // LogDocumentUpdate logs a document update operation
 func (wm *WALManager) LogDocumentUpdate(txID, bundleName, documentID string, beforeData, afterData interface{}) error {
 	// PERF: hvjson is 27-42% faster than encoding/json

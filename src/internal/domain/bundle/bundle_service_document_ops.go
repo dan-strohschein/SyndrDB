@@ -320,6 +320,249 @@ func (s *BundleService) AddDocumentToBundleWithTxID(database *models.Database, b
 	return newDocument.DocumentID, nil
 }
 
+// AddDocumentsToBundle inserts multiple documents in a single batch operation.
+// All documents are validated upfront (all-or-nothing semantics).
+func (s *BundleService) AddDocumentsToBundle(database *models.Database, bundle *models.Bundle, bulkCmd *models.BulkDocumentCommand) ([]string, error) {
+	if bundle == nil {
+		return nil, fmt.Errorf("bundle '%s' is nil, cannot add documents", bulkCmd.BundleName)
+	}
+
+	docCount := len(bulkCmd.Documents)
+	schema := bundle.DocumentStructure.FieldSchema()
+
+	// Phase 1: Validate ALL documents upfront (fail-fast, all-or-nothing)
+	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
+	for i, docKVs := range bulkCmd.Documents {
+		tmpCmd := &models.DocumentCommand{
+			CommandType: "ADD",
+			BundleName:  bulkCmd.BundleName,
+			Fields:      docKVs,
+		}
+		if err := s.processNullValues(bundle, tmpCmd); err != nil {
+			return nil, fmt.Errorf("document %d: failed to process NULL values: %w", i, err)
+		}
+		// Update the fields back after processNullValues may have modified them
+		bulkCmd.Documents[i] = tmpCmd.Fields
+		if err := s.validateDocumentFields(bundle, tmpCmd); err != nil {
+			return nil, fmt.Errorf("document %d: field validation failed: %w", i, err)
+		}
+		if err := uniqueValidator.ValidateUniqueConstraints(bundle, tmpCmd); err != nil {
+			return nil, fmt.Errorf("document %d: unique constraint violation: %w", i, err)
+		}
+	}
+
+	// Phase 2: Create all documents
+	documents := make([]*models.Document, 0, docCount)
+	docIDs := make([]string, 0, docCount)
+	for _, docKVs := range bulkCmd.Documents {
+		tmpCmd := models.DocumentCommand{
+			CommandType: "ADD",
+			BundleName:  bulkCmd.BundleName,
+			Fields:      docKVs,
+		}
+		newDoc := s.documentFactory.NewDocument(tmpCmd, schema)
+		documents = append(documents, newDoc)
+		docIDs = append(docIDs, newDoc.DocumentID)
+	}
+
+	// Phase 3: Batch storage writes
+	pageIDs := make([]uint32, 0, docCount)
+	for _, doc := range documents {
+		pageID, err := s.store.AddDocumentToBundleFile(bundle, doc)
+		if err != nil {
+			return nil, fmt.Errorf("failed to add document %s to bundle: %w", doc.DocumentID, err)
+		}
+		pageIDs = append(pageIDs, pageID)
+	}
+
+	// Phase 4: Batch page cache updates
+	for i, doc := range documents {
+		s.updatePageCacheWithDocument(bundle.Name, pageIDs[i], doc)
+	}
+
+	// Phase 5: Single metadata update
+	s.scheduleMetadataUpdate(bulkCmd.BundleName, "increment_docs", int64(docCount))
+
+	// Phase 6: Batch statistics updates
+	if s.statsUpdater != nil {
+		for _, doc := range documents {
+			if schema != nil && len(doc.Values) > 0 {
+				for j, name := range schema.Names {
+					if j < len(doc.Values) {
+						s.statsUpdater.IncrementalUpdate(bundle.Name, name, nil, doc.Values[j].AsInterface(), bundle.TotalDocuments)
+					}
+				}
+			} else if doc.Data != nil {
+				for fieldName, v := range doc.Data {
+					s.statsUpdater.IncrementalUpdate(bundle.Name, fieldName, nil, v, bundle.TotalDocuments)
+				}
+			}
+		}
+	}
+
+	// Phase 7: Batch index scheduling
+	if bundle.Indexes != nil {
+		for i, doc := range documents {
+			s.scheduleIndexUpdatesForDocument(bundle, doc, schema, pageIDs[i])
+		}
+	}
+
+	// Phase 8: Single cache invalidation
+	s.invalidateBundleCaches(bundle.Name)
+
+	return docIDs, nil
+}
+
+// AddDocumentsToBundleWithTxID is the transaction-aware variant of AddDocumentsToBundle.
+// Sets MVCC version fields and uses the transaction-aware storage path.
+func (s *BundleService) AddDocumentsToBundleWithTxID(database *models.Database, bundle *models.Bundle, bulkCmd *models.BulkDocumentCommand, txID string, preallocDocIDs []string) ([]string, error) {
+	if bundle == nil {
+		return nil, fmt.Errorf("bundle '%s' is nil, cannot add documents", bulkCmd.BundleName)
+	}
+
+	docCount := len(bulkCmd.Documents)
+	schema := bundle.DocumentStructure.FieldSchema()
+
+	// Phase 1: Validate ALL documents upfront
+	uniqueValidator := NewUniqueConstraintValidator(s, s.logger)
+	for i, docKVs := range bulkCmd.Documents {
+		tmpCmd := &models.DocumentCommand{
+			CommandType: "ADD",
+			BundleName:  bulkCmd.BundleName,
+			Fields:      docKVs,
+		}
+		if err := s.processNullValues(bundle, tmpCmd); err != nil {
+			return nil, fmt.Errorf("document %d: failed to process NULL values: %w", i, err)
+		}
+		bulkCmd.Documents[i] = tmpCmd.Fields
+		if err := s.validateDocumentFields(bundle, tmpCmd); err != nil {
+			return nil, fmt.Errorf("document %d: field validation failed: %w", i, err)
+		}
+		if err := uniqueValidator.ValidateUniqueConstraints(bundle, tmpCmd); err != nil {
+			return nil, fmt.Errorf("document %d: unique constraint violation: %w", i, err)
+		}
+	}
+
+	// Phase 2: Create all documents with pre-allocated IDs
+	documents := make([]*models.Document, 0, docCount)
+	docIDs := make([]string, 0, docCount)
+	for i, docKVs := range bulkCmd.Documents {
+		tmpCmd := models.DocumentCommand{
+			CommandType: "ADD",
+			BundleName:  bulkCmd.BundleName,
+			Fields:      docKVs,
+		}
+		var newDoc *models.Document
+		if i < len(preallocDocIDs) && preallocDocIDs[i] != "" {
+			newDoc = s.documentFactory.NewDocumentWithID(tmpCmd, preallocDocIDs[i], schema)
+		} else {
+			newDoc = s.documentFactory.NewDocument(tmpCmd, schema)
+		}
+		s.setDocumentVersionFields(newDoc, txID, 1)
+		documents = append(documents, newDoc)
+		docIDs = append(docIDs, newDoc.DocumentID)
+	}
+
+	// Phase 3: Batch storage writes (transaction-aware)
+	pageIDs := make([]uint32, 0, docCount)
+	for _, doc := range documents {
+		pageID, err := s.store.AppendDocumentToBundleFileWithTxID(bundle, doc, txID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to add document %s to bundle: %w", doc.DocumentID, err)
+		}
+		pageIDs = append(pageIDs, pageID)
+	}
+
+	// Phase 4: Batch page cache updates
+	for i, doc := range documents {
+		s.updatePageCacheWithDocument(bundle.Name, pageIDs[i], doc)
+	}
+
+	// Phase 5: Single metadata update
+	s.scheduleMetadataUpdate(bulkCmd.BundleName, "increment_docs", int64(docCount))
+
+	// Phase 6: Batch statistics updates
+	if s.statsUpdater != nil {
+		for _, doc := range documents {
+			if schema != nil && len(doc.Values) > 0 {
+				for j, name := range schema.Names {
+					if j < len(doc.Values) {
+						s.statsUpdater.IncrementalUpdate(bundle.Name, name, nil, doc.Values[j].AsInterface(), bundle.TotalDocuments)
+					}
+				}
+			} else if doc.Data != nil {
+				for fieldName, v := range doc.Data {
+					s.statsUpdater.IncrementalUpdate(bundle.Name, fieldName, nil, v, bundle.TotalDocuments)
+				}
+			}
+		}
+	}
+
+	// Phase 7: Batch index scheduling
+	if bundle.Indexes != nil {
+		for i, doc := range documents {
+			s.scheduleIndexUpdatesForDocument(bundle, doc, schema, pageIDs[i])
+		}
+	}
+
+	// Phase 8: Single cache invalidation
+	s.invalidateBundleCaches(bundle.Name)
+
+	return docIDs, nil
+}
+
+// scheduleIndexUpdatesForDocument schedules index updates for a single document across all bundle indexes.
+func (s *BundleService) scheduleIndexUpdatesForDocument(bundle *models.Bundle, doc *models.Document, schema *models.BundleFieldSchema, pageID uint32) {
+	for indexName, indexRef := range bundle.Indexes {
+		if indexRef.IndexType == "hash" {
+			if indexRef.WherePredicate != "" {
+				pred, predErr := compilePartialIndexPredicate(indexRef.WherePredicate, schema)
+				if predErr != nil || !pred(doc) {
+					continue
+				}
+			}
+			fieldName := indexRef.HashIndexField.FieldName
+			var fieldValue interface{}
+			if fieldName == "DocumentID" {
+				fieldValue = doc.DocumentID
+			} else {
+				extractedValue, err := extractFieldValueForIndex(*doc, fieldName, schema)
+				if err != nil {
+					continue
+				}
+				fieldValue = extractedValue
+			}
+			s.scheduleIndexUpdate(bundle.Name, indexName, "hash", "insert", doc.DocumentID, fieldValue, pageID, nil, false, doc.CommitSequence, doc.VersionSequence)
+		} else if indexRef.IndexType == "btree" {
+			if indexRef.WherePredicate != "" {
+				pred, predErr := compilePartialIndexPredicate(indexRef.WherePredicate, schema)
+				if predErr != nil || !pred(doc) {
+					continue
+				}
+			}
+			var fieldValue interface{}
+			if indexRef.Expression != "" {
+				_, exprFn, exprErr := indexutils.CompileIndexExpression(indexRef.Expression)
+				if exprErr != nil {
+					continue
+				}
+				rawValue, fErr := extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName, schema)
+				if fErr != nil {
+					continue
+				}
+				fieldValue = exprFn(rawValue)
+			} else {
+				var fErr error
+				fieldValue, fErr = extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName, schema)
+				if fErr != nil {
+					continue
+				}
+			}
+			s.scheduleIndexUpdate(bundle.Name, indexName, "btree", "insert", doc.DocumentID, fieldValue, pageID, nil, false)
+		}
+	}
+}
+
 func (s *BundleService) AddDocumentToBundleByStruct(database *models.Database, bundle *models.Bundle, document *models.Document) error {
 	return s.AddDocumentToBundleByStructWithTxID(database, bundle, document, "")
 }

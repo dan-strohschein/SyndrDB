@@ -1,6 +1,9 @@
 package server
 
 import (
+	"fmt"
+	"strings"
+
 	bndle "syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/syndrQL"
@@ -83,4 +86,98 @@ func parseAddDocument(command string, logger *zap.SugaredLogger) (*models.Docume
 	logger.Infof("Successfully parsed ADD DOCUMENT using new parser")
 
 	return docCommand, nil
+}
+
+// parseBulkAddWithNewParser parses BULK ADD DOCUMENTS using the SyndrQL parser
+func parseBulkAddWithNewParser(command string, logger *zap.SugaredLogger) (*models.BulkDocumentCommand, error) {
+	parser, err := syndrQL.NewInsertParser(command)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create bulk insert parser", errors.LayerParser)
+	}
+
+	insertStmt, err := parser.ParseBulkAdd()
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
+	}
+
+	// Validate all documents' field names and values
+	if err := validateBulkDocumentFields(insertStmt, logger); err != nil {
+		return nil, err
+	}
+
+	adapter := syndrQL.NewInsertStatementAdapter(logger)
+	return adapter.ToBulkDocumentCommand(insertStmt)
+}
+
+// parseBulkInsertWithNewParser parses BULK INSERT INTO BUNDLE using the SyndrQL parser
+func parseBulkInsertWithNewParser(command string, logger *zap.SugaredLogger) (*models.BulkDocumentCommand, error) {
+	parser, err := syndrQL.NewInsertParser(command)
+	if err != nil {
+		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
+			"failed to create bulk insert parser", errors.LayerParser)
+	}
+
+	insertStmt, err := parser.ParseBulkInsert()
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerParser).WithContext("command", command)
+	}
+
+	// Validate all documents' field names and values
+	if err := validateBulkDocumentFields(insertStmt, logger); err != nil {
+		return nil, err
+	}
+
+	adapter := syndrQL.NewInsertStatementAdapter(logger)
+	return adapter.ToBulkDocumentCommand(insertStmt)
+}
+
+// parseBulkCommand is the unified entry point for parsing BULK commands.
+// Dispatches based on command prefix: "bulk add" vs "bulk insert".
+func parseBulkCommand(command string, logger *zap.SugaredLogger) (*models.BulkDocumentCommand, error) {
+	globalParserMetrics.NewParserAttempts.Add(1)
+
+	commandLower := strings.ToLower(command)
+	var bulkCmd *models.BulkDocumentCommand
+	var err error
+
+	if strings.HasPrefix(commandLower, "bulk add") {
+		bulkCmd, err = parseBulkAddWithNewParser(command, logger)
+	} else if strings.HasPrefix(commandLower, "bulk insert") {
+		bulkCmd, err = parseBulkInsertWithNewParser(command, logger)
+	} else {
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"BULK command must be followed by ADD DOCUMENTS or INSERT INTO",
+			errors.LayerParser).WithContext("command", command)
+	}
+
+	if err != nil {
+		globalParserMetrics.NewParserFailures.Add(1)
+		return nil, err
+	}
+
+	globalParserMetrics.NewParserSuccesses.Add(1)
+	return bulkCmd, nil
+}
+
+// validateBulkDocumentFields validates field names and values for all documents in a bulk insert
+func validateBulkDocumentFields(stmt *syndrQL.InsertStatement, logger *zap.SugaredLogger) error {
+	securityConfig := DefaultSecurityConfig()
+	for i, doc := range stmt.Documents {
+		for fieldName, fieldValue := range doc {
+			if err := ValidateFieldName(fieldName, securityConfig); err != nil {
+				if sdbErr, ok := err.(errors.SyndrDBError); ok {
+					return sdbErr.WithContext("document_index", fmt.Sprintf("%d", i))
+				}
+				return err
+			}
+			if err := ValidateFieldValue(fieldValue, securityConfig); err != nil {
+				if sdbErr, ok := err.(errors.SyndrDBError); ok {
+					return sdbErr.WithContext("field_name", fieldName).WithContext("document_index", fmt.Sprintf("%d", i))
+				}
+				return err
+			}
+		}
+	}
+	return nil
 }

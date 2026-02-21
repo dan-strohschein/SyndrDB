@@ -785,12 +785,13 @@ func AutoRollbackOnError(session *Session, serviceManager ServiceManager, databa
 }
 
 // IsDMLCommand checks if a command is a DML command (allowed in transactions)
-// DML commands: SELECT, INSERT/ADD, UPDATE, DELETE
+// DML commands: SELECT, INSERT/ADD, BULK ADD/INSERT, UPDATE, DELETE
 func IsDMLCommand(command string) bool {
 	commandLower := strings.ToLower(strings.TrimSpace(command))
 	return strings.HasPrefix(commandLower, "select") ||
 		strings.HasPrefix(commandLower, "insert") ||
 		strings.HasPrefix(commandLower, "add") ||
+		strings.HasPrefix(commandLower, "bulk") ||
 		strings.HasPrefix(commandLower, "update") ||
 		strings.HasPrefix(commandLower, "delete")
 }

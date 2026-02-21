@@ -545,6 +545,42 @@ func (a *InsertStatementAdapter) ToDocumentCommand(stmt *InsertStatement) (*mode
 	}, nil
 }
 
+// ToBulkDocumentCommand converts a bulk InsertStatement to a BulkDocumentCommand
+func (a *InsertStatementAdapter) ToBulkDocumentCommand(stmt *InsertStatement) (*models.BulkDocumentCommand, error) {
+	if stmt == nil {
+		return nil, fmt.Errorf("cannot convert nil InsertStatement")
+	}
+
+	if stmt.BundleName == "" {
+		return nil, fmt.Errorf("bundle name cannot be empty")
+	}
+
+	if len(stmt.Documents) == 0 {
+		return nil, fmt.Errorf("bulk insert must have at least one document")
+	}
+
+	allDocKVs := make([][]models.KeyValue, 0, len(stmt.Documents))
+	for i, doc := range stmt.Documents {
+		if len(doc) == 0 {
+			return nil, fmt.Errorf("document %d must have at least one field", i)
+		}
+		kvs := make([]models.KeyValue, 0, len(doc))
+		for key, value := range doc {
+			kvs = append(kvs, models.KeyValue{
+				Key:   key,
+				Value: value,
+			})
+		}
+		allDocKVs = append(allDocKVs, kvs)
+	}
+
+	return &models.BulkDocumentCommand{
+		CommandType: "BULK_ADD_DOCUMENTS",
+		BundleName:  stmt.BundleName,
+		Documents:   allDocKVs,
+	}, nil
+}
+
 // UpdateStatementAdapter adapts UpdateStatement to DocumentUpdateCommand
 // This adapter handles the conversion of parsed UPDATE statements from the new
 // SyndrQL parser into the DocumentUpdateCommand structure expected by the bundle service

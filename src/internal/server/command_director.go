@@ -438,6 +438,19 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return &result, nil
 	}
 
+	// Parse BULK ADD DOCUMENTS / BULK INSERT INTO commands
+	if strings.HasPrefix(commandLower, "bulk") {
+		if len(firstWords) < 2 {
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				"incomplete BULK command", errors.LayerCommand)
+		}
+		result1, err := BulkAddDocuments(firstWords, command, logger, serviceManager, database, session)
+		if serviceManager.BundleService != nil {
+			serviceManager.BundleService.ForceFlushIndexUpdates()
+		}
+		return result1, err
+	}
+
 	// Parse Add Document command
 	if strings.HasPrefix(commandLower, "add") {
 		if len(firstWords) < 2 {
@@ -1794,6 +1807,8 @@ func classifyCommandPermission(firstWords []string) string {
 		return "Read"
 
 	// DML Write
+	case "bulk":
+		return "Write"
 	case "add":
 		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "document" {
 			return "Write"

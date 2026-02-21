@@ -149,6 +149,10 @@ const (
 	// LikePatternMaxWildcards is the maximum number of % wildcards in a LIKE pattern
 	// Prevents exponential backtracking in pattern matching
 	LikePatternMaxWildcards = 20
+
+	// MaxDocumentsPerBulkInsert is the maximum number of documents in a single BULK ADD/INSERT
+	// Prevents memory exhaustion from extremely large batch inserts
+	MaxDocumentsPerBulkInsert = 10000
 )
 
 // Memory and Size Limits

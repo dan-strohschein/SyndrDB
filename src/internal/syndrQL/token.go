@@ -91,6 +91,7 @@ const (
 	TOKEN_FOR    // FOR
 	TOKEN_FIELDS // FIELDS
 	TOKEN_ADD    // ADD
+	TOKEN_BULK   // BULK
 	TOKEN_TO     // TO
 	TOKEN_NAME   // NAME
 
@@ -512,6 +513,7 @@ var keywords = map[string]TokenType{
 	"WITH":   TOKEN_WITH,
 	"FIELDS": TOKEN_FIELDS,
 	"ADD":    TOKEN_ADD,
+	"BULK":   TOKEN_BULK,
 	"TO":     TOKEN_TO,
 	"NAME":   TOKEN_NAME,
 
