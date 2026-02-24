@@ -78,6 +78,7 @@ const (
 	OpCommitTx
 	OpRollbackTx
 	OpCommitSequenceAssign // PHASE 2: MVCC - Batch commit sequence assignment for documents
+	OpBatchInsert          // Bulk insert: multiple documents in a single WAL entry
 	OpCheckpointBegin      // Marks the start of a checkpoint (for crash recovery)
 	OpCheckpointComplete   // Marks successful checkpoint completion (recovery point)
 )
@@ -850,6 +851,8 @@ func GetOperationTypeName(op OperationType) string {
 		return "COMMIT_TX"
 	case OpRollbackTx:
 		return "ROLLBACK_TX"
+	case OpBatchInsert:
+		return "BATCH_INSERT"
 	case OpCheckpointBegin:
 		return "CHECKPOINT_BEGIN"
 	case OpCheckpointComplete:

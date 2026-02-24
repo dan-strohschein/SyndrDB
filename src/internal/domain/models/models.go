@@ -741,6 +741,12 @@ type DocumentCommand struct {
 	Fields      []KeyValue // Fields to be added or updated in the document
 }
 
+type BulkDocumentCommand struct {
+	CommandType string       // "BULK_ADD_DOCUMENTS"
+	BundleName  string
+	Documents   [][]KeyValue // Each inner slice = one document's field-value pairs
+}
+
 type DocumentDeleteCommand struct {
 	BundleName         string
 	Fields             []KeyValue // Fields to be added or updated in the document

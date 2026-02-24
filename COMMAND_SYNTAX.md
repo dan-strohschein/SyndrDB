@@ -10,22 +10,54 @@ Creates a new database with the specified name.
 CREATE DATABASE "<DATABASE_NAME>";
 ```
 
-### DELETE DATABASE  
-Deletes an existing database and all its contents.
+### DROP DATABASE
+Drops an existing database and all its contents.
+```
+DROP DATABASE "<DATABASE_NAME>";
+```
+
+### DELETE DATABASE
+Alias for DROP DATABASE.
 ```
 DELETE DATABASE "<DATABASE_NAME>";
 ```
 
-### SELECT DATABASES
-Retrieves information about a specific database.
+### RENAME DATABASE
+Renames an existing database. Use FORCE to bypass safety checks.
 ```
-SELECT DATABASES "<DATABASE_NAME>";
+RENAME DATABASE "<OLD_NAME>" TO "<NEW_NAME>";
+RENAME DATABASE "<OLD_NAME>" TO "<NEW_NAME>" FORCE;
+```
+
+### SELECT DATABASES
+Lists all databases from the default system catalog.
+```
+SELECT DATABASES FROM DEFAULT;
 ```
 
 ### USE
 Switches the current session context to use a specific database.
 ```
 USE "<DATABASE_NAME>";
+```
+
+### ATTACH DATABASE
+Attaches a database from a file path.
+```
+ATTACH DATABASE "<FILE_PATH>" "<DATABASE_NAME>";
+```
+
+### UPDATE DATABASE
+Updates database metadata.
+```
+UPDATE DATABASE "<DATABASE_NAME>" SET <field> = <value>;
+```
+
+### LOCK / UNLOCK DATABASE
+Acquires or releases an exclusive lock on a database.
+```
+LOCK DATABASE "<DATABASE_NAME>";
+UNLOCK DATABASE "<DATABASE_NAME>";
 ```
 
 ## Server Configuration Commands
@@ -44,106 +76,339 @@ Changes the maximum size (in MB) for bundle files before rotation. New value app
 ## Bundle Management Commands
 
 ### CREATE BUNDLE
-Creates a new bundle with field definitions.
+Creates a new bundle with field definitions. Each field definition specifies the name, type, whether it is required, whether it is unique, and an optional default value.
 ```
-CREATE BUNDLE "<BUNDLE_NAME>" 
+CREATE BUNDLE "<BUNDLE_NAME>"
 WITH FIELDS (
     {"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>},
-    {"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>}
+    {"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>, <DEFAULT_VALUE>}
 );
 ```
 
+**Example:**
+```
+CREATE BUNDLE "Users"
+WITH FIELDS (
+    {"name", STRING, true, false},
+    {"age", INTEGER, true, false},
+    {"email", STRING, true, true}
+);
+```
+
+### DROP BUNDLE
+Drops a bundle from the database. Bundle must be empty unless FORCE is used.
+```
+DROP BUNDLE "<BUNDLE_NAME>";
+DROP BUNDLE "<BUNDLE_NAME>" FORCE;
+```
+
 ### DELETE BUNDLE
-Deletes an empty bundle from the database.
+Alias for DROP BUNDLE.
 ```
 DELETE BUNDLE "<BUNDLE_NAME>";
+DELETE BUNDLE "<BUNDLE_NAME>" FORCE;
 ```
 
 ### UPDATE BUNDLE
-Updates bundle structure or metadata.
+Updates bundle structure or metadata. Supports multiple operations:
+
+**Rename a bundle:**
 ```
-UPDATE BUNDLE "<BUNDLE_NAME>" [update_operations];
+UPDATE BUNDLE "<BUNDLE_NAME>" RENAME TO "<NEW_NAME>";
+```
+
+**Add a field:**
+```
+UPDATE BUNDLE "<BUNDLE_NAME>" ADD FIELD {"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>};
+```
+
+**Change a field:**
+```
+UPDATE BUNDLE "<BUNDLE_NAME>" CHANGE FIELD "<OLD_FIELD>" TO {"<FIELDNAME>", <FIELDTYPE>, <REQUIRED>, <UNIQUE>};
+```
+
+**Remove a field:**
+```
+UPDATE BUNDLE "<BUNDLE_NAME>" REMOVE FIELD "<FIELD_NAME>";
+```
+
+**Add a relationship:**
+```
+UPDATE BUNDLE "<BUNDLE_NAME>" ADD RELATIONSHIP "<REL_NAME>" TO "<TARGET_BUNDLE>" ON "<FIELD>";
+```
+
+**Drop a relationship:**
+```
+UPDATE BUNDLE "<BUNDLE_NAME>" DROP RELATIONSHIP "<REL_NAME>";
 ```
 
 ## Document Management Commands
 
 ### ADD DOCUMENT
-Adds a new document to a bundle. Each field must be in its own braces, separated by commas.
+Adds a new document to a bundle. Each field is specified as `{field_name = value}` within the WITH clause, separated by commas.
 ```
-ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>" 
-WITH ({"key"=value}, {"key"=value}, {"key"=value});
+ADD DOCUMENT TO BUNDLE "<BUNDLE_NAME>"
+WITH ({<FIELD_NAME> = <VALUE>}, {<FIELD_NAME> = <VALUE>}, ...);
 ```
 
 **Examples:**
 ```
-ADD DOCUMENT TO BUNDLE "Users" WITH ({"name"="John"}, {"age"=30}, {"email"="john@example.com"});
-ADD DOCUMENT TO BUNDLE "Products" WITH ({"id"=1}, {"title"="Widget"}, {"price"=99.99});
+ADD DOCUMENT TO BUNDLE "Users" WITH ({"name" = "John"}, {"age" = 30}, {"email" = "john@example.com"});
+ADD DOCUMENT TO BUNDLE "Products" WITH ({"id" = 1}, {"title" = "Widget"}, {"price" = 99.99});
 ```
 
-### SELECT DOCUMENTS
-Queries documents from a bundle with optional filtering.
+### BULK ADD DOCUMENTS / BULK INSERT INTO
+Inserts multiple documents in a single batch operation. All documents are validated upfront with all-or-nothing semantics — if any document fails validation, the entire batch is rejected. The `BULK` keyword prefix is required to explicitly opt in to the optimized batch insert path. Maximum 10,000 documents per batch.
+
+**SyndrDB-native syntax:**
 ```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>";
+BULK ADD DOCUMENTS TO BUNDLE "<BUNDLE_NAME>" WITH (
+  ({<FIELD_NAME> = <VALUE>}, {<FIELD_NAME> = <VALUE>}),
+  ({<FIELD_NAME> = <VALUE>}, {<FIELD_NAME> = <VALUE>}),
+  ...
+);
 ```
+
+**SQL-style alias:**
 ```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <CONDITIONS>;
+BULK INSERT INTO BUNDLE "<BUNDLE_NAME>" VALUES (
+  ({<FIELD_NAME> = <VALUE>}, {<FIELD_NAME> = <VALUE>}),
+  ({<FIELD_NAME> = <VALUE>}, {<FIELD_NAME> = <VALUE>}),
+  ...
+);
 ```
+
+**Examples:**
+```
+BULK ADD DOCUMENTS TO BUNDLE "Users" WITH (
+  ({"name" = "Alice"}, {"age" = 28}, {"email" = "alice@example.com"}),
+  ({"name" = "Bob"}, {"age" = 34}, {"email" = "bob@example.com"}),
+  ({"name" = "Charlie"}, {"age" = 42}, {"email" = "charlie@example.com"})
+);
+
+BULK INSERT INTO BUNDLE "Products" VALUES (
+  ({"sku" = "ABC123"}, {"price" = 19.99}, {"active" = true}),
+  ({"sku" = "DEF456"}, {"price" = 29.99}, {"active" = false})
+);
+```
+
+### SELECT
+Queries documents from a bundle. `SELECT DOCUMENTS FROM` is a legacy alias that is normalized to `SELECT * FROM`.
 ```
 SELECT * FROM "<BUNDLE_NAME>";
+SELECT <fields> FROM "<BUNDLE_NAME>";
+SELECT DOCUMENTS FROM "<BUNDLE_NAME>";
 ```
 
-### SELECT TOP DOCUMENTS
-Queries a limited number of documents from a bundle, returning the top N documents.
+#### SELECT with WHERE
 ```
-SELECT TOP <NUMBER> DOCUMENTS FROM "<BUNDLE_NAME>";
-```
-```
-SELECT TOP <NUMBER> DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <CONDITIONS>;
-```
-```
-SELECT TOP <NUMBER> DOCUMENTS FROM "<BUNDLE_NAME>" ORDER BY <FIELD_NAME> [ASC|DESC];
-```
-```
-SELECT TOP <NUMBER> DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <CONDITIONS> ORDER BY <FIELD_NAME> [ASC|DESC];
+SELECT * FROM "<BUNDLE_NAME>" WHERE <CONDITIONS>;
 ```
 
-### SELECT DOCUMENTS with JOIN
+#### SELECT DISTINCT
+Returns only unique rows.
+```
+SELECT DISTINCT <fields> FROM "<BUNDLE_NAME>";
+```
+
+#### SELECT with LIMIT and OFFSET
+```
+SELECT * FROM "<BUNDLE_NAME>" LIMIT <N>;
+SELECT * FROM "<BUNDLE_NAME>" LIMIT <N> OFFSET <M>;
+```
+
+#### SELECT TOP
+Legacy syntax equivalent to LIMIT. `SELECT TOP N` is normalized internally.
+```
+SELECT TOP <N> * FROM "<BUNDLE_NAME>";
+SELECT TOP <N> DOCUMENTS FROM "<BUNDLE_NAME>";
+```
+
+#### SELECT with ORDER BY
+Supports ASC (default) and DESC. Multiple fields allowed.
+```
+SELECT * FROM "<BUNDLE_NAME>" ORDER BY <FIELD> [ASC|DESC];
+SELECT * FROM "<BUNDLE_NAME>" ORDER BY <FIELD1> ASC, <FIELD2> DESC;
+```
+
+#### SELECT with GROUP BY
+```
+SELECT <fields>, <aggregates> FROM "<BUNDLE_NAME>" GROUP BY <FIELD1>, <FIELD2>;
+```
+
+#### SELECT with HAVING
+Filters groups after GROUP BY. Must follow GROUP BY.
+```
+SELECT <fields>, COUNT(*) FROM "<BUNDLE_NAME>"
+GROUP BY <FIELD>
+HAVING COUNT(*) > 5;
+```
+
+#### Aggregate Functions
+Supported in SELECT field lists and HAVING clauses:
+- `COUNT(*)` - Count all rows
+- `COUNT(<field>)` - Count non-null values
+- `SUM(<field>)` - Sum numeric values
+- `AVG(<field>)` - Average numeric values
+- `MIN(<field>)` - Minimum value
+- `MAX(<field>)` - Maximum value
+
+#### Field Aliasing
+```
+SELECT <field> AS <alias>, COUNT(*) AS "Total" FROM "<BUNDLE_NAME>";
+```
+
+#### SELECT with JOIN
 Performs JOIN operations between bundles.
 ```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" 
-JOIN "<OTHER_BUNDLE>" ON <JOIN_CONDITIONS> 
-WHERE <CONDITIONS>;
+SELECT * FROM "<BUNDLE_NAME>"
+JOIN "<OTHER_BUNDLE>" ON "<BUNDLE_NAME>"."<FIELD>" == "<OTHER_BUNDLE>"."<FIELD>";
 ```
 
-### SELECT DOCUMENTS with ORDER BY
-Queries documents with result ordering.
+Multiple JOINs can be chained:
 ```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" 
-WHERE <CONDITIONS> 
-ORDER BY <FIELD_NAME> [ASC|DESC];
+SELECT * FROM "Authors"
+JOIN "Books" ON "Authors"."ID" == "Books"."AuthorID"
+JOIN "Publishers" ON "Books"."PublisherID" == "Publishers"."ID";
 ```
 
-### SELECT DOCUMENTS with GROUP BY
-Queries documents with result grouping.
+JOIN types: `JOIN` (inner), `LEFT JOIN`, `RIGHT JOIN`, `FULL OUTER JOIN`.
+
+#### SELECT with FOR UPDATE
+Acquires read locks on selected documents for subsequent update within a transaction.
 ```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" 
-WHERE <CONDITIONS> 
-GROUP BY <FIELD_NAME>;
+SELECT * FROM "<BUNDLE_NAME>" WHERE <CONDITIONS> FOR UPDATE;
+```
+
+#### Full SELECT Syntax
+```
+SELECT [DISTINCT] [TOP <N>] <fields|*>
+FROM "<BUNDLE_NAME>"
+[JOIN "<OTHER_BUNDLE>" ON <condition>]
+[WHERE <conditions>]
+[GROUP BY <fields>]
+[HAVING <conditions>]
+[ORDER BY <fields> [ASC|DESC]]
+[LIMIT <N> [OFFSET <M>]]
+[FOR UPDATE];
 ```
 
 ### UPDATE DOCUMENTS
-Updates existing documents in a bundle.
+Updates existing documents in a bundle. Field assignments use `field = value` format. The `CONFIRMED` keyword is required for bulk updates without a WHERE clause.
 ```
-UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>" 
-({key=new_value, key=new_value}) 
+UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>"
+(<FIELD_NAME> = <VALUE>, <FIELD_NAME> = <VALUE>)
 WHERE <CONDITIONS>;
 ```
 
-### DELETE DOCUMENTS
-Deletes documents from a bundle based on conditions.
+**Bulk update (no WHERE) requires CONFIRMED:**
 ```
-DELETE DOCUMENTS FROM BUNDLE "<BUNDLE_NAME>" 
-WHERE <CONDITIONS>;
+UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>"
+(<FIELD_NAME> = <VALUE>)
+CONFIRMED;
+```
+
+### DELETE DOCUMENTS
+Deletes documents from a bundle. Note: there is no `BUNDLE` keyword between `FROM` and the bundle name. The `CONFIRMED` keyword is required for bulk deletes without a WHERE clause.
+```
+DELETE DOCUMENTS FROM "<BUNDLE_NAME>" WHERE <CONDITIONS>;
+```
+
+**Bulk delete (no WHERE) requires CONFIRMED:**
+```
+DELETE DOCUMENTS FROM "<BUNDLE_NAME>" CONFIRMED;
+```
+
+## Transaction Commands
+
+### BEGIN TRANSACTION
+Starts a new transaction. All subsequent commands execute within this transaction until COMMIT or ROLLBACK.
+```
+BEGIN TRANSACTION;
+```
+
+### COMMIT
+Commits the current transaction, making all changes permanent.
+```
+COMMIT;
+```
+
+### ROLLBACK
+Rolls back the current transaction, undoing all changes.
+```
+ROLLBACK;
+```
+
+### SAVEPOINT
+Creates a savepoint within the current transaction. Only single-level savepoints are supported.
+```
+SAVEPOINT "<SAVEPOINT_NAME>";
+```
+
+### ROLLBACK TO SAVEPOINT
+Rolls back to a previously created savepoint without aborting the entire transaction.
+```
+ROLLBACK TO SAVEPOINT "<SAVEPOINT_NAME>";
+```
+
+## Cursor Commands
+
+Cursors provide a way to iterate through large result sets without loading everything into memory. Cursors follow PostgreSQL semantics and are automatically closed on COMMIT or ROLLBACK.
+
+### DECLARE CURSOR
+Creates a named cursor for a SELECT query.
+```
+DECLARE <cursor_name> CURSOR FOR <SELECT_STATEMENT>;
+```
+
+**Example:**
+```
+DECLARE my_cursor CURSOR FOR SELECT * FROM "Orders" WHERE "Status" == "pending";
+```
+
+### FETCH
+Retrieves rows from an open cursor.
+```
+FETCH <N> FROM <cursor_name>;
+FETCH ALL FROM <cursor_name>;
+FETCH NEXT FROM <cursor_name>;
+```
+
+**Notes:**
+- `FETCH ALL` caps at 10,000 rows per call to prevent out-of-memory issues.
+- `FETCH NEXT` retrieves a single row.
+
+### CLOSE
+Closes an open cursor and releases its resources.
+```
+CLOSE <cursor_name>;
+```
+
+## Prepared Statement Commands
+
+Prepared statements allow query parsing to happen once and execution to happen multiple times with different parameters.
+
+### PREPARE
+Parses and caches a query for later execution. Parameters use `$1`, `$2`, etc. placeholders.
+```
+PREPARE <statement_name> AS <SELECT_STATEMENT>;
+```
+
+**Example:**
+```
+PREPARE find_user AS SELECT * FROM "Users" WHERE "email" == $1;
+```
+
+### EXECUTE
+Executes a previously prepared statement. Parameters are passed via the protocol layer (delimiter `\x05`), not inline in the SQL.
+```
+EXECUTE <statement_name>;
+```
+
+### DEALLOCATE
+Removes a prepared statement from the session cache.
+```
+DEALLOCATE <statement_name>;
 ```
 
 ## Query Analysis Commands
@@ -215,57 +480,6 @@ EXPLAIN ANALYZE <SELECT_STATEMENT>;
 **Example:**
 ```
 EXPLAIN ANALYZE SELECT * FROM "Authors" WHERE "Country" == "USA" ORDER BY "Name" LIMIT 10;
-```
-
-**Output Format (includes all EXPLAIN fields plus execution metrics):**
-```json
-{
-  "QueryPlan": {
-    "QueryType": "SimpleSelect",
-    "PlanType": "FullScan -> Filter -> Sort -> Limit",
-    "Cost": 245.67,
-    "EstimatedRows": 10,
-    "IndexesUsed": [],
-    "MemoryEstimate": 16384,
-    "CostFormulas": {
-      "FullScanCost": "N * 1.0 (linear scan)",
-      "FilterCost": "N * 0.1 (per-row evaluation)",
-      "SortCost": "N * log2(N) * 0.1 (quicksort)",
-      "LimitCost": "min(N, LIMIT) * 1.0"
-    },
-    "ExecutionTree": {
-      "NodeType": "LimitNode",
-      "Limit": 10,
-      "Cost": 245.67,
-      "EstimatedRows": 10,
-      "ActualExecutionTime": 2.34,
-      "ActualRowsReturned": 10,
-      "Child": {
-        "NodeType": "SortNode",
-        "SortFields": [{"Field": "Name", "Direction": "ASC"}],
-        "Cost": 240.50,
-        "EstimatedRows": 50,
-        "ActualExecutionTime": 1.89,
-        "ActualRowsReturned": 50,
-        "Child": {
-          "NodeType": "FilterNode",
-          "Cost": 120.00,
-          "EstimatedRows": 50,
-          "ActualExecutionTime": 0.45,
-          "ActualRowsReturned": 50,
-          "Child": {
-            "NodeType": "FullScanNode",
-            "BundleName": "Authors",
-            "Cost": 100.00,
-            "EstimatedRows": 100,
-            "ActualExecutionTime": 0.12,
-            "ActualRowsReturned": 100
-          }
-        }
-      }
-    }
-  }
-}
 ```
 
 **Use Cases:**
@@ -342,13 +556,10 @@ These statistics enable the query optimizer to:
 - Rewrite correlated subqueries into semi-joins
 - Improve selectivity estimates for filters
 
+> **Note:** The `ANALYZE BUNDLE` command is implemented internally but is not currently routed through the command director. Statistics collection is triggered automatically via auto-analyze when data changes significantly.
+
 ```
 ANALYZE BUNDLE "<BUNDLE_NAME>";
-```
-
-**Example:**
-```
-ANALYZE BUNDLE "Orders";
 ```
 
 **Auto-Analyze:**
@@ -371,7 +582,7 @@ For large bundles, you can configure scheduled analysis to run during off-peak h
 
 Statistics are:
 - Versioned (STATS_VERSION=1) with automatic re-analysis on version mismatch
-- Compressed using gzip (<5MB) or zstd (≥5MB) when over threshold (default: 1MB)
+- Compressed using gzip (<5MB) or zstd (>=5MB) when over threshold (default: 1MB)
 - Stored in `data_files/statistics/<bundle_name>.stats`
 - Automatically refreshed when stale or bundle schema changes
 
@@ -379,44 +590,64 @@ Statistics are:
 
 To maintain performance on large bundles, ANALYZE uses adaptive sampling:
 - Full scan for bundles with <1,000 documents
-- 10% sample for bundles with 1,000-100,000 documents  
+- 10% sample for bundles with 1,000-100,000 documents
 - 1,000 document sample for bundles with >100,000 documents
 
-**When to Use ANALYZE:**
+## Index Management Commands
 
-1. **After bulk data loads** to refresh statistics
-   ```
-   ANALYZE BUNDLE "Products";
-   ```
-
-2. **Before complex queries** on new or significantly changed data
-   ```
-   ANALYZE BUNDLE "Orders";
-   EXPLAIN SELECT * FROM "Orders" WHERE "Status" == "Pending";
-   ```
-
-3. **When query plans seem suboptimal** to provide fresh data distribution info
-   ```
-   ANALYZE BUNDLE "Customers";
-   EXPLAIN ANALYZE SELECT * FROM "Customers" JOIN "Orders" ON "Customers"."ID" == "Orders"."CustomerID";
-   ```
-
-4. **Periodically for stable bundles** using scheduled analysis configuration
-
-
-
-### CREATE BTREE INDEX
-Creates a B-Tree index on bundle fields.
+### CREATE B-INDEX (B-Tree Index)
+Creates a B-Tree index on bundle fields. Supports optional INCLUDE columns for covering indexes and optional WHERE for partial indexes.
 ```
-CREATE BTREE INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>" 
-(<FIELD_NAME>, <FIELD_NAME>);
+CREATE B-INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS ({"<FIELD_NAME>", <REQUIRED>, <UNIQUE>});
 ```
 
-### CREATE HASH INDEX  
-Creates a Hash index on bundle fields.
+**With INCLUDE (covering index):**
 ```
-CREATE HASH INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>" 
-(<FIELD_NAME>);
+CREATE B-INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS ({"<FIELD_NAME>", <REQUIRED>, <UNIQUE>})
+INCLUDE ("<COL1>", "<COL2>");
+```
+
+**With WHERE (partial index):**
+```
+CREATE B-INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS ({"<FIELD_NAME>", <REQUIRED>, <UNIQUE>})
+WHERE <PREDICATE>;
+```
+
+**With Expression (functional index):**
+```
+CREATE B-INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH EXPRESSION (<EXPRESSION>);
+```
+
+### CREATE HASH INDEX
+Creates a Hash index on bundle fields. Optimal for equality lookups.
+```
+CREATE HASH INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS ({"<FIELD_NAME>", <REQUIRED>, <UNIQUE>});
+```
+
+**With WHERE (partial index):**
+```
+CREATE HASH INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS ({"<FIELD_NAME>", <REQUIRED>, <UNIQUE>})
+WHERE <PREDICATE>;
+```
+
+### CREATE BRIN INDEX
+Creates a BRIN (Block Range INdex) on bundle fields. Efficient for naturally ordered data like timestamps.
+```
+CREATE BRIN INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS ({"<FIELD_NAME>", <REQUIRED>, <UNIQUE>});
+```
+
+**With custom pages per range:**
+```
+CREATE BRIN INDEX "<INDEX_NAME>" ON BUNDLE "<BUNDLE_NAME>"
+WITH FIELDS ({"<FIELD_NAME>", <REQUIRED>, <UNIQUE>})
+PAGES_PER_RANGE <N>;
 ```
 
 ## View Management Commands
@@ -434,14 +665,14 @@ CREATE VIEW "<VIEW_NAME>" AS <SELECT_STATEMENT>;
 
 **Examples:**
 ```
-CREATE VIEW "ActiveCustomers" AS 
+CREATE VIEW "ActiveCustomers" AS
   SELECT * FROM "Customers" WHERE "Status" == "Active";
 ```
 
 ```
-CREATE VIEW "OrderSummary" AS 
+CREATE VIEW "OrderSummary" AS
   SELECT "CustomerID", COUNT(*) AS "OrderCount", SUM("Total") AS "TotalSpent"
-  FROM "Orders" 
+  FROM "Orders"
   GROUP BY "CustomerID";
 ```
 
@@ -469,20 +700,10 @@ CREATE MATERIALIZED VIEW "<VIEW_NAME>" AS <SELECT_STATEMENT>;
 
 **Examples:**
 ```
-CREATE MATERIALIZED VIEW "DailySales" AS 
+CREATE MATERIALIZED VIEW "DailySales" AS
   SELECT DATE("OrderDate") AS "Date", SUM("Amount") AS "TotalSales"
   FROM "Orders"
   GROUP BY DATE("OrderDate");
-```
-
-```
-CREATE MATERIALIZED VIEW "TopProducts" AS
-  SELECT "ProductID", "ProductName", COUNT(*) AS "OrderCount"
-  FROM "Orders" 
-  JOIN "Products" ON "Orders"."ProductID" == "Products"."ID"
-  GROUP BY "ProductID", "ProductName"
-  ORDER BY COUNT(*) DESC
-  LIMIT 100;
 ```
 
 **Characteristics:**
@@ -507,155 +728,172 @@ CREATE MATERIALIZED VIEW "TopProducts" AS
 
 ### DROP VIEW
 Deletes a regular view from the database.
-
 ```
 DROP VIEW "<VIEW_NAME>";
 ```
 
-**Example:**
-```
-DROP VIEW "ActiveCustomers";
-```
-
-**Behavior:**
-- Removes view definition from system catalog
-- Does not affect underlying bundles
-- Fails if view does not exist
-- Cannot be used to drop materialized views (use `DROP MATERIALIZED VIEW`)
-
 ### DROP MATERIALIZED VIEW
 Deletes a materialized view and its associated data bundle.
-
 ```
 DROP MATERIALIZED VIEW "<VIEW_NAME>";
 ```
 
-**Example:**
-```
-DROP MATERIALIZED VIEW "DailySales";
-```
-
-**Behavior:**
-- Removes view definition from system catalog
-- Deletes the physical data bundle (`_mv_<view_name>`)
-- Cannot be undone (data is permanently deleted)
-- Fails if view does not exist
-- Cannot be used to drop regular views (use `DROP VIEW`)
-
 ### REFRESH MATERIALIZED VIEW
 Manually refreshes a materialized view by re-executing its query and replacing the stored data.
-
 ```
 REFRESH MATERIALIZED VIEW "<VIEW_NAME>";
 ```
 
-**Example:**
-```
-REFRESH MATERIALIZED VIEW "DailySales";
-```
-
-**Behavior:**
-- Acquires database-level exclusive lock (1-minute timeout)
-- Re-executes the view's SELECT statement
-- Creates new data snapshot in temporary storage
-- Atomically replaces old data with new snapshot
-- Updates `LastRefreshed` timestamp in system catalog
-- Resets stale data warning timer
-
-**Performance Considerations:**
-- Refresh duration depends on complexity of underlying query
-- Large result sets may take significant time to populate
-- Exclusive lock blocks other operations on the database during refresh
-- Consider scheduling refreshes during low-traffic periods
-
 ### SHOW VIEWS
 Lists all views in the current or specified database.
-
 ```
 SHOW VIEWS;
-SHOW VIEWS FROM "<DATABASE_NAME>";
+SHOW VIEWS IN DATABASE "<DATABASE_NAME>";
 ```
-
-**Examples:**
-```
-SHOW VIEWS;
-SHOW VIEWS FROM "SalesDB";
-```
-
-**Output Format:**
-Returns a list of views with metadata:
-```json
-{
-  "Views": [
-    {
-      "ViewName": "ActiveCustomers",
-      "Type": "VIEW",
-      "CreatedAt": "2024-01-15T10:30:00Z",
-      "CreatedBy": "admin"
-    },
-    {
-      "ViewName": "DailySales", 
-      "Type": "MATERIALIZED_VIEW",
-      "CreatedAt": "2024-01-15T11:00:00Z",
-      "CreatedBy": "admin",
-      "LastRefreshed": "2024-01-20T08:00:00Z",
-      "IsStale": false
-    }
-  ]
-}
-```
-
-**Fields:**
-- `ViewName`: Name of the view
-- `Type`: Either "VIEW" or "MATERIALIZED_VIEW"
-- `CreatedAt`: Timestamp when view was created
-- `CreatedBy`: Username of creator
-- `LastRefreshed`: (Materialized views only) Timestamp of last refresh
-- `IsStale`: (Materialized views only) True if stale warning threshold exceeded
 
 ### DESCRIBE VIEW
 Shows detailed metadata and definition for a specific view.
-
 ```
 DESCRIBE VIEW "<VIEW_NAME>";
 ```
 
-**Example:**
-```
-DESCRIBE VIEW "ActiveCustomers";
-```
+## User Management Commands
 
-**Output Format:**
-```json
-{
-  "ViewName": "ActiveCustomers",
-  "DatabaseName": "CustomerDB",
-  "Type": "VIEW",
-  "Definition": "SELECT * FROM \"Customers\" WHERE \"Status\" == \"Active\"",
-  "CreatedAt": "2024-01-15T10:30:00Z",
-  "CreatedBy": "admin",
-  "ColumnCount": 8,
-  "ReferencedBundles": ["Customers"]
-}
+### CREATE USER
+Creates a new user with a password.
+```
+CREATE USER "<USERNAME>" WITH PASSWORD "<PASSWORD>";
 ```
 
-**Fields:**
-- `ViewName`: Name of the view
-- `DatabaseName`: Database containing the view
-- `Type`: Either "VIEW" or "MATERIALIZED_VIEW"
-- `Definition`: Full SELECT statement defining the view
-- `CreatedAt`: Timestamp when view was created
-- `CreatedBy`: Username of creator
-- `LastRefreshed`: (Materialized views only) Timestamp of last refresh
-- `ColumnCount`: Number of columns in view result
-- `ReferencedBundles`: List of bundles referenced in view definition
-- `DataBundleName`: (Materialized views only) Name of physical storage bundle (`_mv_<view_name>`)
+### ADD USER
+Alias for CREATE USER.
+```
+ADD USER "<USERNAME>" WITH PASSWORD "<PASSWORD>";
+```
 
-**Use Cases:**
-1. **Understanding View Logic**: Review the SELECT statement defining a view
-2. **Dependency Analysis**: Identify which bundles a view depends on
-3. **Refresh Status**: Check when a materialized view was last refreshed
-4. **Schema Information**: See column count and structure
+### UPDATE USER
+Updates user credentials. Use FORCE to bypass session termination warnings.
+```
+UPDATE USER "<USERNAME>" SET PASSWORD = "<NEW_PASSWORD>";
+UPDATE USER "<USERNAME>" SET PASSWORD = "<NEW_PASSWORD>" FORCE;
+```
+
+### DELETE USER / DROP USER
+Removes a user. Use FORCE to terminate active sessions.
+```
+DELETE USER "<USERNAME>";
+DELETE USER "<USERNAME>" FORCE;
+DROP USER "<USERNAME>";
+DROP USER "<USERNAME>" FORCE;
+```
+
+### ATTACH USER TO DATABASE
+Associates a user with a specific database.
+```
+ATTACH USER <username> TO DATABASE <database_name>;
+```
+
+> **Note:** Username and database name are NOT quoted in this command, unlike most other commands.
+
+## Role Management Commands
+
+### CREATE ROLE
+Creates a new role with an optional description.
+```
+CREATE ROLE "<ROLE_NAME>";
+CREATE ROLE "<ROLE_NAME>" WITH DESCRIPTION "<DESCRIPTION>";
+```
+
+### UPDATE ROLE / ALTER ROLE
+Updates role metadata. ALTER ROLE is an alias for UPDATE ROLE.
+```
+UPDATE ROLE "<ROLE_NAME>" SET DESCRIPTION = "<NEW_DESCRIPTION>";
+UPDATE ROLE "<ROLE_NAME>" SET DESCRIPTION = "<NEW_DESCRIPTION>" FORCE;
+ALTER ROLE "<ROLE_NAME>" SET DESCRIPTION = "<NEW_DESCRIPTION>";
+```
+
+### DELETE ROLE / DROP ROLE
+Removes a role. Use FORCE to remove role assignments.
+```
+DELETE ROLE "<ROLE_NAME>";
+DELETE ROLE "<ROLE_NAME>" FORCE;
+DROP ROLE "<ROLE_NAME>";
+DROP ROLE "<ROLE_NAME>" FORCE;
+```
+
+## Permission and Security Commands
+
+### GRANT
+Grants a permission or role to a user.
+```
+GRANT "<PERMISSION>" TO USER "<USERNAME>";
+GRANT ROLE "<ROLE_NAME>" TO USER "<USERNAME>";
+```
+
+### REVOKE
+Revokes a permission or role from a user. Use FORCE to terminate active sessions.
+```
+REVOKE "<PERMISSION>" FROM USER "<USERNAME>";
+REVOKE "<PERMISSION>" FROM USER "<USERNAME>" FORCE;
+REVOKE ROLE "<ROLE_NAME>" FROM USER "<USERNAME>";
+REVOKE ROLE "<ROLE_NAME>" FROM USER "<USERNAME>" FORCE;
+```
+
+## Migration Commands
+
+### START MIGRATION
+Begins a migration block. Commands within the block are recorded and versioned.
+```
+START MIGRATION [WITH DESCRIPTION "<DESCRIPTION>"]
+<commands>
+COMMIT;
+```
+
+### APPLY MIGRATION
+Applies a recorded migration by version number.
+```
+APPLY MIGRATION WITH VERSION <NUMBER>;
+APPLY MIGRATION WITH VERSION <NUMBER> FORCE;
+```
+
+### APPLY ROLLBACK
+Rolls back to a specific migration version.
+```
+APPLY ROLLBACK TO VERSION <NUMBER>;
+```
+
+### VALIDATE MIGRATION / VALIDATE ROLLBACK
+Validates a migration or rollback without executing it.
+```
+VALIDATE MIGRATION WITH VERSION <NUMBER>;
+VALIDATE ROLLBACK TO VERSION <NUMBER>;
+```
+
+### SHOW MIGRATIONS
+Lists all migrations for a database.
+```
+SHOW MIGRATIONS FOR "<DATABASE_NAME>";
+```
+
+## Backup and Recovery Commands
+
+### BACKUP
+Creates a backup of a database to a specified path.
+```
+BACKUP DATABASE "<DATABASE_NAME>" TO "<PATH>";
+```
+
+### RESTORE
+Restores a database from a backup file.
+```
+RESTORE DATABASE "<DATABASE_NAME>" FROM "<PATH>";
+```
+
+### CHECKPOINT
+Forces a WAL checkpoint, flushing pending writes to disk.
+```
+CHECKPOINT;
+```
 
 ## Information Display Commands
 
@@ -666,11 +904,9 @@ SHOW DATABASES;
 ```
 
 ### SHOW BUNDLES
-Lists all bundles in the current database or specified database.
+Lists all bundles in the current database or a specified database.
 ```
 SHOW BUNDLES;
-```
-```
 SHOW BUNDLES FOR "<DATABASE_NAME>";
 ```
 
@@ -681,9 +917,21 @@ SHOW BUNDLE "<BUNDLE_NAME>";
 ```
 
 ### SHOW USERS
-Shows all documents in the Users bundle from the primary database.
+Shows all users in the system.
 ```
 SHOW USERS;
+```
+
+### SHOW SESSIONS
+Lists all active sessions.
+```
+SHOW SESSIONS;
+```
+
+### SHOW SESSION
+Shows information about the current session.
+```
+SHOW SESSION;
 ```
 
 ### SHOW RATE LIMIT
@@ -692,49 +940,68 @@ Displays current rate limiting information.
 SHOW RATE LIMIT;
 ```
 
-## Permission and Security Commands
-
-### GRANT
-Grants permissions to users or roles.
+### SHOW VERSIONS
+Shows document version history (MVCC debugging).
 ```
-GRANT <PERMISSION_TYPE> ON <RESOURCE> TO <USER_OR_ROLE>;
+SHOW VERSIONS;
+SHOW VERSIONS FOR "<DOCUMENT_ID>" IN BUNDLE "<BUNDLE_NAME>";
+```
+
+### SHOW ACTIVE SNAPSHOTS
+Shows active MVCC snapshots.
+```
+SHOW ACTIVE SNAPSHOTS;
+```
+
+### SHOW CONFLICT LOG
+Shows recent MVCC conflict log entries.
+```
+SHOW CONFLICT LOG;
 ```
 
 ## Connection Management Commands
 
-### ATTACH
-Attaches additional resources or connections.
-```
-ATTACH <RESOURCE_SPECIFICATION>;
-```
-
 ### INVALIDATE SESSION
-Invalidates the current session or specified session.
+Invalidates the current session or a specified session.
 ```
 INVALIDATE SESSION;
-```
-```
 INVALIDATE SESSION "<SESSION_ID>";
 ```
 
+## GraphQL Commands
+
+GraphQL queries are sent over the TCP socket with a `GRAPHQL::` prefix.
+```
+GRAPHQL::{ bundleName(where: "field > value", limit: 5) { field1 field2 } }
+GRAPHQL::{"query": "{ bundleName { field1 field2 } }"}
+```
+
+Both raw GraphQL query strings and JSON-encoded `{"query": "..."}` payloads are supported after the `GRAPHQL::` prefix.
+
 ## Field Types
 When defining bundle fields, the following types are supported:
-- STRING
-- INTEGER  
-- FLOAT
-- BOOLEAN
-- DATE
-- TIMESTAMP
+- `STRING`
+- `INTEGER`
+- `FLOAT`
+- `BOOLEAN`
+- `DATE`
+- `DATETIME` (also accepted as `TIMESTAMP`)
 
 ## Condition Syntax
 WHERE clauses support:
-- Equality: `field_name == "value"`
-- Inequality: `field_name != "value"`
-- Comparisons: `field_name > value`, `field_name < value`, `field_name >= value`, `field_name <= value`
+- Equality: `"field_name" == "value"` (note: `==` for comparison, `=` is assignment)
+- Inequality: `"field_name" != "value"`
+- Comparisons: `"field_name" > value`, `"field_name" < value`, `"field_name" >= value`, `"field_name" <= value`
 - Logical operators: `AND`, `OR`, `NOT`
-- Parentheses for grouping: `(condition1 OR condition2) AND condition3`
-- IN operator: `field_name IN (value1, value2, value3)`
-- NOT IN operator: `field_name NOT IN (value1, value2, value3)`
+- Parentheses for grouping: `("condition1" OR "condition2") AND "condition3"`
+- IN operator: `"field_name" IN (value1, value2, value3)`
+- NOT IN operator: `"field_name" NOT IN (value1, value2, value3)`
+- LIKE operator: `"field_name" LIKE "pattern%"`
+- NOT LIKE operator: `"field_name" NOT LIKE "pattern%"`
+- CONTAINS operator: `"field_name" CONTAINS "substring"`
+- IS NULL: `"field_name" IS NULL`
+- IS NOT NULL: `"field_name" IS NOT NULL`
+- EXISTS (subquery): `EXISTS (SELECT * FROM "bundle" WHERE ...)`
 
 ### IN and NOT IN Operators
 
@@ -742,51 +1009,40 @@ The IN and NOT IN operators allow filtering documents based on whether a field's
 
 **Basic Syntax:**
 ```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" IN (value1, value2, value3);
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" NOT IN (value1, value2, value3);
+SELECT * FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" IN (value1, value2, value3);
+SELECT * FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" NOT IN (value1, value2, value3);
 ```
 
 **Examples:**
 
 1. **Simple IN query:**
 ```
-SELECT DOCUMENTS FROM "Users" WHERE "Status" IN ("active", "pending", "verified");
+SELECT * FROM "Users" WHERE "Status" IN ("active", "pending", "verified");
 ```
 
 2. **Numeric IN query:**
 ```
-SELECT DOCUMENTS FROM "Products" WHERE "CategoryID" IN (1, 2, 5, 10);
+SELECT * FROM "Products" WHERE "CategoryID" IN (1, 2, 5, 10);
 ```
 
 3. **NOT IN query:**
 ```
-SELECT DOCUMENTS FROM "Orders" WHERE "Status" NOT IN ("cancelled", "refunded");
+SELECT * FROM "Orders" WHERE "Status" NOT IN ("cancelled", "refunded");
 ```
 
-4. **Case-insensitive IN query (using N prefix):**
+4. **Date IN query:**
 ```
-SELECT DOCUMENTS FROM "Users" WHERE "Email" IN N("john@example.com", "jane@example.com");
-```
-
-5. **Date IN query:**
-```
-SELECT DOCUMENTS FROM "Events" WHERE "EventDate" IN ("2025-01-15", "2025-02-20", "2025-03-10");
+SELECT * FROM "Events" WHERE "EventDate" IN ("2025-01-15", "2025-02-20", "2025-03-10");
 ```
 
-6. **Combined with other conditions:**
+5. **Combined with other conditions:**
 ```
-SELECT DOCUMENTS FROM "Products" WHERE "Status" == "active" AND "CategoryID" IN (1, 2, 3);
+SELECT * FROM "Products" WHERE "Status" == "active" AND "CategoryID" IN (1, 2, 3);
 ```
 
 **Important Features:**
 
 - **Type Consistency**: All values in the IN list must be of the same type (all strings, all numbers, or all dates). Type coercion is not supported.
-
-- **Case Sensitivity**: By default, string comparisons are case-sensitive. Use the `N` prefix for case-insensitive matching:
-  ```
-  IN N("value1", "value2")  // Case-insensitive
-  IN ("value1", "value2")   // Case-sensitive
-  ```
 
 - **NULL Handling**: To check for NULL values, use the special `::SYNDR_NULL::` value:
   ```
@@ -796,7 +1052,7 @@ SELECT DOCUMENTS FROM "Products" WHERE "Status" == "active" AND "CategoryID" IN 
 
 - **Automatic Deduplication**: Duplicate values in the IN list are automatically removed. This is logged in debug mode.
 
-- **List Size Limits**: 
+- **List Size Limits**:
   - Maximum 10,000 values per IN list
   - Warnings logged for lists >1,000 values
   - Query throttling may apply to very large IN queries
@@ -812,15 +1068,6 @@ SELECT DOCUMENTS FROM "Products" WHERE "Status" == "active" AND "CategoryID" IN 
 - **Hash Set Lookups**: Values are converted to hash sets internally for O(1) lookup time
 - **Memory Tracking**: Large IN queries (>100MB memory) trigger warnings
 - **Query Throttling**: Large IN queries (>1,000 values) may be subject to concurrent query limits
-- **Statistics**: IN query patterns are tracked for optimization (admin-only access)
-
-**Best Practices:**
-
-1. Keep IN lists reasonably sized (<1,000 values) for optimal performance
-2. Use indexes on fields frequently queried with IN operators
-3. Consider breaking very large IN queries into smaller batches
-4. Use case-insensitive matching (N prefix) only when necessary
-5. For negation, prefer NOT IN over multiple != conditions
 
 ### LIKE and NOT LIKE Operators
 
@@ -828,8 +1075,8 @@ The LIKE and NOT LIKE operators enable pattern matching and wildcard searches on
 
 **Basic Syntax:**
 ```
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" LIKE "pattern";
-SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" NOT LIKE "pattern";
+SELECT * FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" LIKE "pattern";
+SELECT * FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" NOT LIKE "pattern";
 ```
 
 **Wildcard Characters:**
@@ -842,83 +1089,34 @@ SELECT DOCUMENTS FROM "<BUNDLE_NAME>" WHERE "<FIELD_NAME>" NOT LIKE "pattern";
 - **`_` (Underscore)**: Matches exactly one character (single Unicode rune)
   - `"J_hn"` matches "John" but not "Johnson"
   - `"___-2024"` matches "ABC-2024", "XYZ-2024"
-  - Handles Unicode: `"Hello_World"` matches "Hello😊World"
 
 **Pattern Types:**
 
 1. **Prefix Match** (pattern ends with `%`):
 ```
-SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE "John%";
+SELECT * FROM "Users" WHERE "Name" LIKE "John%";
 ```
-Matches: "John", "Johnny", "John Doe", "Johnson"
 
 2. **Suffix Match** (pattern starts with `%`):
 ```
-SELECT DOCUMENTS FROM "Users" WHERE "Email" LIKE "%@company.com";
+SELECT * FROM "Users" WHERE "Email" LIKE "%@company.com";
 ```
-Matches: "john@company.com", "admin@company.com"
 
 3. **Contains Match** (pattern starts and ends with `%`):
 ```
-SELECT DOCUMENTS FROM "Products" WHERE "Description" LIKE "%premium%";
+SELECT * FROM "Products" WHERE "Description" LIKE "%premium%";
 ```
-Matches any description containing "premium"
 
 4. **Exact Match** (no wildcards):
 ```
-SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE "John Doe";
+SELECT * FROM "Users" WHERE "Name" LIKE "John Doe";
 ```
 Equivalent to: `"Name" == "John Doe"`
 
-5. **Match All** (only `%`):
+5. **Complex Patterns** (multiple wildcards):
 ```
-SELECT DOCUMENTS FROM "Users" WHERE "Email" LIKE "%";
-```
-Matches all non-NULL string values
-
-6. **Complex Patterns** (multiple wildcards):
-```
-SELECT DOCUMENTS FROM "Products" WHERE "Code" LIKE "PRD-___-2024";
-SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE "J_hn%";
-SELECT DOCUMENTS FROM "Messages" WHERE "Text" LIKE "%hello%world%";
-```
-
-**Examples:**
-
-1. **Simple prefix search:**
-```
-SELECT DOCUMENTS FROM "Customers" WHERE "LastName" LIKE "Smith%";
-```
-
-2. **Email domain filtering:**
-```
-SELECT DOCUMENTS FROM "Users" WHERE "Email" LIKE "%@gmail.com";
-```
-
-3. **Pattern with underscores:**
-```
-SELECT DOCUMENTS FROM "Products" WHERE "SKU" LIKE "PRD-____";
-```
-
-4. **Case-insensitive matching (N prefix):**
-```
-SELECT DOCUMENTS FROM "Users" WHERE "Name" LIKE N"john%";
-```
-Matches: "John", "JOHN", "johnny", "Johnny Doe"
-
-5. **NOT LIKE to exclude patterns:**
-```
-SELECT DOCUMENTS FROM "Users" WHERE "Email" NOT LIKE "%@spam.com";
-```
-
-6. **Combined with other conditions:**
-```
-SELECT DOCUMENTS FROM "Products" WHERE "Status" == "active" AND "Name" LIKE "%premium%";
-```
-
-7. **Multiple LIKE conditions:**
-```
-SELECT DOCUMENTS FROM "Users" WHERE "FirstName" LIKE "J%" AND "LastName" LIKE "%son";
+SELECT * FROM "Products" WHERE "Code" LIKE "PRD-___-2024";
+SELECT * FROM "Users" WHERE "Name" LIKE "J_hn%";
 ```
 
 **Escape Sequences:**
@@ -926,108 +1124,73 @@ SELECT DOCUMENTS FROM "Users" WHERE "FirstName" LIKE "J%" AND "LastName" LIKE "%
 Use backslash (`\`) to match literal wildcard characters:
 
 ```
-SELECT DOCUMENTS FROM "Products" WHERE "Discount" LIKE "50\\% off";  // Matches "50% off"
-SELECT DOCUMENTS FROM "Files" WHERE "Name" LIKE "test\\_file.txt";   // Matches "test_file.txt"
-SELECT DOCUMENTS FROM "Paths" WHERE "Path" LIKE "C:\\\\Users\\\\%";  // Matches "C:\Users\..." (Windows paths)
+SELECT * FROM "Products" WHERE "Discount" LIKE "50\\% off";  // Matches "50% off"
+SELECT * FROM "Files" WHERE "Name" LIKE "test\\_file.txt";   // Matches "test_file.txt"
 ```
 
 **Supported Escape Sequences:**
-- `\\%` → Literal `%`
-- `\\_` → Literal `_`
-- `\\\\` → Literal `\`
-- `\\"` → Literal `"`
-
-**Important Features:**
-
-- **Case Sensitivity**: String matching is case-sensitive by default. Use the `N` prefix for case-insensitive:
-  ```
-  LIKE N"john%"     // Case-insensitive
-  LIKE "john%"      // Case-sensitive
-  ```
-
-- **NULL Handling**: LIKE returns `false` for NULL fields (NOT LIKE returns `true`):
-  ```
-  WHERE "Email" LIKE "%"           // Excludes NULL emails
-  WHERE "Email" NOT LIKE "%"       // Includes NULL emails
-  ```
-
-- **Unicode Support**: The `_` wildcard matches a single Unicode rune, not byte:
-  ```
-  "Hello_World" LIKE "Hello_World"  // Matches emoji: "Hello😊World"
-  ```
-
-- **Pattern Validation**: 
-  - Maximum 1,000 characters per pattern
-  - Trailing unescaped backslash generates error
-  - Invalid escape sequences generate error
-
-- **Pattern Normalization**: Consecutive `%` wildcards are automatically collapsed:
-  ```
-  "Name" LIKE "John%%%Doe"  // Normalized to: "John%Doe"
-  ```
+- `\\%` - Literal `%`
+- `\\_` - Literal `_`
+- `\\\\` - Literal `\`
+- `\\"` - Literal `"`
 
 **Performance Characteristics:**
 
 | Pattern Type | Performance | Index Usage | Notes |
 |-------------|-------------|-------------|-------|
-| Prefix (`text%`) | ⚡ **Excellent** | ✅ B-tree index | Fastest for case-sensitive |
-| Exact (`text`) | ⚡ **Excellent** | ✅ Hash/B-tree index | Optimized to `==` |
-| Match All (`%`) | ⚡ **Excellent** | ❌ No scan needed | Always returns true |
-| Suffix (`%text`) | 🔶 **Good** | ❌ Full scan | Requires scanning all documents |
-| Contains (`%text%`) | 🔶 **Good** | ❌ Full scan | Requires scanning all documents |
-| Underscore (`_`) | 🔶 **Good** | ❌ Full scan | Rune-by-rune matching |
-| Complex patterns | 🔶 **Good** | ❌ Full scan | Fail-fast optimization |
+| Prefix (`text%`) | Excellent | B-tree index | Fastest for case-sensitive |
+| Exact (`text`) | Excellent | Hash/B-tree index | Optimized to `==` |
+| Match All (`%`) | Excellent | No scan needed | Always returns true |
+| Suffix (`%text`) | Good | Full scan | Requires scanning all documents |
+| Contains (`%text%`) | Good | Full scan | Requires scanning all documents |
+| Underscore (`_`) | Good | Full scan | Rune-by-rune matching |
+| Complex patterns | Good | Full scan | Fail-fast optimization |
 
-**Performance Considerations:**
+### IS NULL and IS NOT NULL
 
-- **Index Optimization**: Only case-sensitive prefix patterns can utilize B-tree indexes
-- **Case-Insensitive Warning**: Using `N` prefix prevents index usage even for prefix patterns
-- **Full Scan Warning**: Contains and suffix patterns trigger performance warnings (deduplicated)
-- **Fail-Fast Matching**: Complex patterns exit early on first non-match
-- **Statistics Tracking**: Query patterns are tracked for optimization (aggregated by field + pattern type)
-
-**Best Practices:**
-
-1. **Prefer Prefix Patterns** when possible for best performance (e.g., `"Name" LIKE "John%"`)
-2. **Use Indexes** on fields frequently queried with prefix patterns
-3. **Avoid Leading Wildcards** unless necessary (e.g., `"%text"` or `"%text%"`)
-4. **Use Case-Sensitive** matching when possible to enable index usage
-5. **Keep Patterns Short** (<1,000 characters) for optimal performance
-6. **Combine with Other Filters** to reduce scan size before LIKE evaluation
-7. **Consider Full-Text Search** for complex text searching requirements (future feature)
-
-**Comparison with SQL Standards:**
-
-SyndrDB LIKE is designed to be compatible with SQL standard LIKE operators while adding SyndrDB-specific optimizations:
-
-- **PostgreSQL Compatible**: Pattern syntax matches PostgreSQL LIKE
-- **MySQL Compatible**: Escape sequences work like MySQL LIKE
-- **SQL Server Compatible**: Case sensitivity configurable via N prefix
-- **Performance**: Competitive with PostgreSQL for indexed prefix patterns
-
-**Migration Examples:**
-
-From PostgreSQL:
-```sql
--- PostgreSQL
-SELECT * FROM users WHERE name LIKE 'John%';
-
--- SyndrDB
-SELECT DOCUMENTS FROM "users" WHERE "name" LIKE "John%";
+Tests whether a field value is NULL (stored as `::SYNDR_NULL::` internally).
+```
+SELECT * FROM "Users" WHERE "Email" IS NULL;
+SELECT * FROM "Users" WHERE "Email" IS NOT NULL;
 ```
 
-From MySQL:
-```sql
--- MySQL (case-insensitive by default)
-SELECT * FROM users WHERE name LIKE 'john%';
+### CONTAINS Operator
 
--- SyndrDB (use N prefix for case-insensitive)
-SELECT DOCUMENTS FROM "users" WHERE "name" LIKE N"john%";
+Tests whether a string field contains a substring.
 ```
+SELECT * FROM "Products" WHERE "Description" CONTAINS "premium";
+```
+
+### EXISTS (Subqueries)
+
+Tests whether a subquery returns any rows. Currently supports uncorrelated subqueries only.
+```
+SELECT * FROM "Authors"
+WHERE EXISTS (SELECT * FROM "Books" WHERE "Books"."AuthorID" == "Authors"."ID");
+```
+
+## Built-in Functions
+
+SyndrDB provides built-in functions using the `F:` prefix:
+
+### Date/Time Functions
+- `F:NOW()` - Returns the current timestamp
+- `F:EXTRACT(<part> FROM <field>)` - Extracts a part (YEAR, MONTH, DAY, etc.) from a datetime
+- `F:DATE_TRUNC(<part>, <field>)` - Truncates a datetime to the specified precision
+- `F:DATE_ADD(<field>, <interval>)` - Adds an interval to a datetime
+- `F:DATE_SUB(<field>, <interval>)` - Subtracts an interval from a datetime
+
+### String Functions
+- `F:UPPER(<field>)` - Converts a string to uppercase
+- `F:LOWER(<field>)` - Converts a string to lowercase
+- `F:TRIM(<field>)` - Removes leading and trailing whitespace
+- `F:LENGTH(<field>)` - Returns the length of a string
 
 ## Notes
 - All database and bundle names must be enclosed in double quotes
 - Commands are case-insensitive but conventionally written in UPPERCASE
 - Commands should end with semicolon (;) but it's optional for most operations
-- Field values in document operations use key=value pairs within parentheses
+- Field values in document operations use `field = value` pairs within curly braces
 - Multi-line commands are supported with whitespace normalization
+- The `=` operator is for assignment; use `==` for equality comparison in WHERE clauses
+- Cursor names and prepared statement names do NOT use quotes

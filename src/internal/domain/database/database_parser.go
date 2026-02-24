@@ -222,8 +222,8 @@ func ParseDropDatabaseCommand(command string) (*models.DatabaseCommand, error) {
 		return nil, fmt.Errorf("database name cannot be empty")
 	}
 
-	// Check for FORCE keyword (case-insensitive)
-	force := strings.Contains(upperCmd, "FORCE")
+	// Check for WITH FORCE clause (case-insensitive, consistent with DROP BUNDLE syntax)
+	force := strings.Contains(upperCmd, "WITH FORCE")
 
 	// Validate database name
 	if !IsValidDatabaseName(databaseName) {

@@ -838,11 +838,24 @@ func stripBundlePrefix(s string) string {
 // computeRequiredFieldsForJoin returns field lists for projection pushdown (opt #1).
 // leftBundleName and rightBundleName are from query.FromBundle and firstJoin.RightBundle.
 // Join keys, SELECT, and ORDER BY are attributed to left or right when they have a "bundle." prefix.
+// Returns empty slices when SELECT * is used (empty SelectFields or literal "*"),
+// which disables projection pushdown so all fields are fetched from both bundles.
 func computeRequiredFieldsForJoin(
 	query *queryparser.SelectJoinQuery,
 	firstJoin queryparser.JoinClause,
 	leftBundleName, rightBundleName string,
 ) (leftFields, rightFields []string) {
+	// Empty SelectFields means SELECT * (all fields) — disable projection pushdown
+	if len(query.SelectFields) == 0 {
+		return nil, nil
+	}
+	// Also handle literal "*" from legacy parser path
+	for _, f := range query.SelectFields {
+		if f == "*" {
+			return nil, nil
+		}
+	}
+
 	leftSet := make(map[string]bool)
 	rightSet := make(map[string]bool)
 	addLeft := func(f string) { leftSet[stripBundlePrefix(f)] = true }
@@ -897,7 +910,20 @@ func computeRequiredFieldsForJoin(
 
 // computeMergeRequiredFields returns the set of field names to copy in mergeJoinedDocument (opt #3).
 // Includes: join key names (stripped), SelectFields (stripped), OrderBy (stripped), and "join_key".
+// Returns nil when SELECT * is used (empty SelectFields or literal "*"), which disables
+// the whitelist filter so all fields from both sides are included in merged documents.
 func computeMergeRequiredFields(query *queryparser.SelectJoinQuery, firstJoin queryparser.JoinClause) map[string]bool {
+	// Empty SelectFields means SELECT * (all fields) — return nil to disable whitelist filtering
+	if len(query.SelectFields) == 0 {
+		return nil
+	}
+	// Also handle literal "*" from legacy parser path
+	for _, f := range query.SelectFields {
+		if f == "*" {
+			return nil
+		}
+	}
+
 	set := make(map[string]bool)
 	add := func(f string) {
 		bare := stripBundlePrefix(f)

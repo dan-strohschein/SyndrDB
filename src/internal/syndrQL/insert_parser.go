@@ -33,12 +33,12 @@ Performance Targets:
 - Batch insert (future): 10-50μs for 1000 documents
 */
 
-// InsertStatement represents a parsed ADD DOCUMENT statement
+// InsertStatement represents a parsed ADD DOCUMENT or BULK ADD DOCUMENTS statement
 type InsertStatement struct {
-	BundleName string                 // Name of the bundle to insert into
-	Fields     map[string]interface{} // Field name to value mapping
-	// TODO: I will add support for batch inserts with multiple documents
-	// Documents []map[string]interface{} // For batch INSERT support
+	BundleName string                   // Name of the bundle to insert into
+	Fields     map[string]interface{}   // Field name to value mapping (single document)
+	Documents  []map[string]interface{} // Multiple documents (for bulk insert)
+	IsBulk     bool                     // True if this is a bulk insert statement
 }
 
 // InsertParser handles parsing of ADD DOCUMENT statements
@@ -388,4 +388,194 @@ func (p *InsertParser) advance() Token {
 
 func (p *InsertParser) isAtEnd() bool {
 	return p.current >= len(p.tokens) || (p.current < len(p.tokens) && p.tokens[p.current].Type == TOKEN_EOF)
+}
+
+// ParseBulkAdd parses a BULK ADD DOCUMENTS statement
+// Syntax: BULK ADD DOCUMENTS TO BUNDLE "<BUNDLE_NAME>" WITH ( ({f=v}, {f=v}), ({f=v}, {f=v}), ... )
+func (p *InsertParser) ParseBulkAdd() (*InsertStatement, error) {
+	// Expect: BULK
+	if err := p.expectKeyword(TOKEN_BULK, "BULK"); err != nil {
+		return nil, err
+	}
+
+	// Expect: ADD
+	if err := p.expectKeyword(TOKEN_ADD, "ADD"); err != nil {
+		return nil, err
+	}
+
+	// Expect: DOCUMENTS
+	if err := p.expectKeyword(TOKEN_DOCUMENTS, "DOCUMENTS"); err != nil {
+		return nil, err
+	}
+
+	// Expect: TO
+	if err := p.expectKeyword(TOKEN_TO, "TO"); err != nil {
+		return nil, err
+	}
+
+	// Expect: BUNDLE
+	if err := p.expectKeyword(TOKEN_BUNDLE, "BUNDLE"); err != nil {
+		return nil, err
+	}
+
+	// Expect: bundle name (string)
+	bundleName, err := p.expectString()
+	if err != nil {
+		return nil, err
+	}
+
+	// Expect: WITH
+	if err := p.expectKeyword(TOKEN_WITH, "WITH"); err != nil {
+		return nil, err
+	}
+
+	// Expect: outer opening parenthesis
+	if err := p.expectToken(TOKEN_LPAREN, "("); err != nil {
+		return nil, err
+	}
+
+	// Parse the document list
+	documents, err := p.parseDocumentList()
+	if err != nil {
+		return nil, err
+	}
+
+	// Expect: outer closing parenthesis
+	if err := p.expectToken(TOKEN_RPAREN, ")"); err != nil {
+		return nil, err
+	}
+
+	// Optional: semicolon
+	if !p.isAtEnd() && p.peek().Type == TOKEN_SEMICOLON {
+		p.advance()
+	}
+
+	return &InsertStatement{
+		BundleName: bundleName,
+		Documents:  documents,
+		IsBulk:     true,
+	}, nil
+}
+
+// ParseBulkInsert parses a BULK INSERT INTO BUNDLE statement
+// Syntax: BULK INSERT INTO BUNDLE "<BUNDLE_NAME>" VALUES ( ({f=v}, {f=v}), ({f=v}, {f=v}), ... )
+func (p *InsertParser) ParseBulkInsert() (*InsertStatement, error) {
+	// Expect: BULK
+	if err := p.expectKeyword(TOKEN_BULK, "BULK"); err != nil {
+		return nil, err
+	}
+
+	// Expect: INSERT
+	if err := p.expectKeyword(TOKEN_INSERT, "INSERT"); err != nil {
+		return nil, err
+	}
+
+	// Expect: INTO
+	if err := p.expectKeyword(TOKEN_INTO, "INTO"); err != nil {
+		return nil, err
+	}
+
+	// Expect: BUNDLE
+	if err := p.expectKeyword(TOKEN_BUNDLE, "BUNDLE"); err != nil {
+		return nil, err
+	}
+
+	// Expect: bundle name (string)
+	bundleName, err := p.expectString()
+	if err != nil {
+		return nil, err
+	}
+
+	// Expect: VALUES
+	if err := p.expectKeyword(TOKEN_VALUES, "VALUES"); err != nil {
+		return nil, err
+	}
+
+	// Expect: outer opening parenthesis
+	if err := p.expectToken(TOKEN_LPAREN, "("); err != nil {
+		return nil, err
+	}
+
+	// Parse the document list
+	documents, err := p.parseDocumentList()
+	if err != nil {
+		return nil, err
+	}
+
+	// Expect: outer closing parenthesis
+	if err := p.expectToken(TOKEN_RPAREN, ")"); err != nil {
+		return nil, err
+	}
+
+	// Optional: semicolon
+	if !p.isAtEnd() && p.peek().Type == TOKEN_SEMICOLON {
+		p.advance()
+	}
+
+	return &InsertStatement{
+		BundleName: bundleName,
+		Documents:  documents,
+		IsBulk:     true,
+	}, nil
+}
+
+// parseDocumentList parses a comma-separated list of document groups
+// Format: ({f=v}, {f=v}), ({f=v}, {f=v}), ...
+// Each parenthesized group represents one document.
+func (p *InsertParser) parseDocumentList() ([]map[string]interface{}, error) {
+	documents := make([]map[string]interface{}, 0, 64)
+
+	// Parse first document group
+	doc, err := p.parseSingleDocumentGroup()
+	if err != nil {
+		return nil, err
+	}
+	documents = append(documents, doc)
+
+	// Parse additional document groups (comma-separated)
+	for !p.isAtEnd() && p.peek().Type == TOKEN_COMMA {
+		p.advance() // consume comma
+
+		// SECURITY: Enforce maximum document count
+		if len(documents) >= constants.MaxDocumentsPerBulkInsert {
+			return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+				fmt.Sprintf("bulk insert exceeds maximum of %d documents", constants.MaxDocumentsPerBulkInsert),
+				errors.LayerParser)
+		}
+
+		doc, err := p.parseSingleDocumentGroup()
+		if err != nil {
+			return nil, err
+		}
+		documents = append(documents, doc)
+	}
+
+	return documents, nil
+}
+
+// parseSingleDocumentGroup parses a single document group: ({f=v}, {f=v})
+func (p *InsertParser) parseSingleDocumentGroup() (map[string]interface{}, error) {
+	// Expect: opening parenthesis for the document group
+	if err := p.expectToken(TOKEN_LPAREN, "("); err != nil {
+		return nil, err
+	}
+
+	// Reuse existing parseFieldValues which parses {f=v}, {f=v}, ...
+	fields, err := p.parseFieldValues()
+	if err != nil {
+		return nil, err
+	}
+
+	// Expect: closing parenthesis for the document group
+	if err := p.expectToken(TOKEN_RPAREN, ")"); err != nil {
+		return nil, err
+	}
+
+	if len(fields) == 0 {
+		return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+			"document must have at least one field",
+			errors.LayerParser)
+	}
+
+	return fields, nil
 }

@@ -418,3 +418,129 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 	logger.Debugf("DEBUG :: AddDocument total time: %s", endingTime.String())
 	return cmdResponse, nil
 }
+
+// BulkAddDocuments handles BULK ADD DOCUMENTS and BULK INSERT INTO commands.
+// All-or-nothing semantics: all documents are validated upfront; if any fails, the entire batch is rejected.
+func BulkAddDocuments(commandParts []string, command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
+	startingTime := time.Now()
+
+	// Parse the bulk command
+	bulkCmd, err := parseBulkCommand(command, logger)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
+	}
+
+	bundleName := bulkCmd.BundleName
+	docCount := len(bulkCmd.Documents)
+
+	// Look up bundle (once)
+	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+	}
+
+	var docIDs []string
+
+	if serviceManager.WALManager != nil {
+		if session != nil && session.IsInTransaction() {
+			// TRANSACTION PATH: Pre-allocate doc IDs, acquire write locks, call WithTxID variant
+			txID := session.ActiveTransactionID
+
+			preallocIDs := make([]string, docCount)
+			for i := range preallocIDs {
+				preallocIDs[i] = helpers.GenerateFastUUID()
+			}
+
+			// Acquire document-level write locks
+			if serviceManager.LockManager != nil {
+				sort.Strings(preallocIDs) // prevent deadlocks
+				for _, docID := range preallocIDs {
+					if err := serviceManager.LockManager.AcquireWriteLock(bundleName, docID, txID, session.SessionID); err != nil {
+						serviceManager.LockManager.ReleaseLocks(txID)
+						return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_LOCK,
+							"failed to acquire document lock for bulk insert", errors.LayerTransaction).WithContext("bundle", bundleName)
+					}
+				}
+			}
+
+			docIDs, err = serviceManager.BundleService.AddDocumentsToBundleWithTxID(database, bundle, bulkCmd, txID, preallocIDs)
+			if err != nil {
+				if serviceManager.LockManager != nil {
+					serviceManager.LockManager.ReleaseLocks(txID)
+				}
+				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+			}
+
+			// Track document locations in transaction buffer
+			if session.TransactionBuffer != nil {
+				for _, docID := range docIDs {
+					location := DocumentLocation{
+						BundleName: bundleName,
+					}
+					session.TransactionBuffer.AddDocumentLocation(docID, location)
+				}
+			}
+
+			// Log the batch insertion to the WAL
+			err = serviceManager.WALManager.LogBatchInsert(txID, bundleName, docIDs, bulkCmd.Documents)
+			if err != nil {
+				return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_WAL,
+					"failed to log batch insert", errors.LayerWAL).WithContext("bundle", bundleName)
+			}
+		} else {
+			// AUTO-COMMIT PATH: ExecuteWithLogging wrapper
+			globalMetrics := GetGlobalServerMetrics()
+			globalMetrics.TransactionsBegun.Add(1)
+
+			err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+				walErr := serviceManager.WALManager.LogBatchInsert(txID, bundleName, []string{"pending"}, bulkCmd.Documents)
+				if walErr != nil {
+					return errors.WrapWithMessage(walErr, errors.ERR_INTERNAL_WAL,
+						"failed to log batch insert", errors.LayerWAL).WithContext("bundle", bundleName)
+				}
+				docIDs, err = serviceManager.BundleService.AddDocumentsToBundle(database, bundle, bulkCmd)
+				return err
+			})
+
+			if err != nil {
+				globalMetrics.TransactionsRolledBack.Add(1)
+			} else {
+				globalMetrics.TransactionsCommitted.Add(1)
+			}
+		}
+	} else {
+		// No-WAL fallback
+		logger.Warn("WAL Manager not available, executing bulk insert without transaction logging")
+		docIDs, err = serviceManager.BundleService.AddDocumentsToBundle(database, bundle, bulkCmd)
+	}
+
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+	}
+
+	// METRICS: Track document inserts
+	globalMetrics := GetGlobalServerMetrics()
+	globalMetrics.DocumentInsertsTotal.Add(uint64(docCount))
+	dbMetrics := GetDatabaseMetrics(database.Name)
+	dbMetrics.DBDocumentInsertsTotal.Add(uint64(docCount))
+	bundleMetrics := GetBundleMetrics(database.Name, bundleName)
+	bundleMetrics.BundleDocumentsInserted.Add(uint64(docCount))
+	bundleMetrics.BundleCurrentDocCount.Add(uint64(docCount))
+
+	// Track write for plan cache invalidation
+	if serviceManager.UnifiedPlanner != nil {
+		invalidationMgr := serviceManager.UnifiedPlanner.GetInvalidationManager()
+		if invalidationMgr != nil {
+			invalidationMgr.OnWrite(bundleName, docCount)
+		}
+	}
+
+	result := fmt.Sprintf("{\"documents_inserted\": %d, \"bundle\": \"%s\", \"document_ids\": %v}", docCount, bundleName, docIDs)
+	endingTime := time.Since(startingTime)
+	cmdResponse := &CommandResponse{
+		ResultCount:     docCount,
+		Result:          result,
+		ExecutionTimeMS: float64(endingTime.Nanoseconds()) / 1e6,
+	}
+	return cmdResponse, nil
+}
