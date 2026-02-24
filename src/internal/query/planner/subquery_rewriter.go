@@ -49,11 +49,20 @@ const (
 type RewriteStrategy int
 
 const (
-	STRATEGY_SEMI_JOIN RewriteStrategy = iota
-	STRATEGY_ANTI_JOIN
-	STRATEGY_MATERIALIZATION
-	STRATEGY_NESTED_LOOP
-	STRATEGY_UNCHANGED // No rewrite beneficial
+	STRATEGY_SEMI_JOIN       RewriteStrategy = iota // 0 - maps to SubqueryExpression.RewriteStrategy == 1
+	STRATEGY_ANTI_JOIN                              // 1 - maps to SubqueryExpression.RewriteStrategy == 2
+	STRATEGY_MATERIALIZATION                        // 2 - maps to SubqueryExpression.RewriteStrategy == 3
+	STRATEGY_NESTED_LOOP                            // 3 - maps to SubqueryExpression.RewriteStrategy == 4
+	STRATEGY_UNCHANGED                              // 4 - maps to SubqueryExpression.RewriteStrategy == 0
+)
+
+// SubqueryExpression.RewriteStrategy int constants (avoid planner package import in syndrQL)
+const (
+	REWRITE_UNCHANGED      = 0
+	REWRITE_SEMI_JOIN      = 1
+	REWRITE_ANTI_JOIN      = 2
+	REWRITE_MATERIALIZATION = 3
+	REWRITE_NESTED_LOOP    = 4
 )
 
 // SubqueryRewriter rewrites correlated subqueries into more efficient forms
@@ -136,8 +145,22 @@ func (sr *SubqueryRewriter) rewriteExpression(outerQuery *syndrQL.SelectStatemen
 		}
 
 	case *syndrQL.UnaryExpression:
+		// Handle NOT EXISTS pattern: NOT(SubqueryExpression{EXISTS})
+		// When EXISTS subquery is under NOT, treat as anti-join instead of semi-join
+		if e.Operator == syndrQL.TOKEN_NOT {
+			if subExpr, ok := e.Right.(*syndrQL.SubqueryExpression); ok && subExpr.SubqueryType == syndrQL.SUBQUERY_EXISTS {
+				// Override to NOT_EXISTS type for strategy selection
+				subExpr.SubqueryType = syndrQL.SUBQUERY_NOT_EXISTS
+				sr.logger.Debugf("Detected NOT EXISTS pattern, rewriting as SUBQUERY_NOT_EXISTS")
+			}
+		}
 		// Recurse into operand
 		if err := sr.rewriteExpression(outerQuery, e.Right, depth); err != nil {
+			return err
+		}
+
+	case *syndrQL.GroupedExpression:
+		if err := sr.rewriteExpression(outerQuery, e.Expression, depth); err != nil {
 			return err
 		}
 	}
@@ -147,8 +170,22 @@ func (sr *SubqueryRewriter) rewriteExpression(outerQuery *syndrQL.SelectStatemen
 
 // rewriteSubquery analyzes and rewrites a single subquery
 func (sr *SubqueryRewriter) rewriteSubquery(outerQuery *syndrQL.SelectStatement, subqueryExpr *syndrQL.SubqueryExpression, depth int) error {
-	// Analyze correlation
+	// Analyze correlation using basic (unqualified) analysis first
 	isCorrelated, correlatedFields := sr.correlationAnalyzer.AnalyzeSubquery(outerQuery, subqueryExpr.InnerQuery)
+
+	// If basic analysis fails, try qualified correlation analysis (Tier 3)
+	// This detects "OuterBundle"."Field" references in the inner WHERE clause
+	if !isCorrelated && outerQuery.BundleName != "" && subqueryExpr.InnerQuery != nil {
+		qualResult := sr.correlationAnalyzer.AnalyzeCorrelationQualified(
+			outerQuery.BundleName, subqueryExpr.InnerQuery.WhereClause)
+		if qualResult.IsCorrelated {
+			isCorrelated = true
+			correlatedFields = make([]string, len(qualResult.JoinPairs))
+			for i, pair := range qualResult.JoinPairs {
+				correlatedFields[i] = pair.OuterField
+			}
+		}
+	}
 
 	subqueryExpr.IsCorrelated = isCorrelated
 	subqueryExpr.CorrelatedFields = correlatedFields
@@ -186,23 +223,34 @@ func (sr *SubqueryRewriter) analyzeRewriteStrategy(outerQuery *syndrQL.SelectSta
 	}
 
 	// Get bundle statistics for outer query
+	var outerStats, innerStats *statistics.BundleStatistics
 	outerBundleName := outerQuery.BundleName
-	outerStats, err := sr.statsStorage.LoadStatistics(outerBundleName)
-	if err != nil {
-		sr.logger.Debugf("No statistics for outer bundle %s: %v", outerBundleName, err)
-		decision.OuterSize = 1000 // Conservative estimate
-	} else {
+	if sr.statsStorage != nil {
+		var err error
+		outerStats, err = sr.statsStorage.LoadStatistics(outerBundleName)
+		if err != nil {
+			sr.logger.Debugf("No statistics for outer bundle %s: %v", outerBundleName, err)
+		}
+	}
+	if outerStats != nil {
 		decision.OuterSize = outerStats.TotalDocuments
+	} else {
+		decision.OuterSize = 1000 // Conservative estimate
 	}
 
 	// Get bundle statistics for inner query
 	innerBundleName := subqueryExpr.InnerQuery.BundleName
-	innerStats, err := sr.statsStorage.LoadStatistics(innerBundleName)
-	if err != nil {
-		sr.logger.Debugf("No statistics for inner bundle %s: %v", innerBundleName, err)
-		decision.InnerSize = 1000 // Conservative estimate
-	} else {
+	if sr.statsStorage != nil {
+		var err error
+		innerStats, err = sr.statsStorage.LoadStatistics(innerBundleName)
+		if err != nil {
+			sr.logger.Debugf("No statistics for inner bundle %s: %v", innerBundleName, err)
+		}
+	}
+	if innerStats != nil {
 		decision.InnerSize = innerStats.TotalDocuments
+	} else {
+		decision.InnerSize = 1000 // Conservative estimate
 	}
 
 	// Estimate selectivity
@@ -314,26 +362,67 @@ func (sr *SubqueryRewriter) estimateSelectivity(outerStats, innerStats *statisti
 	return selectivity
 }
 
-// applyRewriteStrategy applies the chosen rewrite strategy
+// applyRewriteStrategy applies the chosen rewrite strategy by storing metadata
+// on the SubqueryExpression for the planner to consume.
 func (sr *SubqueryRewriter) applyRewriteStrategy(outerQuery *syndrQL.SelectStatement, subqueryExpr *syndrQL.SubqueryExpression, decision *RewriteDecision) error {
 	switch decision.Strategy {
-	case STRATEGY_SEMI_JOIN, STRATEGY_ANTI_JOIN:
-		// Mark for semi-join execution (actual execution node created by planner)
-		// TODO: I will add metadata to SubqueryExpression to communicate strategy to planner
-		sr.logger.Debugf("Marked subquery for %s execution", strategyName(decision.Strategy))
+	case STRATEGY_SEMI_JOIN:
+		// Analyze qualified correlation to get join field pairs
+		correlationResult := sr.correlationAnalyzer.AnalyzeCorrelationQualified(
+			outerQuery.BundleName, subqueryExpr.InnerQuery.WhereClause)
 
-		// Store decision in subquery expression for planner
-		// (This would require extending SubqueryExpression with RewriteDecision field)
+		if !correlationResult.IsCorrelated || len(correlationResult.JoinPairs) == 0 {
+			// Fallback to nested loop if we can't extract join pairs
+			sr.logger.Warnf("Cannot extract join pairs for semi-join, falling back to nested loop")
+			subqueryExpr.RewriteStrategy = REWRITE_NESTED_LOOP
+			return nil
+		}
+
+		subqueryExpr.RewriteStrategy = REWRITE_SEMI_JOIN
+		subqueryExpr.OuterJoinFields = make([]string, len(correlationResult.JoinPairs))
+		subqueryExpr.InnerJoinFields = make([]string, len(correlationResult.JoinPairs))
+		for i, pair := range correlationResult.JoinPairs {
+			subqueryExpr.OuterJoinFields[i] = pair.OuterField
+			subqueryExpr.InnerJoinFields[i] = pair.InnerField
+		}
+		subqueryExpr.NonCorrelatedWhere = correlationResult.NonCorrelatedExpr
+
+		sr.logger.Debugf("Marked subquery for semi-join: outer=%v, inner=%v",
+			subqueryExpr.OuterJoinFields, subqueryExpr.InnerJoinFields)
+
+	case STRATEGY_ANTI_JOIN:
+		// Same analysis as semi-join but with anti-join strategy
+		correlationResult := sr.correlationAnalyzer.AnalyzeCorrelationQualified(
+			outerQuery.BundleName, subqueryExpr.InnerQuery.WhereClause)
+
+		if !correlationResult.IsCorrelated || len(correlationResult.JoinPairs) == 0 {
+			sr.logger.Warnf("Cannot extract join pairs for anti-join, falling back to nested loop")
+			subqueryExpr.RewriteStrategy = REWRITE_NESTED_LOOP
+			return nil
+		}
+
+		subqueryExpr.RewriteStrategy = REWRITE_ANTI_JOIN
+		subqueryExpr.OuterJoinFields = make([]string, len(correlationResult.JoinPairs))
+		subqueryExpr.InnerJoinFields = make([]string, len(correlationResult.JoinPairs))
+		for i, pair := range correlationResult.JoinPairs {
+			subqueryExpr.OuterJoinFields[i] = pair.OuterField
+			subqueryExpr.InnerJoinFields[i] = pair.InnerField
+		}
+		subqueryExpr.NonCorrelatedWhere = correlationResult.NonCorrelatedExpr
+
+		sr.logger.Debugf("Marked subquery for anti-join: outer=%v, inner=%v",
+			subqueryExpr.OuterJoinFields, subqueryExpr.InnerJoinFields)
 
 	case STRATEGY_MATERIALIZATION:
-		// Use existing materialization logic from TIER 1
+		subqueryExpr.RewriteStrategy = REWRITE_MATERIALIZATION
 		sr.logger.Debug("Using existing materialization strategy")
 
 	case STRATEGY_NESTED_LOOP:
-		// Use nested loop execution
+		subqueryExpr.RewriteStrategy = REWRITE_NESTED_LOOP
 		sr.logger.Debug("Using nested loop execution")
 
 	case STRATEGY_UNCHANGED:
+		subqueryExpr.RewriteStrategy = REWRITE_UNCHANGED
 		sr.logger.Debug("No rewrite applied")
 	}
 

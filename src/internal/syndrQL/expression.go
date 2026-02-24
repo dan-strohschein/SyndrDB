@@ -160,6 +160,12 @@ type SubqueryExpression struct {
 	IsCorrelated     bool             // Whether subquery references outer query (false for Tier 1)
 	CorrelatedFields []string         // Fields that reference outer query (empty for Tier 1)
 	ResolvedType     FieldType        // Bool for EXISTS, matches inner for IN
+
+	// Tier 3: Correlated subquery rewrite metadata (set by SubqueryRewriter during planning)
+	RewriteStrategy    int        // 0=unchanged, 1=semi-join, 2=anti-join, 3=materialization, 4=nested-loop
+	OuterJoinFields    []string   // Outer bundle fields for join (e.g., ["ID"])
+	InnerJoinFields    []string   // Inner bundle fields for join (e.g., ["AuthorID"])
+	NonCorrelatedWhere Expression // Inner WHERE with correlated predicates removed (nil = no remaining predicates)
 }
 
 // SubqueryType categorizes the type of subquery

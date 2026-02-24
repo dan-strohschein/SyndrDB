@@ -259,7 +259,6 @@ func TestSubquery_IN_MediumResultSet(t *testing.T) {
 
 // Test: EXISTS subquery
 func TestSubquery_EXISTS_Basic(t *testing.T) {
-	t.Skip("Skipping: Correlated subqueries not yet implemented (Tier 3 feature)")
 	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
@@ -308,7 +307,6 @@ func TestSubquery_NOT_IN_Basic(t *testing.T) {
 
 // Test: NOT EXISTS subquery
 func TestSubquery_NOT_EXISTS_Basic(t *testing.T) {
-	t.Skip("Skipping: Correlated subqueries not yet implemented (Tier 3 feature)")
 	fixture := setupFullServerTB(t)
 	setupSubqueryBundles(t, fixture)
 	seedAuthorsForSubquery(t, fixture, 100)
