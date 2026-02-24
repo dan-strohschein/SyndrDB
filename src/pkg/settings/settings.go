@@ -392,7 +392,7 @@ func GetSettings() *Arguments {
 			Host:                "0.0.0.0",
 			Port:                27017,
 			Verbose:             false,
-			AuthEnabled:         false,
+			AuthEnabled:         true,
 			CreateDefaultDB:     true,
 			Version:             "0.1.0",
 			BundleStorageFormat: "binary", // Binary (BSON) format is the only supported format
