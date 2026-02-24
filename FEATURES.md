@@ -474,11 +474,20 @@ database/bundleName/
 - Flush strategies: size-based (50% full), time-based (100ms), explicit (on commit)
 
 ### 6.6 Segment Compaction
-- Background workers (default 3) orchestrated by CompactionScheduler
-- PostgreSQL-inspired autovacuum-style evaluation
+- Background workers (default 3) orchestrated by CompactionScheduler with priority queue
+- **Two trigger paths:**
+  - **Post-write**: `EvaluateBundle()` called after each write in `AppendDocumentToBundleFileWithTxID`
+  - **Periodic**: 60-second background ticker via `periodicCompactionEvaluator()` evaluates all bundles
+- **Five trigger strategies** (in `compaction_strategy.go`):
+  - **FileCountStrategy**: triggers when segment count >= 10
+  - **TotalSizeStrategy**: triggers when total bundle size >= 512MB
+  - **TombstoneRatioStrategy**: triggers when tombstone ratio >= 30%
+  - **TimeBasedStrategy**: triggers on 1-hour interval
+  - **CompositeStrategy**: combines strategies with AND/OR logic
 - Process: select files -> merge (keep latest version per key) -> remove tombstones -> atomic replace
-- Per-bundle locking prevents concurrent compaction
+- Per-bundle locking prevents concurrent compaction of the same bundle
 - MVCC-aware: preserves versions visible to active snapshots
+- Graceful shutdown via `CompactionScheduler.Stop()` on server shutdown
 
 ### 6.7 Document Pages
 - `Documents` map (`map[string]Document`) for key-based access

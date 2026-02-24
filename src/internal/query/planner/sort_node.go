@@ -291,8 +291,8 @@ func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner docume
 
 			docCount++
 
-			// Memory tracking: Sample every 100th document (Issue 10: propagate error)
-			if memoryTracker != nil && docCount%100 == 0 {
+			// Memory tracking: Sample every 4096th document to reduce cache-line contention
+			if memoryTracker != nil && docCount%4096 == 0 {
 				docSize := models.EstimateDocumentSize(doc, nil)
 				if sampleErr = memoryTracker.Sample(docSize, docCount); sampleErr != nil {
 					return false

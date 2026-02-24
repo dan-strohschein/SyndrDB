@@ -711,8 +711,8 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 			}
 		}
 
-		// Memory tracking: Sample every 500th document
-		if memoryTracker != nil && i%500 == 0 {
+		// Memory tracking: Sample every 4096th document to reduce cache-line contention
+		if memoryTracker != nil && i%4096 == 0 {
 			docSize := models.EstimateDocumentSize(doc, nil)
 			if err := memoryTracker.Sample(docSize, i); err != nil {
 				return nil, err
@@ -1001,7 +1001,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 				}
 			}
 
-			if memoryTracker != nil && docCount%100 == 0 {
+			if memoryTracker != nil && docCount%4096 == 0 {
 				docSize := models.EstimateDocumentSize(doc, nil)
 				if err := memoryTracker.Sample(docSize, docCount); err != nil {
 					return nil, err
@@ -1099,7 +1099,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 			}
 		}
 
-		if memoryTracker != nil && docCount%100 == 0 {
+		if memoryTracker != nil && docCount%4096 == 0 {
 			docSize := models.EstimateDocumentSize(doc, nil)
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
