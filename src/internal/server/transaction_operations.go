@@ -111,12 +111,35 @@ func (tb *TransactionBuffer) Clear() {
 }
 
 // HandleBeginTransaction handles BEGIN TRANSACTION command
-func HandleBeginTransaction(session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) (*CommandResponse, error) {
+func HandleBeginTransaction(session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger, isolationLevel ...syndrQL.IsolationLevel) (*CommandResponse, error) {
 	// Check if already in a transaction
 	if session.IsInTransaction() {
 		return nil, errors.New(errors.ERR_TRANSACTION_CONFLICT,
 			fmt.Sprintf("transaction already active (transaction ID: %s)", session.ActiveTransactionID),
 			errors.LayerTransaction).WithContext("tx_id", session.ActiveTransactionID)
+	}
+
+	// Determine effective isolation level
+	var level syndrQL.IsolationLevel
+	if len(isolationLevel) > 0 {
+		level = isolationLevel[0]
+	}
+
+	// Reject SERIALIZABLE (Phase 2)
+	effectiveLevel := level
+	if effectiveLevel == syndrQL.IsolationDefault {
+		// Check pending
+		session.mu.RLock()
+		pending := session.PendingIsolationLevel
+		session.mu.RUnlock()
+		if pending != syndrQL.IsolationDefault {
+			effectiveLevel = pending
+		}
+	}
+	if effectiveLevel == syndrQL.IsolationSerializable {
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			"SERIALIZABLE isolation level is not yet supported (planned for Phase 2)",
+			errors.LayerTransaction)
 	}
 
 	// Check WAL availability
@@ -146,7 +169,11 @@ func HandleBeginTransaction(session *Session, serviceManager ServiceManager, log
 	}
 
 	// Initialize transaction state in session (including snapshot for read-path visibility)
-	session.BeginTransaction(txIDStr, startLSN, snapshot)
+	if level != syndrQL.IsolationDefault {
+		session.BeginTransaction(txIDStr, startLSN, snapshot, level)
+	} else {
+		session.BeginTransaction(txIDStr, startLSN, snapshot)
+	}
 
 	// Debug-aware logging
 	debugMode := settings.GetSettings().Debug
@@ -155,7 +182,8 @@ func HandleBeginTransaction(session *Session, serviceManager ServiceManager, log
 		if snapshot != nil {
 			snapSeq = snapshot.SnapshotSequence
 		}
-		logger.Infof("BEGIN TRANSACTION: txID=%s, startLSN=%d, session=%s, snapshotSeq=%d", txIDStr, startLSN, session.SessionID, snapSeq)
+		logger.Infof("BEGIN TRANSACTION: txID=%s, startLSN=%d, session=%s, snapshotSeq=%d, isolation=%s",
+			txIDStr, startLSN, session.SessionID, snapSeq, session.GetEffectiveIsolationLevel())
 	}
 
 	return &CommandResponse{
@@ -692,7 +720,7 @@ func ParseAndExecuteTransactionCommand(command string, session *Session, service
 	// Execute based on transaction type
 	switch txNode.Type {
 	case syndrQL.TransactionBegin:
-		return HandleBeginTransaction(session, serviceManager, logger)
+		return HandleBeginTransaction(session, serviceManager, logger, txNode.IsolationLevel)
 
 	case syndrQL.TransactionCommit:
 		return HandleCommit(session, serviceManager, logger)
@@ -706,11 +734,88 @@ func ParseAndExecuteTransactionCommand(command string, session *Session, service
 	case syndrQL.TransactionRollbackToSavepoint:
 		return HandleRollbackToSavepoint(txNode.SavepointName, session, serviceManager, database, logger)
 
+	case syndrQL.TransactionSetIsolation:
+		return HandleSetTransactionIsolation(txNode.IsolationLevel, session, logger)
+
+	case syndrQL.TransactionSetSessionIsolation:
+		return HandleSetSessionIsolation(txNode.IsolationLevel, session, logger)
+
+	case syndrQL.TransactionShowIsolation:
+		return HandleShowIsolationLevel(session, logger)
+
 	default:
 		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
 			fmt.Sprintf("unknown transaction type: %s", txNode.Type),
 			errors.LayerParser).WithContext("type", fmt.Sprintf("%s", txNode.Type))
 	}
+}
+
+// HandleSetTransactionIsolation handles SET TRANSACTION ISOLATION LEVEL command.
+// Sets a pending isolation level that takes effect on the next BEGIN TRANSACTION.
+func HandleSetTransactionIsolation(level syndrQL.IsolationLevel, session *Session, logger *zap.SugaredLogger) (*CommandResponse, error) {
+	// Cannot SET TRANSACTION while in a transaction
+	if session.IsInTransaction() {
+		return nil, errors.New(errors.ERR_TRANSACTION_CONFLICT,
+			"SET TRANSACTION ISOLATION LEVEL must be called before BEGIN TRANSACTION",
+			errors.LayerTransaction)
+	}
+
+	// Reject SERIALIZABLE (Phase 2)
+	if level == syndrQL.IsolationSerializable {
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			"SERIALIZABLE isolation level is not yet supported (planned for Phase 2)",
+			errors.LayerTransaction)
+	}
+
+	session.SetTransactionIsolation(level)
+
+	effectiveLevel := level
+	if effectiveLevel == syndrQL.IsolationReadUncommitted {
+		effectiveLevel = syndrQL.IsolationReadCommitted
+	}
+
+	logger.Debugf("SET TRANSACTION ISOLATION LEVEL %s (session=%s)", effectiveLevel, session.SessionID)
+
+	return &CommandResponse{
+		Result:      fmt.Sprintf("SET TRANSACTION ISOLATION LEVEL %s", effectiveLevel),
+		ResultCount: 0,
+	}, nil
+}
+
+// HandleSetSessionIsolation handles SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL command.
+// Sets the session-level default isolation level that persists across transactions.
+func HandleSetSessionIsolation(level syndrQL.IsolationLevel, session *Session, logger *zap.SugaredLogger) (*CommandResponse, error) {
+	// Reject SERIALIZABLE (Phase 2)
+	if level == syndrQL.IsolationSerializable {
+		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
+			"SERIALIZABLE isolation level is not yet supported (planned for Phase 2)",
+			errors.LayerTransaction)
+	}
+
+	session.SetDefaultIsolationLevel(level)
+
+	effectiveLevel := level
+	if effectiveLevel == syndrQL.IsolationReadUncommitted {
+		effectiveLevel = syndrQL.IsolationReadCommitted
+	}
+
+	logger.Debugf("SET SESSION default isolation level to %s (session=%s)", effectiveLevel, session.SessionID)
+
+	return &CommandResponse{
+		Result:      fmt.Sprintf("SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL %s", effectiveLevel),
+		ResultCount: 0,
+	}, nil
+}
+
+// HandleShowIsolationLevel handles SHOW TRANSACTION ISOLATION LEVEL command.
+// Returns the effective isolation level for the current session/transaction.
+func HandleShowIsolationLevel(session *Session, logger *zap.SugaredLogger) (*CommandResponse, error) {
+	level := session.GetEffectiveIsolationLevel()
+
+	return &CommandResponse{
+		Result:      level.String(),
+		ResultCount: 1,
+	}, nil
 }
 
 // CheckTransactionIdleTimeout checks if the active transaction has exceeded idle timeout
@@ -813,5 +918,8 @@ func IsTransactionCommand(command string) bool {
 	return strings.HasPrefix(commandLower, "begin") ||
 		strings.HasPrefix(commandLower, "commit") ||
 		strings.HasPrefix(commandLower, "rollback") ||
-		strings.HasPrefix(commandLower, "savepoint")
+		strings.HasPrefix(commandLower, "savepoint") ||
+		strings.HasPrefix(commandLower, "set transaction") ||
+		strings.HasPrefix(commandLower, "set session") ||
+		strings.HasPrefix(commandLower, "show transaction")
 }

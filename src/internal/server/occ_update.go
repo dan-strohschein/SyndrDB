@@ -347,8 +347,11 @@ func occValidateAndWrite(
 	}
 
 	// Build context with MVCC snapshot if in transaction
+	// For READ COMMITTED, create a fresh snapshot so WHERE clause sees latest committed data
 	if session != nil && session.IsInTransaction() {
-		if snap := session.GetMVCCSnapshot(); snap != nil {
+		if session.IsReadCommitted() {
+			ctx = createReadCommittedSnapshot(ctx, session, serviceManager, logger)
+		} else if snap := session.GetMVCCSnapshot(); snap != nil {
 			snapshotInfo := &planner.SnapshotInfo{
 				SnapshotSequence: snap.SnapshotSequence,
 				TransactionID:    snap.TransactionID,
@@ -450,8 +453,11 @@ func executePessimisticUpdate(
 	}()
 
 	// Build context with MVCC snapshot if in transaction
+	// For READ COMMITTED, create a fresh snapshot so WHERE clause sees latest committed data
 	if session != nil && session.IsInTransaction() {
-		if snap := session.GetMVCCSnapshot(); snap != nil {
+		if session.IsReadCommitted() {
+			ctx = createReadCommittedSnapshot(ctx, session, serviceManager, logger)
+		} else if snap := session.GetMVCCSnapshot(); snap != nil {
 			snapshotInfo := &planner.SnapshotInfo{
 				SnapshotSequence: snap.SnapshotSequence,
 				TransactionID:    snap.TransactionID,

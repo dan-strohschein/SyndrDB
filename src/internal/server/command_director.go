@@ -1074,6 +1074,99 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 // Session management commands
 
+// injectTransactionSnapshot adds the appropriate MVCC snapshot to the context.
+// For REPEATABLE READ: uses the transaction-level snapshot (captured at BEGIN).
+// For READ COMMITTED: creates a fresh statement-level snapshot (current global sequence).
+// For non-transactional queries: uses current global sequence.
+func injectTransactionSnapshot(ctx context.Context, session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) context.Context {
+	if session != nil && session.IsInTransaction() {
+		if session.IsReadCommitted() {
+			// READ COMMITTED: Create fresh snapshot for this statement
+			ctx = createReadCommittedSnapshot(ctx, session, serviceManager, logger)
+		} else {
+			// REPEATABLE READ (default): Use transaction-level snapshot
+			snapshot := session.GetMVCCSnapshot()
+			if snapshot != nil {
+				snapshotInfo := &planner.SnapshotInfo{
+					SnapshotSequence: snapshot.SnapshotSequence,
+					TransactionID:    snapshot.TransactionID,
+					ActiveTxIDs:      snapshot.ActiveTxIDs,
+				}
+				ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
+				logger.Debugf("MVCC: Added snapshot to query context: seq=%d, txID=%d", snapshot.SnapshotSequence, snapshot.TransactionID)
+			} else if serviceManager.WALManager != nil {
+				// Fallback: lookup from SnapshotManager (e.g. legacy sessions)
+				txIDStr := session.ActiveTransactionID
+				var txID uint64
+				if txIDStr != "" {
+					_, _ = fmt.Sscanf(txIDStr, "%016x", &txID)
+					if snapshotMgr := serviceManager.WALManager.GetSnapshotManager(); snapshotMgr != nil {
+						if snap, exists := snapshotMgr.GetSnapshot(txID); exists && snap != nil {
+							snapshotInfo := &planner.SnapshotInfo{
+								SnapshotSequence: snap.SnapshotSequence,
+								TransactionID:    snap.TransactionID,
+								ActiveTxIDs:      snap.ActiveTxIDs,
+							}
+							ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
+							logger.Debugf("MVCC: Added snapshot to query context (fallback): seq=%d, txID=%d", snap.SnapshotSequence, txID)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// For non-transactional queries, set a "read-committed" snapshot
+	// using the current global sequence so index-level MVCC filtering works
+	if planner.GetSnapshotInfoFromContext(ctx) == nil && serviceManager.WALManager != nil {
+		if snapshotMgr := serviceManager.WALManager.GetSnapshotManager(); snapshotMgr != nil {
+			currentSeq := snapshotMgr.GetCurrentSequence()
+			if currentSeq > 0 {
+				ctx = planner.WithSnapshotInfo(ctx, &planner.SnapshotInfo{
+					SnapshotSequence: currentSeq,
+				})
+			}
+		}
+	}
+
+	return ctx
+}
+
+// createReadCommittedSnapshot creates a fresh statement-level snapshot for READ COMMITTED isolation.
+// Each statement sees data committed up to the moment that statement starts,
+// while still seeing its own uncommitted writes.
+func createReadCommittedSnapshot(ctx context.Context, session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) context.Context {
+	if serviceManager.WALManager == nil {
+		return ctx
+	}
+
+	snapshotMgr := serviceManager.WALManager.GetSnapshotManager()
+	if snapshotMgr == nil {
+		return ctx
+	}
+
+	// Parse txID from session
+	txIDStr := session.ActiveTransactionID
+	var txID uint64
+	if txIDStr != "" {
+		_, _ = fmt.Sscanf(txIDStr, "%016x", &txID)
+	}
+
+	// Create fresh statement snapshot (does NOT affect oldestSnapshot tracking)
+	snap := snapshotMgr.CreateStatementSnapshot(txID)
+	if snap != nil {
+		snapshotInfo := &planner.SnapshotInfo{
+			SnapshotSequence: snap.SnapshotSequence,
+			TransactionID:    snap.TransactionID,
+			ActiveTxIDs:      snap.ActiveTxIDs,
+		}
+		ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
+		logger.Debugf("MVCC READ COMMITTED: Fresh statement snapshot seq=%d, txID=%d", snap.SnapshotSequence, txID)
+	}
+
+	return ctx
+}
+
 // ShowSessions shows all active sessions
 // Syntax: SHOW SESSIONS
 // filterDocumentFields filters documents to only include specified fields
@@ -1180,50 +1273,8 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		}
 	}()
 
-	// PHASE 1/4: MVCC - Add snapshot to context when in transaction (use session-stored snapshot)
-	if session != nil && session.IsInTransaction() {
-		snapshot := session.GetMVCCSnapshot()
-		if snapshot != nil {
-			snapshotInfo := &planner.SnapshotInfo{
-				SnapshotSequence: snapshot.SnapshotSequence,
-				TransactionID:    snapshot.TransactionID,
-				ActiveTxIDs:      snapshot.ActiveTxIDs,
-			}
-			ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
-			logger.Debugf("MVCC: Added snapshot to query context: seq=%d, txID=%d", snapshot.SnapshotSequence, snapshot.TransactionID)
-		} else if serviceManager.WALManager != nil {
-			// Fallback: lookup from SnapshotManager (e.g. legacy sessions)
-			txIDStr := session.ActiveTransactionID
-			var txID uint64
-			if txIDStr != "" {
-				_, _ = fmt.Sscanf(txIDStr, "%016x", &txID)
-				if snapshotMgr := serviceManager.WALManager.GetSnapshotManager(); snapshotMgr != nil {
-					if snap, exists := snapshotMgr.GetSnapshot(txID); exists && snap != nil {
-						snapshotInfo := &planner.SnapshotInfo{
-							SnapshotSequence: snap.SnapshotSequence,
-							TransactionID:    snap.TransactionID,
-							ActiveTxIDs:      snap.ActiveTxIDs,
-						}
-						ctx = planner.WithSnapshotInfo(ctx, snapshotInfo)
-						logger.Debugf("MVCC: Added snapshot to query context (fallback): seq=%d, txID=%d", snap.SnapshotSequence, txID)
-					}
-				}
-			}
-		}
-	}
-
-	// For non-transactional queries, set a "read-committed" snapshot
-	// using the current global sequence so index-level MVCC filtering works
-	if planner.GetSnapshotInfoFromContext(ctx) == nil && serviceManager.WALManager != nil {
-		if snapshotMgr := serviceManager.WALManager.GetSnapshotManager(); snapshotMgr != nil {
-			currentSeq := snapshotMgr.GetCurrentSequence()
-			if currentSeq > 0 {
-				ctx = planner.WithSnapshotInfo(ctx, &planner.SnapshotInfo{
-					SnapshotSequence: currentSeq,
-				})
-			}
-		}
-	}
+	// MVCC snapshot injection for transactional and non-transactional queries
+	ctx = injectTransactionSnapshot(ctx, session, serviceManager, logger)
 
 	if timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, timeout)

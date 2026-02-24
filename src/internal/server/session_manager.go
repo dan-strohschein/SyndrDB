@@ -160,6 +160,11 @@ type Session struct {
 	// PHASE 1: MVCC - Snapshot created on BEGIN TRANSACTION, stored for read-path visibility
 	MVCCSnapshot *journal.Snapshot
 
+	// Transaction Isolation Levels
+	DefaultIsolationLevel  syndrQL.IsolationLevel // Session-level default (persists across transactions)
+	TransactionIsolation   syndrQL.IsolationLevel // Current transaction's isolation level
+	PendingIsolationLevel  syndrQL.IsolationLevel // Set via SET TRANSACTION before BEGIN (cleared on BEGIN)
+
 	// Prepared statement cache (session-scoped)
 	PreparedStatements *syndrQL.ShardedPreparedStatementCache // Session-isolated prepared statement cache
 
@@ -1584,7 +1589,8 @@ func (s *Session) IsIdleExpired(timeout time.Duration) bool {
 
 // BeginTransaction initializes transaction state for the session.
 // snapshot is the MVCC snapshot for this transaction (created on BEGIN); may be nil for non-MVCC paths.
-func (s *Session) BeginTransaction(txID string, startLSN uint64, snapshot *journal.Snapshot) {
+// isolationLevel is optional; if provided, sets the transaction's isolation level.
+func (s *Session) BeginTransaction(txID string, startLSN uint64, snapshot *journal.Snapshot, isolationLevel ...syndrQL.IsolationLevel) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1596,6 +1602,20 @@ func (s *Session) BeginTransaction(txID string, startLSN uint64, snapshot *journ
 	s.CurrentSavepoint = nil
 	s.TransactionStatus = TransactionStatusActive
 	s.MVCCSnapshot = snapshot
+
+	// Set transaction isolation level:
+	// 1. Explicit parameter from BEGIN TRANSACTION ISOLATION LEVEL
+	// 2. Pending level from SET TRANSACTION ISOLATION LEVEL
+	// 3. Leave as IsolationDefault (will use session/server default)
+	if len(isolationLevel) > 0 && isolationLevel[0] != syndrQL.IsolationDefault {
+		s.TransactionIsolation = isolationLevel[0]
+	} else if s.PendingIsolationLevel != syndrQL.IsolationDefault {
+		s.TransactionIsolation = s.PendingIsolationLevel
+	} else {
+		s.TransactionIsolation = syndrQL.IsolationDefault
+	}
+	s.PendingIsolationLevel = syndrQL.IsolationDefault // Clear pending
+
 	// PHASE 2: MVCC - Initialize transaction buffer for document location tracking
 	s.TransactionBuffer = NewTransactionBuffer()
 }
@@ -1642,11 +1662,57 @@ func (s *Session) clearTransactionState() {
 	s.PendingOperations = nil
 	s.CurrentSavepoint = nil
 	s.MVCCSnapshot = nil
+	s.TransactionIsolation = syndrQL.IsolationDefault
 	// PHASE 2: MVCC - Clear transaction buffer
 	if s.TransactionBuffer != nil {
 		s.TransactionBuffer.Clear()
 		s.TransactionBuffer = nil
 	}
+}
+
+// GetEffectiveIsolationLevel returns the effective isolation level for the current transaction.
+// Priority: TransactionIsolation > DefaultIsolationLevel > server default (REPEATABLE READ).
+// READ UNCOMMITTED is mapped to READ COMMITTED (like PostgreSQL).
+func (s *Session) GetEffectiveIsolationLevel() syndrQL.IsolationLevel {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.getEffectiveIsolationLevelLocked()
+}
+
+// getEffectiveIsolationLevelLocked is the internal version that requires mu to be held.
+func (s *Session) getEffectiveIsolationLevelLocked() syndrQL.IsolationLevel {
+	level := s.TransactionIsolation
+	if level == syndrQL.IsolationDefault {
+		level = s.DefaultIsolationLevel
+	}
+	if level == syndrQL.IsolationDefault {
+		level = syndrQL.IsolationRepeatableRead // Server default
+	}
+	// Map READ UNCOMMITTED → READ COMMITTED (like PostgreSQL)
+	if level == syndrQL.IsolationReadUncommitted {
+		level = syndrQL.IsolationReadCommitted
+	}
+	return level
+}
+
+// IsReadCommitted returns true if the effective isolation level is READ COMMITTED.
+func (s *Session) IsReadCommitted() bool {
+	return s.GetEffectiveIsolationLevel() == syndrQL.IsolationReadCommitted
+}
+
+// SetTransactionIsolation sets the isolation level for the next transaction (via SET TRANSACTION).
+// This is a pending level that takes effect on the next BEGIN.
+func (s *Session) SetTransactionIsolation(level syndrQL.IsolationLevel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.PendingIsolationLevel = level
+}
+
+// SetDefaultIsolationLevel sets the session-level default isolation level.
+func (s *Session) SetDefaultIsolationLevel(level syndrQL.IsolationLevel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DefaultIsolationLevel = level
 }
 
 // AddPendingOperation adds a command to the transaction's pending operations buffer

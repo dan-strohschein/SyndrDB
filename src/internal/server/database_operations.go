@@ -492,19 +492,12 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 
 	dbName := dbCommand.DatabaseName
 
-	// Step 1: Check Admin permissions
-	if session != nil && serviceManager.PermissionService != nil {
-		hasAdmin, err := serviceManager.PermissionService.UserHasPermission(session.Username, "Admin")
-		if err != nil {
-			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
-				"permission check failed", errors.LayerAuth).WithContext("username", session.Username)
-		}
-		if !hasAdmin {
-			// TODO: I will integrate with SecurityAuditor to log failed DROP DATABASE attempts
+	// Step 1: Check Admin permissions (only when auth is enabled)
+	authEnabled := settings.GetSettings().AuthEnabled
+	if authEnabled {
+		if err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled); err != nil {
 			logger.Warnf("User '%s' attempted to drop database '%s' without Admin permission", session.Username, dbName)
-			return nil, errors.New(errors.ERR_PERMISSION_DENIED,
-				"access denied: DROP DATABASE requires Admin permission",
-				errors.LayerAuth).WithContext("username", session.Username).WithContext("database", dbName)
+			return nil, err
 		}
 	}
 
@@ -524,6 +517,18 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 	database, err := serviceManager.DatabaseService.GetDatabaseByName(dbName)
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
+	}
+
+	// Step 3.5: Unless WITH FORCE, reject if any bundle contains documents
+	if !dbCommand.Force && len(database.Bundles) > 0 {
+		for bundleName, bundle := range database.Bundles {
+			if bundle.TotalDocuments > 0 {
+				return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("database '%s' contains non-empty bundle '%s' (%d documents); use DROP DATABASE \"%s\" WITH FORCE to drop anyway",
+						dbName, bundleName, bundle.TotalDocuments, dbName),
+					errors.LayerCommand).WithContext("database", dbName).WithContext("bundle", bundleName)
+			}
+		}
 	}
 
 	// Step 4: Detect and terminate all active sessions
@@ -583,18 +588,18 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 		}
 	}
 
-	// Step 6: In-memory cleanup - Close and remove GraphQL schema manager
+	// Step 6: In-memory cleanup - close indexes, remove bundle metadata, clear caches
 	if serviceManager.BundleService != nil {
-		// TODO: I will add public methods to BundleService for schema manager cleanup when refactoring schema management
-		logger.Debugf("Clearing GraphQL schema manager for database '%s'", dbName)
-
-		// Clear bundle metadata caches, document page caches, and index caches
-		// TODO: I will add explicit cache clearing methods for bundles when refactoring cache management
-		logger.Debugf("Clearing in-memory caches for database '%s'", dbName)
-
-		// Flush all buffers before deletion
 		serviceManager.BundleService.FlushAllBuffers()
-		logger.Debugf("Flushed all buffers for database '%s'", dbName)
+
+		// Clean up each bundle's in-memory state (metadata, page caches, indexes)
+		// so background workers like the MVCC GC don't encounter stale references.
+		for bundleName := range database.Bundles {
+			if err := serviceManager.BundleService.RemoveBundle(database, bundleName); err != nil {
+				logger.Warnf("Failed to clean up bundle '%s' during database drop: %v (continuing)", bundleName, err)
+			}
+		}
+		logger.Debugf("Cleaned up %d bundle(s) for database '%s'", len(database.Bundles), dbName)
 	}
 
 	// Step 7: Remove database from in-memory map
