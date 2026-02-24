@@ -93,13 +93,15 @@ SQL-like query language with document-database extensions.
 - `DROP BUNDLE "Name" [FORCE]`
 - `DELETE BUNDLE "Name"` - alias for DROP
 
-#### View Management
-- `CREATE VIEW "Name" AS SELECT ...`
-- `CREATE MATERIALIZED VIEW "Name" AS SELECT ...`
-- `REFRESH MATERIALIZED VIEW "Name"`
-- `DROP VIEW "Name"`
-- `SHOW VIEWS`
-- `DESCRIBE VIEW "Name"`
+#### View Management (Parsing Complete, Execution Pending)
+- `CREATE VIEW "Name" AS SELECT ...` - parsed, handler returns placeholder
+- `CREATE MATERIALIZED VIEW "Name" AS SELECT ...` - parsed, handler returns placeholder
+- `REFRESH MATERIALIZED VIEW "Name"` - parsed, handler returns placeholder
+- `DROP VIEW "Name"` - parsed, handler returns placeholder
+- `SHOW VIEWS` - parsed, handler returns placeholder
+- `DESCRIBE VIEW "Name"` - parsed, handler returns placeholder
+
+> **Note:** All view commands are fully parsed and routed, but the underlying ViewService execution layer is not yet wired into the ServiceManager. View infrastructure (registry, validator, materializer, store) exists as a framework awaiting integration.
 
 #### Index Management
 - `CREATE B-INDEX "idx" ON BUNDLE "b" WITH FIELDS ({field, req, uniq})`
@@ -112,10 +114,31 @@ SQL-like query language with document-database extensions.
 
 #### Database Management
 - `CREATE DATABASE "Name"`
-- `DROP DATABASE "Name"`
+- `DROP DATABASE "Name"` / `DROP DATABASE "Name" WITH FORCE`
+  - **Safety checks:** The `primary` system database is unconditionally protected (case-insensitive) and cannot be dropped even with `WITH FORCE`
+  - **Non-empty bundle guard:** Without `WITH FORCE`, rejects the drop if any bundle in the database contains documents; the error message reports which bundle and document count, and suggests using `WITH FORCE`
+  - **Admin permission required:** When authentication is enabled, only users with the `Admin` permission may drop databases
+  - **Active session termination:** Automatically detects and terminates all sessions connected to the target database (grouped by user via `InvalidateUserSessions`)
+  - **Cleanup scope:** Flushes write buffers → removes in-memory bundle metadata/indexes/page caches → deletes from `DatabaseService.Databases` map → WAL-logged transaction (records database name, ID, terminated session count, timestamp, admin user) → removes all bundle and database records from the internal catalog → deletes GraphQL schema file → recursively removes the database directory from the filesystem
+  - **Partial failure handling:** Two-phase success tracking (catalog + filesystem); if catalog cleanup succeeds but filesystem deletion fails, returns an error with the path for manual cleanup
 - `RENAME DATABASE "old" TO "new"`
 - `USE "DatabaseName"` - switch active database
-- `ATTACH DATABASE` - attach external database
+- `ATTACH DATABASE "<file_path>" "<database_name>"` - attach external database
+  - **Primary protection:** The `primary` system database name is protected (case-insensitive) and cannot be used as an attach alias
+  - **Path validation:** Requires an absolute file path; rejects relative paths and path traversal (`..`) attempts
+  - **Duplicate guard:** Rejects if a database with the same name already exists in memory or the system catalog
+  - **Bundle discovery:** Automatically discovers `.bnd` files in the target directory and registers them in the BundleService, making them immediately queryable via SELECT
+  - **WAL-logged:** The attach operation is persisted to WAL for crash recovery
+  - **DDL classification:** ATTACH DATABASE is classified as DDL and rejected inside transactions
+  - **Admin permission required:** Requires `Admin` permission when authentication is enabled
+- `DETACH DATABASE "<database_name>"` - detach database (files preserved on disk)
+  - **Primary protection:** The `primary` system database cannot be detached
+  - **Session termination:** Automatically terminates all active sessions connected to the target database
+  - **Clean teardown:** Flushes write buffers, removes bundles from BundleService in-memory state (page cache, metadata), removes database from catalog
+  - **Files preserved:** Unlike DROP DATABASE, DETACH does not delete any files from disk — the database can be re-attached later
+  - **WAL-logged:** The detach operation is persisted to WAL
+  - **DDL classification:** DETACH DATABASE is classified as DDL and rejected inside transactions
+  - **Admin permission required:** Requires `Admin` permission when authentication is enabled
 - `ALTER DATABASE` / `UPDATE DATABASE`
 
 #### Bundle Relationships
@@ -249,6 +272,27 @@ Documents use a discriminated union `FieldValue` struct instead of `interface{}`
 ---
 
 ## 3. ACID Compliance & Transactions
+
+### 3.0 Transaction Commands & Lifecycle
+```sql
+BEGIN TRANSACTION          -- Start transaction, capture MVCC snapshot
+COMMIT                     -- Validate conflicts, assign commit sequence, persist
+ROLLBACK                   -- Undo all changes via WAL replay, release locks
+SAVEPOINT "name"           -- Create named savepoint (single-level)
+ROLLBACK TO SAVEPOINT "name" -- Partial rollback to savepoint
+```
+
+**Transaction lifecycle**:
+```
+BEGIN → [DML operations] → COMMIT (success) or ROLLBACK (failure)
+                         ↳ Auto-rollback on any command error
+```
+
+- Transactions support all DML commands (SELECT, INSERT, UPDATE, DELETE, BULK operations)
+- DDL commands (CREATE, DROP, ALTER) are rejected inside transactions
+- Cursors auto-close on COMMIT/ROLLBACK (PostgreSQL semantics)
+- Prepared statements work within transaction scope
+- Document-level write locks acquired during UPDATE/DELETE, released on COMMIT/ROLLBACK
 
 ### 3.1 Atomicity
 - All-or-nothing transaction execution via WAL-based undo/redo
@@ -851,6 +895,15 @@ END:<total_count>,<execution_time_ms>\n
 - Atomic session counter
 - Per-session tracking: queries, locks, transaction state, cursors, prepared statements, role cache
 
+### 12.7 Connection Pool Management
+- **Server-side connection pool** with configurable maximum size (default 100 connections)
+- **Connection idle timeout:** Default 30 minutes, checked every 5 minutes; idle connections are closed with a notification sent to the client
+- **Active connection tracking:** Each `Connection` carries a `LastActive` timestamp updated on creation, authentication, and activity; `GetConnectionPoolStats()` exposes per-connection idle duration
+- **Pool limit enforcement:** New connections are rejected with an error message (`ERROR: Server has reached maximum connection limit`) when active count reaches `MaxConnections`
+- **Two-tier rate limiting:** Global connection limit (atomic, lock-free) + per-IP connection limit (default 10 per IP) via 32-shard `RateLimiter`; whitelisted IPs (`127.0.0.1`, `::1`) bypass per-IP tracking; temporarily bans IPs that exceed rate thresholds (default 15 minutes)
+- **`GetConnectionPoolStats()` API:** Returns `active_count`, `max_connections`, `idle_timeout_seconds`, and a `connections` array with per-connection details (`id`, `last_active_unix`, `idle_seconds`, `database`, `user`, `authorized`)
+- **Client-side pooling** is the responsibility of application drivers and SDKs
+
 ---
 
 ## 13. GraphQL Support
@@ -884,18 +937,303 @@ END:<total_count>,<execution_time_ms>\n
 
 ---
 
-## 14. Operational Features
+## 14. Schema Migrations
 
-### 14.1 Backup & Restore
-- `BACKUP DATABASE "name" TO "path" [WITH COMPRESSION = 'gzip']`
-- `RESTORE DATABASE "name" FROM "path"`
-- Compression modes: gzip, zstd, none
-- CRC32 checksums for integrity verification
-- Includes bundle files (.bnd segments, .manifest), index files, and database metadata
-- Decompression bomb prevention and path traversal guards
-- Consistency guaranteed via CHECKPOINT before backup
+### 14.1 Migration Lifecycle
+```
+PENDING → IN_PROGRESS → APPLIED → ROLLED_BACK
+                ↓ (error)
+             FAILED (can re-apply after fixing)
+```
 
-### 14.2 Live Monitoring (MONITOR:v1)
+### 14.2 Migration Commands
+- `START MIGRATION [WITH DESCRIPTION "text"] <commands> COMMIT` - create a new migration
+- `APPLY MIGRATION WITH VERSION <n>` - execute a pending migration
+- `APPLY ROLLBACK TO VERSION <n>` - rollback migrations in reverse order to target version
+- `VALIDATE MIGRATION WITH VERSION <n>` - dry-run validation without execution
+- `VALIDATE ROLLBACK TO VERSION <n>` - simulate rollback and verify feasibility
+- `SHOW MIGRATIONS [FOR "db_name"] [WHERE field = "value"]` - list migration history
+
+### 14.3 Supported Operations Inside Migrations
+- `CREATE BUNDLE` - create new bundle with schema
+- `DROP BUNDLE [FORCE]` - drop bundle (FORCE required if non-empty)
+- `UPDATE BUNDLE` - add, remove, or modify fields
+- `UPDATE BUNDLE ... SET NAME =` - rename bundle
+- `UPDATE BUNDLE ... ADD RELATIONSHIP` - add foreign key relationships
+- `CREATE HASH INDEX` / `CREATE B-INDEX` - create indexes
+- `ADD DOCUMENT` / `INSERT` - insert documents with type conversion
+- `DELETE` / `DELETE DOCUMENTS` - delete with WHERE clauses
+
+### 14.4 Validation Pipeline (5 Phases)
+1. **Syntax Validation** - keyword and token analysis (fail-fast)
+2. **Dependency Validation** - entity creation/reference graph analysis
+3. **Command Count Check** - max 1000 commands per migration (configurable)
+4. **Data Loss Detection** - warns on DROP BUNDLE, DELETE, REMOVE FIELD
+5. **Performance Analysis** - estimates impact of large operations
+
+### 14.5 Safety Features
+- **Fail-fast locking**: only one migration per database at a time (no queuing)
+- **SHA-256 checksums**: tamper detection for migration integrity
+- **Atomic execution**: each command wrapped in WAL transaction
+- **Auto-generated descriptions**: derived from first command if not provided
+- **FORCE option**: override data-loss warnings when intentional
+- **Version tracking**: sequential per-database versioning
+
+### 14.6 Migration Storage
+Stored in the `primary` system database across 4 auto-created bundles:
+
+| Bundle | Purpose |
+|--------|---------|
+| `Migrations` | Migration records (up/down commands, status, checksum, error, timing) |
+| `DatabaseVersions` | Current schema version per database |
+| `MigrationLocks` | Fail-fast database-level locks |
+| `MigrationValidationReports` | Validation/rollback reports with 30-day retention |
+
+### 14.7 Migration Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| MaxMigrationCommands | 1000 | Max commands per migration |
+| MigrationTimeoutSeconds | 300 | Execution timeout |
+| EnableAutoReverse | true | Auto-generate down commands |
+| RequireExplicitDownCommands | false | Fail if reverse can't be generated |
+
+---
+
+## 15. Backup & Restore
+
+### 15.1 Backup
+
+#### Syntax
+```sql
+BACKUP DATABASE "dbname" TO "path/to/backup.sdb" [WITH COMPRESSION = 'gzip']
+```
+
+#### Backup Process
+1. Validate database exists
+2. Execute CHECKPOINT (flush WAL and in-memory state for consistency)
+3. Collect all bundle files (`.bnd` segments, `.manifest`)
+4. Collect all index files
+5. Calculate CRC32 checksums for every file
+6. Collect primary database metadata (Databases and Bundles catalog)
+7. Write manifest JSON (file list, checksums, metadata, sizes)
+8. Create compressed tar archive (`.sdb` file)
+9. Validate backup after creation
+
+#### Compression Options
+| Mode | Description |
+|------|-------------|
+| `gzip` | Standard gzip compression |
+| `zstd` | Zstandard (faster, better compression ratio) |
+| `none` | Uncompressed tar archive |
+
+#### Backup Options
+- **Compression**: gzip, zstd, or none (configurable, default: zstd)
+- **Include Indexes**: configurable inclusion of index files (default: true)
+- **Output Path**: full path to output `.sdb` file
+
+### 15.2 Restore
+
+#### Syntax
+```sql
+RESTORE DATABASE "dbname" FROM "path/to/backup.sdb" [FORCE]
+```
+
+#### Restore Process
+1. Extract and validate backup archive
+2. Read and verify manifest
+3. Verify all file CRC32 checksums
+4. Check server version compatibility
+5. Create database directory
+6. Copy files (rename if restoring to different database name)
+7. Create database in LOCKED state for verification
+8. Register in system catalog (`primary.Databases`)
+9. Load and register all bundles in catalog
+10. Validate restored database integrity
+
+#### Restore Features
+- **Database rename**: restore to a different name than the original backup
+- **Manifest rewriting**: auto-updates `databaseName` field in bundle manifests for renamed databases
+- **FORCE option**: overwrite existing database if it already exists
+- **Locked state**: restored databases start locked pending user verification/unlock
+- **Catalog registration**: fresh UUID generation prevents overwriting source database
+
+### 15.3 Security
+- **Decompression bomb prevention**: enforces `MaxRestoreSizeBytes` limit (default: 50GB)
+- **Path traversal prevention**: `filepath.Clean()` + reject `..` and absolute paths
+- **Format auto-detection**: magic byte inspection (not file extension) for gzip/zstd
+- **CRC32 integrity**: every file verified during restore
+
+### 15.4 Backup Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| BackupCompression | zstd | Default compression method |
+| BackupIncludeIndexes | true | Include index files |
+| MaxRestoreSizeBytes | 50 GB | Decompression size limit |
+
+---
+
+## 16. Client Drivers
+
+SyndrDB provides official client drivers for all major modern programming languages, communicating over the TCP wire protocol.
+
+### 16.1 Supported Languages
+
+| Language | Driver |
+|----------|--------|
+| **Go** | Reference implementation (built-in CLI client) |
+| **Python** | Official Python driver |
+| **JavaScript / Node.js** | Official Node.js driver |
+| **TypeScript** | Full TypeScript type definitions included with Node.js driver |
+| **Java** | Official Java driver |
+| **C# / .NET** | Official .NET driver |
+| **Ruby** | Official Ruby driver |
+| **Rust** | Official Rust driver |
+| **PHP** | Official PHP driver |
+| **Swift** | Official Swift driver |
+
+### 16.2 Wire Protocol Support
+All drivers implement the SyndrDB TCP wire protocol:
+- Connection string parsing: `syndrdb://host:port:database:username:password[:options]`
+- Command framing with `\x04` (EOT) terminator and `\x04\x04` escape
+- Parameter binding with `\x05` (ENQ) delimiter and `\x05\x05` escape
+- Pipeline mode with `READY\n` sentinel framing
+- Streaming protocol (STREAM:v1) with `CHUNK` / `ZCHUNK` frames
+- Zstd response compression negotiation
+- Connection pooling and session management
+
+### 16.3 Common Driver Features
+- Connection pooling with configurable pool size
+- Automatic reconnection and retry logic
+- Prepared statement support with parameter binding
+- Transaction management (BEGIN, COMMIT, ROLLBACK, SAVEPOINT)
+- Cursor support for large result set streaming
+- Streaming query results via iterator/async patterns
+- Zstd compression toggle
+- TLS/SSL connection support
+- Type mapping between SyndrDB types and language-native types
+
+### 16.4 SyndrQL IR Compiler
+- TypeScript/Node.js package (`@syndrdb/ir-compiler`)
+- Compiles SyndrQL Intermediate Representation to SyndrQL query strings
+- Enables programmatic query construction with type safety
+
+---
+
+## 17. CLI Client
+
+### 17.1 Interactive Shell
+- Readline-style line editor with raw terminal mode
+- Persistent command history stored in `~/.syndrdb_history` (gob-encoded binary, ring buffer)
+- Configurable history capacity (default: 250 commands)
+- Arrow key navigation (Up/Down for history, Left/Right for cursor)
+
+### 17.2 Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl-A` | Move cursor to beginning of line |
+| `Ctrl-E` | Move cursor to end of line |
+| `Ctrl-K` | Kill text to end of line |
+| `Ctrl-U` | Kill text to beginning of line |
+| `Ctrl-W` | Delete word backwards |
+| `Ctrl-L` | Clear screen and redraw prompt |
+| `Ctrl-D` | EOF (exit) or delete character |
+| `Ctrl-C` | Graceful SIGINT |
+| `Home` / `End` | Jump to start/end of line |
+| `Delete` | Delete character at cursor |
+| `Backspace` | Delete character before cursor |
+
+### 17.3 Output Formatting
+- **Pretty-print JSON** with indentation (default: enabled)
+- **Compact JSON** output mode
+- **TimeOnly mode**: prefix command with `TimeOnly` to show only `ResultCount` and `ExecutionTimeMS`
+- **Streaming response handling**: auto-detects large responses (>= 4096 bytes) and buffers with progress dots
+
+### 17.4 Connection Management
+- Full connection string support: `syndrdb://host:port:database:username:password[:options]`
+- Zstd compression toggle via `--compress` flag
+- Pipeline mode via `--pipeline` flag
+- Streaming protocol negotiation
+
+### 17.5 Operating Modes
+- **Interactive shell** (default): readline prompt with history
+- **Single command mode**: via `-command` argument for scripting
+- **Piped input**: auto-detects non-TTY input for script-friendly usage
+
+### 17.6 Async Features
+- Non-blocking server message listener in separate goroutine
+- Live MONITOR session streaming display
+- Large query response buffering with on-the-fly completion detection
+
+### 17.7 Command-Line Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-connection_string` | | Full connection URI |
+| `-host` | localhost | Server host |
+| `-port` | 1776 | Server port |
+| `-database` | testdb | Database name |
+| `-username` | user | Username |
+| `-password` | password | Password |
+| `-pretty_print` | true | Enable JSON indentation |
+| `-compress` | false | Enable zstd compression |
+| `-pipeline` | false | Enable pipeline mode |
+| `-history_size` | 250 | Max history entries |
+
+### 17.8 Session Management
+- Graceful signal handling (SIGTERM/SIGINT) with terminal state cleanup
+- Exit commands: `exit;` or `quit;` with automatic history persistence
+
+---
+
+## 18. Visual Client (SyndrDB Studio)
+
+SyndrDB Studio is the official graphical client for SyndrDB, providing a full-featured visual interface for database management, query execution, and data exploration.
+
+### 18.1 Query Tools
+- **Query Editor**: syntax-highlighted SyndrQL editor with auto-completion
+- **Query Results Viewer**: tabular display with sorting, filtering, and pagination
+- **Query History**: searchable log of previously executed queries
+- **EXPLAIN Visualizer**: graphical query plan visualization with cost breakdown
+
+### 18.2 Data Management
+- **Data Browser**: paginated document viewer with in-place editing
+- **Document Inspector**: detailed view of individual documents with field types and MVCC metadata
+- **Bulk Operations**: visual interface for bulk insert, update, and delete operations
+- **Import/Export**: CSV and JSON data import/export tools
+
+### 18.3 Schema Management
+- **Schema Designer**: visual bundle (table) creation and modification
+- **Field Editor**: add, remove, and modify fields with type selection, constraints, and defaults
+- **Relationship Viewer**: visual representation of bundle relationships and foreign keys
+- **Index Manager**: create, view, and manage indexes (Hash, B-Tree, BRIN) with visual configuration
+
+### 18.4 Database Administration
+- **Connection Manager**: save and organize multiple server connections
+- **Session Monitor**: real-time view of active sessions and running queries
+- **Server Dashboard**: server statistics, cache performance, and resource utilization
+- **User & Role Management**: visual RBAC administration (create users, assign roles, manage permissions)
+- **Backup Manager**: visual interface for creating and restoring backups
+
+### 18.5 Migration Tools
+- **Migration Editor**: create and edit schema migrations with syntax support
+- **Migration History**: visual timeline of applied migrations with version tracking
+- **Rollback Interface**: guided rollback workflow with validation preview
+- **Diff Viewer**: side-by-side comparison of schema changes
+
+### 18.6 Monitoring & Diagnostics
+- **Live Metrics Dashboard**: real-time charts for query throughput, latency, cache hit rates
+- **Slow Query Log**: filterable view of slow queries with execution plans
+- **MVCC Inspector**: view active snapshots, version history, and conflict logs
+- **Index Health**: index utilization statistics, staleness indicators, and maintenance status
+
+---
+
+## 19. Operational Features
+
+### 19.1 Live Monitoring (MONITOR:v1)
 ```
 MONITOR:v1\n
 SNAPSHOT:<timestamp>\n
@@ -905,19 +1243,12 @@ SNAPSHOT:<timestamp>\n
 - Configurable interval: 500ms to 60000ms
 - Streaming snapshots pushed asynchronously until STOP MONITOR
 
-### 14.3 Metrics & Telemetry
+### 19.2 Metrics & Telemetry
 - GlobalServerMetrics with atomic counters (query count, error count, cache hits/misses, etc.)
 - Real-time export via memory-mapped file (`/tmp/syndrdb_metrics.mmap`)
 - Zero-copy metrics accessible to external monitoring agents
 
-### 14.4 CLI Client
-- Interactive readline shell with history persistence (`~/.syndrdb_history`)
-- Connection string CLI flags: `--connection_string`, `--compress`, `--pipeline`, `--pretty_print`, `--history_size`
-- Streaming response assembly with progress display
-- Monitor display support for MONITOR:v1 frames
-- Raw mode terminal handling with signal cleanup
-
-### 14.5 Server Entry Point
+### 19.3 Server Entry Point
 - GC tuning for database workloads
 - CLI flag parsing with YAML config file support
 - Graceful shutdown handling
@@ -925,22 +1256,22 @@ SNAPSHOT:<timestamp>\n
 
 ---
 
-## 15. Configuration
+## 20. Configuration
 
 All settings loadable from YAML config file with CLI flag overrides.
 
-### 15.1 Server & Network
+### 20.1 Server & Network
 | Setting | Default | Description |
 |---------|---------|-------------|
 | host | 127.0.0.1 | Bind address |
 | port | 1776 | Listen port |
-| mode | standalone | standalone or cluster |
+| mode | standalone | Server operating mode (standalone) |
 | max_connections | 100 | Max concurrent connections |
 | max_sessions | 1000 | Max concurrent sessions |
 | session_timeout_minutes | 30 | Session idle timeout |
 | connection_idle_timeout | 30 | Connection idle timeout |
 
-### 15.2 Storage
+### 20.2 Storage
 | Setting | Default | Description |
 |---------|---------|-------------|
 | data_dir | (required) | Data directory path |
@@ -948,7 +1279,7 @@ All settings loadable from YAML config file with CLI flag overrides.
 | bundle_storage_format | binary | Storage format (binary only) |
 | max_loaded_document_pages | 500 | Max pages in page cache |
 
-### 15.3 WAL & Durability
+### 20.3 WAL & Durability
 | Setting | Default | Description |
 |---------|---------|-------------|
 | wal_enabled | true | Enable write-ahead log |
@@ -958,14 +1289,14 @@ All settings loadable from YAML config file with CLI flag overrides.
 | wal_batch_size | 100 | Operations per flush (balanced mode) |
 | wal_max_flush_delay | 100 | Max ms before forced flush |
 
-### 15.4 Query & Execution
+### 20.4 Query & Execution
 | Setting | Default | Description |
 |---------|---------|-------------|
 | query_timeout_seconds | 300 | Query execution timeout |
 | query_max_memory_mb | 25 | Per-query memory limit |
 | plan_cache_capacity | 1000/shard | Plan cache entries per shard |
 
-### 15.5 SIMD & Performance
+### 20.5 SIMD & Performance
 | Setting | Default | Description |
 |---------|---------|-------------|
 | sort_simd_enabled | true | SIMD-accelerated sorting |
@@ -975,13 +1306,13 @@ All settings loadable from YAML config file with CLI flag overrides.
 | sort_parallel_enabled | true | Parallel sort algorithms |
 | sort_parallel_min_size | 10000 | Min docs for parallel sort |
 
-### 15.6 Indexes
+### 20.6 Indexes
 | Setting | Default | Description |
 |---------|---------|-------------|
 | btree_sync_mode | batched | B-tree sync strategy |
 | index_maintenance_enabled | true | Background index maintenance |
 
-### 15.7 MVCC & Concurrency
+### 20.7 MVCC & Concurrency
 | Setting | Default | Description |
 |---------|---------|-------------|
 | enable_rcu_writes | (varies) | Lock-free update path |
@@ -991,14 +1322,14 @@ All settings loadable from YAML config file with CLI flag overrides.
 | vacuum_dead_ratio_threshold | 0.3 | Trigger compaction at 30% dead |
 | vacuum_max_pages_per_cycle | 100 | Pages scanned per GC cycle |
 
-### 15.8 Streaming & Cursors
+### 20.8 Streaming & Cursors
 | Setting | Default | Description |
 |---------|---------|-------------|
 | streaming_chunk_size | 256 | Documents per streaming chunk |
 | max_open_cursors_per_session | 64 | Max cursors per session |
 | cursor_idle_timeout_seconds | 300 | Cursor expiration timeout |
 
-### 15.9 Security
+### 20.9 Security
 | Setting | Default | Description |
 |---------|---------|-------------|
 | auth_enabled | false | Enable authentication |
@@ -1008,7 +1339,7 @@ All settings loadable from YAML config file with CLI flag overrides.
 | require_join_condition | true | Enforce join conditions |
 | max_restore_size_bytes | 100GB | Backup restore size limit |
 
-### 15.10 Monitoring
+### 20.10 Monitoring
 | Setting | Default | Description |
 |---------|---------|-------------|
 | export_realtime_metrics | true | Enable mmap metrics export |

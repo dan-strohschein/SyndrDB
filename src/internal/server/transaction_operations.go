@@ -902,14 +902,16 @@ func IsDMLCommand(command string) bool {
 }
 
 // IsDDLCommand checks if a command is a DDL command (not allowed in transactions)
-// DDL commands: CREATE, DROP, ALTER, TRUNCATE, RENAME
+// DDL commands: CREATE, DROP, ALTER, TRUNCATE, RENAME, ATTACH, DETACH
 func IsDDLCommand(command string) bool {
 	commandLower := strings.ToLower(strings.TrimSpace(command))
 	return strings.HasPrefix(commandLower, "create") ||
 		strings.HasPrefix(commandLower, "drop") ||
 		strings.HasPrefix(commandLower, "alter") ||
 		strings.HasPrefix(commandLower, "truncate") ||
-		strings.HasPrefix(commandLower, "rename")
+		strings.HasPrefix(commandLower, "rename") ||
+		strings.HasPrefix(commandLower, "attach") ||
+		strings.HasPrefix(commandLower, "detach")
 }
 
 // IsTransactionCommand checks if a command is a transaction control command

@@ -210,6 +210,82 @@ func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseServ
 	return nil
 }
 
+// RegisterExistingBundle registers an existing bundle from disk into the BundleService in-memory state.
+// Unlike AddBundle/AddBundleByStruct, this does NOT create files on disk — it loads metadata
+// from existing .bnd files. Used by ATTACH DATABASE to make discovered bundles queryable.
+func (s *BundleService) RegisterExistingBundle(db *models.Database, bundleName string) error {
+	// Try to load bundle metadata from disk
+	databasePath := helpers.GetDatabaseFolderPath(db.Name)
+	bndFileName := fmt.Sprintf("%s_%s.bnd", db.Name, bundleName)
+
+	bundle, err := s.store.LoadBundleMetadata(db, databasePath, bndFileName)
+	if err != nil {
+		// Fall back: register a shell bundle so it's at least discoverable
+		shellBundle := &models.Bundle{
+			Name:     bundleName,
+			Database: db,
+		}
+		s.bundleMetadata[bundleName] = shellBundle
+		s.logger.Warnf("Bundle '%s' registered with minimal metadata (load error: %v)", bundleName, err)
+		return nil
+	}
+
+	bundle.Database = db
+
+	// Load the SortedIndex for this bundle
+	if err := InitializeBundleSortedIndex(bundle); err != nil {
+		s.logger.Warnf("Failed to load sorted index for attached bundle '%s': %v", bundleName, err)
+		if bundle.SortedIndex == nil {
+			bundle.SortedIndex = models.NewShardedSortedIndex()
+		}
+	}
+
+	// Discover existing indexes
+	if len(bundle.Indexes) == 0 {
+		if err := s.discoverBundleIndexes(bundle); err != nil {
+			s.logger.Warnf("Failed to discover indexes for attached bundle '%s': %v", bundleName, err)
+		}
+	}
+
+	s.bundleMetadata[bundleName] = bundle
+	s.logger.Debugf("Registered existing bundle '%s' from disk into BundleService", bundleName)
+	return nil
+}
+
+// DetachBundle removes a bundle from the BundleService in-memory state without deleting files on disk.
+// Used by DETACH DATABASE to cleanly remove bundles from the query engine.
+func (s *BundleService) DetachBundle(db *models.Database, name string) error {
+	// Remove from bundleMetadata
+	delete(s.bundleMetadata, name)
+
+	// Remove any loaded document pages for this bundle from all shards
+	prefix := name + ":"
+	for i := 0; i < PageCacheShardCount; i++ {
+		shard := s.pageShards[i]
+		shard.mu.Lock()
+		keysToDelete := make([]string, 0, 8)
+		for pageKey := range shard.pages {
+			if strings.HasPrefix(pageKey, prefix) {
+				keysToDelete = append(keysToDelete, pageKey)
+			}
+		}
+		for _, key := range keysToDelete {
+			if elem, exists := shard.lruElements[key]; exists {
+				shard.lruOrder.Remove(elem)
+				delete(shard.lruElements, key)
+			}
+			shard.deleteLocked(key)
+		}
+		shard.mu.Unlock()
+	}
+
+	// Remove from database's Bundles map
+	delete(db.Bundles, name)
+
+	s.logger.Debugf("Detached bundle '%s' from in-memory state (files preserved on disk)", name)
+	return nil
+}
+
 // GetBundleMetadata retrieves only the bundle structure/metadata without documents
 func (s *BundleService) GetBundleMetadata(database *models.Database, name string) (*models.Bundle, error) {
 	//args := settings.GetSettings()

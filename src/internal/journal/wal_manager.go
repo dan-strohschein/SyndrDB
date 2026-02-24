@@ -391,6 +391,44 @@ func (wm *WALManager) LogDatabaseCreate(txID, databaseName string, databaseData 
 	return nil
 }
 
+// LogDatabaseAttach logs a database attach operation to the WAL.
+// This records the attachment of an external database for crash recovery.
+func (wm *WALManager) LogDatabaseAttach(txID, databaseName string, attachData interface{}) error {
+	afterData, err := hvjson.Marshal(&attachData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal attach data: %w", err)
+	}
+
+	metadata := fmt.Sprintf(`{"database_name":"%s","operation":"ATTACH_DATABASE"}`, databaseName)
+
+	err = wm.wal.LogOperation(txID, OpAttachDatabase, databaseName, "", "", string(afterData), metadata)
+	if err != nil {
+		return fmt.Errorf("failed to log database attach: %w", err)
+	}
+
+	wm.logger.Debugf("Logged database attach: database=%s, tx=%s", databaseName, txID)
+	return nil
+}
+
+// LogDatabaseDetach logs a database detach operation to the WAL.
+// This records the detachment of a database for crash recovery.
+func (wm *WALManager) LogDatabaseDetach(txID, databaseName string, detachData interface{}) error {
+	afterData, err := hvjson.Marshal(&detachData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal detach data: %w", err)
+	}
+
+	metadata := fmt.Sprintf(`{"database_name":"%s","operation":"DETACH_DATABASE"}`, databaseName)
+
+	err = wm.wal.LogOperation(txID, OpDetachDatabase, databaseName, "", "", string(afterData), metadata)
+	if err != nil {
+		return fmt.Errorf("failed to log database detach: %w", err)
+	}
+
+	wm.logger.Debugf("Logged database detach: database=%s, tx=%s", databaseName, txID)
+	return nil
+}
+
 // LogRelationshipDrop logs a relationship drop operation to the WAL.
 // This records the removal of a relationship metadata from a bundle, preserving the transaction
 // history for future crash recovery and audit purposes.

@@ -676,6 +676,16 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return AttachUserToDatabase(command, logger, serviceManager)
 	}
 
+	// Parse DETACH command
+	if strings.HasPrefix(commandLower, "detach") {
+		if strings.Contains(commandLower, "detach database") {
+			return DetachDatabase(command, logger, serviceManager, session)
+		}
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"unknown DETACH command. Did you mean: DETACH DATABASE \"name\"?",
+			errors.LayerCommand)
+	}
+
 	// Parse START MIGRATION command
 	if strings.HasPrefix(commandLower, "start") {
 		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "migration" {
@@ -1906,7 +1916,7 @@ func classifyCommandPermission(firstWords []string) string {
 		return "Admin"
 	case "checkpoint":
 		return "Admin"
-	case "attach":
+	case "attach", "detach":
 		return "Admin"
 	case "start", "apply", "validate":
 		// Migration commands
