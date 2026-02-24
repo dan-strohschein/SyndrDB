@@ -640,6 +640,13 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 		}
 	}
 
+	// PAGE BLOOM FILTER: Set bloom hints on scanner for page-skip optimization
+	if len(node.BloomHints) > 0 {
+		if smartScanner, ok := node.DocumentScanner.(*documentscanner.SmartBundleScanner); ok {
+			smartScanner.SetBloomHints(node.BloomHints)
+		}
+	}
+
 	// PROJECTION: Establish projection for this scan (overwrites any previous query's projection).
 	// - When ProjectionFields is nil/empty: clear storage and adapter so we get full deserialization.
 	//   (A prior ORDER BY or other query may have set projection; leaving it causes "GROUP BY field X
@@ -747,6 +754,13 @@ func (node *FullScanNode) ExecuteSlice(ctx context.Context) ([]*models.Document,
 			SetSnapshot(snapshotSeq uint64, txID uint64, activeTxIDs map[uint64]bool)
 		}); ok {
 			smartScanner.SetSnapshot(snapshotInfo.SnapshotSequence, snapshotInfo.TransactionID, snapshotInfo.ActiveTxIDs)
+		}
+	}
+
+	// PAGE BLOOM FILTER: Set bloom hints on scanner for page-skip optimization
+	if len(node.BloomHints) > 0 {
+		if smartScanner, ok := node.DocumentScanner.(*documentscanner.SmartBundleScanner); ok {
+			smartScanner.SetBloomHints(node.BloomHints)
 		}
 	}
 

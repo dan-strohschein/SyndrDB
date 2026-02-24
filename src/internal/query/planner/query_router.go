@@ -593,6 +593,14 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 		qr.logger.Debugf("PREDICATE PUSHDOWN: Compiled WHERE expression to scanner predicate")
 	}
 
+	// PAGE BLOOM FILTER: Extract equality predicates as bloom hints for page-skip optimization.
+	// When the scanner has a page bloom map, these hints let it skip pages where the
+	// searched field-value pairs are definitely absent.
+	if hints := extractBloomHints(expr); len(hints) > 0 {
+		fullScan.BloomHints = hints
+		qr.logger.Debugf("PAGE BLOOM: Extracted %d bloom hints from WHERE expression", len(hints))
+	}
+
 	// Create FilterNode with Expression
 	// Use cost model and selectivity estimator for accurate cost/row estimates
 	estimatedFilterRows := int(bundle.TotalDocuments) / 2 // Default: 50% selectivity
