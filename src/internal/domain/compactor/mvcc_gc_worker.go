@@ -37,6 +37,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -415,10 +416,17 @@ func (w *MVCCGCWorker) performGCCycleWithContext(ctx context.Context, triggerTyp
 
 			shouldCompact, versionCount, err := w.analyzeBundleVersions(ctx, bundleName, db.Name, bundleService)
 			if err != nil {
-				w.logger.Warnw("Failed to analyze bundle versions",
-					"bundle", bundleName,
-					"database", db.Name,
-					"error", err)
+				// Bundle was deleted between listing and analysis — skip silently
+				if strings.Contains(err.Error(), "not found") {
+					w.logger.Debugw("Bundle no longer exists, skipping GC",
+						"bundle", bundleName,
+						"database", db.Name)
+				} else {
+					w.logger.Warnw("Failed to analyze bundle versions",
+						"bundle", bundleName,
+						"database", db.Name,
+						"error", err)
+				}
 				continue
 			}
 

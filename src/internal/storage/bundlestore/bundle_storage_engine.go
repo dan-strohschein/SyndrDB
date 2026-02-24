@@ -4907,39 +4907,33 @@ func (b *BundleStorageEngine) WriteBundleToFile(bundle *models.Bundle, filePath 
 
 func (b *BundleStorageEngine) RemoveBundleFile(database *models.Database, bundleName string) error {
 
-	// Create a new data file
-	//args := settings.GetSettings()
-
 	databasePath := helpers.GetDatabaseFolderPath(database.Name)
+	removedAny := false
 
-	filePath := filepath.Join(databasePath, bundleName)
-
-	// Check if the bundle directory or file exists
-	if !helpers.DirExists(filePath) {
-		if b.logger != nil {
-			b.logger.Debugf("Bundle %s does not exist, skipping removal", filePath)
+	// Remove the bundle subdirectory and all its contents (segment files, indexes, manifest)
+	dirPath := filepath.Join(databasePath, bundleName)
+	if helpers.DirExists(dirPath) {
+		if err := os.RemoveAll(dirPath); err != nil {
+			return fmt.Errorf("error removing bundle directory %s: %w", bundleName, err)
 		}
-		return fmt.Errorf("bundle %s does not exist", bundleName)
+		removedAny = true
 	}
 
-	// Use RemoveAll to recursively delete the bundle directory and all its contents
-	// (including document pages, indexes, etc.)
-	err := os.RemoveAll(filePath)
-	if err != nil {
-		return fmt.Errorf("error removing bundle directory %s: %w", bundleName, err)
-	}
-
-	// Also delete the legacy .bnd metadata file if it exists
+	// Remove the legacy .bnd metadata file if it exists
 	fileName := fmt.Sprintf("%s_%s.bnd", database.Name, bundleName)
 	bndFilePath := filepath.Join(databasePath, fileName)
 	if helpers.FileExists(bndFilePath, *b.logger) {
 		if err := os.Remove(bndFilePath); err != nil {
 			return fmt.Errorf("error removing bundle metadata file %s: %w", fileName, err)
 		}
-	} else {
+		removedAny = true
+	}
+
+	if !removedAny {
 		if b.logger != nil {
-			b.logger.Debugf("Bundle file %s does not exist, skipping removal", fileName)
+			b.logger.Debugf("Bundle %s does not exist on disk, skipping removal", bundleName)
 		}
+		return fmt.Errorf("bundle %s does not exist", bundleName)
 	}
 
 	// Invalidate file-read cache so we don't retain buffers for removed paths

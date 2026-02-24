@@ -19,7 +19,7 @@
 #         {"role": "user", "content": "Show me all customers"}
 #       ],
 #       "temperature": 0.1,
-#       "max_tokens": 512
+#       "max_tokens": 2048
 #     }'
 
 MODEL_PATH="${1:-./syndrql-merged}"
@@ -28,7 +28,7 @@ python -m vllm.entrypoints.openai.api_server \
   --model "$MODEL_PATH" \
   --served-model-name syndrql-model \
   --dtype auto \
-  --max-model-len 2048 \
+  --max-model-len 4096 \
   --gpu-memory-utilization 0.75 \
   --host 127.0.0.1 \
   --port 8000

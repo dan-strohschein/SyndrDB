@@ -235,7 +235,11 @@ func (s *BundleService) ReconcileGraphQLSchemas(db *models.Database) (int, error
 		// We always need this to populate db.Bundles (which is empty at startup).
 		bundle, err := s.GetBundleMetadata(db, bundleName)
 		if err != nil {
-			s.logger.Warnf("[GraphQL Reconcile] Failed to load bundle '%s': %v", bundleName, err)
+			// Bundle has stale on-disk artifacts (e.g. .bnd file or manifest left
+			// behind after DROP BUNDLE WITH FORCE). Clean them up so the warning
+			// does not recur on every restart.
+			s.logger.Warnf("[GraphQL Reconcile] Removing stale artifacts for bundle '%s': %v", bundleName, err)
+			_ = s.store.RemoveBundleFile(db, bundleName)
 			continue
 		}
 
