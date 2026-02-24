@@ -10,6 +10,7 @@ import (
 	hashindexV3 "syndrdb/src/internal/domain/index/hashindexV3" // NEW - Sprint 5: LSM-style hash index
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
+	"syndrdb/src/internal/query/planner/subquery"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/conversion"
 	"syndrdb/src/pkg/settings"
@@ -852,6 +853,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 
 	// Prepare expression and subquery context (shared by both map and slice paths)
 	var subqueryContext syndrQL.SubqueryExecutionContext
+	var correlatedHandler *CorrelatedSubqueryHandler
 	var err error
 	if node.WhereExpression != nil && node.SubqueryExecutor != nil && node.Database != nil {
 		if expr, ok := node.WhereExpression.(syndrQL.Expression); ok {
@@ -863,8 +865,17 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 			if len(subqueryContext) > 0 {
 				node.Logger.Debugf("Executed %d subqueries before WHERE evaluation", len(subqueryContext))
 			}
+
+			// TIER 3: Create handler for nested-loop correlated subqueries
+			if HasCorrelatedNestedLoop(expr) {
+				if subExec, ok := node.SubqueryExecutor.(subquery.SubqueryExecutor); ok {
+					correlatedHandler = NewCorrelatedSubqueryHandler(subExec, node.Database, node.Logger)
+					node.Logger.Debugf("Created correlated subquery handler for nested-loop execution")
+				}
+			}
 		}
 	}
+	_ = correlatedHandler // Used in per-document evaluation when nested-loop strategy is active
 
 	var exprToUse syndrQL.Expression
 	if node.WhereExpression != nil {

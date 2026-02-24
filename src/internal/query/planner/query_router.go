@@ -55,6 +55,10 @@ type QueryRouter struct {
 	// TIER 1 SUBQUERY SUPPORT: Subquery executor for IN/EXISTS evaluation
 	subqueryExecutor interface{} // Passed from UnifiedQueryPlanner
 
+	// TIER 3: Correlated subquery support
+	correlationAnalyzer *CorrelationAnalyzer
+	subqueryRewriter    *SubqueryRewriter
+
 	// COST INTELLIGENCE: Column statistics store for cost-based optimization
 	statsStore             *StatsStore
 	costModel              *CostModel
@@ -85,13 +89,20 @@ func NewQueryRouter(
 	args := settings.GetSettings()
 	queryCache := NewQueryCache(args.WhereExpressionCacheSize, logger)
 
+	// TIER 3: Initialize correlated subquery infrastructure
+	correlationAnalyzer := NewCorrelationAnalyzer(logger)
+	// SubqueryRewriter needs statistics storage; pass nil — strategy analysis handles nil gracefully
+	subqueryRewriter := NewSubqueryRewriter(correlationAnalyzer, nil, nil, logger)
+
 	return &QueryRouter{
-		basePlanner:   basePlanner,
-		joinPlanner:   joinPlanner,
-		bundleService: bundleService,
-		queryCache:    queryCache,
-		costModel:     NewCostModel(),
-		logger:        logger,
+		basePlanner:         basePlanner,
+		joinPlanner:         joinPlanner,
+		bundleService:       bundleService,
+		queryCache:          queryCache,
+		correlationAnalyzer: correlationAnalyzer,
+		subqueryRewriter:    subqueryRewriter,
+		costModel:           NewCostModel(),
+		logger:              logger,
 	}
 }
 
@@ -531,6 +542,13 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 	// For simple queries, we only have one bundle
 	bundleCtx := syndrQL.NewBundleContextForSingleBundle(bundle)
 
+	// TIER 3: Detect and handle correlated subqueries (EXISTS/NOT EXISTS with cross-bundle references)
+	if correlatedNode, usedIndexes, err := qr.tryCorrelatedSubqueryPlan(query, expr, bundle, database, docScanner, bundleCtx); err != nil {
+		return nil, nil, err
+	} else if correlatedNode != nil {
+		return correlatedNode, usedIndexes, nil
+	}
+
 	// Try to optimize with indexes using expression helpers
 	indexNode, indexName := qr.tryIndexOptimization(bundle, expr, docScanner)
 	if indexNode != nil {
@@ -609,6 +627,188 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 	}
 
 	return filterNode, []string{}, nil
+}
+
+// tryCorrelatedSubqueryPlan detects correlated subqueries in the WHERE expression
+// and creates a CorrelatedSubqueryNode when a semi-join/anti-join strategy is chosen.
+// Returns (nil, nil, nil) if no correlated subquery is found or if the fallback path should be used.
+func (qr *QueryRouter) tryCorrelatedSubqueryPlan(
+	query *queryparser.UnifiedSelectQuery,
+	expr syndrQL.Expression,
+	bundle *models.Bundle,
+	database *models.Database,
+	docScanner documentscanner.DocumentScannerInterface,
+	bundleCtx *syndrQL.BundleContext,
+) (ExecutionNode, []string, error) {
+
+	// Find subqueries in the WHERE expression
+	subqueries := findSubqueries(expr)
+	if len(subqueries) == 0 {
+		return nil, nil, nil
+	}
+
+	// Build a temporary SelectStatement for the rewriter (it needs outer query context)
+	outerSelect := &syndrQL.SelectStatement{
+		BundleName: query.FromBundle,
+	}
+
+	// Run rewriter directly on the expression tree to analyze and annotate all subqueries
+	if err := qr.subqueryRewriter.rewriteExpression(outerSelect, expr, 0); err != nil {
+		qr.logger.Warnf("Expression rewrite failed: %v, falling back to standard plan", err)
+		return nil, nil, nil
+	}
+
+	// Re-scan subqueries after rewriting (types may have changed, e.g., EXISTS → NOT_EXISTS)
+	subqueries = findSubqueries(expr)
+
+	// Check if any correlated subquery has a semi-join or anti-join strategy
+	for _, subExpr := range subqueries {
+		if subExpr.RewriteStrategy != REWRITE_SEMI_JOIN && subExpr.RewriteStrategy != REWRITE_ANTI_JOIN {
+			continue
+		}
+
+		if len(subExpr.OuterJoinFields) == 0 || len(subExpr.InnerJoinFields) == 0 {
+			qr.logger.Warnf("Correlated subquery has no join fields, falling back")
+			continue
+		}
+
+		// Determine join type
+		joinType := SEMI_JOIN
+		if subExpr.RewriteStrategy == REWRITE_ANTI_JOIN {
+			joinType = ANTI_JOIN
+		}
+
+		// Get inner bundle
+		innerBundleName := subExpr.InnerQuery.BundleName
+		innerBundle, err := qr.bundleService.GetBundleByName(database, innerBundleName)
+		if err != nil {
+			qr.logger.Warnf("Cannot get inner bundle '%s': %v, falling back", innerBundleName, err)
+			continue
+		}
+
+		innerScanner, err := qr.bundleService.GetOrCreateDocumentScanner(innerBundle)
+		if err != nil {
+			qr.logger.Warnf("Cannot create inner scanner: %v, falling back", err)
+			continue
+		}
+
+		// Create outer scan node
+		outerScan := &FullScanNode{
+			Bundle:           bundle,
+			Cost:             qr.costModel.FullScanCost(bundle.TotalDocuments),
+			EstimatedRows:    int(bundle.TotalDocuments),
+			Logger:           qr.logger,
+			BundleServiceInt: qr.bundleService,
+			DocumentScanner:  docScanner,
+		}
+
+		// Create inner scan node
+		innerScan := &FullScanNode{
+			Bundle:           innerBundle,
+			Cost:             qr.costModel.FullScanCost(innerBundle.TotalDocuments),
+			EstimatedRows:    int(innerBundle.TotalDocuments),
+			Logger:           qr.logger,
+			BundleServiceInt: qr.bundleService,
+			DocumentScanner:  innerScanner,
+		}
+
+		// If inner query has non-correlated WHERE predicates, wrap inner scan in FilterNode
+		var innerNode ExecutionNode = innerScan
+		if subExpr.NonCorrelatedWhere != nil {
+			innerBundleCtx := syndrQL.NewBundleContextForSingleBundle(innerBundle)
+			innerNode = &FilterNode{
+				Child:           innerScan,
+				WhereExpression: subExpr.NonCorrelatedWhere,
+				BundleContext:   innerBundleCtx,
+				Cost:            qr.costModel.FilterCost(innerScan.Cost, innerBundle.TotalDocuments, 1),
+				EstimatedRows:   int(innerBundle.TotalDocuments) / 2,
+				Logger:          qr.logger,
+				DocumentScanner: innerScanner,
+			}
+		}
+
+		// Extract remaining non-subquery predicates from outer WHERE
+		remainingFilter := extractNonSubqueryPredicates(expr, subExpr)
+
+		// Create CorrelatedSubqueryNode
+		correlatedNode := &CorrelatedSubqueryNode{
+			OuterChild:      outerScan,
+			InnerChild:      innerNode,
+			JoinType:        joinType,
+			OuterJoinFields: subExpr.OuterJoinFields,
+			InnerJoinFields: subExpr.InnerJoinFields,
+			RemainingFilter: remainingFilter,
+			BundleContext:   bundleCtx,
+			Cost:            EstimateSemiJoinCost(int64(bundle.TotalDocuments), int64(innerBundle.TotalDocuments)),
+			EstimatedRows:   int(EstimateSemiJoinCardinality(int64(bundle.TotalDocuments), int64(innerBundle.TotalDocuments), 0.5)),
+			Logger:          qr.logger,
+		}
+
+		qr.logger.Infof("Created CorrelatedSubqueryNode: %s on %s.%v ↔ %s.%v",
+			joinTypeName(joinType), bundle.Name, subExpr.OuterJoinFields,
+			innerBundleName, subExpr.InnerJoinFields)
+
+		return correlatedNode, []string{}, nil
+	}
+
+	// No correlated subquery converted to semi-join/anti-join
+	return nil, nil, nil
+}
+
+// extractNonSubqueryPredicates extracts the non-subquery portions of a WHERE expression.
+// Given "A AND EXISTS(...)" or "NOT EXISTS(...) AND B", returns just "A" or "B".
+// Returns nil if the entire expression is the subquery.
+func extractNonSubqueryPredicates(expr syndrQL.Expression, target *syndrQL.SubqueryExpression) syndrQL.Expression {
+	if expr == nil {
+		return nil
+	}
+
+	switch e := expr.(type) {
+	case *syndrQL.SubqueryExpression:
+		if e == target {
+			return nil // This IS the subquery, no remaining predicates
+		}
+		return expr
+
+	case *syndrQL.UnaryExpression:
+		// NOT EXISTS(...) — check if it wraps the target
+		if sub, ok := e.Right.(*syndrQL.SubqueryExpression); ok && sub == target {
+			return nil
+		}
+		return expr
+
+	case *syndrQL.BinaryExpression:
+		if e.Operator == syndrQL.TOKEN_AND {
+			left := extractNonSubqueryPredicates(e.Left, target)
+			right := extractNonSubqueryPredicates(e.Right, target)
+
+			if left == nil && right == nil {
+				return nil
+			}
+			if left == nil {
+				return right
+			}
+			if right == nil {
+				return left
+			}
+			return &syndrQL.BinaryExpression{
+				Left:     left,
+				Operator: syndrQL.TOKEN_AND,
+				Right:    right,
+			}
+		}
+
+		// For IN/NOT IN: check right side for subquery
+		if e.Operator == syndrQL.TOKEN_IN || e.Operator == syndrQL.TOKEN_NOTIN {
+			if sub, ok := e.Right.(*syndrQL.SubqueryExpression); ok && sub == target {
+				return nil
+			}
+		}
+		return expr
+
+	default:
+		return expr
+	}
 }
 
 // tryIndexOptimization attempts to use an index for the WHERE expression

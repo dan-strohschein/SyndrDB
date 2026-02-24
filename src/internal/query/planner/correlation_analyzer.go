@@ -119,6 +119,14 @@ func (ca *CorrelationAnalyzer) collectFieldReferences(expr syndrQL.Expression, f
 			fields[e.Name] = true
 		}
 
+	case *syndrQL.QualifiedIdentifierExpression:
+		// Qualified field reference like "Bundle"."Field"
+		// Store as "Bundle"."Field" format for cross-bundle detection
+		if e.Bundle != "" && e.Field != "" {
+			qualifiedName := e.Bundle + "." + e.Field
+			fields[qualifiedName] = true
+		}
+
 	case *syndrQL.BinaryExpression:
 		// Recurse into both sides
 		ca.collectFieldReferences(e.Left, fields)
@@ -137,6 +145,9 @@ func (ca *CorrelationAnalyzer) collectFieldReferences(expr syndrQL.Expression, f
 	case *syndrQL.SubqueryExpression:
 		// Don't recurse into subqueries - we analyze them separately
 		// This prevents mistakenly treating nested subquery fields as current scope
+
+	case *syndrQL.GroupedExpression:
+		ca.collectFieldReferences(e.Expression, fields)
 
 	// Literal types don't contain field references
 	case *syndrQL.LiteralExpression:
@@ -162,6 +173,133 @@ func (ca *CorrelationAnalyzer) IsFieldCorrelated(outerQuery *syndrQL.SelectState
 	}
 
 	return false
+}
+
+// JoinFieldPair represents a pair of fields for semi-join/anti-join correlation
+type JoinFieldPair struct {
+	OuterField string // Field name in outer bundle
+	InnerField string // Field name in inner bundle
+}
+
+// QualifiedCorrelationResult holds the result of qualified correlation analysis
+type QualifiedCorrelationResult struct {
+	IsCorrelated      bool
+	JoinPairs         []JoinFieldPair
+	NonCorrelatedExpr syndrQL.Expression // Inner WHERE with correlated predicates removed
+}
+
+// AnalyzeCorrelationQualified performs qualified field name correlation analysis.
+// It walks the inner WHERE for BinaryExpression nodes with == operator where one side
+// is a QualifiedIdentifierExpression referencing the outer bundle. Returns join field
+// pairs and the remaining non-correlated inner WHERE expression.
+func (ca *CorrelationAnalyzer) AnalyzeCorrelationQualified(outerBundleName string, innerWhere syndrQL.Expression) *QualifiedCorrelationResult {
+	result := &QualifiedCorrelationResult{}
+
+	if innerWhere == nil {
+		return result
+	}
+
+	// Split inner WHERE into correlated and non-correlated predicates
+	joinPairs, remaining := ca.splitCorrelatedPredicatesQualified(outerBundleName, innerWhere)
+
+	if len(joinPairs) == 0 {
+		return result
+	}
+
+	result.IsCorrelated = true
+	result.JoinPairs = joinPairs
+	result.NonCorrelatedExpr = remaining
+
+	ca.logger.Debugf("Qualified correlation: found %d join pairs for outer bundle '%s'", len(joinPairs), outerBundleName)
+	return result
+}
+
+// splitCorrelatedPredicatesQualified walks the expression tree and separates
+// correlated equality predicates (referencing outerBundleName) from non-correlated ones.
+// Returns join field pairs and the remaining non-correlated expression.
+func (ca *CorrelationAnalyzer) splitCorrelatedPredicatesQualified(outerBundleName string, expr syndrQL.Expression) ([]JoinFieldPair, syndrQL.Expression) {
+	if expr == nil {
+		return nil, nil
+	}
+
+	switch e := expr.(type) {
+	case *syndrQL.BinaryExpression:
+		// Check for AND — split recursively
+		if e.Operator == syndrQL.TOKEN_AND {
+			leftPairs, leftRemaining := ca.splitCorrelatedPredicatesQualified(outerBundleName, e.Left)
+			rightPairs, rightRemaining := ca.splitCorrelatedPredicatesQualified(outerBundleName, e.Right)
+
+			pairs := append(leftPairs, rightPairs...)
+
+			// Reconstruct remaining expression
+			var remaining syndrQL.Expression
+			if leftRemaining != nil && rightRemaining != nil {
+				remaining = &syndrQL.BinaryExpression{
+					Left:     leftRemaining,
+					Operator: syndrQL.TOKEN_AND,
+					Right:    rightRemaining,
+				}
+			} else if leftRemaining != nil {
+				remaining = leftRemaining
+			} else if rightRemaining != nil {
+				remaining = rightRemaining
+			}
+
+			return pairs, remaining
+		}
+
+		// Check for equality predicate with qualified identifier referencing outer bundle
+		if e.Operator == syndrQL.TOKEN_EQ || e.Operator == syndrQL.TOKEN_ASSIGN {
+			if pair := ca.extractJoinPair(outerBundleName, e); pair != nil {
+				// This is a correlated predicate — no remaining expression
+				return []JoinFieldPair{*pair}, nil
+			}
+		}
+
+		// Not a correlated predicate — return as remaining
+		return nil, expr
+
+	case *syndrQL.GroupedExpression:
+		return ca.splitCorrelatedPredicatesQualified(outerBundleName, e.Expression)
+
+	default:
+		// Any other expression is non-correlated
+		return nil, expr
+	}
+}
+
+// extractJoinPair checks if a binary equality expression has one QualifiedIdentifierExpression
+// referencing the outer bundle and extracts the join field pair.
+func (ca *CorrelationAnalyzer) extractJoinPair(outerBundleName string, expr *syndrQL.BinaryExpression) *JoinFieldPair {
+	leftQual, leftIsQual := expr.Left.(*syndrQL.QualifiedIdentifierExpression)
+	rightQual, rightIsQual := expr.Right.(*syndrQL.QualifiedIdentifierExpression)
+	leftIdent, leftIsIdent := expr.Left.(*syndrQL.IdentifierExpression)
+	rightIdent, rightIsIdent := expr.Right.(*syndrQL.IdentifierExpression)
+
+	// Pattern 1: "Outer"."Field" == "Inner"."Field"
+	if leftIsQual && rightIsQual {
+		if leftQual.Bundle == outerBundleName {
+			return &JoinFieldPair{OuterField: leftQual.Field, InnerField: rightQual.Field}
+		}
+		if rightQual.Bundle == outerBundleName {
+			return &JoinFieldPair{OuterField: rightQual.Field, InnerField: leftQual.Field}
+		}
+	}
+
+	// Pattern 2: "Outer"."Field" == InnerField (unqualified inner)
+	if leftIsQual && rightIsIdent {
+		if leftQual.Bundle == outerBundleName {
+			return &JoinFieldPair{OuterField: leftQual.Field, InnerField: rightIdent.Name}
+		}
+	}
+	if rightIsQual && leftIsIdent {
+		if rightQual.Bundle == outerBundleName {
+			return &JoinFieldPair{OuterField: rightQual.Field, InnerField: leftIdent.Name}
+		}
+	}
+
+	// Pattern 3: "Outer"."Field" == literal — not a join pair
+	return nil
 }
 
 // GetCorrelationInfo returns detailed correlation information
