@@ -496,10 +496,16 @@ database/bundleName/
 - Singleflight on all caches prevents thundering herd on cache population misses
 
 ### 6.9 Bloom Filters
-- Per-file bloom filters for negative lookup optimization (~1% false positive rate)
-- Serialized as base64 in manifest JSON
-- `BuildBloomFilterForDocuments()` / `SerializeBloomFilter()` / `DeserializeBloomFilter()`
-- Skips files that definitely don't contain a document
+- **File-level bloom filters** for negative lookup optimization (~1% false positive rate)
+  - Serialized as base64 in manifest JSON
+  - `BuildBloomFilterForDocuments()` / `SerializeBloomFilter()` / `DeserializeBloomFilter()`
+  - Skips files that definitely don't contain a document
+- **Page-level bloom filters** for field-value membership tracking during filtered scans
+  - Composite key format (`fieldName\x00value`) prevents field/value collisions
+  - Background refresher builds bloom filters from COW page snapshots
+  - Generation-based invalidation prevents stale reads during concurrent writes
+  - Configurable FPR, memory budget, and refresh interval
+  - Analogous to Apache Parquet column-chunk bloom filters
 
 ### 6.10 Sorted Index Shards
 - 64 shards with B-tree per shard for O(log n) pageID calculation during INSERT
@@ -659,6 +665,16 @@ SQL string -> Tokenizer -> Parser -> Expression AST -> Semantic Analyzer
 - Per-page all-visible tracking
 - Skips per-document `IsVisibleToSnapshot()` checks for fully visible pages
 - Significant speedup on stable (non-updated) data
+
+### 8.15 Page-Level Bloom Filters
+- Per-page bloom filters track field-value pairs present on each page
+- Scanner checks bloom before loading/iterating a page during filtered scans
+- Equality predicates extracted from WHERE clause as bloom hints
+- AND semantics: skip page if ANY hint says value is definitely absent
+- Configurable false positive rate (default 1%), memory budget (default 64 MB), refresh interval (default 30s)
+- Background refresher builds bloom filters from COW page snapshots (zero-copy)
+- Generation-based invalidation: invalidated on writes, scanners detect stale blooms
+- Composite key format (`fieldName\x00value`) prevents field/value collisions across fields
 
 ---
 
@@ -1346,3 +1362,12 @@ All settings loadable from YAML config file with CLI flag overrides.
 | monitor_default_interval_ms | 1000 | Default MONITOR interval |
 | monitor_min_interval_ms | 500 | Minimum MONITOR interval |
 | monitor_max_interval_ms | 60000 | Maximum MONITOR interval |
+
+### 20.11 Page Bloom Filters
+| Setting | Default | Description |
+|---------|---------|-------------|
+| page_bloom_enabled | true | Enable per-page bloom filters for scan skip optimization |
+| page_bloom_false_positive_rate | 0.01 | Target false positive rate (1%) |
+| page_bloom_min_docs_per_page | 50 | Minimum docs on a page to justify building bloom |
+| page_bloom_max_memory_mb | 64 | Global memory budget for all page blooms in MB |
+| page_bloom_refresh_interval_sec | 30 | Background builder interval in seconds |

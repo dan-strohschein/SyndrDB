@@ -798,6 +798,11 @@ func (ba *BundleAdapter) ScanDocumentChunks(ctx context.Context, chunkSize int, 
 		default:
 		}
 
+		// PAGE BLOOM FILTER: Skip page if bloom says searched values are absent
+		if smartScanner != nil && smartScanner.canSkipPageByBloom(pageID) {
+			continue
+		}
+
 		tLoad := time.Now()
 		docs, err := ba.loadPageDocs(pageID, hasProjection)
 		tLoadTotal += time.Since(tLoad)
