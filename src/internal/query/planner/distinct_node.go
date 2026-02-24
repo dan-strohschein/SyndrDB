@@ -331,7 +331,7 @@ func (n *DistinctNode) executeHashBased(ctx context.Context, documents map[strin
 	for docID, doc := range documents {
 		docCount++
 
-		if memoryTracker != nil && docCount%100 == 0 {
+		if memoryTracker != nil && docCount%4096 == 0 {
 			docSize := models.EstimateDocumentSize(doc, schema)
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err

@@ -587,8 +587,9 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 
 		docCount++
 
-		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
-		if memoryTracker != nil && docCount%100 == 0 {
+		// Memory tracking: Sample every 4096th document to reduce cache-line
+		// contention under high concurrency (see SELECT_GROUP_P99_OPTIMIZATION_PLAN.md).
+		if memoryTracker != nil && docCount%4096 == 0 {
 			docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
@@ -720,24 +721,67 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 					return true
 				}
 
-				for _, doc := range chunk {
-					// Check for cancellation periodically
-					if totalInput%4096 == 0 {
-						select {
-						case <-ctx.Done():
-							chunkErr = ctx.Err()
-							return false
-						default:
+				// G6: Ultra-fast path for single-field GROUP BY + COUNT(*)
+				// Inlines field extraction and avoids per-document []FieldValue allocation.
+				// For 100k docs with 4 groups: eliminates ~100k allocations, reduces to ~4.
+				if isSingleCountStar && fieldInfos != nil && len(fieldInfos) == 1 {
+					fi := &fieldInfos[0]
+					for _, doc := range chunk {
+						if doc == nil {
+							continue
 						}
+						totalInput++
+
+						if memoryTracker != nil && totalInput%4096 == 0 {
+							docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
+							if err := memoryTracker.Sample(docSize, totalInput); err != nil {
+								chunkErr = err
+								return false
+							}
+						}
+
+						var fv models.FieldValue
+						if fi.SchemaIndex >= 0 && fi.SchemaIndex < len(doc.Values) {
+							fv = doc.Values[fi.SchemaIndex]
+						} else {
+							field, exists := n.getCaseInsensitiveFieldClean(doc, fi.CleanName)
+							if !exists {
+								continue
+							}
+							fv = field.Value
+						}
+						gKey := groupKey(fieldValueToKeyString(fv))
+
+						gResult, exists := groupMap[gKey]
+						if !exists {
+							gResult = &groupResult{
+								GroupFields:     map[string]models.FieldValue{fi.CleanName: fv},
+								AggregateValues: map[string]*aggregateValue{countKey: {}},
+							}
+							groupMap[gKey] = gResult
+
+							if n.Limit > 0 && len(groupMap) >= n.Limit {
+								return false
+							}
+						}
+						gResult.AggregateValues[countKey].Count++
 					}
+					return true
+				}
+
+				for _, doc := range chunk {
+					// Context cancellation is checked per-page in ScanDocumentChunks
+					// (factory.go:795-798), so no redundant check needed here.
 
 					if doc == nil {
 						continue
 					}
 					totalInput++
 
-					// Memory tracking: Sample every 100th document
-					if memoryTracker != nil && totalInput%100 == 0 {
+					// Memory tracking: Sample every 4096th document (once per chunk).
+					// Previous 100-doc interval caused cache-line bouncing under high
+					// concurrency (60k calls/s → 1.4k calls/s = 42x reduction).
+					if memoryTracker != nil && totalInput%4096 == 0 {
 						docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 						if err := memoryTracker.Sample(docSize, totalInput); err != nil {
 							chunkErr = err
@@ -841,7 +885,7 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 			}
 			totalInput++
 
-			if memoryTracker != nil && i%500 == 0 {
+			if memoryTracker != nil && i%4096 == 0 {
 				docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 				if err := memoryTracker.Sample(docSize, i); err != nil {
 					return nil, totalInput, err
@@ -968,8 +1012,9 @@ func (n *AggregationNode) executeHashAggregateWithSessionCache(ctx context.Conte
 
 		docCount++
 
-		// Memory tracking: Sample every 100th document
-		if memoryTracker != nil && docCount%100 == 0 {
+		// Memory tracking: Sample every 4096th document to reduce cache-line
+		// contention under high concurrency (see SELECT_GROUP_P99_OPTIMIZATION_PLAN.md).
+		if memoryTracker != nil && docCount%4096 == 0 {
 			estimatedSize := int64(50)
 			if err := memoryTracker.Sample(estimatedSize, docCount); err != nil {
 				return nil, docCount, err
@@ -1233,8 +1278,9 @@ func (n *AggregationNode) executeSortGroupAggregate(ctx context.Context, documen
 
 		docCount++
 
-		// Memory tracking: Sample every 100th document (Issue 10: propagate error)
-		if memoryTracker != nil && docCount%100 == 0 {
+		// Memory tracking: Sample every 4096th document to reduce cache-line
+		// contention under high concurrency (see SELECT_GROUP_P99_OPTIMIZATION_PLAN.md).
+		if memoryTracker != nil && docCount%4096 == 0 {
 			docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
 			if err := memoryTracker.Sample(docSize, docCount); err != nil {
 				return nil, err
