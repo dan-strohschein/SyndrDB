@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/storage/bundlestore"
 	"syndrdb/src/internal/storage/databasestore"
@@ -34,6 +35,7 @@ type DatabaseService struct {
 	Factory   DatabaseFactory
 	Settings  *settings.Arguments
 	Databases map[string]*models.Database
+	mu        sync.RWMutex // protects Databases map
 	Logger    *zap.SugaredLogger
 }
 
@@ -56,13 +58,23 @@ func NewDatabaseService(store databasestore.DatabaseStore, factory DatabaseFacto
 	} else {
 		service.Databases = databases
 		logger.Debugf("Database service loaded %d databases", len(databases))
-
-		// Deprecated - I don't think this is necessary anymore
-		// Register non-primary databases in the system catalog
-		//service.syncDatabaseCatalog(logger)
 	}
 
 	return service
+}
+
+// SetDatabase adds or replaces a database in the in-memory map (thread-safe).
+func (s *DatabaseService) SetDatabase(name string, db *models.Database) {
+	s.mu.Lock()
+	s.Databases[name] = db
+	s.mu.Unlock()
+}
+
+// RemoveDatabase removes a database from the in-memory map by name (thread-safe).
+func (s *DatabaseService) RemoveDatabase(name string) {
+	s.mu.Lock()
+	delete(s.Databases, name)
+	s.mu.Unlock()
 }
 
 func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) (*models.Database, error) {
@@ -76,7 +88,9 @@ func (s *DatabaseService) AddDatabase(databaseCommand models.DatabaseCommand) (*
 	db.DataDirectory = s.Settings.DataDir
 
 	// Add to in-memory map
+	s.mu.Lock()
 	s.Databases[db.Name] = db
+	s.mu.Unlock()
 
 	// Create the database data file
 	err := s.Store.CreateDatabaseDataFile(db)
@@ -177,7 +191,14 @@ func (s *DatabaseService) syncDatabaseCatalog(logger *zap.SugaredLogger) {
 	existingDatabaseIDs := make(map[string]bool)
 
 	// Register any non-primary databases that aren't already in the catalog
+	s.mu.RLock()
+	dbsCopy := make([]*models.Database, 0, len(s.Databases))
 	for _, db := range s.Databases {
+		dbsCopy = append(dbsCopy, db)
+	}
+	s.mu.RUnlock()
+
+	for _, db := range dbsCopy {
 		if strings.ToLower(db.Name) != "primary" && !existingDatabaseIDs[db.DatabaseID] {
 			logger.Debugf("Registering database '%s' in system catalog during startup", db.Name)
 			err := s.registerDatabaseInPrimary(db)
@@ -199,7 +220,9 @@ func (s *DatabaseService) UpdateDatabase(databaseCommand models.DatabaseCommand)
 	}
 
 	// Update in-memory database (use Name as key for consistency)
+	s.mu.Lock()
 	s.Databases[db.Name] = db
+	s.mu.Unlock()
 
 	// Update on disk
 	err = s.Store.UpdateDatabaseDataFile(db)
@@ -231,7 +254,9 @@ func (s *DatabaseService) DeleteDatabase(databaseName string) error {
 	}
 
 	// Remove from memory
+	s.mu.Lock()
 	delete(s.Databases, db.DatabaseID)
+	s.mu.Unlock()
 
 	// Could add actual file deletion here if needed
 	log.Printf("Deleted database %s (ID: %s)", db.Name, db.DatabaseID)
@@ -305,8 +330,10 @@ func (s *DatabaseService) RenameDatabase(oldName, newName string) (*models.Datab
 	database.DataDirectory = newDirPath
 
 	// Update in-memory database map (remove old key, add new key)
+	s.mu.Lock()
 	delete(s.Databases, oldName)
 	s.Databases[newName] = database
+	s.mu.Unlock()
 
 	// Update the database data file with new name
 	if err := s.Store.UpdateDatabaseDataFile(database); err != nil {
@@ -320,7 +347,10 @@ func (s *DatabaseService) RenameDatabase(oldName, newName string) (*models.Datab
 
 // GetDatabaseByID retrieves a database by its ID
 func (s *DatabaseService) GetDatabaseByID(id string) (*models.Database, error) {
-	if db, exists := s.Databases[id]; exists {
+	s.mu.RLock()
+	db, exists := s.Databases[id]
+	s.mu.RUnlock()
+	if exists {
 		return db, nil
 	}
 	return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE, fmt.Sprintf("Database with ID '%s' not found", id), errors.LayerDomain).WithContext("database_id", id)
@@ -329,6 +359,8 @@ func (s *DatabaseService) GetDatabaseByID(id string) (*models.Database, error) {
 // GetDatabaseByName retrieves a database by name (case insensitive)
 func (s *DatabaseService) GetDatabaseByName(name string) (*models.Database, error) {
 	nameLower := strings.ToLower(name)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, db := range s.Databases {
 		if strings.ToLower(db.Name) == nameLower {
 			return db, nil
@@ -339,10 +371,12 @@ func (s *DatabaseService) GetDatabaseByName(name string) (*models.Database, erro
 
 // ListDatabases returns all databases
 func (s *DatabaseService) ListDatabases() []*models.Database {
+	s.mu.RLock()
 	databases := make([]*models.Database, 0, len(s.Databases))
 	for _, db := range s.Databases {
 		databases = append(databases, db)
 	}
+	s.mu.RUnlock()
 	return databases
 }
 

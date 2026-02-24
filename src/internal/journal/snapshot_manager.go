@@ -176,6 +176,37 @@ func (sm *SnapshotManager) GetActiveTransactionCount() int {
 	return count
 }
 
+// CreateStatementSnapshot creates a fresh snapshot for READ COMMITTED isolation.
+// Unlike CreateSnapshot (for BEGIN), this captures the current globalSequence
+// at statement start time so each statement sees the latest committed data.
+// It does NOT store in activeSnapshots or affect oldestSnapshot tracking.
+// The transaction's BEGIN snapshot still anchors dead-version retention.
+func (sm *SnapshotManager) CreateStatementSnapshot(txID uint64) *Snapshot {
+	// Capture current global sequence (fresh, not the BEGIN sequence)
+	snapshotSequence := sm.globalSequence.Load()
+
+	// Build current active transaction list
+	activeTxIDs := make(map[uint64]bool)
+	sm.activeTxRegistry.Range(func(key, value interface{}) bool {
+		if txIDVal, ok := key.(uint64); ok {
+			if status, ok := value.(string); ok && status == "ACTIVE" {
+				// Exclude own txID for read-your-own-writes
+				if txIDVal != txID {
+					activeTxIDs[txIDVal] = true
+				}
+			}
+		}
+		return true
+	})
+
+	return &Snapshot{
+		SnapshotSequence: snapshotSequence,
+		TransactionID:    txID,
+		ActiveTxIDs:      activeTxIDs,
+		CreatedAt:        time.Now(),
+	}
+}
+
 // String returns a string representation of the snapshot manager state
 func (sm *SnapshotManager) String() string {
 	sm.mu.RLock()

@@ -196,6 +196,21 @@ func parseAttachDatabaseCommand(command string) (string, string, error) {
 	return filePath, databaseName, nil
 }
 
+// parseDetachDatabaseCommand parses the DETACH DATABASE command to extract the database name
+func parseDetachDatabaseCommand(command string) (string, error) {
+	// Expected format: DETACH DATABASE "<database_name>";
+	re := regexp.MustCompile(`(?i)detach\s+database\s+"([^"]+)"`)
+	matches := re.FindStringSubmatch(command)
+
+	if len(matches) < 2 {
+		return "", errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid DETACH DATABASE command format. Expected: DETACH DATABASE \"<database_name>\"",
+			errors.LayerCommand)
+	}
+
+	return matches[1], nil
+}
+
 // generateDatabaseID generates a unique database ID
 func generateDatabaseID() string {
 	return fmt.Sprintf("db_%d", time.Now().UnixNano())

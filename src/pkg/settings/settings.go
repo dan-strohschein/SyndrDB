@@ -87,7 +87,8 @@ type Arguments struct {
 	ConnectionIdleTimeoutMinutes int `yaml:"connection_idle_timeout"` // Connection idle timeout in minutes (default: 30)
 
 	// Transaction Configuration
-	TransactionIdleTimeout string `yaml:"transaction_idle_timeout"` // Transaction idle timeout (default: "5m")
+	TransactionIdleTimeout        string `yaml:"transaction_idle_timeout"`        // Transaction idle timeout (default: "5m")
+	DefaultTransactionIsolation   string `yaml:"default_transaction_isolation"`   // Default isolation level: "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE" (default: "REPEATABLE READ")
 
 	// TLS/SSL Configuration
 	TLSEnabled            bool   `yaml:"tls_enabled"`              // Enable TLS/SSL
@@ -942,6 +943,19 @@ func (a *Arguments) ValidateSettings() error {
 	} else {
 		// Empty timeout - use default
 		a.TransactionIdleTimeout = "5m"
+	}
+
+	// Validate DefaultTransactionIsolation
+	if a.DefaultTransactionIsolation != "" {
+		switch a.DefaultTransactionIsolation {
+		case "READ UNCOMMITTED", "READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE":
+			// Valid
+		default:
+			errors = append(errors, fmt.Sprintf(
+				"WARNING: Invalid default_transaction_isolation '%s'. Valid values: 'READ UNCOMMITTED', 'READ COMMITTED', 'REPEATABLE READ', 'SERIALIZABLE'. Using default: REPEATABLE READ",
+				a.DefaultTransactionIsolation))
+			a.DefaultTransactionIsolation = "REPEATABLE READ"
+		}
 	}
 
 	// Validate WAL settings

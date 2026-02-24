@@ -251,8 +251,8 @@ func ShowUsers(command string, database *models.Database, logger *zap.SugaredLog
 	logger.Infof("Processing SHOW USERS command: %s", command)
 
 	// Always use the primary database for system catalogs like Users
-	primaryDB := serviceManager.DatabaseService.Databases["primary"]
-	if primaryDB == nil {
+	primaryDB, dbErr := serviceManager.DatabaseService.GetDatabaseByName("primary")
+	if dbErr != nil || primaryDB == nil {
 		return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
 			"primary database not found - system catalogs unavailable", errors.LayerCommand)
 	}

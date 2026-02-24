@@ -158,6 +158,17 @@ const (
 	TOKEN_TRANSACTION // TRANSACTION
 	TOKEN_SAVEPOINT   // SAVEPOINT
 
+	// Keywords - Transaction Isolation Levels
+	TOKEN_ISOLATION       // ISOLATION
+	TOKEN_LEVEL           // LEVEL
+	TOKEN_READ_KW         // READ (contextual keyword for isolation level)
+	TOKEN_UNCOMMITTED     // UNCOMMITTED
+	TOKEN_COMMITTED_KW    // COMMITTED (contextual keyword for isolation level)
+	TOKEN_REPEATABLE      // REPEATABLE
+	TOKEN_SERIALIZABLE    // SERIALIZABLE
+	TOKEN_SESSION_KW      // SESSION (for SET SESSION CHARACTERISTICS)
+	TOKEN_CHARACTERISTICS // CHARACTERISTICS
+
 	// Keywords - Prepared Statements
 	TOKEN_PREPARE    // PREPARE
 	TOKEN_EXECUTE    // EXECUTE
@@ -420,6 +431,24 @@ func (tt TokenType) String() string {
 		return "TRANSACTION"
 	case TOKEN_SAVEPOINT:
 		return "SAVEPOINT"
+	case TOKEN_ISOLATION:
+		return "ISOLATION"
+	case TOKEN_LEVEL:
+		return "LEVEL"
+	case TOKEN_READ_KW:
+		return "READ"
+	case TOKEN_UNCOMMITTED:
+		return "UNCOMMITTED"
+	case TOKEN_COMMITTED_KW:
+		return "COMMITTED"
+	case TOKEN_REPEATABLE:
+		return "REPEATABLE"
+	case TOKEN_SERIALIZABLE:
+		return "SERIALIZABLE"
+	case TOKEN_SESSION_KW:
+		return "SESSION"
+	case TOKEN_CHARACTERISTICS:
+		return "CHARACTERISTICS"
 	case TOKEN_PREPARE:
 		return "PREPARE"
 	case TOKEN_EXECUTE:
@@ -593,6 +622,16 @@ var keywords = map[string]TokenType{
 	"BEGIN":       TOKEN_BEGIN,
 	"TRANSACTION": TOKEN_TRANSACTION,
 	"SAVEPOINT":   TOKEN_SAVEPOINT,
+
+	// Transaction Isolation Level Keywords
+	// NOTE: LEVEL, READ, COMMITTED, SESSION are NOT in keywords map because they conflict
+	// with common field names. They are handled contextually in the transaction parser
+	// by checking TOKEN_IDENT values.
+	"ISOLATION":       TOKEN_ISOLATION,
+	"UNCOMMITTED":     TOKEN_UNCOMMITTED,
+	"REPEATABLE":      TOKEN_REPEATABLE,
+	"SERIALIZABLE":    TOKEN_SERIALIZABLE,
+	"CHARACTERISTICS": TOKEN_CHARACTERISTICS,
 
 	// Prepared Statement Keywords
 	"PREPARE":    TOKEN_PREPARE,

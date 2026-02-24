@@ -104,28 +104,9 @@ func handleDeclare(
 	}
 
 	// Step 3: Add MVCC snapshot to context
-	if session.IsInTransaction() {
-		snapshot := session.GetMVCCSnapshot()
-		if snapshot != nil {
-			snapshotInfo := &planner.SnapshotInfo{
-				SnapshotSequence: snapshot.SnapshotSequence,
-				TransactionID:    snapshot.TransactionID,
-				ActiveTxIDs:      snapshot.ActiveTxIDs,
-			}
-			cursorCtx = planner.WithSnapshotInfo(cursorCtx, snapshotInfo)
-		}
-	}
-	// For non-transactional, set read-committed snapshot
-	if planner.GetSnapshotInfoFromContext(cursorCtx) == nil && serviceManager.WALManager != nil {
-		if snapshotMgr := serviceManager.WALManager.GetSnapshotManager(); snapshotMgr != nil {
-			currentSeq := snapshotMgr.GetCurrentSequence()
-			if currentSeq > 0 {
-				cursorCtx = planner.WithSnapshotInfo(cursorCtx, &planner.SnapshotInfo{
-					SnapshotSequence: currentSeq,
-				})
-			}
-		}
-	}
+	// Note: Cursors use the snapshot from DECLARE time (even for READ COMMITTED,
+	// the cursor captures a snapshot at declaration, not at each FETCH)
+	cursorCtx = injectTransactionSnapshot(cursorCtx, session, serviceManager, logger)
 
 	// Step 4: Get an iterator from the plan
 	var iterNode planner.IteratorNode

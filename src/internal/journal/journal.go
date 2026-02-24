@@ -81,6 +81,8 @@ const (
 	OpBatchInsert          // Bulk insert: multiple documents in a single WAL entry
 	OpCheckpointBegin      // Marks the start of a checkpoint (for crash recovery)
 	OpCheckpointComplete   // Marks successful checkpoint completion (recovery point)
+	OpAttachDatabase       // Attach external database
+	OpDetachDatabase       // Detach database
 )
 
 // WALEntry represents a single entry in the Write Ahead Log

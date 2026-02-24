@@ -507,7 +507,7 @@ func InitServer(config *settings.Arguments) (*Server, error) {
 			log.Printf("Created primary default database with ID %s", defaultDB.DatabaseID)
 		}
 
-		databaseService.Databases[defaultDB.Name] = defaultDB
+		databaseService.SetDatabase(defaultDB.Name, defaultDB)
 
 		err = defaultdb.InitPrimaryBundleCatalogs(databaseService, databaseStore, defaultDB, sugar, bundleService)
 		if err != nil {

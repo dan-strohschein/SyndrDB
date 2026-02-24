@@ -330,21 +330,47 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	logger.Debugf("Processing ATTACH DATABASE command: %s", command)
 
 	// Parse the file path and database name from the command
-	// Expected format: ATTACH DATABASE "<file_path>" "<database_name>";
 	filePath, databaseName, err := parseAttachDatabaseCommand(command)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
 			"failed to parse ATTACH command", errors.LayerCommand).WithContext("command", command)
 	}
 
-	// Check if the database file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
-			fmt.Sprintf("database file does not exist: %s", filePath),
-			errors.LayerCommand).WithContext("file_path", filePath)
+	// Protect the primary database name (case-insensitive)
+	if strings.EqualFold(databaseName, "primary") {
+		return nil, errors.New(errors.ERR_PERMISSION_DENIED,
+			"cannot attach database as 'primary': this is a protected system database name",
+			errors.LayerAuth).WithContext("database", databaseName)
 	}
 
-	// Check if database already exists in catalog (optional - continue if catalog is corrupted)
+	// Path validation: require absolute path and prevent traversal
+	cleanPath := filepath.Clean(filePath)
+	if !filepath.IsAbs(cleanPath) {
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"ATTACH DATABASE requires an absolute file path",
+			errors.LayerCommand).WithContext("file_path", filePath)
+	}
+	if strings.Contains(cleanPath, "..") {
+		return nil, errors.New(errors.ERR_PERMISSION_DENIED,
+			"path traversal detected in ATTACH DATABASE file path",
+			errors.LayerAuth).WithContext("file_path", filePath)
+	}
+
+	// Check if the database file/directory exists
+	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+		return nil, errors.New(errors.ERR_NOT_FOUND_DATABASE,
+			fmt.Sprintf("database file does not exist: %s", cleanPath),
+			errors.LayerCommand).WithContext("file_path", cleanPath)
+	}
+
+	// Check if database already exists in memory
+	if _, err := serviceManager.DatabaseService.GetDatabaseByName(databaseName); err == nil {
+		return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+			fmt.Sprintf("database '%s' already exists", databaseName),
+			errors.LayerCommand).WithContext("database", databaseName)
+	}
+
+	// Check if database already exists in catalog
 	catalogAvailable := false
 	if serviceManager.InternalCatalogService != nil {
 		allDatabases, catalogErr := serviceManager.InternalCatalogService.ListAllDatabasesInCatalog()
@@ -352,9 +378,8 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 			logger.Warnf("Warning: Failed to check existing databases in catalog (continuing without catalog check): %v", catalogErr)
 		} else {
 			catalogAvailable = true
-			// Check if the database already exists in catalog
 			for _, dbInfo := range allDatabases {
-				if dbName, ok := dbInfo["Name"].(string); ok && dbName == databaseName {
+				if dbName, ok := dbInfo["Name"].(string); ok && strings.EqualFold(dbName, databaseName) {
 					return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
 						fmt.Sprintf("database '%s' already exists in system catalog", databaseName),
 						errors.LayerCommand).WithContext("database", databaseName)
@@ -366,38 +391,25 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 	// Generate a new database ID
 	databaseID := generateDatabaseID()
 
-	// Create database entry for catalog
+	// Create database entry
 	newDatabase := &models.Database{
 		DatabaseID:    databaseID,
 		Name:          databaseName,
-		Description:   fmt.Sprintf("Database attached from file: %s", filePath),
+		Description:   fmt.Sprintf("Database attached from file: %s", cleanPath),
 		Bundles:       make(map[string]models.Bundle),
-		DataDirectory: filepath.Dir(filePath),
+		DataDirectory: filepath.Dir(cleanPath),
 	}
 
-	// Add database to catalog (only if catalog is available)
-	if catalogAvailable && serviceManager.InternalCatalogService != nil {
-		err = serviceManager.InternalCatalogService.AddDatabaseToCatalog(newDatabase)
-		if err != nil {
-			logger.Warnf("Warning: Failed to add database to catalog (continuing with in-memory only): %v", err)
-		} else {
-			logger.Debugf("Successfully added database '%s' to catalog", databaseName)
-		}
+	// Discover bundle files from the directory
+	dbDir := filepath.Dir(cleanPath)
+	bundleFiles, globErr := filepath.Glob(filepath.Join(dbDir, "*.bnd"))
+	if globErr != nil {
+		logger.Warnf("Failed to scan for bundle files: %v", globErr)
 	}
 
-	// Add the database to the in-memory service without creating files
-	// since the files already exist
-	serviceManager.DatabaseService.Databases[databaseName] = newDatabase
-
-	// Discover and attach bundles from the same directory
-	bundlesAdded := 0
-	dbDir := filepath.Dir(filePath)
-
-	// Look for .bnd files in the same directory
-	bundleFiles, err := filepath.Glob(filepath.Join(dbDir, "*.bnd"))
-	if err != nil {
-		logger.Warnf("Failed to scan for bundle files: %v", err)
-	} else {
+	// Collect bundle names to register
+	var bundleNames []string
+	if bundleFiles != nil {
 		for _, bundleFile := range bundleFiles {
 			bundleName := strings.TrimSuffix(filepath.Base(bundleFile), ".bnd")
 
@@ -406,59 +418,90 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 				continue
 			}
 
-			// Check if bundle already exists in catalog (optional check)
-			bundleExists := false
-			if catalogAvailable && serviceManager.InternalCatalogService != nil {
-				allBundles, bundleErr := serviceManager.InternalCatalogService.ListAllBundlesInCatalog()
-				if bundleErr == nil {
-					for _, bundleInfo := range allBundles {
-						if bundleName2, ok := bundleInfo["Name"].(string); ok && bundleName2 == bundleName {
-							// Check if it's for this database (use a database-scoped check)
-							bundleExists = true
-							break
-						}
-					}
-				} else {
-					logger.Warnf("Warning: Failed to check existing bundles in catalog for '%s': %v", bundleName, bundleErr)
-				}
-			}
-
-			if !bundleExists {
-				// Create bundle entry for catalog - referencing existing files
-				bundleID := generateBundleID()
-				newBundle := &models.Bundle{
-					BundleID:    bundleID,
-					Name:        bundleName,
-					Description: fmt.Sprintf("Bundle discovered from file: %s", bundleFile),
-					CreatedAt:   time.Now(),
-					UpdatedAt:   time.Now(),
-					Database:    newDatabase, // Set the database reference
-				}
-
-				// Add bundle to the database's bundles map
-				newDatabase.Bundles[bundleName] = *newBundle
-
-				// Add bundle to catalog (only if catalog is available)
-				if catalogAvailable && serviceManager.InternalCatalogService != nil {
-					bundleErr := serviceManager.InternalCatalogService.RegisterBundleInCatalog(newBundle)
-					if bundleErr != nil {
-						logger.Warnf("Warning: Failed to add bundle '%s' to catalog (continuing with in-memory only): %v", bundleName, bundleErr)
-					} else {
-						logger.Debugf("Added bundle '%s' to catalog", bundleName)
-					}
-				}
-				bundlesAdded++
-				logger.Debugf("Registered bundle '%s' from file '%s'", bundleName, bundleFile)
-			}
+			bundleNames = append(bundleNames, bundleName)
 		}
 	}
 
-	// PHASE 3: Use pooled map to reduce allocation
+	// Execute with WAL logging for crash recovery
+	performAttach := func() error {
+		// Add database to catalog
+		if catalogAvailable && serviceManager.InternalCatalogService != nil {
+			if err := serviceManager.InternalCatalogService.AddDatabaseToCatalog(newDatabase); err != nil {
+				logger.Warnf("Warning: Failed to add database to catalog (continuing with in-memory only): %v", err)
+			} else {
+				logger.Debugf("Successfully added database '%s' to catalog", databaseName)
+			}
+		}
+
+		// Add the database to the in-memory service
+		serviceManager.DatabaseService.SetDatabase(databaseName, newDatabase)
+
+		// Discover and register bundles
+		for _, bundleName := range bundleNames {
+			bundleID := generateBundleID()
+			newBundle := &models.Bundle{
+				BundleID:    bundleID,
+				Name:        bundleName,
+				Description: fmt.Sprintf("Bundle discovered during ATTACH DATABASE"),
+				CreatedAt:   time.Now(),
+				UpdatedAt:   time.Now(),
+				Database:    newDatabase,
+			}
+
+			// Add bundle to the database's bundles map
+			newDatabase.Bundles[bundleName] = *newBundle
+
+			// Register in BundleService so it's queryable
+			if serviceManager.BundleService != nil {
+				if regErr := serviceManager.BundleService.RegisterExistingBundle(newDatabase, bundleName); regErr != nil {
+					logger.Warnf("Failed to register bundle '%s' in BundleService: %v", bundleName, regErr)
+				}
+			}
+
+			// Add bundle to catalog
+			if catalogAvailable && serviceManager.InternalCatalogService != nil {
+				if bundleErr := serviceManager.InternalCatalogService.RegisterBundleInCatalog(newBundle); bundleErr != nil {
+					logger.Warnf("Warning: Failed to add bundle '%s' to catalog: %v", bundleName, bundleErr)
+				}
+			}
+
+			logger.Debugf("Registered bundle '%s' for attached database '%s'", bundleName, databaseName)
+		}
+
+		return nil
+	}
+
+	if serviceManager.WALManager != nil {
+		err = serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+			if attachErr := performAttach(); attachErr != nil {
+				return attachErr
+			}
+
+			walData := map[string]interface{}{
+				"database_name":  databaseName,
+				"database_id":    databaseID,
+				"file_path":      cleanPath,
+				"data_directory": filepath.Dir(cleanPath),
+				"bundles_added":  len(bundleNames),
+				"timestamp":      time.Now(),
+			}
+
+			return serviceManager.WALManager.LogDatabaseAttach(txID, databaseName, walData)
+		})
+	} else {
+		err = performAttach()
+	}
+
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", databaseName)
+	}
+
+	// Build response
 	resultMap := GetResponseMap()
 	resultMap["DatabaseName"] = databaseName
 	resultMap["DatabaseID"] = databaseID
-	resultMap["FilePath"] = filePath
-	resultMap["BundlesAdded"] = bundlesAdded
+	resultMap["FilePath"] = cleanPath
+	resultMap["BundlesAdded"] = len(bundleNames)
 	resultMap["Status"] = "Database attached successfully"
 
 	response := &CommandResponse{
@@ -466,7 +509,122 @@ func AttachDatabase(command string, logger *zap.SugaredLogger, serviceManager Se
 		Result:      resultMap,
 	}
 
-	logger.Debugf("Successfully attached database '%s' from file '%s' with %d bundles", databaseName, filePath, bundlesAdded)
+	logger.Debugf("Successfully attached database '%s' from file '%s' with %d bundles", databaseName, cleanPath, len(bundleNames))
+	return response, nil
+}
+
+// DetachDatabase handles the DETACH DATABASE "<database_name>" command.
+// This removes an attached database from the server without deleting files on disk.
+func DetachDatabase(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, session *Session) (*CommandResponse, error) {
+	logger.Debugf("Processing DETACH DATABASE command: %s", command)
+
+	// Parse the database name
+	databaseName, err := parseDetachDatabaseCommand(command)
+	if err != nil {
+		return nil, err
+	}
+
+	// Protect the primary database
+	if strings.EqualFold(databaseName, "primary") {
+		return nil, errors.New(errors.ERR_PERMISSION_DENIED,
+			"cannot detach database 'primary': this is a protected system database",
+			errors.LayerAuth).WithContext("database", databaseName)
+	}
+
+	// Verify database exists
+	database, err := serviceManager.DatabaseService.GetDatabaseByName(databaseName)
+	if err != nil {
+		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", databaseName)
+	}
+
+	// Find and terminate active sessions on this database
+	sessionsTerminated := 0
+	if serviceManager.SessionManager != nil {
+		userSessionCounts := make(map[string]int)
+		serviceManager.SessionManager.sessions.Range(func(sessionID string, s *Session) bool {
+			if strings.EqualFold(s.DatabaseName, databaseName) {
+				userSessionCounts[s.Username]++
+			}
+			return true
+		})
+
+		for username, count := range userSessionCounts {
+			if err := serviceManager.SessionManager.InvalidateUserSessions(username); err != nil {
+				logger.Warnf("Failed to invalidate sessions for user '%s': %v", username, err)
+			} else {
+				sessionsTerminated += count
+				logger.Debugf("Terminated %d session(s) for user '%s' due to database detach", count, username)
+			}
+		}
+	}
+
+	// Flush write buffers before detaching
+	if serviceManager.BundleService != nil {
+		serviceManager.BundleService.FlushAllBuffers()
+
+		// Detach each bundle (remove from in-memory state, keep files)
+		for bundleName := range database.Bundles {
+			if err := serviceManager.BundleService.DetachBundle(database, bundleName); err != nil {
+				logger.Warnf("Failed to detach bundle '%s': %v (continuing)", bundleName, err)
+			}
+		}
+	}
+
+	bundlesRemoved := len(database.Bundles)
+
+	// Remove from DatabaseService in-memory map
+	serviceManager.DatabaseService.RemoveDatabase(databaseName)
+
+	// Remove from catalog
+	if serviceManager.InternalCatalogService != nil {
+		for _, bundle := range database.Bundles {
+			if err := serviceManager.InternalCatalogService.RemoveBundleFromCatalog(bundle.BundleID); err != nil {
+				logger.Warnf("Failed to remove bundle '%s' from catalog: %v", bundle.Name, err)
+			}
+		}
+		if err := serviceManager.InternalCatalogService.RemoveDatabaseFromCatalog(database.DatabaseID); err != nil {
+			logger.Warnf("Failed to remove database '%s' from catalog: %v", databaseName, err)
+		}
+	}
+
+	// WAL-log the detach
+	if serviceManager.WALManager != nil {
+		walErr := serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+			walData := map[string]interface{}{
+				"database_name":       databaseName,
+				"database_id":         database.DatabaseID,
+				"bundles_removed":     bundlesRemoved,
+				"sessions_terminated": sessionsTerminated,
+				"timestamp":           time.Now(),
+			}
+			if session != nil {
+				walData["admin_user"] = session.Username
+			}
+			return serviceManager.WALManager.LogDatabaseDetach(txID, databaseName, walData)
+		})
+		if walErr != nil {
+			logger.Warnf("Failed to WAL-log database detach: %v (detach already completed)", walErr)
+		}
+	}
+
+	// Build response
+	resultMap := GetResponseMap()
+	resultMap["DatabaseName"] = databaseName
+	resultMap["BundlesRemoved"] = bundlesRemoved
+	resultMap["SessionsTerminated"] = sessionsTerminated
+	resultMap["Status"] = "Database detached successfully (files preserved on disk)"
+
+	result := fmt.Sprintf("Database '%s' detached successfully.", databaseName)
+	if sessionsTerminated > 0 {
+		result = fmt.Sprintf("Database '%s' detached successfully. %d active session(s) were terminated.", databaseName, sessionsTerminated)
+	}
+
+	response := &CommandResponse{
+		ResultCount: 1,
+		Result:      result,
+	}
+
+	logger.Debugf("Successfully detached database '%s' (%d bundles removed, %d sessions terminated)", databaseName, bundlesRemoved, sessionsTerminated)
 	return response, nil
 }
 
@@ -492,19 +650,12 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 
 	dbName := dbCommand.DatabaseName
 
-	// Step 1: Check Admin permissions
-	if session != nil && serviceManager.PermissionService != nil {
-		hasAdmin, err := serviceManager.PermissionService.UserHasPermission(session.Username, "Admin")
-		if err != nil {
-			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL,
-				"permission check failed", errors.LayerAuth).WithContext("username", session.Username)
-		}
-		if !hasAdmin {
-			// TODO: I will integrate with SecurityAuditor to log failed DROP DATABASE attempts
+	// Step 1: Check Admin permissions (only when auth is enabled)
+	authEnabled := settings.GetSettings().AuthEnabled
+	if authEnabled {
+		if err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled); err != nil {
 			logger.Warnf("User '%s' attempted to drop database '%s' without Admin permission", session.Username, dbName)
-			return nil, errors.New(errors.ERR_PERMISSION_DENIED,
-				"access denied: DROP DATABASE requires Admin permission",
-				errors.LayerAuth).WithContext("username", session.Username).WithContext("database", dbName)
+			return nil, err
 		}
 	}
 
@@ -524,6 +675,18 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 	database, err := serviceManager.DatabaseService.GetDatabaseByName(dbName)
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("database", dbName)
+	}
+
+	// Step 3.5: Unless WITH FORCE, reject if any bundle contains documents
+	if !dbCommand.Force && len(database.Bundles) > 0 {
+		for bundleName, bundle := range database.Bundles {
+			if bundle.TotalDocuments > 0 {
+				return nil, errors.New(errors.ERR_VALIDATION_CONSTRAINT,
+					fmt.Sprintf("database '%s' contains non-empty bundle '%s' (%d documents); use DROP DATABASE \"%s\" WITH FORCE to drop anyway",
+						dbName, bundleName, bundle.TotalDocuments, dbName),
+					errors.LayerCommand).WithContext("database", dbName).WithContext("bundle", bundleName)
+			}
+		}
 	}
 
 	// Step 4: Detect and terminate all active sessions
@@ -583,23 +746,23 @@ func DropDatabase(command string, logger *zap.SugaredLogger, serviceManager Serv
 		}
 	}
 
-	// Step 6: In-memory cleanup - Close and remove GraphQL schema manager
+	// Step 6: In-memory cleanup - close indexes, remove bundle metadata, clear caches
 	if serviceManager.BundleService != nil {
-		// TODO: I will add public methods to BundleService for schema manager cleanup when refactoring schema management
-		logger.Debugf("Clearing GraphQL schema manager for database '%s'", dbName)
-
-		// Clear bundle metadata caches, document page caches, and index caches
-		// TODO: I will add explicit cache clearing methods for bundles when refactoring cache management
-		logger.Debugf("Clearing in-memory caches for database '%s'", dbName)
-
-		// Flush all buffers before deletion
 		serviceManager.BundleService.FlushAllBuffers()
-		logger.Debugf("Flushed all buffers for database '%s'", dbName)
+
+		// Clean up each bundle's in-memory state (metadata, page caches, indexes)
+		// so background workers like the MVCC GC don't encounter stale references.
+		for bundleName := range database.Bundles {
+			if err := serviceManager.BundleService.RemoveBundle(database, bundleName); err != nil {
+				logger.Warnf("Failed to clean up bundle '%s' during database drop: %v (continuing)", bundleName, err)
+			}
+		}
+		logger.Debugf("Cleaned up %d bundle(s) for database '%s'", len(database.Bundles), dbName)
 	}
 
 	// Step 7: Remove database from in-memory map
 	if serviceManager.DatabaseService != nil {
-		delete(serviceManager.DatabaseService.Databases, dbName)
+		serviceManager.DatabaseService.RemoveDatabase(dbName)
 		logger.Debugf("Removed database '%s' from in-memory service", dbName)
 	}
 
