@@ -104,8 +104,9 @@ type WriteCoordinator struct {
 	shutdownComplete  sync.WaitGroup // Wait group for graceful shutdown
 
 	// External dependencies (will be injected)
-	wal    *WriteAheadLog     // Reference to WAL for flushing
-	logger *zap.SugaredLogger // Logger for metrics and errors
+	wal      *WriteAheadLog     // Reference to WAL for flushing
+	logger   *zap.SugaredLogger // Logger for metrics and errors
+	archiver *WALArchiver       // Optional WAL archiver for PITR
 }
 
 // NewWriteCoordinator creates a new write coordinator with PostgreSQL-style background writers
@@ -149,7 +150,7 @@ type WriteCoordinatorConfig struct {
 	AutoTuneWarmupCheckpoints  int
 }
 
-// Start launches the three background writer goroutines
+// Start launches the three background writer goroutines (plus optional WAL archiver).
 func (wc *WriteCoordinator) Start() {
 	wc.logger.Info("Starting write coordinator with PostgreSQL-style background writers")
 
@@ -165,6 +166,12 @@ func (wc *WriteCoordinator) Start() {
 	wc.shutdownComplete.Add(1)
 	go wc.checkpointerLoop()
 
+	// Start WAL Archiver goroutine (optional, for PITR)
+	if wc.archiver != nil {
+		wc.archiver.Start()
+		wc.logger.Info("WAL archiver started as part of write coordinator")
+	}
+
 	wc.logger.Infof("Write coordinator started: durability_mode=%s, wal_flush_delay=%dms, bg_writer_delay=%dms, checkpoint_interval=%ds",
 		wc.durabilityMode, wc.walMaxFlushDelay.Milliseconds(), wc.backgroundWriterDelay.Milliseconds(), int(wc.checkpointInterval.Seconds()))
 }
@@ -173,11 +180,22 @@ func (wc *WriteCoordinator) Start() {
 func (wc *WriteCoordinator) Shutdown() error {
 	wc.logger.Info("Shutting down write coordinator (final flush-and-sync)")
 
+	// Stop WAL archiver first (archive any remaining files)
+	if wc.archiver != nil {
+		wc.archiver.Stop()
+		wc.logger.Info("WAL archiver stopped")
+	}
+
 	// Context is already canceled by caller, wait for goroutines to finish
 	wc.shutdownComplete.Wait()
 
 	wc.logger.Info("Write coordinator shutdown complete")
 	return nil
+}
+
+// SetArchiver sets the WAL archiver reference for lifecycle management.
+func (wc *WriteCoordinator) SetArchiver(archiver *WALArchiver) {
+	wc.archiver = archiver
 }
 
 // walWriterLoop implements the WAL Writer background goroutine

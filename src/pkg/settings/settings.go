@@ -218,9 +218,14 @@ type Arguments struct {
 	BackupCompression    string `yaml:"backup_compression"`     // Compression format: "gzip", "zstd", "none" (default: "gzip")
 	BackupIncludeIndexes bool   `yaml:"backup_include_indexes"` // Include index files in backups (default: true)
 	MaxRestoreSizeBytes  int64  `yaml:"max_restore_size_bytes"` // Maximum decompressed restore size in bytes (default: 10GB, 0=unlimited)
-	// TODO: I will add BackupRetentionDays for automatic backup cleanup
-	// TODO: I will add BackupEncryption settings for encrypted backups
-	// TODO: I will add BackupCloudProvider for S3/GCS/Azure integration
+
+	// Point-in-Time Recovery (PITR) Configuration
+	WALArchiveEnabled      bool   `yaml:"wal_archive_enabled"`       // Enable WAL archiving for PITR (default: false)
+	WALArchiveDir          string `yaml:"wal_archive_dir"`           // Directory for archived WAL files (default: "./wal_archive")
+	WALArchivePollSeconds  int    `yaml:"wal_archive_poll_seconds"`  // Polling interval for WAL archiver in seconds (default: 60)
+	WALArchiveRetentionDays int   `yaml:"wal_archive_retention_days"` // Retention period for archived WAL files in days (default: 30)
+	WALArchiveCompression  string `yaml:"wal_archive_compression"`   // Compression for archived WAL files: "none", "gzip", "zstd" (default: "none")
+	PITREnabled            bool   `yaml:"pitr_enabled"`              // Enable PITR features including backup LSN tracking (default: false)
 
 	// Migration System Configuration
 	MaxMigrationCommands          int     `yaml:"max_migration_commands"`           // Maximum commands per migration (default: 1000)
@@ -512,6 +517,14 @@ func GetSettings() *Arguments {
 			BackupCompression:    "gzip",      // Use gzip compression by default
 			BackupIncludeIndexes: true,                    // Include indexes in backups
 			MaxRestoreSizeBytes:  10 * 1024 * 1024 * 1024, // 10GB max decompressed restore size
+
+			// PITR Defaults
+			WALArchiveEnabled:       false,           // WAL archiving off by default
+			WALArchiveDir:           "./wal_archive", // Default archive directory
+			WALArchivePollSeconds:   60,              // Poll every 60 seconds
+			WALArchiveRetentionDays: 30,              // Keep archives for 30 days
+			WALArchiveCompression:   "none",          // No compression by default
+			PITREnabled:             false,           // PITR off by default
 
 			// Migration System Defaults
 			MaxMigrationCommands:          1000,     // Maximum 1000 commands per migration

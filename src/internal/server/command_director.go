@@ -350,6 +350,20 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				errors.LayerCommand).WithContext("command", command)
 		case "backups":
 			return ShowBackups(command, logger, &serviceManager, startTime)
+		case "restore":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "points" {
+				return ShowRestorePoints(command, logger, &serviceManager)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW RESTORE command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
+		case "wal":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "archive" {
+				return ShowWALArchive(command, logger, &serviceManager)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW WAL command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		}
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unknown SHOW command: %s", command),
@@ -1039,6 +1053,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return &result, nil
 	}
 
+	// Parse CREATE RESTORE POINT command
+	if strings.HasPrefix(commandLower, "create restore point") {
+		return CreateRestorePoint(command, logger, &serviceManager)
+	}
+
 	// Parse CHECKPOINT command
 	if strings.HasPrefix(commandLower, "checkpoint") {
 		return Checkpoint(command, logger, &serviceManager)
@@ -1049,8 +1068,14 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return BackupDatabase(command, logger, &serviceManager)
 	}
 
-	// Parse RESTORE command
+	// Parse RESTORE command (PITR restore takes precedence over plain restore)
 	if strings.HasPrefix(commandLower, "restore") {
+		restLower := strings.ToLower(command)
+		if strings.Contains(restLower, "to point in time") ||
+			strings.Contains(restLower, "to lsn") ||
+			strings.Contains(restLower, "to restore point") {
+			return PITRRestore(command, logger, &serviceManager)
+		}
 		return RestoreDatabase(command, logger, &serviceManager)
 	}
 

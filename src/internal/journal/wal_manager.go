@@ -25,12 +25,13 @@ import (
 
 // WALManager provides a high-level interface for WAL operations
 type WALManager struct {
-	wal                *WriteAheadLog
-	logger             *zap.SugaredLogger
-	activeTxs          map[string]*Transaction
-	activeTxsMu        sync.Mutex          // protects activeTxs from concurrent access by multiple connection goroutines
-	transactionCounter *TransactionCounter // Monotonic transaction ID generator for MVCC
-	snapshotManager    *SnapshotManager    // MVCC snapshot management
+	wal                  *WriteAheadLog
+	logger               *zap.SugaredLogger
+	activeTxs            map[string]*Transaction
+	activeTxsMu          sync.Mutex          // protects activeTxs from concurrent access by multiple connection goroutines
+	transactionCounter   *TransactionCounter // Monotonic transaction ID generator for MVCC
+	snapshotManager      *SnapshotManager    // MVCC snapshot management
+	restorePointManager  *RestorePointManager // Named restore points for PITR
 }
 
 // Transaction represents an active database transaction
@@ -79,12 +80,17 @@ func NewWALManager(logger *zap.SugaredLogger) (*WALManager, error) {
 		return nil, fmt.Errorf("failed to create WAL: %w", err)
 	}
 
+	// Initialize restore point manager using WAL directory
+	restorePointPath := fmt.Sprintf("%s/restore_points.json", config.LogDir)
+	restorePointMgr := NewRestorePointManager(restorePointPath)
+
 	manager := &WALManager{
-		wal:                wal,
-		logger:             logger,
-		activeTxs:          make(map[string]*Transaction),
-		transactionCounter: NewTransactionCounter(),
-		snapshotManager:    NewSnapshotManager(),
+		wal:                  wal,
+		logger:               logger,
+		activeTxs:            make(map[string]*Transaction),
+		transactionCounter:   NewTransactionCounter(),
+		snapshotManager:      NewSnapshotManager(),
+		restorePointManager:  restorePointMgr,
 	}
 
 	logger.Info("WAL Manager initialized successfully")
@@ -938,4 +944,50 @@ func (wm *WALManager) RecoverOnStartup(undoFunc func(WALEntry) error) (*Recovery
 		result.Errors, highestCommitSeq, highestTxID)
 
 	return result, nil
+}
+
+// CreateRestorePoint creates a named restore point with the current LSN and commit sequence.
+// The restore point is recorded both in the WAL (as OpRestorePoint) and in the
+// RestorePointManager's persistent storage.
+func (wm *WALManager) CreateRestorePoint(name string) (*RestorePoint, error) {
+	if name == "" {
+		return nil, fmt.Errorf("restore point name cannot be empty")
+	}
+
+	lsn := wm.wal.GetCurrentLSN()
+	commitSeq := wm.snapshotManager.GetCurrentSequence()
+
+	// Log the restore point to WAL (name stored in Metadata field)
+	if err := wm.wal.LogOperation("", OpRestorePoint, "", "", "", "", name); err != nil {
+		return nil, fmt.Errorf("failed to log restore point to WAL: %w", err)
+	}
+
+	// Create in the restore point manager
+	rp, err := wm.restorePointManager.Create(name, lsn, commitSeq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create restore point: %w", err)
+	}
+
+	wm.logger.Infow("Created restore point",
+		"name", name,
+		"lsn", lsn,
+		"commit_seq", commitSeq,
+	)
+
+	return rp, nil
+}
+
+// GetRestorePointManager returns the restore point manager.
+func (wm *WALManager) GetRestorePointManager() *RestorePointManager {
+	return wm.restorePointManager
+}
+
+// GetWALDir returns the WAL directory path.
+func (wm *WALManager) GetWALDir() string {
+	return wm.wal.baseFilePath
+}
+
+// GetWAL returns the underlying WriteAheadLog instance.
+func (wm *WALManager) GetWAL() *WriteAheadLog {
+	return wm.wal
 }

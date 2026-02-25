@@ -74,12 +74,27 @@ func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (str
 		return "", fmt.Errorf("database '%s' not found: %w", dbName, err)
 	}
 
-	// Step 2: Execute CHECKPOINT to flush all data
+	// Step 2: Capture LSN/CommitSeq before checkpoint (for PITR)
+	var startLSN, endLSN uint64
+	var startCommitSeq, endCommitSeq uint64
+	pitrCapable := bs.walManager != nil && bs.settings.WALEnabled && bs.settings.PITREnabled
+	if pitrCapable {
+		startLSN = bs.walManager.GetCurrentLSN()
+		startCommitSeq = bs.walManager.GetSnapshotManager().GetCurrentSequence()
+	}
+
+	// Step 3: Execute CHECKPOINT to flush all data
 	if err := bs.executeCheckpoint(); err != nil {
 		return "", fmt.Errorf("checkpoint failed: %w", err)
 	}
 
-	// Step 3: Collect all database files
+	// Step 4: Capture LSN/CommitSeq after checkpoint (for PITR)
+	if pitrCapable {
+		endLSN = bs.walManager.GetCurrentLSN()
+		endCommitSeq = bs.walManager.GetSnapshotManager().GetCurrentSequence()
+	}
+
+	// Step 5: Collect all database files
 	files, err := bs.collectDatabaseFiles(db, options.IncludeIndexes)
 	if err != nil {
 		return "", fmt.Errorf("failed to collect database files: %w", err)
@@ -90,33 +105,49 @@ func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (str
 		"file_count", len(files),
 	)
 
-	// Step 4: Build manifest
+	// Step 6: Build manifest
 	manifest := bs.buildManifest(db, files, options)
 
-	// Step 5: Create temporary directory for staging
+	// Set PITR fields if capable
+	if pitrCapable {
+		manifest.BackupVersion = "1.1"
+		manifest.StartLSN = startLSN
+		manifest.EndLSN = endLSN
+		manifest.StartCommitSeq = startCommitSeq
+		manifest.EndCommitSeq = endCommitSeq
+		manifest.PITREnabled = true
+		bs.logger.Infow("PITR metadata captured",
+			"start_lsn", startLSN,
+			"end_lsn", endLSN,
+			"start_commit_seq", startCommitSeq,
+			"end_commit_seq", endCommitSeq,
+		)
+	}
+
+	// Step 7: Create temporary directory for staging
 	tempDir, err := os.MkdirTemp(bs.settings.TempDir, "backup_*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	// Step 6: Copy files to temp and calculate CRCs
+	// Step 8: Copy files to temp and calculate CRCs
 	if err := bs.copyFilesWithCRC(db, files, tempDir, manifest); err != nil {
 		return "", fmt.Errorf("failed to copy files: %w", err)
 	}
 
-	// Step 7: Collect Primary DB metadata documents
+	// Step 9: Collect Primary DB metadata documents
 	if err := bs.collectPrimaryDBDocuments(db, manifest); err != nil {
 		return "", fmt.Errorf("failed to collect Primary DB documents: %w", err)
 	}
 
-	// Step 8: Write manifest to temp directory
+	// Step 10: Write manifest to temp directory
 	manifestPath := filepath.Join(tempDir, "manifest.json")
 	if err := bs.writeManifestFile(manifest, manifestPath); err != nil {
 		return "", fmt.Errorf("failed to write manifest: %w", err)
 	}
 
-	// Step 9: Ensure output directory exists, then create compressed archive
+	// Step 11: Ensure output directory exists, then create compressed archive
 	if err := os.MkdirAll(filepath.Dir(options.OutputPath), 0755); err != nil {
 		return "", fmt.Errorf("failed to create backup directory: %w", err)
 	}
@@ -124,7 +155,7 @@ func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (str
 		return "", fmt.Errorf("failed to create archive: %w", err)
 	}
 
-	// Step 10: Calculate final backup size
+	// Step 12: Calculate final backup size
 	backupInfo, err := os.Stat(options.OutputPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to stat backup file: %w", err)

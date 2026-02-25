@@ -83,6 +83,7 @@ const (
 	OpCheckpointComplete   // Marks successful checkpoint completion (recovery point)
 	OpAttachDatabase       // Attach external database
 	OpDetachDatabase       // Detach database
+	OpRestorePoint         // Named restore point marker for PITR
 )
 
 // WALEntry represents a single entry in the Write Ahead Log
@@ -859,6 +860,12 @@ func GetOperationTypeName(op OperationType) string {
 		return "CHECKPOINT_BEGIN"
 	case OpCheckpointComplete:
 		return "CHECKPOINT_COMPLETE"
+	case OpAttachDatabase:
+		return "ATTACH_DATABASE"
+	case OpDetachDatabase:
+		return "DETACH_DATABASE"
+	case OpRestorePoint:
+		return "RESTORE_POINT"
 	default:
 		return "UNKNOWN"
 	}
