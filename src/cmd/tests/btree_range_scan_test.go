@@ -348,7 +348,7 @@ func TestOperatorToKeyRange(t *testing.T) {
 			name:                 "Greater Than",
 			operator:             ">",
 			searchKey:            100,
-			expectedStart:        "\x80\x00\x00\x00\x00\x00\x00\x64", // Binary encoding of 100
+			expectedStart:        "100", // String encoding (EncodeKey uses fmt.Sprintf for ints)
 			expectedEnd:          "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF",
 			expectedExcludeStart: true, // Exclusive lower bound
 			expectedExcludeEnd:   false,
@@ -357,7 +357,7 @@ func TestOperatorToKeyRange(t *testing.T) {
 			name:                 "Greater Than or Equal",
 			operator:             ">=",
 			searchKey:            100,
-			expectedStart:        "\x80\x00\x00\x00\x00\x00\x00\x64", // Binary encoding of 100
+			expectedStart:        "100", // String encoding
 			expectedEnd:          "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF",
 			expectedExcludeStart: false,
 			expectedExcludeEnd:   false,
@@ -367,7 +367,7 @@ func TestOperatorToKeyRange(t *testing.T) {
 			operator:             "<",
 			searchKey:            100,
 			expectedStart:        "\x00",
-			expectedEnd:          "\x80\x00\x00\x00\x00\x00\x00\x64", // Binary encoding of 100
+			expectedEnd:          "100", // String encoding
 			expectedExcludeStart: false,
 			expectedExcludeEnd:   true, // Exclusive upper bound
 		},
@@ -376,7 +376,7 @@ func TestOperatorToKeyRange(t *testing.T) {
 			operator:             "<=",
 			searchKey:            100,
 			expectedStart:        "\x00",
-			expectedEnd:          "\x80\x00\x00\x00\x00\x00\x00\x64", // Binary encoding of 100
+			expectedEnd:          "100", // String encoding
 			expectedExcludeStart: false,
 			expectedExcludeEnd:   false,
 		},
@@ -385,8 +385,8 @@ func TestOperatorToKeyRange(t *testing.T) {
 			operator:             "BETWEEN",
 			rangeStart:           50,
 			rangeEnd:             150,
-			expectedStart:        "\x80\x00\x00\x00\x00\x00\x00\x32", // Binary encoding of 50
-			expectedEnd:          "\x80\x00\x00\x00\x00\x00\x00\x96", // Binary encoding of 150
+			expectedStart:        "50",  // String encoding
+			expectedEnd:          "150", // String encoding
 			expectedExcludeStart: false,
 			expectedExcludeEnd:   false,
 		},

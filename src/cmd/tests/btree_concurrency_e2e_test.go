@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,18 +17,9 @@ import (
 func createConcurrencyTestIndex(t *testing.T, testName string, cacheSize int) *btreeindexV2.BTreeIndex {
 	t.Helper()
 
-	// NOTE: GetIndexFilePath() uses global settings.DataDir + config.DatabaseName
-	// For tests, this resolves to "data/testdb/" relative to the test package directory
-	// Clean up any existing test files before creating new index
-	testDatabaseDir := filepath.Join("data", "testdb")
-	indexFileName := fmt.Sprintf("concurrent_test_%s_test_field_btree.btidx", testName)
-	indexFilePath := filepath.Join(testDatabaseDir, indexFileName)
-
-	// Remove old test file if it exists to ensure fresh start
-	os.Remove(indexFilePath)
-
-	// Ensure database directory exists
-	os.MkdirAll(testDatabaseDir, 0755)
+	// Use t.TempDir() for test isolation — each test gets a fresh directory
+	// that is automatically cleaned up when the test completes.
+	tempDir := t.TempDir()
 
 	logger, _ := zap.NewDevelopment()
 
@@ -38,8 +27,8 @@ func createConcurrencyTestIndex(t *testing.T, testName string, cacheSize int) *b
 		DatabaseName: "testdb",
 		BundleName:   fmt.Sprintf("concurrent_test_%s", testName),
 		FieldName:    "test_field",
-		IndexDir:     "data", // Required by validation, though GetIndexFilePath ignores it
-		IsUnique:     true,   // IMPORTANT: Unique index prevents duplicate keys
+		IndexDir:     tempDir,
+		IsUnique:     true, // IMPORTANT: Unique index prevents duplicate keys
 		PageSize:     4096,
 		CacheSize:    cacheSize,
 		FillFactor:   0.7,
