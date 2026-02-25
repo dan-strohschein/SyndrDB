@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"syndrdb/src/internal/domain/bundle"
 	"syndrdb/src/internal/domain/database"
+	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/pkg/settings"
@@ -398,108 +400,352 @@ func (ps *PITRService) shouldStop(entry journal.WALEntry, target PITRRecoveryTar
 
 // buildApplyFunc constructs the function that applies WAL entries to the database.
 // This is physical replay — it writes directly via BundleService, bypassing the query layer.
+// Follows the same patterns as createUndoFunction in transaction_operations.go.
 func (ps *PITRService) buildApplyFunc(targetDBName string) func(journal.WALEntry) error {
+	// Cache the database reference to avoid repeated lookups.
+	var cachedDB *models.Database
+
 	return func(entry journal.WALEntry) error {
-		db, err := ps.databaseService.GetDatabaseByName(targetDBName)
-		if err != nil {
-			return fmt.Errorf("database '%s' not found: %w", targetDBName, err)
+		if cachedDB == nil {
+			db, err := ps.databaseService.GetDatabaseByName(targetDBName)
+			if err != nil {
+				return fmt.Errorf("database '%s' not found: %w", targetDBName, err)
+			}
+			cachedDB = db
 		}
 
 		switch entry.Operation {
 		case journal.OpInsert:
-			return ps.applyInsert(db, entry)
+			return ps.applyInsert(cachedDB, entry)
 		case journal.OpUpdate:
-			return ps.applyUpdate(db, entry)
+			return ps.applyUpdate(cachedDB, entry)
 		case journal.OpDelete:
-			return ps.applyDelete(db, entry)
+			return ps.applyDelete(cachedDB, entry)
 		case journal.OpBatchInsert:
-			return ps.applyBatchInsert(db, entry)
+			return ps.applyBatchInsert(cachedDB, entry)
 		case journal.OpCreateBundle:
-			return ps.applyCreateBundle(db, entry)
+			return ps.applyCreateBundle(cachedDB, entry)
 		case journal.OpDeleteBundle:
-			return ps.applyDeleteBundle(db, entry)
+			return ps.applyDeleteBundle(cachedDB, entry)
 		default:
-			// Skip non-data operations silently
 			return nil
 		}
 	}
 }
 
+// parseAfterDataToKeyValues parses WAL AfterData JSON into []models.KeyValue.
+// Handles two formats: map[string]interface{} (from WAL adapters) and []KeyValue (from direct logging).
+func parseAfterDataToKeyValues(afterData string) ([]models.KeyValue, error) {
+	if afterData == "" {
+		return nil, fmt.Errorf("AfterData is empty")
+	}
+
+	// Try as map[string]interface{} first (most common from WAL replay)
+	var dataMap map[string]interface{}
+	if err := json.Unmarshal([]byte(afterData), &dataMap); err == nil {
+		fields := make([]models.KeyValue, 0, len(dataMap))
+		for key, value := range dataMap {
+			// Skip internal metadata fields
+			if key == "DocumentID" || key == "CreatedAt" || key == "UpdatedAt" ||
+				key == "CommitSequence" || key == "SupersededAt" ||
+				key == "CreatedByTxID" || key == "DeletedByTxID" || key == "VersionSequence" {
+				continue
+			}
+			fields = append(fields, models.KeyValue{Key: key, Value: value})
+		}
+		return fields, nil
+	}
+
+	// Try as []KeyValue (from document_operations.go direct logging)
+	var kvs []models.KeyValue
+	if err := json.Unmarshal([]byte(afterData), &kvs); err == nil && len(kvs) > 0 {
+		return kvs, nil
+	}
+
+	// Try as a JSON string that was double-marshaled
+	var jsonStr string
+	if err := json.Unmarshal([]byte(afterData), &jsonStr); err == nil && jsonStr != "" {
+		return parseAfterDataToKeyValues(jsonStr)
+	}
+
+	return nil, fmt.Errorf("failed to parse AfterData: unrecognized format")
+}
+
 // applyInsert replays an INSERT operation from the WAL.
-func (ps *PITRService) applyInsert(db interface{}, entry journal.WALEntry) error {
+func (ps *PITRService) applyInsert(db *models.Database, entry journal.WALEntry) error {
 	if entry.AfterData == "" {
 		return nil
 	}
 
-	var afterData map[string]interface{}
-	if err := json.Unmarshal([]byte(entry.AfterData), &afterData); err != nil {
-		return fmt.Errorf("failed to unmarshal AfterData: %w", err)
+	fields, err := parseAfterDataToKeyValues(entry.AfterData)
+	if err != nil {
+		return fmt.Errorf("INSERT parse error (bundle=%s, doc=%s): %w", entry.BundleName, entry.DocumentID, err)
 	}
 
-	ps.logger.Debugw("PITR replay INSERT",
+	bndl, err := ps.bundleService.GetBundleByName(db, entry.BundleName)
+	if err != nil {
+		return fmt.Errorf("bundle '%s' not found for INSERT: %w", entry.BundleName, err)
+	}
+
+	docCmd := &models.DocumentCommand{
+		CommandType: "ADD_DOCUMENT",
+		BundleName:  entry.BundleName,
+		Fields:      fields,
+	}
+
+	_, err = ps.bundleService.AddDocumentToBundleWithTxID(db, bndl, docCmd, "", entry.DocumentID)
+	if err != nil {
+		return fmt.Errorf("INSERT failed (bundle=%s, doc=%s): %w", entry.BundleName, entry.DocumentID, err)
+	}
+
+	ps.logger.Debugw("PITR replay INSERT applied",
 		"bundle", entry.BundleName,
 		"doc_id", entry.DocumentID,
 		"lsn", entry.LSN,
 	)
-
-	// The actual insert will go through BundleService once we have
-	// the full database model reference. For now, log the intent.
 	return nil
 }
 
 // applyUpdate replays an UPDATE operation from the WAL.
-func (ps *PITRService) applyUpdate(db interface{}, entry journal.WALEntry) error {
+// Follows the same pattern as the undo function in transaction_operations.go:
+// unmarshal data → convert to KeyValue → build UpdateCommand with WHERE DocumentID → call UpdateDocumentInBundle.
+func (ps *PITRService) applyUpdate(db *models.Database, entry journal.WALEntry) error {
 	if entry.AfterData == "" {
 		return nil
 	}
 
-	ps.logger.Debugw("PITR replay UPDATE",
+	// Skip bulk "multiple" entries that lack a specific document target
+	if entry.DocumentID == "" || entry.DocumentID == "multiple" {
+		ps.logger.Warnw("PITR replay: skipping bulk UPDATE (no specific DocumentID)",
+			"bundle", entry.BundleName,
+			"lsn", entry.LSN,
+		)
+		return nil
+	}
+
+	fields, err := parseAfterDataToKeyValues(entry.AfterData)
+	if err != nil {
+		return fmt.Errorf("UPDATE parse error (bundle=%s, doc=%s): %w", entry.BundleName, entry.DocumentID, err)
+	}
+
+	bndl, err := ps.bundleService.GetBundleByName(db, entry.BundleName)
+	if err != nil {
+		return fmt.Errorf("bundle '%s' not found for UPDATE: %w", entry.BundleName, err)
+	}
+
+	updateCmd := &models.DocumentUpdateCommand{
+		BundleName:  entry.BundleName,
+		Fields:      fields,
+		WhereClause: fmt.Sprintf("DocumentID = '%s'", entry.DocumentID),
+	}
+
+	err = ps.bundleService.UpdateDocumentInBundle(context.Background(), db, bndl, updateCmd)
+	if err != nil {
+		return fmt.Errorf("UPDATE failed (bundle=%s, doc=%s): %w", entry.BundleName, entry.DocumentID, err)
+	}
+
+	ps.logger.Debugw("PITR replay UPDATE applied",
 		"bundle", entry.BundleName,
 		"doc_id", entry.DocumentID,
 		"lsn", entry.LSN,
 	)
-
 	return nil
 }
 
 // applyDelete replays a DELETE operation from the WAL.
-func (ps *PITRService) applyDelete(db interface{}, entry journal.WALEntry) error {
-	ps.logger.Debugw("PITR replay DELETE",
+// Uses DeleteDocumentFromBundle with explicit docIDs (same pattern as undo INSERT).
+func (ps *PITRService) applyDelete(db *models.Database, entry journal.WALEntry) error {
+	// Skip bulk "multiple" entries that lack a specific document target
+	if entry.DocumentID == "" || entry.DocumentID == "multiple" {
+		ps.logger.Warnw("PITR replay: skipping bulk DELETE (no specific DocumentID)",
+			"bundle", entry.BundleName,
+			"lsn", entry.LSN,
+		)
+		return nil
+	}
+
+	bndl, err := ps.bundleService.GetBundleByName(db, entry.BundleName)
+	if err != nil {
+		return fmt.Errorf("bundle '%s' not found for DELETE: %w", entry.BundleName, err)
+	}
+
+	deleteCmd := &models.DocumentDeleteCommand{
+		BundleName: entry.BundleName,
+	}
+
+	err = ps.bundleService.DeleteDocumentFromBundle(bndl, deleteCmd, []string{entry.DocumentID}, nil)
+	if err != nil {
+		return fmt.Errorf("DELETE failed (bundle=%s, doc=%s): %w", entry.BundleName, entry.DocumentID, err)
+	}
+
+	ps.logger.Debugw("PITR replay DELETE applied",
 		"bundle", entry.BundleName,
 		"doc_id", entry.DocumentID,
 		"lsn", entry.LSN,
 	)
-
 	return nil
 }
 
 // applyBatchInsert replays a BATCH INSERT operation from the WAL.
-func (ps *PITRService) applyBatchInsert(db interface{}, entry journal.WALEntry) error {
-	ps.logger.Debugw("PITR replay BATCH_INSERT",
+// AfterData contains a JSON array of documents.
+func (ps *PITRService) applyBatchInsert(db *models.Database, entry journal.WALEntry) error {
+	if entry.AfterData == "" {
+		return nil
+	}
+
+	bndl, err := ps.bundleService.GetBundleByName(db, entry.BundleName)
+	if err != nil {
+		return fmt.Errorf("bundle '%s' not found for BATCH_INSERT: %w", entry.BundleName, err)
+	}
+
+	// Try to parse as array of maps
+	var docs []map[string]interface{}
+	if err := json.Unmarshal([]byte(entry.AfterData), &docs); err != nil {
+		// Try as array of KeyValue arrays
+		var kvDocs [][]models.KeyValue
+		if err2 := json.Unmarshal([]byte(entry.AfterData), &kvDocs); err2 != nil {
+			return fmt.Errorf("BATCH_INSERT parse error (bundle=%s): %w", entry.BundleName, err)
+		}
+		// Convert each KeyValue array to a map
+		for _, kvs := range kvDocs {
+			doc := make(map[string]interface{}, len(kvs))
+			for _, kv := range kvs {
+				doc[kv.Key] = kv.Value
+			}
+			docs = append(docs, doc)
+		}
+	}
+
+	inserted := 0
+	for _, doc := range docs {
+		fields := make([]models.KeyValue, 0, len(doc))
+		docID := ""
+		for key, value := range doc {
+			if key == "DocumentID" {
+				if s, ok := value.(string); ok {
+					docID = s
+				}
+				continue
+			}
+			if key == "CreatedAt" || key == "UpdatedAt" ||
+				key == "CommitSequence" || key == "SupersededAt" ||
+				key == "CreatedByTxID" || key == "DeletedByTxID" || key == "VersionSequence" {
+				continue
+			}
+			fields = append(fields, models.KeyValue{Key: key, Value: value})
+		}
+
+		docCmd := &models.DocumentCommand{
+			CommandType: "ADD_DOCUMENT",
+			BundleName:  entry.BundleName,
+			Fields:      fields,
+		}
+
+		var preallocID []string
+		if docID != "" {
+			preallocID = []string{docID}
+		}
+		_, err := ps.bundleService.AddDocumentToBundleWithTxID(db, bndl, docCmd, "", preallocID...)
+		if err != nil {
+			ps.logger.Warnw("PITR replay BATCH_INSERT: failed to insert document",
+				"bundle", entry.BundleName, "doc_id", docID, "error", err)
+			continue
+		}
+		inserted++
+	}
+
+	ps.logger.Debugw("PITR replay BATCH_INSERT applied",
 		"bundle", entry.BundleName,
+		"inserted", inserted,
+		"total", len(docs),
 		"lsn", entry.LSN,
 	)
-
 	return nil
 }
 
 // applyCreateBundle replays a CREATE BUNDLE operation from the WAL.
-func (ps *PITRService) applyCreateBundle(db interface{}, entry journal.WALEntry) error {
-	ps.logger.Debugw("PITR replay CREATE_BUNDLE",
+func (ps *PITRService) applyCreateBundle(db *models.Database, entry journal.WALEntry) error {
+	// Check if bundle already exists (base backup may have included it)
+	if _, err := ps.bundleService.GetBundleByName(db, entry.BundleName); err == nil {
+		ps.logger.Debugw("PITR replay CREATE_BUNDLE: bundle already exists, skipping",
+			"bundle", entry.BundleName,
+			"lsn", entry.LSN,
+		)
+		return nil
+	}
+
+	// Parse bundle metadata from AfterData if available
+	bundleCmd := &models.BundleCommand{
+		CommandType: "CREATE",
+		BundleName:  entry.BundleName,
+	}
+
+	if entry.AfterData != "" {
+		// Try to extract field definitions from the serialized bundle data
+		var bundleData map[string]interface{}
+		if err := json.Unmarshal([]byte(entry.AfterData), &bundleData); err == nil {
+			if structure, ok := bundleData["DocumentStructure"].(map[string]interface{}); ok {
+				if fieldDefs, ok := structure["FieldDefinitions"].(map[string]interface{}); ok {
+					for _, fd := range fieldDefs {
+						if fdMap, ok := fd.(map[string]interface{}); ok {
+							fieldDef := models.FieldDefinition{
+								Name: fmt.Sprintf("%v", fdMap["Name"]),
+							}
+							if t, ok := fdMap["Type"].(string); ok {
+								fieldDef.Type = t
+							}
+							if r, ok := fdMap["IsRequired"].(bool); ok {
+								fieldDef.IsRequired = r
+							}
+							if u, ok := fdMap["IsUnique"].(bool); ok {
+								fieldDef.IsUnique = u
+							}
+							bundleCmd.Fields = append(bundleCmd.Fields, fieldDef)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	_, err := ps.bundleService.AddBundle(ps.databaseService, db, bundleCmd)
+	if err != nil {
+		return fmt.Errorf("CREATE_BUNDLE failed (bundle=%s): %w", entry.BundleName, err)
+	}
+
+	ps.logger.Debugw("PITR replay CREATE_BUNDLE applied",
 		"bundle", entry.BundleName,
 		"lsn", entry.LSN,
 	)
-
 	return nil
 }
 
 // applyDeleteBundle replays a DELETE BUNDLE operation from the WAL.
-func (ps *PITRService) applyDeleteBundle(db interface{}, entry journal.WALEntry) error {
-	ps.logger.Debugw("PITR replay DELETE_BUNDLE",
+func (ps *PITRService) applyDeleteBundle(db *models.Database, entry journal.WALEntry) error {
+	// Check if bundle exists
+	if _, err := ps.bundleService.GetBundleByName(db, entry.BundleName); err != nil {
+		ps.logger.Debugw("PITR replay DELETE_BUNDLE: bundle not found, skipping",
+			"bundle", entry.BundleName,
+			"lsn", entry.LSN,
+		)
+		return nil
+	}
+
+	bundleCmd := &models.BundleCommand{
+		CommandType:    "DELETE",
+		BundleName:     entry.BundleName,
+		HasForceSwitch: true, // Skip referential integrity checks during replay
+	}
+
+	err := ps.bundleService.DeleteBundle(db, bundleCmd)
+	if err != nil {
+		return fmt.Errorf("DELETE_BUNDLE failed (bundle=%s): %w", entry.BundleName, err)
+	}
+
+	ps.logger.Debugw("PITR replay DELETE_BUNDLE applied",
 		"bundle", entry.BundleName,
 		"lsn", entry.LSN,
 	)
-
 	return nil
 }
 
