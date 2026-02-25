@@ -1619,6 +1619,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 						continue // next command in batch
 					}
 
+					// Health check: PING works without authentication
+					if strings.TrimSpace(cmd) == "PING" {
+						connection.writeMu.Lock()
+						sendSuccess(writer, "PONG")
+						connection.writeMu.Unlock()
+						continue
+					}
+
 					// Reject commands from unauthorized connections
 				if !connection.Authorized {
 					s.sendError(writer, errors.New(errors.ERR_AUTH_REQUIRED,

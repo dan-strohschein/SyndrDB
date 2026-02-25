@@ -127,6 +127,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		ctx = context.WithValue(ctx, "paramContext", paramContext)
 	}
 
+	// Health check: PING works for authenticated connections too
+	if strings.TrimSpace(command) == "PING" {
+		return "PONG", nil
+	}
+
 	// Check if this is a GraphQL command first
 	if strings.HasPrefix(command, "GRAPHQL::") {
 		if serviceManager.GraphQLProcessor == nil {
@@ -1995,6 +2000,8 @@ func classifyCommandPermission(firstWords []string) string {
 	case "prepare", "execute", "deallocate":
 		return ""
 	case "declare", "fetch", "close":
+		return ""
+	case "ping":
 		return ""
 	}
 
