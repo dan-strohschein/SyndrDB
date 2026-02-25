@@ -45,6 +45,16 @@ type Manifest struct {
 	EndCommitSeq   uint64   `json:"end_commit_seq,omitempty"`    // Commit sequence after checkpoint
 	PITREnabled    bool     `json:"pitr_enabled,omitempty"`      // Whether this backup supports PITR
 	WALSegments    []string `json:"wal_segments_needed,omitempty"` // Informational: WAL segments needed for replay
+
+	// Incremental backup fields — v2.0+
+	BackupID       string   `json:"backup_id,omitempty"`
+	BackupType     string   `json:"backup_type,omitempty"`        // "full" or "incremental"
+	ParentBackupID string   `json:"parent_backup_id,omitempty"`
+	ParentBackupPath string `json:"parent_backup_path,omitempty"`
+	BaseBackupID   string   `json:"base_backup_id,omitempty"`     // Root full backup UUID
+	ChainDepth     int      `json:"chain_depth,omitempty"`        // 0=full, 1=first incr, ...
+	ChangedBundles []string `json:"changed_bundles,omitempty"`
+	WALFiles       []string `json:"wal_files,omitempty"`
 }
 
 // FileEntry represents a single file in the backup
@@ -112,5 +122,4 @@ func VerifyFileCRC(filePath string, expectedCRC uint32) error {
 
 // TODO: I will add schema versioning to support backward compatibility
 // TODO: I will add custom metadata fields for user-defined backup annotations
-// TODO: I will add incremental backup metadata (parent backup reference, LSN range)
 // TODO: I will add encryption metadata (algorithm, key derivation method)

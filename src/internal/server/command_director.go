@@ -348,6 +348,13 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown SHOW CONFLICT command: %s", command),
 				errors.LayerCommand).WithContext("command", command)
+		case "backup":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "chain" {
+				return ShowBackupChain(command, logger, &serviceManager, startTime)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW BACKUP command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		case "backups":
 			return ShowBackups(command, logger, &serviceManager, startTime)
 		case "restore":

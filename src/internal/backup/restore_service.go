@@ -59,6 +59,12 @@ func (rs *RestoreService) RestoreBackup(backupPath string, options RestoreOption
 		"force", options.Force,
 	)
 
+	// Auto-detect incremental backups by peeking at the manifest
+	peekManifest, peekErr := ReadManifestFromArchive(backupPath)
+	if peekErr == nil && peekManifest.BackupType == "incremental" {
+		return rs.RestoreFromIncremental(backupPath, options)
+	}
+
 	// Step 1: Extract backup to temp directory
 	tempDir, manifest, err := rs.extractAndValidate(backupPath)
 	if err != nil {
@@ -234,8 +240,11 @@ func (rs *RestoreService) checkCompatibility(manifest *Manifest) error {
 	}
 
 	// Check backup version
-	if manifest.BackupVersion != "1.0" && manifest.BackupVersion != "1.1" {
-		return fmt.Errorf("unsupported backup version: %s (expected 1.0 or 1.1)", manifest.BackupVersion)
+	switch manifest.BackupVersion {
+	case "1.0", "1.1", "2.0":
+		// OK
+	default:
+		return fmt.Errorf("unsupported backup version: %s (expected 1.0, 1.1, or 2.0)", manifest.BackupVersion)
 	}
 
 	rs.logger.Info("Compatibility check passed")

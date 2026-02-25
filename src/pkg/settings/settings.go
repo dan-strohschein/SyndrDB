@@ -219,6 +219,11 @@ type Arguments struct {
 	BackupIncludeIndexes bool   `yaml:"backup_include_indexes"` // Include index files in backups (default: true)
 	MaxRestoreSizeBytes  int64  `yaml:"max_restore_size_bytes"` // Maximum decompressed restore size in bytes (default: 10GB, 0=unlimited)
 
+	// Incremental Backup Configuration
+	BackupMaxChainDepth   int  `yaml:"backup_max_chain_depth"`     // Max incremental chain depth before requiring full backup (default: 7)
+	BackupCatalogEnabled  bool `yaml:"backup_catalog_enabled"`     // Enable backup catalog tracking (default: true)
+	BackupCatalogSyncToDB bool `yaml:"backup_catalog_sync_to_db"`  // Sync catalog entries to Primary DB (default: false)
+
 	// Point-in-Time Recovery (PITR) Configuration
 	WALArchiveEnabled      bool   `yaml:"wal_archive_enabled"`       // Enable WAL archiving for PITR (default: false)
 	WALArchiveDir          string `yaml:"wal_archive_dir"`           // Directory for archived WAL files (default: "./wal_archive")
@@ -517,6 +522,11 @@ func GetSettings() *Arguments {
 			BackupCompression:    "gzip",      // Use gzip compression by default
 			BackupIncludeIndexes: true,                    // Include indexes in backups
 			MaxRestoreSizeBytes:  10 * 1024 * 1024 * 1024, // 10GB max decompressed restore size
+
+			// Incremental Backup Defaults
+			BackupMaxChainDepth:   7,    // Max 7 incremental backups in a chain
+			BackupCatalogEnabled:  true, // Track backups in catalog by default
+			BackupCatalogSyncToDB: false, // Don't sync to Primary DB by default
 
 			// PITR Defaults
 			WALArchiveEnabled:       false,           // WAL archiving off by default
