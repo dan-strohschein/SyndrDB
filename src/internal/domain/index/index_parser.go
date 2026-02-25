@@ -36,25 +36,33 @@ func ParseCreateBTreeIndexCommand(command string, logger *zap.SugaredLogger) (*m
 	logger.Debugf("Parsing cleaned B-INDEX command: %s", command)
 
 	// Check for EXPRESSION syntax first: CREATE B-INDEX "name" ON BUNDLE "bundle" WITH EXPRESSION (...)
-	exprRegex := regexp.MustCompile(`(?i)^CREATE\s+B-INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+EXPRESSION\s*\(([^)]+)\)`)
+	exprRegex := regexp.MustCompile(`(?i)^CREATE\s+B-INDEX\s+"([^"]+)"\s+ON\s+BUNDLE\s+"([^"]+)"\s+WITH\s+EXPRESSION\s*\((.+)\)`)
 	if exprMatches := exprRegex.FindStringSubmatch(command); exprMatches != nil {
 		indexName := exprMatches[1]
 		bundleName := exprMatches[2]
 		expressionStr := strings.TrimSpace(exprMatches[3])
 
-		// Extract field name from expression (e.g., LOWER("name") -> name)
-		fieldName, err := extractFieldFromExpression(expressionStr)
+		// Compile expression via AST to extract all referenced fields
+		compiled, err := CompileIndexExpressionAST(expressionStr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid expression index: %w", err)
+		}
+
+		// Build field definitions from all referenced fields
+		fields := make([]models.FieldDefinition, len(compiled.FieldNames))
+		for i, fn := range compiled.FieldNames {
+			fields[i] = models.FieldDefinition{Name: fn, IsRequired: false, IsUnique: false}
+		}
+		if len(fields) == 0 {
+			// Expression references no fields (e.g., constant expression) — use a placeholder
+			fields = []models.FieldDefinition{{Name: "_expr", IsRequired: false, IsUnique: false}}
 		}
 
 		cmd := &models.CreateIndexCommand{
 			IndexType:  "btree",
 			IndexName:  indexName,
 			BundleName: bundleName,
-			Fields: []models.FieldDefinition{
-				{Name: fieldName, IsRequired: false, IsUnique: false},
-			},
+			Fields:     fields,
 			Expression: expressionStr,
 		}
 
@@ -304,13 +312,3 @@ func ParseCreateBRINIndexCommand(command string, logger *zap.SugaredLogger) (*mo
 	}, nil
 }
 
-// extractFieldFromExpression extracts the field name from an expression like LOWER("name") or UPPER("email")
-func extractFieldFromExpression(expr string) (string, error) {
-	// Match patterns like LOWER("name"), UPPER("email"), TRIM("name"), LENGTH("name")
-	fieldRegex := regexp.MustCompile(`(?i)(?:LOWER|UPPER|TRIM|LENGTH|YEAR|MONTH)\s*\(\s*"([^"]+)"\s*\)`)
-	match := fieldRegex.FindStringSubmatch(expr)
-	if match != nil {
-		return match[1], nil
-	}
-	return "", fmt.Errorf("cannot extract field name from expression: %s", expr)
-}

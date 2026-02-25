@@ -819,18 +819,51 @@ func (qr *QueryRouter) tryIndexOptimization(
 	docScanner documentscanner.DocumentScannerInterface,
 ) (ExecutionNode, string) {
 
-	// Try expression index optimization for function-call equality (e.g., LOWER(name) = 'john')
-	if funcName, fieldName, value, ok := syndrQL.ExtractFunctionCallEquality(expr); ok {
-		exprStr := funcName + "(" + fieldName + ")"
-		qr.logger.Debugf("INDEX OPTIMIZATION: Found expression equality: %s = %v", exprStr, value)
+	// Try expression index optimization for equality queries (e.g., LOWER(name) == 'john', "price" * "qty" == 500)
+	if exprNode, value, ok := extractExpressionEquality(expr); ok {
+		// Normalize the left-side expression for comparison against index NormalizedExpression
+		normalizedQuery := syndrQL.ExpressionToString(exprNode)
+		qr.logger.Debugf("INDEX OPTIMIZATION: Found expression equality: %s = %v", normalizedQuery, value)
 
 		for indexName, indexRef := range bundle.Indexes {
-			if indexRef.Expression != "" && strings.EqualFold(indexRef.Expression, exprStr) {
+			if indexRef.Expression == "" {
+				continue
+			}
+			// Lazy-initialize NormalizedExpression for indexes loaded from disk
+			if indexRef.NormalizedExpression == "" {
+				indexRef.NormalizedExpression = normalizeExpressionString(indexRef.Expression)
+				bundle.Indexes[indexName] = indexRef
+			}
+			if indexRef.NormalizedExpression == normalizedQuery {
 				// Skip partial indexes whose predicate is not implied by the query
 				if indexRef.WherePredicate != "" && !queryImpliesIndexPredicate(expr, indexRef.WherePredicate) {
 					continue
 				}
-				qr.logger.Debugf("INDEX SELECTED: Using expression index '%s' for %s", indexName, exprStr)
+				qr.logger.Debugf("INDEX SELECTED: Using expression index '%s' for %s", indexName, normalizedQuery)
+				return &IndexScanNode{
+					Bundle:           bundle,
+					IndexName:        indexName,
+					ScanType:         BTreeIndexScan,
+					SearchKey:        value,
+					Cost:             qr.costModel.HashIndexScanCost(1),
+					EstimatedRows:    1,
+					Logger:           qr.logger,
+					BundleServiceInt: qr.bundleService,
+					DocumentScanner:  docScanner,
+				}, indexName
+			}
+		}
+	}
+
+	// Also try legacy single-function equality as fast path (backward compat)
+	if funcName, fieldName, value, ok := syndrQL.ExtractFunctionCallEquality(expr); ok {
+		exprStr := funcName + "(" + fieldName + ")"
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.Expression != "" && strings.EqualFold(indexRef.Expression, exprStr) {
+				if indexRef.WherePredicate != "" && !queryImpliesIndexPredicate(expr, indexRef.WherePredicate) {
+					continue
+				}
+				qr.logger.Debugf("INDEX SELECTED: Using expression index '%s' for %s (legacy path)", indexName, exprStr)
 				return &IndexScanNode{
 					Bundle:           bundle,
 					IndexName:        indexName,
@@ -882,6 +915,40 @@ func (qr *QueryRouter) tryIndexOptimization(
 		qr.logger.Debugf("INDEX OPTIMIZATION: No hash index found for field '%s'", field)
 	} else {
 		qr.logger.Debugf("INDEX OPTIMIZATION: ExtractSimpleEquality failed - not a simple equality expression")
+	}
+
+	// Try expression index range optimization (e.g., LOWER(name) > 'a')
+	if exprNode, rangeOp, rangeVal, ok := extractExpressionRange(expr); ok {
+		normalizedQuery := syndrQL.ExpressionToString(exprNode)
+		qr.logger.Debugf("INDEX OPTIMIZATION: Found expression range: %s %s %v", normalizedQuery, rangeOp, rangeVal)
+		for indexName, indexRef := range bundle.Indexes {
+			if indexRef.Expression == "" || indexRef.IndexType != "btree" {
+				continue
+			}
+			if indexRef.NormalizedExpression == "" {
+				indexRef.NormalizedExpression = normalizeExpressionString(indexRef.Expression)
+				bundle.Indexes[indexName] = indexRef
+			}
+			if indexRef.NormalizedExpression == normalizedQuery {
+				if indexRef.WherePredicate != "" && !queryImpliesIndexPredicate(expr, indexRef.WherePredicate) {
+					continue
+				}
+				qr.logger.Debugf("INDEX SELECTED: Using expression index '%s' for %s %s", indexName, normalizedQuery, rangeOp)
+				return &IndexScanNode{
+					Bundle:           bundle,
+					IndexName:        indexName,
+					ScanType:         BTreeRangeScan,
+					Operator:         rangeOp,
+					RangeStart:       rangeVal,
+					RangeEnd:         rangeVal,
+					Cost:             qr.costModel.BTreeRangeScanCost(bundle.TotalDocuments, bundle.TotalDocuments/10),
+					EstimatedRows:    int(bundle.TotalDocuments) / 10,
+					Logger:           qr.logger,
+					BundleServiceInt: qr.bundleService,
+					DocumentScanner:  docScanner,
+				}, indexName
+			}
+		}
 	}
 
 	// Try BTree index optimization for range conditions
@@ -1064,6 +1131,92 @@ func isQueryCoveredByIndex(query *queryparser.UnifiedSelectQuery, indexRef model
 
 // queryImpliesIndexPredicate checks whether the query's WHERE clause implies a partial index predicate.
 // For a partial index with predicate P, the query can only use the index if the query's WHERE clause
+// extractExpressionEquality detects patterns where the left side of an equality is an arbitrary
+// expression (function call, arithmetic, etc.) and the right side is a literal.
+// This is the generalized version of ExtractFunctionCallEquality.
+// Returns (leftExpr, value, ok).
+func extractExpressionEquality(expr syndrQL.Expression) (syndrQL.Expression, interface{}, bool) {
+	expr = syndrQL.UnwrapGrouped(expr)
+
+	binary, isBinary := expr.(*syndrQL.BinaryExpression)
+	if !isBinary {
+		return nil, nil, false
+	}
+
+	// Must be equality
+	if binary.Operator != syndrQL.TOKEN_EQ && binary.Operator != syndrQL.TOKEN_ASSIGN {
+		return nil, nil, false
+	}
+
+	// Right side must be a literal
+	literal, isLiteral := binary.Right.(*syndrQL.LiteralExpression)
+	if !isLiteral {
+		return nil, nil, false
+	}
+
+	// Left side must not be a simple identifier (those are handled by hash/btree index matching)
+	switch binary.Left.(type) {
+	case *syndrQL.IdentifierExpression, *syndrQL.QualifiedIdentifierExpression:
+		return nil, nil, false // handled by ExtractSimpleEquality
+	}
+
+	return binary.Left, literal.Value, true
+}
+
+// extractExpressionRange detects patterns where the left side of a range comparison is an arbitrary
+// expression (function call, arithmetic, etc.) and the right side is a literal.
+// Returns (leftExpr, operator, value, ok).
+func extractExpressionRange(expr syndrQL.Expression) (syndrQL.Expression, string, interface{}, bool) {
+	expr = syndrQL.UnwrapGrouped(expr)
+
+	binary, isBinary := expr.(*syndrQL.BinaryExpression)
+	if !isBinary {
+		return nil, "", nil, false
+	}
+
+	// Must be a range operator
+	var op string
+	switch binary.Operator {
+	case syndrQL.TOKEN_GT:
+		op = ">"
+	case syndrQL.TOKEN_GTE:
+		op = ">="
+	case syndrQL.TOKEN_LT:
+		op = "<"
+	case syndrQL.TOKEN_LTE:
+		op = "<="
+	case syndrQL.TOKEN_NEQ:
+		op = "!="
+	default:
+		return nil, "", nil, false
+	}
+
+	// Right side must be a literal
+	literal, isLiteral := binary.Right.(*syndrQL.LiteralExpression)
+	if !isLiteral {
+		return nil, "", nil, false
+	}
+
+	// Left side must not be a simple identifier (handled by ExtractRangeCondition)
+	switch binary.Left.(type) {
+	case *syndrQL.IdentifierExpression, *syndrQL.QualifiedIdentifierExpression:
+		return nil, "", nil, false
+	}
+
+	return binary.Left, op, literal.Value, true
+}
+
+// normalizeExpressionString parses an expression string and re-serializes it to a canonical form.
+// This ensures that "LOWER( \"name\" )" and "LOWER(\"name\")" produce the same normalized string.
+func normalizeExpressionString(expr string) string {
+	parsed, err := syndrQL.ParseExpression(expr)
+	if err != nil {
+		// Fallback: lowercase the raw expression
+		return strings.ToLower(strings.TrimSpace(expr))
+	}
+	return syndrQL.ExpressionToString(parsed)
+}
+
 // logically implies P (i.e., every row matching the query's WHERE also matches P).
 //
 // Strategy: Parse the index predicate into AND clauses. For each clause, check if the same clause
