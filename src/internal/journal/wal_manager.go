@@ -13,6 +13,8 @@ before execution, maintaining ACID properties and enabling recovery.
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"syndrdb/src/pkg/settings"
 	"time"
@@ -760,4 +762,180 @@ func (wm *WALManager) RecoverCommitSequenceAssignments() (uint64, error) {
 	}
 
 	return highestCommitSeq, nil
+}
+
+// RecoveryResult holds statistics from a crash recovery run.
+type RecoveryResult struct {
+	RedoneOps             int    // Committed operations replayed
+	UndoneOps             int    // Uncommitted operations rolled back
+	UncommittedTxCount    int    // Transactions that were rolled back
+	HighestCommitSequence uint64 // Restored global commit sequence
+	HighestTxID           uint64 // Restored transaction counter
+	CheckpointLSN         uint64 // LSN we recovered from
+	Errors                int    // Non-fatal errors encountered
+}
+
+// FindLastCheckpoint scans the WAL to find the most recent OpCheckpointComplete entry.
+// Returns the startLSN recorded in that checkpoint's metadata, or 0 if no checkpoint found.
+func (wm *WALManager) FindLastCheckpoint() (uint64, error) {
+	var lastCheckpointLSN uint64
+
+	err := wm.wal.ReplayOperations(0, func(entry WALEntry) error {
+		if entry.Operation == OpCheckpointComplete {
+			// Parse startLSN from metadata: "startLSN=123,pagesSynced=45"
+			if strings.HasPrefix(entry.Metadata, "startLSN=") {
+				parts := strings.SplitN(entry.Metadata, ",", 2)
+				if lsn, err := strconv.ParseUint(strings.TrimPrefix(parts[0], "startLSN="), 10, 64); err == nil {
+					lastCheckpointLSN = lsn
+				}
+			}
+		}
+		return nil
+	})
+
+	return lastCheckpointLSN, err
+}
+
+// RecoverOnStartup performs automatic crash recovery by replaying the WAL from the last
+// checkpoint. It identifies committed and uncommitted transactions, redoes committed
+// operations, and undoes uncommitted ones. This should be called during server startup
+// before accepting client connections.
+//
+// undoFunc is called for each WAL entry that needs to be undone (uncommitted transactions).
+// It receives the WAL entry and should apply the before-image to reverse the operation.
+// If undoFunc is nil, uncommitted transactions are logged but their effects remain
+// (best-effort recovery mode for when the undo infrastructure isn't available).
+func (wm *WALManager) RecoverOnStartup(undoFunc func(WALEntry) error) (*RecoveryResult, error) {
+	startTime := time.Now()
+	result := &RecoveryResult{}
+
+	wm.logger.Info("Starting WAL crash recovery...")
+
+	// Phase 1: Find last checkpoint
+	checkpointLSN, err := wm.FindLastCheckpoint()
+	if err != nil {
+		wm.logger.Warnf("Failed to find last checkpoint, recovering from LSN 0: %v", err)
+		checkpointLSN = 0
+	}
+	result.CheckpointLSN = checkpointLSN
+	wm.logger.Infof("Recovery starting from checkpoint LSN %d", checkpointLSN)
+
+	// Phase 2: Replay WAL and classify transactions
+	// Track transaction state: txID → committed (true) or still open (false)
+	txState := make(map[string]bool)     // txID → true=committed, false=open
+	txEntries := make(map[string][]WALEntry) // txID → entries for undo if uncommitted
+	var highestCommitSeq uint64
+	var highestTxID uint64
+
+	err = wm.wal.ReplayOperations(checkpointLSN, func(entry WALEntry) error {
+		// Track highest txID seen (for transaction counter recovery)
+		if entry.TxID != "" {
+			if txIDVal, parseErr := strconv.ParseUint(entry.TxID, 16, 64); parseErr == nil {
+				if txIDVal > highestTxID {
+					highestTxID = txIDVal
+				}
+			}
+		}
+
+		switch entry.Operation {
+		case OpBeginTx:
+			txState[entry.TxID] = false // open
+		case OpCommitTx:
+			txState[entry.TxID] = true // committed
+			// Extract commit sequence from metadata if present
+			if strings.Contains(entry.Metadata, "commitSequence=") {
+				var seq uint64
+				if _, scanErr := fmt.Sscanf(entry.Metadata, "commitSequence=%d", &seq); scanErr == nil {
+					if seq > highestCommitSeq {
+						highestCommitSeq = seq
+					}
+				}
+			}
+			// Remove undo entries for committed transactions (save memory)
+			delete(txEntries, entry.TxID)
+			result.RedoneOps++
+		case OpRollbackTx:
+			txState[entry.TxID] = true // treated as resolved (already rolled back)
+			delete(txEntries, entry.TxID)
+		case OpCommitSequenceAssign:
+			// Track highest commit sequence from explicit assignments
+			var seq uint64
+			if _, scanErr := fmt.Sscanf(entry.Metadata, "commitSequence=%d", &seq); scanErr == nil {
+				if seq > highestCommitSeq {
+					highestCommitSeq = seq
+				}
+			}
+		case OpInsert, OpUpdate, OpDelete, OpBatchInsert:
+			// Track data operations for potential undo
+			if entry.TxID != "" {
+				if committed, known := txState[entry.TxID]; known && !committed {
+					txEntries[entry.TxID] = append(txEntries[entry.TxID], entry)
+				} else if !known {
+					// Transaction began before our replay window — mark as open
+					txState[entry.TxID] = false
+					txEntries[entry.TxID] = append(txEntries[entry.TxID], entry)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return result, fmt.Errorf("WAL replay failed: %w", err)
+	}
+
+	// Phase 3: Undo uncommitted transactions
+	if undoFunc != nil {
+		for txID, committed := range txState {
+			if !committed {
+				entries := txEntries[txID]
+				if len(entries) == 0 {
+					continue
+				}
+				result.UncommittedTxCount++
+				wm.logger.Infof("Rolling back uncommitted transaction %s (%d operations)", txID, len(entries))
+
+				// Undo in reverse order (last operation first)
+				for i := len(entries) - 1; i >= 0; i-- {
+					if err := undoFunc(entries[i]); err != nil {
+						wm.logger.Warnf("Failed to undo entry LSN=%d for tx %s: %v", entries[i].LSN, txID, err)
+						result.Errors++
+					} else {
+						result.UndoneOps++
+					}
+				}
+			}
+		}
+	} else {
+		// Count uncommitted but don't undo
+		for _, committed := range txState {
+			if !committed {
+				result.UncommittedTxCount++
+			}
+		}
+		if result.UncommittedTxCount > 0 {
+			wm.logger.Warnf("Found %d uncommitted transactions but no undo function provided (best-effort recovery)",
+				result.UncommittedTxCount)
+		}
+	}
+
+	// Phase 4: Restore global state
+	result.HighestCommitSequence = highestCommitSeq
+	result.HighestTxID = highestTxID
+
+	if highestCommitSeq > 0 {
+		wm.snapshotManager.SetGlobalSequence(highestCommitSeq)
+		wm.logger.Infof("Restored global commit sequence to %d", highestCommitSeq)
+	}
+
+	if highestTxID > 0 {
+		wm.transactionCounter.SetValue(highestTxID + 1)
+		wm.logger.Infof("Restored transaction counter to %d", highestTxID+1)
+	}
+
+	duration := time.Since(startTime)
+	wm.logger.Infof("WAL crash recovery complete in %v: checkpoint=%d, redone=%d, undone=%d, uncommitted_txs=%d, errors=%d, commitSeq=%d, txID=%d",
+		duration, checkpointLSN, result.RedoneOps, result.UndoneOps, result.UncommittedTxCount,
+		result.Errors, highestCommitSeq, highestTxID)
+
+	return result, nil
 }

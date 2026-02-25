@@ -154,6 +154,49 @@ func (s *BundleService) AddBundle(databaseService *database.DatabaseService, db 
 	return bundle, nil
 }
 
+// AddInternalBundle creates a hidden internal bundle (e.g., _mv_ prefix) that bypasses
+// the validateBundleName check. Used for materialized view data bundles.
+func (s *BundleService) AddInternalBundle(databaseService *database.DatabaseService, db *models.Database, bundleName string, fields []models.FieldDefinition) (*models.Bundle, error) {
+	// Check if the bundle already exists
+	if _, err := s.GetBundleByName(db, bundleName); err == nil {
+		return nil, fmt.Errorf("internal bundle '%s' already exists", bundleName)
+	}
+
+	bundle := s.factory.NewBundle(bundleName, "")
+	bundle.Database = db
+
+	// Always add DocumentID field
+	bundle.DocumentStructure.FieldDefinitions["DocumentID"] = models.FieldDefinition{
+		Name:       "DocumentID",
+		Type:       "string",
+		IsRequired: true,
+		IsUnique:   true,
+	}
+
+	// Add caller-supplied fields
+	for _, fd := range fields {
+		bundle.DocumentStructure.FieldDefinitions[fd.Name] = fd
+	}
+
+	db.Bundles[bundle.Name] = *bundle
+
+	if err := s.store.CreateBundleFile(db, bundle); err != nil {
+		return nil, fmt.Errorf("error creating internal bundle file: %w", err)
+	}
+
+	db.BundleFiles = append(db.BundleFiles, fmt.Sprintf("%s_%s.bnd", db.Name, bundle.Name))
+
+	if err := databaseService.Store.UpdateDatabaseDataFile(db); err != nil {
+		return nil, fmt.Errorf("error updating database file for internal bundle: %w", err)
+	}
+
+	createHashIndexInternal(s, bundle, "DocumentID")
+	s.bundleMetadata[bundleName] = bundle
+
+	s.logger.Infof("Created internal bundle '%s' in database '%s'", bundleName, db.Name)
+	return bundle, nil
+}
+
 func (s *BundleService) AddBundleByStruct(databaseService *database.DatabaseService, db *models.Database, bundle *models.Bundle) error {
 	// Set the database reference in the bundle
 	bundle.Database = db

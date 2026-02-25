@@ -125,23 +125,6 @@ func HandleBeginTransaction(session *Session, serviceManager ServiceManager, log
 		level = isolationLevel[0]
 	}
 
-	// Reject SERIALIZABLE (Phase 2)
-	effectiveLevel := level
-	if effectiveLevel == syndrQL.IsolationDefault {
-		// Check pending
-		session.mu.RLock()
-		pending := session.PendingIsolationLevel
-		session.mu.RUnlock()
-		if pending != syndrQL.IsolationDefault {
-			effectiveLevel = pending
-		}
-	}
-	if effectiveLevel == syndrQL.IsolationSerializable {
-		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
-			"SERIALIZABLE isolation level is not yet supported (planned for Phase 2)",
-			errors.LayerTransaction)
-	}
-
 	// Check WAL availability
 	if serviceManager.WALManager == nil {
 		return nil, errors.New(errors.ERR_SYSTEM_CONFIG,
@@ -253,6 +236,27 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 		}
 	}
 
+	// SSI: Record rw-antidependencies for all documents written by this SERIALIZABLE transaction,
+	// then check for dangerous structure (two consecutive rw-antidependencies).
+	if serviceManager.SIReadTracker != nil && session.GetEffectiveIsolationLevel() == syndrQL.IsolationSerializable && txIDUint64 > 0 {
+		// Record writes: for each written doc, check if another SERIALIZABLE tx holds a SIREAD lock
+		for docID, loc := range documentLocations {
+			docKey := loc.BundleName + ":" + docID
+			serviceManager.SIReadTracker.RecordWrite(txIDUint64, docKey)
+		}
+		if ssiErr := serviceManager.SIReadTracker.CheckCommit(txIDUint64); ssiErr != nil {
+			// SSI violation detected — abort transaction
+			session.AbortTransaction()
+			if serviceManager.LockManager != nil {
+				serviceManager.LockManager.ReleaseLocks(txID)
+			}
+			serviceManager.SIReadTracker.TransactionFinished(txIDUint64)
+			return nil, errors.New(errors.ERR_TRANSACTION_CONFLICT,
+				ssiErr.Error(),
+				errors.LayerTransaction).WithContext("tx_id", txID)
+		}
+	}
+
 	// PHASE 2: MVCC - Get commit sequence from snapshot manager (via WALManager)
 	var commitSequence uint64
 	if serviceManager.WALManager != nil {
@@ -325,6 +329,15 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 	// Mark transaction as committed in session
 	session.CommitTransaction()
 
+	// SSI: Mark transaction as committed in SSI tracker, then schedule cleanup
+	if serviceManager.SIReadTracker != nil && session.GetEffectiveIsolationLevel() == syndrQL.IsolationSerializable && txIDUint64 > 0 {
+		serviceManager.SIReadTracker.TransactionCommitted(txIDUint64)
+		// Deferred cleanup: keep committed state briefly for other transactions' commit checks
+		go func(tracker *SIReadTracker, id uint64) {
+			tracker.TransactionFinished(id)
+		}(serviceManager.SIReadTracker, txIDUint64)
+	}
+
 	// Flush ALL index updates after commit including B-tree disk flush (full durability)
 	if serviceManager.BundleService != nil {
 		serviceManager.BundleService.ForceFlushIndexUpdatesFull()
@@ -343,8 +356,10 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 	}, nil
 }
 
-// updateDocumentsCommitSequenceAsync updates documents with commit sequence in background
-// PHASE 2: MVCC - Async batch commit sequence assignment
+// updateDocumentsCommitSequenceAsync updates documents with commit sequence in background.
+// For each document written in the transaction, it stamps CommitSequence on the in-memory
+// page cache entry so MVCC visibility rules work without the legacy CommitSequence==0 fallback.
+// Failures are logged but not fatal — the WAL has the assignment recorded for crash recovery.
 func updateDocumentsCommitSequenceAsync(
 	serviceManager ServiceManager,
 	txID string,
@@ -352,14 +367,26 @@ func updateDocumentsCommitSequenceAsync(
 	documentLocations map[string]DocumentLocation,
 	logger *zap.SugaredLogger,
 ) {
-	// TODO: Implement document update logic
-	// For each document location:
-	// 1. Load the document from bundle file
-	// 2. Update CommitSequence field
-	// 3. Write back to bundle file (or update in-place if possible)
-	// This is a placeholder - full implementation requires document update infrastructure
-	logger.Debugf("PHASE 2: Async commit sequence update started: txID=%s, commitSeq=%d, documents=%d",
-		txID, commitSequence, len(documentLocations))
+	if serviceManager.BundleService == nil {
+		logger.Warnf("BundleService is nil, cannot update commit sequences for txID=%s", txID)
+		return
+	}
+
+	var errCount int
+	for docID, loc := range documentLocations {
+		err := serviceManager.BundleService.UpdateDocumentCommitSequence(
+			loc.BundleName, docID, commitSequence,
+		)
+		if err != nil {
+			errCount++
+			logger.Debugf("Failed to update commit sequence for doc %s in bundle %s: %v",
+				docID, loc.BundleName, err)
+			// Not fatal — WAL has the assignment logged for crash recovery
+		}
+	}
+
+	logger.Debugf("Async commit sequence update complete: txID=%s, commitSeq=%d, docs=%d, errors=%d",
+		txID, commitSequence, len(documentLocations), errCount)
 }
 
 // createUndoFunction creates a function that can undo WAL operations
@@ -559,6 +586,14 @@ func HandleRollback(session *Session, serviceManager ServiceManager, database *m
 
 	// Mark transaction as aborted in session
 	session.AbortTransaction()
+
+	// SSI: Clean up SIREAD locks and conflict state for this transaction
+	if serviceManager.SIReadTracker != nil {
+		var txIDUint64 uint64
+		if _, err := fmt.Sscanf(txID, "%016x", &txIDUint64); err == nil && txIDUint64 > 0 {
+			serviceManager.SIReadTracker.TransactionFinished(txIDUint64)
+		}
+	}
 
 	// Flush buffered writes to disk after rollback, then physically delete discarded documents
 	// Process: 1) Collect discarded docIDs, 2) Flush buffer, 3) Delete flushed discarded docs
@@ -760,13 +795,6 @@ func HandleSetTransactionIsolation(level syndrQL.IsolationLevel, session *Sessio
 			errors.LayerTransaction)
 	}
 
-	// Reject SERIALIZABLE (Phase 2)
-	if level == syndrQL.IsolationSerializable {
-		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
-			"SERIALIZABLE isolation level is not yet supported (planned for Phase 2)",
-			errors.LayerTransaction)
-	}
-
 	session.SetTransactionIsolation(level)
 
 	effectiveLevel := level
@@ -785,13 +813,6 @@ func HandleSetTransactionIsolation(level syndrQL.IsolationLevel, session *Sessio
 // HandleSetSessionIsolation handles SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL command.
 // Sets the session-level default isolation level that persists across transactions.
 func HandleSetSessionIsolation(level syndrQL.IsolationLevel, session *Session, logger *zap.SugaredLogger) (*CommandResponse, error) {
-	// Reject SERIALIZABLE (Phase 2)
-	if level == syndrQL.IsolationSerializable {
-		return nil, errors.New(errors.ERR_VALIDATION_FIELD,
-			"SERIALIZABLE isolation level is not yet supported (planned for Phase 2)",
-			errors.LayerTransaction)
-	}
-
 	session.SetDefaultIsolationLevel(level)
 
 	effectiveLevel := level

@@ -99,6 +99,55 @@ func (s *BundleService) RemoveDeadVersionsFromPage(bundleName string, pageID uin
 	return deadDocIDs, len(newSnapshot.Documents), nil
 }
 
+// UpdateDocumentCommitSequence stamps a committed document's CommitSequence in the page cache.
+// This is called asynchronously after COMMIT to update in-memory documents so that MVCC
+// visibility rules work correctly without falling back to the legacy CommitSequence==0 path.
+// The operation is idempotent: calling it twice with the same sequence is a no-op.
+func (s *BundleService) UpdateDocumentCommitSequence(bundleName, docID string, commitSeq uint64) error {
+	// Find which page contains this document
+	pageID, err := s.findDocumentPage(bundleName, docID)
+	if err != nil {
+		// Document not in page cache index — may have been evicted or compacted.
+		// Not fatal: the WAL has the assignment recorded for crash recovery.
+		return fmt.Errorf("document %s not found in page index for bundle %s: %w", docID, bundleName, err)
+	}
+
+	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
+	shardIdx := s.getPageShardIndex(pageKey)
+	shard := s.pageShards[shardIdx]
+
+	shard.mu.Lock()
+	page, exists := shard.pages[pageKey]
+	if !exists {
+		shard.mu.Unlock()
+		// Page was evicted from cache — next load from disk will read the WAL-committed data.
+		return nil
+	}
+
+	doc, docExists := page.Documents[docID]
+	if !docExists {
+		shard.mu.Unlock()
+		return nil
+	}
+
+	// Idempotency: skip if already stamped with this or higher sequence
+	if doc.CommitSequence >= commitSeq {
+		shard.mu.Unlock()
+		return nil
+	}
+
+	// Update the authoritative page
+	doc.CommitSequence = commitSeq
+	page.Documents[docID] = doc
+
+	// Invalidate reader view and COW snapshot so next read picks up the change
+	shard.readerView.Delete(pageKey)
+	shard.cowSnapshot.Load().Delete(pageKey)
+	shard.mu.Unlock()
+
+	return nil
+}
+
 // ScheduleIndexUpdateForVacuum is a public wrapper around scheduleIndexUpdate for the vacuum path.
 // Called by MVCCGCWorker to clean up index entries for reclaimed document versions.
 func (s *BundleService) ScheduleIndexUpdateForVacuum(bundleName, indexName, indexType, operation, documentID string, fieldValue interface{}, pageID uint32) {

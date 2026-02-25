@@ -223,34 +223,36 @@ func (wal *WriteAheadLog) DeserializeWALEntryBinary(data []byte) (*WALEntry, err
 		return nil, fmt.Errorf("data size mismatch: expected %d, got %d", expectedSize, len(data))
 	}
 
-	// Read variable-length fields
+	// Read variable-length fields using io.ReadFull to handle zero-length fields
+	// correctly. bytes.Reader.Read returns io.EOF for zero-length reads at EOF,
+	// but io.ReadFull returns (0, nil) which is the correct behavior for empty fields.
 	txIDBytes := make([]byte, txIDLen)
-	if _, err := buf.Read(txIDBytes); err != nil {
+	if _, err := io.ReadFull(buf, txIDBytes); err != nil {
 		return nil, fmt.Errorf("failed to read TxID: %w", err)
 	}
 
 	bundleNameBytes := make([]byte, bundleNameLen)
-	if _, err := buf.Read(bundleNameBytes); err != nil {
+	if _, err := io.ReadFull(buf, bundleNameBytes); err != nil {
 		return nil, fmt.Errorf("failed to read bundle name: %w", err)
 	}
 
 	docIDBytes := make([]byte, docIDLen)
-	if _, err := buf.Read(docIDBytes); err != nil {
+	if _, err := io.ReadFull(buf, docIDBytes); err != nil {
 		return nil, fmt.Errorf("failed to read document ID: %w", err)
 	}
 
 	beforeBytes := make([]byte, beforeLen)
-	if _, err := buf.Read(beforeBytes); err != nil {
+	if _, err := io.ReadFull(buf, beforeBytes); err != nil {
 		return nil, fmt.Errorf("failed to read before data: %w", err)
 	}
 
 	afterBytes := make([]byte, afterLen)
-	if _, err := buf.Read(afterBytes); err != nil {
+	if _, err := io.ReadFull(buf, afterBytes); err != nil {
 		return nil, fmt.Errorf("failed to read after data: %w", err)
 	}
 
 	metaBytes := make([]byte, metaLen)
-	if _, err := buf.Read(metaBytes); err != nil {
+	if _, err := io.ReadFull(buf, metaBytes); err != nil {
 		return nil, fmt.Errorf("failed to read metadata: %w", err)
 	}
 

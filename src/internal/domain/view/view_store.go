@@ -119,13 +119,16 @@ func (s *ViewFileStore) LoadView(databaseName, viewName string) (*View, error) {
 		if err := s.copyFile(filePath, backupPath); err != nil {
 			s.logger.Errorf("Failed to create backup during migration: %v", err)
 		}
-		// TODO: Perform migration logic
-		// If migration fails, recreate from catalog
 	}
 
-	// TODO: Read view metadata from file
-	// For now, return placeholder
-	return nil, fmt.Errorf("view loading not fully implemented")
+	// Read view metadata as JSON (matches saveToBinaryFile encoding)
+	var view View
+	if err := json.NewDecoder(file).Decode(&view); err != nil {
+		s.logger.Warnf("View file '%s' corrupted: %v", filePath, err)
+		return nil, fmt.Errorf("failed to decode view file: %w", err)
+	}
+
+	return &view, nil
 }
 
 // DeleteView removes a view from both binary file and catalog

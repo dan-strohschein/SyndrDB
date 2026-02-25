@@ -139,7 +139,7 @@ func (p *CreateViewParser) validateViewName(name string) error {
 
 	// Check length (max 128 chars)
 	if len(name) > 128 {
-		return fmt.Errorf("view name too long: %d characters (max 128). View name: '%s'", len(name), name)
+		return fmt.Errorf("view name too long: %d characters (max 128 characters). View name: '%s'", len(name), name)
 	}
 
 	// Check for reserved _mv_ prefix (case-insensitive)
@@ -178,10 +178,15 @@ func (p *CreateViewParser) extractDefinition() (string, error) {
 	}
 
 	// Collect all tokens until semicolon or EOF
+	// Re-quote string tokens to preserve original SQL syntax
 	var parts []string
 	for !p.isAtEnd() && p.peek().Type != TOKEN_SEMICOLON {
 		token := p.peek()
-		parts = append(parts, token.Value)
+		if token.Type == TOKEN_STRING {
+			parts = append(parts, `"`+token.Value+`"`)
+		} else {
+			parts = append(parts, token.Value)
+		}
 		p.advance()
 	}
 

@@ -1468,6 +1468,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 	writer.WriteString(fmt.Sprintf("%s\n", data.Welcome))
 	writer.Flush()
 
+	// Idle check timer: use half the configured timeout (clamped to [5s, 60s])
+	// to detect idle connections faster than the hardcoded 300s, and avoid
+	// timer leak from time.After allocating a new timer each iteration.
+	idleCheckInterval := s.ConnectionIdleTimeout / 2
+	if idleCheckInterval > 60*time.Second {
+		idleCheckInterval = 60 * time.Second
+	}
+	if idleCheckInterval < 5*time.Second {
+		idleCheckInterval = 5 * time.Second
+	}
+	idleTimer := time.NewTimer(idleCheckInterval)
+	defer idleTimer.Stop()
+
 	// Main processing loop
 	for {
 		select {
@@ -1476,6 +1489,15 @@ func (s *Server) handleConnection(conn net.Conn) {
 				// Channel closed
 				goto cleanup
 			}
+
+			// Reset idle timer on data receive to avoid unnecessary wakeups
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleCheckInterval)
 
 			// Batch-drain: collect all immediately-available commands for pipeline processing.
 			// If the client sent multiple \x04-terminated commands in one TCP write, the reader
@@ -1684,15 +1706,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 			connLogger.Debugw("Connection error", "error", err)
 			goto cleanup
 
-		case <-time.After(300 * time.Second):
+		case <-idleTimer.C:
 			// Active monitor counts as activity — don't idle-disconnect
 			if connection.monitorCancel != nil {
 				connection.LastActive = time.Now()
 			}
-			// Check for idle timeout (5-minute checks, but enforce configured timeout)
+			// Check for idle timeout using the configured duration
 			idleTime := time.Since(connection.LastActive)
 			if idleTime >= s.ConnectionIdleTimeout {
-				// TODO: I could add configurable warning threshold before timeout (e.g., send warning at 80% of timeout)
 				connLogger.Infow("Connection closed due to inactivity",
 					"idle_duration", idleTime.String(),
 					"timeout", s.ConnectionIdleTimeout.String())
@@ -1701,10 +1722,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 				writer.Flush()
 				goto cleanup // Properly close doneCh to terminate reader goroutine
 			}
-			// Still within timeout - log activity check
-			connLogger.Debugw("Connection idle check",
-				"idle_duration", idleTime.String(),
-				"timeout", s.ConnectionIdleTimeout.String())
+			// Still within timeout - reset timer for next check
+			idleTimer.Reset(idleCheckInterval)
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/domain/view"
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/settings"
@@ -13,12 +14,10 @@ import (
 )
 
 // HandleCreateView handles CREATE VIEW command
-// Syntax: CREATE VIEW "view_name" AS SELECT ...;
-// Permission: Admin or database owner only
 func HandleCreateView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
 	logger.Infof("Handling CREATE VIEW command in database '%s'", database.Name)
 
-	// Permission check: CREATE VIEW requires Admin permission
+	// Permission check
 	authEnabled := settings.GetSettings().AuthEnabled
 	if err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled); err != nil {
 		return nil, err
@@ -28,57 +27,58 @@ func HandleCreateView(command string, logger *zap.SugaredLogger, serviceManager 
 	parser, err := syndrQL.NewCreateViewParser(command)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to create CREATE VIEW parser", errors.LayerParser)
+			fmt.Sprintf("failed to create CREATE VIEW parser: %v", err), errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to parse CREATE VIEW command", errors.LayerParser)
+			fmt.Sprintf("failed to parse CREATE VIEW command: %v", err), errors.LayerParser)
 	}
 
-	logger.Infof("Creating regular view '%s' in database '%s'", stmt.ViewName, database.Name)
+	// Create view using ViewService
+	viewService := serviceManager.ViewService
+	if viewService == nil {
+		return nil, fmt.Errorf("view service not available")
+	}
 
-	// TODO: I should create view using ViewService
-	// viewService := serviceManager.ViewService
-	// view, err := viewService.CreateView(stmt.ViewName, database.Name, stmt.SelectQuery, session.Username)
-	// if err != nil {
-	//     return nil, fmt.Errorf("Failed to create view: %w", err)
-	// }
-
-	// For now, return a placeholder response
-	result := fmt.Sprintf("View '%s' created successfully in database '%s'", stmt.ViewName, database.Name)
-	logger.Infof("TODO: Actually create view '%s' - placeholder response returned", stmt.ViewName)
+	username := ""
+	if session != nil {
+		username = session.Username
+	}
+	createdView, err := viewService.CreateView(stmt.ViewName, database.Name, stmt.Definition, username)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create view: %w", err)
+	}
 
 	return &CommandResponse{
 		ResultCount: 1,
 		Result: map[string]interface{}{
-			"message":   result,
-			"view_name": stmt.ViewName,
+			"message":   fmt.Sprintf("View '%s' created successfully in database '%s'", createdView.ViewName, database.Name),
+			"view_name": createdView.ViewName,
 			"database":  database.Name,
-			"type":      "REGULAR",
+			"type":      createdView.Type.String(),
 		},
 	}, nil
 }
 
 // HandleCreateMaterializedView handles CREATE MATERIALIZED VIEW command
-// Syntax: CREATE MATERIALIZED VIEW "view_name" AS SELECT ...;
-// Permission: Admin or database owner only
 func HandleCreateMaterializedView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
 	logger.Infof("Handling CREATE MATERIALIZED VIEW command in database '%s'", database.Name)
 
-	// TODO: I should add permission check when authentication is fully wired
-	logger.Debugf("TODO: Check if user has admin or owner permissions for database '%s'", database.Name)
+	authEnabled := settings.GetSettings().AuthEnabled
+	if err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled); err != nil {
+		return nil, err
+	}
 
-	// Parse CREATE MATERIALIZED VIEW statement
 	parser, err := syndrQL.NewCreateViewParser(command)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to create CREATE MATERIALIZED VIEW parser", errors.LayerParser)
+			fmt.Sprintf("failed to create CREATE MATERIALIZED VIEW parser: %v", err), errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to parse CREATE MATERIALIZED VIEW command", errors.LayerParser)
+			fmt.Sprintf("failed to parse CREATE MATERIALIZED VIEW command: %v", err), errors.LayerParser)
 	}
 
 	if !stmt.IsMaterialized {
@@ -86,217 +86,238 @@ func HandleCreateMaterializedView(command string, logger *zap.SugaredLogger, ser
 			"internal error: parsed as regular view, expected materialized view", errors.LayerParser)
 	}
 
-	logger.Infof("Creating materialized view '%s' in database '%s'", stmt.ViewName, database.Name)
+	viewService := serviceManager.ViewService
+	if viewService == nil {
+		return nil, fmt.Errorf("view service not available")
+	}
 
-	// TODO: I should create materialized view using ViewService
-	// viewService := serviceManager.ViewService
-	// view, err := viewService.CreateMaterializedView(stmt.ViewName, database.Name, stmt.SelectQuery, session.Username)
-	// if err != nil {
-	//     return nil, fmt.Errorf("Failed to create materialized view: %w", err)
-	// }
+	username := ""
+	if session != nil {
+		username = session.Username
+	}
+	createdView, err := viewService.CreateMaterializedView(stmt.ViewName, database.Name, stmt.Definition, username)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create materialized view: %w", err)
+	}
 
-	// For now, return a placeholder response
-	result := fmt.Sprintf("Materialized view '%s' created successfully in database '%s'", stmt.ViewName, database.Name)
-	logger.Infof("TODO: Actually create materialized view '%s' with data population - placeholder response returned", stmt.ViewName)
+	refreshStatus := "created"
+	if createdView.LastRefreshed != nil {
+		refreshStatus = "populated"
+	}
 
 	return &CommandResponse{
 		ResultCount: 1,
 		Result: map[string]interface{}{
-			"message":        result,
-			"view_name":      stmt.ViewName,
+			"message":        fmt.Sprintf("Materialized view '%s' created successfully in database '%s'", createdView.ViewName, database.Name),
+			"view_name":      createdView.ViewName,
 			"database":       database.Name,
 			"type":           "MATERIALIZED",
-			"data_bundle":    fmt.Sprintf("_mv_%s", stmt.ViewName),
-			"refresh_status": "populated",
+			"data_bundle":    createdView.DataBundleName,
+			"refresh_status": refreshStatus,
 		},
 	}, nil
 }
 
 // HandleDropView handles DROP VIEW and DROP MATERIALIZED VIEW commands
-// Syntax: DROP [MATERIALIZED] VIEW "view_name";
-// Permission: Admin or database owner only
 func HandleDropView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
 	logger.Infof("Handling DROP VIEW command in database '%s'", database.Name)
 
-	// TODO: I should add permission check when authentication is fully wired
-	logger.Debugf("TODO: Check if user has admin or owner permissions for database '%s'", database.Name)
+	authEnabled := settings.GetSettings().AuthEnabled
+	if err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled); err != nil {
+		return nil, err
+	}
 
-	// Parse DROP VIEW statement
 	parser, err := syndrQL.NewDropViewParser(command)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to create DROP VIEW parser", errors.LayerParser)
+			fmt.Sprintf("failed to create DROP VIEW parser: %v", err), errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to parse DROP VIEW command", errors.LayerParser)
+			fmt.Sprintf("failed to parse DROP VIEW command: %v", err), errors.LayerParser)
 	}
 
-	viewType := "view"
+	viewService := serviceManager.ViewService
+	if viewService == nil {
+		return nil, fmt.Errorf("view service not available")
+	}
+
+	if err := viewService.DropView(stmt.ViewName, database.Name, stmt.IsMaterialized); err != nil {
+		return nil, fmt.Errorf("failed to drop view: %w", err)
+	}
+
+	// Invalidate plan cache for this view
+	if serviceManager.UnifiedPlanner != nil {
+		serviceManager.UnifiedPlanner.InvalidateViewCache(database.Name, stmt.ViewName)
+	}
+
+	viewType := "View"
 	if stmt.IsMaterialized {
-		viewType = "materialized view"
+		viewType = "Materialized view"
 	}
-
-	logger.Infof("Dropping %s '%s' from database '%s'", viewType, stmt.ViewName, database.Name)
-
-	// TODO: I should drop view using ViewService
-	// viewService := serviceManager.ViewService
-	// err = viewService.DropView(stmt.ViewName, database.Name, stmt.IsMaterialized)
-	// if err != nil {
-	//     return nil, fmt.Errorf("Failed to drop view: %w", err)
-	// }
-
-	// For now, return a placeholder response
-	result := fmt.Sprintf("%s '%s' dropped successfully from database '%s'",
-		strings.Title(viewType), stmt.ViewName, database.Name)
-	logger.Infof("TODO: Actually drop %s '%s' - placeholder response returned", viewType, stmt.ViewName)
 
 	return &CommandResponse{
 		ResultCount: 1,
 		Result: map[string]interface{}{
-			"message": result,
+			"message": fmt.Sprintf("%s '%s' dropped successfully from database '%s'", viewType, stmt.ViewName, database.Name),
 		},
 	}, nil
 }
 
 // HandleRefreshMaterializedView handles REFRESH MATERIALIZED VIEW command
-// Syntax: REFRESH MATERIALIZED VIEW "view_name";
-// Permission: Admin or database owner only
 func HandleRefreshMaterializedView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session) (*CommandResponse, error) {
 	logger.Infof("Handling REFRESH MATERIALIZED VIEW command in database '%s'", database.Name)
 
-	// TODO: I should add permission check when authentication is fully wired
-	logger.Debugf("TODO: Check if user has admin or owner permissions for database '%s'", database.Name)
+	authEnabled := settings.GetSettings().AuthEnabled
+	if err := RequirePermission(session, serviceManager.PermissionService, "Admin", authEnabled); err != nil {
+		return nil, err
+	}
 
-	// Parse REFRESH MATERIALIZED VIEW statement
 	parser, err := syndrQL.NewRefreshViewParser(command)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to create REFRESH MATERIALIZED VIEW parser", errors.LayerParser)
+			fmt.Sprintf("failed to create REFRESH MATERIALIZED VIEW parser: %v", err), errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to parse REFRESH MATERIALIZED VIEW command", errors.LayerParser)
+			fmt.Sprintf("failed to parse REFRESH MATERIALIZED VIEW command: %v", err), errors.LayerParser)
 	}
 
-	logger.Infof("Refreshing materialized view '%s' in database '%s'", stmt.ViewName, database.Name)
+	viewService := serviceManager.ViewService
+	if viewService == nil {
+		return nil, fmt.Errorf("view service not available")
+	}
 
-	// TODO: I should refresh materialized view using ViewService
-	// viewService := serviceManager.ViewService
-	// err = viewService.RefreshMaterializedView(stmt.ViewName, database.Name)
-	// if err != nil {
-	//     return nil, fmt.Errorf("Failed to refresh materialized view: %w", err)
-	// }
+	rowCount, err := viewService.RefreshMaterializedView(stmt.ViewName, database.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to refresh materialized view: %w", err)
+	}
 
-	// For now, return a placeholder response
-	result := fmt.Sprintf("Materialized view '%s' refreshed successfully", stmt.ViewName)
-	logger.Infof("TODO: Actually refresh materialized view '%s' - placeholder response returned", stmt.ViewName)
+	// Invalidate plan cache for the materialized view's data bundle
+	if serviceManager.UnifiedPlanner != nil {
+		serviceManager.UnifiedPlanner.InvalidateViewCache(database.Name, stmt.ViewName)
+	}
 
 	return &CommandResponse{
 		ResultCount: 1,
 		Result: map[string]interface{}{
-			"message":        result,
+			"message":        fmt.Sprintf("Materialized view '%s' refreshed successfully", stmt.ViewName),
 			"view_name":      stmt.ViewName,
 			"refresh_status": "completed",
-			"rows_updated":   0, // TODO: Return actual row count after refresh
+			"rows_updated":   rowCount,
 		},
 	}, nil
 }
 
 // HandleShowViews handles SHOW VIEWS command
-// Syntax: SHOW VIEWS [IN DATABASE "database_name"];
-// Returns list of all views in the specified database
 func HandleShowViews(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Handling SHOW VIEWS command")
 
-	// Parse SHOW VIEWS statement
 	parser, err := syndrQL.NewShowViewsParser(command)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to create SHOW VIEWS parser", errors.LayerParser)
+			fmt.Sprintf("failed to create SHOW VIEWS parser: %v", err), errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to parse SHOW VIEWS command", errors.LayerParser)
+			fmt.Sprintf("failed to parse SHOW VIEWS command: %v", err), errors.LayerParser)
 	}
 
-	// Determine which database to query
 	targetDatabase := database.Name
 	if stmt.DatabaseName != "" {
 		targetDatabase = stmt.DatabaseName
 	}
 
-	logger.Infof("Showing views for database '%s'", targetDatabase)
+	viewService := serviceManager.ViewService
+	if viewService == nil {
+		return &CommandResponse{
+			ResultCount:     0,
+			Result:          []map[string]interface{}{},
+			ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+		}, nil
+	}
 
-	// TODO: I should list views using ViewService
-	// viewService := serviceManager.ViewService
-	// views, err := viewService.ListViews(targetDatabase)
-	// if err != nil {
-	//     return nil, fmt.Errorf("Failed to list views: %w", err)
-	// }
+	views, err := viewService.ListViews(targetDatabase)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list views: %w", err)
+	}
 
-	// For now, return a placeholder response with empty array
-	logger.Infof("TODO: Actually list views from database '%s' - placeholder response returned", targetDatabase)
+	result := make([]map[string]interface{}, 0, len(views))
+	for _, v := range views {
+		entry := map[string]interface{}{
+			"view_name":  v.ViewName,
+			"type":       v.Type.String(),
+			"definition": v.Definition,
+			"created_at": v.CreatedAt.Format(time.RFC3339),
+			"created_by": v.CreatedBy,
+		}
+		if v.Type == view.ViewTypeMaterialized && v.LastRefreshed != nil {
+			entry["last_refreshed"] = v.LastRefreshed.Format(time.RFC3339)
+		}
+		result = append(result, entry)
+	}
 
 	return &CommandResponse{
-		ResultCount:     0,
-		Result:          []map[string]interface{}{},
+		ResultCount:     len(result),
+		Result:          result,
 		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
 	}, nil
 }
 
 // HandleDescribeView handles DESCRIBE VIEW command
-// Syntax: DESCRIBE VIEW "view_name";
-// Returns detailed information about a specific view
 func HandleDescribeView(command string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, startTime time.Time) (*CommandResponse, error) {
 	logger.Infof("Handling DESCRIBE VIEW command in database '%s'", database.Name)
 
-	// Parse DESCRIBE VIEW statement
 	parser, err := syndrQL.NewDescribeViewParser(command)
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to create DESCRIBE VIEW parser", errors.LayerParser)
+			fmt.Sprintf("failed to create DESCRIBE VIEW parser: %v", err), errors.LayerParser)
 	}
 	stmt, err := parser.Parse()
 	if err != nil {
 		return nil, errors.WrapWithMessage(err, errors.ERR_VALIDATION_SYNTAX,
-			"failed to parse DESCRIBE VIEW command", errors.LayerParser)
+			fmt.Sprintf("failed to parse DESCRIBE VIEW command: %v", err), errors.LayerParser)
 	}
 
-	logger.Infof("Describing view '%s' in database '%s'", stmt.ViewName, database.Name)
+	viewService := serviceManager.ViewService
+	if viewService == nil {
+		return nil, fmt.Errorf("view service not available")
+	}
 
-	// TODO: I should get view details using ViewService
-	// viewService := serviceManager.ViewService
-	// view, err := viewService.GetView(stmt.ViewName, database.Name)
-	// if err != nil {
-	//     return nil, fmt.Errorf("Failed to get view: %w", err)
-	// }
+	v, err := viewService.GetView(database.Name, stmt.ViewName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe view: %w", err)
+	}
 
-	// For now, return a placeholder response
-	logger.Infof("TODO: Actually retrieve view '%s' details - placeholder response returned", stmt.ViewName)
+	result := map[string]interface{}{
+		"ViewName":          v.ViewName,
+		"DatabaseName":      v.DatabaseName,
+		"Type":              v.Type.String(),
+		"Definition":        v.Definition,
+		"CreatedAt":         v.CreatedAt.Format(time.RFC3339),
+		"CreatedBy":         v.CreatedBy,
+		"ColumnCount":       len(v.Columns),
+		"ReferencedBundles": v.ReferencedBundles,
+	}
+
+	if v.Type == view.ViewTypeMaterialized {
+		result["DataBundleName"] = v.DataBundleName
+		if v.LastRefreshed != nil {
+			result["LastRefreshed"] = v.LastRefreshed.Format(time.RFC3339)
+		}
+	}
 
 	return &CommandResponse{
 		ResultCount:     1,
 		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
-		Result: map[string]interface{}{
-			"view_name":          stmt.ViewName,
-			"database":           database.Name,
-			"type":               "REGULAR",
-			"definition":         "SELECT * FROM placeholder",
-			"created_at":         "2024-01-01T00:00:00Z",
-			"created_by":         "admin",
-			"column_count":       0,
-			"referenced_bundles": []string{},
-			"is_updatable":       false,
-		},
+		Result:          result,
 	}, nil
 }
 
 // isViewCommand checks if a command is a view-related command
-// This helper is used by CommandDirector to route view commands
 func isViewCommand(commandParts []string) bool {
 	if len(commandParts) < 2 {
 		return false
@@ -304,7 +325,6 @@ func isViewCommand(commandParts []string) bool {
 
 	switch strings.ToLower(commandParts[0]) {
 	case "create":
-		// CREATE VIEW or CREATE MATERIALIZED VIEW
 		if strings.ToLower(commandParts[1]) == "view" {
 			return true
 		}
@@ -312,7 +332,6 @@ func isViewCommand(commandParts []string) bool {
 			return true
 		}
 	case "drop":
-		// DROP VIEW or DROP MATERIALIZED VIEW
 		if strings.ToLower(commandParts[1]) == "view" {
 			return true
 		}
@@ -320,17 +339,14 @@ func isViewCommand(commandParts []string) bool {
 			return true
 		}
 	case "refresh":
-		// REFRESH MATERIALIZED VIEW
 		if strings.ToLower(commandParts[1]) == "materialized" && len(commandParts) > 2 && strings.ToLower(commandParts[2]) == "view" {
 			return true
 		}
 	case "show":
-		// SHOW VIEWS
 		if strings.ToLower(commandParts[1]) == "views" {
 			return true
 		}
 	case "describe":
-		// DESCRIBE VIEW
 		if strings.ToLower(commandParts[1]) == "view" {
 			return true
 		}
@@ -340,7 +356,6 @@ func isViewCommand(commandParts []string) bool {
 }
 
 // RouteViewCommand routes view commands to appropriate handlers
-// This is called by CommandDirector when a view command is detected
 func RouteViewCommand(command string, commandParts []string, logger *zap.SugaredLogger, serviceManager ServiceManager, database *models.Database, session *Session, startTime time.Time) (interface{}, error) {
 	if len(commandParts) < 2 {
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
@@ -357,7 +372,6 @@ func RouteViewCommand(command string, commandParts []string, logger *zap.Sugared
 			return HandleCreateMaterializedView(command, logger, serviceManager, database, session)
 		}
 	case "drop":
-		// Both DROP VIEW and DROP MATERIALIZED VIEW use the same handler
 		return HandleDropView(command, logger, serviceManager, database, session)
 	case "refresh":
 		if strings.ToLower(commandParts[1]) == "materialized" && len(commandParts) > 2 && strings.ToLower(commandParts[2]) == "view" {

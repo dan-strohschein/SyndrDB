@@ -9,6 +9,7 @@ import (
 	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/domain/migration"
+	"syndrdb/src/internal/domain/view"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/internal/query/planner"
@@ -65,6 +66,7 @@ type ServiceManager struct {
 	UserService            *UserService              // RBAC: Manages user creation and authentication
 	PermissionService      *PermissionService        // RBAC: Manages permissions and roles
 	MigrationService       MigrationServiceInterface // Migration: Database versioning and schema migration
+	ViewService            *view.ViewService         // View management: regular and materialized views
 
 	// Transaction management
 	LockManager *storage.LockManager // Document-level locking for multi-statement transactions
@@ -78,6 +80,9 @@ type ServiceManager struct {
 
 	// PHASE 3: MVCC - Conflict detection for write-write conflicts
 	ConflictTracker *ConflictTracker
+
+	// SSI: Serializable Snapshot Isolation tracker for rw-antidependency detection
+	SIReadTracker *SIReadTracker
 
 	// Observability: metrics reporting callback for index and plan cache metrics
 	// Accepts metric name and increment value; routes to GlobalServerMetrics atomic counters
@@ -134,6 +139,26 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			if logger != nil {
 				logger.Infof("WAL Manager registered in global service registry")
 			}
+
+			// Perform automatic crash recovery before accepting connections.
+			// This replays the WAL from the last checkpoint, undoes uncommitted
+			// transactions, and restores the global commit sequence + transaction counter.
+			undoFunc := createUndoFunction(ServiceManager{
+				BundleService: bundleService,
+			}, nil, logger)
+			recoveryResult, recoveryErr := walManager.RecoverOnStartup(undoFunc)
+			if recoveryErr != nil {
+				logger.Errorf("WAL crash recovery failed: %v", recoveryErr)
+				// Continue startup — the WAL is still usable, but data may be inconsistent
+			} else if recoveryResult != nil {
+				if recoveryResult.UncommittedTxCount > 0 || recoveryResult.RedoneOps > 0 {
+					logger.Infof("WAL recovery: redone=%d, undone=%d, uncommitted_txs=%d, errors=%d",
+						recoveryResult.RedoneOps, recoveryResult.UndoneOps,
+						recoveryResult.UncommittedTxCount, recoveryResult.Errors)
+				} else {
+					logger.Info("WAL recovery: clean shutdown detected, no recovery needed")
+				}
+			}
 		}
 
 		// Initialize RBAC services
@@ -146,6 +171,14 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 
 		// STEP 2: Initialize unified query planner with plan caching
 		unifiedPlanner := planner.NewUnifiedQueryPlanner(logger, bundleService)
+
+		// VIEW SUPPORT: Create ViewService sharing the planner's ViewRegistry
+		viewStore := view.NewViewFileStore(logger)
+		viewService := view.NewViewServiceWithRegistry(logger, unifiedPlanner.GetViewRegistry(), viewStore)
+
+		// Wire ViewBundleAdapter so materialized views can create/populate hidden bundles
+		viewBundleAdapter := NewViewBundleAdapter(bundleService, dbService, unifiedPlanner, logger)
+		viewService.SetBundleOps(viewBundleAdapter)
 
 		// COST INTELLIGENCE: Initialize column statistics store and wire into planner + bundle service
 		statsStore := planner.NewStatsStore(logger)
@@ -162,6 +195,9 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 
 		// PHASE 3: MVCC - Initialize conflict tracker for write-write conflict detection
 		conflictTracker := NewConflictTracker()
+
+		// SSI: Initialize SIREAD tracker for SERIALIZABLE isolation
+		sireadTracker := NewSIReadTracker()
 
 		// Initialize Migration service with adapters
 		migrationConfig := migration.LoadConfigFromSettings(settings.GetSettings())
@@ -281,8 +317,10 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			UserService:            userService,
 			PermissionService:      permissionService,
 			MigrationService:       migrationService,
+			ViewService:            viewService,
 			UnifiedPlanner:         unifiedPlanner,
 			ConflictTracker:        conflictTracker,
+			SIReadTracker:          sireadTracker,
 			MetricsReporter:        metricsReporter,
 			logger:                 logger,
 		}

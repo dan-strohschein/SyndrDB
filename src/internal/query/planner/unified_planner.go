@@ -42,6 +42,7 @@ import (
 	"syndrdb/src/internal/domain/view"
 	"syndrdb/src/internal/query/planner/subquery"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -254,35 +255,25 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 	}
 
 	// VIEW SUPPORT: Check if FromBundle is a view and rewrite query if needed
-	// This implements PostgreSQL-style query rewriting for regular views
 	if uqp.viewRegistry.IsView(database.Name, query.FromBundle) {
-		uqp.logger.Debugf("Detected view reference: %s in database %s", query.FromBundle, database.Name)
-
-		// TODO: I should extract username from query context when authentication is wired
-		// For now, use empty username (will be populated later by ViewService)
-		username := "" // Placeholder - will be populated from query context
-
-		// Rewrite query to expand view definition
-		// Note: The query is already parsed, so we need to serialize it back to SQL
-		// TODO: I should add a query serializer to convert UnifiedSelectQuery back to SQL
-		// For now, this is a placeholder showing the integration point
-		originalQuerySQL := "" // TODO: Serialize query to SQL string
-
-		rewrittenQuerySQL, err := uqp.viewQueryRewriter.RewriteQuery(originalQuerySQL, username, database.Name)
-		if err != nil {
-			return nil, fmt.Errorf("failed to rewrite view query: %w", err)
+		viewObj := uqp.viewRegistry.GetView(database.Name, query.FromBundle)
+		if viewObj == nil {
+			return nil, fmt.Errorf("view '%s' registered but not found in database '%s'", query.FromBundle, database.Name)
 		}
 
-		// Parse rewritten query back to UnifiedSelectQuery
-		// TODO: I should parse the rewritten SQL back to UnifiedSelectQuery
-		// For now, this is a placeholder showing the integration point
-		_ = rewrittenQuerySQL // Avoid unused variable error
-
-		uqp.logger.Debugf("View query rewritten successfully for view: %s", query.FromBundle)
-
-		// TODO: I should continue planning with rewritten query instead of original
-		// Once query serialization and re-parsing are implemented, replace 'query' with
-		// the rewritten query object throughout the rest of this function
+		if viewObj.Type == view.ViewTypeMaterialized {
+			// Materialized view: transparently redirect to the hidden _mv_ bundle
+			uqp.logger.Debugf("Redirecting materialized view '%s' to bundle '%s'", query.FromBundle, viewObj.DataBundleName)
+			query.FromBundle = viewObj.DataBundleName
+		} else {
+			// Regular view: AST-level rewrite
+			rewrittenQuery, err := uqp.rewriteViewQuery(query, viewObj, database)
+			if err != nil {
+				return nil, fmt.Errorf("failed to rewrite view query for '%s': %w", viewObj.ViewName, err)
+			}
+			query = rewrittenQuery
+			uqp.logger.Debugf("View '%s' rewritten to query against bundle '%s'", viewObj.ViewName, query.FromBundle)
+		}
 	}
 
 	// Step 1: Route to appropriate planner and get base execution tree
@@ -496,4 +487,130 @@ func (uqp *UnifiedQueryPlanner) PlanCacheStats() CacheStatsSnapshot {
 		return uqp.planCache.Stats()
 	}
 	return CacheStatsSnapshot{}
+}
+
+// rewriteViewQuery performs AST-level rewriting of a query against a regular view.
+// It parses the view definition, replaces the FromBundle with the actual bundle,
+// and merges WHERE clauses.
+func (uqp *UnifiedQueryPlanner) rewriteViewQuery(
+	outerQuery *queryparser.UnifiedSelectQuery,
+	viewObj *view.View,
+	database *models.Database,
+) (*queryparser.UnifiedSelectQuery, error) {
+
+	// Parse the view's definition SQL using the new SyndrQL parser (produces syndrQL.Expression
+	// for WhereExpression, unlike the legacy ParseUnifiedSelectQuery which produces WhereGroup)
+	tokenizer := syndrQL.NewTokenizer(viewObj.Definition)
+	tokens, tokenErr := tokenizer.Tokenize()
+	if tokenErr != nil {
+		return nil, fmt.Errorf("failed to tokenize view definition: %w", tokenErr)
+	}
+	parser := syndrQL.NewSelectParser(tokens, uqp.logger)
+	stmt, parseErr := parser.Parse(uqp.logger, viewObj.Definition)
+	if parseErr != nil {
+		return nil, fmt.Errorf("failed to parse view definition: %w", parseErr)
+	}
+	adapter := syndrQL.NewSelectStatementAdapter(uqp.logger)
+	viewQuery, err := adapter.ToUnifiedSelectQuery(stmt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to adapt view definition: %w", err)
+	}
+
+	// Reject nested views (view-of-view)
+	if uqp.viewRegistry.IsView(database.Name, viewQuery.FromBundle) {
+		return nil, fmt.Errorf("nested views are not supported: view '%s' references another view '%s'",
+			viewObj.ViewName, viewQuery.FromBundle)
+	}
+
+	// Build the rewritten query by starting from the view query as base
+	rewritten := &queryparser.UnifiedSelectQuery{
+		QueryType:   outerQuery.QueryType,
+		FromBundle:  viewQuery.FromBundle,
+		JoinClauses: viewQuery.JoinClauses,
+		ForUpdate:   outerQuery.ForUpdate,
+	}
+
+	// SELECT fields: if outer selects *, use view's fields; otherwise use outer's fields
+	if len(outerQuery.SelectFields) == 0 || (len(outerQuery.SelectFields) == 1 && outerQuery.SelectFields[0] == "*") {
+		rewritten.SelectFields = viewQuery.SelectFields
+	} else {
+		rewritten.SelectFields = outerQuery.SelectFields
+	}
+
+	// Aggregate fields: prefer outer query's aggregates if present
+	if len(outerQuery.AggregateFields) > 0 {
+		rewritten.AggregateFields = outerQuery.AggregateFields
+		rewritten.IsAggregateOnly = outerQuery.IsAggregateOnly
+		rewritten.IsCountOnly = outerQuery.IsCountOnly
+	} else {
+		rewritten.AggregateFields = viewQuery.AggregateFields
+		rewritten.IsAggregateOnly = viewQuery.IsAggregateOnly
+		rewritten.IsCountOnly = viewQuery.IsCountOnly
+	}
+
+	rewritten.IsDistinct = outerQuery.IsDistinct || viewQuery.IsDistinct
+
+	// Merge WHERE clauses: (view.WHERE) AND (outer.WHERE)
+	rewritten.WhereExpression = mergeWhereExpressions(viewQuery.WhereExpression, outerQuery.WhereExpression)
+
+	// Carry forward outer query's ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING
+	if outerQuery.OrderBy != nil {
+		rewritten.OrderBy = outerQuery.OrderBy
+	} else {
+		rewritten.OrderBy = viewQuery.OrderBy
+	}
+
+	if outerQuery.Limit > 0 {
+		rewritten.Limit = outerQuery.Limit
+	}
+	if outerQuery.Offset > 0 {
+		rewritten.Offset = outerQuery.Offset
+	}
+	if outerQuery.TopCount > 0 {
+		rewritten.TopCount = outerQuery.TopCount
+	}
+
+	if outerQuery.GroupBy != nil {
+		rewritten.GroupBy = outerQuery.GroupBy
+	} else {
+		rewritten.GroupBy = viewQuery.GroupBy
+	}
+
+	if outerQuery.HavingExpression != nil {
+		rewritten.HavingExpression = outerQuery.HavingExpression
+	} else {
+		rewritten.HavingExpression = viewQuery.HavingExpression
+	}
+
+	if outerQuery.RelationshipName != "" {
+		rewritten.RelationshipName = outerQuery.RelationshipName
+	}
+
+	return rewritten, nil
+}
+
+// mergeWhereExpressions combines two WHERE clause expressions using AND.
+// If either is nil, returns the other. If both are nil, returns nil.
+func mergeWhereExpressions(viewWhere, outerWhere interface{}) interface{} {
+	if viewWhere == nil {
+		return outerWhere
+	}
+	if outerWhere == nil {
+		return viewWhere
+	}
+
+	// Both are non-nil: combine with AND
+	viewExpr, viewOk := viewWhere.(syndrQL.Expression)
+	outerExpr, outerOk := outerWhere.(syndrQL.Expression)
+
+	if !viewOk || !outerOk {
+		// Fallback: if they aren't proper Expression types, prefer outer
+		return outerWhere
+	}
+
+	return &syndrQL.BinaryExpression{
+		Left:     viewExpr,
+		Operator: syndrQL.TOKEN_AND,
+		Right:    outerExpr,
+	}
 }

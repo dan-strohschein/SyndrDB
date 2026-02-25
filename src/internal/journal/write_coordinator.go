@@ -317,8 +317,12 @@ func (wc *WriteCoordinator) performCheckpoint() {
 		wc.wal.mutex.Lock()
 		checkpointLSN := wc.wal.currentLSN
 		wc.checkpointState.StartLSN = checkpointLSN
-		// TODO: I will log OpCheckpointBegin marker to WAL stream in next step
 		wc.wal.mutex.Unlock()
+
+		metadata := fmt.Sprintf("startLSN=%d", checkpointLSN)
+		if err := wc.wal.LogOperation("", OpCheckpointBegin, "", "", "", "", metadata); err != nil {
+			wc.logger.Warnf("Failed to log OpCheckpointBegin: %v", err)
+		}
 	}
 
 	// Sync all dirty pages with auto-tuning
@@ -326,10 +330,11 @@ func (wc *WriteCoordinator) performCheckpoint() {
 
 	// Log checkpoint complete to WAL
 	if wc.wal != nil {
-		// TODO: I will log OpCheckpointComplete marker to WAL stream in next step
-		// wc.wal.mutex.Lock()
-		// - Thie is where the WAL opCheckpointCOmplete marker will be set to the WAL
-		// wc.wal.mutex.Unlock()
+		metadata := fmt.Sprintf("startLSN=%d,pagesSynced=%d",
+			wc.checkpointState.StartLSN, wc.checkpointState.PagesSynced)
+		if err := wc.wal.LogOperation("", OpCheckpointComplete, "", "", "", "", metadata); err != nil {
+			wc.logger.Warnf("Failed to log OpCheckpointComplete: %v", err)
+		}
 	}
 
 	wc.mutex.Lock()
