@@ -213,6 +213,11 @@ type Arguments struct {
 	GroupByCacheWarmingMaxMB   int  `yaml:"groupby_cache_warming_max_mb"`  // Memory budget for warmed cache in MB (default: 512)
 	GroupBySnapshotStalenessMs int  `yaml:"groupby_snapshot_staleness_ms"` // Max staleness for COW snapshots in ms (default: 10)
 
+	// Parallel Aggregation Configuration
+	AggregationParallelEnabled bool `yaml:"aggregation_parallel_enabled"` // Enable parallel partial/finalize aggregation for GROUP BY (default: true)
+	AggregationParallelMinDocs int  `yaml:"aggregation_parallel_min_docs"` // Minimum estimated docs to justify parallel aggregation overhead (default: 50000)
+	AggregationParallelWorkers int  `yaml:"aggregation_parallel_workers"` // Number of parallel workers (0 = auto: min(NumCPU, 8)) (default: 0)
+
 	// Backup & Restore Configuration
 	BackupDir            string `yaml:"backup_dir"`             // Directory for backup files (default: "./backups")
 	BackupCompression    string `yaml:"backup_compression"`     // Compression format: "gzip", "zstd", "none" (default: "gzip")
@@ -514,6 +519,12 @@ func GetSettings() *Arguments {
 			GroupByCacheWarmingEnabled: true,  // Opt-out: enabled by default
 			GroupByCacheWarmingMaxMB:   512,   // 512MB default cache budget
 			GroupBySnapshotStalenessMs: 5000,  // 5 seconds staleness (background cleaner handles cleanup)
+
+			// Parallel Aggregation Defaults
+			AggregationParallelEnabled: true,  // Enable parallel partial/finalize aggregation
+			AggregationParallelMinDocs: 50000, // 50k+ docs to justify goroutine overhead
+			AggregationParallelWorkers: 0,     // Auto: min(NumCPU, 8)
+
 			SortParallelMinSize:        10000, // Phase 5: 10k+ docs for parallel sort
 			SortMaxMemoryMB:            512,   // 512MB memory limit
 

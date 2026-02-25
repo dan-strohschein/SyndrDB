@@ -22,6 +22,11 @@ import (
 // (30 connections * 8-16 workers = 240-480 goroutines competing for CPU).
 var activeScanCount atomic.Int64
 
+// ActiveScanCount returns the current number of concurrent scan operations in progress.
+// Used by the parallel aggregation decision function to avoid goroutine explosion
+// when many queries are already running concurrently.
+func ActiveScanCount() int64 { return activeScanCount.Load() }
+
 // SmartBundleScanner implements intelligent document scanning with batching, caching, and hot key optimization
 // This scanner uses PostgreSQL-inspired techniques: sequential I/O, vectorized processing, and predicate pushdown
 // SNAPSHOT ISOLATION: Scanner captures a snapshot sequence at creation time and filters documents
