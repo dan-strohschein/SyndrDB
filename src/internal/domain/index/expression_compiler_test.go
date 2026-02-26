@@ -127,6 +127,11 @@ func TestImmutabilityAcceptance(t *testing.T) {
 		`CEIL("price")`,
 		`FLOOR("price")`,
 		`ROUND("price", 2)`,
+		`POWER("base", 2)`,
+		`SQRT("value")`,
+		`MOD("dividend", 3)`,
+		`LOG("value")`,
+		`SIGN("value")`,
 		`COALESCE("a", "b")`,
 		`CONCAT("first", "last")`,
 		`SUBSTRING("name", 1, 3)`,
@@ -393,6 +398,145 @@ func TestEvalSUBSTRING(t *testing.T) {
 	result = compiled2.EvalFn(map[string]interface{}{"name": "Hello"})
 	if result != "llo" {
 		t.Errorf("SUBSTRING('Hello', 3) = %v, want 'llo'", result)
+	}
+}
+
+func TestEvalPOWER(t *testing.T) {
+	compiled, err := CompileIndexExpressionAST(`POWER("base", 3)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := compiled.EvalFn(map[string]interface{}{"base": int64(2)})
+	if result != 8.0 {
+		t.Errorf("POWER(2, 3) = %v, want 8.0", result)
+	}
+
+	// Float base
+	result = compiled.EvalFn(map[string]interface{}{"base": 4.0})
+	if result != 64.0 {
+		t.Errorf("POWER(4.0, 3) = %v, want 64.0", result)
+	}
+
+	// Null propagation
+	result = compiled.EvalFn(map[string]interface{}{})
+	if result != nil {
+		t.Errorf("POWER(nil, 3) = %v, want nil", result)
+	}
+}
+
+func TestEvalSQRT(t *testing.T) {
+	compiled, err := CompileIndexExpressionAST(`SQRT("value")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := compiled.EvalFn(map[string]interface{}{"value": int64(9)})
+	if result != 3.0 {
+		t.Errorf("SQRT(9) = %v, want 3.0", result)
+	}
+
+	result = compiled.EvalFn(map[string]interface{}{"value": 0.0})
+	if result != 0.0 {
+		t.Errorf("SQRT(0) = %v, want 0.0", result)
+	}
+
+	// Null propagation
+	result = compiled.EvalFn(map[string]interface{}{})
+	if result != nil {
+		t.Errorf("SQRT(nil) = %v, want nil", result)
+	}
+
+	// Negative returns nil (error swallowed by buildEvalFn)
+	result = compiled.EvalFn(map[string]interface{}{"value": int64(-1)})
+	if result != nil {
+		t.Errorf("SQRT(-1) = %v, want nil", result)
+	}
+}
+
+func TestEvalMOD(t *testing.T) {
+	compiled, err := CompileIndexExpressionAST(`MOD("a", 3)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Integer mod
+	result := compiled.EvalFn(map[string]interface{}{"a": int64(10)})
+	if result != int64(1) {
+		t.Errorf("MOD(10, 3) = %v (%T), want 1 (int64)", result, result)
+	}
+
+	// Float mod
+	compiled2, _ := CompileIndexExpressionAST(`MOD("a", 3.0)`)
+	result = compiled2.EvalFn(map[string]interface{}{"a": 10.5})
+	f, ok := result.(float64)
+	if !ok || math.Abs(f-1.5) > 1e-9 {
+		t.Errorf("MOD(10.5, 3.0) = %v, want 1.5", result)
+	}
+
+	// Null
+	result = compiled.EvalFn(map[string]interface{}{})
+	if result != nil {
+		t.Errorf("MOD(nil, 3) = %v, want nil", result)
+	}
+}
+
+func TestEvalLOG(t *testing.T) {
+	// Natural log
+	compiled, err := CompileIndexExpressionAST(`LOG("value")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := compiled.EvalFn(map[string]interface{}{"value": 1.0})
+	if result != 0.0 {
+		t.Errorf("LOG(1) = %v, want 0.0", result)
+	}
+
+	// LOG(base, number)
+	compiled2, err := CompileIndexExpressionAST(`LOG(10, "value")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result = compiled2.EvalFn(map[string]interface{}{"value": int64(100)})
+	f, ok := result.(float64)
+	if !ok || math.Abs(f-2.0) > 1e-9 {
+		t.Errorf("LOG(10, 100) = %v, want 2.0", result)
+	}
+
+	// Null
+	result = compiled.EvalFn(map[string]interface{}{})
+	if result != nil {
+		t.Errorf("LOG(nil) = %v, want nil", result)
+	}
+}
+
+func TestEvalSIGN(t *testing.T) {
+	compiled, err := CompileIndexExpressionAST(`SIGN("value")`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := compiled.EvalFn(map[string]interface{}{"value": int64(42)})
+	if result != int64(1) {
+		t.Errorf("SIGN(42) = %v, want 1", result)
+	}
+
+	result = compiled.EvalFn(map[string]interface{}{"value": int64(-7)})
+	if result != int64(-1) {
+		t.Errorf("SIGN(-7) = %v, want -1", result)
+	}
+
+	result = compiled.EvalFn(map[string]interface{}{"value": int64(0)})
+	if result != int64(0) {
+		t.Errorf("SIGN(0) = %v, want 0", result)
+	}
+
+	result = compiled.EvalFn(map[string]interface{}{"value": -3.14})
+	if result != int64(-1) {
+		t.Errorf("SIGN(-3.14) = %v, want -1", result)
+	}
+
+	// Null
+	result = compiled.EvalFn(map[string]interface{}{})
+	if result != nil {
+		t.Errorf("SIGN(nil) = %v, want nil", result)
 	}
 }
 

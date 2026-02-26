@@ -428,6 +428,7 @@ var immutableFunctions = map[string]bool{
 	"LOWER": true, "UPPER": true, "TRIM": true, "LENGTH": true,
 	"YEAR": true, "MONTH": true,
 	"ABS": true, "CEIL": true, "CEILING": true, "FLOOR": true, "ROUND": true,
+	"POWER": true, "SQRT": true, "MOD": true, "LOG": true, "SIGN": true,
 	"SUBSTRING": true, "SUBSTR": true, "CONCAT": true, "COALESCE": true,
 	"DATE_TRUNC": true, "EXTRACT": true,
 	"DATE_ADD": true, "DATE_SUB": true,
@@ -641,6 +642,16 @@ func evalCall(e *CallExpr, fieldValues map[string]interface{}) (interface{}, err
 		return evalConcat(args)
 	case "COALESCE":
 		return evalCoalesce(args)
+	case "POWER":
+		return evalPower(args)
+	case "SQRT":
+		return evalSqrt(args)
+	case "MOD":
+		return evalMod(args)
+	case "LOG":
+		return evalLog(args)
+	case "SIGN":
+		return evalSign(args)
 	case "DATE_TRUNC":
 		return evalDateTrunc(args)
 	case "EXTRACT":
@@ -900,6 +911,136 @@ func evalExtract(args []interface{}) (interface{}, error) {
 	default:
 		return nil, fmt.Errorf("EXTRACT: unsupported unit %q", unit)
 	}
+}
+
+func evalPower(args []interface{}) (interface{}, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("POWER() requires 2 arguments")
+	}
+	if args[0] == nil || args[1] == nil {
+		return nil, nil
+	}
+	base, ok := toFloat(args[0])
+	if !ok {
+		return nil, fmt.Errorf("POWER: base must be numeric")
+	}
+	exp, ok := toFloat(args[1])
+	if !ok {
+		return nil, fmt.Errorf("POWER: exponent must be numeric")
+	}
+	return math.Pow(base, exp), nil
+}
+
+func evalSqrt(args []interface{}) (interface{}, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("SQRT() requires 1 argument")
+	}
+	if args[0] == nil {
+		return nil, nil
+	}
+	v, ok := toFloat(args[0])
+	if !ok {
+		return nil, fmt.Errorf("SQRT: argument must be numeric")
+	}
+	if v < 0 {
+		return nil, fmt.Errorf("SQRT: cannot take square root of negative number")
+	}
+	return math.Sqrt(v), nil
+}
+
+func evalMod(args []interface{}) (interface{}, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("MOD() requires 2 arguments")
+	}
+	if args[0] == nil || args[1] == nil {
+		return nil, nil
+	}
+	// Integer path
+	li, liOk := toInt(args[0])
+	ri, riOk := toInt(args[1])
+	if liOk && riOk {
+		if ri == 0 {
+			return nil, fmt.Errorf("MOD: division by zero")
+		}
+		return li % ri, nil
+	}
+	// Float path
+	lf, lok := toFloat(args[0])
+	if !lok {
+		return nil, fmt.Errorf("MOD: dividend must be numeric")
+	}
+	rf, rok := toFloat(args[1])
+	if !rok {
+		return nil, fmt.Errorf("MOD: divisor must be numeric")
+	}
+	if rf == 0 {
+		return nil, fmt.Errorf("MOD: division by zero")
+	}
+	return math.Mod(lf, rf), nil
+}
+
+func evalLog(args []interface{}) (interface{}, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("LOG() requires at least 1 argument")
+	}
+	if args[0] == nil {
+		return nil, nil
+	}
+	if len(args) == 1 {
+		v, ok := toFloat(args[0])
+		if !ok {
+			return nil, fmt.Errorf("LOG: argument must be numeric")
+		}
+		if v <= 0 {
+			return nil, fmt.Errorf("LOG: argument must be positive")
+		}
+		return math.Log(v), nil
+	}
+	// LOG(base, number)
+	if args[1] == nil {
+		return nil, nil
+	}
+	base, ok := toFloat(args[0])
+	if !ok {
+		return nil, fmt.Errorf("LOG: base must be numeric")
+	}
+	number, ok := toFloat(args[1])
+	if !ok {
+		return nil, fmt.Errorf("LOG: number must be numeric")
+	}
+	if base <= 0 || base == 1 {
+		return nil, fmt.Errorf("LOG: base must be positive and not equal to 1")
+	}
+	if number <= 0 {
+		return nil, fmt.Errorf("LOG: number must be positive")
+	}
+	return math.Log(number) / math.Log(base), nil
+}
+
+func evalSign(args []interface{}) (interface{}, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("SIGN() requires 1 argument")
+	}
+	if args[0] == nil {
+		return nil, nil
+	}
+	if i, ok := toInt(args[0]); ok {
+		if i > 0 {
+			return int64(1), nil
+		} else if i < 0 {
+			return int64(-1), nil
+		}
+		return int64(0), nil
+	}
+	if f, ok := toFloat(args[0]); ok {
+		if f > 0 {
+			return int64(1), nil
+		} else if f < 0 {
+			return int64(-1), nil
+		}
+		return int64(0), nil
+	}
+	return nil, fmt.Errorf("SIGN: argument must be numeric")
 }
 
 // --- Type conversion helpers ---
