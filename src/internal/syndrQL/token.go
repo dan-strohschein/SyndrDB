@@ -195,6 +195,7 @@ const (
 	TOKEN_DATE_ADD   // DATE_ADD
 	TOKEN_DATE_SUB   // DATE_SUB
 	TOKEN_AGE        // AGE
+	TOKEN_CAST       // CAST (for CAST(expr AS type))
 	TOKEN_INTERVAL   // INTERVAL
 	TOKEN_AT         // AT (for AT TIME ZONE)
 	TOKEN_TIME       // TIME (for AT TIME ZONE)
@@ -471,6 +472,8 @@ func (tt TokenType) String() string {
 		return "DATE_SUB"
 	case TOKEN_AGE:
 		return "AGE"
+	case TOKEN_CAST:
+		return "CAST"
 	case TOKEN_INTERVAL:
 		return "INTERVAL"
 	case TOKEN_AT:
@@ -654,6 +657,9 @@ var keywords = map[string]TokenType{
 	// "DATE_ADD":   TOKEN_DATE_ADD,   // Only as F:DATE_ADD()
 	// "DATE_SUB":   TOKEN_DATE_SUB,   // Only as F:DATE_SUB()
 	// "AGE":        TOKEN_AGE,        // Only as F:AGE()
+
+	// Type casting
+	"CAST": TOKEN_CAST,
 
 	// DateTime Operators and Keywords (NOT functions)
 	"INTERVAL": TOKEN_INTERVAL,

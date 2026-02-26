@@ -199,6 +199,9 @@ func (sa *SemanticAnalyzer) resolveExpression(expr Expression) {
 	case *AtTimeZoneExpression:
 		sa.resolveExpression(e.Expression)
 		e.ResolvedType = FieldTypeDateTime
+	case *CastExpression:
+		sa.resolveExpression(e.Expression)
+		e.ResolvedType = e.TargetType
 	}
 }
 

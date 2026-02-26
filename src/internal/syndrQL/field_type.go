@@ -147,6 +147,8 @@ func GetResolvedType(expr Expression) FieldType {
 		return e.ResolvedType
 	case *AtTimeZoneExpression:
 		return e.ResolvedType
+	case *CastExpression:
+		return e.ResolvedType
 	default:
 		return FieldTypeUnknown
 	}
