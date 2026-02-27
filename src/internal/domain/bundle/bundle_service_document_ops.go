@@ -76,6 +76,33 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 		return "", err
 	}
 
+	// FK validation: verify referenced parent documents exist
+	if len(bundle.Relationships) > 0 || database != nil {
+		validator := NewReferentialIntegrityValidator(s, s.logger)
+		bundleCache := make(map[string]*models.Bundle)
+
+		// Build field map from document command
+		insertFields := make(map[string]string)
+		for _, kv := range docCommand.Fields {
+			if kv.Value == nil {
+				continue
+			}
+			insertFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
+		}
+
+		// Identify which fields are foreign keys
+		foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, insertFields, bundleCache)
+
+		if len(foreignKeyUpdates) > 0 {
+			// Validate each FK — uses O(1) hash index lookups
+			validationCache := make(map[string]*ForeignKeyViolation)
+			violation := validator.batchValidateForeignKeys(bundle, []string{"new-document"}, foreignKeyUpdates, validationCache)
+			if violation != nil {
+				return "", fmt.Errorf("referential integrity violation: %s", violation.Error())
+			}
+		}
+	}
+
 	schema := bundle.DocumentStructure.FieldSchema()
 	newDocument := s.documentFactory.NewDocument(*docCommand, schema)
 
@@ -368,6 +395,32 @@ func (s *BundleService) AddDocumentsToBundle(database *models.Database, bundle *
 		}
 	}
 
+	// Phase 1.5: FK validation for all documents (batched, deduplicated)
+	if len(bundle.Relationships) > 0 || database != nil {
+		validator := NewReferentialIntegrityValidator(s, s.logger)
+		bundleCache := make(map[string]*models.Bundle)
+		validationCache := make(map[string]*ForeignKeyViolation)
+
+		for i, docKVs := range bulkCmd.Documents {
+			insertFields := make(map[string]string, len(docKVs))
+			for _, kv := range docKVs {
+				if kv.Value == nil {
+					continue
+				}
+				insertFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
+			}
+
+			foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, insertFields, bundleCache)
+
+			if len(foreignKeyUpdates) > 0 {
+				violation := validator.batchValidateForeignKeys(bundle, []string{fmt.Sprintf("doc-%d", i)}, foreignKeyUpdates, validationCache)
+				if violation != nil {
+					return nil, fmt.Errorf("document %d: referential integrity violation: %s", i, violation.Error())
+				}
+			}
+		}
+	}
+
 	// Phase 2: Create all documents
 	documents := make([]*models.Document, 0, docCount)
 	docIDs := make([]string, 0, docCount)
@@ -457,6 +510,32 @@ func (s *BundleService) AddDocumentsToBundleWithTxID(database *models.Database, 
 		}
 		if err := uniqueValidator.ValidateUniqueConstraints(bundle, tmpCmd); err != nil {
 			return nil, fmt.Errorf("document %d: unique constraint violation: %w", i, err)
+		}
+	}
+
+	// Phase 1.5: FK validation for all documents (batched, deduplicated)
+	if len(bundle.Relationships) > 0 || database != nil {
+		validator := NewReferentialIntegrityValidator(s, s.logger)
+		bundleCache := make(map[string]*models.Bundle)
+		validationCache := make(map[string]*ForeignKeyViolation)
+
+		for i, docKVs := range bulkCmd.Documents {
+			insertFields := make(map[string]string, len(docKVs))
+			for _, kv := range docKVs {
+				if kv.Value == nil {
+					continue
+				}
+				insertFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
+			}
+
+			foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, insertFields, bundleCache)
+
+			if len(foreignKeyUpdates) > 0 {
+				violation := validator.batchValidateForeignKeys(bundle, []string{fmt.Sprintf("doc-%d", i)}, foreignKeyUpdates, validationCache)
+				if violation != nil {
+					return nil, fmt.Errorf("document %d: referential integrity violation: %s", i, violation.Error())
+				}
+			}
 		}
 	}
 
@@ -923,9 +1002,10 @@ func (s *BundleService) UpdateDocumentInBundle(ctx context.Context, database *mo
 		// Build map of field updates for easier lookup
 		updateFields := make(map[string]string)
 		for _, kv := range docCommand.Fields {
-			if strValue, ok := kv.Value.(string); ok {
-				updateFields[kv.Key] = strValue
+			if kv.Value == nil {
+				continue
 			}
+			updateFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
 		}
 		s.logger.Debugf("[REFINT-UPDATE] Update fields: %v", updateFields)
 
