@@ -578,21 +578,15 @@ func (wal *WriteAheadLog) ReplayOperationsBinary(filePath string, fromLSN uint64
 			continue
 		}
 
-		// Verify LSN ordering
+		// Check LSN ordering — out-of-order is expected with concurrent writers
+		// (group commit assigns LSNs atomically but flushes in arrival order)
 		if entry.LSN <= lastLSN && entryCount > 0 {
-			// HIGH-008: LSN ordering errors are tracked but non-fatal
-			recoveryErrors = append(recoveryErrors, &RecoveryError{
-				LSN:    entry.LSN,
-				File:   filePath,
-				Reason: "lsn_out_of_order",
-				Err:    fmt.Errorf("entry LSN %d <= previous LSN %d", entry.LSN, lastLSN),
-			})
-			wal.logger.Warnf("LSN out of order at entry %d: %d <= %d", entryCount, entry.LSN, lastLSN)
+			wal.logger.Debugf("LSN out of order at entry %d: %d <= %d (expected with concurrent writes)",
+				entryCount, entry.LSN, lastLSN)
+			// Don't update lastLSN, don't skip entry, don't accumulate error
+		} else {
 			lastLSN = entry.LSN
-			entryCount++
-			continue
 		}
-		lastLSN = entry.LSN
 
 		entryCount++
 
