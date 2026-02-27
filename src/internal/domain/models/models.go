@@ -667,8 +667,43 @@ type IndexReference struct {
 	// Expression index: computed expression (e.g., "LOWER(name)")
 	Expression string `json:"expression,omitempty"`
 
+	// Cached compiled expression (lazily initialized, not serialized).
+	// Set at index creation time or on first use after loading from disk.
+	CompiledExpr *IndexExpressionCompiled `json:"-"`
+
+	// Normalized canonical form of Expression for planner matching.
+	// Produced by parsing with SyndrQL AST and re-serializing.
+	NormalizedExpression string `json:"-"`
+
 	// Index maintenance metadata (for automatic rebuild on staleness)
 	Maintenance *IndexMaintenanceMetadata `json:"maintenance,omitempty"`
+}
+
+// IndexExpressionCompiled holds the result of compiling an index expression via the SyndrQL AST.
+type IndexExpressionCompiled struct {
+	FieldNames   []string                                          // All fields referenced by the expression
+	PrimaryField string                                            // First/main field (backward compat with BTreeIndexField.FieldName)
+	EvalFn       func(fieldValues map[string]interface{}) interface{} // Evaluates the expression given field values
+	Normalized   string                                            // Canonical expression string for matching
+}
+
+// EnsureExpressionCompiled lazily compiles and caches the expression on an IndexReference.
+// Returns nil if there is no expression to compile.
+// The compileFn parameter is injected to avoid circular imports (index package provides it).
+func (ir *IndexReference) EnsureExpressionCompiled(compileFn func(string) (*IndexExpressionCompiled, error)) error {
+	if ir.Expression == "" {
+		return nil
+	}
+	if ir.CompiledExpr != nil {
+		return nil
+	}
+	compiled, err := compileFn(ir.Expression)
+	if err != nil {
+		return err
+	}
+	ir.CompiledExpr = compiled
+	ir.NormalizedExpression = compiled.Normalized
+	return nil
 }
 
 // IndexMaintenanceMetadata tracks index health and rebuild history for automatic maintenance

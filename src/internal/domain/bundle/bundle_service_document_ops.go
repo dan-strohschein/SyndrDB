@@ -167,16 +167,33 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 
 				var fieldValue interface{}
 				if indexRef.Expression != "" {
-					_, exprFn, exprErr := indexutils.CompileIndexExpression(indexRef.Expression)
-					if exprErr != nil {
-						s.logger.Warnf("Failed to compile expression for index '%s': %v", indexName, exprErr)
+					// Use cached compiled expression, falling back to recompilation
+					if err := indexRef.EnsureExpressionCompiled(indexutils.CompileIndexExpressionAST); err != nil {
+						s.logger.Warnf("Failed to compile expression for index '%s': %v", indexName, err)
 						continue
 					}
-					rawValue, fErr := extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName, schema)
-					if fErr != nil {
-						continue
+					if indexRef.CompiledExpr != nil && len(indexRef.CompiledExpr.FieldNames) > 1 {
+						// Multi-field expression: build full field map
+						fieldMap := make(map[string]interface{}, len(indexRef.CompiledExpr.FieldNames))
+						for _, fn := range indexRef.CompiledExpr.FieldNames {
+							v, fErr := extractFieldValueForIndex(*newDocument, fn, schema)
+							if fErr == nil {
+								fieldMap[fn] = v
+							}
+						}
+						fieldValue = indexRef.CompiledExpr.EvalFn(fieldMap)
+					} else {
+						rawValue, fErr := extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName, schema)
+						if fErr != nil {
+							continue
+						}
+						if indexRef.CompiledExpr != nil {
+							fieldMap := map[string]interface{}{indexRef.CompiledExpr.PrimaryField: rawValue}
+							fieldValue = indexRef.CompiledExpr.EvalFn(fieldMap)
+						} else {
+							fieldValue = rawValue
+						}
 					}
-					fieldValue = exprFn(rawValue)
 				} else {
 					var fErr error
 					fieldValue, fErr = extractFieldValueForIndex(*newDocument, indexRef.BTreeIndexField.FieldName, schema)
@@ -542,15 +559,31 @@ func (s *BundleService) scheduleIndexUpdatesForDocument(bundle *models.Bundle, d
 			}
 			var fieldValue interface{}
 			if indexRef.Expression != "" {
-				_, exprFn, exprErr := indexutils.CompileIndexExpression(indexRef.Expression)
-				if exprErr != nil {
+				// Use cached compiled expression, falling back to recompilation
+				if err := indexRef.EnsureExpressionCompiled(indexutils.CompileIndexExpressionAST); err != nil {
 					continue
 				}
-				rawValue, fErr := extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName, schema)
-				if fErr != nil {
-					continue
+				if indexRef.CompiledExpr != nil && len(indexRef.CompiledExpr.FieldNames) > 1 {
+					fieldMap := make(map[string]interface{}, len(indexRef.CompiledExpr.FieldNames))
+					for _, fn := range indexRef.CompiledExpr.FieldNames {
+						v, fErr := extractFieldValueForIndex(*doc, fn, schema)
+						if fErr == nil {
+							fieldMap[fn] = v
+						}
+					}
+					fieldValue = indexRef.CompiledExpr.EvalFn(fieldMap)
+				} else {
+					rawValue, fErr := extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName, schema)
+					if fErr != nil {
+						continue
+					}
+					if indexRef.CompiledExpr != nil {
+						fieldMap := map[string]interface{}{indexRef.CompiledExpr.PrimaryField: rawValue}
+						fieldValue = indexRef.CompiledExpr.EvalFn(fieldMap)
+					} else {
+						fieldValue = rawValue
+					}
 				}
-				fieldValue = exprFn(rawValue)
 			} else {
 				var fErr error
 				fieldValue, fErr = extractFieldValueForIndex(*doc, indexRef.BTreeIndexField.FieldName, schema)

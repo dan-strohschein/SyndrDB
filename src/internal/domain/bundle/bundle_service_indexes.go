@@ -664,13 +664,19 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 
 	// Compile expression index function if present
 	var exprFn func(interface{}) interface{}
+	var compiledExpr *models.IndexExpressionCompiled
 	if indexCommand.Expression != "" {
-		_, fn, exprErr := indexutils.CompileIndexExpression(indexCommand.Expression)
-		if exprErr != nil {
-			return fmt.Errorf("failed to compile index expression: %w", exprErr)
+		compiled, compileErr := indexutils.CompileIndexExpressionAST(indexCommand.Expression)
+		if compileErr != nil {
+			return fmt.Errorf("failed to compile index expression: %w", compileErr)
 		}
-		exprFn = fn
-		s.logger.Debugf("Expression index function compiled for '%s': %s", indexCommand.IndexName, indexCommand.Expression)
+		compiledExpr = compiled
+		// Create backward-compat single-field wrapper
+		exprFn = func(v interface{}) interface{} {
+			fieldMap := map[string]interface{}{compiled.PrimaryField: v}
+			return compiled.EvalFn(fieldMap)
+		}
+		s.logger.Debugf("Expression index function compiled for '%s': %s (fields: %v)", indexCommand.IndexName, indexCommand.Expression, compiled.FieldNames)
 	}
 
 	s.logger.Debugf("Creating BTree index '%s' on field '%s' for bundle '%s'",
@@ -836,6 +842,10 @@ func CreateBTreeIndex(s *BundleService, bundle *models.Bundle, indexCommand *mod
 		IncludeFields:   indexCommand.IncludeFields,
 		WherePredicate:  indexCommand.WherePredicate,
 		Expression:      indexCommand.Expression,
+		CompiledExpr:    compiledExpr,
+	}
+	if compiledExpr != nil {
+		indexRef.NormalizedExpression = compiledExpr.Normalized
 	}
 
 	// Initialize indexes map if nil

@@ -124,7 +124,7 @@ func TestValidateCommand_BalancedDelimiters(t *testing.T) {
 			name:    "Unbalanced single quotes",
 			command: `SELECT * FROM users WHERE name = 'test`,
 			wantErr: true,
-			errMsg:  "unmatched single quote",
+			errMsg:  "unbalanced delimiters", // Server changed error message from "unmatched single quote"
 		},
 		{
 			name:    "Balanced double quotes",
@@ -140,7 +140,7 @@ func TestValidateCommand_BalancedDelimiters(t *testing.T) {
 			name:    "Unbalanced parentheses",
 			command: `SELECT * FROM users WHERE (age > 18 AND active = true`,
 			wantErr: true,
-			errMsg:  "unmatched",
+			errMsg:  "unbalanced delimiters", // Server changed error message from "unmatched"
 		},
 		{
 			name:    "Balanced braces in JSON",
@@ -151,7 +151,7 @@ func TestValidateCommand_BalancedDelimiters(t *testing.T) {
 			name:    "Unbalanced braces",
 			command: `ADD DOCUMENT TO users WITH {"name": "test"`,
 			wantErr: true,
-			errMsg:  "unmatched",
+			errMsg:  "unbalanced delimiters", // Server changed error message from "unmatched"
 		},
 		{
 			name:    "Balanced brackets",
@@ -162,7 +162,7 @@ func TestValidateCommand_BalancedDelimiters(t *testing.T) {
 			name:    "Unbalanced brackets",
 			command: `SELECT * FROM users WHERE tags IN ["tag1", "tag2"`,
 			wantErr: true,
-			errMsg:  "unmatched",
+			errMsg:  "unbalanced delimiters", // Server changed error message from "unmatched"
 		},
 	}
 
