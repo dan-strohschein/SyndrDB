@@ -46,6 +46,11 @@ type SmartBundleScanner struct {
 	// VISIBILITY MAP: Per-page all-visible tracking to skip MVCC checks
 	visibilityMap  VisibilityMapInterface // nil = no VM, check every doc
 	vmGeneration   uint64                 // Generation at scan start (detect concurrent clears)
+
+	// PAGE BLOOM FILTER: Per-page bloom filters to skip pages during filtered scans
+	pageBloomMap    PageBloomMapInterface // nil = no bloom map, scan every page
+	bloomHints      []BloomHint          // Equality predicates to check against bloom
+	bloomGeneration uint64               // Generation at scan start (detect invalidation)
 }
 
 // NewSmartBundleScanner creates a new smart bundle scanner
@@ -123,6 +128,43 @@ func (sbs *SmartBundleScanner) isPageAllVisible(pageID uint32) bool {
 	return sbs.visibilityMap != nil &&
 		sbs.visibilityMap.IsAllVisible(pageID) &&
 		sbs.visibilityMap.Generation() == sbs.vmGeneration
+}
+
+// SetPageBloomMap sets the page bloom map for page-level bloom filter skip optimization.
+// When set along with bloom hints, scan methods check the bloom before loading pages.
+func (sbs *SmartBundleScanner) SetPageBloomMap(pbm PageBloomMapInterface) {
+	sbs.pageBloomMap = pbm
+	if pbm != nil {
+		sbs.bloomGeneration = pbm.Generation()
+	}
+}
+
+// SetBloomHints sets the equality predicates to check against page bloom filters.
+// These are extracted from the WHERE clause by the planner's bloom hint extractor.
+func (sbs *SmartBundleScanner) SetBloomHints(hints []BloomHint) {
+	sbs.bloomHints = hints
+}
+
+// canSkipPageByBloom checks if a page can be skipped based on bloom filter hints.
+// Returns true if ANY hint says the value is definitely absent from the page.
+// Returns false (don't skip) when: no bloom map, no hints, generation changed,
+// or bloom not built for the page.
+func (sbs *SmartBundleScanner) canSkipPageByBloom(pageID uint32) bool {
+	if sbs.pageBloomMap == nil || len(sbs.bloomHints) == 0 {
+		return false
+	}
+	// Generation check: if bloom was invalidated since scan start, don't skip
+	if sbs.pageBloomMap.Generation() != sbs.bloomGeneration {
+		return false
+	}
+	for _, hint := range sbs.bloomHints {
+		mayContain, bloomExists := sbs.pageBloomMap.MayContain(pageID, hint.FieldName, hint.ValueKeyString)
+		if bloomExists && !mayContain {
+			// Bloom says this value is DEFINITELY NOT on the page — skip it
+			return true
+		}
+	}
+	return false
 }
 
 // ScanForKeyValue performs an optimized scan for documents matching a key-value query
@@ -216,6 +258,11 @@ func (sbs *SmartBundleScanner) ScanWithPredicate(predicate func(*models.Document
 	// has natural parallelism from multiple concurrent queries. Per-query parallelism creates
 	// goroutine explosion (30 conn * N workers) that worsens tail latency via CPU contention.
 	for pageID := uint32(0); pageID < pageCount; pageID++ {
+		// PAGE BLOOM FILTER: Skip page if bloom says searched values are absent
+		if sbs.canSkipPageByBloom(pageID) {
+			continue
+		}
+
 		page, err := sbs.loadPage(pageID)
 		if err != nil {
 			sbs.logger.Warnf("Failed to load page %d: %v", pageID, err)
@@ -384,6 +431,11 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 						break
 					}
 
+					// PAGE BLOOM FILTER: Skip page if bloom says searched values are absent
+					if sbs.canSkipPageByBloom(pageID) {
+						continue
+					}
+
 					// Load page from cache
 					page, err := sbs.loadPage(pageID)
 					if err != nil {
@@ -460,6 +512,11 @@ func (sbs *SmartBundleScanner) ScanAllDocumentsWithLimit(maxDocuments int) (*Sca
 			if maxDocuments > 0 && totalScanned >= maxDocuments {
 				sbs.logger.Debugf("Early termination: reached limit of %d documents", maxDocuments)
 				break
+			}
+
+			// PAGE BLOOM FILTER: Skip page if bloom says searched values are absent
+			if sbs.canSkipPageByBloom(pageID) {
+				continue
 			}
 
 			// Load page from cache (uses shared documentPages cache)

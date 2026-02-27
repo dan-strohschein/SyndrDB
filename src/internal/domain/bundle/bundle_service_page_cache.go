@@ -236,6 +236,8 @@ func (s *BundleService) getPageShardIndex(pageKey string) int {
 func (s *BundleService) updatePageCacheWithDocument(bundleName string, pageID uint32, doc *models.Document) {
 	// Clear visibility map bit for this page (page content is changing)
 	s.clearVisibilityForPage(bundleName, pageID)
+	// Invalidate page bloom filter (page content is changing)
+	s.invalidatePageBloom(bundleName, pageID)
 
 	pageKey := bundleName + ":" + strconv.FormatUint(uint64(pageID), 10)
 	shardIdx := s.getPageShardIndex(pageKey)

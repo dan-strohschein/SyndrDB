@@ -942,6 +942,8 @@ func (s *BundleService) InvalidateDocumentPageMapForBundle(bundleName string) {
 
 	// Clear entire visibility map on compaction (page contents may have changed)
 	s.clearVisibilityForBundle(bundleName)
+	// Invalidate all page bloom filters on compaction (page contents may have changed)
+	s.invalidatePageBloomForBundle(bundleName)
 
 	// PAGE ID ARCHITECTURE ALIGNMENT: Rebuild SortedIndex after compaction
 	// Compaction removes tombstoned documents and rewrites the bundle file,
