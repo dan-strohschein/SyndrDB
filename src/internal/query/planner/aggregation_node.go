@@ -46,9 +46,11 @@ package planner
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
@@ -350,10 +352,19 @@ executeChild:
 		// IMPORTANT: Only when child is directly a FullScanNode — if a FilterNode wraps it,
 		// we must execute through the FilterNode to apply the WHERE clause.
 		if ok && fullScan != nil && isAggregateOnly && childIsDirectFullScan && fullScan.DocumentScanner != nil {
-			n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for aggregate-only query (skipping map materialization)")
-			groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
-			if err != nil {
-				return nil, fmt.Errorf("AggregationNode: streaming aggregate-only failed: %w", err)
+			// Try parallel aggregation first
+			if numWorkers, useParallel := n.shouldUseParallelAggregation(); useParallel {
+				n.Logger.Debugf("OPTIMIZATION: Using parallel aggregation for aggregate-only query (%d workers)", numWorkers)
+				groupResults, totalInput, err = n.executeHashAggregateParallel(ctx, fullScan.DocumentScanner, numWorkers)
+				if err != nil {
+					return nil, fmt.Errorf("AggregationNode: parallel aggregate-only failed: %w", err)
+				}
+			} else {
+				n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for aggregate-only query (skipping map materialization)")
+				groupResults, totalInput, err = n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
+				if err != nil {
+					return nil, fmt.Errorf("AggregationNode: streaming aggregate-only failed: %w", err)
+				}
 			}
 		} else if ok && fullScan != nil && childIsDirectFullScan && n.GroupBy != nil && len(n.GroupBy.Fields) > 0 {
 			// OPTIMIZATION: Always use streaming for GROUP BY queries.
@@ -361,10 +372,19 @@ executeChild:
 			// (200k+ allocations) before any aggregation begins. Streaming processes documents
 			// in-place from COW cache pages with zero intermediate allocations — strictly faster.
 			if fullScan.DocumentScanner != nil {
-				n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for GROUP BY (skipping session cache)")
-				groupResults, totalInput, err = n.executeHashAggregateStreamingWithProjection(ctx, fullScan)
-				if err != nil {
-					return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
+				// Try parallel aggregation first
+				if numWorkers, useParallel := n.shouldUseParallelAggregation(); useParallel {
+					n.Logger.Debugf("OPTIMIZATION: Using parallel aggregation for GROUP BY (%d workers)", numWorkers)
+					groupResults, totalInput, err = n.executeHashAggregateParallel(ctx, fullScan.DocumentScanner, numWorkers)
+					if err != nil {
+						return nil, fmt.Errorf("AggregationNode: parallel GROUP BY failed: %w", err)
+					}
+				} else {
+					n.Logger.Debugf("OPTIMIZATION: Using streaming aggregation for GROUP BY (skipping session cache)")
+					groupResults, totalInput, err = n.executeHashAggregateStreamingWithProjection(ctx, fullScan)
+					if err != nil {
+						return nil, fmt.Errorf("AggregationNode: streaming aggregation failed: %w", err)
+					}
 				}
 			} else {
 				// Fallback to regular execution (no scanner available)
@@ -959,6 +979,367 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 // via getCaseInsensitiveFieldClean — they never modify documents, so projection is redundant work.
 func (n *AggregationNode) executeHashAggregateStreamingWithProjection(ctx context.Context, fullScan *FullScanNode) (map[groupKey]*groupResult, int, error) {
 	return n.executeHashAggregateStreaming(ctx, fullScan.DocumentScanner)
+}
+
+// partialAggWorker holds per-worker state for parallel aggregation.
+// Each worker has its own groupMap — zero synchronization during chunk processing.
+type partialAggWorker struct {
+	id         int
+	groupMap   map[groupKey]*groupResult
+	totalInput int
+	chunkCh    chan []*models.Document // buffered, cap=2
+	err        error
+}
+
+// shouldUseParallelAggregation decides whether to use parallel partial/finalize aggregation.
+// Returns the number of workers to use and whether parallel is elected.
+func (n *AggregationNode) shouldUseParallelAggregation() (int, bool) {
+	s := settings.GetSettings()
+	if !s.AggregationParallelEnabled {
+		return 0, false
+	}
+
+	// Only for HashAggregate strategy (SortGroupAggregate needs pre-sorted input)
+	if n.executionStrategy != queryparser.HashAggregate {
+		return 0, false
+	}
+
+	// Check estimated rows threshold
+	estimatedRows := n.Child.GetEstimatedRows()
+	minDocs := s.AggregationParallelMinDocs
+	if minDocs <= 0 {
+		minDocs = 50000
+	}
+	if estimatedRows < minDocs {
+		return 0, false
+	}
+
+	// Need at least 2 CPUs
+	numCPU := runtime.NumCPU()
+	if numCPU < 2 {
+		return 0, false
+	}
+
+	// Avoid goroutine explosion under high concurrency
+	if documentscanner.ActiveScanCount() > 4 {
+		return 0, false
+	}
+
+	// Compute workers
+	workers := s.AggregationParallelWorkers
+	if workers <= 0 {
+		workers = numCPU
+		if workers > 8 {
+			workers = 8
+		}
+	}
+	if workers < 2 {
+		workers = 2
+	}
+
+	return workers, true
+}
+
+// mergeAggregateValues merges src aggregate values into dest.
+// COUNT/SUM/AVG accumulate additively; MIN/MAX take extremes.
+func (n *AggregationNode) mergeAggregateValues(dest, src *groupResult) {
+	for key, srcAgg := range src.AggregateValues {
+		destAgg, exists := dest.AggregateValues[key]
+		if !exists {
+			dest.AggregateValues[key] = srcAgg
+			continue
+		}
+
+		// COUNT: additive
+		destAgg.Count += srcAgg.Count
+
+		// SUM: additive (also accumulates for AVG finalization)
+		destAgg.Sum += srcAgg.Sum
+
+		// AVG: AvgCount is additive (finalization happens in convertGroupResultsToDocuments)
+		destAgg.AvgCount += srcAgg.AvgCount
+
+		// MIN: take the lesser
+		if !srcAgg.Min.IsNil() {
+			if destAgg.Min.IsNil() || n.isLessFieldValue(srcAgg.Min, destAgg.Min) {
+				destAgg.Min = srcAgg.Min
+			}
+		}
+
+		// MAX: take the greater
+		if !srcAgg.Max.IsNil() {
+			if destAgg.Max.IsNil() || n.isGreaterFieldValue(srcAgg.Max, destAgg.Max) {
+				destAgg.Max = srcAgg.Max
+			}
+		}
+	}
+}
+
+// mergePartialAggregates merges all worker maps into a single result.
+// Picks the largest worker map as the base to minimize copy overhead.
+func (n *AggregationNode) mergePartialAggregates(workers []*partialAggWorker) (map[groupKey]*groupResult, int) {
+	// Find the worker with the largest map to use as base
+	baseIdx := 0
+	maxSize := 0
+	totalInput := 0
+	for i, w := range workers {
+		totalInput += w.totalInput
+		if len(w.groupMap) > maxSize {
+			maxSize = len(w.groupMap)
+			baseIdx = i
+		}
+	}
+
+	result := workers[baseIdx].groupMap
+
+	// Merge all other workers into the base
+	for i, w := range workers {
+		if i == baseIdx {
+			continue
+		}
+		for gKey, srcResult := range w.groupMap {
+			destResult, exists := result[gKey]
+			if !exists {
+				// New group — move the entire result (no copy needed)
+				result[gKey] = srcResult
+			} else {
+				// Existing group — merge aggregate values
+				n.mergeAggregateValues(destResult, srcResult)
+			}
+		}
+	}
+
+	return result, totalInput
+}
+
+// executeHashAggregateParallel implements parallel partial/finalize aggregation.
+// N workers each build independent partial hash maps from round-robin chunks,
+// then a sequential merge combines them.
+func (n *AggregationNode) executeHashAggregateParallel(ctx context.Context, scanner documentscanner.DocumentScannerInterface, numWorkers int) (map[groupKey]*groupResult, int, error) {
+	n.Logger.Debugf("Executing parallel hash aggregate with %d workers", numWorkers)
+
+	// Pre-compute all read-only state before launching workers
+	fieldInfos := n.precomputeGroupKeyFields()
+	_ = n.getCachedAggInfos() // force cache population
+	_ = n.getCachedSchema()   // force cache population
+
+	isSingleCountStar := len(n.AggregateFields) == 1 &&
+		n.AggregateFields[0].Function == "COUNT" && n.AggregateFields[0].Field == "*"
+	var countKey string
+	if isSingleCountStar {
+		countKey = n.getAggregateKey(n.AggregateFields[0])
+	}
+
+	// Get the BundleInterface for ScanDocumentChunks
+	smartScanner, ok := scanner.(interface {
+		GetBundle() documentscanner.BundleInterface
+	})
+	if !ok {
+		return nil, 0, fmt.Errorf("parallel aggregation: scanner does not expose GetBundle()")
+	}
+	bundleInterface := smartScanner.GetBundle()
+	if bundleInterface == nil {
+		return nil, 0, fmt.Errorf("parallel aggregation: GetBundle() returned nil")
+	}
+
+	// Create workers
+	workers := make([]*partialAggWorker, numWorkers)
+	for i := 0; i < numWorkers; i++ {
+		workers[i] = &partialAggWorker{
+			id:       i,
+			groupMap: make(map[groupKey]*groupResult),
+			chunkCh:  make(chan []*models.Document, 2),
+		}
+	}
+
+	// Launch worker goroutines
+	var wg sync.WaitGroup
+	for _, w := range workers {
+		wg.Add(1)
+		go func(w *partialAggWorker) {
+			defer wg.Done()
+			n.parallelWorkerLoop(ctx, w, fieldInfos, isSingleCountStar, countKey)
+		}(w)
+	}
+
+	// Dispatch chunks round-robin to workers
+	dispatchIdx := 0
+	var chunkErr error
+
+	scanErr := bundleInterface.ScanDocumentChunks(ctx, 4096, func(chunk []*models.Document) bool {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			chunkErr = ctx.Err()
+			return false
+		default:
+		}
+
+		// Send chunk to worker (blocks if worker's channel is full — backpressure)
+		select {
+		case workers[dispatchIdx%numWorkers].chunkCh <- chunk:
+		case <-ctx.Done():
+			chunkErr = ctx.Err()
+			return false
+		}
+		dispatchIdx++
+		return true
+	})
+
+	// Close all worker channels to signal completion
+	for _, w := range workers {
+		close(w.chunkCh)
+	}
+
+	// Wait for all workers to finish
+	wg.Wait()
+
+	// Check for errors
+	if scanErr != nil {
+		return nil, 0, fmt.Errorf("parallel aggregation scan failed: %w", scanErr)
+	}
+	if chunkErr != nil {
+		return nil, 0, fmt.Errorf("parallel aggregation dispatch failed: %w", chunkErr)
+	}
+	for _, w := range workers {
+		if w.err != nil {
+			return nil, 0, fmt.Errorf("parallel aggregation worker %d failed: %w", w.id, w.err)
+		}
+	}
+
+	// Merge partial results
+	result, totalInput := n.mergePartialAggregates(workers)
+
+	// Post-merge memory check
+	memoryTracker := GetMemoryTrackerFromContext(ctx)
+	if memoryTracker != nil {
+		estimatedBytes := int64(len(result)) * 256
+		if err := memoryTracker.Sample(estimatedBytes, totalInput); err != nil {
+			return nil, totalInput, err
+		}
+	}
+
+	// Post-merge cardinality check
+	maxCardinality := settings.GetSettings().MaxGroupByCardinality
+	if maxCardinality > 0 && len(result) > maxCardinality {
+		return nil, totalInput, fmt.Errorf("GROUP BY cardinality exceeds maximum of %d groups (got %d after parallel merge)", maxCardinality, len(result))
+	}
+
+	n.Logger.Debugf("Parallel hash aggregate completed: %d groups from %d documents (%d workers)", len(result), totalInput, numWorkers)
+	return result, totalInput, nil
+}
+
+// parallelWorkerLoop is the per-worker goroutine that processes chunks from its channel.
+// Each worker maintains its own groupMap with zero synchronization.
+func (n *AggregationNode) parallelWorkerLoop(
+	ctx context.Context,
+	w *partialAggWorker,
+	fieldInfos []groupKeyFieldInfo,
+	isSingleCountStar bool,
+	countKey string,
+) {
+	groupMap := w.groupMap
+
+	for chunk := range w.chunkCh {
+		// Check context cancellation between chunks
+		select {
+		case <-ctx.Done():
+			w.err = ctx.Err()
+			return
+		default:
+		}
+
+		// G6: Ultra-fast path for single-field GROUP BY + COUNT(*)
+		if isSingleCountStar && fieldInfos != nil && len(fieldInfos) == 1 {
+			fi := &fieldInfos[0]
+			for _, doc := range chunk {
+				if doc == nil {
+					continue
+				}
+				w.totalInput++
+
+				var fv models.FieldValue
+				if fi.SchemaIndex >= 0 && fi.SchemaIndex < len(doc.Values) {
+					fv = doc.Values[fi.SchemaIndex]
+				} else {
+					field, exists := n.getCaseInsensitiveFieldClean(doc, fi.CleanName)
+					if !exists {
+						continue
+					}
+					fv = field.Value
+				}
+				gKey := groupKey(fieldValueToKeyString(fv))
+
+				gResult, exists := groupMap[gKey]
+				if !exists {
+					gResult = &groupResult{
+						GroupFields:     map[string]models.FieldValue{fi.CleanName: fv},
+						AggregateValues: map[string]*aggregateValue{countKey: {}},
+					}
+					groupMap[gKey] = gResult
+				}
+				gResult.AggregateValues[countKey].Count++
+			}
+			continue
+		}
+
+		for _, doc := range chunk {
+			if doc == nil {
+				continue
+			}
+			w.totalInput++
+
+			if fieldInfos != nil {
+				// GROUP BY path
+				gKey, fieldValues, err := n.createGroupKeyFast(doc, fieldInfos)
+				if err != nil {
+					continue
+				}
+
+				gResult, exists := groupMap[gKey]
+				if !exists {
+					gResult = &groupResult{
+						GroupFields:     n.buildGroupFields(fieldInfos, fieldValues),
+						AggregateValues: make(map[string]*aggregateValue),
+					}
+					for _, aggFunc := range n.AggregateFields {
+						gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+					}
+					groupMap[gKey] = gResult
+				}
+
+				if isSingleCountStar {
+					gResult.AggregateValues[countKey].Count++
+				} else {
+					if err := n.updateAggregates(gResult, doc); err != nil {
+						// Log suppressed in parallel path to avoid contention
+					}
+				}
+			} else {
+				// Aggregate-only (no GROUP BY) path
+				gKey := groupKey("")
+				gResult, exists := groupMap[gKey]
+				if !exists {
+					gResult = &groupResult{
+						GroupFields:     make(map[string]models.FieldValue),
+						AggregateValues: make(map[string]*aggregateValue),
+					}
+					for _, aggFunc := range n.AggregateFields {
+						gResult.AggregateValues[n.getAggregateKey(aggFunc)] = &aggregateValue{}
+					}
+					groupMap[gKey] = gResult
+				}
+
+				if isSingleCountStar {
+					gResult.AggregateValues[countKey].Count++
+				} else {
+					if err := n.updateAggregates(gResult, doc); err != nil {
+						// Log suppressed in parallel path to avoid contention
+					}
+				}
+			}
+		}
+	}
 }
 
 // executeHashAggregateWithSessionCache implements hash-based aggregation using session-specific projected cache
