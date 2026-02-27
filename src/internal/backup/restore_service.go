@@ -234,8 +234,8 @@ func (rs *RestoreService) checkCompatibility(manifest *Manifest) error {
 	}
 
 	// Check backup version
-	if manifest.BackupVersion != "1.0" {
-		return fmt.Errorf("unsupported backup version: %s (expected 1.0)", manifest.BackupVersion)
+	if manifest.BackupVersion != "1.0" && manifest.BackupVersion != "1.1" {
+		return fmt.Errorf("unsupported backup version: %s (expected 1.0 or 1.1)", manifest.BackupVersion)
 	}
 
 	rs.logger.Info("Compatibility check passed")

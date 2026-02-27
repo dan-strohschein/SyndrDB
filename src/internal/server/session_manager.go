@@ -698,8 +698,7 @@ func (sm *SessionManager) UpdateActivity(sessionID, clientIP, userAgent string) 
 			"session security validation failed", errors.LayerAuth)
 	}
 
-	session.LastActivity = time.Now()
-	session.ExpiresAt = time.Now().Add(session.Timeout)
+	session.updateActivityTimestampsLocked()
 
 	return nil
 }
@@ -727,8 +726,7 @@ func (sm *SessionManager) SetDatabaseContext(sessionID string, databaseName stri
 	session.DatabaseFolderPath = helpers.GetDatabaseFolderPath(databaseName) // STEP 4: Update cache
 
 	// Update activity time when database context changes
-	session.LastActivity = time.Now()
-	session.ExpiresAt = time.Now().Add(session.Timeout)
+	session.updateActivityTimestampsLocked()
 
 	session.Logger.Infow("Database context changed",
 		"previousDatabase", previousDatabase,
@@ -1044,9 +1042,12 @@ func (sm *SessionManager) cleanupExpiredSessions() {
 	now := time.Now()
 
 	// PHASE 1: Find expired sessions using sharded iteration
+	// Check both ExpiresAt and LastActivity as a safety net — if either indicates
+	// the session has exceeded its timeout, consider it expired.
 	expiredSessions := sm.sessions.CollectExpired(func(session *Session) bool {
 		session.mu.RLock()
-		isExpired := now.After(session.ExpiresAt)
+		isExpired := now.After(session.ExpiresAt) ||
+			now.Sub(session.LastActivity) > session.Timeout
 		session.mu.RUnlock()
 		return isExpired
 	})
@@ -1160,14 +1161,22 @@ func (sm *SessionManager) GetSessionStats() map[string]interface{} {
 
 // Session methods for managing state and resources
 
+// UpdateActivityTimestamps atomically updates both LastActivity and ExpiresAt.
+// This ensures any session operation (query, cursor fetch, lock op, etc.) properly
+// extends the session lifetime. Must be called with s.mu already held.
+func (s *Session) updateActivityTimestampsLocked() {
+	now := time.Now()
+	s.LastActivity = now
+	s.ExpiresAt = now.Add(s.Timeout)
+}
+
 // StartQuery starts a new query execution
 func (s *Session) StartQuery(queryID, query string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.State = SessionStateExecuting
-	s.LastActivity = time.Now()
-	s.ExpiresAt = time.Now().Add(s.Timeout)
+	s.updateActivityTimestampsLocked()
 
 	s.CurrentQuery = &QueryInfo{
 		QueryID:   queryID,
@@ -1199,8 +1208,7 @@ func (s *Session) CompleteQuery(affectedRows int) {
 
 	s.CurrentQuery = nil
 	s.State = SessionStateActive
-	s.LastActivity = now
-	s.ExpiresAt = now.Add(s.Timeout)
+	s.updateActivityTimestampsLocked()
 
 	// Reset consecutive error count on success
 	s.ConsecutiveErrors = 0
@@ -1245,8 +1253,7 @@ func (s *Session) FailQuery(err error) {
 		s.State = SessionStateActive
 	}
 
-	s.LastActivity = now
-	s.ExpiresAt = now.Add(s.Timeout)
+	s.updateActivityTimestampsLocked()
 
 	// Log the error - use Warnw for user validation errors (no stack trace),
 	// Errorw for internal/system errors (includes stack trace for debugging)

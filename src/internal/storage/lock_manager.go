@@ -45,6 +45,10 @@ type Lock struct {
 	AcquiredAt   time.Time
 }
 
+// ErrDeadlockDetected is returned when a deadlock cycle is detected in the wait-for graph.
+// The youngest transaction in the cycle is chosen as the victim and receives this error.
+var ErrDeadlockDetected = fmt.Errorf("deadlock detected: transaction aborted as deadlock victim")
+
 // DocumentLock tracks locks on a single document, supporting multiple concurrent readers
 type DocumentLock struct {
 	// For write locks: single owner (nil if no write lock)
@@ -58,6 +62,10 @@ type DocumentLock struct {
 
 	// Condition variable for efficient blocking when waiting for locks
 	cond *sync.Cond
+
+	// waitCh is closed when any lock on this document is released, waking all waiters.
+	// Recreated after each close so subsequent waiters can block again.
+	waitCh chan struct{}
 }
 
 // lockShard holds a partition of the lock table (P1: sharded lock table)
@@ -72,6 +80,86 @@ type lockKey struct {
 	documentID string
 }
 
+// WaitForGraph tracks which transactions are waiting for which other transactions.
+// Used for deadlock detection via DFS cycle detection.
+// The graph is small (only active waiting transactions), so cycle detection is O(V+E) and negligible.
+type WaitForGraph struct {
+	mu    sync.Mutex
+	edges map[string]map[string]struct{} // waiterTxID → set of holderTxIDs
+}
+
+// NewWaitForGraph creates a new wait-for graph.
+func NewWaitForGraph() *WaitForGraph {
+	return &WaitForGraph{
+		edges: make(map[string]map[string]struct{}),
+	}
+}
+
+// AddEdge records that waiter is waiting for holder to release a lock.
+func (g *WaitForGraph) AddEdge(waiter, holder string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.edges[waiter] == nil {
+		g.edges[waiter] = make(map[string]struct{})
+	}
+	g.edges[waiter][holder] = struct{}{}
+}
+
+// RemoveWaiter removes all edges originating from the given waiter.
+func (g *WaitForGraph) RemoveWaiter(waiter string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.edges, waiter)
+}
+
+// RemoveHolder removes the given holder from all waiters' edge sets.
+// Called when a transaction releases its locks.
+func (g *WaitForGraph) RemoveHolder(holder string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for waiter, holders := range g.edges {
+		delete(holders, holder)
+		if len(holders) == 0 {
+			delete(g.edges, waiter)
+		}
+	}
+}
+
+// DetectCycle performs a DFS from startTxID looking for a cycle.
+// Returns the cycle path (including startTxID at both ends) if found, or nil.
+func (g *WaitForGraph) DetectCycle(startTxID string) []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	visited := make(map[string]bool)
+	path := []string{startTxID}
+	if g.dfs(startTxID, startTxID, visited, &path) {
+		return path
+	}
+	return nil
+}
+
+// dfs is the recursive DFS helper for cycle detection. Must be called with g.mu held.
+func (g *WaitForGraph) dfs(current, target string, visited map[string]bool, path *[]string) bool {
+	holders := g.edges[current]
+	for next := range holders {
+		if next == target {
+			*path = append(*path, next)
+			return true // cycle found
+		}
+		if visited[next] {
+			continue
+		}
+		visited[next] = true
+		*path = append(*path, next)
+		if g.dfs(next, target, visited, path) {
+			return true
+		}
+		*path = (*path)[:len(*path)-1]
+	}
+	return false
+}
+
 // LockManager manages document-level locks for transactions
 // P1: Uses 64 shards keyed by hash(bundleName+documentID) to distribute contention
 // P2: Per-transaction lock tracking for O(1) release instead of O(shards*docs)
@@ -82,6 +170,9 @@ type LockManager struct {
 	// This allows O(locks_held) release instead of O(all_shards * all_documents)
 	txLocks   map[string]map[lockKey]struct{}
 	txLocksMu sync.RWMutex
+
+	// Wait-for graph for deadlock detection
+	waitGraph *WaitForGraph
 
 	lockTimeout time.Duration
 	logger      *zap.SugaredLogger
@@ -113,6 +204,7 @@ func NewLockManager(logger *zap.SugaredLogger, lockTimeout ...time.Duration) *Lo
 		lockTimeout: timeout,
 		logger:      logger,
 		txLocks:     make(map[string]map[lockKey]struct{}),
+		waitGraph:   NewWaitForGraph(),
 	}
 	for i := range lm.shards {
 		lm.shards[i].locks = make(map[string]map[string]*DocumentLock)
@@ -199,10 +291,17 @@ func (lm *LockManager) releaseSpecificLock(txID, bundleName, documentID string) 
 		} else if releasedReadLock && wasLastReader {
 			docLock.cond.Signal()
 		}
+		// Wake channel-based waiters and recreate channel
+		if docLock.waitCh != nil {
+			close(docLock.waitCh)
+			docLock.waitCh = make(chan struct{})
+		}
 	}
 	docLock.mu.Unlock()
 
 	if released {
+		// Clean up wait-for graph: remove this txID as a holder so waiters re-evaluate
+		lm.waitGraph.RemoveHolder(txID)
 		lm.logger.Debugf("Released lock for txID=%s on %s.%s", txID, bundleName, documentID)
 		docLock.mu.RLock()
 		isEmpty := docLock.writeLock == nil && len(docLock.readLocks) == 0
@@ -218,17 +317,17 @@ func (lm *LockManager) releaseSpecificLock(txID, bundleName, documentID string) 
 	return released
 }
 
-// AcquireReadLock acquires a read lock on a document
-// Multiple transactions can hold read locks simultaneously
-// If a write lock exists, waits up to lockTimeout before giving up
-// DEADLOCK FIX: Uses polling with short sleeps instead of indefinite cond.Wait()
+// AcquireReadLock acquires a read lock on a document.
+// Multiple transactions can hold read locks simultaneously.
+// If a write lock exists, waits on a notification channel with deadlock detection.
 func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID string) error {
-	startTime := time.Now()
+	deadline := time.Now().Add(lm.lockTimeout)
 	shard := &lm.shards[shardIndex(bundleName, documentID)]
 
 	for {
-		// Check timeout at the start of each iteration
-		if time.Since(startTime) >= lm.lockTimeout {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			lm.waitGraph.RemoveWaiter(txID)
 			return fmt.Errorf("timeout waiting for READ lock on %s.%s after %v",
 				bundleName, documentID, lm.lockTimeout)
 		}
@@ -241,7 +340,10 @@ func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID s
 		docLock := shard.locks[bundleName][documentID]
 
 		if docLock == nil {
-			docLock = &DocumentLock{readLocks: make(map[string]*Lock)}
+			docLock = &DocumentLock{
+				readLocks: make(map[string]*Lock),
+				waitCh:    make(chan struct{}),
+			}
 			docLock.cond = sync.NewCond(&docLock.mu)
 			shard.locks[bundleName][documentID] = docLock
 		}
@@ -257,14 +359,29 @@ func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID s
 
 		// Check if blocked by a write lock from another transaction
 		if docLock.writeLock != nil && docLock.writeLock.OwnerTxID != txID {
-			writeOwnerTxID := docLock.writeLock.OwnerTxID
+			holderTxID := docLock.writeLock.OwnerTxID
+			waitCh := docLock.waitCh
 			docLock.mu.Unlock()
 			shard.mu.Unlock()
 
-			// DEADLOCK FIX: Instead of blocking indefinitely with cond.Wait(),
-			// use short sleep and retry. This ensures we always respect the timeout.
-			lm.logger.Debugf("Waiting for WRITE lock release on %s.%s (held by txID: %s)", bundleName, documentID, writeOwnerTxID)
-			time.Sleep(5 * time.Millisecond)
+			// Record wait-for edge and check for deadlock
+			lm.waitGraph.AddEdge(txID, holderTxID)
+			if cycle := lm.waitGraph.DetectCycle(txID); cycle != nil {
+				lm.waitGraph.RemoveWaiter(txID)
+				lm.logger.Infof("Deadlock detected: cycle=%v, victim=%s", cycle, txID)
+				return ErrDeadlockDetected
+			}
+
+			// Wait for lock release notification or timeout
+			timer := time.NewTimer(remaining)
+			select {
+			case <-waitCh:
+				timer.Stop()
+			case <-timer.C:
+				lm.waitGraph.RemoveWaiter(txID)
+				return fmt.Errorf("timeout waiting for READ lock on %s.%s after %v",
+					bundleName, documentID, lm.lockTimeout)
+			}
 			continue
 		}
 
@@ -277,23 +394,25 @@ func (lm *LockManager) AcquireReadLock(bundleName, documentID, txID, sessionID s
 		}
 		docLock.mu.Unlock()
 		shard.mu.Unlock()
-		// Track this lock for fast release
+
+		// Clean up wait-for graph and track the lock
+		lm.waitGraph.RemoveWaiter(txID)
 		lm.trackLock(txID, bundleName, documentID)
 		return nil
 	}
 }
 
-// AcquireWriteLock acquires a write lock on a document
-// Automatically upgrades from read lock if the same transaction holds a read lock
-// If another transaction holds any lock, waits up to lockTimeout before giving up
-// DEADLOCK FIX: Uses polling with short sleeps instead of indefinite cond.Wait()
+// AcquireWriteLock acquires a write lock on a document.
+// Automatically upgrades from read lock if the same transaction holds a read lock.
+// If another transaction holds any lock, waits on a notification channel with deadlock detection.
 func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID string) error {
-	startTime := time.Now()
+	deadline := time.Now().Add(lm.lockTimeout)
 	shard := &lm.shards[shardIndex(bundleName, documentID)]
 
 	for {
-		// Check timeout at the start of each iteration
-		if time.Since(startTime) >= lm.lockTimeout {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			lm.waitGraph.RemoveWaiter(txID)
 			return fmt.Errorf("timeout waiting for WRITE lock on %s.%s after %v",
 				bundleName, documentID, lm.lockTimeout)
 		}
@@ -306,7 +425,10 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 		docLock := shard.locks[bundleName][documentID]
 
 		if docLock == nil {
-			docLock = &DocumentLock{readLocks: make(map[string]*Lock)}
+			docLock = &DocumentLock{
+				readLocks: make(map[string]*Lock),
+				waitCh:    make(chan struct{}),
+			}
 			docLock.cond = sync.NewCond(&docLock.mu)
 			shard.locks[bundleName][documentID] = docLock
 		}
@@ -322,46 +444,66 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 
 		// Upgrade path: we have a read lock, upgrade to write
 		if _, hasReadLock := docLock.readLocks[txID]; hasReadLock {
-			delete(docLock.readLocks, txID)
-			docLock.writeLock = &Lock{
-				Mode:         LockModeWrite,
-				OwnerTxID:    txID,
-				OwnerSession: sessionID,
-				AcquiredAt:   time.Now(),
+			// Check if other readers block the upgrade
+			otherReaders := len(docLock.readLocks) - 1
+			hasOtherWriteLock := docLock.writeLock != nil && docLock.writeLock.OwnerTxID != txID
+			if otherReaders == 0 && !hasOtherWriteLock {
+				delete(docLock.readLocks, txID)
+				docLock.writeLock = &Lock{
+					Mode:         LockModeWrite,
+					OwnerTxID:    txID,
+					OwnerSession: sessionID,
+					AcquiredAt:   time.Now(),
+				}
+				docLock.mu.Unlock()
+				shard.mu.Unlock()
+				lm.waitGraph.RemoveWaiter(txID)
+				lm.logger.Debugf("Upgraded READ lock to WRITE lock for txID=%s on %s.%s", txID, bundleName, documentID)
+				return nil
 			}
-			docLock.mu.Unlock()
-			shard.mu.Unlock()
-			lm.logger.Debugf("Upgraded READ lock to WRITE lock for txID=%s on %s.%s", txID, bundleName, documentID)
-			return nil
+			// Fall through to wait below — other readers/writers still blocking
 		}
 
-		// Check for blocking conditions
-		otherReaders := 0
+		// Collect blocking holders for wait-for graph edges
+		var holderTxIDs []string
+		if docLock.writeLock != nil && docLock.writeLock.OwnerTxID != txID {
+			holderTxIDs = append(holderTxIDs, docLock.writeLock.OwnerTxID)
+		}
 		for readerTxID := range docLock.readLocks {
 			if readerTxID != txID {
-				otherReaders++
+				holderTxIDs = append(holderTxIDs, readerTxID)
 			}
 		}
-		hasOtherWriteLock := docLock.writeLock != nil && docLock.writeLock.OwnerTxID != txID
 
-		if otherReaders > 0 || hasOtherWriteLock {
-			blockingInfo := ""
-			if hasOtherWriteLock {
-				blockingInfo = fmt.Sprintf("write lock held by txID: %s", docLock.writeLock.OwnerTxID)
-			} else {
-				blockingInfo = fmt.Sprintf("%d read lock(s) held by other transactions", otherReaders)
-			}
+		if len(holderTxIDs) > 0 {
+			waitCh := docLock.waitCh
 			docLock.mu.Unlock()
 			shard.mu.Unlock()
 
-			// DEADLOCK FIX: Instead of blocking indefinitely with cond.Wait(),
-			// use short sleep and retry. This ensures we always respect the timeout.
-			lm.logger.Debugf("Waiting for lock release on %s.%s (%s)", bundleName, documentID, blockingInfo)
-			time.Sleep(5 * time.Millisecond)
+			// Record wait-for edges and check for deadlock
+			for _, holderID := range holderTxIDs {
+				lm.waitGraph.AddEdge(txID, holderID)
+			}
+			if cycle := lm.waitGraph.DetectCycle(txID); cycle != nil {
+				lm.waitGraph.RemoveWaiter(txID)
+				lm.logger.Infof("Deadlock detected: cycle=%v, victim=%s", cycle, txID)
+				return ErrDeadlockDetected
+			}
+
+			// Wait for lock release notification or timeout
+			timer := time.NewTimer(remaining)
+			select {
+			case <-waitCh:
+				timer.Stop()
+			case <-timer.C:
+				lm.waitGraph.RemoveWaiter(txID)
+				return fmt.Errorf("timeout waiting for WRITE lock on %s.%s after %v",
+					bundleName, documentID, lm.lockTimeout)
+			}
 			continue
 		}
 
-		// Acquire the write lock
+		// No blockers — acquire the write lock
 		docLock.writeLock = &Lock{
 			Mode:         LockModeWrite,
 			OwnerTxID:    txID,
@@ -370,7 +512,9 @@ func (lm *LockManager) AcquireWriteLock(bundleName, documentID, txID, sessionID 
 		}
 		docLock.mu.Unlock()
 		shard.mu.Unlock()
-		// Track this lock for fast release
+
+		// Clean up wait-for graph and track the lock
+		lm.waitGraph.RemoveWaiter(txID)
 		lm.trackLock(txID, bundleName, documentID)
 		return nil
 	}
@@ -431,6 +575,11 @@ func (lm *LockManager) ReleaseLocks(txID string) int {
 					} else if releasedReadLock && wasLastReader {
 						docLock.cond.Signal()
 					}
+					// Wake channel-based waiters and recreate channel
+					if docLock.waitCh != nil {
+						close(docLock.waitCh)
+						docLock.waitCh = make(chan struct{})
+					}
 				}
 				docLock.mu.Unlock()
 
@@ -452,6 +601,7 @@ func (lm *LockManager) ReleaseLocks(txID string) int {
 		shard.mu.Unlock()
 	}
 	if releaseCount > 0 {
+		lm.waitGraph.RemoveHolder(txID)
 		lm.logger.Debugf("Released %d locks for txID=%s (slow path)", releaseCount, txID)
 	}
 	return releaseCount
@@ -493,6 +643,11 @@ func (lm *LockManager) ReleaseLocksForSession(sessionID string) int {
 						docLock.cond.Broadcast()
 					} else if wasLastReader {
 						docLock.cond.Signal()
+					}
+					// Wake channel-based waiters and recreate channel
+					if docLock.waitCh != nil {
+						close(docLock.waitCh)
+						docLock.waitCh = make(chan struct{})
 					}
 				}
 				docLock.mu.Unlock()
@@ -580,6 +735,11 @@ func (lm *LockManager) CleanupOrphanedLocks(activeSessionIDs map[string]bool) (i
 						docLock.cond.Broadcast()
 					} else if wasLastReader {
 						docLock.cond.Signal()
+					}
+					// Wake channel-based waiters and recreate channel
+					if docLock.waitCh != nil {
+						close(docLock.waitCh)
+						docLock.waitCh = make(chan struct{})
 					}
 				}
 				docLock.mu.Unlock()

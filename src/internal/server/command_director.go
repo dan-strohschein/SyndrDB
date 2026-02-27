@@ -350,6 +350,20 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				errors.LayerCommand).WithContext("command", command)
 		case "backups":
 			return ShowBackups(command, logger, &serviceManager, startTime)
+		case "restore":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "points" {
+				return ShowRestorePoints(command, logger, &serviceManager)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW RESTORE command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
+		case "wal":
+			if len(firstWords) > 2 && strings.ToLower(firstWords[2]) == "archive" {
+				return ShowWALArchive(command, logger, &serviceManager)
+			}
+			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown SHOW WAL command: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		}
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unknown SHOW command: %s", command),
@@ -1039,6 +1053,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return &result, nil
 	}
 
+	// Parse CREATE RESTORE POINT command
+	if strings.HasPrefix(commandLower, "create restore point") {
+		return CreateRestorePoint(command, logger, &serviceManager)
+	}
+
 	// Parse CHECKPOINT command
 	if strings.HasPrefix(commandLower, "checkpoint") {
 		return Checkpoint(command, logger, &serviceManager)
@@ -1049,8 +1068,14 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return BackupDatabase(command, logger, &serviceManager)
 	}
 
-	// Parse RESTORE command
+	// Parse RESTORE command (PITR restore takes precedence over plain restore)
 	if strings.HasPrefix(commandLower, "restore") {
+		restLower := strings.ToLower(command)
+		if strings.Contains(restLower, "to point in time") ||
+			strings.Contains(restLower, "to lsn") ||
+			strings.Contains(restLower, "to restore point") {
+			return PITRRestore(command, logger, &serviceManager)
+		}
 		return RestoreDatabase(command, logger, &serviceManager)
 	}
 
@@ -1085,7 +1110,7 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 // Session management commands
 
 // injectTransactionSnapshot adds the appropriate MVCC snapshot to the context.
-// For REPEATABLE READ: uses the transaction-level snapshot (captured at BEGIN).
+// For REPEATABLE READ / SERIALIZABLE: uses the transaction-level snapshot (captured at BEGIN).
 // For READ COMMITTED: creates a fresh statement-level snapshot (current global sequence).
 // For non-transactional queries: uses current global sequence.
 func injectTransactionSnapshot(ctx context.Context, session *Session, serviceManager ServiceManager, logger *zap.SugaredLogger) context.Context {
@@ -1094,7 +1119,7 @@ func injectTransactionSnapshot(ctx context.Context, session *Session, serviceMan
 			// READ COMMITTED: Create fresh snapshot for this statement
 			ctx = createReadCommittedSnapshot(ctx, session, serviceManager, logger)
 		} else {
-			// REPEATABLE READ (default): Use transaction-level snapshot
+			// REPEATABLE READ / SERIALIZABLE: Use transaction-level snapshot
 			snapshot := session.GetMVCCSnapshot()
 			if snapshot != nil {
 				snapshotInfo := &planner.SnapshotInfo{
@@ -1403,6 +1428,22 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	}
 
 	logger.Debugf("Query executed successfully: Retrieved %d documents", len(documents))
+
+	// SSI: Record SIREAD locks for SERIALIZABLE transactions.
+	// Every document read by a SERIALIZABLE transaction is tracked so that writes by
+	// other transactions can detect rw-antidependencies and prevent serialization anomalies.
+	if serviceManager.SIReadTracker != nil && session != nil && session.IsInTransaction() &&
+		session.GetEffectiveIsolationLevel() == syndrQL.IsolationSerializable && len(documents) > 0 {
+		bundleName := query.FromBundle
+		docKeys := make([]string, 0, len(documents))
+		for docID := range documents {
+			docKeys = append(docKeys, bundleName+":"+docID)
+		}
+		var txIDUint64 uint64
+		if _, parseErr := fmt.Sscanf(session.ActiveTransactionID, "%016x", &txIDUint64); parseErr == nil && txIDUint64 > 0 {
+			serviceManager.SIReadTracker.RecordRead(txIDUint64, docKeys)
+		}
+	}
 
 	// FOR UPDATE: Acquire read locks only when explicitly requested via SELECT ... FOR UPDATE.
 	// Ordinary SELECT relies on MVCC snapshot isolation for consistent reads without locking.
@@ -1802,6 +1843,20 @@ func ExecutePreparedQuery(
 				errors.LayerCommand).WithContext("memory_limit", fmt.Sprintf("%d", memoryLimit))
 		}
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", preparedStmt.ParsedQuery.FromBundle)
+	}
+
+	// SSI: Record SIREAD locks for prepared statement execution in SERIALIZABLE transactions.
+	if serviceManager.SIReadTracker != nil && session != nil && session.IsInTransaction() &&
+		session.GetEffectiveIsolationLevel() == syndrQL.IsolationSerializable && len(documents) > 0 {
+		bundleName := preparedStmt.BundleName
+		docKeys := make([]string, 0, len(documents))
+		for docID := range documents {
+			docKeys = append(docKeys, bundleName+":"+docID)
+		}
+		var txIDUint64 uint64
+		if _, parseErr := fmt.Sscanf(session.ActiveTransactionID, "%016x", &txIDUint64); parseErr == nil && txIDUint64 > 0 {
+			serviceManager.SIReadTracker.RecordRead(txIDUint64, docKeys)
+		}
 	}
 
 	// FOR UPDATE: Acquire read locks only for prepared statements with FOR UPDATE.

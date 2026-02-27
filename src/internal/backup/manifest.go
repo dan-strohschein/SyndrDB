@@ -37,6 +37,14 @@ type Manifest struct {
 	PrimaryDBDocuments []PrimaryDBDoc `json:"primary_db_documents"` // Metadata from Primary database
 	TotalSizeBytes     int64          `json:"total_size_bytes"`     // Total size of all files
 	CompressedSize     int64          `json:"compressed_size"`      // Size of compressed archive
+
+	// PITR (Point-in-Time Recovery) fields — v1.1+
+	StartLSN       uint64   `json:"start_lsn,omitempty"`         // WAL LSN before checkpoint
+	EndLSN         uint64   `json:"end_lsn,omitempty"`           // WAL LSN after checkpoint
+	StartCommitSeq uint64   `json:"start_commit_seq,omitempty"`  // Commit sequence before checkpoint
+	EndCommitSeq   uint64   `json:"end_commit_seq,omitempty"`    // Commit sequence after checkpoint
+	PITREnabled    bool     `json:"pitr_enabled,omitempty"`      // Whether this backup supports PITR
+	WALSegments    []string `json:"wal_segments_needed,omitempty"` // Informational: WAL segments needed for replay
 }
 
 // FileEntry represents a single file in the backup

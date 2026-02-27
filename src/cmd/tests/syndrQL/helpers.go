@@ -25,6 +25,7 @@ import (
 	"syndrdb/src/internal/domain/document"
 	"syndrdb/src/internal/domain/migration"
 	"syndrdb/src/internal/domain/models"
+	"syndrdb/src/internal/domain/view"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/internal/query/planner"
@@ -126,6 +127,7 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 	globalSettings.LogDir = args.LogDir
 	globalSettings.DataDir = args.DataDir
 	globalSettings.TempDir = args.TempDir
+	globalSettings.AuthEnabled = false // Disable auth for E2E tests (no TCP connection/session)
 
 	// Create directory structure
 	if err := os.MkdirAll(args.DataDir, 0755); err != nil {
@@ -233,6 +235,12 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 	// PHASE 3: MVCC - Initialize conflict tracker
 	conflictTracker := server.NewConflictTracker()
 
+	// VIEW SUPPORT: Create ViewService sharing the planner's ViewRegistry
+	viewStore := view.NewViewFileStore(sugar)
+	viewService := view.NewViewServiceWithRegistry(sugar, unifiedPlanner.GetViewRegistry(), viewStore)
+	viewBundleAdapter := server.NewViewBundleAdapter(bundleService, databaseService, unifiedPlanner, sugar)
+	viewService.SetBundleOps(viewBundleAdapter)
+
 	serviceManager := &server.ServiceManager{
 		DatabaseService:        databaseService,
 		BundleService:          bundleService,
@@ -244,10 +252,12 @@ func setupFullServerTB(tb testing.TB) *TestFixture {
 		UserService:            userService,
 		PermissionService:      permissionService,
 		MigrationService:       migrationService,
+		ViewService:            viewService,
 		SessionManager:         sessionManager,
 		ActiveConnections:      make(map[string]*server.Connection),
 		UnifiedPlanner:         unifiedPlanner,
 		ConflictTracker:        conflictTracker,
+		SIReadTracker:          server.NewSIReadTracker(),
 	}
 
 	// Wire LockManager to SessionManager for proper lock cleanup on session termination
