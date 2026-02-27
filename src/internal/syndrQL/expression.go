@@ -30,6 +30,7 @@ const (
 	EXPR_SUBQUERY     // Added for Tier 1 subquery support
 	EXPR_INTERVAL     // Added for DateTime INTERVAL literals
 	EXPR_AT_TIME_ZONE // Added for AT TIME ZONE operator
+	EXPR_CAST         // Added for CAST(expr AS type)
 )
 
 // LiteralExpression represents a literal value (string, number, bool, null)
@@ -252,6 +253,34 @@ func (atze *AtTimeZoneExpression) String() string {
 	return fmt.Sprintf("(%s AT TIME ZONE '%s')", atze.Expression.String(), atze.Timezone)
 }
 
+// CastExpression represents CAST(expression AS target_type)
+type CastExpression struct {
+	Expression   Expression // The expression being cast
+	TargetType   FieldType  // Resolved target type
+	ResolvedType FieldType  // Same as TargetType (set by parser)
+}
+
+func (ce *CastExpression) expressionNode() {}
+func (ce *CastExpression) String() string {
+	typeName := ce.TargetType.String()
+	// Use SyndrQL type names (uppercase) rather than FieldType display names
+	switch ce.TargetType {
+	case FieldTypeInt:
+		typeName = "INT"
+	case FieldTypeFloat:
+		typeName = "FLOAT"
+	case FieldTypeString:
+		typeName = "STRING"
+	case FieldTypeBool:
+		typeName = "BOOL"
+	case FieldTypeDate:
+		typeName = "DATE"
+	case FieldTypeDateTime:
+		typeName = "DATETIME"
+	}
+	return fmt.Sprintf("CAST(%s AS %s)", ce.Expression.String(), typeName)
+}
+
 // Precedence levels for operator precedence parsing (Pratt parser)
 type Precedence int
 
@@ -368,6 +397,7 @@ func NewExpressionParser(tokens []Token, logger *zap.SugaredLogger) *ExpressionP
 	p.registerPrefix(TOKEN_AGE, p.parseFunctionCall)
 	p.registerPrefix(TOKEN_FUNCTION, p.parseFunctionCall) // Fallback for unknown F:FUNCTION_NAME
 	p.registerPrefix(TOKEN_INTERVAL, p.parseInterval)
+	p.registerPrefix(TOKEN_CAST, p.parseCastExpression)
 
 	// Register keyword-as-identifier parsers for keywords that might be used as field names
 	// This allows reserved words to be used as field names in WHERE clauses and expressions
@@ -1022,6 +1052,62 @@ func (p *ExpressionParser) parseInterval() (Expression, error) {
 		Value:           intervalValue,
 		Unit:            TOKEN_ILLEGAL, // No explicit unit for string format
 		IsNumericFormat: false,
+	}, nil
+}
+
+// parseCastExpression parses CAST(expression AS type)
+// Syntax: CAST(expr AS INT|FLOAT|STRING|BOOL|DATE|DATETIME)
+func (p *ExpressionParser) parseCastExpression() (Expression, error) {
+	p.advance() // consume CAST
+
+	// Expect opening parenthesis
+	if p.current.Type != TOKEN_LPAREN {
+		return nil, fmt.Errorf("expected '(' after CAST, got %s", p.current.Type.String())
+	}
+	p.advance() // consume '('
+
+	// Parse inner expression
+	inner, err := p.parseExpression(PRECEDENCE_LOWEST)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing CAST expression: %w", err)
+	}
+
+	// Expect AS keyword
+	if p.current.Type != TOKEN_AS {
+		return nil, fmt.Errorf("expected AS after CAST expression, got %s", p.current.Type.String())
+	}
+	p.advance() // consume AS
+
+	// Expect a type token
+	var targetType FieldType
+	switch p.current.Type {
+	case TOKEN_INT_TYPE:
+		targetType = FieldTypeInt
+	case TOKEN_FLOAT_TYPE:
+		targetType = FieldTypeFloat
+	case TOKEN_STRING_TYPE:
+		targetType = FieldTypeString
+	case TOKEN_BOOL_TYPE:
+		targetType = FieldTypeBool
+	case TOKEN_DATE_TYPE:
+		targetType = FieldTypeDate
+	case TOKEN_DATETIME_TYPE:
+		targetType = FieldTypeDateTime
+	default:
+		return nil, fmt.Errorf("expected type name (INT, FLOAT, STRING, BOOL, DATE, DATETIME) after AS, got %s", p.current.Type.String())
+	}
+	p.advance() // consume type token
+
+	// Expect closing parenthesis
+	if p.current.Type != TOKEN_RPAREN {
+		return nil, fmt.Errorf("expected ')' after CAST type, got %s", p.current.Type.String())
+	}
+	p.advance() // consume ')'
+
+	return &CastExpression{
+		Expression:   inner,
+		TargetType:   targetType,
+		ResolvedType: targetType,
 	}, nil
 }
 

@@ -51,6 +51,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"syndrdb/src/internal/domain/database"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/syndrQL"
@@ -389,9 +390,33 @@ func updateDocumentsCommitSequenceAsync(
 		txID, commitSequence, len(documentLocations), errCount)
 }
 
-// createUndoFunction creates a function that can undo WAL operations
-// This function applies the reverse of each operation using the before-image data
-func createUndoFunction(serviceManager ServiceManager, database *models.Database, logger *zap.SugaredLogger) func(journal.WALEntry) error {
+// createUndoFunction creates a function that can undo WAL operations.
+// This function applies the reverse of each operation using the before-image data.
+// When database is nil (e.g. during crash recovery), dbService is used to resolve
+// the database dynamically by searching all databases for the target bundle.
+func createUndoFunction(serviceManager ServiceManager, db *models.Database, dbService *database.DatabaseService, logger *zap.SugaredLogger) func(journal.WALEntry) error {
+	// Cache resolved databases per bundle name (avoids repeated lookups during recovery)
+	dbCache := make(map[string]*models.Database)
+
+	resolveDB := func(bundleName string) *models.Database {
+		if db != nil {
+			return db
+		}
+		if cached, ok := dbCache[bundleName]; ok {
+			return cached
+		}
+		if dbService != nil {
+			for _, candidate := range dbService.ListDatabases() {
+				if _, err := serviceManager.BundleService.GetBundleByName(candidate, bundleName); err == nil {
+					dbCache[bundleName] = candidate
+					return candidate
+				}
+			}
+		}
+		logger.Warnf("Could not resolve database for bundle '%s' during undo", bundleName)
+		return nil
+	}
+
 	return func(entry journal.WALEntry) error {
 		switch entry.Operation {
 		case journal.OpInsert:
@@ -416,10 +441,17 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 			// Document was flushed to disk - need physical delete
 			logger.Infof("UNDO INSERT: Document %s was flushed, performing physical delete from bundle %s", entry.DocumentID, entry.BundleName)
 
+			resolvedDB := resolveDB(entry.BundleName)
+			if resolvedDB == nil {
+				return errors.New(errors.ERR_INTERNAL_STORAGE,
+					fmt.Sprintf("cannot resolve database for bundle '%s' during undo insert", entry.BundleName),
+					errors.LayerStorage).WithContext("bundle", entry.BundleName)
+			}
+
 			// Execute the delete within an auto-commit transaction to ensure it's durable
 			err := serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
 				// Get the bundle
-				bundle, err := serviceManager.BundleService.GetBundleByName(database, entry.BundleName)
+				bundle, err := serviceManager.BundleService.GetBundleByName(resolvedDB, entry.BundleName)
 				if err != nil {
 					return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
 						fmt.Sprintf("failed to get bundle %s", entry.BundleName),
@@ -457,7 +489,14 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 					"failed to unmarshal before-data for undo", errors.LayerTransaction).WithContext("document_id", entry.DocumentID)
 			}
 
-			bundle, err := serviceManager.BundleService.GetBundleByName(database, entry.BundleName)
+			resolvedDB := resolveDB(entry.BundleName)
+			if resolvedDB == nil {
+				return errors.New(errors.ERR_INTERNAL_STORAGE,
+					fmt.Sprintf("cannot resolve database for bundle '%s' during undo update", entry.BundleName),
+					errors.LayerStorage).WithContext("bundle", entry.BundleName)
+			}
+
+			bundle, err := serviceManager.BundleService.GetBundleByName(resolvedDB, entry.BundleName)
 			if err != nil {
 				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
 					fmt.Sprintf("failed to get bundle %s for undo", entry.BundleName),
@@ -480,7 +519,7 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 				WhereClause: fmt.Sprintf("DocumentID = '%s'", entry.DocumentID),
 			}
 
-			err = serviceManager.BundleService.UpdateDocumentInBundle(context.Background(), database, bundle, updateCmd)
+			err = serviceManager.BundleService.UpdateDocumentInBundle(context.Background(), resolvedDB, bundle, updateCmd)
 			if err != nil {
 				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
 					fmt.Sprintf("failed to undo update of document %s", entry.DocumentID),
@@ -502,7 +541,14 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 					"failed to unmarshal before-data for undo", errors.LayerTransaction).WithContext("document_id", entry.DocumentID)
 			}
 
-			bundle, err := serviceManager.BundleService.GetBundleByName(database, entry.BundleName)
+			resolvedDB := resolveDB(entry.BundleName)
+			if resolvedDB == nil {
+				return errors.New(errors.ERR_INTERNAL_STORAGE,
+					fmt.Sprintf("cannot resolve database for bundle '%s' during undo delete", entry.BundleName),
+					errors.LayerStorage).WithContext("bundle", entry.BundleName)
+			}
+
+			bundle, err := serviceManager.BundleService.GetBundleByName(resolvedDB, entry.BundleName)
 			if err != nil {
 				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_STORAGE,
 					fmt.Sprintf("failed to get bundle %s for undo", entry.BundleName),
@@ -526,7 +572,7 @@ func createUndoFunction(serviceManager ServiceManager, database *models.Database
 
 			// Re-insert the document (DocumentID will be regenerated, but that's a known limitation)
 			// TODO: Implement RestoreDocumentWithID method to preserve original DocumentID
-			_, err = serviceManager.BundleService.AddDocumentToBundle(database, bundle, docCommand)
+			_, err = serviceManager.BundleService.AddDocumentToBundle(resolvedDB, bundle, docCommand)
 			if err != nil {
 				return errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
 					fmt.Sprintf("failed to undo delete of document %s", entry.DocumentID),
@@ -564,7 +610,7 @@ func HandleRollback(session *Session, serviceManager ServiceManager, database *m
 			logger.Errorf("Failed to flush WAL before undo: %v", err)
 		}
 
-		undoFunc := createUndoFunction(serviceManager, database, logger)
+		undoFunc := createUndoFunction(serviceManager, database, nil, logger)
 		err := serviceManager.WALManager.UndoToLSN(startLSN, txID, undoFunc, serviceManager.LockManager)
 		if err != nil {
 			logger.Errorf("Failed to undo transaction changes: %v", err)
@@ -708,7 +754,7 @@ func HandleRollbackToSavepoint(savepointName string, session *Session, serviceMa
 			logger.Errorf("Failed to flush WAL before undo: %v", err)
 		}
 
-		undoFunc := createUndoFunction(serviceManager, database, logger)
+		undoFunc := createUndoFunction(serviceManager, database, nil, logger)
 		err := serviceManager.WALManager.UndoToLSN(savepointLSN, txID, undoFunc, serviceManager.LockManager)
 		if err != nil {
 			return nil, errors.WrapWithMessage(err, errors.ERR_INTERNAL_TRANSACTION,
@@ -888,7 +934,7 @@ func AutoRollbackOnError(session *Session, serviceManager ServiceManager, databa
 			logger.Errorf("Failed to flush WAL before undo: %v", err)
 		}
 
-		undoFunc := createUndoFunction(serviceManager, database, logger)
+		undoFunc := createUndoFunction(serviceManager, database, nil, logger)
 		err := serviceManager.WALManager.UndoToLSN(startLSN, txID, undoFunc, serviceManager.LockManager)
 		if err != nil {
 			logger.Errorf("Failed to undo transaction changes during auto-rollback: %v", err)

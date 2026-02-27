@@ -589,9 +589,12 @@ func extractFieldNameFromQualified(qualifiedName string) string {
 // ValidateUnifiedQuery performs comprehensive validation on the parsed query
 // This function is exported so it can be called from the syndrQL parser integration
 func ValidateUnifiedQuery(unified *UnifiedSelectQuery, logger *zap.SugaredLogger) error {
-	// Validation 1: Must have FROM bundle
+	// Expression-only queries (no FROM clause) are valid — the select parser already
+	// validates that they don't use WHERE, GROUP BY, ORDER BY, LIMIT, DISTINCT, or
+	// aggregates via validateExpressionOnly(). The planner handles them via
+	// createExpressionOnlyPlan(). Skip all bundle-dependent validations.
 	if unified.FromBundle == "" {
-		return fmt.Errorf("FROM clause is required")
+		return nil
 	}
 
 	// Validation 2: GROUP BY validation

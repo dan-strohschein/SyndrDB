@@ -199,6 +199,9 @@ func (sa *SemanticAnalyzer) resolveExpression(expr Expression) {
 	case *AtTimeZoneExpression:
 		sa.resolveExpression(e.Expression)
 		e.ResolvedType = FieldTypeDateTime
+	case *CastExpression:
+		sa.resolveExpression(e.Expression)
+		e.ResolvedType = e.TargetType
 	}
 }
 
@@ -458,7 +461,7 @@ func (sa *SemanticAnalyzer) resolveCall(expr *CallExpression) {
 		expr.ResolvedType = FieldTypeString
 	case "LENGTH":
 		expr.ResolvedType = FieldTypeInt
-	case "ABS", "CEIL", "FLOOR", "ROUND":
+	case "ABS", "CEIL", "FLOOR", "ROUND", "MOD":
 		if len(expr.Arguments) > 0 {
 			argType := GetResolvedType(expr.Arguments[0])
 			if argType == FieldTypeInt {
@@ -469,6 +472,10 @@ func (sa *SemanticAnalyzer) resolveCall(expr *CallExpression) {
 		} else {
 			expr.ResolvedType = FieldTypeFloat
 		}
+	case "POWER", "SQRT", "LOG":
+		expr.ResolvedType = FieldTypeFloat
+	case "SIGN":
+		expr.ResolvedType = FieldTypeInt
 	case "NOW":
 		expr.ResolvedType = FieldTypeDateTime
 	case "EXTRACT":

@@ -833,6 +833,59 @@ func (v *ReferentialIntegrityValidator) IdentifyForeignKeyFields(
 	return foreignKeyUpdates
 }
 
+// IdentifyInsertForeignKeyFields finds FK fields for INSERT validation.
+//
+// Unlike IdentifyForeignKeyFields (designed for UPDATE), this only checks
+// incoming relationships — relationships defined on OTHER bundles where
+// DestinationBundle == this bundle. These define the FK fields in this bundle
+// that reference parent bundles.
+//
+// Section 1 of IdentifyForeignKeyFields is skipped because bundle.Relationships
+// defines this bundle as a PARENT (SourceField = PK), not as a child with FKs.
+func (v *ReferentialIntegrityValidator) IdentifyInsertForeignKeyFields(
+	database *models.Database,
+	bundle *models.Bundle,
+	insertFields map[string]string,
+	bundleCache map[string]*models.Bundle,
+) []ForeignKeyUpdate {
+	if database == nil {
+		return nil
+	}
+
+	var foreignKeyUpdates []ForeignKeyUpdate
+
+	// Find relationships on other bundles where DestinationBundle == this bundle.
+	// These define FK fields in this bundle (DestinationField) that reference
+	// parent bundles (SourceBundle) via their PK (SourceField).
+	incomingRelationships := v.getAllBundlesWithRelationshipsTo(database, bundle.Name, bundleCache)
+
+	for _, relInfo := range incomingRelationships {
+		sourceBundle, found := bundleCache[relInfo.SourceBundle]
+		if !found {
+			var err error
+			sourceBundle, err = v.bundleService.GetBundleByName(database, relInfo.SourceBundle)
+			if err != nil {
+				v.logger.Warnf("Failed to load bundle '%s' during FK identification: %v", relInfo.SourceBundle, err)
+				continue
+			}
+			bundleCache[relInfo.SourceBundle] = sourceBundle
+		}
+
+		if relationship, exists := sourceBundle.Relationships[relInfo.RelationshipName]; exists {
+			fieldName := relationship.DestinationField
+			if newValue, isBeingInserted := insertFields[fieldName]; isBeingInserted {
+				foreignKeyUpdates = append(foreignKeyUpdates, ForeignKeyUpdate{
+					FieldName:    fieldName,
+					NewValue:     newValue,
+					Relationship: relationship,
+				})
+			}
+		}
+	}
+
+	return foreignKeyUpdates
+}
+
 // isFieldUsedInRelationships checks if a field is referenced in any relationship
 //
 // This is used by foreign key index protection to prevent dropping indexes

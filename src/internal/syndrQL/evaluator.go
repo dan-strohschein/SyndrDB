@@ -154,6 +154,8 @@ func (e *ExpressionEvaluator) Evaluate(expr Expression, doc *models.Document, bu
 		return e.evaluateAtTimeZone(expr, doc, bundleContext, subqueryContext, paramContext)
 	case *ParameterExpression:
 		return e.evaluateParameter(expr, paramContext)
+	case *CastExpression:
+		return e.evaluateCast(expr, doc, bundleContext, subqueryContext, paramContext)
 	default:
 		return nil, fmt.Errorf("unsupported expression type: %T", expr)
 	}
@@ -602,6 +604,209 @@ func (e *ExpressionEvaluator) evaluateAtTimeZone(expr *AtTimeZoneExpression, doc
 	// Convert to target timezone
 	converted := dt.In(loc)
 	return converted, nil
+}
+
+// evaluateCast evaluates a CAST(expression AS type) expression
+// Follows PostgreSQL semantics: strict errors on invalid conversions, NULL propagation
+func (e *ExpressionEvaluator) evaluateCast(expr *CastExpression, doc *models.Document, bundleContext *BundleContext, subqueryContext SubqueryExecutionContext, paramContext *ParameterContext) (interface{}, error) {
+	// Evaluate the inner expression
+	val, err := e.Evaluate(expr.Expression, doc, bundleContext, subqueryContext, paramContext)
+	if err != nil {
+		return nil, fmt.Errorf("error evaluating CAST expression: %w", err)
+	}
+
+	// NULL propagation: CAST(NULL AS anything) returns NULL
+	if val == nil {
+		return nil, nil
+	}
+
+	// Convert to FieldValue for uniform handling
+	fv := interfaceToFieldValue(val)
+	if fv.Type == models.FieldTypeNil {
+		return nil, nil
+	}
+
+	switch expr.TargetType {
+	case FieldTypeInt:
+		return e.castToInt(fv)
+	case FieldTypeFloat:
+		return e.castToFloat(fv)
+	case FieldTypeString:
+		return e.castToString(fv)
+	case FieldTypeBool:
+		return e.castToBool(fv)
+	case FieldTypeDate:
+		return e.castToDate(fv)
+	case FieldTypeDateTime:
+		return e.castToDateTime(fv)
+	default:
+		return nil, fmt.Errorf("unsupported CAST target type: %s", expr.TargetType.String())
+	}
+}
+
+func (e *ExpressionEvaluator) castToInt(fv models.FieldValue) (interface{}, error) {
+	switch fv.Type {
+	case models.FieldTypeInt:
+		return models.NewIntValue(fv.IntVal), nil
+	case models.FieldTypeFloat:
+		if fv.FloatVal != fv.FloatVal { // NaN check
+			return nil, fmt.Errorf("cannot cast NaN to type INT")
+		}
+		if fv.FloatVal > 9223372036854775807 || fv.FloatVal < -9223372036854775808 {
+			return nil, fmt.Errorf("cannot cast Inf to type INT")
+		}
+		return models.NewIntValue(int64(fv.FloatVal)), nil
+	case models.FieldTypeString:
+		// Try parsing as int first
+		i, err := strconv.ParseInt(fv.StringVal, 10, 64)
+		if err == nil {
+			return models.NewIntValue(i), nil
+		}
+		// Try as float then truncate
+		f, err2 := strconv.ParseFloat(fv.StringVal, 64)
+		if err2 == nil {
+			return models.NewIntValue(int64(f)), nil
+		}
+		return nil, fmt.Errorf("cannot cast string \"%s\" to type INT", fv.StringVal)
+	case models.FieldTypeBool:
+		if fv.BoolVal {
+			return models.NewIntValue(1), nil
+		}
+		return models.NewIntValue(0), nil
+	default:
+		return nil, fmt.Errorf("cannot cast type %s to type INT", e.fieldValueTypeName(fv.Type))
+	}
+}
+
+func (e *ExpressionEvaluator) castToFloat(fv models.FieldValue) (interface{}, error) {
+	switch fv.Type {
+	case models.FieldTypeFloat:
+		return models.NewFloatValue(fv.FloatVal), nil
+	case models.FieldTypeInt:
+		return models.NewFloatValue(float64(fv.IntVal)), nil
+	case models.FieldTypeString:
+		f, err := strconv.ParseFloat(fv.StringVal, 64)
+		if err != nil {
+			return nil, fmt.Errorf("cannot cast string \"%s\" to type FLOAT", fv.StringVal)
+		}
+		return models.NewFloatValue(f), nil
+	case models.FieldTypeBool:
+		if fv.BoolVal {
+			return models.NewFloatValue(1.0), nil
+		}
+		return models.NewFloatValue(0.0), nil
+	default:
+		return nil, fmt.Errorf("cannot cast type %s to type FLOAT", e.fieldValueTypeName(fv.Type))
+	}
+}
+
+func (e *ExpressionEvaluator) castToString(fv models.FieldValue) (interface{}, error) {
+	switch fv.Type {
+	case models.FieldTypeString:
+		return models.NewStringValue(fv.StringVal), nil
+	case models.FieldTypeInt:
+		return models.NewStringValue(strconv.FormatInt(fv.IntVal, 10)), nil
+	case models.FieldTypeFloat:
+		return models.NewStringValue(strconv.FormatFloat(fv.FloatVal, 'f', -1, 64)), nil
+	case models.FieldTypeBool:
+		if fv.BoolVal {
+			return models.NewStringValue("true"), nil
+		}
+		return models.NewStringValue("false"), nil
+	case models.FieldTypeDateTime:
+		return models.NewStringValue(fv.DateTimeVal.Format(time.RFC3339)), nil
+	case models.FieldTypeDate:
+		return models.NewStringValue(fv.DateVal.Format("2006-01-02")), nil
+	default:
+		return nil, fmt.Errorf("cannot cast type %s to type STRING", e.fieldValueTypeName(fv.Type))
+	}
+}
+
+func (e *ExpressionEvaluator) castToBool(fv models.FieldValue) (interface{}, error) {
+	switch fv.Type {
+	case models.FieldTypeBool:
+		return models.NewBoolValue(fv.BoolVal), nil
+	case models.FieldTypeInt:
+		return models.NewBoolValue(fv.IntVal != 0), nil
+	case models.FieldTypeFloat:
+		return models.NewBoolValue(fv.FloatVal != 0), nil
+	case models.FieldTypeString:
+		lower := strings.ToLower(fv.StringVal)
+		switch lower {
+		case "true", "t", "1", "yes":
+			return models.NewBoolValue(true), nil
+		case "false", "f", "0", "no":
+			return models.NewBoolValue(false), nil
+		default:
+			return nil, fmt.Errorf("cannot cast string \"%s\" to type BOOL", fv.StringVal)
+		}
+	default:
+		return nil, fmt.Errorf("cannot cast type %s to type BOOL", e.fieldValueTypeName(fv.Type))
+	}
+}
+
+func (e *ExpressionEvaluator) castToDate(fv models.FieldValue) (interface{}, error) {
+	switch fv.Type {
+	case models.FieldTypeDate:
+		return models.NewDateValue(fv.DateVal), nil
+	case models.FieldTypeDateTime:
+		// Truncate time component
+		y, m, d := fv.DateTimeVal.Date()
+		return models.NewDateValue(time.Date(y, m, d, 0, 0, 0, 0, time.UTC)), nil
+	case models.FieldTypeString:
+		t, isDateOnly, err := utils.ParseDateTime(fv.StringVal)
+		if err != nil {
+			return nil, fmt.Errorf("cannot cast string \"%s\" to type DATE", fv.StringVal)
+		}
+		if isDateOnly {
+			return models.NewDateValue(t), nil
+		}
+		// Truncate time portion
+		y, m, d := t.Date()
+		return models.NewDateValue(time.Date(y, m, d, 0, 0, 0, 0, time.UTC)), nil
+	default:
+		return nil, fmt.Errorf("cannot cast type %s to type DATE", e.fieldValueTypeName(fv.Type))
+	}
+}
+
+func (e *ExpressionEvaluator) castToDateTime(fv models.FieldValue) (interface{}, error) {
+	switch fv.Type {
+	case models.FieldTypeDateTime:
+		return models.NewDateTimeValue(fv.DateTimeVal), nil
+	case models.FieldTypeDate:
+		// Promote to midnight UTC
+		return models.NewDateTimeValue(fv.DateVal), nil
+	case models.FieldTypeString:
+		t, _, err := utils.ParseDateTime(fv.StringVal)
+		if err != nil {
+			return nil, fmt.Errorf("cannot cast string \"%s\" to type DATETIME", fv.StringVal)
+		}
+		return models.NewDateTimeValue(t), nil
+	default:
+		return nil, fmt.Errorf("cannot cast type %s to type DATETIME", e.fieldValueTypeName(fv.Type))
+	}
+}
+
+// fieldValueTypeName returns a user-friendly type name for error messages
+func (e *ExpressionEvaluator) fieldValueTypeName(t models.FieldValueType) string {
+	switch t {
+	case models.FieldTypeString:
+		return "STRING"
+	case models.FieldTypeInt:
+		return "INT"
+	case models.FieldTypeFloat:
+		return "FLOAT"
+	case models.FieldTypeBool:
+		return "BOOL"
+	case models.FieldTypeDateTime:
+		return "DATETIME"
+	case models.FieldTypeDate:
+		return "DATE"
+	case models.FieldTypeNil:
+		return "NULL"
+	default:
+		return "UNKNOWN"
+	}
 }
 
 // evaluateArray evaluates an array expression
