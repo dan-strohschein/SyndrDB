@@ -77,7 +77,10 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 	}
 
 	// FK validation: verify referenced parent documents exist
-	if len(bundle.Relationships) > 0 || database != nil {
+	// Only check outgoing relationships (this bundle's FK fields pointing to parent bundles).
+	// Incoming relationships (other bundles referencing this one) are irrelevant for INSERT —
+	// we're adding a new document, not changing an existing PK that others depend on.
+	if len(bundle.Relationships) > 0 {
 		validator := NewReferentialIntegrityValidator(s, s.logger)
 		bundleCache := make(map[string]*models.Bundle)
 
@@ -90,8 +93,8 @@ func (s *BundleService) AddDocumentToBundle(database *models.Database, bundle *m
 			insertFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
 		}
 
-		// Identify which fields are foreign keys
-		foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, insertFields, bundleCache)
+		// Identify which fields are foreign keys (nil database = skip incoming relationship scan)
+		foreignKeyUpdates := validator.IdentifyForeignKeyFields(nil, bundle, insertFields, bundleCache)
 
 		if len(foreignKeyUpdates) > 0 {
 			// Validate each FK — uses O(1) hash index lookups
@@ -396,7 +399,8 @@ func (s *BundleService) AddDocumentsToBundle(database *models.Database, bundle *
 	}
 
 	// Phase 1.5: FK validation for all documents (batched, deduplicated)
-	if len(bundle.Relationships) > 0 || database != nil {
+	// Only check outgoing relationships — incoming are irrelevant for INSERT.
+	if len(bundle.Relationships) > 0 {
 		validator := NewReferentialIntegrityValidator(s, s.logger)
 		bundleCache := make(map[string]*models.Bundle)
 		validationCache := make(map[string]*ForeignKeyViolation)
@@ -410,7 +414,7 @@ func (s *BundleService) AddDocumentsToBundle(database *models.Database, bundle *
 				insertFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
 			}
 
-			foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, insertFields, bundleCache)
+			foreignKeyUpdates := validator.IdentifyForeignKeyFields(nil, bundle, insertFields, bundleCache)
 
 			if len(foreignKeyUpdates) > 0 {
 				violation := validator.batchValidateForeignKeys(bundle, []string{fmt.Sprintf("doc-%d", i)}, foreignKeyUpdates, validationCache)
@@ -514,7 +518,8 @@ func (s *BundleService) AddDocumentsToBundleWithTxID(database *models.Database, 
 	}
 
 	// Phase 1.5: FK validation for all documents (batched, deduplicated)
-	if len(bundle.Relationships) > 0 || database != nil {
+	// Only check outgoing relationships — incoming are irrelevant for INSERT.
+	if len(bundle.Relationships) > 0 {
 		validator := NewReferentialIntegrityValidator(s, s.logger)
 		bundleCache := make(map[string]*models.Bundle)
 		validationCache := make(map[string]*ForeignKeyViolation)
@@ -528,7 +533,7 @@ func (s *BundleService) AddDocumentsToBundleWithTxID(database *models.Database, 
 				insertFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
 			}
 
-			foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, insertFields, bundleCache)
+			foreignKeyUpdates := validator.IdentifyForeignKeyFields(nil, bundle, insertFields, bundleCache)
 
 			if len(foreignKeyUpdates) > 0 {
 				violation := validator.batchValidateForeignKeys(bundle, []string{fmt.Sprintf("doc-%d", i)}, foreignKeyUpdates, validationCache)
