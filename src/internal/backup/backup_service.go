@@ -34,9 +34,11 @@ type BackupService struct {
 
 // BackupOptions configures backup behavior
 type BackupOptions struct {
-	Compression    string // "gzip", "zstd", "none"
-	IncludeIndexes bool   // Include index files
-	OutputPath     string // Full path to output file
+	Compression      string // "gzip", "zstd", "none"
+	IncludeIndexes   bool   // Include index files
+	OutputPath       string // Full path to output file
+	Incremental      bool   // true = incremental backup
+	ParentBackupPath string // explicit parent (auto-discovered from catalog if empty)
 }
 
 // NewBackupService creates a new backup service instance
@@ -57,8 +59,13 @@ func NewBackupService(
 	}
 }
 
-// CreateBackup creates a backup of the specified database
+// CreateBackup creates a backup of the specified database.
+// If options.Incremental is true, delegates to CreateIncrementalBackup.
 func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (string, error) {
+	if options.Incremental {
+		return bs.CreateIncrementalBackup(dbName, options)
+	}
+
 	startTime := time.Now()
 
 	bs.logger.Infow("Starting database backup",
@@ -108,9 +115,16 @@ func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (str
 	// Step 6: Build manifest
 	manifest := bs.buildManifest(db, files, options)
 
+	// Set incremental metadata (every backup gets an ID for catalog tracking)
+	backupID := helpers.GenerateUUID()
+	manifest.BackupID = backupID
+	manifest.BackupType = "full"
+	manifest.BaseBackupID = backupID
+	manifest.ChainDepth = 0
+
 	// Set PITR fields if capable
 	if pitrCapable {
-		manifest.BackupVersion = "1.1"
+		manifest.BackupVersion = "2.0"
 		manifest.StartLSN = startLSN
 		manifest.EndLSN = endLSN
 		manifest.StartCommitSeq = startCommitSeq
@@ -122,6 +136,8 @@ func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (str
 			"start_commit_seq", startCommitSeq,
 			"end_commit_seq", endCommitSeq,
 		)
+	} else {
+		manifest.BackupVersion = "2.0"
 	}
 
 	// Step 7: Create temporary directory for staging
@@ -161,6 +177,34 @@ func (bs *BackupService) CreateBackup(dbName string, options BackupOptions) (str
 		return "", fmt.Errorf("failed to stat backup file: %w", err)
 	}
 	manifest.CompressedSize = backupInfo.Size()
+
+	// Step 13: Update backup catalog
+	if bs.settings.BackupCatalogEnabled {
+		catalogPath := filepath.Join(bs.settings.BackupDir, "backup_catalog.json")
+		catalog, catalogErr := LoadCatalog(catalogPath)
+		if catalogErr != nil {
+			bs.logger.Warnw("Failed to load backup catalog", "error", catalogErr)
+		} else {
+			catalog.AddEntry(BackupCatalogEntry{
+				BackupID:       backupID,
+				BackupType:     "full",
+				BaseBackupID:   backupID,
+				ChainDepth:     0,
+				DatabaseName:   dbName,
+				Timestamp:      manifest.Timestamp,
+				StartLSN:       startLSN,
+				EndLSN:         endLSN,
+				StartCommitSeq: startCommitSeq,
+				EndCommitSeq:   endCommitSeq,
+				FilePath:       options.OutputPath,
+				SizeBytes:      backupInfo.Size(),
+				FileCount:      len(manifest.Files),
+			})
+			if saveErr := SaveCatalog(catalog, catalogPath); saveErr != nil {
+				bs.logger.Warnw("Failed to save backup catalog", "error", saveErr)
+			}
+		}
+	}
 
 	duration := time.Since(startTime)
 	bs.logger.Infow("Backup completed successfully",
@@ -700,7 +744,6 @@ func (nwc *nopWriteCloser) Close() error {
 	return nil
 }
 
-// TODO: I will implement incremental backups (track LSN/checkpoint numbers)
 // TODO: I will add backup streaming to avoid temp directory for large databases
 // TODO: I will add multi-threaded compression for better performance
 // TODO: I will implement background backup (async operation)

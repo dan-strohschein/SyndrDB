@@ -181,6 +181,10 @@ func ShowBackups(command string, logger *zap.SugaredLogger, serviceManager *Serv
 			"failed to read backup directory", errors.LayerCommand).WithContext("backup_dir", backupDir)
 	}
 
+	// Load catalog for enrichment (optional — gracefully degrade if missing)
+	catalogPath := filepath.Join(backupDir, "backup_catalog.json")
+	catalog, _ := backup.LoadCatalog(catalogPath)
+
 	results := make([]map[string]interface{}, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sdb" {
@@ -191,11 +195,24 @@ func ShowBackups(command string, logger *zap.SugaredLogger, serviceManager *Serv
 			logger.Warnf("Failed to stat backup file %s: %v", entry.Name(), err)
 			continue
 		}
-		results = append(results, map[string]interface{}{
+		row := map[string]interface{}{
 			"file_name":   entry.Name(),
 			"size_bytes":  fileInfo.Size(),
 			"modified_at": fileInfo.ModTime().UTC().Format(time.RFC3339),
-		})
+		}
+
+		// Enrich with catalog info if available
+		if catalog != nil {
+			fullPath := filepath.Join(backupDir, entry.Name())
+			if ce := catalog.FindEntryByPath(fullPath); ce != nil {
+				row["backup_type"] = ce.BackupType
+				row["chain_depth"] = ce.ChainDepth
+				row["database_name"] = ce.DatabaseName
+				row["backup_id"] = ce.BackupID
+			}
+		}
+
+		results = append(results, row)
 	}
 
 	return &CommandResponse{
@@ -212,7 +229,6 @@ func ShowBackups(command string, logger *zap.SugaredLogger, serviceManager *Serv
 //
 // TODO: I will add support for additional options:
 // - ENCRYPT = true with optional KEY = 'password'
-// - INCREMENTAL = true to create incremental backup
 // - ASYNC = true to run backup in background
 func parseBackupOptions(tokens []string, options *backup.BackupOptions) error {
 	if len(tokens) == 0 {
@@ -266,6 +282,33 @@ func parseBackupOptions(tokens []string, options *backup.BackupOptions) error {
 					errors.LayerCommand).WithContext("value", value)
 			}
 
+		case "INCREMENTAL":
+			value = strings.ToLower(value)
+			if value == "true" || value == "1" {
+				options.Incremental = true
+			} else if value == "false" || value == "0" {
+				options.Incremental = false
+			} else {
+				return errors.New(errors.ERR_VALIDATION_TYPE,
+					fmt.Sprintf("invalid boolean value for INCREMENTAL: %s", value),
+					errors.LayerCommand).WithContext("value", value)
+			}
+
+		case "TYPE":
+			value = strings.ToLower(value)
+			if value == "incremental" {
+				options.Incremental = true
+			} else if value == "full" {
+				options.Incremental = false
+			} else {
+				return errors.New(errors.ERR_VALIDATION_FIELD,
+					fmt.Sprintf("invalid backup type: %s (supported: full, incremental)", value),
+					errors.LayerCommand).WithContext("type", value)
+			}
+
+		case "PARENT":
+			options.ParentBackupPath = value
+
 		default:
 			return errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown backup option: %s", key),
@@ -282,4 +325,75 @@ func parseBackupOptions(tokens []string, options *backup.BackupOptions) error {
 	}
 
 	return nil
+}
+
+// ShowBackupChain handles the SHOW BACKUP CHAIN FOR "path.sdb" command.
+// It builds and displays the full backup chain for a given backup file.
+func ShowBackupChain(command string, logger *zap.SugaredLogger, serviceManager *ServiceManager, startTime time.Time) (*CommandResponse, error) {
+	// Parse: SHOW BACKUP CHAIN FOR "path"
+	tokens := tokenizeQuoted(command)
+
+	// Find the FOR keyword
+	var backupPath string
+	for i, t := range tokens {
+		if strings.ToUpper(t) == "FOR" && i+1 < len(tokens) {
+			backupPath = strings.Trim(tokens[i+1], "\"'")
+			break
+		}
+	}
+
+	if backupPath == "" {
+		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+			"invalid syntax: expected SHOW BACKUP CHAIN FOR \"path\"",
+			errors.LayerCommand)
+	}
+
+	args := settings.GetSettings()
+	if !filepath.IsAbs(backupPath) {
+		backupPath = filepath.Join(args.BackupDir, backupPath)
+	}
+
+	// Try catalog-based chain first
+	catalogPath := filepath.Join(args.BackupDir, "backup_catalog.json")
+	catalog, _ := backup.LoadCatalog(catalogPath)
+
+	var chain []backup.BackupCatalogEntry
+	var chainErr error
+
+	if catalog != nil {
+		if ce := catalog.FindEntryByPath(backupPath); ce != nil {
+			chain, chainErr = catalog.BuildChain(ce.BackupID)
+		}
+	}
+
+	// Fallback to path-based discovery
+	if chain == nil || chainErr != nil {
+		chain, chainErr = backup.BuildChainFromPath(backupPath)
+	}
+
+	if chainErr != nil {
+		return nil, errors.WrapWithMessage(chainErr, errors.ERR_INTERNAL_STORAGE,
+			"failed to build backup chain", errors.LayerCommand).WithContext("backup_path", backupPath)
+	}
+
+	results := make([]map[string]interface{}, 0, len(chain))
+	for _, entry := range chain {
+		results = append(results, map[string]interface{}{
+			"backup_id":        entry.BackupID,
+			"backup_type":      entry.BackupType,
+			"chain_depth":      entry.ChainDepth,
+			"database_name":    entry.DatabaseName,
+			"timestamp":        entry.Timestamp.UTC().Format(time.RFC3339),
+			"start_commit_seq": entry.StartCommitSeq,
+			"end_commit_seq":   entry.EndCommitSeq,
+			"file_path":        entry.FilePath,
+			"size_bytes":       entry.SizeBytes,
+		})
+	}
+
+	return &CommandResponse{
+		ResultCount:     len(results),
+		Result:          results,
+		ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+	}, nil
 }
