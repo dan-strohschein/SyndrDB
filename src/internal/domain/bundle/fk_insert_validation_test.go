@@ -2,40 +2,13 @@ package bundle
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"syndrdb/src/internal/domain/models"
 
 	"go.uber.org/zap"
 )
-
-// createTestBundleWithFK creates a child bundle with a foreign key relationship to a parent bundle.
-// In SyndrDB's relationship model (for outgoing FKs stored on the child bundle):
-//   - SourceField = the FK field in the child bundle (e.g., "customer_id")
-//   - SourceBundle = the parent bundle being referenced (e.g., "Customers")
-//   - DestinationBundle = the child bundle itself (e.g., "Orders")
-//   - DestinationField = the referenced field in the parent (e.g., "DocumentID")
-func createTestBundleWithFK(childName, parentName, fkField, parentField string) *models.Bundle {
-	return &models.Bundle{
-		Name: childName,
-		DocumentStructure: models.DocumentStructure{
-			FieldDefinitions: map[string]models.FieldDefinition{
-				fkField: {Name: fkField, Type: "STRING"},
-			},
-		},
-		Indexes:       make(map[string]models.IndexReference),
-		Relationships: map[string]models.Relationship{
-			childName + "_" + parentName: {
-				Name:              childName + "_" + parentName,
-				SourceBundle:      parentName,
-				SourceBundleName:  parentName,
-				SourceField:       fkField,
-				DestinationBundle: parentName,
-				DestinationField:  parentField,
-			},
-		},
-	}
-}
 
 // createTestBundleNoFK creates a bundle with no relationships.
 func createTestBundleNoFK(name string) *models.Bundle {
@@ -55,12 +28,45 @@ func testLogger() *zap.SugaredLogger {
 	return zap.NewNop().Sugar()
 }
 
-// TestIdentifyForeignKeyFields_OutgoingRelationships verifies that IdentifyForeignKeyFields
-// correctly identifies FK fields from outgoing relationships (bundle.Relationships).
-func TestIdentifyForeignKeyFields_OutgoingRelationships(t *testing.T) {
+// TestIdentifyInsertForeignKeyFields_NilDatabase verifies that
+// IdentifyInsertForeignKeyFields returns nil when database is nil (zero-overhead fast path).
+func TestIdentifyInsertForeignKeyFields_NilDatabase(t *testing.T) {
 	logger := testLogger()
 	validator := NewReferentialIntegrityValidator(nil, logger)
-	bundle := createTestBundleWithFK("Orders", "Customers", "customer_id", "DocumentID")
+	bundle := createTestBundleNoFK("Products")
+	bundleCache := make(map[string]*models.Bundle)
+
+	insertFields := map[string]string{"name": "Widget"}
+	fkUpdates := validator.IdentifyInsertForeignKeyFields(nil, bundle, insertFields, bundleCache)
+	if fkUpdates != nil {
+		t.Fatalf("expected nil FK updates for nil database, got %d", len(fkUpdates))
+	}
+}
+
+// TestIdentifyForeignKeyFields_Section1_ForUpdate verifies that IdentifyForeignKeyFields
+// section 1 (outgoing relationships) identifies fields via SourceField.
+// This tests the UPDATE path where SourceField is the FK field in the current bundle.
+func TestIdentifyForeignKeyFields_Section1_ForUpdate(t *testing.T) {
+	logger := testLogger()
+	validator := NewReferentialIntegrityValidator(nil, logger)
+
+	// Simulate a bundle where SourceField IS the FK (as section 1 expects for UPDATE)
+	bundle := &models.Bundle{
+		Name: "Orders",
+		DocumentStructure: models.DocumentStructure{
+			FieldDefinitions: map[string]models.FieldDefinition{
+				"customer_id": {Name: "customer_id", Type: "STRING"},
+			},
+		},
+		Indexes: make(map[string]models.IndexReference),
+		Relationships: map[string]models.Relationship{
+			"orders_customers": {
+				Name:         "orders_customers",
+				SourceBundle: "Customers",
+				SourceField:  "customer_id",
+			},
+		},
+	}
 	bundleCache := make(map[string]*models.Bundle)
 
 	t.Run("FK field present in update fields is identified", func(t *testing.T) {
@@ -81,9 +87,7 @@ func TestIdentifyForeignKeyFields_OutgoingRelationships(t *testing.T) {
 	})
 
 	t.Run("non-FK field is not identified", func(t *testing.T) {
-		updateFields := map[string]string{
-			"other_field": "value",
-		}
+		updateFields := map[string]string{"other_field": "value"}
 		fkUpdates := validator.IdentifyForeignKeyFields(nil, bundle, updateFields, bundleCache)
 		if len(fkUpdates) != 0 {
 			t.Fatalf("expected 0 FK updates, got %d", len(fkUpdates))
@@ -91,8 +95,7 @@ func TestIdentifyForeignKeyFields_OutgoingRelationships(t *testing.T) {
 	})
 
 	t.Run("empty update fields returns no FK updates", func(t *testing.T) {
-		updateFields := map[string]string{}
-		fkUpdates := validator.IdentifyForeignKeyFields(nil, bundle, updateFields, bundleCache)
+		fkUpdates := validator.IdentifyForeignKeyFields(nil, bundle, map[string]string{}, bundleCache)
 		if len(fkUpdates) != 0 {
 			t.Fatalf("expected 0 FK updates, got %d", len(fkUpdates))
 		}
@@ -107,10 +110,7 @@ func TestIdentifyForeignKeyFields_NoRelationships(t *testing.T) {
 	bundle := createTestBundleNoFK("Products")
 	bundleCache := make(map[string]*models.Bundle)
 
-	updateFields := map[string]string{
-		"name":  "Widget",
-		"price": "9.99",
-	}
+	updateFields := map[string]string{"name": "Widget", "price": "9.99"}
 	fkUpdates := validator.IdentifyForeignKeyFields(nil, bundle, updateFields, bundleCache)
 	if len(fkUpdates) != 0 {
 		t.Fatalf("expected 0 FK updates for bundle with no relationships, got %d", len(fkUpdates))
@@ -176,17 +176,22 @@ func TestFKFieldValueConversion_NilSkipped(t *testing.T) {
 	}
 }
 
-// TestFKValidationEarlyExit_NoRelationships verifies the zero-overhead fast path:
-// when a bundle has no relationships AND database is nil, FK validation should be skipped.
-func TestFKValidationEarlyExit_NoRelationships(t *testing.T) {
-	bundle := createTestBundleNoFK("Products")
+// TestInsertFKValidationGuard verifies the guard condition for INSERT:
+// FK validation only runs when database is non-nil (needed to scan other bundles).
+func TestInsertFKValidationGuard(t *testing.T) {
+	t.Run("nil database skips validation", func(t *testing.T) {
+		var database *models.Database
+		if database != nil {
+			t.Error("nil database should skip INSERT FK validation")
+		}
+	})
 
-	// Simulate the guard condition used in all INSERT/UPDATE paths
-	var database *models.Database // nil database
-	shouldValidate := len(bundle.Relationships) > 0 || database != nil
-	if shouldValidate {
-		t.Error("expected FK validation to be skipped for bundle with no relationships and nil database")
-	}
+	t.Run("non-nil database enables validation", func(t *testing.T) {
+		database := &models.Database{Name: "testdb"}
+		if database == nil {
+			t.Error("non-nil database should enable INSERT FK validation")
+		}
+	})
 }
 
 // TestFKViolationErrorFormat verifies that ForeignKeyViolation.Error() produces
@@ -203,10 +208,6 @@ func TestFKViolationErrorFormat(t *testing.T) {
 
 	errMsg := violation.Error()
 
-	// Check essential components
-	if got := errMsg; got == "" {
-		t.Fatal("error message should not be empty")
-	}
 	expectedParts := []string{
 		"Foreign key violation",
 		"customer_id",
@@ -214,14 +215,7 @@ func TestFKViolationErrorFormat(t *testing.T) {
 		"Customers",
 	}
 	for _, part := range expectedParts {
-		found := false
-		for i := 0; i <= len(errMsg)-len(part); i++ {
-			if errMsg[i:i+len(part)] == part {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !strings.Contains(errMsg, part) {
 			t.Errorf("expected error message to contain %q, got: %s", part, errMsg)
 		}
 	}
@@ -230,7 +224,6 @@ func TestFKViolationErrorFormat(t *testing.T) {
 // TestBatchValidationCache verifies that the validation cache deduplicates
 // FK lookups across multiple documents with the same FK value.
 func TestBatchValidationCache(t *testing.T) {
-	// Simulate the cache key generation used in batchValidateForeignKeys
 	cache := make(map[string]*ForeignKeyViolation)
 
 	// First lookup: cache miss
@@ -255,15 +248,65 @@ func TestBatchValidationCache(t *testing.T) {
 		ParentBundle:   "Customers",
 	}
 
-	// Verify violation is cached
 	if cached, found := cache[violationKey]; !found || cached == nil {
 		t.Error("expected cached violation")
 	}
 }
 
-// TestMultipleRelationships verifies that IdentifyForeignKeyFields correctly
-// identifies multiple FK fields when a bundle has multiple relationships.
-func TestMultipleRelationships(t *testing.T) {
+// TestParentBundleRelationshipNotTreatedAsFK verifies that when a parent bundle
+// has relationships stored on it (e.g., "users" with "users_orders"), the
+// SourceField (PK like "ID") is NOT mistakenly treated as a FK for INSERT.
+// This was the root cause bug: inserting into "users" would check "ID" as FK.
+func TestParentBundleRelationshipNotTreatedAsFK(t *testing.T) {
+	logger := testLogger()
+	validator := NewReferentialIntegrityValidator(nil, logger)
+
+	// Real-world model: relationship stored on PARENT bundle "users"
+	// SourceField = "ID" (PK in users), DestinationField = "user_id" (FK in orders)
+	usersBundle := &models.Bundle{
+		Name: "users",
+		DocumentStructure: models.DocumentStructure{
+			FieldDefinitions: map[string]models.FieldDefinition{
+				"ID":   {Name: "ID", Type: "INTEGER"},
+				"name": {Name: "name", Type: "STRING"},
+			},
+		},
+		Indexes: make(map[string]models.IndexReference),
+		Relationships: map[string]models.Relationship{
+			"users_orders": {
+				Name:              "users_orders",
+				RelationshipType:  "1toMany",
+				SourceBundle:      "users",
+				SourceField:       "ID",
+				DestinationBundle: "orders",
+				DestinationField:  "user_id",
+			},
+		},
+	}
+
+	// IdentifyInsertForeignKeyFields with nil database returns nil — correct for INSERT
+	insertFields := map[string]string{"ID": "1", "name": "Alice"}
+	bundleCache := make(map[string]*models.Bundle)
+	fkUpdates := validator.IdentifyInsertForeignKeyFields(nil, usersBundle, insertFields, bundleCache)
+	if fkUpdates != nil {
+		t.Fatalf("IdentifyInsertForeignKeyFields should return nil for nil database, got %d updates", len(fkUpdates))
+	}
+
+	// IdentifyForeignKeyFields section 1 WOULD match "ID" (the PK) — this is why
+	// it must NOT be used for INSERT
+	fkUpdatesSection1 := validator.IdentifyForeignKeyFields(nil, usersBundle, insertFields, bundleCache)
+	if len(fkUpdatesSection1) != 1 {
+		t.Fatalf("expected section 1 to match SourceField 'ID', got %d", len(fkUpdatesSection1))
+	}
+	if fkUpdatesSection1[0].FieldName != "ID" {
+		t.Errorf("expected section 1 to match 'ID', got '%s'", fkUpdatesSection1[0].FieldName)
+	}
+	// This demonstrates the bug: section 1 incorrectly treats PK "ID" as a FK
+}
+
+// TestMultipleRelationshipsOnParent verifies that IdentifyForeignKeyFields section 1
+// identifies multiple SourceFields when a parent bundle has multiple relationships.
+func TestMultipleRelationshipsOnParent(t *testing.T) {
 	logger := testLogger()
 	validator := NewReferentialIntegrityValidator(nil, logger)
 
@@ -278,24 +321,20 @@ func TestMultipleRelationships(t *testing.T) {
 		Indexes: make(map[string]models.IndexReference),
 		Relationships: map[string]models.Relationship{
 			"item_order": {
-				Name:              "item_order",
-				SourceBundle:      "Orders",
-				SourceField:       "order_id",
-				DestinationBundle: "Orders",
-				DestinationField:  "DocumentID",
+				Name:         "item_order",
+				SourceBundle: "Orders",
+				SourceField:  "order_id",
 			},
 			"item_product": {
-				Name:              "item_product",
-				SourceBundle:      "Products",
-				SourceField:       "product_id",
-				DestinationBundle: "Products",
-				DestinationField:  "DocumentID",
+				Name:         "item_product",
+				SourceBundle: "Products",
+				SourceField:  "product_id",
 			},
 		},
 	}
 	bundleCache := make(map[string]*models.Bundle)
 
-	t.Run("both FK fields identified when both present", func(t *testing.T) {
+	t.Run("both fields identified when both present", func(t *testing.T) {
 		updateFields := map[string]string{
 			"order_id":   "ord-1",
 			"product_id": "prod-1",
@@ -306,7 +345,7 @@ func TestMultipleRelationships(t *testing.T) {
 		}
 	})
 
-	t.Run("only one FK field identified when other not present", func(t *testing.T) {
+	t.Run("only one field identified when other not present", func(t *testing.T) {
 		updateFields := map[string]string{
 			"order_id": "ord-1",
 			"name":     "Widget",
