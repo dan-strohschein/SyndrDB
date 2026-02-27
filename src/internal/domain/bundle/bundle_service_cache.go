@@ -108,6 +108,8 @@ func (s *BundleService) invalidateBundlePageCache(bundleName string) {
 
 	// Clear entire visibility map when full page cache is invalidated
 	s.clearVisibilityForBundle(bundleName)
+	// Invalidate all page bloom filters when full page cache is invalidated
+	s.invalidatePageBloomForBundle(bundleName)
 }
 
 // invalidateDocumentPagesForInsert invalidates only the affected page(s) after an INSERT
@@ -134,6 +136,8 @@ func (s *BundleService) invalidateDocumentPagesForInsert(bundleName string, page
 
 	// Clear visibility map bit for this page (page may contain uncommitted docs now)
 	s.clearVisibilityForPage(bundleName, pageID)
+	// Invalidate page bloom filter (page content changed after INSERT)
+	s.invalidatePageBloom(bundleName, pageID)
 }
 
 // invalidatePlanCacheForBundle invalidates all cached query plans for a bundle
@@ -214,6 +218,12 @@ func (s *BundleService) GetOrCreateDocumentScanner(bundle *models.Bundle) (docum
 		}
 		vm := s.getOrCreateVisibilityMap(bundle.Name, pageCount)
 		smartScanner.SetVisibilityMap(vm)
+
+		// PAGE BLOOM FILTER: Wire bloom map into scanner for page-skip optimization
+		if settings.GetSettings().PageBloomEnabled {
+			pbm := s.getOrCreatePageBloomMap(bundle.Name)
+			smartScanner.SetPageBloomMap(pbm)
+		}
 	}
 
 	// Cache the scanner

@@ -1753,6 +1753,8 @@ func (s *BundleService) DeleteDocumentFromBundleRCU(bundle *models.Bundle, docCo
 				invalidatedPages[pageID] = true
 				// Clear visibility map bit for deleted page
 				s.clearVisibilityForPage(docCommand.BundleName, pageID)
+				// Invalidate page bloom filter (page content changed)
+				s.invalidatePageBloom(docCommand.BundleName, pageID)
 			}
 		}
 		// Invalidate the document->page cache entry
@@ -2129,6 +2131,8 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 				invalidatedPages[pageID] = true
 				// Clear visibility map bit for deleted page
 				s.clearVisibilityForPage(docCommand.BundleName, pageID)
+				// Invalidate page bloom filter (page content changed)
+				s.invalidatePageBloom(docCommand.BundleName, pageID)
 			}
 		}
 		// Invalidate the document->page cache entry

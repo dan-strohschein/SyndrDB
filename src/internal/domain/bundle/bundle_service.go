@@ -335,6 +335,15 @@ type BundleService struct {
 	vmRefresherCtx    context.Context    // Context for background VM refresher goroutine
 	vmRefresherCancel context.CancelFunc // Cancel function to stop VM refresher
 
+	// PAGE BLOOM FILTER: Per-bundle per-page bloom filters for scan skip optimization.
+	// Tracks field-value membership per page so scanners can skip pages that
+	// definitely don't contain matching values during filtered scans.
+	pageBloomMaps sync.Map // bundleName -> *PageBloomMap
+
+	// PAGE BLOOM FILTER: Background refresher context
+	pbRefresherCtx    context.Context    // Context for background page bloom refresher
+	pbRefresherCancel context.CancelFunc // Cancel function to stop page bloom refresher
+
 	// Observability: metrics reporter callback for index operation tracking
 	metricsReporter func(metricName string, value uint64)
 }
@@ -499,6 +508,13 @@ func NewBundleService(store bundlestore.BundleStore, factory BundleFactory,
 	// so scanners can skip per-document MVCC checks on those pages
 	service.vmRefresherCtx, service.vmRefresherCancel = context.WithCancel(context.Background())
 	go service.startVisibilityMapRefresher(service.vmRefresherCtx)
+
+	// PAGE BLOOM FILTER: Start background page bloom refresher to build bloom filters
+	// for pages that don't have one yet. Builds bloom from COW page snapshots.
+	if globalSettings.PageBloomEnabled {
+		service.pbRefresherCtx, service.pbRefresherCancel = context.WithCancel(context.Background())
+		go service.startPageBloomRefresher(service.pbRefresherCtx)
+	}
 
 	// SCHEMA PROVIDER: Wire up schema resolution so documents loaded from disk have
 	// correctly-populated doc.Values (schema-ordered field array). Without this,
