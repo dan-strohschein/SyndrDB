@@ -271,6 +271,9 @@ type FullScanNode struct {
 	// PREDICATE PUSHDOWN: When set, uses ScanWithPredicate to filter during page iteration
 	// instead of loading all documents and filtering afterward. Reduces copies for high-selectivity queries.
 	Predicate func(*models.Document) bool
+	// PAGE BLOOM FILTER: Equality predicates extracted from WHERE for page-skip optimization.
+	// Set by the planner when creating FullScanNode for filtered queries.
+	BloomHints []documentscanner.BloomHint
 } // FilterNode represents post-scan filtering
 type FilterNode struct {
 	Child      ExecutionNode

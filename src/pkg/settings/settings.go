@@ -288,6 +288,13 @@ type Arguments struct {
 	VacuumDeadRatioThreshold float64 `yaml:"vacuum_dead_ratio_threshold"` // Trigger full compaction at this dead ratio (default: 0.3)
 	VacuumMaxPagesPerCycle   int     `yaml:"vacuum_max_pages_per_cycle"`  // Max pages to scan per GC cycle (default: 100)
 
+	// Page-Level Bloom Filter Configuration
+	PageBloomEnabled          bool    `yaml:"page_bloom_enabled"`            // Enable per-page bloom filters for scan skip optimization (default: true)
+	PageBloomFalsePositiveRate float64 `yaml:"page_bloom_false_positive_rate"` // Target false positive rate for page blooms (default: 0.01 = 1%)
+	PageBloomMinDocsPerPage   int     `yaml:"page_bloom_min_docs_per_page"`  // Min docs on a page to justify building bloom (default: 50)
+	PageBloomMaxMemoryMB      int     `yaml:"page_bloom_max_memory_mb"`      // Global memory budget for all page blooms in MB (default: 64)
+	PageBloomRefreshIntervalSec int   `yaml:"page_bloom_refresh_interval_sec"` // Background builder interval in seconds (default: 30)
+
 	// Streaming & Cursor Configuration
 	StreamingChunkSize       int `yaml:"streaming_chunk_size"`         // Documents per streaming chunk (default: 256)
 	MaxOpenCursorsPerSession int `yaml:"max_open_cursors_per_session"` // Max server-side cursors per session (default: 64)
@@ -596,6 +603,13 @@ func GetSettings() *Arguments {
 			VacuumEnabled:            true, // Enable page-level dead version reclamation
 			VacuumDeadRatioThreshold: 0.3,  // Trigger full compaction at 30% dead ratio
 			VacuumMaxPagesPerCycle:   100,  // Scan up to 100 pages per GC cycle
+
+			// Page-Level Bloom Filter Defaults
+			PageBloomEnabled:            true,  // Enable per-page bloom filters
+			PageBloomFalsePositiveRate:  0.01,  // 1% false positive rate
+			PageBloomMinDocsPerPage:     50,    // Min 50 docs to build bloom
+			PageBloomMaxMemoryMB:        64,    // 64 MB global budget
+			PageBloomRefreshIntervalSec: 30,    // Refresh every 30 seconds
 
 			// Streaming & Cursor Defaults
 			StreamingChunkSize:       256, // 256 documents per streaming chunk

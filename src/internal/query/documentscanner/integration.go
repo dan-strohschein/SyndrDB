@@ -16,6 +16,21 @@ type VisibilityMapInterface interface {
 	Generation() uint64
 }
 
+// PageBloomMapInterface provides per-page bloom filter checking for scan skip optimization.
+// When a page's bloom says a searched field-value pair is definitely absent,
+// scanners can skip the page entirely during filtered scans.
+type PageBloomMapInterface interface {
+	MayContain(pageID uint32, fieldName, valueKeyString string) (bool, bool)
+	Generation() uint64
+}
+
+// BloomHint represents an equality predicate extracted from a WHERE clause
+// that can be checked against a page-level bloom filter.
+type BloomHint struct {
+	FieldName      string // The field name (e.g., "country")
+	ValueKeyString string // The value as a string key (e.g., "Iceland")
+}
+
 // BundleServiceInterface for document loading with streaming support
 type BundleServiceInterface interface {
 	GetAllDocumentsForIndexing(bundleName string) ([]*models.Document, error)
