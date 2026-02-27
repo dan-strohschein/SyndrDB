@@ -145,7 +145,7 @@ func InitServiceManager(dbService *database.DatabaseService, bundleService *bund
 			// transactions, and restores the global commit sequence + transaction counter.
 			undoFunc := createUndoFunction(ServiceManager{
 				BundleService: bundleService,
-			}, nil, logger)
+			}, nil, dbService, logger)
 			recoveryResult, recoveryErr := walManager.RecoverOnStartup(undoFunc)
 			if recoveryErr != nil {
 				logger.Errorf("WAL crash recovery failed: %v", recoveryErr)
