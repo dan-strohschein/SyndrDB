@@ -564,7 +564,9 @@ func (p *SelectParser) parseOptionalClauses(stmt *SelectStatement, logger *zap.S
 		p.advance()
 		whereExpr, err := p.parseWhereClause()
 		if err != nil {
-			logger.Errorf("FATAL: Error parsing WHERE clause: %v", err)
+			if logger != nil {
+				logger.Errorf("FATAL: Error parsing WHERE clause: %v", err)
+			}
 			return err
 		}
 		stmt.WhereClause = whereExpr
@@ -858,10 +860,14 @@ func (p *SelectParser) parseWithRelationshipClause(stmt *SelectStatement, logger
 	var relationshipName string
 	if p.current.Type == TOKEN_STRING {
 		relationshipName = p.current.Value
-		logger.Debugf("Parsed WITH RELATIONSHIP: %s", relationshipName)
+		if logger != nil {
+			logger.Debugf("Parsed WITH RELATIONSHIP: %s", relationshipName)
+		}
 	} else if p.current.Type == TOKEN_IDENT {
 		relationshipName = p.current.Value
-		logger.Debugf("Parsed WITH RELATIONSHIP: %s", relationshipName)
+		if logger != nil {
+			logger.Debugf("Parsed WITH RELATIONSHIP: %s", relationshipName)
+		}
 	} else {
 		return fmt.Errorf("expected relationship field name (string or identifier), got %s", p.current.Type.String())
 	}
@@ -1077,7 +1083,9 @@ func (p *SelectParser) parseJoinClause(logger *zap.SugaredLogger) (*JoinClause, 
 		return nil, fmt.Errorf("expected bundle name after JOIN, got %s", p.current.Type.String())
 	}
 	joinClause.RightBundle = p.current.Value
-	logger.Debugf("Parsing JOIN to bundle: %s", joinClause.RightBundle)
+	if logger != nil {
+		logger.Debugf("Parsing JOIN to bundle: %s", joinClause.RightBundle)
+	}
 	p.advance()
 
 	// Expect ON keyword
@@ -1105,8 +1113,10 @@ func (p *SelectParser) parseJoinClause(logger *zap.SugaredLogger) (*JoinClause, 
 		break
 	}
 
-	logger.Debugf("Parsed JOIN clause: %s to %s with %d conditions",
-		joinClause.JoinType.String(), joinClause.RightBundle, len(joinClause.JoinConditions))
+	if logger != nil {
+		logger.Debugf("Parsed JOIN clause: %s to %s with %d conditions",
+			joinClause.JoinType.String(), joinClause.RightBundle, len(joinClause.JoinConditions))
+	}
 
 	return joinClause, nil
 }
@@ -1139,7 +1149,9 @@ func (p *SelectParser) parseJoinCondition(logger *zap.SugaredLogger) (*JoinCondi
 	}
 	condition.RightField = rightField
 
-	logger.Debugf("Parsed JOIN condition: %s %s %s", condition.LeftField, condition.Operator, condition.RightField)
+	if logger != nil {
+		logger.Debugf("Parsed JOIN condition: %s %s %s", condition.LeftField, condition.Operator, condition.RightField)
+	}
 
 	return condition, nil
 }

@@ -577,34 +577,61 @@ func evalCall(e *CallExpr, fieldValues map[string]interface{}) (interface{}, err
 
 	switch e.Function {
 	case "LOWER":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("LOWER() requires at least 1 argument")
+		}
 		if s, ok := toString(args[0]); ok {
 			return strings.ToLower(s), nil
 		}
 		return args[0], nil
 	case "UPPER":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("UPPER() requires at least 1 argument")
+		}
 		if s, ok := toString(args[0]); ok {
 			return strings.ToUpper(s), nil
 		}
 		return args[0], nil
 	case "TRIM":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("TRIM() requires at least 1 argument")
+		}
 		if s, ok := toString(args[0]); ok {
 			return strings.TrimSpace(s), nil
 		}
 		return args[0], nil
 	case "LENGTH":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("LENGTH() requires at least 1 argument")
+		}
 		if s, ok := toString(args[0]); ok {
 			return int64(len(s)), nil
 		}
 		return args[0], nil
 	case "YEAR":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("YEAR() requires at least 1 argument")
+		}
 		return extractYear(args[0])
 	case "MONTH":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("MONTH() requires at least 1 argument")
+		}
 		return extractMonth(args[0])
 	case "ABS":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("ABS() requires at least 1 argument")
+		}
 		return evalAbs(args[0])
 	case "CEIL", "CEILING":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("CEIL() requires at least 1 argument")
+		}
 		return evalCeil(args[0])
 	case "FLOOR":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("FLOOR() requires at least 1 argument")
+		}
 		return evalFloor(args[0])
 	case "ROUND":
 		return evalRound(args)
@@ -720,6 +747,9 @@ func evalFloor(v interface{}) (interface{}, error) {
 }
 
 func evalRound(args []interface{}) (interface{}, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("ROUND() requires at least 1 argument")
+	}
 	if args[0] == nil {
 		return nil, nil
 	}
@@ -747,6 +777,9 @@ func evalRound(args []interface{}) (interface{}, error) {
 }
 
 func evalSubstring(args []interface{}) (interface{}, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("SUBSTRING() requires at least 2 arguments")
+	}
 	if args[0] == nil {
 		return nil, nil
 	}
@@ -808,6 +841,9 @@ func evalCoalesce(args []interface{}) (interface{}, error) {
 }
 
 func evalDateTrunc(args []interface{}) (interface{}, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("DATE_TRUNC() requires 2 arguments")
+	}
 	if args[0] == nil || args[1] == nil {
 		return nil, nil
 	}
@@ -834,6 +870,9 @@ func evalDateTrunc(args []interface{}) (interface{}, error) {
 }
 
 func evalExtract(args []interface{}) (interface{}, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("EXTRACT() requires 2 arguments")
+	}
 	if args[0] == nil || args[1] == nil {
 		return nil, nil
 	}
