@@ -53,3 +53,12 @@ type ResultTransformExtension interface {
 type AuditEventExtension interface {
 	OnCommandExecuted(ctx context.Context, eventType string, detail map[string]interface{})
 }
+
+// StorageEncryptionExtension provides block-level encryption for storage, WAL, and backups.
+// The scope string drives DEK selection: "bundle:<name>", "wal", "backup:<id>".
+type StorageEncryptionExtension interface {
+	EncryptBlock(plaintext []byte, scope string) ([]byte, error)
+	DecryptBlock(ciphertext []byte, scope string) ([]byte, error)
+	// EncryptionEnabled returns true if encryption is active for the given scope.
+	EncryptionEnabled(scope string) bool
+}

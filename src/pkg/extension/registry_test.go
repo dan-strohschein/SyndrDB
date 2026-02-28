@@ -233,6 +233,88 @@ func (s *stubExtensionContext) Logger() interface{}        { return nil }
 func (s *stubExtensionContext) Settings() interface{}      { return nil }
 func (s *stubExtensionContext) SessionInfo() *SessionInfo  { return nil }
 
+// --- Storage encryptor test helpers ---
+
+type stubStorageEncryptor struct {
+	encryptCalled bool
+	decryptCalled bool
+	enabled       bool
+}
+
+func (s *stubStorageEncryptor) EncryptBlock(plaintext []byte, scope string) ([]byte, error) {
+	s.encryptCalled = true
+	// Simple XOR "encryption" for testing
+	out := make([]byte, len(plaintext))
+	for i, b := range plaintext {
+		out[i] = b ^ 0xFF
+	}
+	return out, nil
+}
+
+func (s *stubStorageEncryptor) DecryptBlock(ciphertext []byte, scope string) ([]byte, error) {
+	s.decryptCalled = true
+	out := make([]byte, len(ciphertext))
+	for i, b := range ciphertext {
+		out[i] = b ^ 0xFF
+	}
+	return out, nil
+}
+
+func (s *stubStorageEncryptor) EncryptionEnabled(scope string) bool {
+	return s.enabled
+}
+
+func TestRegisterStorageEncryptor(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	if reg.HasStorageEncryptors() {
+		t.Fatal("fresh registry should have no storage encryptors")
+	}
+
+	enc := &stubStorageEncryptor{enabled: true}
+	reg.RegisterStorageEncryptor(enc)
+
+	if !reg.HasStorageEncryptors() {
+		t.Fatal("registry should have storage encryptors after registration")
+	}
+}
+
+func TestHasStorageEncryptors(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	if reg.HasStorageEncryptors() {
+		t.Fatal("fresh registry should have no storage encryptors")
+	}
+
+	reg.RegisterStorageEncryptor(&stubStorageEncryptor{enabled: true})
+	if !reg.HasStorageEncryptors() {
+		t.Fatal("registry should have storage encryptors after registration")
+	}
+}
+
+func TestGetStorageEncryptorReturnsFirst(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+
+	// No encryptors registered
+	if reg.GetStorageEncryptor() != nil {
+		t.Fatal("expected nil when no encryptors registered")
+	}
+
+	enc1 := &stubStorageEncryptor{enabled: true}
+	enc2 := &stubStorageEncryptor{enabled: false}
+	reg.RegisterStorageEncryptor(enc1)
+	reg.RegisterStorageEncryptor(enc2)
+
+	got := reg.GetStorageEncryptor()
+	if got != enc1 {
+		t.Fatal("GetStorageEncryptor should return the first registered encryptor")
+	}
+}
+
 // --- Result transform test helpers ---
 
 type stubResultTransformer struct {

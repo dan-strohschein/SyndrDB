@@ -20,6 +20,7 @@ import (
 	"syndrdb/src/internal/storage/format"
 	"syndrdb/src/pkg/common"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/extension"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -959,16 +960,31 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 		magic := binary.LittleEndian.Uint32((*fileData)[offset : offset+4])
 		size := binary.LittleEndian.Uint32((*fileData)[offset+4 : offset+8])
 
-		if magic == 0xDEADBEEF || magic == CompressedDocMagic {
-			// Document record (compressed or uncompressed)
+		if magic == 0xDEADBEEF || magic == CompressedDocMagic ||
+			magic == EncryptedDocMagic || magic == EncryptedCompressedDocMagic {
+			// Document record (plain, compressed, encrypted, or encrypted+compressed)
 			if offset+8+int(size) > len(*fileData) {
 				break
 			}
 
 			documentData := (*fileData)[offset+8 : offset+8+int(size)]
 
-			// Decompress if compressed magic
-			if magic == CompressedDocMagic {
+			// Decrypt if encrypted magic
+			if magic == EncryptedDocMagic || magic == EncryptedCompressedDocMagic {
+				enc := extension.GetRegistry().GetStorageEncryptor()
+				if enc != nil {
+					decrypted, decErr := enc.DecryptBlock(documentData, "bundle:"+bundleName)
+					if decErr != nil {
+						bse.logger.Warnf("Failed to decrypt document at offset %d: %v", offset, decErr)
+						offset += 8 + int(size)
+						continue
+					}
+					documentData = decrypted
+				}
+			}
+
+			// Decompress if compressed magic (or encrypted+compressed)
+			if magic == CompressedDocMagic || magic == EncryptedCompressedDocMagic {
 				decompressed, decErr := DecompressDocument(documentData)
 				if decErr != nil {
 					bse.logger.Warnf("Failed to decompress document at offset %d: %v", offset, decErr)
@@ -995,16 +1011,30 @@ func (bse *BundleStorageEngine) parseAllDocumentsFromFile(bundleName, databaseNa
 			}
 
 			offset += 8 + int(size)
-		} else if magic == 0xDEADDEAD || magic == CompressedTombstoneMagic {
-			// Tombstone marker (compressed or uncompressed)
+		} else if magic == 0xDEADDEAD || magic == CompressedTombstoneMagic ||
+			magic == EncryptedTombstoneMagic || magic == EncryptedCompressedTombMagic {
+			// Tombstone marker (plain, compressed, encrypted, or encrypted+compressed)
 			if offset+8+int(size) > len(*fileData) {
 				break
 			}
 
 			deletionData := (*fileData)[offset+8 : offset+8+int(size)]
 
-			// Decompress if compressed magic
-			if magic == CompressedTombstoneMagic {
+			// Decrypt if encrypted magic
+			if magic == EncryptedTombstoneMagic || magic == EncryptedCompressedTombMagic {
+				enc := extension.GetRegistry().GetStorageEncryptor()
+				if enc != nil {
+					decrypted, decErr := enc.DecryptBlock(deletionData, "bundle:"+bundleName)
+					if decErr != nil {
+						offset += 8 + int(size)
+						continue
+					}
+					deletionData = decrypted
+				}
+			}
+
+			// Decompress if compressed magic (or encrypted+compressed)
+			if magic == CompressedTombstoneMagic || magic == EncryptedCompressedTombMagic {
 				decompressed, decErr := DecompressDocument(deletionData)
 				if decErr != nil {
 					offset += 8 + int(size)
@@ -2092,10 +2122,25 @@ func (b *BundleStorageEngine) appendDeletionMarker(bundleName, documentID, fileP
 		return fmt.Errorf("failed to encode deletion marker: %w", err)
 	}
 
+	// Enterprise encryption hook for tombstones
+	tombMagic := uint32(0xDEADDEAD)
+	if reg := extension.GetRegistry(); reg.HasStorageEncryptors() {
+		enc := reg.GetStorageEncryptor()
+		scope := "bundle:" + bundleName
+		if enc.EncryptionEnabled(scope) {
+			encrypted, encErr := enc.EncryptBlock(deletionBytes, scope)
+			if encErr != nil {
+				return fmt.Errorf("failed to encrypt deletion marker: %w", encErr)
+			}
+			deletionBytes = encrypted
+			tombMagic = EncryptedTombstoneMagic
+		}
+	}
+
 	// Create header with deletion magic number
 	headerSize := uint32(len(deletionBytes))
 	headerBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADDEAD) // Magic number for deletion markers
+	binary.LittleEndian.PutUint32(headerBytes[0:4], tombMagic)
 	binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
 
 	// Open file in append mode
@@ -2174,6 +2219,16 @@ func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bund
 	}
 	defer file.Close()
 
+	// Enterprise encryption: check once outside the loop
+	var batchEncryptor extension.StorageEncryptionExtension
+	batchEncScope := "bundle:" + bundle.Name
+	if reg := extension.GetRegistry(); reg.HasStorageEncryptors() {
+		enc := reg.GetStorageEncryptor()
+		if enc.EncryptionEnabled(batchEncScope) {
+			batchEncryptor = enc
+		}
+	}
+
 	// PERF: Buffer all markers and write once instead of 2*N write syscalls.
 	// Reduces I/O and time under the write lock for large deletes.
 	var buf bytes.Buffer
@@ -2187,9 +2242,18 @@ func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bund
 		if err != nil {
 			return fmt.Errorf("failed to encode deletion marker for %s: %w", documentID, err)
 		}
+		tombMagic := uint32(0xDEADDEAD)
+		if batchEncryptor != nil {
+			encrypted, encErr := batchEncryptor.EncryptBlock(deletionBytes, batchEncScope)
+			if encErr != nil {
+				return fmt.Errorf("failed to encrypt deletion marker for %s: %w", documentID, encErr)
+			}
+			deletionBytes = encrypted
+			tombMagic = EncryptedTombstoneMagic
+		}
 		headerSize := uint32(len(deletionBytes))
 		headerBytes := make([]byte, 8)
-		binary.LittleEndian.PutUint32(headerBytes[0:4], 0xDEADDEAD)
+		binary.LittleEndian.PutUint32(headerBytes[0:4], tombMagic)
 		binary.LittleEndian.PutUint32(headerBytes[4:8], headerSize)
 		buf.Write(headerBytes)
 		buf.Write(deletionBytes)
@@ -2543,6 +2607,24 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.
 			docMagic = CompressedDocMagic // Use compressed magic
 		}
 		// If compression doesn't help or fails, fall through with uncompressed
+	}
+
+	// Enterprise encryption hook (after compression, before header)
+	if reg := extension.GetRegistry(); reg.HasStorageEncryptors() {
+		enc := reg.GetStorageEncryptor()
+		scope := "bundle:" + bundle.Name
+		if enc.EncryptionEnabled(scope) {
+			encrypted, encErr := enc.EncryptBlock(documentBytes, scope)
+			if encErr != nil {
+				return 0, fmt.Errorf("failed to encrypt document: %w", encErr)
+			}
+			if docMagic == CompressedDocMagic {
+				docMagic = EncryptedCompressedDocMagic
+			} else {
+				docMagic = EncryptedDocMagic
+			}
+			documentBytes = encrypted
+		}
 	}
 
 	// CRITICAL FIX: Allocate header buffer per-write to avoid race conditions

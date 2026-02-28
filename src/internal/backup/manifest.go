@@ -55,6 +55,12 @@ type Manifest struct {
 	ChainDepth     int      `json:"chain_depth,omitempty"`        // 0=full, 1=first incr, ...
 	ChangedBundles []string `json:"changed_bundles,omitempty"`
 	WALFiles       []string `json:"wal_files,omitempty"`
+
+	// Encryption fields (v3.0+ — Enterprise)
+	EncryptionEnabled bool   `json:"encryption_enabled,omitempty"`
+	EncryptionAlgo    string `json:"encryption_algorithm,omitempty"`
+	WrappedDEK        string `json:"wrapped_dek,omitempty"`  // base64-encoded wrapped DEK
+	KeyID             string `json:"key_id,omitempty"`       // MK identifier for unwrapping
 }
 
 // FileEntry represents a single file in the backup
@@ -122,4 +128,3 @@ func VerifyFileCRC(filePath string, expectedCRC uint32) error {
 
 // TODO: I will add schema versioning to support backward compatibility
 // TODO: I will add custom metadata fields for user-defined backup annotations
-// TODO: I will add encryption metadata (algorithm, key derivation method)

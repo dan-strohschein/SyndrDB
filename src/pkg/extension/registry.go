@@ -14,6 +14,7 @@ type ExtensionRegistry struct {
 	lifecycleHooks     []LifecycleHook
 	resultTransformers []ResultTransformExtension
 	auditListeners     []AuditEventExtension
+	storageEncryptors  []StorageEncryptionExtension
 }
 
 var (
@@ -154,6 +155,30 @@ func (r *ExtensionRegistry) NotifyCommandExecuted(ctx context.Context, eventType
 	for _, listener := range listeners {
 		listener.OnCommandExecuted(ctx, eventType, detail)
 	}
+}
+
+// RegisterStorageEncryptor adds a StorageEncryptionExtension to the registry.
+func (r *ExtensionRegistry) RegisterStorageEncryptor(ext StorageEncryptionExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.storageEncryptors = append(r.storageEncryptors, ext)
+}
+
+// HasStorageEncryptors returns true if any storage encryption extensions are registered.
+func (r *ExtensionRegistry) HasStorageEncryptors() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.storageEncryptors) > 0
+}
+
+// GetStorageEncryptor returns the first registered storage encryptor (single-provider model).
+func (r *ExtensionRegistry) GetStorageEncryptor() StorageEncryptionExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.storageEncryptors) == 0 {
+		return nil
+	}
+	return r.storageEncryptors[0]
 }
 
 // Global ExtensionContext accessor for use by CommandDirector (set during server init).

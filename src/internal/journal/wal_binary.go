@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"syndrdb/src/pkg/extension"
 	"syscall"
 	"time"
 )
@@ -315,6 +316,17 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 	binary.LittleEndian.PutUint32(binaryData[WAL_BINARY_CHECKSUM_OFFSET:WAL_BINARY_CHECKSUM_OFFSET+4], sum)
 	entry.Checksum = sum
 
+	// Enterprise encryption hook: encrypt after checksum, before writing to disk
+	if reg := extension.GetRegistry(); reg.HasStorageEncryptors() {
+		enc := reg.GetStorageEncryptor()
+		if enc.EncryptionEnabled("wal") {
+			binaryData, err = enc.EncryptBlock(binaryData, "wal")
+			if err != nil {
+				return fmt.Errorf("failed to encrypt WAL entry: %w", err)
+			}
+		}
+	}
+
 	// Write entry length header (4 bytes) followed by binary data
 	// This allows for easy reading of variable-length entries
 	entryLen := uint32(len(binaryData))
@@ -536,6 +548,25 @@ func (wal *WriteAheadLog) ReplayOperationsBinary(filePath string, fromLSN uint64
 		if _, err := io.ReadFull(reader, entryData); err != nil {
 			// HIGH-008: Read errors are fatal - return immediately
 			return fmt.Errorf("failed to read entry data at entry %d: %w", entryCount, err)
+		}
+
+		// Enterprise decryption hook: decrypt before deserialization and CRC validation
+		if reg := extension.GetRegistry(); reg.HasStorageEncryptors() {
+			enc := reg.GetStorageEncryptor()
+			if enc.EncryptionEnabled("wal") {
+				entryData, err = enc.DecryptBlock(entryData, "wal")
+				if err != nil {
+					recoveryErrors = append(recoveryErrors, &RecoveryError{
+						LSN:    0,
+						File:   filePath,
+						Reason: "decrypt",
+						Err:    fmt.Errorf("entry %d: %w", entryCount, err),
+					})
+					wal.logger.Warnf("Failed to decrypt WAL entry at entry %d: %v", entryCount, err)
+					entryCount++
+					continue
+				}
+			}
 		}
 
 		// Deserialize entry

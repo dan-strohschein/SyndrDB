@@ -98,6 +98,13 @@ type Arguments struct {
 	TLSRequireClientCert  bool   `yaml:"tls_require_client_cert"`  // Require client certificates
 	TLSCAFile             string `yaml:"tls_ca_file"`              // Path to CA file for client certificate validation
 
+	// Encryption at Rest (Enterprise)
+	EncryptionEnabled       bool   `yaml:"encryption_enabled"`        // Enable transparent data encryption
+	EncryptionAlgorithm     string `yaml:"encryption_algorithm"`      // Encryption algorithm (default: "aes-256-gcm")
+	EncryptionKeyFile       string `yaml:"encryption_key_file"`       // Path to master key file
+	EncryptionWALEnabled    bool   `yaml:"encryption_wal_enabled"`    // Enable WAL encryption
+	EncryptionBackupEnabled bool   `yaml:"encryption_backup_enabled"` // Enable backup encryption
+
 	Version string `yaml:"version"` // Show version information
 
 	// GraphQL Configuration

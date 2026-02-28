@@ -19,6 +19,14 @@ const (
 	CompressedTombstoneMagic uint32 = 0xDEADDEA1 // Compressed tombstone
 )
 
+// Encrypted document magic numbers (Enterprise encryption at rest)
+const (
+	EncryptedDocMagic           uint32 = 0xDEADBE00 // Encrypted uncompressed document
+	EncryptedCompressedDocMagic uint32 = 0xDEADBE01 // Encrypted + compressed document
+	EncryptedTombstoneMagic     uint32 = 0xDEADBE0D // Encrypted tombstone
+	EncryptedCompressedTombMagic uint32 = 0xDEADBE1D // Encrypted + compressed tombstone
+)
+
 // Pooled zstd encoder/decoder to avoid allocation per call
 var (
 	zstdEncoderPool sync.Pool

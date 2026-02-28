@@ -2,6 +2,7 @@ package backup
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"syndrdb/src/internal/journal"
 	"syndrdb/src/internal/lock"
 	"syndrdb/src/pkg/common/helpers"
+	"syndrdb/src/pkg/extension"
 	"syndrdb/src/pkg/settings"
 )
 
@@ -489,22 +491,42 @@ func (bs *BackupService) createArchive(srcDir, outputPath, compression string) e
 	}
 	defer outFile.Close()
 
+	// Enterprise encryption hook: wrap output file with encryption if enabled
+	var baseWriter io.Writer = outFile
+	var encryptCloser io.Closer
+	if reg := extension.GetRegistry(); reg.HasStorageEncryptors() {
+		enc := reg.GetStorageEncryptor()
+		if enc.EncryptionEnabled("backup:" + filepath.Base(outputPath)) {
+			encWriter, encErr := newEncryptingWriter(outFile, enc, "backup:"+filepath.Base(outputPath))
+			if encErr != nil {
+				return fmt.Errorf("failed to create encrypting writer: %w", encErr)
+			}
+			baseWriter = encWriter
+			encryptCloser = encWriter
+		}
+	}
+
 	// Create compression writer
 	var compWriter io.WriteCloser
 	switch compression {
 	case "gzip":
-		compWriter = gzip.NewWriter(outFile)
+		compWriter = gzip.NewWriter(baseWriter)
 	case "zstd":
-		compWriter, err = zstd.NewWriter(outFile)
+		compWriter, err = zstd.NewWriter(baseWriter)
 		if err != nil {
 			return fmt.Errorf("failed to create zstd writer: %w", err)
 		}
 	case "none":
-		compWriter = &nopWriteCloser{outFile}
+		compWriter = &nopWriteCloser{baseWriter}
 	default:
 		return fmt.Errorf("unsupported compression: %s", compression)
 	}
-	defer compWriter.Close()
+	defer func() {
+		compWriter.Close()
+		if encryptCloser != nil {
+			encryptCloser.Close()
+		}
+	}()
 
 	// Create tar writer
 	tarWriter := tar.NewWriter(compWriter)
@@ -630,32 +652,48 @@ func (bs *BackupService) extractArchive(archivePath, destDir string) error {
 	}
 	defer archiveFile.Close()
 
+	// Enterprise decryption hook: wrap reader if encryption layer is present
+	var baseReader io.Reader = archiveFile
+	if reg := extension.GetRegistry(); reg.HasStorageEncryptors() {
+		enc := reg.GetStorageEncryptor()
+		backupScope := "backup:" + filepath.Base(archivePath)
+		if enc.EncryptionEnabled(backupScope) {
+			decReader, decErr := newDecryptingReader(archiveFile, enc, backupScope)
+			if decErr != nil {
+				return fmt.Errorf("failed to create decrypting reader: %w", decErr)
+			}
+			baseReader = decReader
+		}
+	}
+
 	// Detect compression by reading magic bytes from the file header.
 	// This is more reliable than file extension, especially for .sdb files
 	// which may be gzip or zstd compressed.
-	magic := make([]byte, 4)
-	n, err := archiveFile.Read(magic)
+	//
+	// If baseReader wraps a decryption layer, we read the decrypted bytes.
+	// We need a seekable buffer to peek and then rewind.
+	peekBuf := make([]byte, 4)
+	n, err := baseReader.Read(peekBuf)
 	if err != nil || n < 2 {
 		return fmt.Errorf("failed to read archive header: %w", err)
 	}
-	// Seek back to the start so the decompressor reads from the beginning
-	if _, err := archiveFile.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek archive file: %w", err)
-	}
+
+	// Build a re-readable reader: prepend the peeked bytes back
+	baseReader = io.MultiReader(bytes.NewReader(peekBuf[:n]), baseReader)
 
 	var decompReader io.Reader
 
-	if magic[0] == 0x1f && magic[1] == 0x8b {
+	if peekBuf[0] == 0x1f && peekBuf[1] == 0x8b {
 		// gzip magic bytes
-		gzReader, err := gzip.NewReader(archiveFile)
+		gzReader, err := gzip.NewReader(baseReader)
 		if err != nil {
 			return fmt.Errorf("failed to create gzip reader: %w", err)
 		}
 		defer gzReader.Close()
 		decompReader = gzReader
-	} else if n >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd {
+	} else if n >= 4 && peekBuf[0] == 0x28 && peekBuf[1] == 0xb5 && peekBuf[2] == 0x2f && peekBuf[3] == 0xfd {
 		// zstd magic bytes
-		zstReader, err := zstd.NewReader(archiveFile)
+		zstReader, err := zstd.NewReader(baseReader)
 		if err != nil {
 			return fmt.Errorf("failed to create zstd reader: %w", err)
 		}
@@ -663,7 +701,7 @@ func (bs *BackupService) extractArchive(archivePath, destDir string) error {
 		decompReader = zstReader
 	} else {
 		// Assume uncompressed tar
-		decompReader = archiveFile
+		decompReader = baseReader
 	}
 
 	// Create tar reader
@@ -742,6 +780,90 @@ type nopWriteCloser struct {
 
 func (nwc *nopWriteCloser) Close() error {
 	return nil
+}
+
+// encryptingWriter wraps an io.Writer with block encryption.
+// Each Write call encrypts the data as a single block.
+type encryptingWriter struct {
+	inner io.Writer
+	enc   extension.StorageEncryptionExtension
+	scope string
+}
+
+func newEncryptingWriter(w io.Writer, enc extension.StorageEncryptionExtension, scope string) (*encryptingWriter, error) {
+	return &encryptingWriter{inner: w, enc: enc, scope: scope}, nil
+}
+
+func (ew *encryptingWriter) Write(p []byte) (int, error) {
+	encrypted, err := ew.enc.EncryptBlock(p, ew.scope)
+	if err != nil {
+		return 0, fmt.Errorf("backup encrypt: %w", err)
+	}
+	// Write length-prefixed encrypted block: [len:4][encrypted data]
+	lenBuf := make([]byte, 4)
+	lenBuf[0] = byte(len(encrypted))
+	lenBuf[1] = byte(len(encrypted) >> 8)
+	lenBuf[2] = byte(len(encrypted) >> 16)
+	lenBuf[3] = byte(len(encrypted) >> 24)
+	if _, err := ew.inner.Write(lenBuf); err != nil {
+		return 0, err
+	}
+	if _, err := ew.inner.Write(encrypted); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (ew *encryptingWriter) Close() error {
+	return nil
+}
+
+// decryptingReader wraps an io.Reader with block decryption.
+// Reads length-prefixed encrypted blocks and returns decrypted data.
+type decryptingReader struct {
+	inner  io.Reader
+	enc    extension.StorageEncryptionExtension
+	scope  string
+	buf    []byte // leftover decrypted bytes from previous read
+}
+
+func newDecryptingReader(r io.Reader, enc extension.StorageEncryptionExtension, scope string) (*decryptingReader, error) {
+	return &decryptingReader{inner: r, enc: enc, scope: scope}, nil
+}
+
+func (dr *decryptingReader) Read(p []byte) (int, error) {
+	// Return buffered data first
+	if len(dr.buf) > 0 {
+		n := copy(p, dr.buf)
+		dr.buf = dr.buf[n:]
+		return n, nil
+	}
+
+	// Read next encrypted block: [len:4][encrypted data]
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(dr.inner, lenBuf); err != nil {
+		return 0, err
+	}
+	blockLen := int(lenBuf[0]) | int(lenBuf[1])<<8 | int(lenBuf[2])<<16 | int(lenBuf[3])<<24
+	if blockLen <= 0 || blockLen > 10*1024*1024 {
+		return 0, fmt.Errorf("invalid encrypted block length: %d", blockLen)
+	}
+
+	encrypted := make([]byte, blockLen)
+	if _, err := io.ReadFull(dr.inner, encrypted); err != nil {
+		return 0, fmt.Errorf("backup decrypt read: %w", err)
+	}
+
+	decrypted, err := dr.enc.DecryptBlock(encrypted, dr.scope)
+	if err != nil {
+		return 0, fmt.Errorf("backup decrypt: %w", err)
+	}
+
+	n := copy(p, decrypted)
+	if n < len(decrypted) {
+		dr.buf = decrypted[n:]
+	}
+	return n, nil
 }
 
 // TODO: I will add backup streaming to avoid temp directory for large databases

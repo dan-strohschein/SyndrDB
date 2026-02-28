@@ -578,6 +578,64 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END DATA GOVERNANCE CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// ENCRYPTION CATALOG BUNDLES (Enterprise — Milestone 2)
+	// ==============================================================
+
+	// EncryptionKeys — stores wrapped DEKs and MK metadata
+	encKeys_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":     {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"KeyID":          {Name: "KeyID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"KeyType":        {Name: "KeyType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},        // "MK" or "DEK"
+			"Scope":          {Name: "Scope", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},         // e.g. "bundle:employees", "wal", "backup:xyz"
+			"Algorithm":      {Name: "Algorithm", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},      // e.g. "aes-256-gcm"
+			"WrappedKeyData": {Name: "WrappedKeyData", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""}, // base64-encoded wrapped key
+			"CreatedAt":      {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"RotatedAt":      {Name: "RotatedAt", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"IsActive":       {Name: "IsActive", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+		},
+	}
+	encKeys_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "EncryptionKeys",
+		DocumentStructure: encKeys_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, encKeys_Bundle)
+
+	// EncryptionPolicies — defines which bundles have encryption enabled
+	encPolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"PolicyName": {Name: "PolicyName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName": {Name: "BundleName", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""}, // empty = all bundles
+			"IsEnabled":  {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"Algorithm":  {Name: "Algorithm", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "aes-256-gcm"},
+			"CreatedBy":  {Name: "CreatedBy", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"CreatedAt":  {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	encPolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "EncryptionPolicies",
+		DocumentStructure: encPolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, encPolicies_Bundle)
+
+	// ==============================================================
+	// END ENCRYPTION CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 
