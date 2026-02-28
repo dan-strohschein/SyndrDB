@@ -442,6 +442,142 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END VIEW SYSTEM BUNDLE
 	// ==============================================================
 
+	// ==============================================================
+	// DATA GOVERNANCE CATALOG BUNDLES (Enterprise)
+	// ==============================================================
+
+	// FieldClassifications — stores sensitivity labels for individual fields
+	fieldClassifications_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":       {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"DatabaseName":     {Name: "DatabaseName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"BundleName":       {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FieldName":        {Name: "FieldName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"SensitivityLevel": {Name: "SensitivityLevel", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "INTERNAL"},
+			"InformationType":  {Name: "InformationType", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"CustomLabels":     {Name: "CustomLabels", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"ClassifiedBy":     {Name: "ClassifiedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ClassifiedAt":     {Name: "ClassifiedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	fieldClassifications_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "FieldClassifications",
+		DocumentStructure: fieldClassifications_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, fieldClassifications_Bundle)
+
+	// MaskingPolicies — defines which mask function applies to which field
+	maskingPolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"BundleName":   {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FieldName":    {Name: "FieldName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"MaskFunction": {Name: "MaskFunction", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "FULL"},
+			"MaskParams":   {Name: "MaskParams", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"IsEnabled":    {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"CreatedBy":    {Name: "CreatedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"CreatedAt":    {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	maskingPolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "MaskingPolicies",
+		DocumentStructure: maskingPolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, maskingPolicies_Bundle)
+
+	// MaskingExemptions — users who bypass masking on specific bundles
+	maskingExemptions_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"Username":   {Name: "Username", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"BundleName": {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"GrantedBy":  {Name: "GrantedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"GrantedAt":  {Name: "GrantedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	maskingExemptions_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "MaskingExemptions",
+		DocumentStructure: maskingExemptions_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, maskingExemptions_Bundle)
+
+	// AuditPolicies — defines which operations on which bundles are audited
+	auditPolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"PolicyName": {Name: "PolicyName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName": {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Actions":    {Name: "Actions", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"IsEnabled":  {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"CreatedBy":  {Name: "CreatedBy", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"CreatedAt":  {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	auditPolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "AuditPolicies",
+		DocumentStructure: auditPolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, auditPolicies_Bundle)
+
+	// AuditTrail — immutable chain-hashed audit log
+	auditTrail_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"EventID":      {Name: "EventID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"EventType":    {Name: "EventType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"EventTime":    {Name: "EventTime", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"Username":     {Name: "Username", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"DatabaseName": {Name: "DatabaseName", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"BundleName":   {Name: "BundleName", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"Command":      {Name: "Command", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ResultCount":  {Name: "ResultCount", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"Success":      {Name: "Success", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"ClientIP":     {Name: "ClientIP", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"SessionID":    {Name: "SessionID", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"PreviousHash": {Name: "PreviousHash", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"EventHash":    {Name: "EventHash", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+		},
+	}
+	auditTrail_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "AuditTrail",
+		DocumentStructure: auditTrail_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, auditTrail_Bundle)
+
+	// ==============================================================
+	// END DATA GOVERNANCE CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

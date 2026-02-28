@@ -9,9 +9,11 @@ import (
 // ExtensionRegistry is the central registry for enterprise extensions.
 // It is a global singleton, accessed via GetRegistry().
 type ExtensionRegistry struct {
-	mu             sync.RWMutex
-	commands       []CommandExtension
-	lifecycleHooks []LifecycleHook
+	mu                 sync.RWMutex
+	commands           []CommandExtension
+	lifecycleHooks     []LifecycleHook
+	resultTransformers []ResultTransformExtension
+	auditListeners     []AuditEventExtension
 }
 
 var (
@@ -101,6 +103,57 @@ func (r *ExtensionRegistry) HasCommandExtensions() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.commands) > 0
+}
+
+// RegisterResultTransformer adds a ResultTransformExtension to the registry.
+func (r *ExtensionRegistry) RegisterResultTransformer(ext ResultTransformExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resultTransformers = append(r.resultTransformers, ext)
+}
+
+// RegisterAuditListener adds an AuditEventExtension to the registry.
+func (r *ExtensionRegistry) RegisterAuditListener(ext AuditEventExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.auditListeners = append(r.auditListeners, ext)
+}
+
+// HasResultTransformers returns true if any result transform extensions are registered.
+func (r *ExtensionRegistry) HasResultTransformers() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.resultTransformers) > 0
+}
+
+// GetResultTransformers returns a snapshot of all registered result transformers.
+func (r *ExtensionRegistry) GetResultTransformers() []ResultTransformExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]ResultTransformExtension, len(r.resultTransformers))
+	copy(out, r.resultTransformers)
+	return out
+}
+
+// GetAuditListeners returns a snapshot of all registered audit listeners.
+func (r *ExtensionRegistry) GetAuditListeners() []AuditEventExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]AuditEventExtension, len(r.auditListeners))
+	copy(out, r.auditListeners)
+	return out
+}
+
+// NotifyCommandExecuted dispatches a command event to all audit listeners.
+func (r *ExtensionRegistry) NotifyCommandExecuted(ctx context.Context, eventType string, detail map[string]interface{}) {
+	r.mu.RLock()
+	listeners := make([]AuditEventExtension, len(r.auditListeners))
+	copy(listeners, r.auditListeners)
+	r.mu.RUnlock()
+
+	for _, listener := range listeners {
+		listener.OnCommandExecuted(ctx, eventType, detail)
+	}
 }
 
 // Global ExtensionContext accessor for use by CommandDirector (set during server init).

@@ -68,7 +68,47 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 		AutoRollbackOnError(session, serviceManager, database, err, logger)
 	}
 
+	// Enterprise audit hook: notify audit listeners of executed commands
+	if reg := extension.GetRegistry(); len(reg.GetAuditListeners()) > 0 {
+		dbName := ""
+		if database != nil {
+			dbName = database.Name
+		}
+		detail := map[string]interface{}{
+			"command":   command,
+			"database":  dbName,
+			"success":   err == nil,
+			"client_ip": clientIP,
+		}
+		if session != nil {
+			detail["username"] = session.Username
+			detail["session_id"] = session.SessionID
+		}
+		eventType := classifyCommandType(command)
+		reg.NotifyCommandExecuted(ctx, eventType, detail)
+	}
+
 	return result, err
+}
+
+// classifyCommandType returns a high-level event type for audit logging.
+func classifyCommandType(command string) string {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	switch {
+	case strings.HasPrefix(lower, "select"):
+		return "SELECT"
+	case strings.HasPrefix(lower, "add document"), strings.HasPrefix(lower, "insert"):
+		return "INSERT"
+	case strings.HasPrefix(lower, "update"):
+		return "UPDATE"
+	case strings.HasPrefix(lower, "delete"), strings.HasPrefix(lower, "remove"):
+		return "DELETE"
+	case strings.HasPrefix(lower, "create"), strings.HasPrefix(lower, "drop"),
+		strings.HasPrefix(lower, "alter"), strings.HasPrefix(lower, "rename"):
+		return "DDL"
+	default:
+		return "ADMIN"
+	}
 }
 
 // CommandDirectorWithParams is a convenience wrapper for executing parameterized commands
@@ -1601,6 +1641,26 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	// SortNode had already correctly ordered them, destroying the proper sort order.
 	// The SortNode uses FieldValue type-aware comparisons, which is more accurate than
 	// this interface{} comparison approach. Do not re-enable this code.
+
+	// Enterprise masking hook: apply result transformers (e.g., dynamic data masking)
+	if reg := extension.GetRegistry(); reg.HasResultTransformers() {
+		var sessionInfo *extension.SessionInfo
+		if session != nil {
+			sessionInfo = &extension.SessionInfo{
+				Username:     session.Username,
+				SessionID:    session.SessionID,
+				DatabaseName: session.DatabaseName,
+				IsAdmin:      session.GetIsAdmin(),
+			}
+		}
+		for _, transformer := range reg.GetResultTransformers() {
+			if transformer.ShouldTransform(query.FromBundle) {
+				for i, row := range flattenedDocs {
+					flattenedDocs[i] = transformer.TransformResult(ctx, query.FromBundle, row, sessionInfo)
+				}
+			}
+		}
+	}
 
 	var results interface{}
 	var resultCount int

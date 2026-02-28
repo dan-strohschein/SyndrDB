@@ -229,5 +229,148 @@ type stubExtensionContext struct{}
 func (s *stubExtensionContext) ExecuteQuery(ctx context.Context, sql string) (interface{}, error) {
 	return nil, nil
 }
-func (s *stubExtensionContext) Logger() interface{}   { return nil }
-func (s *stubExtensionContext) Settings() interface{} { return nil }
+func (s *stubExtensionContext) Logger() interface{}        { return nil }
+func (s *stubExtensionContext) Settings() interface{}      { return nil }
+func (s *stubExtensionContext) SessionInfo() *SessionInfo  { return nil }
+
+// --- Result transform test helpers ---
+
+type stubResultTransformer struct {
+	shouldTransformResult bool
+	transformCalled       bool
+	lastBundleName        string
+}
+
+func (s *stubResultTransformer) ShouldTransform(bundleName string) bool {
+	s.lastBundleName = bundleName
+	return s.shouldTransformResult
+}
+
+func (s *stubResultTransformer) TransformResult(ctx context.Context, bundleName string, row map[string]interface{}, session *SessionInfo) map[string]interface{} {
+	s.transformCalled = true
+	row["_masked"] = true
+	return row
+}
+
+// --- Audit listener test helpers ---
+
+type stubAuditListener struct {
+	events []map[string]interface{}
+}
+
+func (s *stubAuditListener) OnCommandExecuted(ctx context.Context, eventType string, detail map[string]interface{}) {
+	detail["_eventType"] = eventType
+	s.events = append(s.events, detail)
+}
+
+// --- New registry method tests ---
+
+func TestRegisterResultTransformer(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	if reg.HasResultTransformers() {
+		t.Fatal("fresh registry should have no result transformers")
+	}
+
+	transformer := &stubResultTransformer{shouldTransformResult: true}
+	reg.RegisterResultTransformer(transformer)
+
+	if !reg.HasResultTransformers() {
+		t.Fatal("registry should have result transformers after registration")
+	}
+
+	transformers := reg.GetResultTransformers()
+	if len(transformers) != 1 {
+		t.Fatalf("expected 1 transformer, got %d", len(transformers))
+	}
+}
+
+func TestResultTransformerShouldTransform(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	transformer := &stubResultTransformer{shouldTransformResult: true}
+	reg.RegisterResultTransformer(transformer)
+
+	transformers := reg.GetResultTransformers()
+	if !transformers[0].ShouldTransform("employees") {
+		t.Fatal("expected ShouldTransform to return true")
+	}
+	if transformer.lastBundleName != "employees" {
+		t.Fatalf("expected bundle name 'employees', got '%s'", transformer.lastBundleName)
+	}
+}
+
+func TestResultTransformerTransformResult(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	transformer := &stubResultTransformer{shouldTransformResult: true}
+	reg.RegisterResultTransformer(transformer)
+
+	transformers := reg.GetResultTransformers()
+	row := map[string]interface{}{"name": "John", "ssn": "123-45-6789"}
+	session := &SessionInfo{Username: "testuser", IsAdmin: false}
+	result := transformers[0].TransformResult(context.Background(), "employees", row, session)
+
+	if !transformer.transformCalled {
+		t.Fatal("expected TransformResult to be called")
+	}
+	if result["_masked"] != true {
+		t.Fatal("expected _masked field to be set")
+	}
+}
+
+func TestRegisterAuditListener(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	listener := &stubAuditListener{}
+	reg.RegisterAuditListener(listener)
+
+	detail := map[string]interface{}{"command": "SELECT * FROM users"}
+	reg.NotifyCommandExecuted(context.Background(), "SELECT", detail)
+
+	if len(listener.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(listener.events))
+	}
+	if listener.events[0]["_eventType"] != "SELECT" {
+		t.Fatalf("expected event type 'SELECT', got '%v'", listener.events[0]["_eventType"])
+	}
+}
+
+func TestNotifyCommandExecutedMultipleListeners(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	listener1 := &stubAuditListener{}
+	listener2 := &stubAuditListener{}
+	reg.RegisterAuditListener(listener1)
+	reg.RegisterAuditListener(listener2)
+
+	detail := map[string]interface{}{"command": "INSERT INTO users"}
+	reg.NotifyCommandExecuted(context.Background(), "INSERT", detail)
+
+	if len(listener1.events) != 1 || len(listener2.events) != 1 {
+		t.Fatal("expected both listeners to receive the event")
+	}
+}
+
+func TestGetResultTransformersReturnsSnapshot(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	reg.RegisterResultTransformer(&stubResultTransformer{shouldTransformResult: true})
+
+	snapshot := reg.GetResultTransformers()
+	// Register another after getting snapshot
+	reg.RegisterResultTransformer(&stubResultTransformer{shouldTransformResult: false})
+
+	if len(snapshot) != 1 {
+		t.Fatal("snapshot should not be affected by later registrations")
+	}
+	if len(reg.GetResultTransformers()) != 2 {
+		t.Fatal("registry should have 2 transformers")
+	}
+}

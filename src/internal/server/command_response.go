@@ -37,6 +37,10 @@ type CommandResponse struct {
 	// instead of materializing. Takes precedence over StreamSlice/StreamDocuments
 	// when the client has negotiated streaming=chunked.
 	StreamIterator planner.IteratorNode `json:"-"`
+
+	// ResultTransformFunc applies enterprise masking to individual rows during streaming.
+	// Set by SelectDocuments when result transformers are registered.
+	ResultTransformFunc func(bundleName string, row map[string]interface{}) map[string]interface{} `json:"-"`
 }
 
 // GetResultOrTransform returns the Result field if populated, otherwise transforms
