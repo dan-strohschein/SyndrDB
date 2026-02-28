@@ -393,6 +393,10 @@ type Arguments struct {
 	// Observability: Slow Query Log Configuration
 	SlowQueryLogEnabled  bool `yaml:"slow_query_log_enabled"`  // Enable slow query warning log (default: true)
 	SlowQueryThresholdMs int  `yaml:"slow_query_threshold_ms"` // Threshold in ms for slow query detection (default: 1000)
+
+	// Enterprise Extension Configuration
+	// Captures any `enterprise:` section from syndrdb.yml for enterprise plugin settings.
+	EnterpriseSettings map[string]interface{} `yaml:"enterprise" json:"enterprise,omitempty"`
 }
 
 var (

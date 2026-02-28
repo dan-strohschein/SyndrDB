@@ -43,6 +43,7 @@ import (
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/constants"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/extension"
 	"syndrdb/src/pkg/fatal"
 	"syndrdb/src/pkg/settings"
 
@@ -1078,6 +1079,13 @@ func (s *Server) Stop() error {
 
 	// Optional: clean up index temp files (*.tmp, *.idx.tmp, *.compact.tmp) on shutdown
 	bundle.CleanupIndexTempFiles(settings.GetSettings().DataDir, s.logger)
+
+	// Notify enterprise extensions of shutdown
+	if reg := extension.GetRegistry(); reg != nil {
+		if err := reg.NotifyServerStop(context.Background()); err != nil {
+			s.logger.Warnf("Extension shutdown error: %v", err)
+		}
+	}
 
 	// Stop session manager first to cleanup all sessions
 	if s.SessionManager != nil {

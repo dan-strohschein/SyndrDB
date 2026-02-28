@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"syndrdb/src/internal/syndrQL"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/extension"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -1114,6 +1116,17 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unknown RENAME command: %s", command),
 			errors.LayerCommand).WithContext("command", command)
+	}
+
+	// Enterprise extension commands: check registered extensions before returning unknown command
+	if reg := extension.GetRegistry(); reg.HasCommandExtensions() {
+		if handler, found := reg.FindCommandHandler(commandLower); found {
+			extCtx := extension.GetExtensionContext()
+			extResult, extErr := handler.HandleCommand(ctx, command, extCtx)
+			if extErr == nil || !stderrors.Is(extErr, extension.ErrNotHandled) {
+				return extResult, extErr
+			}
+		}
 	}
 
 	return &result, nil
