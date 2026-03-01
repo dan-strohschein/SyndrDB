@@ -10,6 +10,7 @@ import (
 	"syndrdb/src/internal/query/planner"
 	"syndrdb/src/pkg/common/helpers"
 	"syndrdb/src/pkg/errors"
+	"syndrdb/src/pkg/extension"
 	"syndrdb/src/pkg/settings"
 	"time"
 
@@ -45,6 +46,15 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 	docCommand, err := parseUpdateDocument(command, logger)
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("command", command)
+	}
+
+	// SAFETY: Reject updates to DocumentID (immutable system field)
+	for _, field := range docCommand.Fields {
+		if strings.EqualFold(field.Key, "DocumentID") {
+			return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+				"cannot update DocumentID: this field is immutable and managed by the system",
+				errors.LayerCommand).WithContext("bundle", bundleName)
+		}
 	}
 
 	// SAFETY: Validate CONFIRMED keyword requirement for bulk updates without WHERE clause
@@ -85,6 +95,16 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		}
 
 		globalMetrics.TransactionsCommitted.Add(1)
+
+		// Enterprise index extension hook: notify indexes of updated document
+		if reg := extension.GetRegistry(); len(reg.GetIndexExtensions()) > 0 {
+			docMap := keyValuesToMap(docCommand.Fields)
+			for _, idx := range reg.GetIndexExtensions() {
+				if notifyErr := idx.OnDocumentChange(context.Background(), bundleName, "", "UPDATE", docMap); notifyErr != nil {
+					logger.Warnf("Index extension OnDocumentChange error (UPDATE): %v", notifyErr)
+				}
+			}
+		}
 
 		// METRICS: Track document update
 		globalMetrics.DocumentUpdatesTotal.Add(1)
@@ -245,6 +265,16 @@ func updateDocumentPessimistic(commandParts []string, serviceManager ServiceMana
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
+	// Enterprise index extension hook: notify indexes of updated document (pessimistic path)
+	if reg := extension.GetRegistry(); len(reg.GetIndexExtensions()) > 0 {
+		docMap := keyValuesToMap(docCommand.Fields)
+		for _, idx := range reg.GetIndexExtensions() {
+			if notifyErr := idx.OnDocumentChange(context.Background(), bundleName, "", "UPDATE", docMap); notifyErr != nil {
+				logger.Warnf("Index extension OnDocumentChange error (UPDATE): %v", notifyErr)
+			}
+		}
+	}
+
 	// METRICS: Track document update
 	globalMetrics := GetGlobalServerMetrics()
 	globalMetrics.DocumentUpdatesTotal.Add(1)
@@ -392,6 +422,16 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+	}
+
+	// Enterprise index extension hook: notify indexes of new document
+	if reg := extension.GetRegistry(); len(reg.GetIndexExtensions()) > 0 {
+		docMap := keyValuesToMap(docCommand.Fields)
+		for _, idx := range reg.GetIndexExtensions() {
+			if notifyErr := idx.OnDocumentChange(context.Background(), bundleName, docID, "INSERT", docMap); notifyErr != nil {
+				logger.Warnf("Index extension OnDocumentChange error (INSERT): %v", notifyErr)
+			}
+		}
 	}
 
 	// METRICS: Track document insert
@@ -546,4 +586,13 @@ func BulkAddDocuments(commandParts []string, command string, logger *zap.Sugared
 		ExecutionTimeMS: float64(endingTime.Nanoseconds()) / 1e6,
 	}
 	return cmdResponse, nil
+}
+
+// keyValuesToMap converts []models.KeyValue to map[string]interface{} for extension hooks.
+func keyValuesToMap(kvs []models.KeyValue) map[string]interface{} {
+	m := make(map[string]interface{}, len(kvs))
+	for _, kv := range kvs {
+		m[kv.Key] = kv.Value
+	}
+	return m
 }

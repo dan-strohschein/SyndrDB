@@ -43,6 +43,7 @@ import (
 	"syndrdb/src/internal/query/planner/subquery"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
+	"syndrdb/src/pkg/extension"
 	"syndrdb/src/pkg/settings"
 
 	"go.uber.org/zap"
@@ -276,7 +277,16 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 		}
 	}
 
-	// Step 1: Route to appropriate planner and get base execution tree
+	// Enterprise planner extension hook: allow extensions (e.g., FTS) to handle the query
+	if reg := extension.GetRegistry(); len(reg.GetPlannerExtensions()) > 0 {
+		for _, pe := range reg.GetPlannerExtensions() {
+			if planNode, ok := pe.PlanQuery(context.Background(), query.FromBundle, query); ok {
+				uqp.logger.Debugf("PlannerExtension handled query for bundle '%s'", query.FromBundle)
+				_ = planNode // Extension plan nodes are handled at execution time
+				break
+			}
+		}
+	}
 
 	// Step 1: Route to appropriate planner and get base execution tree
 	baseNode, indexesUsed, err := uqp.router.RouteQuery(query, database)
@@ -314,6 +324,11 @@ func (uqp *UnifiedQueryPlanner) buildPlanInternal(
 		if bundle, err := uqp.bundleService.GetBundleByName(database, query.FromBundle); err == nil && bundle != nil {
 			plan.ResultSchema = bundle.DocumentStructure.FieldSchema()
 		}
+	}
+
+	// Step 5b: Carry temporal clause if present (for execution-time filtering)
+	if query.TemporalClause != nil {
+		plan.TemporalClause = query.TemporalClause
 	}
 
 	// Step 6: Check if iterator path is beneficial for this query

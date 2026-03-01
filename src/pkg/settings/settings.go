@@ -105,6 +105,28 @@ type Arguments struct {
 	EncryptionWALEnabled    bool   `yaml:"encryption_wal_enabled"`    // Enable WAL encryption
 	EncryptionBackupEnabled bool   `yaml:"encryption_backup_enabled"` // Enable backup encryption
 
+	// Full-Text Search (Enterprise)
+	FTSEnabled         bool   `yaml:"fts_enabled"`          // Enable full-text search indexes
+	FTSDefaultAnalyzer string `yaml:"fts_default_analyzer"` // Default analyzer: "standard" (default: "standard")
+	FTSAsyncUpdate     bool   `yaml:"fts_async_update"`     // Async index updates on DML (default: false)
+
+	// Temporal Bundles (Enterprise)
+	TemporalEnabled       bool `yaml:"temporal_enabled"`        // Enable system-versioned temporal bundles
+	TemporalRetentionDays int  `yaml:"temporal_retention_days"` // History retention in days (default: 365)
+
+	// High Availability (Enterprise)
+	HAEnabled           bool   `yaml:"ha_enabled"`                // Enable high availability replication
+	HARole              string `yaml:"ha_role"`                   // "leader", "follower", "standalone"
+	HANodeID            string `yaml:"ha_node_id"`                // unique node identifier
+	HALeaderHost        string `yaml:"ha_leader_host"`            // leader address (for followers)
+	HALeaderPort        int    `yaml:"ha_leader_port"`            // leader replication port
+	HAReplicationPort   int    `yaml:"ha_replication_port"`       // port for replication traffic
+	HAReplicationMode   string `yaml:"ha_replication_mode"`       // "async" or "semisync"
+	HAHeartbeatInterval int    `yaml:"ha_heartbeat_interval_ms"`  // heartbeat interval in ms
+	HAFailoverTimeout   int    `yaml:"ha_failover_timeout_ms"`    // time before declaring leader dead
+	HASemiSyncTimeout   int    `yaml:"ha_semisync_timeout_ms"`    // max wait for follower ACK
+	HAReadRouting       bool   `yaml:"ha_read_routing"`           // enable automatic read routing
+
 	Version string `yaml:"version"` // Show version information
 
 	// GraphQL Configuration

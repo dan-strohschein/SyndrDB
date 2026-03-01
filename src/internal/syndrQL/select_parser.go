@@ -30,6 +30,9 @@ type SelectStatement struct {
 	// Locking
 	ForUpdate bool // FOR UPDATE clause - acquire row locks for subsequent modification
 
+	// Temporal support (SQL:2011 system-versioned)
+	TemporalClause *TemporalClause // FOR SYSTEM_TIME clause (nil if none)
+
 	// Pattern recognition metadata
 	Pattern    SelectPattern // Recognized query pattern
 	Complexity int           // Estimated execution cost
@@ -246,6 +249,13 @@ func (p *SelectParser) parseFastPath(stmt *SelectStatement, pattern SelectPatter
 		}
 		stmt.BundleName = p.current.Value
 		p.advance()
+
+		// Parse optional FOR SYSTEM_TIME clause (SQL:2011 temporal)
+		if tc, err := p.parseTemporalClause(); err != nil {
+			return nil, err
+		} else if tc != nil {
+			stmt.TemporalClause = tc
+		}
 	}
 	// else: BundleName remains empty - expression-only query
 
@@ -342,6 +352,13 @@ func (p *SelectParser) parseFullPath(stmt *SelectStatement, logger *zap.SugaredL
 		}
 		stmt.BundleName = p.current.Value
 		p.advance()
+
+		// Parse optional FOR SYSTEM_TIME clause (SQL:2011 temporal)
+		if tc, err := p.parseTemporalClause(); err != nil {
+			return nil, err
+		} else if tc != nil {
+			stmt.TemporalClause = tc
+		}
 	}
 	// else: BundleName remains empty - expression-only query
 
@@ -389,6 +406,127 @@ func (p *SelectParser) parseSelectModifiers(stmt *SelectStatement) error {
 	}
 
 	return nil
+}
+
+// parseTemporalClause parses FOR SYSTEM_TIME {AS OF <expr> | BETWEEN <expr> AND <expr> | ALL}
+// Returns nil, nil if no temporal clause is present.
+func (p *SelectParser) parseTemporalClause() (*TemporalClause, error) {
+	// Check for FOR keyword — but FOR UPDATE also starts with FOR,
+	// so we need to look ahead to distinguish.
+	if p.current.Type != TOKEN_FOR {
+		return nil, nil
+	}
+
+	// Look ahead: must be SYSTEM after FOR for temporal clause
+	if p.pos+1 < len(p.tokens) && p.tokens[p.pos+1].Type != TOKEN_SYSTEM {
+		return nil, nil
+	}
+
+	p.advance() // consume FOR
+	p.advance() // consume SYSTEM
+
+	// Accept SYSTEM TIME (two tokens) for FOR SYSTEM TIME ...
+	if p.current.Type == TOKEN_TIME {
+		p.advance() // consume TIME
+	}
+
+	// Now parse the temporal type: AS OF, BETWEEN, or ALL
+	if p.current.Type == TOKEN_AS {
+		// AS OF <expr>
+		p.advance() // consume AS
+
+		// Expect OF
+		if p.current.Type != TOKEN_IDENT || strings.ToUpper(p.current.Value) != "OF" {
+			return nil, fmt.Errorf("expected OF after FOR SYSTEM_TIME AS, got %s", p.current.Value)
+		}
+		p.advance() // consume OF
+
+		expr, err := p.parseTemporalExpression()
+		if err != nil {
+			return nil, fmt.Errorf("error parsing AS OF timestamp: %w", err)
+		}
+
+		return &TemporalClause{
+			Type:     "AS_OF",
+			AsOfTime: expr,
+		}, nil
+	}
+
+	if p.current.Type == TOKEN_BETWEEN {
+		// BETWEEN <expr> AND <expr>
+		p.advance() // consume BETWEEN
+
+		startExpr, err := p.parseTemporalExpression()
+		if err != nil {
+			return nil, fmt.Errorf("error parsing BETWEEN start timestamp: %w", err)
+		}
+
+		if p.current.Type != TOKEN_AND {
+			return nil, fmt.Errorf("expected AND in FOR SYSTEM_TIME BETWEEN, got %s", p.current.Type.String())
+		}
+		p.advance() // consume AND
+
+		endExpr, err := p.parseTemporalExpression()
+		if err != nil {
+			return nil, fmt.Errorf("error parsing BETWEEN end timestamp: %w", err)
+		}
+
+		return &TemporalClause{
+			Type:      "BETWEEN",
+			StartTime: startExpr,
+			EndTime:   endExpr,
+		}, nil
+	}
+
+	if p.current.Type == TOKEN_ALL {
+		// ALL
+		p.advance() // consume ALL
+
+		return &TemporalClause{
+			Type: "ALL",
+		}, nil
+	}
+
+	return nil, fmt.Errorf("expected AS OF, BETWEEN, or ALL after FOR SYSTEM_TIME, got %s", p.current.Value)
+}
+
+// parseTemporalExpression collects tokens for a single temporal expression
+// (a timestamp literal or expression) and parses it via ExpressionParser.
+// Stops at AND, WHERE, ORDER, GROUP, LIMIT, OFFSET, EOF.
+func (p *SelectParser) parseTemporalExpression() (Expression, error) {
+	tokens := make([]Token, 0)
+	parenDepth := 0
+
+	for p.current.Type != TOKEN_EOF {
+		if p.current.Type == TOKEN_LPAREN {
+			parenDepth++
+		} else if p.current.Type == TOKEN_RPAREN {
+			parenDepth--
+		}
+
+		if parenDepth == 0 {
+			if p.current.Type == TOKEN_AND ||
+				p.current.Type == TOKEN_WHERE ||
+				p.current.Type == TOKEN_ORDER ||
+				p.current.Type == TOKEN_GROUP ||
+				p.current.Type == TOKEN_LIMIT ||
+				p.current.Type == TOKEN_OFFSET ||
+				p.current.Type == TOKEN_WITH {
+				break
+			}
+		}
+
+		tokens = append(tokens, p.current)
+		p.advance()
+	}
+
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("expected temporal expression")
+	}
+
+	tokens = append(tokens, Token{Type: TOKEN_EOF})
+	exprParser := NewExpressionParser(tokens, p.logger)
+	return exprParser.Parse()
 }
 
 // parseFieldList parses a comma-separated list of fields/expressions
@@ -592,23 +730,23 @@ func (p *SelectParser) parseOptionalClauses(stmt *SelectStatement, logger *zap.S
 		}
 	}
 
-	// Parse ORDER BY (if present)
-	if p.current.Type == TOKEN_ORDER {
-		if err := p.parseOrderByClause(stmt); err != nil {
-			return err
-		}
-	}
-
-	// Parse GROUP BY (if present)
+	// Parse GROUP BY (if present) — must come before ORDER BY per SQL standard
 	if p.current.Type == TOKEN_GROUP {
 		if err := p.parseGroupByClause(stmt); err != nil {
 			return err
 		}
 	}
 
-	// Parse HAVING (if present)
+	// Parse HAVING (if present) — comes after GROUP BY
 	if p.current.Type == TOKEN_HAVING {
 		if err := p.parseHavingClause(stmt); err != nil {
+			return err
+		}
+	}
+
+	// Parse ORDER BY (if present) — comes after GROUP BY / HAVING
+	if p.current.Type == TOKEN_ORDER {
+		if err := p.parseOrderByClause(stmt); err != nil {
 			return err
 		}
 	}

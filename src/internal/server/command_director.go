@@ -40,25 +40,6 @@ func getKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-func dataKeys(m map[string]interface{}) []string {
-	if m == nil {
-		return []string{"<nil>"}
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
-func mapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
 	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
@@ -89,6 +70,21 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	}
 
 	return result, err
+}
+
+// isWriteCommand returns true if the command modifies data or schema.
+func isWriteCommand(cmd string) bool {
+	writePrefixes := []string{
+		"insert", "add document", "add field", "update", "delete", "remove",
+		"create", "drop", "alter", "rename", "enable", "disable",
+		"set ", "purge",
+	}
+	for _, prefix := range writePrefixes {
+		if strings.HasPrefix(cmd, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyCommandType returns a high-level event type for audit logging.
@@ -172,6 +168,14 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	// Health check: PING works for authenticated connections too
 	if strings.TrimSpace(command) == "PING" {
 		return "PONG", nil
+	}
+
+	// Enterprise replication: reject writes on follower nodes
+	if reg := extension.GetRegistry(); reg.HasReplicationExtension() {
+		replExt := reg.GetReplicationExtension()
+		if replExt.IsFollower() && isWriteCommand(strings.ToLower(strings.TrimSpace(command))) {
+			return nil, fmt.Errorf("this node is a read-only follower; writes must be sent to the leader")
+		}
 	}
 
 	// Check if this is a GraphQL command first
@@ -287,6 +291,14 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 	}
 
 	if strings.HasPrefix(commandLower, "select") {
+		// Enterprise read routing: check if query should be forwarded to a follower
+		if reg := extension.GetRegistry(); reg.HasReadRouterExtension() {
+			router := reg.GetReadRouterExtension()
+			if routeResult, handled := router.RouteRead(ctx, command, extension.GetExtensionContext()); handled {
+				return routeResult, nil
+			}
+		}
+
 		// Parse SELECT command
 		// Check for SELECT DATABASES (special case for system catalog)
 		if len(firstWords) >= 2 && strings.ToLower(firstWords[1]) == "databases" {
@@ -489,6 +501,29 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			if shouldReturn {
 				return result1, err
 			}
+		case "fulltext":
+			// CREATE FULLTEXT INDEX — delegates to IndexExtension
+			if len(firstWords) >= 3 && strings.ToLower(firstWords[2]) == "index" {
+				reg := extension.GetRegistry()
+				idxExt, found := reg.FindIndexExtension("fulltext")
+				if !found {
+					return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
+						"full-text search extension is not enabled", errors.LayerCommand)
+				}
+				// Parse: CREATE FULLTEXT INDEX ON "bundle" (field1, field2, ...)
+				// For now, delegate to the extension's command handler via command extension
+				extCtx := extension.GetExtensionContext()
+				if err := idxExt.BuildIndex(context.Background(), "", nil, map[string]interface{}{"command": command}, extCtx); err != nil {
+					return nil, errors.ConvertError(err, errors.LayerCommand)
+				}
+				return &CommandResponse{
+					ResultCount: 1,
+					Result:      "Full-text index created successfully.",
+				}, nil
+			}
+			return &result, errors.New(errors.ERR_VALIDATION_SYNTAX,
+				fmt.Sprintf("unknown command format: %s", command),
+				errors.LayerCommand).WithContext("command", command)
 		case "user":
 			// CREATE USER "username" WITH PASSWORD 'password';
 			// TODO: Determine debug mode from server configuration
@@ -1042,6 +1077,33 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
+			// Enterprise temporal extension hook: capture history before delete
+			if reg := extension.GetRegistry(); reg.GetTemporalExtension() != nil {
+				tempExt := reg.GetTemporalExtension()
+				if tempExt.IsTemporalBundle(bundleName) {
+					for i, docID := range docIDs {
+						var oldDoc map[string]interface{}
+						if i < len(docs) && docs[i] != nil {
+							oldDoc = docs[i].Data
+						}
+						if tempErr := tempExt.OnDocumentDelete(context.Background(), bundleName, docID, oldDoc); tempErr != nil {
+							logger.Warnf("Temporal extension OnDocumentDelete error: %v", tempErr)
+						}
+					}
+				}
+			}
+
+			// Enterprise index extension hook: notify indexes of deleted documents
+			if reg := extension.GetRegistry(); len(reg.GetIndexExtensions()) > 0 {
+				for _, idx := range reg.GetIndexExtensions() {
+					for _, docID := range docIDs {
+						if notifyErr := idx.OnDocumentChange(context.Background(), bundleName, docID, "DELETE", nil); notifyErr != nil {
+							logger.Warnf("Index extension OnDocumentChange error (DELETE): %v", notifyErr)
+						}
+					}
+				}
+			}
+
 			// METRICS: Track document deletes
 			globalMetrics := GetGlobalServerMetrics()
 			globalMetrics.DocumentDeletesTotal.Add(uint64(len(docIDs)))
@@ -1409,7 +1471,31 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			logger.Warnf("Iterator execution failed, falling back to Execute(): %v", iterErr)
 			// Fall through to traditional Execute() path
 		} else {
-			iterDocs, drainErr := planner.DrainIterator(iter)
+			// Drain iterator with memory tracking to enforce per-query memory limits
+			var iterDocs []*models.Document
+			var drainErr error
+			for {
+				doc, nextErr := iter.Next()
+				if nextErr != nil {
+					drainErr = nextErr
+					break
+				}
+				if doc == nil {
+					break // EOF
+				}
+				iterDocs = append(iterDocs, doc)
+
+				// Memory tracking: progressive sampling (matches FullScanNode pattern)
+				idx := len(iterDocs) - 1
+				if memoryTracker != nil && (idx == 0 || idx == 50 || (idx <= 200 && idx%100 == 0) || idx%4096 == 0) {
+					docSize := models.EstimateDocumentSize(doc, nil)
+					memoryTracker.Sample(docSize, idx)
+					if memoryTracker.WillExceedLimit(len(iterDocs)) {
+						drainErr = planner.ErrMemoryLimitExceeded
+						break
+					}
+				}
+			}
 			iter.Close()
 			if drainErr != nil {
 				err = drainErr
@@ -1589,7 +1675,6 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	if len(query.JoinClauses) == 0 || query.IsAggregateOnly || query.HasGroupBy() {
 		resultSchema = plan.GetEffectiveResultSchema()
 	}
-
 	var flattenedDocs []map[string]interface{}
 	var sortedDocs []*models.Document // Declare at function scope for memory cleanup
 
@@ -1610,23 +1695,17 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 			// LimitNode.GetSortedDocuments() returns the limited subset in sorted order
 			sortedDocs = ln.GetSortedDocuments()
 			foundSortNode = true
+		} else if btn, ok := plan.RootNode.(*planner.BTreeOrderedScanNode); ok {
+			// BTreeOrderedScanNode returns documents already sorted by B-tree key order
+			sortedDocs = btn.GetSortedDocuments()
+			foundSortNode = true
 		}
 
 		if foundSortNode {
 			// Use order-preserving transform for sorted documents
 			// This respects the sort order from the planner (user ORDER BY or default CreatedAt)
 			// Note: sortedDocs may be empty if the query returned no results - this is valid
-			// DEBUG: trace JOIN field projection
-			if len(query.JoinClauses) > 0 && len(sortedDocs) > 0 {
-				logger.Infof("JOIN DEBUG: selectedFields=%v, resultSchema=%v, sortedDocs=%d", selectedFields, resultSchema, len(sortedDocs))
-				d := sortedDocs[0]
-				logger.Infof("JOIN DEBUG: doc[0] DocumentID=%s, Values=%v (len=%d), Data keys=%v (len=%d)",
-					d.DocumentID, d.Values != nil, len(d.Values), dataKeys(d.Data), len(d.Data))
-			}
 			flattenedDocs = helpers.TransformSortedDocumentsToFlatFormatWithProjection(sortedDocs, selectedFields, resultSchema)
-			if len(query.JoinClauses) > 0 && len(flattenedDocs) > 0 {
-				logger.Infof("JOIN DEBUG: flattenedDocs[0] keys=%v", mapKeys(flattenedDocs[0]))
-			}
 		} else {
 			// Fallback: SortNode/LimitNode not found in plan tree
 			// This is expected for aggregate-only queries without ORDER BY (optimization)

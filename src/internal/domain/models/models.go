@@ -412,6 +412,9 @@ type Bundle struct {
 	// This eliminates stale pageID issues caused by INSERT using insertion order
 	// while LOAD uses alphabetical order.
 	SortedIndex *ShardedSortedIndex `json:"-"` // Not serialized - persisted separately
+
+	// SystemVersioned indicates the bundle uses SQL:2011 system-versioned temporal tracking.
+	SystemVersioned bool `json:"system_versioned,omitempty"`
 }
 
 // GetHashIndexForField searches for a hash index on the specified field

@@ -15,6 +15,11 @@ type ExtensionRegistry struct {
 	resultTransformers []ResultTransformExtension
 	auditListeners     []AuditEventExtension
 	storageEncryptors  []StorageEncryptionExtension
+	indexExtensions    []IndexExtension
+	plannerExtensions  []PlannerExtension
+	temporalExtensions    []TemporalExtension
+	replicationExtensions []ReplicationExtension
+	readRouterExtensions  []ReadRouterExtension
 }
 
 var (
@@ -199,4 +204,132 @@ func GetExtensionContext() ExtensionContext {
 	globalExtCtxMu.RLock()
 	defer globalExtCtxMu.RUnlock()
 	return globalExtCtx
+}
+
+// --- Index Extension ---
+
+// RegisterIndexExtension adds an IndexExtension to the registry.
+func (r *ExtensionRegistry) RegisterIndexExtension(ext IndexExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.indexExtensions = append(r.indexExtensions, ext)
+}
+
+// GetIndexExtensions returns a snapshot of all registered index extensions.
+func (r *ExtensionRegistry) GetIndexExtensions() []IndexExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]IndexExtension, len(r.indexExtensions))
+	copy(out, r.indexExtensions)
+	return out
+}
+
+// FindIndexExtension returns the first IndexExtension matching the given index type.
+func (r *ExtensionRegistry) FindIndexExtension(indexType string) (IndexExtension, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, ext := range r.indexExtensions {
+		if ext.IndexType() == indexType {
+			return ext, true
+		}
+	}
+	return nil, false
+}
+
+// --- Planner Extension ---
+
+// RegisterPlannerExtension adds a PlannerExtension to the registry.
+func (r *ExtensionRegistry) RegisterPlannerExtension(ext PlannerExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.plannerExtensions = append(r.plannerExtensions, ext)
+}
+
+// GetPlannerExtensions returns a snapshot of all registered planner extensions.
+func (r *ExtensionRegistry) GetPlannerExtensions() []PlannerExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]PlannerExtension, len(r.plannerExtensions))
+	copy(out, r.plannerExtensions)
+	return out
+}
+
+// --- Temporal Extension ---
+
+// RegisterTemporalExtension adds a TemporalExtension to the registry.
+func (r *ExtensionRegistry) RegisterTemporalExtension(ext TemporalExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.temporalExtensions = append(r.temporalExtensions, ext)
+}
+
+// GetTemporalExtensions returns a snapshot of all registered temporal extensions.
+func (r *ExtensionRegistry) GetTemporalExtensions() []TemporalExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]TemporalExtension, len(r.temporalExtensions))
+	copy(out, r.temporalExtensions)
+	return out
+}
+
+// GetTemporalExtension returns the first registered temporal extension (single-provider model).
+func (r *ExtensionRegistry) GetTemporalExtension() TemporalExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.temporalExtensions) == 0 {
+		return nil
+	}
+	return r.temporalExtensions[0]
+}
+
+// --- Replication Extension ---
+
+// RegisterReplicationExtension adds a ReplicationExtension to the registry.
+func (r *ExtensionRegistry) RegisterReplicationExtension(ext ReplicationExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.replicationExtensions = append(r.replicationExtensions, ext)
+}
+
+// HasReplicationExtension returns true if a replication extension is registered.
+func (r *ExtensionRegistry) HasReplicationExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.replicationExtensions) > 0
+}
+
+// GetReplicationExtension returns the first registered replication extension (single-provider model).
+func (r *ExtensionRegistry) GetReplicationExtension() ReplicationExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.replicationExtensions) == 0 {
+		return nil
+	}
+	return r.replicationExtensions[0]
+}
+
+// --- Read Router Extension ---
+
+// RegisterReadRouterExtension adds a ReadRouterExtension to the registry.
+func (r *ExtensionRegistry) RegisterReadRouterExtension(ext ReadRouterExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readRouterExtensions = append(r.readRouterExtensions, ext)
+}
+
+// HasReadRouterExtension returns true if a read router extension is registered.
+func (r *ExtensionRegistry) HasReadRouterExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.readRouterExtensions) > 0
+}
+
+// GetReadRouterExtension returns the first registered read router extension (single-provider model).
+func (r *ExtensionRegistry) GetReadRouterExtension() ReadRouterExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.readRouterExtensions) == 0 {
+		return nil
+	}
+	return r.readRouterExtensions[0]
 }

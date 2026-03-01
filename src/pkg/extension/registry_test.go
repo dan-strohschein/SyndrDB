@@ -439,6 +439,394 @@ func TestNotifyCommandExecutedMultipleListeners(t *testing.T) {
 	}
 }
 
+// --- Index extension test helpers ---
+
+type stubIndexExtension struct {
+	indexType string
+	built     bool
+	dropped   bool
+	changed   bool
+}
+
+func (s *stubIndexExtension) IndexType() string { return s.indexType }
+func (s *stubIndexExtension) BuildIndex(ctx context.Context, bundleName string, fieldNames []string, options map[string]interface{}, extCtx ExtensionContext) error {
+	s.built = true
+	return nil
+}
+func (s *stubIndexExtension) DropIndex(ctx context.Context, bundleName string, indexName string, extCtx ExtensionContext) error {
+	s.dropped = true
+	return nil
+}
+func (s *stubIndexExtension) OnDocumentChange(ctx context.Context, bundleName string, docID string, changeType string, doc map[string]interface{}) error {
+	s.changed = true
+	return nil
+}
+
+// --- Planner extension test helpers ---
+
+type stubPlannerExtension struct {
+	planned bool
+}
+
+func (s *stubPlannerExtension) PlanQuery(ctx context.Context, bundleName string, query interface{}) (interface{}, bool) {
+	s.planned = true
+	return "custom-plan", true
+}
+
+// --- Temporal extension test helpers ---
+
+type stubTemporalExtension struct {
+	writeCalled  bool
+	deleteCalled bool
+	temporal     bool
+}
+
+func (s *stubTemporalExtension) OnDocumentWrite(ctx context.Context, bundleName string, docID string, oldDoc map[string]interface{}, newDoc map[string]interface{}) error {
+	s.writeCalled = true
+	return nil
+}
+func (s *stubTemporalExtension) OnDocumentDelete(ctx context.Context, bundleName string, docID string, oldDoc map[string]interface{}) error {
+	s.deleteCalled = true
+	return nil
+}
+func (s *stubTemporalExtension) IsTemporalBundle(bundleName string) bool {
+	return s.temporal
+}
+func (s *stubTemporalExtension) FilterTemporalDocs(ctx context.Context, bundleName string, docs []map[string]interface{}, clause interface{}) ([]map[string]interface{}, error) {
+	return docs, nil
+}
+
+// --- Index extension tests ---
+
+func TestRegisterIndexExtension(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubIndexExtension{indexType: "fulltext"}
+	reg.RegisterIndexExtension(ext)
+
+	exts := reg.GetIndexExtensions()
+	if len(exts) != 1 {
+		t.Fatalf("expected 1 index extension, got %d", len(exts))
+	}
+}
+
+func TestFindIndexExtension(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubIndexExtension{indexType: "fulltext"}
+	reg.RegisterIndexExtension(ext)
+
+	found, ok := reg.FindIndexExtension("fulltext")
+	if !ok {
+		t.Fatal("expected to find fulltext index extension")
+	}
+	if found.IndexType() != "fulltext" {
+		t.Fatalf("expected index type 'fulltext', got '%s'", found.IndexType())
+	}
+
+	_, ok = reg.FindIndexExtension("spatial")
+	if ok {
+		t.Fatal("expected not to find spatial index extension")
+	}
+}
+
+func TestIndexExtensionBuildAndDrop(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubIndexExtension{indexType: "fulltext"}
+	reg.RegisterIndexExtension(ext)
+
+	found, _ := reg.FindIndexExtension("fulltext")
+	_ = found.BuildIndex(context.Background(), "articles", []string{"title", "body"}, nil, nil)
+	if !ext.built {
+		t.Fatal("expected BuildIndex to be called")
+	}
+
+	_ = found.DropIndex(context.Background(), "articles", "idx_articles_fts", nil)
+	if !ext.dropped {
+		t.Fatal("expected DropIndex to be called")
+	}
+}
+
+// --- Planner extension tests ---
+
+func TestRegisterPlannerExtension(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubPlannerExtension{}
+	reg.RegisterPlannerExtension(ext)
+
+	exts := reg.GetPlannerExtensions()
+	if len(exts) != 1 {
+		t.Fatalf("expected 1 planner extension, got %d", len(exts))
+	}
+}
+
+func TestPlannerExtensionPlanQuery(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubPlannerExtension{}
+	reg.RegisterPlannerExtension(ext)
+
+	exts := reg.GetPlannerExtensions()
+	plan, ok := exts[0].PlanQuery(context.Background(), "articles", nil)
+	if !ok {
+		t.Fatal("expected PlanQuery to return true")
+	}
+	if plan != "custom-plan" {
+		t.Fatalf("expected 'custom-plan', got '%v'", plan)
+	}
+}
+
+// --- Temporal extension tests ---
+
+func TestRegisterTemporalExtension(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubTemporalExtension{temporal: true}
+	reg.RegisterTemporalExtension(ext)
+
+	exts := reg.GetTemporalExtensions()
+	if len(exts) != 1 {
+		t.Fatalf("expected 1 temporal extension, got %d", len(exts))
+	}
+}
+
+func TestGetTemporalExtensionSingleProvider(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+
+	// No extensions registered
+	if reg.GetTemporalExtension() != nil {
+		t.Fatal("expected nil when no temporal extensions registered")
+	}
+
+	ext1 := &stubTemporalExtension{temporal: true}
+	ext2 := &stubTemporalExtension{temporal: false}
+	reg.RegisterTemporalExtension(ext1)
+	reg.RegisterTemporalExtension(ext2)
+
+	got := reg.GetTemporalExtension()
+	if got != ext1 {
+		t.Fatal("GetTemporalExtension should return the first registered extension")
+	}
+}
+
+func TestTemporalExtensionIsTemporalBundle(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubTemporalExtension{temporal: true}
+	reg.RegisterTemporalExtension(ext)
+
+	got := reg.GetTemporalExtension()
+	if !got.IsTemporalBundle("employees") {
+		t.Fatal("expected IsTemporalBundle to return true")
+	}
+}
+
+func TestTemporalExtensionWriteAndDelete(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubTemporalExtension{temporal: true}
+	reg.RegisterTemporalExtension(ext)
+
+	got := reg.GetTemporalExtension()
+	_ = got.OnDocumentWrite(context.Background(), "employees", "doc1", map[string]interface{}{"name": "old"}, map[string]interface{}{"name": "new"})
+	if !ext.writeCalled {
+		t.Fatal("expected OnDocumentWrite to be called")
+	}
+
+	_ = got.OnDocumentDelete(context.Background(), "employees", "doc1", map[string]interface{}{"name": "old"})
+	if !ext.deleteCalled {
+		t.Fatal("expected OnDocumentDelete to be called")
+	}
+}
+
+// --- Replication extension test helpers ---
+
+type stubReplicationExtension struct {
+	leader     bool
+	follower   bool
+	mode       string
+	lastEntry  WALEntryInfo
+	entryCalls int
+}
+
+func (s *stubReplicationExtension) OnWALEntry(entry WALEntryInfo) error {
+	s.lastEntry = entry
+	s.entryCalls++
+	return nil
+}
+func (s *stubReplicationExtension) IsLeader() bool         { return s.leader }
+func (s *stubReplicationExtension) IsFollower() bool       { return s.follower }
+func (s *stubReplicationExtension) ReplicationMode() string { return s.mode }
+
+// --- Read router extension test helpers ---
+
+type stubReadRouterExtension struct {
+	shouldRoute bool
+	routeResult interface{}
+	routeCalls  int
+}
+
+func (s *stubReadRouterExtension) RouteRead(ctx context.Context, command string, extCtx ExtensionContext) (interface{}, bool) {
+	s.routeCalls++
+	if s.shouldRoute {
+		return s.routeResult, true
+	}
+	return nil, false
+}
+
+// --- Replication extension tests ---
+
+func TestRegisterReplicationExtension(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	if reg.HasReplicationExtension() {
+		t.Fatal("fresh registry should have no replication extensions")
+	}
+
+	ext := &stubReplicationExtension{leader: true, mode: "async"}
+	reg.RegisterReplicationExtension(ext)
+
+	if !reg.HasReplicationExtension() {
+		t.Fatal("registry should have replication extension after registration")
+	}
+}
+
+func TestGetReplicationExtensionSingleProvider(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+
+	if reg.GetReplicationExtension() != nil {
+		t.Fatal("expected nil when no replication extensions registered")
+	}
+
+	ext1 := &stubReplicationExtension{leader: true, mode: "async"}
+	ext2 := &stubReplicationExtension{follower: true, mode: "semisync"}
+	reg.RegisterReplicationExtension(ext1)
+	reg.RegisterReplicationExtension(ext2)
+
+	got := reg.GetReplicationExtension()
+	if got != ext1 {
+		t.Fatal("GetReplicationExtension should return the first registered extension")
+	}
+}
+
+func TestReplicationExtensionMethods(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubReplicationExtension{leader: true, mode: "semisync"}
+	reg.RegisterReplicationExtension(ext)
+
+	got := reg.GetReplicationExtension()
+	if !got.IsLeader() {
+		t.Fatal("expected IsLeader to return true")
+	}
+	if got.IsFollower() {
+		t.Fatal("expected IsFollower to return false")
+	}
+	if got.ReplicationMode() != "semisync" {
+		t.Fatalf("expected mode 'semisync', got '%s'", got.ReplicationMode())
+	}
+
+	entry := WALEntryInfo{LSN: 42, Operation: 1, TxID: "tx1", BundleName: "users", DocumentID: "doc1", RawBytes: []byte("test")}
+	_ = got.OnWALEntry(entry)
+	if ext.entryCalls != 1 {
+		t.Fatal("expected OnWALEntry to be called once")
+	}
+	if ext.lastEntry.LSN != 42 {
+		t.Fatalf("expected LSN 42, got %d", ext.lastEntry.LSN)
+	}
+}
+
+// --- Read router extension tests ---
+
+func TestRegisterReadRouterExtension(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	if reg.HasReadRouterExtension() {
+		t.Fatal("fresh registry should have no read router extensions")
+	}
+
+	ext := &stubReadRouterExtension{shouldRoute: true, routeResult: "routed"}
+	reg.RegisterReadRouterExtension(ext)
+
+	if !reg.HasReadRouterExtension() {
+		t.Fatal("registry should have read router extension after registration")
+	}
+}
+
+func TestGetReadRouterExtensionSingleProvider(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+
+	if reg.GetReadRouterExtension() != nil {
+		t.Fatal("expected nil when no read router extensions registered")
+	}
+
+	ext1 := &stubReadRouterExtension{shouldRoute: true, routeResult: "result1"}
+	ext2 := &stubReadRouterExtension{shouldRoute: false}
+	reg.RegisterReadRouterExtension(ext1)
+	reg.RegisterReadRouterExtension(ext2)
+
+	got := reg.GetReadRouterExtension()
+	if got != ext1 {
+		t.Fatal("GetReadRouterExtension should return the first registered extension")
+	}
+}
+
+func TestReadRouterExtensionRouteRead(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubReadRouterExtension{shouldRoute: true, routeResult: "follower-result"}
+	reg.RegisterReadRouterExtension(ext)
+
+	got := reg.GetReadRouterExtension()
+	result, handled := got.RouteRead(context.Background(), "SELECT * FROM users", nil)
+	if !handled {
+		t.Fatal("expected RouteRead to return handled=true")
+	}
+	if result != "follower-result" {
+		t.Fatalf("expected 'follower-result', got '%v'", result)
+	}
+	if ext.routeCalls != 1 {
+		t.Fatal("expected RouteRead to be called once")
+	}
+}
+
+func TestReadRouterExtensionDecline(t *testing.T) {
+	defer Reset()
+
+	reg := GetRegistry()
+	ext := &stubReadRouterExtension{shouldRoute: false}
+	reg.RegisterReadRouterExtension(ext)
+
+	got := reg.GetReadRouterExtension()
+	result, handled := got.RouteRead(context.Background(), "SELECT * FROM users", nil)
+	if handled {
+		t.Fatal("expected RouteRead to return handled=false")
+	}
+	if result != nil {
+		t.Fatal("expected nil result when not handled")
+	}
+}
+
 func TestGetResultTransformersReturnsSnapshot(t *testing.T) {
 	defer Reset()
 

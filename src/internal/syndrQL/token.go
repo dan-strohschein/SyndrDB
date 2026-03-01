@@ -209,6 +209,10 @@ const (
 	TOKEN_HOUR   // HOUR
 	TOKEN_MINUTE // MINUTE
 	TOKEN_SECOND // SECOND
+
+	// Keywords - Temporal (FOR SYSTEM_TIME)
+	TOKEN_SYSTEM  // SYSTEM
+	TOKEN_BETWEEN // BETWEEN
 )
 
 // String returns the string representation of a token type
@@ -494,6 +498,10 @@ func (tt TokenType) String() string {
 		return "MINUTE"
 	case TOKEN_SECOND:
 		return "SECOND"
+	case TOKEN_SYSTEM:
+		return "SYSTEM"
+	case TOKEN_BETWEEN:
+		return "BETWEEN"
 	default:
 		return "UNKNOWN"
 	}
@@ -674,6 +682,10 @@ var keywords = map[string]TokenType{
 	"HOUR":   TOKEN_HOUR,
 	"MINUTE": TOKEN_MINUTE,
 	"SECOND": TOKEN_SECOND,
+
+	// Temporal Keywords (FOR SYSTEM_TIME)
+	"SYSTEM":  TOKEN_SYSTEM,
+	"BETWEEN": TOKEN_BETWEEN,
 }
 
 // LookupKeyword checks if an identifier is a keyword and returns its token type

@@ -217,8 +217,9 @@ func (t *Tokenizer) readIdentifier() Token {
 
 	// Special handling for IS NULL and IS NOT NULL
 	if upperLiteral == "IS" {
-		// Save current position
+		// Save current position (including readPos for correct restore)
 		savedPos := t.pos
+		savedReadPos := t.readPos
 		savedCh := t.ch
 		savedLine := t.line
 		savedColumn := t.column
@@ -237,6 +238,7 @@ func (t *Tokenizer) readIdentifier() Token {
 			if nextUpperLiteral == "NOT" {
 				// Check for IS NOT NULL
 				secondSavedPos := t.pos
+				secondSavedReadPos := t.readPos
 				secondSavedCh := t.ch
 				secondSavedLine := t.line
 				secondSavedColumn := t.column
@@ -264,6 +266,7 @@ func (t *Tokenizer) readIdentifier() Token {
 
 					// Not followed by NULL, restore to after NOT
 					t.pos = secondSavedPos
+					t.readPos = secondSavedReadPos
 					t.ch = secondSavedCh
 					t.line = secondSavedLine
 					t.column = secondSavedColumn
@@ -271,6 +274,7 @@ func (t *Tokenizer) readIdentifier() Token {
 
 				// IS NOT without NULL - restore position to before IS
 				t.pos = savedPos
+				t.readPos = savedReadPos
 				t.ch = savedCh
 				t.line = savedLine
 				t.column = savedColumn
@@ -287,6 +291,7 @@ func (t *Tokenizer) readIdentifier() Token {
 			} else {
 				// IS followed by something else - restore position
 				t.pos = savedPos
+				t.readPos = savedReadPos
 				t.ch = savedCh
 				t.line = savedLine
 				t.column = savedColumn
@@ -294,6 +299,7 @@ func (t *Tokenizer) readIdentifier() Token {
 		} else {
 			// Not a letter, restore position
 			t.pos = savedPos
+			t.readPos = savedReadPos
 			t.ch = savedCh
 			t.line = savedLine
 			t.column = savedColumn
@@ -302,8 +308,9 @@ func (t *Tokenizer) readIdentifier() Token {
 
 	// Special handling for NOT IN - check if NOT is followed by IN
 	if tokenType == TOKEN_NOT {
-		// Save current position
+		// Save current position (including readPos for correct restore)
 		savedPos := t.pos
+		savedReadPos := t.readPos
 		savedCh := t.ch
 		savedLine := t.line
 		savedColumn := t.column
@@ -332,12 +339,14 @@ func (t *Tokenizer) readIdentifier() Token {
 
 			// Not followed by IN, restore position
 			t.pos = savedPos
+			t.readPos = savedReadPos
 			t.ch = savedCh
 			t.line = savedLine
 			t.column = savedColumn
 		} else {
 			// Not a letter, restore position
 			t.pos = savedPos
+			t.readPos = savedReadPos
 			t.ch = savedCh
 			t.line = savedLine
 			t.column = savedColumn

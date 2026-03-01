@@ -31,7 +31,16 @@ const (
 	EXPR_INTERVAL     // Added for DateTime INTERVAL literals
 	EXPR_AT_TIME_ZONE // Added for AT TIME ZONE operator
 	EXPR_CAST         // Added for CAST(expr AS type)
+	EXPR_TEMPORAL     // Added for FOR SYSTEM_TIME clause
 )
+
+// TemporalClause represents FOR SYSTEM_TIME {AS OF <time> | BETWEEN <t1> AND <t2> | ALL}
+type TemporalClause struct {
+	Type      string     // "AS_OF", "BETWEEN", "ALL"
+	AsOfTime  Expression // for AS OF
+	StartTime Expression // for BETWEEN
+	EndTime   Expression // for BETWEEN
+}
 
 // LiteralExpression represents a literal value (string, number, bool, null)
 type LiteralExpression struct {

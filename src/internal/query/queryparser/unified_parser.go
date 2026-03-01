@@ -138,6 +138,9 @@ type UnifiedSelectQuery struct {
 
 	// Locking
 	ForUpdate bool // FOR UPDATE - acquire row locks for subsequent modification
+
+	// Temporal support (SQL:2011 system-versioned)
+	TemporalClause interface{} // *syndrQL.TemporalClause, carried as interface to avoid import cycle
 }
 
 // ParseUnifiedSelectQuery parses any SELECT query variation into a unified structure

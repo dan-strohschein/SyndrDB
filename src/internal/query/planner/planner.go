@@ -129,6 +129,10 @@ type ExecutionPlan struct {
 	// not reusable after Close()).
 	UseIterator     bool
 	IteratorFactory func() IteratorNode
+
+	// TemporalClause carries the parsed FOR SYSTEM_TIME clause (interface{} to avoid import cycle).
+	// When set, the execution layer applies temporal filtering via TemporalExtension.
+	TemporalClause interface{}
 }
 
 // GetEffectiveResultSchema returns the schema that should be used for encoding result documents.
@@ -254,8 +258,9 @@ type BTreeOrderedScanNode struct {
 	Cost               float64
 	EstimatedRows      int
 	// ORDER BY optimization fields
-	Descending bool // If true, iterate in descending order (for ORDER BY ... DESC)
-	Limit      int  // If > 0, stop after this many documents (for LIMIT optimization)
+	Descending      bool // If true, iterate in descending order (for ORDER BY ... DESC)
+	Limit           int  // If > 0, stop after this many documents (for LIMIT optimization)
+	sortedDocuments []*models.Document // Cached sorted result from Execute()
 }
 
 // FullScanNode represents a full bundle scan

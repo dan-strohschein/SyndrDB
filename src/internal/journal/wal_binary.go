@@ -410,6 +410,19 @@ func (wal *WriteAheadLog) LogOperationBinary(txID string, operation OperationTyp
 		wal.lastFlush = time.Now()
 	}
 
+	// Enterprise replication hook: notify after durable write
+	if reg := extension.GetRegistry(); reg.HasReplicationExtension() {
+		replExt := reg.GetReplicationExtension()
+		replExt.OnWALEntry(extension.WALEntryInfo{
+			LSN:        entry.LSN,
+			Operation:  int(entry.Operation),
+			TxID:       entry.TxID,
+			BundleName: entry.BundleName,
+			DocumentID: entry.DocumentID,
+			RawBytes:   binaryData,
+		})
+	}
+
 	return nil
 }
 

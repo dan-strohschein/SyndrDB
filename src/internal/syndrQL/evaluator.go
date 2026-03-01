@@ -892,6 +892,39 @@ func (e *ExpressionEvaluator) compareValues(a, b interface{}, compare func(float
 		return compare(aNum, bNum), nil
 	}
 
+	// Handle DateTime-to-String cross-type comparison
+	// When one side is time.Time and the other is a string, try parsing the string as DateTime
+	aTime, aIsTime := a.(time.Time)
+	bTime, bIsTime := b.(time.Time)
+	if aIsTime && bIsString {
+		if parsed, err := time.Parse(time.RFC3339Nano, bStr); err == nil {
+			bTime = parsed
+			bIsTime = true
+		} else if parsed, err := time.Parse(time.RFC3339, bStr); err == nil {
+			bTime = parsed
+			bIsTime = true
+		} else if parsed, err := time.Parse("2006-01-02", bStr); err == nil {
+			bTime = parsed
+			bIsTime = true
+		}
+	} else if bIsTime && aIsString {
+		if parsed, err := time.Parse(time.RFC3339Nano, aStr); err == nil {
+			aTime = parsed
+			aIsTime = true
+		} else if parsed, err := time.Parse(time.RFC3339, aStr); err == nil {
+			aTime = parsed
+			aIsTime = true
+		} else if parsed, err := time.Parse("2006-01-02", aStr); err == nil {
+			aTime = parsed
+			aIsTime = true
+		}
+	}
+	if aIsTime && bIsTime {
+		aUnix := float64(aTime.UnixNano())
+		bUnix := float64(bTime.UnixNano())
+		return compare(aUnix, bUnix), nil
+	}
+
 	// Try numeric comparison
 	aNum, aErr := e.toFloat64(a)
 	bNum, bErr := e.toFloat64(b)

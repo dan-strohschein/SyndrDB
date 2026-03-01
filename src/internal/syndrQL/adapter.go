@@ -75,6 +75,11 @@ func (a *SelectStatementAdapter) ToUnifiedSelectQuery(stmt *SelectStatement) (*q
 		ForUpdate: stmt.ForUpdate,
 	}
 
+	// Convert temporal clause if present
+	if stmt.TemporalClause != nil {
+		query.TemporalClause = stmt.TemporalClause
+	}
+
 	// Convert WHERE clause if present - Store Expression directly
 	if stmt.WhereClause != nil {
 		query.WhereExpression = stmt.WhereClause

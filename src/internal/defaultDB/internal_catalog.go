@@ -636,6 +636,130 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END ENCRYPTION CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// FULL-TEXT SEARCH CATALOG BUNDLES (Milestone 3)
+	// ==============================================================
+
+	// FTSIndexes — tracks full-text search index metadata
+	ftsIndexes_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":    {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"IndexName":     {Name: "IndexName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName":    {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FieldNames":    {Name: "FieldNames", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""}, // comma-separated
+			"AnalyzerConfig": {Name: "AnalyzerConfig", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: "standard"},
+			"CreatedAt":     {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"Status":        {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "building"},
+			"DocumentCount": {Name: "DocumentCount", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+		},
+	}
+	ftsIndexes_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "FTSIndexes",
+		DocumentStructure: ftsIndexes_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, ftsIndexes_Bundle)
+
+	// ==============================================================
+	// END FTS CATALOG BUNDLES
+	// ==============================================================
+
+	// ==============================================================
+	// TEMPORAL CATALOG BUNDLES (Milestone 3)
+	// ==============================================================
+
+	// TemporalBundles — tracks which bundles have system versioning enabled
+	temporalBundles_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":    {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"BundleName":    {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"IsEnabled":     {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"RetentionDays": {Name: "RetentionDays", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 365},
+			"CreatedAt":     {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"CreatedBy":     {Name: "CreatedBy", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+		},
+	}
+	temporalBundles_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "TemporalBundles",
+		DocumentStructure: temporalBundles_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, temporalBundles_Bundle)
+
+	// ==============================================================
+	// END TEMPORAL CATALOG BUNDLES
+	// ==============================================================
+
+	// ==============================================================
+	// HIGH AVAILABILITY CATALOG BUNDLES (Milestone 4)
+	// ==============================================================
+
+	// ClusterNodes — tracks cluster topology and node state
+	clusterNodes_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":    {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"NodeID":        {Name: "NodeID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"Host":          {Name: "Host", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Port":          {Name: "Port", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"ReplPort":      {Name: "ReplPort", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"Role":          {Name: "Role", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "standalone"},
+			"Status":        {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "offline"},
+			"AppliedLSN":    {Name: "AppliedLSN", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"LastHeartbeat": {Name: "LastHeartbeat", Type: "DATETIME", IsRequired: false, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"JoinedAt":      {Name: "JoinedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	clusterNodes_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "ClusterNodes",
+		DocumentStructure: clusterNodes_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, clusterNodes_Bundle)
+
+	// ReplicationState — tracks replication status per node
+	replState_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":      {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"NodeID":          {Name: "NodeID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"ReplicationMode": {Name: "ReplicationMode", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "async"},
+			"CurrentLSN":      {Name: "CurrentLSN", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"AppliedLSN":      {Name: "AppliedLSN", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"ReplicationLag":  {Name: "ReplicationLag", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"LastError":       {Name: "LastError", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"UpdatedAt":       {Name: "UpdatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	replState_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "ReplicationState",
+		DocumentStructure: replState_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, replState_Bundle)
+
+	// ==============================================================
+	// END HIGH AVAILABILITY CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 
