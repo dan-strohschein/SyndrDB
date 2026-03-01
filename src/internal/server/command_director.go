@@ -1582,9 +1582,11 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 
 	// Resolve the result schema for Values[i] → field name mapping.
 	// Aggregation nodes produce synthetic schemas; regular queries use the bundle schema.
-	// JOIN queries produce merged documents with Data (not Values), so schema is not applicable.
+	// JOIN queries produce merged documents with Data (not Values), so schema is not applicable
+	// UNLESS an AggregationNode wraps the JOIN (e.g., SELECT COUNT(*) ... JOIN ...),
+	// in which case the AggregationNode produces synthetic documents with Values, not Data.
 	var resultSchema *models.BundleFieldSchema
-	if len(query.JoinClauses) == 0 {
+	if len(query.JoinClauses) == 0 || query.IsAggregateOnly || query.HasGroupBy() {
 		resultSchema = plan.GetEffectiveResultSchema()
 	}
 

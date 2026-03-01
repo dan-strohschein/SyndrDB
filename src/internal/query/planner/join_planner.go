@@ -1674,8 +1674,11 @@ func (f *ExpressionFilteredBundleAdapter) GetAllDocuments() map[string]*models.D
 
 	// Streaming + parallel path: filter while loading pages, never materialize full unfiltered set
 	if f.streamingOpts != nil && f.streamingOpts.BundleService != nil && f.streamingOpts.BundleName != "" {
+		// Capture bundleCtx for closure — required for resolving qualified identifiers
+		// (e.g., "Authors"."Name") in predicate expressions during streaming evaluation.
+		bundleCtx := f.bundleCtx
 		filter := func(d *models.Document) bool {
-			r, err := f.evaluator.EvaluateAsBool(f.predicate, d, nil, nil, nil)
+			r, err := f.evaluator.EvaluateAsBool(f.predicate, d, bundleCtx, nil, nil)
 			if err != nil {
 				f.logger.Warnf("streaming filter eval error for doc %s: %v", d.DocumentID, err)
 				return false

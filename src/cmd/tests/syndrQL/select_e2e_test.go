@@ -484,11 +484,17 @@ func extractDocuments(t *testing.T, response interface{}) []map[string]interface
 	}
 
 	// PHASE H: Handle streaming response where documents aren't materialized as maps
+	// Check StreamSlice first (preferred path for scan-optimized queries without ORDER BY)
+	if len(cmdResponse.StreamSlice) > 0 {
+		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(
+			cmdResponse.StreamSlice,
+			cmdResponse.StreamFields,
+			cmdResponse.StreamSchema,
+		)
+	}
 	if cmdResponse.StreamDocuments != nil || len(cmdResponse.StreamDocuments) > 0 {
 		// Convert StreamDocuments to the expected format
 		return helpers.TransformDocumentsToFlatFormatWithProjection(
-			// Fix: Provide bundle schema as third argument per new helpers.TransformDocumentsToFlatFormatWithProjection signature.
-			// Fix: Provide nil for bundle schema, since CommandResponse no longer has BundleSchema.
 			cmdResponse.StreamDocuments,
 			cmdResponse.StreamFields,
 			nil,

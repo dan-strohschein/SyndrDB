@@ -499,7 +499,7 @@ func (qr *QueryRouter) convertToJoinQuery(query *queryparser.UnifiedSelectQuery)
 		WhereClause:      whereClause,
 		WhereExpression:  query.WhereExpression, // Pass Expression for new executor
 		OrderBy:          []string{},            // ORDER BY handled by PlanBuilder (fields stored separately)
-		Limit:            query.Limit,
+		Limit:            query.GetEffectiveLimit(),
 		Offset:           query.Offset,
 		RelationshipName: query.RelationshipName,
 	}
@@ -625,9 +625,9 @@ func (qr *QueryRouter) createExpressionBasedPlan(
 	// This is safe because without ORDER BY, result order is undefined.
 	// NOTE: We also require no GROUP BY since aggregation needs all matching documents.
 	if query.HasLimit() && !query.HasOrderBy() && !query.HasGroupBy() && !query.IsDistinct && !query.IsAggregateOnly {
-		effectiveLimit := query.Limit
+		effectiveLimit := query.GetEffectiveLimit()
 		if query.Offset > 0 {
-			effectiveLimit = query.Offset + query.Limit // Need extra for OFFSET
+			effectiveLimit = query.Offset + query.GetEffectiveLimit() // Need extra for OFFSET
 		}
 		filterNode.MaxDocuments = effectiveLimit
 		qr.logger.Debugf("OPTIMIZATION: LIMIT pushdown to FilterNode: MaxDocuments=%d (LIMIT %d + OFFSET %d)",

@@ -49,6 +49,12 @@ func getGroupByClause() string {
 	return `GROUP BY "Authors"."Name"`
 }
 
+// getFieldListForGroupBy returns a field list compatible with GROUP BY "Authors"."Name"
+// In standard SQL, non-aggregate SELECT fields must appear in GROUP BY clause
+func getFieldListForGroupBy() string {
+	return `"Name", COUNT(*)`
+}
+
 func seedSimpleAuthorsBundle(t *testing.T, fixture *TestFixture, count int) {
 	t.Helper()
 
@@ -292,10 +298,13 @@ func setupBundles(t *testing.T, fixture *TestFixture) {
 	// }
 
 	// Create Books bundle - must pass database context
+	// NOTE: AuthorsID field is required for JOIN tests (seedBooksBundle stores the Author's
+	// DocumentID in AuthorsID and the JOIN condition references "Books"."AuthorsID")
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
 		{"ID", "INT", true, true, null},
 		{"Title", "STRING", true, false, null},
 		{"AuthorID", "INT", false, false, null},
+		{"AuthorsID", "STRING", false, false, null},
 		{"Genre", "STRING", false, false, null},
 		{"Price", "FLOAT", false, false, null}
 	)`
@@ -368,10 +377,13 @@ func setupBundlesTB(tb testing.TB, fixture *TestFixture) {
 	// }
 
 	// Create Books bundle - must pass database context
+	// NOTE: AuthorsID field is required for JOIN tests (seedBooksBundle stores the Author's
+	// DocumentID in AuthorsID and the JOIN condition references "Books"."AuthorsID")
 	createBooksCmd := `CREATE BUNDLE "Books" WITH FIELDS (
 		{"ID", "INT", true, true},
 		{"Title", "STRING", true, false},
 		{"AuthorID", "INT", false, false},
+		{"AuthorsID", "STRING", false, false},
 		{"Genre", "STRING", false, false},
 		{"Price", "FLOAT", false, false}
 	)`
@@ -1616,7 +1628,8 @@ func TestSelect_FieldListGroupBy(t *testing.T) {
 	//resetDatabase(t, fixture)
 	seedSimpleAuthorsBundle(t, fixture, 100)
 
-	query := fmt.Sprintf(`SELECT %s %s %s;`, getFieldList(), getFromClause(), getGroupByClause())
+	// Use GROUP BY-compatible field list: non-aggregate fields must be in GROUP BY clause
+	query := fmt.Sprintf(`SELECT %s %s %s;`, getFieldListForGroupBy(), getFromClause(), getGroupByClause())
 	response := executeRealQuery(t, fixture, query)
 	count := 0
 	if cmdResp, ok := response.(*server.CommandResponse); ok {
@@ -1716,7 +1729,8 @@ func TestSelect_FieldListBasicWhereGroupBy(t *testing.T) {
 	//resetDatabase(t, fixture)
 	seedSimpleAuthorsBundle(t, fixture, 100)
 
-	query := fmt.Sprintf(`SELECT %s %s %s %s;`, getFieldList(), getFromClause(), getBascWhereClause(), getGroupByClause())
+	// Use GROUP BY-compatible field list
+	query := fmt.Sprintf(`SELECT %s %s %s %s;`, getFieldListForGroupBy(), getFromClause(), getBascWhereClause(), getGroupByClause())
 	response := executeRealQuery(t, fixture, query)
 	count := 0
 	if cmdResp, ok := response.(*server.CommandResponse); ok {
@@ -1816,7 +1830,8 @@ func TestSelect_FieldListRangeWhereGroupBy(t *testing.T) {
 	//resetDatabase(t, fixture)
 	seedSimpleAuthorsBundle(t, fixture, 100)
 
-	query := fmt.Sprintf(`SELECT %s %s %s %s;`, getFieldList(), getFromClause(), getRangeWhereClause(), getGroupByClause())
+	// Use GROUP BY-compatible field list
+	query := fmt.Sprintf(`SELECT %s %s %s %s;`, getFieldListForGroupBy(), getFromClause(), getRangeWhereClause(), getGroupByClause())
 	response := executeRealQuery(t, fixture, query)
 	count := 0
 	if cmdResp, ok := response.(*server.CommandResponse); ok {
@@ -1918,7 +1933,8 @@ func TestSelect_FieldListJoinBasicWhereGroupBy(t *testing.T) {
 	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 100)
 
-	query := fmt.Sprintf(`SELECT %s %s %s %s %s;`, getFieldList(), getFromClause(), getJoinClause(), getBascWhereClause(), getGroupByClause())
+	// Use GROUP BY-compatible field list
+	query := fmt.Sprintf(`SELECT %s %s %s %s %s;`, getFieldListForGroupBy(), getFromClause(), getJoinClause(), getBascWhereClause(), getGroupByClause())
 	response := executeRealQuery(t, fixture, query)
 	count := 0
 	if cmdResp, ok := response.(*server.CommandResponse); ok {
@@ -2022,7 +2038,8 @@ func TestSelect_FieldListJoinRangeWhereGroupBy(t *testing.T) {
 	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 100)
 
-	query := fmt.Sprintf(`SELECT %s %s %s %s %s;`, getFieldList(), getFromClause(), getJoinClause(), getRangeWhereClause(), getGroupByClause())
+	// Use GROUP BY-compatible field list
+	query := fmt.Sprintf(`SELECT %s %s %s %s %s;`, getFieldListForGroupBy(), getFromClause(), getJoinClause(), getRangeWhereClause(), getGroupByClause())
 	response := executeRealQuery(t, fixture, query)
 	count := 0
 	if cmdResp, ok := response.(*server.CommandResponse); ok {

@@ -134,9 +134,10 @@ func (pb *PlanBuilder) BuildPlan(
 	if query.HasLimit() && !query.HasWhere() && !query.HasGroupBy() && !query.HasOrderBy() && !query.IsDistinct {
 		if fullScan, ok := currentTree.(*FullScanNode); ok {
 			// Calculate effective limit (LIMIT + OFFSET) for early termination
-			effectiveLimit := query.Limit
+			// Use GetEffectiveLimit() to handle both TOP and LIMIT clauses
+			effectiveLimit := query.GetEffectiveLimit()
 			if query.Offset > 0 {
-				effectiveLimit = query.Offset + query.Limit
+				effectiveLimit = query.Offset + query.GetEffectiveLimit()
 			}
 			fullScan.MaxDocuments = effectiveLimit
 			pb.logger.Debugf("OPTIMIZATION: Simple LIMIT-only query detected. Setting MaxDocuments=%d on FullScanNode (skipping SortNode)", effectiveLimit)
@@ -308,7 +309,7 @@ func (pb *PlanBuilder) addAggregationNode(
 		query.HavingExpression == nil && // No HAVING clause
 		!query.HasOrderBy() && // No ORDER BY clause
 		query.Offset == 0 { // No OFFSET
-		limitForEarlyTermination = query.Limit
+		limitForEarlyTermination = query.GetEffectiveLimit()
 		pb.logger.Debugf("Enabling early termination for aggregation with limit=%d", limitForEarlyTermination)
 	}
 
@@ -344,6 +345,20 @@ func getBundleFromExecutionNode(node ExecutionNode) *models.Bundle {
 		return n.Bundle
 	case *FilterNode:
 		return getBundleFromExecutionNode(n.Child)
+	case *JoinExecutionNode:
+		// JoinExecutionNode wraps left bundle; extract from Database via ServiceManager
+		if n.Database != nil && n.Query != nil && n.ServiceManager != nil {
+			if bundle, err := n.ServiceManager.GetBundleByName(n.Database, n.Query.FromBundle); err == nil {
+				return bundle
+			}
+		}
+		return nil
+	case *IndexScanNode:
+		return n.Bundle
+	case *BRINScanNode:
+		return n.Bundle
+	case *BTreeOrderedScanNode:
+		return n.Bundle
 	default:
 		return nil
 	}
