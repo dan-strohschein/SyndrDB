@@ -3,6 +3,7 @@ package subquery
 import (
 	"context"
 	"fmt"
+	"strings"
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
 	"syndrdb/src/internal/syndrQL"
@@ -129,7 +130,7 @@ func (e *StandardSubqueryExecutor) Execute(
 	}
 
 	// Step 6: Materialize results according to strategy
-	result, err := e.materializeResult(rawResult, strategy, innerQuery)
+	result, err := e.materializeResult(rawResult, strategy, innerQuery, database)
 	if err != nil {
 		return nil, err
 	}
@@ -201,6 +202,7 @@ func (e *StandardSubqueryExecutor) materializeResult(
 	rawResult interface{},
 	strategy MaterializationStrategy,
 	innerQuery *syndrQL.SelectStatement,
+	database *models.Database,
 ) (*SubqueryResult, error) {
 
 	// Handle different result formats from query execution
@@ -302,8 +304,25 @@ func (e *StandardSubqueryExecutor) materializeResult(
 					value = models.NewInterfaceValue(nil)
 				}
 			} else if doc.Values != nil {
-				// No schema in subquery context; cannot resolve by name
-				value = models.NewInterfaceValue(nil)
+				// Use bundle schema to resolve field name to index in doc.Values
+				resolved := false
+				if database != nil {
+					if bundle, ok := database.Bundles[innerQuery.BundleName]; ok {
+						schema := bundle.DocumentStructure.FieldSchema()
+						if schema != nil {
+							if idx, ok := schema.NameToIndex[fieldToExtract]; ok && idx < len(doc.Values) {
+								value = doc.Values[idx]
+								resolved = true
+							} else if idx, ok := schema.LowerNameToIndex[strings.ToLower(fieldToExtract)]; ok && idx < len(doc.Values) {
+								value = doc.Values[idx]
+								resolved = true
+							}
+						}
+					}
+				}
+				if !resolved {
+					value = models.NewInterfaceValue(nil)
+				}
 			} else {
 				value = models.NewInterfaceValue(nil)
 			}

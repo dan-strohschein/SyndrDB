@@ -83,16 +83,11 @@ func NewMemoryTracker(limitBytes int64) *MemoryTracker {
 	}
 }
 
-// Sample records the size of a document at the given index
-// Only samples every SAMPLE_RATE-th document to minimize overhead
-// Returns error if memory limit would be exceeded
+// Sample records the size of a document at the given index.
+// The caller controls sampling frequency (e.g., progressive sampling in FullScanNode).
+// Every call to Sample records the measurement — no internal filtering.
 func (mt *MemoryTracker) Sample(docSizeBytes int64, currentIndex int) error {
 	mt.documentsProcessed.Add(1)
-
-	// Only sample every SAMPLE_RATE-th document
-	if currentIndex%SAMPLE_RATE != 0 {
-		return nil
-	}
 
 	// Record this sample
 	mt.totalSampledBytes.Add(docSizeBytes)

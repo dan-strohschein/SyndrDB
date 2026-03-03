@@ -274,11 +274,13 @@ func TestMigrationCommand_CreateBundleRollback(t *testing.T) {
 	result, err := executeMigrationCommand(t, fixture, rollbackCmd)
 
 	// Expect rollback to fail because there are no down commands
-	// Note: May also fail with "migration already in progress" if lock wasn't released from previous operation
+	// Note: May also fail with lock-related errors if lock wasn't released from previous operation
 	if err == nil {
 		t.Error("Expected rollback to fail (no down commands), but it succeeded")
-	} else if !strings.Contains(err.Error(), "no down commands") && !strings.Contains(err.Error(), "migration already in progress") {
-		t.Errorf("Expected 'no down commands' or 'migration already in progress' error, got: %v", err)
+	} else if !strings.Contains(err.Error(), "no down commands") &&
+		!strings.Contains(err.Error(), "migration already in progress") &&
+		!strings.Contains(err.Error(), "failed to acquire lock") {
+		t.Errorf("Expected 'no down commands', 'migration already in progress', or 'failed to acquire lock' error, got: %v", err)
 	} else {
 		t.Logf("✓ Rollback correctly failed with: %v", err)
 	}

@@ -829,6 +829,41 @@ func (s *BundleService) AddRelationshipToBundle(bundle *models.Bundle, relations
 		return fmt.Errorf("unsupported relationship type: %s", relationship.RelationshipType)
 	}
 
+	// REFERENTIAL INTEGRITY: Automatically create hash index on source field for FK validation
+	// Foreign key validation needs O(1) lookup to verify parent documents exist.
+	// This ensures ValidateUpdateForeignKey() and ValidateInsertForeignKey() can efficiently
+	// check if a referenced document exists in the source bundle.
+	sourceIndexName := fmt.Sprintf("%s_fk", relationshipCommand.SourceField)
+	if _, exists := bundle.Indexes[sourceIndexName]; !exists {
+		s.logger.Debugf("Automatically creating hash index '%s' on source field '%s.%s' for FK validation",
+			sourceIndexName, bundle.Name, relationshipCommand.SourceField)
+
+		sourceIndexCommand := &models.CreateIndexCommand{
+			IndexName:  sourceIndexName,
+			BundleName: bundle.Name,
+			IndexType:  "hash",
+			Fields: []models.FieldDefinition{
+				{
+					Name:     relationshipCommand.SourceField,
+					Type:     sourceFieldDef.Type,
+					IsUnique: false,
+				},
+			},
+		}
+
+		err := s.AddIndexToBundle(bundle.Database, bundle, sourceIndexCommand)
+		if err != nil {
+			// Log warning but don't fail the relationship creation
+			s.logger.Warnf("Failed to automatically create source field index '%s': %v. "+
+				"FK validation may be slower without this index.", sourceIndexName, err)
+		} else {
+			s.logger.Debugf("Successfully created hash index '%s' on source field for FK validation", sourceIndexName)
+		}
+	} else {
+		s.logger.Debugf("Hash index '%s' already exists on source field '%s', skipping automatic creation",
+			sourceIndexName, relationshipCommand.SourceField)
+	}
+
 	// Update the source bundle in the store
 	err := s.store.UpdateBundleFile(bundle.Database, bundle)
 	if err != nil {

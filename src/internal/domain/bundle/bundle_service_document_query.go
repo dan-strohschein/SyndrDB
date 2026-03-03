@@ -298,7 +298,9 @@ func (s *BundleService) filterBufferedDocuments(docs []*models.Document, wherePa
 // filterDocumentsWithSyndrQL filters documents using the SyndrQL expression parser and evaluator.
 // This is the preferred method for filtering documents with WHERE clauses.
 // Uses cached expression parsing for performance.
-func (s *BundleService) filterDocumentsWithSyndrQL(docs []*models.Document, whereClause string) ([]*models.Document, error) {
+// When bundle is non-nil, creates a BundleContext so the evaluator can resolve fields
+// from schema-ordered Values (not just Data maps).
+func (s *BundleService) filterDocumentsWithSyndrQL(docs []*models.Document, whereClause string, bundle ...*models.Bundle) ([]*models.Document, error) {
 	if whereClause == "" {
 		return docs, nil
 	}
@@ -316,9 +318,20 @@ func (s *BundleService) filterDocumentsWithSyndrQL(docs []*models.Document, wher
 	// Create evaluator for filtering
 	evaluator := syndrQL.NewExpressionEvaluator(s.logger)
 
+	// Build BundleContext if bundle is provided so evaluator can resolve schema-ordered Values
+	var bundleCtx *syndrQL.BundleContext
+	if len(bundle) > 0 && bundle[0] != nil {
+		b := bundle[0]
+		bundleCtx = syndrQL.NewBundleContext(
+			map[string]*models.Bundle{b.Name: b},
+			b.Name,
+			nil,
+		)
+	}
+
 	var result []*models.Document
 	for _, doc := range docs {
-		matches, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
+		matches, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, nil, nil)
 		if err != nil {
 			s.logger.Debugf("Expression evaluation failed for doc %s: %v", doc.DocumentID, err)
 			continue
@@ -518,7 +531,7 @@ func (s *BundleService) scanForMatchingIDsWithPagesSequential(bundle *models.Bun
 		if len(chunk) == 0 {
 			continue
 		}
-		filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause)
+		filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause, bundle)
 		if err != nil {
 			return nil, fmt.Errorf("streaming full scan failed on page %d: %w", pageID, err)
 		}
@@ -566,7 +579,7 @@ func (s *BundleService) scanForMatchingIDsWithPagesParallel(bundle *models.Bundl
 					resultsChan <- pageResult{pageID: pageID, docIDsFound: nil, err: nil}
 					continue
 				}
-				filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause)
+				filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause, bundle)
 				if err != nil {
 					resultsChan <- pageResult{pageID: pageID, docIDsFound: nil, err: fmt.Errorf("page %d: %w", pageID, err)}
 					continue
@@ -621,7 +634,7 @@ func (s *BundleService) getDocumentsByFilterStreamingSequential(bundle *models.B
 		if len(chunk) == 0 {
 			continue
 		}
-		filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause)
+		filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause, bundle)
 		if err != nil {
 			return nil, fmt.Errorf("streaming full scan failed on page %d: %w", pageID, err)
 		}
@@ -678,7 +691,7 @@ func (s *BundleService) getDocumentsByFilterStreamingParallel(bundle *models.Bun
 					continue
 				}
 
-				filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause)
+				filtered, err := s.filterDocumentsWithSyndrQL(chunk, whereClause, bundle)
 				if err != nil {
 					resultsChan <- pageResult{pageID: pageID, docs: nil, err: fmt.Errorf("page %d: %w", pageID, err)}
 					continue
@@ -1118,7 +1131,7 @@ func (s *BundleService) tryANDIndexOptimization(bundle *models.Bundle, whereClau
 	s.logger.Debugf("AND optimization: filtering %d docs by remaining WHERE: %s", len(indexedDocs), remainingWhere)
 
 	// Filter by remaining clauses using SyndrQL (in-memory, fast since we have a small set)
-	filteredDocs, err := s.filterDocumentsWithSyndrQL(indexedDocs, remainingWhere)
+	filteredDocs, err := s.filterDocumentsWithSyndrQL(indexedDocs, remainingWhere, bundle)
 	if err != nil {
 		return nil, false, fmt.Errorf("AND optimization filter failed: %w", err)
 	}

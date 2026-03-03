@@ -157,53 +157,12 @@ func (pb *PlanBuilder) BuildPlan(
 	// Add sorting for deterministic ordering, but skip for aggregate-only queries
 	// (no GROUP BY) when there's no explicit ORDER BY, as there's nothing to sort
 	if !query.IsAggregateOnly || query.HasOrderBy() {
-		// OPTIMIZATION: Skip SortNode if base tree is BTreeOrderedScanNode with matching ORDER BY
-		// BTreeOrderedScanNode already returns documents in sorted order (ASC or DESC)
-		if btreeNode, ok := currentTree.(*BTreeOrderedScanNode); ok && query.HasOrderBy() && query.OrderBy != nil {
-			if len(query.OrderBy.Fields) == 1 {
-				orderField := query.OrderBy.Fields[0]
-				fieldName := strings.Trim(orderField.FieldName, `"'`)
-				if dotIdx := strings.LastIndex(fieldName, "."); dotIdx >= 0 {
-					fieldName = fieldName[dotIdx+1:]
-				}
-				fieldName = strings.Trim(fieldName, `"'`)
-
-				isDescending := orderField.Direction == queryparser.SortDesc
-				directionStr := "ASC"
-				if isDescending {
-					directionStr = "DESC"
-				}
-
-				// Check if BTreeOrderedScanNode matches the ORDER BY requirements
-				if btreeNode.OrderedByFieldName == fieldName && btreeNode.Descending == isDescending {
-					pb.logger.Debugf("SKIP SortNode: BTreeOrderedScanNode already provides ORDER BY %s %s", fieldName, directionStr)
-
-					// Also skip LimitNode if BTreeOrderedScanNode already applied the limit
-					if btreeNode.Limit > 0 && (query.HasLimit() || query.Offset > 0) {
-						pb.logger.Debugf("SKIP LimitNode: BTreeOrderedScanNode already applied limit=%d", btreeNode.Limit)
-
-						// Handle OFFSET by wrapping with LimitNode that only applies OFFSET
-						if query.Offset > 0 {
-							// Need LimitNode to skip OFFSET documents from the pre-limited result
-							limitNode := NewLimitNode(
-								currentTree,
-								query.GetEffectiveLimit(),
-								query.Offset,
-								pb.logger,
-							)
-							currentTree = limitNode
-							pb.logger.Debug("Added LimitNode for OFFSET handling only")
-						}
-
-						// Skip to hierarchical transform
-						goto addHierarchicalTransform
-					}
-
-					// No limit was applied by BTreeOrderedScanNode, continue to add LimitNode if needed
-					goto addLimitNode
-				}
-			}
-		}
+		// NOTE: BTreeOrderedScanNode does NOT skip the SortNode. B-tree keys are
+		// encoded as ASCII strings (e.g., int 10 → "10"), so B-tree iteration order
+		// is lexicographic, not numeric. The SortNode provides correct semantic ordering.
+		// BTreeOrderedScanNode is still useful as the scan node because it retrieves
+		// documents via GetDocument() (fully-populated doc.Data), rather than the
+		// page scanner path which may return partial doc.Values.
 
 		// OPTIMIZATION: Skip SortNode if JoinExecutionNode uses streaming Top-N (already sorted)
 		// JoinExecutionNode with OrderBy + Limit uses heap-based merge producing sorted output
@@ -266,7 +225,6 @@ addLimitNode:
 		pb.logger.Debug("Added LimitNode to tree")
 	}
 
-addHierarchicalTransform:
 	// Add hierarchical transform if WITH RELATIONSHIP present
 	if query.RelationshipName != "" {
 		transformNode, err := pb.addHierarchicalTransformNode(currentTree, query, database)

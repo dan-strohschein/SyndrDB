@@ -44,6 +44,12 @@ func seedUsers(t testing.TB, fixture *TestFixture, count int) {
 			t.Fatalf("Failed to add document: %v", err)
 		}
 	}
+
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		t.Fatalf("Failed to flush buffers after seeding users: %v", err)
+	}
 }
 
 // seedUsersWithPrices creates count Users with Price field for range queries
@@ -71,6 +77,32 @@ func seedUsersWithPrices(t testing.TB, fixture *TestFixture, count int) {
 		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, cmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to add document: %v", err)
+		}
+	}
+
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		t.Fatalf("Failed to flush buffers after seeding users: %v", err)
+	}
+}
+
+// populateDataFromValues fills doc.Data from doc.Values using the schema.
+// Streaming documents have Values (typed FieldValue array) but Data is nil.
+// This bridges the gap so helpers like getDocString/getDocInt64 work.
+func populateDataFromValues(docs []*models.Document, schema *models.BundleFieldSchema) {
+	if schema == nil {
+		return
+	}
+	for _, doc := range docs {
+		if doc == nil || doc.Data != nil || len(doc.Values) == 0 {
+			continue
+		}
+		doc.Data = make(map[string]interface{}, len(doc.Values))
+		for i, val := range doc.Values {
+			if i < len(schema.Names) {
+				doc.Data[schema.Names[i]] = val.AsInterface()
+			}
 		}
 	}
 }
@@ -119,11 +151,19 @@ func executeQuery(t testing.TB, fixture *TestFixture, query string) []*models.Do
 	}
 
 	cmdResp := resp.(*server.CommandResponse)
+
+	// Handle StreamSlice (scan-optimized queries without ORDER BY)
+	if len(cmdResp.StreamSlice) > 0 {
+		populateDataFromValues(cmdResp.StreamSlice, cmdResp.StreamSchema)
+		return cmdResp.StreamSlice
+	}
+
 	if len(cmdResp.StreamDocuments) > 0 {
 		docs := make([]*models.Document, 0, len(cmdResp.StreamDocuments))
 		for _, doc := range cmdResp.StreamDocuments {
 			docs = append(docs, doc)
 		}
+		populateDataFromValues(docs, cmdResp.StreamSchema)
 		return docs
 	}
 
@@ -191,6 +231,12 @@ func TestWhereBloom_vs_NoBloom(t *testing.T) {
 	}
 
 	seedUsers(t, fixture, 1000)
+
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err = fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		t.Fatalf("Failed to flush buffers: %v", err)
+	}
 
 	query := `SELECT * FROM Users WHERE Country == "USA" AND Age > 30`
 

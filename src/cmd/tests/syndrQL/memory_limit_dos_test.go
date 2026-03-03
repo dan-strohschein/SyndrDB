@@ -109,9 +109,16 @@ func TestMemoryLimit_LargeDocumentsExceedLimit(t *testing.T) {
 			t.Fatalf("Expected CommandResponse, got %T", result)
 		}
 
-		t.Logf("DEBUG: response.Error = %v, result type = %T", response.Error, result)
+		t.Logf("DEBUG: response.Error = %v, result type = %T, ResultCount = %d", response.Error, result, response.ResultCount)
 		if response.Error != nil {
 			t.Logf("DEBUG: error message = %s", *response.Error)
+		}
+		if response.StreamSlice != nil {
+			t.Logf("DEBUG: StreamSlice len = %d", len(response.StreamSlice))
+			if len(response.StreamSlice) > 0 {
+				docSize := models.EstimateDocumentSize(response.StreamSlice[0], nil)
+				t.Logf("DEBUG: First doc size estimate = %d bytes, Data len = %d, Values len = %d", docSize, len(response.StreamSlice[0].Data), len(response.StreamSlice[0].Values))
+			}
 		}
 
 		if response.Error == nil || *response.Error == "" {
@@ -179,8 +186,10 @@ func TestMemoryLimit_AggregationQuery(t *testing.T) {
 	// Seed large authors
 	seedLargeAuthors(t, fixture, 200)
 
-	// Aggregation should also hit memory limit
-	query := "SELECT \"Country\", COUNT(*) as AuthorCount FROM \"Authors\" GROUP BY \"Country\""
+	// SELECT * should hit memory limit (materializes all fields including ~300KB Biography).
+	// Note: GROUP BY queries use projection pushdown (only loading grouped/aggregated fields),
+	// so they correctly use much less memory. SELECT * materializes everything.
+	query := `SELECT * FROM "Authors"`
 	result, err := server.CommandDirector(
 		context.Background(),
 		fixture.Database,
@@ -203,7 +212,7 @@ func TestMemoryLimit_AggregationQuery(t *testing.T) {
 		}
 
 		if response.Error == nil || *response.Error == "" {
-			t.Fatal("Aggregation query should trigger memory limit")
+			t.Fatal("Large SELECT * query should trigger memory limit")
 		}
 	}
 }

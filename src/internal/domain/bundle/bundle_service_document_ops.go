@@ -1396,6 +1396,32 @@ func (s *BundleService) UpdateDocumentInBundleRCU(ctx context.Context, database 
 		return fmt.Errorf("field validation failed: %w", err)
 	}
 
+	// FK validation: check referential integrity for updated FK fields
+	if len(bundle.Relationships) > 0 || database != nil {
+		validator := NewReferentialIntegrityValidator(s, s.logger)
+		bundleCache := make(map[string]*models.Bundle)
+
+		updateFields := make(map[string]string)
+		for _, kv := range docCommand.Fields {
+			if kv.Value == nil {
+				continue
+			}
+			updateFields[kv.Key] = fmt.Sprintf("%v", kv.Value)
+		}
+		foreignKeyUpdates := validator.IdentifyForeignKeyFields(database, bundle, updateFields, bundleCache)
+		if len(foreignKeyUpdates) > 0 {
+			docIDs := make([]string, len(filteredDocs))
+			for i, doc := range filteredDocs {
+				docIDs[i] = doc.DocumentID
+			}
+			validationCache := make(map[string]*ForeignKeyViolation)
+			violation := validator.batchValidateForeignKeys(bundle, docIDs, foreignKeyUpdates, validationCache)
+			if violation != nil {
+				return fmt.Errorf("%s", violation.Error())
+			}
+		}
+	}
+
 	// Get hash index for DocumentID (for atomic pointer swap)
 	var hashIndex interface{}
 	if bundle.Indexes != nil {
@@ -2113,23 +2139,45 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 	// Indexes will be flushed during: clean shutdown, background compaction, or batch completion.
 	// If server crashes, indexes may be stale but will be rebuilt automatically on next load.
 
-	// STEP 2: WRITE-THROUGH CACHE: Invalidate pages containing deleted documents
-	//    We invalidate entire pages to ensure deleted documents are not visible to subsequent reads.
-	//    On next read, pages will be reloaded from disk with tombstone filtering applied.
-	// PHASE 5: Use sharded cache for invalidation
-	invalidatedPages := make(map[uint32]bool) // Track unique pages to invalidate
+	// STEP 2: WRITE-THROUGH CACHE: Remove deleted documents from cached pages.
+	// Instead of invalidating entire pages (which loses in-memory commit sequence stamps on
+	// surviving documents), we surgically remove only the deleted documents. This preserves
+	// MVCC state (CommitSequence) that was stamped in-memory by UpdateDocumentCommitSequence
+	// but not yet persisted to disk. Full page invalidation caused committed documents to
+	// become invisible after page reload (disk has commitSeq=0, MVCC filters them out).
+	// PHASE 5: Use sharded cache for targeted removal
+	modifiedPages := make(map[uint32]bool) // Track pages that had documents removed
+	docIDSet := make(map[string]struct{}, len(docIDs))
+	for _, id := range docIDs {
+		docIDSet[id] = struct{}{}
+	}
 	for _, docID := range docIDs {
 		if pageID, found := s.documentPageCache.GetPageID(docCommand.BundleName, docID); found {
-			if !invalidatedPages[pageID] {
-				// Invalidate the entire page containing this document
-				pageKey := fmt.Sprintf("%s:%d", docCommand.BundleName, pageID)
-				shardIdx := s.getPageShardIndex(pageKey)
-				shard := s.pageShards[shardIdx]
-				shard.mu.Lock()
-				shard.deleteLocked(pageKey)
-				shard.mu.Unlock()
-				invalidatedPages[pageID] = true
-				// Clear visibility map bit for deleted page
+			pageKey := fmt.Sprintf("%s:%d", docCommand.BundleName, pageID)
+			shardIdx := s.getPageShardIndex(pageKey)
+			shard := s.pageShards[shardIdx]
+			shard.mu.Lock()
+			if page, exists := shard.pages[pageKey]; exists {
+				// Remove the specific document from the cached page
+				delete(page.Documents, docID)
+				// Rebuild DocumentSlice without deleted documents
+				if page.DocumentSlice != nil {
+					filtered := page.DocumentSlice[:0]
+					for i := range page.DocumentSlice {
+						if _, isDeleted := docIDSet[page.DocumentSlice[i].DocumentID]; !isDeleted {
+							filtered = append(filtered, page.DocumentSlice[i])
+						}
+					}
+					page.DocumentSlice = filtered
+				}
+				// Invalidate reader view and COW snapshot so next read picks up the change
+				shard.readerView.Delete(pageKey)
+				shard.cowSnapshot.Load().Delete(pageKey)
+			}
+			shard.mu.Unlock()
+			if !modifiedPages[pageID] {
+				modifiedPages[pageID] = true
+				// Clear visibility map bit for modified page
 				s.clearVisibilityForPage(docCommand.BundleName, pageID)
 				// Invalidate page bloom filter (page content changed)
 				s.invalidatePageBloom(docCommand.BundleName, pageID)
@@ -2138,8 +2186,8 @@ func (s *BundleService) deleteDocumentsInternal(bundle *models.Bundle, docComman
 		// Invalidate the document->page cache entry
 		s.documentPageCache.InvalidateDocument(docCommand.BundleName, docID)
 	}
-	s.logger.Debugf("Write-through: Invalidated %d pages containing %d deleted documents for bundle '%s'",
-		len(invalidatedPages), len(docIDs), docCommand.BundleName)
+	s.logger.Debugf("Write-through: Removed %d deleted documents from %d cached pages for bundle '%s'",
+		len(docIDs), len(modifiedPages), docCommand.BundleName)
 
 	// 3. Remove deleted docs from scanner's cache when SmartBundleScanner; keep scanner alive to
 	//    avoid 20–30s stall on next SELECT (new scanner would have empty cachedPages + cold

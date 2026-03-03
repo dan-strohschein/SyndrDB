@@ -512,32 +512,29 @@ func (node *BTreeOrderedScanNode) executeBTreeOrderedScanFull(ctx context.Contex
 		return nil, fmt.Errorf("index %s is not a btree (type: %s)", node.IndexName, indexRef.IndexType)
 	}
 
+	// CRITICAL: Always load the B-tree index from the cache-managed instance via
+	// GetOrLoadBTreeIndex. The indexRef.IndexInstance may hold a stale pointer to the
+	// original B-tree created during bundle creation (before any documents were added),
+	// while document inserts go through the loadedIndexes cache which may hold a
+	// different, fully-populated instance. Using GetOrLoadBTreeIndex ensures we query
+	// the same instance that received all INSERT operations.
 	var btreeIndex *btreeindexV2.BTreeIndex
-	if indexRef.IndexInstance == nil {
-		if node.BundleServiceInt == nil {
-			return nil, fmt.Errorf("BundleServiceInt required to load btree index %s", node.IndexName)
-		}
-		loaded, err := node.BundleServiceInt.GetOrLoadBTreeIndex(node.Bundle, node.IndexName, indexRef)
-		if err != nil {
-			return nil, err
-		}
-		var ok bool
-		btreeIndex, ok = loaded.(*btreeindexV2.BTreeIndex)
-		if !ok {
-			return nil, fmt.Errorf("index %s is not *btreeindexV2.BTreeIndex", node.IndexName)
-		}
-	} else {
-		var ok bool
-		btreeIndex, ok = indexRef.IndexInstance.(*btreeindexV2.BTreeIndex)
-		if !ok {
-			return nil, fmt.Errorf("index %s is not *btreeindexV2.BTreeIndex", node.IndexName)
-		}
+	if node.BundleServiceInt == nil {
+		return nil, fmt.Errorf("BundleServiceInt required to load btree index %s", node.IndexName)
+	}
+	loaded, err := node.BundleServiceInt.GetOrLoadBTreeIndex(node.Bundle, node.IndexName, indexRef)
+	if err != nil {
+		return nil, err
+	}
+	var ok bool
+	btreeIndex, ok = loaded.(*btreeindexV2.BTreeIndex)
+	if !ok {
+		return nil, fmt.Errorf("index %s is not *btreeindexV2.BTreeIndex", node.IndexName)
 	}
 
 	// OPTIMIZATION: Use limit-aware and direction-aware range search
 	// This avoids loading all document IDs when we only need LIMIT documents
 	var docIDs []string
-	var err error
 
 	if node.Descending {
 		// DESC order: Use reverse range search for optimal ORDER BY DESC LIMIT performance
@@ -590,6 +587,8 @@ func (node *BTreeOrderedScanNode) Execute(ctx context.Context) (map[string]*mode
 	if err != nil {
 		return nil, err
 	}
+	// Cache sorted slice for GetSortedDocuments() (used by command_director for order-preserving flattening)
+	node.sortedDocuments = slice
 	m := make(map[string]*models.Document, len(slice))
 	for _, d := range slice {
 		m[d.DocumentID] = d
@@ -603,6 +602,12 @@ func (node *BTreeOrderedScanNode) ExecuteOrdered(ctx context.Context) ([]*models
 
 func (node *BTreeOrderedScanNode) OrderedByField() string {
 	return node.OrderedByFieldName
+}
+
+// GetSortedDocuments returns the ordered result from the last Execute() call.
+// Used by command_director for order-preserving flattening (same interface as SortNode).
+func (node *BTreeOrderedScanNode) GetSortedDocuments() []*models.Document {
+	return node.sortedDocuments
 }
 
 func (node *BTreeOrderedScanNode) GetCost() float64           { return node.Cost }
@@ -711,8 +716,10 @@ func (node *FullScanNode) Execute(ctx context.Context) (map[string]*models.Docum
 			}
 		}
 
-		// Memory tracking: Sample every 4096th document to reduce cache-line contention
-		if memoryTracker != nil && i%4096 == 0 {
+		// Memory tracking: Progressive sampling to catch limits early on small datasets
+		// while reducing cache-line contention on large ones.
+		// Sample at i=0,50,100 then every 4096th for large scans.
+		if memoryTracker != nil && (i == 0 || i == 50 || (i <= 200 && i%100 == 0) || i%4096 == 0) {
 			docSize := models.EstimateDocumentSize(doc, nil)
 			if err := memoryTracker.Sample(docSize, i); err != nil {
 				return nil, err
@@ -803,10 +810,10 @@ func (node *FullScanNode) ExecuteSlice(ctx context.Context) ([]*models.Document,
 		return nil, nil, fmt.Errorf("document scanner failed: %w", err)
 	}
 
-	// Memory tracking on sampled documents
+	// Memory tracking: Progressive sampling to catch limits early on small datasets
 	if memoryTracker != nil {
 		for i, doc := range scanResult.Documents {
-			if i%500 == 0 {
+			if i == 0 || i == 50 || (i <= 200 && i%100 == 0) || i%4096 == 0 {
 				docSize := models.EstimateDocumentSize(doc, nil)
 				if err := memoryTracker.Sample(docSize, i); err != nil {
 					return nil, nil, err
@@ -1118,7 +1125,7 @@ func (node *FilterNode) Execute(ctx context.Context) (map[string]*models.Documen
 		docCount++
 	}
 
-	node.Logger.Debugf("Filter node reduced %d documents to %d (scanned: %d)", len(documents), len(filtered), docCount)
+	node.Logger.Debugf("Filter node (map path) reduced %d documents to %d (scanned: %d)", len(documents), len(filtered), docCount)
 	return filtered, nil
 }
 

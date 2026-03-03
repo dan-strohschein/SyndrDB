@@ -331,6 +331,12 @@ func TestTransaction_MultipleRollbacks(t *testing.T) {
 	require.NoError(t, err, "Failed to create session")
 	defer fixture.ServiceManager.SessionManager.InvalidateSession(session.SessionID)
 
+	// DEBUG: Check initial document count
+	selectCmd0 := `SELECT * FROM "TestTxBundle";`
+	response0, _ := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd0, fixture.Logger, startTime, nil, "127.0.0.1")
+	docs0 := extractDocuments(t, response0)
+	t.Logf("DEBUG: Initial document count: %d", len(docs0))
+
 	// Transaction 1: Insert and rollback
 	t.Log("Transaction 1: Insert 3 docs and rollback...")
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, "BEGIN TRANSACTION", fixture.Logger, startTime, session, "127.0.0.1")
@@ -374,7 +380,7 @@ func TestTransaction_MultipleRollbacks(t *testing.T) {
 
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, "ROLLBACK", fixture.Logger, startTime, session, "127.0.0.1")
 	require.NoError(t, err)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // Wait for async commitSeq updates and rollback cleanup
 
 	// Verify only TX2 documents exist
 	selectCmd := `SELECT * FROM "TestTxBundle";`

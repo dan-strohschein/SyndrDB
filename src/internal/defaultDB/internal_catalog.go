@@ -889,6 +889,64 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END PERFORMANCE + OPERATIONS CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// SHARDING CATALOG BUNDLES (Milestone 6.1)
+	// ==============================================================
+
+	// ShardPolicies — shard policy definitions
+	shardPolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":      {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"BundleName":      {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"ShardKey":        {Name: "ShardKey", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"KeyType":         {Name: "KeyType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"RangeDefinition": {Name: "RangeDefinition", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ShardCount":      {Name: "ShardCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"Status":          {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "active"},
+			"CreatedAt":       {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	shardPolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "ShardPolicies",
+		DocumentStructure: shardPolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, shardPolicies_Bundle)
+
+	// ShardMetadata — per-shard range and stats
+	shardMetadata_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":      {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"BundleName":      {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ShardID":         {Name: "ShardID", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"ShardBundleName": {Name: "ShardBundleName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"LowerBound":      {Name: "LowerBound", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"UpperBound":      {Name: "UpperBound", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"DocCount":        {Name: "DocCount", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"Status":          {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "active"},
+		},
+	}
+	shardMetadata_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "ShardMetadata",
+		DocumentStructure: shardMetadata_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, shardMetadata_Bundle)
+
+	// ==============================================================
+	// END SHARDING CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

@@ -607,13 +607,11 @@ func (n *AggregationNode) executeHashAggregate(ctx context.Context, documents ma
 
 		docCount++
 
-		// Memory tracking: Sample every 4096th document to reduce cache-line
-		// contention under high concurrency (see SELECT_GROUP_P99_OPTIMIZATION_PLAN.md).
-		if memoryTracker != nil && docCount%4096 == 0 {
+		// Memory tracking: Progressive sampling to catch limits early
+		idx := docCount - 1
+		if memoryTracker != nil && (idx == 0 || idx == 50 || (idx <= 200 && idx%100 == 0) || idx%4096 == 0) {
 			docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
-			if err := memoryTracker.Sample(docSize, docCount); err != nil {
-				return nil, err
-			}
+			memoryTracker.Sample(docSize, idx)
 			if memoryTracker.WillExceedLimit(len(documents)) {
 				return nil, ErrMemoryLimitExceeded
 			}
@@ -752,10 +750,13 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 						}
 						totalInput++
 
-						if memoryTracker != nil && totalInput%4096 == 0 {
+						// Memory tracking: Progressive sampling to catch limits early
+						idx := totalInput - 1
+						if memoryTracker != nil && (idx == 0 || idx == 50 || (idx <= 200 && idx%100 == 0) || idx%4096 == 0) {
 							docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
-							if err := memoryTracker.Sample(docSize, totalInput); err != nil {
-								chunkErr = err
+							memoryTracker.Sample(docSize, idx)
+							if memoryTracker.WillExceedLimit(totalInput) {
+								chunkErr = ErrMemoryLimitExceeded
 								return false
 							}
 						}
@@ -798,13 +799,13 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 					}
 					totalInput++
 
-					// Memory tracking: Sample every 4096th document (once per chunk).
-					// Previous 100-doc interval caused cache-line bouncing under high
-					// concurrency (60k calls/s → 1.4k calls/s = 42x reduction).
-					if memoryTracker != nil && totalInput%4096 == 0 {
+					// Memory tracking: Progressive sampling to catch limits early
+					idx := totalInput - 1
+					if memoryTracker != nil && (idx == 0 || idx == 50 || (idx <= 200 && idx%100 == 0) || idx%4096 == 0) {
 						docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
-						if err := memoryTracker.Sample(docSize, totalInput); err != nil {
-							chunkErr = err
+						memoryTracker.Sample(docSize, idx)
+						if memoryTracker.WillExceedLimit(totalInput) {
+							chunkErr = ErrMemoryLimitExceeded
 							return false
 						}
 					}
@@ -905,10 +906,12 @@ func (n *AggregationNode) executeHashAggregateStreaming(ctx context.Context, sca
 			}
 			totalInput++
 
-			if memoryTracker != nil && i%4096 == 0 {
+			// Memory tracking: Progressive sampling to catch limits early
+			if memoryTracker != nil && (i == 0 || i == 50 || (i <= 200 && i%100 == 0) || i%4096 == 0) {
 				docSize := models.EstimateDocumentSize(doc, n.getCachedSchema())
-				if err := memoryTracker.Sample(docSize, i); err != nil {
-					return nil, totalInput, err
+				memoryTracker.Sample(docSize, i)
+				if memoryTracker.WillExceedLimit(totalInput) {
+					return nil, totalInput, ErrMemoryLimitExceeded
 				}
 			}
 
@@ -2348,6 +2351,13 @@ func (n *AggregationNode) convertGroupResultsToDocuments(groupResults map[groupK
 		doc := document.GetPooledDocument()
 		doc.DocumentID = docID
 		names := setDocumentValuesFromFieldMap(doc, fields)
+		// Also populate doc.Data for HAVING clause evaluation.
+		// The HAVING evaluator needs Data fallback since the aggregation result schema
+		// differs from the original bundle schema used by BundleContext.
+		doc.Data = make(map[string]interface{}, len(fields))
+		for name, f := range fields {
+			doc.Data[name] = f.Value.AsInterface()
+		}
 		resultDocs[docID] = doc
 
 		// Build result schema once (all groups have the same fields)
@@ -2605,22 +2615,15 @@ func (n *AggregationNode) applyHavingClause(documents map[string]*models.Documen
 
 	n.Logger.Debugf("Applying HAVING expression")
 
-	// Get BundleContext if available (for qualified field resolution)
-	var bundleCtx *syndrQL.BundleContext
-	if n.BundleContext != nil {
-		bundleCtx, ok = n.BundleContext.(*syndrQL.BundleContext)
-		if !ok {
-			return nil, fmt.Errorf("BundleContext is not a *syndrQL.BundleContext: %T", n.BundleContext)
-		}
-	}
-
 	// Create evaluator and filter documents
 	evaluator := &syndrQL.ExpressionEvaluator{}
 	filteredDocs := make(map[string]*models.Document)
 
 	for docID, doc := range documents {
-		// Evaluate HAVING expression against the aggregated document
-		matches, err := evaluator.EvaluateAsBool(expr, doc, bundleCtx, nil, nil)
+		// Evaluate HAVING expression against the aggregated document.
+		// Use nil bundleCtx so the evaluator falls through to doc.Data lookup,
+		// which contains the aggregation result fields (min_start_time, count_all, etc.).
+		matches, err := evaluator.EvaluateAsBool(expr, doc, nil, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("HAVING expression evaluation failed for group %s: %w", docID, err)
 		}

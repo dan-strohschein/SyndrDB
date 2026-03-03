@@ -100,6 +100,36 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
+	// Enterprise sharding hook: reject updates to the shard key field
+	if reg := extension.GetRegistry(); reg.HasShardingExtension() {
+		shardExt := reg.GetShardingExtension()
+		if shardExt.IsShardedBundle(bundleName) {
+			policy := shardExt.GetShardPolicy(bundleName)
+			if policy != nil {
+				for _, field := range docCommand.Fields {
+					if strings.EqualFold(field.Key, policy.ShardKey) {
+						return nil, errors.New(errors.ERR_VALIDATION_REQUIRED,
+							fmt.Sprintf("cannot update shard key field '%s': updates to the shard key are not supported on sharded bundles", policy.ShardKey),
+							errors.LayerCommand).WithContext("bundle", bundleName)
+					}
+				}
+			}
+			// Route UPDATE to correct shard(s) based on WHERE clause
+			shardBundles := shardExt.ResolveReadShards(bundleName, docCommand.WhereClause)
+			if len(shardBundles) == 1 {
+				// Single shard — rewrite bundle target
+				bundle, err = serviceManager.BundleService.GetBundleByName(database, shardBundles[0])
+				if err != nil {
+					return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", shardBundles[0])
+				}
+				bundleName = shardBundles[0]
+				logger.Debugf("Sharding: routed UPDATE to shard bundle '%s'", shardBundles[0])
+			}
+			// Multi-shard updates fall through to scatter across all shards via normal path
+			// (WHERE filtering will handle correctness)
+		}
+	}
+
 	// HYBRID OCC: For autocommit operations (non-transactional), use OCC with pessimistic fallback.
 	// This provides better throughput under contention by avoiding sequential lock acquisition.
 	// For explicit transactions, continue using document-level locks for strict 2PL semantics.
@@ -369,6 +399,25 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 	}
 
+	// Enterprise sharding hook: route INSERT to correct shard sub-bundle
+	if reg := extension.GetRegistry(); reg.HasShardingExtension() {
+		shardExt := reg.GetShardingExtension()
+		if shardExt.IsShardedBundle(bundleName) {
+			docMap := keyValuesToMap(docCommand.Fields)
+			shardBundleName, shardErr := shardExt.ResolveWriteShard(bundleName, docMap)
+			if shardErr != nil {
+				return nil, errors.WrapWithMessage(shardErr, errors.ERR_INTERNAL_QUERY,
+					"failed to resolve shard for insert", errors.LayerCommand).WithContext("bundle", bundleName)
+			}
+			bundle, err = serviceManager.BundleService.GetBundleByName(database, shardBundleName)
+			if err != nil {
+				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", shardBundleName)
+			}
+			bundleName = shardBundleName
+			logger.Debugf("Sharding: routed INSERT to shard bundle '%s'", shardBundleName)
+		}
+	}
+
 	docID := ""
 
 	// Execute with WAL logging
@@ -519,6 +568,75 @@ func BulkAddDocuments(commandParts []string, command string, logger *zap.Sugared
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+	}
+
+	// Enterprise sharding hook: for sharded bundles, group docs by shard and insert per-shard
+	if reg := extension.GetRegistry(); reg.HasShardingExtension() {
+		shardExt := reg.GetShardingExtension()
+		if shardExt.IsShardedBundle(bundleName) {
+			// Group documents by target shard
+			shardGroups := make(map[string][][]models.KeyValue)
+			for _, docFields := range bulkCmd.Documents {
+				docMap := keyValuesToMap(docFields)
+				shardName, shardErr := shardExt.ResolveWriteShard(bundleName, docMap)
+				if shardErr != nil {
+					return nil, errors.WrapWithMessage(shardErr, errors.ERR_INTERNAL_QUERY,
+						"failed to resolve shard for bulk insert", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+				shardGroups[shardName] = append(shardGroups[shardName], docFields)
+			}
+
+			// Execute per-shard bulk inserts
+			var allDocIDs []string
+			for shardName, shardDocs := range shardGroups {
+				shardBundle, shardErr := serviceManager.BundleService.GetBundleByName(database, shardName)
+				if shardErr != nil {
+					return nil, errors.ConvertError(shardErr, errors.LayerCommand).WithContext("bundle", shardName)
+				}
+				shardBulkCmd := &models.BulkDocumentCommand{
+					CommandType: bulkCmd.CommandType,
+					BundleName:  shardName,
+					Documents:   shardDocs,
+				}
+
+				var shardDocIDs []string
+				if serviceManager.WALManager != nil {
+					walErr := serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+						logErr := serviceManager.WALManager.LogBatchInsert(txID, shardName, []string{"pending"}, shardDocs)
+						if logErr != nil {
+							return logErr
+						}
+						shardDocIDs, shardErr = serviceManager.BundleService.AddDocumentsToBundle(database, shardBundle, shardBulkCmd)
+						return shardErr
+					})
+					if walErr != nil {
+						return nil, errors.ConvertError(walErr, errors.LayerCommand).WithContext("bundle", shardName)
+					}
+				} else {
+					shardDocIDs, shardErr = serviceManager.BundleService.AddDocumentsToBundle(database, shardBundle, shardBulkCmd)
+					if shardErr != nil {
+						return nil, errors.ConvertError(shardErr, errors.LayerCommand).WithContext("bundle", shardName)
+					}
+				}
+				allDocIDs = append(allDocIDs, shardDocIDs...)
+			}
+
+			logger.Debugf("Sharding: bulk insert routed %d docs across %d shards", docCount, len(shardGroups))
+
+			// METRICS
+			globalMetrics := GetGlobalServerMetrics()
+			globalMetrics.DocumentInsertsTotal.Add(uint64(docCount))
+			dbMetrics := GetDatabaseMetrics(database.Name)
+			dbMetrics.DBDocumentInsertsTotal.Add(uint64(docCount))
+
+			result := fmt.Sprintf("{\"documents_inserted\": %d, \"bundle\": \"%s\", \"shards_used\": %d, \"document_ids\": %v}",
+				docCount, bundleName, len(shardGroups), allDocIDs)
+			return &CommandResponse{
+				ResultCount:     docCount,
+				Result:          result,
+				ExecutionTimeMS: float64(time.Since(startingTime).Nanoseconds()) / 1e6,
+			}, nil
+		}
 	}
 
 	var docIDs []string

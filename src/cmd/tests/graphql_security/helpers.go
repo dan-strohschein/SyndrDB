@@ -109,6 +109,7 @@ func setupTestEnvironmentWithConfig(t *testing.T, config SecurityTestConfig) *Te
 	globalSettings.LogDir = args.LogDir
 	globalSettings.DataDir = args.DataDir
 	globalSettings.TempDir = args.TempDir
+	globalSettings.AuthEnabled = false // Disable auth for E2E tests (no TCP connection/session)
 	// Disable cache warming to prevent background goroutines that race with settings reset
 	globalSettings.GroupByCacheWarmingEnabled = false
 
@@ -356,6 +357,7 @@ func setupPartialTestEnvironmentWithConfig(t *testing.T, config SecurityTestConf
 	globalSettings.LogDir = args.LogDir
 	globalSettings.DataDir = args.DataDir
 	globalSettings.TempDir = args.TempDir
+	globalSettings.AuthEnabled = false // Disable auth for E2E tests (no TCP connection/session)
 	// Disable cache warming to prevent background goroutines that race with settings reset
 	globalSettings.GroupByCacheWarmingEnabled = false
 

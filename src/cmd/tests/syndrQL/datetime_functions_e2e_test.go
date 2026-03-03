@@ -2,7 +2,6 @@ package syndrQL
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/server"
@@ -27,20 +26,7 @@ func TestDateTime_Function_NOW(t *testing.T) {
 		t.Fatalf("Failed to execute F:NOW(): %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	if len(results) != 1 {
 		t.Fatalf("Expected 1 result row, got %d", len(results))
@@ -96,20 +82,7 @@ func TestDateTime_Function_EXTRACT(t *testing.T) {
 				t.Fatalf("Failed to execute F:EXTRACT(%s): %v", tc.field, err)
 			}
 
-			cmdResp, ok := response.(*server.CommandResponse)
-			if !ok {
-				t.Fatalf("Expected CommandResponse, got %T", response)
-			}
-
-			jsonBytes, err := json.Marshal(cmdResp.Result)
-			if err != nil {
-				t.Fatalf("Failed to marshal result: %v", err)
-			}
-
-			var results []map[string]interface{}
-			if err := json.Unmarshal(jsonBytes, &results); err != nil {
-				t.Fatalf("Failed to unmarshal results: %v", err)
-			}
+			results := extractDocuments(t, response)
 
 			if len(results) != 1 {
 				t.Fatalf("Expected 1 result row, got %d", len(results))
@@ -170,20 +143,7 @@ func TestDateTime_Function_DATE_TRUNC(t *testing.T) {
 				t.Fatalf("Failed to execute F:DATE_TRUNC(%s): %v", tc.precision, err)
 			}
 
-			cmdResp, ok := response.(*server.CommandResponse)
-			if !ok {
-				t.Fatalf("Expected CommandResponse, got %T", response)
-			}
-
-			jsonBytes, err := json.Marshal(cmdResp.Result)
-			if err != nil {
-				t.Fatalf("Failed to marshal result: %v", err)
-			}
-
-			var results []map[string]interface{}
-			if err := json.Unmarshal(jsonBytes, &results); err != nil {
-				t.Fatalf("Failed to unmarshal results: %v", err)
-			}
+			results := extractDocuments(t, response)
 
 			if len(results) != 1 {
 				t.Fatalf("Expected 1 result row, got %d", len(results))
@@ -219,20 +179,7 @@ func TestDateTime_Function_DATE_ADD(t *testing.T) {
 		t.Fatalf("Failed to execute F:DATE_ADD: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	if len(results) != 1 {
 		t.Fatalf("Expected 1 result row, got %d", len(results))
@@ -269,20 +216,7 @@ func TestDateTime_Function_AGE(t *testing.T) {
 		t.Fatalf("Failed to execute F:AGE(): %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	if len(results) != 1 {
 		t.Fatalf("Expected 1 result row, got %d", len(results))
@@ -347,20 +281,7 @@ func TestDateTime_DefaultValue_NOW(t *testing.T) {
 		t.Fatalf("Failed to select document: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var documents []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-		t.Fatalf("Failed to unmarshal documents: %v", err)
-	}
+	documents := extractDocuments(t, response)
 
 	if len(documents) != 1 {
 		t.Fatalf("Expected 1 document, got %d", len(documents))
@@ -419,20 +340,7 @@ func TestDateTime_ATTimeZone_BasicConversion(t *testing.T) {
 				t.Fatalf("Failed to execute AT TIME ZONE: %v", err)
 			}
 
-			cmdResp, ok := response.(*server.CommandResponse)
-			if !ok {
-				t.Fatalf("Expected CommandResponse, got %T", response)
-			}
-
-			jsonBytes, err := json.Marshal(cmdResp.Result)
-			if err != nil {
-				t.Fatalf("Failed to marshal result: %v", err)
-			}
-
-			var results []map[string]interface{}
-			if err := json.Unmarshal(jsonBytes, &results); err != nil {
-				t.Fatalf("Failed to unmarshal results: %v", err)
-			}
+			results := extractDocuments(t, response)
 
 			if len(results) != 1 {
 				t.Fatalf("Expected 1 result row, got %d", len(results))
@@ -473,20 +381,7 @@ func TestDateTime_ATTimeZone_WithNOW(t *testing.T) {
 		t.Fatalf("Failed to execute F:NOW() AT TIME ZONE: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	if len(results) != 1 {
 		t.Fatalf("Expected 1 result row, got %d", len(results))
@@ -539,20 +434,7 @@ func TestDateTime_ATTimeZone_ChainedConversions(t *testing.T) {
 		t.Fatalf("Failed to convert to Tokyo: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	tokyoValue, ok := results[0]["column1"].(string)
 	if !ok {
@@ -579,19 +461,7 @@ func TestDateTime_ATTimeZone_ChainedConversions(t *testing.T) {
 		t.Fatalf("Failed to convert to New York: %v", err)
 	}
 
-	cmdResp, ok = response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err = json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results = extractDocuments(t, response)
 
 	nyValue, ok := results[0]["column1"].(string)
 	if !ok {
@@ -652,29 +522,13 @@ func TestDateTime_ATTimeZone_WithEXTRACT(t *testing.T) {
 		t.Fatalf("Failed to execute EXTRACT with AT TIME ZONE: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	if len(results) != 1 {
 		t.Fatalf("Expected 1 result row, got %d", len(results))
 	}
 
-	hourValue, ok := results[0]["column1"].(float64)
-	if !ok {
-		t.Fatalf("column1 should return float64, got %T: %v", results[0]["column1"], results[0]["column1"])
-	}
+	hourValue := toFloat64(t, results[0]["column1"])
 
 	expectedHour := 9.0
 	if hourValue != expectedHour {
@@ -721,20 +575,7 @@ func TestDateTime_ATTimeZone_DSTTransition(t *testing.T) {
 				t.Fatalf("Failed to execute AT TIME ZONE: %v", err)
 			}
 
-			cmdResp, ok := response.(*server.CommandResponse)
-			if !ok {
-				t.Fatalf("Expected CommandResponse, got %T", response)
-			}
-
-			jsonBytes, err := json.Marshal(cmdResp.Result)
-			if err != nil {
-				t.Fatalf("Failed to marshal result: %v", err)
-			}
-
-			var results []map[string]interface{}
-			if err := json.Unmarshal(jsonBytes, &results); err != nil {
-				t.Fatalf("Failed to unmarshal results: %v", err)
-			}
+			results := extractDocuments(t, response)
 
 			convertedValue, ok := results[0]["column1"].(string)
 			if !ok {
@@ -825,20 +666,7 @@ func TestDateTime_GroupBy_MIN_MAX(t *testing.T) {
 		t.Fatalf("Failed to execute GROUP BY query: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	if len(results) != 3 {
 		t.Fatalf("Expected 3 groups (error, login, logout), got %d", len(results))
@@ -968,20 +796,7 @@ func TestDateTime_GroupBy_COUNT_WithDateTrunc(t *testing.T) {
 		t.Fatalf("Failed to execute GROUP BY with DateTime MIN/MAX: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	if len(results) != 3 {
 		t.Fatalf("Expected 3 user groups, got %d", len(results))
@@ -1014,9 +829,14 @@ func TestDateTime_GroupBy_COUNT_WithDateTrunc(t *testing.T) {
 			t.Fatalf("max_access_time should be string, got %T", row["max_access_time"])
 		}
 
-		count, ok := row["count_all"].(float64)
-		if !ok {
-			t.Fatalf("count_all should be float64, got %T", row["count_all"])
+		var count float64
+		switch c := row["count_all"].(type) {
+		case float64:
+			count = c
+		case int64:
+			count = float64(c)
+		default:
+			t.Fatalf("count_all should be numeric, got %T", row["count_all"])
 		}
 
 		expected, exists := expectedCounts[userID]
@@ -1036,7 +856,7 @@ func TestDateTime_GroupBy_COUNT_WithDateTrunc(t *testing.T) {
 			t.Errorf("For %s: expected count %v, got %v", userID, expected.count, count)
 		}
 
-		t.Logf("✓ User %s: MIN=%s, MAX=%s, COUNT=%v", userID, minTime, maxTime, count)
+		t.Logf("User %s: MIN=%s, MAX=%s, COUNT=%v", userID, minTime, maxTime, count)
 	}
 }
 
@@ -1112,20 +932,7 @@ func TestDateTime_GroupBy_HAVING_WithDateFunctions(t *testing.T) {
 		t.Fatalf("Failed to execute GROUP BY with HAVING: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	// Should only return user1 (started at 08:00) and user2 (started at 09:00)
 	// user3 started at 10:00, which is after 09:30
@@ -1158,9 +965,14 @@ func TestDateTime_GroupBy_HAVING_WithDateFunctions(t *testing.T) {
 			t.Fatalf("max_end_time should be string, got %T", row["max_end_time"])
 		}
 
-		count, ok := row["count_all"].(float64)
-		if !ok {
-			t.Fatalf("count_all should be float64, got %T", row["count_all"])
+		var count float64
+		switch c := row["count_all"].(type) {
+		case float64:
+			count = c
+		case int64:
+			count = float64(c)
+		default:
+			t.Fatalf("count_all should be numeric, got %T", row["count_all"])
 		}
 
 		expected, exists := expectedUsers[userID]
@@ -1180,7 +992,7 @@ func TestDateTime_GroupBy_HAVING_WithDateFunctions(t *testing.T) {
 			t.Errorf("For %s: expected COUNT %v, got %v", userID, expected.count, count)
 		}
 
-		t.Logf("✓ %s: MIN=%s, MAX=%s, COUNT=%v", userID, minStart, maxEnd, count)
+		t.Logf("%s: MIN=%s, MAX=%s, COUNT=%v", userID, minStart, maxEnd, count)
 	}
 }
 
@@ -1256,20 +1068,7 @@ func TestDateTime_GroupBy_WithOtherAggregates(t *testing.T) {
 		t.Fatalf("Failed to execute multi-field GROUP BY: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var results []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &results); err != nil {
-		t.Fatalf("Failed to unmarshal results: %v", err)
-	}
+	results := extractDocuments(t, response)
 
 	// Should have 2 groups: completed and pending
 	if len(results) != 2 {
@@ -1302,9 +1101,14 @@ func TestDateTime_GroupBy_WithOtherAggregates(t *testing.T) {
 			t.Fatalf("max_order_date should be string, got %T", row["max_order_date"])
 		}
 
-		count, ok := row["count_all"].(float64)
-		if !ok {
-			t.Fatalf("count_all should be float64, got %T", row["count_all"])
+		var count float64
+		switch c := row["count_all"].(type) {
+		case float64:
+			count = c
+		case int64:
+			count = float64(c)
+		default:
+			t.Fatalf("count_all should be numeric, got %T", row["count_all"])
 		}
 
 		sum, ok := row["sum_amount"].(float64)

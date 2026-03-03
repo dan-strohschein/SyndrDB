@@ -1190,6 +1190,93 @@ func TestMatViewRefreshMethods(t *testing.T) {
 	}
 }
 
+// --- Milestone 6.1: Sharding Extension ---
+
+type stubShardingExtension struct {
+	sharded    map[string]bool
+	shardNames map[string][]string
+}
+
+func (s *stubShardingExtension) IsShardedBundle(bundleName string) bool {
+	return s.sharded[bundleName]
+}
+func (s *stubShardingExtension) ResolveWriteShard(bundleName string, doc map[string]interface{}) (string, error) {
+	return bundleName + "__shard_0", nil
+}
+func (s *stubShardingExtension) ResolveReadShards(bundleName string, predicates interface{}) []string {
+	if names, ok := s.shardNames[bundleName]; ok {
+		return names
+	}
+	return nil
+}
+func (s *stubShardingExtension) GetShardBundles(bundleName string) []string {
+	if names, ok := s.shardNames[bundleName]; ok {
+		return names
+	}
+	return nil
+}
+func (s *stubShardingExtension) GetShardPolicy(bundleName string) *ShardPolicyInfo {
+	if !s.sharded[bundleName] {
+		return nil
+	}
+	return &ShardPolicyInfo{BundleName: bundleName, ShardKey: "id", ShardCount: 2}
+}
+
+func TestRegisterShardingExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasShardingExtension() {
+		t.Fatal("fresh registry should have no sharding extensions")
+	}
+	ext := &stubShardingExtension{
+		sharded:    map[string]bool{"orders": true},
+		shardNames: map[string][]string{"orders": {"orders__shard_0", "orders__shard_1"}},
+	}
+	reg.RegisterShardingExtension(ext)
+	if !reg.HasShardingExtension() {
+		t.Fatal("registry should have sharding extension after registration")
+	}
+	got := reg.GetShardingExtension()
+	if got != ext {
+		t.Fatal("GetShardingExtension should return the registered extension")
+	}
+}
+
+func TestShardingExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubShardingExtension{
+		sharded:    map[string]bool{"orders": true},
+		shardNames: map[string][]string{"orders": {"orders__shard_0", "orders__shard_1"}},
+	}
+	reg.RegisterShardingExtension(ext)
+	got := reg.GetShardingExtension()
+	if !got.IsShardedBundle("orders") {
+		t.Fatal("expected orders to be sharded")
+	}
+	if got.IsShardedBundle("users") {
+		t.Fatal("expected users to not be sharded")
+	}
+	shardName, err := got.ResolveWriteShard("orders", map[string]interface{}{"id": 42})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if shardName != "orders__shard_0" {
+		t.Fatalf("expected 'orders__shard_0', got '%s'", shardName)
+	}
+	shards := got.GetShardBundles("orders")
+	if len(shards) != 2 {
+		t.Fatalf("expected 2 shards, got %d", len(shards))
+	}
+	policy := got.GetShardPolicy("orders")
+	if policy == nil {
+		t.Fatal("expected non-nil shard policy")
+	}
+	if policy.ShardKey != "id" {
+		t.Fatalf("expected shard key 'id', got '%s'", policy.ShardKey)
+	}
+}
+
 func TestGetResultTransformersReturnsSnapshot(t *testing.T) {
 	defer Reset()
 

@@ -245,19 +245,18 @@ func TestDropRelationship_FieldsPreserved(t *testing.T) {
 	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, dropRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to drop relationship")
 
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	err = fixture.ServiceManager.BundleService.FlushAllBuffers()
+	require.NoError(t, err, "Failed to flush buffers")
+
 	// STEP 6: Verify book document still has AuthorsID field with correct value
 	selectBooksCmd := `SELECT * FROM "Books";`
 	startTime = time.Now()
 	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectBooksCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 	require.NoError(t, err, "Failed to select books")
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	require.True(t, ok, "Response should be CommandResponse")
-	require.Equal(t, 1, cmdResp.ResultCount, "Should have 1 book")
-
-	// Verify AuthorsID field exists and has correct value in result
-	books, ok := cmdResp.Result.([]map[string]interface{})
-	require.True(t, ok, "Result should be array of maps")
+	books := extractDocuments(t, response)
 	require.Len(t, books, 1, "Should have 1 book in results")
 
 	book := books[0]

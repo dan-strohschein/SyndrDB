@@ -281,6 +281,15 @@ func (wb *WriteBuffer) GetStats() WriteBufferStats {
 // Flush forces all buffered data to be written to disk
 func (wb *WriteBuffer) Flush() error {
 	wb.mutex.Lock()
+	// DEBUG: Log what documents are being flushed
+	if len(wb.bufferedDocs) > 0 {
+		docIDs := make([]string, 0, len(wb.bufferedDocs))
+		for docID := range wb.bufferedDocs {
+			docIDs = append(docIDs, docID)
+		}
+		// Note: can't use logger here as it might not be initialized
+		fmt.Printf("[FLUSH] Flushing %d docs: %v\n", len(wb.bufferedDocs), docIDs)
+	}
 	defer wb.mutex.Unlock()
 	return wb.flushInternal()
 }

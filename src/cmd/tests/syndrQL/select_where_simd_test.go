@@ -70,6 +70,12 @@ func seedRandomizedAuthors(t testing.TB, fixture *TestFixture, count int) {
 			t.Fatalf("Failed to seed author %d: %v", i, err)
 		}
 	}
+
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		t.Fatalf("Failed to flush buffers after seeding authors: %v", err)
+	}
 }
 
 // seedRandomizedBooks creates count Book documents with randomized Genre and Price
@@ -86,17 +92,22 @@ func seedRandomizedBooks(t testing.TB, fixture *TestFixture, count int) {
 		genre := genres[rand.Intn(len(genres))]
 		price := 10.0 + rand.Float64()*90.0 // 10.00-100.00
 		title := fmt.Sprintf("Book_%d_%d", i, rand.Intn(1000))
-		authorID := 1 + rand.Intn(count) // Random author reference
 
-		// Note: Use AuthorsID to match the foreign key relationship defined in select_e2e_2_test.go
-		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"ID"=%d}, {"Title"="%s"}, {"AuthorsID"=%d}, {"Genre"="%s"}, {"Price"=%.2f});`,
-			i, title, authorID, genre, price)
+		// Note: Omit AuthorsID to avoid FK validation (these tests focus on WHERE/SIMD, not JOINs)
+		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"ID"=%d}, {"Title"="%s"}, {"Genre"="%s"}, {"Price"=%.2f});`,
+			i, title, genre, price)
 
 		startTime := time.Now()
 		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			t.Fatalf("Failed to seed book %d: %v", i, err)
 		}
+	}
+
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		t.Fatalf("Failed to flush buffers after seeding books: %v", err)
 	}
 }
 
@@ -119,12 +130,19 @@ func executeSelectQuery(t testing.TB, fixture *TestFixture, query string) []*mod
 		t.Fatalf("Expected CommandResponse, got %T", response)
 	}
 
-	// Handle streaming response (newer format) - convert map to slice
+	// Handle streaming response (newer format) - StreamSlice for scan-optimized queries
+	if len(cmdResp.StreamSlice) > 0 {
+		populateDataFromValues(cmdResp.StreamSlice, cmdResp.StreamSchema)
+		return cmdResp.StreamSlice
+	}
+
+	// Handle streaming response - StreamDocuments (map format)
 	if len(cmdResp.StreamDocuments) > 0 {
 		docs := make([]*models.Document, 0, len(cmdResp.StreamDocuments))
 		for _, doc := range cmdResp.StreamDocuments {
 			docs = append(docs, doc)
 		}
+		populateDataFromValues(docs, cmdResp.StreamSchema)
 		return docs
 	}
 
@@ -233,7 +251,7 @@ func validateFloatFieldGreaterThan(t testing.TB, doc *models.Document, fieldName
 
 // TestWhereSIMD_StringEquality verifies SIMD string equality comparisons
 func TestWhereSIMD_StringEquality(t *testing.T) {
-	fixture := setupFullServer(t)
+	fixture := setupRealServer(t)
 	seedRandomizedAuthors(t, fixture, 100)
 
 	// Ensure SIMD is enabled
@@ -258,7 +276,7 @@ func TestWhereSIMD_StringEquality(t *testing.T) {
 
 // TestWhereSIMD_IntegerRange verifies SIMD integer range comparisons
 func TestWhereSIMD_IntegerRange(t *testing.T) {
-	fixture := setupFullServer(t)
+	fixture := setupRealServer(t)
 	seedRandomizedAuthors(t, fixture, 100)
 
 	// Ensure SIMD is enabled
@@ -283,7 +301,7 @@ func TestWhereSIMD_IntegerRange(t *testing.T) {
 
 // TestWhereSIMD_MultiCondition verifies SIMD works with AND/OR logic
 func TestWhereSIMD_MultiCondition(t *testing.T) {
-	fixture := setupFullServer(t)
+	fixture := setupRealServer(t)
 	seedRandomizedAuthors(t, fixture, 100)
 
 	// Ensure SIMD is enabled
@@ -304,10 +322,10 @@ func TestWhereSIMD_MultiCondition(t *testing.T) {
 
 // TestWhereSIMD_vs_Scalar compares SIMD and scalar results for identical queries
 func TestWhereSIMD_vs_Scalar(t *testing.T) {
-	fixture := setupFullServer(t)
-	seedRandomizedBooks(t, fixture, 100)
+	fixture := setupRealServer(t)
+	seedRandomizedAuthors(t, fixture, 100)
 
-	query := `SELECT * FROM "Books" WHERE "Genre" = 'Fiction'`
+	query := `SELECT * FROM "Authors" WHERE "Country" = 'USA'`
 
 	// Execute with SIMD enabled
 	settings.GetSettings().WhereSIMDEnabled = true
@@ -322,10 +340,10 @@ func TestWhereSIMD_vs_Scalar(t *testing.T) {
 		t.Fatalf("Result count mismatch: SIMD=%d, Scalar=%d", len(resultsSIMD), len(resultsScalar))
 	}
 
-	// Field-by-field validation: both must return same Genre
+	// Field-by-field validation: both must return same Country
 	for i := 0; i < len(resultsSIMD); i++ {
-		validateStringField(t, resultsSIMD[i], "Genre", "Fiction")
-		validateStringField(t, resultsScalar[i], "Genre", "Fiction")
+		validateStringField(t, resultsSIMD[i], "Country", "USA")
+		validateStringField(t, resultsScalar[i], "Country", "USA")
 	}
 
 	t.Logf("✓ SIMD vs Scalar consistency test passed (%d results, identical)", len(resultsSIMD))
@@ -337,16 +355,43 @@ func TestWhereSIMD_vs_Scalar(t *testing.T) {
 // TestWhereSIMD_Fallback verifies graceful fallback for mixed/unsupported types
 func TestWhereSIMD_Fallback(t *testing.T) {
 	fixture := setupFullServer(t)
-	seedRandomizedBooks(t, fixture, 100)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create a standalone Products bundle with float field (no FK constraints)
+	createCmd := `CREATE BUNDLE "Products" WITH FIELDS (
+		{"ID", "INT", true, false},
+		{"Name", "STRING", true, false},
+		{"Price", "FLOAT", true, false}
+	);`
+	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Failed to create Products bundle: %v", err)
+	}
+
+	// Seed products with randomized prices
+	for i := 1; i <= 100; i++ {
+		price := 10.0 + rand.Float64()*90.0
+		addCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Products" WITH ({"ID"=%d}, {"Name"="Product_%d"}, {"Price"=%.2f});`, i, i, price)
+		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
+		if err != nil {
+			t.Fatalf("Failed to seed product %d: %v", i, err)
+		}
+	}
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
 
 	// Ensure SIMD is enabled
 	settings.GetSettings().WhereSIMDEnabled = true
 
 	// Query with float comparison (may use scalar fallback)
-	query := `SELECT * FROM "Books" WHERE "Price" > 25.50`
+	query := `SELECT * FROM "Products" WHERE "Price" > 25.50`
 	results := executeSelectQuery(t, fixture, query)
 
-	// Validate count (expect ~75% of books to have Price > 25.50 from 10-100 range)
+	// Validate count (expect ~75% of products to have Price > 25.50 from 10-100 range)
 	if len(results) == 0 {
 		t.Fatal("Expected at least some results for Price > 25.50")
 	}

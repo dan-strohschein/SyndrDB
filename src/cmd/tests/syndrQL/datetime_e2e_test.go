@@ -2,7 +2,6 @@ package syndrQL
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"syndrdb/src/internal/server"
@@ -143,21 +142,7 @@ func TestDateTime_E2E_DocumentInsertAndRetrieve(t *testing.T) {
 		t.Fatalf("Failed to select document: %v", err)
 	}
 
-	// Parse JSON response
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var documents []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-		t.Fatalf("Failed to unmarshal documents: %v", err)
-	}
+	documents := extractDocuments(t, response)
 
 	if len(documents) != 1 {
 		t.Fatalf("Expected 1 document, got %d", len(documents))
@@ -279,20 +264,7 @@ func TestDateTime_E2E_MultipleFormats(t *testing.T) {
 				t.Fatalf("Failed to select document: %v", err)
 			}
 
-			cmdResp, ok := response.(*server.CommandResponse)
-			if !ok {
-				t.Fatalf("Expected CommandResponse, got %T", response)
-			}
-
-			jsonBytes, err := json.Marshal(cmdResp.Result)
-			if err != nil {
-				t.Fatalf("Failed to marshal result: %v", err)
-			}
-
-			var documents []map[string]interface{}
-			if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-				t.Fatalf("Failed to unmarshal documents: %v", err)
-			}
+			documents := extractDocuments(t, response)
 
 			if len(documents) != 1 {
 				t.Fatalf("Expected 1 document, got %d", len(documents))
@@ -403,20 +375,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
 
-		cmdResp, ok := response.(*server.CommandResponse)
-		if !ok {
-			t.Fatalf("Expected CommandResponse, got %T", response)
-		}
-
-		jsonBytes, err := json.Marshal(cmdResp.Result)
-		if err != nil {
-			t.Fatalf("Failed to marshal result: %v", err)
-		}
-
-		var documents []map[string]interface{}
-		if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-			t.Fatalf("Failed to unmarshal documents: %v", err)
-		}
+		documents := extractDocuments(t, response)
 
 		if len(documents) != 1 {
 			t.Fatalf("Expected 1 document, got %d", len(documents))
@@ -435,20 +394,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
 
-		cmdResp, ok := response.(*server.CommandResponse)
-		if !ok {
-			t.Fatalf("Expected CommandResponse, got %T", response)
-		}
-
-		jsonBytes, err := json.Marshal(cmdResp.Result)
-		if err != nil {
-			t.Fatalf("Failed to marshal result: %v", err)
-		}
-
-		var documents []map[string]interface{}
-		if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-			t.Fatalf("Failed to unmarshal documents: %v", err)
-		}
+		documents := extractDocuments(t, response)
 
 		// Should return evt-103 and evt-104
 		if len(documents) < 2 {
@@ -464,20 +410,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
 
-		cmdResp, ok := response.(*server.CommandResponse)
-		if !ok {
-			t.Fatalf("Expected CommandResponse, got %T", response)
-		}
-
-		jsonBytes, err := json.Marshal(cmdResp.Result)
-		if err != nil {
-			t.Fatalf("Failed to marshal result: %v", err)
-		}
-
-		var documents []map[string]interface{}
-		if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-			t.Fatalf("Failed to unmarshal documents: %v", err)
-		}
+		documents := extractDocuments(t, response)
 
 		// Should return evt-100 and evt-101
 		if len(documents) < 2 {
@@ -493,20 +426,7 @@ func TestDateTime_E2E_WhereClauseFiltering(t *testing.T) {
 			t.Fatalf("Failed to execute query: %v", err)
 		}
 
-		cmdResp, ok := response.(*server.CommandResponse)
-		if !ok {
-			t.Fatalf("Expected CommandResponse, got %T", response)
-		}
-
-		jsonBytes, err := json.Marshal(cmdResp.Result)
-		if err != nil {
-			t.Fatalf("Failed to marshal result: %v", err)
-		}
-
-		var documents []map[string]interface{}
-		if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-			t.Fatalf("Failed to unmarshal documents: %v", err)
-		}
+		documents := extractDocuments(t, response)
 
 		// Should return evt-101, evt-102, evt-103
 		if len(documents) < 3 {
@@ -583,20 +503,7 @@ func TestDateTime_E2E_MillisecondPrecision(t *testing.T) {
 		t.Fatalf("Failed to execute query: %v", err)
 	}
 
-	cmdResp, ok := response.(*server.CommandResponse)
-	if !ok {
-		t.Fatalf("Expected CommandResponse, got %T", response)
-	}
-
-	jsonBytes, err := json.Marshal(cmdResp.Result)
-	if err != nil {
-		t.Fatalf("Failed to marshal result: %v", err)
-	}
-
-	var documents []map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &documents); err != nil {
-		t.Fatalf("Failed to unmarshal documents: %v", err)
-	}
+	documents := extractDocuments(t, response)
 
 	if len(documents) != 1 {
 		t.Fatalf("Expected 1 document, got %d", len(documents))

@@ -422,8 +422,8 @@ func TestNullWithDefaultValues(t *testing.T) {
 	createCmd := `CREATE BUNDLE "Settings" WITH FIELDS (
 		{"ID", "INT", true, false},
 		{"Key", "STRING", true, false},
-		{"Value", "STRING", false, false},
-		{"Priority", "INT", false, false}
+		{"Value", "STRING", false, false, "default_value"},
+		{"Priority", "INT", false, false, 0}
 	);`
 
 	_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
@@ -439,7 +439,7 @@ func TestNullWithDefaultValues(t *testing.T) {
 		t.Fatalf("Failed to insert document: %v", err)
 	}
 
-	// Query for NULL values - should find none because default was substituted
+	// Query for NULL values - should find none because default "default_value" was substituted
 	selectCmd := `SELECT * FROM "Settings" WHERE "Value" IS NULL;`
 	response, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd, fixture.Logger, time.Now(), nil, "127.0.0.1")
 	if err != nil {
@@ -449,7 +449,7 @@ func TestNullWithDefaultValues(t *testing.T) {
 	if cmdResp, ok := response.(*server.CommandResponse); ok {
 		// Default value substitution means Value field should NOT be NULL
 		if cmdResp.ResultCount != 0 {
-			t.Errorf("Expected 0 settings with NULL value (default should be substituted), got %d", cmdResp.ResultCount)
+			t.Errorf("Expected 0 settings with NULL value (default 'default_value' should be substituted), got %d", cmdResp.ResultCount)
 		} else {
 			t.Logf("✓ Default value substitution working correctly - no NULL values found")
 		}
@@ -467,6 +467,21 @@ func TestNullWithDefaultValues(t *testing.T) {
 			t.Errorf("Expected 1 setting with non-NULL value (default), got %d", cmdResp.ResultCount)
 		} else {
 			t.Logf("✓ IS NOT NULL query found document with default value: %d", cmdResp.ResultCount)
+		}
+	}
+
+	// Verify the default value was actually substituted with "default_value"
+	selectCmd3 := `SELECT * FROM "Settings" WHERE "Value" == "default_value";`
+	response3, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectCmd3, fixture.Logger, time.Now(), nil, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Failed to execute equality query: %v", err)
+	}
+
+	if cmdResp, ok := response3.(*server.CommandResponse); ok {
+		if cmdResp.ResultCount != 1 {
+			t.Errorf("Expected 1 setting with Value='default_value', got %d", cmdResp.ResultCount)
+		} else {
+			t.Logf("✓ Default value 'default_value' was correctly substituted")
 		}
 	}
 }

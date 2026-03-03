@@ -28,6 +28,8 @@ type ExtensionRegistry struct {
 	cdcExtensions         []CDCExtension
 	adaptiveOptimizers    []AdaptiveOptimizerExtension
 	matViewRefreshExts    []MatViewRefreshExtension
+	// Milestone 6.1
+	shardingExtensions []ShardingExtension
 }
 
 var (
@@ -521,4 +523,30 @@ func (r *ExtensionRegistry) GetMatViewRefreshExtension() MatViewRefreshExtension
 		return nil
 	}
 	return r.matViewRefreshExts[0]
+}
+
+// --- Sharding Extension (Milestone 6.1) ---
+
+// RegisterShardingExtension adds a ShardingExtension to the registry.
+func (r *ExtensionRegistry) RegisterShardingExtension(ext ShardingExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.shardingExtensions = append(r.shardingExtensions, ext)
+}
+
+// HasShardingExtension returns true if a sharding extension is registered.
+func (r *ExtensionRegistry) HasShardingExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.shardingExtensions) > 0
+}
+
+// GetShardingExtension returns the first registered sharding extension (single-provider model).
+func (r *ExtensionRegistry) GetShardingExtension() ShardingExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.shardingExtensions) == 0 {
+		return nil
+	}
+	return r.shardingExtensions[0]
 }

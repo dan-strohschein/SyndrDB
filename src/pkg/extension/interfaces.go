@@ -230,6 +230,42 @@ type MatViewRefreshExtension interface {
 	RefreshView(ctx context.Context, viewName string) error
 }
 
+// --- Milestone 6.1: Range-Based Sharding ---
+
+// ShardingExtension provides range-based sharding for bundles.
+type ShardingExtension interface {
+	// IsShardedBundle returns true if the bundle has an active shard policy.
+	IsShardedBundle(bundleName string) bool
+	// ResolveWriteShard determines which shard sub-bundle a document should be written to.
+	ResolveWriteShard(bundleName string, doc map[string]interface{}) (shardBundleName string, err error)
+	// ResolveReadShards returns the shard sub-bundle names relevant to the given predicates.
+	// Returns all shards if predicates don't reference the shard key.
+	ResolveReadShards(bundleName string, predicates interface{}) []string
+	// GetShardBundles returns all shard sub-bundle names for a sharded bundle.
+	GetShardBundles(bundleName string) []string
+	// GetShardPolicy returns the shard policy info for a bundle, or nil if not sharded.
+	GetShardPolicy(bundleName string) *ShardPolicyInfo
+}
+
+// ShardPolicyInfo describes a shard policy on a bundle.
+type ShardPolicyInfo struct {
+	BundleName string
+	ShardKey   string
+	KeyType    string // "int", "float", "string"
+	Ranges     []ShardRange
+	ShardCount int
+	CreatedAt  time.Time
+}
+
+// ShardRange describes one shard's key range.
+type ShardRange struct {
+	ShardID    int
+	ShardName  string
+	LowerBound interface{} // inclusive; nil = MIN
+	UpperBound interface{} // exclusive; nil = MAX
+	DocCount   int64
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.

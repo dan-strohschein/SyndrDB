@@ -67,14 +67,6 @@ func setupSubqueryBundles(tb testing.TB, fixture *TestFixture) {
 		tb.Fatalf("Failed to create Publishers bundle: %v", err)
 	}
 
-	// Create relationship
-	createRelationshipCmd := `UPDATE BUNDLE "Authors" ADD RELATIONSHIP ("AuthorsBooks" {"1toMany", "Authors", "DocumentID", "Books", "AuthorsID"});`
-	startTime = time.Now()
-	_, err = server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, createRelationshipCmd, fixture.Logger, startTime, nil, "127.0.0.1")
-	if err != nil {
-		tb.Fatalf("Failed to create relationship: %v", err)
-	}
-
 	fixture.Logger.Infof("Subquery test bundles created")
 }
 
@@ -115,6 +107,12 @@ func seedAuthorsForSubquery(tb testing.TB, fixture *TestFixture, count int) {
 		}
 	}
 
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		tb.Fatalf("Failed to flush buffers after seeding authors: %v", err)
+	}
+
 	tb.Logf("Seeded %d authors", count)
 }
 
@@ -145,14 +143,20 @@ func seedBooksForSubquery(tb testing.TB, fixture *TestFixture, count int) {
 		price := 9.99 + float64(i%50)
 		publishedYear := 1980 + (i % 44)
 
-		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"ID"=%d}, {"Title"="%s"}, {"AuthorID"=%d}, {"AuthorsID"=%d}, {"PublisherID"=%d}, {"Genre"="%s"}, {"Price"=%.2f}, {"PublishedYear"=%d});`,
-			i, title, authorID, authorID, publisherID, genre, price, publishedYear)
+		addDocCmd := fmt.Sprintf(`ADD DOCUMENT TO BUNDLE "Books" WITH ({"ID"=%d}, {"Title"="%s"}, {"AuthorID"=%d}, {"PublisherID"=%d}, {"Genre"="%s"}, {"Price"=%.2f}, {"PublishedYear"=%d});`,
+			i, title, authorID, publisherID, genre, price, publishedYear)
 
 		startTime := time.Now()
 		_, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, addDocCmd, fixture.Logger, startTime, nil, "127.0.0.1")
 		if err != nil {
 			tb.Fatalf("Failed to seed book %d: %v", i, err)
 		}
+	}
+
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		tb.Fatalf("Failed to flush buffers after seeding books: %v", err)
 	}
 
 	tb.Logf("Seeded %d books", count)
@@ -180,6 +184,12 @@ func seedPublishersForSubquery(tb testing.TB, fixture *TestFixture, count int) {
 		if err != nil {
 			tb.Fatalf("Failed to seed publisher %d: %v", i, err)
 		}
+	}
+
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	if err := fixture.ServiceManager.BundleService.FlushAllBuffers(); err != nil {
+		tb.Fatalf("Failed to flush buffers after seeding publishers: %v", err)
 	}
 
 	tb.Logf("Seeded %d publishers", count)

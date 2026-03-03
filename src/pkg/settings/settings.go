@@ -470,6 +470,11 @@ type Arguments struct {
 	MSSQLImportProgressInterval int `yaml:"mssql_import_progress_interval"` // Log progress every N records (default: 10000)
 	MSSQLImportMaxErrors        int `yaml:"mssql_import_max_errors"`        // Maximum errors before abort (default: 100)
 
+	// Sharding Configuration (Enterprise)
+	ShardingEnabled      bool   `yaml:"sharding_enabled"`       // Enable range-based sharding (default: false)
+	ShardDefaultBehavior string `yaml:"shard_default_behavior"` // "reject" or "default" for missing shard key (default: "reject")
+	ShardRebalanceWorkers int   `yaml:"shard_rebalance_workers"` // Worker count for parallel rebalance (default: 4)
+
 	// Enterprise Extension Configuration
 	// Captures any `enterprise:` section from syndrdb.yml for enterprise plugin settings.
 	EnterpriseSettings map[string]interface{} `yaml:"enterprise" json:"enterprise,omitempty"`

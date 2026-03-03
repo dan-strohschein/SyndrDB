@@ -1001,6 +1001,23 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
 			}
 
+			// Enterprise sharding hook: route DELETE to correct shard(s)
+			if reg := extension.GetRegistry(); reg.HasShardingExtension() {
+				shardExt := reg.GetShardingExtension()
+				if shardExt.IsShardedBundle(bundleName) {
+					shardBundles := shardExt.ResolveReadShards(bundleName, docCommand.WhereClause)
+					if len(shardBundles) == 1 {
+						bundle, err = serviceManager.BundleService.GetBundleByName(database, shardBundles[0])
+						if err != nil {
+							return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", shardBundles[0])
+						}
+						bundleName = shardBundles[0]
+						logger.Debugf("Sharding: routed DELETE to shard bundle '%s'", shardBundles[0])
+					}
+					// Multi-shard deletes: fall through to scatter via normal path
+				}
+			}
+
 			// OPTIMIZATION: Use GetDocumentsAndIDsByFilter to get both docIDs and docs; pass docs into
 			// DeleteDocumentFromBundle so harvest avoids N×GetDocument (P1: pass docs through for DELETE harvest).
 			whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)

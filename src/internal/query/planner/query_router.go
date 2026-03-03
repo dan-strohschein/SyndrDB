@@ -27,6 +27,7 @@ package planner
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/documentscanner"
@@ -669,9 +670,11 @@ func (qr *QueryRouter) tryCorrelatedSubqueryPlan(
 	// Re-scan subqueries after rewriting (types may have changed, e.g., EXISTS → NOT_EXISTS)
 	subqueries = findSubqueries(expr)
 
-	// Check if any correlated subquery has a semi-join or anti-join strategy
+	// Check if any correlated subquery has a viable execution strategy
 	for _, subExpr := range subqueries {
-		if subExpr.RewriteStrategy != REWRITE_SEMI_JOIN && subExpr.RewriteStrategy != REWRITE_ANTI_JOIN {
+		if subExpr.RewriteStrategy != REWRITE_SEMI_JOIN &&
+			subExpr.RewriteStrategy != REWRITE_ANTI_JOIN &&
+			subExpr.RewriteStrategy != REWRITE_NESTED_LOOP {
 			continue
 		}
 
@@ -680,10 +683,16 @@ func (qr *QueryRouter) tryCorrelatedSubqueryPlan(
 			continue
 		}
 
-		// Determine join type
+		// Determine join type based on strategy and subquery type
 		joinType := SEMI_JOIN
 		if subExpr.RewriteStrategy == REWRITE_ANTI_JOIN {
 			joinType = ANTI_JOIN
+		} else if subExpr.RewriteStrategy == REWRITE_NESTED_LOOP {
+			// NESTED_LOOP uses the same hash-based CorrelatedSubqueryNode
+			// but we select semi/anti based on subquery type
+			if subExpr.SubqueryType == syndrQL.SUBQUERY_NOT_EXISTS || subExpr.SubqueryType == syndrQL.SUBQUERY_NOT_IN {
+				joinType = ANTI_JOIN
+			}
 		}
 
 		// Get inner bundle
@@ -738,13 +747,15 @@ func (qr *QueryRouter) tryCorrelatedSubqueryPlan(
 		// Extract remaining non-subquery predicates from outer WHERE
 		remainingFilter := extractNonSubqueryPredicates(expr, subExpr)
 
-		// Create CorrelatedSubqueryNode
+		// Create CorrelatedSubqueryNode with schemas for field value extraction
 		correlatedNode := &CorrelatedSubqueryNode{
 			OuterChild:      outerScan,
 			InnerChild:      innerNode,
 			JoinType:        joinType,
 			OuterJoinFields: subExpr.OuterJoinFields,
 			InnerJoinFields: subExpr.InnerJoinFields,
+			OuterSchema:     bundle.DocumentStructure.FieldSchema(),
+			InnerSchema:     innerBundle.DocumentStructure.FieldSchema(),
 			RemainingFilter: remainingFilter,
 			BundleContext:   bundleCtx,
 			Cost:            EstimateSemiJoinCost(int64(bundle.TotalDocuments), int64(innerBundle.TotalDocuments)),
@@ -1517,6 +1528,18 @@ func makeEqPredicate(fieldName string, literalValue interface{}, schema *models.
 		if fv, fok := predicateToFloat64(fieldVal); fok {
 			if lv, lok := predicateToFloat64(literalValue); lok {
 				return fv == lv
+			}
+		}
+		// Handle DateTime-to-String comparison
+		if fieldTime, ok := fieldVal.(time.Time); ok {
+			if litStr, ok := literalValue.(string); ok {
+				if parsed, err := time.Parse(time.RFC3339Nano, litStr); err == nil {
+					return fieldTime.Equal(parsed)
+				} else if parsed, err := time.Parse(time.RFC3339, litStr); err == nil {
+					return fieldTime.Equal(parsed)
+				} else if parsed, err := time.Parse("2006-01-02", litStr); err == nil {
+					return fieldTime.Equal(parsed)
+				}
 			}
 		}
 		return fmt.Sprintf("%v", fieldVal) == fmt.Sprintf("%v", literalValue)

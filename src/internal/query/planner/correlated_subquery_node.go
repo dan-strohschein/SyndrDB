@@ -32,13 +32,15 @@ import (
 
 // CorrelatedSubqueryNode wraps the semi-join/anti-join flattening for correlated subqueries
 type CorrelatedSubqueryNode struct {
-	OuterChild      ExecutionNode      // Scan of outer bundle (e.g., "Authors")
-	InnerChild      ExecutionNode      // Scan of inner bundle (e.g., "Books")
-	JoinType        SemiJoinType       // SEMI_JOIN or ANTI_JOIN
-	OuterJoinFields []string           // Fields from outer to join on
-	InnerJoinFields []string           // Fields from inner to join on
-	RemainingFilter syndrQL.Expression // Non-subquery predicates from outer WHERE (applied after join)
-	BundleContext   interface{}        // For remaining filter evaluation (*syndrQL.BundleContext)
+	OuterChild      ExecutionNode              // Scan of outer bundle (e.g., "Authors")
+	InnerChild      ExecutionNode              // Scan of inner bundle (e.g., "Books")
+	JoinType        SemiJoinType               // SEMI_JOIN or ANTI_JOIN
+	OuterJoinFields []string                   // Fields from outer to join on
+	InnerJoinFields []string                   // Fields from inner to join on
+	OuterSchema     *models.BundleFieldSchema  // Schema for extracting outer field values
+	InnerSchema     *models.BundleFieldSchema  // Schema for extracting inner field values
+	RemainingFilter syndrQL.Expression         // Non-subquery predicates from outer WHERE (applied after join)
+	BundleContext   interface{}                // For remaining filter evaluation (*syndrQL.BundleContext)
 	Cost            float64
 	EstimatedRows   int
 	Logger          *zap.SugaredLogger
@@ -107,7 +109,7 @@ func (node *CorrelatedSubqueryNode) executeAsymmetricJoin(
 	hasNull := false
 
 	for _, innerDoc := range innerSlice {
-		key := buildJoinKeyFromFields(innerDoc, node.InnerJoinFields)
+		key := buildJoinKeyFromFields(innerDoc, node.InnerJoinFields, node.InnerSchema)
 		if key == nil {
 			hasNull = true
 		}
@@ -120,7 +122,7 @@ func (node *CorrelatedSubqueryNode) executeAsymmetricJoin(
 	result := make(map[string]*models.Document, len(outerSlice)/2)
 
 	for i, outerDoc := range outerSlice {
-		key := buildJoinKeyFromFields(outerDoc, node.OuterJoinFields)
+		key := buildJoinKeyFromFields(outerDoc, node.OuterJoinFields, node.OuterSchema)
 
 		if key == nil {
 			// NULL key handling
@@ -204,9 +206,13 @@ func (node *CorrelatedSubqueryNode) EstimateMemoryUsage() int64 {
 }
 
 // buildJoinKeyFromFields extracts a join key from a document using specified field names
-func buildJoinKeyFromFields(doc *models.Document, fields []string) interface{} {
+func buildJoinKeyFromFields(doc *models.Document, fields []string, schema ...*models.BundleFieldSchema) interface{} {
+	var s *models.BundleFieldSchema
+	if len(schema) > 0 {
+		s = schema[0]
+	}
 	getVal := func(name string) (interface{}, bool) {
-		if fv, ok := doc.GetFieldValue(nil, name); ok && !fv.IsNil() {
+		if fv, ok := doc.GetFieldValue(s, name); ok && !fv.IsNil() {
 			return fv.AsInterface(), true
 		}
 		if doc.Data != nil {

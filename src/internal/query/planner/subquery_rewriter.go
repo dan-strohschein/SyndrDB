@@ -418,8 +418,23 @@ func (sr *SubqueryRewriter) applyRewriteStrategy(outerQuery *syndrQL.SelectState
 		sr.logger.Debug("Using existing materialization strategy")
 
 	case STRATEGY_NESTED_LOOP:
+		// Extract join field pairs for correlated nested loop execution
+		correlationResult := sr.correlationAnalyzer.AnalyzeCorrelationQualified(
+			outerQuery.BundleName, subqueryExpr.InnerQuery.WhereClause)
+
+		if correlationResult.IsCorrelated && len(correlationResult.JoinPairs) > 0 {
+			subqueryExpr.OuterJoinFields = make([]string, len(correlationResult.JoinPairs))
+			subqueryExpr.InnerJoinFields = make([]string, len(correlationResult.JoinPairs))
+			for i, pair := range correlationResult.JoinPairs {
+				subqueryExpr.OuterJoinFields[i] = pair.OuterField
+				subqueryExpr.InnerJoinFields[i] = pair.InnerField
+			}
+			subqueryExpr.NonCorrelatedWhere = correlationResult.NonCorrelatedExpr
+		}
+
 		subqueryExpr.RewriteStrategy = REWRITE_NESTED_LOOP
-		sr.logger.Debug("Using nested loop execution")
+		sr.logger.Debugf("Using nested loop execution: outer=%v, inner=%v",
+			subqueryExpr.OuterJoinFields, subqueryExpr.InnerJoinFields)
 
 	case STRATEGY_UNCHANGED:
 		subqueryExpr.RewriteStrategy = REWRITE_UNCHANGED

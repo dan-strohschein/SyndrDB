@@ -311,9 +311,12 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 		serviceManager.ConflictTracker.UpdateCommitSequencesBatch(docIDs, commitSequence)
 	}
 
-	// PHASE 2: MVCC - Start async background update of documents with commit sequence
+	// PHASE 2: MVCC - Update documents with commit sequence synchronously.
+	// Must be synchronous so committed data is immediately visible to subsequent reads.
+	// Previously async, but that created a race where SELECTs after COMMIT could miss documents
+	// (CommitSequence=0 + CreatedByTxID!=0 → invisible to non-transactional reads).
 	if len(documentLocations) > 0 && commitSequence > 0 {
-		go updateDocumentsCommitSequenceAsync(
+		updateDocumentsCommitSequenceAsync(
 			serviceManager,
 			txID,
 			commitSequence,
@@ -342,6 +345,12 @@ func HandleCommit(session *Session, serviceManager ServiceManager, logger *zap.S
 	// Flush ALL index updates after commit including B-tree disk flush (full durability)
 	if serviceManager.BundleService != nil {
 		serviceManager.BundleService.ForceFlushIndexUpdatesFull()
+		// CRITICAL: Flush write buffers to ensure documents are persisted to disk
+		// Without this, documents remain in the buffer and can be flushed again during
+		// subsequent rollbacks, creating duplicates
+		if err := serviceManager.BundleService.FlushAllBuffers(); err != nil {
+			logger.Warnf("Failed to flush write buffers after commit: %v", err)
+		}
 	}
 
 	// Debug-aware logging
@@ -386,7 +395,7 @@ func updateDocumentsCommitSequenceAsync(
 		}
 	}
 
-	logger.Debugf("Async commit sequence update complete: txID=%s, commitSeq=%d, docs=%d, errors=%d",
+	logger.Debugf("Commit sequence update complete: txID=%s, commitSeq=%d, docs=%d, errors=%d",
 		txID, commitSequence, len(documentLocations), errCount)
 }
 
@@ -650,7 +659,7 @@ func HandleRollback(session *Session, serviceManager ServiceManager, database *m
 			discarded := serviceManager.BundleService.GetDiscardedDocuments(bundleName)
 			if len(discarded) > 0 {
 				discardedByBundle[bundleName] = discarded
-				logger.Debugf("Found %d discarded documents in bundle %s", len(discarded), bundleName)
+				logger.Infof("ROLLBACK CLEANUP: Found %d discarded documents in bundle %s: %v", len(discarded), bundleName, discarded)
 			}
 		}
 

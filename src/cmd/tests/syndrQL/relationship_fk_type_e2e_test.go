@@ -169,6 +169,11 @@ func TestFKTypePreservation_JOIN(t *testing.T) {
 		fixture.Logger, time.Now(), nil, "127.0.0.1")
 	require.NoError(t, err)
 
+	// Flush metadata and buffers to persist documents before querying
+	fixture.ServiceManager.BundleService.FlushMetadataUpdates()
+	err = fixture.ServiceManager.BundleService.FlushAllBuffers()
+	require.NoError(t, err, "Failed to flush buffers")
+
 	// DEBUG: Verify documents with SELECT queries
 	selectAuthors := `SELECT * FROM "Authors";`
 	authorsResult, err := server.CommandDirector(ctx, fixture.Database, *fixture.ServiceManager, selectAuthors,

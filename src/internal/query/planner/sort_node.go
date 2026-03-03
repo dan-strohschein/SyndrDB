@@ -126,6 +126,12 @@ func NewSortNode(child ExecutionNode, orderBy *queryparser.OrderByClause, logger
 		config:        config,
 	}
 
+	// Set schema on sorter so it uses typed doc.Values instead of falling back to doc.Data
+	// (doc.Data may contain string representations of numbers, causing incorrect sort order)
+	if bundle := getBundleFromExecutionNode(child); bundle != nil {
+		node.sorter.SetSchema(bundle.DocumentStructure.FieldSchema())
+	}
+
 	// Calculate cost: child cost + sorting cost
 	// Sorting cost = n * log(n) * 0.001 (small constant for comparison operations)
 	n := float64(child.GetEstimatedRows())
@@ -182,7 +188,7 @@ func (n *SortNode) Execute(ctx context.Context) (map[string]*models.Document, er
 			}
 		}
 	} else {
-		// Regular execution path
+		// Regular execution path (e.g., BTreeOrderedScanNode → SortNode)
 		documents, err = n.Child.Execute(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("SortNode: child execution failed: %w", err)
@@ -291,10 +297,14 @@ func (n *SortNode) collectDocumentsStreaming(ctx context.Context, scanner docume
 
 			docCount++
 
-			// Memory tracking: Sample every 4096th document to reduce cache-line contention
-			if memoryTracker != nil && docCount%4096 == 0 {
+			// Memory tracking: Progressive sampling to catch limits early
+			// Matches FullScanNode pattern: sample at 0,50,100,200 then every 4096th
+			idx := docCount - 1 // 0-based index for Sample's modulo check
+			if memoryTracker != nil && (idx == 0 || idx == 50 || (idx <= 200 && idx%100 == 0) || idx%4096 == 0) {
 				docSize := models.EstimateDocumentSize(doc, nil)
-				if sampleErr = memoryTracker.Sample(docSize, docCount); sampleErr != nil {
+				memoryTracker.Sample(docSize, idx)
+				if memoryTracker.WillExceedLimit(docCount) {
+					sampleErr = ErrMemoryLimitExceeded
 					return false
 				}
 			}

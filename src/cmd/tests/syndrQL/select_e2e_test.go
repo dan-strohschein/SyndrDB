@@ -357,14 +357,10 @@ func seedBooksBundle(t *testing.T, fixture *TestFixture, count int) {
 		t.Fatalf("Failed to flush buffers after seeding books: %v", err)
 	}
 
-	// CRITICAL: Clear memtable to force SELECT to read from disk
-	// After flush, documents are on disk, but memtable still exists with potentially stale data
-	// Setting DocumentsComplete=true forces reads from disk
-	booksBundle, _ := fixture.ServiceManager.BundleService.GetBundleByName(fixture.Database, "Books")
-	if booksBundle != nil {
-		booksBundle.DocumentsComplete = true
-		t.Logf("Cleared Books memtable, forcing disk reads")
-	}
+	// Note: Do NOT set DocumentsComplete=true - this flag indicates the in-memory
+	// Documents map is authoritative, which can cause the page scanner to see incomplete
+	// data if the map doesn't contain all documents. The page cache loaded from disk
+	// is the proper source of truth after FlushAllBuffers.
 
 	// Log success with document IDs if count ≤10
 	if count <= 10 {
@@ -486,24 +482,34 @@ func extractDocuments(t *testing.T, response interface{}) []map[string]interface
 	// PHASE H: Handle streaming response where documents aren't materialized as maps
 	// Check StreamSlice first (preferred path for scan-optimized queries without ORDER BY)
 	if len(cmdResponse.StreamSlice) > 0 {
-		return helpers.TransformSortedDocumentsToFlatFormatWithProjection(
+		results := helpers.TransformSortedDocumentsToFlatFormatWithProjection(
 			cmdResponse.StreamSlice,
 			cmdResponse.StreamFields,
 			cmdResponse.StreamSchema,
 		)
+		normalizeTimeValues(results)
+		return results
 	}
 	if cmdResponse.StreamDocuments != nil || len(cmdResponse.StreamDocuments) > 0 {
 		// Convert StreamDocuments to the expected format
-		return helpers.TransformDocumentsToFlatFormatWithProjection(
+		results := helpers.TransformDocumentsToFlatFormatWithProjection(
 			cmdResponse.StreamDocuments,
 			cmdResponse.StreamFields,
-			nil,
+			cmdResponse.StreamSchema,
 		)
+		normalizeTimeValues(results)
+		return results
+	}
+
+	// Handle nil result (empty bundle, no documents found)
+	if cmdResponse.Result == nil {
+		return []map[string]interface{}{}
 	}
 
 	// Handle different result types (legacy path)
 	switch result := cmdResponse.Result.(type) {
 	case []map[string]interface{}:
+		normalizeTimeValues(result)
 		return result
 	case []interface{}:
 		docs := make([]map[string]interface{}, len(result))
@@ -514,6 +520,7 @@ func extractDocuments(t *testing.T, response interface{}) []map[string]interface
 				t.Fatalf("Expected map[string]interface{} in result array at index %d, got %T", i, item)
 			}
 		}
+		normalizeTimeValues(docs)
 		return docs
 	case map[string]interface{}:
 		// Single result wrapped in a map - could be aggregate or single document
@@ -531,6 +538,36 @@ func extractDocuments(t *testing.T, response interface{}) []map[string]interface
 	default:
 		t.Fatalf("Unexpected result type: %T, value: %v", result, result)
 		return nil
+	}
+}
+
+// normalizeTimeValues converts time.Time values to RFC3339 strings in extracted documents.
+// The streaming path returns raw time.Time values, but tests expect JSON-like string representations.
+// Preserves timezone information (does NOT convert to UTC) to match json.Marshal behavior.
+func normalizeTimeValues(docs []map[string]interface{}) {
+	for _, doc := range docs {
+		for k, v := range doc {
+			if tv, ok := v.(time.Time); ok {
+				doc[k] = tv.Format(time.RFC3339Nano)
+			}
+		}
+	}
+}
+
+// toFloat64 converts a numeric value (int64, float64, int) to float64.
+// Handles both JSON-deserialized values (float64) and streaming path values (int64).
+func toFloat64(t *testing.T, val interface{}) float64 {
+	t.Helper()
+	switch v := val.(type) {
+	case float64:
+		return v
+	case int64:
+		return float64(v)
+	case int:
+		return float64(v)
+	default:
+		t.Fatalf("Expected numeric value, got %T: %v", val, val)
+		return 0
 	}
 }
 
@@ -818,6 +855,7 @@ func getKeys(m map[string]interface{}) []string {
 func TestSelectCount_TotalDocuments(t *testing.T) {
 	fixture := setupRealServer(t)
 	//resetDatabase(t, fixture)
+	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 100)
 
 	query := `SELECT COUNT(*) FROM "Books"`
@@ -988,6 +1026,7 @@ func TestOrderBy_SingleFieldAsc(t *testing.T) {
 func TestOrderBy_SingleFieldDesc(t *testing.T) {
 	fixture := setupRealServer(t)
 
+	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 75)
 
 	query := `SELECT * FROM "Books" ORDER BY "Price" DESC`
@@ -1007,6 +1046,7 @@ func TestOrderBy_SingleFieldDesc(t *testing.T) {
 func TestOrderBy_WithWhereAndLimit(t *testing.T) {
 	fixture := setupRealServer(t)
 
+	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 100)
 
 	query := `SELECT TOP 10 * FROM "Books" WHERE Genre == "Fiction" ORDER BY Price ASC`
@@ -1045,6 +1085,7 @@ func TestOrderBy_WithWhereAndLimit(t *testing.T) {
 func TestOrderBy_LargeResultSet_Sampling(t *testing.T) {
 	fixture := setupRealServer(t)
 
+	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 200)
 
 	query := `SELECT * FROM "Books" ORDER BY "ID" ASC`
@@ -1142,6 +1183,7 @@ func TestSelectTopN_Limit(t *testing.T) {
 func TestWhere_ComplexAndOr(t *testing.T) {
 	fixture := setupRealServer(t)
 
+	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 100)
 
 	query := `SELECT * FROM "Books" WHERE ("Genre" == "Fiction" OR "Genre" == "Mystery") AND "Price" > 50.0`
@@ -1263,6 +1305,7 @@ func TestWhere_MultipleFields(t *testing.T) {
 func TestOrderBy_MultipleFields(t *testing.T) {
 	fixture := setupRealServer(t)
 	//resetDatabase(t, fixture)
+	seedAuthorsBundle(t, fixture, 100)
 	seedBooksBundle(t, fixture, 100)
 
 	query := `SELECT * FROM "Books" ORDER BY Genre ASC, Price DESC`

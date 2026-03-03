@@ -663,7 +663,8 @@ func (s *BundleService) Shutdown() error {
 	// Stop background index flush goroutine and drain remaining updates
 	if s.indexFlushTrigger != nil {
 		close(s.indexFlushTrigger)
-		<-s.indexFlushDone // Wait for background flusher to exit
+		<-s.indexFlushDone        // Wait for background flusher to exit
+		s.indexFlushTrigger = nil // Prevent double-close on repeated Shutdown calls
 	}
 
 	// Force flush any remaining pending index updates (full, including B-tree disk flush)

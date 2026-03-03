@@ -927,6 +927,8 @@ func (s *BundleService) DeleteDiscardedDocuments(database *models.Database, bund
 		return nil
 	}
 
+	s.logger.Infof("DeleteDiscardedDocuments called with %d docIDs: %v", len(docIDs), docIDs)
+
 	bundle, err := s.GetBundleByName(database, bundleName)
 	if err != nil {
 		return fmt.Errorf("failed to get bundle %s: %w", bundleName, err)

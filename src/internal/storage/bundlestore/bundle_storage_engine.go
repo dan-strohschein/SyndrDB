@@ -2229,6 +2229,9 @@ func (b *BundleStorageEngine) appendDeletionMarkersBatchCore(bundle *models.Bund
 		}
 	}
 
+	// DEBUG: Log all deletions
+	b.logger.Infof("DELETE MARKERS: bundle=%s, count=%d, docIDs=%v, totalDocsBefore=%d", bundle.Name, len(documentIDs), documentIDs, bundle.TotalDocuments)
+
 	// PERF: Buffer all markers and write once instead of 2*N write syscalls.
 	// Reduces I/O and time under the write lock for large deletes.
 	var buf bytes.Buffer
@@ -2384,6 +2387,9 @@ func (b *BundleStorageEngine) AppendDocumentToBundleFile(bundle *models.Bundle, 
 // This eliminates the need to rewrite the entire bundle file on every document insert
 // Returns the physical page ID where the document was stored (0-based)
 func (b *BundleStorageEngine) AppendDocumentToBundleFileWithTxID(bundle *models.Bundle, document *models.Document, txID string) (uint32, error) {
+	// DEBUG: Log all document writes for debugging duplicate writes
+	b.logger.Infof("WRITE DOC: bundle=%s, docID=%s, txID=%s, commitSeq=%d", bundle.Name, document.DocumentID, txID, document.CommitSequence)
+
 	//b.logger.Debugf("Starting time: %s", time.Now().Format(time.RFC3339Nano))
 	//testingStart := time.Now()
 	// PHASE 1: MVCC - Removed bundle-wide write lock to allow concurrent writes
