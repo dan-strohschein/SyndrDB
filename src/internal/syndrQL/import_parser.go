@@ -5,8 +5,9 @@ import (
 	"strings"
 )
 
-// ImportCommand represents a parsed IMPORT POSTGRES command.
+// ImportCommand represents a parsed IMPORT command.
 type ImportCommand struct {
+	SourceType     string            // "POSTGRES", "MYSQL", "MONGODB", "MSSQL"
 	SourceFile     string
 	TargetDatabase string
 	Options        map[string]string // Optional WITH OPTIONS
@@ -43,9 +44,19 @@ func ParseImportCommand(command string) (*ImportCommand, error) {
 	}
 	pos++
 
-	// POSTGRES
-	if toks[pos].Type != TOKEN_POSTGRES {
-		return nil, fmt.Errorf("expected POSTGRES, got %s", toks[pos].Value)
+	// Source type: POSTGRES, MYSQL, MONGODB, MSSQL
+	var sourceType string
+	switch toks[pos].Type {
+	case TOKEN_POSTGRES:
+		sourceType = "POSTGRES"
+	case TOKEN_MYSQL:
+		sourceType = "MYSQL"
+	case TOKEN_MONGODB:
+		sourceType = "MONGODB"
+	case TOKEN_MSSQL:
+		sourceType = "MSSQL"
+	default:
+		return nil, fmt.Errorf("expected POSTGRES, MYSQL, MONGODB, or MSSQL, got %s", toks[pos].Value)
 	}
 	pos++
 
@@ -82,6 +93,7 @@ func ParseImportCommand(command string) (*ImportCommand, error) {
 	pos++
 
 	cmd := &ImportCommand{
+		SourceType:     sourceType,
 		SourceFile:     sourcePath,
 		TargetDatabase: dbName,
 		Options:        make(map[string]string),

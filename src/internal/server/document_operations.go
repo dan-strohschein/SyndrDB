@@ -17,6 +17,36 @@ import (
 	"go.uber.org/zap"
 )
 
+// notifyCDCAndMatView fires CDC and MatView change hooks after a mutation.
+func notifyCDCAndMatView(ctx context.Context, operation, bundleName, docID string, before, after map[string]interface{}, logger *zap.SugaredLogger) {
+	reg := extension.GetRegistry()
+
+	// CDC hook: notify all CDC listeners
+	if reg.HasCDCExtension() {
+		event := extension.DataChangeEvent{
+			Operation:  operation,
+			BundleName: bundleName,
+			DocumentID: docID,
+			Before:     before,
+			After:      after,
+			Timestamp:  time.Now(),
+		}
+		for _, cdc := range reg.GetCDCExtensions() {
+			cdc.OnDataChange(ctx, event)
+		}
+	}
+
+	// MatView refresh hook: notify if this bundle is a source for any materialized view
+	if reg.HasMatViewRefreshExtension() {
+		mvExt := reg.GetMatViewRefreshExtension()
+		if mvExt.IsSourceBundle(bundleName) {
+			if err := mvExt.OnSourceChange(ctx, bundleName, docID, operation, after); err != nil {
+				logger.Warnf("MatView OnSourceChange error (%s): %v", operation, err)
+			}
+		}
+	}
+}
+
 // UpdateDocument handles UPDATE DOCUMENTS commands
 // Syntax: UPDATE DOCUMENTS IN BUNDLE "<BUNDLE_NAME>" (<FIELD_NAME> = <VALUE>) WHERE <WHERE_CLAUSE>;
 //
@@ -105,6 +135,9 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 				}
 			}
 		}
+
+		// Enterprise CDC + MatView hooks
+		notifyCDCAndMatView(context.Background(), "UPDATE", bundleName, "", nil, keyValuesToMap(docCommand.Fields), logger)
 
 		// METRICS: Track document update
 		globalMetrics.DocumentUpdatesTotal.Add(1)
@@ -275,6 +308,9 @@ func updateDocumentPessimistic(commandParts []string, serviceManager ServiceMana
 		}
 	}
 
+	// Enterprise CDC + MatView hooks (pessimistic path)
+	notifyCDCAndMatView(context.Background(), "UPDATE", bundleName, "", nil, keyValuesToMap(docCommand.Fields), logger)
+
 	// METRICS: Track document update
 	globalMetrics := GetGlobalServerMetrics()
 	globalMetrics.DocumentUpdatesTotal.Add(1)
@@ -433,6 +469,9 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 			}
 		}
 	}
+
+	// Enterprise CDC + MatView hooks
+	notifyCDCAndMatView(context.Background(), "INSERT", bundleName, docID, nil, keyValuesToMap(docCommand.Fields), logger)
 
 	// METRICS: Track document insert
 	globalMetrics := GetGlobalServerMetrics()

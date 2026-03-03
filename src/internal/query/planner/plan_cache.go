@@ -52,6 +52,7 @@ import (
 
 	"syndrdb/src/internal/domain/models"
 	"syndrdb/src/internal/query/queryparser"
+	"syndrdb/src/pkg/extension"
 	"syndrdb/src/pkg/settings"
 
 	"github.com/cespare/xxhash/v2"
@@ -233,6 +234,21 @@ func (spc *ShardedPlanCache) Get(
 
 	// Try to get from cache
 	plan, staleServed := shard.get(ctx, query, key, useGeneric)
+	if plan != nil {
+		// Enterprise adaptive optimizer: check if plan should be re-optimized
+		if reg := extension.GetRegistry(); reg.HasAdaptiveOptimizerExtension() {
+			if shouldReplan, _ := reg.GetAdaptiveOptimizerExtension().SuggestPlanChange(key); shouldReplan {
+				// Evict stale plan and fall through to rebuild
+				shard.mu.Lock()
+				if elem, ok := shard.cache[key]; ok {
+					shard.lru.Remove(elem)
+					delete(shard.cache, key)
+				}
+				shard.mu.Unlock()
+				plan = nil
+			}
+		}
+	}
 	if plan != nil {
 		if staleServed {
 			spc.stats.staleServes.Add(1)
@@ -613,6 +629,16 @@ func (spc *ShardedPlanCache) UpdatePlanStats(key uint64, duration time.Duration,
 		entry.customPlanCost = append(entry.customPlanCost, duration.Seconds())
 	} else if isGeneric {
 		entry.genericPlanCost = duration.Seconds()
+	}
+
+	// Enterprise adaptive optimizer hook: record execution stats
+	if reg := extension.GetRegistry(); reg.HasAdaptiveOptimizerExtension() {
+		adaptiveExt := reg.GetAdaptiveOptimizerExtension()
+		adaptiveExt.RecordExecution(key, extension.ExecutionStats{
+			ElapsedMs: float64(duration.Milliseconds()),
+			PlanCost:  entry.plan.Cost,
+			Timestamp: time.Now(),
+		})
 	}
 }
 

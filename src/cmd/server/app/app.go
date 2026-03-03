@@ -397,7 +397,12 @@ func Run() {
 	}
 
 	// Notify enterprise extensions of startup
-	extCtx := NewExtensionContext(srv.GetLogger(), args)
+	var bundleSvc, dbSvc interface{}
+	if sm := server.GetServiceManager(); sm != nil {
+		bundleSvc = sm.BundleService
+		dbSvc = sm.DatabaseService
+	}
+	extCtx := NewExtensionContext(srv.GetLogger(), args, bundleSvc, dbSvc)
 	extension.SetExtensionContext(extCtx)
 	if reg := extension.GetRegistry(); reg != nil {
 		if err := reg.NotifyServerStart(context.Background(), extCtx); err != nil {

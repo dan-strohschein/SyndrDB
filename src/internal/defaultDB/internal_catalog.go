@@ -760,6 +760,135 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END HIGH AVAILABILITY CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// PERFORMANCE + OPERATIONS CATALOG BUNDLES (Milestone 5)
+	// ==============================================================
+
+	// QueryGovernorLimits — per-user query resource limits
+	qgLimits_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":           {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"Username":             {Name: "Username", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"MaxConcurrentQueries": {Name: "MaxConcurrentQueries", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"MaxTimeoutMs":         {Name: "MaxTimeoutMs", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"MaxMemoryMB":          {Name: "MaxMemoryMB", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"IsActive":             {Name: "IsActive", Type: "BOOLEAN", IsRequired: true, IsUnique: false, DefaultValue: true},
+		},
+	}
+	qgLimits_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "QueryGovernorLimits",
+		DocumentStructure: qgLimits_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, qgLimits_Bundle)
+
+	// DLSPolicies — document-level security policies
+	dlsPolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":       {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"PolicyName":       {Name: "PolicyName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName":       {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FilterExpression": {Name: "FilterExpression", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"AppliesTo":        {Name: "AppliesTo", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"AppliesToType":    {Name: "AppliesToType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "user"},
+			"CreatedAt":        {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	dlsPolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "DLSPolicies",
+		DocumentStructure: dlsPolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, dlsPolicies_Bundle)
+
+	// CDCSubscriptions — change data capture subscriptions
+	cdcSubs_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":       {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"SubscriptionName": {Name: "SubscriptionName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName":       {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FilterExpression": {Name: "FilterExpression", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"WebhookURL":       {Name: "WebhookURL", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"Status":           {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "active"},
+			"CreatedAt":        {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	cdcSubs_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "CDCSubscriptions",
+		DocumentStructure: cdcSubs_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, cdcSubs_Bundle)
+
+	// VectorIndexes — vector/embedding search index metadata
+	vectorIdx_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":     {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"IndexName":      {Name: "IndexName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName":     {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FieldName":      {Name: "FieldName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Dimensions":     {Name: "Dimensions", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 128},
+			"Metric":         {Name: "Metric", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "cosine"},
+			"EfConstruction": {Name: "EfConstruction", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 200},
+			"MaxConnections": {Name: "MaxConnections", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 16},
+			"DocCount":       {Name: "DocCount", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+		},
+	}
+	vectorIdx_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "VectorIndexes",
+		DocumentStructure: vectorIdx_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, vectorIdx_Bundle)
+
+	// MatViewChangeLog — tracks source bundle mutations for incremental refresh
+	mvChangeLog_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":   {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"ViewName":     {Name: "ViewName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"SourceBundle": {Name: "SourceBundle", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"DocID":        {Name: "DocID", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ChangeType":   {Name: "ChangeType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Timestamp":    {Name: "Timestamp", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+			"Processed":    {Name: "Processed", Type: "BOOLEAN", IsRequired: true, IsUnique: false, DefaultValue: false},
+		},
+	}
+	mvChangeLog_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "MatViewChangeLog",
+		DocumentStructure: mvChangeLog_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, mvChangeLog_Bundle)
+
+	// ==============================================================
+	// END PERFORMANCE + OPERATIONS CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

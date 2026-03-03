@@ -454,6 +454,22 @@ type Arguments struct {
 	PGImportMaxErrors        int    `yaml:"pg_import_max_errors"`        // Maximum errors before abort (default: 100)
 	PGImportTempDir          string `yaml:"pg_import_temp_dir"`          // Temp directory for pg_restore output (default: os.TempDir())
 
+	// MySQL Import Configuration (Enterprise)
+	MySQLImportDefaultBatchSize int `yaml:"mysql_import_default_batch_size"` // Default batch size for MySQL import (default: 1000)
+	MySQLImportProgressInterval int `yaml:"mysql_import_progress_interval"` // Log progress every N records (default: 10000)
+	MySQLImportMaxErrors        int `yaml:"mysql_import_max_errors"`        // Maximum errors before abort (default: 100)
+
+	// MongoDB Import Configuration (Enterprise)
+	MongoImportDefaultBatchSize  int `yaml:"mongo_import_default_batch_size"`  // Default batch size for MongoDB import (default: 1000)
+	MongoImportProgressInterval  int `yaml:"mongo_import_progress_interval"`  // Log progress every N records (default: 10000)
+	MongoImportMaxErrors         int `yaml:"mongo_import_max_errors"`         // Maximum errors before abort (default: 100)
+	MongoImportSchemaSampleSize  int `yaml:"mongo_import_schema_sample_size"` // Documents to sample for schema inference (default: 1000)
+
+	// MSSQL Import Configuration (Enterprise)
+	MSSQLImportDefaultBatchSize int `yaml:"mssql_import_default_batch_size"` // Default batch size for MSSQL import (default: 1000)
+	MSSQLImportProgressInterval int `yaml:"mssql_import_progress_interval"` // Log progress every N records (default: 10000)
+	MSSQLImportMaxErrors        int `yaml:"mssql_import_max_errors"`        // Maximum errors before abort (default: 100)
+
 	// Enterprise Extension Configuration
 	// Captures any `enterprise:` section from syndrdb.yml for enterprise plugin settings.
 	EnterpriseSettings map[string]interface{} `yaml:"enterprise" json:"enterprise,omitempty"`
@@ -766,6 +782,22 @@ func GetSettings() *Arguments {
 			PGImportDefaultBatchSize: 1000,
 			PGImportProgressInterval: 10000,
 			PGImportMaxErrors:        100,
+
+			// MySQL Import Defaults
+			MySQLImportDefaultBatchSize: 1000,
+			MySQLImportProgressInterval: 10000,
+			MySQLImportMaxErrors:        100,
+
+			// MongoDB Import Defaults
+			MongoImportDefaultBatchSize: 1000,
+			MongoImportProgressInterval: 10000,
+			MongoImportMaxErrors:        100,
+			MongoImportSchemaSampleSize: 1000,
+
+			// MSSQL Import Defaults
+			MSSQLImportDefaultBatchSize: 1000,
+			MSSQLImportProgressInterval: 10000,
+			MSSQLImportMaxErrors:        100,
 		}
 	})
 	return instance

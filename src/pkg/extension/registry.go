@@ -20,6 +20,14 @@ type ExtensionRegistry struct {
 	temporalExtensions    []TemporalExtension
 	replicationExtensions []ReplicationExtension
 	readRouterExtensions  []ReadRouterExtension
+	// Milestone 5
+	executionExtensions   []ExecutionExtension
+	queryGovernors        []QueryGovernorExtension
+	metricsExporters      []MetricsExporterExtension
+	docSecurityExtensions []DocumentSecurityExtension
+	cdcExtensions         []CDCExtension
+	adaptiveOptimizers    []AdaptiveOptimizerExtension
+	matViewRefreshExts    []MatViewRefreshExtension
 }
 
 var (
@@ -332,4 +340,185 @@ func (r *ExtensionRegistry) GetReadRouterExtension() ReadRouterExtension {
 		return nil
 	}
 	return r.readRouterExtensions[0]
+}
+
+// --- Execution Extension (Milestone 5) ---
+
+// RegisterExecutionExtension adds an ExecutionExtension to the registry.
+func (r *ExtensionRegistry) RegisterExecutionExtension(ext ExecutionExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.executionExtensions = append(r.executionExtensions, ext)
+}
+
+// HasExecutionExtension returns true if an execution extension is registered.
+func (r *ExtensionRegistry) HasExecutionExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.executionExtensions) > 0
+}
+
+// GetExecutionExtension returns the first registered execution extension (single-provider model).
+func (r *ExtensionRegistry) GetExecutionExtension() ExecutionExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.executionExtensions) == 0 {
+		return nil
+	}
+	return r.executionExtensions[0]
+}
+
+// --- Query Governor Extension (Milestone 5) ---
+
+// RegisterQueryGovernorExtension adds a QueryGovernorExtension to the registry.
+func (r *ExtensionRegistry) RegisterQueryGovernorExtension(ext QueryGovernorExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queryGovernors = append(r.queryGovernors, ext)
+}
+
+// HasQueryGovernorExtension returns true if a query governor is registered.
+func (r *ExtensionRegistry) HasQueryGovernorExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.queryGovernors) > 0
+}
+
+// GetQueryGovernorExtension returns the first registered query governor (single-provider model).
+func (r *ExtensionRegistry) GetQueryGovernorExtension() QueryGovernorExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.queryGovernors) == 0 {
+		return nil
+	}
+	return r.queryGovernors[0]
+}
+
+// --- Metrics Exporter Extension (Milestone 5) ---
+
+// RegisterMetricsExporterExtension adds a MetricsExporterExtension to the registry.
+func (r *ExtensionRegistry) RegisterMetricsExporterExtension(ext MetricsExporterExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.metricsExporters = append(r.metricsExporters, ext)
+}
+
+// HasMetricsExporterExtension returns true if a metrics exporter is registered.
+func (r *ExtensionRegistry) HasMetricsExporterExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.metricsExporters) > 0
+}
+
+// GetMetricsExporterExtension returns the first registered metrics exporter (single-provider model).
+func (r *ExtensionRegistry) GetMetricsExporterExtension() MetricsExporterExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.metricsExporters) == 0 {
+		return nil
+	}
+	return r.metricsExporters[0]
+}
+
+// --- Document Security Extension (Milestone 5) ---
+
+// RegisterDocumentSecurityExtension adds a DocumentSecurityExtension to the registry.
+func (r *ExtensionRegistry) RegisterDocumentSecurityExtension(ext DocumentSecurityExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.docSecurityExtensions = append(r.docSecurityExtensions, ext)
+}
+
+// HasDocumentSecurityExtension returns true if a document security extension is registered.
+func (r *ExtensionRegistry) HasDocumentSecurityExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.docSecurityExtensions) > 0
+}
+
+// GetDocumentSecurityExtension returns the first registered document security extension (single-provider model).
+func (r *ExtensionRegistry) GetDocumentSecurityExtension() DocumentSecurityExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.docSecurityExtensions) == 0 {
+		return nil
+	}
+	return r.docSecurityExtensions[0]
+}
+
+// --- CDC Extension (Milestone 5) ---
+
+// RegisterCDCExtension adds a CDCExtension to the registry.
+func (r *ExtensionRegistry) RegisterCDCExtension(ext CDCExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cdcExtensions = append(r.cdcExtensions, ext)
+}
+
+// HasCDCExtension returns true if any CDC extensions are registered.
+func (r *ExtensionRegistry) HasCDCExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.cdcExtensions) > 0
+}
+
+// GetCDCExtensions returns a snapshot of all registered CDC extensions (multi-listener).
+func (r *ExtensionRegistry) GetCDCExtensions() []CDCExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]CDCExtension, len(r.cdcExtensions))
+	copy(out, r.cdcExtensions)
+	return out
+}
+
+// --- Adaptive Optimizer Extension (Milestone 5) ---
+
+// RegisterAdaptiveOptimizerExtension adds an AdaptiveOptimizerExtension to the registry.
+func (r *ExtensionRegistry) RegisterAdaptiveOptimizerExtension(ext AdaptiveOptimizerExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.adaptiveOptimizers = append(r.adaptiveOptimizers, ext)
+}
+
+// HasAdaptiveOptimizerExtension returns true if an adaptive optimizer is registered.
+func (r *ExtensionRegistry) HasAdaptiveOptimizerExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.adaptiveOptimizers) > 0
+}
+
+// GetAdaptiveOptimizerExtension returns the first registered adaptive optimizer (single-provider model).
+func (r *ExtensionRegistry) GetAdaptiveOptimizerExtension() AdaptiveOptimizerExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.adaptiveOptimizers) == 0 {
+		return nil
+	}
+	return r.adaptiveOptimizers[0]
+}
+
+// --- MatView Refresh Extension (Milestone 5) ---
+
+// RegisterMatViewRefreshExtension adds a MatViewRefreshExtension to the registry.
+func (r *ExtensionRegistry) RegisterMatViewRefreshExtension(ext MatViewRefreshExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.matViewRefreshExts = append(r.matViewRefreshExts, ext)
+}
+
+// HasMatViewRefreshExtension returns true if a mat view refresh extension is registered.
+func (r *ExtensionRegistry) HasMatViewRefreshExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.matViewRefreshExts) > 0
+}
+
+// GetMatViewRefreshExtension returns the first registered mat view refresh extension (single-provider model).
+func (r *ExtensionRegistry) GetMatViewRefreshExtension() MatViewRefreshExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.matViewRefreshExts) == 0 {
+		return nil
+	}
+	return r.matViewRefreshExts[0]
 }

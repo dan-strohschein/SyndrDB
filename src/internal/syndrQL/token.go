@@ -217,6 +217,9 @@ const (
 	// Keywords - Import
 	TOKEN_IMPORT   // IMPORT
 	TOKEN_POSTGRES // POSTGRES
+	TOKEN_MYSQL    // MYSQL
+	TOKEN_MONGODB  // MONGODB
+	TOKEN_MSSQL    // MSSQL
 )
 
 // String returns the string representation of a token type
@@ -510,6 +513,12 @@ func (tt TokenType) String() string {
 		return "IMPORT"
 	case TOKEN_POSTGRES:
 		return "POSTGRES"
+	case TOKEN_MYSQL:
+		return "MYSQL"
+	case TOKEN_MONGODB:
+		return "MONGODB"
+	case TOKEN_MSSQL:
+		return "MSSQL"
 	default:
 		return "UNKNOWN"
 	}
@@ -698,6 +707,9 @@ var keywords = map[string]TokenType{
 	// Import Keywords
 	"IMPORT":   TOKEN_IMPORT,
 	"POSTGRES": TOKEN_POSTGRES,
+	"MYSQL":    TOKEN_MYSQL,
+	"MONGODB":  TOKEN_MONGODB,
+	"MSSQL":    TOKEN_MSSQL,
 }
 
 // LookupKeyword checks if an identifier is a keyword and returns its token type

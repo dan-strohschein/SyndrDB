@@ -1251,8 +1251,8 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return RestoreDatabase(command, logger, &serviceManager)
 	}
 
-	// Parse IMPORT command (IMPORT POSTGRES FROM ...)
-	if strings.HasPrefix(commandLower, "import") {
+	// Parse IMPORT POSTGRES command (enterprise import mysql/mongodb/mssql falls through to extension handler)
+	if strings.HasPrefix(commandLower, "import postgres") {
 		return HandleImportCommand(command, logger, &serviceManager, session, startTime)
 	}
 

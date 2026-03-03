@@ -2,6 +2,8 @@ package extension
 
 import (
 	"context"
+	"net"
+	"time"
 )
 
 // ExtensionContext provides enterprise extensions with safe access to core services.
@@ -16,6 +18,10 @@ type ExtensionContext interface {
 	Settings() interface{}
 	// SessionInfo returns the current session's user context, or nil if unavailable.
 	SessionInfo() *SessionInfo
+	// BundleService returns the core bundle service (concrete type: *bundle.BundleService).
+	BundleService() interface{}
+	// DatabaseService returns the core database service (concrete type: *database.DatabaseService).
+	DatabaseService() interface{}
 }
 
 // CommandExtension allows enterprise features to register new SyndrQL commands.
@@ -111,6 +117,117 @@ type ReadRouterExtension interface {
 	//   result, true  — extension handled the query (return result to client)
 	//   nil, false    — execute locally as normal
 	RouteRead(ctx context.Context, command string, extCtx ExtensionContext) (interface{}, bool)
+}
+
+// --- Milestone 5: Performance + Operations ---
+
+// ExecutionExtension intercepts query execution for parallelization.
+type ExecutionExtension interface {
+	// ParallelExecute is called with the execution plan. Returns (result, true)
+	// if handled in parallel, or (nil, false) to use default execution.
+	ParallelExecute(ctx context.Context, plan interface{}, extCtx ExtensionContext) (interface{}, bool)
+	// ShouldParallelize returns true if the plan is eligible for parallel execution.
+	ShouldParallelize(plan interface{}) bool
+}
+
+// QueryGovernorExtension enforces resource limits on queries.
+type QueryGovernorExtension interface {
+	// OnQueryStart is called before execution. Returns queryID or error to reject.
+	OnQueryStart(ctx context.Context, command string, session *SessionInfo) (string, error)
+	// OnQueryEnd is called after execution completes (success or error).
+	OnQueryEnd(queryID string, elapsed time.Duration, rowsScanned int64, err error)
+	// GetActiveQueries returns info about running queries.
+	GetActiveQueries() []ActiveQueryInfo
+	// KillQuery terminates a running query by ID.
+	KillQuery(queryID string) error
+}
+
+// ActiveQueryInfo describes a running query for monitoring.
+type ActiveQueryInfo struct {
+	QueryID   string
+	Command   string
+	Username  string
+	StartTime time.Time
+	Elapsed   time.Duration
+}
+
+// MetricsExporterExtension provides metrics in various formats.
+type MetricsExporterExtension interface {
+	// RecordMetric records a metric data point.
+	RecordMetric(name string, value float64, labels map[string]string)
+	// IncrementCounter increments a counter metric.
+	IncrementCounter(name string, labels map[string]string)
+	// RecordHistogram records a value in a histogram.
+	RecordHistogram(name string, value float64, labels map[string]string)
+	// ServeMetrics returns formatted metrics (Prometheus text format).
+	ServeMetrics() ([]byte, error)
+}
+
+// DocumentSecurityExtension applies row-level security filters.
+type DocumentSecurityExtension interface {
+	// FilterDocuments applies DLS policies, returning only docs the user can see.
+	FilterDocuments(ctx context.Context, bundleName string, docs []map[string]interface{}, session *SessionInfo) []map[string]interface{}
+	// ShouldFilter returns true if this bundle has DLS policies.
+	ShouldFilter(bundleName string) bool
+}
+
+// CDCExtension captures data changes for external consumption.
+type CDCExtension interface {
+	// OnDataChange is called after a mutation is committed.
+	OnDataChange(ctx context.Context, change DataChangeEvent)
+}
+
+// DataChangeEvent describes a data mutation for CDC.
+type DataChangeEvent struct {
+	Operation  string                 // "INSERT", "UPDATE", "DELETE"
+	BundleName string
+	DocumentID string
+	Before     map[string]interface{} // nil for INSERT
+	After      map[string]interface{} // nil for DELETE
+	Timestamp  time.Time
+	TxID       string
+	LSN        uint64
+}
+
+// ConnectionPoolExtension manages server-side connection pooling.
+type ConnectionPoolExtension interface {
+	// OnConnectionRequest is called when a new connection arrives.
+	OnConnectionRequest(conn net.Conn) (net.Conn, bool)
+	// OnConnectionRelease returns a connection to the pool.
+	OnConnectionRelease(connID string)
+	// GetPoolStats returns pool utilization info.
+	GetPoolStats() interface{}
+}
+
+// AdaptiveOptimizerExtension provides runtime feedback to the query planner.
+type AdaptiveOptimizerExtension interface {
+	// RecordExecution records actual execution metrics for a plan.
+	RecordExecution(planHash uint64, stats ExecutionStats)
+	// SuggestPlanChange returns true if the plan should be re-optimized.
+	SuggestPlanChange(planHash uint64) (bool, string)
+	// GetExecutionHistory returns historical stats for a plan.
+	GetExecutionHistory(planHash uint64) []ExecutionStats
+}
+
+// ExecutionStats captures actual runtime behavior of a query.
+type ExecutionStats struct {
+	RowsScanned  int64
+	RowsReturned int64
+	ElapsedMs    float64
+	MemoryBytes  int64
+	PlanCost     float64
+	ActualCost   float64
+	Timestamp    time.Time
+}
+
+// MatViewRefreshExtension supports incremental materialized view refresh.
+type MatViewRefreshExtension interface {
+	// OnSourceChange is called when a document in a source bundle changes.
+	OnSourceChange(ctx context.Context, bundleName string, docID string, changeType string, doc map[string]interface{}) error
+	// IsSourceBundle returns true if this bundle is a source for any materialized view.
+	IsSourceBundle(bundleName string) bool
+	// RefreshView triggers an incremental refresh of a materialized view.
+	RefreshView(ctx context.Context, viewName string) error
 }
 
 // TemporalExtension manages system-versioned bundle lifecycle.

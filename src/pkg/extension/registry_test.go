@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // --- Test helpers ---
@@ -229,9 +230,11 @@ type stubExtensionContext struct{}
 func (s *stubExtensionContext) ExecuteQuery(ctx context.Context, sql string) (interface{}, error) {
 	return nil, nil
 }
-func (s *stubExtensionContext) Logger() interface{}        { return nil }
-func (s *stubExtensionContext) Settings() interface{}      { return nil }
-func (s *stubExtensionContext) SessionInfo() *SessionInfo  { return nil }
+func (s *stubExtensionContext) Logger() interface{}           { return nil }
+func (s *stubExtensionContext) Settings() interface{}         { return nil }
+func (s *stubExtensionContext) SessionInfo() *SessionInfo     { return nil }
+func (s *stubExtensionContext) BundleService() interface{}    { return nil }
+func (s *stubExtensionContext) DatabaseService() interface{}  { return nil }
 
 // --- Storage encryptor test helpers ---
 
@@ -824,6 +827,366 @@ func TestReadRouterExtensionDecline(t *testing.T) {
 	}
 	if result != nil {
 		t.Fatal("expected nil result when not handled")
+	}
+}
+
+// --- Milestone 5: Execution Extension ---
+
+type stubExecutionExtension struct {
+	shouldParallel bool
+	result         interface{}
+}
+
+func (s *stubExecutionExtension) ParallelExecute(ctx context.Context, plan interface{}, extCtx ExtensionContext) (interface{}, bool) {
+	if s.shouldParallel {
+		return s.result, true
+	}
+	return nil, false
+}
+func (s *stubExecutionExtension) ShouldParallelize(plan interface{}) bool { return s.shouldParallel }
+
+func TestRegisterExecutionExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasExecutionExtension() {
+		t.Fatal("fresh registry should have no execution extensions")
+	}
+	ext := &stubExecutionExtension{shouldParallel: true, result: "parallel-result"}
+	reg.RegisterExecutionExtension(ext)
+	if !reg.HasExecutionExtension() {
+		t.Fatal("registry should have execution extension after registration")
+	}
+	got := reg.GetExecutionExtension()
+	if got != ext {
+		t.Fatal("GetExecutionExtension should return the registered extension")
+	}
+}
+
+func TestExecutionExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubExecutionExtension{shouldParallel: true, result: "parallel-result"}
+	reg.RegisterExecutionExtension(ext)
+	got := reg.GetExecutionExtension()
+	if !got.ShouldParallelize(nil) {
+		t.Fatal("expected ShouldParallelize to return true")
+	}
+	result, handled := got.ParallelExecute(context.Background(), nil, nil)
+	if !handled {
+		t.Fatal("expected ParallelExecute to return handled=true")
+	}
+	if result != "parallel-result" {
+		t.Fatalf("expected 'parallel-result', got '%v'", result)
+	}
+}
+
+// --- Milestone 5: Query Governor Extension ---
+
+type stubQueryGovernor struct {
+	activeQueries []ActiveQueryInfo
+	killCalled    bool
+	rejectQuery   bool
+}
+
+func (s *stubQueryGovernor) OnQueryStart(ctx context.Context, command string, session *SessionInfo) (string, error) {
+	if s.rejectQuery {
+		return "", errors.New("query rejected: too many concurrent queries")
+	}
+	return "q-123", nil
+}
+func (s *stubQueryGovernor) OnQueryEnd(queryID string, elapsed time.Duration, rowsScanned int64, err error) {
+}
+func (s *stubQueryGovernor) GetActiveQueries() []ActiveQueryInfo { return s.activeQueries }
+func (s *stubQueryGovernor) KillQuery(queryID string) error {
+	s.killCalled = true
+	return nil
+}
+
+func TestRegisterQueryGovernorExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasQueryGovernorExtension() {
+		t.Fatal("fresh registry should have no query governors")
+	}
+	ext := &stubQueryGovernor{}
+	reg.RegisterQueryGovernorExtension(ext)
+	if !reg.HasQueryGovernorExtension() {
+		t.Fatal("registry should have query governor after registration")
+	}
+	got := reg.GetQueryGovernorExtension()
+	if got != ext {
+		t.Fatal("GetQueryGovernorExtension should return the registered extension")
+	}
+}
+
+func TestQueryGovernorMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubQueryGovernor{}
+	reg.RegisterQueryGovernorExtension(ext)
+	got := reg.GetQueryGovernorExtension()
+	qid, err := got.OnQueryStart(context.Background(), "SELECT 1", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if qid != "q-123" {
+		t.Fatalf("expected query ID 'q-123', got '%s'", qid)
+	}
+	_ = got.KillQuery("q-123")
+	if !ext.killCalled {
+		t.Fatal("expected KillQuery to be called")
+	}
+}
+
+// --- Milestone 5: Metrics Exporter Extension ---
+
+type stubMetricsExporter struct {
+	counters   int
+	histograms int
+}
+
+func (s *stubMetricsExporter) RecordMetric(name string, value float64, labels map[string]string) {}
+func (s *stubMetricsExporter) IncrementCounter(name string, labels map[string]string)            { s.counters++ }
+func (s *stubMetricsExporter) RecordHistogram(name string, value float64, labels map[string]string) {
+	s.histograms++
+}
+func (s *stubMetricsExporter) ServeMetrics() ([]byte, error) {
+	return []byte("# HELP test\n"), nil
+}
+
+func TestRegisterMetricsExporterExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasMetricsExporterExtension() {
+		t.Fatal("fresh registry should have no metrics exporters")
+	}
+	ext := &stubMetricsExporter{}
+	reg.RegisterMetricsExporterExtension(ext)
+	if !reg.HasMetricsExporterExtension() {
+		t.Fatal("registry should have metrics exporter after registration")
+	}
+}
+
+func TestMetricsExporterMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubMetricsExporter{}
+	reg.RegisterMetricsExporterExtension(ext)
+	got := reg.GetMetricsExporterExtension()
+	got.IncrementCounter("queries_total", nil)
+	got.RecordHistogram("query_duration", 1.5, nil)
+	if ext.counters != 1 || ext.histograms != 1 {
+		t.Fatal("expected counter and histogram to be incremented")
+	}
+	data, err := got.ServeMetrics()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("expected non-empty metrics output")
+	}
+}
+
+// --- Milestone 5: Document Security Extension ---
+
+type stubDocumentSecurity struct {
+	shouldFilterResult bool
+	filterCalled       bool
+}
+
+func (s *stubDocumentSecurity) FilterDocuments(ctx context.Context, bundleName string, docs []map[string]interface{}, session *SessionInfo) []map[string]interface{} {
+	s.filterCalled = true
+	// Filter out docs without "visible" field
+	var out []map[string]interface{}
+	for _, d := range docs {
+		if d["visible"] == true {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+func (s *stubDocumentSecurity) ShouldFilter(bundleName string) bool { return s.shouldFilterResult }
+
+func TestRegisterDocumentSecurityExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasDocumentSecurityExtension() {
+		t.Fatal("fresh registry should have no document security extensions")
+	}
+	ext := &stubDocumentSecurity{shouldFilterResult: true}
+	reg.RegisterDocumentSecurityExtension(ext)
+	if !reg.HasDocumentSecurityExtension() {
+		t.Fatal("registry should have document security extension after registration")
+	}
+}
+
+func TestDocumentSecurityMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubDocumentSecurity{shouldFilterResult: true}
+	reg.RegisterDocumentSecurityExtension(ext)
+	got := reg.GetDocumentSecurityExtension()
+	if !got.ShouldFilter("users") {
+		t.Fatal("expected ShouldFilter to return true")
+	}
+	docs := []map[string]interface{}{
+		{"id": "1", "visible": true},
+		{"id": "2", "visible": false},
+	}
+	filtered := got.FilterDocuments(context.Background(), "users", docs, nil)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 visible doc, got %d", len(filtered))
+	}
+}
+
+// --- Milestone 5: CDC Extension ---
+
+type stubCDCExtension struct {
+	events []DataChangeEvent
+}
+
+func (s *stubCDCExtension) OnDataChange(ctx context.Context, change DataChangeEvent) {
+	s.events = append(s.events, change)
+}
+
+func TestRegisterCDCExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasCDCExtension() {
+		t.Fatal("fresh registry should have no CDC extensions")
+	}
+	ext := &stubCDCExtension{}
+	reg.RegisterCDCExtension(ext)
+	if !reg.HasCDCExtension() {
+		t.Fatal("registry should have CDC extension after registration")
+	}
+}
+
+func TestCDCExtensionMultiListener(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext1 := &stubCDCExtension{}
+	ext2 := &stubCDCExtension{}
+	reg.RegisterCDCExtension(ext1)
+	reg.RegisterCDCExtension(ext2)
+	exts := reg.GetCDCExtensions()
+	if len(exts) != 2 {
+		t.Fatalf("expected 2 CDC extensions, got %d", len(exts))
+	}
+	change := DataChangeEvent{Operation: "INSERT", BundleName: "users", DocumentID: "doc1"}
+	for _, e := range exts {
+		e.OnDataChange(context.Background(), change)
+	}
+	if len(ext1.events) != 1 || len(ext2.events) != 1 {
+		t.Fatal("expected both CDC listeners to receive event")
+	}
+}
+
+// --- Milestone 5: Adaptive Optimizer Extension ---
+
+type stubAdaptiveOptimizer struct {
+	recorded    int
+	shouldReplan bool
+}
+
+func (s *stubAdaptiveOptimizer) RecordExecution(planHash uint64, stats ExecutionStats) {
+	s.recorded++
+}
+func (s *stubAdaptiveOptimizer) SuggestPlanChange(planHash uint64) (bool, string) {
+	return s.shouldReplan, "cost drift"
+}
+func (s *stubAdaptiveOptimizer) GetExecutionHistory(planHash uint64) []ExecutionStats {
+	return []ExecutionStats{{RowsScanned: 100, ElapsedMs: 5.0}}
+}
+
+func TestRegisterAdaptiveOptimizerExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasAdaptiveOptimizerExtension() {
+		t.Fatal("fresh registry should have no adaptive optimizers")
+	}
+	ext := &stubAdaptiveOptimizer{shouldReplan: true}
+	reg.RegisterAdaptiveOptimizerExtension(ext)
+	if !reg.HasAdaptiveOptimizerExtension() {
+		t.Fatal("registry should have adaptive optimizer after registration")
+	}
+}
+
+func TestAdaptiveOptimizerMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubAdaptiveOptimizer{shouldReplan: true}
+	reg.RegisterAdaptiveOptimizerExtension(ext)
+	got := reg.GetAdaptiveOptimizerExtension()
+	got.RecordExecution(42, ExecutionStats{RowsScanned: 1000, ElapsedMs: 10.0})
+	if ext.recorded != 1 {
+		t.Fatal("expected RecordExecution to be called")
+	}
+	replan, reason := got.SuggestPlanChange(42)
+	if !replan {
+		t.Fatal("expected SuggestPlanChange to return true")
+	}
+	if reason != "cost drift" {
+		t.Fatalf("expected reason 'cost drift', got '%s'", reason)
+	}
+	history := got.GetExecutionHistory(42)
+	if len(history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(history))
+	}
+}
+
+// --- Milestone 5: MatView Refresh Extension ---
+
+type stubMatViewRefresh struct {
+	sourceBundles map[string]bool
+	changeCalled  bool
+	refreshCalled bool
+}
+
+func (s *stubMatViewRefresh) OnSourceChange(ctx context.Context, bundleName string, docID string, changeType string, doc map[string]interface{}) error {
+	s.changeCalled = true
+	return nil
+}
+func (s *stubMatViewRefresh) IsSourceBundle(bundleName string) bool {
+	return s.sourceBundles[bundleName]
+}
+func (s *stubMatViewRefresh) RefreshView(ctx context.Context, viewName string) error {
+	s.refreshCalled = true
+	return nil
+}
+
+func TestRegisterMatViewRefreshExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasMatViewRefreshExtension() {
+		t.Fatal("fresh registry should have no matview refresh extensions")
+	}
+	ext := &stubMatViewRefresh{sourceBundles: map[string]bool{"orders": true}}
+	reg.RegisterMatViewRefreshExtension(ext)
+	if !reg.HasMatViewRefreshExtension() {
+		t.Fatal("registry should have matview refresh extension after registration")
+	}
+}
+
+func TestMatViewRefreshMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubMatViewRefresh{sourceBundles: map[string]bool{"orders": true}}
+	reg.RegisterMatViewRefreshExtension(ext)
+	got := reg.GetMatViewRefreshExtension()
+	if !got.IsSourceBundle("orders") {
+		t.Fatal("expected IsSourceBundle to return true for 'orders'")
+	}
+	if got.IsSourceBundle("users") {
+		t.Fatal("expected IsSourceBundle to return false for 'users'")
+	}
+	_ = got.OnSourceChange(context.Background(), "orders", "doc1", "INSERT", nil)
+	if !ext.changeCalled {
+		t.Fatal("expected OnSourceChange to be called")
+	}
+	_ = got.RefreshView(context.Background(), "order_summary")
+	if !ext.refreshCalled {
+		t.Fatal("expected RefreshView to be called")
 	}
 }
 
