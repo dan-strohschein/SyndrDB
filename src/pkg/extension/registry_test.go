@@ -1378,6 +1378,174 @@ func TestDistributedTxExtensionMethods(t *testing.T) {
 	}
 }
 
+// --- Milestone 6.6: Columnar Processing Extension ---
+
+type stubColumnarProcessingExtension struct {
+	bundles map[string]bool
+	memUsed int64
+}
+
+func (s *stubColumnarProcessingExtension) IsColumnarBundle(bundleName string) bool {
+	return s.bundles[bundleName]
+}
+func (s *stubColumnarProcessingExtension) ExecuteColumnar(ctx context.Context, bundleName string, query interface{}, session *SessionInfo) ([]map[string]interface{}, int, bool) {
+	if !s.bundles[bundleName] {
+		return nil, 0, false
+	}
+	return []map[string]interface{}{{"id": "1", "name": "test"}}, 1, true
+}
+func (s *stubColumnarProcessingExtension) InvalidateSegments(bundleName string) {}
+func (s *stubColumnarProcessingExtension) GetBundleInfo(bundleName string) *ColumnarBundleInfo {
+	if !s.bundles[bundleName] {
+		return nil
+	}
+	return &ColumnarBundleInfo{BundleName: bundleName, SegmentCount: 2, TotalRows: 1000}
+}
+func (s *stubColumnarProcessingExtension) GetSegmentStats(bundleName string) []ColumnarSegmentStats {
+	return []ColumnarSegmentStats{{SegmentID: 0, RowCount: 500}}
+}
+func (s *stubColumnarProcessingExtension) GetMemoryUsage() int64 { return s.memUsed }
+
+func TestRegisterColumnarProcessingExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasColumnarProcessingExtension() {
+		t.Fatal("fresh registry should have no columnar processing extensions")
+	}
+	ext := &stubColumnarProcessingExtension{bundles: map[string]bool{"orders": true}, memUsed: 1024}
+	reg.RegisterColumnarProcessingExtension(ext)
+	if !reg.HasColumnarProcessingExtension() {
+		t.Fatal("registry should have columnar processing extension after registration")
+	}
+	got := reg.GetColumnarProcessingExtension()
+	if got != ext {
+		t.Fatal("GetColumnarProcessingExtension should return the registered extension")
+	}
+}
+
+func TestColumnarProcessingExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubColumnarProcessingExtension{bundles: map[string]bool{"orders": true}, memUsed: 2048}
+	reg.RegisterColumnarProcessingExtension(ext)
+	got := reg.GetColumnarProcessingExtension()
+
+	if !got.IsColumnarBundle("orders") {
+		t.Fatal("expected orders to be columnar")
+	}
+	if got.IsColumnarBundle("users") {
+		t.Fatal("expected users to not be columnar")
+	}
+
+	result, count, handled := got.ExecuteColumnar(context.Background(), "orders", nil, nil)
+	if !handled {
+		t.Fatal("expected columnar execution to be handled")
+	}
+	if count != 1 || len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d/%d", count, len(result))
+	}
+
+	info := got.GetBundleInfo("orders")
+	if info == nil || info.SegmentCount != 2 {
+		t.Fatal("expected bundle info with 2 segments")
+	}
+	if got.GetBundleInfo("users") != nil {
+		t.Fatal("expected nil bundle info for non-columnar bundle")
+	}
+
+	stats := got.GetSegmentStats("orders")
+	if len(stats) != 1 || stats[0].RowCount != 500 {
+		t.Fatal("unexpected segment stats")
+	}
+
+	if got.GetMemoryUsage() != 2048 {
+		t.Fatalf("expected memory usage 2048, got %d", got.GetMemoryUsage())
+	}
+}
+
+// --- Milestone 6.7: Query Result Cache Extension ---
+
+type stubQueryResultCache struct {
+	lookupCalls  int
+	storeCalls   int
+	flushCalls   int
+	shouldResult bool
+}
+
+func (s *stubQueryResultCache) LookupResult(ctx context.Context, queryHash uint64, bundleName string, session *SessionInfo) ([]map[string]interface{}, int, bool) {
+	s.lookupCalls++
+	if s.shouldResult {
+		return []map[string]interface{}{{"id": "1"}}, 1, true
+	}
+	return nil, 0, false
+}
+func (s *stubQueryResultCache) StoreResult(ctx context.Context, queryHash uint64, bundleName string, session *SessionInfo, result []map[string]interface{}, isAggregate bool) {
+	s.storeCalls++
+}
+func (s *stubQueryResultCache) InvalidateBundle(bundleName string)    {}
+func (s *stubQueryResultCache) ShouldCache(bundleName string) bool    { return true }
+func (s *stubQueryResultCache) GetStats() ResultCacheStats             { return ResultCacheStats{Hits: 10, Misses: 5, HitRate: 0.67} }
+func (s *stubQueryResultCache) FlushAll()                              { s.flushCalls++ }
+func (s *stubQueryResultCache) FlushBundle(bundleName string)          { s.flushCalls++ }
+
+func TestRegisterQueryResultCacheExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasQueryResultCacheExtension() {
+		t.Fatal("fresh registry should have no result cache extensions")
+	}
+	ext := &stubQueryResultCache{shouldResult: true}
+	reg.RegisterQueryResultCacheExtension(ext)
+	if !reg.HasQueryResultCacheExtension() {
+		t.Fatal("registry should have result cache extension after registration")
+	}
+	got := reg.GetQueryResultCacheExtension()
+	if got != ext {
+		t.Fatal("GetQueryResultCacheExtension should return the registered extension")
+	}
+}
+
+func TestQueryResultCacheExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubQueryResultCache{shouldResult: true}
+	reg.RegisterQueryResultCacheExtension(ext)
+	got := reg.GetQueryResultCacheExtension()
+
+	// Test LookupResult hit
+	result, count, hit := got.LookupResult(context.Background(), 42, "users", nil)
+	if !hit {
+		t.Fatal("expected cache hit")
+	}
+	if count != 1 {
+		t.Fatalf("expected count 1, got %d", count)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
+	}
+	if ext.lookupCalls != 1 {
+		t.Fatal("expected LookupResult to be called once")
+	}
+
+	// Test StoreResult
+	got.StoreResult(context.Background(), 42, "users", nil, result, false)
+	if ext.storeCalls != 1 {
+		t.Fatal("expected StoreResult to be called once")
+	}
+
+	// Test GetStats
+	stats := got.GetStats()
+	if stats.Hits != 10 || stats.Misses != 5 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	// Test FlushAll
+	got.FlushAll()
+	if ext.flushCalls != 1 {
+		t.Fatal("expected FlushAll to be called once")
+	}
+}
+
 func TestGetResultTransformersReturnsSnapshot(t *testing.T) {
 	defer Reset()
 

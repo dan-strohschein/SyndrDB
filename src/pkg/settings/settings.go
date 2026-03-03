@@ -480,6 +480,26 @@ type Arguments struct {
 	DistTxnTimeoutMs int  `yaml:"dist_txn_timeout_ms"` // Prepare timeout in milliseconds (default: 30000)
 	DistTxnMaxActive int  `yaml:"dist_txn_max_active"` // Max concurrent distributed transactions (default: 100)
 
+	// Columnar Processing (Enterprise)
+	ColumnarEnabled       bool    `yaml:"columnar_enabled"`        // Master toggle (default: false)
+	ColumnarSegmentSize   int     `yaml:"columnar_segment_size"`   // Rows per segment (default: 65536)
+	ColumnarMaxMemoryMB   int     `yaml:"columnar_max_memory_mb"`  // Global memory ceiling (default: 512)
+	ColumnarCompression   string  `yaml:"columnar_compression"`    // "none", "dictionary", "auto" (default: "auto")
+	ColumnarMinRows       int     `yaml:"columnar_min_rows"`       // Min bundle rows to enable columnar (default: 1000)
+	ColumnarDictThreshold float64 `yaml:"columnar_dict_threshold"` // Cardinality ratio for dict encoding (default: 0.5)
+	ColumnarAutoRebuild   bool    `yaml:"columnar_auto_rebuild"`   // Auto-rebuild stale segments on access (default: true)
+
+	// Result Cache (Enterprise)
+	ResultCacheEnabled      bool `yaml:"result_cache_enabled"`       // Master toggle (default: false)
+	ResultCacheMaxMemoryMB  int  `yaml:"result_cache_max_memory_mb"` // Global memory ceiling in MB (default: 256)
+	ResultCacheDefaultTTL   int  `yaml:"result_cache_default_ttl"`   // Default TTL in seconds (default: 300)
+	ResultCacheMaxEntries   int  `yaml:"result_cache_max_entries"`   // Max cached result sets (default: 1000)
+	ResultCacheShards       int  `yaml:"result_cache_shards"`        // Shard count for lock reduction (default: 16)
+	ResultCacheMinRows      int  `yaml:"result_cache_min_rows"`      // Min rows to cache (default: 1)
+	ResultCacheMaxRows      int  `yaml:"result_cache_max_rows"`      // Max rows per entry (default: 100000)
+	ResultCacheWarmEnabled  bool `yaml:"result_cache_warm_enabled"`  // Proactive warming toggle (default: false)
+	ResultCacheWarmTopN     int  `yaml:"result_cache_warm_top_n"`    // Top-N queries to warm (default: 50)
+
 	// Enterprise Extension Configuration
 	// Captures any `enterprise:` section from syndrdb.yml for enterprise plugin settings.
 	EnterpriseSettings map[string]interface{} `yaml:"enterprise" json:"enterprise,omitempty"`
@@ -808,6 +828,15 @@ func GetSettings() *Arguments {
 			MSSQLImportDefaultBatchSize: 1000,
 			MSSQLImportProgressInterval: 10000,
 			MSSQLImportMaxErrors:        100,
+
+			// Columnar Processing Defaults (Enterprise)
+			ColumnarEnabled:       false,
+			ColumnarSegmentSize:   65536,
+			ColumnarMaxMemoryMB:   512,
+			ColumnarCompression:   "auto",
+			ColumnarMinRows:       1000,
+			ColumnarDictThreshold: 0.5,
+			ColumnarAutoRebuild:   true,
 		}
 	})
 	return instance

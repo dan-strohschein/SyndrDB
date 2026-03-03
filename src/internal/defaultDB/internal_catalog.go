@@ -979,6 +979,71 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END DISTRIBUTED TRANSACTION CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// RESULT CACHE CATALOG BUNDLES (Milestone 6.7)
+	// ==============================================================
+
+	// ResultCachePolicies — per-bundle cache policy definitions
+	resultCachePolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"PolicyName": {Name: "PolicyName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName": {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"TTLSeconds": {Name: "TTLSeconds", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 300},
+			"MaxRows":    {Name: "MaxRows", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 100000},
+			"IsEnabled":  {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"CacheMode":  {Name: "CacheMode", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "auto"},
+			"CreatedAt":  {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	resultCachePolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "ResultCachePolicies",
+		DocumentStructure: resultCachePolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, resultCachePolicies_Bundle)
+
+	// ==============================================================
+	// END RESULT CACHE CATALOG BUNDLES
+	// ==============================================================
+
+	// ==============================================================
+	// COLUMNAR PROCESSING CATALOG BUNDLES (Milestone 6.6)
+	// ==============================================================
+
+	// ColumnarPolicies — per-bundle columnar processing policy definitions
+	columnarPolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":  {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"PolicyName":  {Name: "PolicyName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName":  {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"SegmentSize": {Name: "SegmentSize", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 65536},
+			"Compression": {Name: "Compression", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "auto"},
+			"IsEnabled":   {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"CreatedAt":   {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	columnarPolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "ColumnarPolicies",
+		DocumentStructure: columnarPolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, columnarPolicies_Bundle)
+
+	// ==============================================================
+	// END COLUMNAR PROCESSING CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

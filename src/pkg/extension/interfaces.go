@@ -261,6 +261,54 @@ type DistributedTxInfo struct {
 	StartedAt    time.Time
 }
 
+// --- Milestone 6.7: Enterprise Query Result Caching ---
+
+// CachedResultInfo describes a cached query result set.
+type CachedResultInfo struct {
+	CacheKey    string
+	BundleName  string
+	Username    string
+	IsAdmin     bool
+	ResultCount int
+	MemoryBytes int64
+	CachedAt    time.Time
+	TTL         time.Duration
+	HitCount    uint64
+	IsAggregate bool
+}
+
+// ResultCacheStats is a point-in-time snapshot of result cache statistics.
+type ResultCacheStats struct {
+	Hits            uint64
+	Misses          uint64
+	Stores          uint64
+	Evictions       uint64
+	Invalidations   uint64
+	MemoryUsed      int64
+	MemoryLimit     int64
+	EntryCount      int
+	HitRate         float64
+}
+
+// QueryResultCacheExtension caches materialized query result sets (single-provider model).
+type QueryResultCacheExtension interface {
+	// LookupResult checks the cache for a result set.
+	// Returns (result, resultCount, true) on hit, or (nil, 0, false) on miss.
+	LookupResult(ctx context.Context, queryHash uint64, bundleName string, session *SessionInfo) ([]map[string]interface{}, int, bool)
+	// StoreResult caches a result set after execution and DLS/masking.
+	StoreResult(ctx context.Context, queryHash uint64, bundleName string, session *SessionInfo, result []map[string]interface{}, isAggregate bool)
+	// InvalidateBundle evicts all cached results for a bundle.
+	InvalidateBundle(bundleName string)
+	// ShouldCache returns true if caching is enabled for this bundle.
+	ShouldCache(bundleName string) bool
+	// GetStats returns a point-in-time snapshot of cache statistics.
+	GetStats() ResultCacheStats
+	// FlushAll evicts all cached results.
+	FlushAll()
+	// FlushBundle evicts cached results for a specific bundle.
+	FlushBundle(bundleName string)
+}
+
 // --- Milestone 6.1: Range-Based Sharding ---
 
 // ShardingExtension provides range-based sharding for bundles.
@@ -295,6 +343,42 @@ type ShardRange struct {
 	LowerBound interface{} // inclusive; nil = MIN
 	UpperBound interface{} // exclusive; nil = MAX
 	DocCount   int64
+}
+
+// --- Milestone 6.6: In-Memory Columnar Processing ---
+
+// ColumnarSegmentStats — per-segment column statistics for pruning.
+type ColumnarSegmentStats struct {
+	SegmentID   int
+	RowCount    int
+	MinValues   map[string]interface{}
+	MaxValues   map[string]interface{}
+	NullCounts  map[string]int
+	DistinctEst map[string]int
+}
+
+// ColumnarBundleInfo — columnar processing state for a bundle.
+type ColumnarBundleInfo struct {
+	BundleName    string
+	SegmentCount  int
+	TotalRows     int
+	MemoryBytes   int64
+	ColumnCount   int
+	Compression   string
+	LastRefreshed time.Time
+	IsStale       bool
+	StaleSegments int
+}
+
+// ColumnarProcessingExtension — single-provider model.
+type ColumnarProcessingExtension interface {
+	IsColumnarBundle(bundleName string) bool
+	ExecuteColumnar(ctx context.Context, bundleName string, query interface{},
+		session *SessionInfo) ([]map[string]interface{}, int, bool)
+	InvalidateSegments(bundleName string)
+	GetBundleInfo(bundleName string) *ColumnarBundleInfo
+	GetSegmentStats(bundleName string) []ColumnarSegmentStats
+	GetMemoryUsage() int64
 }
 
 // TemporalExtension manages system-versioned bundle lifecycle.

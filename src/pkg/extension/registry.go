@@ -32,6 +32,10 @@ type ExtensionRegistry struct {
 	shardingExtensions []ShardingExtension
 	// Milestone 6.2
 	distributedTxExtensions []DistributedTransactionExtension
+	// Milestone 6.6
+	columnarExtensions []ColumnarProcessingExtension
+	// Milestone 6.7
+	resultCacheExtensions []QueryResultCacheExtension
 }
 
 var (
@@ -577,4 +581,56 @@ func (r *ExtensionRegistry) GetDistributedTxExtension() DistributedTransactionEx
 		return nil
 	}
 	return r.distributedTxExtensions[0]
+}
+
+// --- Columnar Processing Extension (Milestone 6.6) ---
+
+// RegisterColumnarProcessingExtension adds a ColumnarProcessingExtension to the registry.
+func (r *ExtensionRegistry) RegisterColumnarProcessingExtension(ext ColumnarProcessingExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.columnarExtensions = append(r.columnarExtensions, ext)
+}
+
+// HasColumnarProcessingExtension returns true if a columnar processing extension is registered.
+func (r *ExtensionRegistry) HasColumnarProcessingExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.columnarExtensions) > 0
+}
+
+// GetColumnarProcessingExtension returns the first registered columnar processing extension (single-provider model).
+func (r *ExtensionRegistry) GetColumnarProcessingExtension() ColumnarProcessingExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.columnarExtensions) == 0 {
+		return nil
+	}
+	return r.columnarExtensions[0]
+}
+
+// --- Query Result Cache Extension (Milestone 6.7) ---
+
+// RegisterQueryResultCacheExtension adds a QueryResultCacheExtension to the registry.
+func (r *ExtensionRegistry) RegisterQueryResultCacheExtension(ext QueryResultCacheExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resultCacheExtensions = append(r.resultCacheExtensions, ext)
+}
+
+// HasQueryResultCacheExtension returns true if a query result cache extension is registered.
+func (r *ExtensionRegistry) HasQueryResultCacheExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.resultCacheExtensions) > 0
+}
+
+// GetQueryResultCacheExtension returns the first registered query result cache extension (single-provider model).
+func (r *ExtensionRegistry) GetQueryResultCacheExtension() QueryResultCacheExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.resultCacheExtensions) == 0 {
+		return nil
+	}
+	return r.resultCacheExtensions[0]
 }

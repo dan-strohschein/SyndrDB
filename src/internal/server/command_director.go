@@ -1558,6 +1558,68 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	logger.Debugf("Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 
+	// Enterprise columnar processing: check for columnar execution before result cache
+	if reg := extension.GetRegistry(); reg.HasColumnarProcessingExtension() {
+		colExt := reg.GetColumnarProcessingExtension()
+		inTx := session != nil && session.IsInTransaction()
+		if !query.ForUpdate && query.TemporalClause == nil && query.FromBundle != "" && !inTx && colExt.IsColumnarBundle(query.FromBundle) {
+			var sessInfo *extension.SessionInfo
+			if session != nil {
+				sessInfo = &extension.SessionInfo{
+					Username:     session.Username,
+					SessionID:    session.SessionID,
+					DatabaseName: session.DatabaseName,
+					IsAdmin:      session.GetIsAdmin(),
+				}
+			}
+			if colResult, colCount, handled := colExt.ExecuteColumnar(ctx, query.FromBundle, query, sessInfo); handled {
+				executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6
+				logger.Debugf("Columnar execution: bundle=%s rows=%d time=%.2fms", query.FromBundle, colCount, executionTime)
+				return &CommandResponse{
+					ResultCount:     colCount,
+					Result:          colResult,
+					ExecutionTimeMS: executionTime,
+				}, nil
+			}
+		}
+	}
+
+	// Enterprise result cache: check for cached result set before execution
+	var resultCacheKey uint64
+	var resultCacheEnabled bool
+	if reg := extension.GetRegistry(); reg.HasQueryResultCacheExtension() {
+		cacheExt := reg.GetQueryResultCacheExtension()
+		// Skip caching for: FOR UPDATE, temporal queries, expression-only, in-transaction
+		inTx := session != nil && session.IsInTransaction()
+		if !query.ForUpdate && query.TemporalClause == nil && query.FromBundle != "" && !inTx && cacheExt.ShouldCache(query.FromBundle) {
+			resultCacheEnabled = true
+			// Compute cache key using plan cache's key computation
+			if serviceManager.UnifiedPlanner != nil && serviceManager.UnifiedPlanner.PlanCache() != nil {
+				resultCacheKey = serviceManager.UnifiedPlanner.PlanCache().ComputeKeyExported(query, false)
+			}
+			if resultCacheKey != 0 {
+				var sessInfo *extension.SessionInfo
+				if session != nil {
+					sessInfo = &extension.SessionInfo{
+						Username:     session.Username,
+						SessionID:    session.SessionID,
+						DatabaseName: session.DatabaseName,
+						IsAdmin:      session.GetIsAdmin(),
+					}
+				}
+				if cachedResult, cachedCount, hit := cacheExt.LookupResult(ctx, resultCacheKey, query.FromBundle, sessInfo); hit {
+					executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6
+					logger.Debugf("Result cache HIT: bundle=%s key=%016x rows=%d time=%.2fms", query.FromBundle, resultCacheKey, cachedCount, executionTime)
+					return &CommandResponse{
+						ResultCount:     cachedCount,
+						Result:          cachedResult,
+						ExecutionTimeMS: executionTime,
+					}, nil
+				}
+			}
+		}
+	}
+
 	// STEP 4: Create timeout context and execute the plan
 	args := settings.GetSettings()
 	isAdmin := false
@@ -1906,6 +1968,24 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 				}
 			}
 			flattenedDocs = dlsExt.FilterDocuments(ctx, query.FromBundle, flattenedDocs, sessionInfo)
+		}
+	}
+
+	// Enterprise result cache: store result set after DLS/masking
+	if resultCacheEnabled && resultCacheKey != 0 && !useStreaming && flattenedDocs != nil {
+		if reg := extension.GetRegistry(); reg.HasQueryResultCacheExtension() {
+			cacheExt := reg.GetQueryResultCacheExtension()
+			var sessInfo *extension.SessionInfo
+			if session != nil {
+				sessInfo = &extension.SessionInfo{
+					Username:     session.Username,
+					SessionID:    session.SessionID,
+					DatabaseName: session.DatabaseName,
+					IsAdmin:      session.GetIsAdmin(),
+				}
+			}
+			isAggregate := query.IsAggregateOnly || query.IsCountOnly
+			cacheExt.StoreResult(ctx, resultCacheKey, query.FromBundle, sessInfo, flattenedDocs, isAggregate)
 		}
 	}
 
