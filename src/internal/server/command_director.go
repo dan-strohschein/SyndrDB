@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1558,6 +1559,45 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	logger.Debugf("Execution plan created: Cost=%.2f, EstimatedRows=%d, IndexesUsed=%v",
 		plan.Cost, plan.EstimatedRows, plan.IndexesUsed)
 
+	// Enterprise cross-shard query routing: scatter-gather for sharded bundles
+	if reg := extension.GetRegistry(); reg.HasShardingExtension() {
+		shardExt := reg.GetShardingExtension()
+		if query.FromBundle != "" && shardExt.IsShardedBundle(query.FromBundle) {
+			var sessInfo *extension.SessionInfo
+			if session != nil {
+				sessInfo = &extension.SessionInfo{
+					Username:     session.Username,
+					SessionID:    session.SessionID,
+					DatabaseName: session.DatabaseName,
+					IsAdmin:      session.GetIsAdmin(),
+				}
+			}
+
+			shardExecutor := func(shardBundleName string) ([]map[string]interface{}, int, error) {
+				rewrittenCmd := rewriteFromBundle(fullCommand, query.FromBundle, shardBundleName)
+				if query.OrderBy != nil && (query.Limit > 0 || query.Offset > 0) {
+					rewrittenCmd = adjustLimitForShard(rewrittenCmd, query.Limit, query.Offset)
+				}
+				result, execErr := SelectDocuments(ctx, rewrittenCmd, serviceManager, database, logger, time.Now(), session)
+				if execErr != nil {
+					return nil, 0, execErr
+				}
+				return extractResultRows(result)
+			}
+
+			if shardResult, shardCount, handled := shardExt.ExecuteShardedQuery(
+				ctx, query.FromBundle, query, fullCommand, sessInfo, shardExecutor,
+			); handled {
+				executionTime := float64(time.Since(startTime).Nanoseconds()) / 1e6
+				return &CommandResponse{
+					ResultCount:     shardCount,
+					Result:          shardResult,
+					ExecutionTimeMS: executionTime,
+				}, nil
+			}
+		}
+	}
+
 	// Enterprise columnar processing: check for columnar execution before result cache
 	if reg := extension.GetRegistry(); reg.HasColumnarProcessingExtension() {
 		colExt := reg.GetColumnarProcessingExtension()
@@ -2406,4 +2446,59 @@ func classifyCommandPermission(firstWords []string) string {
 	}
 
 	return ""
+}
+
+// --- Cross-shard query helpers ---
+
+// rewriteFromBundle replaces the FROM bundle name in a SyndrQL command.
+// Handles both quoted (FROM "orders") and unquoted (FROM orders) forms.
+var rewriteFromRe = regexp.MustCompile(`(?i)(FROM\s+)"?([^"\s]+)"?`)
+
+func rewriteFromBundle(cmd, oldBundle, newBundle string) string {
+	return rewriteFromRe.ReplaceAllStringFunc(cmd, func(match string) string {
+		parts := rewriteFromRe.FindStringSubmatch(match)
+		if len(parts) >= 3 && strings.EqualFold(parts[2], oldBundle) {
+			return parts[1] + `"` + newBundle + `"`
+		}
+		return match
+	})
+}
+
+// adjustLimitForShard rewrites LIMIT/OFFSET for ORDER BY queries.
+// Each shard gets LIMIT (N+M) with OFFSET removed so global merge can re-sort and apply original limits.
+func adjustLimitForShard(cmd string, limit, offset int) string {
+	newLimit := limit + offset
+
+	// Replace LIMIT value
+	limitRe := regexp.MustCompile(`(?i)\bLIMIT\s+\d+`)
+	cmd = limitRe.ReplaceAllString(cmd, fmt.Sprintf("LIMIT %d", newLimit))
+
+	// Remove OFFSET clause
+	offsetRe := regexp.MustCompile(`(?i)\s+OFFSET\s+\d+`)
+	cmd = offsetRe.ReplaceAllString(cmd, "")
+
+	return cmd
+}
+
+// extractResultRows extracts the []map[string]interface{} rows and count from a SelectDocuments result.
+func extractResultRows(result interface{}) ([]map[string]interface{}, int, error) {
+	if result == nil {
+		return nil, 0, nil
+	}
+
+	cmdResp, ok := result.(*CommandResponse)
+	if !ok {
+		return nil, 0, fmt.Errorf("unexpected result type: %T", result)
+	}
+
+	if cmdResp.Result == nil {
+		return []map[string]interface{}{}, 0, nil
+	}
+
+	rows, ok := cmdResp.Result.([]map[string]interface{})
+	if !ok {
+		return nil, 0, fmt.Errorf("unexpected result data type: %T", cmdResp.Result)
+	}
+
+	return rows, cmdResp.ResultCount, nil
 }

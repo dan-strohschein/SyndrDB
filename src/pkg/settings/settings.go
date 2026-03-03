@@ -474,6 +474,8 @@ type Arguments struct {
 	ShardingEnabled      bool   `yaml:"sharding_enabled"`       // Enable range-based sharding (default: false)
 	ShardDefaultBehavior string `yaml:"shard_default_behavior"` // "reject" or "default" for missing shard key (default: "reject")
 	ShardRebalanceWorkers int   `yaml:"shard_rebalance_workers"` // Worker count for parallel rebalance (default: 4)
+	CrossShardMaxWorkers  int  `yaml:"cross_shard_max_workers"`  // Max parallel shard queries (default: 4)
+	CrossShardTimeoutMs   int  `yaml:"cross_shard_timeout_ms"`   // Per-query timeout in ms (default: 30000)
 
 	// Distributed Transactions (Enterprise)
 	DistTxnEnabled   bool `yaml:"dist_txn_enabled"`    // Enable distributed transaction tracking (default: false)

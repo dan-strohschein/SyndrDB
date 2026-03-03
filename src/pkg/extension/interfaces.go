@@ -311,6 +311,10 @@ type QueryResultCacheExtension interface {
 
 // --- Milestone 6.1: Range-Based Sharding ---
 
+// ShardQueryExecutorFn is the callback type that core passes to enterprise
+// for executing a per-shard query through the full SelectDocuments pipeline.
+type ShardQueryExecutorFn func(shardBundleName string) ([]map[string]interface{}, int, error)
+
 // ShardingExtension provides range-based sharding for bundles.
 type ShardingExtension interface {
 	// IsShardedBundle returns true if the bundle has an active shard policy.
@@ -324,6 +328,12 @@ type ShardingExtension interface {
 	GetShardBundles(bundleName string) []string
 	// GetShardPolicy returns the shard policy info for a bundle, or nil if not sharded.
 	GetShardPolicy(bundleName string) *ShardPolicyInfo
+	// ExecuteShardedQuery handles SELECT scatter-gather for sharded bundles.
+	// Called by core's SelectDocuments() when the target bundle is sharded.
+	// The executor callback calls SelectDocuments recursively per shard.
+	ExecuteShardedQuery(ctx context.Context, bundleName string, query interface{},
+		rawCommand string, session *SessionInfo,
+		executor ShardQueryExecutorFn) ([]map[string]interface{}, int, bool)
 }
 
 // ShardPolicyInfo describes a shard policy on a bundle.

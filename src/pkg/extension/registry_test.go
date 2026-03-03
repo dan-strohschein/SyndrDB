@@ -1222,6 +1222,10 @@ func (s *stubShardingExtension) GetShardPolicy(bundleName string) *ShardPolicyIn
 	}
 	return &ShardPolicyInfo{BundleName: bundleName, ShardKey: "id", ShardCount: 2}
 }
+func (s *stubShardingExtension) ExecuteShardedQuery(ctx context.Context, bundleName string, query interface{},
+	rawCommand string, session *SessionInfo, executor ShardQueryExecutorFn) ([]map[string]interface{}, int, bool) {
+	return nil, 0, false
+}
 
 func TestRegisterShardingExtension(t *testing.T) {
 	defer Reset()
