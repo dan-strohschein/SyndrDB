@@ -124,8 +124,81 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 				}
 				bundleName = shardBundles[0]
 				logger.Debugf("Sharding: routed UPDATE to shard bundle '%s'", shardBundles[0])
+			} else if len(shardBundles) > 1 && reg.HasDistributedTxExtension() && serviceManager.WALManager != nil {
+				// Multi-shard UPDATE with 2PC: execute UPDATE on each shard under shared WAL txID
+				dtxExt := reg.GetDistributedTxExtension()
+				sort.Strings(shardBundles)
+
+				sessionID := ""
+				if session != nil {
+					sessionID = session.SessionID
+				}
+				dtxID := dtxExt.TrackBegin(sessionID, shardBundles)
+
+				txIDUint64, txErr := serviceManager.WALManager.BeginTransactionUint64()
+				if txErr != nil {
+					dtxExt.TrackAbort(dtxID)
+					return nil, errors.WrapWithMessage(txErr, errors.ERR_INTERNAL_QUERY,
+						"failed to begin distributed transaction for UPDATE", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+				txIDStr := fmt.Sprintf("%016x", txIDUint64)
+				_ = txIDStr // WAL txID used for shared transaction scope
+
+				var totalUpdated int
+				var firstErr error
+				for _, shardName := range shardBundles {
+					shardBundle, shardErr := serviceManager.BundleService.GetBundleByName(database, shardName)
+					if shardErr != nil {
+						firstErr = shardErr
+						break
+					}
+					shardCmd := &models.DocumentUpdateCommand{
+						BundleName:  shardName,
+						Fields:      docCommand.Fields,
+						WhereClause: docCommand.WhereClause,
+						Confirmed:   docCommand.Confirmed,
+					}
+					whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
+					shardDocIDs, _, filterErr := whereService.GetDocumentsAndIDsByFilter(shardBundle, shardCmd.WhereClause)
+					if filterErr != nil {
+						firstErr = filterErr
+						break
+					}
+					if len(shardDocIDs) == 0 {
+						continue
+					}
+					updErr := serviceManager.BundleService.UpdateDocumentInBundle(context.Background(), database, shardBundle, shardCmd)
+					if updErr != nil {
+						firstErr = updErr
+						break
+					}
+					totalUpdated += len(shardDocIDs)
+				}
+
+				if firstErr != nil {
+					_ = serviceManager.WALManager.RollbackTransaction(txIDStr)
+					dtxExt.TrackAbort(dtxID)
+					return nil, errors.WrapWithMessage(firstErr, errors.ERR_INTERNAL_QUERY,
+						"distributed transaction aborted for UPDATE", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+
+				dtxExt.TrackPrepared(dtxID)
+				if commitErr := serviceManager.WALManager.CommitTransaction(txIDStr, nil); commitErr != nil {
+					_ = serviceManager.WALManager.RollbackTransaction(txIDStr)
+					dtxExt.TrackAbort(dtxID)
+					return nil, errors.WrapWithMessage(commitErr, errors.ERR_INTERNAL_QUERY,
+						"distributed transaction commit failed for UPDATE", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+				dtxExt.TrackCommit(dtxID)
+
+				logger.Debugf("Sharding: distributed UPDATE across %d shards, %d docs updated", len(shardBundles), totalUpdated)
+				return &CommandResponse{
+					ResultCount:     totalUpdated,
+					Result:          fmt.Sprintf("{\"documents_updated\": %d, \"bundle\": \"%s\", \"shards_used\": %d}", totalUpdated, bundleName, len(shardBundles)),
+					ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+				}, nil
 			}
-			// Multi-shard updates fall through to scatter across all shards via normal path
+			// Multi-shard updates without dtx extension fall through to scatter via normal path
 			// (WHERE filtering will handle correctness)
 		}
 	}
@@ -588,37 +661,108 @@ func BulkAddDocuments(commandParts []string, command string, logger *zap.Sugared
 
 			// Execute per-shard bulk inserts
 			var allDocIDs []string
-			for shardName, shardDocs := range shardGroups {
-				shardBundle, shardErr := serviceManager.BundleService.GetBundleByName(database, shardName)
-				if shardErr != nil {
-					return nil, errors.ConvertError(shardErr, errors.LayerCommand).WithContext("bundle", shardName)
+
+			// Enterprise 2PC hook: when multiple shards are involved and distributed
+			// transaction extension is registered, wrap all shard writes in a single
+			// shared WAL transaction for cross-shard atomicity.
+			if len(shardGroups) > 1 && reg.HasDistributedTxExtension() && serviceManager.WALManager != nil {
+				dtxExt := reg.GetDistributedTxExtension()
+				shardNames := make([]string, 0, len(shardGroups))
+				for name := range shardGroups {
+					shardNames = append(shardNames, name)
 				}
-				shardBulkCmd := &models.BulkDocumentCommand{
-					CommandType: bulkCmd.CommandType,
-					BundleName:  shardName,
-					Documents:   shardDocs,
+				sort.Strings(shardNames)
+
+				sessionID := ""
+				if session != nil {
+					sessionID = session.SessionID
+				}
+				dtxID := dtxExt.TrackBegin(sessionID, shardNames)
+
+				// Begin shared WAL transaction
+				txIDUint64, txErr := serviceManager.WALManager.BeginTransactionUint64()
+				if txErr != nil {
+					dtxExt.TrackAbort(dtxID)
+					return nil, errors.WrapWithMessage(txErr, errors.ERR_INTERNAL_QUERY,
+						"failed to begin distributed transaction", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+				txIDStr := fmt.Sprintf("%016x", txIDUint64)
+
+				var firstErr error
+				for _, shardName := range shardNames {
+					shardDocs := shardGroups[shardName]
+					shardBundle, shardErr := serviceManager.BundleService.GetBundleByName(database, shardName)
+					if shardErr != nil {
+						firstErr = shardErr
+						break
+					}
+					shardBulkCmd := &models.BulkDocumentCommand{
+						CommandType: bulkCmd.CommandType,
+						BundleName:  shardName,
+						Documents:   shardDocs,
+					}
+					logErr := serviceManager.WALManager.LogBatchInsert(txIDStr, shardName, []string{"pending"}, shardDocs)
+					if logErr != nil {
+						firstErr = logErr
+						break
+					}
+					shardDocIDs, insertErr := serviceManager.BundleService.AddDocumentsToBundle(database, shardBundle, shardBulkCmd)
+					if insertErr != nil {
+						firstErr = insertErr
+						break
+					}
+					allDocIDs = append(allDocIDs, shardDocIDs...)
 				}
 
-				var shardDocIDs []string
-				if serviceManager.WALManager != nil {
-					walErr := serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
-						logErr := serviceManager.WALManager.LogBatchInsert(txID, shardName, []string{"pending"}, shardDocs)
-						if logErr != nil {
-							return logErr
-						}
-						shardDocIDs, shardErr = serviceManager.BundleService.AddDocumentsToBundle(database, shardBundle, shardBulkCmd)
-						return shardErr
-					})
-					if walErr != nil {
-						return nil, errors.ConvertError(walErr, errors.LayerCommand).WithContext("bundle", shardName)
-					}
-				} else {
-					shardDocIDs, shardErr = serviceManager.BundleService.AddDocumentsToBundle(database, shardBundle, shardBulkCmd)
+				if firstErr != nil {
+					_ = serviceManager.WALManager.RollbackTransaction(txIDStr)
+					dtxExt.TrackAbort(dtxID)
+					return nil, errors.WrapWithMessage(firstErr, errors.ERR_INTERNAL_QUERY,
+						"distributed transaction aborted", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+
+				dtxExt.TrackPrepared(dtxID)
+				if commitErr := serviceManager.WALManager.CommitTransaction(txIDStr, nil); commitErr != nil {
+					_ = serviceManager.WALManager.RollbackTransaction(txIDStr)
+					dtxExt.TrackAbort(dtxID)
+					return nil, errors.WrapWithMessage(commitErr, errors.ERR_INTERNAL_QUERY,
+						"distributed transaction commit failed", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+				dtxExt.TrackCommit(dtxID)
+			} else {
+				// Original per-shard independent path (single shard or no dtx extension)
+				for shardName, shardDocs := range shardGroups {
+					shardBundle, shardErr := serviceManager.BundleService.GetBundleByName(database, shardName)
 					if shardErr != nil {
 						return nil, errors.ConvertError(shardErr, errors.LayerCommand).WithContext("bundle", shardName)
 					}
+					shardBulkCmd := &models.BulkDocumentCommand{
+						CommandType: bulkCmd.CommandType,
+						BundleName:  shardName,
+						Documents:   shardDocs,
+					}
+
+					var shardDocIDs []string
+					if serviceManager.WALManager != nil {
+						walErr := serviceManager.WALManager.ExecuteWithLogging(func(txID string) error {
+							logErr := serviceManager.WALManager.LogBatchInsert(txID, shardName, []string{"pending"}, shardDocs)
+							if logErr != nil {
+								return logErr
+							}
+							shardDocIDs, shardErr = serviceManager.BundleService.AddDocumentsToBundle(database, shardBundle, shardBulkCmd)
+							return shardErr
+						})
+						if walErr != nil {
+							return nil, errors.ConvertError(walErr, errors.LayerCommand).WithContext("bundle", shardName)
+						}
+					} else {
+						shardDocIDs, shardErr = serviceManager.BundleService.AddDocumentsToBundle(database, shardBundle, shardBulkCmd)
+						if shardErr != nil {
+							return nil, errors.ConvertError(shardErr, errors.LayerCommand).WithContext("bundle", shardName)
+						}
+					}
+					allDocIDs = append(allDocIDs, shardDocIDs...)
 				}
-				allDocIDs = append(allDocIDs, shardDocIDs...)
 			}
 
 			logger.Debugf("Sharding: bulk insert routed %d docs across %d shards", docCount, len(shardGroups))

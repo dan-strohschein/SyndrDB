@@ -475,6 +475,11 @@ type Arguments struct {
 	ShardDefaultBehavior string `yaml:"shard_default_behavior"` // "reject" or "default" for missing shard key (default: "reject")
 	ShardRebalanceWorkers int   `yaml:"shard_rebalance_workers"` // Worker count for parallel rebalance (default: 4)
 
+	// Distributed Transactions (Enterprise)
+	DistTxnEnabled   bool `yaml:"dist_txn_enabled"`    // Enable distributed transaction tracking (default: false)
+	DistTxnTimeoutMs int  `yaml:"dist_txn_timeout_ms"` // Prepare timeout in milliseconds (default: 30000)
+	DistTxnMaxActive int  `yaml:"dist_txn_max_active"` // Max concurrent distributed transactions (default: 100)
+
 	// Enterprise Extension Configuration
 	// Captures any `enterprise:` section from syndrdb.yml for enterprise plugin settings.
 	EnterpriseSettings map[string]interface{} `yaml:"enterprise" json:"enterprise,omitempty"`

@@ -1013,8 +1013,79 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 						}
 						bundleName = shardBundles[0]
 						logger.Debugf("Sharding: routed DELETE to shard bundle '%s'", shardBundles[0])
+					} else if len(shardBundles) > 1 && reg.HasDistributedTxExtension() && serviceManager.WALManager != nil {
+						// Multi-shard DELETE with 2PC: execute DELETE on each shard under shared WAL txID
+						dtxExt := reg.GetDistributedTxExtension()
+						sort.Strings(shardBundles)
+
+						sessionID := ""
+						if session != nil {
+							sessionID = session.SessionID
+						}
+						dtxID := dtxExt.TrackBegin(sessionID, shardBundles)
+
+						txIDUint64, txErr := serviceManager.WALManager.BeginTransactionUint64()
+						if txErr != nil {
+							dtxExt.TrackAbort(dtxID)
+							return nil, errors.WrapWithMessage(txErr, errors.ERR_INTERNAL_QUERY,
+								"failed to begin distributed transaction for DELETE", errors.LayerCommand).WithContext("bundle", bundleName)
+						}
+						txIDStr := fmt.Sprintf("%016x", txIDUint64)
+
+						var totalDeleted int
+						var firstErr error
+						for _, shardName := range shardBundles {
+							shardBundle, shardErr := serviceManager.BundleService.GetBundleByName(database, shardName)
+							if shardErr != nil {
+								firstErr = shardErr
+								break
+							}
+							whereService := bndle.NewWhereFilterService(serviceManager.BundleService, logger)
+							shardDocIDs, shardDocs, filterErr := whereService.GetDocumentsAndIDsByFilter(shardBundle, docCommand.WhereClause)
+							if filterErr != nil {
+								firstErr = filterErr
+								break
+							}
+							if len(shardDocIDs) == 0 {
+								continue
+							}
+							shardDelCmd := &models.DocumentDeleteCommand{
+								BundleName:  shardName,
+								WhereClause: docCommand.WhereClause,
+								Confirmed:   docCommand.Confirmed,
+							}
+							delErr := serviceManager.BundleService.DeleteDocumentFromBundle(shardBundle, shardDelCmd, shardDocIDs, shardDocs)
+							if delErr != nil {
+								firstErr = delErr
+								break
+							}
+							totalDeleted += len(shardDocIDs)
+						}
+
+						if firstErr != nil {
+							_ = serviceManager.WALManager.RollbackTransaction(txIDStr)
+							dtxExt.TrackAbort(dtxID)
+							return nil, errors.WrapWithMessage(firstErr, errors.ERR_INTERNAL_QUERY,
+								"distributed transaction aborted for DELETE", errors.LayerCommand).WithContext("bundle", bundleName)
+						}
+
+						dtxExt.TrackPrepared(dtxID)
+						if commitErr := serviceManager.WALManager.CommitTransaction(txIDStr, nil); commitErr != nil {
+							_ = serviceManager.WALManager.RollbackTransaction(txIDStr)
+							dtxExt.TrackAbort(dtxID)
+							return nil, errors.WrapWithMessage(commitErr, errors.ERR_INTERNAL_QUERY,
+								"distributed transaction commit failed for DELETE", errors.LayerCommand).WithContext("bundle", bundleName)
+						}
+						dtxExt.TrackCommit(dtxID)
+
+						logger.Debugf("Sharding: distributed DELETE across %d shards, %d docs deleted", len(shardBundles), totalDeleted)
+						return &CommandResponse{
+							ResultCount:     totalDeleted,
+							Result:          fmt.Sprintf("{\"documents_deleted\": %d, \"bundle\": \"%s\", \"shards_used\": %d}", totalDeleted, bundleName, len(shardBundles)),
+							ExecutionTimeMS: float64(time.Since(startTime).Nanoseconds()) / 1e6,
+						}, nil
 					}
-					// Multi-shard deletes: fall through to scatter via normal path
+					// Multi-shard deletes without dtx extension: fall through to scatter via normal path
 				}
 			}
 

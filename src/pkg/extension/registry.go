@@ -30,6 +30,8 @@ type ExtensionRegistry struct {
 	matViewRefreshExts    []MatViewRefreshExtension
 	// Milestone 6.1
 	shardingExtensions []ShardingExtension
+	// Milestone 6.2
+	distributedTxExtensions []DistributedTransactionExtension
 }
 
 var (
@@ -549,4 +551,30 @@ func (r *ExtensionRegistry) GetShardingExtension() ShardingExtension {
 		return nil
 	}
 	return r.shardingExtensions[0]
+}
+
+// --- Distributed Transaction Extension (Milestone 6.2) ---
+
+// RegisterDistributedTxExtension adds a DistributedTransactionExtension to the registry.
+func (r *ExtensionRegistry) RegisterDistributedTxExtension(ext DistributedTransactionExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.distributedTxExtensions = append(r.distributedTxExtensions, ext)
+}
+
+// HasDistributedTxExtension returns true if a distributed transaction extension is registered.
+func (r *ExtensionRegistry) HasDistributedTxExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.distributedTxExtensions) > 0
+}
+
+// GetDistributedTxExtension returns the first registered distributed transaction extension (single-provider model).
+func (r *ExtensionRegistry) GetDistributedTxExtension() DistributedTransactionExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.distributedTxExtensions) == 0 {
+		return nil
+	}
+	return r.distributedTxExtensions[0]
 }

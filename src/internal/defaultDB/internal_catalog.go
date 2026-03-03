@@ -947,6 +947,38 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END SHARDING CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// DISTRIBUTED TRANSACTION CATALOG BUNDLES (Milestone 6.2)
+	// ==============================================================
+
+	// DistributedTransactions — tracks 2PC distributed transaction state
+	distributedTxn_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":  {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true},
+			"DTXID":       {Name: "DTXID", Type: "STRING", IsRequired: true, IsUnique: true},
+			"State":       {Name: "State", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "ACTIVE"},
+			"Participants": {Name: "Participants", Type: "STRING", IsRequired: true, IsUnique: false},
+			"SessionID":   {Name: "SessionID", Type: "STRING", IsRequired: true, IsUnique: false},
+			"StartedAt":   {Name: "StartedAt", Type: "STRING", IsRequired: true, IsUnique: false},
+			"ResolvedAt":  {Name: "ResolvedAt", Type: "STRING", IsRequired: false, IsUnique: false},
+		},
+	}
+	distributedTxn_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "DistributedTransactions",
+		DocumentStructure: distributedTxn_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, distributedTxn_Bundle)
+
+	// ==============================================================
+	// END DISTRIBUTED TRANSACTION CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

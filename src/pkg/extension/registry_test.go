@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -1274,6 +1275,106 @@ func TestShardingExtensionMethods(t *testing.T) {
 	}
 	if policy.ShardKey != "id" {
 		t.Fatalf("expected shard key 'id', got '%s'", policy.ShardKey)
+	}
+}
+
+// --- Milestone 6.2: Distributed Transaction Extension ---
+
+type stubDistributedTxExtension struct {
+	beginCalls   int
+	lastSession  string
+	lastParticipants []string
+	states       map[string]DistributedTxState
+}
+
+func (s *stubDistributedTxExtension) TrackBegin(sessionID string, participants []string) string {
+	s.beginCalls++
+	s.lastSession = sessionID
+	s.lastParticipants = participants
+	dtxID := fmt.Sprintf("dtx-%d", s.beginCalls)
+	if s.states == nil {
+		s.states = make(map[string]DistributedTxState)
+	}
+	s.states[dtxID] = DTxStateActive
+	return dtxID
+}
+func (s *stubDistributedTxExtension) TrackPrepared(dtxID string) {
+	s.states[dtxID] = DTxStatePrepared
+}
+func (s *stubDistributedTxExtension) TrackCommit(dtxID string) {
+	s.states[dtxID] = DTxStateCommitted
+}
+func (s *stubDistributedTxExtension) TrackAbort(dtxID string) {
+	s.states[dtxID] = DTxStateAborted
+}
+func (s *stubDistributedTxExtension) GetState(dtxID string) (DistributedTxState, error) {
+	st, ok := s.states[dtxID]
+	if !ok {
+		return 0, fmt.Errorf("dtx not found: %s", dtxID)
+	}
+	return st, nil
+}
+func (s *stubDistributedTxExtension) ListActive() []DistributedTxInfo {
+	var out []DistributedTxInfo
+	for id, st := range s.states {
+		if st == DTxStateActive || st == DTxStatePrepared {
+			out = append(out, DistributedTxInfo{DTXID: id, State: st})
+		}
+	}
+	return out
+}
+
+func TestRegisterDistributedTxExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasDistributedTxExtension() {
+		t.Fatal("fresh registry should have no distributed tx extensions")
+	}
+	ext := &stubDistributedTxExtension{}
+	reg.RegisterDistributedTxExtension(ext)
+	if !reg.HasDistributedTxExtension() {
+		t.Fatal("registry should have distributed tx extension after registration")
+	}
+	got := reg.GetDistributedTxExtension()
+	if got != ext {
+		t.Fatal("GetDistributedTxExtension should return the registered extension")
+	}
+}
+
+func TestDistributedTxExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubDistributedTxExtension{}
+	reg.RegisterDistributedTxExtension(ext)
+	got := reg.GetDistributedTxExtension()
+
+	dtxID := got.TrackBegin("sess-1", []string{"shard_0", "shard_1"})
+	if dtxID != "dtx-1" {
+		t.Fatalf("expected dtx-1, got %s", dtxID)
+	}
+	st, err := got.GetState(dtxID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if st != DTxStateActive {
+		t.Fatalf("expected DTxStateActive, got %d", st)
+	}
+
+	got.TrackPrepared(dtxID)
+	st, _ = got.GetState(dtxID)
+	if st != DTxStatePrepared {
+		t.Fatalf("expected DTxStatePrepared, got %d", st)
+	}
+
+	got.TrackCommit(dtxID)
+	st, _ = got.GetState(dtxID)
+	if st != DTxStateCommitted {
+		t.Fatalf("expected DTxStateCommitted, got %d", st)
+	}
+
+	active := got.ListActive()
+	if len(active) != 0 {
+		t.Fatalf("expected 0 active after commit, got %d", len(active))
 	}
 }
 

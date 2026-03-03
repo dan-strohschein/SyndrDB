@@ -230,6 +230,37 @@ type MatViewRefreshExtension interface {
 	RefreshView(ctx context.Context, viewName string) error
 }
 
+// --- Milestone 6.2: Distributed Transactions (2PC) ---
+
+// DistributedTransactionExtension tracks cross-shard transaction state.
+type DistributedTransactionExtension interface {
+	TrackBegin(sessionID string, participants []string) (dtxID string)
+	TrackPrepared(dtxID string)
+	TrackCommit(dtxID string)
+	TrackAbort(dtxID string)
+	GetState(dtxID string) (DistributedTxState, error)
+	ListActive() []DistributedTxInfo
+}
+
+// DistributedTxState represents the state of a distributed transaction.
+type DistributedTxState int
+
+const (
+	DTxStateActive    DistributedTxState = iota
+	DTxStatePrepared
+	DTxStateCommitted
+	DTxStateAborted
+)
+
+// DistributedTxInfo describes an active or recently resolved distributed transaction.
+type DistributedTxInfo struct {
+	DTXID        string
+	State        DistributedTxState
+	Participants []string
+	SessionID    string
+	StartedAt    time.Time
+}
+
 // --- Milestone 6.1: Range-Based Sharding ---
 
 // ShardingExtension provides range-based sharding for bundles.
