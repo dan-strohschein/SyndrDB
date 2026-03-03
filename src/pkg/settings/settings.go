@@ -127,6 +127,31 @@ type Arguments struct {
 	HASemiSyncTimeout   int    `yaml:"ha_semisync_timeout_ms"`    // max wait for follower ACK
 	HAReadRouting       bool   `yaml:"ha_read_routing"`           // enable automatic read routing
 
+	// Performance + Operations (Enterprise Milestone 5)
+	ParallelEnabled       bool    `yaml:"parallel_enabled"`
+	ParallelMinDocs       int     `yaml:"parallel_min_docs"`           // minimum docs to trigger (default: 10000)
+	ParallelWorkers       int     `yaml:"parallel_workers"`            // 0 = NumCPU
+	QueryGovernorEnabled  bool    `yaml:"query_governor_enabled"`
+	QueryTimeoutMs        int     `yaml:"query_timeout_ms"`            // max query duration (default: 30000)
+	MaxConcurrentQueries  int     `yaml:"max_concurrent_queries"`      // 0 = unlimited
+	MaxMemoryPerQueryMB   int     `yaml:"max_memory_per_query_mb"`     // default: 256
+	MetricsEnabled        bool    `yaml:"metrics_enabled"`
+	MetricsPort           int     `yaml:"metrics_port"`                // HTTP /metrics port (default: 9090)
+	MetricsFormat         string  `yaml:"metrics_format"`              // "prometheus" or "otel"
+	DLSEnabled            bool    `yaml:"dls_enabled"`
+	CDCEnabled            bool    `yaml:"cdc_enabled"`
+	CDCBufferSize         int     `yaml:"cdc_buffer_size"`             // default: 4096
+	CDCWebhookURL         string  `yaml:"cdc_webhook_url"`
+	VectorEnabled         bool    `yaml:"vector_enabled"`
+	VectorDefaultDims     int     `yaml:"vector_default_dimensions"`   // default: 128
+	VectorEfConstruction  int     `yaml:"vector_ef_construction"`      // HNSW build param (default: 200)
+	VectorMaxConnections  int     `yaml:"vector_max_connections"`      // HNSW M param (default: 16)
+	AdaptiveOptEnabled    bool    `yaml:"adaptive_opt_enabled"`
+	AdaptiveHistorySize   int     `yaml:"adaptive_history_size"`       // executions to keep (default: 100)
+	AdaptiveCostThreshold float64 `yaml:"adaptive_cost_threshold"`     // replan if actual > N*estimated (default: 2.0)
+	MatViewIncrRefresh    bool    `yaml:"matview_incr_refresh"`
+	MatViewRefreshIntervalMs int  `yaml:"matview_refresh_interval_ms"` // auto-refresh interval (default: 0 = manual)
+
 	Version string `yaml:"version"` // Show version information
 
 	// GraphQL Configuration
@@ -422,6 +447,12 @@ type Arguments struct {
 	// Observability: Slow Query Log Configuration
 	SlowQueryLogEnabled  bool `yaml:"slow_query_log_enabled"`  // Enable slow query warning log (default: true)
 	SlowQueryThresholdMs int  `yaml:"slow_query_threshold_ms"` // Threshold in ms for slow query detection (default: 1000)
+
+	// PostgreSQL Import Configuration
+	PGImportDefaultBatchSize int    `yaml:"pg_import_default_batch_size"` // Default batch size for PG import (default: 1000)
+	PGImportProgressInterval int    `yaml:"pg_import_progress_interval"` // Log progress every N records (default: 10000)
+	PGImportMaxErrors        int    `yaml:"pg_import_max_errors"`        // Maximum errors before abort (default: 100)
+	PGImportTempDir          string `yaml:"pg_import_temp_dir"`          // Temp directory for pg_restore output (default: os.TempDir())
 
 	// Enterprise Extension Configuration
 	// Captures any `enterprise:` section from syndrdb.yml for enterprise plugin settings.
@@ -730,6 +761,11 @@ func GetSettings() *Arguments {
 			// Observability: Slow Query Log Defaults
 			SlowQueryLogEnabled:  true, // Enable slow query detection by default
 			SlowQueryThresholdMs: 1000, // 1 second threshold
+
+			// PostgreSQL Import Defaults
+			PGImportDefaultBatchSize: 1000,
+			PGImportProgressInterval: 10000,
+			PGImportMaxErrors:        100,
 		}
 	})
 	return instance

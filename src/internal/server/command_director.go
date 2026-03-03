@@ -41,8 +41,53 @@ func getKeys(m map[string]interface{}) []string {
 }
 
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
+	reg := extension.GetRegistry()
+
+	// Enterprise query governor: check limits before execution
+	var queryID string
+	if reg.HasQueryGovernorExtension() {
+		gov := reg.GetQueryGovernorExtension()
+		var sessInfo *extension.SessionInfo
+		if session != nil {
+			sessInfo = &extension.SessionInfo{
+				Username:     session.Username,
+				SessionID:    session.SessionID,
+				DatabaseName: session.DatabaseName,
+				IsAdmin:      session.GetIsAdmin(),
+			}
+		}
+		var govErr error
+		queryID, govErr = gov.OnQueryStart(ctx, command, sessInfo)
+		if govErr != nil {
+			return nil, govErr
+		}
+	}
+
 	// TRANSACTION MANAGEMENT: Execute command and handle auto-rollback on errors
 	result, err := executeCommand(ctx, database, serviceManager, command, logger, startTime, session, clientIP)
+
+	elapsed := time.Since(startTime)
+
+	// Enterprise query governor: record completion
+	if reg.HasQueryGovernorExtension() && queryID != "" {
+		reg.GetQueryGovernorExtension().OnQueryEnd(queryID, elapsed, 0, err)
+	}
+
+	// Enterprise metrics: record query metrics
+	if reg.HasMetricsExporterExtension() {
+		metrics := reg.GetMetricsExporterExtension()
+		cmdType := classifyCommandType(command)
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		labels := map[string]string{"type": cmdType, "status": status}
+		metrics.IncrementCounter("syndrdb_queries_total", labels)
+		metrics.RecordHistogram("syndrdb_query_duration_ms", float64(elapsed.Milliseconds()), map[string]string{"type": cmdType})
+		if err != nil {
+			metrics.IncrementCounter("syndrdb_query_errors_total", map[string]string{"type": cmdType})
+		}
+	}
 
 	// Auto-rollback on any error if session has active transaction
 	if err != nil && session != nil && session.IsInTransaction() {
@@ -50,7 +95,7 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 	}
 
 	// Enterprise audit hook: notify audit listeners of executed commands
-	if reg := extension.GetRegistry(); len(reg.GetAuditListeners()) > 0 {
+	if len(reg.GetAuditListeners()) > 0 {
 		dbName := ""
 		if database != nil {
 			dbName = database.Name
@@ -102,6 +147,8 @@ func classifyCommandType(command string) string {
 	case strings.HasPrefix(lower, "create"), strings.HasPrefix(lower, "drop"),
 		strings.HasPrefix(lower, "alter"), strings.HasPrefix(lower, "rename"):
 		return "DDL"
+	case strings.HasPrefix(lower, "import"):
+		return "ADMIN"
 	default:
 		return "ADMIN"
 	}
@@ -1104,6 +1151,15 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 				}
 			}
 
+			// Enterprise CDC + MatView hooks for DELETE
+			for i, docID := range docIDs {
+				var oldDoc map[string]interface{}
+				if i < len(docs) && docs[i] != nil {
+					oldDoc = docs[i].Data
+				}
+				notifyCDCAndMatView(context.Background(), "DELETE", bundleName, docID, oldDoc, nil, logger)
+			}
+
 			// METRICS: Track document deletes
 			globalMetrics := GetGlobalServerMetrics()
 			globalMetrics.DocumentDeletesTotal.Add(uint64(len(docIDs)))
@@ -1193,6 +1249,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			return PITRRestore(command, logger, &serviceManager)
 		}
 		return RestoreDatabase(command, logger, &serviceManager)
+	}
+
+	// Parse IMPORT command (IMPORT POSTGRES FROM ...)
+	if strings.HasPrefix(commandLower, "import") {
+		return HandleImportCommand(command, logger, &serviceManager, session, startTime)
 	}
 
 	// Parse LOCK command
@@ -1743,6 +1804,23 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		}
 	}
 
+	// Enterprise document-level security: filter documents by user's DLS policies
+	if reg := extension.GetRegistry(); reg.HasDocumentSecurityExtension() {
+		dlsExt := reg.GetDocumentSecurityExtension()
+		if dlsExt.ShouldFilter(query.FromBundle) {
+			var sessionInfo *extension.SessionInfo
+			if session != nil {
+				sessionInfo = &extension.SessionInfo{
+					Username:     session.Username,
+					SessionID:    session.SessionID,
+					DatabaseName: session.DatabaseName,
+					IsAdmin:      session.GetIsAdmin(),
+				}
+			}
+			flattenedDocs = dlsExt.FilterDocuments(ctx, query.FromBundle, flattenedDocs, sessionInfo)
+		}
+	}
+
 	var results interface{}
 	var resultCount int
 
@@ -2127,7 +2205,7 @@ func classifyCommandPermission(firstWords []string) string {
 		return "Admin"
 	case "grant", "revoke":
 		return "Admin"
-	case "backup", "restore":
+	case "backup", "restore", "import":
 		return "Admin"
 	case "lock", "unlock":
 		return "Admin"

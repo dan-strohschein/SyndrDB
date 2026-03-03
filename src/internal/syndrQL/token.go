@@ -213,6 +213,10 @@ const (
 	// Keywords - Temporal (FOR SYSTEM_TIME)
 	TOKEN_SYSTEM  // SYSTEM
 	TOKEN_BETWEEN // BETWEEN
+
+	// Keywords - Import
+	TOKEN_IMPORT   // IMPORT
+	TOKEN_POSTGRES // POSTGRES
 )
 
 // String returns the string representation of a token type
@@ -502,6 +506,10 @@ func (tt TokenType) String() string {
 		return "SYSTEM"
 	case TOKEN_BETWEEN:
 		return "BETWEEN"
+	case TOKEN_IMPORT:
+		return "IMPORT"
+	case TOKEN_POSTGRES:
+		return "POSTGRES"
 	default:
 		return "UNKNOWN"
 	}
@@ -686,6 +694,10 @@ var keywords = map[string]TokenType{
 	// Temporal Keywords (FOR SYSTEM_TIME)
 	"SYSTEM":  TOKEN_SYSTEM,
 	"BETWEEN": TOKEN_BETWEEN,
+
+	// Import Keywords
+	"IMPORT":   TOKEN_IMPORT,
+	"POSTGRES": TOKEN_POSTGRES,
 }
 
 // LookupKeyword checks if an identifier is a keyword and returns its token type
