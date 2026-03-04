@@ -12,6 +12,7 @@ import (
 	"syndrdb/src/internal/query/resolver"
 	"syndrdb/src/internal/utils"
 	pkgSettings "syndrdb/src/pkg/settings"
+	"syndrdb/src/pkg/trigger"
 
 	"go.uber.org/zap"
 )
@@ -48,12 +49,12 @@ PARAMETERIZED QUERY IMPLEMENTATION - Subtasks:
 // BundleContext provides context about available bundles for field resolution
 // This enables qualified field name validation and ambiguity detection
 type BundleContext struct {
-	Bundles       map[string]*models.Bundle // All bundles involved in the query
-	PrimaryBundle string                    // The primary bundle from FROM clause
-	JoinedBundles []string                  // Bundles added via JOIN clauses
-	fieldResolver *resolver.FieldResolver   // Cached field resolver instance
-	fieldMapCache map[string][]string       // Cache of bundle name -> field names
-	// TODO: I should cache field maps when bundle schemas evolve to avoid repeated lookups
+	Bundles        map[string]*models.Bundle    // All bundles involved in the query
+	PrimaryBundle  string                       // The primary bundle from FROM clause
+	JoinedBundles  []string                     // Bundles added via JOIN clauses
+	fieldResolver  *resolver.FieldResolver      // Cached field resolver instance
+	fieldMapCache  map[string][]string          // Cache of bundle name -> field names
+	TriggerContext *trigger.ExecutionContext     // Set during trigger execution for OLD/NEW resolution
 }
 
 // NewBundleContext creates a new bundle context with the given bundles
@@ -244,21 +245,28 @@ func (e *ExpressionEvaluator) schemaFromContext(bundleContext *BundleContext, bu
 
 // evaluateQualifiedIdentifier evaluates a qualified identifier (Bundle.Field notation)
 func (e *ExpressionEvaluator) evaluateQualifiedIdentifier(expr *QualifiedIdentifierExpression, doc *models.Document, bundleContext *BundleContext) (interface{}, error) {
+	bundleName := strings.Trim(expr.Bundle, "\"")
+	fieldName := strings.Trim(expr.Field, "\"")
+
+	// Trigger context: resolve OLD."field" and NEW."field"
+	if bundleContext != nil && bundleContext.TriggerContext != nil {
+		upperBundle := strings.ToUpper(bundleName)
+		if upperBundle == "OLD" || upperBundle == "NEW" {
+			return e.evaluateTriggerField(upperBundle, fieldName, bundleContext)
+		}
+	}
+
 	// If we have bundle context, validate the qualified field
 	if bundleContext != nil && bundleContext.fieldResolver != nil {
-		bundleName := strings.Trim(expr.Bundle, "\"")
-		fieldName := strings.Trim(expr.Field, "\"")
 		if err := bundleContext.fieldResolver.ValidateQualifiedField(bundleName, fieldName); err != nil {
 			return nil, err
 		}
 	}
 
-	fieldName := strings.Trim(expr.Field, "\"")
 	if strings.EqualFold(fieldName, "documentid") {
 		return models.NewStringValue(doc.DocumentID), nil
 	}
 
-	bundleName := strings.Trim(expr.Bundle, "\"")
 	schema := e.schemaFromContext(bundleContext, bundleName)
 	if schema != nil {
 		if fv, ok := doc.GetFieldValue(schema, fieldName); ok {
@@ -273,6 +281,45 @@ func (e *ExpressionEvaluator) evaluateQualifiedIdentifier(expr *QualifiedIdentif
 	if e.logger != nil {
 		e.logger.Debugf("Field '%s' not found in document, treating as NULL", fieldName)
 	}
+	return models.FieldValue{Type: models.FieldTypeNil}, nil
+}
+
+// evaluateTriggerField resolves OLD."field" or NEW."field" from the trigger context
+func (e *ExpressionEvaluator) evaluateTriggerField(qualifier, fieldName string, bundleContext *BundleContext) (interface{}, error) {
+	tc := bundleContext.TriggerContext
+	var targetDoc *models.Document
+
+	if qualifier == "OLD" {
+		if tc.OldDocument == nil {
+			return nil, fmt.Errorf("OLD reference is not available in INSERT triggers")
+		}
+		targetDoc = tc.OldDocument
+	} else { // "NEW"
+		if tc.NewDocument == nil {
+			return nil, fmt.Errorf("NEW reference is not available in DELETE triggers")
+		}
+		targetDoc = tc.NewDocument
+	}
+
+	if strings.EqualFold(fieldName, "documentid") {
+		return models.NewStringValue(targetDoc.DocumentID), nil
+	}
+
+	// Try schema-based lookup first
+	schema := e.schemaFromContext(bundleContext, tc.SourceBundleName)
+	if schema != nil {
+		if fv, ok := targetDoc.GetFieldValue(schema, fieldName); ok {
+			return fv, nil
+		}
+	}
+
+	// Fall back to Data map
+	if targetDoc.Data != nil {
+		if v, ok := targetDoc.Data[fieldName]; ok {
+			return models.NewInterfaceValue(v), nil
+		}
+	}
+
 	return models.FieldValue{Type: models.FieldTypeNil}, nil
 }
 

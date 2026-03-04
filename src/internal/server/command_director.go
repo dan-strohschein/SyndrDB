@@ -300,6 +300,11 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return HandleCursorCommand(ctx, command, session, serviceManager, database, logger, startTime)
 	}
 
+	// TRIGGER: Handle SET NEW."field" = value inside trigger execution
+	if session != nil && session.TriggerContext != nil && len(command) >= 7 && strings.EqualFold(command[:7], "SET NEW") {
+		return HandleTriggerSetNew(command, session, logger)
+	}
+
 	// TRANSACTION MANAGEMENT: Check for transaction commands first (before any other processing)
 	if IsTransactionCommand(command) {
 		return ParseAndExecuteTransactionCommand(command, session, serviceManager, database, logger)
@@ -580,6 +585,9 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		case "role":
 			// CREATE ROLE "role_name" [WITH DESCRIPTION "description"];
 			return CreateRole(command, logger, serviceManager)
+		case "trigger":
+			// CREATE TRIGGER "name" ON BUNDLE "bundle" ...
+			return HandleCreateTrigger(command, logger, serviceManager, database, session)
 		default:
 
 			return &result, errors.New(errors.ERR_VALIDATION_SYNTAX,
@@ -922,7 +930,15 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		case "role":
 			// DROP ROLE "role_name" [FORCE]; (same as DELETE ROLE)
 			return DeleteRole(command, logger, serviceManager)
+		case "trigger":
+			// DROP TRIGGER "name" ON BUNDLE "bundle"
+			return HandleDropTrigger(command, logger, serviceManager, database)
 		}
+	}
+
+	// Parse ENABLE TRIGGER / DISABLE TRIGGER commands
+	if strings.HasPrefix(commandLower, "enable trigger") || strings.HasPrefix(commandLower, "disable trigger") {
+		return HandleEnableDisableTrigger(command, logger, serviceManager, database)
 	}
 
 	// Parse DELETE  command
@@ -1101,6 +1117,27 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			logger.Debugf("WHERE clause filter matched %d documents for deletion", len(docIDs))
 
+			// BEFORE DELETE triggers
+			triggerExecutor := NewTriggerExecutor(logger)
+			if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil && len(docIDs) > 0 {
+				for i, docID := range docIDs {
+					var oldDoc *models.Document
+					if i < len(docs) && docs[i] != nil {
+						oldDoc = docs[i]
+					} else {
+						oldDoc = &models.Document{DocumentID: docID}
+					}
+					_, trigErr := triggerExecutor.ExecuteTriggers(
+						ctx, bundle,
+						models.TRIGGER_EVENT_DELETE, models.TRIGGER_TIMING_BEFORE,
+						oldDoc, nil, session, database, serviceManager,
+					)
+					if trigErr != nil {
+						return nil, trigErr
+					}
+				}
+			}
+
 			// PHASE 4+: Document-level locks for DELETE (both transaction and autocommit modes)
 			// Extended to autocommit operations for better concurrent delete throughput.
 			// For explicit transactions, locks are held until commit/rollback.
@@ -1211,6 +1248,23 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 
 			if err != nil {
 				return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+			}
+
+			// AFTER DELETE triggers (errors are logged but don't abort)
+			if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil {
+				for i, docID := range docIDs {
+					var oldDoc *models.Document
+					if i < len(docs) && docs[i] != nil {
+						oldDoc = docs[i]
+					} else {
+						oldDoc = &models.Document{DocumentID: docID}
+					}
+					_, _ = triggerExecutor.ExecuteTriggers(
+						ctx, bundle,
+						models.TRIGGER_EVENT_DELETE, models.TRIGGER_TIMING_AFTER,
+						oldDoc, nil, session, database, serviceManager,
+					)
+				}
 			}
 
 			// Enterprise temporal extension hook: capture history before delete
@@ -2424,6 +2478,9 @@ func classifyCommandPermission(firstWords []string) string {
 	case "checkpoint":
 		return "Admin"
 	case "attach", "detach":
+		return "Admin"
+	case "enable", "disable":
+		// ENABLE/DISABLE TRIGGER
 		return "Admin"
 	case "start", "apply", "validate":
 		// Migration commands

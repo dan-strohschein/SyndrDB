@@ -506,6 +506,13 @@ type Arguments struct {
 	ResultCacheWarmEnabled  bool `yaml:"result_cache_warm_enabled"`  // Proactive warming toggle (default: false)
 	ResultCacheWarmTopN     int  `yaml:"result_cache_warm_top_n"`    // Top-N queries to warm (default: 50)
 
+	// Trigger Configuration
+	TriggersEnabled      bool `yaml:"triggers_enabled"`       // Enable trigger system (default: true)
+	TriggerMaxDepth      int  `yaml:"trigger_max_depth"`      // Maximum cascade depth for triggers (default: 16)
+	TriggerMaxPerBundle  int  `yaml:"trigger_max_per_bundle"` // Maximum triggers per bundle (default: 100)
+	TriggerTimeoutMs     int  `yaml:"trigger_timeout_ms"`     // Per-trigger execution timeout in ms (default: 5000)
+	TriggerAllowRecursion bool `yaml:"trigger_allow_recursion"` // Allow recursive trigger firing (default: false)
+
 	// Enterprise Extension Configuration
 	// Captures any `enterprise:` section from syndrdb.yml for enterprise plugin settings.
 	EnterpriseSettings map[string]interface{} `yaml:"enterprise" json:"enterprise,omitempty"`
@@ -834,6 +841,13 @@ func GetSettings() *Arguments {
 			MSSQLImportDefaultBatchSize: 1000,
 			MSSQLImportProgressInterval: 10000,
 			MSSQLImportMaxErrors:        100,
+
+			// Trigger System Defaults
+			TriggersEnabled:       true,  // Triggers enabled by default
+			TriggerMaxDepth:       16,    // Max 16 levels of cascade
+			TriggerMaxPerBundle:   100,   // Max 100 triggers per bundle
+			TriggerTimeoutMs:      5000,  // 5 second per-trigger timeout
+			TriggerAllowRecursion: false, // No recursive triggers by default
 
 			// Columnar Processing Defaults (Enterprise)
 			ColumnarEnabled:       false,

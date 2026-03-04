@@ -390,6 +390,7 @@ type Bundle struct {
 
 	Relationships map[string]Relationship
 	Constraints   map[string]Constraint
+	Triggers      map[string]TriggerDefinition `json:"triggers,omitempty" bson:"triggers,omitempty"`
 
 	Database *Database `json:"-"` // Reference to the parent database
 
@@ -839,6 +840,47 @@ type CreateHashIndexCommand struct {
 	IndexName  string
 	BundleName string
 	Fields     []FieldDefinition
+}
+
+// ============================================================================
+// TRIGGER DEFINITIONS
+// ============================================================================
+
+// TriggerEvent represents the DML event(s) that fire a trigger (bitmask)
+type TriggerEvent int
+
+const (
+	TRIGGER_EVENT_INSERT TriggerEvent = 1 << iota // 1
+	TRIGGER_EVENT_UPDATE                          // 2
+	TRIGGER_EVENT_DELETE                          // 4
+)
+
+// TriggerTiming represents when a trigger fires relative to the operation
+type TriggerTiming int
+
+const (
+	TRIGGER_TIMING_BEFORE TriggerTiming = iota
+	TRIGGER_TIMING_AFTER
+)
+
+// TriggerDefinition describes a single trigger attached to a bundle
+type TriggerDefinition struct {
+	Name       string        `json:"name" bson:"name"`
+	BundleName string        `json:"bundle_name" bson:"bundle_name"`
+	Timing     TriggerTiming `json:"timing" bson:"timing"`
+	Events     TriggerEvent  `json:"events" bson:"events"`
+	WhenClause string        `json:"when_clause,omitempty" bson:"when_clause,omitempty"`
+	Body       string        `json:"body" bson:"body"`
+	Priority   int           `json:"priority" bson:"priority"`
+	Enabled    bool          `json:"enabled" bson:"enabled"`
+	CreatedAt  time.Time     `json:"created_at" bson:"created_at"`
+	CreatedBy  string        `json:"created_by" bson:"created_by"`
+	UpdatedAt  time.Time     `json:"updated_at" bson:"updated_at"`
+}
+
+// MatchesEvent returns true if this trigger is enabled and matches the given event
+func (t *TriggerDefinition) MatchesEvent(event TriggerEvent) bool {
+	return t.Enabled && (t.Events&event != 0)
 }
 
 type CreateIndexCommand struct {

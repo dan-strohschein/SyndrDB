@@ -220,6 +220,29 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		}
 	}
 
+	// BEFORE UPDATE triggers
+	triggerExecutor := NewTriggerExecutor(logger)
+	if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil {
+		newDoc := &models.Document{
+			Data: keyValuesToMap(docCommand.Fields),
+		}
+		modifiedDoc, trigErr := triggerExecutor.ExecuteTriggers(
+			context.Background(), bundle,
+			models.TRIGGER_EVENT_UPDATE, models.TRIGGER_TIMING_BEFORE,
+			nil, newDoc, session, database, serviceManager,
+		)
+		if trigErr != nil {
+			return nil, trigErr
+		}
+		if modifiedDoc != nil && modifiedDoc.Data != nil {
+			updatedFields := make([]models.KeyValue, 0, len(modifiedDoc.Data))
+			for k, v := range modifiedDoc.Data {
+				updatedFields = append(updatedFields, models.KeyValue{Key: k, Value: v})
+			}
+			docCommand.Fields = updatedFields
+		}
+	}
+
 	// HYBRID OCC: For autocommit operations (non-transactional), use OCC with pessimistic fallback.
 	// This provides better throughput under contention by avoiding sequential lock acquisition.
 	// For explicit transactions, continue using document-level locks for strict 2PL semantics.
@@ -254,6 +277,16 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 					logger.Warnf("Index extension OnDocumentChange error (UPDATE): %v", notifyErr)
 				}
 			}
+		}
+
+		// AFTER UPDATE triggers (errors are logged but don't abort)
+		if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil {
+			afterDoc := &models.Document{Data: keyValuesToMap(docCommand.Fields)}
+			_, _ = triggerExecutor.ExecuteTriggers(
+				context.Background(), bundle,
+				models.TRIGGER_EVENT_UPDATE, models.TRIGGER_TIMING_AFTER,
+				nil, afterDoc, session, database, serviceManager,
+			)
 		}
 
 		// Enterprise CDC + MatView hooks
@@ -525,6 +558,33 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		}
 	}
 
+	// BEFORE INSERT triggers
+	triggerExecutor := NewTriggerExecutor(logger)
+	if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil {
+		// Build a temporary document from the command fields for trigger evaluation
+		newDoc := &models.Document{
+			Data: keyValuesToMap(docCommand.Fields),
+		}
+
+		modifiedDoc, trigErr := triggerExecutor.ExecuteTriggers(
+			context.Background(), bundle,
+			models.TRIGGER_EVENT_INSERT, models.TRIGGER_TIMING_BEFORE,
+			nil, newDoc, session, database, serviceManager,
+		)
+		if trigErr != nil {
+			return nil, trigErr
+		}
+
+		// If BEFORE trigger modified the document, update the command fields
+		if modifiedDoc != nil && modifiedDoc.Data != nil {
+			updatedFields := make([]models.KeyValue, 0, len(modifiedDoc.Data))
+			for k, v := range modifiedDoc.Data {
+				updatedFields = append(updatedFields, models.KeyValue{Key: k, Value: v})
+			}
+			docCommand.Fields = updatedFields
+		}
+	}
+
 	docID := ""
 
 	// Execute with WAL logging
@@ -624,6 +684,19 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 				logger.Warnf("Index extension OnDocumentChange error (INSERT): %v", notifyErr)
 			}
 		}
+	}
+
+	// AFTER INSERT triggers (errors are logged but don't abort)
+	if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil {
+		afterDoc := &models.Document{
+			DocumentID: docID,
+			Data:       keyValuesToMap(docCommand.Fields),
+		}
+		_, _ = triggerExecutor.ExecuteTriggers(
+			context.Background(), bundle,
+			models.TRIGGER_EVENT_INSERT, models.TRIGGER_TIMING_AFTER,
+			nil, afterDoc, session, database, serviceManager,
+		)
 	}
 
 	// Enterprise CDC + MatView hooks

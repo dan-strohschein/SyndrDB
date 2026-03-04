@@ -18,6 +18,7 @@ import (
 	"syndrdb/src/pkg/errors"
 	"syndrdb/src/pkg/fatal"
 	"syndrdb/src/pkg/settings"
+	"syndrdb/src/pkg/trigger"
 	"time"
 
 	"github.com/dan-strohschein/HVJson/hvjson"
@@ -181,6 +182,12 @@ type Session struct {
 
 	// Server-side cursor management
 	Cursors *CursorManager
+
+	// Trigger execution tracking
+	TriggerDepth     atomic.Int32               // Current cascade depth
+	TriggerCallStack []string                   // "bundle.trigger" names on stack (recursion detection)
+	TriggerMutex     sync.Mutex                 // Protects TriggerCallStack
+	TriggerContext   *trigger.ExecutionContext   // Current trigger context (for SET NEW)
 
 	// Synchronization
 	mu     sync.RWMutex

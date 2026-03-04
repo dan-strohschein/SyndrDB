@@ -220,6 +220,16 @@ const (
 	TOKEN_MYSQL    // MYSQL
 	TOKEN_MONGODB  // MONGODB
 	TOKEN_MSSQL    // MSSQL
+
+	// Keywords - Trigger System
+	TOKEN_TRIGGER  // TRIGGER
+	TOKEN_BEFORE   // BEFORE
+	TOKEN_AFTER    // AFTER
+	TOKEN_EACH     // EACH
+	TOKEN_WHEN     // WHEN
+	TOKEN_PRIORITY // PRIORITY
+	TOKEN_ENABLE   // ENABLE
+	TOKEN_DISABLE  // DISABLE
 )
 
 // String returns the string representation of a token type
@@ -519,6 +529,22 @@ func (tt TokenType) String() string {
 		return "MONGODB"
 	case TOKEN_MSSQL:
 		return "MSSQL"
+	case TOKEN_TRIGGER:
+		return "TRIGGER"
+	case TOKEN_BEFORE:
+		return "BEFORE"
+	case TOKEN_AFTER:
+		return "AFTER"
+	case TOKEN_EACH:
+		return "EACH"
+	case TOKEN_WHEN:
+		return "WHEN"
+	case TOKEN_PRIORITY:
+		return "PRIORITY"
+	case TOKEN_ENABLE:
+		return "ENABLE"
+	case TOKEN_DISABLE:
+		return "DISABLE"
 	default:
 		return "UNKNOWN"
 	}
@@ -710,6 +736,16 @@ var keywords = map[string]TokenType{
 	"MYSQL":    TOKEN_MYSQL,
 	"MONGODB":  TOKEN_MONGODB,
 	"MSSQL":    TOKEN_MSSQL,
+
+	// Trigger Keywords
+	"TRIGGER":  TOKEN_TRIGGER,
+	"BEFORE":   TOKEN_BEFORE,
+	"AFTER":    TOKEN_AFTER,
+	"EACH":     TOKEN_EACH,
+	"WHEN":     TOKEN_WHEN,
+	"PRIORITY": TOKEN_PRIORITY,
+	"ENABLE":   TOKEN_ENABLE,
+	"DISABLE":  TOKEN_DISABLE,
 }
 
 // LookupKeyword checks if an identifier is a keyword and returns its token type

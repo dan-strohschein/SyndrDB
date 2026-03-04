@@ -78,6 +78,13 @@ const (
 	ERR_TRANSACTION_VERSION_CONFLICT ErrorCode = "ERR_TRANSACTION_VERSION_CONFLICT" // 8005 - OCC version conflict (document modified since read)
 )
 
+// Trigger Errors (9xxx)
+const (
+	ERR_TRIGGER_FAILED    ErrorCode = "ERR_TRIGGER_FAILED"    // 9001 - Trigger execution failed
+	ERR_TRIGGER_RECURSION ErrorCode = "ERR_TRIGGER_RECURSION" // 9002 - Trigger recursion limit exceeded
+	ERR_TRIGGER_TIMEOUT   ErrorCode = "ERR_TRIGGER_TIMEOUT"   // 9003 - Trigger execution timeout
+)
+
 // String returns the string representation of the error code
 func (ec ErrorCode) String() string {
 	return string(ec)

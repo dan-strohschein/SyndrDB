@@ -219,6 +219,21 @@ const (
 	ValidationReportMaxSizeDefault = 10485760 // 10MB
 )
 
+// Trigger Constants
+const (
+	// MaxTriggerBodyLength is the maximum length of a trigger body in bytes (64KB)
+	MaxTriggerBodyLength = 65536
+
+	// MaxTriggerNameLength is the maximum length of a trigger name (128 characters)
+	MaxTriggerNameLength = 128
+
+	// DefaultTriggerPriority is the default priority for triggers (lower fires first)
+	DefaultTriggerPriority = 1000
+
+	// TriggerDepthHardLimit is the absolute maximum cascade depth for triggers
+	TriggerDepthHardLimit = 16
+)
+
 // Time Constants (milliseconds)
 const (
 	// TimeMillisecond is 1 millisecond
