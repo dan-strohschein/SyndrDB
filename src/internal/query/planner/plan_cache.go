@@ -563,6 +563,12 @@ func (spc *ShardedPlanCache) computeKey(query *queryparser.UnifiedSelectQuery, u
 	return h.Sum64()
 }
 
+// ComputeKeyExported exposes the internal computeKey so that enterprise result caching
+// can reuse the same xxhash-based query fingerprint without duplicating the logic.
+func (spc *ShardedPlanCache) ComputeKeyExported(query *queryparser.UnifiedSelectQuery, useGeneric bool) uint64 {
+	return spc.computeKey(query, useGeneric)
+}
+
 // shouldUseGenericPlan determines if generic plan should be used (PostgreSQL-style)
 func (spc *ShardedPlanCache) shouldUseGenericPlan(query *queryparser.UnifiedSelectQuery) bool {
 	// Compute key for custom plan

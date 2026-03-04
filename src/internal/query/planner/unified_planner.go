@@ -453,6 +453,11 @@ func (uqp *UnifiedQueryPlanner) GetViewRegistry() *view.ViewRegistry {
 	return uqp.viewRegistry
 }
 
+// PlanCache returns the underlying sharded plan cache for reuse by result caching.
+func (uqp *UnifiedQueryPlanner) PlanCache() *ShardedPlanCache {
+	return uqp.planCache
+}
+
 // Shutdown gracefully shuts down the plan cache
 // Call this during server shutdown to ensure all resources are released
 func (uqp *UnifiedQueryPlanner) Shutdown() {
