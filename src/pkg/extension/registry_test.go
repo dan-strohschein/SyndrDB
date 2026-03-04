@@ -1550,6 +1550,61 @@ func TestQueryResultCacheExtensionMethods(t *testing.T) {
 	}
 }
 
+// --- Milestone 7.3: Field Encryption Extension ---
+
+type stubFieldEncryptionExtension struct {
+	policies map[string]bool
+	encCalls int
+}
+
+func (s *stubFieldEncryptionExtension) EncryptFieldValues(ctx context.Context, bundleName string, fields map[string]interface{}) error {
+	s.encCalls++
+	return nil
+}
+func (s *stubFieldEncryptionExtension) HasFLEPolicy(bundleName string) bool {
+	return s.policies[bundleName]
+}
+
+func TestRegisterFieldEncryptionExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasFieldEncryptionExtension() {
+		t.Fatal("fresh registry should have no field encryption extensions")
+	}
+	ext := &stubFieldEncryptionExtension{policies: map[string]bool{"employees": true}}
+	reg.RegisterFieldEncryptionExtension(ext)
+	if !reg.HasFieldEncryptionExtension() {
+		t.Fatal("registry should have field encryption extension after registration")
+	}
+	got := reg.GetFieldEncryptionExtension()
+	if got != ext {
+		t.Fatal("GetFieldEncryptionExtension should return the registered extension")
+	}
+}
+
+func TestFieldEncryptionExtensionSingleProvider(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubFieldEncryptionExtension{policies: map[string]bool{"employees": true}}
+	reg.RegisterFieldEncryptionExtension(ext)
+	got := reg.GetFieldEncryptionExtension()
+
+	if !got.HasFLEPolicy("employees") {
+		t.Fatal("expected HasFLEPolicy to return true for 'employees'")
+	}
+	if got.HasFLEPolicy("orders") {
+		t.Fatal("expected HasFLEPolicy to return false for 'orders'")
+	}
+
+	err := got.EncryptFieldValues(context.Background(), "employees", map[string]interface{}{"ssn": "123-45-6789"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ext.encCalls != 1 {
+		t.Fatal("expected EncryptFieldValues to be called once")
+	}
+}
+
 func TestGetResultTransformersReturnsSnapshot(t *testing.T) {
 	defer Reset()
 

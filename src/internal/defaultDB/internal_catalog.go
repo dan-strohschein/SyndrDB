@@ -1044,6 +1044,61 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END COLUMNAR PROCESSING CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// FIELD-LEVEL ENCRYPTION CATALOG BUNDLES (Milestone 7.3)
+	// ==============================================================
+
+	// FLEPolicies — per-field encryption policy definitions
+	flePolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":     {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"BundleName":     {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FieldName":      {Name: "FieldName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"EncryptionMode": {Name: "EncryptionMode", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "RANDOMIZED"},
+			"KeyScope":       {Name: "KeyScope", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"IsEnabled":      {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"CreatedBy":      {Name: "CreatedBy", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"CreatedAt":      {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	flePolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "FLEPolicies",
+		DocumentStructure: flePolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, flePolicies_Bundle)
+
+	// FLEExemptions — per-user decrypt exemptions
+	fleExemptions_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"Username":   {Name: "Username", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"BundleName": {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"GrantedBy":  {Name: "GrantedBy", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"GrantedAt":  {Name: "GrantedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	fleExemptions_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "FLEExemptions",
+		DocumentStructure: fleExemptions_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, fleExemptions_Bundle)
+
+	// ==============================================================
+	// END FIELD-LEVEL ENCRYPTION CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

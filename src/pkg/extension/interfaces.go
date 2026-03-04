@@ -391,6 +391,18 @@ type ColumnarProcessingExtension interface {
 	GetMemoryUsage() int64
 }
 
+// --- Milestone 7.3: Field-Level Encryption ---
+
+// FieldEncryptionExtension provides application-level encryption for individual document fields.
+// Single-provider model (like StorageEncryptionExtension).
+type FieldEncryptionExtension interface {
+	// EncryptFieldValues modifies the map in-place, replacing plaintext values with FLE markers
+	// for fields that have an active FLE policy on the given bundle.
+	EncryptFieldValues(ctx context.Context, bundleName string, fields map[string]interface{}) error
+	// HasFLEPolicy returns true if the bundle has any active FLE policies (fast-path skip).
+	HasFLEPolicy(bundleName string) bool
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.

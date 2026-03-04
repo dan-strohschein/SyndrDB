@@ -36,6 +36,8 @@ type ExtensionRegistry struct {
 	columnarExtensions []ColumnarProcessingExtension
 	// Milestone 6.7
 	resultCacheExtensions []QueryResultCacheExtension
+	// Milestone 7.3
+	fieldEncryptors []FieldEncryptionExtension
 }
 
 var (
@@ -633,4 +635,30 @@ func (r *ExtensionRegistry) GetQueryResultCacheExtension() QueryResultCacheExten
 		return nil
 	}
 	return r.resultCacheExtensions[0]
+}
+
+// --- Field Encryption Extension (Milestone 7.3) ---
+
+// RegisterFieldEncryptionExtension adds a FieldEncryptionExtension to the registry.
+func (r *ExtensionRegistry) RegisterFieldEncryptionExtension(ext FieldEncryptionExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fieldEncryptors = append(r.fieldEncryptors, ext)
+}
+
+// HasFieldEncryptionExtension returns true if a field encryption extension is registered.
+func (r *ExtensionRegistry) HasFieldEncryptionExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.fieldEncryptors) > 0
+}
+
+// GetFieldEncryptionExtension returns the first registered field encryption extension (single-provider model).
+func (r *ExtensionRegistry) GetFieldEncryptionExtension() FieldEncryptionExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.fieldEncryptors) == 0 {
+		return nil
+	}
+	return r.fieldEncryptors[0]
 }

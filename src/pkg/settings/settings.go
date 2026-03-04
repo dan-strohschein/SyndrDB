@@ -105,6 +105,10 @@ type Arguments struct {
 	EncryptionWALEnabled    bool   `yaml:"encryption_wal_enabled"`    // Enable WAL encryption
 	EncryptionBackupEnabled bool   `yaml:"encryption_backup_enabled"` // Enable backup encryption
 
+	// Field-Level Encryption (Enterprise)
+	FLEEnabled     bool   `yaml:"fle_enabled"`      // Enable field-level encryption
+	FLEDefaultMode string `yaml:"fle_default_mode"` // Default encryption mode: "RANDOMIZED" or "DETERMINISTIC"
+
 	// Full-Text Search (Enterprise)
 	FTSEnabled         bool   `yaml:"fts_enabled"`          // Enable full-text search indexes
 	FTSDefaultAnalyzer string `yaml:"fts_default_analyzer"` // Default analyzer: "standard" (default: "standard")

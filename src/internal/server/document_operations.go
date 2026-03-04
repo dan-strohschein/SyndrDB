@@ -203,6 +203,23 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		}
 	}
 
+	// Enterprise FLE hook: encrypt designated fields before storage
+	if reg := extension.GetRegistry(); reg.HasFieldEncryptionExtension() {
+		fleExt := reg.GetFieldEncryptionExtension()
+		if fleExt.HasFLEPolicy(bundleName) {
+			docMap := keyValuesToMap(docCommand.Fields)
+			if fleErr := fleExt.EncryptFieldValues(context.Background(), bundleName, docMap); fleErr != nil {
+				return nil, errors.WrapWithMessage(fleErr, errors.ERR_INTERNAL_QUERY,
+					"field-level encryption failed for update", errors.LayerCommand).WithContext("bundle", bundleName)
+			}
+			for i, kv := range docCommand.Fields {
+				if v, ok := docMap[kv.Key]; ok {
+					docCommand.Fields[i].Value = v
+				}
+			}
+		}
+	}
+
 	// HYBRID OCC: For autocommit operations (non-transactional), use OCC with pessimistic fallback.
 	// This provides better throughput under contention by avoiding sequential lock acquisition.
 	// For explicit transactions, continue using document-level locks for strict 2PL semantics.
@@ -491,6 +508,23 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		}
 	}
 
+	// Enterprise FLE hook: encrypt designated fields before WAL logging and storage
+	if reg := extension.GetRegistry(); reg.HasFieldEncryptionExtension() {
+		fleExt := reg.GetFieldEncryptionExtension()
+		if fleExt.HasFLEPolicy(bundleName) {
+			docMap := keyValuesToMap(docCommand.Fields)
+			if fleErr := fleExt.EncryptFieldValues(context.Background(), bundleName, docMap); fleErr != nil {
+				return nil, errors.WrapWithMessage(fleErr, errors.ERR_INTERNAL_QUERY,
+					"field-level encryption failed for insert", errors.LayerCommand).WithContext("bundle", bundleName)
+			}
+			for i, kv := range docCommand.Fields {
+				if v, ok := docMap[kv.Key]; ok {
+					docCommand.Fields[i].Value = v
+				}
+			}
+		}
+	}
+
 	docID := ""
 
 	// Execute with WAL logging
@@ -641,6 +675,25 @@ func BulkAddDocuments(commandParts []string, command string, logger *zap.Sugared
 	bundle, err := serviceManager.BundleService.GetBundleByName(database, bundleName)
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", bundleName)
+	}
+
+	// Enterprise FLE hook: encrypt designated fields in all documents before storage
+	if reg := extension.GetRegistry(); reg.HasFieldEncryptionExtension() {
+		fleExt := reg.GetFieldEncryptionExtension()
+		if fleExt.HasFLEPolicy(bundleName) {
+			for i, docFields := range bulkCmd.Documents {
+				docMap := keyValuesToMap(docFields)
+				if fleErr := fleExt.EncryptFieldValues(context.Background(), bundleName, docMap); fleErr != nil {
+					return nil, errors.WrapWithMessage(fleErr, errors.ERR_INTERNAL_QUERY,
+						"field-level encryption failed for bulk insert", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+				for j, kv := range docFields {
+					if v, ok := docMap[kv.Key]; ok {
+						bulkCmd.Documents[i][j].Value = v
+					}
+				}
+			}
+		}
 	}
 
 	// Enterprise sharding hook: for sharded bundles, group docs by shard and insert per-shard
