@@ -861,6 +861,31 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	}
 	bundleService.AddBundleByStruct(databaseService, db, vectorIdx_Bundle)
 
+	// SpatialIndexes — geospatial R-tree index metadata
+	spatialIdx_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"IndexName":  {Name: "IndexName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName": {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"FieldName":  {Name: "FieldName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"SRID":       {Name: "SRID", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 4326},
+			"MaxEntries": {Name: "MaxEntries", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 25},
+			"MinEntries": {Name: "MinEntries", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 4},
+			"DocCount":   {Name: "DocCount", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+		},
+	}
+	spatialIdx_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "SpatialIndexes",
+		DocumentStructure: spatialIdx_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, spatialIdx_Bundle)
+
 	// MatViewChangeLog — tracks source bundle mutations for incremental refresh
 	mvChangeLog_docStructure := models.DocumentStructure{
 		FieldDefinitions: map[string]models.FieldDefinition{

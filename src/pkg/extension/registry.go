@@ -42,6 +42,8 @@ type ExtensionRegistry struct {
 	fieldEncryptors []FieldEncryptionExtension
 	// Milestone 7.1
 	crdtReplicationExtensions []CRDTReplicationExtension
+	// Milestone 6.8
+	spatialFunctionExtensions []SpatialFunctionExtension
 }
 
 var (
@@ -717,4 +719,28 @@ func (r *ExtensionRegistry) GetCRDTReplicationExtension() CRDTReplicationExtensi
 		return nil
 	}
 	return r.crdtReplicationExtensions[0]
+}
+
+// RegisterSpatialFunctionExtension registers a spatial function evaluator (single-provider model).
+func (r *ExtensionRegistry) RegisterSpatialFunctionExtension(ext SpatialFunctionExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.spatialFunctionExtensions = append(r.spatialFunctionExtensions, ext)
+}
+
+// HasSpatialFunctionExtension returns true if a spatial function extension is registered.
+func (r *ExtensionRegistry) HasSpatialFunctionExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.spatialFunctionExtensions) > 0
+}
+
+// GetSpatialFunctionExtension returns the first registered spatial function extension.
+func (r *ExtensionRegistry) GetSpatialFunctionExtension() SpatialFunctionExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.spatialFunctionExtensions) == 0 {
+		return nil
+	}
+	return r.spatialFunctionExtensions[0]
 }

@@ -454,6 +454,22 @@ type CRDTPeerInfo struct {
 	PendingDeltas        int64
 }
 
+// SpatialFunctionExtension evaluates ST_* spatial functions at query time.
+// The core stubs delegate to this extension when it is registered.
+// geomA/geomB are interface{} — either a map[string]interface{} (GeoJSON) or string (WKT).
+type SpatialFunctionExtension interface {
+	// EvalDistance returns distance between two geometries. geomA from doc field, geomB from arg.
+	EvalDistance(bundleName string, geomA interface{}, geomB interface{}) (float64, error)
+	// EvalWithin returns true if geomA is within geomB.
+	EvalWithin(bundleName string, geomA interface{}, geomB interface{}) (bool, error)
+	// EvalContains returns true if geomA contains geomB.
+	EvalContains(bundleName string, geomA interface{}, geomB interface{}) (bool, error)
+	// EvalIntersects returns true if geomA intersects geomB.
+	EvalIntersects(bundleName string, geomA interface{}, geomB interface{}) (bool, error)
+	// EvalDWithin returns true if geomA is within distance of geomB.
+	EvalDWithin(bundleName string, geomA interface{}, geomB interface{}, distance float64) (bool, error)
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.

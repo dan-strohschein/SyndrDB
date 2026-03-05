@@ -32,6 +32,7 @@ type EvaluationContext struct {
 	TimezoneCache interface{}                  // Timezone cache reference (avoid import cycle)
 	BundleName    string                       // Bundle being queried
 	FieldValues   map[string]models.FieldValue // Pre-evaluated field values (from doc.Fields, no interface boxing)
+	CurrentDoc    map[string]interface{}       // Raw document for spatial/extension functions
 }
 
 // GetFieldValue returns the typed field value for name from the current document context.
@@ -102,6 +103,17 @@ func (fr *FunctionRegistry) Register(sig *FunctionSignature) error {
 
 	fr.functions[upperName] = sig
 	return nil
+}
+
+// Replace replaces the implementation of an already-registered function.
+// Used by enterprise extensions to swap stub implementations with real ones.
+func (fr *FunctionRegistry) Replace(name string, impl func(args []models.FieldValue, evalCtx *EvaluationContext) (models.FieldValue, error)) {
+	upperName := strings.ToUpper(name)
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if sig, exists := fr.functions[upperName]; exists {
+		sig.Implementation = impl
+	}
 }
 
 // Get retrieves a function signature by name (case-insensitive)

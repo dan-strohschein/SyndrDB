@@ -150,6 +150,10 @@ type Arguments struct {
 	VectorDefaultDims     int     `yaml:"vector_default_dimensions"`   // default: 128
 	VectorEfConstruction  int     `yaml:"vector_ef_construction"`      // HNSW build param (default: 200)
 	VectorMaxConnections  int     `yaml:"vector_max_connections"`      // HNSW M param (default: 16)
+	SpatialEnabled        bool    `yaml:"spatial_enabled"`             // Enable geospatial indexing (default: false)
+	SpatialDefaultSRID    int     `yaml:"spatial_default_srid"`        // default: 4326 (geographic)
+	SpatialMaxEntries     int     `yaml:"spatial_max_entries"`         // R-tree max entries per node (default: 25)
+	SpatialMinEntries     int     `yaml:"spatial_min_entries"`         // R-tree min entries per node (default: 4)
 	AdaptiveOptEnabled    bool    `yaml:"adaptive_opt_enabled"`
 	AdaptiveHistorySize   int     `yaml:"adaptive_history_size"`       // executions to keep (default: 100)
 	AdaptiveCostThreshold float64 `yaml:"adaptive_cost_threshold"`     // replan if actual > N*estimated (default: 2.0)
