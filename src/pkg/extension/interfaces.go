@@ -501,6 +501,40 @@ type IndexRecommendation struct {
 	EstimatedImprovement string
 }
 
+// --- Milestone 7.8: Distributed Tracing / Observability ---
+
+// SpanInfo describes a completed span for query results.
+type SpanInfo struct {
+	TraceID      string
+	SpanID       string
+	ParentSpanID string
+	Operation    string
+	StartTimeNs  int64
+	EndTimeNs    int64
+	Status       int // 0=OK, 1=Error
+	Tags         map[string]string
+	Events       []SpanEvent
+}
+
+// SpanEvent is a timestamped annotation on a span.
+type SpanEvent struct {
+	Name      string
+	Timestamp int64
+	Attrs     map[string]string
+}
+
+// DistributedTracingExtension provides per-request span trees (single-provider model).
+type DistributedTracingExtension interface {
+	StartSpan(ctx context.Context, operation string, tags map[string]string) (context.Context, string)
+	EndSpan(spanHandle string, status int, errMsg string)
+	AddSpanEvent(spanHandle string, name string, attrs map[string]string)
+	IsEnabled() bool
+	ShouldSample() bool
+	GetTraceID(ctx context.Context) string
+	InjectTraceContext(ctx context.Context) string
+	ExtractTraceContext(ctx context.Context, traceparent string) context.Context
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.

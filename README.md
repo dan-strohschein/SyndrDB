@@ -286,6 +286,7 @@ SyndrDB Enterprise extends the Community Edition with production-grade capabilit
 - [x] **Query Result Caching** — Sharded LRU cache with CDC-driven invalidation and proactive warming
 - [x] **Geospatial Indexing** — R-tree spatial indexes with ST_DISTANCE, ST_WITHIN, ST_CONTAINS, ST_INTERSECTS, ST_DWITHIN
 - [x] **Automated Index Advisor** — Passive query pattern tracking with on-demand index recommendations, unused index detection, and ready-to-execute DDL
+- [x] **Distributed Tracing** — Per-request span trees with W3C Trace Context, configurable sampling, in-memory trace buffer, and OTLP/HTTP export
 
 ### Planned
 

@@ -44,6 +44,29 @@ func getKeys(m map[string]interface{}) []string {
 func CommandDirector(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
 	reg := extension.GetRegistry()
 
+	// Enterprise distributed tracing: create root span for the command
+	var rootSpanHandle string
+	if reg.HasDistributedTracingExtension() {
+		tracingExt := reg.GetDistributedTracingExtension()
+		if tracingExt.IsEnabled() {
+			cmdType := classifyCommandType(command)
+			tags := map[string]string{
+				"db.system":    "syndrdb",
+				"db.operation": cmdType,
+			}
+			if session != nil {
+				tags["db.user"] = session.Username
+				tags["db.name"] = session.DatabaseName
+			}
+			stmt := command
+			if len(stmt) > 256 {
+				stmt = stmt[:256] + "..."
+			}
+			tags["db.statement"] = stmt
+			ctx, rootSpanHandle = tracingExt.StartSpan(ctx, "syndrdb.command", tags)
+		}
+	}
+
 	// Enterprise query governor: check limits before execution
 	var queryID string
 	if reg.HasQueryGovernorExtension() {
@@ -115,6 +138,17 @@ func CommandDirector(ctx context.Context, database *models.Database, serviceMana
 		reg.NotifyCommandExecuted(ctx, eventType, detail)
 	}
 
+	// Enterprise distributed tracing: end root span
+	if rootSpanHandle != "" && reg.HasDistributedTracingExtension() {
+		status := 0
+		errMsg := ""
+		if err != nil {
+			status = 1
+			errMsg = err.Error()
+		}
+		reg.GetDistributedTracingExtension().EndSpan(rootSpanHandle, status, errMsg)
+	}
+
 	return result, err
 }
 
@@ -178,8 +212,15 @@ func CommandDirectorWithParams(ctx context.Context, database *models.Database, s
 
 // executeCommand contains the main command execution logic
 func executeCommand(ctx context.Context, database *models.Database, serviceManager ServiceManager, command string, logger *zap.SugaredLogger, startTime time.Time, session *Session, clientIP string) (interface{}, error) {
-	// Observability: Generate trace ID for request correlation (xxhash-style hex, 16 chars)
-	traceID := strconv.FormatInt(startTime.UnixNano(), 16)
+	// Observability: Generate trace ID for request correlation
+	// If distributed tracing extension provides a trace ID, use it; otherwise fall back to timestamp hex.
+	traceID := ""
+	if reg := extension.GetRegistry(); reg.HasDistributedTracingExtension() {
+		traceID = reg.GetDistributedTracingExtension().GetTraceID(ctx)
+	}
+	if traceID == "" {
+		traceID = strconv.FormatInt(startTime.UnixNano(), 16)
+	}
 	ctx = context.WithValue(ctx, traceIDKey, traceID)
 	logger = logger.With("traceID", traceID)
 
@@ -1606,7 +1647,30 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	unifiedPlanner := serviceManager.UnifiedPlanner
 
 	// STEP 3: Create execution plan
+	// Enterprise distributed tracing: wrap plan creation in a child span
+	var planSpanHandle string
+	if reg := extension.GetRegistry(); reg.HasDistributedTracingExtension() {
+		tracingExt := reg.GetDistributedTracingExtension()
+		if tracingExt.IsEnabled() {
+			ctx, planSpanHandle = tracingExt.StartSpan(ctx, "syndrdb.query.plan", map[string]string{
+				"db.bundle": query.FromBundle,
+			})
+		}
+	}
 	plan, err := unifiedPlanner.CreatePlan(query, database)
+	if planSpanHandle != "" {
+		tracingExt := extension.GetRegistry().GetDistributedTracingExtension()
+		if err != nil {
+			tracingExt.EndSpan(planSpanHandle, 1, err.Error())
+		} else {
+			tracingExt.AddSpanEvent(planSpanHandle, "plan_created", map[string]string{
+				"cost":           fmt.Sprintf("%.2f", plan.Cost),
+				"estimated_rows": fmt.Sprintf("%d", plan.EstimatedRows),
+				"indexes_used":   fmt.Sprintf("%v", plan.IndexesUsed),
+			})
+			tracingExt.EndSpan(planSpanHandle, 0, "")
+		}
+	}
 	if err != nil {
 		return nil, errors.ConvertError(err, errors.LayerCommand).WithContext("bundle", query.FromBundle)
 	}
@@ -1775,6 +1839,17 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		}
 	}
 
+	// Enterprise distributed tracing: wrap query execution in a child span
+	var execSpanHandle string
+	if reg := extension.GetRegistry(); reg.HasDistributedTracingExtension() {
+		tracingExt := reg.GetDistributedTracingExtension()
+		if tracingExt.IsEnabled() {
+			ctx, execSpanHandle = tracingExt.StartSpan(ctx, "syndrdb.query.execute", map[string]string{
+				"db.bundle": query.FromBundle,
+			})
+		}
+	}
+
 	// Execute the plan with context.
 	// Priority: (1) Iterator path for LIMIT queries (2) SliceExecution for streaming (3) Execute()
 	execStart := time.Now()
@@ -1849,6 +1924,21 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 		documents, err = plan.RootNode.Execute(ctx)
 	}
 	execDuration := time.Since(execStart)
+	// Enterprise distributed tracing: end execute span
+	if execSpanHandle != "" {
+		tracingExt := extension.GetRegistry().GetDistributedTracingExtension()
+		execStatus := 0
+		execErrMsg := ""
+		if err != nil {
+			execStatus = 1
+			execErrMsg = err.Error()
+		}
+		tracingExt.AddSpanEvent(execSpanHandle, "execution_complete", map[string]string{
+			"rows_scanned": fmt.Sprintf("%d", len(documents)),
+			"duration_ms":  fmt.Sprintf("%.2f", float64(execDuration.Milliseconds())),
+		})
+		tracingExt.EndSpan(execSpanHandle, execStatus, execErrMsg)
+	}
 	if serviceManager.UnifiedPlanner != nil {
 		serviceManager.UnifiedPlanner.RecordPlanStats(plan, execDuration)
 	}

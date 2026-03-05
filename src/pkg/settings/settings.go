@@ -513,6 +513,15 @@ type Arguments struct {
 	IndexAdvisorMinQueries  int     `yaml:"index_advisor_min_queries"`   // Min queries before recommendations (default: 10)
 	IndexAdvisorMinScore    float64 `yaml:"index_advisor_min_score"`     // Min recommendation score (default: 0.3)
 
+	// Distributed Tracing (Enterprise)
+	TracingEnabled      bool    `yaml:"tracing_enabled"`       // Enable distributed tracing (default: false)
+	TracingSampleRate   float64 `yaml:"tracing_sample_rate"`   // Sampling rate 0.0-1.0 (default: 0.1)
+	TracingBufferSize   int     `yaml:"tracing_buffer_size"`   // Ring buffer size for completed traces (default: 1000)
+	TracingExporterType string  `yaml:"tracing_exporter_type"` // "none", "console", "otlp" (default: "none")
+	TracingExporterURL  string  `yaml:"tracing_exporter_url"`  // OTLP endpoint URL (default: "")
+	TracingRateLimit    int     `yaml:"tracing_rate_limit"`    // Max traces/sec, 0=unlimited (default: 0)
+	TracingServiceName  string  `yaml:"tracing_service_name"`  // Service name in traces (default: "syndrdb")
+
 	// Columnar Processing (Enterprise)
 	ColumnarEnabled       bool    `yaml:"columnar_enabled"`        // Master toggle (default: false)
 	ColumnarSegmentSize   int     `yaml:"columnar_segment_size"`   // Rows per segment (default: 65536)
@@ -897,6 +906,15 @@ func GetSettings() *Arguments {
 			IndexAdvisorHistorySize: 500,
 			IndexAdvisorMinQueries:  10,
 			IndexAdvisorMinScore:    0.3,
+
+			// Distributed Tracing Defaults (Enterprise)
+			TracingEnabled:      false,
+			TracingSampleRate:   0.1,
+			TracingBufferSize:   1000,
+			TracingExporterType: "none",
+			TracingExporterURL:  "",
+			TracingRateLimit:    0,
+			TracingServiceName:  "syndrdb",
 
 			// Columnar Processing Defaults (Enterprise)
 			ColumnarEnabled:       false,

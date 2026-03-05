@@ -46,6 +46,8 @@ type ExtensionRegistry struct {
 	spatialFunctionExtensions []SpatialFunctionExtension
 	// Index Advisor
 	indexAdvisorExtensions []IndexAdvisorExtension
+	// Milestone 7.8
+	distributedTracingExtensions []DistributedTracingExtension
 }
 
 var (
@@ -771,4 +773,30 @@ func (r *ExtensionRegistry) GetIndexAdvisorExtension() IndexAdvisorExtension {
 		return nil
 	}
 	return r.indexAdvisorExtensions[0]
+}
+
+// --- Distributed Tracing Extension (Milestone 7.8) ---
+
+// RegisterDistributedTracingExtension adds a DistributedTracingExtension to the registry.
+func (r *ExtensionRegistry) RegisterDistributedTracingExtension(ext DistributedTracingExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.distributedTracingExtensions = append(r.distributedTracingExtensions, ext)
+}
+
+// HasDistributedTracingExtension returns true if a distributed tracing extension is registered.
+func (r *ExtensionRegistry) HasDistributedTracingExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.distributedTracingExtensions) > 0
+}
+
+// GetDistributedTracingExtension returns the first registered distributed tracing extension (single-provider model).
+func (r *ExtensionRegistry) GetDistributedTracingExtension() DistributedTracingExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.distributedTracingExtensions) == 0 {
+		return nil
+	}
+	return r.distributedTracingExtensions[0]
 }

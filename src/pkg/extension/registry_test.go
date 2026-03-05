@@ -1819,3 +1819,68 @@ func TestIndexAdvisorExtensionMethods(t *testing.T) {
 		t.Fatalf("expected lastBundle 'orders', got '%s'", ext.lastBundle)
 	}
 }
+
+// --- Distributed Tracing Extension (Milestone 7.8) ---
+
+type stubDistributedTracingExtension struct {
+	enabled bool
+	sample  bool
+}
+
+func (s *stubDistributedTracingExtension) StartSpan(ctx context.Context, operation string, tags map[string]string) (context.Context, string) {
+	return ctx, "span-handle-1"
+}
+func (s *stubDistributedTracingExtension) EndSpan(spanHandle string, status int, errMsg string)         {}
+func (s *stubDistributedTracingExtension) AddSpanEvent(spanHandle string, name string, attrs map[string]string) {}
+func (s *stubDistributedTracingExtension) IsEnabled() bool                                              { return s.enabled }
+func (s *stubDistributedTracingExtension) ShouldSample() bool                                           { return s.sample }
+func (s *stubDistributedTracingExtension) GetTraceID(ctx context.Context) string                        { return "abc123" }
+func (s *stubDistributedTracingExtension) InjectTraceContext(ctx context.Context) string                { return "00-abc-def-01" }
+func (s *stubDistributedTracingExtension) ExtractTraceContext(ctx context.Context, traceparent string) context.Context {
+	return ctx
+}
+
+func TestRegisterDistributedTracingExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasDistributedTracingExtension() {
+		t.Fatal("fresh registry should have no distributed tracing extensions")
+	}
+	ext := &stubDistributedTracingExtension{enabled: true, sample: true}
+	reg.RegisterDistributedTracingExtension(ext)
+	if !reg.HasDistributedTracingExtension() {
+		t.Fatal("registry should have distributed tracing extension after registration")
+	}
+	got := reg.GetDistributedTracingExtension()
+	if got != ext {
+		t.Fatal("GetDistributedTracingExtension should return the registered extension")
+	}
+}
+
+func TestDistributedTracingExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubDistributedTracingExtension{enabled: true, sample: true}
+	reg.RegisterDistributedTracingExtension(ext)
+	got := reg.GetDistributedTracingExtension()
+
+	if !got.IsEnabled() {
+		t.Fatal("expected IsEnabled to return true")
+	}
+	if !got.ShouldSample() {
+		t.Fatal("expected ShouldSample to return true")
+	}
+	ctx := context.Background()
+	newCtx, handle := got.StartSpan(ctx, "test.op", map[string]string{"key": "val"})
+	if newCtx == nil {
+		t.Fatal("expected non-nil context from StartSpan")
+	}
+	if handle == "" {
+		t.Fatal("expected non-empty span handle from StartSpan")
+	}
+	got.EndSpan(handle, 0, "")
+	traceID := got.GetTraceID(ctx)
+	if traceID == "" {
+		t.Fatal("expected non-empty trace ID")
+	}
+}
