@@ -486,6 +486,14 @@ type Arguments struct {
 	DistTxnTimeoutMs int  `yaml:"dist_txn_timeout_ms"` // Prepare timeout in milliseconds (default: 30000)
 	DistTxnMaxActive int  `yaml:"dist_txn_max_active"` // Max concurrent distributed transactions (default: 100)
 
+	// Online Schema Changes (Enterprise)
+	OnlineSchemaEnabled          bool `yaml:"online_schema_enabled"`           // Master toggle (default: false)
+	OnlineSchemaWorkers          int  `yaml:"online_schema_workers"`           // Parallel copy workers (default: 4)
+	OnlineSchemaBatchSize        int  `yaml:"online_schema_batch_size"`        // Docs per copy batch (default: 1000)
+	OnlineSchemaBufferSize       int  `yaml:"online_schema_buffer_size"`       // CDC event buffer size (default: 8192)
+	OnlineSchemaCatchupThreshold int  `yaml:"online_schema_catchup_threshold"` // Events pending to trigger swap (default: 100)
+	OnlineSchemaRetentionMin     int  `yaml:"online_schema_retention_min"`     // Minutes to keep old bundle (default: 60)
+
 	// Columnar Processing (Enterprise)
 	ColumnarEnabled       bool    `yaml:"columnar_enabled"`        // Master toggle (default: false)
 	ColumnarSegmentSize   int     `yaml:"columnar_segment_size"`   // Rows per segment (default: 65536)
@@ -848,6 +856,14 @@ func GetSettings() *Arguments {
 			TriggerMaxPerBundle:   100,   // Max 100 triggers per bundle
 			TriggerTimeoutMs:      5000,  // 5 second per-trigger timeout
 			TriggerAllowRecursion: false, // No recursive triggers by default
+
+			// Online Schema Changes Defaults (Enterprise)
+			OnlineSchemaEnabled:          false,
+			OnlineSchemaWorkers:          4,
+			OnlineSchemaBatchSize:        1000,
+			OnlineSchemaBufferSize:       8192,
+			OnlineSchemaCatchupThreshold: 100,
+			OnlineSchemaRetentionMin:     60,
 
 			// Columnar Processing Defaults (Enterprise)
 			ColumnarEnabled:       false,

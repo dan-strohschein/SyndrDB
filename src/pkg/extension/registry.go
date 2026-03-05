@@ -36,6 +36,8 @@ type ExtensionRegistry struct {
 	columnarExtensions []ColumnarProcessingExtension
 	// Milestone 6.7
 	resultCacheExtensions []QueryResultCacheExtension
+	// Milestone 6.4
+	onlineSchemaChangeExtensions []OnlineSchemaChangeExtension
 	// Milestone 7.3
 	fieldEncryptors []FieldEncryptionExtension
 }
@@ -635,6 +637,32 @@ func (r *ExtensionRegistry) GetQueryResultCacheExtension() QueryResultCacheExten
 		return nil
 	}
 	return r.resultCacheExtensions[0]
+}
+
+// --- Online Schema Change Extension (Milestone 6.4) ---
+
+// RegisterOnlineSchemaChangeExtension adds an OnlineSchemaChangeExtension to the registry.
+func (r *ExtensionRegistry) RegisterOnlineSchemaChangeExtension(ext OnlineSchemaChangeExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onlineSchemaChangeExtensions = append(r.onlineSchemaChangeExtensions, ext)
+}
+
+// HasOnlineSchemaChangeExtension returns true if an online schema change extension is registered.
+func (r *ExtensionRegistry) HasOnlineSchemaChangeExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.onlineSchemaChangeExtensions) > 0
+}
+
+// GetOnlineSchemaChangeExtension returns the first registered online schema change extension (single-provider model).
+func (r *ExtensionRegistry) GetOnlineSchemaChangeExtension() OnlineSchemaChangeExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.onlineSchemaChangeExtensions) == 0 {
+		return nil
+	}
+	return r.onlineSchemaChangeExtensions[0]
 }
 
 // --- Field Encryption Extension (Milestone 7.3) ---

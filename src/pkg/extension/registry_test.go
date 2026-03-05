@@ -1605,6 +1605,78 @@ func TestFieldEncryptionExtensionSingleProvider(t *testing.T) {
 	}
 }
 
+// --- Milestone 6.4: Online Schema Change Extension ---
+
+type stubOnlineSchemaChangeExtension struct {
+	migrating map[string]bool
+}
+
+func (s *stubOnlineSchemaChangeExtension) IsMigrating(bundleName string) bool {
+	return s.migrating[bundleName]
+}
+func (s *stubOnlineSchemaChangeExtension) GetMigrationState(bundleName string) *SchemaChangeInfo {
+	if !s.migrating[bundleName] {
+		return nil
+	}
+	return &SchemaChangeInfo{BundleName: bundleName, State: "COPYING", DocsCopied: 500, DocsTotal: 1000}
+}
+func (s *stubOnlineSchemaChangeExtension) ListMigrations() []SchemaChangeInfo {
+	var out []SchemaChangeInfo
+	for name := range s.migrating {
+		out = append(out, SchemaChangeInfo{BundleName: name, State: "COPYING"})
+	}
+	return out
+}
+
+func TestRegisterOnlineSchemaChangeExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasOnlineSchemaChangeExtension() {
+		t.Fatal("fresh registry should have no online schema change extensions")
+	}
+	ext := &stubOnlineSchemaChangeExtension{migrating: map[string]bool{"employees": true}}
+	reg.RegisterOnlineSchemaChangeExtension(ext)
+	if !reg.HasOnlineSchemaChangeExtension() {
+		t.Fatal("registry should have online schema change extension after registration")
+	}
+	got := reg.GetOnlineSchemaChangeExtension()
+	if got != ext {
+		t.Fatal("GetOnlineSchemaChangeExtension should return the registered extension")
+	}
+}
+
+func TestOnlineSchemaChangeExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubOnlineSchemaChangeExtension{migrating: map[string]bool{"employees": true}}
+	reg.RegisterOnlineSchemaChangeExtension(ext)
+	got := reg.GetOnlineSchemaChangeExtension()
+
+	if !got.IsMigrating("employees") {
+		t.Fatal("expected IsMigrating to return true for 'employees'")
+	}
+	if got.IsMigrating("orders") {
+		t.Fatal("expected IsMigrating to return false for 'orders'")
+	}
+
+	state := got.GetMigrationState("employees")
+	if state == nil {
+		t.Fatal("expected non-nil migration state")
+	}
+	if state.State != "COPYING" || state.DocsCopied != 500 || state.DocsTotal != 1000 {
+		t.Fatalf("unexpected state: %+v", state)
+	}
+
+	if got.GetMigrationState("orders") != nil {
+		t.Fatal("expected nil state for non-migrating bundle")
+	}
+
+	migrations := got.ListMigrations()
+	if len(migrations) != 1 {
+		t.Fatalf("expected 1 migration, got %d", len(migrations))
+	}
+}
+
 func TestGetResultTransformersReturnsSnapshot(t *testing.T) {
 	defer Reset()
 

@@ -403,6 +403,30 @@ type FieldEncryptionExtension interface {
 	HasFLEPolicy(bundleName string) bool
 }
 
+// --- Milestone 6.4: Online Schema Changes ---
+
+// OnlineSchemaChangeExtension provides non-blocking schema migration status.
+type OnlineSchemaChangeExtension interface {
+	IsMigrating(bundleName string) bool
+	GetMigrationState(bundleName string) *SchemaChangeInfo
+	ListMigrations() []SchemaChangeInfo
+}
+
+// SchemaChangeInfo describes the state of an online schema migration.
+type SchemaChangeInfo struct {
+	MigrationID    string
+	BundleName     string
+	State          string // "PENDING", "CREATING_SHADOW", "COPYING", "CATCHING_UP", "SWAPPING", "COMPLETED", "FAILED", "CANCELLED"
+	ShadowBundle   string
+	DocsCopied     int64
+	DocsTotal      int64
+	EventsReplayed int64
+	EventsPending  int64
+	StartedAt      time.Time
+	CompletedAt    time.Time
+	ErrorMessage   string
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.

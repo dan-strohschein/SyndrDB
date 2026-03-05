@@ -483,6 +483,17 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 			return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 				fmt.Sprintf("unknown SHOW WAL command: %s", command),
 				errors.LayerCommand).WithContext("command", command)
+		default:
+			// Try enterprise extension handlers for unrecognized SHOW subcommands
+			if reg := extension.GetRegistry(); reg.HasCommandExtensions() {
+				if handler, found := reg.FindCommandHandler(commandLower); found {
+					extCtx := extension.GetExtensionContext()
+					extResult, extErr := handler.HandleCommand(ctx, command, extCtx)
+					if extErr == nil || !stderrors.Is(extErr, extension.ErrNotHandled) {
+						return extResult, extErr
+					}
+				}
+			}
 		}
 		return nil, errors.New(errors.ERR_VALIDATION_SYNTAX,
 			fmt.Sprintf("unknown SHOW command: %s", command),

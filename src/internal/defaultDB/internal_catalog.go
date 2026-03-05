@@ -1045,6 +1045,43 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// ==============================================================
 
 	// ==============================================================
+	// ONLINE SCHEMA CHANGES CATALOG BUNDLES (Milestone 6.4)
+	// ==============================================================
+
+	// OnlineSchemaChanges — tracks online schema migration state
+	onlineSchemaChanges_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":     {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"MigrationID":    {Name: "MigrationID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"BundleName":     {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"ShadowBundle":   {Name: "ShadowBundle", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"State":          {Name: "State", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "PENDING"},
+			"Changes":        {Name: "Changes", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"DocsCopied":     {Name: "DocsCopied", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"DocsTotal":      {Name: "DocsTotal", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"EventsReplayed": {Name: "EventsReplayed", Type: "INT", IsRequired: false, IsUnique: false, DefaultValue: 0},
+			"ErrorMessage":   {Name: "ErrorMessage", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"StartedAt":      {Name: "StartedAt", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"CompletedAt":    {Name: "CompletedAt", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+		},
+	}
+	onlineSchemaChanges_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "OnlineSchemaChanges",
+		DocumentStructure: onlineSchemaChanges_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, onlineSchemaChanges_Bundle)
+
+	// ==============================================================
+	// END ONLINE SCHEMA CHANGES CATALOG BUNDLES
+	// ==============================================================
+
+	// ==============================================================
 	// FIELD-LEVEL ENCRYPTION CATALOG BUNDLES (Milestone 7.3)
 	// ==============================================================
 
