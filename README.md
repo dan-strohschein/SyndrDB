@@ -256,17 +256,42 @@ SyndrDB borrows battle-tested concepts from the best databases:
 - [x] Migration system
 - [x] Backup & restore
 
-## Expected Enterprise Features (Coming Soon!!)
+## Enterprise Edition Features
 
-- [ ] Full-text search (enterprise edition)
-- [ ] Cluster mode (distributed) (enterprise edtion)
-- [ ] Real-time subscriptions (enterprise edition)
-- [ ] Performance benchmarks vs existing databases
-- [ ] Multi-region Replication
+SyndrDB Enterprise extends the Community Edition with production-grade capabilities. All features are implemented as extensions that plug into the core extension system — the core database remains unchanged.
+
+### Implemented
+
+- [x] **Data Governance** — Field classification, dynamic data masking (5 modes), unified audit trail with chain hashing
+- [x] **Encryption at Rest** — AES-256-GCM for storage, WAL, and backups with pluggable KMS and key rotation
+- [x] **Field-Level Encryption** — Per-field AES encryption for PII/PHI with deterministic and randomized modes
+- [x] **Full-Text Search** — BM25-scored inverted index with boolean, phrase, prefix, fuzzy, and proximity queries
+- [x] **Temporal Tables** — System-versioned bundles with AS OF / BETWEEN / ALL queries and retention policies
+- [x] **High Availability** — Leader-follower replication with automatic failover and read routing
+- [x] **Multi-Primary CRDT Replication** — Write-anywhere clusters using LWW-Register, OR-Set, and PN-Counter CRDTs
+- [x] **Parallel Query Execution** — Partitioned scatter-gather for large SELECT queries
+- [x] **Query Governor** — Concurrent query tracking, kill query, per-user resource limits
+- [x] **Prometheus Metrics** — Counters, gauges, histograms with HTTP /metrics endpoint
+- [x] **Document-Level Security** — Row-level security policies with per-user/role filtering
+- [x] **Change Data Capture** — Async event dispatch with webhook delivery and exactly-once watermarks
+- [x] **Vector Search** — HNSW index with cosine, euclidean, and dot product distance metrics
+- [x] **Adaptive Query Optimization** — Runtime feedback with automatic plan invalidation
+- [x] **Materialized View Refresh** — Incremental change tracking for materialized views
+- [x] **Database Migration** — Zero-downtime import from MySQL (mysqldump), MongoDB (EJSON), and MS SQL Server (T-SQL/BACPAC)
+- [x] **Range-Based Sharding** — Horizontal data partitioning with transparent write/read routing
+- [x] **Cross-Shard Query Routing** — Scatter-gather SELECT with sort, limit, distinct, and aggregate merge
+- [x] **Distributed Transactions (2PC)** — Cross-shard atomicity with implicit multi-shard transaction wrapping
+- [x] **Online Schema Changes** — Non-blocking ALTER BUNDLE with shadow bundle + CDC catch-up (gh-ost pattern)
+- [x] **In-Memory Columnar Processing** — Vectorized aggregation with dictionary encoding and segment pruning
+- [x] **Query Result Caching** — Sharded LRU cache with CDC-driven invalidation and proactive warming
+- [x] **Geospatial Indexing** — R-tree spatial indexes with ST_DISTANCE, ST_WITHIN, ST_CONTAINS, ST_INTERSECTS, ST_DWITHIN
+- [x] **Automated Index Advisor** — Passive query pattern tracking with on-demand index recommendations, unused index detection, and ready-to-execute DDL
+
+### Planned
+
+- [ ] Real-time subscriptions
 - [ ] Federated GraphQL instancing
-- [ ] Hot Backups
-- [ ] Embedded Code Execution/Webhooks
-- [ ] Advanced observability tooling
+- [ ] Embedded code execution / webhooks
 
 ---
 
