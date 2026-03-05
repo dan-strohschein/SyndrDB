@@ -494,6 +494,15 @@ type Arguments struct {
 	OnlineSchemaCatchupThreshold int  `yaml:"online_schema_catchup_threshold"` // Events pending to trigger swap (default: 100)
 	OnlineSchemaRetentionMin     int  `yaml:"online_schema_retention_min"`     // Minutes to keep old bundle (default: 60)
 
+	// CRDT Multi-Primary Replication (Enterprise)
+	CRDTEnabled           bool   `yaml:"crdt_enabled"`             // Enable multi-primary CRDT mode (default: false)
+	CRDTNodeID            string `yaml:"crdt_node_id"`             // Unique node ID for HLC
+	CRDTGossipPort        int    `yaml:"crdt_gossip_port"`         // Gossip protocol listen port (default: 9091)
+	CRDTGossipIntervalMs  int    `yaml:"crdt_gossip_interval_ms"`  // Anti-entropy interval (default: 5000)
+	CRDTMerkleDepth       int    `yaml:"crdt_merkle_depth"`        // Merkle tree depth (default: 8 → 256 buckets)
+	CRDTMaxDeltaBatchSize int    `yaml:"crdt_max_delta_batch_size"` // Max docs per gossip exchange (default: 100)
+	CRDTMetadataField     string `yaml:"crdt_metadata_field"`      // Embedded field name (default: "__crdt_meta")
+
 	// Columnar Processing (Enterprise)
 	ColumnarEnabled       bool    `yaml:"columnar_enabled"`        // Master toggle (default: false)
 	ColumnarSegmentSize   int     `yaml:"columnar_segment_size"`   // Rows per segment (default: 65536)
@@ -864,6 +873,14 @@ func GetSettings() *Arguments {
 			OnlineSchemaBufferSize:       8192,
 			OnlineSchemaCatchupThreshold: 100,
 			OnlineSchemaRetentionMin:     60,
+
+			// CRDT Multi-Primary Replication Defaults (Enterprise)
+			CRDTEnabled:           false,
+			CRDTGossipPort:        9091,
+			CRDTGossipIntervalMs:  5000,
+			CRDTMerkleDepth:       8,
+			CRDTMaxDeltaBatchSize: 100,
+			CRDTMetadataField:     "__crdt_meta",
 
 			// Columnar Processing Defaults (Enterprise)
 			ColumnarEnabled:       false,

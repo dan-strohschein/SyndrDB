@@ -427,6 +427,33 @@ type SchemaChangeInfo struct {
 	ErrorMessage   string
 }
 
+// --- Milestone 7.1: Multi-Primary CRDT Replication ---
+
+// CRDTReplicationExtension enables multi-primary replication using CRDTs.
+// Single-provider model (like StorageEncryptionExtension).
+type CRDTReplicationExtension interface {
+	// IsCRDTBundle returns true if the bundle has an active CRDT policy.
+	IsCRDTBundle(bundleName string) bool
+	// OnDocumentWrite injects CRDT metadata into document fields before storage.
+	OnDocumentWrite(ctx context.Context, bundleName, docID string,
+		fields map[string]interface{}, operation string) (map[string]interface{}, error)
+	// MergeRemoteState merges a remote document's CRDT state with local state.
+	MergeRemoteState(ctx context.Context, bundleName, docID string,
+		remoteFields map[string]interface{}) (map[string]interface{}, error)
+	// IsPrimary returns true if this node accepts writes (always true in CRDT mode).
+	IsPrimary() bool
+	// GetPeerInfo returns information about all known peers.
+	GetPeerInfo() []CRDTPeerInfo
+}
+
+// CRDTPeerInfo describes a peer node in the multi-primary cluster.
+type CRDTPeerInfo struct {
+	NodeID, Host, Status string
+	Port, GossipPort     int
+	LastSyncTime         time.Time
+	PendingDeltas        int64
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.

@@ -40,6 +40,8 @@ type ExtensionRegistry struct {
 	onlineSchemaChangeExtensions []OnlineSchemaChangeExtension
 	// Milestone 7.3
 	fieldEncryptors []FieldEncryptionExtension
+	// Milestone 7.1
+	crdtReplicationExtensions []CRDTReplicationExtension
 }
 
 var (
@@ -689,4 +691,30 @@ func (r *ExtensionRegistry) GetFieldEncryptionExtension() FieldEncryptionExtensi
 		return nil
 	}
 	return r.fieldEncryptors[0]
+}
+
+// --- CRDT Replication Extension (Milestone 7.1) ---
+
+// RegisterCRDTReplicationExtension adds a CRDTReplicationExtension to the registry.
+func (r *ExtensionRegistry) RegisterCRDTReplicationExtension(ext CRDTReplicationExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.crdtReplicationExtensions = append(r.crdtReplicationExtensions, ext)
+}
+
+// HasCRDTReplicationExtension returns true if a CRDT replication extension is registered.
+func (r *ExtensionRegistry) HasCRDTReplicationExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.crdtReplicationExtensions) > 0
+}
+
+// GetCRDTReplicationExtension returns the first registered CRDT replication extension (single-provider model).
+func (r *ExtensionRegistry) GetCRDTReplicationExtension() CRDTReplicationExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.crdtReplicationExtensions) == 0 {
+		return nil
+	}
+	return r.crdtReplicationExtensions[0]
 }

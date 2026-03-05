@@ -1136,6 +1136,62 @@ func InitPrimaryBundleCatalogs(databaseService *database.DatabaseService,
 	// END FIELD-LEVEL ENCRYPTION CATALOG BUNDLES
 	// ==============================================================
 
+	// ==============================================================
+	// CRDT MULTI-PRIMARY REPLICATION CATALOG BUNDLES (Milestone 7.1)
+	// ==============================================================
+
+	// CRDTPolicies — per-bundle CRDT policy definitions
+	crdtPolicies_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID":  {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"BundleName":  {Name: "BundleName", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"DefaultType": {Name: "DefaultType", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "lww"},
+			"FieldTypes":  {Name: "FieldTypes", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+			"IsEnabled":   {Name: "IsEnabled", Type: "BOOL", IsRequired: true, IsUnique: false, DefaultValue: true},
+			"CreatedAt":   {Name: "CreatedAt", Type: "DATETIME", IsRequired: true, IsUnique: false, DefaultValue: "CURRENT_TIMESTAMP"},
+		},
+	}
+	crdtPolicies_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "CRDTPolicies",
+		DocumentStructure: crdtPolicies_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, crdtPolicies_Bundle)
+
+	// CRDTPeers — multi-primary peer topology
+	crdtPeers_docStructure := models.DocumentStructure{
+		FieldDefinitions: map[string]models.FieldDefinition{
+			"DocumentID": {Name: "DocumentID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: helpers.GenerateFastUUID()},
+			"NodeID":     {Name: "NodeID", Type: "STRING", IsRequired: true, IsUnique: true, DefaultValue: ""},
+			"Host":       {Name: "Host", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"Port":       {Name: "Port", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"GossipPort": {Name: "GossipPort", Type: "INT", IsRequired: true, IsUnique: false, DefaultValue: 0},
+			"Status":     {Name: "Status", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: "online"},
+			"JoinedAt":   {Name: "JoinedAt", Type: "STRING", IsRequired: true, IsUnique: false, DefaultValue: ""},
+			"LastSyncAt": {Name: "LastSyncAt", Type: "STRING", IsRequired: false, IsUnique: false, DefaultValue: ""},
+		},
+	}
+	crdtPeers_Bundle := &models.Bundle{
+		BundleID:          helpers.GenerateUUID(),
+		Name:              "CRDTPeers",
+		DocumentStructure: crdtPeers_docStructure,
+		Indexes:           map[string]models.IndexReference{},
+		IndexNames:        []string{},
+		Relationships:     map[string]models.Relationship{},
+		Constraints:       map[string]models.Constraint{},
+		Database:          db,
+	}
+	bundleService.AddBundleByStruct(databaseService, db, crdtPeers_Bundle)
+
+	// ==============================================================
+	// END CRDT MULTI-PRIMARY REPLICATION CATALOG BUNDLES
+	// ==============================================================
+
 	// NOW CREATE ALL RELATIONSHIPS AFTER ALL BUNDLES ARE PERSISTED
 	// This ensures all bundle files are properly written before we try to add relationships
 

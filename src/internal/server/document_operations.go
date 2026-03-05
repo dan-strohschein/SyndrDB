@@ -220,6 +220,24 @@ func UpdateDocument(commandParts []string, serviceManager ServiceManager, databa
 		}
 	}
 
+	// Enterprise CRDT hook: inject CRDT metadata for updates
+	if reg := extension.GetRegistry(); reg.HasCRDTReplicationExtension() {
+		crdtExt := reg.GetCRDTReplicationExtension()
+		if crdtExt.IsCRDTBundle(bundleName) {
+			docMap := keyValuesToMap(docCommand.Fields)
+			enriched, crdtErr := crdtExt.OnDocumentWrite(context.Background(), bundleName, "", docMap, "UPDATE")
+			if crdtErr != nil {
+				return nil, errors.WrapWithMessage(crdtErr, errors.ERR_INTERNAL_QUERY,
+					"CRDT metadata injection failed for update", errors.LayerCommand).WithContext("bundle", bundleName)
+			}
+			newFields := make([]models.KeyValue, 0, len(enriched))
+			for k, v := range enriched {
+				newFields = append(newFields, models.KeyValue{Key: k, Value: v})
+			}
+			docCommand.Fields = newFields
+		}
+	}
+
 	// BEFORE UPDATE triggers
 	triggerExecutor := NewTriggerExecutor(logger)
 	if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil {
@@ -558,6 +576,32 @@ func AddDocument(commandParts []string, command string, logger *zap.SugaredLogge
 		}
 	}
 
+	// Enterprise CRDT hook: inject CRDT metadata before WAL and storage
+	if reg := extension.GetRegistry(); reg.HasCRDTReplicationExtension() {
+		crdtExt := reg.GetCRDTReplicationExtension()
+		if crdtExt.IsCRDTBundle(bundleName) {
+			docMap := keyValuesToMap(docCommand.Fields)
+			docID := ""
+			for _, kv := range docCommand.Fields {
+				if kv.Key == "DocumentID" {
+					docID, _ = kv.Value.(string)
+					break
+				}
+			}
+			enriched, crdtErr := crdtExt.OnDocumentWrite(context.Background(), bundleName, docID, docMap, "INSERT")
+			if crdtErr != nil {
+				return nil, errors.WrapWithMessage(crdtErr, errors.ERR_INTERNAL_QUERY,
+					"CRDT metadata injection failed for insert", errors.LayerCommand).WithContext("bundle", bundleName)
+			}
+			// Rebuild fields from enriched map
+			newFields := make([]models.KeyValue, 0, len(enriched))
+			for k, v := range enriched {
+				newFields = append(newFields, models.KeyValue{Key: k, Value: v})
+			}
+			docCommand.Fields = newFields
+		}
+	}
+
 	// BEFORE INSERT triggers
 	triggerExecutor := NewTriggerExecutor(logger)
 	if bundle.Triggers != nil && len(bundle.Triggers) > 0 && session != nil {
@@ -765,6 +809,33 @@ func BulkAddDocuments(commandParts []string, command string, logger *zap.Sugared
 						bulkCmd.Documents[i][j].Value = v
 					}
 				}
+			}
+		}
+	}
+
+	// Enterprise CRDT hook: inject CRDT metadata for all bulk docs
+	if reg := extension.GetRegistry(); reg.HasCRDTReplicationExtension() {
+		crdtExt := reg.GetCRDTReplicationExtension()
+		if crdtExt.IsCRDTBundle(bundleName) {
+			for i, docFields := range bulkCmd.Documents {
+				docMap := keyValuesToMap(docFields)
+				docID := ""
+				for _, kv := range docFields {
+					if kv.Key == "DocumentID" {
+						docID, _ = kv.Value.(string)
+						break
+					}
+				}
+				enriched, crdtErr := crdtExt.OnDocumentWrite(context.Background(), bundleName, docID, docMap, "INSERT")
+				if crdtErr != nil {
+					return nil, errors.WrapWithMessage(crdtErr, errors.ERR_INTERNAL_QUERY,
+						"CRDT metadata injection failed for bulk insert", errors.LayerCommand).WithContext("bundle", bundleName)
+				}
+				newFields := make([]models.KeyValue, 0, len(enriched))
+				for k, v := range enriched {
+					newFields = append(newFields, models.KeyValue{Key: k, Value: v})
+				}
+				bulkCmd.Documents[i] = newFields
 			}
 		}
 	}

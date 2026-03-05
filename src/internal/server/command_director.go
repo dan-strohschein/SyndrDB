@@ -218,8 +218,10 @@ func executeCommand(ctx context.Context, database *models.Database, serviceManag
 		return "PONG", nil
 	}
 
-	// Enterprise replication: reject writes on follower nodes
-	if reg := extension.GetRegistry(); reg.HasReplicationExtension() {
+	// Enterprise replication: reject writes on follower nodes (skip if CRDT multi-primary)
+	if reg := extension.GetRegistry(); reg.HasCRDTReplicationExtension() && reg.GetCRDTReplicationExtension().IsPrimary() {
+		// Multi-primary CRDT mode: all nodes accept writes — skip follower rejection
+	} else if reg := extension.GetRegistry(); reg.HasReplicationExtension() {
 		replExt := reg.GetReplicationExtension()
 		if replExt.IsFollower() && isWriteCommand(strings.ToLower(strings.TrimSpace(command))) {
 			return nil, fmt.Errorf("this node is a read-only follower; writes must be sent to the leader")

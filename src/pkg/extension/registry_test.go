@@ -1694,3 +1694,75 @@ func TestGetResultTransformersReturnsSnapshot(t *testing.T) {
 		t.Fatal("registry should have 2 transformers")
 	}
 }
+
+// --- Milestone 7.1: CRDT Replication Extension ---
+
+type stubCRDTReplicationExtension struct {
+	crdtBundles map[string]bool
+}
+
+func (s *stubCRDTReplicationExtension) IsCRDTBundle(bundleName string) bool {
+	return s.crdtBundles[bundleName]
+}
+func (s *stubCRDTReplicationExtension) OnDocumentWrite(ctx context.Context, bundleName, docID string,
+	fields map[string]interface{}, operation string) (map[string]interface{}, error) {
+	fields["__crdt_meta"] = `{"type":"lww"}`
+	return fields, nil
+}
+func (s *stubCRDTReplicationExtension) MergeRemoteState(ctx context.Context, bundleName, docID string,
+	remoteFields map[string]interface{}) (map[string]interface{}, error) {
+	return remoteFields, nil
+}
+func (s *stubCRDTReplicationExtension) IsPrimary() bool { return true }
+func (s *stubCRDTReplicationExtension) GetPeerInfo() []CRDTPeerInfo {
+	return []CRDTPeerInfo{{NodeID: "peer-1", Host: "10.0.0.2", Status: "online", Port: 27017, GossipPort: 9090}}
+}
+
+func TestRegisterCRDTReplicationExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasCRDTReplicationExtension() {
+		t.Fatal("fresh registry should have no CRDT replication extensions")
+	}
+	ext := &stubCRDTReplicationExtension{crdtBundles: map[string]bool{"users": true}}
+	reg.RegisterCRDTReplicationExtension(ext)
+	if !reg.HasCRDTReplicationExtension() {
+		t.Fatal("registry should have CRDT replication extension after registration")
+	}
+	got := reg.GetCRDTReplicationExtension()
+	if got != ext {
+		t.Fatal("GetCRDTReplicationExtension should return the registered extension")
+	}
+}
+
+func TestCRDTReplicationExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubCRDTReplicationExtension{crdtBundles: map[string]bool{"users": true}}
+	reg.RegisterCRDTReplicationExtension(ext)
+	got := reg.GetCRDTReplicationExtension()
+
+	if !got.IsCRDTBundle("users") {
+		t.Fatal("expected IsCRDTBundle to return true for 'users'")
+	}
+	if got.IsCRDTBundle("orders") {
+		t.Fatal("expected IsCRDTBundle to return false for 'orders'")
+	}
+	if !got.IsPrimary() {
+		t.Fatal("expected IsPrimary to return true")
+	}
+
+	peers := got.GetPeerInfo()
+	if len(peers) != 1 || peers[0].NodeID != "peer-1" {
+		t.Fatalf("unexpected peers: %+v", peers)
+	}
+
+	fields := map[string]interface{}{"name": "Alice"}
+	enriched, err := got.OnDocumentWrite(context.Background(), "users", "doc-1", fields, "INSERT")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := enriched["__crdt_meta"]; !ok {
+		t.Fatal("OnDocumentWrite should inject __crdt_meta")
+	}
+}
