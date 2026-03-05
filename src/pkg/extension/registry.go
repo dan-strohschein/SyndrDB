@@ -44,6 +44,8 @@ type ExtensionRegistry struct {
 	crdtReplicationExtensions []CRDTReplicationExtension
 	// Milestone 6.8
 	spatialFunctionExtensions []SpatialFunctionExtension
+	// Index Advisor
+	indexAdvisorExtensions []IndexAdvisorExtension
 }
 
 var (
@@ -743,4 +745,30 @@ func (r *ExtensionRegistry) GetSpatialFunctionExtension() SpatialFunctionExtensi
 		return nil
 	}
 	return r.spatialFunctionExtensions[0]
+}
+
+// --- Index Advisor Extension ---
+
+// RegisterIndexAdvisorExtension adds an IndexAdvisorExtension to the registry.
+func (r *ExtensionRegistry) RegisterIndexAdvisorExtension(ext IndexAdvisorExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.indexAdvisorExtensions = append(r.indexAdvisorExtensions, ext)
+}
+
+// HasIndexAdvisorExtension returns true if an index advisor extension is registered.
+func (r *ExtensionRegistry) HasIndexAdvisorExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.indexAdvisorExtensions) > 0
+}
+
+// GetIndexAdvisorExtension returns the first registered index advisor extension (single-provider model).
+func (r *ExtensionRegistry) GetIndexAdvisorExtension() IndexAdvisorExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.indexAdvisorExtensions) == 0 {
+		return nil
+	}
+	return r.indexAdvisorExtensions[0]
 }

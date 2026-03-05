@@ -1766,3 +1766,56 @@ func TestCRDTReplicationExtensionMethods(t *testing.T) {
 		t.Fatal("OnDocumentWrite should inject __crdt_meta")
 	}
 }
+
+// --- Index Advisor Extension ---
+
+type stubIndexAdvisorExtension struct {
+	analyzedCount int
+	lastBundle    string
+}
+
+func (s *stubIndexAdvisorExtension) OnQueryAnalyzed(command string, planInfo QueryPlanInfo) {
+	s.analyzedCount++
+	s.lastBundle = planInfo.BundleName
+}
+
+func TestRegisterIndexAdvisorExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasIndexAdvisorExtension() {
+		t.Fatal("fresh registry should have no index advisor extensions")
+	}
+	ext := &stubIndexAdvisorExtension{}
+	reg.RegisterIndexAdvisorExtension(ext)
+	if !reg.HasIndexAdvisorExtension() {
+		t.Fatal("registry should have index advisor extension after registration")
+	}
+	got := reg.GetIndexAdvisorExtension()
+	if got != ext {
+		t.Fatal("GetIndexAdvisorExtension should return the registered extension")
+	}
+}
+
+func TestIndexAdvisorExtensionMethods(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	ext := &stubIndexAdvisorExtension{}
+	reg.RegisterIndexAdvisorExtension(ext)
+	got := reg.GetIndexAdvisorExtension()
+
+	got.OnQueryAnalyzed("SELECT * FROM orders WHERE status = 'active'", QueryPlanInfo{
+		BundleName:  "orders",
+		IndexesUsed: nil,
+		ScanType:    "full_scan",
+		Cost:        100.0,
+		RowsScanned: 5000,
+		RowsReturned: 150,
+		ElapsedMs:   12.5,
+	})
+	if ext.analyzedCount != 1 {
+		t.Fatal("expected OnQueryAnalyzed to be called once")
+	}
+	if ext.lastBundle != "orders" {
+		t.Fatalf("expected lastBundle 'orders', got '%s'", ext.lastBundle)
+	}
+}

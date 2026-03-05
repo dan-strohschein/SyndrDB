@@ -1852,6 +1852,23 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	if serviceManager.UnifiedPlanner != nil {
 		serviceManager.UnifiedPlanner.RecordPlanStats(plan, execDuration)
 	}
+	// Index Advisor hook: feed query pattern data for index recommendations
+	if reg := extension.GetRegistry(); reg.HasIndexAdvisorExtension() {
+		scanType := "full_scan"
+		if len(plan.IndexesUsed) > 0 {
+			scanType = "index_scan"
+		}
+		reg.GetIndexAdvisorExtension().OnQueryAnalyzed(fullCommand, extension.QueryPlanInfo{
+			BundleName:    query.FromBundle,
+			IndexesUsed:   plan.IndexesUsed,
+			ScanType:      scanType,
+			Cost:          plan.Cost,
+			EstimatedRows: plan.EstimatedRows,
+			RowsScanned:   int64(len(documents)),
+			RowsReturned:  int64(len(documents)),
+			ElapsedMs:     float64(execDuration.Milliseconds()),
+		})
+	}
 	if err != nil {
 		// Check if error is due to timeout
 		if ctx.Err() == context.DeadlineExceeded {

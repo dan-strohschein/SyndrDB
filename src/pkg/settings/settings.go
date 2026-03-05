@@ -507,6 +507,12 @@ type Arguments struct {
 	CRDTMaxDeltaBatchSize int    `yaml:"crdt_max_delta_batch_size"` // Max docs per gossip exchange (default: 100)
 	CRDTMetadataField     string `yaml:"crdt_metadata_field"`      // Embedded field name (default: "__crdt_meta")
 
+	// Index Advisor (Enterprise)
+	IndexAdvisorEnabled     bool    `yaml:"index_advisor_enabled"`       // Enable index advisor (default: true)
+	IndexAdvisorHistorySize int     `yaml:"index_advisor_history_size"`  // Circular buffer size per bundle (default: 500)
+	IndexAdvisorMinQueries  int     `yaml:"index_advisor_min_queries"`   // Min queries before recommendations (default: 10)
+	IndexAdvisorMinScore    float64 `yaml:"index_advisor_min_score"`     // Min recommendation score (default: 0.3)
+
 	// Columnar Processing (Enterprise)
 	ColumnarEnabled       bool    `yaml:"columnar_enabled"`        // Master toggle (default: false)
 	ColumnarSegmentSize   int     `yaml:"columnar_segment_size"`   // Rows per segment (default: 65536)
@@ -885,6 +891,12 @@ func GetSettings() *Arguments {
 			CRDTMerkleDepth:       8,
 			CRDTMaxDeltaBatchSize: 100,
 			CRDTMetadataField:     "__crdt_meta",
+
+			// Index Advisor Defaults (Enterprise)
+			IndexAdvisorEnabled:     true,
+			IndexAdvisorHistorySize: 500,
+			IndexAdvisorMinQueries:  10,
+			IndexAdvisorMinScore:    0.3,
 
 			// Columnar Processing Defaults (Enterprise)
 			ColumnarEnabled:       false,

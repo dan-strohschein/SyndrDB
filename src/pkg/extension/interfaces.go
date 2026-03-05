@@ -470,6 +470,37 @@ type SpatialFunctionExtension interface {
 	EvalDWithin(bundleName string, geomA interface{}, geomB interface{}, distance float64) (bool, error)
 }
 
+// --- Automated Index Advisor ---
+
+// QueryPlanInfo carries execution plan metadata for index advisory.
+type QueryPlanInfo struct {
+	BundleName    string
+	IndexesUsed   []string
+	ScanType      string // "full_scan", "index_scan", "brin_scan"
+	Cost          float64
+	EstimatedRows int
+	RowsScanned   int64
+	RowsReturned  int64
+	ElapsedMs     float64
+}
+
+// IndexAdvisorExtension passively collects query patterns and recommends indexes.
+type IndexAdvisorExtension interface {
+	OnQueryAnalyzed(command string, planInfo QueryPlanInfo)
+}
+
+// IndexRecommendation describes a recommended index.
+type IndexRecommendation struct {
+	BundleName           string
+	Fields               []string
+	IndexType            string // "btree", "hash"
+	DDL                  string // Ready-to-execute CREATE INDEX statement
+	Reason               string
+	Score                float64 // 0.0-1.0
+	QueryCount           int64
+	EstimatedImprovement string
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.
