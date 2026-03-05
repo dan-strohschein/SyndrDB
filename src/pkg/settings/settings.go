@@ -513,6 +513,11 @@ type Arguments struct {
 	IndexAdvisorMinQueries  int     `yaml:"index_advisor_min_queries"`   // Min queries before recommendations (default: 10)
 	IndexAdvisorMinScore    float64 `yaml:"index_advisor_min_score"`     // Min recommendation score (default: 0.3)
 
+	// Window Functions + CTEs (Enterprise)
+	WindowCTEEnabled          bool `yaml:"window_cte_enabled"`           // Enable window functions and CTEs (default: true)
+	WindowCTEMaxRecursionDepth int  `yaml:"window_cte_max_recursion_depth"` // Max recursion depth for recursive CTEs (default: 100)
+	WindowCTEMaxCTERows       int  `yaml:"window_cte_max_cte_rows"`       // Max rows per materialized CTE (default: 100000)
+
 	// Distributed Tracing (Enterprise)
 	TracingEnabled      bool    `yaml:"tracing_enabled"`       // Enable distributed tracing (default: false)
 	TracingSampleRate   float64 `yaml:"tracing_sample_rate"`   // Sampling rate 0.0-1.0 (default: 0.1)
@@ -906,6 +911,11 @@ func GetSettings() *Arguments {
 			IndexAdvisorHistorySize: 500,
 			IndexAdvisorMinQueries:  10,
 			IndexAdvisorMinScore:    0.3,
+
+			// Window Functions + CTEs Defaults (Enterprise)
+			WindowCTEEnabled:          true,
+			WindowCTEMaxRecursionDepth: 100,
+			WindowCTEMaxCTERows:       100000,
 
 			// Distributed Tracing Defaults (Enterprise)
 			TracingEnabled:      false,

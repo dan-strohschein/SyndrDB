@@ -1643,6 +1643,24 @@ func SelectDocuments(ctx context.Context, fullCommand string, serviceManager Ser
 	logger.Debugf("Parsed unified query: WHERE:%v, Type=%s, HasJoin=%v, HasGroupBy=%v, HasOrderBy=%v, HasLimit=%v",
 		query.WhereExpression, query.QueryType, query.HasJoin(), query.HasGroupBy(), query.HasOrderBy(), query.HasLimit())
 
+	// Enterprise: Window function interception — before plan creation
+	if reg := extension.GetRegistry(); reg.HasWindowCTEExtension() {
+		wcteExt := reg.GetWindowCTEExtension()
+		if wcteExt.HasWindowFunctions(fullCommand) {
+			extCtx := extension.GetExtensionContext()
+			result, count, err := wcteExt.ExecuteWindowQuery(ctx, fullCommand, extCtx)
+			if err != nil {
+				return nil, err
+			}
+			elapsed := time.Since(startTime)
+			return &CommandResponse{
+				Result:          result,
+				ResultCount:     count,
+				ExecutionTimeMS: float64(elapsed.Milliseconds()),
+			}, nil
+		}
+	}
+
 	// STEP 2: Use unified query planner from ServiceManager (with plan caching)
 	unifiedPlanner := serviceManager.UnifiedPlanner
 

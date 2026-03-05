@@ -48,6 +48,8 @@ type ExtensionRegistry struct {
 	indexAdvisorExtensions []IndexAdvisorExtension
 	// Milestone 7.8
 	distributedTracingExtensions []DistributedTracingExtension
+	// Milestone 6.9
+	windowCTEExtensions []WindowCTEExtension
 }
 
 var (
@@ -799,4 +801,30 @@ func (r *ExtensionRegistry) GetDistributedTracingExtension() DistributedTracingE
 		return nil
 	}
 	return r.distributedTracingExtensions[0]
+}
+
+// --- Window CTE Extension (Milestone 6.9) ---
+
+// RegisterWindowCTEExtension adds a WindowCTEExtension to the registry.
+func (r *ExtensionRegistry) RegisterWindowCTEExtension(ext WindowCTEExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.windowCTEExtensions = append(r.windowCTEExtensions, ext)
+}
+
+// HasWindowCTEExtension returns true if a window CTE extension is registered.
+func (r *ExtensionRegistry) HasWindowCTEExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.windowCTEExtensions) > 0
+}
+
+// GetWindowCTEExtension returns the first registered window CTE extension (single-provider model).
+func (r *ExtensionRegistry) GetWindowCTEExtension() WindowCTEExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.windowCTEExtensions) == 0 {
+		return nil
+	}
+	return r.windowCTEExtensions[0]
 }

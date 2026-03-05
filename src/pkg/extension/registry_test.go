@@ -1884,3 +1884,40 @@ func TestDistributedTracingExtensionMethods(t *testing.T) {
 		t.Fatal("expected non-empty trace ID")
 	}
 }
+
+// --- Window CTE Extension (Milestone 6.9) ---
+
+type stubWindowCTEExtension struct {
+	hasWindow bool
+}
+
+func (s *stubWindowCTEExtension) HasWindowFunctions(command string) bool { return s.hasWindow }
+func (s *stubWindowCTEExtension) ExecuteWindowQuery(ctx context.Context, command string, extCtx ExtensionContext) ([]map[string]interface{}, int, error) {
+	return nil, 0, nil
+}
+
+func TestRegisterWindowCTEExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasWindowCTEExtension() {
+		t.Fatal("fresh registry should have no window CTE extensions")
+	}
+	ext := &stubWindowCTEExtension{hasWindow: true}
+	reg.RegisterWindowCTEExtension(ext)
+	if !reg.HasWindowCTEExtension() {
+		t.Fatal("registry should have window CTE extension after registration")
+	}
+	got := reg.GetWindowCTEExtension()
+	if got != ext {
+		t.Fatal("GetWindowCTEExtension should return the registered extension")
+	}
+}
+
+func TestGetWindowCTEExtensionNil(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	got := reg.GetWindowCTEExtension()
+	if got != nil {
+		t.Fatal("expected nil when no window CTE extension registered")
+	}
+}

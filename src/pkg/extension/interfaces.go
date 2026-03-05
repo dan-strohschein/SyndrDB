@@ -535,6 +535,14 @@ type DistributedTracingExtension interface {
 	ExtractTraceContext(ctx context.Context, traceparent string) context.Context
 }
 
+// --- Milestone 6.9: Window Functions + CTEs ---
+
+// WindowCTEExtension provides window function and CTE support (single-provider model).
+type WindowCTEExtension interface {
+	HasWindowFunctions(command string) bool
+	ExecuteWindowQuery(ctx context.Context, command string, extCtx ExtensionContext) ([]map[string]interface{}, int, error)
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.
