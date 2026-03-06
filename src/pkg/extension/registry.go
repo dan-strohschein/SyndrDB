@@ -50,6 +50,8 @@ type ExtensionRegistry struct {
 	distributedTracingExtensions []DistributedTracingExtension
 	// Milestone 6.9
 	windowCTEExtensions []WindowCTEExtension
+	// Milestone 7.5
+	storageTieringExtensions []StorageTieringExtension
 }
 
 var (
@@ -827,4 +829,30 @@ func (r *ExtensionRegistry) GetWindowCTEExtension() WindowCTEExtension {
 		return nil
 	}
 	return r.windowCTEExtensions[0]
+}
+
+// --- Storage Tiering Extension (Milestone 7.5) ---
+
+// RegisterStorageTieringExtension adds a StorageTieringExtension to the registry.
+func (r *ExtensionRegistry) RegisterStorageTieringExtension(ext StorageTieringExtension) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.storageTieringExtensions = append(r.storageTieringExtensions, ext)
+}
+
+// HasStorageTieringExtension returns true if a storage tiering extension is registered.
+func (r *ExtensionRegistry) HasStorageTieringExtension() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.storageTieringExtensions) > 0
+}
+
+// GetStorageTieringExtension returns the first registered storage tiering extension (single-provider model).
+func (r *ExtensionRegistry) GetStorageTieringExtension() StorageTieringExtension {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.storageTieringExtensions) == 0 {
+		return nil
+	}
+	return r.storageTieringExtensions[0]
 }

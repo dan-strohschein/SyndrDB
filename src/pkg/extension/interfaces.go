@@ -543,6 +543,35 @@ type WindowCTEExtension interface {
 	ExecuteWindowQuery(ctx context.Context, command string, extCtx ExtensionContext) ([]map[string]interface{}, int, error)
 }
 
+// --- Milestone 7.5: Object Storage Tiering ---
+
+// SegmentTierSummary describes a segment's tiering state for query results.
+type SegmentTierSummary struct {
+	FileName    string
+	CurrentTier string
+	RemoteKey   string
+	FileID      int
+	SizeBytes   int64
+	LastAccess  time.Time
+}
+
+// StorageTieringExtension provides transparent object storage tiering for cold data.
+// Single-provider model (like StorageEncryptionExtension).
+type StorageTieringExtension interface {
+	// IsRemoteSegment returns true if the segment has been tiered to remote storage.
+	IsRemoteSegment(db, bundle, fileName string) bool
+	// EnsureLocalSegment downloads a remote segment to local disk if needed and returns the local path.
+	EnsureLocalSegment(ctx context.Context, db, bundle, fileName, localPath string) (string, error)
+	// RecordSegmentAccess records a read access for tier policy evaluation.
+	RecordSegmentAccess(db, bundle, fileName string)
+	// GetSegmentTier returns the current tier ("HOT", "WARM", "COLD") for a segment.
+	GetSegmentTier(db, bundle, fileName string) string
+	// GetBundleTierInfo returns tier info for all segments in a bundle.
+	GetBundleTierInfo(db, bundle string) []SegmentTierSummary
+	// GetWALArchiverBackend returns a WAL archiver backend compatible with journal.WALArchiverBackend.
+	GetWALArchiverBackend() interface{}
+}
+
 // TemporalExtension manages system-versioned bundle lifecycle.
 type TemporalExtension interface {
 	// OnDocumentWrite is called before a document write to capture history.

@@ -366,8 +366,15 @@ func (bse *BundleStorageEngine) warmParsedDocsCache(ctx context.Context) {
 				continue
 			}
 
-			// Check if file exists
+			// Check if file exists (skip remote-tiered segments gracefully)
 			if _, err := os.Stat(segmentFile); os.IsNotExist(err) {
+				if reg := extension.GetRegistry(); reg.HasStorageTieringExtension() {
+					tierExt := reg.GetStorageTieringExtension()
+					base := filepath.Base(segmentFile)
+					if tierExt.IsRemoteSegment(databaseName, bundleName, base) {
+						continue // remote-tiered segment, skip warming
+					}
+				}
 				continue
 			}
 
@@ -770,6 +777,23 @@ func (bse *BundleStorageEngine) getOrReadFile(filePath string) ([]byte, error) {
 		wb := bse.writeBufferCache.Get(filePath)
 		if wb != nil && !wb.IsFrozen() {
 			return bse.readFileSafeForActiveBuffer(filePath, wb)
+		}
+		// Storage tiering: check if segment is remote-tiered and fetch on demand
+		if reg := extension.GetRegistry(); reg.HasStorageTieringExtension() {
+			tierExt := reg.GetStorageTieringExtension()
+			base := filepath.Base(filePath)
+			// Extract db/bundle from path: .../data/<db>/<bundle>/<file>
+			dir := filepath.Dir(filePath)
+			bundleName := filepath.Base(dir)
+			dbName := filepath.Base(filepath.Dir(dir))
+			tierExt.RecordSegmentAccess(dbName, bundleName, base)
+			if tierExt.IsRemoteSegment(dbName, bundleName, base) {
+				localPath, err := tierExt.EnsureLocalSegment(context.Background(), dbName, bundleName, base, filePath)
+				if err != nil {
+					return nil, err
+				}
+				return os.ReadFile(localPath)
+			}
 		}
 		// No active buffer - safe to read entire file
 		return os.ReadFile(filePath)

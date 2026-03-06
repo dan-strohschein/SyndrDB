@@ -518,6 +518,25 @@ type Arguments struct {
 	WindowCTEMaxRecursionDepth int  `yaml:"window_cte_max_recursion_depth"` // Max recursion depth for recursive CTEs (default: 100)
 	WindowCTEMaxCTERows       int  `yaml:"window_cte_max_cte_rows"`       // Max rows per materialized CTE (default: 100000)
 
+	// Object Storage Tiering (Enterprise)
+	TieringEnabled        bool   `yaml:"tiering_enabled"`         // Enable object storage tiering (default: false)
+	TieringProvider       string `yaml:"tiering_provider"`        // Provider: "s3", "gcs", "azure" (default: "s3")
+	TieringBucket         string `yaml:"tiering_bucket"`          // Bucket/container name
+	TieringPrefix         string `yaml:"tiering_prefix"`          // Key prefix in bucket (default: "syndrdb/")
+	TieringRegion         string `yaml:"tiering_region"`          // Cloud region
+	TieringEndpoint       string `yaml:"tiering_endpoint"`        // Custom endpoint (MinIO, etc.)
+	TieringAccessKey      string `yaml:"tiering_access_key"`      // Access key (S3/GCS)
+	TieringSecretKey      string `yaml:"tiering_secret_key"`      // Secret key (S3/GCS)
+	TieringCredFile       string `yaml:"tiering_cred_file"`       // Credential file path (GCS)
+	TieringCacheDir       string `yaml:"tiering_cache_dir"`       // Local cache directory (default: "./tier_cache")
+	TieringCacheMaxMB     int    `yaml:"tiering_cache_max_mb"`    // Max cache size in MB (default: 1024)
+	TieringWorkerInterval int    `yaml:"tiering_worker_interval"` // Background worker interval in seconds (default: 3600)
+	TieringMaxConcurrent  int    `yaml:"tiering_max_concurrent"`  // Max concurrent migrations (default: 4)
+	TieringWALArchive     bool   `yaml:"tiering_wal_archive"`     // Archive WAL to object storage (default: false)
+	TieringAzureAccount   string `yaml:"tiering_azure_account"`   // Azure storage account name
+	TieringAzureKey       string `yaml:"tiering_azure_key"`       // Azure storage account key
+	TieringAzureContainer string `yaml:"tiering_azure_container"` // Azure blob container name
+
 	// Distributed Tracing (Enterprise)
 	TracingEnabled      bool    `yaml:"tracing_enabled"`       // Enable distributed tracing (default: false)
 	TracingSampleRate   float64 `yaml:"tracing_sample_rate"`   // Sampling rate 0.0-1.0 (default: 0.1)
@@ -916,6 +935,16 @@ func GetSettings() *Arguments {
 			WindowCTEEnabled:          true,
 			WindowCTEMaxRecursionDepth: 100,
 			WindowCTEMaxCTERows:       100000,
+
+			// Object Storage Tiering Defaults (Enterprise)
+			TieringEnabled:        false,
+			TieringProvider:       "s3",
+			TieringPrefix:         "syndrdb/",
+			TieringCacheDir:       "./tier_cache",
+			TieringCacheMaxMB:     1024,
+			TieringWorkerInterval: 3600,
+			TieringMaxConcurrent:  4,
+			TieringWALArchive:     false,
 
 			// Distributed Tracing Defaults (Enterprise)
 			TracingEnabled:      false,

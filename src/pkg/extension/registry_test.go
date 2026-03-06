@@ -1921,3 +1921,53 @@ func TestGetWindowCTEExtensionNil(t *testing.T) {
 		t.Fatal("expected nil when no window CTE extension registered")
 	}
 }
+
+// --- Storage Tiering Extension (Milestone 7.5) ---
+
+type stubStorageTieringExtension struct {
+	isRemote bool
+}
+
+func (s *stubStorageTieringExtension) IsRemoteSegment(db, bundle, fileName string) bool {
+	return s.isRemote
+}
+func (s *stubStorageTieringExtension) EnsureLocalSegment(ctx context.Context, db, bundle, fileName, localPath string) (string, error) {
+	return localPath, nil
+}
+func (s *stubStorageTieringExtension) RecordSegmentAccess(db, bundle, fileName string) {}
+func (s *stubStorageTieringExtension) GetSegmentTier(db, bundle, fileName string) string {
+	if s.isRemote {
+		return "WARM"
+	}
+	return "HOT"
+}
+func (s *stubStorageTieringExtension) GetBundleTierInfo(db, bundle string) []SegmentTierSummary {
+	return nil
+}
+func (s *stubStorageTieringExtension) GetWALArchiverBackend() interface{} { return nil }
+
+func TestRegisterStorageTieringExtension(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	if reg.HasStorageTieringExtension() {
+		t.Fatal("fresh registry should have no storage tiering extensions")
+	}
+	ext := &stubStorageTieringExtension{isRemote: true}
+	reg.RegisterStorageTieringExtension(ext)
+	if !reg.HasStorageTieringExtension() {
+		t.Fatal("registry should have storage tiering extension after registration")
+	}
+	got := reg.GetStorageTieringExtension()
+	if got != ext {
+		t.Fatal("GetStorageTieringExtension should return the registered extension")
+	}
+}
+
+func TestGetStorageTieringExtensionNil(t *testing.T) {
+	defer Reset()
+	reg := GetRegistry()
+	got := reg.GetStorageTieringExtension()
+	if got != nil {
+		t.Fatal("expected nil when no storage tiering extension registered")
+	}
+}
