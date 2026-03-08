@@ -39,7 +39,7 @@
 ```
 
 ---
-## Current Version: Pre-alpha MVP of Community Edition
+## Current Version: v0.20.0 Community Edition
 
 ---
 
@@ -245,7 +245,7 @@ SyndrDB borrows battle-tested concepts from the best databases:
 
 ---
 
-## 🗺️ Roadmap to Community Edition v1.0
+## 🗺️ Roadmap to Community Edition v0.20
 
 - [x] Core SyndrQL query language
 - [x] GraphQL interface
