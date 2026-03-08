@@ -1,0 +1,132 @@
+# Auto-release workflow: on push to main, bump patch version from existing tags,
+# create tag, build SyndrDB server for Linux/macOS/Windows (multiple arches), and publish a GitHub Release.
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Version and tag
+    runs-on: ubuntu-latest
+    outputs:
+      next_version: ${{ steps.version.outputs.next_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        run: |
+          set -e
+          LATEST=$(git tag -l 'v*.*.*' | sort -V | tail -1)
+          if [ -z "$LATEST" ]; then
+            NEXT_VERSION="0.20.1"
+          else
+            VER="${LATEST#v}"
+            MAJOR=$(echo "$VER" | cut -d. -f1)
+            MINOR=$(echo "$VER" | cut -d. -f2)
+            PATCH=$(echo "$VER" | cut -d. -f3)
+            PATCH=$((PATCH + 1))
+            NEXT_VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Next version: $NEXT_VERSION"
+
+      - name: Create tag
+        run: |
+          NEXT_VERSION="${{ steps.version.outputs.next_version }}"
+          if git rev-parse "v$NEXT_VERSION" >/dev/null 2>&1; then
+            if [ "$(git rev-parse "v$NEXT_VERSION")" = "$(git rev-parse HEAD)" ]; then
+              echo "Tag v$NEXT_VERSION already exists on this commit, skipping"
+            else
+              echo "Tag v$NEXT_VERSION exists on another commit, skipping"
+            fi
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "v$NEXT_VERSION"
+            git push origin "v$NEXT_VERSION"
+          fi
+
+  build:
+    name: Build (${{ matrix.goos }}-${{ matrix.goarch }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: 386
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: windows
+            goarch: 386
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          BINARY="syndrdb-server-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY="${BINARY}.exe"
+          fi
+          go build -o "$BINARY" ./src/cmd/server
+          echo "BINARY=$BINARY" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: syndrdb-server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ env.BINARY }}
+
+  release:
+    name: Create release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: syndrdb-server-*
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.next_version }}
+          name: v${{ needs.version.outputs.next_version }}
+          generate_release_notes: true
+          files: |
+            release-artifacts/*
