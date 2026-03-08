@@ -1,5 +1,7 @@
 # Auto-release workflow: on push to main, bump patch version from existing tags,
-# create tag, build SyndrDB server for Linux/macOS/Windows (multiple arches), and publish a GitHub Release.
+# create tag, build SyndrDB server for supported platforms, and publish a GitHub Release.
+# Build matrix limited to: Linux amd64 (syndrdb-simd impls), Darwin amd64/arm64.
+# Windows and Linux arm64/386 are excluded (storage uses Unix mmap; simd has amd64 impls only).
 name: Release
 
 on:
@@ -65,20 +67,10 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: linux
-            goarch: 386
           - goos: darwin
             goarch: amd64
           - goos: darwin
             goarch: arm64
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
-          - goos: windows
-            goarch: 386
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
